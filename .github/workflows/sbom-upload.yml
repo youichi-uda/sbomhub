@@ -4,11 +4,13 @@
 name: SBOM Upload
 
 on:
-  push:
-    branches: [main, master]
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      scan:
+        description: 'Run vulnerability scan after upload'
+        required: false
+        default: true
+        type: boolean
 
 env:
   SBOMHUB_URL: ${{ vars.SBOMHUB_URL || 'http://localhost:8080' }}

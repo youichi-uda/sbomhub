@@ -11,9 +11,9 @@ SBOMHub is an open-source SBOM management dashboard for the Japanese market.
 
 ## Tech Stack
 
-- Backend: Go (Gin or Echo framework)
-- Frontend: Next.js 14 (App Router) + TypeScript
-- UI: shadcn/ui + Tailwind CSS
+- Backend: Go 1.22+ (Echo v4)
+- Frontend: Next.js 16 (App Router) + React 19 + TypeScript 5.7
+- UI: shadcn/ui + Tailwind CSS 3.4
 - Database: PostgreSQL 15+
 - Cache/Queue: Redis 7+
 - License: AGPL-3.0
