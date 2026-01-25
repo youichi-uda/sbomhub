@@ -55,6 +55,10 @@ coverage.out
 coverage.html
 *.test
 
+# Playwright test results
+test-results/
+playwright-report/
+
 # Temporary files
 tmp/
 temp/
