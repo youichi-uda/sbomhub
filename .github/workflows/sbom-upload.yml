@@ -1,0 +1,72 @@
+# SBOMHub SBOM Upload Workflow
+# This workflow generates an SBOM and uploads it to SBOMHub
+
+name: SBOM Upload
+
+on:
+  push:
+    branches: [main, master]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  SBOMHUB_URL: ${{ vars.SBOMHUB_URL || 'http://localhost:8080' }}
+  PROJECT_ID: ${{ vars.SBOMHUB_PROJECT_ID }}
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM
+        run: |
+          syft dir:. -o cyclonedx-json=sbom.json
+
+      - name: Upload SBOM to SBOMHub
+        env:
+          SBOMHUB_API_KEY: ${{ secrets.SBOMHUB_API_KEY }}
+        run: |
+          if [ -z "$PROJECT_ID" ]; then
+            echo "Error: SBOMHUB_PROJECT_ID is not set"
+            exit 1
+          fi
+
+          if [ -z "$SBOMHUB_API_KEY" ]; then
+            echo "Error: SBOMHUB_API_KEY secret is not set"
+            exit 1
+          fi
+
+          curl -X POST \
+            "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${SBOMHUB_API_KEY}" \
+            -d @sbom.json \
+            --fail-with-body
+
+          echo "SBOM uploaded successfully!"
+
+      - name: Trigger Vulnerability Scan (Optional)
+        env:
+          SBOMHUB_API_KEY: ${{ secrets.SBOMHUB_API_KEY }}
+        run: |
+          # Get latest SBOM ID
+          SBOM_RESPONSE=$(curl -s \
+            "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
+            -H "X-API-Key: ${SBOMHUB_API_KEY}")
+
+          SBOM_ID=$(echo $SBOM_RESPONSE | jq -r '.id')
+
+          if [ "$SBOM_ID" != "null" ] && [ -n "$SBOM_ID" ]; then
+            curl -X POST \
+              "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/scan?sbom_id=${SBOM_ID}&sources=nvd,jvn" \
+              -H "X-API-Key: ${SBOMHUB_API_KEY}"
+            echo "Vulnerability scan triggered!"
+          fi
+        continue-on-error: true

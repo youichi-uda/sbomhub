@@ -1,0 +1,47 @@
+{
+  "Home": {
+    "title": "SBOMHub",
+    "description": "SBOMを管理・可視化するためのオープンソースプラットフォーム",
+    "getStarted": "始める"
+  },
+  "Navigation": {
+    "projects": "プロジェクト",
+    "components": "コンポーネント",
+    "vulnerabilities": "脆弱性"
+  },
+  "Projects": {
+    "title": "プロジェクト",
+    "create": "新規プロジェクト",
+    "name": "プロジェクト名",
+    "description": "説明",
+    "createdAt": "作成日",
+    "actions": "操作",
+    "delete": "削除",
+    "upload": "SBOMをアップロード"
+  },
+  "Components": {
+    "title": "コンポーネント",
+    "name": "名前",
+    "version": "バージョン",
+    "type": "種類",
+    "license": "ライセンス"
+  },
+  "Vulnerabilities": {
+    "title": "脆弱性",
+    "cveId": "CVE ID",
+    "severity": "深刻度",
+    "cvssScore": "CVSSスコア",
+    "description": "説明",
+    "critical": "重大",
+    "high": "高",
+    "medium": "中",
+    "low": "低"
+  },
+  "Common": {
+    "loading": "読み込み中...",
+    "error": "エラーが発生しました",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "confirm": "確認"
+  }
+}

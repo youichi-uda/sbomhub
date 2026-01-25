@@ -1,0 +1,47 @@
+{
+  "Home": {
+    "title": "SBOMHub",
+    "description": "Open-source platform for managing and visualizing SBOMs",
+    "getStarted": "Get Started"
+  },
+  "Navigation": {
+    "projects": "Projects",
+    "components": "Components",
+    "vulnerabilities": "Vulnerabilities"
+  },
+  "Projects": {
+    "title": "Projects",
+    "create": "New Project",
+    "name": "Project Name",
+    "description": "Description",
+    "createdAt": "Created At",
+    "actions": "Actions",
+    "delete": "Delete",
+    "upload": "Upload SBOM"
+  },
+  "Components": {
+    "title": "Components",
+    "name": "Name",
+    "version": "Version",
+    "type": "Type",
+    "license": "License"
+  },
+  "Vulnerabilities": {
+    "title": "Vulnerabilities",
+    "cveId": "CVE ID",
+    "severity": "Severity",
+    "cvssScore": "CVSS Score",
+    "description": "Description",
+    "critical": "Critical",
+    "high": "High",
+    "medium": "Medium",
+    "low": "Low"
+  },
+  "Common": {
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "save": "Save",
+    "cancel": "Cancel",
+    "confirm": "Confirm"
+  }
+}

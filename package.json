@@ -1,0 +1,20 @@
+{
+  "name": "sbomhub",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "cd apps/api && go run ./cmd/server",
+    "build:web": "pnpm --filter web build",
+    "build:api": "cd apps/api && go build -o bin/server ./cmd/server",
+    "lint:web": "pnpm --filter web lint",
+    "lint:api": "cd apps/api && golangci-lint run",
+    "test:web": "pnpm --filter web test",
+    "test:api": "cd apps/api && go test ./...",
+    "db:up": "docker compose up -d postgres redis",
+    "db:migrate": "cd apps/api && go run ./cmd/migrate up"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

@@ -1,8 +1,23 @@
 # Private documents (not for public repo)
 /private/
+/.claude/
+
+# Internal documents (kept in sbomhub-internal repo)
+/docs/articles/
+/docs/STATUS.md
+
+# Test/temp files
+/test-sbom*.json
+/nul
+docker_info.txt
+docker_ps.txt
+
+# Playwright MCP screenshots (development only)
+/.playwright-mcp/
 
 # Dependencies
 node_modules/
+.pnpm-store/
 vendor/
 
 # Build outputs
@@ -10,6 +25,8 @@ dist/
 build/
 .next/
 out/
+bin/
+*.exe
 
 # Environment files
 .env
@@ -29,10 +46,19 @@ Thumbs.db
 # Logs
 *.log
 logs/
+npm-debug.log*
+pnpm-debug.log*
 
 # Test coverage
 coverage/
+coverage.out
+coverage.html
+*.test
 
 # Temporary files
 tmp/
 temp/
+
+# Misc
+*.pem
+.turbo
