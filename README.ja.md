@@ -5,8 +5,8 @@
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
 ![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8)
 ![Next.js](https://img.shields.io/badge/Next.js-14-black)
-![Docker Pulls](https://img.shields.io/docker/pulls/sbomhub/sbomhub-api)
-![GitHub Stars](https://img.shields.io/github/stars/sbomhub/sbomhub)
+![Docker Pulls](https://img.shields.io/docker/pulls/y1uda/sbomhub-api)
+![GitHub Stars](https://img.shields.io/github/stars/youichi-uda/sbomhub)
 
 <p align="center">
   <img src="docs/images/dashboard.png" alt="SBOMHub ダッシュボード" width="800">
@@ -43,14 +43,14 @@ SBOMHubは、日本市場向けに設計されたオープンソースのSBOM（
 
 ```bash
 # ダウンロードして起動（クローン不要）
-curl -fsSL https://raw.githubusercontent.com/sbomhub/sbomhub/main/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
 docker compose up -d
 ```
 
 または、クローンして起動：
 
 ```bash
-git clone https://github.com/sbomhub/sbomhub.git
+git clone https://github.com/youichi-uda/sbomhub.git
 cd sbomhub
 docker compose up -d
 ```

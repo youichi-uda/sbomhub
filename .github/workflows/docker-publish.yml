@@ -9,8 +9,8 @@ on:
 
 env:
   REGISTRY: docker.io
-  API_IMAGE: sbomhub/sbomhub-api
-  WEB_IMAGE: sbomhub/sbomhub-web
+  API_IMAGE: y1uda/sbomhub-api
+  WEB_IMAGE: y1uda/sbomhub-web
 
 jobs:
   build-and-push:

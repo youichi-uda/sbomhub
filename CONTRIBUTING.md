@@ -186,7 +186,7 @@ When adding new migrations:
 
 ## Questions?
 
-- Open a [GitHub Discussion](https://github.com/sbomhub/sbomhub/discussions)
+- Open a [GitHub Discussion](https://github.com/youichi-uda/sbomhub/discussions)
 - Check existing issues and discussions first
 
 ---
@@ -256,5 +256,5 @@ pnpm dev
 
 ## 質問がある場合
 
-- [GitHub Discussions](https://github.com/sbomhub/sbomhub/discussions)を利用
+- [GitHub Discussions](https://github.com/youichi-uda/sbomhub/discussions)を利用
 - 既存のIssueやDiscussionを先に確認
