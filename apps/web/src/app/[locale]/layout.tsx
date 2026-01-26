@@ -2,9 +2,6 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { NextIntlClientProvider } from "next-intl";
 import { getMessages } from "next-intl/server";
-import { Sidebar } from "@/components/layout/sidebar";
-import { Header } from "@/components/layout/header";
-import { AuthProvider } from "@/components/providers/auth-provider";
 import { routing } from "@/i18n/routing";
 import { notFound } from "next/navigation";
 import "../globals.css";
@@ -33,17 +30,9 @@ export default async function RootLayout({ children, params }: Props) {
   return (
     <html lang={locale}>
       <body className={inter.className}>
-        <AuthProvider>
-          <NextIntlClientProvider messages={messages}>
-            <div className="flex min-h-screen">
-              <Sidebar />
-              <div className="flex-1 flex flex-col">
-                <Header />
-                <main className="flex-1 bg-gray-50 p-6">{children}</main>
-              </div>
-            </div>
-          </NextIntlClientProvider>
-        </AuthProvider>
+        <NextIntlClientProvider messages={messages}>
+          {children}
+        </NextIntlClientProvider>
       </body>
     </html>
   );
