@@ -1,19 +1,17 @@
-"use client";
-
 import { ClerkProvider } from "@clerk/nextjs";
 import { jaJP, enUS } from "@clerk/localizations";
-import { useParams } from "next/navigation";
 import { ReactNode } from "react";
+import Link from "next/link";
 
 const CLERK_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
 interface AuthLayoutProps {
   children: ReactNode;
+  params: Promise<{ locale: string }>;
 }
 
-export default function AuthLayout({ children }: AuthLayoutProps) {
-  const params = useParams();
-  const locale = (params?.locale as string) || "ja";
+export default async function AuthLayout({ children, params }: AuthLayoutProps) {
+  const { locale } = await params;
   const localization = locale === "ja" ? jaJP : enUS;
 
   // Self-hosted mode - auth pages shouldn't be accessible
@@ -23,9 +21,9 @@ export default function AuthLayout({ children }: AuthLayoutProps) {
         <div className="text-center">
           <h1 className="text-2xl font-bold mb-4">Self-Hosted Mode</h1>
           <p className="text-gray-600 mb-4">Authentication is disabled in self-hosted mode.</p>
-          <a href={`/${locale}`} className="text-blue-600 hover:underline">
+          <Link href={`/${locale}`} className="text-blue-600 hover:underline">
             Go to Dashboard
-          </a>
+          </Link>
         </div>
       </div>
     );
