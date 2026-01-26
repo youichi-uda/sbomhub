@@ -35,8 +35,9 @@ const clerkHandler = clerkMiddleware(
         const locale = localeMatch ? localeMatch[1] : "ja";
 
         // Redirect to sign-in page with redirect_url
-        const signInUrl = new URL(`/${locale}/sign-in`, req.url);
-        signInUrl.searchParams.set("redirect_url", req.url);
+        const signInUrl = req.nextUrl.clone();
+        signInUrl.pathname = `/${locale}/sign-in`;
+        signInUrl.searchParams.set("redirect_url", req.nextUrl.pathname);
         return NextResponse.redirect(signInUrl);
       }
     }
