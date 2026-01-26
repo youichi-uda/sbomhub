@@ -3,11 +3,12 @@ package handler
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -343,16 +344,33 @@ func (h *ClerkWebhookHandler) verifySignature(r *http.Request, body []byte) bool
 	svixSignature := r.Header.Get("svix-signature")
 
 	if svixID == "" || svixTimestamp == "" || svixSignature == "" {
+		slog.Warn("Missing Svix headers",
+			"svix-id", svixID != "",
+			"svix-timestamp", svixTimestamp != "",
+			"svix-signature", svixSignature != "")
+		return false
+	}
+
+	// Decode the webhook secret
+	// Clerk webhook secret format: "whsec_<base64-encoded-key>"
+	secret := h.cfg.ClerkWebhookSecret
+	if strings.HasPrefix(secret, "whsec_") {
+		secret = strings.TrimPrefix(secret, "whsec_")
+	}
+
+	secretBytes, err := base64.StdEncoding.DecodeString(secret)
+	if err != nil {
+		slog.Error("Failed to decode webhook secret", "error", err)
 		return false
 	}
 
 	// Create the signed payload
 	signedPayload := svixID + "." + svixTimestamp + "." + string(body)
 
-	// Compute expected signature
-	mac := hmac.New(sha256.New, []byte(h.cfg.ClerkWebhookSecret))
+	// Compute expected signature using decoded secret
+	mac := hmac.New(sha256.New, secretBytes)
 	mac.Write([]byte(signedPayload))
-	expectedSig := "v1," + hex.EncodeToString(mac.Sum(nil))
+	expectedSig := "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
 	// Compare signatures (svix-signature can have multiple signatures)
 	for _, sig := range splitSignatures(svixSignature) {
@@ -361,6 +379,9 @@ func (h *ClerkWebhookHandler) verifySignature(r *http.Request, body []byte) bool
 		}
 	}
 
+	slog.Warn("Webhook signature verification failed",
+		"received_signatures", svixSignature,
+		"expected_signature", expectedSig)
 	return false
 }
 
