@@ -3,6 +3,7 @@
 import { ClerkProvider } from "@clerk/nextjs";
 import { jaJP, enUS } from "@clerk/localizations";
 import { ReactNode } from "react";
+import { ApiAuthProvider } from "./api-auth-provider";
 
 interface AuthProviderProps {
   children: ReactNode;
@@ -30,7 +31,7 @@ export function AuthProvider({ children, locale }: AuthProviderProps) {
       signInUrl={`/${locale}/sign-in`}
       signUpUrl={`/${locale}/sign-up`}
     >
-      {children}
+      <ApiAuthProvider>{children}</ApiAuthProvider>
     </ClerkProvider>
   );
 }
