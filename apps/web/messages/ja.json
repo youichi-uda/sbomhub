@@ -53,7 +53,8 @@
         "feature2": "無制限のユーザー",
         "feature3": "全機能利用可能",
         "feature4": "コミュニティサポート",
-        "cta": "GitHubでダウンロード"
+        "feature5": "GitHub / Docker Hub",
+        "cta": "GitHub / Docker Hub"
       },
       "starter": {
         "name": "Cloud Starter",

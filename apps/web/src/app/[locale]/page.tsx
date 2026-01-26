@@ -66,6 +66,7 @@ export default async function LandingPage({ params }: Props) {
         t("pricing.free.feature2"),
         t("pricing.free.feature3"),
         t("pricing.free.feature4"),
+        t("pricing.free.feature5"),
       ],
       cta: t("pricing.free.cta"),
       href: "https://github.com/youichi-uda/sbomhub",

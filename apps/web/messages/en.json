@@ -53,7 +53,8 @@
         "feature2": "Unlimited users",
         "feature3": "All features included",
         "feature4": "Community support",
-        "cta": "Download on GitHub"
+        "feature5": "GitHub / Docker Hub",
+        "cta": "GitHub / Docker Hub"
       },
       "starter": {
         "name": "Cloud Starter",
