@@ -48,7 +48,7 @@ export default async function LegalPage({ params }: Props) {
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">メールアドレス</th>
-                  <td className="py-4 px-4">support@sbomhub.app</td>
+                  <td className="py-4 px-4">abyo.software@gmail.com</td>
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">販売URL</th>
@@ -116,7 +116,7 @@ export default async function LegalPage({ params }: Props) {
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">Email</th>
-                  <td className="py-4 px-4">support@sbomhub.app</td>
+                  <td className="py-4 px-4">abyo.software@gmail.com</td>
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">Website</th>

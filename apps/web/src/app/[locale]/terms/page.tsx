@@ -77,7 +77,7 @@ export default async function TermsPage({ params }: Props) {
 
               <h2 className="text-xl font-semibold mt-8 mb-4">9. お問い合わせ</h2>
               <p>本規約に関するお問い合わせは、以下までご連絡ください：</p>
-              <p className="mt-2">メール: support@sbomhub.app</p>
+              <p className="mt-2">メール: abyo.software@gmail.com</p>
             </>
           ) : (
             <>
@@ -129,7 +129,7 @@ export default async function TermsPage({ params }: Props) {
 
               <h2 className="text-xl font-semibold mt-8 mb-4">9. Contact Us</h2>
               <p>For questions about these terms, please contact us at:</p>
-              <p className="mt-2">Email: support@sbomhub.app</p>
+              <p className="mt-2">Email: abyo.software@gmail.com</p>
             </>
           )}
         </div>
