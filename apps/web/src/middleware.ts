@@ -24,28 +24,31 @@ const isClerkEnabled = () => {
   return !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 };
 
-export default async function middleware(request: NextRequest) {
-  // If Clerk is not configured, just use i18n middleware (self-hosted mode)
+export default clerkMiddleware(async (auth, req) => {
+  // If Clerk is not configured (self-hosted mode), skip auth check
   if (!isClerkEnabled()) {
-    return intlMiddleware(request);
+    return intlMiddleware(req);
   }
 
-  // SaaS mode: Use Clerk middleware with i18n
-  const clerkHandler = clerkMiddleware(
-    async (auth, req) => {
-      // Check if route requires auth
-      if (!isPublicRoute(req)) {
-        await auth.protect();
-      }
+  // Check if route requires auth
+  if (!isPublicRoute(req)) {
+    const { userId } = await auth();
+    if (!userId) {
+      // Get the locale from the URL or default to 'ja'
+      const pathname = req.nextUrl.pathname;
+      const localeMatch = pathname.match(/^\/([a-z]{2})(\/|$)/);
+      const locale = localeMatch ? localeMatch[1] : "ja";
 
-      // Run i18n middleware
-      return intlMiddleware(req);
-    },
-    { debug: false }
-  );
+      // Redirect to sign-in page with redirect_url
+      const signInUrl = new URL(`/${locale}/sign-in`, req.url);
+      signInUrl.searchParams.set("redirect_url", req.url);
+      return NextResponse.redirect(signInUrl);
+    }
+  }
 
-  return clerkHandler(request, {} as any);
-}
+  // Run i18n middleware
+  return intlMiddleware(req);
+});
 
 export const config = {
   matcher: ["/((?!api|_next|_vercel|.*\\..*).*)"],
