@@ -4,14 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
-import { FolderOpen, Package, AlertTriangle, Home, LayoutDashboard, Search } from "lucide-react";
+import { FolderOpen, LayoutDashboard, Search } from "lucide-react";
 
 export function Sidebar() {
   const t = useTranslations("Navigation");
   const pathname = usePathname();
 
   const links = [
-    { href: "/", icon: Home, label: "Home" },
     { href: "/dashboard", icon: LayoutDashboard, label: "ダッシュボード" },
     { href: "/search", icon: Search, label: "横断検索" },
     { href: "/projects", icon: FolderOpen, label: t("projects") },

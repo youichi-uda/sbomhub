@@ -1,4 +1,101 @@
 {
+  "Landing": {
+    "nav": {
+      "features": "機能",
+      "pricing": "料金",
+      "signIn": "ログイン",
+      "getStarted": "無料で始める"
+    },
+    "hero": {
+      "badge": "オープンソース SBOM 管理",
+      "title": "ソフトウェア部品表を\n一元管理",
+      "description": "SBOMHubは、CycloneDX/SPDXのインポート、脆弱性管理、VEXステートメント作成、コンプライアンスチェックを提供するSBOM管理プラットフォームです。",
+      "cta": "無料で始める",
+      "github": "GitHubで見る"
+    },
+    "features": {
+      "title": "主な機能",
+      "description": "ソフトウェアサプライチェーンセキュリティに必要な機能を網羅",
+      "import": {
+        "title": "SBOM インポート",
+        "description": "CycloneDX、SPDX形式のSBOMファイルをインポート。Syft、cdxgen、Trivyなどの主要ツールに対応。"
+      },
+      "vulnerability": {
+        "title": "脆弱性管理",
+        "description": "NVDデータベースと連携し、コンポーネントの脆弱性を自動検出。深刻度別に一覧表示。"
+      },
+      "vex": {
+        "title": "VEX ステートメント",
+        "description": "脆弱性の影響評価（VEX）を作成・管理。誤検知の除外や対応状況を記録。"
+      },
+      "compliance": {
+        "title": "コンプライアンス",
+        "description": "経済産業省のSBOMガイドラインに準拠したコンプライアンスチェック機能。"
+      },
+      "cicd": {
+        "title": "CI/CD 連携",
+        "description": "GitHub ActionsなどのCI/CDパイプラインからAPIでSBOMをアップロード。"
+      },
+      "i18n": {
+        "title": "日本語対応",
+        "description": "日本市場向けに最適化。UIは日本語/英語の両方に対応。"
+      }
+    },
+    "pricing": {
+      "title": "料金プラン",
+      "description": "チームの規模に合わせて選べるプラン。まずは無料でお試しください。",
+      "popular": "人気",
+      "free": {
+        "name": "Self-hosted",
+        "price": "無料",
+        "description": "自社サーバーで運用",
+        "feature1": "無制限のプロジェクト",
+        "feature2": "無制限のユーザー",
+        "feature3": "全機能利用可能",
+        "feature4": "コミュニティサポート",
+        "cta": "GitHubでダウンロード"
+      },
+      "starter": {
+        "name": "Cloud Starter",
+        "price": "¥2,500",
+        "period": "月",
+        "description": "小規模チーム向け",
+        "feature1": "5 プロジェクトまで",
+        "feature2": "3 ユーザーまで",
+        "feature3": "全機能利用可能",
+        "feature4": "メールサポート",
+        "feature5": "自動バックアップ",
+        "cta": "無料トライアル開始"
+      },
+      "pro": {
+        "name": "Cloud Pro",
+        "price": "¥8,000",
+        "period": "月",
+        "description": "成長するチーム向け",
+        "feature1": "無制限のプロジェクト",
+        "feature2": "10 ユーザーまで",
+        "feature3": "全機能利用可能",
+        "feature4": "優先サポート",
+        "feature5": "SLA 99.9%",
+        "cta": "無料トライアル開始"
+      }
+    },
+    "cta": {
+      "title": "今すぐSBOM管理を始めましょう",
+      "description": "ソフトウェアサプライチェーンのセキュリティを強化。14日間の無料トライアルで全機能をお試しいただけます。",
+      "button": "無料で始める"
+    },
+    "footer": {
+      "description": "ソフトウェア部品表（SBOM）を管理・可視化するオープンソースプラットフォーム",
+      "product": "プロダクト",
+      "resources": "リソース",
+      "legal": "法的情報",
+      "privacy": "プライバシーポリシー",
+      "terms": "利用規約",
+      "commercialLaw": "特定商取引法に基づく表記",
+      "rights": "All rights reserved."
+    }
+  },
   "Home": {
     "title": "SBOMHub",
     "description": "SBOMを管理・可視化するためのオープンソースプラットフォーム",

@@ -1,4 +1,101 @@
 {
+  "Landing": {
+    "nav": {
+      "features": "Features",
+      "pricing": "Pricing",
+      "signIn": "Sign In",
+      "getStarted": "Get Started"
+    },
+    "hero": {
+      "badge": "Open Source SBOM Management",
+      "title": "Manage Your Software\nBill of Materials",
+      "description": "SBOMHub is an SBOM management platform that provides CycloneDX/SPDX import, vulnerability management, VEX statement creation, and compliance checking.",
+      "cta": "Get Started Free",
+      "github": "View on GitHub"
+    },
+    "features": {
+      "title": "Key Features",
+      "description": "Everything you need for software supply chain security",
+      "import": {
+        "title": "SBOM Import",
+        "description": "Import SBOM files in CycloneDX and SPDX formats. Compatible with major tools like Syft, cdxgen, and Trivy."
+      },
+      "vulnerability": {
+        "title": "Vulnerability Management",
+        "description": "Automatically detect component vulnerabilities with NVD database integration. View by severity level."
+      },
+      "vex": {
+        "title": "VEX Statements",
+        "description": "Create and manage Vulnerability Exploitability eXchange (VEX) statements. Record false positive exclusions and response status."
+      },
+      "compliance": {
+        "title": "Compliance",
+        "description": "Compliance checking feature aligned with METI (Japan) SBOM guidelines."
+      },
+      "cicd": {
+        "title": "CI/CD Integration",
+        "description": "Upload SBOMs via API from CI/CD pipelines like GitHub Actions."
+      },
+      "i18n": {
+        "title": "Multilingual",
+        "description": "Optimized for the Japanese market. UI supports both Japanese and English."
+      }
+    },
+    "pricing": {
+      "title": "Pricing Plans",
+      "description": "Choose a plan that fits your team size. Start with a free trial.",
+      "popular": "Popular",
+      "free": {
+        "name": "Self-hosted",
+        "price": "Free",
+        "description": "Run on your own server",
+        "feature1": "Unlimited projects",
+        "feature2": "Unlimited users",
+        "feature3": "All features included",
+        "feature4": "Community support",
+        "cta": "Download on GitHub"
+      },
+      "starter": {
+        "name": "Cloud Starter",
+        "price": "$17",
+        "period": "month",
+        "description": "For small teams",
+        "feature1": "Up to 5 projects",
+        "feature2": "Up to 3 users",
+        "feature3": "All features included",
+        "feature4": "Email support",
+        "feature5": "Automatic backups",
+        "cta": "Start Free Trial"
+      },
+      "pro": {
+        "name": "Cloud Pro",
+        "price": "$54",
+        "period": "month",
+        "description": "For growing teams",
+        "feature1": "Unlimited projects",
+        "feature2": "Up to 10 users",
+        "feature3": "All features included",
+        "feature4": "Priority support",
+        "feature5": "99.9% SLA",
+        "cta": "Start Free Trial"
+      }
+    },
+    "cta": {
+      "title": "Start Managing Your SBOMs Today",
+      "description": "Strengthen your software supply chain security. Try all features free for 14 days.",
+      "button": "Get Started Free"
+    },
+    "footer": {
+      "description": "Open-source platform for managing and visualizing Software Bill of Materials (SBOM)",
+      "product": "Product",
+      "resources": "Resources",
+      "legal": "Legal",
+      "privacy": "Privacy Policy",
+      "terms": "Terms of Service",
+      "commercialLaw": "Commercial Transactions Act",
+      "rights": "All rights reserved."
+    }
+  },
   "Home": {
     "title": "SBOMHub",
     "description": "Open-source platform for managing and visualizing SBOMs",
