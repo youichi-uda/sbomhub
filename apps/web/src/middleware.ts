@@ -9,14 +9,13 @@ const intlMiddleware = createIntlMiddleware(routing);
 // Routes that don't require authentication
 const isPublicRoute = createRouteMatcher([
   "/",
-  "/:locale",
-  "/:locale/sign-in(.*)",
-  "/:locale/sign-up(.*)",
   "/sign-in(.*)",
   "/sign-up(.*)",
-  "/api/webhooks(.*)",
+  "/:locale/sign-in(.*)",
+  "/:locale/sign-up(.*)",
   "/:locale/pricing",
   "/pricing",
+  "/api/webhooks(.*)",
 ]);
 
 // Check if Clerk is configured (SaaS mode) at build time

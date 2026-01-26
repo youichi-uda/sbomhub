@@ -9,17 +9,15 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
-// Check if Clerk is configured
-const isClerkEnabled = () => {
-  return !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-};
+// Check at build time - direct access for proper inlining
+const CLERK_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
 export function AuthProvider({ children }: AuthProviderProps) {
   const params = useParams();
-  const locale = params?.locale as string;
+  const locale = (params?.locale as string) || "ja";
 
   // Self-hosted mode: no auth provider needed
-  if (!isClerkEnabled()) {
+  if (!CLERK_PUBLISHABLE_KEY) {
     return <>{children}</>;
   }
 
@@ -28,9 +26,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   return (
     <ClerkProvider
+      publishableKey={CLERK_PUBLISHABLE_KEY}
       localization={localization}
-      afterSignInUrl={`/${locale}/dashboard`}
-      afterSignUpUrl={`/${locale}/dashboard`}
+      afterSignInUrl={`/${locale}`}
+      afterSignUpUrl={`/${locale}`}
       signInUrl={`/${locale}/sign-in`}
       signUpUrl={`/${locale}/sign-up`}
     >
