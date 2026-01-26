@@ -179,8 +179,10 @@ jobs:
 - [x] Compliance Scoring (METI Guidelines)
 - [x] CI/CD Integration (GitHub Actions)
 - [x] Notifications (Slack/Discord)
-- [ ] LDAP/OIDC Authentication
-- [ ] Multi-tenancy
+- [x] Multi-tenancy (Row-Level Security)
+- [x] Clerk Authentication Integration
+- [x] Lemon Squeezy Billing Integration
+- [ ] LDAP/OIDC Authentication (Self-hosted)
 - [ ] SBOMHub Cloud (Managed SaaS)
 
 ## Contributing
@@ -190,6 +192,15 @@ Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for g
 ## License
 
 This project is licensed under the [AGPL-3.0 License](./LICENSE).
+
+| Use Case | Allowed | Notes |
+|----------|---------|-------|
+| Self-hosted (internal use) | ✅ | No source disclosure required |
+| Self-hosted (with modifications) | ✅ | Modified source must be disclosed |
+| Providing as SaaS to third parties | ⚠️ | Full source code must be disclosed under AGPL |
+| Official SBOMHub Cloud | ✅ | Provided by the maintainers |
+
+> **Note**: If you want to offer SBOMHub as a commercial SaaS without AGPL obligations, please contact us for a commercial license.
 
 ## Acknowledgements
 
