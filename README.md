@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
 ![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8)
-![Next.js](https://img.shields.io/badge/Next.js-14-black)
+![Next.js](https://img.shields.io/badge/Next.js-16-black)
 ![Docker Pulls](https://img.shields.io/docker/pulls/y1uda/sbomhub-api)
 ![GitHub Stars](https://img.shields.io/github/stars/youichi-uda/sbomhub)
 
@@ -39,7 +39,11 @@ SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard
 
 ## Quick Start
 
-### Docker Compose (Recommended)
+### SaaS Version (Coming Soon)
+
+Try SBOMHub without installation: **https://sbomhub.app**
+
+### Docker Compose (Self-hosted)
 
 ```bash
 # Download and start (no clone needed)

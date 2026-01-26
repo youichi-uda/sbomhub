@@ -4,7 +4,7 @@
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
 ![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8)
-![Next.js](https://img.shields.io/badge/Next.js-14-black)
+![Next.js](https://img.shields.io/badge/Next.js-16-black)
 ![Docker Pulls](https://img.shields.io/docker/pulls/y1uda/sbomhub-api)
 ![GitHub Stars](https://img.shields.io/github/stars/youichi-uda/sbomhub)
 
@@ -39,7 +39,11 @@ SBOMHubは、日本市場向けに設計されたオープンソースのSBOM（
 
 ## クイックスタート
 
-### Docker Compose（推奨）
+### SaaS版（近日公開）
+
+インストール不要ですぐに試せます: **https://sbomhub.app**
+
+### Docker Compose（セルフホスト）
 
 ```bash
 # ダウンロードして起動（クローン不要）
