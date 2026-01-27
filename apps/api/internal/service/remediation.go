@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/client"
+	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
@@ -68,44 +69,47 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 		return nil, fmt.Errorf("vulnerability not found: %w", err)
 	}
 
-	// Get affected component
-	component, err := s.componentRepo.GetByID(ctx, vuln.ComponentID)
-	if err != nil {
-		return nil, fmt.Errorf("component not found: %w", err)
-	}
-
 	// Fetch from OSV API
 	osvVuln, err := s.osvClient.GetVulnerability(ctx, vuln.CVEID)
 	if err != nil {
 		// If OSV fails, return basic info from our database
-		return s.buildBasicResponse(vuln, component), nil
+		return &RemediationResponse{
+			CVEID:    vuln.CVEID,
+			Summary:  vuln.Description,
+			Severity: vuln.Severity,
+			Remediation: RemediationDetails{
+				Type:     "manual",
+				Commands: map[string]string{},
+			},
+			Workarounds: getKnownWorkarounds(vuln.CVEID),
+		}, nil
 	}
-
-	// Extract ecosystem from PURL or component type
-	ecosystem := detectEcosystem(component.Purl, component.Type)
-
-	// Get remediation info from OSV
-	remediationInfo := s.osvClient.GetRemediation(osvVuln, component.Name, ecosystem)
 
 	response := &RemediationResponse{
 		CVEID:    vuln.CVEID,
 		Summary:  vuln.Description,
 		Severity: vuln.Severity,
-		AffectedComponent: AffectedComponent{
-			Name:           component.Name,
-			Ecosystem:      ecosystem,
-			CurrentVersion: component.Version,
-		},
 	}
 
-	if remediationInfo != nil && remediationInfo.FixedVersion != "" {
-		response.Remediation = RemediationDetails{
-			Type:          "upgrade",
-			TargetVersion: remediationInfo.FixedVersion,
-			Commands:      generateUpgradeCommands(component.Name, remediationInfo.FixedVersion, ecosystem),
+	// Get remediation info from OSV - try to find any affected package
+	if osvVuln != nil && len(osvVuln.Affected) > 0 {
+		affected := osvVuln.Affected[0]
+		remediationInfo := s.osvClient.GetRemediation(osvVuln, affected.Package.Name, affected.Package.Ecosystem)
+
+		response.AffectedComponent = AffectedComponent{
+			Name:      affected.Package.Name,
+			Ecosystem: affected.Package.Ecosystem,
 		}
-		if len(remediationInfo.AffectedVersions) > 0 {
-			response.AffectedComponent.AffectedVersions = strings.Join(remediationInfo.AffectedVersions[:min(5, len(remediationInfo.AffectedVersions))], ", ")
+
+		if remediationInfo != nil && remediationInfo.FixedVersion != "" {
+			response.Remediation = RemediationDetails{
+				Type:          "upgrade",
+				TargetVersion: remediationInfo.FixedVersion,
+				Commands:      generateUpgradeCommands(affected.Package.Name, remediationInfo.FixedVersion, affected.Package.Ecosystem),
+			}
+			if len(remediationInfo.AffectedVersions) > 0 {
+				response.AffectedComponent.AffectedVersions = strings.Join(remediationInfo.AffectedVersions[:min(5, len(remediationInfo.AffectedVersions))], ", ")
+			}
 		}
 	}
 
@@ -114,6 +118,7 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 
 	return response, nil
 }
+
 
 // GetRemediationByCVE fetches remediation by CVE ID
 func (s *RemediationService) GetRemediationByCVE(ctx context.Context, cveID string, componentName, componentVersion string) (*RemediationResponse, error) {
@@ -161,7 +166,7 @@ func (s *RemediationService) GetRemediationByCVE(ctx context.Context, cveID stri
 	return response, nil
 }
 
-func (s *RemediationService) buildBasicResponse(vuln *repository.Vulnerability, component *repository.Component) *RemediationResponse {
+func (s *RemediationService) buildBasicResponse(vuln *model.Vulnerability, component *model.Component) *RemediationResponse {
 	ecosystem := detectEcosystem(component.Purl, component.Type)
 	return &RemediationResponse{
 		CVEID:    vuln.CVEID,

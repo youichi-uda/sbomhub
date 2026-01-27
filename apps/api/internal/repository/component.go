@@ -100,3 +100,14 @@ func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Con
 	}
 	return results, nil
 }
+
+// GetByID retrieves a component by its UUID
+func (r *ComponentRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Component, error) {
+	query := `SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE id = $1`
+	var c model.Component
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&c.ID, &c.SbomID, &c.Name, &c.Version, &c.Type, &c.Purl, &c.License, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}

@@ -23,7 +23,7 @@ func NewScanSettingsHandler(ss *service.ScanSettingsService) *ScanSettingsHandle
 // GET /api/v1/settings/scan
 func (h *ScanSettingsHandler) Get(c echo.Context) error {
 	ctx := c.Request().Context()
-	tenantCtx := middleware.GetTenantContext(c)
+	tenantCtx := middleware.NewTenantContext(c)
 	if tenantCtx == nil {
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "unauthorized",
@@ -44,7 +44,7 @@ func (h *ScanSettingsHandler) Get(c echo.Context) error {
 // PUT /api/v1/settings/scan
 func (h *ScanSettingsHandler) Update(c echo.Context) error {
 	ctx := c.Request().Context()
-	tenantCtx := middleware.GetTenantContext(c)
+	tenantCtx := middleware.NewTenantContext(c)
 	if tenantCtx == nil {
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "unauthorized",
@@ -79,7 +79,7 @@ func (h *ScanSettingsHandler) Update(c echo.Context) error {
 // GET /api/v1/settings/scan/logs
 func (h *ScanSettingsHandler) GetLogs(c echo.Context) error {
 	ctx := c.Request().Context()
-	tenantCtx := middleware.GetTenantContext(c)
+	tenantCtx := middleware.NewTenantContext(c)
 	if tenantCtx == nil {
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "unauthorized",
