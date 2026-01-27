@@ -576,3 +576,29 @@ export const api = {
     },
   },
 };
+
+// useApi hook for components that need direct API access with auth
+export function useApi() {
+  return {
+    async get<T>(path: string): Promise<T> {
+      return request<T>(path);
+    },
+    async post<T>(path: string, data?: unknown): Promise<T> {
+      return request<T>(path, {
+        method: "POST",
+        body: data ? JSON.stringify(data) : undefined,
+      });
+    },
+    async put<T>(path: string, data?: unknown): Promise<T> {
+      return request<T>(path, {
+        method: "PUT",
+        body: data ? JSON.stringify(data) : undefined,
+      });
+    },
+    async delete<T>(path: string): Promise<T> {
+      return request<T>(path, {
+        method: "DELETE",
+      });
+    },
+  };
+}
