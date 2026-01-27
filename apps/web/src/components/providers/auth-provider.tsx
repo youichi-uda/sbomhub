@@ -26,8 +26,8 @@ export function AuthProvider({ children, locale }: AuthProviderProps) {
     <ClerkProvider
       publishableKey={CLERK_PUBLISHABLE_KEY}
       localization={localization}
-      afterSignInUrl={`/${locale}`}
-      afterSignUpUrl={`/${locale}`}
+      signInFallbackRedirectUrl={`/${locale}/dashboard`}
+      signUpFallbackRedirectUrl={`/${locale}/dashboard`}
       signInUrl={`/${locale}/sign-in`}
       signUpUrl={`/${locale}/sign-up`}
     >

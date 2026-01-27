@@ -1,5 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3000';
+const serverPort = new URL(baseURL).port || '3000';
+const apiBaseURL =
+  process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -8,7 +13,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL,
     trace: 'on-first-retry',
   },
   projects: [
@@ -19,8 +24,14 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:3000',
+    url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 120000,
+    env: {
+      PORT: serverPort,
+      NEXT_PUBLIC_API_URL: apiBaseURL,
+      NEXT_PUBLIC_APP_URL: baseURL,
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: '',
+    },
   },
 });

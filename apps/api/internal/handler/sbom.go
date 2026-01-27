@@ -50,6 +50,20 @@ func (h *SbomHandler) Get(c echo.Context) error {
 	return c.JSON(http.StatusOK, sbom)
 }
 
+func (h *SbomHandler) List(c echo.Context) error {
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+
+	sboms, err := h.sbomService.ListByProject(c.Request().Context(), projectID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, sboms)
+}
+
 func (h *SbomHandler) GetComponents(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {

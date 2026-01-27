@@ -19,6 +19,42 @@ export interface Component {
   created_at: string;
 }
 
+export interface Sbom {
+  id: string;
+  project_id: string;
+  format: string;
+  version: string | null;
+  created_at: string;
+}
+
+export interface PublicLink {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  sbom_id?: string | null;
+  token: string;
+  name: string;
+  expires_at: string;
+  is_active: boolean;
+  allowed_downloads?: number | null;
+  view_count: number;
+  download_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublicSbomView {
+  project_name: string;
+  sbom: Sbom;
+  components: Component[];
+  link: {
+    name: string;
+    expires_at: string;
+    view_count: number;
+    download_count: number;
+  };
+}
+
 export interface Vulnerability {
   id: string;
   cve_id: string;
@@ -149,6 +185,43 @@ export interface DashboardSummary {
   top_risks: TopRisk[];
   project_scores: ProjectScore[];
   trend: TrendPoint[];
+}
+
+// SBOM Diff types
+export interface SbomDiffSummary {
+  added_count: number;
+  removed_count: number;
+  updated_count: number;
+  new_vulnerabilities_count: number;
+}
+
+export interface SbomDiffComponent {
+  name: string;
+  version: string;
+  license?: string;
+  vulnerabilities?: Vulnerability[];
+}
+
+export interface SbomDiffUpdated {
+  name: string;
+  old_version: string;
+  new_version: string;
+  vulnerabilities_fixed?: string[];
+}
+
+export interface SbomDiffVulnerability {
+  cve_id: string;
+  severity: string;
+  component: string;
+  version: string;
+}
+
+export interface SbomDiffResponse {
+  summary: SbomDiffSummary;
+  added: SbomDiffComponent[];
+  removed: SbomDiffComponent[];
+  updated: SbomDiffUpdated[];
+  new_vulnerabilities: SbomDiffVulnerability[];
 }
 
 // Search types
@@ -327,6 +400,8 @@ export const api = {
       request<Component[]>(`/api/v1/projects/${id}/components`),
     getVulnerabilities: (id: string) =>
       request<Vulnerability[]>(`/api/v1/projects/${id}/vulnerabilities`),
+    getSboms: (id: string) =>
+      request<Sbom[]>(`/api/v1/projects/${id}/sboms`),
     // VEX methods
     getVEXStatements: (id: string) =>
       request<VEXStatementWithDetails[]>(`/api/v1/projects/${id}/vex`),
@@ -450,5 +525,54 @@ export const api = {
   },
   licenses: {
     getCommon: () => request<Record<string, string>>("/api/v1/licenses/common"),
+  },
+  sbom: {
+    diff: (data: { base_sbom_id: string; target_sbom_id: string }) =>
+      request<SbomDiffResponse>("/api/v1/sbom/diff", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+  },
+  publicLinks: {
+    list: (projectId: string) =>
+      request<PublicLink[]>(`/api/v1/projects/${projectId}/public-links`),
+    create: (
+      projectId: string,
+      data: {
+        name: string;
+        sbom_id?: string;
+        expires_at: string;
+        is_active: boolean;
+        allowed_downloads?: number;
+        password?: string;
+      }
+    ) =>
+      request<PublicLink>(`/api/v1/projects/${projectId}/public-links`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    update: (
+      linkId: string,
+      data: {
+        name: string;
+        sbom_id?: string;
+        expires_at: string;
+        is_active: boolean;
+        allowed_downloads?: number;
+        password?: string | null;
+      }
+    ) =>
+      request<PublicLink>(`/api/v1/public-links/${linkId}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    delete: (linkId: string) =>
+      request<void>(`/api/v1/public-links/${linkId}`, { method: "DELETE" }),
+    publicView: (token: string, password?: string) => {
+      const url = password
+        ? `/api/v1/public/${token}?password=${encodeURIComponent(password)}`
+        : `/api/v1/public/${token}`;
+      return request<PublicSbomView>(url);
+    },
   },
 };

@@ -3,8 +3,9 @@ package middleware
 import (
 	"net/http"
 	"strings"
-
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
@@ -78,6 +79,31 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 				c.Set(ContextKeyAPI, key)
 			}
 
+			return next(c)
+		}
+	}
+}
+
+// APIKeyTenant sets tenant context based on API key's project
+func APIKeyTenant(projectRepo *repository.ProjectRepository, tenantRepo *repository.TenantRepository) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			key, ok := c.Get(ContextKeyAPI).(*model.APIKey)
+			if !ok || key == nil {
+				return c.JSON(http.StatusUnauthorized, map[string]string{
+					"error": "invalid API key context",
+				})
+			}
+
+			projectID := key.ProjectID
+			tenantID, err := projectRepo.GetTenantID(c.Request().Context(), projectID)
+			if err != nil {
+				return c.JSON(http.StatusForbidden, map[string]string{"error": "tenant not found"})
+			}
+			if err := tenantRepo.SetCurrentTenant(c.Request().Context(), tenantID); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to set tenant context"})
+			}
+			c.Set(ContextKeyTenantID, tenantID)
 			return next(c)
 		}
 	}

@@ -177,8 +177,20 @@ export default function ProjectDetailPage() {
           <ArrowLeft className="h-4 w-4 mr-1" />
           Back to Projects
         </Link>
-        <h1 className="text-3xl font-bold">{project.name}</h1>
-        <p className="text-muted-foreground">{project.description}</p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold">{project.name}</h1>
+            <p className="text-muted-foreground">{project.description}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Link href={`/projects/${projectId}/diff`}>
+              <Button variant="outline">SBOM Diff</Button>
+            </Link>
+            <Link href={`/projects/${projectId}/share`}>
+              <Button variant="outline">Share</Button>
+            </Link>
+          </div>
+        </div>
       </div>
 
       <div className="flex gap-2 mb-6">

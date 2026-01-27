@@ -9,6 +9,7 @@ const intlMiddleware = createIntlMiddleware(routing);
 // Routes that don't require authentication
 const isPublicRoute = createRouteMatcher([
   "/",
+  "/public(.*)",
   "/sign-in(.*)",
   "/sign-up(.*)",
   "/:locale/sign-in(.*)",
@@ -24,15 +25,21 @@ const CLERK_ENABLED = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 // Clerk middleware handler for SaaS mode
 const clerkHandler = clerkMiddleware(
   async (auth, req) => {
+    const { userId } = await auth();
+    const pathname = req.nextUrl.pathname;
+    const localeMatch = pathname.match(/^\/([a-z]{2})(\/|$)/);
+    const locale = localeMatch ? localeMatch[1] : "ja";
+
+    // Redirect authenticated users from landing page to dashboard
+    if (userId && (pathname === "/" || pathname === `/${locale}` || pathname === `/${locale}/`)) {
+      const dashboardUrl = req.nextUrl.clone();
+      dashboardUrl.pathname = `/${locale}/dashboard`;
+      return NextResponse.redirect(dashboardUrl);
+    }
+
     // Check if route requires auth
     if (!isPublicRoute(req)) {
-      const { userId } = await auth();
       if (!userId) {
-        // Get the locale from the URL or default to 'ja'
-        const pathname = req.nextUrl.pathname;
-        const localeMatch = pathname.match(/^\/([a-z]{2})(\/|$)/);
-        const locale = localeMatch ? localeMatch[1] : "ja";
-
         // Redirect to sign-in page with redirect_url
         const signInUrl = req.nextUrl.clone();
         signInUrl.pathname = `/${locale}/sign-in`;
@@ -52,6 +59,10 @@ const clerkHandler = clerkMiddleware(
 
 // Main middleware - conditionally use Clerk
 export default async function middleware(request: NextRequest) {
+  if (request.nextUrl.pathname.startsWith("/public/")) {
+    return NextResponse.next();
+  }
+
   if (!CLERK_ENABLED) {
     // Self-hosted mode: just use i18n middleware
     return intlMiddleware(request);

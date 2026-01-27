@@ -155,3 +155,37 @@ func (r *TenantRepository) GetOrCreateDefault(ctx context.Context) (*model.Tenan
 	}
 	return t, nil
 }
+
+// GetOrCreateByClerkOrgID returns the tenant for a Clerk org ID
+// Creates one if it doesn't exist (auto-provisioning for SaaS mode)
+func (r *TenantRepository) GetOrCreateByClerkOrgID(ctx context.Context, clerkOrgID string, orgName string) (*model.Tenant, error) {
+	// Try to get existing tenant
+	t, err := r.GetByClerkOrgID(ctx, clerkOrgID)
+	if err == nil {
+		return t, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	// Create tenant for this Clerk org (auto-provisioning)
+	now := time.Now()
+	slug := clerkOrgID // Use Clerk org ID as slug for uniqueness
+	if orgName == "" {
+		orgName = "Organization"
+	}
+	t = &model.Tenant{
+		ID:         uuid.New(),
+		ClerkOrgID: clerkOrgID,
+		Name:       orgName,
+		Slug:       slug,
+		Plan:       model.PlanFree, // Start with free plan
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	if err := r.Create(ctx, t); err != nil {
+		return nil, err
+	}
+	return t, nil
+}

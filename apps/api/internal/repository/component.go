@@ -66,3 +66,37 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	}
 	return vulns, nil
 }
+
+func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.ComponentVulnerability, error) {
+	query := `
+		SELECT c.id, c.name, c.version, c.purl, c.license, v.cve_id, v.severity
+		FROM components c
+		JOIN component_vulnerabilities cv ON cv.component_id = c.id
+		JOIN vulnerabilities v ON v.id = cv.vulnerability_id
+		WHERE c.sbom_id = $1
+		ORDER BY v.cvss_score DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, sbomID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []model.ComponentVulnerability
+	for rows.Next() {
+		var item model.ComponentVulnerability
+		if err := rows.Scan(
+			&item.ComponentID,
+			&item.ComponentName,
+			&item.ComponentVersion,
+			&item.ComponentPurl,
+			&item.ComponentLicense,
+			&item.CVEID,
+			&item.Severity,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, item)
+	}
+	return results, nil
+}

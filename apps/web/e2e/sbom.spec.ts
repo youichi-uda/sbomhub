@@ -1,13 +1,14 @@
 import { test, expect } from '@playwright/test';
-import path from 'path';
-import fs from 'fs';
+
+const API_BASE_URL =
+  process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
 test.describe('SBOM Management', () => {
   let projectId: string;
 
   test.beforeAll(async ({ request }) => {
     // Create a test project via API
-    const response = await request.post('http://localhost:8080/api/v1/projects', {
+    const response = await request.post(`${API_BASE_URL}/api/v1/projects`, {
       data: {
         name: `SBOM Test Project ${Date.now()}`,
         description: 'Project for SBOM E2E tests',
@@ -20,7 +21,7 @@ test.describe('SBOM Management', () => {
   test.afterAll(async ({ request }) => {
     // Clean up test project
     if (projectId) {
-      await request.delete(`http://localhost:8080/api/v1/projects/${projectId}`);
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
     }
   });
 
@@ -47,7 +48,7 @@ test.describe('SBOM Management', () => {
 
     // Upload via API (file input is tricky in Playwright)
     const uploadResponse = await request.post(
-      `http://localhost:8080/api/v1/projects/${projectId}/sbom`,
+      `${API_BASE_URL}/api/v1/projects/${projectId}/sbom`,
       {
         data: JSON.stringify(cycloneDxSbom),
         headers: { 'Content-Type': 'application/json' },
@@ -66,7 +67,7 @@ test.describe('SBOM Management', () => {
 
   test('should upload SPDX SBOM', async ({ page, request }) => {
     // Create a new project for SPDX test
-    const createResponse = await request.post('http://localhost:8080/api/v1/projects', {
+    const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
       data: {
         name: `SPDX Test Project ${Date.now()}`,
         description: 'Project for SPDX E2E tests',
@@ -97,7 +98,7 @@ test.describe('SBOM Management', () => {
 
     // Upload SPDX SBOM
     const uploadResponse = await request.post(
-      `http://localhost:8080/api/v1/projects/${project.id}/sbom`,
+      `${API_BASE_URL}/api/v1/projects/${project.id}/sbom`,
       {
         data: JSON.stringify(spdxSbom),
         headers: { 'Content-Type': 'application/json' },
@@ -114,7 +115,7 @@ test.describe('SBOM Management', () => {
     await expect(page.getByText('2.0.0')).toBeVisible();
 
     // Clean up
-    await request.delete(`http://localhost:8080/api/v1/projects/${project.id}`);
+    await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
   });
 
   test('should display components list after upload', async ({ page, request }) => {
@@ -134,7 +135,7 @@ test.describe('SBOM Management', () => {
     };
 
     await request.post(
-      `http://localhost:8080/api/v1/projects/${projectId}/sbom`,
+      `${API_BASE_URL}/api/v1/projects/${projectId}/sbom`,
       {
         data: JSON.stringify(testSbom),
         headers: { 'Content-Type': 'application/json' },

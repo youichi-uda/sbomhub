@@ -1,6 +1,6 @@
 # SBOMHub
 
-[English](./README.md) | 日本語
+[![日本語](https://img.shields.io/badge/lang-日本語-red.svg)](./README.ja.md) [![English](https://img.shields.io/badge/lang-English-blue.svg)](./README.md)
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
 ![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8)

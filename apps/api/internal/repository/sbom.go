@@ -31,3 +31,32 @@ func (r *SbomRepository) GetLatest(ctx context.Context, projectID uuid.UUID) (*m
 	}
 	return &s, nil
 }
+
+func (r *SbomRepository) GetByID(ctx context.Context, sbomID uuid.UUID) (*model.Sbom, error) {
+	query := `SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id = $1`
+	var s model.Sbom
+	err := r.db.QueryRowContext(ctx, query, sbomID).Scan(&s.ID, &s.ProjectID, &s.Format, &s.Version, &s.RawData, &s.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (r *SbomRepository) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.Sbom, error) {
+	query := `SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = $1 ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sboms []model.Sbom
+	for rows.Next() {
+		var s model.Sbom
+		if err := rows.Scan(&s.ID, &s.ProjectID, &s.Format, &s.Version, &s.RawData, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		sboms = append(sboms, s)
+	}
+	return sboms, nil
+}

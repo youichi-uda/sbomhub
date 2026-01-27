@@ -51,6 +51,13 @@ func (r *ProjectRepository) Get(ctx context.Context, id uuid.UUID) (*model.Proje
 	return &p, nil
 }
 
+func (r *ProjectRepository) GetTenantID(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	query := `SELECT tenant_id FROM projects WHERE id = $1`
+	var tenantID uuid.UUID
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&tenantID)
+	return tenantID, err
+}
+
 func (r *ProjectRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM projects WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, id)

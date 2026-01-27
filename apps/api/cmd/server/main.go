@@ -3,18 +3,25 @@ package main
 import (
 	"log/slog"
 	"os"
+	"time"
 
+	"github.com/clerk/clerk-sdk-go/v2"
+	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/sbomhub/sbomhub/internal/config"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/handler"
 	appmw "github.com/sbomhub/sbomhub/internal/middleware"
+	"github.com/sbomhub/sbomhub/internal/redis"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
 func main() {
+	// Load .env file if it exists (for local development)
+	_ = godotenv.Load()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
@@ -26,6 +33,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	rdb, err := redis.NewClient(cfg.RedisURL)
+	if err != nil {
+		slog.Error("Failed to connect to redis", "error", err)
+		os.Exit(1)
+	}
+	defer rdb.Close()
+
+	// Initialize Clerk SDK with secret key (required for JWT verification)
+	if cfg.ClerkSecretKey != "" {
+		clerk.SetKey(cfg.ClerkSecretKey)
+		slog.Info("Clerk SDK initialized")
+	}
 
 	// Log startup mode
 	slog.Info("Starting SBOMHub", "mode", cfg.Mode(), "auth_enabled", cfg.IsAuthEnabled(), "billing_enabled", cfg.IsBillingEnabled())
@@ -42,6 +62,7 @@ func main() {
 	dashboardRepo := repository.NewDashboardRepository(db)
 	searchRepo := repository.NewSearchRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
+	publicLinkRepo := repository.NewPublicLinkRepository(db)
 
 	// SaaS Repositories
 	tenantRepo := repository.NewTenantRepository(db)
@@ -52,6 +73,7 @@ func main() {
 	// Services
 	projectService := service.NewProjectService(projectRepo)
 	sbomService := service.NewSbomService(sbomRepo, componentRepo)
+	sbomDiffService := service.NewSbomDiffService(sbomRepo, componentRepo)
 	nvdService := service.NewNVDService(vulnRepo, componentRepo, cfg.NVDAPIKey)
 	jvnService := service.NewJVNService(vulnRepo, componentRepo)
 	statsService := service.NewStatsService(statsRepo)
@@ -63,10 +85,12 @@ func main() {
 	epssService := service.NewEPSSService(vulnRepo)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg.BaseURL)
 	complianceService := service.NewComplianceService(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo)
+	publicLinkService := service.NewPublicLinkService(publicLinkRepo, projectRepo, sbomRepo, componentRepo)
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
 	sbomHandler := handler.NewSbomHandler(sbomService)
+	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	vexHandler := handler.NewVEXHandler(vexService)
@@ -77,6 +101,7 @@ func main() {
 	epssHandler := handler.NewEPSSHandler(epssService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	complianceHandler := handler.NewComplianceHandler(complianceService)
+	publicLinkHandler := handler.NewPublicLinkHandler(publicLinkService)
 
 	// SaaS Handlers
 	clerkWebhookHandler := handler.NewClerkWebhookHandler(cfg, tenantRepo, userRepo, auditRepo)
@@ -104,6 +129,25 @@ func main() {
 			"mode":   string(cfg.Mode()),
 		})
 	})
+	api.GET("/public/:token", publicLinkHandler.PublicGet)
+	api.GET("/public/:token/download", publicLinkHandler.PublicDownload)
+
+	// MCP endpoints (API key auth)
+	mcp := api.Group("/mcp",
+		appmw.APIKeyAuth(apiKeyService),
+		appmw.APIKeyTenant(projectRepo, tenantRepo),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.MCPAudit(auditRepo),
+	)
+
+	mcp.GET("/projects", projectHandler.List)
+	mcp.GET("/dashboard/summary", dashboardHandler.GetSummary)
+	mcp.GET("/search/cve", searchHandler.SearchByCVE)
+	mcp.GET("/search/component", searchHandler.SearchByComponent)
+	mcp.POST("/sbom/diff", sbomDiffHandler.Diff)
+	mcp.GET("/projects/:id/vulnerabilities", sbomHandler.GetVulnerabilities)
+	mcp.GET("/projects/:id/compliance", complianceHandler.Check)
+	mcp.GET("/projects/:id/sboms", sbomHandler.List)
 
 	// Auth middleware - applies to most endpoints
 	authMiddleware := appmw.Auth(cfg, tenantRepo, userRepo)
@@ -150,9 +194,13 @@ func main() {
 	// SBOM endpoints
 	auth.POST("/projects/:id/sbom", sbomHandler.Upload)
 	auth.GET("/projects/:id/sbom", sbomHandler.Get)
+	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)
 	auth.GET("/projects/:id/vulnerabilities", sbomHandler.GetVulnerabilities)
 	auth.POST("/projects/:id/scan", vulnHandler.Scan)
+
+	// SBOM Diff endpoints
+	auth.POST("/sbom/diff", sbomDiffHandler.Diff)
 
 	// VEX endpoints
 	auth.GET("/projects/:id/vex", vexHandler.List)
@@ -185,6 +233,12 @@ func main() {
 	// Compliance endpoints
 	auth.GET("/projects/:id/compliance", complianceHandler.Check)
 	auth.GET("/projects/:id/compliance/report", complianceHandler.ExportReport)
+
+	// Public link endpoints
+	auth.POST("/projects/:id/public-links", publicLinkHandler.Create)
+	auth.GET("/projects/:id/public-links", publicLinkHandler.List)
+	auth.PUT("/public-links/:id", publicLinkHandler.Update)
+	auth.DELETE("/public-links/:id", publicLinkHandler.Delete)
 
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))

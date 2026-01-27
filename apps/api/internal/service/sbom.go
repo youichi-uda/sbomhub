@@ -60,6 +60,10 @@ func (s *SbomService) GetLatest(ctx context.Context, projectID uuid.UUID) (*mode
 	return s.sbomRepo.GetLatest(ctx, projectID)
 }
 
+func (s *SbomService) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.Sbom, error) {
+	return s.sbomRepo.ListByProject(ctx, projectID)
+}
+
 func (s *SbomService) GetComponents(ctx context.Context, projectID uuid.UUID) ([]model.Component, error) {
 	sbom, err := s.sbomRepo.GetLatest(ctx, projectID)
 	if err != nil {

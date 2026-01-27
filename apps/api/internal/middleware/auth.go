@@ -3,9 +3,12 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	clerkjwt "github.com/clerk/clerk-sdk-go/v2/jwt"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/config"
@@ -110,6 +113,7 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 	// Get token from Authorization header
 	authHeader := c.Request().Header.Get("Authorization")
 	if authHeader == "" {
+		slog.Debug("Auth failed: missing authorization header")
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "missing authorization header",
 		})
@@ -117,14 +121,18 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 
 	token := strings.TrimPrefix(authHeader, "Bearer ")
 	if token == authHeader {
+		slog.Debug("Auth failed: invalid authorization header format")
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "invalid authorization header format",
 		})
 	}
 
+	slog.Debug("Verifying Clerk JWT", "token_length", len(token), "token_prefix", token[:min(20, len(token))])
+
 	// Verify JWT with Clerk
 	claims, err := verifyClerkJWT(ctx, token, cfg.ClerkSecretKey)
 	if err != nil {
+		slog.Error("Clerk JWT verification failed", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "invalid token: " + err.Error(),
 		})
@@ -138,43 +146,68 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 		})
 	}
 
-	// Get tenant by Clerk org ID
-	tenant, err := tenantRepo.GetByClerkOrgID(ctx, orgID)
+	// Get or create tenant by Clerk org ID (auto-provisioning)
+	tenant, err := tenantRepo.GetOrCreateByClerkOrgID(ctx, orgID, "")
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusForbidden, map[string]string{
-				"error": "organization not found",
-			})
-		}
+		slog.Error("Failed to get or create tenant", "error", err, "clerk_org_id", orgID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to get organization",
 		})
 	}
 
-	// Get user by Clerk user ID
+	// Get or create user by Clerk user ID (auto-provisioning)
 	user, err := userRepo.GetByClerkUserID(ctx, claims.UserID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusForbidden, map[string]string{
-				"error": "user not found",
+			// Create user on first login
+			now := time.Now()
+			user = &model.User{
+				ID:          uuid.New(),
+				ClerkUserID: claims.UserID,
+				Email:       claims.UserID + "@clerk.user", // Placeholder, will be updated via webhook
+				Name:        "User",
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			if err := userRepo.Create(ctx, user); err != nil {
+				slog.Error("Failed to create user", "error", err)
+				return c.JSON(http.StatusInternalServerError, map[string]string{
+					"error": "failed to create user",
+				})
+			}
+		} else {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to get user",
 			})
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "failed to get user",
-		})
 	}
 
-	// Get user's role in tenant
+	// Get or create user's role in tenant (auto-provisioning)
 	tenantUser, err := userRepo.GetUserRole(ctx, tenant.ID, user.ID)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusForbidden, map[string]string{
-				"error": "not a member of this organization",
+			// Add user to tenant (first user becomes owner)
+			role := model.RoleMember
+			if claims.OrgRole == "org:admin" {
+				role = model.RoleOwner
+			}
+			tenantUser = &model.TenantUser{
+				TenantID:  tenant.ID,
+				UserID:    user.ID,
+				Role:      role,
+				CreatedAt: time.Now(),
+			}
+			if err := userRepo.AddToTenant(ctx, tenantUser); err != nil {
+				slog.Error("Failed to add user to tenant", "error", err)
+				return c.JSON(http.StatusInternalServerError, map[string]string{
+					"error": "failed to add user to organization",
+				})
+			}
+		} else {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to get user role",
 			})
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "failed to get user role",
-		})
 	}
 
 	// Set RLS context
@@ -203,27 +236,21 @@ type ClerkClaims struct {
 	OrgRole string
 }
 
-// verifyClerkJWT verifies a Clerk JWT token
-// This is a simplified implementation - in production, use the official Clerk SDK
+// verifyClerkJWT verifies a Clerk JWT token using the official Clerk SDK
 func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims, error) {
-	// TODO: Implement proper Clerk JWT verification using clerk-sdk-go
-	// For now, return a placeholder that will be replaced with actual implementation
-	//
-	// import "github.com/clerk/clerk-sdk-go/v2/jwt"
-	//
-	// claims, err := jwt.Verify(ctx, &jwt.VerifyParams{
-	//     Token: token,
-	// })
-	// if err != nil {
-	//     return nil, err
-	// }
-	// return &ClerkClaims{
-	//     UserID:  claims.Subject,
-	//     OrgID:   claims.ActiveOrganizationID,
-	//     OrgRole: claims.ActiveOrganizationRole,
-	// }, nil
+	claims, err := clerkjwt.Verify(ctx, &clerkjwt.VerifyParams{
+		Token:  token,
+		Leeway: 5 * time.Minute, // Allow 5 minutes clock skew
+	})
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, echo.NewHTTPError(http.StatusNotImplemented, "Clerk JWT verification not implemented")
+	return &ClerkClaims{
+		UserID:  claims.Subject,
+		OrgID:   claims.ActiveOrganizationID,
+		OrgRole: claims.ActiveOrganizationRole,
+	}, nil
 }
 
 // RequireRole returns a middleware that checks if the user has the required role

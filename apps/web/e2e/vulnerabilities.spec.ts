@@ -1,12 +1,15 @@
 import { test, expect } from '@playwright/test';
 
+const API_BASE_URL =
+  process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
+
 test.describe('Vulnerabilities', () => {
   let projectId: string;
   let sbomId: string;
 
   test.beforeAll(async ({ request }) => {
     // Create a test project with vulnerable components
-    const createResponse = await request.post('http://localhost:8080/api/v1/projects', {
+    const createResponse = await request.post(`${API_BASE_URL}/api/v1/projects`, {
       data: {
         name: `Vuln Test Project ${Date.now()}`,
         description: 'Project for vulnerability E2E tests',
@@ -31,7 +34,7 @@ test.describe('Vulnerabilities', () => {
     };
 
     const uploadResponse = await request.post(
-      `http://localhost:8080/api/v1/projects/${projectId}/sbom`,
+      `${API_BASE_URL}/api/v1/projects/${projectId}/sbom`,
       {
         data: JSON.stringify(sbom),
         headers: { 'Content-Type': 'application/json' },
@@ -43,14 +46,14 @@ test.describe('Vulnerabilities', () => {
 
   test.afterAll(async ({ request }) => {
     if (projectId) {
-      await request.delete(`http://localhost:8080/api/v1/projects/${projectId}`);
+      await request.delete(`${API_BASE_URL}/api/v1/projects/${projectId}`);
     }
   });
 
   test('should trigger vulnerability scan', async ({ page, request }) => {
     // Trigger vulnerability scan via API
     const scanResponse = await request.post(
-      `http://localhost:8080/api/v1/projects/${projectId}/scan?sbom_id=${sbomId}`
+      `${API_BASE_URL}/api/v1/projects/${projectId}/scan?sbom_id=${sbomId}`
     );
     expect(scanResponse.status()).toBe(202);
 
@@ -69,7 +72,7 @@ test.describe('Vulnerabilities', () => {
   test('should display vulnerability details', async ({ page, request }) => {
     // Get vulnerabilities for the project
     const vulnResponse = await request.get(
-      `http://localhost:8080/api/v1/projects/${projectId}/vulnerabilities`
+      `${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`
     );
     const vulnerabilities = await vulnResponse.json();
 
