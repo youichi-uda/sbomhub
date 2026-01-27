@@ -280,7 +280,7 @@ func (s *NotificationService) sendWebhook(ctx context.Context, webhookURL string
 	if resp.StatusCode >= 400 {
 		errMsg := fmt.Sprintf("webhook returned status %d", resp.StatusCode)
 		s.logNotification(ctx, projectID, channel, string(jsonPayload), "failed", errMsg)
-		return fmt.Errorf(errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	s.logNotification(ctx, projectID, channel, string(jsonPayload), "sent", "")
