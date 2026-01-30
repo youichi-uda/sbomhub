@@ -240,6 +240,98 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
+	// Search endpoints
+	if strings.HasPrefix(path, "/search") {
+		resourceType = "search"
+		if method == "GET" {
+			if strings.Contains(path, "/cve") {
+				return "search.cve", "search"
+			}
+			if strings.Contains(path, "/component") {
+				return "search.component", "search"
+			}
+			return "search.executed", "search"
+		}
+	}
+
+	// Dashboard endpoints
+	if strings.HasPrefix(path, "/dashboard") {
+		resourceType = "dashboard"
+		if method == "GET" {
+			return "dashboard.viewed", "dashboard"
+		}
+	}
+
+	// Vulnerability endpoints
+	if strings.HasPrefix(path, "/vulnerabilities") || strings.Contains(path, "/vulnerabilities") {
+		resourceType = "vulnerability"
+		switch method {
+		case "POST":
+			if strings.Contains(path, "/scan") {
+				return "vulnerability.scanned", "vulnerability"
+			}
+			return "vulnerability.created", "vulnerability"
+		case "PUT", "PATCH":
+			return "vulnerability.updated", "vulnerability"
+		case "GET":
+			return "vulnerability.viewed", "vulnerability"
+		}
+	}
+
+	// MCP endpoints
+	if strings.HasPrefix(path, "/mcp") {
+		resourceType = "mcp"
+		if method == "GET" {
+			return "mcp.accessed", "mcp"
+		}
+		if method == "POST" {
+			return "mcp.action", "mcp"
+		}
+	}
+
+	// CLI endpoints
+	if strings.HasPrefix(path, "/cli") {
+		resourceType = "cli"
+		switch method {
+		case "POST":
+			if strings.Contains(path, "/upload") {
+				return "cli.upload", "cli"
+			}
+			if strings.Contains(path, "/check") {
+				return "cli.check", "cli"
+			}
+			return "cli.action", "cli"
+		case "GET":
+			return "cli.accessed", "cli"
+		}
+	}
+
+	// Scan endpoints
+	if strings.Contains(path, "/scan") {
+		resourceType = "scan"
+		if method == "POST" {
+			return "scan.started", "scan"
+		}
+		if method == "GET" {
+			return "scan.status", "scan"
+		}
+	}
+
+	// Notifications endpoints
+	if strings.HasPrefix(path, "/notifications") || strings.Contains(path, "/notifications") {
+		resourceType = "notification"
+		switch method {
+		case "POST":
+			return "notification.created", "notification"
+		case "PUT", "PATCH":
+			return "notification.updated", "notification"
+		case "DELETE":
+			return "notification.deleted", "notification"
+		case "GET":
+			return "notification.viewed", "notification"
+		}
+	}
+
 	// Default: log as generic resource access
 	if method == "GET" {
 		return "resource.viewed", "unknown"

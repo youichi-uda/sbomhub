@@ -115,7 +115,7 @@ func main() {
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
-	sbomHandler := handler.NewSbomHandler(sbomService)
+	sbomHandler := handler.NewSbomHandler(sbomService, nvdService, jvnService)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
@@ -144,9 +144,10 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:3000", "http://localhost:13000", "http://localhost:*", "https://sbomhub.app"},
-		AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.DELETE},
-		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "X-Clerk-Org-ID"},
+		AllowOrigins:  []string{"http://localhost:3000", "http://localhost:13000", "http://localhost:*", "https://sbomhub.app"},
+		AllowMethods:  []string{echo.GET, echo.POST, echo.PUT, echo.DELETE},
+		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "X-Clerk-Org-ID"},
+		ExposeHeaders: []string{echo.HeaderContentDisposition, echo.HeaderContentLength, echo.HeaderContentType},
 	}))
 
 	// Webhook endpoints (no auth required)
