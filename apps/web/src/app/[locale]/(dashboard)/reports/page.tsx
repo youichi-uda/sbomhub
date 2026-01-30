@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, FileText, Download, Plus, RefreshCw, Clock, CheckCircle2, AlertTriangle, Settings } from 'lucide-react';
 import { api, GeneratedReport, ReportListResponse } from '@/lib/api';
-import { useAuth } from '@clerk/nextjs';
+import { useAuth, useOrganization } from '@clerk/nextjs';
 import Link from 'next/link';
 
 export default function ReportsPage() {
@@ -12,6 +12,7 @@ export default function ReportsPage() {
     const tc = useTranslations("Common");
     const locale = useLocale();
     const { getToken } = useAuth();
+    const { organization } = useOrganization();
     const [reports, setReports] = useState<GeneratedReport[]>([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
@@ -66,10 +67,14 @@ export default function ReportsPage() {
     const handleDownload = async (report: GeneratedReport) => {
         try {
             const token = await getToken();
+            const headers: Record<string, string> = {
+                'Authorization': `Bearer ${token}`,
+            };
+            if (organization?.id) {
+                headers['X-Clerk-Org-ID'] = organization.id;
+            }
             const response = await fetch(api.reports.downloadUrl(report.id), {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                },
+                headers,
             });
             if (!response.ok) throw new Error('Download failed');
 

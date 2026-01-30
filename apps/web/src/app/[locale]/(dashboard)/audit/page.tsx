@@ -4,12 +4,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
 import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X } from 'lucide-react';
 import { api, AuditLog, AuditListResponse, AuditFilter, ActionInfo, ResourceTypeInfo } from '@/lib/api';
-import { useAuth } from '@clerk/nextjs';
+import { useAuth, useOrganization } from '@clerk/nextjs';
 
 export default function AuditLogPage() {
     const t = useTranslations("Audit");
     const locale = useLocale();
     const { getToken } = useAuth();
+    const { organization } = useOrganization();
     const [logs, setLogs] = useState<AuditLog[]>([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
@@ -69,11 +70,15 @@ export default function AuditLogPage() {
     const handleExport = async () => {
         try {
             const token = await getToken();
+            const headers: Record<string, string> = {
+                'Authorization': `Bearer ${token}`,
+            };
+            if (organization?.id) {
+                headers['X-Clerk-Org-ID'] = organization.id;
+            }
             const exportUrl = api.auditLogs.exportUrl(filter);
             const response = await fetch(exportUrl, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                },
+                headers,
             });
             if (!response.ok) throw new Error('Export failed');
 
