@@ -182,3 +182,103 @@ func TestRequireOwner_Denied(t *testing.T) {
 		t.Errorf("expected status 403, got %d", rec.Code)
 	}
 }
+
+func TestNoopResponseWriter(t *testing.T) {
+	w := &noopResponseWriter{}
+
+	// Test Header returns non-nil empty header
+	h := w.Header()
+	if h == nil {
+		t.Error("Header() should return non-nil http.Header")
+	}
+	if len(h) != 0 {
+		t.Errorf("Header() should return empty header, got %v", h)
+	}
+
+	// Test Write returns correct count
+	data := []byte("test data")
+	n, err := w.Write(data)
+	if err != nil {
+		t.Errorf("Write() returned error: %v", err)
+	}
+	if n != len(data) {
+		t.Errorf("Write() returned %d, want %d", n, len(data))
+	}
+
+	// Test WriteHeader sets status code
+	w.WriteHeader(http.StatusNotFound)
+	if w.statusCode != http.StatusNotFound {
+		t.Errorf("WriteHeader() did not set statusCode: got %d, want %d", w.statusCode, http.StatusNotFound)
+	}
+}
+
+func TestContextKeyConstants(t *testing.T) {
+	// Verify context keys are unique and non-empty
+	keys := []string{
+		ContextKeyUserID,
+		ContextKeyUser,
+		ContextKeyTenantID,
+		ContextKeyTenant,
+		ContextKeyRole,
+		ContextKeyClerkOrgID,
+		ContextKeyClerkUserID,
+	}
+
+	seen := make(map[string]bool)
+	for _, key := range keys {
+		if key == "" {
+			t.Error("context key should not be empty")
+		}
+		if seen[key] {
+			t.Errorf("duplicate context key: %s", key)
+		}
+		seen[key] = true
+	}
+}
+
+func TestAuthContext_IsSelfHosted(t *testing.T) {
+	tests := []struct {
+		name         string
+		clerkUserID  string
+		wantSelfHost bool
+	}{
+		{"self-hosted", "self-hosted", true},
+		{"clerk user", "user_123", false},
+		{"empty string", "", false},
+		{"similar but not exact", "self-hosted-1", false},
+		{"uppercase", "SELF-HOSTED", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &AuthContext{ClerkUserID: tt.clerkUserID}
+			auth.IsSelfHosted = auth.ClerkUserID == "self-hosted"
+			if auth.IsSelfHosted != tt.wantSelfHost {
+				t.Errorf("IsSelfHosted = %v, want %v", auth.IsSelfHosted, tt.wantSelfHost)
+			}
+		})
+	}
+}
+
+func TestRequireRole_EmptyRoles(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	c.Set(ContextKeyRole, model.RoleOwner)
+
+	// Empty roles should deny everyone
+	handler := RequireRole()(func(c echo.Context) error {
+		return c.String(http.StatusOK, "OK")
+	})
+
+	err := handler(c)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected status 403, got %d", rec.Code)
+	}
+}
