@@ -181,4 +181,5 @@ type GenerateReportInput struct {
 	Format      string    `json:"format"`
 	PeriodStart time.Time `json:"period_start"`
 	PeriodEnd   time.Time `json:"period_end"`
+	Locale      string    `json:"locale"` // "ja" or "en", defaults to "ja"
 }

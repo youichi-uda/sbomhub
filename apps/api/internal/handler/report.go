@@ -104,6 +104,16 @@ func (h *ReportHandler) Generate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
 
+	// Set locale from Accept-Language header if not specified in request
+	if input.Locale == "" {
+		acceptLang := c.Request().Header.Get("Accept-Language")
+		if len(acceptLang) >= 2 && acceptLang[:2] == "en" {
+			input.Locale = "en"
+		} else {
+			input.Locale = "ja" // Default to Japanese
+		}
+	}
+
 	// Validate report type
 	validTypes := map[string]bool{
 		model.ReportTypeExecutive:  true,
