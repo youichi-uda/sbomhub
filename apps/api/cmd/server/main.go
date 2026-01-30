@@ -183,6 +183,7 @@ func main() {
 	auth.POST("/subscription/checkout", billingHandler.CreateCheckout)
 	auth.GET("/subscription/portal", billingHandler.GetPortalURL)
 	auth.GET("/plan/usage", billingHandler.GetUsage)
+	auth.POST("/plan/select-free", billingHandler.SelectFreePlan)
 
 	// Me endpoint
 	auth.GET("/me", func(c echo.Context) error {

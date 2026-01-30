@@ -214,3 +214,28 @@ func (h *BillingHandler) planToVariant(plan string) string {
 		return ""
 	}
 }
+
+// SelectFreePlan explicitly sets the tenant's plan to free
+func (h *BillingHandler) SelectFreePlan(c echo.Context) error {
+	ctx := c.Request().Context()
+	tc := middleware.NewTenantContext(c)
+
+	// Not applicable in self-hosted mode
+	if tc.IsSelfHosted() {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "not applicable in self-hosted mode",
+		})
+	}
+
+	tenant := tc.Tenant()
+	if tenant == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "tenant not found"})
+	}
+
+	// Set plan to free
+	if err := h.tenantRepo.UpdatePlan(ctx, tc.TenantID(), model.PlanFree); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update plan"})
+	}
+
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok", "plan": model.PlanFree})
+}

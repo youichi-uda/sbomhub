@@ -260,7 +260,7 @@ func (h *ClerkWebhookHandler) handleOrgEvent(c echo.Context, eventType string, o
 		ClerkOrgID: orgData.ID,
 		Name:       orgData.Name,
 		Slug:       orgData.Slug,
-		Plan:       model.PlanFree, // Start with free plan
+		Plan:       "", // Empty - user must select plan on billing page
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -292,7 +292,7 @@ func (h *ClerkWebhookHandler) handleMembershipEvent(c echo.Context, eventType st
 			ClerkOrgID: memberData.Organization.ID,
 			Name:       memberData.Organization.Name,
 			Slug:       memberData.Organization.Slug,
-			Plan:       model.PlanFree,
+			Plan:       "", // Empty - user must select plan on billing page
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}

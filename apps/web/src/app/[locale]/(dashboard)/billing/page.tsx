@@ -44,6 +44,7 @@ export default function BillingPage() {
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
+  const [freeLoading, setFreeLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -90,6 +91,20 @@ export default function BillingPage() {
     }
   };
 
+  const handleSelectFree = async () => {
+    try {
+      setFreeLoading(true);
+      await api.billing.selectFreePlan();
+      // Reload data to reflect the change
+      await loadData();
+    } catch (err) {
+      setError("プランの選択に失敗しました");
+      console.error(err);
+    } finally {
+      setFreeLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -119,7 +134,8 @@ export default function BillingPage() {
     );
   }
 
-  const currentPlan = subscription?.plan || "free";
+  const currentPlan = subscription?.plan || "";
+  const hasSelectedPlan = currentPlan !== "";
   const currentPlanIndex = PLANS.findIndex((p) => p.id === currentPlan);
 
   return (
@@ -130,6 +146,18 @@ export default function BillingPage() {
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-6">
           {error}
         </div>
+      )}
+
+      {/* Show plan selection prompt for new users */}
+      {!hasSelectedPlan && subscription?.billing_enabled && (
+        <Card className="mb-8 border-primary border-2 bg-primary/5">
+          <CardHeader>
+            <CardTitle className="text-xl">プランを選択してください</CardTitle>
+            <CardDescription>
+              SBOMHub を利用するにはプランを選択する必要があります。無料プランから始めることもできます。
+            </CardDescription>
+          </CardHeader>
+        </Card>
       )}
 
       {/* Current Plan & Usage */}
@@ -250,7 +278,22 @@ export default function BillingPage() {
                         </li>
                       ))}
                     </ul>
-                    {plan.id !== "free" && (
+                    {plan.id === "free" ? (
+                      <Button
+                        className="w-full"
+                        variant={isCurrent ? "outline" : "default"}
+                        disabled={isCurrent || freeLoading}
+                        onClick={handleSelectFree}
+                      >
+                        {freeLoading ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : isCurrent ? (
+                          "現在のプラン"
+                        ) : (
+                          "Freeで始める"
+                        )}
+                      </Button>
+                    ) : (
                       <Button
                         className="w-full"
                         variant={isCurrent ? "outline" : isUpgrade ? "default" : "secondary"}

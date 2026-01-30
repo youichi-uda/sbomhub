@@ -1011,6 +1011,10 @@ export const api = {
       }),
     getPortalUrl: () => request<{ url: string }>("/api/v1/subscription/portal"),
     getUsage: () => request<UsageResponse>("/api/v1/plan/usage"),
+    selectFreePlan: () =>
+      request<{ status: string; plan: string }>("/api/v1/plan/select-free", {
+        method: "POST",
+      }),
   },
   publicLinks: {
     list: (projectId: string) =>

@@ -179,7 +179,7 @@ func (r *TenantRepository) GetOrCreateByClerkOrgID(ctx context.Context, clerkOrg
 		ClerkOrgID: clerkOrgID,
 		Name:       orgName,
 		Slug:       slug,
-		Plan:       model.PlanFree, // Start with free plan
+		Plan:       "", // Empty - user must select plan on billing page
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}

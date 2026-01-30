@@ -69,14 +69,14 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
         return;
       }
 
-      // Has active subscription - allow access
-      if (subscription.has_subscription) {
+      // Has a plan selected (including "free") - allow access
+      if (subscription.plan && subscription.plan !== "") {
         setLoading(false);
         setChecked(true);
         return;
       }
 
-      // No subscription - redirect to billing to select a plan
+      // No plan selected yet - redirect to billing to select a plan
       router.replace(`/${locale}/billing`);
     } catch (error) {
       // On error, allow access (don't block users)
