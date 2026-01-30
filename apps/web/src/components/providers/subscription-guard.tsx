@@ -69,26 +69,15 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
         return;
       }
 
-      // Has subscription or on free plan with usage within limits - allow access
-      if (subscription.has_subscription || subscription.plan !== "free") {
+      // Has active subscription - allow access
+      if (subscription.has_subscription) {
         setLoading(false);
         setChecked(true);
         return;
       }
 
-      // Free plan user - redirect to billing on first visit
-      // Check if this is a new user (no projects yet)
-      const usage = await api.billing.getUsage();
-
-      // If user has no projects, they're likely new - redirect to billing
-      if (usage.projects.current === 0) {
-        router.replace(`/${locale}/billing`);
-        return;
-      }
-
-      // Existing free user with projects - allow access
-      setLoading(false);
-      setChecked(true);
+      // No subscription - redirect to billing to select a plan
+      router.replace(`/${locale}/billing`);
     } catch (error) {
       // On error, allow access (don't block users)
       console.error("Subscription check failed:", error);
@@ -112,8 +101,8 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
           <CardContent className="flex flex-col items-center gap-4">
             <OrganizationSwitcher
               hidePersonal
-              afterCreateOrganizationUrl={pathname}
-              afterSelectOrganizationUrl={pathname}
+              afterCreateOrganizationUrl={`/${locale}/billing`}
+              afterSelectOrganizationUrl={`/${locale}/billing`}
               appearance={{
                 elements: {
                   rootBox: "w-full",
