@@ -206,6 +206,8 @@
     "webhookUrls": "Webhook URL",
     "slackWebhookUrl": "Slack Webhook URL",
     "discordWebhookUrl": "Discord Webhook URL",
+    "emailAddresses": "メールアドレス",
+    "emailAddressesDescription": "カンマ区切りで複数のメールアドレスを指定できます。Teams転送にはPower Automateのメールアドレスを使用してください。",
     "severityThresholds": "重要度しきい値",
     "severityThresholdsDescription": "通知をトリガーする重要度レベルを選択",
     "testNotification": "テスト送信",

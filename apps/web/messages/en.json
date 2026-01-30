@@ -206,6 +206,8 @@
     "webhookUrls": "Webhook URLs",
     "slackWebhookUrl": "Slack Webhook URL",
     "discordWebhookUrl": "Discord Webhook URL",
+    "emailAddresses": "Email Addresses",
+    "emailAddressesDescription": "Separate multiple email addresses with commas. For Teams forwarding, use a Power Automate email address.",
     "severityThresholds": "Severity Thresholds",
     "severityThresholdsDescription": "Select which severity levels trigger notifications",
     "testNotification": "Send Test",

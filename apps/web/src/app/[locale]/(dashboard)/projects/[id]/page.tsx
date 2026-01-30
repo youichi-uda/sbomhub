@@ -725,6 +725,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
   const tv = useTranslations("Vulnerabilities");
   const [slackWebhookUrl, setSlackWebhookUrl] = useState(settings?.slack_webhook_url || "");
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(settings?.discord_webhook_url || "");
+  const [emailAddresses, setEmailAddresses] = useState(settings?.email_addresses || "");
   const [notifyCritical, setNotifyCritical] = useState(settings?.notify_critical ?? true);
   const [notifyHigh, setNotifyHigh] = useState(settings?.notify_high ?? true);
   const [notifyMedium, setNotifyMedium] = useState(settings?.notify_medium ?? false);
@@ -736,6 +737,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
     if (settings) {
       setSlackWebhookUrl(settings.slack_webhook_url || "");
       setDiscordWebhookUrl(settings.discord_webhook_url || "");
+      setEmailAddresses(settings.email_addresses || "");
       setNotifyCritical(settings.notify_critical);
       setNotifyHigh(settings.notify_high);
       setNotifyMedium(settings.notify_medium);
@@ -750,6 +752,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
       await api.projects.updateNotificationSettings(projectId, {
         slack_webhook_url: slackWebhookUrl || undefined,
         discord_webhook_url: discordWebhookUrl || undefined,
+        email_addresses: emailAddresses || undefined,
         notify_critical: notifyCritical,
         notify_high: notifyHigh,
         notify_medium: notifyMedium,
@@ -804,6 +807,18 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
               className="w-full border rounded px-3 py-2"
               placeholder="https://discord.com/api/webhooks/..."
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">{tp("emailAddresses")}</label>
+            <input
+              type="text"
+              name="email_addresses"
+              value={emailAddresses}
+              onChange={(e) => setEmailAddresses(e.target.value)}
+              className="w-full border rounded px-3 py-2"
+              placeholder="user1@example.com, user2@example.com"
+            />
+            <p className="text-xs text-muted-foreground mt-1">{tp("emailAddressesDescription")}</p>
           </div>
         </div>
       </div>
@@ -861,7 +876,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
           type="button"
           variant="outline"
           onClick={handleTestNotification}
-          disabled={testingNotification || (!slackWebhookUrl && !discordWebhookUrl)}
+          disabled={testingNotification || (!slackWebhookUrl && !discordWebhookUrl && !emailAddresses)}
         >
           {testingNotification ? tp("sendingTest") : tp("testNotification")}
         </Button>
