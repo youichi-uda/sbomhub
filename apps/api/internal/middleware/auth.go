@@ -139,15 +139,24 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 		})
 	}
 
-	// Debug: log claims content
-	slog.Info("Clerk claims received", "user_id", claims.UserID, "org_id", claims.OrgID, "org_role", claims.OrgRole)
-
-	// Get organization ID from claims
-	orgID := claims.OrgID
+	// Get organization ID - prefer header (sent by frontend), fallback to JWT claims
+	// This allows the system to work without requiring Clerk Dashboard configuration
+	orgID := c.Request().Header.Get("X-Clerk-Org-ID")
 	if orgID == "" {
-		slog.Warn("Organization ID is empty in claims")
+		orgID = claims.OrgID
+	}
+
+	slog.Info("Clerk auth", "user_id", claims.UserID, "org_id", orgID, "org_id_source", func() string {
+		if c.Request().Header.Get("X-Clerk-Org-ID") != "" {
+			return "header"
+		}
+		return "jwt"
+	}())
+
+	if orgID == "" {
+		slog.Warn("Organization ID is empty - user must select an organization")
 		return c.JSON(http.StatusForbidden, map[string]string{
-			"error": "organization membership required",
+			"error": "organization membership required - please select an organization",
 		})
 	}
 

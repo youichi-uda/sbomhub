@@ -2,14 +2,14 @@
 
 import { useAuth } from "@clerk/nextjs";
 import { useEffect, useState, ReactNode } from "react";
-import { setAuthTokenGetter } from "@/lib/api";
+import { setAuthTokenGetter, setOrgIdGetter } from "@/lib/api";
 
 interface ApiAuthProviderProps {
   children: ReactNode;
 }
 
 export function ApiAuthProvider({ children }: ApiAuthProviderProps) {
-  const { getToken, isLoaded } = useAuth();
+  const { getToken, isLoaded, orgId } = useAuth();
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
@@ -21,9 +21,11 @@ export function ApiAuthProvider({ children }: ApiAuthProviderProps) {
           return null;
         }
       });
+      // Set organization ID getter - this allows API to know which org the user is in
+      setOrgIdGetter(() => orgId || null);
       setIsReady(true);
     }
-  }, [getToken, isLoaded]);
+  }, [getToken, isLoaded, orgId]);
 
   // Don't render children until auth token getter is set up
   if (!isReady) {

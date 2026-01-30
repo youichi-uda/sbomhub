@@ -609,9 +609,14 @@ export interface TicketListResponse {
 
 // Token getter function - will be set by AuthProvider
 let getAuthToken: (() => Promise<string | null>) | null = null;
+let getOrgId: (() => string | null) | null = null;
 
 export function setAuthTokenGetter(getter: () => Promise<string | null>) {
   getAuthToken = getter;
+}
+
+export function setOrgIdGetter(getter: () => string | null) {
+  getOrgId = getter;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -625,6 +630,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const token = await getAuthToken();
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
+    }
+  }
+
+  // Add organization ID header if available
+  if (getOrgId) {
+    const orgId = getOrgId();
+    if (orgId) {
+      headers["X-Clerk-Org-ID"] = orgId;
     }
   }
 
