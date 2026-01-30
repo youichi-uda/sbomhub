@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -238,8 +239,15 @@ type ClerkClaims struct {
 
 // verifyClerkJWT verifies a Clerk JWT token using the official Clerk SDK
 func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims, error) {
+	// Clerk SDK v2 requires fetching JWKS first
+	jwks, err := clerkjwt.GetJSONWebKeySet(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
+	}
+
 	claims, err := clerkjwt.Verify(ctx, &clerkjwt.VerifyParams{
 		Token:  token,
+		JWK:    jwks,
 		Leeway: 5 * time.Minute, // Allow 5 minutes clock skew
 	})
 	if err != nil {
