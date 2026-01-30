@@ -3,14 +3,12 @@ package middleware
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	clerkjwks "github.com/clerk/clerk-sdk-go/v2/jwks"
-	clerkjwt "github.com/clerk/clerk-sdk-go/v2/jwt"
+	clerkhttp "github.com/clerk/clerk-sdk-go/v2/http"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/config"
@@ -131,8 +129,8 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 
 	slog.Debug("Verifying Clerk JWT", "token_length", len(token), "token_prefix", token[:min(20, len(token))])
 
-	// Verify JWT with Clerk
-	claims, err := verifyClerkJWT(ctx, token, cfg.ClerkSecretKey)
+	// Verify JWT with Clerk using official HTTP middleware
+	claims, err := verifyClerkJWT(c, cfg)
 	if err != nil {
 		slog.Error("Clerk JWT verification failed", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -238,54 +236,53 @@ type ClerkClaims struct {
 	OrgRole string
 }
 
-// verifyClerkJWT verifies a Clerk JWT token using the official Clerk SDK
-func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims, error) {
-	// Clerk SDK v2: First decode the token to get the key ID
-	decoded, err := clerkjwt.Decode(ctx, &clerkjwt.DecodeParams{Token: token})
-	if err != nil {
-		slog.Error("Failed to decode token", "error", err)
-		return nil, fmt.Errorf("failed to decode token: %w", err)
-	}
-	slog.Debug("Token decoded", "key_id", decoded.KeyID)
+// verifyClerkJWT verifies a Clerk JWT token using the official Clerk HTTP middleware
+func verifyClerkJWT(c echo.Context, cfg *config.Config) (*ClerkClaims, error) {
+	// Use Clerk's official HTTP middleware to verify the token
+	var claims *ClerkClaims
+	var verifyErr error
 
-	// Fetch the JSON Web Key Set using jwks client
-	jwksClient := clerkjwks.NewClient(nil)
-	jwkSet, err := jwksClient.Get(ctx, &clerkjwks.GetParams{})
-	if err != nil {
-		slog.Error("Failed to fetch JWKS", "error", err)
-		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
-	}
-	slog.Debug("JWKS fetched", "keys_count", len(jwkSet.Keys))
-
-	// Find the key matching the token's key ID
-	var jwk *clerkjwks.JSONWebKey
-	for i := range jwkSet.Keys {
-		if jwkSet.Keys[i].KeyID == decoded.KeyID {
-			jwk = &jwkSet.Keys[i]
-			break
+	// Create a handler that extracts claims
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionClaims, ok := clerkhttp.SessionClaimsFromContext(r.Context())
+		if !ok || sessionClaims == nil {
+			verifyErr = echo.NewHTTPError(http.StatusUnauthorized, "invalid session")
+			return
 		}
-	}
-	if jwk == nil {
-		return nil, fmt.Errorf("JWK not found for key ID: %s", decoded.KeyID)
-	}
-
-	// Verify the token with the JWK
-	claims, err := clerkjwt.Verify(ctx, &clerkjwt.VerifyParams{
-		Token:  token,
-		JWK:    jwk,
-		Leeway: 5 * time.Minute, // Allow 5 minutes clock skew
+		claims = &ClerkClaims{
+			UserID:  sessionClaims.Subject,
+			OrgID:   sessionClaims.ActiveOrganizationID,
+			OrgRole: sessionClaims.ActiveOrganizationRole,
+		}
 	})
-	if err != nil {
-		slog.Error("JWT verify failed", "error", err)
-		return nil, err
+
+	// Wrap with Clerk's authorization middleware
+	protectedHandler := clerkhttp.WithHeaderAuthorization()(handler)
+
+	// Create a response recorder (we don't need the response)
+	recorder := &noopResponseWriter{}
+
+	// Execute the middleware chain
+	protectedHandler.ServeHTTP(recorder, c.Request())
+
+	if verifyErr != nil {
+		return nil, verifyErr
+	}
+	if claims == nil {
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "failed to verify token")
 	}
 
-	return &ClerkClaims{
-		UserID:  claims.Subject,
-		OrgID:   claims.ActiveOrganizationID,
-		OrgRole: claims.ActiveOrganizationRole,
-	}, nil
+	return claims, nil
 }
+
+// noopResponseWriter is a no-op http.ResponseWriter for middleware execution
+type noopResponseWriter struct {
+	statusCode int
+}
+
+func (w *noopResponseWriter) Header() http.Header         { return http.Header{} }
+func (w *noopResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *noopResponseWriter) WriteHeader(code int)        { w.statusCode = code }
 
 // RequireRole returns a middleware that checks if the user has the required role
 func RequireRole(roles ...string) echo.MiddlewareFunc {
