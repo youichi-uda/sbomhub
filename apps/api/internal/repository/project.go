@@ -63,3 +63,45 @@ func (r *ProjectRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.ExecContext(ctx, query, id)
 	return err
 }
+
+// GetByName finds a project by name within a tenant.
+// Returns nil, nil if not found.
+func (r *ProjectRepository) GetByName(ctx context.Context, tenantID uuid.UUID, name string) (*model.Project, error) {
+	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = $1 AND name = $2`
+	var p model.Project
+	err := r.db.QueryRowContext(ctx, query, tenantID, name).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// CreateWithTenant creates a project associated with a tenant.
+func (r *ProjectRepository) CreateWithTenant(ctx context.Context, tenantID uuid.UUID, p *model.Project) error {
+	query := `INSERT INTO projects (id, tenant_id, name, description, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`
+	_, err := r.db.ExecContext(ctx, query, p.ID, tenantID, p.Name, p.Description, p.CreatedAt, p.UpdatedAt)
+	return err
+}
+
+// ListByTenant lists projects for a specific tenant.
+func (r *ProjectRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]model.Project, error) {
+	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = $1 ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []model.Project
+	for rows.Next() {
+		var p model.Project
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}

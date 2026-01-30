@@ -167,6 +167,23 @@ func main() {
 	mcp.GET("/projects/:id/compliance", complianceHandler.Check)
 	mcp.GET("/projects/:id/sboms", sbomHandler.List)
 
+	// CLI Service and Handler
+	cliService := service.NewCLIService(projectRepo, sbomRepo, componentRepo)
+	cliHandler := handler.NewCLIHandler(cliService)
+
+	// CLI endpoints (API key auth)
+	cli := api.Group("/cli",
+		appmw.APIKeyAuth(apiKeyService),
+		appmw.APIKeyTenant(projectRepo, tenantRepo),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.MCPAudit(auditRepo),
+	)
+	cli.POST("/upload", cliHandler.Upload)
+	cli.POST("/check", cliHandler.Check)
+	cli.GET("/projects", cliHandler.ListProjects)
+	cli.GET("/projects/:id", cliHandler.GetProject)
+	cli.POST("/projects", cliHandler.CreateProject)
+
 	// Auth middleware - applies to most endpoints
 	authMiddleware := appmw.Auth(cfg, tenantRepo, userRepo)
 

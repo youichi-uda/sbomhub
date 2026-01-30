@@ -138,6 +138,51 @@ GET    /api/v1/projects/:id/vulnerabilities
 GET    /api/v1/projects/:id/vex      # VEXステートメント
 ```
 
+## CLI
+
+SBOMHub CLIを使うと、SBOM生成からアップロードまでを1コマンドで実行できます。
+
+### インストール
+
+```bash
+# Homebrew (macOS/Linux)
+brew tap sbomhub/tap && brew install sbomhub
+
+# Shell script
+curl -fsSL https://sbomhub.app/install.sh | sh
+
+# Go install
+go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
+```
+
+### 基本的な使い方
+
+```bash
+# ログイン（API Key設定）
+sbomhub login
+
+# カレントディレクトリをスキャン＆アップロード
+sbomhub scan .
+
+# プロジェクト指定でスキャン
+sbomhub scan . --project my-app
+
+# 脆弱性チェックのみ（アップロードなし）
+sbomhub check .
+
+# CI/CD向け（Critical検出でexit 1）
+sbomhub scan . --project my-app --fail-on critical --quiet
+```
+
+### 必要な外部ツール
+
+以下のいずれかがインストールされている必要があります:
+- [Syft](https://github.com/anchore/syft) (推奨)
+- [Trivy](https://github.com/aquasecurity/trivy)
+- [cdxgen](https://github.com/CycloneDX/cdxgen)
+
+詳細は[sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli)を参照。
+
 ## CI/CD連携
 
 ### GitHub Actions
