@@ -12,6 +12,8 @@ import {
   Globe,
   Check,
   ArrowRight,
+  Building2,
+  GitCompare,
 } from "lucide-react";
 
 interface Props {
@@ -47,6 +49,16 @@ export default async function LandingPage({ params }: Props) {
       icon: GitBranch,
       title: t("features.cicd.title"),
       description: t("features.cicd.description"),
+    },
+    {
+      icon: Building2,
+      title: t("features.ipa.title"),
+      description: t("features.ipa.description"),
+    },
+    {
+      icon: GitCompare,
+      title: t("features.diff.title"),
+      description: t("features.diff.description"),
     },
     {
       icon: Globe,

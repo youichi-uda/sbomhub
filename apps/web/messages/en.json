@@ -39,6 +39,14 @@
       "i18n": {
         "title": "Multilingual",
         "description": "Optimized for the Japanese market. UI supports both Japanese and English."
+      },
+      "ipa": {
+        "title": "IPA Integration",
+        "description": "Integrate with IPA (Japan Information-technology Promotion Agency) security alerts. Auto-fetch domestic vulnerability information."
+      },
+      "diff": {
+        "title": "SBOM Diff Comparison",
+        "description": "Compare SBOMs across versions to detect added, removed, and updated components along with new vulnerabilities."
       }
     },
     "pricing": {
