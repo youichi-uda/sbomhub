@@ -172,9 +172,9 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 
 	slog.Info("subscription_created: found tenant", "tenant_id", tenantID, "tenant_name", tenant.Name)
 
-	// Determine plan from variant name (more reliable than variant ID)
-	plan := h.variantNameToPlan(payload.Data.Attributes.VariantName)
-	slog.Info("subscription_created: determined plan", "variant_name", payload.Data.Attributes.VariantName, "plan", plan)
+	// Determine plan from product name (variant_name is often "Default")
+	plan := h.productNameToPlan(payload.Data.Attributes.ProductName)
+	slog.Info("subscription_created: determined plan", "product_name", payload.Data.Attributes.ProductName, "plan", plan)
 
 	// Parse dates
 	renewsAt := parseTime(payload.Data.Attributes.RenewsAt)
@@ -247,7 +247,7 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, p
 	previousPlan := sub.Plan
 
 	// Update subscription
-	newPlan := h.variantNameToPlan(payload.Data.Attributes.VariantName)
+	newPlan := h.productNameToPlan(payload.Data.Attributes.ProductName)
 	sub.LSVariantID = intToString(payload.Data.Attributes.VariantID)
 	sub.Status = payload.Data.Attributes.Status
 	sub.Plan = newPlan
@@ -412,10 +412,10 @@ func (h *LemonSqueezyWebhookHandler) verifySignature(r *http.Request, body []byt
 	return hmac.Equal([]byte(signature), []byte(expectedSig))
 }
 
-// variantNameToPlan maps Lemon Squeezy variant name to plan name
-func (h *LemonSqueezyWebhookHandler) variantNameToPlan(variantName string) string {
+// productNameToPlan maps Lemon Squeezy product name to plan name
+func (h *LemonSqueezyWebhookHandler) productNameToPlan(productName string) string {
 	// Normalize to lowercase for comparison
-	name := strings.ToLower(variantName)
+	name := strings.ToLower(productName)
 
 	if strings.Contains(name, "team") {
 		return model.PlanTeam

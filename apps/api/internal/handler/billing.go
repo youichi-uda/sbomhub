@@ -310,8 +310,8 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 		})
 	}
 
-	// Determine plan from variant name
-	plan := h.variantNameToPlan(sub.Attributes.VariantName)
+	// Determine plan from product name (variant_name is often "Default")
+	plan := h.productNameToPlan(sub.Attributes.ProductName)
 
 	// Check if subscription already exists
 	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
@@ -368,8 +368,8 @@ func (h *BillingHandler) syncBySubscriptionID(c echo.Context, ctx context.Contex
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "Subscription not found in Lemon Squeezy"})
 	}
 
-	// Determine plan from variant name
-	plan := h.variantNameToPlan(sub.Attributes.VariantName)
+	// Determine plan from product name (variant_name is often "Default")
+	plan := h.productNameToPlan(sub.Attributes.ProductName)
 
 	// Check if subscription already exists in our DB
 	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
@@ -517,9 +517,9 @@ func (h *BillingHandler) fetchLemonSqueezySubscriptions() ([]LSAPISubscription, 
 	return apiResp.Data, nil
 }
 
-// variantNameToPlan maps Lemon Squeezy variant name to plan name
-func (h *BillingHandler) variantNameToPlan(variantName string) string {
-	name := strings.ToLower(variantName)
+// productNameToPlan maps Lemon Squeezy product name to plan name
+func (h *BillingHandler) productNameToPlan(productName string) string {
+	name := strings.ToLower(productName)
 
 	if strings.Contains(name, "team") {
 		return model.PlanTeam
