@@ -182,25 +182,55 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 	endsAt := parseTime(payload.Data.Attributes.EndsAt)
 
 	now := time.Now()
-	sub := &model.Subscription{
-		ID:               uuid.New(),
-		TenantID:         tenantID,
-		LSSubscriptionID: payload.Data.ID,
-		LSCustomerID:     intToString(payload.Data.Attributes.CustomerID),
-		LSVariantID:      intToString(payload.Data.Attributes.VariantID),
-		LSProductID:      intToString(payload.Data.Attributes.ProductID),
-		Status:           payload.Data.Attributes.Status,
-		Plan:             plan,
-		BillingAnchor:    &payload.Data.Attributes.BillingAnchor,
-		RenewsAt:         renewsAt,
-		TrialEndsAt:      trialEndsAt,
-		EndsAt:           endsAt,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
 
-	if err := h.subRepo.Create(ctx, sub); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
+	// Check if subscription already exists (upsert logic)
+	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, payload.Data.ID)
+
+	var sub *model.Subscription
+	if existingSub != nil {
+		// Update existing subscription
+		existingSub.TenantID = tenantID
+		existingSub.LSCustomerID = intToString(payload.Data.Attributes.CustomerID)
+		existingSub.LSVariantID = intToString(payload.Data.Attributes.VariantID)
+		existingSub.LSProductID = intToString(payload.Data.Attributes.ProductID)
+		existingSub.Status = payload.Data.Attributes.Status
+		existingSub.Plan = plan
+		existingSub.BillingAnchor = &payload.Data.Attributes.BillingAnchor
+		existingSub.RenewsAt = renewsAt
+		existingSub.TrialEndsAt = trialEndsAt
+		existingSub.EndsAt = endsAt
+		existingSub.UpdatedAt = now
+
+		if err := h.subRepo.Update(ctx, existingSub); err != nil {
+			slog.Error("failed to update existing subscription", "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update subscription"})
+		}
+		sub = existingSub
+		slog.Info("subscription_created: updated existing subscription", "subscription_id", sub.ID)
+	} else {
+		// Create new subscription
+		sub = &model.Subscription{
+			ID:               uuid.New(),
+			TenantID:         tenantID,
+			LSSubscriptionID: payload.Data.ID,
+			LSCustomerID:     intToString(payload.Data.Attributes.CustomerID),
+			LSVariantID:      intToString(payload.Data.Attributes.VariantID),
+			LSProductID:      intToString(payload.Data.Attributes.ProductID),
+			Status:           payload.Data.Attributes.Status,
+			Plan:             plan,
+			BillingAnchor:    &payload.Data.Attributes.BillingAnchor,
+			RenewsAt:         renewsAt,
+			TrialEndsAt:      trialEndsAt,
+			EndsAt:           endsAt,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+
+		if err := h.subRepo.Create(ctx, sub); err != nil {
+			slog.Error("failed to create subscription", "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
+		}
+		slog.Info("subscription_created: created new subscription", "subscription_id", sub.ID)
 	}
 
 	// Update tenant plan - return error to trigger webhook retry if this fails
