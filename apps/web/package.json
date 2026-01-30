@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "echo \"CLERK_KEY_EXISTS=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY\" && echo \"API_URL=$NEXT_PUBLIC_API_URL\" && next build",
+    "build": "echo \"=== BUILD ENV CHECK ===\"  && echo \"CLERK_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY\" && echo \"API_URL=$NEXT_PUBLIC_API_URL\" && echo \"=== END CHECK ===\" && next build",
     "start": "next start",
     "lint": "next lint",
     "test:e2e": "playwright test",
