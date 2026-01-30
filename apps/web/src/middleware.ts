@@ -9,13 +9,21 @@ const intlMiddleware = createIntlMiddleware(routing);
 // Routes that don't require authentication
 const isPublicRoute = createRouteMatcher([
   "/",
+  "/:locale",
   "/public(.*)",
+  "/:locale/public(.*)",
   "/sign-in(.*)",
   "/sign-up(.*)",
   "/:locale/sign-in(.*)",
   "/:locale/sign-up(.*)",
   "/:locale/pricing",
   "/pricing",
+  "/:locale/privacy",
+  "/:locale/terms",
+  "/:locale/legal",
+  "/privacy",
+  "/terms",
+  "/legal",
   "/api/webhooks(.*)",
 ]);
 
