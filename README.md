@@ -202,6 +202,117 @@ This project is licensed under the [AGPL-3.0 License](./LICENSE).
 
 > **Note**: If you want to offer SBOMHub as a commercial SaaS without AGPL obligations, please contact us for a commercial license.
 
+## Tech Stack
+
+| Layer | Technology | Version |
+|-------|------------|---------|
+| Backend | Go (Echo v4) | 1.22+ |
+| Frontend | Next.js (App Router) | 16 |
+| UI Framework | React | 19 |
+| Language | TypeScript | 5.7 |
+| UI Components | shadcn/ui | Latest |
+| Styling | Tailwind CSS | 3.4 |
+| Database | PostgreSQL | 15+ |
+| Cache | Redis | 7+ |
+| i18n | next-intl | Latest |
+| Form Validation | react-hook-form + zod | Latest |
+
+## Development
+
+### Prerequisites
+
+- Go 1.22+
+- Node.js 20+ with pnpm
+- PostgreSQL 15+
+- Redis 7+
+- Docker & Docker Compose (optional)
+
+### Project Structure
+
+```
+sbomhub/
+├── apps/
+│   ├── web/          # Next.js frontend
+│   └── api/          # Go backend
+├── packages/
+│   ├── db/           # DB schema and migrations
+│   └── types/        # Shared TypeScript types
+├── docker/           # Docker configurations
+├── docs/             # Documentation
+└── .github/workflows/  # CI/CD pipelines
+```
+
+### Common Commands
+
+```bash
+# Start development servers
+cd apps/web && pnpm dev      # Frontend (http://localhost:3000)
+cd apps/api && go run ./cmd/server  # Backend (http://localhost:8080)
+
+# Database
+docker compose up -d postgres redis  # Start DB
+cd apps/api && go run ./cmd/migrate up  # Run migrations
+
+# Testing
+cd apps/api && go test ./...   # Backend tests
+cd apps/web && pnpm test       # Frontend tests
+
+# Linting
+cd apps/api && golangci-lint run   # Go linting
+cd apps/web && pnpm lint           # TypeScript linting
+
+# Build
+docker compose build           # Build all containers
+```
+
+### Code Style
+
+- **Go**: gofmt, golangci-lint
+- **TypeScript**: ESLint, Prettier
+- **Commits**: [Conventional Commits](https://www.conventionalcommits.org/)
+
+## Claude Code Integration
+
+This project includes [Claude Code](https://claude.ai/code) skills for AI-assisted development.
+
+### Installed Skills
+
+| Category | Source | Description |
+|----------|--------|-------------|
+| Security | [Trail of Bits](https://github.com/trailofbits/skills) | Security audits, vulnerability detection, static analysis |
+| Go Development | [Gopher AI](https://github.com/gopherguides/gopher-ai) | Go best practices, testing patterns |
+| React/Next.js | [Vercel Agent Skills](https://github.com/vercel-labs/agent-skills) | Performance optimization (57+ rules) |
+| Workflows | [Claude Code SDK](https://github.com/hgeldenhuys/claude-code-sdk) | CI/CD, testing, code review patterns |
+
+### Key Skills for This Project
+
+- **differential-review** - Security-focused PR review
+- **go-best-practices** - Idiomatic Go patterns
+- **react-best-practices** - React/Next.js optimization
+- **ci-cd-integration** - Pipeline automation
+- **monorepo-patterns** - Monorepo workflows
+
+Skills are located in `.claude/skills/` and are automatically detected by Claude Code.
+
+## Security
+
+### Reporting Vulnerabilities
+
+If you discover a security vulnerability, please report it via:
+
+1. **GitHub Security Advisories**: [Report a vulnerability](https://github.com/youichi-uda/sbomhub/security/advisories/new)
+2. **Email**: security@sbomhub.app (for sensitive issues)
+
+Please do NOT report security vulnerabilities through public GitHub issues.
+
+### Security Features
+
+- Row-Level Security (RLS) for multi-tenancy
+- API key authentication for CI/CD integration
+- HTTPS enforcement in production
+- Input validation with zod schemas
+- SQL injection prevention with parameterized queries
+
 ## Acknowledgements
 
 - [CycloneDX](https://cyclonedx.org/) - SBOM specification
@@ -209,3 +320,5 @@ This project is licensed under the [AGPL-3.0 License](./LICENSE).
 - [NVD](https://nvd.nist.gov/) - National Vulnerability Database
 - [JVN](https://jvn.jp/) - Japan Vulnerability Notes
 - [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
+- [Trail of Bits](https://github.com/trailofbits/skills) - Security skills for Claude Code
+- [Vercel](https://github.com/vercel-labs/agent-skills) - React best practices

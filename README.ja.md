@@ -179,8 +179,10 @@ jobs:
 - [x] コンプライアンススコア（経産省ガイドライン）
 - [x] CI/CD連携（GitHub Actions）
 - [x] 通知機能（Slack/Discord）
-- [ ] LDAP/OIDC認証
-- [ ] マルチテナント対応
+- [x] マルチテナント対応（Row-Level Security）
+- [x] Clerk認証連携
+- [x] Lemon Squeezy課金連携
+- [ ] LDAP/OIDC認証（セルフホスト向け）
 - [ ] SBOMHub Cloud（マネージドSaaS）
 
 ## コントリビューション
@@ -191,6 +193,117 @@ jobs:
 
 本プロジェクトは[AGPL-3.0ライセンス](./LICENSE)の下で公開されています。
 
+## 技術スタック
+
+| レイヤー | 技術 | バージョン |
+|---------|------|-----------|
+| バックエンド | Go (Echo v4) | 1.22+ |
+| フロントエンド | Next.js (App Router) | 16 |
+| UIフレームワーク | React | 19 |
+| 言語 | TypeScript | 5.7 |
+| UIコンポーネント | shadcn/ui | 最新 |
+| スタイリング | Tailwind CSS | 3.4 |
+| データベース | PostgreSQL | 15+ |
+| キャッシュ | Redis | 7+ |
+| 国際化 | next-intl | 最新 |
+| フォームバリデーション | react-hook-form + zod | 最新 |
+
+## 開発
+
+### 必要環境
+
+- Go 1.22+
+- Node.js 20+ と pnpm
+- PostgreSQL 15+
+- Redis 7+
+- Docker & Docker Compose（オプション）
+
+### プロジェクト構造
+
+```
+sbomhub/
+├── apps/
+│   ├── web/          # Next.js フロントエンド
+│   └── api/          # Go バックエンド
+├── packages/
+│   ├── db/           # DBスキーマとマイグレーション
+│   └── types/        # 共有TypeScript型定義
+├── docker/           # Docker設定
+├── docs/             # ドキュメント
+└── .github/workflows/  # CI/CDパイプライン
+```
+
+### よく使うコマンド
+
+```bash
+# 開発サーバー起動
+cd apps/web && pnpm dev      # フロントエンド (http://localhost:3000)
+cd apps/api && go run ./cmd/server  # バックエンド (http://localhost:8080)
+
+# データベース
+docker compose up -d postgres redis  # DB起動
+cd apps/api && go run ./cmd/migrate up  # マイグレーション実行
+
+# テスト
+cd apps/api && go test ./...   # バックエンドテスト
+cd apps/web && pnpm test       # フロントエンドテスト
+
+# Lint
+cd apps/api && golangci-lint run   # Go lint
+cd apps/web && pnpm lint           # TypeScript lint
+
+# ビルド
+docker compose build           # 全コンテナビルド
+```
+
+### コードスタイル
+
+- **Go**: gofmt, golangci-lint
+- **TypeScript**: ESLint, Prettier
+- **コミット**: [Conventional Commits](https://www.conventionalcommits.org/ja/)
+
+## Claude Code連携
+
+本プロジェクトには、AI支援開発のための[Claude Code](https://claude.ai/code)スキルが導入されています。
+
+### 導入済みスキル
+
+| カテゴリ | ソース | 説明 |
+|---------|--------|------|
+| セキュリティ | [Trail of Bits](https://github.com/trailofbits/skills) | セキュリティ監査、脆弱性検出、静的解析 |
+| Go開発 | [Gopher AI](https://github.com/gopherguides/gopher-ai) | Goベストプラクティス、テストパターン |
+| React/Next.js | [Vercel Agent Skills](https://github.com/vercel-labs/agent-skills) | パフォーマンス最適化（57以上のルール） |
+| ワークフロー | [Claude Code SDK](https://github.com/hgeldenhuys/claude-code-sdk) | CI/CD、テスト、コードレビューパターン |
+
+### このプロジェクト向けの主要スキル
+
+- **differential-review** - セキュリティ重視のPRレビュー
+- **go-best-practices** - 慣用的なGoパターン
+- **react-best-practices** - React/Next.js最適化
+- **ci-cd-integration** - パイプライン自動化
+- **monorepo-patterns** - モノレポワークフロー
+
+スキルは `.claude/skills/` に配置され、Claude Codeによって自動検出されます。
+
+## セキュリティ
+
+### 脆弱性の報告
+
+セキュリティ脆弱性を発見した場合は、以下の方法で報告してください：
+
+1. **GitHub Security Advisories**: [脆弱性を報告](https://github.com/youichi-uda/sbomhub/security/advisories/new)
+2. **メール**: security@sbomhub.app（機密性の高い問題の場合）
+
+公開のGitHub Issueでセキュリティ脆弱性を報告しないでください。
+
+### セキュリティ機能
+
+- マルチテナント向けRow-Level Security (RLS)
+- CI/CD連携用APIキー認証
+- 本番環境でのHTTPS強制
+- zodスキーマによる入力バリデーション
+- パラメータ化クエリによるSQLインジェクション防止
+
 ## 謝辞
 
 - [CycloneDX](https://cyclonedx.org/) - SBOM仕様
@@ -198,3 +311,5 @@ jobs:
 - [NVD](https://nvd.nist.gov/) - National Vulnerability Database
 - [JVN](https://jvn.jp/) - Japan Vulnerability Notes
 - [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
+- [Trail of Bits](https://github.com/trailofbits/skills) - Claude Code向けセキュリティスキル
+- [Vercel](https://github.com/vercel-labs/agent-skills) - Reactベストプラクティス
