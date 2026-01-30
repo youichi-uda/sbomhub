@@ -139,9 +139,13 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 		})
 	}
 
+	// Debug: log claims content
+	slog.Info("Clerk claims received", "user_id", claims.UserID, "org_id", claims.OrgID, "org_role", claims.OrgRole)
+
 	// Get organization ID from claims
 	orgID := claims.OrgID
 	if orgID == "" {
+		slog.Warn("Organization ID is empty in claims")
 		return c.JSON(http.StatusForbidden, map[string]string{
 			"error": "organization membership required",
 		})
