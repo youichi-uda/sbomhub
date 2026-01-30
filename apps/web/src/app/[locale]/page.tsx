@@ -117,7 +117,7 @@ export default async function LandingPage({ params }: Props) {
         t("pricing.team.feature5"),
       ],
       cta: t("pricing.team.cta"),
-      href: "mailto:support@sbomhub.app?subject=Cloud Team Plan Inquiry",
+      href: `/${locale}/sign-up`,
       highlight: false,
     },
   ];
