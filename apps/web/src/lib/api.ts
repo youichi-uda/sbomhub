@@ -626,9 +626,14 @@ export interface Subscription {
   ls_product_id: string;
   ls_variant_id: string;
   status: string;
-  current_period_start: string;
-  current_period_end: string;
-  cancel_at_period_end: boolean;
+  plan: string;
+  billing_anchor?: number;
+  current_period_start?: string;
+  current_period_end?: string;
+  trial_ends_at?: string;
+  renews_at?: string;
+  ends_at?: string;
+  cancelled_at?: string;
   created_at: string;
   updated_at: string;
 }
