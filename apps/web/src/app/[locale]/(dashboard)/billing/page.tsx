@@ -266,7 +266,7 @@ export default function BillingPage() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={handleSyncSubscription}
+                  onClick={() => handleSyncSubscription()}
                   disabled={syncLoading}
                   title="Lemon Squeezyからサブスクリプションを同期"
                 >
