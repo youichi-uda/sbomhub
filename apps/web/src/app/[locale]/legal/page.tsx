@@ -32,11 +32,11 @@ export default async function LegalPage({ params }: Props) {
               <tbody>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50 w-1/3">販売事業者</th>
-                  <td className="py-4 px-4">宇田 陽一</td>
+                  <td className="py-4 px-4">柳剛 陽一</td>
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">運営統括責任者</th>
-                  <td className="py-4 px-4">宇田 陽一</td>
+                  <td className="py-4 px-4">柳剛 陽一</td>
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">所在地</th>
@@ -101,11 +101,11 @@ export default async function LegalPage({ params }: Props) {
               <tbody>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50 w-1/3">Business Operator</th>
-                  <td className="py-4 px-4">Yoichi Uda</td>
+                  <td className="py-4 px-4">Yoichi Ryugo</td>
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">Representative</th>
-                  <td className="py-4 px-4">Yoichi Uda</td>
+                  <td className="py-4 px-4">Yoichi Ryugo</td>
                 </tr>
                 <tr className="border-b">
                   <th className="py-4 px-4 text-left bg-gray-50">Address</th>
