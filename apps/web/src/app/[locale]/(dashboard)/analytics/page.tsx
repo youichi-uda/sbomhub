@@ -1,10 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslations } from 'next-intl';
 import { Loader2, Clock, Target, TrendingUp, ShieldCheck, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { api, AnalyticsSummary, MTTRResult, SLOAchievement } from '@/lib/api';
 
 export default function AnalyticsPage() {
+    const t = useTranslations("Analytics");
+    const tc = useTranslations("Common");
+    const tv = useTranslations("Vulnerabilities");
     const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -17,7 +21,7 @@ export default function AnalyticsPage() {
             const data = await api.analytics.getSummary(days);
             setSummary(data);
         } catch (err) {
-            setError('データの読み込みに失敗しました');
+            setError(tc("error"));
             console.error(err);
         } finally {
             setLoading(false);
@@ -29,10 +33,10 @@ export default function AnalyticsPage() {
     }, [loadData]);
 
     const formatHours = (hours: number) => {
-        if (hours < 24) return `${hours.toFixed(1)}時間`;
+        if (hours < 24) return `${hours.toFixed(1)} ${t("hours")}`;
         const d = Math.floor(hours / 24);
         const h = hours % 24;
-        return `${d}日${h > 0 ? ` ${h.toFixed(0)}時間` : ''}`;
+        return `${d} ${d === 1 ? t("day") : t("days")}${h > 0 ? ` ${h.toFixed(0)} ${t("hours")}` : ''}`;
     };
 
     const getSeverityColor = (severity: string) => {
@@ -67,23 +71,23 @@ export default function AnalyticsPage() {
         <div className="py-8 px-4">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold">トレンド分析</h1>
+                    <h1 className="text-2xl font-bold">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
-                        脆弱性対応のパフォーマンス指標を可視化
+                        {t("description")}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <label className="text-sm text-muted-foreground">期間:</label>
+                    <label className="text-sm text-muted-foreground">{t("period")}:</label>
                     <select
                         value={days}
                         onChange={(e) => setDays(parseInt(e.target.value))}
                         className="bg-background border border-border rounded-lg px-3 py-2"
                     >
-                        <option value={7}>7日間</option>
-                        <option value={30}>30日間</option>
-                        <option value={90}>90日間</option>
-                        <option value={180}>180日間</option>
-                        <option value={365}>1年間</option>
+                        <option value={7}>{t("days7")}</option>
+                        <option value={30}>{t("days30")}</option>
+                        <option value={90}>{t("days90")}</option>
+                        <option value={180}>{t("days180")}</option>
+                        <option value={365}>{t("year1")}</option>
                     </select>
                 </div>
             </div>
@@ -103,7 +107,7 @@ export default function AnalyticsPage() {
                                 <AlertTriangle className="w-5 h-5 text-red-500" />
                             </div>
                             <div>
-                                <p className="text-sm text-muted-foreground">未解決の脆弱性</p>
+                                <p className="text-sm text-muted-foreground">{t("openVulnerabilities")}</p>
                                 <p className="text-2xl font-bold">{summary.summary.total_open_vulnerabilities}</p>
                             </div>
                         </div>
@@ -115,7 +119,7 @@ export default function AnalyticsPage() {
                                 <CheckCircle2 className="w-5 h-5 text-green-500" />
                             </div>
                             <div>
-                                <p className="text-sm text-muted-foreground">直近30日で解決</p>
+                                <p className="text-sm text-muted-foreground">{t("resolvedRecently", { days: 30 })}</p>
                                 <p className="text-2xl font-bold">{summary.summary.resolved_last_30_days}</p>
                             </div>
                         </div>
@@ -127,7 +131,7 @@ export default function AnalyticsPage() {
                                 <Clock className="w-5 h-5 text-blue-500" />
                             </div>
                             <div>
-                                <p className="text-sm text-muted-foreground">平均MTTR</p>
+                                <p className="text-sm text-muted-foreground">{t("averageMttr")}</p>
                                 <p className="text-2xl font-bold">{formatHours(summary.summary.average_mttr_hours)}</p>
                             </div>
                         </div>
@@ -139,7 +143,7 @@ export default function AnalyticsPage() {
                                 <Target className="w-5 h-5 text-purple-500" />
                             </div>
                             <div>
-                                <p className="text-sm text-muted-foreground">SLO達成率</p>
+                                <p className="text-sm text-muted-foreground">{t("sloAchievementRate")}</p>
                                 <p className="text-2xl font-bold">{summary.summary.overall_slo_achievement_pct.toFixed(1)}%</p>
                             </div>
                         </div>
@@ -153,7 +157,7 @@ export default function AnalyticsPage() {
                     <div className="bg-card border border-border rounded-lg p-6">
                         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                             <Clock className="w-5 h-5" />
-                            MTTR (平均修復時間)
+                            {t("mttrTitle")}
                         </h2>
                         <div className="space-y-4">
                             {summary.mttr.map((m: MTTRResult) => (
@@ -166,11 +170,11 @@ export default function AnalyticsPage() {
                                             <span className="text-sm">
                                                 {formatHours(m.mttr_hours)}
                                                 <span className="text-muted-foreground ml-1">
-                                                    ({m.count}件)
+                                                    ({m.count} {t("cases")})
                                                 </span>
                                             </span>
                                             <span className="text-sm text-muted-foreground">
-                                                目標: {formatHours(m.target_hours)}
+                                                {t("target")}: {formatHours(m.target_hours)}
                                             </span>
                                         </div>
                                         <div className="h-2 bg-muted rounded-full overflow-hidden">
@@ -198,7 +202,7 @@ export default function AnalyticsPage() {
                     <div className="bg-card border border-border rounded-lg p-6">
                         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                             <Target className="w-5 h-5" />
-                            SLO達成率
+                            {t("sloTitle")}
                         </h2>
                         <div className="space-y-4">
                             {summary.slo_achievement.map((slo: SLOAchievement) => (
@@ -212,7 +216,7 @@ export default function AnalyticsPage() {
                                                 {slo.achievement_pct.toFixed(1)}%
                                             </span>
                                             <span className="text-sm text-muted-foreground">
-                                                {slo.on_target_count}/{slo.total_count}件
+                                                {slo.on_target_count}/{slo.total_count} {t("cases")}
                                             </span>
                                         </div>
                                         <div className="h-2 bg-muted rounded-full overflow-hidden">
@@ -227,8 +231,7 @@ export default function AnalyticsPage() {
                         </div>
                         <div className="mt-4 pt-4 border-t border-border">
                             <p className="text-sm text-muted-foreground">
-                                SLO目標時間内に解決された脆弱性の割合を表示します。
-                                Critical: 24時間, High: 7日, Medium: 30日, Low: 90日
+                                {t("sloDescription")}
                             </p>
                         </div>
                     </div>
@@ -240,7 +243,7 @@ export default function AnalyticsPage() {
                 <div className="mt-6 bg-card border border-border rounded-lg p-6">
                     <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                         <TrendingUp className="w-5 h-5" />
-                        脆弱性トレンド
+                        {t("vulnerabilityTrend")}
                     </h2>
                     <div className="overflow-x-auto">
                         <div className="min-w-[600px]">
@@ -295,7 +298,7 @@ export default function AnalyticsPage() {
                 <div className="mt-6 bg-card border border-border rounded-lg p-6">
                     <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                         <ShieldCheck className="w-5 h-5" />
-                        コンプライアンススコア推移
+                        {t("complianceScoreTrend")}
                     </h2>
                     <div className="flex items-center gap-4 mb-4">
                         <div className="text-3xl font-bold">
@@ -326,9 +329,9 @@ export default function AnalyticsPage() {
             {summary && summary.vulnerability_trend.length === 0 && summary.mttr.every(m => m.count === 0) && (
                 <div className="mt-6 bg-card border border-border rounded-lg p-12 text-center">
                     <TrendingUp className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-                    <h3 className="text-lg font-medium mb-2">データがありません</h3>
+                    <h3 className="text-lg font-medium mb-2">{t("noData")}</h3>
                     <p className="text-muted-foreground">
-                        脆弱性の検出・解決データが蓄積されると、トレンド分析が表示されます。
+                        {t("noDataDescription")}
                     </p>
                 </div>
             )}

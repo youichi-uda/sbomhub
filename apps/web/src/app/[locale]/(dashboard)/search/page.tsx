@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations, useLocale } from "next-intl";
 import Link from "next/link";
 import { api, CVESearchResult, ComponentSearchResult } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -43,7 +44,8 @@ function SeverityBadge({ severity }: { severity: string }) {
   );
 }
 
-function CVESearchResults({ result }: { result: CVESearchResult }) {
+function CVESearchResults({ result, locale }: { result: CVESearchResult; locale: string }) {
+  const t = useTranslations("Search");
   return (
     <div className="space-y-6">
       {/* CVE Info */}
@@ -67,18 +69,18 @@ function CVESearchResults({ result }: { result: CVESearchResult }) {
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
             <XCircle className="h-5 w-5 text-red-500" />
-            影響を受けるプロジェクト ({result.affected_projects.length}件)
+            {t("affectedProjects")} ({result.affected_projects.length})
           </CardTitle>
         </CardHeader>
         <CardContent>
           {result.affected_projects.length === 0 ? (
-            <p className="text-muted-foreground">影響を受けるプロジェクトはありません</p>
+            <p className="text-muted-foreground">{t("noAffectedProjects")}</p>
           ) : (
             <div className="space-y-4">
               {result.affected_projects.map((project) => (
                 <div key={project.project_id} className="border rounded-lg p-4">
                   <Link
-                    href={`/ja/projects/${project.project_id}`}
+                    href={`/${locale}/projects/${project.project_id}`}
                     className="font-medium text-blue-500 hover:underline"
                   >
                     {project.project_name}
@@ -90,7 +92,7 @@ function CVESearchResults({ result }: { result: CVESearchResult }) {
                         <span className="font-mono">{comp.name}@{comp.version}</span>
                         {comp.fixed_version && (
                           <span className="text-muted-foreground">
-                            → {comp.fixed_version}にアップデート推奨
+                            → {t("upgradeRecommended", { version: comp.fixed_version })}
                           </span>
                         )}
                       </div>
@@ -109,7 +111,7 @@ function CVESearchResults({ result }: { result: CVESearchResult }) {
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
               <CheckCircle className="h-5 w-5 text-green-500" />
-              影響なしのプロジェクト ({result.unaffected_projects.length}件)
+              {t("unaffectedProjects")} ({result.unaffected_projects.length})
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -117,7 +119,7 @@ function CVESearchResults({ result }: { result: CVESearchResult }) {
               {result.unaffected_projects.map((project) => (
                 <Link
                   key={project.project_id}
-                  href={`/ja/projects/${project.project_id}`}
+                  href={`/${locale}/projects/${project.project_id}`}
                   className="text-sm text-muted-foreground hover:text-foreground"
                 >
                   {project.project_name}
@@ -131,20 +133,23 @@ function CVESearchResults({ result }: { result: CVESearchResult }) {
   );
 }
 
-function ComponentSearchResults({ result }: { result: ComponentSearchResult }) {
+function ComponentSearchResults({ result, locale }: { result: ComponentSearchResult; locale: string }) {
+  const t = useTranslations("Search");
   return (
     <div className="space-y-4">
       <p className="text-muted-foreground">
-        「{result.query.name}」
-        {result.query.version_constraint && ` (${result.query.version_constraint})`}
-        の検索結果: {result.matches.length}件
+        {t("searchResults", {
+          name: result.query.name,
+          constraint: result.query.version_constraint ? ` (${result.query.version_constraint})` : "",
+          count: result.matches.length
+        })}
       </p>
 
       {result.matches.length === 0 ? (
         <Card>
           <CardContent className="pt-6">
             <p className="text-center text-muted-foreground">
-              該当するコンポーネントが見つかりませんでした
+              {t("noComponentsFound")}
             </p>
           </CardContent>
         </Card>
@@ -152,11 +157,11 @@ function ComponentSearchResults({ result }: { result: ComponentSearchResult }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>プロジェクト</TableHead>
-              <TableHead>コンポーネント</TableHead>
-              <TableHead>バージョン</TableHead>
-              <TableHead>ライセンス</TableHead>
-              <TableHead>脆弱性</TableHead>
+              <TableHead>{t("project")}</TableHead>
+              <TableHead>{t("component")}</TableHead>
+              <TableHead>{t("version")}</TableHead>
+              <TableHead>{t("license")}</TableHead>
+              <TableHead>{t("vulnerabilities")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -164,7 +169,7 @@ function ComponentSearchResults({ result }: { result: ComponentSearchResult }) {
               <TableRow key={`${match.project_id}-${match.component.id}`}>
                 <TableCell>
                   <Link
-                    href={`/ja/projects/${match.project_id}`}
+                    href={`/${locale}/projects/${match.project_id}`}
                     className="text-blue-500 hover:underline"
                   >
                     {match.project_name}
@@ -184,7 +189,7 @@ function ComponentSearchResults({ result }: { result: ComponentSearchResult }) {
                       )}
                     </div>
                   ) : (
-                    <span className="text-green-500">なし</span>
+                    <span className="text-green-500">{t("none")}</span>
                   )}
                 </TableCell>
               </TableRow>
@@ -197,6 +202,8 @@ function ComponentSearchResults({ result }: { result: ComponentSearchResult }) {
 }
 
 export default function SearchPage() {
+  const t = useTranslations("Search");
+  const locale = useLocale();
   const [activeTab, setActiveTab] = useState("cve");
   const [cveQuery, setCveQuery] = useState("");
   const [componentQuery, setComponentQuery] = useState("");
@@ -218,7 +225,7 @@ export default function SearchPage() {
       const result = await api.search.byCVE(cveQuery.trim());
       setCveResult(result);
     } catch (err) {
-      setError("CVEが見つかりませんでした");
+      setError(t("cveNotFound"));
       console.error(err);
     } finally {
       setLoading(false);
@@ -240,7 +247,7 @@ export default function SearchPage() {
       );
       setComponentResult(result);
     } catch (err) {
-      setError("検索に失敗しました");
+      setError(t("searchFailed"));
       console.error(err);
     } finally {
       setLoading(false);
@@ -251,33 +258,33 @@ export default function SearchPage() {
     <div className="container mx-auto py-8 space-y-6">
       <h1 className="text-3xl font-bold flex items-center gap-2">
         <Search className="h-8 w-8" />
-        横断検索
+        {t("title")}
       </h1>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
-          <TabsTrigger value="cve">CVE検索</TabsTrigger>
-          <TabsTrigger value="component">コンポーネント検索</TabsTrigger>
+          <TabsTrigger value="cve">{t("cveSearch")}</TabsTrigger>
+          <TabsTrigger value="component">{t("componentSearch")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="cve" className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>CVE横断検索</CardTitle>
+              <CardTitle>{t("cveSearchTitle")}</CardTitle>
               <CardDescription>
-                特定のCVE IDで全プロジェクトを検索し、影響範囲を特定します
+                {t("cveSearchDescription")}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <form onSubmit={handleCVESearch} className="flex gap-2">
                 <Input
-                  placeholder="CVE-2021-44228"
+                  placeholder={t("cvePlaceholder")}
                   value={cveQuery}
                   onChange={(e) => setCveQuery(e.target.value)}
                   className="font-mono"
                 />
                 <Button type="submit" disabled={loading}>
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "検索"}
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : t("searchButton")}
                 </Button>
               </form>
             </CardContent>
@@ -294,32 +301,32 @@ export default function SearchPage() {
             </Card>
           )}
 
-          {cveResult && <CVESearchResults result={cveResult} />}
+          {cveResult && <CVESearchResults result={cveResult} locale={locale} />}
         </TabsContent>
 
         <TabsContent value="component" className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>コンポーネント検索</CardTitle>
+              <CardTitle>{t("componentSearchTitle")}</CardTitle>
               <CardDescription>
-                コンポーネント名とバージョンで全プロジェクトを検索します
+                {t("componentSearchDescription")}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <form onSubmit={handleComponentSearch} className="flex gap-2">
                 <Input
-                  placeholder="コンポーネント名 (例: lodash)"
+                  placeholder={t("componentNamePlaceholder")}
                   value={componentQuery}
                   onChange={(e) => setComponentQuery(e.target.value)}
                 />
                 <Input
-                  placeholder="バージョン制約 (例: <4.17.21)"
+                  placeholder={t("versionPlaceholder")}
                   value={versionQuery}
                   onChange={(e) => setVersionQuery(e.target.value)}
                   className="w-48"
                 />
                 <Button type="submit" disabled={loading}>
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "検索"}
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : t("searchButton")}
                 </Button>
               </form>
             </CardContent>
@@ -336,7 +343,7 @@ export default function SearchPage() {
             </Card>
           )}
 
-          {componentResult && <ComponentSearchResults result={componentResult} />}
+          {componentResult && <ComponentSearchResults result={componentResult} locale={locale} />}
         </TabsContent>
       </Tabs>
     </div>

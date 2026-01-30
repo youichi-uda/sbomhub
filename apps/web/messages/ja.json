@@ -287,6 +287,7 @@
     "projectRiskScore": "プロジェクト別リスクスコア",
     "noProjects": "プロジェクトがありません",
     "vulnerabilityTrend": "脆弱性トレンド（過去30日）",
+    "noTrendData": "トレンドデータがありません",
     "daysAgo": "日前",
     "today": "今日"
   },
@@ -311,7 +312,10 @@
     "cases": "件",
     "sloTitle": "SLO達成率",
     "sloDescription": "SLO目標時間内に解決された脆弱性の割合を表示します。Critical: 24時間, High: 7日, Medium: 30日, Low: 90日",
-    "vulnerabilityTrend": "脆弱性トレンド"
+    "vulnerabilityTrend": "脆弱性トレンド",
+    "complianceScoreTrend": "コンプライアンススコア推移",
+    "noData": "データがありません",
+    "noDataDescription": "脆弱性の検出・解決データが蓄積されると、トレンド分析が表示されます。"
   },
   "Reports": {
     "title": "レポート",
@@ -335,7 +339,16 @@
     "failed": "失敗",
     "emailed": "メール送信済み",
     "loadFailed": "レポート一覧の読み込みに失敗しました",
-    "downloadFailed": "ダウンロードに失敗しました"
+    "downloadFailed": "ダウンロードに失敗しました",
+    "generateFailed": "レポート生成に失敗しました",
+    "noReports": "レポートがありません",
+    "noReportsDescription": "「レポート生成」ボタンから新しいレポートを作成できます。",
+    "reportType": "レポートタイプ",
+    "format": "フォーマット",
+    "pageInfo": "{total} 件中 {start} - {end} 件",
+    "previous": "前へ",
+    "next": "次へ",
+    "error": "エラー"
   },
   "Search": {
     "title": "横断検索",
@@ -352,7 +365,20 @@
     "searching": "検索中...",
     "noResults": "検索結果がありません",
     "affectedProjects": "影響を受けるプロジェクト",
-    "matchingComponents": "一致するコンポーネント"
+    "unaffectedProjects": "影響なしのプロジェクト",
+    "matchingComponents": "一致するコンポーネント",
+    "cveNotFound": "CVEが見つかりませんでした",
+    "searchFailed": "検索に失敗しました",
+    "noAffectedProjects": "影響を受けるプロジェクトはありません",
+    "upgradeRecommended": "{version}にアップデート推奨",
+    "searchResults": "「{name}」{constraint}の検索結果: {count}件",
+    "noComponentsFound": "該当するコンポーネントが見つかりませんでした",
+    "project": "プロジェクト",
+    "component": "コンポーネント",
+    "version": "バージョン",
+    "license": "ライセンス",
+    "vulnerabilities": "脆弱性",
+    "none": "なし"
   },
   "Audit": {
     "title": "監査ログ",
@@ -367,7 +393,16 @@
     "previous": "前へ",
     "next": "次へ",
     "pageInfo": "{start} - {end} / {total} 件",
-    "pageNumber": "{current} / {total}"
+    "pageNumber": "{current} / {total}",
+    "loadFailed": "監査ログの読み込みに失敗しました",
+    "exportFailed": "エクスポートに失敗しました",
+    "filterConditions": "フィルター条件",
+    "clear": "クリア",
+    "all": "すべて",
+    "resourceType": "リソースタイプ",
+    "startDate": "開始日",
+    "endDate": "終了日",
+    "noLogs": "監査ログがありません"
   },
   "Billing": {
     "title": "プラン・お支払い",
@@ -395,7 +430,28 @@
     "sla": "SLA 99.9%",
     "auditLog": "監査ログ",
     "dedicatedSupport": "専任サポート",
-    "priorityResponse": "優先対応"
+    "priorityResponse": "優先対応",
+    "loadFailed": "データの読み込みに失敗しました",
+    "checkoutFailed": "チェックアウトの作成に失敗しました",
+    "portalFailed": "ポータルURLの取得に失敗しました",
+    "selectPlanFailed": "プランの選択に失敗しました",
+    "syncFailed": "サブスクリプションの同期に失敗しました",
+    "syncSuccess": "サブスクリプションを同期しました: {plan}",
+    "manualSyncRequired": "手動でサブスクリプションIDを入力してください",
+    "noSubscriptionFound": "サブスクリプションが見つかりませんでした",
+    "manualSyncTitle": "サブスクリプションを手動で同期",
+    "manualSyncDescription": "Lemon Squeezyダッシュボードの Subscriptions からサブスクリプションIDを確認して入力してください。",
+    "openLemonSqueezy": "Lemon Squeezy Subscriptions を開く",
+    "subscriptionIdPlaceholder": "サブスクリプションID (例: 123456)",
+    "sync": "同期",
+    "selfHostedMode": "Self-Hosted モード",
+    "selfHostedDescription": "セルフホスト版では全機能が無制限でご利用いただけます。",
+    "enterpriseUnlimited": "Enterprise (無制限)",
+    "selectPlanPrompt": "プランを選択してください",
+    "selectPlanPromptDescription": "SBOMHub を利用するにはプランを選択する必要があります。無料プランから始めることもできます。",
+    "startWithFree": "Freeで始める",
+    "downgrade": "ダウングレード",
+    "billingDisabled": "課金機能は現在無効になっています。"
   },
   "Common": {
     "loading": "読み込み中...",

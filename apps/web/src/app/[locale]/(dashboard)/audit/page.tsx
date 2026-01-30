@@ -1,11 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslations, useLocale } from 'next-intl';
 import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X } from 'lucide-react';
 import { api, AuditLog, AuditListResponse, AuditFilter, ActionInfo, ResourceTypeInfo } from '@/lib/api';
 import { useAuth } from '@clerk/nextjs';
 
 export default function AuditLogPage() {
+    const t = useTranslations("Audit");
+    const locale = useLocale();
     const { getToken } = useAuth();
     const [logs, setLogs] = useState<AuditLog[]>([]);
     const [total, setTotal] = useState(0);
@@ -48,7 +51,7 @@ export default function AuditLogPage() {
             setTotal(response.total);
             setTotalPages(response.total_pages);
         } catch (err) {
-            setError('監査ログの読み込みに失敗しました');
+            setError(t("loadFailed"));
             console.error(err);
         } finally {
             setLoading(false);
@@ -84,7 +87,7 @@ export default function AuditLogPage() {
             window.URL.revokeObjectURL(url);
             a.remove();
         } catch (err) {
-            setError('エクスポートに失敗しました');
+            setError(t("exportFailed"));
             console.error(err);
         }
     };
@@ -108,7 +111,7 @@ export default function AuditLogPage() {
     const hasActiveFilters = filter.action || filter.resource_type || filter.start_date || filter.end_date;
 
     const formatDate = (dateStr: string) => {
-        return new Date(dateStr).toLocaleString('ja-JP');
+        return new Date(dateStr).toLocaleString(locale === 'ja' ? 'ja-JP' : 'en-US');
     };
 
     const getActionLabel = (action: string) => {
@@ -141,9 +144,9 @@ export default function AuditLogPage() {
         <div className="py-8 px-4">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold">監査ログ</h1>
+                    <h1 className="text-2xl font-bold">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
-                        すべての操作履歴を確認できます（{total.toLocaleString()}件）
+                        {t("description", { count: total.toLocaleString() })}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -154,7 +157,7 @@ export default function AuditLogPage() {
                         }`}
                     >
                         <Filter className="w-4 h-4" />
-                        フィルター
+                        {t("filter")}
                         {hasActiveFilters && (
                             <span className="bg-primary text-primary-foreground text-xs px-1.5 py-0.5 rounded-full">
                                 ON
@@ -166,7 +169,7 @@ export default function AuditLogPage() {
                         className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
                     >
                         <Download className="w-4 h-4" />
-                        CSVエクスポート
+                        {t("exportCsv")}
                     </button>
                 </div>
             </div>
@@ -181,26 +184,26 @@ export default function AuditLogPage() {
             {showFilters && (
                 <div className="mb-6 p-4 bg-card border border-border rounded-lg">
                     <div className="flex items-center justify-between mb-4">
-                        <h3 className="font-medium">フィルター条件</h3>
+                        <h3 className="font-medium">{t("filterConditions")}</h3>
                         {hasActiveFilters && (
                             <button
                                 onClick={clearFilters}
                                 className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
                             >
                                 <X className="w-4 h-4" />
-                                クリア
+                                {t("clear")}
                             </button>
                         )}
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                         <div>
-                            <label className="block text-sm font-medium mb-1">アクション</label>
+                            <label className="block text-sm font-medium mb-1">{t("action")}</label>
                             <select
                                 value={filter.action || ''}
                                 onChange={(e) => handleFilterChange('action', e.target.value)}
                                 className="w-full bg-background border border-border rounded-lg px-3 py-2"
                             >
-                                <option value="">すべて</option>
+                                <option value="">{t("all")}</option>
                                 {actions.map((action) => (
                                     <option key={action.action} value={action.action}>
                                         {action.label}
@@ -209,13 +212,13 @@ export default function AuditLogPage() {
                             </select>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium mb-1">リソースタイプ</label>
+                            <label className="block text-sm font-medium mb-1">{t("resourceType")}</label>
                             <select
                                 value={filter.resource_type || ''}
                                 onChange={(e) => handleFilterChange('resource_type', e.target.value)}
                                 className="w-full bg-background border border-border rounded-lg px-3 py-2"
                             >
-                                <option value="">すべて</option>
+                                <option value="">{t("all")}</option>
                                 {resourceTypes.map((type) => (
                                     <option key={type.type} value={type.type}>
                                         {type.label}
@@ -224,7 +227,7 @@ export default function AuditLogPage() {
                             </select>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium mb-1">開始日</label>
+                            <label className="block text-sm font-medium mb-1">{t("startDate")}</label>
                             <input
                                 type="date"
                                 value={filter.start_date || ''}
@@ -233,7 +236,7 @@ export default function AuditLogPage() {
                             />
                         </div>
                         <div>
-                            <label className="block text-sm font-medium mb-1">終了日</label>
+                            <label className="block text-sm font-medium mb-1">{t("endDate")}</label>
                             <input
                                 type="date"
                                 value={filter.end_date || ''}
@@ -251,18 +254,18 @@ export default function AuditLogPage() {
                     <table className="w-full">
                         <thead className="bg-muted/50">
                             <tr>
-                                <th className="px-4 py-3 text-left text-sm font-medium">日時</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">アクション</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">リソース</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">ユーザー</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">IPアドレス</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("dateTime")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("action")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("resource")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("user")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("ipAddress")}</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border">
                             {logs.length === 0 ? (
                                 <tr>
                                     <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">
-                                        監査ログがありません
+                                        {t("noLogs")}
                                     </td>
                                 </tr>
                             ) : (
@@ -306,7 +309,11 @@ export default function AuditLogPage() {
             {totalPages > 1 && (
                 <div className="flex items-center justify-between mt-4">
                     <p className="text-sm text-muted-foreground">
-                        {((page - 1) * (filter.limit || 50)) + 1} - {Math.min(page * (filter.limit || 50), total)} / {total} 件
+                        {t("pageInfo", {
+                            start: ((page - 1) * (filter.limit || 50)) + 1,
+                            end: Math.min(page * (filter.limit || 50), total),
+                            total
+                        })}
                     </p>
                     <div className="flex items-center gap-2">
                         <button
@@ -315,17 +322,17 @@ export default function AuditLogPage() {
                             className="flex items-center gap-1 px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             <ChevronLeft className="w-4 h-4" />
-                            前へ
+                            {t("previous")}
                         </button>
                         <span className="text-sm">
-                            {page} / {totalPages}
+                            {t("pageNumber", { current: page, total: totalPages })}
                         </span>
                         <button
                             onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                             disabled={page === totalPages}
                             className="flex items-center gap-1 px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            次へ
+                            {t("next")}
                             <ChevronRight className="w-4 h-4" />
                         </button>
                     </div>

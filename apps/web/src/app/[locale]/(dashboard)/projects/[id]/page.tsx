@@ -16,6 +16,11 @@ export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.id as string;
   const t = useTranslations();
+  const tp = useTranslations("ProjectDetail");
+  const tc = useTranslations("Common");
+  const tv = useTranslations("VexForm");
+  const ta = useTranslations("ApiKeyForm");
+  const tl = useTranslations("LicenseForm");
 
   const [project, setProject] = useState<Project | null>(null);
   const [components, setComponents] = useState<Component[]>([]);
@@ -166,12 +171,12 @@ export default function ProjectDetailPage() {
     try {
       const content = await file.text();
       await api.projects.uploadSbom(projectId, content);
-      alert("SBOM uploaded successfully!");
+      alert(tp("uploadSuccess"));
       loadComponents();
       setActiveTab("components");
     } catch (error) {
       console.error("Failed to upload SBOM:", error);
-      alert("Failed to upload SBOM");
+      alert(tp("uploadFailed"));
     } finally {
       setUploading(false);
     }
@@ -188,11 +193,11 @@ export default function ProjectDetailPage() {
   }
 
   if (loading) {
-    return <div className="flex items-center justify-center h-64">Loading...</div>;
+    return <div className="flex items-center justify-center h-64">{tc("loading")}</div>;
   }
 
   if (!project) {
-    return <div className="flex items-center justify-center h-64">Project not found</div>;
+    return <div className="flex items-center justify-center h-64">{tc("projectNotFound")}</div>;
   }
 
   return (
@@ -200,7 +205,7 @@ export default function ProjectDetailPage() {
       <div className="mb-6">
         <Link href="/projects" className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-2">
           <ArrowLeft className="h-4 w-4 mr-1" />
-          Back to Projects
+          {tp("backToProjects")}
         </Link>
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -209,10 +214,10 @@ export default function ProjectDetailPage() {
           </div>
           <div className="flex items-center gap-2">
             <Link href={`/projects/${projectId}/diff`}>
-              <Button variant="outline">SBOM Diff</Button>
+              <Button variant="outline">{tp("sbomDiff")}</Button>
             </Link>
             <Link href={`/projects/${projectId}/share`}>
-              <Button variant="outline">Share</Button>
+              <Button variant="outline">{tp("share")}</Button>
             </Link>
           </div>
         </div>
@@ -252,21 +257,21 @@ export default function ProjectDetailPage() {
           onClick={() => setActiveTab("licenses")}
         >
           <FileCheck className="h-4 w-4 mr-2" />
-          Licenses ({licensePolicies.length})
+          {t("Components.license")} ({licensePolicies.length})
         </Button>
         <Button
           variant={activeTab === "apikeys" ? "default" : "outline"}
           onClick={() => setActiveTab("apikeys")}
         >
           <Key className="h-4 w-4 mr-2" />
-          API Keys ({apiKeys.length})
+          {tp("apiKeys")} ({apiKeys.length})
         </Button>
         <Button
           variant={activeTab === "notifications" ? "default" : "outline"}
           onClick={() => setActiveTab("notifications")}
         >
           <Bell className="h-4 w-4 mr-2" />
-          Notifications
+          {tp("notifications")}
         </Button>
       </div>
 
@@ -279,7 +284,7 @@ export default function ProjectDetailPage() {
             <div className="border-2 border-dashed rounded-lg p-8 text-center">
               <Upload className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
               <p className="text-muted-foreground mb-4">
-                Upload a CycloneDX or SPDX JSON file
+                {tp("uploadDescription")}
               </p>
               <label className="cursor-pointer">
                 <input
@@ -290,7 +295,7 @@ export default function ProjectDetailPage() {
                   disabled={uploading}
                 />
                 <Button disabled={uploading}>
-                  {uploading ? "Uploading..." : "Select File"}
+                  {uploading ? tp("uploading") : tp("selectFile")}
                 </Button>
               </label>
             </div>
@@ -306,7 +311,7 @@ export default function ProjectDetailPage() {
           <CardContent>
             {components.length === 0 ? (
               <p className="text-center text-muted-foreground py-8">
-                No components found. Upload an SBOM first.
+                {tp("noComponents")}
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -344,7 +349,7 @@ export default function ProjectDetailPage() {
           <CardContent>
             {vulnerabilities.length === 0 ? (
               <p className="text-center text-muted-foreground py-8">
-                No vulnerabilities found.
+                {tp("noVulnerabilities")}
               </p>
             ) : (
               <div className="space-y-4">
@@ -376,7 +381,7 @@ export default function ProjectDetailPage() {
                           }}
                         >
                           <Shield className="h-3 w-3 mr-1" />
-                          Add VEX
+                          {tp("addVex")}
                         </Button>
                       </div>
                     </div>
@@ -395,7 +400,7 @@ export default function ProjectDetailPage() {
         <Card>
           <CardHeader>
             <div className="flex justify-between items-center">
-              <CardTitle>VEX Statements</CardTitle>
+              <CardTitle>{tp("vexStatements")}</CardTitle>
               <div className="flex gap-2">
                 <a
                   href={api.projects.exportVEX(projectId)}
@@ -404,7 +409,7 @@ export default function ProjectDetailPage() {
                 >
                   <Button variant="outline" size="sm">
                     <Download className="h-4 w-4 mr-2" />
-                    Export VEX
+                    {tp("exportVex")}
                   </Button>
                 </a>
               </div>
@@ -429,7 +434,7 @@ export default function ProjectDetailPage() {
 
             {vexStatements.length === 0 && !showVexForm ? (
               <p className="text-center text-muted-foreground py-8">
-                No VEX statements found. Add VEX statements from the Vulnerabilities tab.
+                {tp("noVexStatements")}
               </p>
             ) : (
               <div className="space-y-4">
@@ -450,28 +455,28 @@ export default function ProjectDetailPage() {
                         variant="ghost"
                         className="text-red-500 hover:text-red-700"
                         onClick={async () => {
-                          if (confirm("Delete this VEX statement?")) {
+                          if (confirm(tp("deleteVexConfirm"))) {
                             await api.projects.deleteVEXStatement(projectId, vex.id);
                             loadVexStatements();
                           }
                         }}
                       >
-                        Delete
+                        {tc("delete")}
                       </Button>
                     </div>
                     {vex.justification && (
                       <p className="text-sm text-muted-foreground mb-1">
-                        <strong>Justification:</strong> {vex.justification.replace(/_/g, " ")}
+                        <strong>{tp("justification")}:</strong> {vex.justification.replace(/_/g, " ")}
                       </p>
                     )}
                     {vex.impact_statement && (
                       <p className="text-sm text-muted-foreground">
-                        <strong>Impact:</strong> {vex.impact_statement}
+                        <strong>{tp("impact")}:</strong> {vex.impact_statement}
                       </p>
                     )}
                     {vex.component_name && (
                       <p className="text-xs text-muted-foreground mt-2">
-                        Component: {vex.component_name} {vex.component_version}
+                        {tp("component")}: {vex.component_name} {vex.component_version}
                       </p>
                     )}
                   </div>
@@ -486,13 +491,13 @@ export default function ProjectDetailPage() {
         <Card>
           <CardHeader>
             <div className="flex justify-between items-center">
-              <CardTitle>License Policies</CardTitle>
+              <CardTitle>{tp("licensePolicies")}</CardTitle>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setShowLicenseForm(true)}
               >
-                Add Policy
+                {tp("addPolicy")}
               </Button>
             </div>
           </CardHeader>
@@ -511,7 +516,7 @@ export default function ProjectDetailPage() {
 
             {licenseViolations.length > 0 && (
               <div className="mb-6">
-                <h3 className="font-semibold mb-3 text-red-600">License Violations ({licenseViolations.length})</h3>
+                <h3 className="font-semibold mb-3 text-red-600">{tp("licenseViolations")} ({licenseViolations.length})</h3>
                 <div className="space-y-2">
                   {licenseViolations.map((v) => (
                     <div key={v.component_id} className="border border-red-200 rounded-lg p-3 bg-red-50">
@@ -538,10 +543,10 @@ export default function ProjectDetailPage() {
               </div>
             )}
 
-            <h3 className="font-semibold mb-3">Configured Policies</h3>
+            <h3 className="font-semibold mb-3">{tp("configuredPolicies")}</h3>
             {licensePolicies.length === 0 && !showLicenseForm ? (
               <p className="text-center text-muted-foreground py-8">
-                No license policies configured. Add policies to check component licenses.
+                {tp("noLicensePolicies")}
               </p>
             ) : (
               <div className="space-y-2">
@@ -561,14 +566,14 @@ export default function ProjectDetailPage() {
                           variant="ghost"
                           className="text-red-500 hover:text-red-700"
                           onClick={async () => {
-                            if (confirm("Delete this license policy?")) {
+                            if (confirm(tp("deleteLicenseConfirm"))) {
                               await api.projects.deleteLicensePolicy(projectId, policy.id);
                               loadLicensePolicies();
                               loadLicenseViolations();
                             }
                           }}
                         >
-                          Delete
+                          {tc("delete")}
                         </Button>
                       </div>
                     </div>
@@ -587,22 +592,22 @@ export default function ProjectDetailPage() {
         <Card>
           <CardHeader>
             <div className="flex justify-between items-center">
-              <CardTitle>API Keys</CardTitle>
+              <CardTitle>{tp("apiKeys")}</CardTitle>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setShowApiKeyForm(true)}
               >
-                Create API Key
+                {tp("createApiKey")}
               </Button>
             </div>
           </CardHeader>
           <CardContent>
             {newApiKey && (
               <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-                <p className="font-semibold text-green-800 mb-2">API Key Created!</p>
+                <p className="font-semibold text-green-800 mb-2">{tp("apiKeyCreated")}</p>
                 <p className="text-sm text-green-700 mb-2">
-                  Copy this key now. You won&apos;t be able to see it again.
+                  {tp("apiKeyCopyWarning")}
                 </p>
                 <div className="flex items-center gap-2 bg-white p-2 rounded border font-mono text-sm">
                   <code className="flex-1 break-all">{newApiKey.key}</code>
@@ -614,7 +619,7 @@ export default function ProjectDetailPage() {
                   className="mt-2"
                   onClick={() => setNewApiKey(null)}
                 >
-                  Done
+                  {tp("done")}
                 </Button>
               </div>
             )}
@@ -632,16 +637,16 @@ export default function ProjectDetailPage() {
             )}
 
             <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="font-semibold text-blue-800 mb-2">GitHub Actions Integration</p>
+              <p className="font-semibold text-blue-800 mb-2">{tp("githubActionsIntegration")}</p>
               <p className="text-sm text-blue-700">
-                Use API keys to authenticate CI/CD workflows. Add your key as a secret named{" "}
-                <code className="bg-blue-100 px-1 rounded">SBOMHUB_API_KEY</code> in your repository settings.
+                {tp("githubActionsDescription")}{" "}
+                <code className="bg-blue-100 px-1 rounded">{tp("githubActionsSecretName")}</code> {tp("githubActionsDescriptionSuffix")}
               </p>
             </div>
 
             {apiKeys.length === 0 && !showApiKeyForm ? (
               <p className="text-center text-muted-foreground py-8">
-                No API keys created. Create a key to enable CI/CD integration.
+                {tp("noApiKeys")}
               </p>
             ) : (
               <div className="space-y-2">
@@ -661,26 +666,26 @@ export default function ProjectDetailPage() {
                           variant="ghost"
                           className="text-red-500 hover:text-red-700"
                           onClick={async () => {
-                            if (confirm("Delete this API key? This action cannot be undone.")) {
+                            if (confirm(tp("deleteApiKeyConfirm"))) {
                               await api.projects.deleteAPIKey(projectId, key.id);
                               loadApiKeys();
                             }
                           }}
                         >
-                          Delete
+                          {tc("delete")}
                         </Button>
                       </div>
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
-                      Created: {new Date(key.created_at).toLocaleDateString()}
+                      {tp("created")}: {new Date(key.created_at).toLocaleDateString()}
                       {key.last_used_at && (
                         <span className="ml-4">
-                          Last used: {new Date(key.last_used_at).toLocaleDateString()}
+                          {tp("lastUsed")}: {new Date(key.last_used_at).toLocaleDateString()}
                         </span>
                       )}
                       {key.expires_at && (
                         <span className="ml-4">
-                          Expires: {new Date(key.expires_at).toLocaleDateString()}
+                          {tp("expires")}: {new Date(key.expires_at).toLocaleDateString()}
                         </span>
                       )}
                     </div>
@@ -695,7 +700,7 @@ export default function ProjectDetailPage() {
       {activeTab === "notifications" && (
         <Card>
           <CardHeader>
-            <CardTitle>Notifications</CardTitle>
+            <CardTitle>{tp("notifications")}</CardTitle>
           </CardHeader>
           <CardContent>
             <NotificationSettingsForm
@@ -708,7 +713,7 @@ export default function ProjectDetailPage() {
 
             {notificationLogs.length > 0 && (
               <div className="mt-6">
-                <h3 className="font-semibold mb-3">Notification History</h3>
+                <h3 className="font-semibold mb-3">{tp("notificationHistory")}</h3>
                 <div className="space-y-2">
                   {notificationLogs.map((log) => (
                     <div key={log.id} className="border rounded-lg p-3">
@@ -742,6 +747,9 @@ interface NotificationSettingsFormProps {
 }
 
 function NotificationSettingsForm({ projectId, settings, onSuccess }: NotificationSettingsFormProps) {
+  const tp = useTranslations("ProjectDetail");
+  const tc = useTranslations("Common");
+  const tv = useTranslations("Vulnerabilities");
   const [slackWebhookUrl, setSlackWebhookUrl] = useState(settings?.slack_webhook_url || "");
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(settings?.discord_webhook_url || "");
   const [notifyCritical, setNotifyCritical] = useState(settings?.notify_critical ?? true);
@@ -775,10 +783,10 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
         notify_low: notifyLow,
       });
       onSuccess();
-      alert("Notification settings saved!");
+      alert(tp("settingsSaved"));
     } catch (error) {
       console.error("Failed to save notification settings:", error);
-      alert("Failed to save notification settings");
+      alert(tp("settingsFailed"));
     } finally {
       setSubmitting(false);
     }
@@ -788,10 +796,10 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
     setTestingNotification(true);
     try {
       await api.projects.testNotification(projectId);
-      alert("Test notification sent!");
+      alert(tp("testSent"));
     } catch (error) {
       console.error("Failed to send test notification:", error);
-      alert("Failed to send test notification");
+      alert(tp("testFailed"));
     } finally {
       setTestingNotification(false);
     }
@@ -800,10 +808,10 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div>
-        <h3 className="font-semibold mb-3">Webhook URLs</h3>
+        <h3 className="font-semibold mb-3">{tp("webhookUrls")}</h3>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Slack Webhook URL</label>
+            <label className="block text-sm font-medium mb-1">{tp("slackWebhookUrl")}</label>
             <input
               type="url"
               name="slack_webhook"
@@ -814,7 +822,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Discord Webhook URL</label>
+            <label className="block text-sm font-medium mb-1">{tp("discordWebhookUrl")}</label>
             <input
               type="url"
               name="discord_webhook"
@@ -828,9 +836,9 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
       </div>
 
       <div>
-        <h3 className="font-semibold mb-3">Severity Thresholds</h3>
+        <h3 className="font-semibold mb-3">{tp("severityThresholds")}</h3>
         <p className="text-sm text-muted-foreground mb-3">
-          Select which severity levels trigger notifications
+          {tp("severityThresholdsDescription")}
         </p>
         <div className="space-y-2">
           <label className="flex items-center gap-2">
@@ -840,7 +848,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
               onChange={(e) => setNotifyCritical(e.target.checked)}
               className="rounded"
             />
-            <span>Critical</span>
+            <span>{tv("critical")}</span>
           </label>
           <label className="flex items-center gap-2">
             <input
@@ -849,7 +857,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
               onChange={(e) => setNotifyHigh(e.target.checked)}
               className="rounded"
             />
-            <span>High</span>
+            <span>{tv("high")}</span>
           </label>
           <label className="flex items-center gap-2">
             <input
@@ -858,7 +866,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
               onChange={(e) => setNotifyMedium(e.target.checked)}
               className="rounded"
             />
-            <span>Medium</span>
+            <span>{tv("medium")}</span>
           </label>
           <label className="flex items-center gap-2">
             <input
@@ -867,14 +875,14 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
               onChange={(e) => setNotifyLow(e.target.checked)}
               className="rounded"
             />
-            <span>Low</span>
+            <span>{tv("low")}</span>
           </label>
         </div>
       </div>
 
       <div className="flex gap-2">
         <Button type="submit" disabled={submitting}>
-          {submitting ? "Saving..." : "Save"}
+          {submitting ? tc("saving") : tc("save")}
         </Button>
         <Button
           type="button"
@@ -882,7 +890,7 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
           onClick={handleTestNotification}
           disabled={testingNotification || (!slackWebhookUrl && !discordWebhookUrl)}
         >
-          {testingNotification ? "Sending..." : "Send Test"}
+          {testingNotification ? tp("sendingTest") : tp("testNotification")}
         </Button>
       </div>
     </form>
@@ -912,6 +920,8 @@ interface APIKeyFormProps {
 }
 
 function APIKeyForm({ projectId, onSuccess, onCancel }: APIKeyFormProps) {
+  const ta = useTranslations("ApiKeyForm");
+  const tc = useTranslations("Common");
   const [name, setName] = useState("");
   const [expiresInDays, setExpiresInDays] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -935,41 +945,41 @@ function APIKeyForm({ projectId, onSuccess, onCancel }: APIKeyFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="border rounded-lg p-4 mb-4 bg-muted/50">
-      <h3 className="font-bold mb-4">Create API Key</h3>
+      <h3 className="font-bold mb-4">{ta("title")}</h3>
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium mb-1">Name</label>
+          <label className="block text-sm font-medium mb-1">{ta("name")}</label>
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             className="w-full border rounded px-3 py-2"
-            placeholder="e.g., GitHub Actions CI"
+            placeholder={ta("namePlaceholder")}
             required
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">Expires In (Days)</label>
+          <label className="block text-sm font-medium mb-1">{ta("expiresIn")}</label>
           <select
             value={expiresInDays}
             onChange={(e) => setExpiresInDays(Number(e.target.value))}
             className="w-full border rounded px-3 py-2"
           >
-            <option value="0">Never expires</option>
-            <option value="30">30 days</option>
-            <option value="90">90 days</option>
-            <option value="365">1 year</option>
+            <option value="0">{ta("neverExpires")}</option>
+            <option value="30">{ta("days30")}</option>
+            <option value="90">{ta("days90")}</option>
+            <option value="365">{ta("year1")}</option>
           </select>
         </div>
 
         <div className="flex gap-2">
           <Button type="submit" disabled={submitting || !name}>
-            {submitting ? "Creating..." : "Create Key"}
+            {submitting ? ta("creating") : ta("createKey")}
           </Button>
           <Button type="button" variant="outline" onClick={onCancel}>
-            Cancel
+            {tc("cancel")}
           </Button>
         </div>
       </div>
@@ -1013,6 +1023,8 @@ interface VEXFormProps {
 }
 
 function VEXForm({ vulnerability, projectId, onSuccess, onCancel }: VEXFormProps) {
+  const tv = useTranslations("VexForm");
+  const tc = useTranslations("Common");
   const [status, setStatus] = useState<VEXStatus>("under_investigation");
   const [justification, setJustification] = useState<VEXJustification | "">("");
   const [impactStatement, setImpactStatement] = useState("");
@@ -1041,70 +1053,70 @@ function VEXForm({ vulnerability, projectId, onSuccess, onCancel }: VEXFormProps
 
   return (
     <form onSubmit={handleSubmit} className="border rounded-lg p-4 mb-4 bg-muted/50">
-      <h3 className="font-bold mb-4">Create VEX Statement for {vulnerability.cve_id}</h3>
+      <h3 className="font-bold mb-4">{tv("createFor", { cveId: vulnerability.cve_id })}</h3>
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium mb-1">Status</label>
+          <label className="block text-sm font-medium mb-1">{tv("status")}</label>
           <select
             value={status}
             onChange={(e) => setStatus(e.target.value as VEXStatus)}
             className="w-full border rounded px-3 py-2"
           >
-            <option value="under_investigation">Under Investigation</option>
-            <option value="not_affected">Not Affected</option>
-            <option value="affected">Affected</option>
-            <option value="fixed">Fixed</option>
+            <option value="under_investigation">{tv("underInvestigation")}</option>
+            <option value="not_affected">{tv("notAffected")}</option>
+            <option value="affected">{tv("affected")}</option>
+            <option value="fixed">{tv("fixed")}</option>
           </select>
         </div>
 
         {status === "not_affected" && (
           <div>
-            <label className="block text-sm font-medium mb-1">Justification (required)</label>
+            <label className="block text-sm font-medium mb-1">{tv("justificationRequired")}</label>
             <select
               value={justification}
               onChange={(e) => setJustification(e.target.value as VEXJustification)}
               className="w-full border rounded px-3 py-2"
               required
             >
-              <option value="">Select justification...</option>
-              <option value="component_not_present">Component not present</option>
-              <option value="vulnerable_code_not_present">Vulnerable code not present</option>
-              <option value="vulnerable_code_not_in_execute_path">Vulnerable code not in execute path</option>
-              <option value="vulnerable_code_cannot_be_controlled_by_adversary">Vulnerable code cannot be controlled by adversary</option>
-              <option value="inline_mitigations_already_exist">Inline mitigations already exist</option>
+              <option value="">{tv("selectJustification")}</option>
+              <option value="component_not_present">{tv("componentNotPresent")}</option>
+              <option value="vulnerable_code_not_present">{tv("vulnerableCodeNotPresent")}</option>
+              <option value="vulnerable_code_not_in_execute_path">{tv("vulnerableCodeNotInExecutePath")}</option>
+              <option value="vulnerable_code_cannot_be_controlled_by_adversary">{tv("vulnerableCodeCannotBeControlled")}</option>
+              <option value="inline_mitigations_already_exist">{tv("inlineMitigationsExist")}</option>
             </select>
           </div>
         )}
 
         <div>
-          <label className="block text-sm font-medium mb-1">Impact Statement</label>
+          <label className="block text-sm font-medium mb-1">{tv("impactStatement")}</label>
           <textarea
             value={impactStatement}
             onChange={(e) => setImpactStatement(e.target.value)}
             className="w-full border rounded px-3 py-2"
             rows={2}
-            placeholder="Describe the impact of this vulnerability..."
+            placeholder={tv("impactPlaceholder")}
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">Action Statement</label>
+          <label className="block text-sm font-medium mb-1">{tv("actionStatement")}</label>
           <textarea
             value={actionStatement}
             onChange={(e) => setActionStatement(e.target.value)}
             className="w-full border rounded px-3 py-2"
             rows={2}
-            placeholder="Describe actions taken or planned..."
+            placeholder={tv("actionPlaceholder")}
           />
         </div>
 
         <div className="flex gap-2">
           <Button type="submit" disabled={submitting}>
-            {submitting ? "Creating..." : "Create VEX Statement"}
+            {submitting ? tv("creating") : tv("createVexStatement")}
           </Button>
           <Button type="button" variant="outline" onClick={onCancel}>
-            Cancel
+            {tc("cancel")}
           </Button>
         </div>
       </div>
@@ -1134,6 +1146,8 @@ const COMMON_LICENSES = [
 ];
 
 function LicensePolicyForm({ projectId, onSuccess, onCancel }: LicensePolicyFormProps) {
+  const tl = useTranslations("LicenseForm");
+  const tc = useTranslations("Common");
   const [licenseId, setLicenseId] = useState("");
   const [customLicenseId, setCustomLicenseId] = useState("");
   const [policyType, setPolicyType] = useState<LicensePolicyType>("allowed");
@@ -1165,71 +1179,71 @@ function LicensePolicyForm({ projectId, onSuccess, onCancel }: LicensePolicyForm
 
   return (
     <form onSubmit={handleSubmit} className="border rounded-lg p-4 mb-4 bg-muted/50">
-      <h3 className="font-bold mb-4">Add License Policy</h3>
+      <h3 className="font-bold mb-4">{tl("title")}</h3>
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium mb-1">License</label>
+          <label className="block text-sm font-medium mb-1">{tl("license")}</label>
           <select
             value={licenseId}
             onChange={(e) => setLicenseId(e.target.value)}
             className="w-full border rounded px-3 py-2"
             required
           >
-            <option value="">Select a license...</option>
+            <option value="">{tl("selectLicense")}</option>
             {COMMON_LICENSES.map((lic) => (
               <option key={lic.id} value={lic.id}>
                 {lic.name} ({lic.id})
               </option>
             ))}
-            <option value="custom">Other (custom)</option>
+            <option value="custom">{tl("otherCustom")}</option>
           </select>
         </div>
 
         {licenseId === "custom" && (
           <div>
-            <label className="block text-sm font-medium mb-1">Custom License ID (SPDX)</label>
+            <label className="block text-sm font-medium mb-1">{tl("customLicenseId")}</label>
             <input
               type="text"
               value={customLicenseId}
               onChange={(e) => setCustomLicenseId(e.target.value)}
               className="w-full border rounded px-3 py-2"
-              placeholder="e.g., Proprietary, EUPL-1.2"
+              placeholder={tl("customPlaceholder")}
               required
             />
           </div>
         )}
 
         <div>
-          <label className="block text-sm font-medium mb-1">Policy Type</label>
+          <label className="block text-sm font-medium mb-1">{tl("policyType")}</label>
           <select
             value={policyType}
             onChange={(e) => setPolicyType(e.target.value as LicensePolicyType)}
             className="w-full border rounded px-3 py-2"
           >
-            <option value="allowed">Allowed - This license is approved</option>
-            <option value="denied">Denied - This license is prohibited</option>
-            <option value="review">Review - Requires manual review</option>
+            <option value="allowed">{tl("allowed")}</option>
+            <option value="denied">{tl("denied")}</option>
+            <option value="review">{tl("review")}</option>
           </select>
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">Reason (optional)</label>
+          <label className="block text-sm font-medium mb-1">{tl("reason")}</label>
           <textarea
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             className="w-full border rounded px-3 py-2"
             rows={2}
-            placeholder="Explain why this policy was set..."
+            placeholder={tl("reasonPlaceholder")}
           />
         </div>
 
         <div className="flex gap-2">
           <Button type="submit" disabled={submitting || (!licenseId || (licenseId === "custom" && !customLicenseId))}>
-            {submitting ? "Creating..." : "Add Policy"}
+            {submitting ? tl("creating") : tl("addPolicy")}
           </Button>
           <Button type="button" variant="outline" onClick={onCancel}>
-            Cancel
+            {tc("cancel")}
           </Button>
         </div>
       </div>

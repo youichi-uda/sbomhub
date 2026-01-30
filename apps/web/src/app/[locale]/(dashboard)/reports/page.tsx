@@ -1,12 +1,16 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, FileText, Download, Plus, RefreshCw, Clock, CheckCircle2, AlertTriangle, Settings } from 'lucide-react';
 import { api, GeneratedReport, ReportListResponse } from '@/lib/api';
 import { useAuth } from '@clerk/nextjs';
 import Link from 'next/link';
 
 export default function ReportsPage() {
+    const t = useTranslations("Reports");
+    const tc = useTranslations("Common");
+    const locale = useLocale();
     const { getToken } = useAuth();
     const [reports, setReports] = useState<GeneratedReport[]>([]);
     const [total, setTotal] = useState(0);
@@ -32,7 +36,7 @@ export default function ReportsPage() {
             setTotal(response.total);
             setTotalPages(response.total_pages);
         } catch (err) {
-            setError('レポート一覧の読み込みに失敗しました');
+            setError(t("loadFailed"));
             console.error(err);
         } finally {
             setLoading(false);
@@ -52,7 +56,7 @@ export default function ReportsPage() {
             // Refresh list after a short delay
             setTimeout(loadReports, 1000);
         } catch (err) {
-            setError('レポート生成に失敗しました');
+            setError(t("generateFailed"));
             console.error(err);
         } finally {
             setGenerating(false);
@@ -79,13 +83,13 @@ export default function ReportsPage() {
             window.URL.revokeObjectURL(url);
             a.remove();
         } catch (err) {
-            setError('ダウンロードに失敗しました');
+            setError(t("downloadFailed"));
             console.error(err);
         }
     };
 
     const formatDate = (dateStr: string) => {
-        return new Date(dateStr).toLocaleString('ja-JP');
+        return new Date(dateStr).toLocaleString(locale === 'ja' ? 'ja-JP' : 'en-US');
     };
 
     const formatFileSize = (bytes: number) => {
@@ -110,9 +114,9 @@ export default function ReportsPage() {
 
     const getReportTypeLabel = (type: string) => {
         switch (type) {
-            case 'executive': return '経営レポート';
-            case 'technical': return '技術レポート';
-            case 'compliance': return 'コンプライアンスレポート';
+            case 'executive': return t("executive");
+            case 'technical': return t("technical");
+            case 'compliance': return t("compliance");
             default: return type;
         }
     };
@@ -129,32 +133,32 @@ export default function ReportsPage() {
         <div className="py-8 px-4">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold">レポート</h1>
+                    <h1 className="text-2xl font-bold">{t("title")}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
-                        経営・技術・コンプライアンスレポートの生成と管理
+                        {t("description")}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
                     <Link
-                        href="/settings/reports"
+                        href={`/${locale}/settings/reports`}
                         className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors"
                     >
                         <Settings className="w-4 h-4" />
-                        設定
+                        {t("settings")}
                     </Link>
                     <button
                         onClick={loadReports}
                         className="flex items-center gap-2 px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors"
                     >
                         <RefreshCw className="w-4 h-4" />
-                        更新
+                        {t("refresh")}
                     </button>
                     <button
                         onClick={() => setShowGenerateModal(true)}
                         className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
                     >
                         <Plus className="w-4 h-4" />
-                        レポート生成
+                        {t("generate")}
                     </button>
                 </div>
             </div>
@@ -170,29 +174,29 @@ export default function ReportsPage() {
                 {reports.length === 0 ? (
                     <div className="p-12 text-center">
                         <FileText className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-                        <h3 className="text-lg font-medium mb-2">レポートがありません</h3>
+                        <h3 className="text-lg font-medium mb-2">{t("noReports")}</h3>
                         <p className="text-muted-foreground mb-4">
-                            「レポート生成」ボタンから新しいレポートを作成できます。
+                            {t("noReportsDescription")}
                         </p>
                         <button
                             onClick={() => setShowGenerateModal(true)}
                             className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
                         >
                             <Plus className="w-4 h-4" />
-                            レポート生成
+                            {t("generate")}
                         </button>
                     </div>
                 ) : (
                     <table className="w-full">
                         <thead className="bg-muted/50">
                             <tr>
-                                <th className="px-4 py-3 text-left text-sm font-medium">ステータス</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">タイトル</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">タイプ</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">期間</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">サイズ</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">作成日時</th>
-                                <th className="px-4 py-3 text-left text-sm font-medium">操作</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("status")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("reportTitle")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("type")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("period")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("size")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("createdAt")}</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium">{t("actions")}</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border">
@@ -227,12 +231,12 @@ export default function ReportsPage() {
                                                 className="flex items-center gap-1 px-3 py-1 text-sm text-primary hover:bg-primary/10 rounded transition-colors"
                                             >
                                                 <Download className="w-4 h-4" />
-                                                ダウンロード
+                                                {t("download")}
                                             </button>
                                         )}
                                         {report.status === 'failed' && report.error_message && (
                                             <span className="text-sm text-destructive" title={report.error_message}>
-                                                エラー
+                                                {t("error")}
                                             </span>
                                         )}
                                     </td>
@@ -247,7 +251,7 @@ export default function ReportsPage() {
             {totalPages > 1 && (
                 <div className="flex items-center justify-between mt-4">
                     <p className="text-sm text-muted-foreground">
-                        {total} 件中 {((page - 1) * 20) + 1} - {Math.min(page * 20, total)} 件
+                        {t("pageInfo", { total, start: ((page - 1) * 20) + 1, end: Math.min(page * 20, total) })}
                     </p>
                     <div className="flex items-center gap-2">
                         <button
@@ -255,7 +259,7 @@ export default function ReportsPage() {
                             disabled={page === 1}
                             className="px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50"
                         >
-                            前へ
+                            {t("previous")}
                         </button>
                         <span className="text-sm">{page} / {totalPages}</span>
                         <button
@@ -263,7 +267,7 @@ export default function ReportsPage() {
                             disabled={page === totalPages}
                             className="px-3 py-2 border border-border rounded-lg hover:bg-muted disabled:opacity-50"
                         >
-                            次へ
+                            {t("next")}
                         </button>
                     </div>
                 </div>
@@ -273,24 +277,24 @@ export default function ReportsPage() {
             {showGenerateModal && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div className="bg-card border border-border rounded-lg p-6 w-full max-w-md mx-4">
-                        <h2 className="text-lg font-semibold mb-4">レポート生成</h2>
+                        <h2 className="text-lg font-semibold mb-4">{t("generate")}</h2>
 
                         <div className="space-y-4">
                             <div>
-                                <label className="block text-sm font-medium mb-2">レポートタイプ</label>
+                                <label className="block text-sm font-medium mb-2">{t("reportType")}</label>
                                 <select
                                     value={generateInput.report_type}
                                     onChange={(e) => setGenerateInput(prev => ({ ...prev, report_type: e.target.value }))}
                                     className="w-full bg-background border border-border rounded-lg px-3 py-2"
                                 >
-                                    <option value="executive">経営レポート</option>
-                                    <option value="technical">技術レポート</option>
-                                    <option value="compliance">コンプライアンスレポート</option>
+                                    <option value="executive">{t("executive")}</option>
+                                    <option value="technical">{t("technical")}</option>
+                                    <option value="compliance">{t("compliance")}</option>
                                 </select>
                             </div>
 
                             <div>
-                                <label className="block text-sm font-medium mb-2">フォーマット</label>
+                                <label className="block text-sm font-medium mb-2">{t("format")}</label>
                                 <select
                                     value={generateInput.format}
                                     onChange={(e) => setGenerateInput(prev => ({ ...prev, format: e.target.value }))}
@@ -307,7 +311,7 @@ export default function ReportsPage() {
                                 onClick={() => setShowGenerateModal(false)}
                                 className="px-4 py-2 border border-border rounded-lg hover:bg-muted transition-colors"
                             >
-                                キャンセル
+                                {tc("cancel")}
                             </button>
                             <button
                                 onClick={handleGenerate}
@@ -317,12 +321,12 @@ export default function ReportsPage() {
                                 {generating ? (
                                     <>
                                         <Loader2 className="w-4 h-4 animate-spin" />
-                                        生成中...
+                                        {t("generating")}...
                                     </>
                                 ) : (
                                     <>
                                         <Plus className="w-4 h-4" />
-                                        生成
+                                        {t("generate")}
                                     </>
                                 )}
                             </button>

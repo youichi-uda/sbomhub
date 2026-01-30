@@ -287,6 +287,7 @@
     "projectRiskScore": "Project Risk Scores",
     "noProjects": "No projects",
     "vulnerabilityTrend": "Vulnerability Trend (Last 30 Days)",
+    "noTrendData": "No trend data available",
     "daysAgo": "days ago",
     "today": "Today"
   },
@@ -311,7 +312,10 @@
     "cases": "cases",
     "sloTitle": "SLO Achievement Rate",
     "sloDescription": "Shows the percentage of vulnerabilities resolved within SLO target time. Critical: 24 hours, High: 7 days, Medium: 30 days, Low: 90 days",
-    "vulnerabilityTrend": "Vulnerability Trend"
+    "vulnerabilityTrend": "Vulnerability Trend",
+    "complianceScoreTrend": "Compliance Score Trend",
+    "noData": "No data available",
+    "noDataDescription": "Trend analysis will be displayed as vulnerability detection and resolution data accumulates."
   },
   "Reports": {
     "title": "Reports",
@@ -335,7 +339,16 @@
     "failed": "Failed",
     "emailed": "Emailed",
     "loadFailed": "Failed to load reports",
-    "downloadFailed": "Download failed"
+    "downloadFailed": "Download failed",
+    "generateFailed": "Failed to generate report",
+    "noReports": "No reports",
+    "noReportsDescription": "Create a new report using the \"Generate Report\" button.",
+    "reportType": "Report Type",
+    "format": "Format",
+    "pageInfo": "{start} - {end} of {total} items",
+    "previous": "Previous",
+    "next": "Next",
+    "error": "Error"
   },
   "Search": {
     "title": "Cross Search",
@@ -352,7 +365,20 @@
     "searching": "Searching...",
     "noResults": "No results found",
     "affectedProjects": "Affected Projects",
-    "matchingComponents": "Matching Components"
+    "unaffectedProjects": "Unaffected Projects",
+    "matchingComponents": "Matching Components",
+    "cveNotFound": "CVE not found",
+    "searchFailed": "Search failed",
+    "noAffectedProjects": "No affected projects",
+    "upgradeRecommended": "Upgrade to {version} recommended",
+    "searchResults": "Search results for \"{name}\"{constraint}: {count} matches",
+    "noComponentsFound": "No matching components found",
+    "project": "Project",
+    "component": "Component",
+    "version": "Version",
+    "license": "License",
+    "vulnerabilities": "Vulnerabilities",
+    "none": "None"
   },
   "Audit": {
     "title": "Audit Logs",
@@ -367,7 +393,16 @@
     "previous": "Previous",
     "next": "Next",
     "pageInfo": "{start} - {end} / {total} entries",
-    "pageNumber": "{current} / {total}"
+    "pageNumber": "{current} / {total}",
+    "loadFailed": "Failed to load audit logs",
+    "exportFailed": "Export failed",
+    "filterConditions": "Filter Conditions",
+    "clear": "Clear",
+    "all": "All",
+    "resourceType": "Resource Type",
+    "startDate": "Start Date",
+    "endDate": "End Date",
+    "noLogs": "No audit logs"
   },
   "Billing": {
     "title": "Plans & Billing",
@@ -395,7 +430,28 @@
     "sla": "SLA 99.9%",
     "auditLog": "Audit logs",
     "dedicatedSupport": "Dedicated support",
-    "priorityResponse": "Priority response"
+    "priorityResponse": "Priority response",
+    "loadFailed": "Failed to load data",
+    "checkoutFailed": "Failed to create checkout",
+    "portalFailed": "Failed to get portal URL",
+    "selectPlanFailed": "Failed to select plan",
+    "syncFailed": "Failed to sync subscription",
+    "syncSuccess": "Subscription synced: {plan}",
+    "manualSyncRequired": "Please enter the subscription ID manually",
+    "noSubscriptionFound": "No subscription found",
+    "manualSyncTitle": "Manually sync subscription",
+    "manualSyncDescription": "Check the subscription ID from Lemon Squeezy dashboard and enter it below.",
+    "openLemonSqueezy": "Open Lemon Squeezy Subscriptions",
+    "subscriptionIdPlaceholder": "Subscription ID (e.g., 123456)",
+    "sync": "Sync",
+    "selfHostedMode": "Self-Hosted Mode",
+    "selfHostedDescription": "All features are unlimited in self-hosted mode.",
+    "enterpriseUnlimited": "Enterprise (Unlimited)",
+    "selectPlanPrompt": "Please select a plan",
+    "selectPlanPromptDescription": "You need to select a plan to use SBOMHub. You can also start with the free plan.",
+    "startWithFree": "Start with Free",
+    "downgrade": "Downgrade",
+    "billingDisabled": "Billing is currently disabled."
   },
   "Common": {
     "loading": "Loading...",

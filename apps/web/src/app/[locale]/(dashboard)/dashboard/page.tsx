@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
+import { useLocale } from "next-intl";
 import Link from "next/link";
 import { api, DashboardSummary, TopRisk, ProjectScore, TrendPoint } from "@/lib/api";
 import {
@@ -54,11 +56,12 @@ function VulnerabilityCard({ label, count, color }: { label: string; count: numb
   );
 }
 
-function TopRisksTable({ risks }: { risks: TopRisk[] }) {
+function TopRisksTable({ risks, noDataMessage, locale }: { risks: TopRisk[]; noDataMessage: string; locale: string }) {
+  const t = useTranslations("Navigation");
   if (risks.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        脆弱性は検出されていません
+        {noDataMessage}
       </div>
     );
   }
@@ -71,8 +74,8 @@ function TopRisksTable({ risks }: { risks: TopRisk[] }) {
           <TableHead>CVE ID</TableHead>
           <TableHead>EPSS</TableHead>
           <TableHead>CVSS</TableHead>
-          <TableHead>プロジェクト</TableHead>
-          <TableHead>コンポーネント</TableHead>
+          <TableHead>{t("projects")}</TableHead>
+          <TableHead>{t("components")}</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -90,7 +93,7 @@ function TopRisksTable({ risks }: { risks: TopRisk[] }) {
               <span className="ml-2">{risk.cvss_score.toFixed(1)}</span>
             </TableCell>
             <TableCell>
-              <Link href={`/ja/projects/${risk.project_id}`} className="text-blue-500 hover:underline">
+              <Link href={`/${locale}/projects/${risk.project_id}`} className="text-blue-500 hover:underline">
                 {risk.project_name}
               </Link>
             </TableCell>
@@ -104,11 +107,12 @@ function TopRisksTable({ risks }: { risks: TopRisk[] }) {
   );
 }
 
-function ProjectScoresList({ scores }: { scores: ProjectScore[] }) {
+function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectScore[]; noDataMessage: string; locale: string }) {
+  const tv = useTranslations("Vulnerabilities");
   if (scores.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        プロジェクトがありません
+        {noDataMessage}
       </div>
     );
   }
@@ -118,7 +122,7 @@ function ProjectScoresList({ scores }: { scores: ProjectScore[] }) {
       {scores.map((score) => (
         <div key={score.project_id} className="space-y-2">
           <div className="flex justify-between items-center">
-            <Link href={`/ja/projects/${score.project_id}`} className="font-medium hover:underline">
+            <Link href={`/${locale}/projects/${score.project_id}`} className="font-medium hover:underline">
               {score.project_name}
             </Link>
             <div className="flex items-center gap-2">
@@ -128,10 +132,10 @@ function ProjectScoresList({ scores }: { scores: ProjectScore[] }) {
           </div>
           <Progress value={score.risk_score} className="h-2" />
           <div className="flex gap-4 text-xs text-muted-foreground">
-            <span className="text-red-500">Critical: {score.critical}</span>
-            <span className="text-orange-500">High: {score.high}</span>
-            <span className="text-yellow-600">Medium: {score.medium}</span>
-            <span className="text-green-500">Low: {score.low}</span>
+            <span className="text-red-500">{tv("critical")}: {score.critical}</span>
+            <span className="text-orange-500">{tv("high")}: {score.high}</span>
+            <span className="text-yellow-600">{tv("medium")}: {score.medium}</span>
+            <span className="text-green-500">{tv("low")}: {score.low}</span>
           </div>
         </div>
       ))}
@@ -139,11 +143,11 @@ function ProjectScoresList({ scores }: { scores: ProjectScore[] }) {
   );
 }
 
-function TrendChart({ trend }: { trend: TrendPoint[] }) {
+function TrendChart({ trend, noDataMessage }: { trend: TrendPoint[]; noDataMessage?: string }) {
   if (trend.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        トレンドデータがありません
+        {noDataMessage || "No trend data"}
       </div>
     );
   }
@@ -175,6 +179,9 @@ function TrendChart({ trend }: { trend: TrendPoint[] }) {
 }
 
 export default function DashboardPage() {
+  const t = useTranslations("Dashboard");
+  const tc = useTranslations("Common");
+  const locale = useLocale();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -189,7 +196,7 @@ export default function DashboardPage() {
       const data = await api.dashboard.getSummary();
       setSummary(data);
     } catch (err) {
-      setError("ダッシュボードの読み込みに失敗しました");
+      setError(tc("error"));
       console.error(err);
     } finally {
       setLoading(false);
@@ -218,7 +225,7 @@ export default function DashboardPage() {
           <CardContent className="pt-6">
             <div className="flex items-center gap-2 text-red-500">
               <AlertCircle className="h-5 w-5" />
-              <span>{error || "データの読み込みに失敗しました"}</span>
+              <span>{error || tc("error")}</span>
             </div>
           </CardContent>
         </Card>
@@ -229,15 +236,15 @@ export default function DashboardPage() {
   return (
     <div className="container mx-auto py-8 space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold">ダッシュボード</h1>
+        <h1 className="text-3xl font-bold">{t("title")}</h1>
         <div className="flex gap-4 text-sm text-muted-foreground">
           <div className="flex items-center gap-1">
             <FolderOpen className="h-4 w-4" />
-            <span>{summary.total_projects} プロジェクト</span>
+            <span>{summary.total_projects} {t("projects")}</span>
           </div>
           <div className="flex items-center gap-1">
             <Package className="h-4 w-4" />
-            <span>{summary.total_components} コンポーネント</span>
+            <span>{summary.total_components} {t("components")}</span>
           </div>
         </div>
       </div>
@@ -272,14 +279,14 @@ export default function DashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <AlertCircle className="h-5 w-5 text-red-500" />
-              要対応 TOP10 - EPSS順
+              {t("topEpss")}
             </CardTitle>
             <CardDescription>
-              悪用される可能性が高い脆弱性
+              {t("topEpssDescription")}
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <TopRisksTable risks={summary.top_risks} />
+            <TopRisksTable risks={summary.top_risks} noDataMessage={t("noVulnerabilities")} locale={locale} />
           </CardContent>
         </Card>
 
@@ -288,11 +295,11 @@ export default function DashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Shield className="h-5 w-5" />
-              プロジェクト別リスクスコア
+              {t("projectRiskScore")}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <ProjectScoresList scores={summary.project_scores} />
+            <ProjectScoresList scores={summary.project_scores} noDataMessage={t("noProjects")} locale={locale} />
           </CardContent>
         </Card>
 
@@ -301,14 +308,14 @@ export default function DashboardPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <TrendingUp className="h-5 w-5" />
-              脆弱性トレンド（過去30日）
+              {t("vulnerabilityTrend")}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <TrendChart trend={summary.trend} />
+            <TrendChart trend={summary.trend} noDataMessage={t("noTrendData")} />
             <div className="flex justify-between text-xs text-muted-foreground mt-2">
-              <span>30日前</span>
-              <span>今日</span>
+              <span>30 {t("daysAgo")}</span>
+              <span>{t("today")}</span>
             </div>
           </CardContent>
         </Card>

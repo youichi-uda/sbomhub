@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,38 +10,45 @@ import { Input } from "@/components/ui/input";
 import { api, SubscriptionResponse, UsageResponse } from "@/lib/api";
 import { Check, ExternalLink, Loader2, CreditCard, Users, FolderOpen, RefreshCw } from "lucide-react";
 
-const PLANS = [
-  {
-    id: "free",
-    name: "Free",
-    price: "¥0",
-    period: "",
-    features: ["3 プロジェクト", "1 ユーザー", "基本機能"],
-  },
-  {
-    id: "starter",
-    name: "Cloud Starter",
-    price: "¥2,500",
-    period: "月",
-    features: ["10 プロジェクト", "3 ユーザー", "メールサポート", "自動バックアップ"],
-  },
-  {
-    id: "pro",
-    name: "Cloud Pro",
-    price: "¥8,000",
-    period: "月",
-    features: ["無制限プロジェクト", "10 ユーザー", "優先サポート", "監査ログ"],
-  },
-  {
-    id: "team",
-    name: "Cloud Team",
-    price: "¥20,000",
-    period: "月",
-    features: ["無制限プロジェクト", "30 ユーザー", "専任サポート", "優先対応"],
-  },
-];
+function usePlans() {
+  const t = useTranslations("Billing");
+  return [
+    {
+      id: "free",
+      name: t("free"),
+      price: "¥0",
+      period: "",
+      features: [t("projectsLimit", { count: 3 }), t("usersLimit", { count: 1 }), t("basicFeatures")],
+    },
+    {
+      id: "starter",
+      name: t("cloudStarter"),
+      price: "¥2,500",
+      period: t("perMonth"),
+      features: [t("projectsLimit", { count: 10 }), t("usersLimit", { count: 3 }), t("emailSupport"), t("autoBackup")],
+    },
+    {
+      id: "pro",
+      name: t("cloudPro"),
+      price: "¥8,000",
+      period: t("perMonth"),
+      features: [t("unlimited") + " " + t("projects"), t("usersLimit", { count: 10 }), t("prioritySupport"), t("auditLog")],
+    },
+    {
+      id: "team",
+      name: t("cloudTeam"),
+      price: "¥20,000",
+      period: t("perMonth"),
+      features: [t("unlimited") + " " + t("projects"), t("usersLimit", { count: 30 }), t("dedicatedSupport"), t("priorityResponse")],
+    },
+  ];
+}
 
 export default function BillingPage() {
+  const t = useTranslations("Billing");
+  const tc = useTranslations("Common");
+  const locale = useLocale();
+  const PLANS = usePlans();
   const [subscription, setSubscription] = useState<SubscriptionResponse | null>(null);
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -66,7 +74,7 @@ export default function BillingPage() {
       setSubscription(subData);
       setUsage(usageData);
     } catch (err) {
-      setError("データの読み込みに失敗しました");
+      setError(t("loadFailed"));
       console.error(err);
     } finally {
       setLoading(false);
@@ -79,7 +87,7 @@ export default function BillingPage() {
       const { url } = await api.billing.createCheckout(plan);
       window.location.href = url;
     } catch (err) {
-      setError("チェックアウトの作成に失敗しました");
+      setError(t("checkoutFailed"));
       console.error(err);
     } finally {
       setCheckoutLoading(null);
@@ -91,7 +99,7 @@ export default function BillingPage() {
       const { url } = await api.billing.getPortalUrl();
       window.open(url, "_blank");
     } catch (err) {
-      setError("ポータルURLの取得に失敗しました");
+      setError(t("portalFailed"));
       console.error(err);
     }
   };
@@ -103,7 +111,7 @@ export default function BillingPage() {
       // Reload data to reflect the change
       await loadData();
     } catch (err) {
-      setError("プランの選択に失敗しました");
+      setError(t("selectPlanFailed"));
       console.error(err);
     } finally {
       setFreeLoading(false);
@@ -117,18 +125,18 @@ export default function BillingPage() {
       setError(null);
       const result = await api.billing.syncSubscription(lsSubId);
       if (result.status === "synced") {
-        setSyncMessage(`サブスクリプションを同期しました: ${result.plan}`);
+        setSyncMessage(t("syncSuccess", { plan: result.plan || "" }));
         setShowSyncInput(false);
         setSubscriptionIdInput("");
         await loadData();
       } else if (result.status === "manual_required") {
         setShowSyncInput(true);
-        setSyncMessage(result.message || "手動でサブスクリプションIDを入力してください");
+        setSyncMessage(result.message || t("manualSyncRequired"));
       } else if (result.status === "no_subscription") {
-        setSyncMessage(result.message || "サブスクリプションが見つかりませんでした");
+        setSyncMessage(result.message || t("noSubscriptionFound"));
       }
     } catch (err) {
-      setError("サブスクリプションの同期に失敗しました");
+      setError(t("syncFailed"));
       console.error(err);
     } finally {
       setSyncLoading(false);
@@ -146,17 +154,17 @@ export default function BillingPage() {
   if (subscription?.is_self_hosted) {
     return (
       <div className="p-6 max-w-4xl mx-auto">
-        <h1 className="text-2xl font-bold mb-6">プラン・お支払い</h1>
+        <h1 className="text-2xl font-bold mb-6">{t("title")}</h1>
         <Card>
           <CardHeader>
-            <CardTitle>Self-Hosted モード</CardTitle>
+            <CardTitle>{t("selfHostedMode")}</CardTitle>
             <CardDescription>
-              セルフホスト版では全機能が無制限でご利用いただけます。
+              {t("selfHostedDescription")}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <Badge variant="secondary" className="text-lg px-4 py-2">
-              Enterprise (無制限)
+              {t("enterpriseUnlimited")}
             </Badge>
           </CardContent>
         </Card>
@@ -170,7 +178,7 @@ export default function BillingPage() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">プラン・お支払い</h1>
+      <h1 className="text-2xl font-bold mb-6">{t("title")}</h1>
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-6">
@@ -187,9 +195,9 @@ export default function BillingPage() {
       {showSyncInput && (
         <Card className="mb-6 border-amber-200 bg-amber-50">
           <CardHeader className="pb-2">
-            <CardTitle className="text-lg">サブスクリプションを手動で同期</CardTitle>
+            <CardTitle className="text-lg">{t("manualSyncTitle")}</CardTitle>
             <CardDescription>
-              Lemon Squeezyダッシュボードの Subscriptions からサブスクリプションIDを確認して入力してください。
+              {t("manualSyncDescription")}
               <br />
               <a
                 href="https://app.lemonsqueezy.com/subscriptions"
@@ -197,14 +205,14 @@ export default function BillingPage() {
                 rel="noopener noreferrer"
                 className="text-blue-600 hover:underline"
               >
-                Lemon Squeezy Subscriptions を開く →
+                {t("openLemonSqueezy")} →
               </a>
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="flex gap-2">
               <Input
-                placeholder="サブスクリプションID (例: 123456)"
+                placeholder={t("subscriptionIdPlaceholder")}
                 value={subscriptionIdInput}
                 onChange={(e) => setSubscriptionIdInput(e.target.value)}
                 className="max-w-xs"
@@ -213,10 +221,10 @@ export default function BillingPage() {
                 onClick={() => handleSyncSubscription(subscriptionIdInput)}
                 disabled={syncLoading || !subscriptionIdInput}
               >
-                {syncLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "同期"}
+                {syncLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : t("sync")}
               </Button>
               <Button variant="ghost" onClick={() => setShowSyncInput(false)}>
-                キャンセル
+                {tc("cancel")}
               </Button>
             </div>
           </CardContent>
@@ -227,9 +235,9 @@ export default function BillingPage() {
       {!hasSelectedPlan && subscription?.billing_enabled && (
         <Card className="mb-8 border-primary border-2 bg-primary/5">
           <CardHeader>
-            <CardTitle className="text-xl">プランを選択してください</CardTitle>
+            <CardTitle className="text-xl">{t("selectPlanPrompt")}</CardTitle>
             <CardDescription>
-              SBOMHub を利用するにはプランを選択する必要があります。無料プランから始めることもできます。
+              {t("selectPlanPromptDescription")}
             </CardDescription>
           </CardHeader>
         </Card>
@@ -241,7 +249,7 @@ export default function BillingPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <CreditCard className="h-5 w-5" />
-              現在のプラン
+              {t("currentPlan")}
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -252,10 +260,10 @@ export default function BillingPage() {
                 </p>
                 {subscription?.has_subscription && subscription.subscription && (
                   <p className="text-sm text-muted-foreground mt-1">
-                    次回更新: {subscription.subscription.renews_at
-                      ? new Date(subscription.subscription.renews_at).toLocaleDateString("ja-JP")
+                    {t("nextRenewal")}: {subscription.subscription.renews_at
+                      ? new Date(subscription.subscription.renews_at).toLocaleDateString(locale === 'ja' ? "ja-JP" : "en-US")
                       : subscription.subscription.current_period_end
-                        ? new Date(subscription.subscription.current_period_end).toLocaleDateString("ja-JP")
+                        ? new Date(subscription.subscription.current_period_end).toLocaleDateString(locale === 'ja' ? "ja-JP" : "en-US")
                         : "-"}
                   </p>
                 )}
@@ -264,7 +272,7 @@ export default function BillingPage() {
                 {subscription?.has_subscription && (
                   <Button variant="outline" onClick={handleManageSubscription}>
                     <ExternalLink className="h-4 w-4 mr-2" />
-                    サブスクリプション管理
+                    {t("manageSubscription")}
                   </Button>
                 )}
                 <Button
@@ -272,7 +280,7 @@ export default function BillingPage() {
                   size="icon"
                   onClick={() => handleSyncSubscription()}
                   disabled={syncLoading}
-                  title="Lemon Squeezyからサブスクリプションを同期"
+                  title={t("sync")}
                 >
                   <RefreshCw className={`h-4 w-4 ${syncLoading ? "animate-spin" : ""}`} />
                 </Button>
@@ -284,7 +292,7 @@ export default function BillingPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              使用状況
+              {t("usage")}
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -294,7 +302,7 @@ export default function BillingPage() {
                   <div className="flex items-center justify-between text-sm mb-1">
                     <span className="flex items-center gap-2">
                       <FolderOpen className="h-4 w-4" />
-                      プロジェクト
+                      {t("projects")}
                     </span>
                     <span>
                       {usage.projects.current} / {usage.projects.limit === -1 ? "∞" : usage.projects.limit}
@@ -311,7 +319,7 @@ export default function BillingPage() {
                   <div className="flex items-center justify-between text-sm mb-1">
                     <span className="flex items-center gap-2">
                       <Users className="h-4 w-4" />
-                      ユーザー
+                      {t("users")}
                     </span>
                     <span>
                       {usage.users.current} / {usage.users.limit === -1 ? "∞" : usage.users.limit}
@@ -333,7 +341,7 @@ export default function BillingPage() {
       {/* Plan Selection */}
       {subscription?.billing_enabled && (
         <>
-          <h2 className="text-xl font-semibold mb-4">プランを選択</h2>
+          <h2 className="text-xl font-semibold mb-4">{t("selectPlan")}</h2>
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
             {PLANS.map((plan, index) => {
               const isCurrent = plan.id === currentPlan;
@@ -347,7 +355,7 @@ export default function BillingPage() {
                 >
                   {isCurrent && (
                     <Badge className="absolute -top-3 left-1/2 -translate-x-1/2">
-                      現在のプラン
+                      {t("currentPlanBadge")}
                     </Badge>
                   )}
                   <CardHeader className="pb-2">
@@ -378,9 +386,9 @@ export default function BillingPage() {
                         {freeLoading ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : isCurrent ? (
-                          "現在のプラン"
+                          t("currentPlanBadge")
                         ) : (
-                          "Freeで始める"
+                          t("startWithFree")
                         )}
                       </Button>
                     ) : (
@@ -393,11 +401,11 @@ export default function BillingPage() {
                         {checkoutLoading === plan.id ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : isCurrent ? (
-                          "現在のプラン"
+                          t("currentPlanBadge")
                         ) : isUpgrade ? (
-                          "アップグレード"
+                          t("upgrade")
                         ) : (
-                          "ダウングレード"
+                          t("downgrade")
                         )}
                       </Button>
                     )}
@@ -412,7 +420,7 @@ export default function BillingPage() {
       {!subscription?.billing_enabled && (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
-            課金機能は現在無効になっています。
+            {t("billingDisabled")}
           </CardContent>
         </Card>
       )}

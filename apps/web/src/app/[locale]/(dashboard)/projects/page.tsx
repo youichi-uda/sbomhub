@@ -12,6 +12,7 @@ import Link from "next/link";
 
 export default function ProjectsPage() {
   const t = useTranslations("Projects");
+  const tc = useTranslations("Common");
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -47,7 +48,7 @@ export default function ProjectsPage() {
   }
 
   async function handleDelete(id: string) {
-    if (!confirm("Delete this project?")) return;
+    if (!confirm(t("deleteConfirm"))) return;
     try {
       await api.projects.delete(id);
       setProjects(projects.filter((p) => p.id !== id));
@@ -59,7 +60,7 @@ export default function ProjectsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="text-muted-foreground">Loading...</div>
+        <div className="text-muted-foreground">{tc("loading")}</div>
       </div>
     );
   }
@@ -78,7 +79,7 @@ export default function ProjectsPage() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <FolderOpen className="h-12 w-12 text-muted-foreground mb-4" />
-            <p className="text-muted-foreground mb-4">No projects yet</p>
+            <p className="text-muted-foreground mb-4">{t("noProjects")}</p>
             <Button onClick={() => setDialogOpen(true)}>
               <Plus className="h-4 w-4 mr-2" />
               {t("create")}
@@ -98,7 +99,7 @@ export default function ProjectsPage() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground mb-4 line-clamp-2">
-                  {project.description || "No description"}
+                  {project.description || t("noDescription")}
                 </p>
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-muted-foreground">
@@ -136,7 +137,7 @@ export default function ProjectsPage() {
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="My Project"
+                placeholder={t("namePlaceholder")}
               />
             </div>
             <div>
@@ -144,16 +145,16 @@ export default function ProjectsPage() {
               <Input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Project description"
+                placeholder={t("descriptionPlaceholder")}
               />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
-              Cancel
+              {tc("cancel")}
             </Button>
             <Button onClick={handleCreate} disabled={!name}>
-              Create
+              {tc("create")}
             </Button>
           </DialogFooter>
         </DialogContent>
