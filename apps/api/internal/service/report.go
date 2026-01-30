@@ -18,7 +18,9 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/consts/align"
 	"github.com/johnfercher/maroto/v2/pkg/consts/fontstyle"
 	"github.com/johnfercher/maroto/v2/pkg/core"
+	"github.com/johnfercher/maroto/v2/pkg/core/entity"
 	"github.com/johnfercher/maroto/v2/pkg/props"
+	"github.com/sbomhub/sbomhub/internal/assets"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/xuri/excelize/v2"
@@ -443,11 +445,34 @@ func (s *ReportService) gatherVisualizationData(ctx context.Context, tenantID uu
 
 // generatePDF generates a PDF report using maroto
 func (s *ReportService) generatePDF(data *model.ExecutiveReportData) ([]byte, error) {
+	// Load Japanese fonts from embedded assets
+	regularFontBytes, err := assets.Fonts.ReadFile("fonts/NotoSansJP-Regular.ttf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load regular font: %w", err)
+	}
+	boldFontBytes, err := assets.Fonts.ReadFile("fonts/NotoSansJP-Bold.ttf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load bold font: %w", err)
+	}
+
 	cfg := config.NewBuilder().
 		WithPageNumber().
 		WithLeftMargin(15).
 		WithTopMargin(15).
 		WithRightMargin(15).
+		WithCustomFonts([]*entity.CustomFont{
+			{
+				Family: "NotoSansJP",
+				Style:  fontstyle.Normal,
+				Bytes:  regularFontBytes,
+			},
+			{
+				Family: "NotoSansJP",
+				Style:  fontstyle.Bold,
+				Bytes:  boldFontBytes,
+			},
+		}).
+		WithDefaultFont(&props.Font{Family: "NotoSansJP"}).
 		Build()
 
 	m := maroto.New(cfg)
@@ -565,52 +590,57 @@ func (s *ReportService) getVisualizationOptionLabel(options []model.Visualizatio
 
 // PDF helper functions
 func (s *ReportService) buildPDFTitle(title string) core.Row {
-	return row.New(12).Add(
+	return row.New(16).Add(
 		col.New(12).Add(
 			text.New(title, props.Text{
-				Size:  18,
-				Style: fontstyle.Bold,
-				Align: align.Center,
+				Size:   20,
+				Style:  fontstyle.Bold,
+				Align:  align.Center,
+				Family: "NotoSansJP",
 			}),
 		),
 	)
 }
 
 func (s *ReportService) buildPDFSubtitle(subtitle string) core.Row {
-	return row.New(6).Add(
+	return row.New(8).Add(
 		col.New(12).Add(
 			text.New(subtitle, props.Text{
-				Size:  10,
-				Align: align.Center,
-				Color: &props.Color{Red: 100, Green: 100, Blue: 100},
+				Size:   10,
+				Align:  align.Center,
+				Color:  &props.Color{Red: 100, Green: 100, Blue: 100},
+				Family: "NotoSansJP",
 			}),
 		),
 	)
 }
 
 func (s *ReportService) buildPDFSectionHeader(header string) core.Row {
-	return row.New(10).Add(
+	return row.New(14).Add(
 		col.New(12).Add(
 			text.New(header, props.Text{
-				Size:  14,
-				Style: fontstyle.Bold,
-				Top:   5,
+				Size:   14,
+				Style:  fontstyle.Bold,
+				Top:    6,
+				Family: "NotoSansJP",
 			}),
 		),
 	)
 }
 
 func (s *ReportService) buildPDFKeyValue(key, value string) core.Row {
-	return row.New(6).Add(
+	return row.New(8).Add(
 		col.New(6).Add(
 			text.New(key, props.Text{
-				Size: 10,
+				Size:   10,
+				Family: "NotoSansJP",
 			}),
 		),
 		col.New(6).Add(
 			text.New(value, props.Text{
-				Size:  10,
-				Align: align.Right,
+				Size:   10,
+				Align:  align.Right,
+				Family: "NotoSansJP",
 			}),
 		),
 	)
