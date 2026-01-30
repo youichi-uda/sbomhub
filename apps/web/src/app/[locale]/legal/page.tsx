@@ -60,6 +60,7 @@ export default async function LegalPage({ params }: Props) {
                     <ul className="list-disc pl-4 space-y-1">
                       <li>Cloud Starter: 月額2,500円（税込）</li>
                       <li>Cloud Pro: 月額8,000円（税込）</li>
+                      <li>Cloud Team: 月額20,000円（税込）</li>
                     </ul>
                   </td>
                 </tr>
@@ -128,6 +129,7 @@ export default async function LegalPage({ params }: Props) {
                     <ul className="list-disc pl-4 space-y-1">
                       <li>Cloud Starter: $17/month (tax included)</li>
                       <li>Cloud Pro: $54/month (tax included)</li>
+                      <li>Cloud Team: $134/month (tax included)</li>
                     </ul>
                   </td>
                 </tr>
