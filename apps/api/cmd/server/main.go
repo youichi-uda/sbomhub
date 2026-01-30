@@ -103,7 +103,7 @@ func main() {
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	searchService := service.NewSearchService(searchRepo)
 	epssService := service.NewEPSSService(vulnRepo)
-	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg.BaseURL)
+	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
 	publicLinkService := service.NewPublicLinkService(publicLinkRepo, projectRepo, sbomRepo, componentRepo)
 	auditService := service.NewAuditService(auditRepo, userRepo)

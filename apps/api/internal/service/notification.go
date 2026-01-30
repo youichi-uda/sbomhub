@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/smtp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/config"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
@@ -18,17 +21,17 @@ type NotificationService struct {
 	notifRepo   *repository.NotificationRepository
 	projectRepo *repository.ProjectRepository
 	client      *http.Client
-	baseURL     string
+	cfg         *config.Config
 }
 
-func NewNotificationService(notifRepo *repository.NotificationRepository, projectRepo *repository.ProjectRepository, baseURL string) *NotificationService {
+func NewNotificationService(notifRepo *repository.NotificationRepository, projectRepo *repository.ProjectRepository, cfg *config.Config) *NotificationService {
 	return &NotificationService{
 		notifRepo:   notifRepo,
 		projectRepo: projectRepo,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		baseURL: baseURL,
+		cfg: cfg,
 	}
 }
 
@@ -59,6 +62,7 @@ func (s *NotificationService) UpdateSettings(ctx context.Context, projectID uuid
 		ProjectID:         projectID,
 		SlackWebhookURL:   input.SlackWebhookURL,
 		DiscordWebhookURL: input.DiscordWebhookURL,
+		EmailAddresses:    input.EmailAddresses,
 		NotifyCritical:    input.NotifyCritical,
 		NotifyHigh:        input.NotifyHigh,
 		NotifyMedium:      input.NotifyMedium,
@@ -77,6 +81,7 @@ func (s *NotificationService) UpdateSettings(ctx context.Context, projectID uuid
 type UpdateNotificationSettingsInput struct {
 	SlackWebhookURL   string `json:"slack_webhook_url"`
 	DiscordWebhookURL string `json:"discord_webhook_url"`
+	EmailAddresses    string `json:"email_addresses"`
 	NotifyCritical    bool   `json:"notify_critical"`
 	NotifyHigh        bool   `json:"notify_high"`
 	NotifyMedium      bool   `json:"notify_medium"`
@@ -107,7 +112,7 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 		ProjectName:      project.Name,
 		ComponentName:    "test-component",
 		ComponentVersion: "1.0.0",
-		DetailsURL:       fmt.Sprintf("%s/projects/%s/vulnerabilities", s.baseURL, projectID),
+		DetailsURL:       fmt.Sprintf("%s/projects/%s/vulnerabilities", s.cfg.BaseURL, projectID),
 	}
 
 	if settings.SlackWebhookURL != "" {
@@ -119,6 +124,12 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 	if settings.DiscordWebhookURL != "" {
 		if err := s.sendDiscordNotification(ctx, settings.DiscordWebhookURL, testNotif, projectID); err != nil {
 			return fmt.Errorf("discord notification failed: %w", err)
+		}
+	}
+
+	if settings.EmailAddresses != "" {
+		if err := s.sendEmailNotification(ctx, settings.EmailAddresses, testNotif, projectID); err != nil {
+			return fmt.Errorf("email notification failed: %w", err)
 		}
 	}
 
@@ -152,7 +163,7 @@ func (s *NotificationService) NotifyVulnerability(ctx context.Context, projectID
 		return nil
 	}
 
-	notif.DetailsURL = fmt.Sprintf("%s/projects/%s/vulnerabilities", s.baseURL, projectID)
+	notif.DetailsURL = fmt.Sprintf("%s/projects/%s/vulnerabilities", s.cfg.BaseURL, projectID)
 
 	var errs []error
 	if settings.SlackWebhookURL != "" {
@@ -163,6 +174,12 @@ func (s *NotificationService) NotifyVulnerability(ctx context.Context, projectID
 
 	if settings.DiscordWebhookURL != "" {
 		if err := s.sendDiscordNotification(ctx, settings.DiscordWebhookURL, notif, projectID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if settings.EmailAddresses != "" {
+		if err := s.sendEmailNotification(ctx, settings.EmailAddresses, notif, projectID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -308,4 +325,195 @@ func (s *NotificationService) GetLogs(ctx context.Context, projectID uuid.UUID, 
 		limit = 50
 	}
 	return s.notifRepo.GetLogs(ctx, projectID, limit)
+}
+
+// sendEmailNotification sends email notifications for a vulnerability
+func (s *NotificationService) sendEmailNotification(ctx context.Context, emailAddresses string, notif model.VulnerabilityNotification, projectID uuid.UUID) error {
+	if !s.cfg.IsEmailEnabled() {
+		slog.Debug("Email notifications disabled - SMTP not configured")
+		return nil
+	}
+
+	recipients := parseEmailAddresses(emailAddresses)
+	if len(recipients) == 0 {
+		return nil
+	}
+
+	subject := fmt.Sprintf("[SBOMHub] %s脆弱性検出: %s", notif.Severity, notif.CVEID)
+	htmlBody := s.generateEmailHTML(notif)
+	textBody := s.generateEmailText(notif)
+
+	for _, to := range recipients {
+		if err := s.sendSMTPEmail(to, subject, htmlBody, textBody); err != nil {
+			s.logNotification(ctx, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "failed", err.Error())
+			return err
+		}
+		s.logNotification(ctx, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "sent", "")
+	}
+
+	return nil
+}
+
+// sendSMTPEmail sends an email via SMTP
+func (s *NotificationService) sendSMTPEmail(to, subject, htmlBody, textBody string) error {
+	from := s.cfg.SMTPFrom
+	host := s.cfg.SMTPHost
+	port := s.cfg.SMTPPort
+	user := s.cfg.SMTPUser
+	password := s.cfg.SMTPPassword
+
+	// Build multipart email with both HTML and plain text
+	boundary := "SBOMHubEmailBoundary"
+	headers := fmt.Sprintf("From: %s\r\n", from)
+	headers += fmt.Sprintf("To: %s\r\n", to)
+	headers += fmt.Sprintf("Subject: %s\r\n", subject)
+	headers += "MIME-Version: 1.0\r\n"
+	headers += fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary)
+	headers += "\r\n"
+
+	body := fmt.Sprintf("--%s\r\n", boundary)
+	body += "Content-Type: text/plain; charset=\"utf-8\"\r\n"
+	body += "Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+	body += textBody + "\r\n"
+
+	body += fmt.Sprintf("--%s\r\n", boundary)
+	body += "Content-Type: text/html; charset=\"utf-8\"\r\n"
+	body += "Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+	body += htmlBody + "\r\n"
+
+	body += fmt.Sprintf("--%s--\r\n", boundary)
+
+	message := headers + body
+
+	addr := fmt.Sprintf("%s:%s", host, port)
+
+	var auth smtp.Auth
+	if user != "" && password != "" {
+		auth = smtp.PlainAuth("", user, password, host)
+	}
+
+	if err := smtp.SendMail(addr, auth, from, []string{to}, []byte(message)); err != nil {
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	return nil
+}
+
+// generateEmailHTML generates an HTML email body for vulnerability notification
+func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotification) string {
+	severityColors := map[string]string{
+		"CRITICAL": "#dc2626",
+		"HIGH":     "#ea580c",
+		"MEDIUM":   "#ca8a04",
+		"LOW":      "#16a34a",
+	}
+
+	color := severityColors[notif.Severity]
+	if color == "" {
+		color = "#6b7280"
+	}
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 20px; background-color: #f3f4f6;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background-color: %s; padding: 20px; text-align: center;">
+      <h1 style="color: white; margin: 0; font-size: 18px;">新規%s脆弱性検出</h1>
+    </div>
+    <div style="padding: 24px;">
+      <table style="width: 100%%; border-collapse: collapse; margin-bottom: 20px;">
+        <tr>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>CVE ID</strong></td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>CVSS Score</strong></td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%.1f (%s)</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>EPSS Score</strong></td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%.1f%%</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Project</strong></td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%s</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0;"><strong>Component</strong></td>
+          <td style="padding: 8px 0;">%s@%s</td>
+        </tr>
+      </table>
+      <div style="text-align: center;">
+        <a href="%s" style="display: inline-block; background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 500;">詳細を見る</a>
+      </div>
+    </div>
+    <div style="background-color: #f9fafb; padding: 16px; text-align: center; font-size: 12px; color: #6b7280;">
+      <p style="margin: 0;">このメールはSBOMHubから自動送信されました。</p>
+    </div>
+  </div>
+</body>
+</html>`,
+		color,
+		notif.Severity,
+		notif.CVEID,
+		notif.CVSSScore,
+		notif.Severity,
+		notif.EPSSScore*100,
+		notif.ProjectName,
+		notif.ComponentName,
+		notif.ComponentVersion,
+		notif.DetailsURL,
+	)
+
+	return html
+}
+
+// generateEmailText generates a plain text email body for vulnerability notification
+func (s *NotificationService) generateEmailText(notif model.VulnerabilityNotification) string {
+	text := fmt.Sprintf(`[SBOMHub] 新規%s脆弱性検出
+
+CVE ID: %s
+CVSS Score: %.1f (%s)
+EPSS Score: %.1f%%
+Project: %s
+Component: %s@%s
+
+詳細を確認: %s
+
+---
+このメールはSBOMHubから自動送信されました。
+`,
+		notif.Severity,
+		notif.CVEID,
+		notif.CVSSScore,
+		notif.Severity,
+		notif.EPSSScore*100,
+		notif.ProjectName,
+		notif.ComponentName,
+		notif.ComponentVersion,
+		notif.DetailsURL,
+	)
+
+	return text
+}
+
+// parseEmailAddresses parses a comma-separated list of email addresses
+func parseEmailAddresses(addresses string) []string {
+	if addresses == "" {
+		return nil
+	}
+
+	parts := strings.Split(addresses, ",")
+	var result []string
+	for _, part := range parts {
+		email := strings.TrimSpace(part)
+		if email != "" && strings.Contains(email, "@") {
+			result = append(result, email)
+		}
+	}
+	return result
 }

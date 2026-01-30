@@ -286,6 +286,7 @@ export interface NotificationSettings {
   project_id: string;
   slack_webhook_url?: string;
   discord_webhook_url?: string;
+  email_addresses?: string;
   notify_critical: boolean;
   notify_high: boolean;
   notify_medium: boolean;
@@ -297,7 +298,7 @@ export interface NotificationSettings {
 export interface NotificationLog {
   id: string;
   project_id: string;
-  channel: "slack" | "discord";
+  channel: "slack" | "discord" | "email";
   payload: string;
   status: "sent" | "failed";
   error_message?: string;
@@ -929,6 +930,7 @@ export const api = {
       data: {
         slack_webhook_url?: string;
         discord_webhook_url?: string;
+        email_addresses?: string;
         notify_critical: boolean;
         notify_high: boolean;
         notify_medium: boolean;

@@ -18,19 +18,20 @@ func NewNotificationRepository(db *sql.DB) *NotificationRepository {
 
 func (r *NotificationRepository) GetSettings(ctx context.Context, projectID uuid.UUID) (*model.NotificationSettings, error) {
 	query := `
-		SELECT id, project_id, slack_webhook_url, discord_webhook_url,
+		SELECT id, project_id, slack_webhook_url, discord_webhook_url, email_addresses,
 		       notify_critical, notify_high, notify_medium, notify_low,
 		       created_at, updated_at
 		FROM notification_settings
 		WHERE project_id = $1
 	`
 	var settings model.NotificationSettings
-	var slackURL, discordURL sql.NullString
+	var slackURL, discordURL, emailAddresses sql.NullString
 	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
 		&settings.ID,
 		&settings.ProjectID,
 		&slackURL,
 		&discordURL,
+		&emailAddresses,
 		&settings.NotifyCritical,
 		&settings.NotifyHigh,
 		&settings.NotifyMedium,
@@ -46,20 +47,22 @@ func (r *NotificationRepository) GetSettings(ctx context.Context, projectID uuid
 	}
 	settings.SlackWebhookURL = slackURL.String
 	settings.DiscordWebhookURL = discordURL.String
+	settings.EmailAddresses = emailAddresses.String
 	return &settings, nil
 }
 
 func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *model.NotificationSettings) error {
 	query := `
 		INSERT INTO notification_settings (
-			id, project_id, slack_webhook_url, discord_webhook_url,
+			id, project_id, slack_webhook_url, discord_webhook_url, email_addresses,
 			notify_critical, notify_high, notify_medium, notify_low,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (project_id)
 		DO UPDATE SET
 			slack_webhook_url = EXCLUDED.slack_webhook_url,
 			discord_webhook_url = EXCLUDED.discord_webhook_url,
+			email_addresses = EXCLUDED.email_addresses,
 			notify_critical = EXCLUDED.notify_critical,
 			notify_high = EXCLUDED.notify_high,
 			notify_medium = EXCLUDED.notify_medium,
@@ -67,12 +70,15 @@ func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *m
 			updated_at = EXCLUDED.updated_at
 	`
 
-	var slackURL, discordURL sql.NullString
+	var slackURL, discordURL, emailAddresses sql.NullString
 	if settings.SlackWebhookURL != "" {
 		slackURL = sql.NullString{String: settings.SlackWebhookURL, Valid: true}
 	}
 	if settings.DiscordWebhookURL != "" {
 		discordURL = sql.NullString{String: settings.DiscordWebhookURL, Valid: true}
+	}
+	if settings.EmailAddresses != "" {
+		emailAddresses = sql.NullString{String: settings.EmailAddresses, Valid: true}
 	}
 
 	_, err := r.db.ExecContext(ctx, query,
@@ -80,6 +86,7 @@ func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *m
 		settings.ProjectID,
 		slackURL,
 		discordURL,
+		emailAddresses,
 		settings.NotifyCritical,
 		settings.NotifyHigh,
 		settings.NotifyMedium,
@@ -157,13 +164,13 @@ func (r *NotificationRepository) GetAllSettingsForSeverity(ctx context.Context, 
 	var query string
 	switch severity {
 	case "CRITICAL":
-		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_critical = true`
+		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, email_addresses, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_critical = true`
 	case "HIGH":
-		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_high = true`
+		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, email_addresses, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_high = true`
 	case "MEDIUM":
-		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_medium = true`
+		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, email_addresses, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_medium = true`
 	case "LOW":
-		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_low = true`
+		query = `SELECT id, project_id, slack_webhook_url, discord_webhook_url, email_addresses, notify_critical, notify_high, notify_medium, notify_low, created_at, updated_at FROM notification_settings WHERE notify_low = true`
 	default:
 		return []model.NotificationSettings{}, nil
 	}
@@ -177,12 +184,13 @@ func (r *NotificationRepository) GetAllSettingsForSeverity(ctx context.Context, 
 	var settings []model.NotificationSettings
 	for rows.Next() {
 		var s model.NotificationSettings
-		var slackURL, discordURL sql.NullString
+		var slackURL, discordURL, emailAddresses sql.NullString
 		if err := rows.Scan(
 			&s.ID,
 			&s.ProjectID,
 			&slackURL,
 			&discordURL,
+			&emailAddresses,
 			&s.NotifyCritical,
 			&s.NotifyHigh,
 			&s.NotifyMedium,
@@ -194,6 +202,7 @@ func (r *NotificationRepository) GetAllSettingsForSeverity(ctx context.Context, 
 		}
 		s.SlackWebhookURL = slackURL.String
 		s.DiscordWebhookURL = discordURL.String
+		s.EmailAddresses = emailAddresses.String
 		settings = append(settings, s)
 	}
 

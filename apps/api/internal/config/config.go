@@ -34,6 +34,13 @@ type Config struct {
 	// Security
 	EncryptionKey string // For encrypting sensitive data like API tokens
 
+	// SMTP settings (for email notifications)
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string
+
 	// Derived settings
 	mode Mode
 }
@@ -62,6 +69,13 @@ func Load() *Config {
 
 		// Security
 		EncryptionKey: getEnv("ENCRYPTION_KEY", "sbomhub-default-encryption-key-32"),
+
+		// SMTP
+		SMTPHost:     getEnv("SMTP_HOST", ""),
+		SMTPPort:     getEnv("SMTP_PORT", "587"),
+		SMTPUser:     getEnv("SMTP_USER", ""),
+		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:     getEnv("SMTP_FROM", "noreply@sbomhub.app"),
 	}
 
 	// Determine mode based on configuration
@@ -102,6 +116,11 @@ func (c *Config) IsBillingEnabled() bool {
 // IsProduction returns true if running in production environment
 func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
+}
+
+// IsEmailEnabled returns true if email notifications are configured
+func (c *Config) IsEmailEnabled() bool {
+	return c.SMTPHost != "" && c.SMTPFrom != ""
 }
 
 func getEnv(key, defaultValue string) string {

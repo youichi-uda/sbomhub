@@ -12,6 +12,7 @@ type NotificationSettings struct {
 	ProjectID         uuid.UUID `json:"project_id" db:"project_id"`
 	SlackWebhookURL   string    `json:"slack_webhook_url,omitempty" db:"slack_webhook_url"`
 	DiscordWebhookURL string    `json:"discord_webhook_url,omitempty" db:"discord_webhook_url"`
+	EmailAddresses    string    `json:"email_addresses,omitempty" db:"email_addresses"`
 	NotifyCritical    bool      `json:"notify_critical" db:"notify_critical"`
 	NotifyHigh        bool      `json:"notify_high" db:"notify_high"`
 	NotifyMedium      bool      `json:"notify_medium" db:"notify_medium"`
@@ -26,6 +27,7 @@ type NotificationChannel string
 const (
 	NotificationChannelSlack   NotificationChannel = "slack"
 	NotificationChannelDiscord NotificationChannel = "discord"
+	NotificationChannelEmail   NotificationChannel = "email"
 )
 
 // NotificationLog represents a notification send log
