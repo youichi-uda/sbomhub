@@ -239,15 +239,24 @@ type ClerkClaims struct {
 
 // verifyClerkJWT verifies a Clerk JWT token using the official Clerk SDK
 func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims, error) {
-	// Clerk SDK v2 requires fetching JWKS first
-	jwks, err := clerkjwt.GetJSONWebKeySet(ctx)
+	// Clerk SDK v2: First decode the token to get the key ID
+	decoded, err := clerkjwt.Decode(ctx, &clerkjwt.DecodeParams{Token: token})
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
+		return nil, fmt.Errorf("failed to decode token: %w", err)
 	}
 
+	// Fetch the JSON Web Key for verification
+	jwk, err := clerkjwt.GetJSONWebKey(ctx, &clerkjwt.GetJSONWebKeyParams{
+		KeyID: decoded.KeyID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch JWK: %w", err)
+	}
+
+	// Verify the token with the JWK
 	claims, err := clerkjwt.Verify(ctx, &clerkjwt.VerifyParams{
 		Token:  token,
-		JWK:    jwks,
+		JWK:    jwk,
 		Leeway: 5 * time.Minute, // Allow 5 minutes clock skew
 	})
 	if err != nil {
