@@ -207,26 +207,19 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 		return
 	}
 
-	// Save file
+	// Generate filename for reference
 	filename := fmt.Sprintf("%s_%s_%s.%s",
 		report.ReportType,
 		tenantID.String()[:8],
 		time.Now().Format("20060102_150405"),
 		report.Format,
 	)
-	filePath := filepath.Join(s.reportDir, filename)
 
-	if err := os.WriteFile(filePath, fileData, 0644); err != nil {
-		report.Status = model.ReportStatusFailed
-		report.ErrorMessage = fmt.Sprintf("Failed to save file: %v", err)
-		s.reportRepo.UpdateReport(ctx, report)
-		return
-	}
-
-	// Update report record
+	// Update report record - store content in database
 	now := time.Now()
-	report.FilePath = filePath
+	report.FilePath = filename // Store filename for reference
 	report.FileSize = len(fileData)
+	report.FileContent = fileData // Store content in DB
 	report.Status = model.ReportStatusCompleted
 	report.CompletedAt = &now
 
@@ -415,7 +408,7 @@ func (s *ReportService) ListReports(ctx context.Context, tenantID uuid.UUID, pag
 
 // GetReportFile returns the file content for a report
 func (s *ReportService) GetReportFile(ctx context.Context, tenantID, reportID uuid.UUID) ([]byte, string, error) {
-	report, err := s.reportRepo.GetReport(ctx, tenantID, reportID)
+	report, err := s.reportRepo.GetReportWithContent(ctx, tenantID, reportID)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get report: %w", err)
 	}
@@ -424,6 +417,13 @@ func (s *ReportService) GetReportFile(ctx context.Context, tenantID, reportID uu
 		return nil, "", fmt.Errorf("report is not ready: status=%s", report.Status)
 	}
 
+	// Return content from database
+	if len(report.FileContent) > 0 {
+		filename := filepath.Base(report.FilePath)
+		return report.FileContent, filename, nil
+	}
+
+	// Fallback to file system for old reports
 	data, err := os.ReadFile(report.FilePath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read file: %w", err)

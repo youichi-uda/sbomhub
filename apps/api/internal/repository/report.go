@@ -150,16 +150,43 @@ func (r *ReportRepository) CreateReport(ctx context.Context, report *model.Gener
 func (r *ReportRepository) UpdateReport(ctx context.Context, report *model.GeneratedReport) error {
 	query := `
 		UPDATE generated_reports SET
-			file_path = $2, file_size = $3, status = $4, error_message = $5,
-			email_sent_at = $6, email_recipients = $7, completed_at = $8
+			file_path = $2, file_size = $3, file_content = $4, status = $5, error_message = $6,
+			email_sent_at = $7, email_recipients = $8, completed_at = $9
 		WHERE id = $1
 	`
 
 	_, err := r.db.ExecContext(ctx, query,
-		report.ID, report.FilePath, report.FileSize, report.Status, report.ErrorMessage,
+		report.ID, report.FilePath, report.FileSize, report.FileContent, report.Status, report.ErrorMessage,
 		report.EmailSentAt, pq.Array(report.EmailRecipients), report.CompletedAt,
 	)
 	return err
+}
+
+// GetReportWithContent returns a generated report with file content by ID
+func (r *ReportRepository) GetReportWithContent(ctx context.Context, tenantID, reportID uuid.UUID) (*model.GeneratedReport, error) {
+	query := `
+		SELECT id, tenant_id, settings_id, report_type, format, title, period_start, period_end,
+			file_path, file_size, file_content, status, error_message, generated_by, email_sent_at,
+			email_recipients, created_at, completed_at
+		FROM generated_reports
+		WHERE id = $1 AND tenant_id = $2
+	`
+
+	var report model.GeneratedReport
+	var emailRecipients []string
+	err := r.db.QueryRowContext(ctx, query, reportID, tenantID).Scan(
+		&report.ID, &report.TenantID, &report.SettingsID, &report.ReportType, &report.Format,
+		&report.Title, &report.PeriodStart, &report.PeriodEnd,
+		&report.FilePath, &report.FileSize, &report.FileContent, &report.Status, &report.ErrorMessage,
+		&report.GeneratedBy, &report.EmailSentAt, pq.Array(&emailRecipients),
+		&report.CreatedAt, &report.CompletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	report.EmailRecipients = emailRecipients
+
+	return &report, nil
 }
 
 // GetReport returns a generated report by ID

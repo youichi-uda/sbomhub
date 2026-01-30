@@ -35,6 +35,7 @@ type GeneratedReport struct {
 	PeriodEnd       time.Time  `json:"period_end" db:"period_end"`
 	FilePath        string     `json:"file_path" db:"file_path"`
 	FileSize        int        `json:"file_size" db:"file_size"`
+	FileContent     []byte     `json:"-" db:"file_content"` // Stored in DB, not exposed in JSON
 	Status          string     `json:"status" db:"status"`
 	ErrorMessage    string     `json:"error_message,omitempty" db:"error_message"`
 	GeneratedBy     *uuid.UUID `json:"generated_by,omitempty" db:"generated_by"`
