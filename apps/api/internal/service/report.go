@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -175,6 +176,30 @@ func (s *ReportService) GenerateReport(ctx context.Context, tenantID, userID uui
 
 // generateReportAsync generates the report file asynchronously
 func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.UUID, report *model.GeneratedReport) {
+	startTime := time.Now()
+
+	// Panic recovery to ensure status is updated even if something goes wrong
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in report generation",
+				"report_id", report.ID,
+				"tenant_id", tenantID,
+				"panic", r,
+				"duration_ms", time.Since(startTime).Milliseconds(),
+			)
+			report.Status = model.ReportStatusFailed
+			report.ErrorMessage = fmt.Sprintf("Internal error: %v", r)
+			s.reportRepo.UpdateReport(ctx, report)
+		}
+	}()
+
+	slog.Info("starting report generation",
+		"report_id", report.ID,
+		"tenant_id", tenantID,
+		"report_type", report.ReportType,
+		"format", report.Format,
+	)
+
 	// Set tenant context for RLS
 	if s.tenantRepo != nil {
 		s.tenantRepo.SetCurrentTenant(ctx, tenantID)
@@ -183,6 +208,10 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 	// Gather report data
 	data, err := s.gatherReportData(ctx, tenantID, report.PeriodStart, report.PeriodEnd)
 	if err != nil {
+		slog.Error("failed to gather report data",
+			"report_id", report.ID,
+			"error", err,
+		)
 		report.Status = model.ReportStatusFailed
 		report.ErrorMessage = fmt.Sprintf("Failed to gather data: %v", err)
 		s.reportRepo.UpdateReport(ctx, report)
@@ -201,6 +230,11 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 	}
 
 	if err != nil {
+		slog.Error("failed to generate report file",
+			"report_id", report.ID,
+			"format", report.Format,
+			"error", err,
+		)
 		report.Status = model.ReportStatusFailed
 		report.ErrorMessage = fmt.Sprintf("Failed to generate file: %v", err)
 		s.reportRepo.UpdateReport(ctx, report)
@@ -223,7 +257,19 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 	report.Status = model.ReportStatusCompleted
 	report.CompletedAt = &now
 
-	s.reportRepo.UpdateReport(ctx, report)
+	if err := s.reportRepo.UpdateReport(ctx, report); err != nil {
+		slog.Error("failed to update report record",
+			"report_id", report.ID,
+			"error", err,
+		)
+		return
+	}
+
+	slog.Info("report generation completed",
+		"report_id", report.ID,
+		"file_size", report.FileSize,
+		"duration_ms", time.Since(startTime).Milliseconds(),
+	)
 }
 
 // gatherReportData collects all data needed for the report
