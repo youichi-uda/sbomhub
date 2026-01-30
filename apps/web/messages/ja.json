@@ -79,6 +79,18 @@
         "feature4": "優先サポート（24時間以内対応）",
         "feature5": "SLA 99.9%・監査ログ",
         "cta": "無料トライアル開始"
+      },
+      "team": {
+        "name": "Cloud Team",
+        "price": "¥20,000",
+        "period": "月",
+        "description": "大規模チーム向けの専用プラン",
+        "feature1": "無制限のプロジェクト",
+        "feature2": "30 ユーザーまで",
+        "feature3": "全機能利用可能",
+        "feature4": "専任サポート担当",
+        "feature5": "SLA 99.9%・優先対応",
+        "cta": "お問い合わせ"
       }
     },
     "cta": {

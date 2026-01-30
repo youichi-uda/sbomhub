@@ -104,6 +104,22 @@ export default async function LandingPage({ params }: Props) {
       href: `/${locale}/sign-up`,
       highlight: false,
     },
+    {
+      name: t("pricing.team.name"),
+      price: t("pricing.team.price"),
+      period: t("pricing.team.period"),
+      description: t("pricing.team.description"),
+      features: [
+        t("pricing.team.feature1"),
+        t("pricing.team.feature2"),
+        t("pricing.team.feature3"),
+        t("pricing.team.feature4"),
+        t("pricing.team.feature5"),
+      ],
+      cta: t("pricing.team.cta"),
+      href: "mailto:support@sbomhub.app?subject=Cloud Team Plan Inquiry",
+      highlight: false,
+    },
   ];
 
   return (
@@ -197,7 +213,7 @@ export default async function LandingPage({ params }: Props) {
                 {t("pricing.description")}
               </p>
             </div>
-            <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-6xl mx-auto">
               {plans.map((plan, index) => (
                 <Card
                   key={index}
