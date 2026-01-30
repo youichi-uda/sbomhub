@@ -2,8 +2,13 @@
 
 import { useEffect, useState, ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { api, SubscriptionResponse } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
 import { Loader2 } from "lucide-react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Building2 } from "lucide-react";
+import { OrganizationSwitcher } from "@clerk/nextjs";
 
 interface SubscriptionGuardProps {
   children: ReactNode;
@@ -20,10 +25,14 @@ const EXEMPT_PATHS = [
 export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) {
   const [loading, setLoading] = useState(true);
   const [checked, setChecked] = useState(false);
+  const [needsOrg, setNeedsOrg] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
+  const { orgId, isLoaded } = useAuth();
 
   useEffect(() => {
+    if (!isLoaded) return;
+
     // Skip check for exempt paths
     const isExempt = EXEMPT_PATHS.some((path) => pathname.includes(path));
     if (isExempt) {
@@ -32,8 +41,15 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
       return;
     }
 
+    // Check if user has an organization selected
+    if (!orgId) {
+      setNeedsOrg(true);
+      setLoading(false);
+      return;
+    }
+
     checkSubscription();
-  }, [pathname]);
+  }, [pathname, orgId, isLoaded]);
 
   const checkSubscription = async () => {
     try {
@@ -80,6 +96,39 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
       setChecked(true);
     }
   };
+
+  // Show organization selection if user has no org
+  if (needsOrg) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-50">
+        <Card className="w-full max-w-md mx-4">
+          <CardHeader className="text-center">
+            <Building2 className="h-12 w-12 mx-auto text-primary mb-4" />
+            <CardTitle>組織を選択してください</CardTitle>
+            <CardDescription>
+              SBOMHub を使用するには、組織を作成または選択する必要があります。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col items-center gap-4">
+            <OrganizationSwitcher
+              hidePersonal
+              afterCreateOrganizationUrl={pathname}
+              afterSelectOrganizationUrl={pathname}
+              appearance={{
+                elements: {
+                  rootBox: "w-full",
+                  organizationSwitcherTrigger: "w-full justify-center px-4 py-3 border rounded-lg",
+                },
+              }}
+            />
+            <p className="text-sm text-muted-foreground text-center">
+              組織を作成するか、招待された組織を選択してください。
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (loading && !checked) {
     return (
