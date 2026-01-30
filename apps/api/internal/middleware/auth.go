@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/clerk/clerk-sdk-go/v2"
 	clerkhttp "github.com/clerk/clerk-sdk-go/v2/http"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -244,7 +245,7 @@ func verifyClerkJWT(c echo.Context, cfg *config.Config) (*ClerkClaims, error) {
 
 	// Create a handler that extracts claims
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionClaims, ok := clerkhttp.SessionClaimsFromContext(r.Context())
+		sessionClaims, ok := clerk.SessionClaimsFromContext(r.Context())
 		if !ok || sessionClaims == nil {
 			verifyErr = echo.NewHTTPError(http.StatusUnauthorized, "invalid session")
 			return
