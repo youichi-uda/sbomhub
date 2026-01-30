@@ -1,5 +1,6 @@
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
+import Script from "next/script";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,8 +17,89 @@ import {
   GitCompare,
 } from "lucide-react";
 
+const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
+
 interface Props {
   params: Promise<{ locale: string }>;
+}
+
+function generateJsonLd(locale: string) {
+  return {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": `${BASE_URL}/#website`,
+        url: BASE_URL,
+        name: "SBOMHub",
+        description:
+          locale === "ja"
+            ? "オープンソースのSBOM管理プラットフォーム"
+            : "Open-source SBOM management platform",
+        inLanguage: locale === "ja" ? "ja-JP" : "en-US",
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": `${BASE_URL}/#software`,
+        name: "SBOMHub",
+        applicationCategory: "SecurityApplication",
+        operatingSystem: "Web-based",
+        description:
+          locale === "ja"
+            ? "CycloneDX/SPDXのインポート、脆弱性管理、VEXステートメント作成、コンプライアンスチェックを提供するSBOM管理プラットフォーム"
+            : "SBOM management platform providing CycloneDX/SPDX import, vulnerability management, VEX statement creation, and compliance checking",
+        url: BASE_URL,
+        offers: [
+          {
+            "@type": "Offer",
+            name: "Self-hosted",
+            price: "0",
+            priceCurrency: "JPY",
+            description:
+              locale === "ja" ? "無料のセルフホスト版" : "Free self-hosted version",
+          },
+          {
+            "@type": "Offer",
+            name: "Cloud Starter",
+            price: "2500",
+            priceCurrency: "JPY",
+            description:
+              locale === "ja"
+                ? "小規模チーム向けクラウド版"
+                : "Cloud version for small teams",
+          },
+          {
+            "@type": "Offer",
+            name: "Cloud Pro",
+            price: "8000",
+            priceCurrency: "JPY",
+            description:
+              locale === "ja"
+                ? "成長するチーム向けフル機能版"
+                : "Full-featured version for growing teams",
+          },
+        ],
+        featureList: [
+          "SBOM Import (CycloneDX, SPDX)",
+          "Vulnerability Management",
+          "VEX Statements",
+          "Compliance Checking",
+          "CI/CD Integration",
+          "IPA Integration",
+          "SBOM Diff Comparison",
+          "Multilingual Support (Japanese/English)",
+        ],
+      },
+      {
+        "@type": "Organization",
+        "@id": `${BASE_URL}/#organization`,
+        name: "SBOMHub",
+        url: BASE_URL,
+        logo: `${BASE_URL}/logo.png`,
+        sameAs: ["https://github.com/youichi-uda/sbomhub"],
+      },
+    ],
+  };
 }
 
 export default async function LandingPage({ params }: Props) {
@@ -134,9 +216,17 @@ export default async function LandingPage({ params }: Props) {
     },
   ];
 
+  const jsonLd = generateJsonLd(locale);
+
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Header */}
+    <>
+      <Script
+        id="json-ld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+      <div className="min-h-screen flex flex-col">
+        {/* Header */}
       <header className="border-b bg-white">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <Link href="/" className="text-2xl font-bold text-primary">
@@ -325,5 +415,6 @@ export default async function LandingPage({ params }: Props) {
         </div>
       </footer>
     </div>
+    </>
   );
 }
