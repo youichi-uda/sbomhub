@@ -252,7 +252,11 @@ export default function BillingPage() {
                 </p>
                 {subscription?.has_subscription && subscription.subscription && (
                   <p className="text-sm text-muted-foreground mt-1">
-                    次回更新: {new Date(subscription.subscription.current_period_end).toLocaleDateString("ja-JP")}
+                    次回更新: {subscription.subscription.renews_at
+                      ? new Date(subscription.subscription.renews_at).toLocaleDateString("ja-JP")
+                      : subscription.subscription.current_period_end
+                        ? new Date(subscription.subscription.current_period_end).toLocaleDateString("ja-JP")
+                        : "-"}
                   </p>
                 )}
               </div>
