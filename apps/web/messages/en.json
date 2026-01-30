@@ -41,6 +41,10 @@
         "title": "Compliance",
         "description": "Compliance checking feature aligned with METI (Japan) SBOM guidelines."
       },
+      "license": {
+        "title": "License Management",
+        "description": "Automatic OSS license detection and policy checking. Prevent license conflicts and usage violations."
+      },
       "cicd": {
         "title": "CI/CD Integration",
         "description": "Upload SBOMs via API from CI/CD pipelines like GitHub Actions."

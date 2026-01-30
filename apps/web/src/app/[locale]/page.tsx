@@ -15,6 +15,7 @@ import {
   ArrowRight,
   Building2,
   GitCompare,
+  Scale,
 } from "lucide-react";
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
@@ -126,6 +127,11 @@ export default async function LandingPage({ params }: Props) {
       icon: BarChart3,
       title: t("features.compliance.title"),
       description: t("features.compliance.description"),
+    },
+    {
+      icon: Scale,
+      title: t("features.license.title"),
+      description: t("features.license.description"),
     },
     {
       icon: GitBranch,

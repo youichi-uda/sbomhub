@@ -41,6 +41,10 @@
         "title": "コンプライアンス",
         "description": "経済産業省のSBOMガイドラインに準拠したコンプライアンスチェック機能。"
       },
+      "license": {
+        "title": "ライセンス管理",
+        "description": "OSSライセンスの自動検出とポリシーチェック。ライセンス競合や利用条件の違反を防止。"
+      },
       "cicd": {
         "title": "CI/CD 連携",
         "description": "GitHub ActionsなどのCI/CDパイプラインからAPIでSBOMをアップロード。"
