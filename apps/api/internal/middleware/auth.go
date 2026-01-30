@@ -242,16 +242,20 @@ func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims,
 	// Clerk SDK v2: First decode the token to get the key ID
 	decoded, err := clerkjwt.Decode(ctx, &clerkjwt.DecodeParams{Token: token})
 	if err != nil {
+		slog.Error("Failed to decode token", "error", err)
 		return nil, fmt.Errorf("failed to decode token: %w", err)
 	}
+	slog.Debug("Token decoded", "key_id", decoded.KeyID)
 
 	// Fetch the JSON Web Key for verification
 	jwk, err := clerkjwt.GetJSONWebKey(ctx, &clerkjwt.GetJSONWebKeyParams{
 		KeyID: decoded.KeyID,
 	})
 	if err != nil {
+		slog.Error("Failed to fetch JWK", "error", err, "key_id", decoded.KeyID)
 		return nil, fmt.Errorf("failed to fetch JWK: %w", err)
 	}
+	slog.Debug("JWK fetched", "jwk_nil", jwk == nil)
 
 	// Verify the token with the JWK
 	claims, err := clerkjwt.Verify(ctx, &clerkjwt.VerifyParams{
@@ -260,6 +264,7 @@ func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims,
 		Leeway: 5 * time.Minute, // Allow 5 minutes clock skew
 	})
 	if err != nil {
+		slog.Error("JWT verify failed", "error", err)
 		return nil, err
 	}
 
