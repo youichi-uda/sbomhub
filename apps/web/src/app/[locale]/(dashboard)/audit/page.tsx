@@ -189,9 +189,7 @@ export default function AuditLogPage() {
                     </div>
                     <h1 className="text-2xl font-bold mb-4">{t("title")}</h1>
                     <p className="text-muted-foreground mb-6">
-                        {locale === 'ja'
-                            ? '監査ログ機能はPro版以上のプランでご利用いただけます。'
-                            : 'Audit logs are available on Pro plan and above.'}
+                        {t("proFeatureMessage")}
                     </p>
                     <Link
                         href={`/${locale}/billing`}

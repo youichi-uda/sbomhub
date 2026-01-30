@@ -571,6 +571,7 @@ export interface GenerateReportInput {
   format: string;
   period_start?: string;
   period_end?: string;
+  locale?: string;
 }
 
 // IPA types

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useTranslations, useLocale } from 'next-intl';
 import { Clock, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { useApi } from '@/lib/api';
 
@@ -28,11 +29,17 @@ interface ScanLog {
     error_message?: string;
 }
 
-const WEEKDAYS = ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
 export default function ScanSettingsPage() {
+    const t = useTranslations("Settings.Scan");
+    const tCommon = useTranslations("Common");
+    const locale = useLocale();
     const api = useApi();
+
+    const WEEKDAYS = locale === 'ja'
+        ? ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日']
+        : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const [settings, setSettings] = useState<ScanSettings | null>(null);
     const [logs, setLogs] = useState<ScanLog[]>([]);
     const [loading, setLoading] = useState(true);
@@ -50,7 +57,7 @@ export default function ScanSettingsPage() {
             const data = await api.get<ScanSettings>('/api/v1/settings/scan');
             setSettings(data);
         } catch (err) {
-            setError('設定の読み込みに失敗しました');
+            setError(t('loadError'));
         } finally {
             setLoading(false);
         }
@@ -78,7 +85,7 @@ export default function ScanSettingsPage() {
             setSuccess(true);
             setTimeout(() => setSuccess(false), 3000);
         } catch (err) {
-            setError('設定の保存に失敗しました');
+            setError(t('saveError'));
         } finally {
             setSaving(false);
         }
@@ -90,7 +97,7 @@ export default function ScanSettingsPage() {
     };
 
     const formatDate = (dateStr: string) => {
-        return new Date(dateStr).toLocaleString('ja-JP');
+        return new Date(dateStr).toLocaleString(locale === 'ja' ? 'ja-JP' : 'en-US');
     };
 
     const getStatusIcon = (status: ScanLog['status']) => {
@@ -116,7 +123,7 @@ export default function ScanSettingsPage() {
 
     return (
         <div className="max-w-2xl mx-auto py-8 px-4">
-            <h1 className="text-2xl font-bold mb-6">定期スキャン設定</h1>
+            <h1 className="text-2xl font-bold mb-6">{t('title')}</h1>
 
             {error && (
                 <div className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-lg text-destructive">
@@ -126,7 +133,7 @@ export default function ScanSettingsPage() {
 
             {success && (
                 <div className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg text-green-600 dark:text-green-400">
-                    設定を保存しました
+                    {t('saveSuccess')}
                 </div>
             )}
 
@@ -134,9 +141,9 @@ export default function ScanSettingsPage() {
                 {/* Enable/Disable */}
                 <div className="flex items-center justify-between">
                     <div>
-                        <label className="font-medium">スキャン有効</label>
+                        <label className="font-medium">{t('enableScan')}</label>
                         <p className="text-sm text-muted-foreground">
-                            定期的に脆弱性データベースを確認します
+                            {t('enableScanDescription')}
                         </p>
                     </div>
                     <button
@@ -153,7 +160,7 @@ export default function ScanSettingsPage() {
 
                 {/* Schedule Type */}
                 <div>
-                    <label className="block font-medium mb-2">スキャン間隔</label>
+                    <label className="block font-medium mb-2">{t('scanInterval')}</label>
                     <div className="space-y-2">
                         {(['hourly', 'daily', 'weekly'] as const).map((type) => (
                             <label key={type} className="flex items-center gap-3 cursor-pointer">
@@ -165,9 +172,9 @@ export default function ScanSettingsPage() {
                                     className="w-4 h-4 text-primary"
                                 />
                                 <span>
-                                    {type === 'hourly' && '毎時'}
-                                    {type === 'daily' && '毎日'}
-                                    {type === 'weekly' && '毎週'}
+                                    {type === 'hourly' && t('hourly')}
+                                    {type === 'daily' && t('daily')}
+                                    {type === 'weekly' && t('weekly')}
                                 </span>
 
                                 {type === 'daily' && settings?.schedule_type === 'daily' && (
@@ -217,9 +224,9 @@ export default function ScanSettingsPage() {
 
                 {/* Notification Settings */}
                 <div>
-                    <label className="block font-medium mb-2">通知条件</label>
+                    <label className="block font-medium mb-2">{t('notificationConditions')}</label>
                     <p className="text-sm text-muted-foreground mb-3">
-                        選択した重大度以上の脆弱性が検出された場合に通知します
+                        {t('notificationDescription')}
                     </p>
                     <div className="space-y-2">
                         {[
@@ -245,7 +252,7 @@ export default function ScanSettingsPage() {
                 {settings?.next_scan_at && (
                     <div className="pt-4 border-t border-border">
                         <p className="text-sm text-muted-foreground">
-                            次回スキャン: {formatDate(settings.next_scan_at)}
+                            {t('nextScan')}: {formatDate(settings.next_scan_at)}
                         </p>
                     </div>
                 )}
@@ -260,7 +267,7 @@ export default function ScanSettingsPage() {
                         {saving ? (
                             <Loader2 className="w-5 h-5 animate-spin mx-auto" />
                         ) : (
-                            '保存'
+                            tCommon('save')
                         )}
                     </button>
                 </div>
@@ -269,15 +276,15 @@ export default function ScanSettingsPage() {
             {/* Scan Logs */}
             {logs.length > 0 && (
                 <div className="mt-8">
-                    <h2 className="text-lg font-semibold mb-4">スキャン履歴</h2>
+                    <h2 className="text-lg font-semibold mb-4">{t('scanHistory')}</h2>
                     <div className="bg-card border border-border rounded-lg overflow-hidden">
                         <table className="w-full">
                             <thead className="bg-muted/50">
                                 <tr>
-                                    <th className="px-4 py-2 text-left text-sm font-medium">ステータス</th>
-                                    <th className="px-4 py-2 text-left text-sm font-medium">開始時刻</th>
-                                    <th className="px-4 py-2 text-left text-sm font-medium">プロジェクト</th>
-                                    <th className="px-4 py-2 text-left text-sm font-medium">新規脆弱性</th>
+                                    <th className="px-4 py-2 text-left text-sm font-medium">{t('status')}</th>
+                                    <th className="px-4 py-2 text-left text-sm font-medium">{t('startTime')}</th>
+                                    <th className="px-4 py-2 text-left text-sm font-medium">{t('projects')}</th>
+                                    <th className="px-4 py-2 text-left text-sm font-medium">{t('newVulnerabilities')}</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border">

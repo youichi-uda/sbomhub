@@ -143,7 +143,7 @@ function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectS
   );
 }
 
-function TrendChart({ trend, noDataMessage }: { trend: TrendPoint[]; noDataMessage?: string }) {
+function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: TrendPoint[]; noDataMessage?: string; locale: string; countLabel: string }) {
   if (trend.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
@@ -156,6 +156,14 @@ function TrendChart({ trend, noDataMessage }: { trend: TrendPoint[]; noDataMessa
     ...trend.map((t) => t.critical + t.high + t.medium + t.low)
   );
 
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString(locale === 'ja' ? 'ja-JP' : 'en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
   return (
     <div className="flex items-end gap-1 h-40">
       {trend.map((point, index) => {
@@ -165,7 +173,7 @@ function TrendChart({ trend, noDataMessage }: { trend: TrendPoint[]; noDataMessa
           <div
             key={index}
             className="flex-1 flex flex-col justify-end"
-            title={`${new Date(point.date).toLocaleDateString("ja-JP")}: ${total}件`}
+            title={`${formatDate(point.date)}: ${countLabel.replace('{count}', String(total))}`}
           >
             <div
               className="bg-gradient-to-t from-red-500 via-orange-400 to-yellow-300 rounded-t"
@@ -312,7 +320,7 @@ export default function DashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <TrendChart trend={summary.trend} noDataMessage={t("noTrendData")} />
+            <TrendChart trend={summary.trend} noDataMessage={t("noTrendData")} locale={locale} countLabel={t("countSuffix")} />
             <div className="flex justify-between text-xs text-muted-foreground mt-2">
               <span>30 {t("daysAgo")}</span>
               <span>{t("today")}</span>

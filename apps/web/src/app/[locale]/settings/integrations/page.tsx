@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +38,10 @@ import { api, IssueTrackerConnection, TrackerType } from "@/lib/api";
 import { Plus, Trash2, RefreshCw, ExternalLink, CheckCircle2 } from "lucide-react";
 
 export default function IntegrationsPage() {
+  const t = useTranslations("Settings.Integrations");
+  const tCommon = useTranslations("Common");
+  const locale = useLocale();
+
   const [connections, setConnections] = useState<IssueTrackerConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -51,6 +56,24 @@ export default function IntegrationsPage() {
   const [apiToken, setApiToken] = useState("");
   const [defaultProjectKey, setDefaultProjectKey] = useState("");
   const [defaultIssueType, setDefaultIssueType] = useState("");
+
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString(locale === 'ja' ? 'ja-JP' : 'en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  const formatDateTime = (dateString: string) => {
+    return new Date(dateString).toLocaleString(locale === 'ja' ? 'ja-JP' : 'en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
 
   useEffect(() => {
     loadConnections();
@@ -97,7 +120,7 @@ export default function IntegrationsPage() {
       setIsDialogOpen(false);
       resetForm();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "接続の作成に失敗しました");
+      setError(err instanceof Error ? err.message : t("createFailed"));
     } finally {
       setSaving(false);
     }
@@ -124,9 +147,9 @@ export default function IntegrationsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">外部連携設定</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t("title")}</h1>
           <p className="text-muted-foreground">
-            Jira, Backlog などの課題管理システムとの連携を設定します
+            {t("description")}
           </p>
         </div>
 
@@ -137,20 +160,20 @@ export default function IntegrationsPage() {
           <DialogTrigger asChild>
             <Button>
               <Plus className="h-4 w-4 mr-2" />
-              連携を追加
+              {t("addIntegration")}
             </Button>
           </DialogTrigger>
           <DialogContent className="sm:max-w-[500px]">
             <DialogHeader>
-              <DialogTitle>新しい連携を追加</DialogTitle>
+              <DialogTitle>{t("addNewIntegration")}</DialogTitle>
               <DialogDescription>
-                課題管理システムへの接続情報を入力してください
+                {t("enterConnectionInfo")}
               </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-4 py-4">
               <div className="space-y-2">
-                <Label htmlFor="tracker_type">サービス</Label>
+                <Label htmlFor="tracker_type">{t("service")}</Label>
                 <Select value={trackerType} onValueChange={(v) => setTrackerType(v as TrackerType)}>
                   <SelectTrigger>
                     <SelectValue />
@@ -163,17 +186,17 @@ export default function IntegrationsPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="name">接続名</Label>
+                <Label htmlFor="name">{t("connectionName")}</Label>
                 <Input
                   id="name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="例: 本番環境 Jira"
+                  placeholder={t("connectionNamePlaceholder")}
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="base_url">ベースURL</Label>
+                <Label htmlFor="base_url">{t("baseUrl")}</Label>
                 <Input
                   id="base_url"
                   value={baseUrl}
@@ -184,7 +207,7 @@ export default function IntegrationsPage() {
 
               {trackerType === "jira" && (
                 <div className="space-y-2">
-                  <Label htmlFor="email">メールアドレス</Label>
+                  <Label htmlFor="email">{t("email")}</Label>
                   <Input
                     id="email"
                     type="email"
@@ -196,13 +219,13 @@ export default function IntegrationsPage() {
               )}
 
               <div className="space-y-2">
-                <Label htmlFor="api_token">APIトークン</Label>
+                <Label htmlFor="api_token">{t("apiToken")}</Label>
                 <Input
                   id="api_token"
                   type="password"
                   value={apiToken}
                   onChange={(e) => setApiToken(e.target.value)}
-                  placeholder="APIトークンを入力"
+                  placeholder={t("apiTokenPlaceholder")}
                 />
                 <p className="text-xs text-muted-foreground">
                   {trackerType === "jira" ? (
@@ -212,7 +235,7 @@ export default function IntegrationsPage() {
                       rel="noopener noreferrer"
                       className="text-primary hover:underline"
                     >
-                      Atlassian API トークンを取得 →
+                      {t("getAtlassianToken")}
                     </a>
                   ) : (
                     <a
@@ -221,29 +244,29 @@ export default function IntegrationsPage() {
                       rel="noopener noreferrer"
                       className="text-primary hover:underline"
                     >
-                      Backlog API キーを取得 →
+                      {t("getBacklogToken")}
                     </a>
                   )}
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="default_project">デフォルトプロジェクト（オプション）</Label>
+                <Label htmlFor="default_project">{t("defaultProject")}</Label>
                 <Input
                   id="default_project"
                   value={defaultProjectKey}
                   onChange={(e) => setDefaultProjectKey(e.target.value)}
-                  placeholder="プロジェクトキー (例: PROJ)"
+                  placeholder={t("projectKeyPlaceholder")}
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="default_issue_type">デフォルト課題タイプ（オプション）</Label>
+                <Label htmlFor="default_issue_type">{t("defaultIssueType")}</Label>
                 <Input
                   id="default_issue_type"
                   value={defaultIssueType}
                   onChange={(e) => setDefaultIssueType(e.target.value)}
-                  placeholder="例: Bug, Task"
+                  placeholder={t("issueTypePlaceholder")}
                 />
               </div>
 
@@ -256,10 +279,10 @@ export default function IntegrationsPage() {
 
             <DialogFooter>
               <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
-                キャンセル
+                {tCommon("cancel")}
               </Button>
               <Button onClick={handleCreate} disabled={saving || !name || !baseUrl || !apiToken}>
-                {saving ? "接続テスト中..." : "接続を追加"}
+                {saving ? t("testingConnection") : t("addConnection")}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -270,13 +293,13 @@ export default function IntegrationsPage() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <div className="text-center space-y-3">
-              <h3 className="text-lg font-medium">連携がありません</h3>
+              <h3 className="text-lg font-medium">{t("noIntegrations")}</h3>
               <p className="text-muted-foreground text-sm max-w-sm">
-                Jira や Backlog と連携することで、脆弱性から直接チケットを作成できます
+                {t("noIntegrationsDescription")}
               </p>
               <Button onClick={() => setIsDialogOpen(true)}>
                 <Plus className="h-4 w-4 mr-2" />
-                最初の連携を追加
+                {t("addFirstIntegration")}
               </Button>
             </div>
           </CardContent>
@@ -305,7 +328,7 @@ export default function IntegrationsPage() {
                         {conn.is_active && (
                           <Badge variant="outline" className="text-green-600 border-green-600">
                             <CheckCircle2 className="h-3 w-3 mr-1" />
-                            接続済み
+                            {t("connected")}
                           </Badge>
                         )}
                       </CardTitle>
@@ -334,18 +357,18 @@ export default function IntegrationsPage() {
                     </AlertDialogTrigger>
                     <AlertDialogContent>
                       <AlertDialogHeader>
-                        <AlertDialogTitle>連携を削除しますか？</AlertDialogTitle>
+                        <AlertDialogTitle>{t("deleteIntegration")}</AlertDialogTitle>
                         <AlertDialogDescription>
-                          この操作は取り消せません。この連携を使用して作成されたチケットは影響を受けませんが、新しいチケットを作成できなくなります。
+                          {t("deleteDescription")}
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
-                        <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                        <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
                         <AlertDialogAction
                           onClick={() => handleDelete(conn.id)}
                           className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
-                          削除
+                          {tCommon("delete")}
                         </AlertDialogAction>
                       </AlertDialogFooter>
                     </AlertDialogContent>
@@ -356,28 +379,28 @@ export default function IntegrationsPage() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   {conn.default_project_key && (
                     <div>
-                      <span className="text-muted-foreground">デフォルトプロジェクト:</span>
+                      <span className="text-muted-foreground">{t("defaultProjectLabel")}</span>
                       <span className="ml-2 font-medium">{conn.default_project_key}</span>
                     </div>
                   )}
                   {conn.default_issue_type && (
                     <div>
-                      <span className="text-muted-foreground">デフォルト課題タイプ:</span>
+                      <span className="text-muted-foreground">{t("defaultIssueTypeLabel")}</span>
                       <span className="ml-2 font-medium">{conn.default_issue_type}</span>
                     </div>
                   )}
                   {conn.last_sync_at && (
                     <div>
-                      <span className="text-muted-foreground">最終同期:</span>
+                      <span className="text-muted-foreground">{t("lastSync")}</span>
                       <span className="ml-2 font-medium">
-                        {new Date(conn.last_sync_at).toLocaleString("ja-JP")}
+                        {formatDateTime(conn.last_sync_at)}
                       </span>
                     </div>
                   )}
                   <div>
-                    <span className="text-muted-foreground">作成日:</span>
+                    <span className="text-muted-foreground">{t("createdAt")}</span>
                     <span className="ml-2 font-medium">
-                      {new Date(conn.created_at).toLocaleDateString("ja-JP")}
+                      {formatDate(conn.created_at)}
                     </span>
                   </div>
                 </div>
@@ -387,28 +410,28 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {/* 使い方説明 */}
+      {/* How to use */}
       <Card>
         <CardHeader>
-          <CardTitle>使い方</CardTitle>
+          <CardTitle>{t("howToUse")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <h4 className="font-medium">1. 連携を設定</h4>
+            <h4 className="font-medium">{t("step1Title")}</h4>
             <p className="text-sm text-muted-foreground">
-              上のフォームから Jira または Backlog への接続を設定します。APIトークンが必要です。
+              {t("step1Description")}
             </p>
           </div>
           <div className="space-y-2">
-            <h4 className="font-medium">2. 脆弱性からチケットを作成</h4>
+            <h4 className="font-medium">{t("step2Title")}</h4>
             <p className="text-sm text-muted-foreground">
-              脆弱性一覧や詳細ページから「チケットを作成」ボタンをクリックして、課題を作成できます。
+              {t("step2Description")}
             </p>
           </div>
           <div className="space-y-2">
-            <h4 className="font-medium">3. ステータスを同期</h4>
+            <h4 className="font-medium">{t("step3Title")}</h4>
             <p className="text-sm text-muted-foreground">
-              作成されたチケットのステータスは自動的に同期されます。課題が解決されると、脆弱性のステータスも更新されます。
+              {t("step3Description")}
             </p>
           </div>
         </CardContent>

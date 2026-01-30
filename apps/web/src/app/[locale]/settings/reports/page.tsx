@@ -1,15 +1,22 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, Save, ArrowLeft } from 'lucide-react';
 import { api, ReportSettings } from '@/lib/api';
 import Link from 'next/link';
 
-const WEEKDAYS = ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
 export default function ReportSettingsPage() {
+    const t = useTranslations("Settings.Reports");
+    const tCommon = useTranslations("Common");
+    const locale = useLocale();
     const [settings, setSettings] = useState<ReportSettings[]>([]);
+
+    const WEEKDAYS = locale === 'ja'
+        ? ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日']
+        : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -25,7 +32,7 @@ export default function ReportSettingsPage() {
             const data = await api.reports.getSettings() as ReportSettings[];
             setSettings(Array.isArray(data) ? data : [data]);
         } catch (err) {
-            setError('設定の読み込みに失敗しました');
+            setError(t('loadError'));
             console.error(err);
         } finally {
             setLoading(false);
@@ -49,10 +56,10 @@ export default function ReportSettingsPage() {
                 email_recipients: setting.email_recipients,
                 include_sections: setting.include_sections,
             });
-            setSuccess(`${getReportTypeLabel(setting.report_type)}の設定を保存しました`);
+            setSuccess(t('saveSuccess', { type: getReportTypeLabel(setting.report_type) }));
             setTimeout(() => setSuccess(null), 3000);
         } catch (err) {
-            setError('設定の保存に失敗しました');
+            setError(t('saveError'));
             console.error(err);
         } finally {
             setSaving(null);
@@ -67,9 +74,9 @@ export default function ReportSettingsPage() {
 
     const getReportTypeLabel = (type: string) => {
         switch (type) {
-            case 'executive': return '経営レポート';
-            case 'technical': return '技術レポート';
-            case 'compliance': return 'コンプライアンスレポート';
+            case 'executive': return t('executive');
+            case 'technical': return t('technical');
+            case 'compliance': return t('compliance');
             default: return type;
         }
     };
@@ -86,15 +93,15 @@ export default function ReportSettingsPage() {
         <div className="max-w-3xl mx-auto py-8 px-4">
             <div className="flex items-center gap-4 mb-6">
                 <Link
-                    href="/reports"
+                    href={`/${locale}/reports`}
                     className="p-2 hover:bg-muted rounded-lg transition-colors"
                 >
                     <ArrowLeft className="w-5 h-5" />
                 </Link>
                 <div>
-                    <h1 className="text-2xl font-bold">レポート設定</h1>
+                    <h1 className="text-2xl font-bold">{t('title')}</h1>
                     <p className="text-sm text-muted-foreground mt-1">
-                        自動レポート生成のスケジュールと配信設定
+                        {t('description')}
                     </p>
                 </div>
             </div>
@@ -131,20 +138,20 @@ export default function ReportSettingsPage() {
                                 {/* Schedule Type */}
                                 <div className="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label className="block text-sm font-medium mb-2">スケジュール</label>
+                                        <label className="block text-sm font-medium mb-2">{t('schedule')}</label>
                                         <select
                                             value={setting.schedule_type}
                                             onChange={(e) => updateSetting(setting.report_type, { schedule_type: e.target.value })}
                                             className="w-full bg-background border border-border rounded-lg px-3 py-2"
                                         >
-                                            <option value="weekly">毎週</option>
-                                            <option value="monthly">毎月</option>
+                                            <option value="weekly">{t('weekly')}</option>
+                                            <option value="monthly">{t('monthly')}</option>
                                         </select>
                                     </div>
 
                                     <div>
                                         <label className="block text-sm font-medium mb-2">
-                                            {setting.schedule_type === 'weekly' ? '曜日' : '日付'}
+                                            {setting.schedule_type === 'weekly' ? t('dayOfWeek') : t('dayOfMonth')}
                                         </label>
                                         {setting.schedule_type === 'weekly' ? (
                                             <select
@@ -163,7 +170,7 @@ export default function ReportSettingsPage() {
                                                 className="w-full bg-background border border-border rounded-lg px-3 py-2"
                                             >
                                                 {Array.from({ length: 28 }, (_, i) => i + 1).map(d => (
-                                                    <option key={d} value={d}>{d}日</option>
+                                                    <option key={d} value={d}>{locale === 'ja' ? `${d}日` : d}</option>
                                                 ))}
                                             </select>
                                         )}
@@ -172,7 +179,7 @@ export default function ReportSettingsPage() {
 
                                 <div className="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label className="block text-sm font-medium mb-2">時間</label>
+                                        <label className="block text-sm font-medium mb-2">{t('time')}</label>
                                         <select
                                             value={setting.schedule_hour}
                                             onChange={(e) => updateSetting(setting.report_type, { schedule_hour: parseInt(e.target.value) })}
@@ -185,7 +192,7 @@ export default function ReportSettingsPage() {
                                     </div>
 
                                     <div>
-                                        <label className="block text-sm font-medium mb-2">フォーマット</label>
+                                        <label className="block text-sm font-medium mb-2">{t('format')}</label>
                                         <select
                                             value={setting.format}
                                             onChange={(e) => updateSetting(setting.report_type, { format: e.target.value })}
@@ -201,9 +208,9 @@ export default function ReportSettingsPage() {
                                 <div className="pt-4 border-t border-border">
                                     <div className="flex items-center justify-between mb-4">
                                         <div>
-                                            <label className="font-medium">メール配信</label>
+                                            <label className="font-medium">{t('emailDelivery')}</label>
                                             <p className="text-sm text-muted-foreground">
-                                                レポート生成後に自動でメール送信
+                                                {t('emailDeliveryDescription')}
                                             </p>
                                         </div>
                                         <button
@@ -219,7 +226,7 @@ export default function ReportSettingsPage() {
                                     {setting.email_enabled && (
                                         <div>
                                             <label className="block text-sm font-medium mb-2">
-                                                送信先メールアドレス（カンマ区切り）
+                                                {t('emailRecipients')}
                                             </label>
                                             <input
                                                 type="text"
@@ -244,12 +251,12 @@ export default function ReportSettingsPage() {
                                         {saving === setting.report_type ? (
                                             <>
                                                 <Loader2 className="w-4 h-4 animate-spin" />
-                                                保存中...
+                                                {t('saving')}
                                             </>
                                         ) : (
                                             <>
                                                 <Save className="w-4 h-4" />
-                                                保存
+                                                {tCommon('save')}
                                             </>
                                         )}
                                     </button>
