@@ -1,6 +1,6 @@
 # SBOMHub
 
-[![日本語](https://img.shields.io/badge/lang-日本語-red.svg)](./README.ja.md) [![English](https://img.shields.io/badge/lang-English-blue.svg)](./README.md)
+[![日本語](https://img.shields.io/badge/lang-日本語-red.svg)](./README.md) [![English](https://img.shields.io/badge/lang-English-blue.svg)](./README_en.md)
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
 ![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8)
@@ -9,53 +9,53 @@
 ![GitHub Stars](https://img.shields.io/github/stars/youichi-uda/sbomhub)
 
 <p align="center">
-  <img src="docs/images/dashboard.png" alt="SBOMHub Dashboard" width="800">
+  <img src="docs/images/dashboard.png" alt="SBOMHub ダッシュボード" width="800">
 </p>
 
-## What is SBOMHub?
+## SBOMHubとは？
 
-SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard designed for the Japanese market. It helps you:
+SBOMHubは、日本市場向けに設計されたオープンソースのSBOM（ソフトウェア部品表）管理ダッシュボードです。
 
-- **Import** SBOMs from Syft, cdxgen, Trivy, and more (CycloneDX/SPDX)
-- **Track** vulnerabilities with NVD and JVN (Japan) integration
-- **Prioritize** with EPSS exploit prediction scores
-- **Manage** VEX statements for vulnerability triage
-- **Comply** with METI guidelines (Japan) and EU CRA requirements
-- **Enforce** license policies across your projects
-- **Alert** your team via Slack/Discord/Email
+- Syft、cdxgen、Trivyなどで生成したSBOMを**インポート**（CycloneDX/SPDX対応）
+- NVD・JVNと連携して**脆弱性を追跡**
+- EPSSスコアで**対応優先度を判断**
+- VEXステートメントで**脆弱性トリアージを管理**
+- **経産省ガイドライン**・EU CRAへの準拠を支援
+- **ライセンスポリシー**でプロジェクト全体を管理
+- Slack/Discord/Emailで**チームに通知**
 
-## Features
+## 機能一覧
 
-| Feature | Description |
-|---------|-------------|
-| Multi-format SBOM | Import CycloneDX and SPDX JSON |
-| Vulnerability Tracking | NVD + JVN integration for comprehensive coverage |
-| EPSS Scoring | Prioritize by exploit probability |
-| VEX Support | Document vulnerability applicability |
-| License Policies | Enforce allowed/denied licenses |
-| Compliance Scoring | METI guideline compliance check |
-| CI/CD Integration | GitHub Actions support with API keys |
-| Japanese UI | Full Japanese language support |
+| 機能 | 説明 |
+|------|------|
+| マルチフォーマットSBOM | CycloneDX・SPDX JSONに対応 |
+| 脆弱性トラッキング | NVD + JVN連携で網羅的にカバー |
+| EPSSスコアリング | 悪用可能性に基づく優先度付け |
+| VEXサポート | 脆弱性の適用可否を記録 |
+| ライセンスポリシー | 許可/拒否ライセンスの管理 |
+| コンプライアンススコア | 経産省ガイドライン準拠度チェック |
+| CI/CD連携 | GitHub Actions対応（APIキー認証） |
+| 日本語UI | 完全日本語対応 |
 
-## Quick Start
+## クイックスタート
 
-### SaaS Version (Recommended)
+### SaaS版（おすすめ）
 
-Try SBOMHub instantly without installation: **https://sbomhub.app**
+インストール不要ですぐに試せます: **https://sbomhub.app**
 
-- No setup required
-- Free tier available
-- Managed infrastructure with automatic updates
+- セットアップ不要
+- 無料プランあり
+- 自動アップデート付きマネージドインフラ
 
-### Docker Compose (Self-hosted)
+### Docker Compose（セルフホスト）
 
 ```bash
-# Download and start (no clone needed)
+# ダウンロードして起動（クローン不要）
 curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
 docker compose up -d
 ```
 
-Or clone and run:
+または、クローンして起動：
 
 ```bash
 git clone https://github.com/youichi-uda/sbomhub.git
@@ -63,48 +63,48 @@ cd sbomhub
 docker compose up -d
 ```
 
-Open http://localhost:3000
+http://localhost:3000 を開く
 
-### From Source
+### ソースからビルド
 
-**Prerequisites:**
+**前提条件:**
 - Go 1.22+
 - Node.js 20+ / pnpm
 - PostgreSQL 15+
 - Redis 7+
 
 ```bash
-# Start database
+# データベースを起動
 docker compose -f docker/docker-compose.yml up -d postgres redis
 
-# Backend
+# バックエンド
 cd apps/api
 go run ./cmd/server
 
-# Frontend (new terminal)
+# フロントエンド（別ターミナル）
 cd apps/web
 pnpm install
 pnpm dev
 ```
 
-## Screenshots
+## スクリーンショット
 
 <details>
-<summary>Dashboard</summary>
+<summary>ダッシュボード</summary>
 <img src="docs/images/dashboard.png" width="600">
 </details>
 
 <details>
-<summary>Vulnerability List</summary>
+<summary>脆弱性一覧</summary>
 <img src="docs/images/vulnerabilities.png" width="600">
 </details>
 
 <details>
-<summary>Compliance Score</summary>
+<summary>コンプライアンススコア</summary>
 <img src="docs/images/compliance.png" width="600">
 </details>
 
-## Architecture
+## アーキテクチャ
 
 ```
 ┌─────────────────┐     ┌─────────────────┐
@@ -120,25 +120,25 @@ pnpm dev
              └───────────┘ └───────────┘ └───────────┘
 ```
 
-## API Reference
+## APIリファレンス
 
-See [API Documentation](./docs/api.md)
+詳細は[APIドキュメント](./docs/api.md)を参照
 
-### Core Endpoints
+### 主要エンドポイント
 
 ```
-POST   /api/v1/projects              # Create project
-GET    /api/v1/projects              # List projects
-GET    /api/v1/projects/:id          # Get project
-DELETE /api/v1/projects/:id          # Delete project
+POST   /api/v1/projects              # プロジェクト作成
+GET    /api/v1/projects              # プロジェクト一覧
+GET    /api/v1/projects/:id          # プロジェクト詳細
+DELETE /api/v1/projects/:id          # プロジェクト削除
 
-POST   /api/v1/projects/:id/sbom     # Upload SBOM
+POST   /api/v1/projects/:id/sbom     # SBOMアップロード
 GET    /api/v1/projects/:id/components
 GET    /api/v1/projects/:id/vulnerabilities
-GET    /api/v1/projects/:id/vex      # VEX statements
+GET    /api/v1/projects/:id/vex      # VEXステートメント
 ```
 
-## CI/CD Integration
+## CI/CD連携
 
 ### GitHub Actions
 
@@ -166,163 +166,154 @@ jobs:
             ${{ secrets.SBOMHUB_URL }}/api/v1/projects/${{ secrets.PROJECT_ID }}/sbom
 ```
 
-## Documentation
+## ドキュメント
 
-- [Installation Guide](./docs/installation.md)
-- [Configuration](./docs/configuration.md)
-- [API Reference](./docs/api.md)
-- [GitHub Actions Integration](./docs/github-actions.md)
+- [インストールガイド](./docs/installation.ja.md)
+- [設定](./docs/configuration.ja.md)
+- [APIリファレンス](./docs/api.ja.md)
+- [GitHub Actions連携](./docs/github-actions.ja.md)
 
-## Roadmap
+## ロードマップ
 
-- [x] SBOM Import (CycloneDX/SPDX)
-- [x] NVD/JVN Vulnerability Matching
-- [x] EPSS Scoring
-- [x] VEX Support
-- [x] License Policies
-- [x] Compliance Scoring (METI Guidelines)
-- [x] CI/CD Integration (GitHub Actions)
-- [x] Notifications (Slack/Discord)
-- [x] Multi-tenancy (Row-Level Security)
-- [x] Clerk Authentication Integration
-- [x] Lemon Squeezy Billing Integration
-- [x] SBOMHub Cloud (Managed SaaS)
-- [ ] LDAP/OIDC Authentication (Self-hosted)
+- [x] SBOMインポート（CycloneDX/SPDX）
+- [x] NVD/JVN脆弱性マッチング
+- [x] EPSSスコアリング
+- [x] VEXサポート
+- [x] ライセンスポリシー
+- [x] コンプライアンススコア（経産省ガイドライン）
+- [x] CI/CD連携（GitHub Actions）
+- [x] 通知機能（Slack/Discord）
+- [x] マルチテナント対応（Row-Level Security）
+- [x] Clerk認証連携
+- [x] Lemon Squeezy課金連携
+- [x] SBOMHub Cloud（マネージドSaaS）
+- [ ] LDAP/OIDC認証（セルフホスト向け）
 
-## Contributing
+## コントリビューション
 
-Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+コントリビューションを歓迎します！詳細は[CONTRIBUTING.md](./CONTRIBUTING.md)をご覧ください。
 
-## License
+## ライセンス
 
-This project is licensed under the [AGPL-3.0 License](./LICENSE).
+本プロジェクトは[AGPL-3.0ライセンス](./LICENSE)の下で公開されています。
 
-| Use Case | Allowed | Notes |
-|----------|---------|-------|
-| Self-hosted (internal use) | ✅ | No source disclosure required |
-| Self-hosted (with modifications) | ✅ | Modified source must be disclosed |
-| Providing as SaaS to third parties | ⚠️ | Full source code must be disclosed under AGPL |
-| Official SBOMHub Cloud | ✅ | Provided by the maintainers |
+## 技術スタック
 
-> **Note**: If you want to offer SBOMHub as a commercial SaaS without AGPL obligations, please contact us for a commercial license.
+| レイヤー | 技術 | バージョン |
+|---------|------|-----------|
+| バックエンド | Go (Echo v4) | 1.22+ |
+| フロントエンド | Next.js (App Router) | 16 |
+| UIフレームワーク | React | 19 |
+| 言語 | TypeScript | 5.7 |
+| UIコンポーネント | shadcn/ui | 最新 |
+| スタイリング | Tailwind CSS | 3.4 |
+| データベース | PostgreSQL | 15+ |
+| キャッシュ | Redis | 7+ |
+| 国際化 | next-intl | 最新 |
+| フォームバリデーション | react-hook-form + zod | 最新 |
 
-## Tech Stack
+## 開発
 
-| Layer | Technology | Version |
-|-------|------------|---------|
-| Backend | Go (Echo v4) | 1.22+ |
-| Frontend | Next.js (App Router) | 16 |
-| UI Framework | React | 19 |
-| Language | TypeScript | 5.7 |
-| UI Components | shadcn/ui | Latest |
-| Styling | Tailwind CSS | 3.4 |
-| Database | PostgreSQL | 15+ |
-| Cache | Redis | 7+ |
-| i18n | next-intl | Latest |
-| Form Validation | react-hook-form + zod | Latest |
-
-## Development
-
-### Prerequisites
+### 必要環境
 
 - Go 1.22+
-- Node.js 20+ with pnpm
+- Node.js 20+ と pnpm
 - PostgreSQL 15+
 - Redis 7+
-- Docker & Docker Compose (optional)
+- Docker & Docker Compose（オプション）
 
-### Project Structure
+### プロジェクト構造
 
 ```
 sbomhub/
 ├── apps/
-│   ├── web/          # Next.js frontend
-│   └── api/          # Go backend
+│   ├── web/          # Next.js フロントエンド
+│   └── api/          # Go バックエンド
 ├── packages/
-│   ├── db/           # DB schema and migrations
-│   └── types/        # Shared TypeScript types
-├── docker/           # Docker configurations
-├── docs/             # Documentation
-└── .github/workflows/  # CI/CD pipelines
+│   ├── db/           # DBスキーマとマイグレーション
+│   └── types/        # 共有TypeScript型定義
+├── docker/           # Docker設定
+├── docs/             # ドキュメント
+└── .github/workflows/  # CI/CDパイプライン
 ```
 
-### Common Commands
+### よく使うコマンド
 
 ```bash
-# Start development servers
-cd apps/web && pnpm dev      # Frontend (http://localhost:3000)
-cd apps/api && go run ./cmd/server  # Backend (http://localhost:8080)
+# 開発サーバー起動
+cd apps/web && pnpm dev      # フロントエンド (http://localhost:3000)
+cd apps/api && go run ./cmd/server  # バックエンド (http://localhost:8080)
 
-# Database
-docker compose up -d postgres redis  # Start DB
-cd apps/api && go run ./cmd/migrate up  # Run migrations
+# データベース
+docker compose up -d postgres redis  # DB起動
+cd apps/api && go run ./cmd/migrate up  # マイグレーション実行
 
-# Testing
-cd apps/api && go test ./...   # Backend tests
-cd apps/web && pnpm test       # Frontend tests
+# テスト
+cd apps/api && go test ./...   # バックエンドテスト
+cd apps/web && pnpm test       # フロントエンドテスト
 
-# Linting
-cd apps/api && golangci-lint run   # Go linting
-cd apps/web && pnpm lint           # TypeScript linting
+# Lint
+cd apps/api && golangci-lint run   # Go lint
+cd apps/web && pnpm lint           # TypeScript lint
 
-# Build
-docker compose build           # Build all containers
+# ビルド
+docker compose build           # 全コンテナビルド
 ```
 
-### Code Style
+### コードスタイル
 
 - **Go**: gofmt, golangci-lint
 - **TypeScript**: ESLint, Prettier
-- **Commits**: [Conventional Commits](https://www.conventionalcommits.org/)
+- **コミット**: [Conventional Commits](https://www.conventionalcommits.org/ja/)
 
-## Claude Code Integration
+## Claude Code連携
 
-This project includes [Claude Code](https://claude.ai/code) skills for AI-assisted development.
+本プロジェクトには、AI支援開発のための[Claude Code](https://claude.ai/code)スキルが導入されています。
 
-### Installed Skills
+### 導入済みスキル
 
-| Category | Source | Description |
-|----------|--------|-------------|
-| Security | [Trail of Bits](https://github.com/trailofbits/skills) | Security audits, vulnerability detection, static analysis |
-| Go Development | [Gopher AI](https://github.com/gopherguides/gopher-ai) | Go best practices, testing patterns |
-| React/Next.js | [Vercel Agent Skills](https://github.com/vercel-labs/agent-skills) | Performance optimization (57+ rules) |
-| Workflows | [Claude Code SDK](https://github.com/hgeldenhuys/claude-code-sdk) | CI/CD, testing, code review patterns |
+| カテゴリ | ソース | 説明 |
+|---------|--------|------|
+| セキュリティ | [Trail of Bits](https://github.com/trailofbits/skills) | セキュリティ監査、脆弱性検出、静的解析 |
+| Go開発 | [Gopher AI](https://github.com/gopherguides/gopher-ai) | Goベストプラクティス、テストパターン |
+| React/Next.js | [Vercel Agent Skills](https://github.com/vercel-labs/agent-skills) | パフォーマンス最適化（57以上のルール） |
+| ワークフロー | [Claude Code SDK](https://github.com/hgeldenhuys/claude-code-sdk) | CI/CD、テスト、コードレビューパターン |
 
-### Key Skills for This Project
+### このプロジェクト向けの主要スキル
 
-- **differential-review** - Security-focused PR review
-- **go-best-practices** - Idiomatic Go patterns
-- **react-best-practices** - React/Next.js optimization
-- **ci-cd-integration** - Pipeline automation
-- **monorepo-patterns** - Monorepo workflows
+- **differential-review** - セキュリティ重視のPRレビュー
+- **go-best-practices** - 慣用的なGoパターン
+- **react-best-practices** - React/Next.js最適化
+- **ci-cd-integration** - パイプライン自動化
+- **monorepo-patterns** - モノレポワークフロー
 
-Skills are located in `.claude/skills/` and are automatically detected by Claude Code.
+スキルは `.claude/skills/` に配置され、Claude Codeによって自動検出されます。
 
-## Security
+## セキュリティ
 
-### Reporting Vulnerabilities
+### 脆弱性の報告
 
-If you discover a security vulnerability, please report it via:
+セキュリティ脆弱性を発見した場合は、以下の方法で報告してください：
 
-1. **GitHub Security Advisories**: [Report a vulnerability](https://github.com/youichi-uda/sbomhub/security/advisories/new)
-2. **Email**: security@sbomhub.app (for sensitive issues)
+1. **GitHub Security Advisories**: [脆弱性を報告](https://github.com/youichi-uda/sbomhub/security/advisories/new)
+2. **メール**: security@sbomhub.app（機密性の高い問題の場合）
 
-Please do NOT report security vulnerabilities through public GitHub issues.
+公開のGitHub Issueでセキュリティ脆弱性を報告しないでください。
 
-### Security Features
+### セキュリティ機能
 
-- Row-Level Security (RLS) for multi-tenancy
-- API key authentication for CI/CD integration
-- HTTPS enforcement in production
-- Input validation with zod schemas
-- SQL injection prevention with parameterized queries
+- マルチテナント向けRow-Level Security (RLS)
+- CI/CD連携用APIキー認証
+- 本番環境でのHTTPS強制
+- zodスキーマによる入力バリデーション
+- パラメータ化クエリによるSQLインジェクション防止
 
-## Acknowledgements
+## 謝辞
 
-- [CycloneDX](https://cyclonedx.org/) - SBOM specification
-- [SPDX](https://spdx.dev/) - SBOM specification
+- [CycloneDX](https://cyclonedx.org/) - SBOM仕様
+- [SPDX](https://spdx.dev/) - SBOM仕様
 - [NVD](https://nvd.nist.gov/) - National Vulnerability Database
 - [JVN](https://jvn.jp/) - Japan Vulnerability Notes
 - [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
-- [Trail of Bits](https://github.com/trailofbits/skills) - Security skills for Claude Code
-- [Vercel](https://github.com/vercel-labs/agent-skills) - React best practices
+- [Trail of Bits](https://github.com/trailofbits/skills) - Claude Code向けセキュリティスキル
+- [Vercel](https://github.com/vercel-labs/agent-skills) - Reactベストプラクティス
