@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	clerkjwks "github.com/clerk/clerk-sdk-go/v2/jwks"
 	clerkjwt "github.com/clerk/clerk-sdk-go/v2/jwt"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -247,15 +248,26 @@ func verifyClerkJWT(ctx context.Context, token, secretKey string) (*ClerkClaims,
 	}
 	slog.Debug("Token decoded", "key_id", decoded.KeyID)
 
-	// Fetch the JSON Web Key for verification
-	jwk, err := clerkjwt.GetJSONWebKey(ctx, &clerkjwt.GetJSONWebKeyParams{
-		KeyID: decoded.KeyID,
-	})
+	// Fetch the JSON Web Key Set using jwks client
+	jwksClient := clerkjwks.NewClient(nil)
+	jwkSet, err := jwksClient.Get(ctx, &clerkjwks.GetParams{})
 	if err != nil {
-		slog.Error("Failed to fetch JWK", "error", err, "key_id", decoded.KeyID)
-		return nil, fmt.Errorf("failed to fetch JWK: %w", err)
+		slog.Error("Failed to fetch JWKS", "error", err)
+		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
-	slog.Debug("JWK fetched", "jwk_nil", jwk == nil)
+	slog.Debug("JWKS fetched", "keys_count", len(jwkSet.Keys))
+
+	// Find the key matching the token's key ID
+	var jwk *clerkjwks.JSONWebKey
+	for i := range jwkSet.Keys {
+		if jwkSet.Keys[i].KeyID == decoded.KeyID {
+			jwk = &jwkSet.Keys[i]
+			break
+		}
+	}
+	if jwk == nil {
+		return nil, fmt.Errorf("JWK not found for key ID: %s", decoded.KeyID)
+	}
 
 	// Verify the token with the JWK
 	claims, err := clerkjwt.Verify(ctx, &clerkjwt.VerifyParams{
