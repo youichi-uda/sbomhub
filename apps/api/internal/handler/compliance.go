@@ -77,21 +77,21 @@ func (h *ComplianceHandler) ExportReport(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
-		filename := fmt.Sprintf("compliance-report-%s-%s.txt", projectID.String()[:8], time.Now().Format("20060102"))
-		c.Response().Header().Set("Content-Type", "text/plain; charset=utf-8")
+		filename := fmt.Sprintf("compliance-report-%s-%s.pdf", projectID.String()[:8], time.Now().Format("20060102"))
+		c.Response().Header().Set("Content-Type", "application/pdf")
 		c.Response().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		c.Response().Header().Set("Content-Length", strconv.Itoa(len(data)))
-		return c.Blob(http.StatusOK, "text/plain", data)
+		return c.Blob(http.StatusOK, "application/pdf", data)
 	case "xlsx":
 		data, err := h.complianceService.GenerateComplianceExcel(c.Request().Context(), projectID, result)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
-		filename := fmt.Sprintf("compliance-report-%s-%s.csv", projectID.String()[:8], time.Now().Format("20060102"))
-		c.Response().Header().Set("Content-Type", "text/csv; charset=utf-8")
+		filename := fmt.Sprintf("compliance-report-%s-%s.xlsx", projectID.String()[:8], time.Now().Format("20060102"))
+		c.Response().Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 		c.Response().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		c.Response().Header().Set("Content-Length", strconv.Itoa(len(data)))
-		return c.Blob(http.StatusOK, "text/csv", data)
+		return c.Blob(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 	default:
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "unsupported format"})
 	}

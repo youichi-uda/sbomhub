@@ -798,14 +798,22 @@ export default function CompliancePage() {
             <Download className="h-4 w-4 mr-2" />
             JSON
           </a>
-          <Button variant="outline" disabled>
+          <a
+            href={api.projects.exportComplianceReport(projectId, "pdf")}
+            download
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
+          >
             <Download className="h-4 w-4 mr-2" />
-            PDF (準備中)
-          </Button>
-          <Button variant="outline" disabled>
+            PDF
+          </a>
+          <a
+            href={api.projects.exportComplianceReport(projectId, "xlsx")}
+            download
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
+          >
             <Download className="h-4 w-4 mr-2" />
-            Excel (準備中)
-          </Button>
+            Excel
+          </a>
         </CardContent>
       </Card>
     </div>

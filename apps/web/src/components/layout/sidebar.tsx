@@ -8,21 +8,22 @@ import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileTex
 
 export function Sidebar() {
   const t = useTranslations("Navigation");
+  const tSettings = useTranslations("Settings.APIKeys");
   const pathname = usePathname();
 
   const links = [
-    { href: "/dashboard", icon: LayoutDashboard, label: "ダッシュボード" },
-    { href: "/analytics", icon: TrendingUp, label: "トレンド分析" },
-    { href: "/reports", icon: FileText, label: "レポート" },
-    { href: "/search", icon: Search, label: "横断検索" },
+    { href: "/dashboard", icon: LayoutDashboard, label: t("dashboard") },
+    { href: "/analytics", icon: TrendingUp, label: t("analytics") },
+    { href: "/reports", icon: FileText, label: t("reports") },
+    { href: "/search", icon: Search, label: t("search") },
     { href: "/projects", icon: FolderOpen, label: t("projects") },
-    { href: "/audit", icon: ClipboardList, label: "監査ログ" },
-    { href: "/billing", icon: CreditCard, label: "プラン・お支払い" },
+    { href: "/audit", icon: ClipboardList, label: t("audit") },
+    { href: "/billing", icon: CreditCard, label: t("billing") },
   ];
 
   const settingsLinks = [
-    { href: "/settings/apikeys", icon: Key, label: "APIキー" },
-    { href: "/settings/integrations", icon: Plug, label: "外部連携" },
+    { href: "/settings/apikeys", icon: Key, label: tSettings("title") },
+    { href: "/settings/integrations", icon: Plug, label: t("integrations") },
   ];
 
   return (
@@ -54,7 +55,7 @@ export function Sidebar() {
       <div className="mt-8 pt-4 border-t border-gray-700">
         <div className="flex items-center gap-2 px-3 mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
           <Settings className="h-4 w-4" />
-          設定
+          {t("settings")}
         </div>
         <nav className="space-y-1">
           {settingsLinks.map((link) => {

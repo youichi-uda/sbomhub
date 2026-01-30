@@ -10,8 +10,18 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/johnfercher/maroto/v2"
+	"github.com/johnfercher/maroto/v2/pkg/components/col"
+	"github.com/johnfercher/maroto/v2/pkg/components/row"
+	"github.com/johnfercher/maroto/v2/pkg/components/text"
+	"github.com/johnfercher/maroto/v2/pkg/config"
+	"github.com/johnfercher/maroto/v2/pkg/consts/align"
+	"github.com/johnfercher/maroto/v2/pkg/consts/fontstyle"
+	"github.com/johnfercher/maroto/v2/pkg/core"
+	"github.com/johnfercher/maroto/v2/pkg/props"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/xuri/excelize/v2"
 )
 
 type ComplianceService struct {
@@ -803,71 +813,332 @@ func (s *ComplianceService) GetMinimumElementsCoverage(ctx context.Context, proj
 	}, nil
 }
 
-// GenerateCompliancePDF generates a PDF compliance report
+// GenerateCompliancePDF generates a PDF compliance report using maroto
 func (s *ComplianceService) GenerateCompliancePDF(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
-	// Simplified text-based report (in production, use maroto library for proper PDF)
-	content := fmt.Sprintf(`
-経済産業省 ソフトウェア管理ガイドライン
-コンプライアンス評価レポート
-======================================
+	cfg := config.NewBuilder().
+		WithPageNumber().
+		WithLeftMargin(15).
+		WithTopMargin(15).
+		WithRightMargin(15).
+		Build()
 
-プロジェクトID: %s
-評価日時: %s
-総合スコア: %d / %d (%.1f%%)
+	m := maroto.New(cfg)
 
-`,
-		projectID.String(),
-		time.Now().Format("2006-01-02 15:04:05"),
-		result.Score, result.MaxScore,
-		float64(result.Score)/float64(result.MaxScore)*100,
-	)
+	// Title
+	m.AddRows(s.buildCompliancePDFTitle("経産省SBOMガイドライン コンプライアンスレポート"))
 
+	// Metadata
+	m.AddRows(s.buildCompliancePDFSubtitle(fmt.Sprintf("プロジェクトID: %s", projectID.String()[:8])))
+	m.AddRows(s.buildCompliancePDFSubtitle(fmt.Sprintf("評価日時: %s", time.Now().Format("2006-01-02 15:04"))))
+
+	// Summary Section
+	pct := 0.0
+	if result.MaxScore > 0 {
+		pct = float64(result.Score) / float64(result.MaxScore) * 100
+	}
+	m.AddRows(s.buildCompliancePDFSectionHeader("総合スコア"))
+	m.AddRows(s.buildCompliancePDFKeyValue("スコア", fmt.Sprintf("%d / %d (%.0f%%)", result.Score, result.MaxScore, pct)))
+
+	// Categories
+	m.AddRows(s.buildCompliancePDFSectionHeader("カテゴリ別評価"))
 	for _, category := range result.Categories {
-		content += fmt.Sprintf(`
-%s
---------------------
-スコア: %d / %d
+		catPct := 0.0
+		if category.MaxScore > 0 {
+			catPct = float64(category.Score) / float64(category.MaxScore) * 100
+		}
+		m.AddRows(s.buildCompliancePDFKeyValue(category.Label, fmt.Sprintf("%d / %d (%.0f%%)", category.Score, category.MaxScore, catPct)))
+	}
 
-チェック項目:
-`, category.Label, category.Score, category.MaxScore)
-
+	// Checklist Details
+	m.AddRows(s.buildCompliancePDFSectionHeader("チェック項目詳細"))
+	for _, category := range result.Categories {
+		m.AddRows(s.buildCompliancePDFSubsection(category.Label))
 		for _, check := range category.Checks {
-			status := "[ ] 未達成"
-			if check.Passed {
-				status = "[✓] 達成"
+			status := "○"
+			if !check.Passed {
+				status = "×"
 			}
-			content += fmt.Sprintf("  %s %s\n", status, check.Label)
-			if check.Details != nil && *check.Details != "" {
-				content += fmt.Sprintf("      詳細: %s\n", *check.Details)
-			}
+			m.AddRows(s.buildCompliancePDFCheckItem(status, check.Label))
 		}
 	}
 
-	content += `
-======================================
-推奨事項:
-
-`
+	// Recommendations
+	hasFailures := false
 	for _, category := range result.Categories {
 		for _, check := range category.Checks {
 			if !check.Passed {
-				content += fmt.Sprintf("- %s: %s\n", check.Label, getRecommendation(check.ID))
+				hasFailures = true
+				break
 			}
 		}
 	}
 
-	content += `
-本レポートは経済産業省「ソフトウェア管理に向けたSBOM（Software Bill of Materials）
-の導入に関する手引」に基づいて作成されています。
+	if hasFailures {
+		m.AddRows(s.buildCompliancePDFSectionHeader("推奨事項"))
+		for _, category := range result.Categories {
+			for _, check := range category.Checks {
+				if !check.Passed {
+					m.AddRows(s.buildCompliancePDFRecommendation(check.Label, getRecommendation(check.ID)))
+				}
+			}
+		}
+	}
 
-生成元: SBOMHub
-`
+	// Footer
+	m.AddRows(s.buildCompliancePDFFooter())
 
-	return []byte(content), nil
+	// Generate PDF
+	doc, err := m.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate PDF: %w", err)
+	}
+
+	return doc.GetBytes(), nil
 }
 
-// GenerateComplianceExcel generates an Excel/CSV compliance report
+// PDF helper functions for compliance
+func (s *ComplianceService) buildCompliancePDFTitle(title string) core.Row {
+	return row.New(12).Add(
+		col.New(12).Add(
+			text.New(title, props.Text{
+				Size:  16,
+				Style: fontstyle.Bold,
+				Align: align.Center,
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFSubtitle(subtitle string) core.Row {
+	return row.New(6).Add(
+		col.New(12).Add(
+			text.New(subtitle, props.Text{
+				Size:  10,
+				Align: align.Center,
+				Color: &props.Color{Red: 100, Green: 100, Blue: 100},
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFSectionHeader(header string) core.Row {
+	return row.New(10).Add(
+		col.New(12).Add(
+			text.New(header, props.Text{
+				Size:  12,
+				Style: fontstyle.Bold,
+				Top:   5,
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFSubsection(header string) core.Row {
+	return row.New(7).Add(
+		col.New(12).Add(
+			text.New("■ "+header, props.Text{
+				Size:  10,
+				Style: fontstyle.Bold,
+				Top:   3,
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFKeyValue(key, value string) core.Row {
+	return row.New(6).Add(
+		col.New(6).Add(
+			text.New(key, props.Text{
+				Size: 10,
+			}),
+		),
+		col.New(6).Add(
+			text.New(value, props.Text{
+				Size:  10,
+				Align: align.Right,
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFCheckItem(status, label string) core.Row {
+	return row.New(5).Add(
+		col.New(1).Add(
+			text.New(status, props.Text{
+				Size:  10,
+				Align: align.Center,
+			}),
+		),
+		col.New(11).Add(
+			text.New(label, props.Text{
+				Size: 9,
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFRecommendation(label, recommendation string) core.Row {
+	return row.New(8).Add(
+		col.New(12).Add(
+			text.New(fmt.Sprintf("・%s: %s", label, recommendation), props.Text{
+				Size: 9,
+			}),
+		),
+	)
+}
+
+func (s *ComplianceService) buildCompliancePDFFooter() core.Row {
+	return row.New(10).Add(
+		col.New(12).Add(
+			text.New("※本レポートは経済産業省「ソフトウェア管理に向けたSBOM導入に関する手引」に基づく自己評価です", props.Text{
+				Size:  8,
+				Align: align.Center,
+				Top:   5,
+				Color: &props.Color{Red: 100, Green: 100, Blue: 100},
+			}),
+		),
+	)
+}
+
+// GenerateComplianceExcel generates an Excel compliance report using excelize
 func (s *ComplianceService) GenerateComplianceExcel(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
+	f := excelize.NewFile()
+	defer f.Close()
+
+	// Create Summary sheet
+	sheetName := "サマリー"
+	f.SetSheetName("Sheet1", sheetName)
+
+	// Set column widths
+	f.SetColWidth(sheetName, "A", "A", 25)
+	f.SetColWidth(sheetName, "B", "B", 35)
+
+	// Header style
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Size: 14, Color: "#FFFFFF"},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#4472C4"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
+	})
+
+	// Title
+	f.MergeCell(sheetName, "A1", "B1")
+	f.SetCellValue(sheetName, "A1", "経産省SBOMガイドライン コンプライアンスレポート")
+	f.SetCellStyle(sheetName, "A1", "B1", headerStyle)
+	f.SetRowHeight(sheetName, 1, 30)
+
+	// Metadata
+	f.SetCellValue(sheetName, "A3", "プロジェクトID")
+	f.SetCellValue(sheetName, "B3", projectID.String()[:8])
+	f.SetCellValue(sheetName, "A4", "評価日時")
+	f.SetCellValue(sheetName, "B4", time.Now().Format("2006-01-02 15:04:05"))
+
+	// Summary
+	pct := 0.0
+	if result.MaxScore > 0 {
+		pct = float64(result.Score) / float64(result.MaxScore) * 100
+	}
+	f.SetCellValue(sheetName, "A6", "総合スコア")
+	f.SetCellValue(sheetName, "B6", fmt.Sprintf("%d / %d (%.0f%%)", result.Score, result.MaxScore, pct))
+
+	// Category scores
+	row := 8
+	f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "カテゴリ別スコア")
+	f.SetCellStyle(sheetName, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), headerStyle)
+	row++
+
+	for _, category := range result.Categories {
+		catPct := 0.0
+		if category.MaxScore > 0 {
+			catPct = float64(category.Score) / float64(category.MaxScore) * 100
+		}
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), category.Label)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), fmt.Sprintf("%d / %d (%.0f%%)", category.Score, category.MaxScore, catPct))
+		row++
+	}
+
+	// Create Details sheet
+	detailSheet := "チェック項目詳細"
+	f.NewSheet(detailSheet)
+	f.SetColWidth(detailSheet, "A", "A", 25)
+	f.SetColWidth(detailSheet, "B", "B", 40)
+	f.SetColWidth(detailSheet, "C", "C", 10)
+	f.SetColWidth(detailSheet, "D", "D", 30)
+	f.SetColWidth(detailSheet, "E", "E", 40)
+
+	// Headers
+	f.SetCellValue(detailSheet, "A1", "カテゴリ")
+	f.SetCellValue(detailSheet, "B1", "チェック項目")
+	f.SetCellValue(detailSheet, "C1", "結果")
+	f.SetCellValue(detailSheet, "D1", "詳細")
+	f.SetCellValue(detailSheet, "E1", "推奨事項")
+	f.SetCellStyle(detailSheet, "A1", "E1", headerStyle)
+
+	// Pass/Fail styles
+	passStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{Color: "#008000"},
+	})
+	failStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{Color: "#FF0000"},
+	})
+
+	// Data rows
+	row = 2
+	for _, category := range result.Categories {
+		for _, check := range category.Checks {
+			f.SetCellValue(detailSheet, fmt.Sprintf("A%d", row), category.Label)
+			f.SetCellValue(detailSheet, fmt.Sprintf("B%d", row), check.Label)
+
+			if check.Passed {
+				f.SetCellValue(detailSheet, fmt.Sprintf("C%d", row), "達成")
+				f.SetCellStyle(detailSheet, fmt.Sprintf("C%d", row), fmt.Sprintf("C%d", row), passStyle)
+			} else {
+				f.SetCellValue(detailSheet, fmt.Sprintf("C%d", row), "未達成")
+				f.SetCellStyle(detailSheet, fmt.Sprintf("C%d", row), fmt.Sprintf("C%d", row), failStyle)
+			}
+
+			if check.Details != nil {
+				f.SetCellValue(detailSheet, fmt.Sprintf("D%d", row), *check.Details)
+			}
+
+			if !check.Passed {
+				f.SetCellValue(detailSheet, fmt.Sprintf("E%d", row), getRecommendation(check.ID))
+			}
+			row++
+		}
+	}
+
+	// Create Recommendations sheet
+	recSheet := "推奨事項"
+	f.NewSheet(recSheet)
+	f.SetColWidth(recSheet, "A", "A", 40)
+	f.SetColWidth(recSheet, "B", "B", 50)
+
+	f.SetCellValue(recSheet, "A1", "未達成項目")
+	f.SetCellValue(recSheet, "B1", "推奨事項")
+	f.SetCellStyle(recSheet, "A1", "B1", headerStyle)
+
+	row = 2
+	for _, category := range result.Categories {
+		for _, check := range category.Checks {
+			if !check.Passed {
+				f.SetCellValue(recSheet, fmt.Sprintf("A%d", row), check.Label)
+				f.SetCellValue(recSheet, fmt.Sprintf("B%d", row), getRecommendation(check.ID))
+				row++
+			}
+		}
+	}
+
+	// Write to buffer
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		return nil, fmt.Errorf("failed to write Excel: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// Deprecated: Keep for backward compatibility
+func (s *ComplianceService) GenerateComplianceCSV(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
 

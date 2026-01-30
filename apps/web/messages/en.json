@@ -144,7 +144,9 @@
     "reports": "Reports",
     "search": "Cross Search",
     "audit": "Audit Logs",
-    "billing": "Plans & Billing"
+    "billing": "Plans & Billing",
+    "settings": "Settings",
+    "integrations": "Integrations"
   },
   "Projects": {
     "title": "Projects",

@@ -144,7 +144,9 @@
     "reports": "レポート",
     "search": "横断検索",
     "audit": "監査ログ",
-    "billing": "プラン・お支払い"
+    "billing": "プラン・お支払い",
+    "settings": "設定",
+    "integrations": "外部連携"
   },
   "Projects": {
     "title": "プロジェクト",
