@@ -241,9 +241,9 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 	var fileData []byte
 	switch report.Format {
 	case model.ReportFormatPDF:
-		fileData, err = s.generatePDF(data)
+		fileData, err = s.generatePDF(data, report.ReportType)
 	case model.ReportFormatXLSX:
-		fileData, err = s.generateExcel(data)
+		fileData, err = s.generateExcel(data, report.ReportType)
 	default:
 		err = fmt.Errorf("unsupported format: %s", report.Format)
 	}
@@ -444,7 +444,7 @@ func (s *ReportService) gatherVisualizationData(ctx context.Context, tenantID uu
 }
 
 // generatePDF generates a PDF report using maroto
-func (s *ReportService) generatePDF(data *model.ExecutiveReportData) ([]byte, error) {
+func (s *ReportService) generatePDF(data *model.ExecutiveReportData, reportType string) ([]byte, error) {
 	// Load Japanese font from embedded assets (IPA Gothic)
 	fontBytes, err := assets.Fonts.ReadFile("fonts/IPAGothic.ttf")
 	if err != nil {
@@ -473,96 +473,25 @@ func (s *ReportService) generatePDF(data *model.ExecutiveReportData) ([]byte, er
 
 	m := maroto.New(cfg)
 
-	// Title
-	m.AddRows(s.buildPDFTitle("SBOMHub セキュリティレポート"))
+	// Title based on report type
+	title := s.getReportTitle(reportType)
+	m.AddRows(s.buildPDFTitle(title))
 	m.AddRows(s.buildPDFSubtitle(fmt.Sprintf("期間: %s 〜 %s",
 		data.PeriodStart.Format("2006-01-02"),
 		data.PeriodEnd.Format("2006-01-02"))))
 	m.AddRows(s.buildPDFSubtitle(fmt.Sprintf("生成日時: %s",
 		data.GeneratedAt.Format("2006-01-02 15:04"))))
 
-	// Summary Section
-	m.AddRows(s.buildPDFSectionHeader("サマリー"))
-	m.AddRows(s.buildPDFKeyValue("プロジェクト数", fmt.Sprintf("%d", data.Summary.TotalProjects)))
-	m.AddRows(s.buildPDFKeyValue("コンポーネント数", fmt.Sprintf("%d", data.Summary.TotalComponents)))
-	m.AddRows(s.buildPDFKeyValue("脆弱性総数", fmt.Sprintf("%d", data.Summary.TotalVulnerabilities)))
-	m.AddRows(s.buildPDFKeyValue("期間内解決数", fmt.Sprintf("%d", data.Summary.ResolvedInPeriod)))
-	m.AddRows(s.buildPDFKeyValue("平均MTTR", fmt.Sprintf("%.1f時間", data.Summary.AverageMTTRHours)))
-	m.AddRows(s.buildPDFKeyValue("SLO達成率", fmt.Sprintf("%.1f%%", data.Summary.SLOAchievementPct)))
-
-	// Vulnerability Section
-	m.AddRows(s.buildPDFSectionHeader("脆弱性内訳"))
-	m.AddRows(s.buildPDFKeyValue("Critical", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["CRITICAL"])))
-	m.AddRows(s.buildPDFKeyValue("High", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["HIGH"])))
-	m.AddRows(s.buildPDFKeyValue("Medium", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["MEDIUM"])))
-	m.AddRows(s.buildPDFKeyValue("Low", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["LOW"])))
-
-	// Compliance Section
-	m.AddRows(s.buildPDFSectionHeader("コンプライアンス"))
-	m.AddRows(s.buildPDFKeyValue("スコア", fmt.Sprintf("%d / %d",
-		data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore)))
-
-	// Top Risks Section
-	if len(data.TopRisks) > 0 {
-		m.AddRows(s.buildPDFSectionHeader("TOP リスク"))
-		for i, risk := range data.TopRisks {
-			if i >= 5 {
-				break
-			}
-			m.AddRows(s.buildPDFKeyValue(
-				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
-				fmt.Sprintf("%s - CVSS: %.1f, EPSS: %.2f%%",
-					risk.ProjectName, risk.CVSSScore, risk.EPSSScore*100),
-			))
-		}
-	}
-
-	// METI Checklist Section
-	if data.ChecklistData != nil {
-		m.AddRows(s.buildPDFSectionHeader("経産省ガイドライン チェックリスト"))
-		checklistPct := 0.0
-		if data.ChecklistData.MaxScore > 0 {
-			checklistPct = float64(data.ChecklistData.Score) / float64(data.ChecklistData.MaxScore) * 100
-		}
-		m.AddRows(s.buildPDFKeyValue("進捗", fmt.Sprintf("%d / %d (%.0f%%)",
-			data.ChecklistData.Score, data.ChecklistData.MaxScore, checklistPct)))
-
-		for _, phase := range data.ChecklistData.Phases {
-			phasePct := 0.0
-			if phase.MaxScore > 0 {
-				phasePct = float64(phase.Score) / float64(phase.MaxScore) * 100
-			}
-			m.AddRows(s.buildPDFKeyValue(
-				fmt.Sprintf("  %s", phase.LabelJa),
-				fmt.Sprintf("%d / %d (%.0f%%)", phase.Score, phase.MaxScore, phasePct),
-			))
-		}
-	}
-
-	// Visualization Framework Section
-	if data.VisualizationData != nil {
-		m.AddRows(s.buildPDFSectionHeader("SBOM可視化フレームワーク"))
-		vizOptions := model.GetVisualizationOptions()
-
-		// (a) SBOM作成主体
-		authorLabel := s.getVisualizationOptionLabel(vizOptions.SBOMAuthorScope, data.VisualizationData.SBOMAuthorScope)
-		m.AddRows(s.buildPDFKeyValue("SBOM作成主体", authorLabel))
-
-		// (b) 依存関係
-		depLabel := s.getVisualizationOptionLabel(vizOptions.DependencyScope, data.VisualizationData.DependencyScope)
-		m.AddRows(s.buildPDFKeyValue("依存関係", depLabel))
-
-		// (c) 生成手段
-		genLabel := s.getVisualizationOptionLabel(vizOptions.GenerationMethod, data.VisualizationData.GenerationMethod)
-		m.AddRows(s.buildPDFKeyValue("生成手段", genLabel))
-
-		// (d) データ様式
-		formatLabel := s.getVisualizationOptionLabel(vizOptions.DataFormat, data.VisualizationData.DataFormat)
-		m.AddRows(s.buildPDFKeyValue("データ様式", formatLabel))
-
-		// (f) 活用主体
-		actorLabel := s.getVisualizationOptionLabel(vizOptions.UtilizationActor, data.VisualizationData.UtilizationActor)
-		m.AddRows(s.buildPDFKeyValue("活用主体", actorLabel))
+	// Generate content based on report type
+	switch reportType {
+	case model.ReportTypeExecutive:
+		s.buildExecutivePDFContent(m, data)
+	case model.ReportTypeTechnical:
+		s.buildTechnicalPDFContent(m, data)
+	case model.ReportTypeCompliance:
+		s.buildCompliancePDFContent(m, data)
+	default:
+		s.buildExecutivePDFContent(m, data) // fallback to executive
 	}
 
 	// Generate PDF
@@ -572,6 +501,205 @@ func (s *ReportService) generatePDF(data *model.ExecutiveReportData) ([]byte, er
 	}
 
 	return doc.GetBytes(), nil
+}
+
+// getReportTitle returns the title for a report type
+func (s *ReportService) getReportTitle(reportType string) string {
+	switch reportType {
+	case model.ReportTypeExecutive:
+		return "SBOMHub エグゼクティブレポート"
+	case model.ReportTypeTechnical:
+		return "SBOMHub テクニカルレポート"
+	case model.ReportTypeCompliance:
+		return "SBOMHub コンプライアンスレポート"
+	default:
+		return "SBOMHub セキュリティレポート"
+	}
+}
+
+// buildExecutivePDFContent builds content for executive report (summary focused)
+func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.ExecutiveReportData) {
+	// Summary Section
+	m.AddRows(s.buildPDFSectionHeader("サマリー"))
+	m.AddRows(s.buildPDFKeyValue("プロジェクト数", fmt.Sprintf("%d", data.Summary.TotalProjects)))
+	m.AddRows(s.buildPDFKeyValue("コンポーネント数", fmt.Sprintf("%d", data.Summary.TotalComponents)))
+	m.AddRows(s.buildPDFKeyValue("脆弱性総数", fmt.Sprintf("%d", data.Summary.TotalVulnerabilities)))
+	m.AddRows(s.buildPDFKeyValue("期間内解決数", fmt.Sprintf("%d", data.Summary.ResolvedInPeriod)))
+	m.AddRows(s.buildPDFKeyValue("平均MTTR", fmt.Sprintf("%.1f時間", data.Summary.AverageMTTRHours)))
+	m.AddRows(s.buildPDFKeyValue("SLO達成率", fmt.Sprintf("%.1f%%", data.Summary.SLOAchievementPct)))
+
+	// Vulnerability Summary
+	m.AddRows(s.buildPDFSectionHeader("脆弱性内訳"))
+	m.AddRows(s.buildPDFKeyValue("Critical", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["CRITICAL"])))
+	m.AddRows(s.buildPDFKeyValue("High", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["HIGH"])))
+	m.AddRows(s.buildPDFKeyValue("Medium", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["MEDIUM"])))
+	m.AddRows(s.buildPDFKeyValue("Low", fmt.Sprintf("%d", data.VulnerabilityData.BySeverity["LOW"])))
+
+	// Compliance Score
+	m.AddRows(s.buildPDFSectionHeader("コンプライアンス"))
+	m.AddRows(s.buildPDFKeyValue("スコア", fmt.Sprintf("%d / %d",
+		data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore)))
+
+	// Top Risks (limited)
+	if len(data.TopRisks) > 0 {
+		m.AddRows(s.buildPDFSectionHeader("TOP リスク"))
+		for i, risk := range data.TopRisks {
+			if i >= 5 {
+				break
+			}
+			m.AddRows(s.buildPDFKeyValue(
+				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
+				fmt.Sprintf("%s - CVSS: %.1f", risk.ProjectName, risk.CVSSScore),
+			))
+		}
+	}
+}
+
+// buildTechnicalPDFContent builds content for technical report (detailed vulnerability info)
+func (s *ReportService) buildTechnicalPDFContent(m core.Maroto, data *model.ExecutiveReportData) {
+	// Summary Section
+	m.AddRows(s.buildPDFSectionHeader("サマリー"))
+	m.AddRows(s.buildPDFKeyValue("プロジェクト数", fmt.Sprintf("%d", data.Summary.TotalProjects)))
+	m.AddRows(s.buildPDFKeyValue("コンポーネント数", fmt.Sprintf("%d", data.Summary.TotalComponents)))
+	m.AddRows(s.buildPDFKeyValue("脆弱性総数", fmt.Sprintf("%d", data.Summary.TotalVulnerabilities)))
+
+	// Detailed Vulnerability Breakdown
+	m.AddRows(s.buildPDFSectionHeader("脆弱性 詳細内訳"))
+	m.AddRows(s.buildPDFKeyValue("Critical (緊急)", fmt.Sprintf("%d 件", data.VulnerabilityData.BySeverity["CRITICAL"])))
+	m.AddRows(s.buildPDFKeyValue("High (重要)", fmt.Sprintf("%d 件", data.VulnerabilityData.BySeverity["HIGH"])))
+	m.AddRows(s.buildPDFKeyValue("Medium (警告)", fmt.Sprintf("%d 件", data.VulnerabilityData.BySeverity["MEDIUM"])))
+	m.AddRows(s.buildPDFKeyValue("Low (注意)", fmt.Sprintf("%d 件", data.VulnerabilityData.BySeverity["LOW"])))
+
+	// Metrics
+	m.AddRows(s.buildPDFSectionHeader("セキュリティメトリクス"))
+	m.AddRows(s.buildPDFKeyValue("期間内解決数", fmt.Sprintf("%d", data.Summary.ResolvedInPeriod)))
+	m.AddRows(s.buildPDFKeyValue("平均MTTR", fmt.Sprintf("%.1f時間", data.Summary.AverageMTTRHours)))
+	m.AddRows(s.buildPDFKeyValue("SLO達成率", fmt.Sprintf("%.1f%%", data.Summary.SLOAchievementPct)))
+
+	// Extended Top Risks (more details)
+	if len(data.TopRisks) > 0 {
+		m.AddRows(s.buildPDFSectionHeader("TOP リスク 詳細"))
+		for i, risk := range data.TopRisks {
+			if i >= 10 {
+				break
+			}
+			m.AddRows(s.buildPDFKeyValue(
+				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
+				fmt.Sprintf("CVSS: %.1f, EPSS: %.2f%%", risk.CVSSScore, risk.EPSSScore*100),
+			))
+			m.AddRows(s.buildPDFKeyValue(
+				fmt.Sprintf("   プロジェクト"),
+				risk.ProjectName,
+			))
+			m.AddRows(s.buildPDFKeyValue(
+				fmt.Sprintf("   コンポーネント"),
+				risk.ComponentName,
+			))
+		}
+	}
+
+	// Trend Data Summary
+	if len(data.VulnerabilityData.TrendData) > 0 {
+		m.AddRows(s.buildPDFSectionHeader("脆弱性トレンド (直近7日)"))
+		count := len(data.VulnerabilityData.TrendData)
+		start := 0
+		if count > 7 {
+			start = count - 7
+		}
+		for i := start; i < count; i++ {
+			trend := data.VulnerabilityData.TrendData[i]
+			total := trend.Critical + trend.High + trend.Medium + trend.Low
+			m.AddRows(s.buildPDFKeyValue(
+				trend.Date.Format("2006-01-02"),
+				fmt.Sprintf("合計: %d (C:%d H:%d M:%d L:%d)",
+					total, trend.Critical, trend.High, trend.Medium, trend.Low),
+			))
+		}
+	}
+}
+
+// buildCompliancePDFContent builds content for compliance report (checklist & framework)
+func (s *ReportService) buildCompliancePDFContent(m core.Maroto, data *model.ExecutiveReportData) {
+	// Compliance Score Summary
+	m.AddRows(s.buildPDFSectionHeader("コンプライアンススコア"))
+	m.AddRows(s.buildPDFKeyValue("総合スコア", fmt.Sprintf("%d / %d",
+		data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore)))
+	if data.Summary.ComplianceMaxScore > 0 {
+		pct := float64(data.Summary.ComplianceScore) / float64(data.Summary.ComplianceMaxScore) * 100
+		m.AddRows(s.buildPDFKeyValue("達成率", fmt.Sprintf("%.1f%%", pct)))
+	}
+
+	// METI Checklist Section (detailed)
+	if data.ChecklistData != nil {
+		m.AddRows(s.buildPDFSectionHeader("経産省ガイドライン チェックリスト"))
+		checklistPct := 0.0
+		if data.ChecklistData.MaxScore > 0 {
+			checklistPct = float64(data.ChecklistData.Score) / float64(data.ChecklistData.MaxScore) * 100
+		}
+		m.AddRows(s.buildPDFKeyValue("総合進捗", fmt.Sprintf("%d / %d (%.0f%%)",
+			data.ChecklistData.Score, data.ChecklistData.MaxScore, checklistPct)))
+
+		// Phase details
+		for _, phase := range data.ChecklistData.Phases {
+			phasePct := 0.0
+			if phase.MaxScore > 0 {
+				phasePct = float64(phase.Score) / float64(phase.MaxScore) * 100
+			}
+			m.AddRows(s.buildPDFKeyValue(
+				phase.LabelJa,
+				fmt.Sprintf("%d / %d (%.0f%%)", phase.Score, phase.MaxScore, phasePct),
+			))
+
+			// Individual items
+			for _, item := range phase.Items {
+				status := "未完了"
+				if item.Passed {
+					status = "完了"
+				}
+				autoMark := ""
+				if item.AutoVerify {
+					autoMark = " [自動]"
+				}
+				m.AddRows(s.buildPDFKeyValue(
+					fmt.Sprintf("  - %s%s", item.LabelJa, autoMark),
+					status,
+				))
+			}
+		}
+	}
+
+	// Visualization Framework Section (detailed)
+	if data.VisualizationData != nil {
+		m.AddRows(s.buildPDFSectionHeader("SBOM可視化フレームワーク"))
+		vizOptions := model.GetVisualizationOptions()
+
+		// (a) SBOM作成主体
+		authorLabel := s.getVisualizationOptionLabel(vizOptions.SBOMAuthorScope, data.VisualizationData.SBOMAuthorScope)
+		m.AddRows(s.buildPDFKeyValue("(a) SBOM作成主体 (Who)", authorLabel))
+
+		// (b) 依存関係
+		depLabel := s.getVisualizationOptionLabel(vizOptions.DependencyScope, data.VisualizationData.DependencyScope)
+		m.AddRows(s.buildPDFKeyValue("(b) 依存関係 (What/Where)", depLabel))
+
+		// (c) 生成手段
+		genLabel := s.getVisualizationOptionLabel(vizOptions.GenerationMethod, data.VisualizationData.GenerationMethod)
+		m.AddRows(s.buildPDFKeyValue("(c) 生成手段 (How)", genLabel))
+
+		// (d) データ様式
+		formatLabel := s.getVisualizationOptionLabel(vizOptions.DataFormat, data.VisualizationData.DataFormat)
+		m.AddRows(s.buildPDFKeyValue("(d) データ様式 (What)", formatLabel))
+
+		// (f) 活用主体
+		actorLabel := s.getVisualizationOptionLabel(vizOptions.UtilizationActor, data.VisualizationData.UtilizationActor)
+		m.AddRows(s.buildPDFKeyValue("(f) 活用主体 (Who)", actorLabel))
+	}
+
+	// Basic vulnerability summary for context
+	m.AddRows(s.buildPDFSectionHeader("脆弱性サマリー (参考)"))
+	m.AddRows(s.buildPDFKeyValue("脆弱性総数", fmt.Sprintf("%d", data.Summary.TotalVulnerabilities)))
+	m.AddRows(s.buildPDFKeyValue("Critical/High", fmt.Sprintf("%d / %d",
+		data.VulnerabilityData.BySeverity["CRITICAL"],
+		data.VulnerabilityData.BySeverity["HIGH"])))
 }
 
 // getVisualizationOptionLabel returns the Japanese label for a visualization option value
@@ -643,11 +771,11 @@ func (s *ReportService) buildPDFKeyValue(key, value string) core.Row {
 }
 
 // generateExcel generates an Excel report using excelize
-func (s *ReportService) generateExcel(data *model.ExecutiveReportData) ([]byte, error) {
+func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportType string) ([]byte, error) {
 	f := excelize.NewFile()
 	defer f.Close()
 
-	// Create Summary sheet
+	// Create Summary sheet with title based on report type
 	sheetName := "サマリー"
 	f.SetSheetName("Sheet1", sheetName)
 
@@ -662,9 +790,10 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData) ([]byte, 
 		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
 	})
 
-	// Title
+	// Title based on report type
+	title := s.getReportTitle(reportType)
 	f.MergeCell(sheetName, "A1", "B1")
-	f.SetCellValue(sheetName, "A1", "SBOMHub セキュリティレポート")
+	f.SetCellValue(sheetName, "A1", title)
 	f.SetCellStyle(sheetName, "A1", "B1", headerStyle)
 	f.SetRowHeight(sheetName, 1, 30)
 
@@ -713,8 +842,8 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData) ([]byte, 
 		row++
 	}
 
-	// Create Top Risks sheet if data exists
-	if len(data.TopRisks) > 0 {
+	// Create Top Risks sheet for Executive and Technical reports
+	if len(data.TopRisks) > 0 && (reportType == model.ReportTypeExecutive || reportType == model.ReportTypeTechnical) {
 		riskSheet := "TOPリスク"
 		f.NewSheet(riskSheet)
 		f.SetColWidth(riskSheet, "A", "A", 20)
@@ -740,8 +869,8 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData) ([]byte, 
 		}
 	}
 
-	// Create Trend sheet if data exists
-	if len(data.VulnerabilityData.TrendData) > 0 {
+	// Create Trend sheet for Technical reports only
+	if len(data.VulnerabilityData.TrendData) > 0 && reportType == model.ReportTypeTechnical {
 		trendSheet := "トレンド"
 		f.NewSheet(trendSheet)
 		f.SetColWidth(trendSheet, "A", "A", 15)
@@ -764,8 +893,8 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData) ([]byte, 
 		}
 	}
 
-	// Create METI Checklist sheet if data exists
-	if data.ChecklistData != nil {
+	// Create METI Checklist sheet for Compliance reports only
+	if data.ChecklistData != nil && reportType == model.ReportTypeCompliance {
 		checklistSheet := "チェックリスト"
 		f.NewSheet(checklistSheet)
 		f.SetColWidth(checklistSheet, "A", "A", 15)
@@ -826,8 +955,8 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData) ([]byte, 
 		}
 	}
 
-	// Create Visualization Framework sheet if data exists
-	if data.VisualizationData != nil {
+	// Create Visualization Framework sheet for Compliance reports only
+	if data.VisualizationData != nil && reportType == model.ReportTypeCompliance {
 		vizSheet := "可視化フレームワーク"
 		f.NewSheet(vizSheet)
 		f.SetColWidth(vizSheet, "A", "A", 25)
