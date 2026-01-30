@@ -42,9 +42,12 @@ func main() {
 	defer rdb.Close()
 
 	// Initialize Clerk SDK with secret key (required for JWT verification)
+	slog.Info("Clerk config check", "secret_key_set", cfg.ClerkSecretKey != "", "secret_key_length", len(cfg.ClerkSecretKey))
 	if cfg.ClerkSecretKey != "" {
 		clerk.SetKey(cfg.ClerkSecretKey)
 		slog.Info("Clerk SDK initialized")
+	} else {
+		slog.Warn("Clerk secret key not set - running in self-hosted mode")
 	}
 
 	// Log startup mode
