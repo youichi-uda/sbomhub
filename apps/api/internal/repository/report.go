@@ -166,7 +166,7 @@ func (r *ReportRepository) UpdateReport(ctx context.Context, report *model.Gener
 func (r *ReportRepository) GetReportWithContent(ctx context.Context, tenantID, reportID uuid.UUID) (*model.GeneratedReport, error) {
 	query := `
 		SELECT id, tenant_id, settings_id, report_type, format, title, period_start, period_end,
-			file_path, file_size, file_content, status, error_message, generated_by, email_sent_at,
+			COALESCE(file_path, ''), file_size, file_content, status, COALESCE(error_message, ''), generated_by, email_sent_at,
 			email_recipients, created_at, completed_at
 		FROM generated_reports
 		WHERE id = $1 AND tenant_id = $2
@@ -193,7 +193,7 @@ func (r *ReportRepository) GetReportWithContent(ctx context.Context, tenantID, r
 func (r *ReportRepository) GetReport(ctx context.Context, tenantID, reportID uuid.UUID) (*model.GeneratedReport, error) {
 	query := `
 		SELECT id, tenant_id, settings_id, report_type, format, title, period_start, period_end,
-			file_path, file_size, status, error_message, generated_by, email_sent_at,
+			COALESCE(file_path, ''), file_size, status, COALESCE(error_message, ''), generated_by, email_sent_at,
 			email_recipients, created_at, completed_at
 		FROM generated_reports
 		WHERE id = $1 AND tenant_id = $2
@@ -227,7 +227,7 @@ func (r *ReportRepository) ListReports(ctx context.Context, tenantID uuid.UUID, 
 
 	query := `
 		SELECT id, tenant_id, settings_id, report_type, format, title, period_start, period_end,
-			file_path, file_size, status, error_message, generated_by, email_sent_at,
+			COALESCE(file_path, ''), file_size, status, COALESCE(error_message, ''), generated_by, email_sent_at,
 			email_recipients, created_at, completed_at
 		FROM generated_reports
 		WHERE tenant_id = $1
