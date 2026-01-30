@@ -39,9 +39,13 @@ SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard
 
 ## Quick Start
 
-### SaaS Version (Coming Soon)
+### SaaS Version (Recommended)
 
-Try SBOMHub without installation: **https://sbomhub.app**
+Try SBOMHub instantly without installation: **https://sbomhub.app**
+
+- No setup required
+- Free tier available
+- Managed infrastructure with automatic updates
 
 ### Docker Compose (Self-hosted)
 
@@ -182,8 +186,8 @@ jobs:
 - [x] Multi-tenancy (Row-Level Security)
 - [x] Clerk Authentication Integration
 - [x] Lemon Squeezy Billing Integration
+- [x] SBOMHub Cloud (Managed SaaS)
 - [ ] LDAP/OIDC Authentication (Self-hosted)
-- [ ] SBOMHub Cloud (Managed SaaS)
 
 ## Contributing
 

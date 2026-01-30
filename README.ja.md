@@ -39,9 +39,13 @@ SBOMHubは、日本市場向けに設計されたオープンソースのSBOM（
 
 ## クイックスタート
 
-### SaaS版（近日公開）
+### SaaS版（おすすめ）
 
 インストール不要ですぐに試せます: **https://sbomhub.app**
+
+- セットアップ不要
+- 無料プランあり
+- 自動アップデート付きマネージドインフラ
 
 ### Docker Compose（セルフホスト）
 
@@ -182,8 +186,8 @@ jobs:
 - [x] マルチテナント対応（Row-Level Security）
 - [x] Clerk認証連携
 - [x] Lemon Squeezy課金連携
+- [x] SBOMHub Cloud（マネージドSaaS）
 - [ ] LDAP/OIDC認証（セルフホスト向け）
-- [ ] SBOMHub Cloud（マネージドSaaS）
 
 ## コントリビューション
 
