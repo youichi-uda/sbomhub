@@ -16,6 +16,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/redis"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/migrations"
 )
 
 func main() {
@@ -33,6 +34,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Run migrations automatically on startup
+	if err := database.Migrate(db, migrations.FS); err != nil {
+		slog.Error("Failed to run migrations", "error", err)
+		os.Exit(1)
+	}
 
 	rdb, err := redis.NewClient(cfg.RedisURL)
 	if err != nil {
