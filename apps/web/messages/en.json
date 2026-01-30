@@ -65,6 +65,7 @@
     "pricing": {
       "title": "Pricing Plans",
       "description": "Choose a plan that fits your team size. Start with a free trial.",
+      "currencyNote": "All prices are in JPY (Japanese Yen)",
       "popular": "Popular",
       "free": {
         "name": "Self-hosted",
@@ -79,7 +80,7 @@
       },
       "starter": {
         "name": "Cloud Starter",
-        "price": "$17",
+        "price": "¥2,500",
         "period": "month",
         "description": "Cloud-hosted solution for small teams",
         "feature1": "Up to 5 projects",
@@ -91,7 +92,7 @@
       },
       "pro": {
         "name": "Cloud Pro",
-        "price": "$54",
+        "price": "¥8,000",
         "period": "month",
         "description": "Full-featured solution for growing teams",
         "feature1": "Unlimited projects",
@@ -103,7 +104,7 @@
       },
       "team": {
         "name": "Cloud Team",
-        "price": "$134",
+        "price": "¥20,000",
         "period": "month",
         "description": "Dedicated plan for large teams",
         "feature1": "Unlimited projects",

@@ -320,6 +320,11 @@ export default async function LandingPage({ params }: Props) {
               <p className="text-muted-foreground max-w-2xl mx-auto">
                 {t("pricing.description")}
               </p>
+              {locale === "en" && (
+                <p className="text-sm text-muted-foreground mt-2">
+                  {t("pricing.currencyNote")}
+                </p>
+              )}
             </div>
             <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-6xl mx-auto">
               {plans.map((plan, index) => (
