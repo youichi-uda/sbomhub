@@ -123,7 +123,7 @@ export default function BillingPage() {
   const currentPlanIndex = PLANS.findIndex((p) => p.id === currentPlan);
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="max-w-6xl mx-auto">
       <h1 className="text-2xl font-bold mb-6">プラン・お支払い</h1>
 
       {error && (

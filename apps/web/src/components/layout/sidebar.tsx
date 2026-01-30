@@ -17,7 +17,7 @@ export function Sidebar() {
     { href: "/search", icon: Search, label: "横断検索" },
     { href: "/projects", icon: FolderOpen, label: t("projects") },
     { href: "/audit", icon: ClipboardList, label: "監査ログ" },
-    { href: "/settings/billing", icon: CreditCard, label: "プラン・お支払い" },
+    { href: "/billing", icon: CreditCard, label: "プラン・お支払い" },
   ];
 
   return (
