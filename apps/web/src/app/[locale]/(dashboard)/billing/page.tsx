@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
 import { api, SubscriptionResponse, UsageResponse } from "@/lib/api";
 import { Check, ExternalLink, Loader2, CreditCard, Users, FolderOpen, RefreshCw } from "lucide-react";
 
@@ -47,6 +48,8 @@ export default function BillingPage() {
   const [freeLoading, setFreeLoading] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [showSyncInput, setShowSyncInput] = useState(false);
+  const [subscriptionIdInput, setSubscriptionIdInput] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -107,15 +110,20 @@ export default function BillingPage() {
     }
   };
 
-  const handleSyncSubscription = async () => {
+  const handleSyncSubscription = async (lsSubId?: string) => {
     try {
       setSyncLoading(true);
       setSyncMessage(null);
       setError(null);
-      const result = await api.billing.syncSubscription();
+      const result = await api.billing.syncSubscription(lsSubId);
       if (result.status === "synced") {
         setSyncMessage(`サブスクリプションを同期しました: ${result.plan}`);
+        setShowSyncInput(false);
+        setSubscriptionIdInput("");
         await loadData();
+      } else if (result.status === "manual_required") {
+        setShowSyncInput(true);
+        setSyncMessage(result.message || "手動でサブスクリプションIDを入力してください");
       } else if (result.status === "no_subscription") {
         setSyncMessage(result.message || "サブスクリプションが見つかりませんでした");
       }
@@ -174,6 +182,45 @@ export default function BillingPage() {
         <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded mb-6">
           {syncMessage}
         </div>
+      )}
+
+      {showSyncInput && (
+        <Card className="mb-6 border-amber-200 bg-amber-50">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg">サブスクリプションを手動で同期</CardTitle>
+            <CardDescription>
+              Lemon Squeezyダッシュボードの Subscriptions からサブスクリプションIDを確認して入力してください。
+              <br />
+              <a
+                href="https://app.lemonsqueezy.com/subscriptions"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline"
+              >
+                Lemon Squeezy Subscriptions を開く →
+              </a>
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2">
+              <Input
+                placeholder="サブスクリプションID (例: 123456)"
+                value={subscriptionIdInput}
+                onChange={(e) => setSubscriptionIdInput(e.target.value)}
+                className="max-w-xs"
+              />
+              <Button
+                onClick={() => handleSyncSubscription(subscriptionIdInput)}
+                disabled={syncLoading || !subscriptionIdInput}
+              >
+                {syncLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "同期"}
+              </Button>
+              <Button variant="ghost" onClick={() => setShowSyncInput(false)}>
+                キャンセル
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Show plan selection prompt for new users */}

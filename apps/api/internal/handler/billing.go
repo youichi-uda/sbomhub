@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -257,6 +258,11 @@ func (h *BillingHandler) SelectFreePlan(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok", "plan": model.PlanFree})
 }
 
+// SyncSubscriptionRequest represents a manual sync request
+type SyncSubscriptionRequest struct {
+	LSSubscriptionID string `json:"ls_subscription_id"`
+}
+
 // SyncSubscription syncs subscription from Lemon Squeezy API
 // This is a recovery mechanism when webhook fails
 func (h *BillingHandler) SyncSubscription(c echo.Context) error {
@@ -278,40 +284,39 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 
 	tenantID := tc.TenantID()
 
-	// Fetch all subscriptions from Lemon Squeezy API and find one matching this tenant
-	subs, err := h.fetchLemonSqueezySubscriptions()
+	// Check if request body contains ls_subscription_id for manual sync
+	var req SyncSubscriptionRequest
+	if err := c.Bind(&req); err == nil && req.LSSubscriptionID != "" {
+		return h.syncBySubscriptionID(c, ctx, tenantID, req.LSSubscriptionID)
+	}
+
+	// Try to fetch subscription directly from Lemon Squeezy API
+	sub, err := h.fetchLemonSqueezySubscriptionByID(req.LSSubscriptionID)
 	if err != nil {
-		slog.Error("failed to fetch subscriptions from Lemon Squeezy", "error", err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch subscriptions"})
+		slog.Error("failed to fetch subscription from Lemon Squeezy", "error", err)
+		// Return helpful error message
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"status":  "manual_required",
+			"message": "自動同期に失敗しました。Lemon SqueezyダッシュボードからサブスクリプションIDを入力してください。",
+			"help":    "https://app.lemonsqueezy.com → Subscriptions から ID を確認できます",
+		})
 	}
 
-	// Find subscription matching this tenant
-	var matchedSub *LSAPISubscription
-	for _, sub := range subs {
-		if sub.Attributes.CustomData != nil {
-			if tid, ok := sub.Attributes.CustomData["tenant_id"]; ok && tid == tenantID.String() {
-				matchedSub = &sub
-				break
-			}
-		}
-	}
-
-	if matchedSub == nil {
-		slog.Info("no subscription found for tenant in Lemon Squeezy", "tenant_id", tenantID)
+	if sub == nil {
 		return c.JSON(http.StatusOK, map[string]string{
 			"status":  "no_subscription",
-			"message": "No active subscription found for this tenant",
+			"message": "サブスクリプションが見つかりませんでした",
 		})
 	}
 
 	// Determine plan from variant
-	plan := h.variantToPlan(matchedSub.Attributes.VariantID)
+	plan := h.variantToPlan(sub.Attributes.VariantID)
 
 	// Check if subscription already exists
-	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, matchedSub.ID)
+	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
 	if existingSub != nil {
 		// Update existing subscription
-		existingSub.Status = matchedSub.Attributes.Status
+		existingSub.Status = sub.Attributes.Status
 		existingSub.Plan = plan
 		existingSub.UpdatedAt = time.Now()
 		if err := h.subRepo.Update(ctx, existingSub); err != nil {
@@ -323,11 +328,11 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 		newSub := &model.Subscription{
 			ID:               uuid.New(),
 			TenantID:         tenantID,
-			LSSubscriptionID: matchedSub.ID,
-			LSCustomerID:     fmt.Sprintf("%d", matchedSub.Attributes.CustomerID),
-			LSVariantID:      fmt.Sprintf("%d", matchedSub.Attributes.VariantID),
-			LSProductID:      fmt.Sprintf("%d", matchedSub.Attributes.ProductID),
-			Status:           matchedSub.Attributes.Status,
+			LSSubscriptionID: sub.ID,
+			LSCustomerID:     fmt.Sprintf("%d", sub.Attributes.CustomerID),
+			LSVariantID:      fmt.Sprintf("%d", sub.Attributes.VariantID),
+			LSProductID:      fmt.Sprintf("%d", sub.Attributes.ProductID),
+			Status:           sub.Attributes.Status,
 			Plan:             plan,
 			CreatedAt:        now,
 			UpdatedAt:        now,
@@ -350,17 +355,119 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 	})
 }
 
+// syncBySubscriptionID syncs a specific subscription by its Lemon Squeezy ID
+func (h *BillingHandler) syncBySubscriptionID(c echo.Context, ctx context.Context, tenantID uuid.UUID, lsSubID string) error {
+	sub, err := h.fetchLemonSqueezySubscriptionByID(lsSubID)
+	if err != nil {
+		slog.Error("failed to fetch subscription by ID", "error", err, "ls_subscription_id", lsSubID)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Failed to fetch subscription: %v", err)})
+	}
+
+	if sub == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Subscription not found in Lemon Squeezy"})
+	}
+
+	// Determine plan from variant
+	plan := h.variantToPlan(sub.Attributes.VariantID)
+
+	// Check if subscription already exists in our DB
+	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
+	if existingSub != nil {
+		// Update existing
+		existingSub.Status = sub.Attributes.Status
+		existingSub.Plan = plan
+		existingSub.TenantID = tenantID // Link to current tenant
+		existingSub.UpdatedAt = time.Now()
+		if err := h.subRepo.Update(ctx, existingSub); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update subscription"})
+		}
+	} else {
+		// Create new
+		now := time.Now()
+		newSub := &model.Subscription{
+			ID:               uuid.New(),
+			TenantID:         tenantID,
+			LSSubscriptionID: sub.ID,
+			LSCustomerID:     fmt.Sprintf("%d", sub.Attributes.CustomerID),
+			LSVariantID:      fmt.Sprintf("%d", sub.Attributes.VariantID),
+			LSProductID:      fmt.Sprintf("%d", sub.Attributes.ProductID),
+			Status:           sub.Attributes.Status,
+			Plan:             plan,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if err := h.subRepo.Create(ctx, newSub); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
+		}
+	}
+
+	// Update tenant plan
+	if err := h.tenantRepo.UpdatePlan(ctx, tenantID, plan); err != nil {
+		slog.Error("failed to update tenant plan", "error", err)
+	}
+
+	slog.Info("subscription synced by ID", "tenant_id", tenantID, "ls_subscription_id", lsSubID, "plan", plan)
+
+	return c.JSON(http.StatusOK, map[string]string{
+		"status": "synced",
+		"plan":   plan,
+	})
+}
+
+// fetchLemonSqueezySubscriptionByID fetches a single subscription by ID
+func (h *BillingHandler) fetchLemonSqueezySubscriptionByID(subID string) (*LSAPISubscription, error) {
+	if subID == "" {
+		return nil, fmt.Errorf("subscription ID is required")
+	}
+
+	url := fmt.Sprintf("https://api.lemonsqueezy.com/v1/subscriptions/%s", subID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+h.cfg.LemonSqueezyAPIKey)
+	req.Header.Set("Accept", "application/vnd.api+json")
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Lemon Squeezy API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data LSAPISubscription `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result.Data, nil
+}
+
 // LSAPISubscription represents a subscription from Lemon Squeezy API
 type LSAPISubscription struct {
 	ID         string `json:"id"`
 	Type       string `json:"type"`
 	Attributes struct {
-		StoreID    int               `json:"store_id"`
-		CustomerID int               `json:"customer_id"`
-		ProductID  int               `json:"product_id"`
-		VariantID  int               `json:"variant_id"`
-		Status     string            `json:"status"`
-		CustomData map[string]string `json:"first_subscription_item"`
+		StoreID     int    `json:"store_id"`
+		CustomerID  int    `json:"customer_id"`
+		ProductID   int    `json:"product_id"`
+		VariantID   int    `json:"variant_id"`
+		Status      string `json:"status"`
+		VariantName string `json:"variant_name"`
+		ProductName string `json:"product_name"`
 	} `json:"attributes"`
 }
 
