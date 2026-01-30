@@ -593,73 +593,30 @@ export default function ProjectDetailPage() {
           <CardHeader>
             <div className="flex justify-between items-center">
               <CardTitle>{tp("apiKeys")}</CardTitle>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowApiKeyForm(true)}
-              >
-                {tp("createApiKey")}
-              </Button>
+              <a href="/settings/apikeys">
+                <Button variant="default" size="sm">
+                  {tp("goToApiKeySettings")}
+                </Button>
+              </a>
             </div>
           </CardHeader>
           <CardContent>
-            {newApiKey && (
-              <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-                <p className="font-semibold text-green-800 mb-2">{tp("apiKeyCreated")}</p>
-                <p className="text-sm text-green-700 mb-2">
-                  {tp("apiKeyCopyWarning")}
-                </p>
-                <div className="flex items-center gap-2 bg-white p-2 rounded border font-mono text-sm">
-                  <code className="flex-1 break-all">{newApiKey.key}</code>
-                  <CopyButton text={newApiKey.key} />
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-2"
-                  onClick={() => setNewApiKey(null)}
-                >
-                  {tp("done")}
-                </Button>
-              </div>
-            )}
-
-            {showApiKeyForm && !newApiKey && (
-              <APIKeyForm
-                projectId={projectId}
-                onSuccess={(key) => {
-                  setNewApiKey(key);
-                  setShowApiKeyForm(false);
-                  loadApiKeys();
-                }}
-                onCancel={() => setShowApiKeyForm(false)}
-              />
-            )}
-
-            <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="font-semibold text-blue-800 mb-2">{tp("apiKeyUseCases")}</p>
-              <p className="text-sm text-blue-700 mb-2">{tp("apiKeyUseCasesDescription")}</p>
-              <ul className="text-sm text-blue-700 space-y-1 list-disc list-inside">
-                <li>{tp("apiKeyUseCli")}</li>
-                <li>
-                  {tp("apiKeyUseMcp")}{" "}
-                  <a href="/docs/mcp" className="underline hover:text-blue-900">
-                    {tp("mcpDocsLink")}
-                  </a>
-                </li>
-                <li>{tp("apiKeyUseCicd")}</li>
-              </ul>
-              <p className="text-sm text-blue-600 mt-2">
-                {tp("apiKeyEnvDescription")}: <code className="bg-blue-100 px-1 rounded">{tp("apiKeyEnvName")}</code>
+            {/* Migration Notice */}
+            <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+              <p className="font-semibold text-amber-800 mb-2">{tp("apiKeyMigrationNotice")}</p>
+              <p className="text-sm text-amber-700 mb-2">
+                {tp("apiKeyMigrationDescription")}
               </p>
+              <a href="/settings/apikeys" className="text-sm text-amber-800 underline hover:text-amber-900">
+                {tp("goToApiKeySettings")} →
+              </a>
             </div>
 
-            {apiKeys.length === 0 && !showApiKeyForm ? (
-              <p className="text-center text-muted-foreground py-8">
-                {tp("noApiKeys")}
-              </p>
-            ) : (
-              <div className="space-y-2">
+            {/* Legacy Project Keys - read only display */}
+            {apiKeys.length > 0 && (
+              <div className="mt-4">
+                <p className="text-sm text-muted-foreground mb-2">{tp("legacyProjectKeys")}</p>
+                <div className="space-y-2 opacity-75">
                 {apiKeys.map((key) => (
                   <div key={key.id} className="border rounded-lg p-3">
                     <div className="flex items-center justify-between">
@@ -701,6 +658,7 @@ export default function ProjectDetailPage() {
                     </div>
                   </div>
                 ))}
+                </div>
               </div>
             )}
           </CardContent>

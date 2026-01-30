@@ -127,7 +127,8 @@ export interface LicenseViolation {
 
 export interface APIKey {
   id: string;
-  project_id: string;
+  tenant_id: string;
+  project_id?: string; // Deprecated: project-level keys
   name: string;
   key_prefix: string;
   permissions: string;
@@ -138,6 +139,12 @@ export interface APIKey {
 
 export interface APIKeyWithSecret extends APIKey {
   key: string; // Only returned on creation
+}
+
+export interface CreateAPIKeyInput {
+  name: string;
+  permissions?: string;
+  expires_in_days?: number;
 }
 
 // Dashboard types
@@ -1025,6 +1032,17 @@ export const api = {
       request<{ status: string; plan: string }>("/api/v1/plan/select-free", {
         method: "POST",
       }),
+  },
+  // Tenant-level API key methods (recommended)
+  apiKeys: {
+    list: () => request<APIKey[]>("/api/v1/apikeys"),
+    create: (data: CreateAPIKeyInput) =>
+      request<APIKeyWithSecret>("/api/v1/apikeys", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    delete: (keyId: string) =>
+      request<void>(`/api/v1/apikeys/${keyId}`, { method: "DELETE" }),
   },
   publicLinks: {
     list: (projectId: string) =>

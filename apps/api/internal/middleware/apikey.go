@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"strings"
+
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -84,7 +85,8 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 	}
 }
 
-// APIKeyTenant sets tenant context based on API key's project
+// APIKeyTenant sets tenant context based on API key's tenant_id (direct)
+// Falls back to project->tenant lookup for legacy project-level keys
 func APIKeyTenant(projectRepo *repository.ProjectRepository, tenantRepo *repository.TenantRepository) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -95,15 +97,15 @@ func APIKeyTenant(projectRepo *repository.ProjectRepository, tenantRepo *reposit
 				})
 			}
 
-			projectID := key.ProjectID
-			tenantID, err := projectRepo.GetTenantID(c.Request().Context(), projectID)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]string{"error": "tenant not found"})
-			}
+			// New: Use tenant_id directly from the API key (tenant-level keys)
+			tenantID := key.TenantID
+
+			// Set tenant context for RLS
 			if err := tenantRepo.SetCurrentTenant(c.Request().Context(), tenantID); err != nil {
 				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to set tenant context"})
 			}
 			c.Set(ContextKeyTenantID, tenantID)
+
 			return next(c)
 		}
 	}

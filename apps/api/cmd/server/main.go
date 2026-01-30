@@ -259,7 +259,12 @@ func main() {
 	auth.PUT("/projects/:id/licenses/:policy_id", licensePolicyHandler.Update)
 	auth.DELETE("/projects/:id/licenses/:policy_id", licensePolicyHandler.Delete)
 
-	// API key endpoints
+	// API key endpoints (tenant-level - recommended)
+	auth.GET("/apikeys", apiKeyHandler.ListTenant)
+	auth.POST("/apikeys", apiKeyHandler.CreateTenant)
+	auth.DELETE("/apikeys/:key_id", apiKeyHandler.DeleteTenant)
+
+	// API key endpoints (project-level - deprecated, for backwards compatibility)
 	auth.GET("/projects/:id/apikeys", apiKeyHandler.List)
 	auth.POST("/projects/:id/apikeys", apiKeyHandler.Create)
 	auth.DELETE("/projects/:id/apikeys/:key_id", apiKeyHandler.Delete)

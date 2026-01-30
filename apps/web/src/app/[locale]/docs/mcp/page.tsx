@@ -114,14 +114,13 @@ export default function MCPDocsPage() {
             </h3>
             <ol className="list-decimal list-inside space-y-2 text-muted-foreground ml-4">
               <li>{t("step1Item1")}</li>
-              <li>{t("step1Item2")}</li>
-              <li>{t("step1Item3")}</li>
-              <li>{t("step1Item4")}</li>
+              <li>{t("step1Item2Revised")}</li>
+              <li>{t("step1Item3Revised")}</li>
             </ol>
             <div className="mt-3">
-              <Link href="/projects">
+              <Link href="/settings/apikeys">
                 <Button variant="outline" size="sm">
-                  {t("goToProjects")}
+                  {t("goToAPIKeys")}
                   <ExternalLink className="h-3 w-3 ml-2" />
                 </Button>
               </Link>
