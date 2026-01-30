@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { api, SubscriptionResponse, UsageResponse } from "@/lib/api";
-import { Check, ExternalLink, Loader2, CreditCard, Users, FolderOpen } from "lucide-react";
+import { Check, ExternalLink, Loader2, CreditCard, Users, FolderOpen, RefreshCw } from "lucide-react";
 
 const PLANS = [
   {
@@ -45,6 +45,8 @@ export default function BillingPage() {
   const [loading, setLoading] = useState(true);
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const [freeLoading, setFreeLoading] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -105,6 +107,26 @@ export default function BillingPage() {
     }
   };
 
+  const handleSyncSubscription = async () => {
+    try {
+      setSyncLoading(true);
+      setSyncMessage(null);
+      setError(null);
+      const result = await api.billing.syncSubscription();
+      if (result.status === "synced") {
+        setSyncMessage(`サブスクリプションを同期しました: ${result.plan}`);
+        await loadData();
+      } else if (result.status === "no_subscription") {
+        setSyncMessage(result.message || "サブスクリプションが見つかりませんでした");
+      }
+    } catch (err) {
+      setError("サブスクリプションの同期に失敗しました");
+      console.error(err);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -148,6 +170,12 @@ export default function BillingPage() {
         </div>
       )}
 
+      {syncMessage && (
+        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded mb-6">
+          {syncMessage}
+        </div>
+      )}
+
       {/* Show plan selection prompt for new users */}
       {!hasSelectedPlan && subscription?.billing_enabled && (
         <Card className="mb-8 border-primary border-2 bg-primary/5">
@@ -181,12 +209,23 @@ export default function BillingPage() {
                   </p>
                 )}
               </div>
-              {subscription?.has_subscription && (
-                <Button variant="outline" onClick={handleManageSubscription}>
-                  <ExternalLink className="h-4 w-4 mr-2" />
-                  サブスクリプション管理
+              <div className="flex gap-2">
+                {subscription?.has_subscription && (
+                  <Button variant="outline" onClick={handleManageSubscription}>
+                    <ExternalLink className="h-4 w-4 mr-2" />
+                    サブスクリプション管理
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleSyncSubscription}
+                  disabled={syncLoading}
+                  title="Lemon Squeezyからサブスクリプションを同期"
+                >
+                  <RefreshCw className={`h-4 w-4 ${syncLoading ? "animate-spin" : ""}`} />
                 </Button>
-              )}
+              </div>
             </div>
           </CardContent>
         </Card>

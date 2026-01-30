@@ -83,32 +83,43 @@ type LSSubscriptionAttrs struct {
 func (h *LemonSqueezyWebhookHandler) Handle(c echo.Context) error {
 	// Skip in self-hosted mode
 	if h.cfg.IsSelfHosted() {
+		slog.Info("webhook skipped: self-hosted mode")
 		return c.JSON(http.StatusOK, map[string]string{"status": "skipped", "reason": "self-hosted mode"})
 	}
 
 	// Skip if billing not enabled
 	if !h.cfg.IsBillingEnabled() {
+		slog.Info("webhook skipped: billing not enabled")
 		return c.JSON(http.StatusOK, map[string]string{"status": "skipped", "reason": "billing not enabled"})
 	}
 
 	// Read body
 	body, err := io.ReadAll(c.Request().Body)
 	if err != nil {
+		slog.Error("webhook failed to read body", "error", err)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to read body"})
 	}
 
+	slog.Info("webhook received", "body_length", len(body))
+
 	// Verify HMAC signature
 	if !h.verifySignature(c.Request(), body) {
+		slog.Error("webhook signature verification failed", "has_secret", h.cfg.LemonSqueezyWebhookSecret != "")
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
 	}
 
 	// Parse payload
 	var payload LSWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
+		slog.Error("webhook failed to parse payload", "error", err, "body", string(body[:min(len(body), 500)]))
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 	}
 
-	slog.Info("received Lemon Squeezy webhook", "event", payload.Meta.EventName)
+	slog.Info("received Lemon Squeezy webhook",
+		"event", payload.Meta.EventName,
+		"custom_data", payload.Meta.CustomData,
+		"subscription_id", payload.Data.ID,
+		"status", payload.Data.Attributes.Status)
 
 	switch payload.Meta.EventName {
 	case "subscription_created":
@@ -134,22 +145,31 @@ func (h *LemonSqueezyWebhookHandler) Handle(c echo.Context) error {
 func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, payload *LSWebhookPayload) error {
 	ctx := c.Request().Context()
 
+	slog.Info("handleSubscriptionCreated started", "custom_data", payload.Meta.CustomData)
+
 	// Get tenant ID from custom data
 	tenantIDStr := payload.Meta.CustomData["tenant_id"]
 	if tenantIDStr == "" {
+		slog.Error("subscription_created: missing tenant_id in custom data", "custom_data", payload.Meta.CustomData)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing tenant_id in custom data"})
 	}
 
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {
+		slog.Error("subscription_created: invalid tenant_id", "tenant_id_str", tenantIDStr, "error", err)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid tenant_id"})
 	}
+
+	slog.Info("subscription_created: parsed tenant_id", "tenant_id", tenantID)
 
 	// Get tenant
 	tenant, err := h.tenantRepo.GetByID(ctx, tenantID)
 	if err != nil {
+		slog.Error("subscription_created: tenant not found", "tenant_id", tenantID, "error", err)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "tenant not found"})
 	}
+
+	slog.Info("subscription_created: found tenant", "tenant_id", tenantID, "tenant_name", tenant.Name)
 
 	// Determine plan from variant
 	plan := h.variantToPlan(payload.Data.Attributes.VariantID)

@@ -182,6 +182,7 @@ func main() {
 	auth.GET("/subscription", billingHandler.GetSubscription)
 	auth.POST("/subscription/checkout", billingHandler.CreateCheckout)
 	auth.GET("/subscription/portal", billingHandler.GetPortalURL)
+	auth.POST("/subscription/sync", billingHandler.SyncSubscription)
 	auth.GET("/plan/usage", billingHandler.GetUsage)
 	auth.POST("/plan/select-free", billingHandler.SelectFreePlan)
 

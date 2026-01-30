@@ -1010,6 +1010,10 @@ export const api = {
         body: JSON.stringify({ plan }),
       }),
     getPortalUrl: () => request<{ url: string }>("/api/v1/subscription/portal"),
+    syncSubscription: () =>
+      request<{ status: string; plan?: string; message?: string }>("/api/v1/subscription/sync", {
+        method: "POST",
+      }),
     getUsage: () => request<UsageResponse>("/api/v1/plan/usage"),
     selectFreePlan: () =>
       request<{ status: string; plan: string }>("/api/v1/plan/select-free", {
