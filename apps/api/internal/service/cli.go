@@ -293,9 +293,9 @@ func (s *CLIService) CheckVulnerabilities(ctx context.Context, components []CLIC
 			}
 			seenVulns[key] = true
 
-			severity := extractSeverity(v)
-			fixedIn := extractFixedVersion(v, comp.Name)
-			refs := extractReferences(v)
+			severity := cliExtractSeverity(v)
+			fixedIn := cliExtractFixedVersion(v, comp.Name)
+			refs := cliExtractReferences(v)
 
 			entry := CLIVulnerabilityEntry{
 				Package:    comp.Name,
@@ -319,10 +319,10 @@ func (s *CLIService) CheckVulnerabilities(ctx context.Context, components []CLIC
 	return result, nil
 }
 
-func extractSeverity(v osvVuln) string {
+func cliExtractSeverity(v osvVuln) string {
 	for _, sev := range v.Severity {
 		if sev.Type == "CVSS_V3" {
-			score := parseCVSSScore(sev.Score)
+			score := cliParseCVSSScore(sev.Score)
 			if score >= 9.0 {
 				return "CRITICAL"
 			} else if score >= 7.0 {
@@ -337,13 +337,13 @@ func extractSeverity(v osvVuln) string {
 	return "UNKNOWN"
 }
 
-func parseCVSSScore(score string) float64 {
+func cliParseCVSSScore(score string) float64 {
 	var f float64
 	fmt.Sscanf(score, "%f", &f)
 	return f
 }
 
-func extractFixedVersion(v osvVuln, pkgName string) string {
+func cliExtractFixedVersion(v osvVuln, pkgName string) string {
 	for _, affected := range v.Affected {
 		if affected.Package.Name == pkgName || affected.Package.Purl != "" {
 			for _, r := range affected.Ranges {
@@ -358,7 +358,7 @@ func extractFixedVersion(v osvVuln, pkgName string) string {
 	return ""
 }
 
-func extractReferences(v osvVuln) []string {
+func cliExtractReferences(v osvVuln) []string {
 	refs := make([]string, 0, len(v.References))
 	for _, r := range v.References {
 		refs = append(refs, r.URL)
