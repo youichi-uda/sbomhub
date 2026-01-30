@@ -445,14 +445,10 @@ func (s *ReportService) gatherVisualizationData(ctx context.Context, tenantID uu
 
 // generatePDF generates a PDF report using maroto
 func (s *ReportService) generatePDF(data *model.ExecutiveReportData) ([]byte, error) {
-	// Load Japanese fonts from embedded assets
-	regularFontBytes, err := assets.Fonts.ReadFile("fonts/NotoSansJP-Regular.ttf")
+	// Load Japanese font from embedded assets (IPA Gothic)
+	fontBytes, err := assets.Fonts.ReadFile("fonts/IPAGothic.ttf")
 	if err != nil {
-		return nil, fmt.Errorf("failed to load regular font: %w", err)
-	}
-	boldFontBytes, err := assets.Fonts.ReadFile("fonts/NotoSansJP-Bold.ttf")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load bold font: %w", err)
+		return nil, fmt.Errorf("failed to load font: %w", err)
 	}
 
 	cfg := config.NewBuilder().
@@ -462,17 +458,17 @@ func (s *ReportService) generatePDF(data *model.ExecutiveReportData) ([]byte, er
 		WithRightMargin(15).
 		WithCustomFonts([]*entity.CustomFont{
 			{
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 				Style:  fontstyle.Normal,
-				Bytes:  regularFontBytes,
+				Bytes:  fontBytes,
 			},
 			{
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 				Style:  fontstyle.Bold,
-				Bytes:  boldFontBytes,
+				Bytes:  fontBytes, // IPA Gothic doesn't have bold variant, use same font
 			},
 		}).
-		WithDefaultFont(&props.Font{Family: "NotoSansJP"}).
+		WithDefaultFont(&props.Font{Family: "IPAGothic"}).
 		Build()
 
 	m := maroto.New(cfg)
@@ -596,7 +592,7 @@ func (s *ReportService) buildPDFTitle(title string) core.Row {
 				Size:   20,
 				Style:  fontstyle.Bold,
 				Align:  align.Center,
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 			}),
 		),
 	)
@@ -609,7 +605,7 @@ func (s *ReportService) buildPDFSubtitle(subtitle string) core.Row {
 				Size:   10,
 				Align:  align.Center,
 				Color:  &props.Color{Red: 100, Green: 100, Blue: 100},
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 			}),
 		),
 	)
@@ -622,7 +618,7 @@ func (s *ReportService) buildPDFSectionHeader(header string) core.Row {
 				Size:   14,
 				Style:  fontstyle.Bold,
 				Top:    6,
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 			}),
 		),
 	)
@@ -633,14 +629,14 @@ func (s *ReportService) buildPDFKeyValue(key, value string) core.Row {
 		col.New(6).Add(
 			text.New(key, props.Text{
 				Size:   10,
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 			}),
 		),
 		col.New(6).Add(
 			text.New(value, props.Text{
 				Size:   10,
 				Align:  align.Right,
-				Family: "NotoSansJP",
+				Family: "IPAGothic",
 			}),
 		),
 	)
