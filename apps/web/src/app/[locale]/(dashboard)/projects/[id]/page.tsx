@@ -637,10 +637,20 @@ export default function ProjectDetailPage() {
             )}
 
             <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="font-semibold text-blue-800 mb-2">{tp("githubActionsIntegration")}</p>
-              <p className="text-sm text-blue-700">
-                {tp("githubActionsDescription")}{" "}
-                <code className="bg-blue-100 px-1 rounded">{tp("githubActionsSecretName")}</code> {tp("githubActionsDescriptionSuffix")}
+              <p className="font-semibold text-blue-800 mb-2">{tp("apiKeyUseCases")}</p>
+              <p className="text-sm text-blue-700 mb-2">{tp("apiKeyUseCasesDescription")}</p>
+              <ul className="text-sm text-blue-700 space-y-1 list-disc list-inside">
+                <li>{tp("apiKeyUseCli")}</li>
+                <li>
+                  {tp("apiKeyUseMcp")}{" "}
+                  <a href="/docs/mcp" className="underline hover:text-blue-900">
+                    {tp("mcpDocsLink")}
+                  </a>
+                </li>
+                <li>{tp("apiKeyUseCicd")}</li>
+              </ul>
+              <p className="text-sm text-blue-600 mt-2">
+                {tp("apiKeyEnvDescription")}: <code className="bg-blue-100 px-1 rounded">{tp("apiKeyEnvName")}</code>
               </p>
             </div>
 
