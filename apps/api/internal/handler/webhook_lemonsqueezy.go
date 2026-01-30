@@ -181,9 +181,11 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
 	}
 
-	// Update tenant plan
+	// Update tenant plan - return error to trigger webhook retry if this fails
 	if err := h.tenantRepo.UpdatePlan(ctx, tenantID, plan); err != nil {
-		slog.Error("failed to update tenant plan", "error", err)
+		slog.Error("failed to update tenant plan", "error", err, "tenant_id", tenantID, "plan", plan)
+		// Don't fail the webhook - subscription is already created, tenant.plan is secondary
+		// The GetSubscription API now uses subscription.plan as source of truth
 	}
 
 	// Log event

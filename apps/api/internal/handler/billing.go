@@ -66,24 +66,36 @@ func (h *BillingHandler) GetSubscription(c echo.Context) error {
 	// Get subscription
 	sub, err := h.subRepo.GetByTenantID(ctx, tc.TenantID())
 
-	// Get plan limits
-	limits, _ := h.subRepo.GetPlanLimits(ctx, tenant.Plan)
-
 	if err != nil {
-		// No subscription - return free plan
+		// No subscription - return tenant plan (free or previously set)
+		plan := tenant.Plan
+		if plan == "" {
+			plan = model.PlanFree
+		}
+		limits, _ := h.subRepo.GetPlanLimits(ctx, plan)
 		return c.JSON(http.StatusOK, SubscriptionResponse{
 			HasSubscription: false,
-			Plan:            tenant.Plan,
+			Plan:            plan,
 			Limits:          limits,
 			BillingEnabled:  h.cfg.IsBillingEnabled(),
 			IsSelfHosted:    false,
 		})
 	}
 
+	// Use subscription.Plan as source of truth (more reliable than tenant.Plan)
+	plan := sub.Plan
+	if plan == "" {
+		plan = tenant.Plan
+	}
+	if plan == "" {
+		plan = model.PlanFree
+	}
+	limits, _ := h.subRepo.GetPlanLimits(ctx, plan)
+
 	return c.JSON(http.StatusOK, SubscriptionResponse{
 		HasSubscription: true,
 		Subscription:    sub,
-		Plan:            tenant.Plan,
+		Plan:            plan,
 		Limits:          limits,
 		BillingEnabled:  h.cfg.IsBillingEnabled(),
 		IsSelfHosted:    false,
