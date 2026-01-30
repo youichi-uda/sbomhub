@@ -52,7 +52,7 @@ export default function ReportsPage() {
         setGenerating(true);
         setError(null);
         try {
-            await api.reports.generate(generateInput);
+            await api.reports.generate({ ...generateInput, locale });
             setShowGenerateModal(false);
             // Refresh list after a short delay
             setTimeout(loadReports, 1000);
