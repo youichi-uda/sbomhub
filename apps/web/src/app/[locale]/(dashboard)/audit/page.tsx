@@ -2,12 +2,14 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
-import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X } from 'lucide-react';
+import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X, Lock } from 'lucide-react';
 import { api, AuditLog, AuditListResponse, AuditFilter, ActionInfo, ResourceTypeInfo } from '@/lib/api';
 import { useAuth, useOrganization } from '@clerk/nextjs';
+import Link from 'next/link';
 
 export default function AuditLogPage() {
     const t = useTranslations("Audit");
+    const tBilling = useTranslations("Billing");
     const locale = useLocale();
     const { getToken } = useAuth();
     const { organization } = useOrganization();
@@ -17,6 +19,8 @@ export default function AuditLogPage() {
     const [totalPages, setTotalPages] = useState(1);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [hasFeature, setHasFeature] = useState<boolean | null>(null);
+    const [isSelfHosted, setIsSelfHosted] = useState(false);
 
     // Filter states
     const [showFilters, setShowFilters] = useState(false);
@@ -26,6 +30,24 @@ export default function AuditLogPage() {
         page: 1,
         limit: 50,
     });
+
+    // Check if the feature is available for the current plan
+    const checkFeatureAccess = useCallback(async () => {
+        try {
+            const subscription = await api.billing.getSubscription();
+            setIsSelfHosted(subscription.is_self_hosted);
+            if (subscription.is_self_hosted) {
+                setHasFeature(true);
+                return;
+            }
+            const hasAuditLogs = subscription.limits?.features?.audit_logs ?? false;
+            setHasFeature(hasAuditLogs);
+        } catch (err) {
+            console.error('Failed to check feature access:', err);
+            // On error, allow access (handled by backend)
+            setHasFeature(true);
+        }
+    }, []);
 
     const loadFilterOptions = useCallback(async () => {
         try {
@@ -60,12 +82,20 @@ export default function AuditLogPage() {
     }, [filter, page]);
 
     useEffect(() => {
-        loadFilterOptions();
-    }, [loadFilterOptions]);
+        checkFeatureAccess();
+    }, [checkFeatureAccess]);
 
     useEffect(() => {
-        loadLogs();
-    }, [loadLogs]);
+        if (hasFeature === true) {
+            loadFilterOptions();
+        }
+    }, [hasFeature, loadFilterOptions]);
+
+    useEffect(() => {
+        if (hasFeature === true) {
+            loadLogs();
+        }
+    }, [hasFeature, loadLogs]);
 
     const handleExport = async () => {
         try {
@@ -139,6 +169,40 @@ export default function AuditLogPage() {
         if (action.includes('viewed')) return 'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400';
         return 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400';
     };
+
+    // Still checking feature access
+    if (hasFeature === null) {
+        return (
+            <div className="flex items-center justify-center h-64">
+                <Loader2 className="w-8 h-8 animate-spin text-primary" />
+            </div>
+        );
+    }
+
+    // Feature not available - show upgrade prompt
+    if (hasFeature === false) {
+        return (
+            <div className="py-8 px-4">
+                <div className="max-w-lg mx-auto text-center">
+                    <div className="mb-6 p-4 bg-muted rounded-full w-16 h-16 flex items-center justify-center mx-auto">
+                        <Lock className="w-8 h-8 text-muted-foreground" />
+                    </div>
+                    <h1 className="text-2xl font-bold mb-4">{t("title")}</h1>
+                    <p className="text-muted-foreground mb-6">
+                        {locale === 'ja'
+                            ? '監査ログ機能はPro版以上のプランでご利用いただけます。'
+                            : 'Audit logs are available on Pro plan and above.'}
+                    </p>
+                    <Link
+                        href={`/${locale}/billing`}
+                        className="inline-flex items-center justify-center px-6 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
+                    >
+                        {tBilling("upgrade")}
+                    </Link>
+                </div>
+            </div>
+        );
+    }
 
     if (loading && logs.length === 0) {
         return (

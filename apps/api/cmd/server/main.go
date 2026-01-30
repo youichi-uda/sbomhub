@@ -311,12 +311,13 @@ func main() {
 	auth.PUT("/public-links/:id", publicLinkHandler.Update)
 	auth.DELETE("/public-links/:id", publicLinkHandler.Delete)
 
-	// Audit log endpoints
-	auth.GET("/audit-logs", auditHandler.List)
-	auth.GET("/audit-logs/export", auditHandler.Export)
-	auth.GET("/audit-logs/statistics", auditHandler.GetStatistics)
-	auth.GET("/audit-logs/actions", auditHandler.GetActions)
-	auth.GET("/audit-logs/resource-types", auditHandler.GetResourceTypes)
+	// Audit log endpoints (Pro plan and above)
+	auditFeatureCheck := appmw.CheckFeature("audit_logs", subscriptionRepo)
+	auth.GET("/audit-logs", auditHandler.List, auditFeatureCheck)
+	auth.GET("/audit-logs/export", auditHandler.Export, auditFeatureCheck)
+	auth.GET("/audit-logs/statistics", auditHandler.GetStatistics, auditFeatureCheck)
+	auth.GET("/audit-logs/actions", auditHandler.GetActions, auditFeatureCheck)
+	auth.GET("/audit-logs/resource-types", auditHandler.GetResourceTypes, auditFeatureCheck)
 
 	// Analytics endpoints
 	auth.GET("/analytics/summary", analyticsHandler.GetSummary)
