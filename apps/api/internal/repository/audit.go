@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net"
 	"time"
 
@@ -185,4 +186,173 @@ func (r *AuditRepository) Log(ctx context.Context, input *model.CreateAuditLogIn
 		CreatedAt:    time.Now(),
 	}
 	return r.Create(ctx, log)
+}
+
+// AuditFilter defines filter options for audit log queries
+type AuditFilter struct {
+	Action       string
+	ResourceType string
+	UserID       *uuid.UUID
+	StartDate    *time.Time
+	EndDate      *time.Time
+	Limit        int
+	Offset       int
+}
+
+// ListWithFilter returns audit logs with filtering support
+func (r *AuditRepository) ListWithFilter(ctx context.Context, tenantID uuid.UUID, filter AuditFilter) ([]model.AuditLog, int, error) {
+	// Build query with filters
+	baseQuery := `
+		FROM audit_logs
+		WHERE tenant_id = $1
+	`
+	args := []interface{}{tenantID}
+	argIndex := 2
+
+	if filter.Action != "" {
+		baseQuery += fmt.Sprintf(" AND action = $%d", argIndex)
+		args = append(args, filter.Action)
+		argIndex++
+	}
+
+	if filter.ResourceType != "" {
+		baseQuery += fmt.Sprintf(" AND resource_type = $%d", argIndex)
+		args = append(args, filter.ResourceType)
+		argIndex++
+	}
+
+	if filter.UserID != nil {
+		baseQuery += fmt.Sprintf(" AND user_id = $%d", argIndex)
+		args = append(args, *filter.UserID)
+		argIndex++
+	}
+
+	if filter.StartDate != nil {
+		baseQuery += fmt.Sprintf(" AND created_at >= $%d", argIndex)
+		args = append(args, *filter.StartDate)
+		argIndex++
+	}
+
+	if filter.EndDate != nil {
+		baseQuery += fmt.Sprintf(" AND created_at <= $%d", argIndex)
+		args = append(args, *filter.EndDate)
+		argIndex++
+	}
+
+	// Get total count
+	countQuery := `SELECT COUNT(*) ` + baseQuery
+	var total int
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Get paginated results
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	selectQuery := fmt.Sprintf(`
+		SELECT id, tenant_id, user_id, action, resource_type, resource_id,
+			details, ip_address, user_agent, created_at
+	%s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d`, baseQuery, argIndex, argIndex+1)
+	args = append(args, limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, selectQuery, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var logs []model.AuditLog
+	for rows.Next() {
+		var a model.AuditLog
+		var detailsJSON []byte
+		var ipStr sql.NullString
+		if err := rows.Scan(
+			&a.ID, &a.TenantID, &a.UserID, &a.Action, &a.ResourceType, &a.ResourceID,
+			&detailsJSON, &ipStr, &a.UserAgent, &a.CreatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		if len(detailsJSON) > 0 {
+			json.Unmarshal(detailsJSON, &a.Details)
+		}
+		if ipStr.Valid {
+			a.IPAddress = net.ParseIP(ipStr.String)
+		}
+		logs = append(logs, a)
+	}
+
+	return logs, total, nil
+}
+
+// ActionCount represents the count of a specific action
+type ActionCount struct {
+	Action string `json:"action"`
+	Count  int    `json:"count"`
+}
+
+// GetActionCounts returns action statistics for a given period
+func (r *AuditRepository) GetActionCounts(ctx context.Context, tenantID uuid.UUID, start, end time.Time) ([]ActionCount, error) {
+	query := `
+		SELECT action, COUNT(*) as count
+		FROM audit_logs
+		WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
+		GROUP BY action
+		ORDER BY count DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, tenantID, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var counts []ActionCount
+	for rows.Next() {
+		var ac ActionCount
+		if err := rows.Scan(&ac.Action, &ac.Count); err != nil {
+			return nil, err
+		}
+		counts = append(counts, ac)
+	}
+	return counts, nil
+}
+
+// GetDailyActionCounts returns daily action counts for charting
+func (r *AuditRepository) GetDailyActionCounts(ctx context.Context, tenantID uuid.UUID, days int) ([]map[string]interface{}, error) {
+	query := `
+		SELECT DATE(created_at) as date, action, COUNT(*) as count
+		FROM audit_logs
+		WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '1 day' * $2
+		GROUP BY DATE(created_at), action
+		ORDER BY date DESC, count DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, tenantID, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var date time.Time
+		var action string
+		var count int
+		if err := rows.Scan(&date, &action, &count); err != nil {
+			return nil, err
+		}
+		results = append(results, map[string]interface{}{
+			"date":   date.Format("2006-01-02"),
+			"action": action,
+			"count":  count,
+		})
+	}
+	return results, nil
 }

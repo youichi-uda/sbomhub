@@ -320,6 +320,293 @@ export interface ComplianceResult {
   categories: ComplianceCategory[];
 }
 
+// Audit log types
+export interface AuditLog {
+  id: string;
+  tenant_id?: string;
+  user_id?: string;
+  action: string;
+  resource_type: string;
+  resource_id?: string;
+  details?: Record<string, unknown>;
+  ip_address?: string;
+  user_agent?: string;
+  created_at: string;
+  user_email?: string;
+  user_name?: string;
+}
+
+export interface AuditListResponse {
+  logs: AuditLog[];
+  total: number;
+  page: number;
+  limit: number;
+  total_pages: number;
+}
+
+export interface AuditFilter {
+  action?: string;
+  resource_type?: string;
+  user_id?: string;
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface ActionInfo {
+  action: string;
+  label: string;
+  category: string;
+}
+
+export interface ResourceTypeInfo {
+  type: string;
+  label: string;
+}
+
+export interface ActionCount {
+  action: string;
+  count: number;
+}
+
+export interface AuditStatistics {
+  period: number;
+  action_counts: ActionCount[];
+  daily_counts: Array<{ date: string; action: string; count: number }>;
+}
+
+// Analytics types
+export interface MTTRResult {
+  severity: string;
+  mttr_hours: number;
+  count: number;
+  target_hours: number;
+  on_target: boolean;
+}
+
+export interface VulnerabilityTrendPoint {
+  date: string;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  total: number;
+  resolved: number;
+}
+
+export interface SLOAchievement {
+  severity: string;
+  total_count: number;
+  on_target_count: number;
+  achievement_pct: number;
+  target_hours: number;
+  average_mttr_hours: number;
+}
+
+export interface ComplianceTrendPoint {
+  date: string;
+  score: number;
+  max_score: number;
+  percentage: number;
+  sbom_score?: number;
+  vulnerability_score?: number;
+  license_score?: number;
+}
+
+export interface AnalyticsQuickStats {
+  total_open_vulnerabilities: number;
+  resolved_last_30_days: number;
+  average_mttr_hours: number;
+  overall_slo_achievement_pct: number;
+  current_compliance_score: number;
+  compliance_max_score: number;
+}
+
+export interface AnalyticsSummary {
+  period: number;
+  mttr: MTTRResult[];
+  vulnerability_trend: VulnerabilityTrendPoint[];
+  slo_achievement: SLOAchievement[];
+  compliance_trend: ComplianceTrendPoint[];
+  summary: AnalyticsQuickStats;
+}
+
+export interface SLOTarget {
+  id: string;
+  tenant_id?: string;
+  severity: string;
+  target_hours: number;
+}
+
+// Report types
+export interface ReportSettings {
+  id: string;
+  tenant_id: string;
+  enabled: boolean;
+  report_type: string;
+  schedule_type: string;
+  schedule_day: number;
+  schedule_hour: number;
+  format: string;
+  email_enabled: boolean;
+  email_recipients: string[];
+  include_sections: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GeneratedReport {
+  id: string;
+  tenant_id: string;
+  settings_id?: string;
+  report_type: string;
+  format: string;
+  title: string;
+  period_start: string;
+  period_end: string;
+  file_path: string;
+  file_size: number;
+  status: string;
+  error_message?: string;
+  generated_by?: string;
+  email_sent_at?: string;
+  email_recipients?: string[];
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface ReportListResponse {
+  reports: GeneratedReport[];
+  total: number;
+  page: number;
+  limit: number;
+  total_pages: number;
+}
+
+export interface GenerateReportInput {
+  report_type: string;
+  format: string;
+  period_start?: string;
+  period_end?: string;
+}
+
+// IPA types
+export interface IPAAnnouncement {
+  id: string;
+  ipa_id: string;
+  title: string;
+  title_ja?: string;
+  description?: string;
+  category: string;
+  severity?: string;
+  source_url: string;
+  related_cves?: string[];
+  published_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IPAAnnouncementListResponse {
+  announcements: IPAAnnouncement[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface IPASyncSettings {
+  id?: string;
+  tenant_id: string;
+  enabled: boolean;
+  notify_on_new: boolean;
+  notify_severity: string[];
+  last_sync_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface IPASyncResult {
+  new_announcements: number;
+  updated_announcements: number;
+  total_processed: number;
+}
+
+// Issue Tracker types
+export type TrackerType = "jira" | "backlog";
+
+export interface IssueTrackerConnection {
+  id: string;
+  tenant_id: string;
+  tracker_type: TrackerType;
+  name: string;
+  base_url: string;
+  auth_type: string;
+  auth_email?: string;
+  default_project_key?: string;
+  default_issue_type?: string;
+  is_active: boolean;
+  last_sync_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VulnerabilityTicket {
+  id: string;
+  tenant_id: string;
+  vulnerability_id: string;
+  project_id: string;
+  connection_id: string;
+  external_ticket_id: string;
+  external_ticket_key?: string;
+  external_ticket_url: string;
+  local_status: "open" | "in_progress" | "resolved" | "closed";
+  external_status?: string;
+  priority?: string;
+  assignee?: string;
+  summary?: string;
+  last_synced_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VulnerabilityTicketWithDetails extends VulnerabilityTicket {
+  cve_id: string;
+  severity: string;
+  tracker_type: string;
+  tracker_name: string;
+  project_name: string;
+  component_name?: string;
+}
+
+export interface CreateConnectionInput {
+  tracker_type: TrackerType;
+  name: string;
+  base_url: string;
+  email?: string;
+  api_token: string;
+  default_project_key?: string;
+  default_issue_type?: string;
+}
+
+export interface CreateTicketInput {
+  vulnerability_id: string;
+  project_id: string;
+  connection_id: string;
+  project_key?: string;
+  issue_type?: string;
+  priority?: string;
+  summary?: string;
+  description?: string;
+  labels?: string[];
+}
+
+export interface TicketListResponse {
+  tickets: VulnerabilityTicketWithDetails[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 // Token getter function - will be set by AuthProvider
 let getAuthToken: (() => Promise<string | null>) | null = null;
 
@@ -532,6 +819,132 @@ export const api = {
         method: "POST",
         body: JSON.stringify(data),
       }),
+  },
+  // Report methods
+  reports: {
+    getSettings: (type?: string) => {
+      const query = type ? `?type=${type}` : "";
+      return request<ReportSettings | ReportSettings[]>(`/api/v1/reports/settings${query}`);
+    },
+    updateSettings: (settings: Partial<ReportSettings> & { report_type: string }) =>
+      request<ReportSettings>("/api/v1/reports/settings", {
+        method: "PUT",
+        body: JSON.stringify(settings),
+      }),
+    generate: (input: GenerateReportInput) =>
+      request<GeneratedReport>("/api/v1/reports/generate", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    list: (page?: number, limit?: number) => {
+      const params = new URLSearchParams();
+      if (page) params.set("page", page.toString());
+      if (limit) params.set("limit", limit.toString());
+      const query = params.toString();
+      return request<ReportListResponse>(`/api/v1/reports${query ? `?${query}` : ""}`);
+    },
+    get: (id: string) => request<GeneratedReport>(`/api/v1/reports/${id}`),
+    downloadUrl: (id: string) => `${API_URL}/api/v1/reports/${id}/download`,
+  },
+  // Analytics methods
+  analytics: {
+    getSummary: (days?: number) =>
+      request<AnalyticsSummary>(`/api/v1/analytics/summary${days ? `?days=${days}` : ""}`),
+    getMTTR: (days?: number) =>
+      request<MTTRResult[]>(`/api/v1/analytics/mttr${days ? `?days=${days}` : ""}`),
+    getVulnerabilityTrend: (days?: number) =>
+      request<VulnerabilityTrendPoint[]>(`/api/v1/analytics/vulnerability-trend${days ? `?days=${days}` : ""}`),
+    getSLOAchievement: (days?: number) =>
+      request<SLOAchievement[]>(`/api/v1/analytics/slo-achievement${days ? `?days=${days}` : ""}`),
+    getComplianceTrend: (days?: number) =>
+      request<ComplianceTrendPoint[]>(`/api/v1/analytics/compliance-trend${days ? `?days=${days}` : ""}`),
+    getSLOTargets: () => request<SLOTarget[]>("/api/v1/analytics/slo-targets"),
+    updateSLOTarget: (severity: string, targetHours: number) =>
+      request<{ status: string }>("/api/v1/analytics/slo-targets", {
+        method: "PUT",
+        body: JSON.stringify({ severity, target_hours: targetHours }),
+      }),
+  },
+  // Audit log methods
+  auditLogs: {
+    list: (filter?: AuditFilter) => {
+      const params = new URLSearchParams();
+      if (filter?.action) params.set("action", filter.action);
+      if (filter?.resource_type) params.set("resource_type", filter.resource_type);
+      if (filter?.user_id) params.set("user_id", filter.user_id);
+      if (filter?.start_date) params.set("start_date", filter.start_date);
+      if (filter?.end_date) params.set("end_date", filter.end_date);
+      if (filter?.page) params.set("page", filter.page.toString());
+      if (filter?.limit) params.set("limit", filter.limit.toString());
+      const query = params.toString();
+      return request<AuditListResponse>(`/api/v1/audit-logs${query ? `?${query}` : ""}`);
+    },
+    exportUrl: (filter?: AuditFilter) => {
+      const params = new URLSearchParams();
+      if (filter?.action) params.set("action", filter.action);
+      if (filter?.resource_type) params.set("resource_type", filter.resource_type);
+      if (filter?.user_id) params.set("user_id", filter.user_id);
+      if (filter?.start_date) params.set("start_date", filter.start_date);
+      if (filter?.end_date) params.set("end_date", filter.end_date);
+      const query = params.toString();
+      return `${API_URL}/api/v1/audit-logs/export${query ? `?${query}` : ""}`;
+    },
+    getStatistics: (days?: number) =>
+      request<AuditStatistics>(`/api/v1/audit-logs/statistics${days ? `?days=${days}` : ""}`),
+    getActions: () => request<ActionInfo[]>("/api/v1/audit-logs/actions"),
+    getResourceTypes: () => request<ResourceTypeInfo[]>("/api/v1/audit-logs/resource-types"),
+  },
+  // IPA methods
+  ipa: {
+    listAnnouncements: (category?: string, limit?: number, offset?: number) => {
+      const params = new URLSearchParams();
+      if (category) params.set("category", category);
+      if (limit) params.set("limit", limit.toString());
+      if (offset) params.set("offset", offset.toString());
+      const query = params.toString();
+      return request<IPAAnnouncementListResponse>(`/api/v1/ipa/announcements${query ? `?${query}` : ""}`);
+    },
+    getAnnouncementsByCVE: (cveId: string) =>
+      request<{ announcements: IPAAnnouncement[]; cve_id: string }>(`/api/v1/vulnerabilities/${cveId}/ipa`),
+    getSettings: () => request<IPASyncSettings>("/api/v1/settings/ipa"),
+    updateSettings: (settings: { enabled: boolean; notify_on_new: boolean; notify_severity: string[] }) =>
+      request<IPASyncSettings>("/api/v1/settings/ipa", {
+        method: "PUT",
+        body: JSON.stringify(settings),
+      }),
+    sync: () => request<IPASyncResult>("/api/v1/ipa/sync", { method: "POST" }),
+  },
+  // Issue Tracker methods
+  integrations: {
+    list: () =>
+      request<{ connections: IssueTrackerConnection[] }>("/api/v1/integrations"),
+    get: (id: string) => request<IssueTrackerConnection>(`/api/v1/integrations/${id}`),
+    create: (input: CreateConnectionInput) =>
+      request<IssueTrackerConnection>("/api/v1/integrations", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    delete: (id: string) =>
+      request<void>(`/api/v1/integrations/${id}`, { method: "DELETE" }),
+  },
+  tickets: {
+    list: (status?: string, limit?: number, offset?: number) => {
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      if (limit) params.set("limit", limit.toString());
+      if (offset) params.set("offset", offset.toString());
+      const query = params.toString();
+      return request<TicketListResponse>(`/api/v1/tickets${query ? `?${query}` : ""}`);
+    },
+    getByVulnerability: (vulnId: string) =>
+      request<{ tickets: VulnerabilityTicketWithDetails[] }>(`/api/v1/vulnerabilities/${vulnId}/tickets`),
+    create: (vulnId: string, input: Omit<CreateTicketInput, "vulnerability_id">) =>
+      request<VulnerabilityTicket>(`/api/v1/vulnerabilities/${vulnId}/ticket`, {
+        method: "POST",
+        body: JSON.stringify({ ...input, vulnerability_id: vulnId }),
+      }),
+    sync: (ticketId: string) =>
+      request<{ status: string }>(`/api/v1/tickets/${ticketId}/sync`, { method: "POST" }),
   },
   publicLinks: {
     list: (projectId: string) =>

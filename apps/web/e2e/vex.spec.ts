@@ -59,8 +59,8 @@ test.describe('VEX Statement Management', () => {
         // Wait for page to load
         await page.waitForLoadState('networkidle');
 
-        // Look for VEX tab
-        const vexTab = page.getByRole('button', { name: /VEX/i }).or(page.getByText('VEX'));
+        // Look for VEX tab - use more specific locator to match tab button with count
+        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
         await expect(vexTab).toBeVisible({ timeout: 5000 });
     });
 
@@ -68,8 +68,8 @@ test.describe('VEX Statement Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on VEX tab
-        await page.getByRole('button', { name: /VEX/i }).click();
+        // Click on VEX tab - use specific locator for tab button with count
+        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
 
         // Should show empty state or existing statements
         await page.waitForTimeout(1000);
@@ -89,8 +89,8 @@ test.describe('VEX Statement Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on VEX tab
-        await page.getByRole('button', { name: /VEX/i }).click();
+        // Click on VEX tab - use specific locator for tab button with count
+        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
         await page.waitForTimeout(500);
 
         // Click add VEX button or look for vulnerability with "Add VEX" action
@@ -127,8 +127,8 @@ test.describe('VEX Statement Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on VEX tab
-        await page.getByRole('button', { name: /VEX/i }).click();
+        // Click on VEX tab - use specific locator for tab button with count
+        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
         await page.waitForTimeout(500);
 
         // Look for export button
@@ -164,8 +164,8 @@ test.describe('VEX Statement Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on VEX tab
-        await page.getByRole('button', { name: /VEX/i }).click();
+        // Click on VEX tab - use specific locator for tab button with count
+        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
         await page.waitForTimeout(1000);
 
         // Find delete button

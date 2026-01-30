@@ -56,8 +56,12 @@ test.describe('Search Functionality', () => {
         await page.goto('/en/search');
 
         // Verify search page elements
-        await expect(page.getByRole('heading', { name: /Search/i })).toBeVisible();
-        await expect(page.getByPlaceholder(/CVE-/i)).toBeVisible();
+        // The heading is in Japanese: "横断検索" (Cross-search) - use exact match to avoid matching "CVE横断検索"
+        await expect(page.getByRole('heading', { name: '横断検索', exact: true })).toBeVisible();
+        // The CVE input has placeholder "CVE-2021-44228"
+        await expect(page.getByPlaceholder('CVE-2021-44228')).toBeVisible();
+        // Verify the CVE search button is visible (use exact match to avoid matching tab triggers)
+        await expect(page.getByRole('button', { name: '検索', exact: true }).first()).toBeVisible();
     });
 
     test('should search for component by name', async ({ page }) => {
@@ -84,11 +88,12 @@ test.describe('Search Functionality', () => {
         await page.goto('/en/search');
 
         // Search for a well-known CVE
-        const cveInput = page.getByPlaceholder(/CVE-/i);
+        // The CVE input has placeholder "CVE-2021-44228"
+        const cveInput = page.getByPlaceholder('CVE-2021-44228');
         await cveInput.fill('CVE-2021-44228');
 
-        // Submit search
-        await page.getByRole('button', { name: /Search/i }).click();
+        // Submit search - use exact match to target only the submit button, not tab triggers
+        await page.getByRole('button', { name: '検索', exact: true }).first().click();
 
         // Wait for results
         await page.waitForTimeout(2000);
@@ -101,14 +106,16 @@ test.describe('Search Functionality', () => {
     test('should handle empty CVE search gracefully', async ({ page }) => {
         await page.goto('/en/search');
 
-        const cveInput = page.getByPlaceholder(/CVE-/i);
+        // The CVE input has placeholder "CVE-2021-44228"
+        const cveInput = page.getByPlaceholder('CVE-2021-44228');
         await cveInput.fill('CVE-9999-99999');
 
-        await page.getByRole('button', { name: /Search/i }).click();
+        // Submit search - use exact match to target only the submit button, not tab triggers
+        await page.getByRole('button', { name: '検索', exact: true }).first().click();
 
         await page.waitForTimeout(1000);
 
-        // Should show "not found" or empty results
+        // Should show "not found" or empty results (Japanese: "CVEが見つかりませんでした")
         const noResults = page.getByText(/not found|no results|見つかりません/i);
         const resultsExist = await noResults.isVisible().catch(() => false);
 

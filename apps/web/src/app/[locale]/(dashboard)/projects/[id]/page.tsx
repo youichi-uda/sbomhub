@@ -6,11 +6,11 @@ import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, APIKey, APIKeyWithSecret } from "@/lib/api";
-import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check } from "lucide-react";
+import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, APIKey, APIKeyWithSecret, NotificationSettings, NotificationLog } from "@/lib/api";
+import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check, Bell } from "lucide-react";
 import Link from "next/link";
 
-type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "apikeys";
+type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "apikeys" | "notifications";
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -33,6 +33,8 @@ export default function ProjectDetailPage() {
   const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
   const [showApiKeyForm, setShowApiKeyForm] = useState(false);
   const [newApiKey, setNewApiKey] = useState<APIKeyWithSecret | null>(null);
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
+  const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
 
   const loadProject = useCallback(async () => {
     try {
@@ -112,6 +114,24 @@ export default function ProjectDetailPage() {
     }
   }, [projectId]);
 
+  const loadNotificationSettings = useCallback(async () => {
+    try {
+      const data = await api.projects.getNotificationSettings(projectId);
+      setNotificationSettings(data);
+    } catch (error) {
+      console.error("Failed to load notification settings:", error);
+    }
+  }, [projectId]);
+
+  const loadNotificationLogs = useCallback(async () => {
+    try {
+      const data = await api.projects.getNotificationLogs(projectId);
+      setNotificationLogs(data || []);
+    } catch (error) {
+      console.error("Failed to load notification logs:", error);
+    }
+  }, [projectId]);
+
   useEffect(() => {
     loadProject();
     loadComponents();
@@ -120,7 +140,8 @@ export default function ProjectDetailPage() {
     loadLicensePolicies();
     loadSbomId();
     loadApiKeys();
-  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadApiKeys]);
+    loadNotificationSettings();
+  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadApiKeys, loadNotificationSettings]);
 
   useEffect(() => {
     if (activeTab === "components") loadComponents();
@@ -131,7 +152,11 @@ export default function ProjectDetailPage() {
       loadLicenseViolations();
     }
     if (activeTab === "apikeys") loadApiKeys();
-  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadApiKeys]);
+    if (activeTab === "notifications") {
+      loadNotificationSettings();
+      loadNotificationLogs();
+    }
+  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadApiKeys, loadNotificationSettings, loadNotificationLogs]);
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -235,6 +260,13 @@ export default function ProjectDetailPage() {
         >
           <Key className="h-4 w-4 mr-2" />
           API Keys ({apiKeys.length})
+        </Button>
+        <Button
+          variant={activeTab === "notifications" ? "default" : "outline"}
+          onClick={() => setActiveTab("notifications")}
+        >
+          <Bell className="h-4 w-4 mr-2" />
+          Notifications
         </Button>
       </div>
 
@@ -659,7 +691,201 @@ export default function ProjectDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {activeTab === "notifications" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Notifications</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <NotificationSettingsForm
+              projectId={projectId}
+              settings={notificationSettings}
+              onSuccess={() => {
+                loadNotificationSettings();
+              }}
+            />
+
+            {notificationLogs.length > 0 && (
+              <div className="mt-6">
+                <h3 className="font-semibold mb-3">Notification History</h3>
+                <div className="space-y-2">
+                  {notificationLogs.map((log) => (
+                    <div key={log.id} className="border rounded-lg p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={log.status === "sent" ? "default" : "destructive"}>
+                            {log.status}
+                          </Badge>
+                          <span className="text-sm font-medium capitalize">{log.channel}</span>
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(log.created_at).toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
+  );
+}
+
+interface NotificationSettingsFormProps {
+  projectId: string;
+  settings: NotificationSettings | null;
+  onSuccess: () => void;
+}
+
+function NotificationSettingsForm({ projectId, settings, onSuccess }: NotificationSettingsFormProps) {
+  const [slackWebhookUrl, setSlackWebhookUrl] = useState(settings?.slack_webhook_url || "");
+  const [discordWebhookUrl, setDiscordWebhookUrl] = useState(settings?.discord_webhook_url || "");
+  const [notifyCritical, setNotifyCritical] = useState(settings?.notify_critical ?? true);
+  const [notifyHigh, setNotifyHigh] = useState(settings?.notify_high ?? true);
+  const [notifyMedium, setNotifyMedium] = useState(settings?.notify_medium ?? false);
+  const [notifyLow, setNotifyLow] = useState(settings?.notify_low ?? false);
+  const [submitting, setSubmitting] = useState(false);
+  const [testingNotification, setTestingNotification] = useState(false);
+
+  useEffect(() => {
+    if (settings) {
+      setSlackWebhookUrl(settings.slack_webhook_url || "");
+      setDiscordWebhookUrl(settings.discord_webhook_url || "");
+      setNotifyCritical(settings.notify_critical);
+      setNotifyHigh(settings.notify_high);
+      setNotifyMedium(settings.notify_medium);
+      setNotifyLow(settings.notify_low);
+    }
+  }, [settings]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await api.projects.updateNotificationSettings(projectId, {
+        slack_webhook_url: slackWebhookUrl || undefined,
+        discord_webhook_url: discordWebhookUrl || undefined,
+        notify_critical: notifyCritical,
+        notify_high: notifyHigh,
+        notify_medium: notifyMedium,
+        notify_low: notifyLow,
+      });
+      onSuccess();
+      alert("Notification settings saved!");
+    } catch (error) {
+      console.error("Failed to save notification settings:", error);
+      alert("Failed to save notification settings");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleTestNotification = async () => {
+    setTestingNotification(true);
+    try {
+      await api.projects.testNotification(projectId);
+      alert("Test notification sent!");
+    } catch (error) {
+      console.error("Failed to send test notification:", error);
+      alert("Failed to send test notification");
+    } finally {
+      setTestingNotification(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6">
+      <div>
+        <h3 className="font-semibold mb-3">Webhook URLs</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium mb-1">Slack Webhook URL</label>
+            <input
+              type="url"
+              name="slack_webhook"
+              value={slackWebhookUrl}
+              onChange={(e) => setSlackWebhookUrl(e.target.value)}
+              className="w-full border rounded px-3 py-2"
+              placeholder="https://hooks.slack.com/services/..."
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Discord Webhook URL</label>
+            <input
+              type="url"
+              name="discord_webhook"
+              value={discordWebhookUrl}
+              onChange={(e) => setDiscordWebhookUrl(e.target.value)}
+              className="w-full border rounded px-3 py-2"
+              placeholder="https://discord.com/api/webhooks/..."
+            />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-3">Severity Thresholds</h3>
+        <p className="text-sm text-muted-foreground mb-3">
+          Select which severity levels trigger notifications
+        </p>
+        <div className="space-y-2">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={notifyCritical}
+              onChange={(e) => setNotifyCritical(e.target.checked)}
+              className="rounded"
+            />
+            <span>Critical</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={notifyHigh}
+              onChange={(e) => setNotifyHigh(e.target.checked)}
+              className="rounded"
+            />
+            <span>High</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={notifyMedium}
+              onChange={(e) => setNotifyMedium(e.target.checked)}
+              className="rounded"
+            />
+            <span>Medium</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={notifyLow}
+              onChange={(e) => setNotifyLow(e.target.checked)}
+              className="rounded"
+            />
+            <span>Low</span>
+          </label>
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <Button type="submit" disabled={submitting}>
+          {submitting ? "Saving..." : "Save"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={handleTestNotification}
+          disabled={testingNotification || (!slackWebhookUrl && !discordWebhookUrl)}
+        >
+          {testingNotification ? "Sending..." : "Send Test"}
+        </Button>
+      </div>
+    </form>
   );
 }
 

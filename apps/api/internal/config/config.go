@@ -31,6 +31,9 @@ type Config struct {
 	LemonSqueezyProVariant     string
 	LemonSqueezyTeamVariant    string
 
+	// Security
+	EncryptionKey string // For encrypting sensitive data like API tokens
+
 	// Derived settings
 	mode Mode
 }
@@ -56,6 +59,9 @@ func Load() *Config {
 		LemonSqueezyStarterVariant: getEnv("LEMONSQUEEZY_STARTER_VARIANT_ID", ""),
 		LemonSqueezyProVariant:     getEnv("LEMONSQUEEZY_PRO_VARIANT_ID", ""),
 		LemonSqueezyTeamVariant:    getEnv("LEMONSQUEEZY_TEAM_VARIANT_ID", ""),
+
+		// Security
+		EncryptionKey: getEnv("ENCRYPTION_KEY", "sbomhub-default-encryption-key-32"),
 	}
 
 	// Determine mode based on configuration

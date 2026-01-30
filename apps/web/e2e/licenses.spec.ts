@@ -82,77 +82,67 @@ test.describe('License Policy Management', () => {
         await page.waitForLoadState('networkidle');
 
         // Click on Licenses tab
-        await page.getByRole('button', { name: /Licenses|ライセンス/i }).click();
+        await page.getByRole('button', { name: /Licenses/i }).click();
         await page.waitForTimeout(500);
 
-        // Look for add policy button
-        const addButton = page.getByRole('button', { name: /Add Policy|Add License|ポリシー追加/i });
-        if (await addButton.isVisible()) {
-            await addButton.click();
+        // Click the Add Policy button
+        await page.getByRole('button', { name: 'Add Policy' }).click();
+        await page.waitForTimeout(300);
 
-            // Select license
-            const licenseSelect = page.locator('select').first();
-            if (await licenseSelect.isVisible()) {
-                await licenseSelect.selectOption({ label: /MIT/i });
-            }
+        // Select license - options are formatted as "MIT License (MIT)"
+        const licenseSelect = page.locator('select').first();
+        await expect(licenseSelect).toBeVisible();
+        await licenseSelect.selectOption({ label: 'MIT License (MIT)' });
 
-            // Select policy type
-            const policySelect = page.locator('select').nth(1);
-            if (await policySelect.isVisible()) {
-                await policySelect.selectOption('allowed');
-            }
+        // Select policy type - second select is for policy type, default is "allowed"
+        const policySelect = page.locator('select').nth(1);
+        await expect(policySelect).toBeVisible();
+        await policySelect.selectOption('allowed');
 
-            // Add reason
-            const reasonInput = page.getByPlaceholder(/reason|理由/i);
-            if (await reasonInput.isVisible()) {
-                await reasonInput.fill('MIT is approved for commercial use');
-            }
+        // Add reason
+        const reasonInput = page.locator('textarea');
+        await reasonInput.fill('MIT is approved for commercial use');
 
-            // Submit
-            await page.getByRole('button', { name: /Save|Create|保存/i }).click();
-            await page.waitForTimeout(1000);
+        // Submit - button text is "Add Policy"
+        await page.getByRole('button', { name: 'Add Policy' }).nth(1).click();
+        await page.waitForTimeout(1000);
 
-            // Verify policy appears
-            await expect(page.getByText('MIT')).toBeVisible();
-        }
+        // Verify policy appears in the list
+        await expect(page.getByText('MIT License')).toBeVisible();
     });
 
     test('should create denied license policy', async ({ page }) => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        await page.getByRole('button', { name: /Licenses|ライセンス/i }).click();
+        // Click on Licenses tab
+        await page.getByRole('button', { name: /Licenses/i }).click();
         await page.waitForTimeout(500);
 
-        const addButton = page.getByRole('button', { name: /Add Policy|Add License|ポリシー追加/i });
-        if (await addButton.isVisible()) {
-            await addButton.click();
+        // Click the Add Policy button
+        await page.getByRole('button', { name: 'Add Policy' }).click();
+        await page.waitForTimeout(300);
 
-            // Select GPL license
-            const licenseSelect = page.locator('select').first();
-            if (await licenseSelect.isVisible()) {
-                // Try to select GPL
-                const options = await licenseSelect.locator('option').allTextContents();
-                const gplOption = options.find((o) => o.includes('GPL'));
-                if (gplOption) {
-                    await licenseSelect.selectOption({ label: gplOption });
-                }
-            }
+        // Select GPL license - options are formatted as "GNU GPL v3.0 (GPL-3.0-only)"
+        const licenseSelect = page.locator('select').first();
+        await expect(licenseSelect).toBeVisible();
+        await licenseSelect.selectOption({ label: 'GNU GPL v3.0 (GPL-3.0-only)' });
 
-            // Select denied policy type
-            const policySelect = page.locator('select').nth(1);
-            if (await policySelect.isVisible()) {
-                await policySelect.selectOption('denied');
-            }
+        // Select denied policy type
+        const policySelect = page.locator('select').nth(1);
+        await expect(policySelect).toBeVisible();
+        await policySelect.selectOption('denied');
 
-            const reasonInput = page.getByPlaceholder(/reason|理由/i);
-            if (await reasonInput.isVisible()) {
-                await reasonInput.fill('GPL not allowed due to copyleft requirements');
-            }
+        // Add reason
+        const reasonInput = page.locator('textarea');
+        await reasonInput.fill('GPL not allowed due to copyleft requirements');
 
-            await page.getByRole('button', { name: /Save|Create|保存/i }).click();
-            await page.waitForTimeout(1000);
-        }
+        // Submit - button text is "Add Policy"
+        await page.getByRole('button', { name: 'Add Policy' }).nth(1).click();
+        await page.waitForTimeout(1000);
+
+        // Verify policy appears in the list
+        await expect(page.getByText('GNU GPL v3.0')).toBeVisible();
     });
 
     test('should check license violations', async ({ page }) => {

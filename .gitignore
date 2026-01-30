@@ -15,6 +15,9 @@ docker_ps.txt
 # Playwright MCP screenshots (development only)
 /.playwright-mcp/
 
+# Playwright browser profile (session persistence)
+/.playwright-profile/
+
 # Dependencies
 node_modules/
 .pnpm-store/

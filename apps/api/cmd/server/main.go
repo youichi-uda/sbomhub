@@ -69,6 +69,10 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	subscriptionRepo := repository.NewSubscriptionRepository(db)
 	auditRepo := repository.NewAuditRepository(db)
+	analyticsRepo := repository.NewAnalyticsRepository(db)
+	reportRepo := repository.NewReportRepository(db)
+	ipaRepo := repository.NewIPARepository(db)
+	issueTrackerRepo := repository.NewIssueTrackerRepository(db)
 
 	// Services
 	projectService := service.NewProjectService(projectRepo)
@@ -86,6 +90,11 @@ func main() {
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg.BaseURL)
 	complianceService := service.NewComplianceService(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo)
 	publicLinkService := service.NewPublicLinkService(publicLinkRepo, projectRepo, sbomRepo, componentRepo)
+	auditService := service.NewAuditService(auditRepo, userRepo)
+	analyticsService := service.NewAnalyticsService(analyticsRepo, dashboardRepo)
+	reportService := service.NewReportService(reportRepo, dashboardRepo, analyticsRepo, tenantRepo, "./reports")
+	ipaService := service.NewIPAService(ipaRepo)
+	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, cfg.EncryptionKey)
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -107,6 +116,11 @@ func main() {
 	clerkWebhookHandler := handler.NewClerkWebhookHandler(cfg, tenantRepo, userRepo, auditRepo)
 	lsWebhookHandler := handler.NewLemonSqueezyWebhookHandler(cfg, tenantRepo, subscriptionRepo, auditRepo)
 	billingHandler := handler.NewBillingHandler(cfg, tenantRepo, subscriptionRepo)
+	auditHandler := handler.NewAuditHandler(auditService)
+	analyticsHandler := handler.NewAnalyticsHandler(analyticsService)
+	reportHandler := handler.NewReportHandler(reportService)
+	ipaHandler := handler.NewIPAHandler(ipaService)
+	issueTrackerHandler := handler.NewIssueTrackerHandler(issueTrackerService)
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -152,8 +166,11 @@ func main() {
 	// Auth middleware - applies to most endpoints
 	authMiddleware := appmw.Auth(cfg, tenantRepo, userRepo)
 
-	// Authenticated endpoints
-	auth := api.Group("", authMiddleware)
+	// Audit middleware - logs all authenticated requests
+	auditMiddleware := appmw.Audit(auditRepo)
+
+	// Authenticated endpoints with audit logging
+	auth := api.Group("", authMiddleware, auditMiddleware)
 
 	auth.GET("/stats", statsHandler.Get)
 
@@ -239,6 +256,47 @@ func main() {
 	auth.GET("/projects/:id/public-links", publicLinkHandler.List)
 	auth.PUT("/public-links/:id", publicLinkHandler.Update)
 	auth.DELETE("/public-links/:id", publicLinkHandler.Delete)
+
+	// Audit log endpoints
+	auth.GET("/audit-logs", auditHandler.List)
+	auth.GET("/audit-logs/export", auditHandler.Export)
+	auth.GET("/audit-logs/statistics", auditHandler.GetStatistics)
+	auth.GET("/audit-logs/actions", auditHandler.GetActions)
+	auth.GET("/audit-logs/resource-types", auditHandler.GetResourceTypes)
+
+	// Analytics endpoints
+	auth.GET("/analytics/summary", analyticsHandler.GetSummary)
+	auth.GET("/analytics/mttr", analyticsHandler.GetMTTR)
+	auth.GET("/analytics/vulnerability-trend", analyticsHandler.GetVulnerabilityTrend)
+	auth.GET("/analytics/slo-achievement", analyticsHandler.GetSLOAchievement)
+	auth.GET("/analytics/compliance-trend", analyticsHandler.GetComplianceTrend)
+	auth.GET("/analytics/slo-targets", analyticsHandler.GetSLOTargets)
+	auth.PUT("/analytics/slo-targets", analyticsHandler.UpdateSLOTarget)
+
+	// Report endpoints
+	auth.GET("/reports/settings", reportHandler.GetSettings)
+	auth.PUT("/reports/settings", reportHandler.UpdateSettings)
+	auth.POST("/reports/generate", reportHandler.Generate)
+	auth.GET("/reports", reportHandler.List)
+	auth.GET("/reports/:id", reportHandler.Get)
+	auth.GET("/reports/:id/download", reportHandler.Download)
+
+	// IPA integration endpoints
+	auth.GET("/ipa/announcements", ipaHandler.ListAnnouncements)
+	auth.POST("/ipa/sync", ipaHandler.SyncAnnouncements)
+	auth.GET("/vulnerabilities/:cve_id/ipa", ipaHandler.GetAnnouncementsByCVE)
+	auth.GET("/settings/ipa", ipaHandler.GetSyncSettings)
+	auth.PUT("/settings/ipa", ipaHandler.UpdateSyncSettings)
+
+	// Issue tracker integration endpoints
+	auth.POST("/integrations", issueTrackerHandler.CreateConnection)
+	auth.GET("/integrations", issueTrackerHandler.ListConnections)
+	auth.GET("/integrations/:id", issueTrackerHandler.GetConnection)
+	auth.DELETE("/integrations/:id", issueTrackerHandler.DeleteConnection)
+	auth.POST("/vulnerabilities/:vuln_id/ticket", issueTrackerHandler.CreateTicket)
+	auth.GET("/vulnerabilities/:vuln_id/tickets", issueTrackerHandler.GetTicketsByVulnerability)
+	auth.GET("/tickets", issueTrackerHandler.ListTickets)
+	auth.POST("/tickets/:id/sync", issueTrackerHandler.SyncTicket)
 
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))

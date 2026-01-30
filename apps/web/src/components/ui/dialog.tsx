@@ -58,3 +58,18 @@ export function DialogTitle({ children }: { children: React.ReactNode }) {
 export function DialogFooter({ children }: { children: React.ReactNode }) {
   return <div className="mt-6 flex justify-end gap-2">{children}</div>;
 }
+
+export function DialogDescription({ children }: { children: React.ReactNode }) {
+  return <p className="text-sm text-gray-500 mt-1">{children}</p>;
+}
+
+export function DialogTrigger({
+  children,
+  asChild,
+}: {
+  children: React.ReactNode;
+  asChild?: boolean;
+}) {
+  // Simple pass-through - the trigger is handled by the parent
+  return <>{children}</>;
+}

@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"fmt"
 	"time"
 
@@ -291,4 +293,132 @@ func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectI
 	category.Checks = append(category.Checks, check2)
 
 	return category, nil
+}
+
+// GenerateCompliancePDF generates a PDF compliance report
+func (s *ComplianceService) GenerateCompliancePDF(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
+	// Simplified text-based report (in production, use maroto library for proper PDF)
+	content := fmt.Sprintf(`
+経済産業省 ソフトウェア管理ガイドライン
+コンプライアンス評価レポート
+======================================
+
+プロジェクトID: %s
+評価日時: %s
+総合スコア: %d / %d (%.1f%%)
+
+`,
+		projectID.String(),
+		time.Now().Format("2006-01-02 15:04:05"),
+		result.Score, result.MaxScore,
+		float64(result.Score)/float64(result.MaxScore)*100,
+	)
+
+	for _, category := range result.Categories {
+		content += fmt.Sprintf(`
+%s
+--------------------
+スコア: %d / %d
+
+チェック項目:
+`, category.Label, category.Score, category.MaxScore)
+
+		for _, check := range category.Checks {
+			status := "[ ] 未達成"
+			if check.Passed {
+				status = "[✓] 達成"
+			}
+			content += fmt.Sprintf("  %s %s\n", status, check.Label)
+			if check.Details != nil && *check.Details != "" {
+				content += fmt.Sprintf("      詳細: %s\n", *check.Details)
+			}
+		}
+	}
+
+	content += `
+======================================
+推奨事項:
+
+`
+	for _, category := range result.Categories {
+		for _, check := range category.Checks {
+			if !check.Passed {
+				content += fmt.Sprintf("- %s: %s\n", check.Label, getRecommendation(check.ID))
+			}
+		}
+	}
+
+	content += `
+本レポートは経済産業省「ソフトウェア管理に向けたSBOM（Software Bill of Materials）
+の導入に関する手引」に基づいて作成されています。
+
+生成元: SBOMHub
+`
+
+	return []byte(content), nil
+}
+
+// GenerateComplianceExcel generates an Excel/CSV compliance report
+func (s *ComplianceService) GenerateComplianceExcel(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+
+	// Write BOM for Excel compatibility
+	buf.Write([]byte{0xEF, 0xBB, 0xBF})
+
+	// Header
+	writer.Write([]string{"経済産業省コンプライアンスレポート"})
+	writer.Write([]string{"プロジェクトID", projectID.String()})
+	writer.Write([]string{"評価日時", time.Now().Format("2006-01-02 15:04:05")})
+	writer.Write([]string{"総合スコア", fmt.Sprintf("%d / %d", result.Score, result.MaxScore)})
+	writer.Write([]string{""})
+
+	// Column headers
+	writer.Write([]string{"カテゴリ", "チェック項目", "結果", "詳細", "推奨事項"})
+
+	// Data rows
+	for _, category := range result.Categories {
+		for _, check := range category.Checks {
+			status := "未達成"
+			if check.Passed {
+				status = "達成"
+			}
+			details := ""
+			if check.Details != nil {
+				details = *check.Details
+			}
+			recommendation := ""
+			if !check.Passed {
+				recommendation = getRecommendation(check.ID)
+			}
+			writer.Write([]string{
+				category.Label,
+				check.Label,
+				status,
+				details,
+				recommendation,
+			})
+		}
+	}
+
+	writer.Flush()
+	return buf.Bytes(), nil
+}
+
+// getRecommendation returns a recommendation for a failed check
+func getRecommendation(checkID string) string {
+	recommendations := map[string]string{
+		"sbom_exists":            "CycloneDXまたはSPDX形式のSBOMをアップロードしてください",
+		"required_fields":        "全てのコンポーネントに名前とバージョンを設定してください",
+		"recently_updated":       "SBOMを定期的に更新してください（推奨: 30日以内）",
+		"scan_performed":         "脆弱性データベース（NVD/JVN）との照合を実行してください",
+		"no_unresolved_critical": "Critical脆弱性に対してVEXステートメントを作成し、対応状況を記録してください",
+		"vex_in_use":             "脆弱性の対応状況をVEXで管理してください",
+		"policy_configured":      "ライセンスポリシーを設定してください",
+		"no_violations":          "禁止ライセンスを含むコンポーネントを除去または置換してください",
+	}
+	if rec, ok := recommendations[checkID]; ok {
+		return rec
+	}
+	return ""
 }
