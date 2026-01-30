@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -309,8 +310,8 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 		})
 	}
 
-	// Determine plan from variant
-	plan := h.variantToPlan(sub.Attributes.VariantID)
+	// Determine plan from variant name
+	plan := h.variantNameToPlan(sub.Attributes.VariantName)
 
 	// Check if subscription already exists
 	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
@@ -367,8 +368,8 @@ func (h *BillingHandler) syncBySubscriptionID(c echo.Context, ctx context.Contex
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "Subscription not found in Lemon Squeezy"})
 	}
 
-	// Determine plan from variant
-	plan := h.variantToPlan(sub.Attributes.VariantID)
+	// Determine plan from variant name
+	plan := h.variantNameToPlan(sub.Attributes.VariantName)
 
 	// Check if subscription already exists in our DB
 	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
@@ -516,17 +517,18 @@ func (h *BillingHandler) fetchLemonSqueezySubscriptions() ([]LSAPISubscription, 
 	return apiResp.Data, nil
 }
 
-// variantToPlan maps Lemon Squeezy variant ID to plan name
-func (h *BillingHandler) variantToPlan(variantID int) string {
-	variantStr := fmt.Sprintf("%d", variantID)
-	switch variantStr {
-	case h.cfg.LemonSqueezyStarterVariant:
-		return model.PlanStarter
-	case h.cfg.LemonSqueezyProVariant:
-		return model.PlanPro
-	case h.cfg.LemonSqueezyTeamVariant:
+// variantNameToPlan maps Lemon Squeezy variant name to plan name
+func (h *BillingHandler) variantNameToPlan(variantName string) string {
+	name := strings.ToLower(variantName)
+
+	if strings.Contains(name, "team") {
 		return model.PlanTeam
-	default:
-		return model.PlanFree
 	}
+	if strings.Contains(name, "pro") {
+		return model.PlanPro
+	}
+	if strings.Contains(name, "starter") {
+		return model.PlanStarter
+	}
+	return model.PlanFree
 }

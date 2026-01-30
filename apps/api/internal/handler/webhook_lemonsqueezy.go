@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -171,8 +172,9 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 
 	slog.Info("subscription_created: found tenant", "tenant_id", tenantID, "tenant_name", tenant.Name)
 
-	// Determine plan from variant
-	plan := h.variantToPlan(payload.Data.Attributes.VariantID)
+	// Determine plan from variant name (more reliable than variant ID)
+	plan := h.variantNameToPlan(payload.Data.Attributes.VariantName)
+	slog.Info("subscription_created: determined plan", "variant_name", payload.Data.Attributes.VariantName, "plan", plan)
 
 	// Parse dates
 	renewsAt := parseTime(payload.Data.Attributes.RenewsAt)
@@ -245,7 +247,7 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, p
 	previousPlan := sub.Plan
 
 	// Update subscription
-	newPlan := h.variantToPlan(payload.Data.Attributes.VariantID)
+	newPlan := h.variantNameToPlan(payload.Data.Attributes.VariantName)
 	sub.LSVariantID = intToString(payload.Data.Attributes.VariantID)
 	sub.Status = payload.Data.Attributes.Status
 	sub.Plan = newPlan
@@ -410,7 +412,24 @@ func (h *LemonSqueezyWebhookHandler) verifySignature(r *http.Request, body []byt
 	return hmac.Equal([]byte(signature), []byte(expectedSig))
 }
 
-// variantToPlan maps Lemon Squeezy variant ID to plan name
+// variantNameToPlan maps Lemon Squeezy variant name to plan name
+func (h *LemonSqueezyWebhookHandler) variantNameToPlan(variantName string) string {
+	// Normalize to lowercase for comparison
+	name := strings.ToLower(variantName)
+
+	if strings.Contains(name, "team") {
+		return model.PlanTeam
+	}
+	if strings.Contains(name, "pro") {
+		return model.PlanPro
+	}
+	if strings.Contains(name, "starter") {
+		return model.PlanStarter
+	}
+	return model.PlanFree
+}
+
+// variantToPlan maps Lemon Squeezy variant ID to plan name (legacy, uses variant name if available)
 func (h *LemonSqueezyWebhookHandler) variantToPlan(variantID int) string {
 	variantStr := intToString(variantID)
 	switch variantStr {
