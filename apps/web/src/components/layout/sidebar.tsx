@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
-import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileText } from "lucide-react";
+import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileText, CreditCard } from "lucide-react";
 
 export function Sidebar() {
   const t = useTranslations("Navigation");
@@ -17,6 +17,7 @@ export function Sidebar() {
     { href: "/search", icon: Search, label: "横断検索" },
     { href: "/projects", icon: FolderOpen, label: t("projects") },
     { href: "/audit", icon: ClipboardList, label: "監査ログ" },
+    { href: "/settings/billing", icon: CreditCard, label: "プラン・お支払い" },
   ];
 
   return (

@@ -607,6 +607,48 @@ export interface TicketListResponse {
   offset: number;
 }
 
+// Billing types
+export interface PlanLimits {
+  plan: string;
+  max_projects: number;
+  max_users: number;
+  max_components: number;
+  max_vulnerabilities: number;
+  monthly_api_calls: number;
+  features: Record<string, boolean>;
+}
+
+export interface Subscription {
+  id: string;
+  tenant_id: string;
+  ls_subscription_id: string;
+  ls_customer_id: string;
+  ls_product_id: string;
+  ls_variant_id: string;
+  status: string;
+  current_period_start: string;
+  current_period_end: string;
+  cancel_at_period_end: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubscriptionResponse {
+  has_subscription: boolean;
+  subscription?: Subscription;
+  plan: string;
+  limits: PlanLimits;
+  billing_enabled: boolean;
+  is_self_hosted: boolean;
+}
+
+export interface UsageResponse {
+  users: { current: number; limit: number };
+  projects: { current: number; limit: number };
+  plan: string;
+  isSelfHosted: boolean;
+}
+
 // Token getter function - will be set by AuthProvider
 let getAuthToken: (() => Promise<string | null>) | null = null;
 let getOrgId: (() => string | null) | null = null;
@@ -958,6 +1000,17 @@ export const api = {
       }),
     sync: (ticketId: string) =>
       request<{ status: string }>(`/api/v1/tickets/${ticketId}/sync`, { method: "POST" }),
+  },
+  // Billing methods
+  billing: {
+    getSubscription: () => request<SubscriptionResponse>("/api/v1/subscription"),
+    createCheckout: (plan: string) =>
+      request<{ url: string }>("/api/v1/subscription/checkout", {
+        method: "POST",
+        body: JSON.stringify({ plan }),
+      }),
+    getPortalUrl: () => request<{ url: string }>("/api/v1/subscription/portal"),
+    getUsage: () => request<UsageResponse>("/api/v1/plan/usage"),
   },
   publicLinks: {
     list: (projectId: string) =>
