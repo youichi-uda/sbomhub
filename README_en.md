@@ -20,7 +20,7 @@ SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard
 - **Track** vulnerabilities with NVD and JVN (Japan) integration
 - **Prioritize** with EPSS exploit prediction scores
 - **Manage** VEX statements for vulnerability triage
-- **Comply** with METI guidelines (Japan) and EU CRA requirements
+- **Support** METI guidelines (Japan) and EU CRA response
 - **Enforce** license policies across your projects
 - **Alert** your team via Slack/Discord/Email
 
@@ -33,7 +33,7 @@ SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard
 | EPSS Scoring | Prioritize by exploit probability |
 | VEX Support | Document vulnerability applicability |
 | License Policies | Enforce allowed/denied licenses |
-| Compliance Scoring | METI guideline compliance check |
+| Compliance Support | METI guideline self-assessment |
 | CI/CD Integration | GitHub Actions support with API keys |
 | Japanese UI | Full Japanese language support |
 
@@ -180,7 +180,7 @@ jobs:
 - [x] EPSS Scoring
 - [x] VEX Support
 - [x] License Policies
-- [x] Compliance Scoring (METI Guidelines)
+- [x] Compliance Support (METI Guideline Self-Assessment)
 - [x] CI/CD Integration (GitHub Actions)
 - [x] Notifications (Slack/Discord)
 - [x] Multi-tenancy (Row-Level Security)

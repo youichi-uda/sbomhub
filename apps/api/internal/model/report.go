@@ -75,15 +75,17 @@ const (
 
 // ExecutiveReportData contains all data needed for an executive report
 type ExecutiveReportData struct {
-	TenantName        string            `json:"tenant_name"`
-	PeriodStart       time.Time         `json:"period_start"`
-	PeriodEnd         time.Time         `json:"period_end"`
-	GeneratedAt       time.Time         `json:"generated_at"`
-	Summary           ReportSummary     `json:"summary"`
-	VulnerabilityData VulnReportData    `json:"vulnerability_data"`
-	ComplianceData    ComplianceReportData `json:"compliance_data"`
-	ProjectScores     []ProjectScore    `json:"project_scores"`
-	TopRisks          []TopRisk         `json:"top_risks"`
+	TenantName        string                   `json:"tenant_name"`
+	PeriodStart       time.Time                `json:"period_start"`
+	PeriodEnd         time.Time                `json:"period_end"`
+	GeneratedAt       time.Time                `json:"generated_at"`
+	Summary           ReportSummary            `json:"summary"`
+	VulnerabilityData VulnReportData           `json:"vulnerability_data"`
+	ComplianceData    ComplianceReportData     `json:"compliance_data"`
+	ChecklistData     *ChecklistReportData     `json:"checklist_data,omitempty"`
+	VisualizationData *VisualizationReportData `json:"visualization_data,omitempty"`
+	ProjectScores     []ProjectScore           `json:"project_scores"`
+	TopRisks          []TopRisk                `json:"top_risks"`
 }
 
 // ReportSummary contains summary statistics for a report
@@ -119,10 +121,45 @@ type CVESummary struct {
 
 // ComplianceReportData contains compliance statistics
 type ComplianceReportData struct {
-	OverallScore   int                 `json:"overall_score"`
-	MaxScore       int                 `json:"max_score"`
-	Categories     []ComplianceCategory `json:"categories"`
+	OverallScore   int                    `json:"overall_score"`
+	MaxScore       int                    `json:"max_score"`
+	Categories     []ComplianceCategory   `json:"categories"`
 	TrendData      []ComplianceTrendPoint `json:"trend_data"`
+}
+
+// ChecklistReportData contains METI checklist progress for reports
+type ChecklistReportData struct {
+	Score    int                        `json:"score"`
+	MaxScore int                        `json:"max_score"`
+	Phases   []ChecklistPhaseReportData `json:"phases"`
+}
+
+// ChecklistPhaseReportData contains phase-level checklist data for reports
+type ChecklistPhaseReportData struct {
+	Phase    string                    `json:"phase"`
+	LabelJa  string                    `json:"label_ja"`
+	Score    int                       `json:"score"`
+	MaxScore int                       `json:"max_score"`
+	Items    []ChecklistItemReportData `json:"items"`
+}
+
+// ChecklistItemReportData contains item-level checklist data for reports
+type ChecklistItemReportData struct {
+	ID         string `json:"id"`
+	LabelJa    string `json:"label_ja"`
+	AutoVerify bool   `json:"auto_verify"`
+	Passed     bool   `json:"passed"`
+	Note       string `json:"note,omitempty"`
+}
+
+// VisualizationReportData contains visualization framework settings for reports
+type VisualizationReportData struct {
+	SBOMAuthorScope  string   `json:"sbom_author_scope"`
+	DependencyScope  string   `json:"dependency_scope"`
+	GenerationMethod string   `json:"generation_method"`
+	DataFormat       string   `json:"data_format"`
+	UtilizationScope []string `json:"utilization_scope"`
+	UtilizationActor string   `json:"utilization_actor"`
 }
 
 // CreateReportSettingsInput is the input for creating report settings

@@ -39,7 +39,7 @@
       },
       "compliance": {
         "title": "Compliance",
-        "description": "Compliance checking feature aligned with METI (Japan) SBOM guidelines."
+        "description": "Self-assessment feature to support METI (Japan) SBOM guideline response. Note: This is not an official compliance certification."
       },
       "license": {
         "title": "License Management",

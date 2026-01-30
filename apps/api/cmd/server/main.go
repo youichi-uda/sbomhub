@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"time"
@@ -15,6 +16,7 @@ import (
 	appmw "github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/redis"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/scheduler"
 	"github.com/sbomhub/sbomhub/internal/service"
 	"github.com/sbomhub/sbomhub/migrations"
 )
@@ -74,6 +76,10 @@ func main() {
 	notificationRepo := repository.NewNotificationRepository(db)
 	publicLinkRepo := repository.NewPublicLinkRepository(db)
 
+	// METI Compliance Repositories
+	checklistRepo := repository.NewChecklistRepository(db)
+	visualizationRepo := repository.NewVisualizationRepository(db)
+
 	// SaaS Repositories
 	tenantRepo := repository.NewTenantRepository(db)
 	userRepo := repository.NewUserRepository(db)
@@ -98,13 +104,14 @@ func main() {
 	searchService := service.NewSearchService(searchRepo)
 	epssService := service.NewEPSSService(vulnRepo)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg.BaseURL)
-	complianceService := service.NewComplianceService(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo)
+	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
 	publicLinkService := service.NewPublicLinkService(publicLinkRepo, projectRepo, sbomRepo, componentRepo)
 	auditService := service.NewAuditService(auditRepo, userRepo)
 	analyticsService := service.NewAnalyticsService(analyticsRepo, dashboardRepo)
-	reportService := service.NewReportService(reportRepo, dashboardRepo, analyticsRepo, tenantRepo, "./reports")
+	reportService := service.NewReportService(reportRepo, dashboardRepo, analyticsRepo, tenantRepo, checklistRepo, visualizationRepo, "./reports")
 	ipaService := service.NewIPAService(ipaRepo)
 	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, cfg.EncryptionKey)
+	remediationService := service.NewRemediationService(vulnRepo, componentRepo)
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -131,6 +138,7 @@ func main() {
 	reportHandler := handler.NewReportHandler(reportService)
 	ipaHandler := handler.NewIPAHandler(ipaService)
 	issueTrackerHandler := handler.NewIssueTrackerHandler(issueTrackerService)
+	remediationHandler := handler.NewRemediationHandler(remediationService)
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -286,6 +294,16 @@ func main() {
 	auth.GET("/projects/:id/compliance", complianceHandler.Check)
 	auth.GET("/projects/:id/compliance/report", complianceHandler.ExportReport)
 
+	// METI Checklist endpoints (18 items)
+	auth.GET("/projects/:id/checklist", complianceHandler.GetChecklist)
+	auth.PUT("/projects/:id/checklist/:checkId", complianceHandler.UpdateChecklistResponse)
+	auth.DELETE("/projects/:id/checklist/:checkId", complianceHandler.DeleteChecklistResponse)
+
+	// Visualization Framework endpoints
+	auth.GET("/projects/:id/visualization", complianceHandler.GetVisualizationSettings)
+	auth.PUT("/projects/:id/visualization", complianceHandler.UpdateVisualizationSettings)
+	auth.DELETE("/projects/:id/visualization", complianceHandler.DeleteVisualizationSettings)
+
 	// Public link endpoints
 	auth.POST("/projects/:id/public-links", publicLinkHandler.Create)
 	auth.GET("/projects/:id/public-links", publicLinkHandler.List)
@@ -332,6 +350,23 @@ func main() {
 	auth.GET("/vulnerabilities/:vuln_id/tickets", issueTrackerHandler.GetTicketsByVulnerability)
 	auth.GET("/tickets", issueTrackerHandler.ListTickets)
 	auth.POST("/tickets/:id/sync", issueTrackerHandler.SyncTicket)
+
+	// Remediation guidance endpoints
+	auth.GET("/remediation/:cve_id", remediationHandler.GetRemediationByCVE)
+	auth.GET("/vulnerabilities/:id/remediation", remediationHandler.GetRemediation)
+
+	// Start background jobs
+	ctx := context.Background()
+
+	// Ticket sync job - runs every 5 minutes to sync ticket statuses with Jira/Backlog
+	ticketSyncJob := scheduler.NewTicketSyncJob(issueTrackerService, issueTrackerRepo, 5*time.Minute)
+	go ticketSyncJob.Start(ctx)
+	slog.Info("Ticket sync job started", "interval", "5m")
+
+	// Report generation job - runs every hour to check scheduled reports
+	reportGenJob := scheduler.NewReportGenerationJob(reportService, reportRepo, tenantRepo, 1*time.Hour)
+	go reportGenJob.Start(ctx)
+	slog.Info("Report generation job started", "interval", "1h")
 
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))

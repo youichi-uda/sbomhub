@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, APIKey, APIKeyWithSecret, NotificationSettings, NotificationLog } from "@/lib/api";
-import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check, Bell } from "lucide-react";
+import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check, Bell, Wrench } from "lucide-react";
+import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import Link from "next/link";
 
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "apikeys" | "notifications";
@@ -385,9 +386,13 @@ export default function ProjectDetailPage() {
                         </Button>
                       </div>
                     </div>
-                    <p className="text-sm text-muted-foreground line-clamp-2">
+                    <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
                       {vuln.description}
                     </p>
+                    <RemediationPanel
+                      cveId={vuln.cve_id}
+                      severity={vuln.severity}
+                    />
                   </div>
                 ))}
               </div>

@@ -327,6 +327,80 @@ export interface ComplianceResult {
   categories: ComplianceCategory[];
 }
 
+// METI Checklist types
+export type ChecklistPhase = "setup" | "creation" | "operation";
+
+export interface ChecklistItem {
+  id: string;
+  phase: ChecklistPhase;
+  label: string;
+  label_ja: string;
+  description?: string;
+  auto_verify: boolean;
+}
+
+export interface ChecklistItemResult extends ChecklistItem {
+  passed: boolean;
+  response?: boolean;
+  note?: string;
+  auto_result?: boolean;
+}
+
+export interface ChecklistPhaseResult {
+  phase: ChecklistPhase;
+  label: string;
+  label_ja: string;
+  items: ChecklistItemResult[];
+  score: number;
+  max_score: number;
+}
+
+export interface ChecklistResult {
+  project_id: string;
+  phases: ChecklistPhaseResult[];
+  score: number;
+  max_score: number;
+}
+
+export interface ChecklistResponseInput {
+  response: boolean;
+  note?: string;
+}
+
+// Visualization Framework types
+export interface VisualizationOption {
+  value: string;
+  label: string;
+  label_ja: string;
+}
+
+export interface VisualizationOptions {
+  sbom_author_scope: VisualizationOption[];
+  dependency_scope: VisualizationOption[];
+  generation_method: VisualizationOption[];
+  data_format: VisualizationOption[];
+  utilization_scope: VisualizationOption[];
+  utilization_actor: VisualizationOption[];
+}
+
+export interface VisualizationSettings {
+  id?: string;
+  project_id: string;
+  sbom_author_scope: string;
+  dependency_scope: string;
+  generation_method: string;
+  data_format: string;
+  utilization_scope: string[];
+  utilization_actor: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface VisualizationFramework {
+  settings?: VisualizationSettings;
+  options: VisualizationOptions;
+}
+
 // Audit log types
 export interface AuditLog {
   id: string;
@@ -876,6 +950,37 @@ export const api = {
       request<ComplianceResult>(`/api/v1/projects/${id}/compliance`),
     exportComplianceReport: (projectId: string, format: "json" | "pdf" | "xlsx" = "json") =>
       `${API_URL}/api/v1/projects/${projectId}/compliance/report?format=${format}`,
+    // METI Checklist methods
+    getChecklist: (id: string) =>
+      request<ChecklistResult>(`/api/v1/projects/${id}/checklist`),
+    updateChecklistResponse: (
+      projectId: string,
+      checkId: string,
+      data: ChecklistResponseInput
+    ) =>
+      request<{ status: string }>(`/api/v1/projects/${projectId}/checklist/${checkId}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    deleteChecklistResponse: (projectId: string, checkId: string) =>
+      request<void>(`/api/v1/projects/${projectId}/checklist/${checkId}`, {
+        method: "DELETE",
+      }),
+    // Visualization Framework methods
+    getVisualization: (id: string) =>
+      request<VisualizationFramework>(`/api/v1/projects/${id}/visualization`),
+    updateVisualization: (
+      projectId: string,
+      data: Partial<VisualizationSettings>
+    ) =>
+      request<VisualizationSettings>(`/api/v1/projects/${projectId}/visualization`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }),
+    deleteVisualization: (projectId: string) =>
+      request<void>(`/api/v1/projects/${projectId}/visualization`, {
+        method: "DELETE",
+      }),
   },
   licenses: {
     getCommon: () => request<Record<string, string>>("/api/v1/licenses/common"),

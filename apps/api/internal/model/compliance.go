@@ -31,7 +31,24 @@ type ComplianceCheck struct {
 type ComplianceCategoryName string
 
 const (
-	ComplianceCategorySBOM          ComplianceCategoryName = "sbom_generation"
-	ComplianceCategoryVulnerability ComplianceCategoryName = "vulnerability_management"
-	ComplianceCategoryLicense       ComplianceCategoryName = "license_management"
+	ComplianceCategorySBOM            ComplianceCategoryName = "sbom_generation"
+	ComplianceCategoryVulnerability   ComplianceCategoryName = "vulnerability_management"
+	ComplianceCategoryLicense         ComplianceCategoryName = "license_management"
+	ComplianceCategoryMinimumElements ComplianceCategoryName = "minimum_elements"
 )
+
+// MinimumElementsCoverage represents coverage stats for METI minimum elements
+type MinimumElementsCoverage struct {
+	TotalComponents int                   `json:"total_components"`
+	Elements        []MinimumElementStats `json:"elements"`
+	OverallScore    int                   `json:"overall_score"` // 0-100
+}
+
+// MinimumElementStats represents statistics for a single minimum element
+type MinimumElementStats struct {
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	LabelJa    string `json:"label_ja"`
+	Count      int    `json:"count"`      // Number of components with this element
+	Percentage int    `json:"percentage"` // 0-100
+}
