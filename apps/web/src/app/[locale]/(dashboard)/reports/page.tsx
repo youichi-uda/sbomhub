@@ -284,7 +284,7 @@ export default function ReportsPage() {
             {/* Generate Modal */}
             {showGenerateModal && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-card border border-border rounded-lg p-6 w-full max-w-md mx-4">
+                    <div className="bg-background border border-border rounded-lg p-6 w-full max-w-md mx-4 shadow-lg">
                         <h2 className="text-lg font-semibold mb-4">{t("generate")}</h2>
 
                         <div className="space-y-4">
