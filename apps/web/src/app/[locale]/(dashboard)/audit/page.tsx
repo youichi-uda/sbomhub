@@ -84,8 +84,11 @@ export default function AuditLogPage() {
             a.download = `audit-logs-${new Date().toISOString().split('T')[0]}.csv`;
             document.body.appendChild(a);
             a.click();
-            window.URL.revokeObjectURL(url);
-            a.remove();
+            // Delay cleanup to ensure download starts
+            setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                a.remove();
+            }, 100);
         } catch (err) {
             setError(t("exportFailed"));
             console.error(err);

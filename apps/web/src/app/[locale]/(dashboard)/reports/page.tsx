@@ -80,8 +80,11 @@ export default function ReportsPage() {
             a.download = `${report.title}.${report.format}`;
             document.body.appendChild(a);
             a.click();
-            window.URL.revokeObjectURL(url);
-            a.remove();
+            // Delay cleanup to ensure download starts
+            setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                a.remove();
+            }, 100);
         } catch (err) {
             setError(t("downloadFailed"));
             console.error(err);
