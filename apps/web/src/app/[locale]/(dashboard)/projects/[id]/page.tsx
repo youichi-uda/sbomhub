@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, APIKey, APIKeyWithSecret, NotificationSettings, NotificationLog } from "@/lib/api";
 import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check, Bell, Wrench } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
+import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import Link from "next/link";
 
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "apikeys" | "notifications";
@@ -367,6 +368,12 @@ export default function ProjectDetailPage() {
                         <Badge variant="outline" className="text-xs">
                           {vuln.source || "NVD"}
                         </Badge>
+                        <KEVBadge
+                          cveId={vuln.cve_id}
+                          inKev={vuln.in_kev}
+                          kevDueDate={vuln.kev_due_date}
+                          kevRansomwareUse={vuln.kev_ransomware_use}
+                        />
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-muted-foreground">

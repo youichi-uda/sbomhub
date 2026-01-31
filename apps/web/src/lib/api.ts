@@ -63,8 +63,152 @@ export interface Vulnerability {
   cvss_score: number;
   epss_score?: number;
   epss_percentile?: number;
+  // KEV (Known Exploited Vulnerabilities) fields
+  in_kev?: boolean;
+  kev_date_added?: string;
+  kev_due_date?: string;
+  kev_ransomware_use?: boolean;
   source: string; // NVD or JVN
   published_at: string;
+}
+
+// KEV types
+export interface KEVEntry {
+  id: string;
+  cve_id: string;
+  vendor_project: string;
+  product: string;
+  vulnerability_name: string;
+  short_description?: string;
+  required_action?: string;
+  date_added: string;
+  due_date: string;
+  known_ransomware_use: boolean;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KEVSyncResult {
+  new_entries: number;
+  updated_entries: number;
+  total_processed: number;
+  catalog_version: string;
+}
+
+export interface KEVStats {
+  total_entries: number;
+  last_sync_at?: string;
+  catalog_version?: string;
+}
+
+export interface KEVCheckResult {
+  cve_id: string;
+  in_kev: boolean;
+  date_added?: string;
+  due_date?: string;
+  known_ransomware_use?: boolean;
+  vendor_project?: string;
+  product?: string;
+  required_action?: string;
+}
+
+// SSVC (Stakeholder-Specific Vulnerability Categorization) types
+export type SSVCExploitation = "none" | "poc" | "active";
+export type SSVCAutomatable = "yes" | "no";
+export type SSVCTechnicalImpact = "partial" | "total";
+export type SSVCMissionPrevalence = "minimal" | "support" | "essential";
+export type SSVCSafetyImpact = "minimal" | "significant";
+export type SSVCDecision = "defer" | "scheduled" | "out_of_cycle" | "immediate";
+
+export interface SSVCProjectDefaults {
+  id?: string;
+  project_id: string;
+  tenant_id?: string;
+  mission_prevalence: SSVCMissionPrevalence;
+  safety_impact: SSVCSafetyImpact;
+  system_exposure: string;
+  auto_assess_enabled: boolean;
+  auto_assess_exploitation: boolean;
+  auto_assess_automatable: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SSVCAssessment {
+  id: string;
+  project_id: string;
+  tenant_id?: string;
+  vulnerability_id: string;
+  cve_id: string;
+  exploitation: SSVCExploitation;
+  automatable: SSVCAutomatable;
+  technical_impact: SSVCTechnicalImpact;
+  mission_prevalence: SSVCMissionPrevalence;
+  safety_impact: SSVCSafetyImpact;
+  decision: SSVCDecision;
+  exploitation_auto: boolean;
+  automatable_auto: boolean;
+  assessed_by?: string;
+  assessed_at: string;
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SSVCAssessmentWithVuln extends SSVCAssessment {
+  vulnerability_severity: string;
+  vulnerability_cvss_score: number;
+  vulnerability_in_kev: boolean;
+  vulnerability_epss_score?: number;
+}
+
+export interface SSVCAssessmentInput {
+  exploitation: SSVCExploitation;
+  automatable: SSVCAutomatable;
+  technical_impact: SSVCTechnicalImpact;
+  mission_prevalence: SSVCMissionPrevalence;
+  safety_impact: SSVCSafetyImpact;
+  notes?: string;
+}
+
+export interface SSVCSummary {
+  project_id: string;
+  total_assessed: number;
+  immediate: number;
+  out_of_cycle: number;
+  scheduled: number;
+  defer: number;
+  unassessed: number;
+}
+
+export interface SSVCAssessmentHistory {
+  id: string;
+  assessment_id: string;
+  prev_exploitation?: SSVCExploitation;
+  prev_automatable?: SSVCAutomatable;
+  prev_technical_impact?: SSVCTechnicalImpact;
+  prev_mission_prevalence?: SSVCMissionPrevalence;
+  prev_safety_impact?: SSVCSafetyImpact;
+  prev_decision?: SSVCDecision;
+  new_exploitation: SSVCExploitation;
+  new_automatable: SSVCAutomatable;
+  new_technical_impact: SSVCTechnicalImpact;
+  new_mission_prevalence: SSVCMissionPrevalence;
+  new_safety_impact: SSVCSafetyImpact;
+  new_decision: SSVCDecision;
+  changed_by?: string;
+  changed_at: string;
+  change_reason?: string;
+}
+
+export interface SSVCCalculateResult {
+  decision: SSVCDecision;
+  exploitation: SSVCExploitation;
+  automatable: SSVCAutomatable;
+  technical_impact: SSVCTechnicalImpact;
+  mission_prevalence: SSVCMissionPrevalence;
+  safety_impact: SSVCSafetyImpact;
 }
 
 export interface Stats {
@@ -1068,6 +1212,73 @@ export const api = {
       request<AuditStatistics>(`/api/v1/audit-logs/statistics${days ? `?days=${days}` : ""}`),
     getActions: () => request<ActionInfo[]>("/api/v1/audit-logs/actions"),
     getResourceTypes: () => request<ResourceTypeInfo[]>("/api/v1/audit-logs/resource-types"),
+  },
+  // KEV methods
+  kev: {
+    sync: () =>
+      request<KEVSyncResult>("/api/v1/kev/sync", { method: "POST" }),
+    getCatalog: (limit?: number, offset?: number) => {
+      const params = new URLSearchParams();
+      if (limit) params.set("limit", limit.toString());
+      if (offset) params.set("offset", offset.toString());
+      const query = params.toString();
+      return request<{ entries: KEVEntry[]; total: number }>(`/api/v1/kev/catalog${query ? `?${query}` : ""}`);
+    },
+    getStats: () => request<KEVStats>("/api/v1/kev/stats"),
+    getByCVE: (cveId: string) =>
+      request<{ in_kev: boolean; cve_id: string; entry?: KEVEntry }>(`/api/v1/kev/${cveId}`),
+    checkCVE: (cveId: string) =>
+      request<KEVCheckResult>(`/api/v1/vulnerabilities/${cveId}/kev`),
+    getProjectKEV: (projectId: string) =>
+      request<{ vulnerabilities: Vulnerability[]; count: number }>(`/api/v1/projects/${projectId}/kev`),
+  },
+  // SSVC methods
+  ssvc: {
+    getDefaults: (projectId: string) =>
+      request<SSVCProjectDefaults>(`/api/v1/projects/${projectId}/ssvc/defaults`),
+    updateDefaults: (projectId: string, defaults: Partial<SSVCProjectDefaults>) =>
+      request<SSVCProjectDefaults>(`/api/v1/projects/${projectId}/ssvc/defaults`, {
+        method: "PUT",
+        body: JSON.stringify(defaults),
+      }),
+    getSummary: (projectId: string) =>
+      request<SSVCSummary>(`/api/v1/projects/${projectId}/ssvc/summary`),
+    listAssessments: (projectId: string, decision?: SSVCDecision, limit?: number, offset?: number) => {
+      const params = new URLSearchParams();
+      if (decision) params.set("decision", decision);
+      if (limit) params.set("limit", limit.toString());
+      if (offset) params.set("offset", offset.toString());
+      const query = params.toString();
+      return request<{ assessments: SSVCAssessmentWithVuln[]; total: number; limit: number; offset: number }>(
+        `/api/v1/projects/${projectId}/ssvc/assessments${query ? `?${query}` : ""}`
+      );
+    },
+    getAssessment: (projectId: string, vulnId: string) =>
+      request<SSVCAssessment>(`/api/v1/projects/${projectId}/vulnerabilities/${vulnId}/ssvc`),
+    getAssessmentByCVE: (projectId: string, cveId: string) =>
+      request<SSVCAssessment>(`/api/v1/projects/${projectId}/ssvc/cve/${cveId}`),
+    assess: (projectId: string, vulnId: string, cveId: string, input: SSVCAssessmentInput) =>
+      request<SSVCAssessment>(`/api/v1/projects/${projectId}/vulnerabilities/${vulnId}/ssvc?cve_id=${encodeURIComponent(cveId)}`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    autoAssess: (projectId: string, vulnId: string, cveId: string) =>
+      request<SSVCAssessment>(`/api/v1/projects/${projectId}/vulnerabilities/${vulnId}/ssvc/auto?cve_id=${encodeURIComponent(cveId)}`, {
+        method: "POST",
+      }),
+    deleteAssessment: (projectId: string, assessmentId: string) =>
+      request<void>(`/api/v1/projects/${projectId}/ssvc/assessments/${assessmentId}`, {
+        method: "DELETE",
+      }),
+    getHistory: (projectId: string, assessmentId: string) =>
+      request<SSVCAssessmentHistory[]>(`/api/v1/projects/${projectId}/ssvc/assessments/${assessmentId}/history`),
+    getImmediateAssessments: () =>
+      request<SSVCAssessmentWithVuln[]>("/api/v1/ssvc/immediate"),
+    calculate: (input: SSVCAssessmentInput) =>
+      request<SSVCCalculateResult>("/api/v1/ssvc/calculate", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
   },
   // IPA methods
   ipa: {

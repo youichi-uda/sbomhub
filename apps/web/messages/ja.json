@@ -317,6 +317,131 @@
     "showMore": "他 {count} 件を表示",
     "ipaCount": "IPA {count}件"
   },
+  "KEV": {
+    "badge": "悪用確認済み",
+    "title": "CISA KEV カタログ",
+    "description": "この脆弱性はCISAのKnown Exploited Vulnerabilitiesカタログに登録されており、実際に悪用が確認されています。",
+    "dueDate": "対応期限",
+    "overdue": "期限超過",
+    "ransomwareWarning": "ランサムウェア攻撃での悪用が確認されています",
+    "exploitedTooltip": "実際に悪用が確認された脆弱性",
+    "syncButton": "KEVカタログ同期",
+    "syncSuccess": "KEVカタログの同期が完了しました",
+    "syncFailed": "KEVカタログの同期に失敗しました",
+    "stats": {
+      "title": "KEV統計",
+      "totalEntries": "登録件数",
+      "lastSync": "最終同期",
+      "catalogVersion": "カタログバージョン"
+    },
+    "catalog": {
+      "title": "KEVカタログ",
+      "vendor": "ベンダー",
+      "product": "製品",
+      "vulnerabilityName": "脆弱性名",
+      "dateAdded": "登録日",
+      "dueDate": "対応期限",
+      "ransomware": "ランサムウェア"
+    }
+  },
+  "SSVC": {
+    "title": "SSVC 評価",
+    "subtitle": "Stakeholder-Specific Vulnerability Categorization",
+    "description": "CISAのSSVCフレームワークに基づく脆弱性の優先度評価",
+    "decision": {
+      "immediate": "即時対応",
+      "out_of_cycle": "緊急対応",
+      "scheduled": "計画対応",
+      "defer": "経過観察"
+    },
+    "decisionDescription": {
+      "immediate": "他のすべての作業を中断し、直ちにこの脆弱性に対応してください",
+      "out_of_cycle": "通常の更新サイクル外で、できるだけ早く対応してください",
+      "scheduled": "次回の定期メンテナンスサイクルで対応を計画してください",
+      "defer": "現時点では対応不要。状況を継続的に監視してください"
+    },
+    "exploitation": {
+      "title": "悪用状況",
+      "none": "悪用なし",
+      "poc": "PoC公開",
+      "active": "悪用中"
+    },
+    "exploitationDescription": {
+      "none": "悪用コードやPoCは確認されていません",
+      "poc": "実証コード(PoC)が公開されています",
+      "active": "実際の攻撃で悪用が確認されています"
+    },
+    "automatable": {
+      "title": "自動化可能性",
+      "yes": "自動化可能",
+      "no": "手動のみ"
+    },
+    "automatableDescription": {
+      "yes": "攻撃の自動化が可能です",
+      "no": "攻撃には手動介入が必要です"
+    },
+    "technicalImpact": {
+      "title": "技術的影響",
+      "partial": "部分的",
+      "total": "完全"
+    },
+    "technicalImpactDescription": {
+      "partial": "一部の機能やデータに影響があります",
+      "total": "システム全体の制御が奪われる可能性があります"
+    },
+    "missionPrevalence": {
+      "title": "ミッション重要度",
+      "minimal": "最小",
+      "support": "サポート",
+      "essential": "必須"
+    },
+    "missionPrevalenceDescription": {
+      "minimal": "影響を受けるシステムはミッションにほとんど関係ありません",
+      "support": "影響を受けるシステムはミッションをサポートしています",
+      "essential": "影響を受けるシステムはミッションに不可欠です"
+    },
+    "safetyImpact": {
+      "title": "安全性影響",
+      "minimal": "最小",
+      "significant": "重大"
+    },
+    "safetyImpactDescription": {
+      "minimal": "安全性への影響は軽微です",
+      "significant": "人命や安全に重大な影響を及ぼす可能性があります"
+    },
+    "systemExposure": {
+      "title": "システム露出度",
+      "internet": "インターネット",
+      "internal": "内部ネットワーク",
+      "airgap": "エアギャップ"
+    },
+    "assess": "評価する",
+    "autoAssess": "自動評価",
+    "manualAssess": "手動評価",
+    "assessedBy": "評価者",
+    "assessedAt": "評価日時",
+    "notes": "メモ",
+    "history": "評価履歴",
+    "defaults": {
+      "title": "SSVC デフォルト設定",
+      "description": "プロジェクト全体に適用されるSSVCパラメータのデフォルト値を設定します",
+      "autoAssessEnabled": "自動評価を有効化",
+      "autoAssessExploitation": "KEVから悪用状況を自動設定",
+      "autoAssessAutomatable": "EPSSから自動化可能性を推定",
+      "saved": "設定を保存しました"
+    },
+    "summary": {
+      "title": "SSVC サマリー",
+      "totalAssessed": "評価済み",
+      "unassessed": "未評価",
+      "immediate": "即時対応",
+      "outOfCycle": "緊急対応",
+      "scheduled": "計画対応",
+      "defer": "経過観察"
+    },
+    "autoAssessed": "自動評価済み",
+    "manualAssessed": "手動評価済み"
+  },
   "CreateTicket": {
     "title": "チケット作成",
     "createTicket": "チケットを作成",

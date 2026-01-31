@@ -89,6 +89,8 @@ func main() {
 	reportRepo := repository.NewReportRepository(db)
 	ipaRepo := repository.NewIPARepository(db)
 	issueTrackerRepo := repository.NewIssueTrackerRepository(db)
+	kevRepo := repository.NewKEVRepository(db)
+	ssvcRepo := repository.NewSSVCRepository(db)
 
 	// Services
 	projectService := service.NewProjectService(projectRepo)
@@ -112,6 +114,8 @@ func main() {
 	ipaService := service.NewIPAService(ipaRepo)
 	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, cfg.EncryptionKey)
 	remediationService := service.NewRemediationService(vulnRepo, componentRepo)
+	kevService := service.NewKEVService(kevRepo)
+	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -139,6 +143,8 @@ func main() {
 	ipaHandler := handler.NewIPAHandler(ipaService)
 	issueTrackerHandler := handler.NewIssueTrackerHandler(issueTrackerService)
 	remediationHandler := handler.NewRemediationHandler(remediationService)
+	kevHandler := handler.NewKEVHandler(kevService)
+	ssvcHandler := handler.NewSSVCHandler(ssvcService)
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -343,6 +349,30 @@ func main() {
 	auth.GET("/settings/ipa", ipaHandler.GetSyncSettings)
 	auth.PUT("/settings/ipa", ipaHandler.UpdateSyncSettings)
 
+	// KEV (Known Exploited Vulnerabilities) integration endpoints
+	auth.POST("/kev/sync", kevHandler.SyncCatalog)
+	auth.GET("/kev/catalog", kevHandler.ListCatalog)
+	auth.GET("/kev/stats", kevHandler.GetStats)
+	auth.GET("/kev/settings", kevHandler.GetSyncSettings)
+	auth.GET("/kev/sync/latest", kevHandler.GetLatestSync)
+	auth.GET("/kev/:cve_id", kevHandler.GetByCVE)
+	auth.GET("/vulnerabilities/:cve_id/kev", kevHandler.CheckCVE)
+	auth.GET("/projects/:id/kev", kevHandler.GetProjectKEVVulnerabilities)
+
+	// SSVC (Stakeholder-Specific Vulnerability Categorization) endpoints
+	auth.GET("/projects/:id/ssvc/defaults", ssvcHandler.GetProjectDefaults)
+	auth.PUT("/projects/:id/ssvc/defaults", ssvcHandler.UpdateProjectDefaults)
+	auth.GET("/projects/:id/ssvc/summary", ssvcHandler.GetSummary)
+	auth.GET("/projects/:id/ssvc/assessments", ssvcHandler.ListAssessments)
+	auth.DELETE("/projects/:id/ssvc/assessments/:assessment_id", ssvcHandler.DeleteAssessment)
+	auth.GET("/projects/:id/ssvc/assessments/:assessment_id/history", ssvcHandler.GetAssessmentHistory)
+	auth.GET("/projects/:id/ssvc/cve/:cve_id", ssvcHandler.GetAssessmentByCVE)
+	auth.GET("/projects/:id/vulnerabilities/:vuln_id/ssvc", ssvcHandler.GetAssessment)
+	auth.POST("/projects/:id/vulnerabilities/:vuln_id/ssvc", ssvcHandler.AssessVulnerability)
+	auth.POST("/projects/:id/vulnerabilities/:vuln_id/ssvc/auto", ssvcHandler.AutoAssessVulnerability)
+	auth.POST("/ssvc/calculate", ssvcHandler.CalculateDecision)
+	auth.GET("/ssvc/immediate", ssvcHandler.GetImmediateAssessments)
+
 	// Issue tracker integration endpoints
 	auth.POST("/integrations", issueTrackerHandler.CreateConnection)
 	auth.GET("/integrations", issueTrackerHandler.ListConnections)
@@ -369,6 +399,11 @@ func main() {
 	reportGenJob := scheduler.NewReportGenerationJob(reportService, reportRepo, tenantRepo, 1*time.Hour)
 	go reportGenJob.Start(ctx)
 	slog.Info("Report generation job started", "interval", "1h")
+
+	// KEV sync job - runs daily to sync CISA KEV catalog
+	kevSyncJob := scheduler.NewKEVSyncJob(kevService, 24*time.Hour)
+	go kevSyncJob.Start(ctx)
+	slog.Info("KEV sync job started", "interval", "24h")
 
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))

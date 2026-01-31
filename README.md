@@ -31,6 +31,8 @@ SBOMHubは、日本市場向けに設計されたオープンソースのSBOM（
 | マルチフォーマットSBOM | CycloneDX・SPDX JSONに対応 |
 | 脆弱性トラッキング | NVD + JVN連携で網羅的にカバー |
 | EPSSスコアリング | 悪用可能性に基づく優先度付け |
+| **SSVC意思決定** | CISA SSVCフレームワークによる脆弱性優先度付け |
+| **KEV連携** | CISA Known Exploited Vulnerabilities カタログ連携 |
 | VEXサポート | 脆弱性の適用可否を記録 |
 | ライセンスポリシー | 許可/拒否ライセンスの管理 |
 | コンプライアンス対応支援 | 経産省ガイドライン自己評価チェック |
@@ -136,6 +138,19 @@ POST   /api/v1/projects/:id/sbom     # SBOMアップロード
 GET    /api/v1/projects/:id/components
 GET    /api/v1/projects/:id/vulnerabilities
 GET    /api/v1/projects/:id/vex      # VEXステートメント
+
+# SSVC (Stakeholder-Specific Vulnerability Categorization)
+GET    /api/v1/projects/:id/ssvc/defaults    # プロジェクトSSVCデフォルト設定
+PUT    /api/v1/projects/:id/ssvc/defaults    # SSVCデフォルト設定更新
+POST   /api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc  # SSVC評価作成
+GET    /api/v1/projects/:id/ssvc/summary     # SSVC評価サマリー
+POST   /api/v1/ssvc/calculate                # SSVC決定計算（保存なし）
+
+# KEV (Known Exploited Vulnerabilities)
+POST   /api/v1/kev/sync              # KEVカタログ同期
+GET    /api/v1/kev/stats             # KEV統計情報
+GET    /api/v1/kev/:cve_id           # CVEのKEV確認
+GET    /api/v1/projects/:id/kev      # プロジェクトのKEV脆弱性一覧
 ```
 
 ## CLI
@@ -232,6 +247,8 @@ jobs:
 - [x] Clerk認証連携
 - [x] Lemon Squeezy課金連携
 - [x] SBOMHub Cloud（マネージドSaaS）
+- [x] **SSVC意思決定フレームワーク** - CISA SSVCによる脆弱性優先度付け
+- [x] **KEV連携** - Known Exploited Vulnerabilities カタログ自動同期
 - [ ] LDAP/OIDC認証（セルフホスト向け）
 
 ## コントリビューション
@@ -360,5 +377,7 @@ docker compose build           # 全コンテナビルド
 - [NVD](https://nvd.nist.gov/) - National Vulnerability Database
 - [JVN](https://jvn.jp/) - Japan Vulnerability Notes
 - [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
+- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) - Known Exploited Vulnerabilities Catalog
+- [CISA SSVC](https://www.cisa.gov/stakeholder-specific-vulnerability-categorization-ssvc) - Stakeholder-Specific Vulnerability Categorization
 - [Trail of Bits](https://github.com/trailofbits/skills) - Claude Code向けセキュリティスキル
 - [Vercel](https://github.com/vercel-labs/agent-skills) - Reactベストプラクティス

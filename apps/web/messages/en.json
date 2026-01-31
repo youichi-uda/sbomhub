@@ -318,6 +318,131 @@
     "showMore": "Show {count} more items",
     "ipaCount": "IPA {count} items"
   },
+  "KEV": {
+    "badge": "Exploited",
+    "title": "CISA KEV Catalog",
+    "description": "This vulnerability is listed in CISA's Known Exploited Vulnerabilities catalog and is actively exploited in the wild.",
+    "dueDate": "Due Date",
+    "overdue": "Overdue",
+    "ransomwareWarning": "Known to be used in ransomware attacks",
+    "exploitedTooltip": "Actively exploited vulnerability",
+    "syncButton": "Sync KEV Catalog",
+    "syncSuccess": "KEV catalog sync completed",
+    "syncFailed": "KEV catalog sync failed",
+    "stats": {
+      "title": "KEV Statistics",
+      "totalEntries": "Total Entries",
+      "lastSync": "Last Sync",
+      "catalogVersion": "Catalog Version"
+    },
+    "catalog": {
+      "title": "KEV Catalog",
+      "vendor": "Vendor",
+      "product": "Product",
+      "vulnerabilityName": "Vulnerability Name",
+      "dateAdded": "Date Added",
+      "dueDate": "Due Date",
+      "ransomware": "Ransomware"
+    }
+  },
+  "SSVC": {
+    "title": "SSVC Assessment",
+    "subtitle": "Stakeholder-Specific Vulnerability Categorization",
+    "description": "Vulnerability prioritization based on CISA's SSVC framework",
+    "decision": {
+      "immediate": "Act Immediately",
+      "out_of_cycle": "Out-of-Cycle",
+      "scheduled": "Scheduled",
+      "defer": "Defer"
+    },
+    "decisionDescription": {
+      "immediate": "Stop all other work and address this vulnerability immediately",
+      "out_of_cycle": "Address this vulnerability outside of your regular update cycle as soon as possible",
+      "scheduled": "Plan to address this vulnerability during your next regular maintenance cycle",
+      "defer": "No action required at this time. Continue monitoring the situation"
+    },
+    "exploitation": {
+      "title": "Exploitation",
+      "none": "None",
+      "poc": "PoC",
+      "active": "Active"
+    },
+    "exploitationDescription": {
+      "none": "No exploit code or PoC has been identified",
+      "poc": "Proof of concept exploit code is publicly available",
+      "active": "Active exploitation has been observed in the wild"
+    },
+    "automatable": {
+      "title": "Automatable",
+      "yes": "Yes",
+      "no": "No"
+    },
+    "automatableDescription": {
+      "yes": "Attacks can be automated",
+      "no": "Manual intervention is required for exploitation"
+    },
+    "technicalImpact": {
+      "title": "Technical Impact",
+      "partial": "Partial",
+      "total": "Total"
+    },
+    "technicalImpactDescription": {
+      "partial": "Some functionality or data is affected",
+      "total": "Complete control of the system may be compromised"
+    },
+    "missionPrevalence": {
+      "title": "Mission Prevalence",
+      "minimal": "Minimal",
+      "support": "Support",
+      "essential": "Essential"
+    },
+    "missionPrevalenceDescription": {
+      "minimal": "Affected systems have little relevance to the mission",
+      "support": "Affected systems support the mission",
+      "essential": "Affected systems are essential to the mission"
+    },
+    "safetyImpact": {
+      "title": "Safety Impact",
+      "minimal": "Minimal",
+      "significant": "Significant"
+    },
+    "safetyImpactDescription": {
+      "minimal": "Safety impact is negligible",
+      "significant": "May significantly impact human life or safety"
+    },
+    "systemExposure": {
+      "title": "System Exposure",
+      "internet": "Internet",
+      "internal": "Internal Network",
+      "airgap": "Air-gapped"
+    },
+    "assess": "Assess",
+    "autoAssess": "Auto Assess",
+    "manualAssess": "Manual Assess",
+    "assessedBy": "Assessed By",
+    "assessedAt": "Assessed At",
+    "notes": "Notes",
+    "history": "Assessment History",
+    "defaults": {
+      "title": "SSVC Default Settings",
+      "description": "Configure default SSVC parameter values for this project",
+      "autoAssessEnabled": "Enable Auto Assessment",
+      "autoAssessExploitation": "Auto-detect exploitation from KEV",
+      "autoAssessAutomatable": "Estimate automatable from EPSS",
+      "saved": "Settings saved"
+    },
+    "summary": {
+      "title": "SSVC Summary",
+      "totalAssessed": "Assessed",
+      "unassessed": "Unassessed",
+      "immediate": "Immediate",
+      "outOfCycle": "Out-of-Cycle",
+      "scheduled": "Scheduled",
+      "defer": "Defer"
+    },
+    "autoAssessed": "Auto-assessed",
+    "manualAssessed": "Manually assessed"
+  },
   "CreateTicket": {
     "title": "Create Ticket",
     "createTicket": "Create Ticket",

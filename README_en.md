@@ -31,6 +31,8 @@ SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard
 | Multi-format SBOM | Import CycloneDX and SPDX JSON |
 | Vulnerability Tracking | NVD + JVN integration for comprehensive coverage |
 | EPSS Scoring | Prioritize by exploit probability |
+| **SSVC Decision Making** | CISA SSVC framework for vulnerability prioritization |
+| **KEV Integration** | CISA Known Exploited Vulnerabilities catalog sync |
 | VEX Support | Document vulnerability applicability |
 | License Policies | Enforce allowed/denied licenses |
 | Compliance Support | METI guideline self-assessment |
@@ -136,6 +138,19 @@ POST   /api/v1/projects/:id/sbom     # Upload SBOM
 GET    /api/v1/projects/:id/components
 GET    /api/v1/projects/:id/vulnerabilities
 GET    /api/v1/projects/:id/vex      # VEX statements
+
+# SSVC (Stakeholder-Specific Vulnerability Categorization)
+GET    /api/v1/projects/:id/ssvc/defaults    # Get project SSVC defaults
+PUT    /api/v1/projects/:id/ssvc/defaults    # Update SSVC defaults
+POST   /api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc  # Create SSVC assessment
+GET    /api/v1/projects/:id/ssvc/summary     # Get SSVC summary
+POST   /api/v1/ssvc/calculate                # Calculate SSVC decision (no save)
+
+# KEV (Known Exploited Vulnerabilities)
+POST   /api/v1/kev/sync              # Sync KEV catalog
+GET    /api/v1/kev/stats             # Get KEV statistics
+GET    /api/v1/kev/:cve_id           # Check CVE in KEV
+GET    /api/v1/projects/:id/kev      # List project KEV vulnerabilities
 ```
 
 ## CI/CD Integration
@@ -187,6 +202,8 @@ jobs:
 - [x] Clerk Authentication Integration
 - [x] Lemon Squeezy Billing Integration
 - [x] SBOMHub Cloud (Managed SaaS)
+- [x] **SSVC Decision Framework** - CISA SSVC for vulnerability prioritization
+- [x] **KEV Integration** - Known Exploited Vulnerabilities catalog auto-sync
 - [ ] LDAP/OIDC Authentication (Self-hosted)
 
 ## Contributing
@@ -324,5 +341,7 @@ Please do NOT report security vulnerabilities through public GitHub issues.
 - [NVD](https://nvd.nist.gov/) - National Vulnerability Database
 - [JVN](https://jvn.jp/) - Japan Vulnerability Notes
 - [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
+- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) - Known Exploited Vulnerabilities Catalog
+- [CISA SSVC](https://www.cisa.gov/stakeholder-specific-vulnerability-categorization-ssvc) - Stakeholder-Specific Vulnerability Categorization
 - [Trail of Bits](https://github.com/trailofbits/skills) - Security skills for Claude Code
 - [Vercel](https://github.com/vercel-labs/agent-skills) - React best practices
