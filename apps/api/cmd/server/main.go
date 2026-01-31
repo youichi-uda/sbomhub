@@ -91,6 +91,7 @@ func main() {
 	issueTrackerRepo := repository.NewIssueTrackerRepository(db)
 	kevRepo := repository.NewKEVRepository(db)
 	ssvcRepo := repository.NewSSVCRepository(db)
+	eolRepo := repository.NewEOLRepository(db)
 
 	// Services
 	projectService := service.NewProjectService(projectRepo)
@@ -116,6 +117,7 @@ func main() {
 	remediationService := service.NewRemediationService(vulnRepo, componentRepo)
 	kevService := service.NewKEVService(kevRepo)
 	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
+	eolService := service.NewEOLService(eolRepo)
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -145,6 +147,7 @@ func main() {
 	remediationHandler := handler.NewRemediationHandler(remediationService)
 	kevHandler := handler.NewKEVHandler(kevService)
 	ssvcHandler := handler.NewSSVCHandler(ssvcService)
+	eolHandler := handler.NewEOLHandler(eolService)
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -359,6 +362,17 @@ func main() {
 	auth.GET("/vulnerabilities/:cve_id/kev", kevHandler.CheckCVE)
 	auth.GET("/projects/:id/kev", kevHandler.GetProjectKEVVulnerabilities)
 
+	// EOL (End of Life) integration endpoints
+	auth.POST("/eol/sync", eolHandler.SyncCatalog)
+	auth.GET("/eol/products", eolHandler.ListProducts)
+	auth.GET("/eol/products/:name", eolHandler.GetProduct)
+	auth.GET("/eol/stats", eolHandler.GetStats)
+	auth.GET("/eol/settings", eolHandler.GetSyncSettings)
+	auth.GET("/eol/sync/latest", eolHandler.GetLatestSync)
+	auth.GET("/eol/check", eolHandler.CheckComponentEOL)
+	auth.GET("/projects/:id/eol-summary", eolHandler.GetProjectEOLSummary)
+	auth.POST("/projects/:id/eol-check", eolHandler.UpdateProjectComponentsEOL)
+
 	// SSVC (Stakeholder-Specific Vulnerability Categorization) endpoints
 	auth.GET("/projects/:id/ssvc/defaults", ssvcHandler.GetProjectDefaults)
 	auth.PUT("/projects/:id/ssvc/defaults", ssvcHandler.UpdateProjectDefaults)
@@ -404,6 +418,11 @@ func main() {
 	kevSyncJob := scheduler.NewKEVSyncJob(kevService, 24*time.Hour)
 	go kevSyncJob.Start(ctx)
 	slog.Info("KEV sync job started", "interval", "24h")
+
+	// EOL sync job - runs daily to sync endoflife.date catalog
+	eolSyncJob := scheduler.NewEOLSyncJob(eolService, 24*time.Hour)
+	go eolSyncJob.Start(ctx)
+	slog.Info("EOL sync job started", "interval", "24h")
 
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))

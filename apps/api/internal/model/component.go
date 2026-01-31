@@ -15,6 +15,15 @@ type Component struct {
 	Purl      string    `json:"purl" db:"purl"`
 	License   string    `json:"license" db:"license"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
+
+	// EOL (End of Life) fields
+	EOLStatus       string     `json:"eol_status,omitempty" db:"eol_status"`
+	EOLProductID    *uuid.UUID `json:"eol_product_id,omitempty" db:"eol_product_id"`
+	EOLCycleID      *uuid.UUID `json:"eol_cycle_id,omitempty" db:"eol_cycle_id"`
+	EOLDate         *time.Time `json:"eol_date,omitempty" db:"eol_date"`
+	EOSDate         *time.Time `json:"eos_date,omitempty" db:"eos_date"`
+	EOLProductName  string     `json:"eol_product_name,omitempty" db:"-"`
+	EOLCycleVersion string     `json:"eol_cycle_version,omitempty" db:"-"`
 }
 
 type ComponentVulnerability struct {

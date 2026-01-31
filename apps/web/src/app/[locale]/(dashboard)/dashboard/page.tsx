@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import Link from "next/link";
-import { api, DashboardSummary, TopRisk, ProjectScore, TrendPoint } from "@/lib/api";
+import { api, DashboardSummary, TopRisk, ProjectScore, TrendPoint, EOLSummary } from "@/lib/api";
 import {
   Card,
   CardContent,
@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { AlertCircle, Shield, Package, FolderOpen, TrendingUp } from "lucide-react";
+import { AlertCircle, Shield, Package, FolderOpen, TrendingUp, Clock, CheckCircle, AlertTriangle, HelpCircle } from "lucide-react";
 
 function SeverityBadge({ severity }: { severity: string }) {
   const colors: Record<string, string> = {
@@ -143,6 +143,62 @@ function ProjectScoresList({ scores, noDataMessage, locale }: { scores: ProjectS
   );
 }
 
+function EOLSummaryCard({
+  active,
+  eos,
+  eol,
+  unknown,
+  labels
+}: {
+  active: number;
+  eos: number;
+  eol: number;
+  unknown: number;
+  labels: { active: string; eos: string; eol: string; unknown: string };
+}) {
+  const total = active + eos + eol + unknown;
+  if (total === 0) {
+    return (
+      <div className="text-center py-4 text-muted-foreground text-sm">
+        No component data
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-4 gap-4 text-center">
+      <div className="space-y-1">
+        <div className="flex items-center justify-center gap-1 text-green-500">
+          <CheckCircle className="h-4 w-4" />
+          <span className="text-2xl font-bold">{active}</span>
+        </div>
+        <p className="text-xs text-muted-foreground">{labels.active}</p>
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-center gap-1 text-orange-500">
+          <Clock className="h-4 w-4" />
+          <span className="text-2xl font-bold">{eos}</span>
+        </div>
+        <p className="text-xs text-muted-foreground">{labels.eos}</p>
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-center gap-1 text-red-500">
+          <AlertTriangle className="h-4 w-4" />
+          <span className="text-2xl font-bold">{eol}</span>
+        </div>
+        <p className="text-xs text-muted-foreground">{labels.eol}</p>
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-center gap-1 text-gray-500">
+          <HelpCircle className="h-4 w-4" />
+          <span className="text-2xl font-bold">{unknown}</span>
+        </div>
+        <p className="text-xs text-muted-foreground">{labels.unknown}</p>
+      </div>
+    </div>
+  );
+}
+
 function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: TrendPoint[]; noDataMessage?: string; locale: string; countLabel: string }) {
   if (trend.length === 0) {
     return (
@@ -189,8 +245,10 @@ function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: Trend
 export default function DashboardPage() {
   const t = useTranslations("Dashboard");
   const tc = useTranslations("Common");
+  const teol = useTranslations("EOL");
   const locale = useLocale();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [eolSummaries, setEolSummaries] = useState<Record<string, EOLSummary>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -203,6 +261,22 @@ export default function DashboardPage() {
       setLoading(true);
       const data = await api.dashboard.getSummary();
       setSummary(data);
+
+      // Load EOL summaries for each project
+      if (data.project_scores && data.project_scores.length > 0) {
+        const eolData: Record<string, EOLSummary> = {};
+        await Promise.all(
+          data.project_scores.map(async (project) => {
+            try {
+              const eolSummary = await api.eol.getProjectEOLSummary(project.project_id);
+              eolData[project.project_id] = eolSummary;
+            } catch {
+              // Ignore errors for individual projects
+            }
+          })
+        );
+        setEolSummaries(eolData);
+      }
     } catch (err) {
       setError(tc("error"));
       console.error(err);
@@ -210,6 +284,17 @@ export default function DashboardPage() {
       setLoading(false);
     }
   };
+
+  // Aggregate EOL data across all projects
+  const aggregatedEol = Object.values(eolSummaries).reduce(
+    (acc, s) => ({
+      active: acc.active + s.active,
+      eos: acc.eos + s.eos,
+      eol: acc.eol + s.eol,
+      unknown: acc.unknown + s.unknown,
+    }),
+    { active: 0, eos: 0, eol: 0, unknown: 0 }
+  );
 
   if (loading) {
     return (
@@ -280,6 +365,35 @@ export default function DashboardPage() {
           color="text-green-500"
         />
       </div>
+
+      {/* EOL Component Status Card */}
+      {(aggregatedEol.active > 0 || aggregatedEol.eos > 0 || aggregatedEol.eol > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Clock className="h-5 w-5" />
+              {teol("summary.title")}
+            </CardTitle>
+            <CardDescription>
+              {teol("summary.description")}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <EOLSummaryCard
+              active={aggregatedEol.active}
+              eos={aggregatedEol.eos}
+              eol={aggregatedEol.eol}
+              unknown={aggregatedEol.unknown}
+              labels={{
+                active: teol("active"),
+                eos: teol("eos"),
+                eol: teol("eol"),
+                unknown: teol("unknown"),
+              }}
+            />
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Top Risks Table */}

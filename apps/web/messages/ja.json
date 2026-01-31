@@ -278,7 +278,8 @@
     "name": "名前",
     "version": "バージョン",
     "type": "種類",
-    "license": "ライセンス"
+    "license": "ライセンス",
+    "eolStatus": "EOLステータス"
   },
   "Vulnerabilities": {
     "title": "脆弱性",
@@ -316,6 +317,44 @@
     "close": "閉じる",
     "showMore": "他 {count} 件を表示",
     "ipaCount": "IPA {count}件"
+  },
+  "EOL": {
+    "active": "サポート中",
+    "eol": "サポート終了",
+    "eos": "セキュリティ更新終了",
+    "unknown": "不明",
+    "eolDate": "サポート終了日",
+    "eosDate": "セキュリティ更新終了日",
+    "product": "製品",
+    "past": "終了済み",
+    "lts": "長期サポート版",
+    "description": {
+      "activeTitle": "サポート中",
+      "active": "このコンポーネントは現在もサポートされており、更新を受けています。",
+      "eolTitle": "サポート終了",
+      "eol": "このコンポーネントはサポート終了（EOL）に達しました。今後の更新は提供されません。アップグレードを推奨します。",
+      "eosTitle": "セキュリティ更新終了",
+      "eos": "セキュリティ更新が提供されなくなりました。アップグレードを推奨します。",
+      "unknownTitle": "ステータス不明",
+      "unknown": "このコンポーネントのEOLステータスを判定できませんでした。"
+    },
+    "syncButton": "EOLカタログ同期",
+    "syncSuccess": "EOLカタログの同期が完了しました",
+    "syncFailed": "EOLカタログの同期に失敗しました",
+    "stats": {
+      "title": "EOL統計",
+      "totalProducts": "製品数",
+      "totalCycles": "バージョン数",
+      "lastSync": "最終同期"
+    },
+    "summary": {
+      "title": "EOLコンポーネント状況",
+      "description": "プロジェクトコンポーネントのサポート終了状況"
+    },
+    "checkButton": "EOLステータス確認",
+    "checkSuccess": "EOL確認が完了しました",
+    "upgradeRecommended": "アップグレード推奨",
+    "latestVersion": "最新バージョン"
   },
   "KEV": {
     "badge": "悪用確認済み",

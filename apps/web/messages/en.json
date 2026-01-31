@@ -279,7 +279,8 @@
     "name": "Name",
     "version": "Version",
     "type": "Type",
-    "license": "License"
+    "license": "License",
+    "eolStatus": "EOL Status"
   },
   "Vulnerabilities": {
     "title": "Vulnerabilities",
@@ -317,6 +318,44 @@
     "close": "Close",
     "showMore": "Show {count} more items",
     "ipaCount": "IPA {count} items"
+  },
+  "EOL": {
+    "active": "Active",
+    "eol": "End of Life",
+    "eos": "End of Support",
+    "unknown": "Unknown",
+    "eolDate": "EOL Date",
+    "eosDate": "EOS Date",
+    "product": "Product",
+    "past": "Past",
+    "lts": "Long Term Support",
+    "description": {
+      "activeTitle": "Active Support",
+      "active": "This component is actively supported and receiving updates.",
+      "eolTitle": "End of Life",
+      "eol": "This component has reached End of Life. No more updates will be provided. Upgrade recommended.",
+      "eosTitle": "End of Support",
+      "eos": "Security updates are no longer provided. Upgrade recommended.",
+      "unknownTitle": "Unknown Status",
+      "unknown": "EOL status could not be determined for this component."
+    },
+    "syncButton": "Sync EOL Catalog",
+    "syncSuccess": "EOL catalog sync completed",
+    "syncFailed": "EOL catalog sync failed",
+    "stats": {
+      "title": "EOL Statistics",
+      "totalProducts": "Total Products",
+      "totalCycles": "Total Cycles",
+      "lastSync": "Last Sync"
+    },
+    "summary": {
+      "title": "EOL Component Status",
+      "description": "End of Life status for project components"
+    },
+    "checkButton": "Check EOL Status",
+    "checkSuccess": "EOL check completed",
+    "upgradeRecommended": "Upgrade recommended",
+    "latestVersion": "Latest Version"
   },
   "KEV": {
     "badge": "Exploited",

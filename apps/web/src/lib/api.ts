@@ -17,6 +17,80 @@ export interface Component {
   purl: string;
   license: string;
   created_at: string;
+  // EOL (End of Life) fields
+  eol_status?: EOLStatus;
+  eol_product_id?: string;
+  eol_cycle_id?: string;
+  eol_date?: string;
+  eos_date?: string;
+  eol_product_name?: string;
+  eol_cycle_version?: string;
+}
+
+// EOL types
+export type EOLStatus = "active" | "eol" | "eos" | "unknown";
+
+export interface EOLProduct {
+  id: string;
+  name: string;
+  title: string;
+  category?: string;
+  link?: string;
+  total_cycles: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EOLProductCycle {
+  id: string;
+  product_id: string;
+  cycle: string;
+  release_date?: string;
+  eol_date?: string;
+  eos_date?: string;
+  latest_version?: string;
+  is_lts: boolean;
+  is_eol: boolean;
+  discontinued: boolean;
+  link?: string;
+  support_end_date?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EOLSyncResult {
+  products_synced: number;
+  cycles_synced: number;
+  components_updated: number;
+}
+
+export interface EOLSummary {
+  project_id: string;
+  total_components: number;
+  active: number;
+  eol: number;
+  eos: number;
+  unknown: number;
+}
+
+export interface EOLStats {
+  total_products: number;
+  total_cycles: number;
+  last_sync_at?: string;
+}
+
+export interface ComponentEOLInfo {
+  status: EOLStatus;
+  product_id?: string;
+  product_name?: string;
+  cycle_id?: string;
+  cycle_version?: string;
+  eol_date?: string;
+  eos_date?: string;
+  latest_version?: string;
+  is_lts: boolean;
+  release_date?: string;
+  support_end_date?: string;
 }
 
 export interface Sbom {
@@ -1212,6 +1286,32 @@ export const api = {
       request<AuditStatistics>(`/api/v1/audit-logs/statistics${days ? `?days=${days}` : ""}`),
     getActions: () => request<ActionInfo[]>("/api/v1/audit-logs/actions"),
     getResourceTypes: () => request<ResourceTypeInfo[]>("/api/v1/audit-logs/resource-types"),
+  },
+  // EOL methods
+  eol: {
+    sync: () =>
+      request<EOLSyncResult>("/api/v1/eol/sync", { method: "POST" }),
+    getProducts: (limit?: number, offset?: number) => {
+      const params = new URLSearchParams();
+      if (limit) params.set("limit", limit.toString());
+      if (offset) params.set("offset", offset.toString());
+      const query = params.toString();
+      return request<{ products: EOLProduct[]; total: number }>(`/api/v1/eol/products${query ? `?${query}` : ""}`);
+    },
+    getProduct: (name: string) =>
+      request<{ product: EOLProduct; cycles: EOLProductCycle[] }>(`/api/v1/eol/products/${name}`),
+    getStats: () => request<EOLStats>("/api/v1/eol/stats"),
+    checkComponent: (name: string, version?: string, purl?: string) => {
+      const params = new URLSearchParams();
+      params.set("name", name);
+      if (version) params.set("version", version);
+      if (purl) params.set("purl", purl);
+      return request<ComponentEOLInfo>(`/api/v1/eol/check?${params.toString()}`);
+    },
+    getProjectEOLSummary: (projectId: string) =>
+      request<EOLSummary>(`/api/v1/projects/${projectId}/eol-summary`),
+    updateProjectComponents: (projectId: string) =>
+      request<{ message: string; components_updated: number }>(`/api/v1/projects/${projectId}/eol-check`, { method: "POST" }),
   },
   // KEV methods
   kev: {

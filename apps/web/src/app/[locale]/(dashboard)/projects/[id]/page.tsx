@@ -10,6 +10,7 @@ import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXSta
 import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check, Bell, Wrench } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
+import { EOLBadge } from "@/components/component/eol-badge";
 import Link from "next/link";
 
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "apikeys" | "notifications";
@@ -324,15 +325,30 @@ export default function ProjectDetailPage() {
                       <th className="text-left py-3 px-4">{t("Components.version")}</th>
                       <th className="text-left py-3 px-4">{t("Components.type")}</th>
                       <th className="text-left py-3 px-4">{t("Components.license")}</th>
+                      <th className="text-left py-3 px-4">{t("Components.eolStatus")}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {components.map((comp) => (
-                      <tr key={comp.id} className="border-b hover:bg-gray-50">
+                      <tr key={comp.id} className="border-b hover:bg-gray-50 dark:hover:bg-gray-800">
                         <td className="py-3 px-4 font-medium">{comp.name}</td>
                         <td className="py-3 px-4">{comp.version || "-"}</td>
                         <td className="py-3 px-4">{comp.type || "-"}</td>
                         <td className="py-3 px-4">{comp.license || "-"}</td>
+                        <td className="py-3 px-4">
+                          {comp.eol_status && comp.eol_status !== "unknown" ? (
+                            <EOLBadge
+                              status={comp.eol_status}
+                              eolDate={comp.eol_date}
+                              eosDate={comp.eos_date}
+                              productLabel={comp.eol_product_name}
+                              cycleVersion={comp.eol_cycle_version}
+                              size="sm"
+                            />
+                          ) : (
+                            <span className="text-muted-foreground text-sm">-</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
