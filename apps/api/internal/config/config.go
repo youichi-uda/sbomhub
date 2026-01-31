@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // Mode represents the application deployment mode
 type Mode string
@@ -68,7 +71,8 @@ func Load() *Config {
 		LemonSqueezyTeamVariant:    getEnv("LEMONSQUEEZY_TEAM_VARIANT_ID", ""),
 
 		// Security
-		EncryptionKey: getEnv("ENCRYPTION_KEY", "sbomhub-default-encryption-key-32"),
+		// SECURITY: Default key is only for development. Production requires explicit key.
+		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
 
 		// SMTP
 		SMTPHost:     getEnv("SMTP_HOST", ""),
@@ -121,6 +125,51 @@ func (c *Config) IsProduction() bool {
 // IsEmailEnabled returns true if email notifications are configured
 func (c *Config) IsEmailEnabled() bool {
 	return c.SMTPHost != "" && c.SMTPFrom != ""
+}
+
+// Validate checks for security-critical configuration errors
+// Returns an error if the configuration is insecure for the current environment
+func (c *Config) Validate() error {
+	// SECURITY: Encryption key validation
+	if c.EncryptionKey == "" {
+		if c.IsProduction() {
+			return fmt.Errorf("ENCRYPTION_KEY must be set in production environment")
+		}
+		// Use a development-only default key (this is logged as a warning)
+		c.EncryptionKey = "dev-only-insecure-key-32bytes!!"
+	}
+
+	// SECURITY: Key length validation - AES-256 requires exactly 32 bytes
+	if len(c.EncryptionKey) < 32 {
+		if c.IsProduction() {
+			return fmt.Errorf("ENCRYPTION_KEY must be at least 32 bytes for AES-256 (got %d bytes)", len(c.EncryptionKey))
+		}
+	}
+
+	// SECURITY: Warn about weak keys that look like defaults
+	weakKeys := []string{
+		"sbomhub-default-encryption-key-32",
+		"dev-only-insecure-key-32bytes!!",
+		"00000000000000000000000000000000",
+		"11111111111111111111111111111111",
+	}
+	for _, weak := range weakKeys {
+		if c.EncryptionKey == weak && c.IsProduction() {
+			return fmt.Errorf("ENCRYPTION_KEY appears to be a default/weak key - please use a cryptographically random key in production")
+		}
+	}
+
+	return nil
+}
+
+// GetEncryptionKey returns the encryption key as a 32-byte slice for AES-256
+// SECURITY: This method ensures proper key length without silent zero-padding
+func (c *Config) GetEncryptionKey() ([]byte, error) {
+	if len(c.EncryptionKey) < 32 {
+		return nil, fmt.Errorf("encryption key too short: need 32 bytes, got %d", len(c.EncryptionKey))
+	}
+	// Use first 32 bytes if key is longer
+	return []byte(c.EncryptionKey)[:32], nil
 }
 
 func getEnv(key, defaultValue string) string {

@@ -111,15 +111,17 @@ func (r *TenantRepository) GetWithStats(ctx context.Context, id uuid.UUID) (*mod
 }
 
 // SetCurrentTenant sets the current tenant for RLS policies
+// SECURITY: Uses is_local=true to scope the setting to the current transaction only
+// This prevents tenant ID leakage across pooled connections
 func (r *TenantRepository) SetCurrentTenant(ctx context.Context, tenantID uuid.UUID) error {
-	query := `SELECT set_config('app.current_tenant_id', $1, false)`
+	query := `SELECT set_config('app.current_tenant_id', $1, true)`
 	_, err := r.db.ExecContext(ctx, query, tenantID.String())
 	return err
 }
 
 // ClearCurrentTenant clears the current tenant setting
 func (r *TenantRepository) ClearCurrentTenant(ctx context.Context) error {
-	query := `SELECT set_config('app.current_tenant_id', '', false)`
+	query := `SELECT set_config('app.current_tenant_id', '', true)`
 	_, err := r.db.ExecContext(ctx, query)
 	return err
 }

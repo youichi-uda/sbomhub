@@ -30,6 +30,12 @@ func main() {
 
 	cfg := config.Load()
 
+	// SECURITY: Validate configuration before starting
+	if err := cfg.Validate(); err != nil {
+		slog.Error("Configuration validation failed", "error", err)
+		os.Exit(1)
+	}
+
 	db, err := database.Connect(cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("Failed to connect to database", "error", err)
@@ -113,7 +119,18 @@ func main() {
 	analyticsService := service.NewAnalyticsService(analyticsRepo, dashboardRepo)
 	reportService := service.NewReportService(reportRepo, dashboardRepo, analyticsRepo, tenantRepo, checklistRepo, visualizationRepo, "./reports")
 	ipaService := service.NewIPAService(ipaRepo)
-	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, cfg.EncryptionKey)
+	encryptionKey, err := cfg.GetEncryptionKey()
+	if err != nil {
+		slog.Error("Failed to get encryption key", "error", err)
+		os.Exit(1)
+	}
+	// SECURITY: In SaaS mode, restrict issue tracker URLs to known domains to prevent SSRF
+	var issueTrackerAllowedDomains []string
+	if cfg.IsSaaS() {
+		issueTrackerAllowedDomains = service.AllowedIssueTrackerDomains
+		slog.Info("Issue tracker SSRF protection enabled", "allowed_domains", issueTrackerAllowedDomains)
+	}
+	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, encryptionKey, issueTrackerAllowedDomains)
 	remediationService := service.NewRemediationService(vulnRepo, componentRepo)
 	kevService := service.NewKEVService(kevRepo)
 	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
@@ -152,6 +169,9 @@ func main() {
 	e := echo.New()
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
+	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks
+	// 10MB should be sufficient for most SBOM files while preventing abuse
+	e.Use(middleware.BodyLimit("10M"))
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:  []string{"http://localhost:3000", "http://localhost:13000", "http://localhost:*", "https://sbomhub.app"},
 		AllowMethods:  []string{echo.GET, echo.POST, echo.PUT, echo.DELETE},

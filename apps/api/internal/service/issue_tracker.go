@@ -8,6 +8,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,22 +24,41 @@ type IssueTrackerService struct {
 	issueTrackerRepo *repository.IssueTrackerRepository
 	vulnRepo         *repository.VulnerabilityRepository
 	encryptionKey    []byte
+	// SECURITY: Allowed domains for issue tracker connections (SaaS mode)
+	// Empty list means all domains allowed (self-hosted mode)
+	allowedDomains []string
+}
+
+// AllowedIssueTrackerDomains contains the default allowed domains for SaaS mode
+// These are well-known issue tracker services
+var AllowedIssueTrackerDomains = []string{
+	// Jira Cloud
+	"atlassian.net",
+	"jira.com",
+	// Backlog
+	"backlog.com",
+	"backlog.jp",
+	// Additional enterprise domains can be added here
 }
 
 // NewIssueTrackerService creates a new IssueTrackerService
+// SECURITY: encryptionKey must be exactly 32 bytes for AES-256
+// SECURITY: allowedDomains restricts which domains can be used (nil = allow all for self-hosted)
 func NewIssueTrackerService(
 	issueTrackerRepo *repository.IssueTrackerRepository,
 	vulnRepo *repository.VulnerabilityRepository,
-	encryptionKey string,
+	encryptionKey []byte,
+	allowedDomains []string,
 ) *IssueTrackerService {
-	// Use a 32-byte key for AES-256
-	key := make([]byte, 32)
-	copy(key, []byte(encryptionKey))
+	if len(encryptionKey) != 32 {
+		panic(fmt.Sprintf("encryption key must be exactly 32 bytes, got %d", len(encryptionKey)))
+	}
 
 	return &IssueTrackerService{
 		issueTrackerRepo: issueTrackerRepo,
 		vulnRepo:         vulnRepo,
-		encryptionKey:    key,
+		encryptionKey:    encryptionKey,
+		allowedDomains:   allowedDomains,
 	}
 }
 
@@ -53,6 +75,11 @@ type CreateConnectionInput struct {
 
 // CreateConnection creates a new issue tracker connection
 func (s *IssueTrackerService) CreateConnection(ctx context.Context, tenantID uuid.UUID, input CreateConnectionInput) (*model.IssueTrackerConnection, error) {
+	// SECURITY: Validate BaseURL to prevent SSRF attacks
+	if err := s.validateBaseURL(input.BaseURL); err != nil {
+		return nil, fmt.Errorf("invalid base URL: %w", err)
+	}
+
 	// Encrypt the API token
 	encryptedToken, err := s.encrypt(input.APIToken)
 	if err != nil {
@@ -447,4 +474,115 @@ func (s *IssueTrackerService) decrypt(ciphertext string) (string, error) {
 	}
 
 	return string(plaintext), nil
+}
+
+// validateBaseURL validates the issue tracker base URL to prevent SSRF attacks
+// SECURITY: This is critical for SaaS mode to prevent attackers from making
+// the server connect to internal services or arbitrary external hosts
+func (s *IssueTrackerService) validateBaseURL(baseURL string) error {
+	// Parse the URL
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL format: %w", err)
+	}
+
+	// Must be HTTPS (security requirement)
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("URL must use HTTPS scheme")
+	}
+
+	// Must have a valid host
+	host := parsed.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL must have a valid host")
+	}
+
+	// Block localhost and loopback addresses
+	if isBlockedHost(host) {
+		return fmt.Errorf("localhost and internal addresses are not allowed")
+	}
+
+	// If allowedDomains is configured (SaaS mode), check against allowlist
+	if len(s.allowedDomains) > 0 {
+		if !isDomainAllowed(host, s.allowedDomains) {
+			return fmt.Errorf("domain not in allowed list: %s", host)
+		}
+	}
+
+	return nil
+}
+
+// isBlockedHost checks if a host should be blocked (internal/localhost)
+func isBlockedHost(host string) bool {
+	// Block localhost variations
+	lowercaseHost := strings.ToLower(host)
+	if lowercaseHost == "localhost" || lowercaseHost == "127.0.0.1" || lowercaseHost == "::1" {
+		return true
+	}
+
+	// Try to resolve and check for internal IPs
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		// If we can't resolve, allow it (will fail on actual connection)
+		return false
+	}
+
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isPrivateIP checks if an IP is in a private/reserved range
+func isPrivateIP(ip net.IP) bool {
+	// Private IPv4 ranges
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",    // Loopback
+		"169.254.0.0/16", // Link-local
+		"0.0.0.0/8",      // Current network
+	}
+
+	// Private IPv6 ranges
+	privateRangesV6 := []string{
+		"::1/128",      // Loopback
+		"fc00::/7",     // Unique local
+		"fe80::/10",    // Link-local
+	}
+
+	for _, cidr := range privateRanges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+
+	for _, cidr := range privateRangesV6 {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isDomainAllowed checks if a host matches any allowed domain
+func isDomainAllowed(host string, allowedDomains []string) bool {
+	lowercaseHost := strings.ToLower(host)
+
+	for _, domain := range allowedDomains {
+		lowerDomain := strings.ToLower(domain)
+		// Exact match or subdomain match
+		if lowercaseHost == lowerDomain || strings.HasSuffix(lowercaseHost, "."+lowerDomain) {
+			return true
+		}
+	}
+
+	return false
 }

@@ -139,19 +139,25 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 		})
 	}
 
-	// Get organization ID - prefer header (sent by frontend), fallback to JWT claims
-	// This allows the system to work without requiring Clerk Dashboard configuration
-	orgID := c.Request().Header.Get("X-Clerk-Org-ID")
-	if orgID == "" {
-		orgID = claims.OrgID
+	// SECURITY FIX: Only use organization ID from verified JWT claims
+	// Previously, X-Clerk-Org-ID header was trusted, allowing any authenticated user
+	// to spoof another organization and gain unauthorized access.
+	// Now we only trust the org ID embedded in the verified JWT token.
+	orgID := claims.OrgID
+
+	// Log warning if header is present (indicates potential attack or outdated client)
+	if headerOrgID := c.Request().Header.Get("X-Clerk-Org-ID"); headerOrgID != "" {
+		if headerOrgID != orgID {
+			slog.Warn("X-Clerk-Org-ID header mismatch - potential spoofing attempt",
+				"header_org_id", headerOrgID,
+				"jwt_org_id", orgID,
+				"user_id", claims.UserID,
+				"ip", c.RealIP(),
+			)
+		}
 	}
 
-	slog.Info("Clerk auth", "user_id", claims.UserID, "org_id", orgID, "org_id_source", func() string {
-		if c.Request().Header.Get("X-Clerk-Org-ID") != "" {
-			return "header"
-		}
-		return "jwt"
-	}())
+	slog.Info("Clerk auth", "user_id", claims.UserID, "org_id", orgID)
 
 	if orgID == "" {
 		slog.Warn("Organization ID is empty - user must select an organization")
