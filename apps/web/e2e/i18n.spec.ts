@@ -21,8 +21,8 @@ test.describe('Internationalization (i18n)', () => {
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(2000);
 
-      // Verify Japanese heading is displayed
-      await expect(page.getByRole('heading', { name: 'プロジェクト' })).toBeVisible({ timeout: 10000 });
+      // Verify Japanese heading is displayed (use level: 1 to target main heading only)
+      await expect(page.getByRole('heading', { name: 'プロジェクト', level: 1 })).toBeVisible({ timeout: 10000 });
 
       // Check for Japanese button text
       await expect(page.getByRole('button', { name: /新規プロジェクト/i })).toBeVisible();
@@ -34,8 +34,8 @@ test.describe('Internationalization (i18n)', () => {
       await page.waitForTimeout(2000);
 
       // Check for Japanese navigation items in sidebar
-      await expect(page.locator('a').filter({ hasText: 'ダッシュボード' })).toBeVisible();
-      await expect(page.locator('a').filter({ hasText: 'プロジェクト' })).toBeVisible();
+      await expect(page.locator('aside a').filter({ hasText: 'ダッシュボード' })).toBeVisible();
+      await expect(page.locator('aside a').filter({ hasText: 'プロジェクト' })).toBeVisible();
     });
   });
 
@@ -59,9 +59,8 @@ test.describe('Internationalization (i18n)', () => {
       // Verify button now shows EN
       await expect(page.locator('button').filter({ hasText: 'EN' })).toBeVisible({ timeout: 5000 });
 
-      // Verify the dashboard page is displayed (heading uses Japanese text regardless of locale)
-      // The app currently shows "ダッシュボード" for both locales
-      const dashboardHeading = page.getByRole('heading', { name: 'ダッシュボード' }).first();
+      // Verify the dashboard page is displayed in English
+      const dashboardHeading = page.getByRole('heading', { name: 'Dashboard' }).first();
       await expect(dashboardHeading).toBeVisible({ timeout: 10000 });
     });
 
@@ -96,14 +95,14 @@ test.describe('Internationalization (i18n)', () => {
       await page.waitForTimeout(2000);
 
       // Navigate to projects page via sidebar link
-      await page.locator('a').filter({ hasText: 'プロジェクト' }).click();
+      await page.locator('aside a').filter({ hasText: 'プロジェクト' }).click();
       await page.waitForLoadState('networkidle');
 
       // Verify URL still has /ja
       await expect(page).toHaveURL(/\/ja\/projects/);
 
-      // Verify Japanese content is displayed
-      await expect(page.getByRole('heading', { name: 'プロジェクト' })).toBeVisible({ timeout: 10000 });
+      // Verify Japanese content is displayed (use level: 1 to target main heading only)
+      await expect(page.getByRole('heading', { name: 'プロジェクト', level: 1 })).toBeVisible({ timeout: 10000 });
     });
 
     test('should maintain language preference after page refresh', async ({ page }) => {
@@ -167,16 +166,16 @@ test.describe('Internationalization (i18n)', () => {
       await page.waitForTimeout(2000);
 
       // Check sidebar navigation has consistent Japanese labels
-      const sidebar = page.locator('nav, aside').first();
-      await expect(sidebar).toBeVisible();
+      const sidebar = page.locator('aside');
+      await expect(sidebar).toBeVisible({ timeout: 10000 });
 
       // Navigate to projects and verify navigation is still in Japanese
-      await page.locator('a').filter({ hasText: 'プロジェクト' }).click();
+      await page.locator('aside a').filter({ hasText: 'プロジェクト' }).click();
       await page.waitForLoadState('networkidle');
 
       // Sidebar should still show Japanese text
-      await expect(page.locator('a').filter({ hasText: 'ダッシュボード' })).toBeVisible();
-      await expect(page.locator('a').filter({ hasText: 'プロジェクト' })).toBeVisible();
+      await expect(page.locator('aside a').filter({ hasText: 'ダッシュボード' })).toBeVisible();
+      await expect(page.locator('aside a').filter({ hasText: 'プロジェクト' })).toBeVisible();
     });
 
     test('should have consistent navigation text in English', async ({ page }) => {
@@ -185,17 +184,17 @@ test.describe('Internationalization (i18n)', () => {
       await page.waitForTimeout(2000);
 
       // Check sidebar navigation has consistent labels
-      const sidebar = page.locator('nav, aside').first();
-      await expect(sidebar).toBeVisible();
+      const sidebar = page.locator('aside');
+      await expect(sidebar).toBeVisible({ timeout: 10000 });
 
       // Navigate to projects (sidebar uses Japanese labels for Dashboard/Search, but i18n for Projects)
       // Projects link uses i18n translation which is "Projects" in English
-      await page.locator('a').filter({ hasText: 'Projects' }).click();
+      await page.locator('aside a').filter({ hasText: 'Projects' }).click();
       await page.waitForLoadState('networkidle');
 
-      // Sidebar should show consistent text (Dashboard and Search are currently Japanese)
-      await expect(page.locator('a').filter({ hasText: 'ダッシュボード' })).toBeVisible();
-      await expect(page.locator('a').filter({ hasText: 'Projects' })).toBeVisible();
+      // Sidebar should show consistent English text
+      await expect(page.locator('aside a').filter({ hasText: 'Dashboard' })).toBeVisible();
+      await expect(page.locator('aside a').filter({ hasText: 'Projects' })).toBeVisible();
     });
 
     test('should display both locales for vulnerability severity labels', async ({ page }) => {

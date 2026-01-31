@@ -54,11 +54,13 @@ test.describe('Dashboard', () => {
     await page.waitForTimeout(2000);
 
     // Click on Projects link in sidebar (Japanese: プロジェクト - use text matching for links with icons)
-    await page.locator('a').filter({ hasText: 'プロジェクト' }).click();
+    // Use aside selector to target sidebar specifically (avoid matching project links in dashboard content)
+    await page.locator('aside a').filter({ hasText: 'プロジェクト' }).click();
 
     // Verify navigation
     await expect(page).toHaveURL(/\/projects/);
-    await expect(page.getByRole('heading', { name: /Projects|プロジェクト/i })).toBeVisible({ timeout: 15000 });
+    // Use level: 1 to target only the main h1 heading, not project card headings
+    await expect(page.getByRole('heading', { name: /Projects|プロジェクト/i, level: 1 })).toBeVisible({ timeout: 15000 });
   });
 
   test('should switch language to English', async ({ page }) => {

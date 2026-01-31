@@ -65,8 +65,8 @@ const clerkHandler = clerkMiddleware(
   }
 );
 
-// Main middleware - conditionally use Clerk
-export default async function middleware(request: NextRequest) {
+// Main proxy - conditionally use Clerk
+export default async function proxy(request: NextRequest) {
   if (request.nextUrl.pathname.startsWith("/public/")) {
     return NextResponse.next();
   }
