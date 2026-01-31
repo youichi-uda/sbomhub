@@ -47,7 +47,7 @@ function SeverityBadge({ severity }: { severity: string }) {
 function CVESearchResults({ result, locale }: { result: CVESearchResult; locale: string }) {
   const t = useTranslations("Search");
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="search-results">
       {/* CVE Info */}
       <Card>
         <CardHeader>
@@ -136,7 +136,7 @@ function CVESearchResults({ result, locale }: { result: CVESearchResult; locale:
 function ComponentSearchResults({ result, locale }: { result: ComponentSearchResult; locale: string }) {
   const t = useTranslations("Search");
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" data-testid="search-results">
       <p className="text-muted-foreground">
         {t("searchResults", {
           name: result.query.name,
@@ -291,7 +291,7 @@ export default function SearchPage() {
           </Card>
 
           {error && (
-            <Card className="border-red-200">
+            <Card className="border-red-200" data-testid="empty-state">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-2 text-red-500">
                   <AlertCircle className="h-5 w-5" />
@@ -333,7 +333,7 @@ export default function SearchPage() {
           </Card>
 
           {error && (
-            <Card className="border-red-200">
+            <Card className="border-red-200" data-testid="empty-state">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-2 text-red-500">
                   <AlertCircle className="h-5 w-5" />
