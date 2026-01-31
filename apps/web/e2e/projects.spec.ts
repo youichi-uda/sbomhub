@@ -147,11 +147,9 @@ test.describe('Projects', () => {
       await page.waitForLoadState('networkidle');
       await page.waitForTimeout(1000);
 
-      // Verify we're on the project detail page - check for back link or project heading
-      const backLink = page.getByRole('link', { name: /Back|Projects|戻る/i });
+      // Verify we're on the project detail page - check for Upload SBOM button
       const uploadButton = page.getByRole('button', { name: /Upload SBOM/i });
-
-      await expect(backLink.or(uploadButton)).toBeVisible({ timeout: 10000 });
+      await expect(uploadButton).toBeVisible({ timeout: 10000 });
     }
   });
 
