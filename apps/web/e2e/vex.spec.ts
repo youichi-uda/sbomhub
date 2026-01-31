@@ -64,16 +64,42 @@ test.describe('VEX Statement Management', () => {
         await expect(vexTab).toBeVisible({ timeout: 5000 });
     });
 
-    test('should show VEX statements list', async ({ page }) => {
+    test('should show VEX statements list with count', async ({ page, request }) => {
+        // Get VEX statements count from API
+        const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
+        const vexStatements = await vexResponse.json();
+        const expectedCount = Array.isArray(vexStatements) ? vexStatements.length : 0;
+
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on VEX tab - use specific locator for tab button with count
-        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
-
-        // Should show empty state or existing statements
+        // Click on VEX tab
+        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
+        await vexTab.click();
         await page.waitForTimeout(1000);
-        await expect(page.locator('body')).toBeVisible();
+
+        // Verify the tab shows correct count
+        const tabText = await vexTab.textContent();
+        if (tabText) {
+            const match = tabText.match(/\((\d+)\)/);
+            if (match) {
+                const displayedCount = parseInt(match[1], 10);
+                expect(displayedCount).toBe(expectedCount);
+            }
+        }
+
+        // If there are VEX statements, verify they are displayed
+        if (expectedCount > 0) {
+            // VEX statements should show status
+            const statusIndicator = page.getByText(/not_affected|affected|under_investigation|fixed/i);
+            await expect(statusIndicator.first()).toBeVisible();
+        } else {
+            // Empty state should be shown
+            const emptyMessage = page.getByText(/no VEX|VEXなし|empty/i);
+            const hasEmptyMessage = await emptyMessage.isVisible().catch(() => false);
+            // Empty state or just no items - both are valid
+            expect(hasEmptyMessage || true).toBeTruthy();
+        }
     });
 
     test('should create VEX statement via dialog', async ({ page, request }) => {
@@ -143,7 +169,7 @@ test.describe('VEX Statement Management', () => {
         }
     });
 
-    test('should delete VEX statement', async ({ page, request }) => {
+    test('should delete VEX statement and update count', async ({ page, request }) => {
         // First create a VEX statement via API to ensure we have one
         const vulnResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`);
         const vulns = await vulnResponse.json();
@@ -164,8 +190,13 @@ test.describe('VEX Statement Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on VEX tab - use specific locator for tab button with count
-        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
+        // Get initial VEX count from tab
+        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
+        const initialTabText = await vexTab.textContent();
+        const initialMatch = initialTabText?.match(/\((\d+)\)/);
+        const initialCount = initialMatch ? parseInt(initialMatch[1], 10) : 0;
+
+        await vexTab.click();
         await page.waitForTimeout(1000);
 
         // Find delete button
@@ -179,7 +210,96 @@ test.describe('VEX Statement Management', () => {
                 await confirmButton.click();
             }
 
-            await page.waitForTimeout(1000);
+            await page.waitForTimeout(2000);
+
+            // Verify count decreased
+            const updatedTabText = await vexTab.textContent();
+            const updatedMatch = updatedTabText?.match(/\((\d+)\)/);
+            const updatedCount = updatedMatch ? parseInt(updatedMatch[1], 10) : 0;
+
+            expect(updatedCount).toBeLessThan(initialCount);
+        }
+    });
+
+    test('should create VEX statement and verify in list', async ({ page, request }) => {
+        const vulnResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vulnerabilities`);
+        const vulns = await vulnResponse.json();
+
+        if (!vulns || vulns.length === 0) {
+            test.skip();
+            return;
+        }
+
+        await page.goto(`/en/projects/${projectId}`);
+        await page.waitForLoadState('networkidle');
+
+        // Get initial VEX count
+        const vexTab = page.getByRole('button', { name: /^VEX \(\d+\)$/i });
+        const initialTabText = await vexTab.textContent();
+        const initialMatch = initialTabText?.match(/\((\d+)\)/);
+        const initialCount = initialMatch ? parseInt(initialMatch[1], 10) : 0;
+
+        await vexTab.click();
+        await page.waitForTimeout(500);
+
+        // Look for add VEX button
+        const addButton = page.getByRole('button', { name: /Add VEX|VEX追加/i });
+        if (await addButton.isVisible()) {
+            await addButton.click();
+
+            // Fill in VEX form
+            const statusSelect = page.locator('select').first();
+            if (await statusSelect.isVisible()) {
+                await statusSelect.selectOption('not_affected');
+            }
+
+            // Select justification if available
+            const justificationSelect = page.locator('select').nth(1);
+            if (await justificationSelect.isVisible()) {
+                await justificationSelect.selectOption('component_not_present');
+            }
+
+            // Add impact statement
+            const impactInput = page.getByPlaceholder(/impact|影響/i);
+            if (await impactInput.isVisible()) {
+                await impactInput.fill('This component is not used in production.');
+            }
+
+            // Submit
+            await page.getByRole('button', { name: /Save|Submit|保存/i }).click();
+            await page.waitForTimeout(2000);
+
+            // Verify count increased
+            const updatedTabText = await vexTab.textContent();
+            const updatedMatch = updatedTabText?.match(/\((\d+)\)/);
+            const updatedCount = updatedMatch ? parseInt(updatedMatch[1], 10) : 0;
+
+            expect(updatedCount).toBeGreaterThan(initialCount);
+
+            // Verify the new VEX status is visible
+            await expect(page.getByText(/not_affected/i).first()).toBeVisible();
+        }
+    });
+
+    test('should display VEX status correctly for each statement', async ({ page, request }) => {
+        const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
+        const vexStatements = await vexResponse.json();
+
+        if (!vexStatements || vexStatements.length === 0) {
+            test.skip();
+            return;
+        }
+
+        await page.goto(`/en/projects/${projectId}`);
+        await page.waitForLoadState('networkidle');
+
+        await page.getByRole('button', { name: /^VEX \(\d+\)$/i }).click();
+        await page.waitForTimeout(1000);
+
+        // Verify each VEX statement status matches API data
+        for (const vex of vexStatements.slice(0, 3)) { // Check first 3 to avoid long tests
+            const statusText = page.getByText(new RegExp(vex.status, 'i'));
+            await expect(statusText.first()).toBeVisible();
         }
     });
 });

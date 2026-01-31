@@ -23,15 +23,16 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev',
+    // Use dev:test script that runs with auth disabled (self-hosted mode)
+    command: 'npm run dev:test',
     url: baseURL,
+    // Reuse existing server if available (faster development)
     reuseExistingServer: !process.env.CI,
     timeout: 120000,
     env: {
       PORT: serverPort,
       NEXT_PUBLIC_API_URL: apiBaseURL,
       NEXT_PUBLIC_APP_URL: baseURL,
-      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: '',
     },
   },
 });
