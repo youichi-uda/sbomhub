@@ -16,8 +16,13 @@ export function ApiAuthProvider({ children }: ApiAuthProviderProps) {
   const getOrgScopedToken = useCallback(async () => {
     try {
       // Use custom JWT template that includes org_id, org_role, org_slug
-      return await getToken({ template: "sbomhub" });
-    } catch {
+      const token = await getToken({ template: "sbomhub" });
+      if (!token) {
+        console.warn("[Auth] No token returned from Clerk for sbomhub template");
+      }
+      return token;
+    } catch (error) {
+      console.error("[Auth] Failed to get token from Clerk:", error);
       return null;
     }
   }, [getToken]);

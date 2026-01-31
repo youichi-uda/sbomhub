@@ -978,7 +978,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const token = await getAuthToken();
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
+    } else {
+      console.warn(`[API] No auth token returned for ${path}`);
     }
+  } else {
+    console.warn(`[API] Auth token getter not initialized for ${path}`);
   }
 
   // Add organization ID header if available
@@ -995,10 +999,28 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
+    // Log more details for debugging auth issues
+    if (res.status === 401) {
+      console.error(`[API] 401 Unauthorized for ${path}`, {
+        hasAuthGetter: !!getAuthToken,
+        hasAuthHeader: !!headers["Authorization"],
+        hasOrgHeader: !!headers["X-Clerk-Org-ID"],
+      });
+    }
     throw new Error(`API error: ${res.status}`);
   }
 
-  return res.json();
+  // Handle 204 No Content and empty responses
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
+
+  const text = await res.text();
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text);
 }
 
 export const api = {
