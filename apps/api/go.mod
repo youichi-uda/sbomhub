@@ -1,6 +1,6 @@
 module github.com/sbomhub/sbomhub
 
-go 1.24.0
+go 1.24.11
 
 require (
 	github.com/CycloneDX/cyclonedx-go v0.9.3
