@@ -341,7 +341,7 @@ docker compose build           # 全コンテナビルド
 セキュリティ脆弱性を発見した場合は、以下の方法で報告してください：
 
 1. **GitHub Security Advisories**: [脆弱性を報告](https://github.com/youichi-uda/sbomhub/security/advisories/new)
-2. **メール**: security@sbomhub.app（機密性の高い問題の場合）
+2. **メール**: abyo.software@gmail.com（機密性の高い問題の場合）
 
 公開のGitHub Issueでセキュリティ脆弱性を報告しないでください。
 

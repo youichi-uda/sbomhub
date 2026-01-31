@@ -305,7 +305,7 @@ Skills are located in `.claude/skills/` and are automatically detected by Claude
 If you discover a security vulnerability, please report it via:
 
 1. **GitHub Security Advisories**: [Report a vulnerability](https://github.com/youichi-uda/sbomhub/security/advisories/new)
-2. **Email**: security@sbomhub.app (for sensitive issues)
+2. **Email**: abyo.software@gmail.com (for sensitive issues)
 
 Please do NOT report security vulnerabilities through public GitHub issues.
 
