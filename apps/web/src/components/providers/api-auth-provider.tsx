@@ -12,14 +12,11 @@ export function ApiAuthProvider({ children }: ApiAuthProviderProps) {
   const { getToken, isLoaded, orgId } = useAuth();
   const [isReady, setIsReady] = useState(false);
 
-  // Memoized token getter that ensures fresh token with organization context
+  // Memoized token getter using custom JWT template with org claims
   const getOrgScopedToken = useCallback(async () => {
     try {
-      // SECURITY FIX: Always get a fresh token to ensure org claims are current
-      // When user switches organizations via OrganizationSwitcher, Clerk updates
-      // the session. Using skipCache ensures we get the latest token with
-      // the current ActiveOrganizationID claim.
-      return await getToken({ skipCache: true });
+      // Use custom JWT template that includes org_id, org_role, org_slug
+      return await getToken({ template: "sbomhub" });
     } catch {
       return null;
     }
