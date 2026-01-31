@@ -6,14 +6,14 @@ import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, APIKey, APIKeyWithSecret, NotificationSettings, NotificationLog } from "@/lib/api";
-import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Key, Copy, Check, Bell, Wrench } from "lucide-react";
+import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, NotificationSettings, NotificationLog } from "@/lib/api";
+import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Bell } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { EOLBadge } from "@/components/component/eol-badge";
 import Link from "next/link";
 
-type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "apikeys" | "notifications";
+type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications";
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -22,7 +22,6 @@ export default function ProjectDetailPage() {
   const tp = useTranslations("ProjectDetail");
   const tc = useTranslations("Common");
   const tv = useTranslations("VexForm");
-  const ta = useTranslations("ApiKeyForm");
   const tl = useTranslations("LicenseForm");
 
   const [project, setProject] = useState<Project | null>(null);
@@ -38,9 +37,6 @@ export default function ProjectDetailPage() {
   const [selectedVulnForVex, setSelectedVulnForVex] = useState<Vulnerability | null>(null);
   const [showLicenseForm, setShowLicenseForm] = useState(false);
   const [sbomId, setSbomId] = useState<string | null>(null);
-  const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
-  const [showApiKeyForm, setShowApiKeyForm] = useState(false);
-  const [newApiKey, setNewApiKey] = useState<APIKeyWithSecret | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
 
@@ -113,15 +109,6 @@ export default function ProjectDetailPage() {
     }
   }, [projectId]);
 
-  const loadApiKeys = useCallback(async () => {
-    try {
-      const data = await api.projects.getAPIKeys(projectId);
-      setApiKeys(data || []);
-    } catch (error) {
-      console.error("Failed to load API keys:", error);
-    }
-  }, [projectId]);
-
   const loadNotificationSettings = useCallback(async () => {
     try {
       const data = await api.projects.getNotificationSettings(projectId);
@@ -147,9 +134,8 @@ export default function ProjectDetailPage() {
     loadVexStatements();
     loadLicensePolicies();
     loadSbomId();
-    loadApiKeys();
     loadNotificationSettings();
-  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadApiKeys, loadNotificationSettings]);
+  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadNotificationSettings]);
 
   useEffect(() => {
     if (activeTab === "components") loadComponents();
@@ -159,12 +145,11 @@ export default function ProjectDetailPage() {
       loadLicensePolicies();
       loadLicenseViolations();
     }
-    if (activeTab === "apikeys") loadApiKeys();
     if (activeTab === "notifications") {
       loadNotificationSettings();
       loadNotificationLogs();
     }
-  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadApiKeys, loadNotificationSettings, loadNotificationLogs]);
+  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadNotificationSettings, loadNotificationLogs]);
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -261,13 +246,6 @@ export default function ProjectDetailPage() {
         >
           <FileCheck className="h-4 w-4 mr-2" />
           {t("Components.license")} ({licensePolicies.length})
-        </Button>
-        <Button
-          variant={activeTab === "apikeys" ? "default" : "outline"}
-          onClick={() => setActiveTab("apikeys")}
-        >
-          <Key className="h-4 w-4 mr-2" />
-          {tp("apiKeys")} ({apiKeys.length})
         </Button>
         <Button
           variant={activeTab === "notifications" ? "default" : "outline"}
@@ -616,83 +594,6 @@ export default function ProjectDetailPage() {
         </Card>
       )}
 
-      {activeTab === "apikeys" && (
-        <Card>
-          <CardHeader>
-            <div className="flex justify-between items-center">
-              <CardTitle>{tp("apiKeys")}</CardTitle>
-              <a href="/settings/apikeys">
-                <Button variant="default" size="sm">
-                  {tp("goToApiKeySettings")}
-                </Button>
-              </a>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {/* Migration Notice */}
-            <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-              <p className="font-semibold text-amber-800 mb-2">{tp("apiKeyMigrationNotice")}</p>
-              <p className="text-sm text-amber-700 mb-2">
-                {tp("apiKeyMigrationDescription")}
-              </p>
-              <a href="/settings/apikeys" className="text-sm text-amber-800 underline hover:text-amber-900">
-                {tp("goToApiKeySettings")} →
-              </a>
-            </div>
-
-            {/* Legacy Project Keys - read only display */}
-            {apiKeys.length > 0 && (
-              <div className="mt-4">
-                <p className="text-sm text-muted-foreground mb-2">{tp("legacyProjectKeys")}</p>
-                <div className="space-y-2 opacity-75">
-                {apiKeys.map((key) => (
-                  <div key={key.id} className="border rounded-lg p-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="font-medium">{key.name}</span>
-                        <span className="text-muted-foreground text-sm ml-2">
-                          ({key.key_prefix}...)
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline">{key.permissions}</Badge>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-red-500 hover:text-red-700"
-                          onClick={async () => {
-                            if (confirm(tp("deleteApiKeyConfirm"))) {
-                              await api.projects.deleteAPIKey(projectId, key.id);
-                              loadApiKeys();
-                            }
-                          }}
-                        >
-                          {tc("delete")}
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {tp("created")}: {new Date(key.created_at).toLocaleDateString()}
-                      {key.last_used_at && (
-                        <span className="ml-4">
-                          {tp("lastUsed")}: {new Date(key.last_used_at).toLocaleDateString()}
-                        </span>
-                      )}
-                      {key.expires_at && (
-                        <span className="ml-4">
-                          {tp("expires")}: {new Date(key.expires_at).toLocaleDateString()}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
       {activeTab === "notifications" && (
         <Card>
           <CardHeader>
@@ -903,96 +804,6 @@ function NotificationSettingsForm({ projectId, settings, onSuccess }: Notificati
         >
           {testingNotification ? tp("sendingTest") : tp("testNotification")}
         </Button>
-      </div>
-    </form>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <Button variant="ghost" size="sm" onClick={handleCopy}>
-      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-    </Button>
-  );
-}
-
-interface APIKeyFormProps {
-  projectId: string;
-  onSuccess: (key: APIKeyWithSecret) => void;
-  onCancel: () => void;
-}
-
-function APIKeyForm({ projectId, onSuccess, onCancel }: APIKeyFormProps) {
-  const ta = useTranslations("ApiKeyForm");
-  const tc = useTranslations("Common");
-  const [name, setName] = useState("");
-  const [expiresInDays, setExpiresInDays] = useState(0);
-  const [submitting, setSubmitting] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmitting(true);
-    try {
-      const key = await api.projects.createAPIKey(projectId, {
-        name,
-        expires_in_days: expiresInDays > 0 ? expiresInDays : undefined,
-      });
-      onSuccess(key);
-    } catch (error) {
-      console.error("Failed to create API key:", error);
-      alert("Failed to create API key");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="border rounded-lg p-4 mb-4 bg-muted/50">
-      <h3 className="font-bold mb-4">{ta("title")}</h3>
-
-      <div className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium mb-1">{ta("name")}</label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder={ta("namePlaceholder")}
-            required
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium mb-1">{ta("expiresIn")}</label>
-          <select
-            value={expiresInDays}
-            onChange={(e) => setExpiresInDays(Number(e.target.value))}
-            className="w-full border rounded px-3 py-2"
-          >
-            <option value="0">{ta("neverExpires")}</option>
-            <option value="30">{ta("days30")}</option>
-            <option value="90">{ta("days90")}</option>
-            <option value="365">{ta("year1")}</option>
-          </select>
-        </div>
-
-        <div className="flex gap-2">
-          <Button type="submit" disabled={submitting || !name}>
-            {submitting ? ta("creating") : ta("createKey")}
-          </Button>
-          <Button type="button" variant="outline" onClick={onCancel}>
-            {tc("cancel")}
-          </Button>
-        </div>
       </div>
     </form>
   );
