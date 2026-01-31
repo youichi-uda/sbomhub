@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -37,9 +38,9 @@ type CreateConnectionRequest struct {
 func (h *IssueTrackerHandler) CreateConnection(c echo.Context) error {
 	ctx := c.Request().Context()
 
-	tenantID, ok := c.Get("tenant_id").(uuid.UUID)
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
 	if !ok {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Tenant ID not found")
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant context required")
 	}
 
 	var req CreateConnectionRequest
@@ -86,9 +87,9 @@ func (h *IssueTrackerHandler) CreateConnection(c echo.Context) error {
 func (h *IssueTrackerHandler) ListConnections(c echo.Context) error {
 	ctx := c.Request().Context()
 
-	tenantID, ok := c.Get("tenant_id").(uuid.UUID)
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
 	if !ok {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Tenant ID not found")
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant context required")
 	}
 
 	connections, err := h.issueTrackerService.ListConnections(ctx, tenantID)
@@ -154,9 +155,9 @@ type CreateTicketRequest struct {
 func (h *IssueTrackerHandler) CreateTicket(c echo.Context) error {
 	ctx := c.Request().Context()
 
-	tenantID, ok := c.Get("tenant_id").(uuid.UUID)
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
 	if !ok {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Tenant ID not found")
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant context required")
 	}
 
 	vulnID, err := uuid.Parse(c.Param("vuln_id"))
@@ -222,9 +223,9 @@ func (h *IssueTrackerHandler) GetTicketsByVulnerability(c echo.Context) error {
 func (h *IssueTrackerHandler) ListTickets(c echo.Context) error {
 	ctx := c.Request().Context()
 
-	tenantID, ok := c.Get("tenant_id").(uuid.UUID)
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
 	if !ok {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Tenant ID not found")
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant context required")
 	}
 
 	status := c.QueryParam("status")

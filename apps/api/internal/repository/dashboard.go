@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
@@ -16,19 +17,43 @@ func NewDashboardRepository(db *sql.DB) *DashboardRepository {
 	return &DashboardRepository{db: db}
 }
 
+// Deprecated: Use GetTotalProjectsByTenant for proper tenant isolation
 func (r *DashboardRepository) GetTotalProjects(ctx context.Context) (int, error) {
-	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&count)
-	return count, err
+	return 0, fmt.Errorf("deprecated: use GetTotalProjectsByTenant")
 }
 
+// Deprecated: Use GetTotalComponentsByTenant for proper tenant isolation
 func (r *DashboardRepository) GetTotalComponents(ctx context.Context) (int, error) {
+	return 0, fmt.Errorf("deprecated: use GetTotalComponentsByTenant")
+}
+
+// Deprecated: Use GetVulnerabilityCountsByTenant for proper tenant isolation
+func (r *DashboardRepository) GetVulnerabilityCounts(ctx context.Context) (model.VulnerabilityCounts, error) {
+	return model.VulnerabilityCounts{}, fmt.Errorf("deprecated: use GetVulnerabilityCountsByTenant")
+}
+
+// GetTotalProjectsByTenant returns the total number of projects for a tenant
+func (r *DashboardRepository) GetTotalProjectsByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM components`).Scan(&count)
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE tenant_id = $1`, tenantID).Scan(&count)
 	return count, err
 }
 
-func (r *DashboardRepository) GetVulnerabilityCounts(ctx context.Context) (model.VulnerabilityCounts, error) {
+// GetTotalComponentsByTenant returns the total number of components for a tenant's projects
+func (r *DashboardRepository) GetTotalComponentsByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	var count int
+	query := `
+		SELECT COUNT(*) FROM components c
+		INNER JOIN sboms s ON c.sbom_id = s.id
+		INNER JOIN projects p ON s.project_id = p.id
+		WHERE p.tenant_id = $1
+	`
+	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(&count)
+	return count, err
+}
+
+// GetVulnerabilityCountsByTenant returns vulnerability counts for a tenant's projects
+func (r *DashboardRepository) GetVulnerabilityCountsByTenant(ctx context.Context, tenantID uuid.UUID) (model.VulnerabilityCounts, error) {
 	query := `
 		SELECT
 			COALESCE(SUM(CASE WHEN v.severity = 'CRITICAL' THEN 1 ELSE 0 END), 0) as critical,
@@ -37,9 +62,13 @@ func (r *DashboardRepository) GetVulnerabilityCounts(ctx context.Context) (model
 			COALESCE(SUM(CASE WHEN v.severity = 'LOW' THEN 1 ELSE 0 END), 0) as low
 		FROM vulnerabilities v
 		INNER JOIN component_vulnerabilities cv ON v.id = cv.vulnerability_id
+		INNER JOIN components c ON cv.component_id = c.id
+		INNER JOIN sboms s ON c.sbom_id = s.id
+		INNER JOIN projects p ON s.project_id = p.id
+		WHERE p.tenant_id = $1
 	`
 	var counts model.VulnerabilityCounts
-	err := r.db.QueryRowContext(ctx, query).Scan(
+	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(
 		&counts.Critical,
 		&counts.High,
 		&counts.Medium,
@@ -48,7 +77,13 @@ func (r *DashboardRepository) GetVulnerabilityCounts(ctx context.Context) (model
 	return counts, err
 }
 
+// Deprecated: Use GetTopRisksByTenant for proper tenant isolation
 func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]model.TopRisk, error) {
+	return nil, fmt.Errorf("deprecated: use GetTopRisksByTenant")
+}
+
+// GetTopRisksByTenant returns the top vulnerabilities for a tenant's projects
+func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID uuid.UUID, limit int) ([]model.TopRisk, error) {
 	// Note: If epss_score column doesn't exist, this will still work with 0 values
 	// Run 006_epss.sql migration to enable EPSS scores
 	query := `
@@ -66,6 +101,7 @@ func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]mod
 		INNER JOIN components c ON cv.component_id = c.id
 		INNER JOIN sboms s ON c.sbom_id = s.id
 		INNER JOIN projects p ON s.project_id = p.id
+		WHERE p.tenant_id = $1
 		ORDER BY v.cve_id, v.cvss_score DESC
 	`
 
@@ -73,10 +109,10 @@ func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]mod
 	query = `
 		SELECT * FROM (` + query + `) sub
 		ORDER BY cvss_score DESC
-		LIMIT $1
+		LIMIT $2
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, limit)
+	rows, err := r.db.QueryContext(ctx, query, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +142,13 @@ func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]mod
 	return risks, rows.Err()
 }
 
+// Deprecated: Use GetProjectScoresByTenant for proper tenant isolation
 func (r *DashboardRepository) GetProjectScores(ctx context.Context) ([]model.ProjectScore, error) {
+	return nil, fmt.Errorf("deprecated: use GetProjectScoresByTenant")
+}
+
+// GetProjectScoresByTenant returns project risk scores for a tenant
+func (r *DashboardRepository) GetProjectScoresByTenant(ctx context.Context, tenantID uuid.UUID) ([]model.ProjectScore, error) {
 	query := `
 		SELECT
 			p.id,
@@ -120,13 +162,14 @@ func (r *DashboardRepository) GetProjectScores(ctx context.Context) ([]model.Pro
 		LEFT JOIN components c ON s.id = c.sbom_id
 		LEFT JOIN component_vulnerabilities cv ON c.id = cv.component_id
 		LEFT JOIN vulnerabilities v ON cv.vulnerability_id = v.id
+		WHERE p.tenant_id = $1
 		GROUP BY p.id, p.name
 		ORDER BY
 			COALESCE(SUM(CASE WHEN v.severity = 'CRITICAL' THEN 1 ELSE 0 END), 0) DESC,
 			COALESCE(SUM(CASE WHEN v.severity = 'HIGH' THEN 1 ELSE 0 END), 0) DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.db.QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +200,13 @@ func (r *DashboardRepository) GetProjectScores(ctx context.Context) ([]model.Pro
 	return scores, rows.Err()
 }
 
+// Deprecated: Use GetTrendByTenant for proper tenant isolation
 func (r *DashboardRepository) GetTrend(ctx context.Context, days int) ([]model.TrendPoint, error) {
+	return nil, fmt.Errorf("deprecated: use GetTrendByTenant")
+}
+
+// GetTrendByTenant returns vulnerability trend data for a tenant
+func (r *DashboardRepository) GetTrendByTenant(ctx context.Context, tenantID uuid.UUID, days int) ([]model.TrendPoint, error) {
 	query := `
 		WITH date_series AS (
 			SELECT generate_series(
@@ -173,7 +222,11 @@ func (r *DashboardRepository) GetTrend(ctx context.Context, days int) ([]model.T
 				COUNT(*) as count
 			FROM component_vulnerabilities cv
 			INNER JOIN vulnerabilities v ON cv.vulnerability_id = v.id
+			INNER JOIN components c ON cv.component_id = c.id
+			INNER JOIN sboms s ON c.sbom_id = s.id
+			INNER JOIN projects p ON s.project_id = p.id
 			WHERE cv.detected_at >= CURRENT_DATE - INTERVAL '1 day' * $1
+			  AND p.tenant_id = $2
 			GROUP BY cv.detected_at::date, v.severity
 		)
 		SELECT
@@ -188,7 +241,7 @@ func (r *DashboardRepository) GetTrend(ctx context.Context, days int) ([]model.T
 		ORDER BY ds.date
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, days)
+	rows, err := r.db.QueryContext(ctx, query, days, tenantID)
 	if err != nil {
 		return nil, err
 	}
