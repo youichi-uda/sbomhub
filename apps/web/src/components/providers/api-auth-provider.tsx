@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@clerk/nextjs";
-import { useEffect, useState, ReactNode, useCallback, useRef } from "react";
+import { useEffect, useState, ReactNode, useCallback } from "react";
 import { setAuthTokenGetter, setOrgIdGetter } from "@/lib/api";
 
 interface ApiAuthProviderProps {
@@ -12,22 +12,14 @@ export function ApiAuthProvider({ children }: ApiAuthProviderProps) {
   const { getToken, isLoaded, orgId } = useAuth();
   const [isReady, setIsReady] = useState(false);
 
-  // Use ref to track the current orgId for the token getter
-  const orgIdRef = useRef(orgId);
-  orgIdRef.current = orgId;
-
-  // Memoized token getter that includes organization context
+  // Memoized token getter that ensures fresh token with organization context
   const getOrgScopedToken = useCallback(async () => {
     try {
-      const currentOrgId = orgIdRef.current;
-      if (currentOrgId) {
-        // SECURITY FIX: Get organization-scoped token
-        // This ensures the JWT includes the organization ID in its claims
-        // The backend will verify the org ID from JWT, not from headers
-        return await getToken({ organizationId: currentOrgId });
-      }
-      // Fall back to regular token if no org selected
-      return await getToken();
+      // SECURITY FIX: Always get a fresh token to ensure org claims are current
+      // When user switches organizations via OrganizationSwitcher, Clerk updates
+      // the session. Using skipCache ensures we get the latest token with
+      // the current ActiveOrganizationID claim.
+      return await getToken({ skipCache: true });
     } catch {
       return null;
     }
