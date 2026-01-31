@@ -337,9 +337,9 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "successful get vulnerabilities",
 			sbomID: sbomID,
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "source", "published_at", "updated_at"}).
-					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, "NVD", now, now).
-					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, "NVD", now, now)
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"}).
+					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, "NVD", true, now, now, false, now, now).
+					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, "NVD", false, nil, nil, nil, now, now)
 				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
 					WithArgs(sbomID).
 					WillReturnRows(rows)
@@ -353,8 +353,14 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 				if vulns[0].CVSSScore != 9.8 {
 					t.Errorf("expected CVSS score 9.8, got %f", vulns[0].CVSSScore)
 				}
+				if !vulns[0].InKEV {
+					t.Errorf("expected first vuln to be in KEV")
+				}
 				if vulns[1].Severity != "HIGH" {
 					t.Errorf("expected HIGH severity, got %s", vulns[1].Severity)
+				}
+				if vulns[1].InKEV {
+					t.Errorf("expected second vuln to not be in KEV")
 				}
 			},
 		},
@@ -362,7 +368,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "no vulnerabilities found",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "source", "published_at", "updated_at"})
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"})
 				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)

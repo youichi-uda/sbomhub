@@ -43,7 +43,9 @@ func (r *ComponentRepository) ListBySbom(ctx context.Context, sbomID uuid.UUID) 
 
 func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uuid.UUID) ([]model.Vulnerability, error) {
 	query := `
-		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score, COALESCE(v.source, 'NVD'), v.published_at, v.updated_at
+		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score, COALESCE(v.source, 'NVD'),
+		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
+		       v.published_at, v.updated_at
 		FROM vulnerabilities v
 		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
 		JOIN components c ON c.id = cv.component_id
@@ -59,7 +61,9 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.Source, &v.PublishedAt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.Source,
+			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
+			&v.PublishedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
 		vulns = append(vulns, v)
