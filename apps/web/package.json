@@ -13,16 +13,16 @@
   },
   "dependencies": {
     "@clerk/localizations": "^3.12.0",
-    "@clerk/nextjs": "^6.12.0",
+    "@clerk/nextjs": "^6.36.8",
     "@hookform/resolvers": "^3.9.0",
-    "@tanstack/react-query": "^5.62.0",
+    "@tanstack/react-query": "^5.90.19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.469.0",
     "next": "^16.1.0",
     "next-intl": "^4.7.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "react-hook-form": "^7.54.0",
     "tailwind-merge": "^2.6.0",
     "zod": "^3.24.0"
@@ -30,14 +30,14 @@
   "devDependencies": {
     "@playwright/test": "^1.50.0",
     "@types/node": "^22.10.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "autoprefixer": "^10.4.20",
     "cross-env": "^10.1.0",
     "eslint": "^9.17.0",
     "eslint-config-next": "^16.1.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.3"
   }
 }
