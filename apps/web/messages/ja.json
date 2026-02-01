@@ -11,6 +11,7 @@
   "Landing": {
     "nav": {
       "features": "機能",
+      "allFeatures": "全機能",
       "pricing": "料金",
       "signIn": "ログイン",
       "getStarted": "無料で始める"
@@ -60,6 +61,115 @@
       "diff": {
         "title": "SBOM 差分比較",
         "description": "異なるバージョン間のSBOMを比較し、追加・削除・更新されたコンポーネントと新規脆弱性を検出。"
+      }
+    },
+    "allFeatures": {
+      "title": "全機能一覧",
+      "description": "SBOMHubが提供するすべての機能をご紹介します",
+      "categories": {
+        "core": "SBOM管理",
+        "security": "セキュリティ",
+        "analysis": "分析・レポート",
+        "integration": "連携・自動化",
+        "enterprise": "エンタープライズ"
+      },
+      "items": {
+        "sbomImport": {
+          "title": "SBOMインポート",
+          "description": "CycloneDX・SPDX形式に対応。Syft、cdxgen、Trivyなどの主要ツールからインポート可能"
+        },
+        "componentManagement": {
+          "title": "コンポーネント管理",
+          "description": "プロジェクト内の全コンポーネントを一覧表示。名前・バージョン・ライセンス情報を管理"
+        },
+        "sbomDiff": {
+          "title": "SBOM差分比較",
+          "description": "バージョン間のSBOMを比較し、追加・削除・更新されたコンポーネントを可視化"
+        },
+        "sbomShare": {
+          "title": "SBOM共有",
+          "description": "プロジェクトのSBOMを外部パートナーと安全に共有するための公開リンクを生成"
+        },
+        "vulnManagement": {
+          "title": "脆弱性管理",
+          "description": "NVDデータベースと連携し、コンポーネントの脆弱性を自動検出・深刻度別に表示"
+        },
+        "vexStatements": {
+          "title": "VEXステートメント",
+          "description": "脆弱性の影響評価（VEX）を作成・管理。誤検知の除外や対応状況を記録"
+        },
+        "ssvcAssessment": {
+          "title": "SSVC評価",
+          "description": "CISAのSSVCフレームワークに基づき、脆弱性の優先度を自動・手動で評価"
+        },
+        "kevIntegration": {
+          "title": "KEV連携",
+          "description": "CISAの既知悪用脆弱性カタログと連携し、実際に悪用されている脆弱性を警告"
+        },
+        "eolCheck": {
+          "title": "EOLステータス確認",
+          "description": "コンポーネントのサポート終了状況を自動チェック。アップグレード推奨を表示"
+        },
+        "licenseManagement": {
+          "title": "ライセンス管理",
+          "description": "OSSライセンスの自動検出とポリシーチェック。許可・禁止・要確認を設定可能"
+        },
+        "dashboard": {
+          "title": "ダッシュボード",
+          "description": "脆弱性サマリー、EPSS上位脆弱性、プロジェクトリスクスコアを一覧表示"
+        },
+        "trendAnalysis": {
+          "title": "トレンド分析",
+          "description": "MTTR・SLO達成率などの脆弱性対応パフォーマンス指標を可視化"
+        },
+        "reports": {
+          "title": "レポート機能",
+          "description": "経営・技術・コンプライアンスレポートをPDF/Excel形式で自動生成"
+        },
+        "crossSearch": {
+          "title": "横断検索",
+          "description": "CVE IDやコンポーネント名で全プロジェクトを横断検索し、影響範囲を特定"
+        },
+        "compliance": {
+          "title": "コンプライアンス",
+          "description": "経済産業省SBOMガイドラインへの対応を支援する自己評価チェック機能"
+        },
+        "cicdIntegration": {
+          "title": "CI/CD連携",
+          "description": "GitHub ActionsなどのCI/CDパイプラインからAPIでSBOMを自動アップロード"
+        },
+        "ipaIntegration": {
+          "title": "IPA/JVN連携",
+          "description": "IPAセキュリティアラートとJVN脆弱性情報を自動取得。国内向け情報に対応"
+        },
+        "ticketIntegration": {
+          "title": "チケット連携",
+          "description": "Jira・Backlogと連携し、脆弱性から直接チケットを作成。ステータス同期対応"
+        },
+        "notifications": {
+          "title": "通知機能",
+          "description": "Slack・Discord・メールで新規脆弱性検出時に通知。重要度でフィルタリング可能"
+        },
+        "mcpServer": {
+          "title": "MCP Server",
+          "description": "Claude Desktop・Cursorから自然言語でSBOMHubの情報にアクセス"
+        },
+        "cli": {
+          "title": "CLIツール",
+          "description": "sbomhub-cliでコマンドラインからSBOMスキャン・アップロード・検索を実行"
+        },
+        "auditLog": {
+          "title": "監査ログ",
+          "description": "すべての操作履歴を記録・検索。コンプライアンス要件への対応に"
+        },
+        "apiKeys": {
+          "title": "APIキー管理",
+          "description": "CLI・MCP Server・CI/CD連携で使用するAPIキーを発行・管理"
+        },
+        "i18n": {
+          "title": "多言語対応",
+          "description": "日本語・英語のUIを完全サポート。日本市場向けに最適化"
+        }
       }
     },
     "pricing": {

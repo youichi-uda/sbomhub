@@ -16,6 +16,24 @@ import {
   Building2,
   GitCompare,
   Scale,
+  Package,
+  Share2,
+  Target,
+  Skull,
+  Clock,
+  LayoutDashboard,
+  TrendingUp,
+  FileText,
+  Search,
+  ClipboardCheck,
+  Workflow,
+  Bell,
+  MessageSquare,
+  Terminal,
+  History,
+  Key,
+  Languages,
+  Ticket,
 } from "lucide-react";
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
@@ -220,6 +238,44 @@ export default async function LandingPage({ params }: Props) {
     },
   ];
 
+  // All features grouped by category
+  const allFeatures = {
+    core: [
+      { key: "sbomImport", icon: FileSearch },
+      { key: "componentManagement", icon: Package },
+      { key: "sbomDiff", icon: GitCompare },
+      { key: "sbomShare", icon: Share2 },
+    ],
+    security: [
+      { key: "vulnManagement", icon: AlertTriangle },
+      { key: "vexStatements", icon: Shield },
+      { key: "ssvcAssessment", icon: Target },
+      { key: "kevIntegration", icon: Skull },
+      { key: "eolCheck", icon: Clock },
+      { key: "licenseManagement", icon: Scale },
+    ],
+    analysis: [
+      { key: "dashboard", icon: LayoutDashboard },
+      { key: "trendAnalysis", icon: TrendingUp },
+      { key: "reports", icon: FileText },
+      { key: "crossSearch", icon: Search },
+      { key: "compliance", icon: ClipboardCheck },
+    ],
+    integration: [
+      { key: "cicdIntegration", icon: Workflow },
+      { key: "ipaIntegration", icon: Building2 },
+      { key: "ticketIntegration", icon: Ticket },
+      { key: "notifications", icon: Bell },
+      { key: "mcpServer", icon: MessageSquare },
+      { key: "cli", icon: Terminal },
+    ],
+    enterprise: [
+      { key: "auditLog", icon: History },
+      { key: "apiKeys", icon: Key },
+      { key: "i18n", icon: Languages },
+    ],
+  };
+
   const jsonLd = generateJsonLd(locale);
 
   return (
@@ -239,6 +295,9 @@ export default async function LandingPage({ params }: Props) {
           <nav className="flex items-center gap-6">
             <Link href="#features" className="text-sm text-muted-foreground hover:text-foreground">
               {t("nav.features")}
+            </Link>
+            <Link href="#all-features" className="text-sm text-muted-foreground hover:text-foreground">
+              {t("nav.allFeatures")}
             </Link>
             <Link href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">
               {t("nav.pricing")}
@@ -369,8 +428,48 @@ export default async function LandingPage({ params }: Props) {
           </div>
         </section>
 
+        {/* All Features Section */}
+        <section id="all-features" className="py-20">
+          <div className="container mx-auto px-4">
+            <div className="text-center mb-12">
+              <h2 className="text-3xl font-bold mb-4">{t("allFeatures.title")}</h2>
+              <p className="text-muted-foreground max-w-2xl mx-auto">
+                {t("allFeatures.description")}
+              </p>
+            </div>
+
+            <div className="space-y-12 max-w-6xl mx-auto">
+              {(Object.keys(allFeatures) as Array<keyof typeof allFeatures>).map((category) => (
+                <div key={category}>
+                  <h3 className="text-xl font-semibold mb-6 text-primary border-b pb-2">
+                    {t(`allFeatures.categories.${category}`)}
+                  </h3>
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {allFeatures[category].map((feature) => (
+                      <div
+                        key={feature.key}
+                        className="flex items-start gap-3 p-4 rounded-lg bg-white border hover:border-primary/30 hover:shadow-sm transition-all"
+                      >
+                        <feature.icon className="h-5 w-5 text-primary shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="font-medium text-sm mb-1">
+                            {t(`allFeatures.items.${feature.key}.title`)}
+                          </h4>
+                          <p className="text-xs text-muted-foreground leading-relaxed">
+                            {t(`allFeatures.items.${feature.key}.description`)}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
         {/* CTA Section */}
-        <section className="py-20">
+        <section className="py-20 bg-gradient-to-b from-white to-blue-50">
           <div className="container mx-auto px-4 text-center">
             <h2 className="text-3xl font-bold mb-4">{t("cta.title")}</h2>
             <p className="text-muted-foreground mb-8 max-w-2xl mx-auto">

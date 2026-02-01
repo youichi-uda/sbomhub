@@ -11,6 +11,7 @@
   "Landing": {
     "nav": {
       "features": "Features",
+      "allFeatures": "All Features",
       "pricing": "Pricing",
       "signIn": "Sign In",
       "getStarted": "Get Started"
@@ -60,6 +61,115 @@
       "diff": {
         "title": "SBOM Diff Comparison",
         "description": "Compare SBOMs across versions to detect added, removed, and updated components along with new vulnerabilities."
+      }
+    },
+    "allFeatures": {
+      "title": "All Features",
+      "description": "Explore everything SBOMHub has to offer",
+      "categories": {
+        "core": "SBOM Management",
+        "security": "Security",
+        "analysis": "Analysis & Reporting",
+        "integration": "Integration & Automation",
+        "enterprise": "Enterprise"
+      },
+      "items": {
+        "sbomImport": {
+          "title": "SBOM Import",
+          "description": "Supports CycloneDX and SPDX formats. Import from Syft, cdxgen, Trivy, and other major tools"
+        },
+        "componentManagement": {
+          "title": "Component Management",
+          "description": "View all components in your project. Manage names, versions, and license information"
+        },
+        "sbomDiff": {
+          "title": "SBOM Diff Comparison",
+          "description": "Compare SBOMs across versions and visualize added, removed, and updated components"
+        },
+        "sbomShare": {
+          "title": "SBOM Sharing",
+          "description": "Generate secure public links to share your project's SBOM with external partners"
+        },
+        "vulnManagement": {
+          "title": "Vulnerability Management",
+          "description": "Automatically detect component vulnerabilities via NVD database integration"
+        },
+        "vexStatements": {
+          "title": "VEX Statements",
+          "description": "Create and manage VEX statements. Record false positive exclusions and response status"
+        },
+        "ssvcAssessment": {
+          "title": "SSVC Assessment",
+          "description": "Prioritize vulnerabilities using CISA's SSVC framework with auto or manual assessment"
+        },
+        "kevIntegration": {
+          "title": "KEV Integration",
+          "description": "Integrate with CISA's Known Exploited Vulnerabilities catalog to flag active exploits"
+        },
+        "eolCheck": {
+          "title": "EOL Status Check",
+          "description": "Automatically check component end-of-life status and show upgrade recommendations"
+        },
+        "licenseManagement": {
+          "title": "License Management",
+          "description": "Automatic OSS license detection with policy checks. Set allowed, denied, or review required"
+        },
+        "dashboard": {
+          "title": "Dashboard",
+          "description": "View vulnerability summary, top EPSS vulnerabilities, and project risk scores at a glance"
+        },
+        "trendAnalysis": {
+          "title": "Trend Analysis",
+          "description": "Visualize vulnerability response metrics including MTTR and SLO achievement rates"
+        },
+        "reports": {
+          "title": "Report Generation",
+          "description": "Auto-generate executive, technical, and compliance reports in PDF/Excel format"
+        },
+        "crossSearch": {
+          "title": "Cross Search",
+          "description": "Search all projects by CVE ID or component name to identify impact scope"
+        },
+        "compliance": {
+          "title": "Compliance",
+          "description": "Self-assessment feature to support METI (Japan) SBOM guideline compliance"
+        },
+        "cicdIntegration": {
+          "title": "CI/CD Integration",
+          "description": "Upload SBOMs automatically via API from GitHub Actions and other CI/CD pipelines"
+        },
+        "ipaIntegration": {
+          "title": "IPA/JVN Integration",
+          "description": "Auto-fetch IPA security alerts and JVN vulnerability information for Japan-specific data"
+        },
+        "ticketIntegration": {
+          "title": "Ticket Integration",
+          "description": "Create tickets directly from vulnerabilities with Jira and Backlog. Supports status sync"
+        },
+        "notifications": {
+          "title": "Notifications",
+          "description": "Get notified via Slack, Discord, or email when new vulnerabilities are detected"
+        },
+        "mcpServer": {
+          "title": "MCP Server",
+          "description": "Access SBOMHub information using natural language from Claude Desktop or Cursor"
+        },
+        "cli": {
+          "title": "CLI Tool",
+          "description": "Use sbomhub-cli to scan, upload, and search SBOMs from the command line"
+        },
+        "auditLog": {
+          "title": "Audit Logs",
+          "description": "Record and search all operation history for compliance requirements"
+        },
+        "apiKeys": {
+          "title": "API Key Management",
+          "description": "Issue and manage API keys for CLI, MCP Server, and CI/CD integrations"
+        },
+        "i18n": {
+          "title": "Multilingual Support",
+          "description": "Full Japanese and English UI support. Optimized for the Japanese market"
+        }
       }
     },
     "pricing": {
