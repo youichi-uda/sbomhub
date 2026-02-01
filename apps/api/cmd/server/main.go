@@ -462,7 +462,8 @@ func main() {
 	slog.Info("CVE sync job started", "interval", "24h")
 
 	// Vulnerability scan job - runs hourly to scan components against NVD
-	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, os.Getenv("NVD_API_KEY"), notificationService)
+	// Uses NVDService with Redis cache for efficient API usage
+	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, nvdService, notificationService)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
