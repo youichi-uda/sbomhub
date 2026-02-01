@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -391,6 +392,32 @@ func (s *ReportService) gatherChecklistData(ctx context.Context, tenantID uuid.U
 	allItems := model.GetAllChecklistItems()
 	phaseLabels := model.GetChecklistPhaseLabels()
 
+	// Get all responses from the tenant
+	responses, err := s.checklistRepo.ListByTenant(ctx, tenantID)
+	if err != nil {
+		// Log error but continue with defaults
+		slog.Warn("failed to get checklist responses for report", "tenant_id", tenantID, "error", err)
+		responses = nil
+	}
+
+	// Build a map of check_id -> passed status (true if any project marked it as passed)
+	// This aggregates across all projects - an item is considered passed if at least one project has it passed
+	passedItems := make(map[string]bool)
+	notesMap := make(map[string]string)
+	for _, resp := range responses {
+		if resp.Response {
+			passedItems[resp.CheckID] = true
+		}
+		// Keep the most recent note for each check item
+		// ListByTenant returns results ordered by check_id, updated_at DESC
+		// so the first non-empty note we encounter for each check_id is the most recent
+		if _, exists := notesMap[resp.CheckID]; !exists {
+			if resp.Note != nil && *resp.Note != "" {
+				notesMap[resp.CheckID] = *resp.Note
+			}
+		}
+	}
+
 	// Group items by phase
 	phaseItems := make(map[model.ChecklistPhase][]model.ChecklistItem)
 	for _, item := range allItems {
@@ -414,15 +441,17 @@ func (s *ReportService) gatherChecklistData(ctx context.Context, tenantID uuid.U
 		}
 
 		for _, item := range items {
-			// For report, just include the item definition
-			// In a real implementation, you'd aggregate responses across projects
+			// Determine if passed: auto-verified items are always passed, otherwise check actual responses
+			passed := item.AutoVerify || passedItems[item.ID]
+
 			itemData := model.ChecklistItemReportData{
 				ID:         item.ID,
 				LabelJa:    item.LabelJa,
 				AutoVerify: item.AutoVerify,
-				Passed:     item.AutoVerify, // Auto-verified items are considered passed for now
+				Passed:     passed,
+				Note:       notesMap[item.ID],
 			}
-			if item.AutoVerify {
+			if passed {
 				phaseData.Score++
 				data.Score++
 			}
@@ -728,6 +757,26 @@ func (s *ReportService) getVisualizationOptionLabel(options []model.Visualizatio
 	return value
 }
 
+// getUtilizationScopeLabels returns a comma-separated string of labels for selected utilization scopes
+func (s *ReportService) getUtilizationScopeLabels(options []model.VisualizationOption, values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	optionMap := make(map[string]string)
+	for _, opt := range options {
+		optionMap[opt.Value] = opt.LabelJa
+	}
+	var labels []string
+	for _, v := range values {
+		if label, ok := optionMap[v]; ok {
+			labels = append(labels, label)
+		} else {
+			labels = append(labels, v)
+		}
+	}
+	return strings.Join(labels, ", ")
+}
+
 // PDF helper functions
 func (s *ReportService) buildPDFTitle(title string) core.Row {
 	return row.New(16).Add(
@@ -1024,7 +1073,11 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizDataFormatDesc)
 		row++
 
-		// (e) Utilization Scope - skip for now as it's complex
+		// (e) Utilization Scope
+		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizUtilizationScope)
+		scopeLabels := s.getUtilizationScopeLabels(vizOptions.UtilizationScope, data.VisualizationData.UtilizationScope)
+		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row), scopeLabels)
+		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizUtilizationScopeDesc)
 		row++
 
 		// (f) Utilization Actor

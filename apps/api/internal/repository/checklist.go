@@ -49,6 +49,39 @@ func (r *ChecklistRepository) ListByProject(ctx context.Context, projectID uuid.
 	return responses, rows.Err()
 }
 
+// ListByTenant returns all checklist responses for a tenant (aggregated across all projects)
+// Results are ordered by check_id and updated_at DESC so the most recent note for each item comes first
+func (r *ChecklistRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]model.ChecklistResponse, error) {
+	query := `
+		SELECT id, tenant_id, project_id, check_id, response, note, updated_by, updated_at
+		FROM compliance_checklist_responses
+		WHERE tenant_id = $1
+		ORDER BY check_id, updated_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var responses []model.ChecklistResponse
+	for rows.Next() {
+		var resp model.ChecklistResponse
+		var note sql.NullString
+		if err := rows.Scan(
+			&resp.ID, &resp.TenantID, &resp.ProjectID, &resp.CheckID,
+			&resp.Response, &note, &resp.UpdatedBy, &resp.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if note.Valid {
+			resp.Note = &note.String
+		}
+		responses = append(responses, resp)
+	}
+	return responses, rows.Err()
+}
+
 // GetByCheckID returns a specific checklist response
 func (r *ChecklistRepository) GetByCheckID(ctx context.Context, projectID uuid.UUID, checkID string) (*model.ChecklistResponse, error) {
 	query := `

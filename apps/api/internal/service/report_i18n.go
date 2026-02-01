@@ -51,15 +51,17 @@ type ReportTranslations struct {
 	Auto        string
 
 	// Visualization framework
-	VizSBOMAuthor     string
-	VizDependency     string
-	VizGeneration     string
-	VizDataFormat     string
-	VizUtilization    string
-	VizSBOMAuthorDesc string
-	VizDependencyDesc string
-	VizGenerationDesc string
-	VizDataFormatDesc string
+	VizSBOMAuthor      string
+	VizDependency      string
+	VizGeneration      string
+	VizDataFormat      string
+	VizUtilizationScope string
+	VizUtilization     string
+	VizSBOMAuthorDesc  string
+	VizDependencyDesc  string
+	VizGenerationDesc  string
+	VizDataFormatDesc  string
+	VizUtilizationScopeDesc string
 	VizUtilizationDesc string
 
 	// Excel specific
@@ -136,15 +138,17 @@ var translationsJa = ReportTranslations{
 	NotCompleted: "未完了",
 	Auto:         "自動",
 
-	VizSBOMAuthor:     "(a) SBOM作成主体 (Who)",
-	VizDependency:     "(b) 依存関係 (What/Where)",
-	VizGeneration:     "(c) 生成手段 (How)",
-	VizDataFormat:     "(d) データ様式 (What)",
-	VizUtilization:    "(f) 活用主体 (Who)",
-	VizSBOMAuthorDesc: "SBOMを作成する主体",
-	VizDependencyDesc: "SBOMに含める依存関係の範囲",
-	VizGenerationDesc: "SBOMの生成方法",
-	VizDataFormatDesc: "SBOMのデータ形式",
+	VizSBOMAuthor:      "(a) SBOM作成主体 (Who)",
+	VizDependency:      "(b) 依存関係 (What/Where)",
+	VizGeneration:      "(c) 生成手段 (How)",
+	VizDataFormat:      "(d) データ様式 (What)",
+	VizUtilizationScope: "(e) 活用目的 (Why)",
+	VizUtilization:     "(f) 活用主体 (Who)",
+	VizSBOMAuthorDesc:  "SBOMを作成する主体",
+	VizDependencyDesc:  "SBOMに含める依存関係の範囲",
+	VizGenerationDesc:  "SBOMの生成方法",
+	VizDataFormatDesc:  "SBOMのデータ形式",
+	VizUtilizationScopeDesc: "SBOMの活用目的・範囲",
 	VizUtilizationDesc: "SBOMを活用する主体",
 
 	SheetSummary:      "サマリー",
@@ -218,15 +222,17 @@ var translationsEn = ReportTranslations{
 	NotCompleted: "Not Completed",
 	Auto:         "Auto",
 
-	VizSBOMAuthor:     "(a) SBOM Author (Who)",
-	VizDependency:     "(b) Dependencies (What/Where)",
-	VizGeneration:     "(c) Generation Method (How)",
-	VizDataFormat:     "(d) Data Format (What)",
-	VizUtilization:    "(f) Utilization Actor (Who)",
-	VizSBOMAuthorDesc: "Entity that creates the SBOM",
-	VizDependencyDesc: "Scope of dependencies included in SBOM",
-	VizGenerationDesc: "Method of SBOM generation",
-	VizDataFormatDesc: "Data format of SBOM",
+	VizSBOMAuthor:      "(a) SBOM Author (Who)",
+	VizDependency:      "(b) Dependencies (What/Where)",
+	VizGeneration:      "(c) Generation Method (How)",
+	VizDataFormat:      "(d) Data Format (What)",
+	VizUtilizationScope: "(e) Utilization Scope (Why)",
+	VizUtilization:     "(f) Utilization Actor (Who)",
+	VizSBOMAuthorDesc:  "Entity that creates the SBOM",
+	VizDependencyDesc:  "Scope of dependencies included in SBOM",
+	VizGenerationDesc:  "Method of SBOM generation",
+	VizDataFormatDesc:  "Data format of SBOM",
+	VizUtilizationScopeDesc: "Purpose and scope of SBOM utilization",
 	VizUtilizationDesc: "Entity that utilizes the SBOM",
 
 	SheetSummary:      "Summary",

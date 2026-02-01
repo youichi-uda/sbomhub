@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -52,6 +53,16 @@ func (h *VEXHandler) Create(c echo.Context) error {
 		compID = &parsed
 	}
 
+	// Get authenticated user from context
+	auth := middleware.GetAuthContext(c)
+	user, _ := c.Get(middleware.ContextKeyUser).(*model.User)
+	createdBy := "system"
+	if user != nil && user.Email != "" {
+		createdBy = user.Email
+	} else if auth != nil && auth.ClerkUserID != "" {
+		createdBy = auth.ClerkUserID
+	}
+
 	input := service.CreateVEXStatementInput{
 		ProjectID:       projectID,
 		VulnerabilityID: vulnID,
@@ -60,7 +71,7 @@ func (h *VEXHandler) Create(c echo.Context) error {
 		Justification:   model.VEXJustification(req.Justification),
 		ActionStatement: req.ActionStatement,
 		ImpactStatement: req.ImpactStatement,
-		CreatedBy:       "system", // TODO: Replace with actual user when auth is implemented
+		CreatedBy:       createdBy,
 	}
 
 	statement, err := h.vexService.CreateStatement(c.Request().Context(), input)
