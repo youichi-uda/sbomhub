@@ -9,7 +9,7 @@
 ![GitHub Stars](https://img.shields.io/github/stars/youichi-uda/sbomhub)
 
 <p align="center">
-  <img src="docs/images/dashboard.png" alt="SBOMHub Dashboard" width="800">
+  <img src="docs/images/dashboard-en.png" alt="SBOMHub Dashboard" width="800">
 </p>
 
 ## What is SBOMHub?
@@ -153,6 +153,100 @@ GET    /api/v1/kev/:cve_id           # Check CVE in KEV
 GET    /api/v1/projects/:id/kev      # List project KEV vulnerabilities
 ```
 
+## CLI
+
+SBOMHub CLI lets you generate SBOMs and upload them in a single command.
+
+### Installation
+
+```bash
+# Homebrew (macOS/Linux)
+brew install sbomhub/tap/sbomhub
+
+# Shell script (macOS/Linux)
+curl -fsSL https://sbomhub.app/install.sh | sh
+
+# Windows (Scoop)
+scoop bucket add sbomhub https://github.com/sbomhub/scoop-bucket
+scoop install sbomhub
+
+# Go install
+go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
+```
+
+### Basic Usage
+
+```bash
+# Login (set API Key)
+sbomhub login
+
+# Scan current directory & upload
+sbomhub scan .
+
+# Specify project
+sbomhub scan . --project my-app
+
+# Vulnerability check only (no upload)
+sbomhub check .
+
+# CI/CD mode (exit 1 on Critical)
+sbomhub scan . --project my-app --fail-on critical --quiet
+```
+
+### Required External Tools
+
+At least one of the following must be installed:
+- [Syft](https://github.com/anchore/syft) (recommended)
+- [Trivy](https://github.com/aquasecurity/trivy)
+- [cdxgen](https://github.com/CycloneDX/cdxgen)
+
+See [sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli) for details.
+
+## MCP Server
+
+SBOMHub MCP Server allows Claude Desktop, Cursor, and other MCP-compatible AI tools to directly access SBOMHub data.
+
+### Installation
+
+```bash
+cd packages/mcp-server
+pnpm install
+pnpm build
+```
+
+### Configuration (Claude Desktop)
+
+Add the following to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "sbomhub": {
+      "command": "node",
+      "args": ["/path/to/sbomhub/packages/mcp-server/dist/index.js"],
+      "env": {
+        "SBOMHUB_API_KEY": "your-api-key",
+        "SBOMHUB_API_URL": "https://api.sbomhub.app"
+      }
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| sbomhub_list_projects | List all projects |
+| sbomhub_get_dashboard | Get dashboard summary |
+| sbomhub_search_cve | Cross-project CVE search |
+| sbomhub_search_component | Component search |
+| sbomhub_diff | SBOM diff comparison |
+| sbomhub_get_vulnerabilities | List vulnerabilities |
+| sbomhub_get_compliance | Get compliance score |
+
+See [packages/mcp-server/README.md](./packages/mcp-server/README.md) for details.
+
 ## CI/CD Integration
 
 ### GitHub Actions
@@ -204,6 +298,9 @@ jobs:
 - [x] SBOMHub Cloud (Managed SaaS)
 - [x] **SSVC Decision Framework** - CISA SSVC for vulnerability prioritization
 - [x] **KEV Integration** - Known Exploited Vulnerabilities catalog auto-sync
+- [ ] Risk Profiles - Project-specific risk settings
+- [ ] Triage Dashboard - Unified priority view with KEV/SSVC
+- [ ] AI Priority Estimation - AI-powered assessment via MCP
 - [ ] LDAP/OIDC Authentication (Self-hosted)
 
 ## Contributing
@@ -257,6 +354,7 @@ sbomhub/
 │   └── api/          # Go backend
 ├── packages/
 │   ├── db/           # DB schema and migrations
+│   ├── mcp-server/   # MCP Server (Claude/Cursor integration)
 │   └── types/        # Shared TypeScript types
 ├── docker/           # Docker configurations
 ├── docs/             # Documentation
