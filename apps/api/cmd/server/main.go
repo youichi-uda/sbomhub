@@ -372,6 +372,13 @@ func main() {
 	auth.GET("/settings/ipa", ipaHandler.GetSyncSettings)
 	auth.PUT("/settings/ipa", ipaHandler.UpdateSyncSettings)
 
+	// Scan settings endpoints
+	scanSettingsService := service.NewScanSettingsService(db)
+	scanSettingsHandler := handler.NewScanSettingsHandler(scanSettingsService)
+	auth.GET("/settings/scan", scanSettingsHandler.Get)
+	auth.PUT("/settings/scan", scanSettingsHandler.Update)
+	auth.GET("/settings/scan/logs", scanSettingsHandler.GetLogs)
+
 	// KEV (Known Exploited Vulnerabilities) integration endpoints
 	auth.POST("/kev/sync", kevHandler.SyncCatalog)
 	auth.GET("/kev/catalog", kevHandler.ListCatalog)
