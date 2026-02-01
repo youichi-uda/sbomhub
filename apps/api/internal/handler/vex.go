@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -55,7 +57,12 @@ func (h *VEXHandler) Create(c echo.Context) error {
 
 	// Get authenticated user from context
 	auth := middleware.GetAuthContext(c)
-	user, _ := c.Get(middleware.ContextKeyUser).(*model.User)
+	user, ok := c.Get(middleware.ContextKeyUser).(*model.User)
+	if !ok && c.Get(middleware.ContextKeyUser) != nil {
+		// Log unexpected type in context (helps debug middleware issues)
+		slog.Warn("context value for user is not of expected type",
+			"actual_type", fmt.Sprintf("%T", c.Get(middleware.ContextKeyUser)))
+	}
 	createdBy := "system"
 	if user != nil && user.Email != "" {
 		createdBy = user.Email

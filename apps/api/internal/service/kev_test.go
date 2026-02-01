@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockKEVRepository is a mock implementation of KEVRepository for testing
+// mockKEVRepository implements KEVRepositoryInterface for testing
 type mockKEVRepository struct {
 	entries      map[string]*model.KEVEntry
 	syncSettings *model.KEVSyncSettings
@@ -31,6 +31,7 @@ func newMockKEVRepository() *mockKEVRepository {
 	}
 }
 
+// Implement KEVRepositoryInterface
 func (m *mockKEVRepository) GetByCVE(ctx context.Context, cveID string) (*model.KEVEntry, error) {
 	entry, ok := m.entries[cveID]
 	if !ok {
@@ -39,31 +40,109 @@ func (m *mockKEVRepository) GetByCVE(ctx context.Context, cveID string) (*model.
 	return entry, nil
 }
 
+func (m *mockKEVRepository) UpsertEntry(ctx context.Context, entry *model.KEVEntry) error {
+	m.entries[entry.CVEID] = entry
+	return nil
+}
+
+func (m *mockKEVRepository) GetAllCVEIDs(ctx context.Context) ([]string, error) {
+	ids := make([]string, 0, len(m.entries))
+	for id := range m.entries {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (m *mockKEVRepository) SyncVulnerabilitiesKEVStatus(ctx context.Context) (int, error) {
+	return len(m.entries), nil
+}
+
+func (m *mockKEVRepository) GetSyncSettings(ctx context.Context) (*model.KEVSyncSettings, error) {
+	return m.syncSettings, nil
+}
+
+func (m *mockKEVRepository) UpdateSyncSettings(ctx context.Context, settings *model.KEVSyncSettings) error {
+	m.syncSettings = settings
+	return nil
+}
+
+func (m *mockKEVRepository) CreateSyncLog(ctx context.Context) (*model.KEVSyncLog, error) {
+	log := &model.KEVSyncLog{
+		ID:        uuid.New(),
+		StartedAt: time.Now(),
+		Status:    "in_progress",
+	}
+	m.syncLogs = append(m.syncLogs, log)
+	return log, nil
+}
+
+func (m *mockKEVRepository) UpdateSyncLog(ctx context.Context, log *model.KEVSyncLog) error {
+	for i, l := range m.syncLogs {
+		if l.ID == log.ID {
+			m.syncLogs[i] = log
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *mockKEVRepository) GetLatestSyncLog(ctx context.Context) (*model.KEVSyncLog, error) {
+	if len(m.syncLogs) == 0 {
+		return nil, nil
+	}
+	return m.syncLogs[len(m.syncLogs)-1], nil
+}
+
+func (m *mockKEVRepository) List(ctx context.Context, limit, offset int) ([]model.KEVEntry, int, error) {
+	entries := make([]model.KEVEntry, 0, len(m.entries))
+	for _, e := range m.entries {
+		entries = append(entries, *e)
+	}
+	// Simple pagination
+	total := len(entries)
+	if offset >= len(entries) {
+		return []model.KEVEntry{}, total, nil
+	}
+	end := offset + limit
+	if end > len(entries) {
+		end = len(entries)
+	}
+	return entries[offset:end], total, nil
+}
+
+func (m *mockKEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uuid.UUID) ([]model.Vulnerability, error) {
+	// Return empty list for testing
+	return []model.Vulnerability{}, nil
+}
+
+func (m *mockKEVRepository) Count(ctx context.Context) (int, error) {
+	return len(m.entries), nil
+}
+
+// Helper to add entries to mock
 func (m *mockKEVRepository) addEntry(entry *model.KEVEntry) {
 	m.entries[entry.CVEID] = entry
 }
 
-func TestKEVService_IsInKEV(t *testing.T) {
+func TestKEVService_CheckCVEInKEV(t *testing.T) {
 	tests := []struct {
 		name     string
 		cveID    string
-		inKEV    bool
 		setup    func(*mockKEVRepository)
 		expected bool
 	}{
 		{
 			name:  "CVE in KEV catalog",
 			cveID: "CVE-2021-44228", // Log4Shell - definitely in KEV
-			inKEV: true,
 			setup: func(repo *mockKEVRepository) {
 				repo.addEntry(&model.KEVEntry{
-					ID:                uuid.New(),
-					CVEID:             "CVE-2021-44228",
-					VendorProject:     "Apache",
-					Product:           "Log4j2",
-					VulnerabilityName: "Apache Log4j2 Remote Code Execution Vulnerability",
-					DateAdded:         time.Date(2021, 12, 10, 0, 0, 0, 0, time.UTC),
-					DueDate:           time.Date(2021, 12, 24, 0, 0, 0, 0, time.UTC),
+					ID:                 uuid.New(),
+					CVEID:              "CVE-2021-44228",
+					VendorProject:      "Apache",
+					Product:            "Log4j2",
+					VulnerabilityName:  "Apache Log4j2 Remote Code Execution Vulnerability",
+					DateAdded:          time.Date(2021, 12, 10, 0, 0, 0, 0, time.UTC),
+					DueDate:            time.Date(2021, 12, 24, 0, 0, 0, 0, time.UTC),
 					KnownRansomwareUse: true,
 				})
 			},
@@ -72,7 +151,6 @@ func TestKEVService_IsInKEV(t *testing.T) {
 		{
 			name:     "CVE not in KEV catalog",
 			cveID:    "CVE-9999-99999", // Non-existent CVE
-			inKEV:    false,
 			setup:    func(repo *mockKEVRepository) {},
 			expected: false,
 		},
@@ -83,12 +161,72 @@ func TestKEVService_IsInKEV(t *testing.T) {
 			repo := newMockKEVRepository()
 			tt.setup(repo)
 
-			// Simulate KEV check
-			entry, err := repo.GetByCVE(context.Background(), tt.cveID)
+			// Create service with mock repository
+			service := NewKEVServiceWithRepo(repo)
+
+			// Call actual service method
+			result, err := service.CheckCVEInKEV(context.Background(), tt.cveID)
 			require.NoError(t, err)
 
-			result := entry != nil
 			assert.Equal(t, tt.expected, result, "CVE in KEV status mismatch")
+		})
+	}
+}
+
+func TestKEVService_GetByCVE(t *testing.T) {
+	tests := []struct {
+		name      string
+		cveID     string
+		setup     func(*mockKEVRepository)
+		expectNil bool
+		validate  func(*testing.T, *model.KEVEntry)
+	}{
+		{
+			name:  "CVE exists in KEV",
+			cveID: "CVE-2021-44228",
+			setup: func(repo *mockKEVRepository) {
+				repo.addEntry(&model.KEVEntry{
+					ID:                 uuid.New(),
+					CVEID:              "CVE-2021-44228",
+					VendorProject:      "Apache",
+					Product:            "Log4j2",
+					VulnerabilityName:  "Apache Log4j2 Remote Code Execution Vulnerability",
+					KnownRansomwareUse: true,
+				})
+			},
+			expectNil: false,
+			validate: func(t *testing.T, entry *model.KEVEntry) {
+				assert.Equal(t, "CVE-2021-44228", entry.CVEID)
+				assert.Equal(t, "Apache", entry.VendorProject)
+				assert.Equal(t, "Log4j2", entry.Product)
+				assert.True(t, entry.KnownRansomwareUse)
+			},
+		},
+		{
+			name:      "CVE does not exist",
+			cveID:     "CVE-0000-00000",
+			setup:     func(repo *mockKEVRepository) {},
+			expectNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMockKEVRepository()
+			tt.setup(repo)
+
+			service := NewKEVServiceWithRepo(repo)
+			entry, err := service.GetByCVE(context.Background(), tt.cveID)
+			require.NoError(t, err)
+
+			if tt.expectNil {
+				assert.Nil(t, entry)
+			} else {
+				require.NotNil(t, entry)
+				if tt.validate != nil {
+					tt.validate(t, entry)
+				}
+			}
 		})
 	}
 }
@@ -187,16 +325,16 @@ func TestKEVService_ParseVulnerability(t *testing.T) {
 		{
 			name: "Valid vulnerability",
 			input: KEVVulnerability{
-				CVEID:                     "CVE-2021-44228",
-				VendorProject:             "Apache",
-				Product:                   "Log4j2",
-				VulnerabilityName:         "Apache Log4j2 Remote Code Execution Vulnerability",
-				DateAdded:                 "2021-12-10",
-				ShortDescription:          "RCE vulnerability",
-				RequiredAction:            "Apply updates",
-				DueDate:                   "2021-12-24",
+				CVEID:                      "CVE-2021-44228",
+				VendorProject:              "Apache",
+				Product:                    "Log4j2",
+				VulnerabilityName:          "Apache Log4j2 Remote Code Execution Vulnerability",
+				DateAdded:                  "2021-12-10",
+				ShortDescription:           "RCE vulnerability",
+				RequiredAction:             "Apply updates",
+				DueDate:                    "2021-12-24",
 				KnownRansomwareCampaignUse: "Known",
-				Notes:                     "Critical",
+				Notes:                      "Critical",
 			},
 			expectError: false,
 			validate: func(t *testing.T, entry *model.KEVEntry) {
@@ -212,14 +350,14 @@ func TestKEVService_ParseVulnerability(t *testing.T) {
 		{
 			name: "Unknown ransomware use",
 			input: KEVVulnerability{
-				CVEID:                     "CVE-2021-45046",
-				VendorProject:             "Apache",
-				Product:                   "Log4j2",
-				VulnerabilityName:         "DoS Vulnerability",
-				DateAdded:                 "2021-12-15",
-				ShortDescription:          "DoS",
-				RequiredAction:            "Apply updates",
-				DueDate:                   "2021-12-29",
+				CVEID:                      "CVE-2021-45046",
+				VendorProject:              "Apache",
+				Product:                    "Log4j2",
+				VulnerabilityName:          "DoS Vulnerability",
+				DateAdded:                  "2021-12-15",
+				ShortDescription:           "DoS",
+				RequiredAction:             "Apply updates",
+				DueDate:                    "2021-12-29",
 				KnownRansomwareCampaignUse: "Unknown",
 			},
 			expectError: false,
@@ -266,11 +404,22 @@ func TestKEVService_ParseVulnerability(t *testing.T) {
 	}
 }
 
-func TestKEVService_GetStats(t *testing.T) {
-	// Test that GetStats returns correct aggregated stats
+func TestKEVService_GetSyncSettings(t *testing.T) {
+	repo := newMockKEVRepository()
+	service := NewKEVServiceWithRepo(repo)
+
+	settings, err := service.GetSyncSettings(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, settings)
+
+	assert.True(t, settings.Enabled)
+	assert.Equal(t, 24, settings.SyncIntervalHours)
+}
+
+func TestKEVService_GetCatalog(t *testing.T) {
 	repo := newMockKEVRepository()
 
-	// Add some entries
+	// Add test entries
 	repo.addEntry(&model.KEVEntry{
 		ID:        uuid.New(),
 		CVEID:     "CVE-2021-44228",
@@ -282,11 +431,11 @@ func TestKEVService_GetStats(t *testing.T) {
 		DateAdded: time.Now().AddDate(0, 0, -25),
 	})
 
-	// Verify entry count
-	assert.Equal(t, 2, len(repo.entries), "Expected 2 entries in repository")
+	service := NewKEVServiceWithRepo(repo)
 
-	// Verify sync settings exist
-	assert.NotNil(t, repo.syncSettings, "Sync settings should not be nil")
-	assert.True(t, repo.syncSettings.Enabled, "Sync should be enabled by default")
-	assert.Equal(t, 24, repo.syncSettings.SyncIntervalHours, "Default sync interval should be 24 hours")
+	entries, total, err := service.GetCatalog(context.Background(), 10, 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, total)
+	assert.Len(t, entries, 2)
 }

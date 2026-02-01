@@ -395,8 +395,12 @@ func (s *ReportService) gatherChecklistData(ctx context.Context, tenantID uuid.U
 	// Get all responses from the tenant
 	responses, err := s.checklistRepo.ListByTenant(ctx, tenantID)
 	if err != nil {
-		// Log error but continue with defaults
-		slog.Warn("failed to get checklist responses for report", "tenant_id", tenantID, "error", err)
+		// Log error at ERROR level since DB query failure is significant
+		// Continue with empty responses to allow partial report generation
+		slog.Error("failed to get checklist responses for report - using defaults",
+			"tenant_id", tenantID,
+			"error", err,
+			"impact", "checklist section will show all items as not passed")
 		responses = nil
 	}
 

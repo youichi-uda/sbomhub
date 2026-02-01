@@ -17,14 +17,41 @@ const (
 	kevCatalogURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 )
 
+// KEVRepositoryInterface defines the repository methods used by KEVService
+// This interface enables dependency injection for testing
+type KEVRepositoryInterface interface {
+	GetByCVE(ctx context.Context, cveID string) (*model.KEVEntry, error)
+	UpsertEntry(ctx context.Context, entry *model.KEVEntry) error
+	GetAllCVEIDs(ctx context.Context) ([]string, error)
+	SyncVulnerabilitiesKEVStatus(ctx context.Context) (int, error)
+	GetSyncSettings(ctx context.Context) (*model.KEVSyncSettings, error)
+	UpdateSyncSettings(ctx context.Context, settings *model.KEVSyncSettings) error
+	CreateSyncLog(ctx context.Context) (*model.KEVSyncLog, error)
+	UpdateSyncLog(ctx context.Context, log *model.KEVSyncLog) error
+	GetLatestSyncLog(ctx context.Context) (*model.KEVSyncLog, error)
+	List(ctx context.Context, limit, offset int) ([]model.KEVEntry, int, error)
+	GetKEVVulnerabilities(ctx context.Context, projectID uuid.UUID) ([]model.Vulnerability, error)
+	Count(ctx context.Context) (int, error)
+}
+
 // KEVService handles KEV catalog synchronization
 type KEVService struct {
 	client  *http.Client
-	kevRepo *repository.KEVRepository
+	kevRepo KEVRepositoryInterface
 }
 
 // NewKEVService creates a new KEVService
 func NewKEVService(kevRepo *repository.KEVRepository) *KEVService {
+	return &KEVService{
+		client: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+		kevRepo: kevRepo,
+	}
+}
+
+// NewKEVServiceWithRepo creates a new KEVService with a custom repository (for testing)
+func NewKEVServiceWithRepo(kevRepo KEVRepositoryInterface) *KEVService {
 	return &KEVService{
 		client: &http.Client{
 			Timeout: 60 * time.Second,
