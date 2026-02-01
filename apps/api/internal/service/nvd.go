@@ -9,30 +9,48 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/cache"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
 const (
-	nvdAPIBase = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-	rateLimit  = 6 * time.Second
+	nvdAPIBase            = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+	rateLimitWithoutKey   = 6 * time.Second  // ~5 requests per 30 seconds
+	rateLimitWithKey      = 700 * time.Millisecond // ~50 requests per 30 seconds
+	maxConcurrentWithKey  = 5  // Max concurrent workers with API key
+	maxConcurrentNoKey    = 1  // Single worker without API key
 )
 
 type NVDService struct {
 	httpClient *http.Client
 	vulnRepo   *repository.VulnerabilityRepository
 	compRepo   *repository.ComponentRepository
+	cache      *cache.NVDCache
 	apiKey     string
 }
 
+// NewNVDService creates a new NVD service (without cache - for backwards compatibility)
 func NewNVDService(vr *repository.VulnerabilityRepository, cr *repository.ComponentRepository, apiKey string) *NVDService {
 	return &NVDService{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		vulnRepo:   vr,
 		compRepo:   cr,
+		apiKey:     apiKey,
+	}
+}
+
+// NewNVDServiceWithCache creates a new NVD service with Redis cache
+func NewNVDServiceWithCache(vr *repository.VulnerabilityRepository, cr *repository.ComponentRepository, apiKey string, nvdCache *cache.NVDCache) *NVDService {
+	return &NVDService{
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		vulnRepo:   vr,
+		compRepo:   cr,
+		cache:      nvdCache,
 		apiKey:     apiKey,
 	}
 }
@@ -76,42 +94,185 @@ type CvssData struct {
 	BaseSeverity string  `json:"baseSeverity"`
 }
 
+// nvdComponentKey is used for deduplication in NVD scanning
+type nvdComponentKey struct {
+	Name    string
+	Version string
+}
+
+// ScanComponents scans all components in an SBOM for vulnerabilities
+// Uses Redis cache and deduplication for efficiency
 func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
 	components, err := s.compRepo.ListBySbom(ctx, sbomID)
 	if err != nil {
 		return fmt.Errorf("failed to get components: %w", err)
 	}
 
+	if len(components) == 0 {
+		return nil
+	}
+
+	slog.Info("starting component scan", "sbom_id", sbomID, "component_count", len(components))
+
+	// Deduplicate components by name+version
+	uniqueComponents := make(map[nvdComponentKey][]uuid.UUID)
 	for _, comp := range components {
 		if comp.Name == "" {
 			continue
 		}
-
-		vulns, err := s.searchByKeyword(ctx, comp.Name, comp.Version)
-		if err != nil {
-			slog.Warn("Failed to search NVD", "component", comp.Name, "error", err)
-			continue
-		}
-
-		for _, v := range vulns {
-			existing, err := s.vulnRepo.GetByCVE(ctx, v.CVEID)
-			if err != nil {
-				if err := s.vulnRepo.Create(ctx, &v); err != nil {
-					slog.Warn("Failed to create vulnerability", "cve", v.CVEID, "error", err)
-					continue
-				}
-				existing = &v
-			}
-
-			if err := s.vulnRepo.LinkComponent(ctx, comp.ID, existing.ID); err != nil {
-				slog.Warn("Failed to link component", "component", comp.ID, "vuln", existing.ID, "error", err)
-			}
-		}
-
-		time.Sleep(rateLimit)
+		key := nvdComponentKey{Name: comp.Name, Version: comp.Version}
+		uniqueComponents[key] = append(uniqueComponents[key], comp.ID)
 	}
 
+	slog.Info("deduplicated components", "unique_count", len(uniqueComponents), "total_count", len(components))
+
+	// Process components with worker pool
+	return s.processComponentsParallel(ctx, uniqueComponents)
+}
+
+// processComponentsParallel processes components in parallel with rate limiting
+func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) error {
+	maxWorkers := maxConcurrentNoKey
+	rateLimit := rateLimitWithoutKey
+	if s.apiKey != "" {
+		maxWorkers = maxConcurrentWithKey
+		rateLimit = rateLimitWithKey
+	}
+
+	// Create work channel
+	type workItem struct {
+		key          nvdComponentKey
+		componentIDs []uuid.UUID
+	}
+	workChan := make(chan workItem, len(components))
+	for key, ids := range components {
+		workChan <- workItem{key: key, componentIDs: ids}
+	}
+	close(workChan)
+
+	// Rate limiter - shared across workers
+	rateLimiter := time.NewTicker(rateLimit)
+	defer rateLimiter.Stop()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	processedCount := 0
+	cacheHits := 0
+	apiCalls := 0
+
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			for work := range workChan {
+				select {
+				case <-ctx.Done():
+					return
+				case <-rateLimiter.C:
+					// Rate limit acquired
+				}
+
+				vulns, fromCache, err := s.getVulnerabilitiesWithCache(ctx, work.key.Name, work.key.Version)
+				if err != nil {
+					slog.Warn("failed to get vulnerabilities",
+						"component", work.key.Name,
+						"version", work.key.Version,
+						"error", err)
+					continue
+				}
+
+				mu.Lock()
+				processedCount++
+				if fromCache {
+					cacheHits++
+				} else {
+					apiCalls++
+				}
+				mu.Unlock()
+
+				// Link vulnerabilities to all component instances
+				for _, vuln := range vulns {
+					existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
+					if err != nil {
+						if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
+							slog.Warn("failed to create vulnerability", "cve", vuln.CVEID, "error", err)
+							continue
+						}
+						existing = &vuln
+					}
+
+					for _, compID := range work.componentIDs {
+						if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID); err != nil {
+							slog.Debug("failed to link component", "component", compID, "vuln", existing.ID, "error", err)
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	slog.Info("component scan completed",
+		"processed", processedCount,
+		"cache_hits", cacheHits,
+		"api_calls", apiCalls,
+	)
+
 	return nil
+}
+
+// getVulnerabilitiesWithCache tries cache first, falls back to API
+func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, version string) ([]model.Vulnerability, bool, error) {
+	// Try cache first
+	if s.cache != nil {
+		entry, err := s.cache.Get(ctx, name, version)
+		if err != nil {
+			slog.Debug("cache get error", "component", name, "error", err)
+		} else if entry != nil {
+			// Cache hit - convert cached vulns to model
+			vulns := make([]model.Vulnerability, len(entry.Vulnerabilities))
+			for i, cv := range entry.Vulnerabilities {
+				vulns[i] = model.Vulnerability{
+					ID:          uuid.New(),
+					CVEID:       cv.CVEID,
+					Description: cv.Description,
+					Severity:    cv.Severity,
+					CVSSScore:   cv.CVSSScore,
+					PublishedAt: cv.PublishedAt,
+					Source:      "NVD",
+					UpdatedAt:   entry.CachedAt,
+				}
+			}
+			return vulns, true, nil
+		}
+	}
+
+	// Cache miss - call API
+	vulns, err := s.searchByKeyword(ctx, name, version)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Store in cache
+	if s.cache != nil && len(vulns) >= 0 {
+		cachedVulns := make([]cache.CachedVuln, len(vulns))
+		for i, v := range vulns {
+			cachedVulns[i] = cache.CachedVuln{
+				CVEID:       v.CVEID,
+				Description: v.Description,
+				Severity:    v.Severity,
+				CVSSScore:   v.CVSSScore,
+				PublishedAt: v.PublishedAt,
+			}
+		}
+		if err := s.cache.Set(ctx, name, version, cachedVulns); err != nil {
+			slog.Debug("cache set error", "component", name, "error", err)
+		}
+	}
+
+	return vulns, false, nil
 }
 
 func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) ([]model.Vulnerability, error) {

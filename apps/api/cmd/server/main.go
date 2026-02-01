@@ -11,6 +11,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/sbomhub/sbomhub/internal/cache"
 	"github.com/sbomhub/sbomhub/internal/config"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/handler"
@@ -100,11 +101,14 @@ func main() {
 	ssvcRepo := repository.NewSSVCRepository(db)
 	eolRepo := repository.NewEOLRepository(db)
 
+	// NVD Cache for vulnerability scanning
+	nvdCache := cache.NewNVDCache(rdb)
+
 	// Services
 	projectService := service.NewProjectService(projectRepo)
 	sbomService := service.NewSbomService(sbomRepo, componentRepo)
 	sbomDiffService := service.NewSbomDiffService(sbomRepo, componentRepo)
-	nvdService := service.NewNVDService(vulnRepo, componentRepo, cfg.NVDAPIKey)
+	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache)
 	jvnService := service.NewJVNService(vulnRepo, componentRepo)
 	statsService := service.NewStatsService(statsRepo)
 	vexService := service.NewVEXService(vexRepo, vulnRepo)
@@ -451,6 +455,11 @@ func main() {
 	eolSyncJob := scheduler.NewEOLSyncJob(eolService, 24*time.Hour)
 	go eolSyncJob.Start(ctx)
 	slog.Info("EOL sync job started", "interval", "24h")
+
+	// CVE sync job - runs daily to fetch new/updated CVEs and match against components
+	cveSyncJob := scheduler.NewCVESyncJob(db, cfg.NVDAPIKey, 24*time.Hour)
+	go cveSyncJob.Start(ctx)
+	slog.Info("CVE sync job started", "interval", "24h")
 
 	// Vulnerability scan job - runs hourly to scan components against NVD
 	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, os.Getenv("NVD_API_KEY"), notificationService)
