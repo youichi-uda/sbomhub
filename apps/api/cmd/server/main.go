@@ -444,6 +444,28 @@ func main() {
 	go eolSyncJob.Start(ctx)
 	slog.Info("EOL sync job started", "interval", "24h")
 
+	// Vulnerability scan job - runs hourly to scan components against NVD
+	vulnScanJob := scheduler.NewVulnerabilityScanJobWithAPIKey(db, os.Getenv("NVD_API_KEY"))
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		// Run immediately on startup
+		if err := vulnScanJob.Run(ctx); err != nil {
+			slog.Error("Vulnerability scan failed", "error", err)
+		}
+		for {
+			select {
+			case <-ticker.C:
+				if err := vulnScanJob.Run(ctx); err != nil {
+					slog.Error("Vulnerability scan failed", "error", err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	slog.Info("Vulnerability scan job started", "interval", "1h")
+
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))
 }

@@ -1,0 +1,147 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "serialNumber": "urn:uuid:test-vulnerable-sbom-001",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-02-01T12:00:00Z",
+    "tools": [
+      {
+        "vendor": "SBOMHub",
+        "name": "E2E Test Data Generator",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "name": "e2e-test-vulnerable-app",
+      "version": "1.0.0",
+      "description": "E2Eテスト用の脆弱性を含むアプリケーション"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "group": "org.apache.logging.log4j",
+      "name": "log4j-core",
+      "version": "2.14.1",
+      "description": "Apache Log4j Core - CVE-2021-44228 (Log4Shell) Critical",
+      "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lodash@4.17.20",
+      "name": "lodash",
+      "version": "4.17.20",
+      "description": "Lodash - CVE-2021-23337 Command Injection High",
+      "purl": "pkg:npm/lodash@4.17.20",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.8",
+      "group": "com.fasterxml.jackson.core",
+      "name": "jackson-databind",
+      "version": "2.9.8",
+      "description": "Jackson Databind - Multiple CVEs including CVE-2019-12086",
+      "purl": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.9.8",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.springframework/spring-core@5.2.0.RELEASE",
+      "group": "org.springframework",
+      "name": "spring-core",
+      "version": "5.2.0.RELEASE",
+      "description": "Spring Core - Multiple security vulnerabilities",
+      "purl": "pkg:maven/org.springframework/spring-core@5.2.0.RELEASE",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/minimist@1.2.5",
+      "name": "minimist",
+      "version": "1.2.5",
+      "description": "Minimist - CVE-2021-44906 Prototype Pollution",
+      "purl": "pkg:npm/minimist@1.2.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/axios@0.21.1",
+      "name": "axios",
+      "version": "0.21.1",
+      "description": "Axios - CVE-2021-3749 ReDoS",
+      "purl": "pkg:npm/axios@0.21.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/django@2.2.0",
+      "name": "django",
+      "version": "2.2.0",
+      "description": "Django - Multiple CVEs including SQL injection",
+      "purl": "pkg:pypi/django@2.2.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:golang/github.com/gin-gonic/gin@1.6.0",
+      "name": "github.com/gin-gonic/gin",
+      "version": "1.6.0",
+      "description": "Gin Web Framework - Older version with potential issues",
+      "purl": "pkg:golang/github.com/gin-gonic/gin@1.6.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    }
+  ]
+}
