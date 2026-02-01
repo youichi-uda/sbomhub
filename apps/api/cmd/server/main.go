@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
@@ -437,7 +438,7 @@ func main() {
 	slog.Info("Ticket sync job started", "interval", "5m")
 
 	// Report generation job - runs every hour to check scheduled reports
-	reportGenJob := scheduler.NewReportGenerationJob(reportService, reportRepo, tenantRepo, 1*time.Hour)
+	reportGenJob := scheduler.NewReportGenerationJobFull(reportService, reportRepo, tenantRepo, cfg, 1*time.Hour)
 	go reportGenJob.Start(ctx)
 	slog.Info("Report generation job started", "interval", "1h")
 
@@ -452,7 +453,7 @@ func main() {
 	slog.Info("EOL sync job started", "interval", "24h")
 
 	// Vulnerability scan job - runs hourly to scan components against NVD
-	vulnScanJob := scheduler.NewVulnerabilityScanJobWithAPIKey(db, os.Getenv("NVD_API_KEY"))
+	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, os.Getenv("NVD_API_KEY"), notificationService)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -472,6 +473,26 @@ func main() {
 		}
 	}()
 	slog.Info("Vulnerability scan job started", "interval", "1h")
+
+	// Force scan endpoint (admin only) - triggers immediate vulnerability scan
+	auth.POST("/settings/scan/force", func(c echo.Context) error {
+		tenantCtx := appmw.NewTenantContext(c)
+		if tenantCtx == nil {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		}
+		if !tenantCtx.CanAdmin() {
+			return c.JSON(http.StatusForbidden, map[string]string{"error": "admin required"})
+		}
+
+		// Force run scan for this tenant
+		go func() {
+			if err := vulnScanJob.ForceRunTenant(context.Background(), tenantCtx.TenantID()); err != nil {
+				slog.Error("Force scan failed", "tenant_id", tenantCtx.TenantID(), "error", err)
+			}
+		}()
+
+		return c.JSON(http.StatusOK, map[string]string{"status": "scan started"})
+	})
 
 	slog.Info("Starting server", "port", cfg.Port)
 	e.Logger.Fatal(e.Start(":" + cfg.Port))
