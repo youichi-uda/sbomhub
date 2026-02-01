@@ -18,13 +18,36 @@ func NewTenantRepository(db *sql.DB) *TenantRepository {
 }
 
 func (r *TenantRepository) Create(ctx context.Context, t *model.Tenant) error {
+	// Use transaction to ensure both tenant and scan_settings are created atomically
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Create tenant
 	query := `
 		INSERT INTO tenants (id, clerk_org_id, name, slug, plan, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err = tx.ExecContext(ctx, query,
 		t.ID, t.ClerkOrgID, t.Name, t.Slug, t.Plan, t.CreatedAt, t.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Auto-create scan_settings with defaults (enabled by default)
+	scanSettingsQuery := `
+		INSERT INTO scan_settings (id, tenant_id, enabled, schedule_type, schedule_hour,
+		                           notify_critical, notify_high, next_scan_at)
+		VALUES (uuid_generate_v4(), $1, true, 'daily', 6, true, true, NOW())
+	`
+	_, err = tx.ExecContext(ctx, scanSettingsQuery, t.ID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (r *TenantRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Tenant, error) {
