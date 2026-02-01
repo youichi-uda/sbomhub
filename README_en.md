@@ -93,17 +93,27 @@ pnpm dev
 
 <details>
 <summary>Dashboard</summary>
-<img src="docs/images/dashboard.png" width="600">
+<img src="docs/images/dashboard-en.png" width="600">
 </details>
 
 <details>
 <summary>Vulnerability List</summary>
-<img src="docs/images/vulnerabilities.png" width="600">
+<img src="docs/images/vulnerabilities-en.png" width="600">
 </details>
 
 <details>
-<summary>Compliance Score</summary>
-<img src="docs/images/compliance.png" width="600">
+<summary>Trend Analysis (MTTR/SLO)</summary>
+<img src="docs/images/analytics-en.png" width="600">
+</details>
+
+<details>
+<summary>Cross Search</summary>
+<img src="docs/images/search-en.png" width="600">
+</details>
+
+<details>
+<summary>Projects</summary>
+<img src="docs/images/projects-en.png" width="600">
 </details>
 
 ## Architecture
