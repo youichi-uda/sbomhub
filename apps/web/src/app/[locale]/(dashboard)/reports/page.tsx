@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, FileText, Download, Plus, RefreshCw, Clock, CheckCircle2, AlertTriangle, Settings } from 'lucide-react';
 import { api, GeneratedReport, ReportListResponse } from '@/lib/api';
-import { useAuth, useOrganization } from '@clerk/nextjs';
+import { useAuth, useOrganization } from '@/lib/auth';
 import Link from 'next/link';
 
 export default function ReportsPage() {

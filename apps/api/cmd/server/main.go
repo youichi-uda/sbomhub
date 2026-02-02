@@ -115,7 +115,7 @@ func main() {
 	licensePolicyService := service.NewLicensePolicyService(licensePolicyRepo, componentRepo)
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo)
 	dashboardService := service.NewDashboardService(dashboardRepo)
-	searchService := service.NewSearchService(searchRepo)
+	searchService := service.NewSearchServiceWithNVD(searchRepo, nvdService)
 	epssService := service.NewEPSSService(vulnRepo)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)

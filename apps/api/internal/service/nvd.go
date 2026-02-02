@@ -371,3 +371,58 @@ func scoreToCvss2Severity(score float64) string {
 		return "LOW"
 	}
 }
+
+// SearchByCVEID searches for a specific CVE by ID from NVD API
+// Returns the vulnerability info if found, nil if not found
+func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vulnerability, error) {
+	params := url.Values{}
+	params.Set("cveId", cveID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", nvdAPIBase+"?"+params.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.apiKey != "" {
+		req.Header.Set("apiKey", s.apiKey)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("NVD API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var nvdResp NVDResponse
+	if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
+		return nil, fmt.Errorf("failed to decode NVD response: %w", err)
+	}
+
+	if len(nvdResp.Vulnerabilities) == 0 {
+		return nil, nil // CVE not found
+	}
+
+	vulns := s.convertToVulnerabilities(nvdResp.Vulnerabilities)
+	if len(vulns) == 0 {
+		return nil, nil
+	}
+
+	return &vulns[0], nil
+}
+
+// SaveVulnerability saves a vulnerability to the database
+func (s *NVDService) SaveVulnerability(ctx context.Context, vuln *model.Vulnerability) error {
+	existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
+	if err != nil {
+		// Not found, create new
+		return s.vulnRepo.Create(ctx, vuln)
+	}
+	// Already exists, update ID to use existing
+	vuln.ID = existing.ID
+	return nil
+}

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
 import { Download, Loader2, ChevronLeft, ChevronRight, Filter, X, Lock } from 'lucide-react';
 import { api, AuditLog, AuditListResponse, AuditFilter, ActionInfo, ResourceTypeInfo } from '@/lib/api';
-import { useAuth, useOrganization } from '@clerk/nextjs';
+import { useAuth, useOrganization } from '@/lib/auth';
 import Link from 'next/link';
 
 export default function AuditLogPage() {

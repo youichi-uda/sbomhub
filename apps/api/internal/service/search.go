@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/sbomhub/sbomhub/internal/model"
@@ -11,13 +12,23 @@ import (
 
 type SearchService struct {
 	searchRepo *repository.SearchRepository
+	nvdService *NVDService
 }
 
 func NewSearchService(searchRepo *repository.SearchRepository) *SearchService {
 	return &SearchService{searchRepo: searchRepo}
 }
 
+// NewSearchServiceWithNVD creates a SearchService with NVD fallback support
+func NewSearchServiceWithNVD(searchRepo *repository.SearchRepository, nvdService *NVDService) *SearchService {
+	return &SearchService{
+		searchRepo: searchRepo,
+		nvdService: nvdService,
+	}
+}
+
 // SearchByCVE searches for all projects affected by a specific CVE
+// Uses hybrid approach: local DB first, then NVD API fallback
 func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.CVESearchResult, error) {
 	// Normalize CVE ID
 	cveID = strings.ToUpper(strings.TrimSpace(cveID))
@@ -25,15 +36,45 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 		return nil, fmt.Errorf("invalid CVE ID format: %s", cveID)
 	}
 
+	// Try local database first
 	result, err := s.searchRepo.SearchByCVE(ctx, cveID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search CVE: %w", err)
 	}
-	if result == nil {
-		return nil, fmt.Errorf("CVE not found: %s", cveID)
+	if result != nil {
+		return result, nil
 	}
 
-	return result, nil
+	// Fallback to NVD API if available
+	if s.nvdService != nil {
+		slog.Info("CVE not in local DB, fetching from NVD", "cve_id", cveID)
+		vuln, err := s.nvdService.SearchByCVEID(ctx, cveID)
+		if err != nil {
+			slog.Warn("NVD API search failed", "cve_id", cveID, "error", err)
+			return nil, fmt.Errorf("CVE not found: %s", cveID)
+		}
+		if vuln == nil {
+			return nil, fmt.Errorf("CVE not found: %s", cveID)
+		}
+
+		// Save to local DB for future queries
+		if err := s.nvdService.SaveVulnerability(ctx, vuln); err != nil {
+			slog.Warn("failed to cache CVE in local DB", "cve_id", cveID, "error", err)
+		}
+
+		// Return CVE info (no affected projects since we just fetched it)
+		return &model.CVESearchResult{
+			CVEID:              vuln.CVEID,
+			Description:        vuln.Description,
+			Severity:           vuln.Severity,
+			CVSSScore:          vuln.CVSSScore,
+			EPSSScore:          0,
+			AffectedProjects:   []model.AffectedProject{},
+			UnaffectedProjects: []model.UnaffectedProject{},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("CVE not found: %s", cveID)
 }
 
 // SearchByComponent searches for components by name and optional version constraint

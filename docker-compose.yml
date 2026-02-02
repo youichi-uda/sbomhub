@@ -10,6 +10,7 @@ services:
     environment:
       - DATABASE_URL=postgres://sbomhub:sbomhub@postgres:5432/sbomhub?sslmode=disable
       - REDIS_URL=redis://redis:6379
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-V5jgaCSCV/Mdf8JbVX42aWYAB6dG1Dp9G9Bo0Nw+qjY=}
       - NVD_API_KEY=${NVD_API_KEY:-}
     depends_on:
       postgres:
