@@ -6,6 +6,7 @@ import { api, PublicSbomView } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { FormatBadge } from "@/components/sbom/format-badge";
 
 export default function PublicSbomPage() {
   const params = useParams();
@@ -73,7 +74,9 @@ export default function PublicSbomPage() {
         <p className="text-muted-foreground">
           SBOM Date: {new Date(view.sbom.created_at).toLocaleDateString()}
         </p>
-        <p className="text-muted-foreground">Format: {view.sbom.format}</p>
+        <p className="text-muted-foreground flex items-center gap-2">
+          Format: <FormatBadge format={view.sbom.format} version={view.sbom.version} />
+        </p>
       </div>
 
       <Card className="mb-6">

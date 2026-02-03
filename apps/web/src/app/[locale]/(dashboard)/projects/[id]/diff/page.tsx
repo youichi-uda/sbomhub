@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft } from "lucide-react";
+import { formatSbomLabel } from "@/components/sbom/format-badge";
 
 export default function ProjectDiffPage() {
   const params = useParams();
@@ -90,7 +91,7 @@ export default function ProjectDiffPage() {
                   <option value="">Select SBOM</option>
                   {sboms.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.version || "unknown"} ({new Date(s.created_at).toLocaleDateString()})
+                      {formatSbomLabel(s.format, s.version)} ({new Date(s.created_at).toLocaleDateString()})
                     </option>
                   ))}
                 </select>
@@ -105,7 +106,7 @@ export default function ProjectDiffPage() {
                   <option value="">Select SBOM</option>
                   {sboms.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.version || "unknown"} ({new Date(s.created_at).toLocaleDateString()})
+                      {formatSbomLabel(s.format, s.version)} ({new Date(s.created_at).toLocaleDateString()})
                     </option>
                   ))}
                 </select>

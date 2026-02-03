@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	cdx "github.com/CycloneDX/cyclonedx-go"
@@ -13,6 +14,12 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
+
+// FormatInfo contains the detected SBOM format and version
+type FormatInfo struct {
+	Format  model.SbomFormat
+	Version string
+}
 
 type SbomService struct {
 	sbomRepo      *repository.SbomRepository
@@ -24,7 +31,7 @@ func NewSbomService(sr *repository.SbomRepository, cr *repository.ComponentRepos
 }
 
 func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, error) {
-	format, err := detectFormat(data)
+	info, err := detectFormatAndVersion(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to detect SBOM format: %w", err)
 	}
@@ -32,7 +39,8 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 	sbom := &model.Sbom{
 		ID:        uuid.New(),
 		ProjectID: projectID,
-		Format:    string(format),
+		Format:    string(info.Format),
+		Version:   info.Version,
 		RawData:   data,
 		CreatedAt: time.Now(),
 	}
@@ -41,7 +49,7 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 		return nil, fmt.Errorf("failed to save SBOM: %w", err)
 	}
 
-	components, err := parseComponents(data, format)
+	components, err := parseComponents(data, info.Format, info.Version)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse components: %w", err)
 	}
@@ -86,27 +94,66 @@ func (s *SbomService) GetVulnerabilities(ctx context.Context, projectID uuid.UUI
 	return s.componentRepo.GetVulnerabilities(ctx, sbom.ID)
 }
 
+// detectFormat is deprecated, use detectFormatAndVersion instead
 func detectFormat(data []byte) (model.SbomFormat, error) {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return "", fmt.Errorf("invalid JSON: %w", err)
+	info, err := detectFormatAndVersion(data)
+	if err != nil {
+		return "", err
 	}
-
-	if _, ok := raw["bomFormat"]; ok {
-		return model.FormatCycloneDX, nil
-	}
-	if _, ok := raw["spdxVersion"]; ok {
-		return model.FormatSPDX, nil
-	}
-
-	return "", fmt.Errorf("unknown SBOM format")
+	return info.Format, nil
 }
 
-func parseComponents(data []byte, format model.SbomFormat) ([]model.Component, error) {
+// detectFormatAndVersion detects the SBOM format and extracts the spec version
+func detectFormatAndVersion(data []byte) (*FormatInfo, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// CycloneDX: check "bomFormat" + extract "specVersion"
+	if _, ok := raw["bomFormat"]; ok {
+		version, _ := raw["specVersion"].(string)
+		return &FormatInfo{Format: model.FormatCycloneDX, Version: version}, nil
+	}
+
+	// SPDX 2.x: check "spdxVersion" (e.g., "SPDX-2.3")
+	if spdxVer, ok := raw["spdxVersion"].(string); ok {
+		version := strings.TrimPrefix(spdxVer, "SPDX-")
+		return &FormatInfo{Format: model.FormatSPDX, Version: version}, nil
+	}
+
+	// SPDX 3.0: check "@context" contains "spdx.org/rdf/3.0"
+	if ctx, ok := raw["@context"].(string); ok {
+		if strings.Contains(ctx, "spdx.org/rdf/3.0") {
+			version := extractSPDX3Version(ctx)
+			return &FormatInfo{Format: model.FormatSPDX, Version: version}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unknown SBOM format")
+}
+
+// extractSPDX3Version extracts the SPDX 3.x version from the @context URL
+func extractSPDX3Version(ctx string) string {
+	// Handle patterns like "https://spdx.org/rdf/3.0.1/terms/Core"
+	// or "https://spdx.org/rdf/3.0/terms/Core"
+	if strings.Contains(ctx, "spdx.org/rdf/3.0.1") {
+		return "3.0.1"
+	}
+	if strings.Contains(ctx, "spdx.org/rdf/3.0") {
+		return "3.0"
+	}
+	return "3.0" // default to 3.0
+}
+
+func parseComponents(data []byte, format model.SbomFormat, version string) ([]model.Component, error) {
 	switch format {
 	case model.FormatCycloneDX:
 		return parseCycloneDX(data)
 	case model.FormatSPDX:
+		if strings.HasPrefix(version, "3.") {
+			return parseSPDX3(data)
+		}
 		return parseSPDX(data)
 	default:
 		return nil, fmt.Errorf("unsupported format: %s", format)
@@ -180,4 +227,50 @@ func getString(m map[string]interface{}, key string) string {
 		return v
 	}
 	return ""
+}
+
+// parseSPDX3 parses SPDX 3.0/3.0.1 format documents
+func parseSPDX3(data []byte) ([]model.Component, error) {
+	var doc model.SPDX3Document
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+
+	var components []model.Component
+	for _, elem := range doc.Graph {
+		// Only process Package types
+		if !strings.Contains(elem.Type, "Package") && !strings.Contains(elem.Type, "software_Package") {
+			continue
+		}
+
+		comp := model.Component{
+			ID:        uuid.New(),
+			Name:      elem.Name,
+			Version:   elem.PackageVersion,
+			Type:      "library",
+			CreatedAt: time.Now(),
+		}
+
+		// Check for direct packageUrl field first
+		if elem.PackageUrl != "" {
+			comp.Purl = elem.PackageUrl
+		}
+
+		// Extract PURL from externalIdentifier array
+		for _, ext := range elem.ExternalIdentifier {
+			if ext.ExternalIDType == "packageUrl" || ext.ExternalIDType == "purl" {
+				comp.Purl = ext.Identifier
+				break
+			}
+		}
+
+		// Extract license if available
+		if elem.DeclaredLicense != "" {
+			comp.License = elem.DeclaredLicense
+		}
+
+		components = append(components, comp)
+	}
+
+	return components, nil
 }

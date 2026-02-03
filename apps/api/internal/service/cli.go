@@ -67,7 +67,7 @@ func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID,
 
 // UploadSBOM imports an SBOM for a project via CLI.
 func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, int, error) {
-	format, err := detectFormat(data)
+	info, err := detectFormatAndVersion(data)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to detect SBOM format: %w", err)
 	}
@@ -75,7 +75,8 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 	sbom := &model.Sbom{
 		ID:        uuid.New(),
 		ProjectID: projectID,
-		Format:    string(format),
+		Format:    string(info.Format),
+		Version:   info.Version,
 		RawData:   data,
 		CreatedAt: time.Now(),
 	}
@@ -84,7 +85,7 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 		return nil, 0, fmt.Errorf("failed to save SBOM: %w", err)
 	}
 
-	components, err := parseComponents(data, format)
+	components, err := parseComponents(data, info.Format, info.Version)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to parse components: %w", err)
 	}
