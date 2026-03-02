@@ -1,0 +1,68 @@
+# SBOMHub
+
+> Open-source SBOM (Software Bill of Materials) management platform optimized for the Japanese market.
+
+SBOMHub helps organizations manage software supply chain security by providing SBOM import, vulnerability management, VEX statements, compliance checking, and more.
+
+## Key Information
+
+- Website: https://sbomhub.app
+- API: https://api.sbomhub.app
+- GitHub: https://github.com/youichi-uda/sbomhub
+- License: AGPL-3.0
+
+## Features
+
+- **SBOM Import**: CycloneDX and SPDX format support. Compatible with Syft, cdxgen, and Trivy.
+- **Vulnerability Management**: NVD database integration for automatic vulnerability detection. CVSS scoring and severity classification.
+- **VEX Statements**: Create and manage Vulnerability Exploitability eXchange (VEX) statements.
+- **SSVC Assessment**: CISA SSVC framework-based vulnerability prioritization.
+- **KEV Integration**: CISA Known Exploited Vulnerabilities catalog integration.
+- **License Management**: Automatic OSS license detection and policy checking.
+- **Compliance**: Self-assessment for METI (Japan) SBOM guideline compliance.
+- **SBOM Diff Comparison**: Compare SBOMs across versions to detect changes.
+- **IPA/JVN Integration**: Japan-specific vulnerability information from IPA and JVN.
+- **CI/CD Integration**: GitHub Actions and other pipeline integration via API.
+- **MCP Server**: Claude Desktop and Cursor integration via Model Context Protocol.
+- **CLI Tool**: sbomhub-cli for command-line SBOM scanning and uploading.
+- **Notifications**: Slack, Discord, and email notifications for new vulnerabilities.
+- **Ticket Integration**: Jira and Backlog integration for vulnerability ticketing.
+- **Reports**: Executive, technical, and compliance report generation (PDF/Excel).
+- **Audit Logs**: Complete operation history for compliance requirements.
+- **Multilingual**: Full Japanese and English UI support.
+
+## Pricing
+
+- **Self-hosted**: Free (AGPL-3.0 open-source)
+- **Cloud Starter**: ¥2,500/month (5 projects, 3 users)
+- **Cloud Pro**: ¥8,000/month (unlimited projects, 10 users)
+- **Cloud Team**: ¥20,000/month (unlimited projects, 30 users)
+
+All cloud plans include a 14-day free trial.
+
+## API
+
+REST API available at https://api.sbomhub.app
+
+- `POST /api/v1/projects` - Create project
+- `GET /api/v1/projects` - List projects
+- `GET /api/v1/projects/:id` - Get project
+- `DELETE /api/v1/projects/:id` - Delete project
+- `POST /api/v1/projects/:id/sbom` - Upload SBOM
+- `GET /api/v1/projects/:id/sbom` - Get latest SBOM
+- `GET /api/v1/projects/:id/components` - List components
+- `GET /api/v1/projects/:id/vulnerabilities` - List vulnerabilities
+
+## Tech Stack
+
+- Backend: Go (Echo framework)
+- Frontend: Next.js (App Router) + React + TypeScript
+- Database: PostgreSQL
+- Cache: Redis
+- UI: shadcn/ui + Tailwind CSS
+
+## Links
+
+- [Documentation](https://sbomhub.app/docs)
+- [Privacy Policy](https://sbomhub.app/privacy)
+- [Terms of Service](https://sbomhub.app/terms)

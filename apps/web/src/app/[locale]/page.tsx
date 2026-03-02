@@ -34,6 +34,7 @@ import {
   Key,
   Languages,
   Ticket,
+  HelpCircle,
 } from "lucide-react";
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
@@ -117,13 +118,41 @@ function generateJsonLd(locale: string) {
         logo: `${BASE_URL}/logo.png`,
         sameAs: ["https://github.com/youichi-uda/sbomhub"],
       },
+      {
+        "@type": "BreadcrumbList",
+        "@id": `${BASE_URL}/#breadcrumb`,
+        itemListElement: [
+          {
+            "@type": "ListItem",
+            position: 1,
+            name: "Home",
+            item: `${BASE_URL}/${locale}`,
+          },
+        ],
+      },
     ],
+  };
+}
+
+function generateFaqJsonLd(locale: string, faqItems: { q: string; a: string }[]) {
+  return {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: faqItems.map((item) => ({
+      "@type": "Question",
+      name: item.q,
+      acceptedAnswer: {
+        "@type": "Answer",
+        text: item.a,
+      },
+    })),
   };
 }
 
 export default async function LandingPage({ params }: Props) {
   const { locale } = await params;
   const t = await getTranslations("Landing");
+  const faqT = await getTranslations("FAQ");
 
   const features = [
     {
@@ -276,7 +305,17 @@ export default async function LandingPage({ params }: Props) {
     ],
   };
 
+  const faqItems = [
+    { q: faqT("q1"), a: faqT("a1") },
+    { q: faqT("q2"), a: faqT("a2") },
+    { q: faqT("q3"), a: faqT("a3") },
+    { q: faqT("q4"), a: faqT("a4") },
+    { q: faqT("q5"), a: faqT("a5") },
+    { q: faqT("q6"), a: faqT("a6") },
+  ];
+
   const jsonLd = generateJsonLd(locale);
+  const faqJsonLd = generateFaqJsonLd(locale, faqItems);
 
   return (
     <>
@@ -284,6 +323,11 @@ export default async function LandingPage({ params }: Props) {
         id="json-ld"
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+      <Script
+        id="faq-json-ld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(faqJsonLd) }}
       />
       <div className="min-h-screen flex flex-col">
         {/* Header */}
@@ -463,6 +507,36 @@ export default async function LandingPage({ params }: Props) {
                     ))}
                   </div>
                 </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* FAQ Section */}
+        <section id="faq" className="py-20 bg-gray-50">
+          <div className="container mx-auto px-4 max-w-4xl">
+            <div className="text-center mb-12">
+              <h2 className="text-3xl font-bold mb-4">{faqT("title")}</h2>
+            </div>
+            <div className="space-y-4">
+              {faqItems.map((item, index) => (
+                <details
+                  key={index}
+                  className="group bg-white rounded-lg border p-6 cursor-pointer hover:border-primary/50 transition-colors"
+                >
+                  <summary className="flex items-center justify-between font-medium text-lg list-none">
+                    <span className="flex items-center gap-3">
+                      <HelpCircle className="h-5 w-5 text-primary shrink-0" />
+                      {item.q}
+                    </span>
+                    <span className="text-muted-foreground group-open:rotate-180 transition-transform ml-4 shrink-0">
+                      ▼
+                    </span>
+                  </summary>
+                  <p className="mt-4 text-muted-foreground leading-relaxed pl-8">
+                    {item.a}
+                  </p>
+                </details>
               ))}
             </div>
           </div>

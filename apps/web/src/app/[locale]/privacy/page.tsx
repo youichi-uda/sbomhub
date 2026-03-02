@@ -2,6 +2,39 @@ import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
+import type { Metadata } from "next";
+
+const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}): Promise<Metadata> {
+  const { locale } = await params;
+  const isJapanese = locale === "ja";
+
+  return {
+    title: isJapanese ? "プライバシーポリシー" : "Privacy Policy",
+    description: isJapanese
+      ? "SBOMHubのプライバシーポリシー。個人情報の収集、利用目的、データ保護について説明します。"
+      : "SBOMHub Privacy Policy. Learn about how we collect, use, and protect your personal information.",
+    alternates: {
+      canonical: `/${locale}/privacy`,
+      languages: {
+        ja: "/ja/privacy",
+        en: "/en/privacy",
+      },
+    },
+    openGraph: {
+      title: isJapanese ? "プライバシーポリシー | SBOMHub" : "Privacy Policy | SBOMHub",
+      description: isJapanese
+        ? "SBOMHubのプライバシーポリシー"
+        : "SBOMHub Privacy Policy",
+      url: `${BASE_URL}/${locale}/privacy`,
+    },
+  };
+}
 
 interface Props {
   params: Promise<{ locale: string }>;

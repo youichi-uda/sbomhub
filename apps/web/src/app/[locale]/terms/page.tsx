@@ -1,6 +1,39 @@
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
+import type { Metadata } from "next";
+
+const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}): Promise<Metadata> {
+  const { locale } = await params;
+  const isJapanese = locale === "ja";
+
+  return {
+    title: isJapanese ? "利用規約" : "Terms of Service",
+    description: isJapanese
+      ? "SBOMHubの利用規約。サービスの利用条件、データの取り扱い、免責事項について説明します。"
+      : "SBOMHub Terms of Service. Learn about service conditions, data handling, and liability limitations.",
+    alternates: {
+      canonical: `/${locale}/terms`,
+      languages: {
+        ja: "/ja/terms",
+        en: "/en/terms",
+      },
+    },
+    openGraph: {
+      title: isJapanese ? "利用規約 | SBOMHub" : "Terms of Service | SBOMHub",
+      description: isJapanese
+        ? "SBOMHubの利用規約"
+        : "SBOMHub Terms of Service",
+      url: `${BASE_URL}/${locale}/terms`,
+    },
+  };
+}
 
 interface Props {
   params: Promise<{ locale: string }>;

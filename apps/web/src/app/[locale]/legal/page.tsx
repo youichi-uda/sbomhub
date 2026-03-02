@@ -1,6 +1,39 @@
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
+import type { Metadata } from "next";
+
+const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://sbomhub.com";
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}): Promise<Metadata> {
+  const { locale } = await params;
+  const isJapanese = locale === "ja";
+
+  return {
+    title: isJapanese ? "特定商取引法に基づく表記" : "Commercial Transactions Act Disclosure",
+    description: isJapanese
+      ? "SBOMHubの特定商取引法に基づく表記。事業者情報、料金、支払方法、返品・キャンセルポリシーについて。"
+      : "SBOMHub Commercial Transactions Act Disclosure. Business operator information, pricing, payment methods, and cancellation policy.",
+    alternates: {
+      canonical: `/${locale}/legal`,
+      languages: {
+        ja: "/ja/legal",
+        en: "/en/legal",
+      },
+    },
+    openGraph: {
+      title: isJapanese ? "特定商取引法に基づく表記 | SBOMHub" : "Legal | SBOMHub",
+      description: isJapanese
+        ? "SBOMHubの特定商取引法に基づく表記"
+        : "SBOMHub Legal Information",
+      url: `${BASE_URL}/${locale}/legal`,
+    },
+  };
+}
 
 interface Props {
   params: Promise<{ locale: string }>;

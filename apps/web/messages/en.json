@@ -1014,5 +1014,20 @@
       "usageMCP": "MCP Server",
       "usageCI": "CI/CD (GitHub Actions, etc.)"
     }
+  },
+  "FAQ": {
+    "title": "Frequently Asked Questions",
+    "q1": "What is an SBOM?",
+    "a1": "An SBOM (Software Bill of Materials) is a comprehensive list of components (libraries, frameworks, etc.) that make up a piece of software. It is essential for ensuring transparency in the software supply chain, vulnerability management, and license compliance.",
+    "q2": "Is SBOMHub free to use?",
+    "a2": "Yes. SBOMHub is open-source software under the AGPL-3.0 license. The self-hosted version is completely free with all features included. The cloud version offers a 14-day free trial, then starts at ¥2,500/month.",
+    "q3": "What is the difference between CycloneDX and SPDX?",
+    "a3": "CycloneDX and SPDX are both standard SBOM formats. CycloneDX is developed by OWASP and focuses on security. SPDX is managed by the Linux Foundation and has strengths in license compliance. SBOMHub supports both formats.",
+    "q4": "What is VEX (Vulnerability Exploitability eXchange)?",
+    "a4": "VEX is a standard format for communicating whether a reported vulnerability actually affects your product. In SBOMHub, you can set statuses of 'Under Investigation', 'Not Affected', 'Affected', or 'Fixed' for each vulnerability, managing false positives and recording response status.",
+    "q5": "Does it support METI (Japan) SBOM guidelines?",
+    "a5": "SBOMHub provides a self-assessment checklist feature based on METI's 'Guide for Introducing SBOM for Software Management'. Note that this is not an official compliance certification, but a tool to support your guideline compliance efforts.",
+    "q6": "Which SBOM generation tools are supported?",
+    "a6": "SBOMHub supports output from major SBOM generation tools including Syft (Anchore), cdxgen (CycloneDX), and Trivy (Aqua Security). Any SBOM in CycloneDX or SPDX JSON format can be imported, regardless of the generation tool."
   }
 }

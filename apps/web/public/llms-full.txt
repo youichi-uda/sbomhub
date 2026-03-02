@@ -1,0 +1,121 @@
+# SBOMHub
+
+> Open-source SBOM (Software Bill of Materials) management platform optimized for the Japanese market.
+
+SBOMHub helps organizations manage software supply chain security by providing SBOM import, vulnerability management, VEX statements, compliance checking, and more.
+
+## Key Information
+
+- Website: https://sbomhub.app
+- API: https://api.sbomhub.app
+- GitHub: https://github.com/youichi-uda/sbomhub
+- License: AGPL-3.0
+
+## Features
+
+- **SBOM Import**: CycloneDX and SPDX format support. Compatible with Syft, cdxgen, and Trivy.
+- **Vulnerability Management**: NVD database integration for automatic vulnerability detection. CVSS scoring and severity classification.
+- **VEX Statements**: Create and manage Vulnerability Exploitability eXchange (VEX) statements.
+- **SSVC Assessment**: CISA SSVC framework-based vulnerability prioritization.
+- **KEV Integration**: CISA Known Exploited Vulnerabilities catalog integration.
+- **License Management**: Automatic OSS license detection and policy checking.
+- **Compliance**: Self-assessment for METI (Japan) SBOM guideline compliance.
+- **SBOM Diff Comparison**: Compare SBOMs across versions to detect changes.
+- **IPA/JVN Integration**: Japan-specific vulnerability information from IPA and JVN.
+- **CI/CD Integration**: GitHub Actions and other pipeline integration via API.
+- **MCP Server**: Claude Desktop and Cursor integration via Model Context Protocol.
+- **CLI Tool**: sbomhub-cli for command-line SBOM scanning and uploading.
+- **Notifications**: Slack, Discord, and email notifications for new vulnerabilities.
+- **Ticket Integration**: Jira and Backlog integration for vulnerability ticketing.
+- **Reports**: Executive, technical, and compliance report generation (PDF/Excel).
+- **Audit Logs**: Complete operation history for compliance requirements.
+- **Multilingual**: Full Japanese and English UI support.
+
+## Pricing
+
+- **Self-hosted**: Free (AGPL-3.0 open-source)
+- **Cloud Starter**: ¥2,500/month (5 projects, 3 users)
+- **Cloud Pro**: ¥8,000/month (unlimited projects, 10 users)
+- **Cloud Team**: ¥20,000/month (unlimited projects, 30 users)
+
+All cloud plans include a 14-day free trial.
+
+## API
+
+REST API available at https://api.sbomhub.app
+
+- `POST /api/v1/projects` - Create project
+- `GET /api/v1/projects` - List projects
+- `GET /api/v1/projects/:id` - Get project
+- `DELETE /api/v1/projects/:id` - Delete project
+- `POST /api/v1/projects/:id/sbom` - Upload SBOM
+- `GET /api/v1/projects/:id/sbom` - Get latest SBOM
+- `GET /api/v1/projects/:id/components` - List components
+- `GET /api/v1/projects/:id/vulnerabilities` - List vulnerabilities
+
+## Tech Stack
+
+- Backend: Go (Echo framework)
+- Frontend: Next.js (App Router) + React + TypeScript
+- Database: PostgreSQL
+- Cache: Redis
+- UI: shadcn/ui + Tailwind CSS
+
+## Links
+
+- [Documentation](https://sbomhub.app/docs)
+- [Privacy Policy](https://sbomhub.app/privacy)
+- [Terms of Service](https://sbomhub.app/terms)
+
+## Detailed Feature Descriptions
+
+### SBOM Import
+SBOMHub supports importing Software Bill of Materials in CycloneDX and SPDX JSON formats. It is compatible with output from major SBOM generation tools including Syft (by Anchore), cdxgen (by CycloneDX), and Trivy (by Aqua Security). Users can upload SBOMs via the web dashboard, CLI tool, or REST API.
+
+### Vulnerability Management
+SBOMHub automatically correlates imported SBOM components with the NVD (National Vulnerability Database) to detect known vulnerabilities. Vulnerabilities are classified by severity (Critical, High, Medium, Low) using CVSS scores. The EPSS (Exploit Prediction Scoring System) score is also displayed to help prioritize which vulnerabilities are most likely to be exploited.
+
+### VEX (Vulnerability Exploitability eXchange)
+VEX statements allow organizations to communicate whether a reported vulnerability actually affects their product. SBOMHub supports creating VEX statements with statuses: Under Investigation, Not Affected, Affected, and Fixed. Justifications include: Component Not Present, Vulnerable Code Not Present, Vulnerable Code Not In Execute Path, Vulnerable Code Cannot Be Controlled, and Inline Mitigations Exist.
+
+### SSVC (Stakeholder-Specific Vulnerability Categorization)
+Based on CISA's SSVC framework, SBOMHub provides vulnerability prioritization with four decision levels: Immediate (stop all work), Out-of-Cycle (address ASAP), Scheduled (next maintenance), and Defer (monitor). Factors considered include exploitation status, automatable, technical impact, mission prevalence, and safety impact.
+
+### KEV (Known Exploited Vulnerabilities)
+Integration with CISA's KEV catalog flags vulnerabilities that are actively exploited in the wild. Includes ransomware usage indicators and remediation due dates.
+
+### License Management
+Automatic detection of OSS licenses from SBOM data. Organizations can set policies (Allowed, Denied, Review Required) for each license type. Violations are highlighted when components use licenses that conflict with organizational policies.
+
+### IPA/JVN Integration
+Japan-specific security information from IPA (Information-technology Promotion Agency, Japan) security alerts and JVN (Japan Vulnerability Notes) vulnerability database. Auto-fetches domestic vulnerability information relevant to the Japanese market.
+
+### MCP Server (Model Context Protocol)
+SBOMHub provides an MCP Server that integrates with Claude Desktop, Cursor, and other MCP-compatible AI tools. Available tools: project listing, dashboard info, CVE cross-search, component search, SBOM diff, vulnerability listing, and compliance scoring. This enables natural language queries like "Search for projects affected by CVE-2021-44228."
+
+### CLI Tool (sbomhub-cli)
+A Go-based CLI tool that wraps Syft, Trivy, and cdxgen for one-command SBOM generation and upload. Commands include: scan (generate and upload), check (local vulnerability check), login (API key authentication), and projects list.
+
+### Compliance
+Self-assessment feature supporting METI (Ministry of Economy, Trade and Industry, Japan) SBOM guidelines. Provides a checklist-based evaluation to help organizations understand their SBOM management maturity. Note: This is not an official compliance certification.
+
+### Reports
+Auto-generate reports in PDF and Excel formats. Three types: Executive (for management), Technical (for engineering teams), and Compliance (for auditors). Supports scheduled generation and email delivery.
+
+### EOL (End of Life) Status Check
+Automatically checks component end-of-life status using the endoflife.date database. Shows upgrade recommendations for components that have reached EOL or EOS (End of Security updates).
+
+## Target Market
+
+SBOMHub is primarily designed for the Japanese market, with full Japanese language support and integration with Japan-specific security resources (IPA, JVN, METI guidelines). It also supports English for international use.
+
+## Comparison with Other Tools
+
+SBOMHub differs from SBOM generation tools (like Syft, Trivy, cdxgen) in that it focuses on SBOM management rather than generation. It serves as a centralized dashboard for:
+- Importing and storing SBOMs from multiple tools
+- Tracking vulnerabilities across projects
+- Managing VEX statements and SSVC assessments
+- Ensuring compliance with regulatory guidelines
+- Generating reports for stakeholders
+
+Similar products include Dependency-Track (OWASP), GUAC (Google), and commercial solutions like Snyk, Sonatype, and Mend.io.
