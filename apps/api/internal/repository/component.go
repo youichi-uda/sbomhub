@@ -16,9 +16,19 @@ func NewComponentRepository(db *sql.DB) *ComponentRepository {
 	return &ComponentRepository{db: db}
 }
 
+// Create inserts a new component row.
+//
+// tenant_id is required because:
+//   - the column is NOT NULL since migration 027, and
+//   - FORCE ROW LEVEL SECURITY on `components` enforces a WITH CHECK clause
+//     that rejects mismatched tenant_id at INSERT time.
+//
+// Callers must populate c.TenantID before calling Create. The typical flow
+// is `comp.TenantID = sbom.TenantID` inside SbomService.Import /
+// CLIService.UploadSBOM, since every component is scoped to a single SBOM.
 func (r *ComponentRepository) Create(ctx context.Context, c *model.Component) error {
-	query := `INSERT INTO components (id, sbom_id, name, version, type, purl, license, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
-	_, err := r.db.ExecContext(ctx, query, c.ID, c.SbomID, c.Name, c.Version, c.Type, c.Purl, c.License, c.CreatedAt)
+	query := `INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	_, err := r.db.ExecContext(ctx, query, c.ID, c.TenantID, c.SbomID, c.Name, c.Version, c.Type, c.Purl, c.License, c.CreatedAt)
 	return err
 }
 

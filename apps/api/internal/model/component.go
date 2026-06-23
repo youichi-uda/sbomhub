@@ -8,6 +8,7 @@ import (
 
 type Component struct {
 	ID        uuid.UUID `json:"id" db:"id"`
+	TenantID  uuid.UUID `json:"tenant_id" db:"tenant_id"`
 	SbomID    uuid.UUID `json:"sbom_id" db:"sbom_id"`
 	Name      string    `json:"name" db:"name"`
 	Version   string    `json:"version" db:"version"`

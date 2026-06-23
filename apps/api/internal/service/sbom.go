@@ -36,8 +36,19 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 		return nil, fmt.Errorf("failed to detect SBOM format: %w", err)
 	}
 
+	// Resolve the tenant_id of the parent project so that both the new sbom
+	// row and the components belonging to it are tagged with the correct
+	// tenant. Without this, the FORCE RLS WITH CHECK clause on `sboms` (see
+	// migration 023) rejects the INSERT and the NOT NULL constraint added in
+	// 027 rejects it at the schema layer as well.
+	tenantID, err := s.sbomRepo.LookupProjectTenantID(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	sbom := &model.Sbom{
 		ID:        uuid.New(),
+		TenantID:  tenantID,
 		ProjectID: projectID,
 		Format:    string(info.Format),
 		Version:   info.Version,
@@ -56,6 +67,7 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 
 	for _, comp := range components {
 		comp.SbomID = sbom.ID
+		comp.TenantID = sbom.TenantID
 		if err := s.componentRepo.Create(ctx, &comp); err != nil {
 			return nil, fmt.Errorf("failed to save component: %w", err)
 		}

@@ -72,8 +72,18 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 		return nil, 0, fmt.Errorf("failed to detect SBOM format: %w", err)
 	}
 
+	// Resolve the tenant_id of the parent project. Required because
+	// sboms.tenant_id and components.tenant_id are NOT NULL (migration 027)
+	// and gated by FORCE RLS WITH CHECK (migration 023). Without this, the
+	// INSERT either fails the NOT NULL constraint or the RLS predicate.
+	tenantID, err := s.projectRepo.GetTenantID(ctx, projectID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	sbom := &model.Sbom{
 		ID:        uuid.New(),
+		TenantID:  tenantID,
 		ProjectID: projectID,
 		Format:    string(info.Format),
 		Version:   info.Version,
@@ -92,6 +102,7 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 
 	for _, comp := range components {
 		comp.SbomID = sbom.ID
+		comp.TenantID = sbom.TenantID
 		if err := s.componentRepo.Create(ctx, &comp); err != nil {
 			return nil, 0, fmt.Errorf("failed to save component: %w", err)
 		}

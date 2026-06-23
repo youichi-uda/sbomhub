@@ -8,6 +8,7 @@ import (
 
 type Sbom struct {
 	ID        uuid.UUID `json:"id" db:"id"`
+	TenantID  uuid.UUID `json:"tenant_id" db:"tenant_id"`
 	ProjectID uuid.UUID `json:"project_id" db:"project_id"`
 	Format    string    `json:"format" db:"format"`
 	Version   string    `json:"version" db:"version"`
