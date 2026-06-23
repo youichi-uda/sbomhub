@@ -157,13 +157,22 @@ func (h *APIKeyHandler) Create(c echo.Context) error {
 
 // List returns all API keys for a project (deprecated)
 // GET /api/v1/projects/:id/apikeys
+//
+// The tenant_id from middleware context is required because RLS no longer
+// enforces tenant scope on api_keys (migration 028) — without it a caller
+// could enumerate other tenants' project-level keys by guessing project UUIDs.
 func (h *APIKeyHandler) List(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
 	}
 
-	keys, err := h.keyService.ListByProject(c.Request().Context(), projectID)
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
+	keys, err := h.keyService.ListByProject(c.Request().Context(), tenantID, projectID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list API keys"})
 	}
@@ -177,13 +186,21 @@ func (h *APIKeyHandler) List(c echo.Context) error {
 
 // Delete removes an API key (deprecated)
 // DELETE /api/v1/projects/:id/apikeys/:key_id
+//
+// Mirrors List: tenant context is mandatory now that the api_keys RLS
+// policy is gone (migration 028).
 func (h *APIKeyHandler) Delete(c echo.Context) error {
 	keyID, err := uuid.Parse(c.Param("key_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid key ID"})
 	}
 
-	if err := h.keyService.DeleteKey(c.Request().Context(), keyID); err != nil {
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
+	if err := h.keyService.DeleteKey(c.Request().Context(), tenantID, keyID); err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 

@@ -128,8 +128,11 @@ func (s *APIKeyService) CreateProjectKey(ctx context.Context, input CreateProjec
 	}, nil
 }
 
-func (s *APIKeyService) GetKey(ctx context.Context, id uuid.UUID) (*model.APIKey, error) {
-	return s.keyRepo.GetByID(ctx, id)
+// GetKey looks up an API key restricted to the caller's tenant. tenantID
+// MUST be derived from the authenticated session (e.g. middleware.ContextKeyTenantID),
+// never from a request body — see APIKeyRepository.GetByID for the rationale.
+func (s *APIKeyService) GetKey(ctx context.Context, tenantID, id uuid.UUID) (*model.APIKey, error) {
+	return s.keyRepo.GetByID(ctx, tenantID, id)
 }
 
 // ListByTenant returns all API keys for a tenant (new tenant-level method)
@@ -137,13 +140,17 @@ func (s *APIKeyService) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([
 	return s.keyRepo.ListByTenant(ctx, tenantID)
 }
 
-// ListByProject returns API keys for a specific project (legacy, deprecated)
-func (s *APIKeyService) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.APIKey, error) {
-	return s.keyRepo.ListByProject(ctx, projectID)
+// ListByProject returns API keys for a specific project (legacy, deprecated).
+// tenantID restricts the query to the caller's own tenant; without it a
+// caller could enumerate API keys on another tenant's project by guessing
+// the project UUID (RLS no longer enforces this — see migration 028).
+func (s *APIKeyService) ListByProject(ctx context.Context, tenantID, projectID uuid.UUID) ([]model.APIKey, error) {
+	return s.keyRepo.ListByProject(ctx, tenantID, projectID)
 }
 
-func (s *APIKeyService) DeleteKey(ctx context.Context, id uuid.UUID) error {
-	return s.keyRepo.Delete(ctx, id)
+// DeleteKey removes an API key restricted to the caller's tenant.
+func (s *APIKeyService) DeleteKey(ctx context.Context, tenantID, id uuid.UUID) error {
+	return s.keyRepo.Delete(ctx, tenantID, id)
 }
 
 // DeleteKeyByTenant deletes an API key ensuring it belongs to the specified tenant
@@ -151,7 +158,12 @@ func (s *APIKeyService) DeleteKeyByTenant(ctx context.Context, id uuid.UUID, ten
 	return s.keyRepo.DeleteByTenant(ctx, id, tenantID)
 }
 
-// ValidateKey validates an API key and returns the key info if valid
+// ValidateKey validates an API key and returns the key info if valid.
+//
+// GetByKeyHash is the sole tenant-unscoped read on api_keys: it is itself
+// the call that decides which tenant the caller belongs to. Once we have
+// the row, every subsequent api_keys access (here: UpdateLastUsed) is
+// re-scoped to key.TenantID.
 func (s *APIKeyService) ValidateKey(ctx context.Context, rawKey string) (*model.APIKey, error) {
 	keyHash := hashKey(rawKey)
 
@@ -168,8 +180,8 @@ func (s *APIKeyService) ValidateKey(ctx context.Context, rawKey string) (*model.
 		return nil, fmt.Errorf("API key has expired")
 	}
 
-	// Update last used
-	_ = s.keyRepo.UpdateLastUsed(ctx, key.ID)
+	// Update last used (best-effort; scoped to the key's own tenant).
+	_ = s.keyRepo.UpdateLastUsed(ctx, key.TenantID, key.ID)
 
 	return key, nil
 }
