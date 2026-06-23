@@ -12,52 +12,111 @@
   <img src="docs/images/dashboard-en.png" alt="SBOMHub Dashboard" width="800">
 </p>
 
-## What is SBOMHub?
+## SBOMHub — A CRA-Ready SBOM Compliance Evidence Layer
 
-SBOMHub is an open-source SBOM (Software Bill of Materials) management dashboard designed for the Japanese market. It helps you:
+> **Dependency-Track finds CVEs. SBOMHub turns them into submittable paperwork.**
+>
+> An AGPL-3.0 open-source workbench that converts SBOMs into approval-ready VEX statements, CRA reports, and audit trails.
 
-- **Import** SBOMs from Syft, cdxgen, Trivy, and more (CycloneDX/SPDX)
-- **Track** vulnerabilities with NVD and JVN (Japan) integration
-- **Prioritize** with EPSS exploit prediction scores
-- **Manage** VEX statements for vulnerability triage
-- **Support** METI guidelines (Japan) and EU CRA response
-- **Enforce** license policies across your projects
-- **Alert** your team via Slack/Discord/Email
+## Overview
 
-## Features
+SBOMHub helps small and mid-sized Japanese manufacturers facing the **EU Cyber Resilience Act (CRA) vulnerability reporting deadline of 11 September 2026** turn raw SBOM and CVE output from Syft, Trivy, or Dependency-Track into actual submission artefacts.
+
+We have stepped away from positioning SBOMHub as "a Japan-flavoured Dependency-Track." It now sits on top of DT / Syft / Trivy as an **AI compliance evidence layer**: AI drafts VEX statements, CRA reports, and METI self-assessments; a human approves them; the result is a document you can hand to a customer, an auditor, or a regulator.
+
+Fully open source under AGPL-3.0. Self-hosted. AI features are **BYOK (Bring Your Own Key)** only — no bundled LLM keys.
+
+## Who is this for?
+
+- **Japanese SMB manufacturers** shipping IoT, embedded, or digital products into the EU
+- Teams without a dedicated PSIRT, where developers or QA handle vulnerability response on the side
+- Subcontract development shops and small SaaS companies asked by customers to attach SBOM / VEX to deliverables
+- Organisations that **cannot send source code or SBOMs to overseas SaaS or external LLM APIs**
+- Anyone facing CRA September 2026 with no full-time security headcount
+
+This is not a general-purpose SBOM management tool for everyone. It is a sharp tool aimed at the ICP above.
+
+## Implemented features
 
 | Feature | Description |
 |---------|-------------|
-| Multi-format SBOM | Import CycloneDX and SPDX JSON |
-| Vulnerability Tracking | NVD + JVN integration for comprehensive coverage |
-| EPSS Scoring | Prioritize by exploit probability |
-| **SSVC Decision Making** | CISA SSVC framework for vulnerability prioritization |
-| **KEV Integration** | CISA Known Exploited Vulnerabilities catalog sync |
-| VEX Support | Document vulnerability applicability |
-| License Policies | Enforce allowed/denied licenses |
-| Compliance Support | METI guideline self-assessment |
-| CI/CD Integration | GitHub Actions support with API keys |
-| Japanese UI | Full Japanese language support |
+| SBOM import | CycloneDX / SPDX JSON |
+| Vulnerability correlation | NVD + JVN (Japan) integration |
+| EPSS scoring | Exploit probability based prioritisation |
+| SSVC | CISA SSVC decision framework |
+| KEV integration | Auto-sync of CISA Known Exploited Vulnerabilities catalog |
+| VEX (manual) | CycloneDX VEX authoring / editing / export |
+| License policies | Allow / deny license enforcement |
+| METI self-assessment | METI SBOM-introduction guideline self-check |
+| Audit log | Operation history for accountability |
+| CI/CD | GitHub Actions examples, API key auth |
+| CLI | `sbomhub scan` / `sbomhub check` (sbomhub-cli) |
+| MCP Server | Read access from Claude Desktop, Cursor, etc. |
+| Multi-tenancy | PostgreSQL Row-Level Security |
+| i18n | Japanese / English via next-intl |
 
-## Quick Start
+## In development (Phase 7: strategy pivot)
 
-### SaaS Version (Recommended)
+Everything below is being built in the open, under AGPL-3.0. Full milestone notes live in `sbomhub-internal/planning/PRODUCT_REBOOT_PLAN.md` (internal).
 
-Try SBOMHub instantly without installation: **https://sbomhub.app**
+- **AI VEX triage MVP (M1).** An LLM reads CVE × component × code context and produces a CycloneDX VEX draft. Go and npm ecosystems first. Every output carries confidence, source code evidence, and advisory citations.
+- **CRA report drafting (M2).** Drafts for 24-hour early warning, 72-hour detailed notification, and the final report, in Japanese and English. **Never auto-submitted.**
+- **METI self-assessment prefill (M3).** CI configs, SBOM scan history, and matching history are turned into "achieved / not achieved / needs review" rows with evidence and remediation suggestions.
+- **Local LLM / enterprise self-host polish (M4).** Quality-tune Ollama and friends; ship a hardened self-host security guide.
 
-- No setup required
-- Free tier available
-- Managed infrastructure with automatic updates
+**Hard rule: AI drafts, humans decide.** SBOMHub will not auto-confirm `not_affected`, and it will not auto-submit CRA reports.
 
-### Docker Compose (Self-hosted)
+## AI features and BYOK
+
+OSS SBOMHub ships with **no bundled LLM credentials**. Set up a key for one of the providers below — or run a local model — and the AI features turn on.
+
+| Provider | Example model | Code leaves your network? |
+|---|---|---|
+| OpenAI | `gpt-5` | Yes (BYO key) |
+| Anthropic | `claude-opus-4-7` | Yes (BYO key) |
+| Google Gemini | `gemini-3.5-flash` | Yes (BYO key) |
+| Ollama (local) | `llama3.3`, `qwen2.5-coder` | No (recommended for manufacturers) |
+
+`.env` example:
 
 ```bash
-# Download and start (no clone needed)
-curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
-docker compose up -d
+# Pick one to enable AI features
+SBOMHUB_LLM_PROVIDER=openai            # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_MODEL=gpt-5
+OPENAI_API_KEY=sk-...
+
+# Local LLM example
+# SBOMHUB_LLM_PROVIDER=ollama
+# SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+# OLLAMA_HOST=http://localhost:11434
 ```
 
-Or clone and run:
+If no provider is configured, AI features stay off. Manual VEX authoring, manual CRA paperwork, and manual METI self-assessment continue to work — every non-AI capability of SBOMHub is available without an LLM.
+
+## Quick start
+
+### Docker Compose (self-host, recommended)
+
+```bash
+# 1. Pull docker-compose.yml (no clone required)
+curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
+
+# 2. Create .env with at minimum an encryption key
+cat > .env <<'EOF'
+SBOMHUB_ENCRYPTION_KEY=$(openssl rand -base64 32)
+# Optional: enable AI features
+# SBOMHUB_LLM_PROVIDER=openai
+# SBOMHUB_LLM_MODEL=gpt-5
+# OPENAI_API_KEY=sk-...
+EOF
+
+# 3. Start
+docker compose up -d
+
+# 4. Open http://localhost:3000
+```
+
+Or clone the repo:
 
 ```bash
 git clone https://github.com/youichi-uda/sbomhub.git
@@ -65,168 +124,103 @@ cd sbomhub
 docker compose up -d
 ```
 
-Open http://localhost:3000
+### CLI (`sbomhub scan`)
 
-### From Source
-
-**Prerequisites:**
-- Go 1.22+
-- Node.js 20+ / pnpm
-- PostgreSQL 15+
-- Redis 7+
+Scan and upload directly from your workstation or CI.
 
 ```bash
-# Start database
-docker compose -f docker/docker-compose.yml up -d postgres redis
+# Install (Homebrew, macOS/Linux)
+brew install sbomhub/tap/sbomhub
 
-# Backend
-cd apps/api
-go run ./cmd/server
+# Or with Go
+go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
 
-# Frontend (new terminal)
-cd apps/web
-pnpm install
-pnpm dev
+# Point at your self-hosted instance
+sbomhub login --api-key YOUR_API_KEY --url http://localhost:8080
+
+# Scan & upload
+sbomhub scan . --project my-device
+
+# Local vulnerability check only (no upload)
+sbomhub check .
+
+# CI mode (exit 1 on Critical findings)
+sbomhub scan . --project my-device --fail-on critical
 ```
 
-## Screenshots
+Under the hood, the CLI auto-detects Syft, Trivy, or cdxgen. See [sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli) for details.
 
-<details>
-<summary>Dashboard</summary>
-<img src="docs/images/dashboard-en.png" width="600">
-</details>
+### From source
 
-<details>
-<summary>Vulnerability List</summary>
-<img src="docs/images/vulnerabilities-en.png" width="600">
-</details>
+**Prerequisites:** Go 1.22+ / Node.js 20+ / pnpm / PostgreSQL 15+ / Redis 7+
 
-<details>
-<summary>Trend Analysis (MTTR/SLO)</summary>
-<img src="docs/images/analytics-en.png" width="600">
-</details>
+```bash
+docker compose -f docker/docker-compose.yml up -d postgres redis
+cd apps/api && go run ./cmd/server
+# In another terminal
+cd apps/web && pnpm install && pnpm dev
+```
 
-<details>
-<summary>Cross Search</summary>
-<img src="docs/images/search-en.png" width="600">
-</details>
+### About the hosted SaaS
 
-<details>
-<summary>Projects</summary>
-<img src="docs/images/projects-en.png" width="600">
-</details>
+> The hosted version at https://sbomhub.app is **sunset for new signups as of 2026-06-23**. We will reopen it under the new positioning at a later date; the announcement will go through this repository. In the meantime, self-host plus the CLI is the supported path.
+
+## Note for existing users
+
+SBOMHub has pivoted during v0.x from "Dependency-Track for Japan" to "CRA-ready SBOM compliance evidence layer." All shipped features — SBOM management, vulnerability correlation, manual VEX, license policies, METI self-assessment — remain. AI features and CRA reporting are being layered on top.
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐
-│   Next.js Web   │────▶│    Go API       │
-│   (Port 3000)   │     │   (Port 8080)   │
-└─────────────────┘     └────────┬────────┘
-                                 │
-                    ┌────────────┼────────────┐
-                    ▼            ▼            ▼
-             ┌───────────┐ ┌───────────┐ ┌───────────┐
-             │ PostgreSQL│ │   Redis   │ │ NVD / JVN │
-             │  (Data)   │ │  (Cache)  │ │  (APIs)   │
-             └───────────┘ └───────────┘ └───────────┘
+┌──────────────────┐     ┌──────────────────┐
+│   Next.js Web    │────▶│     Go API       │
+│   (Port 3000)    │     │   (Port 8080)    │
+└──────────────────┘     └─────────┬────────┘
+                                   │
+                ┌──────────────────┼────────────────────┐
+                ▼                  ▼                    ▼
+        ┌───────────────┐  ┌───────────────┐  ┌─────────────────┐
+        │  PostgreSQL   │  │     Redis     │  │   NVD / JVN     │
+        │   (Data)      │  │    (Cache)    │  │   (Vuln feeds)  │
+        └───────────────┘  └───────────────┘  └─────────────────┘
+                                   │
+                                   ▼ (BYOK, optional)
+                        ┌──────────────────────────┐
+                        │   LLM Provider           │
+                        │   OpenAI / Anthropic /   │
+                        │   Gemini / Ollama        │
+                        └──────────────────────────┘
 ```
 
-## API Reference
+## API reference
 
-See [API Documentation](./docs/api.md)
-
-### Core Endpoints
+Core endpoints (see [docs/api.md](./docs/api.md) for the full list).
 
 ```
 POST   /api/v1/projects              # Create project
 GET    /api/v1/projects              # List projects
 GET    /api/v1/projects/:id          # Get project
-DELETE /api/v1/projects/:id          # Delete project
 
 POST   /api/v1/projects/:id/sbom     # Upload SBOM
 GET    /api/v1/projects/:id/components
 GET    /api/v1/projects/:id/vulnerabilities
 GET    /api/v1/projects/:id/vex      # VEX statements
 
-# SSVC (Stakeholder-Specific Vulnerability Categorization)
-GET    /api/v1/projects/:id/ssvc/defaults    # Get project SSVC defaults
-PUT    /api/v1/projects/:id/ssvc/defaults    # Update SSVC defaults
-POST   /api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc  # Create SSVC assessment
-GET    /api/v1/projects/:id/ssvc/summary     # Get SSVC summary
-POST   /api/v1/ssvc/calculate                # Calculate SSVC decision (no save)
+# SSVC
+GET    /api/v1/projects/:id/ssvc/defaults
+PUT    /api/v1/projects/:id/ssvc/defaults
+POST   /api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc
+POST   /api/v1/ssvc/calculate
 
-# KEV (Known Exploited Vulnerabilities)
-POST   /api/v1/kev/sync              # Sync KEV catalog
-GET    /api/v1/kev/stats             # Get KEV statistics
-GET    /api/v1/kev/:cve_id           # Check CVE in KEV
-GET    /api/v1/projects/:id/kev      # List project KEV vulnerabilities
+# KEV
+POST   /api/v1/kev/sync
+GET    /api/v1/kev/:cve_id
+GET    /api/v1/projects/:id/kev
 ```
 
-## CLI
+## MCP Server (read-only)
 
-SBOMHub CLI lets you generate SBOMs and upload them in a single command.
-
-### Installation
-
-```bash
-# Homebrew (macOS/Linux)
-brew install sbomhub/tap/sbomhub
-
-# Shell script (macOS/Linux)
-curl -fsSL https://sbomhub.app/install.sh | sh
-
-# Windows (Scoop)
-scoop bucket add sbomhub https://github.com/sbomhub/scoop-bucket
-scoop install sbomhub
-
-# Go install
-go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
-```
-
-### Basic Usage
-
-```bash
-# Login (set API Key)
-sbomhub login
-
-# Scan current directory & upload
-sbomhub scan .
-
-# Specify project
-sbomhub scan . --project my-app
-
-# Vulnerability check only (no upload)
-sbomhub check .
-
-# CI/CD mode (exit 1 on Critical)
-sbomhub scan . --project my-app --fail-on critical --quiet
-```
-
-### Required External Tools
-
-At least one of the following must be installed:
-- [Syft](https://github.com/anchore/syft) (recommended)
-- [Trivy](https://github.com/aquasecurity/trivy)
-- [cdxgen](https://github.com/CycloneDX/cdxgen)
-
-See [sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli) for details.
-
-## MCP Server
-
-SBOMHub MCP Server allows Claude Desktop, Cursor, and other MCP-compatible AI tools to directly access SBOMHub data.
-
-### Installation
-
-```bash
-cd packages/mcp-server
-pnpm install
-pnpm build
-```
-
-### Configuration (Claude Desktop)
-
-Add the following to `claude_desktop_config.json`:
+Surface SBOMHub data inside Claude Desktop, Cursor, and other MCP-compatible AI clients.
 
 ```json
 {
@@ -236,14 +230,12 @@ Add the following to `claude_desktop_config.json`:
       "args": ["/path/to/sbomhub/packages/mcp-server/dist/index.js"],
       "env": {
         "SBOMHUB_API_KEY": "your-api-key",
-        "SBOMHUB_API_URL": "https://api.sbomhub.app"
+        "SBOMHUB_API_URL": "http://localhost:8080"
       }
     }
   }
 }
 ```
-
-### Available Tools
 
 | Tool | Description |
 |------|-------------|
@@ -257,26 +249,20 @@ Add the following to `claude_desktop_config.json`:
 
 See [packages/mcp-server/README.md](./packages/mcp-server/README.md) for details.
 
-## CI/CD Integration
-
-### GitHub Actions
+## CI/CD (GitHub Actions)
 
 ```yaml
 name: Upload SBOM
-
 on:
   push:
     branches: [main]
-
 jobs:
   sbom:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Generate SBOM
         run: syft . -o cyclonedx-json > sbom.json
-
       - name: Upload to SBOMHub
         run: |
           curl -X POST \
@@ -285,77 +271,55 @@ jobs:
             ${{ secrets.SBOMHUB_URL }}/api/v1/projects/${{ secrets.PROJECT_ID }}/sbom
 ```
 
-## Documentation
+## Roadmap (Phase 7: strategy pivot)
 
-- [Installation Guide](./docs/installation.md)
-- [Configuration](./docs/configuration.md)
-- [API Reference](./docs/api.md)
-- [GitHub Actions Integration](./docs/github-actions.md)
+Counted backwards from CRA 11 September 2026.
 
-## Roadmap
+| Milestone | Rough duration | Scope |
+|---|---|---|
+| **M0** Strategy lock-in + Trust Rescue | ~2 weeks | New positioning in README / LP, P0 fixes for RLS / encryption keys / API contracts / CI / distribution, waitlist plumbing, design partner shortlist |
+| **M1** AI VEX triage MVP | ~6 weeks | `sbomhub triage` CLI, first-pass reachability for Go / npm, LLM judgement layer, VEX draft store, approve / edit / reject UI, CycloneDX VEX export, confidence + evidence + audit log |
+| **M2** CRA report drafting | ~4 weeks | 24h / 72h / final templates, Japanese + English, Evidence Pack assembly |
+| **M3** METI self-assessment prefill | ~3 weeks | CI + scan history mapped to METI items with evidence and remediation hints |
+| **M4** Local LLM + enterprise self-host polish | Ongoing | LLM provider abstraction, Ollama quality benchmarks, hardened self-host security guide |
 
-- [x] SBOM Import (CycloneDX/SPDX)
-- [x] NVD/JVN Vulnerability Matching
-- [x] EPSS Scoring
-- [x] VEX Support
-- [x] License Policies
-- [x] Compliance Support (METI Guideline Self-Assessment)
-- [x] CI/CD Integration (GitHub Actions)
-- [x] Notifications (Slack/Discord)
-- [x] Multi-tenancy (Row-Level Security)
-- [x] Clerk Authentication Integration
-- [x] Lemon Squeezy Billing Integration
-- [x] SBOMHub Cloud (Managed SaaS)
-- [x] **SSVC Decision Framework** - CISA SSVC for vulnerability prioritization
-- [x] **KEV Integration** - Known Exploited Vulnerabilities catalog auto-sync
-- [ ] Risk Profiles - Project-specific risk settings
-- [ ] Triage Dashboard - Unified priority view with KEV/SSVC
-- [ ] AI Priority Estimation - AI-powered assessment via MCP
-- [ ] LDAP/OIDC Authentication (Self-hosted)
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+Shipped features stay in. New milestones land on top.
 
 ## License
 
-This project is licensed under the [AGPL-3.0 License](./LICENSE).
+This project is licensed under [AGPL-3.0](./LICENSE).
 
-| Use Case | Allowed | Notes |
+| Use case | OK? | Notes |
 |----------|---------|-------|
-| Self-hosted (internal use) | ✅ | No source disclosure required |
-| Self-hosted (with modifications) | ✅ | Modified source must be disclosed |
-| Providing as SaaS to third parties | ⚠️ | Full source code must be disclosed under AGPL |
-| Official SBOMHub Cloud | ✅ | Provided by the maintainers |
+| Self-host (internal use) | Yes | No source disclosure required |
+| Self-host (with modifications) | Yes | Must disclose modified source |
+| Provide as SaaS to third parties | Caution | Full source code disclosure under AGPL |
 
-> **Note**: If you want to offer SBOMHub as a commercial SaaS without AGPL obligations, please contact us for a commercial license.
+> If you want to embed or resell SBOMHub commercially without AGPL obligations, get in touch about a commercial license.
 
-## Tech Stack
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+
+If you are interested in the new positioning (CRA, AI VEX, METI self-assessment) or in being a CRA-readiness design partner, open a GitHub Issue or email abyo.software@gmail.com.
+
+## Tech stack
 
 | Layer | Technology | Version |
 |-------|------------|---------|
 | Backend | Go (Echo v4) | 1.22+ |
 | Frontend | Next.js (App Router) | 16 |
-| UI Framework | React | 19 |
+| UI | React + shadcn/ui + Tailwind CSS | 19 / latest / 3.4 |
 | Language | TypeScript | 5.7 |
-| UI Components | shadcn/ui | Latest |
-| Styling | Tailwind CSS | 3.4 |
 | Database | PostgreSQL | 15+ |
 | Cache | Redis | 7+ |
-| i18n | next-intl | Latest |
-| Form Validation | react-hook-form + zod | Latest |
+| i18n | next-intl | latest |
+| Forms | react-hook-form + zod | latest |
+| LLM (BYOK) | OpenAI / Anthropic / Gemini / Ollama | Optional |
 
 ## Development
 
-### Prerequisites
-
-- Go 1.22+
-- Node.js 20+ with pnpm
-- PostgreSQL 15+
-- Redis 7+
-- Docker & Docker Compose (optional)
-
-### Project Structure
+### Project structure
 
 ```
 sbomhub/
@@ -371,85 +335,53 @@ sbomhub/
 └── .github/workflows/  # CI/CD pipelines
 ```
 
-### Common Commands
+### Common commands
 
 ```bash
-# Start development servers
-cd apps/web && pnpm dev      # Frontend (http://localhost:3000)
-cd apps/api && go run ./cmd/server  # Backend (http://localhost:8080)
+# Dev servers
+cd apps/web && pnpm dev                # Frontend (http://localhost:3000)
+cd apps/api && go run ./cmd/server     # Backend (http://localhost:8080)
 
 # Database
-docker compose up -d postgres redis  # Start DB
-cd apps/api && go run ./cmd/migrate up  # Run migrations
+docker compose up -d postgres redis
+cd apps/api && go run ./cmd/migrate up
 
-# Testing
-cd apps/api && go test ./...   # Backend tests
-cd apps/web && pnpm test       # Frontend tests
-
-# Linting
-cd apps/api && golangci-lint run   # Go linting
-cd apps/web && pnpm lint           # TypeScript linting
-
-# Build
-docker compose build           # Build all containers
+# Test, lint, build
+cd apps/api && go test ./... && golangci-lint run
+cd apps/web && pnpm test && pnpm lint
+docker compose build
 ```
 
-### Code Style
+### Code style
 
 - **Go**: gofmt, golangci-lint
 - **TypeScript**: ESLint, Prettier
 - **Commits**: [Conventional Commits](https://www.conventionalcommits.org/)
 
-## Claude Code Integration
-
-This project includes [Claude Code](https://claude.ai/code) skills for AI-assisted development.
-
-### Installed Skills
-
-| Category | Source | Description |
-|----------|--------|-------------|
-| Security | [Trail of Bits](https://github.com/trailofbits/skills) | Security audits, vulnerability detection, static analysis |
-| Go Development | [Gopher AI](https://github.com/gopherguides/gopher-ai) | Go best practices, testing patterns |
-| React/Next.js | [Vercel Agent Skills](https://github.com/vercel-labs/agent-skills) | Performance optimization (57+ rules) |
-| Workflows | [Claude Code SDK](https://github.com/hgeldenhuys/claude-code-sdk) | CI/CD, testing, code review patterns |
-
-### Key Skills for This Project
-
-- **differential-review** - Security-focused PR review
-- **go-best-practices** - Idiomatic Go patterns
-- **react-best-practices** - React/Next.js optimization
-- **ci-cd-integration** - Pipeline automation
-- **monorepo-patterns** - Monorepo workflows
-
-Skills are located in `.claude/skills/` and are automatically detected by Claude Code.
-
 ## Security
 
-### Reporting Vulnerabilities
+### Reporting vulnerabilities
 
-If you discover a security vulnerability, please report it via:
+If you find a security vulnerability, please use one of the following channels:
 
-1. **GitHub Security Advisories**: [Report a vulnerability](https://github.com/youichi-uda/sbomhub/security/advisories/new)
-2. **Email**: abyo.software@gmail.com (for sensitive issues)
+1. **GitHub Security Advisories** — [report a vulnerability](https://github.com/youichi-uda/sbomhub/security/advisories/new)
+2. **Email** — abyo.software@gmail.com for sensitive issues
 
-Please do NOT report security vulnerabilities through public GitHub issues.
+Please do not report security vulnerabilities through public GitHub issues.
 
-### Security Features
+### Security features
 
 - Row-Level Security (RLS) for multi-tenancy
 - API key authentication for CI/CD integration
 - HTTPS enforcement in production
 - Input validation with zod schemas
-- SQL injection prevention with parameterized queries
+- SQL injection prevention via parameterised queries
+- BYOK: LLM credentials stay with the operator; SBOMHub ships none
 
 ## Acknowledgements
 
-- [CycloneDX](https://cyclonedx.org/) - SBOM specification
-- [SPDX](https://spdx.dev/) - SBOM specification
-- [NVD](https://nvd.nist.gov/) - National Vulnerability Database
-- [JVN](https://jvn.jp/) - Japan Vulnerability Notes
-- [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
-- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) - Known Exploited Vulnerabilities Catalog
-- [CISA SSVC](https://www.cisa.gov/stakeholder-specific-vulnerability-categorization-ssvc) - Stakeholder-Specific Vulnerability Categorization
-- [Trail of Bits](https://github.com/trailofbits/skills) - Security skills for Claude Code
-- [Vercel](https://github.com/vercel-labs/agent-skills) - React best practices
+- [CycloneDX](https://cyclonedx.org/) / [SPDX](https://spdx.dev/) — SBOM specifications
+- [NVD](https://nvd.nist.gov/) / [JVN](https://jvn.jp/) — Vulnerability databases
+- [FIRST EPSS](https://www.first.org/epss/) — Exploit Prediction Scoring System
+- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) / [CISA SSVC](https://www.cisa.gov/stakeholder-specific-vulnerability-categorization-ssvc)
+- [Syft](https://github.com/anchore/syft) / [Trivy](https://github.com/aquasecurity/trivy) / [cdxgen](https://github.com/CycloneDX/cdxgen) / [OWASP Dependency-Track](https://dependencytrack.org/) — input sources we respect and complement

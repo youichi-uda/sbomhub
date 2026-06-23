@@ -12,52 +12,111 @@
   <img src="docs/images/dashboard.png" alt="SBOMHub ダッシュボード" width="800">
 </p>
 
-## SBOMHubとは？
+## SBOMHub — CRA 対応 SBOM コンプラ成果物レイヤー
 
-SBOMHubは、日本市場向けに設計されたオープンソースのSBOM（ソフトウェア部品表）管理ダッシュボードです。
+> **DT は CVE を見つける。SBOMHub は、提出できる紙にする。**
+>
+> SBOM を、提出できる VEX・CRA 報告書・監査証跡に変える、AGPL-3.0 の OSS 運用基盤。
 
-- Syft、cdxgen、Trivyなどで生成したSBOMを**インポート**（CycloneDX/SPDX対応）
-- NVD・JVNと連携して**脆弱性を追跡**
-- EPSSスコアで**対応優先度を判断**
-- VEXステートメントで**脆弱性トリアージを管理**
-- **経産省ガイドライン**・EU CRAへの対応を支援
-- **ライセンスポリシー**でプロジェクト全体を管理
-- Slack/Discord/Emailで**チームに通知**
+## 概要
 
-## 機能一覧
+SBOMHub は、CRA (EU Cyber Resilience Act) 2026/9 の脆弱性報告義務に直面する日本の組込み・IoT・中小ベンダー向けに、Syft / Trivy / Dependency-Track などの出力を取り込み、**AI が VEX・CRA 報告書・経産省自己評価の下書きを作り、人間が承認して提出物にする** 運用基盤です。
+
+「日本市場向けの汎用 SBOM 管理ダッシュボード」というカテゴリからは撤退し、DT / Syft / Trivy の上に乗る **AI コンプラ成果物レイヤー** に再定義しました。完全オープンソース (AGPL-3.0)、セルフホスト、BYOK (Bring Your Own Key) で運用できます。
+
+## 誰のためのものか
+
+- EU 向けに IoT / 組込み / デジタル製品を出荷する **日本の中小製造業ベンダー**
+- 専任 PSIRT を置けず、開発者や品質保証担当が片手間で脆弱性対応している組織
+- 取引先や監査から SBOM / VEX 提出を求められ始めた **受託開発会社・小規模 SaaS**
+- コードや SBOM を **海外 SaaS や外部 LLM API に出したくない** 製造業
+- CRA 2026/9 が具体的な期限として迫っているが、専任セキュリティ担当がいない組織
+
+汎用 SBOM 管理ツールとして広く誰にでも、ではなく、上記 ICP に絞った道具です。
+
+## 主な機能 (実装済み)
 
 | 機能 | 説明 |
 |------|------|
-| マルチフォーマットSBOM | CycloneDX・SPDX JSONに対応 |
-| 脆弱性トラッキング | NVD + JVN連携で網羅的にカバー |
-| EPSSスコアリング | 悪用可能性に基づく優先度付け |
-| **SSVC意思決定** | CISA SSVCフレームワークによる脆弱性優先度付け |
-| **KEV連携** | CISA Known Exploited Vulnerabilities カタログ連携 |
-| VEXサポート | 脆弱性の適用可否を記録 |
-| ライセンスポリシー | 許可/拒否ライセンスの管理 |
-| コンプライアンス対応支援 | 経産省ガイドライン自己評価チェック |
-| CI/CD連携 | GitHub Actions対応（APIキー認証） |
-| 日本語UI | 完全日本語対応 |
+| SBOM インポート | CycloneDX / SPDX JSON 取り込み |
+| 脆弱性突合 | NVD + JVN 連携で日本語 CVE 情報もカバー |
+| EPSS スコアリング | 悪用可能性に基づく優先度付け |
+| SSVC 意思決定 | CISA SSVC フレームワークによる優先度付け |
+| KEV 連携 | CISA Known Exploited Vulnerabilities カタログ自動同期 |
+| VEX 管理 (手動) | CycloneDX VEX 形式の作成・編集・エクスポート |
+| ライセンスポリシー | 許可 / 拒否ライセンスの管理 |
+| 経産省自己評価 | 経産省「ソフトウェア管理に向けた SBOM の導入に関する手引」自己評価チェックリスト |
+| 監査ログ | 操作履歴の証跡化 |
+| CI/CD 連携 | GitHub Actions 例、API キー認証 |
+| CLI | `sbomhub scan` / `sbomhub check` (sbomhub-cli) |
+| MCP Server | Claude Desktop / Cursor などからの読み取りアクセス |
+| マルチテナント | PostgreSQL Row-Level Security |
+| 日本語 UI | next-intl による日本語 / 英語切替 |
+
+## 開発中 (Phase 7: 戦略ピボット)
+
+ここから先は AGPL-3.0 の OSS としてそのまま実装していきます。詳細マイルストーンは [sbomhub-internal/planning/PRODUCT_REBOOT_PLAN.md](../sbomhub-internal/planning/PRODUCT_REBOOT_PLAN.md) (内部) を参照してください。
+
+- **AI VEX トリアージ MVP** (M1): CVE × コンポーネント × コードを LLM が読み、CycloneDX VEX の下書きを生成。最初は Go / npm のみ。confidence・根拠コード・アドバイザリ引用を必ず添付。
+- **CRA 報告書ドラフト生成** (M2): 24 時間早期警告 / 72 時間詳細通知 / 最終報告の日本語・英語ドラフト。自動提出はしません。
+- **経産省自己評価プリフィル** (M3): CI 設定 / SBOM 生成履歴 / 突合履歴から自己評価項目を自動で達成・未達・要確認に振り分け、根拠と改善アクションを表示。
+- **Local LLM / Enterprise Self-host 磨き込み** (M4): Ollama 等のローカル LLM 品質向上、セルフホストセキュリティガイド整備。
+
+絶対原則: **AI は下書きまで、最終判断は人間。** AI が勝手に `not_affected` を確定したり、CRA 報告を自動送信したりはしません。
+
+## AI 機能と BYOK (Bring Your Own Key)
+
+OSS 版の AI 機能は **完全 BYOK** です。SBOMHub にバンドルされた LLM 鍵はありません。お手元の OpenAI / Anthropic / Google Gemini の API キー、または Ollama などのローカル LLM を環境変数で設定して有効化してください。
+
+サポート予定プロバイダ:
+
+| プロバイダ | 想定モデル | コードを外部に出すか |
+|---|---|---|
+| OpenAI | `gpt-5` 等 | 出る (BYO key) |
+| Anthropic | `claude-opus-4-7` 等 | 出る (BYO key) |
+| Google Gemini | `gemini-3.5-flash` 等 | 出る (BYO key) |
+| Ollama (Local) | `llama3.3` / `qwen2.5-coder` 等 | 出ない (推奨) |
+
+設定例 (`.env`):
+
+```bash
+# どれか 1 つを設定すれば AI 機能が有効化されます
+SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_MODEL=gpt-5
+OPENAI_API_KEY=sk-...
+
+# ローカル LLM の例
+# SBOMHUB_LLM_PROVIDER=ollama
+# SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+# OLLAMA_HOST=http://localhost:11434
+```
+
+LLM プロバイダを設定していない場合、AI 機能は無効化され、手動 VEX 管理 / 手動 CRA 報告 / 手動経産省自己評価のみが動作します。AI なしでも従来の SBOM 管理機能はすべて使えます。
 
 ## クイックスタート
 
-### SaaS版（おすすめ）
-
-インストール不要ですぐに試せます: **https://sbomhub.app**
-
-- セットアップ不要
-- 無料プランあり
-- 自動アップデート付きマネージドインフラ
-
-### Docker Compose（セルフホスト）
+### Docker Compose (セルフホスト・推奨)
 
 ```bash
-# ダウンロードして起動（クローン不要）
+# 1. docker-compose.yml をダウンロード (クローン不要)
 curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
+
+# 2. .env を作成 (最低限、暗号鍵を発行)
+cat > .env <<'EOF'
+SBOMHUB_ENCRYPTION_KEY=$(openssl rand -base64 32)
+# AI を使う場合は追記
+# SBOMHUB_LLM_PROVIDER=openai
+# SBOMHUB_LLM_MODEL=gpt-5
+# OPENAI_API_KEY=sk-...
+EOF
+
+# 3. 起動
 docker compose up -d
+
+# 4. ブラウザで http://localhost:3000
 ```
 
-または、クローンして起動：
+または、リポジトリをクローンして起動:
 
 ```bash
 git clone https://github.com/youichi-uda/sbomhub.git
@@ -65,158 +124,107 @@ cd sbomhub
 docker compose up -d
 ```
 
-http://localhost:3000 を開く
+### CLI (sbomhub scan)
+
+ローカルから直接スキャン・アップロードする場合は CLI を使います。
+
+```bash
+# インストール (Homebrew, macOS/Linux)
+brew install sbomhub/tap/sbomhub
+
+# または Go install
+go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
+
+# セルフホストインスタンスに接続
+sbomhub login --api-key YOUR_API_KEY --url http://localhost:8080
+
+# スキャン & アップロード
+sbomhub scan . --project my-device
+
+# 脆弱性チェックのみ (アップロードなし)
+sbomhub check .
+
+# CI/CD 用 (Critical 検出で exit 1)
+sbomhub scan . --project my-device --fail-on critical
+```
+
+CLI は内部で Syft / Trivy / cdxgen のいずれかを自動検出して呼び出します。詳細は [sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli) を参照してください。
 
 ### ソースからビルド
 
-**前提条件:**
-- Go 1.22+
-- Node.js 20+ / pnpm
-- PostgreSQL 15+
-- Redis 7+
+**前提条件:** Go 1.22+ / Node.js 20+ / pnpm / PostgreSQL 15+ / Redis 7+
 
 ```bash
 # データベースを起動
 docker compose -f docker/docker-compose.yml up -d postgres redis
 
 # バックエンド
-cd apps/api
-go run ./cmd/server
+cd apps/api && go run ./cmd/server
 
-# フロントエンド（別ターミナル）
-cd apps/web
-pnpm install
-pnpm dev
+# フロントエンド (別ターミナル)
+cd apps/web && pnpm install && pnpm dev
 ```
 
-## スクリーンショット
+### SaaS 版について
 
-<details>
-<summary>ダッシュボード</summary>
-<img src="docs/images/dashboard.png" width="600">
-</details>
+> SaaS 版 (https://sbomhub.app) は **2026-06-23 時点で新規受付停止 (sunset)** です。新ポジショニング下での再開時期は未定。当面はセルフホスト + CLI を主導線にしてください。再開時はリポジトリ上でアナウンスします。
 
-<details>
-<summary>脆弱性一覧</summary>
-<img src="docs/images/vulnerabilities.png" width="600">
-</details>
+## 既存ユーザー向けの注意
 
-<details>
-<summary>コンプライアンススコア</summary>
-<img src="docs/images/compliance.png" width="600">
-</details>
+SBOMHub は v0.x の間に「日本版 Dependency-Track」から「CRA 対応 SBOM コンプラ成果物レイヤー」へポジショニングをピボットしました。実装済みの SBOM 管理 / 脆弱性突合 / VEX / ライセンスポリシー / 経産省自己評価機能は維持されます。AI 機能と CRA 報告書ドラフト機能が順次追加されます。
 
 ## アーキテクチャ
 
 ```
-┌─────────────────┐     ┌─────────────────┐
-│   Next.js Web   │────▶│    Go API       │
-│   (Port 3000)   │     │   (Port 8080)   │
-└─────────────────┘     └────────┬────────┘
-                                 │
-                    ┌────────────┼────────────┐
-                    ▼            ▼            ▼
-             ┌───────────┐ ┌───────────┐ ┌───────────┐
-             │ PostgreSQL│ │   Redis   │ │ NVD / JVN │
-             │  (Data)   │ │  (Cache)  │ │  (APIs)   │
-             └───────────┘ └───────────┘ └───────────┘
+┌──────────────────┐     ┌──────────────────┐
+│   Next.js Web    │────▶│     Go API       │
+│   (Port 3000)    │     │   (Port 8080)    │
+└──────────────────┘     └─────────┬────────┘
+                                   │
+                ┌──────────────────┼────────────────────┐
+                ▼                  ▼                    ▼
+        ┌───────────────┐  ┌───────────────┐  ┌─────────────────┐
+        │  PostgreSQL   │  │     Redis     │  │   NVD / JVN     │
+        │   (Data)      │  │    (Cache)    │  │   (Vuln feeds)  │
+        └───────────────┘  └───────────────┘  └─────────────────┘
+                                   │
+                                   ▼ (BYOK, optional)
+                        ┌──────────────────────────┐
+                        │   LLM Provider           │
+                        │   OpenAI / Anthropic /   │
+                        │   Gemini / Ollama        │
+                        └──────────────────────────┘
 ```
 
-## APIリファレンス
+## API リファレンス
 
-詳細は[APIドキュメント](./docs/api.md)を参照
-
-### 主要エンドポイント
+主要エンドポイント (詳細は [docs/api.ja.md](./docs/api.ja.md))。
 
 ```
 POST   /api/v1/projects              # プロジェクト作成
 GET    /api/v1/projects              # プロジェクト一覧
 GET    /api/v1/projects/:id          # プロジェクト詳細
-DELETE /api/v1/projects/:id          # プロジェクト削除
 
-POST   /api/v1/projects/:id/sbom     # SBOMアップロード
+POST   /api/v1/projects/:id/sbom     # SBOM アップロード
 GET    /api/v1/projects/:id/components
 GET    /api/v1/projects/:id/vulnerabilities
-GET    /api/v1/projects/:id/vex      # VEXステートメント
+GET    /api/v1/projects/:id/vex      # VEX ステートメント
 
-# SSVC (Stakeholder-Specific Vulnerability Categorization)
-GET    /api/v1/projects/:id/ssvc/defaults    # プロジェクトSSVCデフォルト設定
-PUT    /api/v1/projects/:id/ssvc/defaults    # SSVCデフォルト設定更新
-POST   /api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc  # SSVC評価作成
-GET    /api/v1/projects/:id/ssvc/summary     # SSVC評価サマリー
-POST   /api/v1/ssvc/calculate                # SSVC決定計算（保存なし）
+# SSVC
+GET    /api/v1/projects/:id/ssvc/defaults
+PUT    /api/v1/projects/:id/ssvc/defaults
+POST   /api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc
+POST   /api/v1/ssvc/calculate
 
-# KEV (Known Exploited Vulnerabilities)
-POST   /api/v1/kev/sync              # KEVカタログ同期
-GET    /api/v1/kev/stats             # KEV統計情報
-GET    /api/v1/kev/:cve_id           # CVEのKEV確認
-GET    /api/v1/projects/:id/kev      # プロジェクトのKEV脆弱性一覧
+# KEV
+POST   /api/v1/kev/sync
+GET    /api/v1/kev/:cve_id
+GET    /api/v1/projects/:id/kev
 ```
 
-## CLI
+## MCP Server (読み取り)
 
-SBOMHub CLIを使うと、SBOM生成からアップロードまでを1コマンドで実行できます。
-
-### インストール
-
-```bash
-# Homebrew (macOS/Linux)
-brew install sbomhub/tap/sbomhub
-
-# Shell script (macOS/Linux)
-curl -fsSL https://sbomhub.app/install.sh | sh
-
-# Windows (Scoop)
-scoop bucket add sbomhub https://github.com/sbomhub/scoop-bucket
-scoop install sbomhub
-
-# Go install
-go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
-```
-
-### 基本的な使い方
-
-```bash
-# ログイン（API Key設定）
-sbomhub login
-
-# カレントディレクトリをスキャン＆アップロード
-sbomhub scan .
-
-# プロジェクト指定でスキャン
-sbomhub scan . --project my-app
-
-# 脆弱性チェックのみ（アップロードなし）
-sbomhub check .
-
-# CI/CD向け（Critical検出でexit 1）
-sbomhub scan . --project my-app --fail-on critical --quiet
-```
-
-### 必要な外部ツール
-
-以下のいずれかがインストールされている必要があります:
-- [Syft](https://github.com/anchore/syft) (推奨)
-- [Trivy](https://github.com/aquasecurity/trivy)
-- [cdxgen](https://github.com/CycloneDX/cdxgen)
-
-詳細は[sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli)を参照。
-
-## MCP Server
-
-SBOMHub MCPサーバーを使用すると、Claude Desktop、Cursor、その他のMCP対応AIツールからSBOMHubのデータに直接アクセスできます。
-
-### インストール
-
-```bash
-cd packages/mcp-server
-pnpm install
-pnpm build
-```
-
-### 設定（Claude Desktop）
-
-`claude_desktop_config.json`に以下を追加:
+Claude Desktop / Cursor 等から SBOMHub のデータに読み取りアクセスできます。
 
 ```json
 {
@@ -226,47 +234,39 @@ pnpm build
       "args": ["/path/to/sbomhub/packages/mcp-server/dist/index.js"],
       "env": {
         "SBOMHUB_API_KEY": "your-api-key",
-        "SBOMHUB_API_URL": "https://api.sbomhub.app"
+        "SBOMHUB_API_URL": "http://localhost:8080"
       }
     }
   }
 }
 ```
 
-### 利用可能なツール
-
 | ツール | 説明 |
 |--------|------|
 | sbomhub_list_projects | プロジェクト一覧取得 |
 | sbomhub_get_dashboard | ダッシュボード情報 |
-| sbomhub_search_cve | CVE横断検索 |
+| sbomhub_search_cve | CVE 横断検索 |
 | sbomhub_search_component | コンポーネント検索 |
-| sbomhub_diff | SBOM差分比較 |
+| sbomhub_diff | SBOM 差分比較 |
 | sbomhub_get_vulnerabilities | 脆弱性一覧 |
 | sbomhub_get_compliance | コンプライアンススコア |
 
-詳細は[packages/mcp-server/README.md](./packages/mcp-server/README.md)を参照。
+詳細は [packages/mcp-server/README.md](./packages/mcp-server/README.md) を参照。
 
-## CI/CD連携
-
-### GitHub Actions
+## CI/CD 連携 (GitHub Actions)
 
 ```yaml
 name: Upload SBOM
-
 on:
   push:
     branches: [main]
-
 jobs:
   sbom:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Generate SBOM
         run: syft . -o cyclonedx-json > sbom.json
-
       - name: Upload to SBOMHub
         run: |
           curl -X POST \
@@ -275,41 +275,37 @@ jobs:
             ${{ secrets.SBOMHUB_URL }}/api/v1/projects/${{ secrets.PROJECT_ID }}/sbom
 ```
 
-## ドキュメント
+## ロードマップ (Phase 7 = 戦略ピボット)
 
-- [インストールガイド](./docs/installation.ja.md)
-- [設定](./docs/configuration.ja.md)
-- [APIリファレンス](./docs/api.ja.md)
-- [GitHub Actions連携](./docs/github-actions.ja.md)
+CRA 2026-09-11 から逆算した M0-M4 マイルストーン。
 
-## ロードマップ
+| マイルストーン | 期間目安 | 内容 |
+|---|---|---|
+| **M0** 戦略確定 + Trust Rescue 着手 | 〜 2 週間 | README / LP のポジショニング刷新、RLS / 暗号鍵 / API 契約 / CI / 配布の P0 修正、waitlist 導線、デザインパートナー候補リスト化 |
+| **M1** AI VEX トリアージ MVP | 〜 6 週間 | `sbomhub triage` CLI、Go / npm の reachability 一次解析、LLM 判断、VEX draft 保存、UI 承認 / 編集 / 却下、CycloneDX VEX export、confidence / evidence / 監査ログ |
+| **M2** CRA 報告書ドラフト | 〜 4 週間 | 24h 早期警告 / 72h 詳細通知 / 最終報告テンプレ、日本語 / 英語、Evidence Pack 統合 |
+| **M3** 経産省自己評価プリフィル | 〜 3 週間 | CI / SBOMHub 利用履歴から自己評価項目をプリフィル、達成 / 未達 / 要確認 + 根拠 |
+| **M4** Local LLM / Enterprise Self-host 磨き込み | 継続 | LLM プロバイダ抽象化、Ollama 等の品質比較、セルフホストセキュリティガイド |
 
-- [x] SBOMインポート（CycloneDX/SPDX）
-- [x] NVD/JVN脆弱性マッチング
-- [x] EPSSスコアリング
-- [x] VEXサポート
-- [x] ライセンスポリシー
-- [x] コンプライアンス対応支援（経産省ガイドライン自己評価）
-- [x] CI/CD連携（GitHub Actions）
-- [x] 通知機能（Slack/Discord）
-- [x] マルチテナント対応（Row-Level Security）
-- [x] Clerk認証連携
-- [x] Lemon Squeezy課金連携
-- [x] SBOMHub Cloud（マネージドSaaS）
-- [x] **SSVC意思決定フレームワーク** - CISA SSVCによる脆弱性優先度付け
-- [x] **KEV連携** - Known Exploited Vulnerabilities カタログ自動同期
-- [ ] リスクプロファイル - プロジェクト固有のリスク設定
-- [ ] トリアージダッシュボード - KEV/SSVCを統合した優先度表示
-- [ ] AI優先度推定 - MCP拡張によるAI自動判定
-- [ ] LDAP/OIDC認証（セルフホスト向け）
-
-## コントリビューション
-
-コントリビューションを歓迎します！詳細は[CONTRIBUTING.md](./CONTRIBUTING.md)をご覧ください。
+実装済み機能 (現状の機能一覧) はそのまま維持し、上記マイルストーンを順次追加していきます。
 
 ## ライセンス
 
-本プロジェクトは[AGPL-3.0ライセンス](./LICENSE)の下で公開されています。
+本プロジェクトは [AGPL-3.0 ライセンス](./LICENSE) の下で公開されています。
+
+| ユースケース | 可否 | 備考 |
+|----------|---------|-------|
+| セルフホスト (社内利用) | OK | ソース開示義務なし |
+| セルフホスト (改変あり) | OK | 改変ソースの開示義務あり |
+| 第三者に SaaS として提供 | 注意 | AGPL に従い全ソース開示義務 |
+
+> AGPL 義務なしで商用 SaaS / 組込み配布したい場合は、別途お問い合わせください。
+
+## コントリビューション
+
+コントリビューションを歓迎します。詳細は [CONTRIBUTING.md](./CONTRIBUTING.md) をご覧ください。
+
+新ポジショニング (CRA / AI VEX / 経産省自己評価) に関するフィードバックや、CRA 対応デザインパートナーとしての参加にご興味のある方は、GitHub Issue または abyo.software@gmail.com までご連絡ください。
 
 ## 技術スタック
 
@@ -317,24 +313,15 @@ jobs:
 |---------|------|-----------|
 | バックエンド | Go (Echo v4) | 1.22+ |
 | フロントエンド | Next.js (App Router) | 16 |
-| UIフレームワーク | React | 19 |
+| UI | React + shadcn/ui + Tailwind CSS | 19 / latest / 3.4 |
 | 言語 | TypeScript | 5.7 |
-| UIコンポーネント | shadcn/ui | 最新 |
-| スタイリング | Tailwind CSS | 3.4 |
 | データベース | PostgreSQL | 15+ |
 | キャッシュ | Redis | 7+ |
-| 国際化 | next-intl | 最新 |
-| フォームバリデーション | react-hook-form + zod | 最新 |
+| 国際化 | next-intl | latest |
+| フォーム | react-hook-form + zod | latest |
+| LLM (BYOK) | OpenAI / Anthropic / Gemini / Ollama | 任意 |
 
 ## 開発
-
-### 必要環境
-
-- Go 1.22+
-- Node.js 20+ と pnpm
-- PostgreSQL 15+
-- Redis 7+
-- Docker & Docker Compose（オプション）
 
 ### プロジェクト構造
 
@@ -344,35 +331,29 @@ sbomhub/
 │   ├── web/          # Next.js フロントエンド
 │   └── api/          # Go バックエンド
 ├── packages/
-│   ├── db/           # DBスキーマとマイグレーション
-│   ├── mcp-server/   # MCP Server（Claude/Cursor連携）
-│   └── types/        # 共有TypeScript型定義
-├── docker/           # Docker設定
+│   ├── db/           # DB スキーマとマイグレーション
+│   ├── mcp-server/   # MCP Server (Claude/Cursor 連携)
+│   └── types/        # 共有 TypeScript 型定義
+├── docker/           # Docker 設定
 ├── docs/             # ドキュメント
-└── .github/workflows/  # CI/CDパイプライン
+└── .github/workflows/  # CI/CD パイプライン
 ```
 
 ### よく使うコマンド
 
 ```bash
 # 開発サーバー起動
-cd apps/web && pnpm dev      # フロントエンド (http://localhost:3000)
-cd apps/api && go run ./cmd/server  # バックエンド (http://localhost:8080)
+cd apps/web && pnpm dev                # フロントエンド (http://localhost:3000)
+cd apps/api && go run ./cmd/server     # バックエンド (http://localhost:8080)
 
 # データベース
-docker compose up -d postgres redis  # DB起動
-cd apps/api && go run ./cmd/migrate up  # マイグレーション実行
+docker compose up -d postgres redis
+cd apps/api && go run ./cmd/migrate up
 
-# テスト
-cd apps/api && go test ./...   # バックエンドテスト
-cd apps/web && pnpm test       # フロントエンドテスト
-
-# Lint
-cd apps/api && golangci-lint run   # Go lint
-cd apps/web && pnpm lint           # TypeScript lint
-
-# ビルド
-docker compose build           # 全コンテナビルド
+# テスト・Lint・ビルド
+cd apps/api && go test ./... && golangci-lint run
+cd apps/web && pnpm test && pnpm lint
+docker compose build
 ```
 
 ### コードスタイル
@@ -381,56 +362,30 @@ docker compose build           # 全コンテナビルド
 - **TypeScript**: ESLint, Prettier
 - **コミット**: [Conventional Commits](https://www.conventionalcommits.org/ja/)
 
-## Claude Code連携
-
-本プロジェクトには、AI支援開発のための[Claude Code](https://claude.ai/code)スキルが導入されています。
-
-### 導入済みスキル
-
-| カテゴリ | ソース | 説明 |
-|---------|--------|------|
-| セキュリティ | [Trail of Bits](https://github.com/trailofbits/skills) | セキュリティ監査、脆弱性検出、静的解析 |
-| Go開発 | [Gopher AI](https://github.com/gopherguides/gopher-ai) | Goベストプラクティス、テストパターン |
-| React/Next.js | [Vercel Agent Skills](https://github.com/vercel-labs/agent-skills) | パフォーマンス最適化（57以上のルール） |
-| ワークフロー | [Claude Code SDK](https://github.com/hgeldenhuys/claude-code-sdk) | CI/CD、テスト、コードレビューパターン |
-
-### このプロジェクト向けの主要スキル
-
-- **differential-review** - セキュリティ重視のPRレビュー
-- **go-best-practices** - 慣用的なGoパターン
-- **react-best-practices** - React/Next.js最適化
-- **ci-cd-integration** - パイプライン自動化
-- **monorepo-patterns** - モノレポワークフロー
-
-スキルは `.claude/skills/` に配置され、Claude Codeによって自動検出されます。
-
 ## セキュリティ
 
 ### 脆弱性の報告
 
-セキュリティ脆弱性を発見した場合は、以下の方法で報告してください：
+セキュリティ脆弱性を発見した場合は、以下の方法で報告してください。
 
 1. **GitHub Security Advisories**: [脆弱性を報告](https://github.com/youichi-uda/sbomhub/security/advisories/new)
-2. **メール**: abyo.software@gmail.com（機密性の高い問題の場合）
+2. **メール**: abyo.software@gmail.com (機密性の高い問題の場合)
 
-公開のGitHub Issueでセキュリティ脆弱性を報告しないでください。
+公開の GitHub Issue でセキュリティ脆弱性を報告しないでください。
 
 ### セキュリティ機能
 
-- マルチテナント向けRow-Level Security (RLS)
-- CI/CD連携用APIキー認証
-- 本番環境でのHTTPS強制
-- zodスキーマによる入力バリデーション
-- パラメータ化クエリによるSQLインジェクション防止
+- マルチテナント向け Row-Level Security (RLS)
+- CI/CD 連携用 API キー認証
+- 本番環境での HTTPS 強制
+- zod スキーマによる入力バリデーション
+- パラメータ化クエリによる SQL インジェクション防止
+- BYOK: LLM 鍵はユーザー側で保持。SBOMHub はバンドル鍵を持ちません
 
 ## 謝辞
 
-- [CycloneDX](https://cyclonedx.org/) - SBOM仕様
-- [SPDX](https://spdx.dev/) - SBOM仕様
-- [NVD](https://nvd.nist.gov/) - National Vulnerability Database
-- [JVN](https://jvn.jp/) - Japan Vulnerability Notes
+- [CycloneDX](https://cyclonedx.org/) / [SPDX](https://spdx.dev/) - SBOM 仕様
+- [NVD](https://nvd.nist.gov/) / [JVN](https://jvn.jp/) - 脆弱性データベース
 - [FIRST EPSS](https://www.first.org/epss/) - Exploit Prediction Scoring System
-- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) - Known Exploited Vulnerabilities Catalog
-- [CISA SSVC](https://www.cisa.gov/stakeholder-specific-vulnerability-categorization-ssvc) - Stakeholder-Specific Vulnerability Categorization
-- [Trail of Bits](https://github.com/trailofbits/skills) - Claude Code向けセキュリティスキル
-- [Vercel](https://github.com/vercel-labs/agent-skills) - Reactベストプラクティス
+- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) / [CISA SSVC](https://www.cisa.gov/stakeholder-specific-vulnerability-categorization-ssvc)
+- [Syft](https://github.com/anchore/syft) / [Trivy](https://github.com/aquasecurity/trivy) / [cdxgen](https://github.com/CycloneDX/cdxgen) / [OWASP Dependency-Track](https://dependencytrack.org/) - 入力源として尊敬しています
