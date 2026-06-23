@@ -41,7 +41,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(1, 1))
 			},
 			wantErr: false,
@@ -60,7 +60,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "express", "4.18.2", "library", "", "", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "express", "4.18.2", "library", "", "", sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(1, 1))
 			},
 			wantErr: false,
@@ -77,7 +77,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "axios", "1.4.0", "library", "", "", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "axios", "1.4.0", "library", "", "", sqlmock.AnyArg()).
 					WillReturnError(errors.New("foreign key violation"))
 			},
 			wantErr: true,
@@ -94,7 +94,7 @@ func TestComponentRepository_Create(t *testing.T) {
 			},
 			setupMock: func() {
 				mock.ExpectExec("INSERT INTO components").
-					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "react", "18.2.0", "library", "", "", sqlmock.AnyArg()).
+					WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "react", "18.2.0", "library", "", "", sqlmock.AnyArg()).
 					WillReturnError(errors.New("duplicate key value violates unique constraint"))
 			},
 			wantErr: true,
@@ -552,7 +552,7 @@ func TestComponentRepository_Create_VariousTypes(t *testing.T) {
 			}
 
 			mock.ExpectExec("INSERT INTO components").
-				WithArgs(component.ID, component.SbomID, tc.name, "1.0.0", tc.compType, tc.purl, "MIT", sqlmock.AnyArg()).
+				WithArgs(component.ID, component.TenantID, component.SbomID, tc.name, "1.0.0", tc.compType, tc.purl, "MIT", sqlmock.AnyArg()).
 				WillReturnResult(sqlmock.NewResult(1, 1))
 
 			err := repo.Create(context.Background(), component)
@@ -602,5 +602,45 @@ func TestComponentRepository_ListBySbom_OrderedByName(t *testing.T) {
 		if components[i].Name != expected {
 			t.Errorf("component at index %d: expected name '%s', got '%s'", i, expected, components[i].Name)
 		}
+	}
+}
+
+// TestComponentRepository_Create_PassesTenantID locks the tenant_id column to
+// position 2 of the INSERT. Symmetric guard to the sbom-side test: makes a
+// silent reorder loud.
+func TestComponentRepository_Create_PassesTenantID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create mock db: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewComponentRepository(db)
+	tenantID := uuid.New()
+	sbomID := uuid.New()
+	compID := uuid.New()
+	createdAt := time.Now()
+
+	mock.ExpectExec("INSERT INTO components").
+		WithArgs(compID, tenantID, sbomID, "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", createdAt).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	err = repo.Create(context.Background(), &model.Component{
+		ID:        compID,
+		TenantID:  tenantID,
+		SbomID:    sbomID,
+		Name:      "lodash",
+		Version:   "4.17.21",
+		Type:      "library",
+		Purl:      "pkg:npm/lodash@4.17.21",
+		License:   "MIT",
+		CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("Create returned unexpected error: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %s", err)
 	}
 }
