@@ -1,17 +1,33 @@
 # SBOMHub - Quick Start Docker Compose
 # Usage: docker compose up -d
 # Open: http://localhost:3000
+#
+# Roles (P0 #2 / Trust Rescue 9.1.1):
+#   - sbomhub          : POSTGRES_USER, db owner (superuser-equivalent inside
+#                        this DB). Used only to bootstrap the two roles below.
+#   - sbomhub_migrator : Runs migrations / DDL. CREATEDB + CREATEROLE, NOT
+#                        BYPASSRLS. Used by MIGRATE_DATABASE_URL.
+#   - sbomhub_app      : Runtime app role. SELECT/INSERT/UPDATE/DELETE only,
+#                        NOBYPASSRLS so Row-Level Security is enforced. Used
+#                        by DATABASE_URL.
+#
+# Override passwords by creating a .env file at the repo root (see .env.example).
 
 services:
   api:
     image: y1uda/sbomhub-api:latest
     ports:
       - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
     environment:
-      - DATABASE_URL=postgres://sbomhub:sbomhub@postgres:5432/sbomhub?sslmode=disable
+      - DATABASE_URL=postgres://sbomhub_app:${APP_PASSWORD:-sbomhub_app_dev}@postgres:5432/sbomhub?sslmode=disable
+      - MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIGRATOR_PASSWORD:-sbomhub_migrator_dev}@postgres:5432/sbomhub?sslmode=disable
       - REDIS_URL=redis://redis:6379
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-V5jgaCSCV/Mdf8JbVX42aWYAB6dG1Dp9G9Bo0Nw+qjY=}
       - NVD_API_KEY=${NVD_API_KEY:-}
+      - APP_ENV=${APP_ENV:-development}
     depends_on:
       postgres:
         condition: service_healthy
@@ -31,12 +47,18 @@ services:
 
   postgres:
     image: postgres:15-alpine
+    env_file:
+      - path: .env
+        required: false
     environment:
       - POSTGRES_USER=sbomhub
       - POSTGRES_PASSWORD=sbomhub
       - POSTGRES_DB=sbomhub
+      - MIGRATOR_PASSWORD=${MIGRATOR_PASSWORD:-sbomhub_migrator_dev}
+      - APP_PASSWORD=${APP_PASSWORD:-sbomhub_app_dev}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./apps/api/cmd/migrate/init.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sbomhub"]
       interval: 5s
