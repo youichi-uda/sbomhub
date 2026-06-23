@@ -1,6 +1,9 @@
 # インストールガイド
 
-このガイドでは、SBOMHubをインストールして実行するさまざまな方法を説明します。
+このガイドでは、SBOMHub をインストールして実行するさまざまな方法を説明します。
+
+> SBOMHub は CRA (EU Cyber Resilience Act 2026/9) 対応を主軸とする **AI コンプラ成果物レイヤー** です (Dependency-Track / Syft / Trivy の上に乗ります)。
+> **SaaS 版 (`sbomhub.app`) は 2026-06 にサンセット**し、現在は self-host (Docker Compose) のみがサポート対象です。本ガイドの手順はすべて self-host を前提とします。
 
 ## Docker Composeでクイックスタート
 
@@ -37,6 +40,8 @@ cd sbomhub
 ```bash
 cp .env.example .env
 # .envを編集して設定をカスタマイズ
+# AI 機能を使う場合は BYOK で LLM プロバイダを設定 (OpenAI / Anthropic / Gemini / Ollama)。
+# 未設定なら AI 機能は無効化され、SBOM 管理 / 手動 VEX などは通常通り動作します。
 ```
 
 3. サービスを起動：

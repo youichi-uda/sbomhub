@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to SBOMHub!
 
+SBOMHub is an AGPL-3.0 **AI compliance evidence layer** built on top of Dependency-Track / Syft / Trivy, focused on the EU Cyber Resilience Act (CRA) reporting deadline of **2026-09-11**. The SaaS instance at `sbomhub.app` was sunset in 2026-06; self-host (Docker Compose) is the only supported path. See `CLAUDE.md` and `README.md` for the full positioning before you start a non-trivial contribution.
+
 [日本語版はこちら](#コントリビューションガイド日本語)
 
 ## Development Setup
@@ -193,7 +195,9 @@ When adding new migrations:
 
 # コントリビューションガイド（日本語）
 
-SBOMHubへのコントリビューションに興味を持っていただきありがとうございます！
+SBOMHub へのコントリビューションに興味を持っていただきありがとうございます！
+
+SBOMHub は AGPL-3.0 の OSS で、CRA (EU Cyber Resilience Act 2026/9) 対応を主軸とする **AI コンプラ成果物レイヤー** です (Dependency-Track / Syft / Trivy の上に乗ります)。SaaS 版 (`sbomhub.app`) は 2026-06 にサンセットされ、現在は self-host (Docker Compose) のみがサポート対象です。大きめの変更を始める前に `CLAUDE.md` / `README.md` の新ポジショニングを必ず確認してください。
 
 ## 開発環境のセットアップ
 

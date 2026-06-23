@@ -1,20 +1,22 @@
 # GitHub Actions連携
 
-このガイドでは、SBOMHubをGitHub Actionsと連携してSBOM生成とアップロードを自動化する方法を説明します。
+このガイドでは、SBOMHub を GitHub Actions と連携して SBOM 生成と CRA / VEX 用の証跡アップロードを自動化する方法を説明します。
+
+> SaaS 版 (`sbomhub.app`) は 2026-06 にサンセットされました。本ガイドの `SBOMHUB_URL` は **self-host インスタンス** (Docker Compose) を指す前提です (例: 社内ネットワーク内の `https://sbomhub.internal.example.com` や GitHub self-hosted runner から到達可能な URL)。
 
 ## 概要
 
-SBOMワークフローの自動化：
+SBOM ワークフローの自動化：
 
-1. プッシュ/リリースごとにSBOMを生成
-2. SBOMHubにアップロードして脆弱性を追跡
+1. プッシュ/リリースごとに SBOM を生成
+2. self-host の SBOMHub にアップロードして脆弱性を追跡・VEX / CRA 報告の証跡にする
 3. 新しい脆弱性の通知を受信
 
 ## 前提条件
 
-1. SBOMHubインスタンス（セルフホストまたはSaaS）
-2. SBOMHubでプロジェクトを作成済み
-3. プロジェクト用のAPIキーを生成済み
+1. self-host の SBOMHub インスタンス
+2. SBOMHub でプロジェクトを作成済み
+3. プロジェクト用の API キーを生成済み
 
 ## セットアップ
 
@@ -35,7 +37,7 @@ GitHubリポジトリで：
 | シークレット | 説明 |
 |-------------|------|
 | `SBOMHUB_API_KEY` | ステップ1で取得したAPIキー |
-| `SBOMHUB_URL` | SBOMHubのURL（例: `https://sbomhub.app` または `http://your-server:8080`） |
+| `SBOMHUB_URL` | self-host SBOMHub のURL（例: `https://sbomhub.internal.example.com` または `http://your-server:8080`） |
 | `SBOMHUB_PROJECT_ID` | プロジェクトのUUID |
 
 ## ワークフロー例
@@ -281,10 +283,10 @@ cat sbom.json | jq '.bomFormat // .spdxVersion'
 
 ### 接続タイムアウト
 
-セルフホストインスタンスの場合、以下を確認：
-- サーバーがGitHub Actionsからアクセス可能
+self-host インスタンスの場合、以下を確認：
+- サーバーが GitHub Actions ランナーから到達可能
 - ファイアウォールルールが受信接続を許可
-- パブリックURLまたはGitHubセルフホストランナーを使用
+- 社内ネットワークの場合は GitHub self-hosted runner を使用
 
 ## ベストプラクティス
 

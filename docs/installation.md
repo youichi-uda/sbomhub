@@ -2,6 +2,9 @@
 
 This guide covers different ways to install and run SBOMHub.
 
+> SBOMHub is an **AI compliance evidence layer** focused on the EU Cyber Resilience Act (CRA) reporting deadline of **2026-09-11**, built on top of Dependency-Track / Syft / Trivy.
+> **The SaaS instance at `sbomhub.app` was sunset in 2026-06**; self-host (Docker Compose) is the only supported path. All instructions below assume self-host.
+
 ## Quick Start with Docker Compose
 
 The fastest way to get started:
@@ -37,6 +40,8 @@ cd sbomhub
 ```bash
 cp .env.example .env
 # Edit .env with your settings
+# To enable AI features, configure a BYOK LLM provider (OpenAI / Anthropic / Gemini / Ollama).
+# If unset, AI features are gracefully disabled; SBOM management / manual VEX still work.
 ```
 
 3. Start the services:

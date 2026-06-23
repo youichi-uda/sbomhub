@@ -2,7 +2,9 @@
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for SBOMHub.
 
-Claude Desktop や Cursor から自然言語で SBOMHub の脆弱性情報にアクセスできます。
+Claude Desktop や Cursor から自然言語で SBOMHub の脆弱性情報 / VEX / CRA 報告書ドラフトにアクセスできます (読み取り専用)。
+
+> SBOMHub は CRA (EU Cyber Resilience Act 2026/9) 対応の **AI コンプラ成果物レイヤー** です。SaaS 版 (`sbomhub.app`) は 2026-06 にサンセットされ、現在は self-host (Docker Compose) のみがサポート対象です。MCP Server はローカルの SBOMHub インスタンス (`http://localhost:8080` がデフォルト) を参照します。
 
 ## 機能
 
@@ -20,7 +22,7 @@ Claude Desktop や Cursor から自然言語で SBOMHub の脆弱性情報にア
 
 ### 1. APIキーの取得
 
-1. SBOMHub にログイン
+1. self-host した SBOMHub (例: `http://localhost:8080`) にログイン
 2. プロジェクト詳細ページを開く
 3. 「API Keys」タブをクリック
 4. 「Create API Key」で新規作成
@@ -49,7 +51,7 @@ pnpm build
       "command": "node",
       "args": ["/path/to/sbomhub/packages/mcp-server/dist/index.js"],
       "env": {
-        "SBOMHUB_API_URL": "https://your-sbomhub-instance.com",
+        "SBOMHUB_API_URL": "http://localhost:8080",
         "SBOMHUB_API_KEY": "sbh_your_api_key_here"
       }
     }
@@ -68,7 +70,7 @@ pnpm build
       "command": "node",
       "args": ["/path/to/sbomhub/packages/mcp-server/dist/index.js"],
       "env": {
-        "SBOMHUB_API_URL": "https://your-sbomhub-instance.com",
+        "SBOMHUB_API_URL": "http://localhost:8080",
         "SBOMHUB_API_KEY": "sbh_your_api_key_here"
       }
     }
@@ -122,7 +124,7 @@ Claude に話しかけるだけで SBOMHub の情報を取得できます:
 
 1. APIキーが正しいか確認
 2. APIキーの有効期限が切れていないか確認
-3. SBOMHub の URL が正しいか確認
+3. SBOMHub の URL が正しいか確認 (self-host 既定は `http://localhost:8080`)
 
 ## 開発
 

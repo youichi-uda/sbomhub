@@ -1,18 +1,20 @@
 # GitHub Actions Integration
 
-This guide explains how to integrate SBOMHub with GitHub Actions for automated SBOM generation and upload.
+This guide explains how to integrate SBOMHub with GitHub Actions to automate SBOM generation and upload as CRA / VEX evidence.
+
+> The SaaS instance at `sbomhub.app` was sunset in 2026-06. `SBOMHUB_URL` in this guide refers to a **self-host instance** (Docker Compose) — for example an internal URL such as `https://sbomhub.internal.example.com`, or any URL reachable from the GitHub Actions runner you use.
 
 ## Overview
 
 Automate your SBOM workflow:
 
 1. Generate SBOM on every push/release
-2. Upload to SBOMHub for vulnerability tracking
+2. Upload to your self-host SBOMHub for vulnerability tracking and as VEX / CRA evidence
 3. Receive notifications for new vulnerabilities
 
 ## Prerequisites
 
-1. SBOMHub instance (self-hosted or SaaS)
+1. Self-host SBOMHub instance
 2. Project created in SBOMHub
 3. API key generated for the project
 
@@ -35,7 +37,7 @@ In your GitHub repository:
 | Secret | Description |
 |--------|-------------|
 | `SBOMHUB_API_KEY` | Your API key from step 1 |
-| `SBOMHUB_URL` | Your SBOMHub URL (e.g., `https://sbomhub.app` or `http://your-server:8080`) |
+| `SBOMHUB_URL` | Your self-host SBOMHub URL (e.g., `https://sbomhub.internal.example.com` or `http://your-server:8080`) |
 | `SBOMHUB_PROJECT_ID` | Your project UUID |
 
 ## Workflow Examples
@@ -281,10 +283,10 @@ cat sbom.json | jq '.bomFormat // .spdxVersion'
 
 ### Connection Timeout
 
-For self-hosted instances, ensure:
-- The server is accessible from GitHub Actions
+For self-host instances, ensure:
+- The server is reachable from your GitHub Actions runner
 - Firewall rules allow incoming connections
-- Use a public URL or GitHub self-hosted runners
+- For internal networks, use GitHub self-hosted runners
 
 ## Best Practices
 

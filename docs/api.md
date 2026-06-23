@@ -2,10 +2,13 @@
 
 This document describes the SBOMHub REST API.
 
+> SBOMHub is an **AI compliance evidence layer** for the EU Cyber Resilience Act (CRA) reporting deadline of **2026-09-11**.
+> The SaaS instance at `sbomhub.app` / `api.sbomhub.app` was sunset in 2026-06; self-host (Docker Compose) is the only supported path. Examples in this document use the self-host default URL `http://localhost:8080`.
+
 ## Base URL
 
-- Self-hosted: `http://localhost:8080`
-- SaaS: `https://api.sbomhub.app`
+- Self-host (recommended): `http://localhost:8080`
+- Self-host behind a reverse proxy: `https://sbomhub.example.com`
 
 ## Authentication
 
@@ -15,7 +18,7 @@ For CI/CD integration, use API keys:
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
-  https://api.sbomhub.app/api/v1/projects
+  http://localhost:8080/api/v1/projects
 ```
 
 API keys can be created in the project settings page.
@@ -89,7 +92,7 @@ POST /api/v1/projects/:id/sbom
 curl -X POST \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "sbom=@sbom.json" \
-  https://api.sbomhub.app/api/v1/projects/{project_id}/sbom
+  http://localhost:8080/api/v1/projects/{project_id}/sbom
 ```
 
 #### Get Components
@@ -293,12 +296,9 @@ All errors follow this format:
 
 ## Rate Limiting
 
-- Self-hosted: No rate limiting
-- SaaS Free: 100 requests/hour
-- SaaS Pro: 1000 requests/hour
-- SaaS Team: 10000 requests/hour
+Self-host has no built-in rate limiting; apply it at a reverse proxy (Nginx, Caddy, etc.) if needed.
 
-Rate limit headers:
+For a future SaaS comeback, the planned rate-limit header format is:
 ```
 X-RateLimit-Limit: 1000
 X-RateLimit-Remaining: 999

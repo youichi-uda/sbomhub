@@ -2,6 +2,9 @@
 
 SBOMHub can be configured through environment variables.
 
+> SBOMHub is an **AI compliance evidence layer** for the EU Cyber Resilience Act (CRA) reporting deadline of **2026-09-11**, and only self-host (Docker Compose) is supported.
+> The SaaS instance at `sbomhub.app` was sunset in 2026-06; Clerk / Lemon Squeezy and other SaaS integrations are not used in the OSS distribution.
+
 ## Environment Variables
 
 ### Core Settings
@@ -20,32 +23,26 @@ SBOMHub can be configured through environment variables.
 |----------|---------|-------------|
 | `NVD_API_KEY` | (empty) | NVD API key for higher rate limits. Get one at https://nvd.nist.gov/developers/request-an-api-key |
 
-### Authentication (SaaS Mode)
+### LLM Provider (AI Features, BYOK)
+
+AI features (AI VEX triage, CRA report drafting, METI self-assessment prefill, etc.) are **BYOK (Bring Your Own Key) only**. SBOMHub OSS ships zero bundled LLM keys. Configure exactly one provider below to enable AI features. If unset, AI features are gracefully disabled and the rest of the product (SBOM management, manual VEX, manual CRA reports, manual METI self-assessment) continues to work.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLERK_SECRET_KEY` | (empty) | Clerk secret key for authentication |
-| `CLERK_WEBHOOK_SECRET` | (empty) | Clerk webhook signing secret |
+| `SBOMHUB_LLM_PROVIDER` | (empty) | `openai` / `anthropic` / `gemini` / `ollama` |
+| `SBOMHUB_LLM_MODEL` | (empty) | e.g. `gpt-5`, `claude-opus-4-7`, `gemini-3.5-flash`, `qwen2.5-coder:7b` |
+| `OPENAI_API_KEY` | (empty) | Required if `provider=openai` |
+| `ANTHROPIC_API_KEY` | (empty) | Required if `provider=anthropic` |
+| `GOOGLE_API_KEY` | (empty) | Required if `provider=gemini` |
+| `OLLAMA_HOST` | (empty) | Required if `provider=ollama` (e.g. `http://localhost:11434`) |
 
-> When `CLERK_SECRET_KEY` is set, SBOMHub operates in SaaS mode with user authentication.
-
-### Billing (SaaS Mode)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LEMONSQUEEZY_API_KEY` | (empty) | Lemon Squeezy API key |
-| `LEMONSQUEEZY_WEBHOOK_SECRET` | (empty) | Lemon Squeezy webhook signing secret |
-| `LEMONSQUEEZY_STORE_ID` | (empty) | Lemon Squeezy store ID |
-| `LEMONSQUEEZY_STARTER_VARIANT_ID` | (empty) | Product variant ID for Starter plan |
-| `LEMONSQUEEZY_PRO_VARIANT_ID` | (empty) | Product variant ID for Pro plan |
-| `LEMONSQUEEZY_TEAM_VARIANT_ID` | (empty) | Product variant ID for Team plan |
+> For manufacturing self-host setups that cannot send code or SBOMs to external APIs, Ollama (or any OpenAI-compatible local endpoint) is the recommended choice.
 
 ### Frontend Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8080` | API URL for frontend |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | (empty) | Clerk publishable key |
 
 ## Configuration Files
 
@@ -75,47 +72,30 @@ ENVIRONMENT=production
 # NVD
 NVD_API_KEY=your-nvd-api-key
 
-# Clerk (SaaS mode only)
-CLERK_SECRET_KEY=sk_live_xxxxx
-CLERK_WEBHOOK_SECRET=whsec_xxxxx
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_xxxxx
+# AI features (BYOK). If unset, AI features are disabled.
+# Configure exactly one of the providers below.
+SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_MODEL=gpt-5
+OPENAI_API_KEY=sk-...
 
-# Lemon Squeezy (SaaS mode only)
-LEMONSQUEEZY_API_KEY=xxxxx
-LEMONSQUEEZY_WEBHOOK_SECRET=xxxxx
-LEMONSQUEEZY_STORE_ID=xxxxx
+# Local LLM example (no code/SBOM leaves your network)
+# SBOMHUB_LLM_PROVIDER=ollama
+# SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+# OLLAMA_HOST=http://localhost:11434
 ```
 
-## Deployment Modes
+## Deployment Mode
 
-### Self-Hosted Mode
+Only self-host (Docker Compose) is supported. The SaaS instance at `sbomhub.app` was sunset in 2026-06.
 
-Default mode when no authentication is configured:
-
-- No user authentication required
-- Single-tenant operation
-- All features available without subscription
+- User authentication is handled by API keys (and a simple in-product account flow planned)
+- Multi-tenancy is enforced via PostgreSQL Row-Level Security
+- AI features are enabled / disabled gracefully via BYOK env vars
 
 ```bash
-# Minimal configuration for self-hosted
+# Minimal configuration for self-host
 export DATABASE_URL="postgres://..."
 export REDIS_URL="redis://..."
-docker compose up -d
-```
-
-### SaaS Mode
-
-Enabled when `CLERK_SECRET_KEY` is set:
-
-- User authentication via Clerk
-- Multi-tenant with row-level security
-- Subscription-based feature access
-- Billing via Lemon Squeezy
-
-```bash
-# SaaS mode configuration
-export CLERK_SECRET_KEY="sk_live_xxxxx"
-export LEMONSQUEEZY_API_KEY="xxxxx"
 docker compose up -d
 ```
 

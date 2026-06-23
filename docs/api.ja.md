@@ -1,21 +1,24 @@
 # APIリファレンス
 
-このドキュメントではSBOMHubのREST APIについて説明します。
+このドキュメントでは SBOMHub の REST API について説明します。
+
+> SBOMHub は CRA (EU Cyber Resilience Act 2026/9) 対応の **AI コンプラ成果物レイヤー** です。
+> SaaS 版 (`sbomhub.app` / `api.sbomhub.app`) は 2026-06 にサンセットされ、self-host (Docker Compose) のみがサポート対象です。本ドキュメントの URL は self-host 既定の `http://localhost:8080` を使用します。
 
 ## ベースURL
 
-- セルフホスト: `http://localhost:8080`
-- SaaS: `https://api.sbomhub.app`
+- self-host (推奨): `http://localhost:8080`
+- リバースプロキシ経由の self-host: `https://sbomhub.example.com`
 
 ## 認証
 
 ### APIキー認証
 
-CI/CD連携にはAPIキーを使用します：
+CI/CD 連携には API キーを使用します：
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
-  https://api.sbomhub.app/api/v1/projects
+  http://localhost:8080/api/v1/projects
 ```
 
 APIキーはプロジェクト設定ページで作成できます。
@@ -89,7 +92,7 @@ POST /api/v1/projects/:id/sbom
 curl -X POST \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "sbom=@sbom.json" \
-  https://api.sbomhub.app/api/v1/projects/{project_id}/sbom
+  http://localhost:8080/api/v1/projects/{project_id}/sbom
 ```
 
 #### コンポーネント取得
@@ -293,12 +296,9 @@ GET /api/v1/projects/:id/license-violations
 
 ## レート制限
 
-- セルフホスト: 制限なし
-- SaaS Free: 100リクエスト/時
-- SaaS Pro: 1000リクエスト/時
-- SaaS Team: 10000リクエスト/時
+self-host ではデフォルトでレート制限はかかりません。リバースプロキシ (Nginx 等) で制御してください。
 
-レート制限ヘッダー:
+将来 SaaS が再開された場合に向けて、レート制限ヘッダーの形式は以下を予定しています:
 ```
 X-RateLimit-Limit: 1000
 X-RateLimit-Remaining: 999

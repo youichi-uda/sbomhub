@@ -1,6 +1,9 @@
 # 設定
 
-SBOMHubは環境変数で設定できます。
+SBOMHub は環境変数で設定できます。
+
+> SBOMHub は CRA (EU Cyber Resilience Act 2026/9) 対応の **AI コンプラ成果物レイヤー** として位置付けられ、self-host (Docker Compose) のみがサポート対象です。
+> SaaS 版 (`sbomhub.app`) は 2026-06 にサンセットされ、Clerk / Lemon Squeezy 等の SaaS 連携設定は OSS 版では使用しません。
 
 ## 環境変数
 
@@ -20,32 +23,26 @@ SBOMHubは環境変数で設定できます。
 |------|---------|------|
 | `NVD_API_KEY` | (空) | NVD APIキー（レート制限緩和用）。https://nvd.nist.gov/developers/request-an-api-key で取得 |
 
-### 認証（SaaSモード）
+### LLM プロバイダ (AI 機能・BYOK)
+
+AI VEX トリアージ / CRA 報告書ドラフト / 経産省自己評価プリフィルなどの AI 機能は **完全 BYOK (Bring Your Own Key)** です。バンドルされた鍵はありません。下記いずれか 1 プロバイダを設定すれば AI 機能が有効化されます。未設定の場合は AI 機能が graceful に無効化され、手動 VEX / 手動 CRA 報告 / 手動自己評価などの従来機能はそのまま動作します。
 
 | 変数 | デフォルト | 説明 |
 |------|---------|------|
-| `CLERK_SECRET_KEY` | (空) | Clerk認証用シークレットキー |
-| `CLERK_WEBHOOK_SECRET` | (空) | Clerk Webhook署名シークレット |
+| `SBOMHUB_LLM_PROVIDER` | (空) | `openai` / `anthropic` / `gemini` / `ollama` |
+| `SBOMHUB_LLM_MODEL` | (空) | 例: `gpt-5`, `claude-opus-4-7`, `gemini-3.5-flash`, `qwen2.5-coder:7b` |
+| `OPENAI_API_KEY` | (空) | `provider=openai` の場合に必須 |
+| `ANTHROPIC_API_KEY` | (空) | `provider=anthropic` の場合に必須 |
+| `GOOGLE_API_KEY` | (空) | `provider=gemini` の場合に必須 |
+| `OLLAMA_HOST` | (空) | `provider=ollama` の場合に必須 (例: `http://localhost:11434`) |
 
-> `CLERK_SECRET_KEY`を設定すると、SBOMHubはユーザー認証付きのSaaSモードで動作します。
-
-### 課金（SaaSモード）
-
-| 変数 | デフォルト | 説明 |
-|------|---------|------|
-| `LEMONSQUEEZY_API_KEY` | (空) | Lemon Squeezy APIキー |
-| `LEMONSQUEEZY_WEBHOOK_SECRET` | (空) | Lemon Squeezy Webhook署名シークレット |
-| `LEMONSQUEEZY_STORE_ID` | (空) | Lemon SqueezyストアID |
-| `LEMONSQUEEZY_STARTER_VARIANT_ID` | (空) | Starterプランの製品バリアントID |
-| `LEMONSQUEEZY_PRO_VARIANT_ID` | (空) | Proプランの製品バリアントID |
-| `LEMONSQUEEZY_TEAM_VARIANT_ID` | (空) | Teamプランの製品バリアントID |
+> コードや SBOM を外部に出したくない製造業セルフホスト運用では、Ollama などのローカル LLM を推奨します。
 
 ### フロントエンド設定
 
 | 変数 | デフォルト | 説明 |
 |------|---------|------|
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8080` | フロントエンド用API URL |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | (空) | Clerkの公開キー |
 
 ## 設定ファイル
 
@@ -75,47 +72,30 @@ ENVIRONMENT=production
 # NVD
 NVD_API_KEY=your-nvd-api-key
 
-# Clerk（SaaSモードのみ）
-CLERK_SECRET_KEY=sk_live_xxxxx
-CLERK_WEBHOOK_SECRET=whsec_xxxxx
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_live_xxxxx
+# AI 機能 (BYOK)。未設定なら AI 機能は無効化されます。
+# どれか 1 つを設定してください。
+SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_MODEL=gpt-5
+OPENAI_API_KEY=sk-...
 
-# Lemon Squeezy（SaaSモードのみ）
-LEMONSQUEEZY_API_KEY=xxxxx
-LEMONSQUEEZY_WEBHOOK_SECRET=xxxxx
-LEMONSQUEEZY_STORE_ID=xxxxx
+# ローカル LLM の例 (コードを外部に出さない)
+# SBOMHUB_LLM_PROVIDER=ollama
+# SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+# OLLAMA_HOST=http://localhost:11434
 ```
 
 ## デプロイモード
 
-### セルフホストモード
+self-host (Docker Compose) のみがサポート対象です。SaaS 版 (`sbomhub.app`) は 2026-06 にサンセットされました。
 
-認証が設定されていない場合のデフォルトモード：
-
-- ユーザー認証不要
-- シングルテナント運用
-- サブスクリプションなしですべての機能が利用可能
+- ユーザー認証は self-host 内のシンプルなアカウント管理 (将来) / API キーで運用
+- マルチテナントは PostgreSQL Row-Level Security で実現
+- AI 機能は BYOK で graceful に有効化 / 無効化
 
 ```bash
-# セルフホスト用の最小限の設定
+# self-host の最小限の設定
 export DATABASE_URL="postgres://..."
 export REDIS_URL="redis://..."
-docker compose up -d
-```
-
-### SaaSモード
-
-`CLERK_SECRET_KEY`を設定すると有効化：
-
-- Clerk経由のユーザー認証
-- Row-Level Securityによるマルチテナント
-- サブスクリプションベースの機能アクセス
-- Lemon Squeezyによる課金
-
-```bash
-# SaaSモード設定
-export CLERK_SECRET_KEY="sk_live_xxxxx"
-export LEMONSQUEEZY_API_KEY="xxxxx"
 docker compose up -d
 ```
 
