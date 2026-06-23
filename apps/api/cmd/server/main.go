@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,6 +25,36 @@ import (
 	"github.com/sbomhub/sbomhub/migrations"
 )
 
+// assertAppRoleNotBypassRLS verifies that the runtime DB role does not have
+// the BYPASSRLS attribute. In production we hard-fail; in development we log
+// a warning so contributors can keep running against a single-role local DB
+// while they migrate.
+func assertAppRoleNotBypassRLS(db *sql.DB) error {
+	var bypass bool
+	var role string
+	if err := db.QueryRow(
+		`SELECT current_user, rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&role, &bypass); err != nil {
+		return fmt.Errorf("failed to query rolbypassrls for current_user: %w", err)
+	}
+	if !bypass {
+		slog.Info("DB role check passed", "role", role, "bypass_rls", false)
+		return nil
+	}
+	appEnv := os.Getenv("APP_ENV")
+	if appEnv == "development" {
+		slog.Warn("DB role has BYPASSRLS — tenant isolation is NOT enforced. "+
+			"Switch DATABASE_URL to the sbomhub_app role before deploying.",
+			"role", role, "app_env", appEnv)
+		return nil
+	}
+	return fmt.Errorf(
+		"RLS bypass 権限を持つロールでの起動は禁止です。 sbomhub_app ロールを使用してください "+
+			"(current_user=%s, rolbypassrls=true, APP_ENV=%q)",
+		role, appEnv,
+	)
+}
+
 func main() {
 	// Load .env file if it exists (for local development)
 	_ = godotenv.Load()
@@ -38,6 +70,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// SECURITY (P0 #2 / Trust Rescue 9.1.1): Migrations and runtime use
+	// distinct DB roles. We open a short-lived migrator connection here, run
+	// DDL, then close it. The long-lived runtime connection below uses the
+	// non-superuser, NOBYPASSRLS app role.
+	migrateURL := os.Getenv("MIGRATE_DATABASE_URL")
+	if migrateURL == "" {
+		slog.Warn("MIGRATE_DATABASE_URL is not set; falling back to DATABASE_URL for auto-migrations. " +
+			"Set MIGRATE_DATABASE_URL to a sbomhub_migrator connection string for proper role separation.")
+		migrateURL = cfg.DatabaseURL
+	}
+	migrateDB, err := database.Connect(migrateURL)
+	if err != nil {
+		slog.Error("Failed to connect to database for migrations", "error", err)
+		os.Exit(1)
+	}
+	if err := database.Migrate(migrateDB, migrations.FS); err != nil {
+		_ = migrateDB.Close()
+		slog.Error("Failed to run migrations", "error", err)
+		os.Exit(1)
+	}
+	_ = migrateDB.Close()
+
 	db, err := database.Connect(cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("Failed to connect to database", "error", err)
@@ -45,9 +99,12 @@ func main() {
 	}
 	defer db.Close()
 
-	// Run migrations automatically on startup
-	if err := database.Migrate(db, migrations.FS); err != nil {
-		slog.Error("Failed to run migrations", "error", err)
+	// SECURITY (P0 #2 / Trust Rescue 9.1.1): refuse to serve traffic on a
+	// DB role that bypasses Row-Level Security. RLS policies are how we
+	// enforce tenant isolation, so a BYPASSRLS runtime role silently breaks
+	// the entire multi-tenant boundary.
+	if err := assertAppRoleNotBypassRLS(db); err != nil {
+		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
 

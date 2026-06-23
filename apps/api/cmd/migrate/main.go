@@ -22,9 +22,21 @@ func main() {
 	// Load .env
 	_ = godotenv.Load()
 
-	dbURL := os.Getenv("DATABASE_URL")
+	// Prefer MIGRATE_DATABASE_URL (sbomhub_migrator role) over DATABASE_URL.
+	// DATABASE_URL is for the runtime app role (sbomhub_app, NOBYPASSRLS) and
+	// generally lacks DDL permissions. We fall back to it for OSS users who
+	// have not yet split their roles, with a loud warning.
+	dbURL := os.Getenv("MIGRATE_DATABASE_URL")
+	if dbURL == "" {
+		dbURL = os.Getenv("DATABASE_URL")
+		if dbURL != "" {
+			log.Println("warning: MIGRATE_DATABASE_URL is not set; falling back to DATABASE_URL. " +
+				"Set MIGRATE_DATABASE_URL to a sbomhub_migrator connection string for proper role separation.")
+		}
+	}
 	if dbURL == "" {
 		dbURL = "postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable"
+		log.Println("warning: neither MIGRATE_DATABASE_URL nor DATABASE_URL is set; using legacy default sbomhub:sbomhub@localhost.")
 	}
 
 	db, err := sql.Open("postgres", dbURL)
