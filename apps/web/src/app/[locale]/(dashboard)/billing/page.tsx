@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,7 +9,17 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { api, SubscriptionResponse, UsageResponse } from "@/lib/api";
-import { Check, ExternalLink, Loader2, CreditCard, Users, FolderOpen, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Check,
+  CreditCard,
+  ExternalLink,
+  FolderOpen,
+  Loader2,
+  RefreshCw,
+  Users,
+} from "lucide-react";
 
 function usePlans() {
   const t = useTranslations("Billing");
@@ -52,13 +63,14 @@ export default function BillingPage() {
   const [subscription, setSubscription] = useState<SubscriptionResponse | null>(null);
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
-  const [freeLoading, setFreeLoading] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [showSyncInput, setShowSyncInput] = useState(false);
   const [subscriptionIdInput, setSubscriptionIdInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // NOTE: checkout / select-free handlers are intentionally removed while
+  // the SaaS is sunset. Existing subscriptions continue to display and
+  // can be managed through the Lemon Squeezy portal. See sunset/page.tsx.
 
   useEffect(() => {
     loadData();
@@ -81,19 +93,6 @@ export default function BillingPage() {
     }
   };
 
-  const handleUpgrade = async (plan: string) => {
-    try {
-      setCheckoutLoading(plan);
-      const { url } = await api.billing.createCheckout(plan);
-      window.location.href = url;
-    } catch (err) {
-      setError(t("checkoutFailed"));
-      console.error(err);
-    } finally {
-      setCheckoutLoading(null);
-    }
-  };
-
   const handleManageSubscription = async () => {
     try {
       const { url } = await api.billing.getPortalUrl();
@@ -101,20 +100,6 @@ export default function BillingPage() {
     } catch (err) {
       setError(t("portalFailed"));
       console.error(err);
-    }
-  };
-
-  const handleSelectFree = async () => {
-    try {
-      setFreeLoading(true);
-      await api.billing.selectFreePlan();
-      // Reload data to reflect the change
-      await loadData();
-    } catch (err) {
-      setError(t("selectPlanFailed"));
-      console.error(err);
-    } finally {
-      setFreeLoading(false);
     }
   };
 
@@ -174,11 +159,33 @@ export default function BillingPage() {
 
   const currentPlan = subscription?.plan || "";
   const hasSelectedPlan = currentPlan !== "";
-  const currentPlanIndex = PLANS.findIndex((p) => p.id === currentPlan);
 
   return (
     <div className="max-w-6xl mx-auto">
       <h1 className="text-2xl font-bold mb-6">{t("title")}</h1>
+
+      {/* SaaS sunset notice — new plan signups are paused but existing
+          subscriptions continue to display and can be managed via the
+          Lemon Squeezy portal. */}
+      <Card className="mb-6 border-amber-200 bg-amber-50">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-amber-900">
+            <AlertTriangle className="h-5 w-5" />
+            {t("sunsetTitle")}
+          </CardTitle>
+          <CardDescription className="text-amber-900/80">
+            {t("sunsetMessage")}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link href={`/${locale}/sunset`}>
+            <Button variant="outline" className="gap-2 bg-white">
+              {t("sunsetCta")}
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Link>
+        </CardContent>
+      </Card>
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-6">
@@ -338,20 +345,24 @@ export default function BillingPage() {
         </Card>
       </div>
 
-      {/* Plan Selection */}
+      {/* Plan Selection
+          New-plan signups and upgrades are disabled while the SaaS is sunset.
+          The grid remains visible so existing customers can still see what
+          they are on; only the action buttons are disabled. */}
       {subscription?.billing_enabled && (
         <>
-          <h2 className="text-xl font-semibold mb-4">{t("selectPlan")}</h2>
+          <h2 className="text-xl font-semibold mb-2">{t("selectPlan")}</h2>
+          <p className="text-sm text-muted-foreground mb-4">
+            {t("checkoutDisabledHint")}
+          </p>
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {PLANS.map((plan, index) => {
+            {PLANS.map((plan) => {
               const isCurrent = plan.id === currentPlan;
-              const isDowngrade = index < currentPlanIndex;
-              const isUpgrade = index > currentPlanIndex;
 
               return (
                 <Card
                   key={plan.id}
-                  className={`relative ${isCurrent ? "border-primary border-2" : ""}`}
+                  className={`relative ${isCurrent ? "border-primary border-2" : "opacity-80"}`}
                 >
                   {isCurrent && (
                     <Badge className="absolute -top-3 left-1/2 -translate-x-1/2">
@@ -376,39 +387,14 @@ export default function BillingPage() {
                         </li>
                       ))}
                     </ul>
-                    {plan.id === "free" ? (
-                      <Button
-                        className="w-full"
-                        variant={isCurrent ? "outline" : "default"}
-                        disabled={isCurrent || freeLoading}
-                        onClick={handleSelectFree}
-                      >
-                        {freeLoading ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : isCurrent ? (
-                          t("currentPlanBadge")
-                        ) : (
-                          t("startWithFree")
-                        )}
-                      </Button>
-                    ) : (
-                      <Button
-                        className="w-full"
-                        variant={isCurrent ? "outline" : isUpgrade ? "default" : "secondary"}
-                        disabled={isCurrent || checkoutLoading !== null}
-                        onClick={() => handleUpgrade(plan.id)}
-                      >
-                        {checkoutLoading === plan.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : isCurrent ? (
-                          t("currentPlanBadge")
-                        ) : isUpgrade ? (
-                          t("upgrade")
-                        ) : (
-                          t("downgrade")
-                        )}
-                      </Button>
-                    )}
+                    <Button
+                      className="w-full"
+                      variant={isCurrent ? "outline" : "secondary"}
+                      disabled
+                      title={t("checkoutDisabledHint")}
+                    >
+                      {isCurrent ? t("currentPlanBadge") : t("checkoutDisabled")}
+                    </Button>
                   </CardContent>
                 </Card>
               );

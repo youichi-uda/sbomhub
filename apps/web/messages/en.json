@@ -1,243 +1,205 @@
 {
   "Metadata": {
-    "title": "SBOMHub - Open Source SBOM Management Platform",
-    "description": "SBOMHub is an open-source SBOM management platform providing CycloneDX/SPDX import, vulnerability management, VEX statement creation, and compliance checking. Optimized for the Japanese market.",
-    "keywords": "SBOM, Software Bill of Materials, vulnerability management, CycloneDX, SPDX, VEX, software supply chain, security, compliance, open source",
-    "ogTitle": "SBOMHub - Manage Your Software Bill of Materials",
-    "ogDescription": "Open-source SBOM management platform with CycloneDX/SPDX import, vulnerability management, and VEX support. Start your 14-day free trial.",
-    "twitterTitle": "SBOMHub - Open Source SBOM Management",
-    "twitterDescription": "Strengthen your software supply chain security. Centralize SBOM management, vulnerability detection, and VEX support."
+    "title": "SBOMHub - CRA-ready AI Compliance Evidence Layer",
+    "description": "Dependency-Track finds CVEs. SBOMHub turns them into submittable VEX, CRA reports, and audit trails. For Japanese SMB manufacturers facing the EU Cyber Resilience Act 2026/9 deadline. AGPL-3.0 OSS with BYOK LLM.",
+    "keywords": "SBOM, CRA, EU Cyber Resilience Act, vulnerability reporting, VEX, CycloneDX, Dependency-Track, Syft, Trivy, METI, BYOK, self-hosted, AGPL, AI, SMB manufacturers, IoT, embedded",
+    "ogTitle": "SBOMHub - Turn SBOMs into submittable CRA reports, VEX, and audit trails",
+    "ogDescription": "For Japanese SMB manufacturers facing CRA 2026/9. AI drafts VEX, CRA reports, and METI self-assessments from your existing SBOM tools. Humans approve. BYOK LLM.",
+    "twitterTitle": "SBOMHub - CRA-ready AI Compliance Evidence Layer",
+    "twitterDescription": "Dependency-Track finds CVEs. SBOMHub turns them into submittable artefacts. AI VEX/report drafts for CRA 2026/9."
   },
   "Landing": {
     "nav": {
-      "features": "Features",
-      "allFeatures": "All Features",
-      "pricing": "Pricing",
+      "problem": "Problem",
+      "solution": "Evidence Pack",
+      "byok": "AI / BYOK",
+      "roadmap": "Roadmap",
+      "faq": "FAQ",
+      "waitlist": "Waitlist",
       "signIn": "Sign In",
-      "getStarted": "Get Started"
+      "github": "GitHub"
     },
+    "sunsetBanner": "The hosted SaaS (sbomhub.app) is sunset while we transition to the new positioning. New plan signups are paused. See",
+    "sunsetBannerLink": "sunset notice",
     "hero": {
-      "badge": "Open Source SBOM Management",
-      "title": "Manage Your Software\nBill of Materials",
-      "description": "SBOMHub is an SBOM management platform that provides CycloneDX/SPDX import, vulnerability management, VEX statement creation, and compliance checking.",
-      "cta": "Get Started Free",
-      "github": "View on GitHub"
+      "badge": "CRA 2026/9 ready - AI Compliance Evidence Layer",
+      "title": "Dependency-Track finds CVEs.\nSBOMHub turns them into submittable artefacts.",
+      "subtitle": "Convert SBOMs into submittable VEX, CRA reports, and audit trails. Built for Japanese SMB manufacturers shipping IoT / embedded products to the EU.",
+      "ctaWaitlist": "Join the waitlist",
+      "ctaSelfHost": "Self-host now",
+      "ctaGithub": "View on GitHub"
     },
-    "features": {
-      "title": "Key Features",
-      "description": "Everything you need for software supply chain security",
-      "import": {
-        "title": "SBOM Import",
-        "description": "Import SBOM files in CycloneDX and SPDX formats. Compatible with major tools like Syft, cdxgen, and Trivy."
-      },
-      "vulnerability": {
-        "title": "Vulnerability Management",
-        "description": "Automatically detect component vulnerabilities with NVD database integration. View by severity level."
-      },
-      "vex": {
-        "title": "VEX Statements",
-        "description": "Create and manage Vulnerability Exploitability eXchange (VEX) statements. Record false positive exclusions and response status."
-      },
-      "compliance": {
-        "title": "Compliance",
-        "description": "Self-assessment feature to support METI (Japan) SBOM guideline response. Note: This is not an official compliance certification."
-      },
-      "license": {
-        "title": "License Management",
-        "description": "Automatic OSS license detection and policy checking. Prevent license conflicts and usage violations."
-      },
-      "cicd": {
-        "title": "CI/CD Integration",
-        "description": "Upload SBOMs via API from CI/CD pipelines like GitHub Actions."
-      },
-      "i18n": {
-        "title": "Multilingual",
-        "description": "Optimized for the Japanese market. UI supports both Japanese and English."
-      },
-      "ipa": {
-        "title": "IPA Integration",
-        "description": "Integrate with IPA (Japan Information-technology Promotion Agency) security alerts. Auto-fetch domestic vulnerability information."
-      },
-      "diff": {
-        "title": "SBOM Diff Comparison",
-        "description": "Compare SBOMs across versions to detect added, removed, and updated components along with new vulnerabilities."
-      }
+    "target": {
+      "title": "For Japanese SMB manufacturers shipping IoT / embedded products to the EU",
+      "description": "If your team has no dedicated PSIRT and handles SBOM, VEX, and CRA reporting as a side job, SBOMHub ingests Syft / Trivy / Dependency-Track output, drafts the human work with AI, and lets you approve submittable artefacts."
     },
-    "allFeatures": {
-      "title": "All Features",
-      "description": "Explore everything SBOMHub has to offer",
-      "categories": {
-        "core": "SBOM Management",
-        "security": "Security",
-        "analysis": "Analysis & Reporting",
-        "integration": "Integration & Automation",
-        "enterprise": "Enterprise"
-      },
-      "items": {
-        "sbomImport": {
-          "title": "SBOM Import",
-          "description": "Supports CycloneDX and SPDX formats. Import from Syft, cdxgen, Trivy, and other major tools"
+    "problem": {
+      "title": "What CRA 2026/9 actually breaks",
+      "description": "The EU CRA starts enforcing vulnerability reporting on 11 September 2026: 24 hours for early warning after exploitation is known, 72 hours for detailed notification. Non-compliance: up to EUR 15M or 2.5% of global annual turnover.",
+      "items": [
+        {
+          "title": "Too many CVEs from your scanners",
+          "description": "Syft / Trivy / DT surface CVEs but never decide impact. Dozens of Critical and High per month per product is unsustainable for a non-PSIRT team."
         },
-        "componentManagement": {
-          "title": "Component Management",
-          "description": "View all components in your project. Manage names, versions, and license information"
+        {
+          "title": "VEX is unfamiliar",
+          "description": "CycloneDX VEX's analysis.state and justification fields require careful reasoning. Mis-labelling 'not_affected' is a legal liability under CRA, not just a security mistake."
         },
-        "sbomDiff": {
-          "title": "SBOM Diff Comparison",
-          "description": "Compare SBOMs across versions and visualize added, removed, and updated components"
+        {
+          "title": "No one to draft CRA reports",
+          "description": "24h early warning, 72h detailed notification, final report. Required in JP and EN. Doing this without a dedicated PSIRT and without templates is unrealistic."
         },
-        "sbomShare": {
-          "title": "SBOM Sharing",
-          "description": "Generate secure public links to share your project's SBOM with external partners"
+        {
+          "title": "Code can't leave your network",
+          "description": "Manufacturers cannot send proprietary source or detailed SBOMs to overseas SaaS LLMs. You need BYOK or fully local LLM, and a Japanese-language UI for compliance teams."
         },
-        "vulnManagement": {
-          "title": "Vulnerability Management",
-          "description": "Automatically detect component vulnerabilities via NVD database integration"
-        },
-        "vexStatements": {
-          "title": "VEX Statements",
-          "description": "Create and manage VEX statements. Record false positive exclusions and response status"
-        },
-        "ssvcAssessment": {
-          "title": "SSVC Assessment",
-          "description": "Prioritize vulnerabilities using CISA's SSVC framework with auto or manual assessment"
-        },
-        "kevIntegration": {
-          "title": "KEV Integration",
-          "description": "Integrate with CISA's Known Exploited Vulnerabilities catalog to flag active exploits"
-        },
-        "eolCheck": {
-          "title": "EOL Status Check",
-          "description": "Automatically check component end-of-life status and show upgrade recommendations"
-        },
-        "licenseManagement": {
-          "title": "License Management",
-          "description": "Automatic OSS license detection with policy checks. Set allowed, denied, or review required"
-        },
-        "dashboard": {
-          "title": "Dashboard",
-          "description": "View vulnerability summary, top EPSS vulnerabilities, and project risk scores at a glance"
-        },
-        "trendAnalysis": {
-          "title": "Trend Analysis",
-          "description": "Visualize vulnerability response metrics including MTTR and SLO achievement rates"
-        },
-        "reports": {
-          "title": "Report Generation",
-          "description": "Auto-generate executive, technical, and compliance reports in PDF/Excel format"
-        },
-        "crossSearch": {
-          "title": "Cross Search",
-          "description": "Search all projects by CVE ID or component name to identify impact scope"
-        },
-        "compliance": {
-          "title": "Compliance",
-          "description": "Self-assessment feature to support METI (Japan) SBOM guideline compliance"
-        },
-        "cicdIntegration": {
-          "title": "CI/CD Integration",
-          "description": "Upload SBOMs automatically via API from GitHub Actions and other CI/CD pipelines"
-        },
-        "ipaIntegration": {
-          "title": "IPA/JVN Integration",
-          "description": "Auto-fetch IPA security alerts and JVN vulnerability information for Japan-specific data"
-        },
-        "ticketIntegration": {
-          "title": "Ticket Integration",
-          "description": "Create tickets directly from vulnerabilities with Jira and Backlog. Supports status sync"
-        },
-        "notifications": {
-          "title": "Notifications",
-          "description": "Get notified via Slack, Discord, or email when new vulnerabilities are detected"
-        },
-        "mcpServer": {
-          "title": "MCP Server",
-          "description": "Access SBOMHub information using natural language from Claude Desktop or Cursor"
-        },
-        "cli": {
-          "title": "CLI Tool",
-          "description": "Use sbomhub-cli to scan, upload, and search SBOMs from the command line"
-        },
-        "auditLog": {
-          "title": "Audit Logs",
-          "description": "Record and search all operation history for compliance requirements"
-        },
-        "apiKeys": {
-          "title": "API Key Management",
-          "description": "Issue and manage API keys for CLI, MCP Server, and CI/CD integrations"
-        },
-        "i18n": {
-          "title": "Multilingual Support",
-          "description": "Full Japanese and English UI support. Optimized for the Japanese market"
+        {
+          "title": "METI self-assessment is all manual",
+          "description": "Japan's METI SBOM guideline self-assessment is a hand-written checklist today. Prefilling it from CI configs and scan history would cut the work by an order of magnitude."
         }
-      }
+      ]
     },
-    "pricing": {
-      "title": "Pricing Plans",
-      "description": "Choose a plan that fits your team size. Start with a free trial.",
-      "currencyNote": "All prices are in JPY (Japanese Yen)",
-      "popular": "Popular",
-      "free": {
-        "name": "Self-hosted",
-        "price": "Free",
-        "description": "Run on your own server",
-        "feature1": "Unlimited projects",
-        "feature2": "Unlimited users",
-        "feature3": "All features included",
-        "feature4": "Community support",
-        "feature5": "GitHub / Docker Hub",
-        "cta": "GitHub / Docker Hub"
-      },
-      "starter": {
-        "name": "Cloud Starter",
-        "price": "¥2,500",
-        "period": "month",
-        "description": "Cloud-hosted solution for small teams",
-        "feature1": "Up to 5 projects",
-        "feature2": "Up to 3 users",
-        "feature3": "SBOM management, vulnerability detection, VEX",
-        "feature4": "Email support (business days)",
-        "feature5": "Auto backups, SSL certificate",
-        "cta": "Start Free Trial"
-      },
-      "pro": {
-        "name": "Cloud Pro",
-        "price": "¥8,000",
-        "period": "month",
-        "description": "Full-featured solution for growing teams",
-        "feature1": "Unlimited projects",
-        "feature2": "Up to 10 users",
-        "feature3": "SBOM management, vulnerability detection, VEX",
-        "feature4": "Audit logs",
-        "cta": "Start Free Trial"
-      },
-      "team": {
-        "name": "Cloud Team",
-        "price": "¥20,000",
-        "period": "month",
-        "description": "Dedicated plan for large teams",
-        "feature1": "Unlimited projects",
-        "feature2": "Up to 30 users",
-        "feature3": "All features included",
-        "feature4": "Audit logs & reports",
-        "cta": "Start Free Trial"
-      }
+    "solution": {
+      "title": "AI Compliance Evidence Pack",
+      "description": "Ingest output from Syft / Trivy / Dependency-Track. AI drafts VEX, CRA reports, and METI self-assessments. Humans approve every output. Every draft and decision is recorded in the audit log.",
+      "principle": "AI drafts. Humans decide. Every output carries confidence and evidence; below the threshold, the draft falls back to under_investigation.",
+      "evidencePack": [
+        {
+          "title": "VEX drafts",
+          "description": "AI proposes affected / not_affected / under_investigation / resolved with code reachability and advisory excerpts as evidence."
+        },
+        {
+          "title": "CRA early warning (24h)",
+          "description": "Template draft for the 24-hour early warning, prefilled with product, CVE, exploitation status, and provisional impact scope."
+        },
+        {
+          "title": "CRA detailed notification (72h)",
+          "description": "Affected components, target versions, mitigations, and remediation plan drafted by AI for the 72-hour submission."
+        },
+        {
+          "title": "CRA final report",
+          "description": "Final report draft covering permanent fix, recurrence prevention, and patched versions. JP and EN drafts side by side."
+        },
+        {
+          "title": "METI self-assessment prefill",
+          "description": "Pre-fills METI's SBOM management self-assessment from CI configs, SBOM scan history, and correlation history."
+        },
+        {
+          "title": "SBOM / VEX export",
+          "description": "Submittable CycloneDX, SPDX, and VEX files with evidence attached for traceability and audit."
+        },
+        {
+          "title": "Shareable links",
+          "description": "Generate a controlled link to share the Evidence Pack with customers and auditors, with expiry and scope controls."
+        },
+        {
+          "title": "Audit trail",
+          "description": "AI draft, human edits, approval / rejection, and final submission are all recorded. Use it for CRA inspection and METI explanations."
+        }
+      ]
     },
-    "cta": {
-      "title": "Start Managing Your SBOMs Today",
-      "description": "Strengthen your software supply chain security. Try all features free for 14 days.",
-      "button": "Get Started Free"
+    "byok": {
+      "title": "AI = BYOK (Bring Your Own Key)",
+      "description": "SBOMHub's open-source build ships zero LLM credentials. Choose your own LLM provider: OpenAI, Anthropic, Google Gemini, Azure OpenAI, or Ollama for a fully local model. M4 will harden Local LLM quality for manufacturers who cannot send code outside.",
+      "providersTitle": "Supported providers",
+      "providers": [
+        "OpenAI (gpt-4o / gpt-5)",
+        "Anthropic (Claude)",
+        "Google Gemini",
+        "Azure OpenAI",
+        "Ollama (Local LLM)"
+      ],
+      "selfHostNote": "Self-hosted deployments can lock the configuration to BYOK only or Local LLM only."
+    },
+    "selfHost": {
+      "title": "Self-host in five minutes",
+      "description": "Docker Compose, AGPL-3.0, all features. Built for manufacturers who keep code inside the company network.",
+      "command": "git clone https://github.com/youichi-uda/sbomhub.git\ncd sbomhub\ndocker compose up -d\n# -> http://localhost:3000",
+      "githubCta": "Open GitHub repository",
+      "dockerHint": "For production, run the Trust Rescue steps first: initialise an encryption key and split the migration / runtime Postgres roles."
+    },
+    "cli": {
+      "title": "CLI for local analysis",
+      "description": "sbomhub-cli wraps Syft / Trivy / cdxgen with auto-detection. Scan, AI triage, and VEX export in one command.",
+      "command": "sbomhub scan . --project my-device\nsbomhub triage . --project my-device --ecosystem go\nsbomhub vex export --project my-device --output vex.json\nsbomhub cra draft --project my-device --cve CVE-XXXX-YYYY --lang ja,en"
+    },
+    "roadmap": {
+      "title": "Roadmap",
+      "description": "Worked back from CRA 2026-09-11. The Trust Rescue work (RLS, encryption keys, API contracts, CI, distribution) runs ahead of M0/M1.",
+      "milestones": [
+        {
+          "id": "M0",
+          "title": "Strategy lock-in + Trust Rescue",
+          "duration": "~2 weeks",
+          "description": "New positioning across README/LP. CRA SMB landing + waitlist. Begin RLS, key, API contract, distribution, and CI P0 fixes."
+        },
+        {
+          "id": "M1",
+          "title": "AI VEX triage MVP",
+          "duration": "~6 weeks",
+          "description": "Go / npm reachability, LLM judgement, VEX draft persistence, approve / edit / reject UI, CycloneDX VEX export, confidence + evidence + audit log."
+        },
+        {
+          "id": "M2",
+          "title": "CRA report drafting",
+          "duration": "~4 weeks",
+          "description": "24h early warning / 72h detailed notification / final report templates plus AI drafts. JP and EN drafts integrated into the Evidence Pack."
+        },
+        {
+          "id": "M3",
+          "title": "METI self-assessment prefill",
+          "duration": "~3 weeks",
+          "description": "Classify self-assessment items as met / unmet / needs review based on CI configs and SBOMHub usage, with evidence and remediation."
+        },
+        {
+          "id": "M4",
+          "title": "Local LLM / Enterprise self-host polish",
+          "duration": "after M3",
+          "description": "BYO key abstraction, Ollama and local-LLM rollout, managed vs local quality benchmark, Enterprise commercial license and SLA collateral."
+        }
+      ]
+    },
+    "waitlist": {
+      "title": "Join the waitlist",
+      "description": "We will email you when AI VEX MVP, CRA report drafting, and METI self-assessment prefill ship. Tell us briefly what CRA work is hurting you and we will prioritise contact.",
+      "placeholder": "you@company.com",
+      "cta": "Sign up",
+      "submitting": "Submitting...",
+      "success": "Thanks. We will reach out from hello@sbomhub.app as features ship.",
+      "error": "Submission failed. Please try again later or email hello@sbomhub.app directly.",
+      "fallbackNote": "Your mail client will open. Send the prefilled message to finish signing up."
+    },
+    "faqCta": {
+      "title": "Want the full strategy?",
+      "description": "The detailed reboot plan, market timing, and Evidence Pack specs live in the GitHub repository.",
+      "github": "View the repository"
     },
     "footer": {
-      "description": "Open-source platform for managing and visualizing Software Bill of Materials (SBOM)",
+      "description": "AI compliance evidence layer for Japanese SMB manufacturers facing CRA 2026/9. AGPL-3.0.",
       "product": "Product",
       "resources": "Resources",
       "legal": "Legal",
       "privacy": "Privacy Policy",
       "terms": "Terms of Service",
-      "commercialLaw": "Commercial Transactions Act",
+      "commercialLaw": "Commercial Transactions Act (Japan)",
+      "sunset": "SaaS sunset notice",
       "rights": "All rights reserved."
     }
+  },
+  "Sunset": {
+    "title": "The SBOMHub SaaS (sbomhub.app) is currently sunset",
+    "subtitle": "We are repositioning SBOMHub as a CRA 2026/9-ready AI compliance evidence layer. While the transition is in progress, we are not accepting new signups or new plan checkouts on the hosted SaaS.",
+    "selfHostTitle": "Self-host is fully supported",
+    "selfHostDescription": "SBOMHub OSS (AGPL-3.0) is on GitHub. Docker Compose brings it up in five minutes and provides the same feature set the SaaS did. For AI features, configure a BYOK LLM provider or a local Ollama-compatible endpoint.",
+    "waitlistTitle": "Get notified when new modules ship",
+    "waitlistDescription": "Join the waitlist to be notified when AI VEX MVP, CRA report drafting, and METI self-assessment prefill are released.",
+    "existingTitle": "Existing subscription, cancellation, and data export",
+    "existingDescription": "If you have an active subscription, want to cancel it, or need a data export or migration, email hello@sbomhub.app. We respond within one business day.",
+    "contactCta": "Email hello@sbomhub.app",
+    "repoCta": "Open GitHub repository",
+    "backToTop": "Back to home",
+    "viewDetailsCta": "View sunset notice",
+    "lastUpdated": "Last updated: June 2026"
   },
   "Home": {
     "title": "SBOMHub",
@@ -789,7 +751,12 @@
     "selectPlanPromptDescription": "You need to select a plan to use SBOMHub. You can also start with the free plan.",
     "startWithFree": "Start with Free",
     "downgrade": "Downgrade",
-    "billingDisabled": "Billing is currently disabled."
+    "billingDisabled": "Billing is currently disabled.",
+    "sunsetTitle": "The hosted SaaS is sunset",
+    "sunsetMessage": "We have paused new plan signups and Cloud Checkout while we reposition SBOMHub as a CRA 2026/9-ready AI compliance evidence layer. Existing subscriptions continue to work. For cancellation or data export, email hello@sbomhub.app.",
+    "sunsetCta": "Open sunset notice",
+    "checkoutDisabled": "New plan signups are paused",
+    "checkoutDisabledHint": "We are not accepting new plan signups or upgrades on the hosted SaaS during the sunset."
   },
   "Common": {
     "loading": "Loading...",
@@ -1017,17 +984,15 @@
   },
   "FAQ": {
     "title": "Frequently Asked Questions",
-    "q1": "What is an SBOM?",
-    "a1": "An SBOM (Software Bill of Materials) is a comprehensive list of components (libraries, frameworks, etc.) that make up a piece of software. It is essential for ensuring transparency in the software supply chain, vulnerability management, and license compliance.",
-    "q2": "Is SBOMHub free to use?",
-    "a2": "Yes. SBOMHub is open-source software under the AGPL-3.0 license. The self-hosted version is completely free with all features included. The cloud version offers a 14-day free trial, then starts at ¥2,500/month.",
-    "q3": "What is the difference between CycloneDX and SPDX?",
-    "a3": "CycloneDX and SPDX are both standard SBOM formats. CycloneDX is developed by OWASP and focuses on security. SPDX is managed by the Linux Foundation and has strengths in license compliance. SBOMHub supports both formats.",
-    "q4": "What is VEX (Vulnerability Exploitability eXchange)?",
-    "a4": "VEX is a standard format for communicating whether a reported vulnerability actually affects your product. In SBOMHub, you can set statuses of 'Under Investigation', 'Not Affected', 'Affected', or 'Fixed' for each vulnerability, managing false positives and recording response status.",
-    "q5": "Does it support METI (Japan) SBOM guidelines?",
-    "a5": "SBOMHub provides a self-assessment checklist feature based on METI's 'Guide for Introducing SBOM for Software Management'. Note that this is not an official compliance certification, but a tool to support your guideline compliance efforts.",
-    "q6": "Which SBOM generation tools are supported?",
-    "a6": "SBOMHub supports output from major SBOM generation tools including Syft (Anchore), cdxgen (CycloneDX), and Trivy (Aqua Security). Any SBOM in CycloneDX or SPDX JSON format can be imported, regardless of the generation tool."
+    "q1": "What is CRA 2026/9?",
+    "a1": "The EU Cyber Resilience Act (CRA) is a regulation that imposes vulnerability reporting obligations on manufacturers of digital products (including IoT and embedded) sold in the EU. It entered into force on 2024-12-10, and the vulnerability and incident reporting obligations apply from 2026-09-11: an early warning within 24 hours of an actively exploited vulnerability becoming known, a detailed notification within 72 hours, and a final report. Penalties for non-compliance can reach EUR 15M or 2.5% of global annual turnover.",
+    "q2": "What is VEX?",
+    "a2": "VEX (Vulnerability Exploitability eXchange) is a standard format for declaring whether a reported vulnerability actually affects your product. CycloneDX VEX uses analysis.state values (not_affected / affected / under_investigation / resolved), a justification (e.g., code_not_present, code_not_reachable), and a detail explanation. In SBOMHub, AI drafts each VEX statement and a human approves, edits, or rejects it - a strict human-in-the-loop workflow.",
+    "q3": "What does BYOK (Bring Your Own Key) mean here?",
+    "a3": "SBOMHub OSS / self-hosted does not ship any LLM API keys. The operator configures one of OpenAI, Anthropic, Google Gemini, Azure OpenAI, or Ollama (local). Manufacturers who cannot send code to overseas APIs can pick Ollama and keep all AI work inside the company network. AI features use the configured provider only; no traffic is sent to SBOMHub.",
+    "q4": "How does self-host differ from the SaaS?",
+    "a4": "The SBOMHub SaaS at sbomhub.app is currently sunset while we transition to the new positioning and is not accepting new signups. The OSS self-host build (AGPL-3.0) is fully supported, can be started with Docker Compose in about five minutes, and has the same feature set the SaaS had. The new SaaS reopening will be announced via the GitHub repository and the waitlist.",
+    "q5": "What is the METI self-assessment?",
+    "a5": "Japan's METI publishes 'Guide for Introducing SBOM for Software Management', which contains a self-assessment checklist for an organisation's SBOM management practices. In M3, SBOMHub will auto-prefill these items from your CI configuration, SBOM generation history, and vulnerability correlation history, classifying each as met / unmet / needs review with evidence and remediation suggestions. This is not an official compliance certification, but a tool that supports the self-assessment work."
   }
 }

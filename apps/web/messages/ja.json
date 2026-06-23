@@ -1,242 +1,205 @@
 {
   "Metadata": {
-    "title": "SBOMHub - オープンソース SBOM 管理プラットフォーム",
-    "description": "SBOMHubは、CycloneDX/SPDXのインポート、脆弱性管理、VEXステートメント作成、コンプライアンスチェックを提供するオープンソースのSBOM管理プラットフォームです。日本市場向けに最適化。",
-    "keywords": "SBOM, ソフトウェア部品表, 脆弱性管理, CycloneDX, SPDX, VEX, ソフトウェアサプライチェーン, セキュリティ, コンプライアンス, オープンソース",
-    "ogTitle": "SBOMHub - ソフトウェア部品表を一元管理",
-    "ogDescription": "CycloneDX/SPDXインポート、脆弱性管理、VEX対応のオープンソースSBOM管理プラットフォーム。14日間無料トライアル。",
-    "twitterTitle": "SBOMHub - オープンソース SBOM 管理",
-    "twitterDescription": "ソフトウェアサプライチェーンセキュリティを強化。SBOM管理・脆弱性検出・VEX対応を一元化。"
+    "title": "SBOMHub - CRA 対応 × AI コンプラ成果物レイヤー",
+    "description": "DT は CVE を見つける。SBOMHub は提出物を作る。EU CRA 2026/9 に直面する日本の中小製造業向けに、SBOM/Syft/Trivy/Dependency-Track の出力から AI が VEX・CRA 報告書・経産省自己評価の下書きを生成。BYOK / セルフホスト対応の AGPL-3.0 OSS。",
+    "keywords": "SBOM, CRA, EU Cyber Resilience Act, 脆弱性報告, VEX, CycloneDX, Dependency-Track, Syft, Trivy, 経産省, BYOK, セルフホスト, AGPL, AI, 中小製造業, IoT, 組込み",
+    "ogTitle": "SBOMHub - SBOM を提出できる CRA 報告書・VEX・監査証跡に変える",
+    "ogDescription": "CRA 2026/9 に直面する日本の中小製造業向け。AI が VEX/CRA 報告書/経産省自己評価の下書きを作り、人間が承認して提出できる成果物に変える AI コンプラ成果物レイヤー。BYOK 対応。",
+    "twitterTitle": "SBOMHub - CRA 対応 × AI コンプラ成果物レイヤー",
+    "twitterDescription": "DT は CVE を見つける。SBOMHub は提出物を作る。CRA 2026/9 対応の AI VEX/報告書ドラフト生成基盤。"
   },
   "Landing": {
     "nav": {
-      "features": "機能",
-      "allFeatures": "全機能",
-      "pricing": "料金",
+      "problem": "課題",
+      "solution": "成果物",
+      "byok": "AI / BYOK",
+      "roadmap": "ロードマップ",
+      "faq": "FAQ",
+      "waitlist": "Waitlist",
       "signIn": "ログイン",
-      "getStarted": "無料で始める"
+      "github": "GitHub"
     },
+    "sunsetBanner": "現行 SaaS (sbomhub.app) は新ポジショニング移行のためサンセット中です。新規プラン契約は停止しています。詳細は",
+    "sunsetBannerLink": "サンセット告知ページ",
     "hero": {
-      "badge": "オープンソース SBOM 管理",
-      "title": "ソフトウェア部品表を\n一元管理",
-      "description": "SBOMHubは、CycloneDX/SPDXのインポート、脆弱性管理、VEXステートメント作成、コンプライアンスチェックを提供するSBOM管理プラットフォームです。",
-      "cta": "無料で始める",
-      "github": "GitHubで見る"
+      "badge": "CRA 2026/9 対応 × AI コンプラ成果物レイヤー",
+      "title": "DT は CVE を見つける。\nSBOMHub は提出物を作る。",
+      "subtitle": "SBOM を、提出できる VEX・CRA 報告書・監査証跡に変える。EU 向け IoT/組込みを出荷する日本の中小製造業向けの、AI コンプラ成果物レイヤーです。",
+      "ctaWaitlist": "Waitlist に登録",
+      "ctaSelfHost": "セルフホストを試す",
+      "ctaGithub": "GitHub を見る"
     },
-    "features": {
-      "title": "主な機能",
-      "description": "ソフトウェアサプライチェーンセキュリティに必要な機能を網羅",
-      "import": {
-        "title": "SBOM インポート",
-        "description": "CycloneDX、SPDX形式のSBOMファイルをインポート。Syft、cdxgen、Trivyなどの主要ツールに対応。"
-      },
-      "vulnerability": {
-        "title": "脆弱性管理",
-        "description": "NVDデータベースと連携し、コンポーネントの脆弱性を自動検出。深刻度別に一覧表示。"
-      },
-      "vex": {
-        "title": "VEX ステートメント",
-        "description": "脆弱性の影響評価（VEX）を作成・管理。誤検知の除外や対応状況を記録。"
-      },
-      "compliance": {
-        "title": "コンプライアンス",
-        "description": "経済産業省のSBOMガイドラインへの対応を支援する自己評価チェック機能。※公式な準拠認定ではありません。"
-      },
-      "license": {
-        "title": "ライセンス管理",
-        "description": "OSSライセンスの自動検出とポリシーチェック。ライセンス競合や利用条件の違反を防止。"
-      },
-      "cicd": {
-        "title": "CI/CD 連携",
-        "description": "GitHub ActionsなどのCI/CDパイプラインからAPIでSBOMをアップロード。"
-      },
-      "i18n": {
-        "title": "日本語対応",
-        "description": "日本市場向けに最適化。UIは日本語/英語の両方に対応。"
-      },
-      "ipa": {
-        "title": "IPA 連携",
-        "description": "IPA（情報処理推進機構）の重要なセキュリティ情報と連携。国内向け脆弱性情報を自動取得。"
-      },
-      "diff": {
-        "title": "SBOM 差分比較",
-        "description": "異なるバージョン間のSBOMを比較し、追加・削除・更新されたコンポーネントと新規脆弱性を検出。"
-      }
+    "target": {
+      "title": "対象: EU 向け IoT/組込み製品を出荷する日本の中小製造業",
+      "description": "専任 PSIRT がいない、SBOM/VEX/CRA 報告書を片手間で扱うチーム向けに、Syft/Trivy/Dependency-Track の出力を取り込み、AI が下書きを作り、人間が承認して提出できる成果物に変える運用基盤です。"
     },
-    "allFeatures": {
-      "title": "全機能一覧",
-      "description": "SBOMHubが提供するすべての機能をご紹介します",
-      "categories": {
-        "core": "SBOM管理",
-        "security": "セキュリティ",
-        "analysis": "分析・レポート",
-        "integration": "連携・自動化",
-        "enterprise": "エンタープライズ"
-      },
-      "items": {
-        "sbomImport": {
-          "title": "SBOMインポート",
-          "description": "CycloneDX・SPDX形式に対応。Syft、cdxgen、Trivyなどの主要ツールからインポート可能"
+    "problem": {
+      "title": "CRA 2026/9 までに直面する課題",
+      "description": "EU CRA は 2026-09-11 に脆弱性報告義務の適用が始まり、悪用認識後 24 時間以内の早期通知・72 時間以内の詳細報告が必要です。違反時は最大 1,500 万ユーロまたは全世界年商 2.5% の制裁。",
+      "items": [
+        {
+          "title": "脆弱性スキャンの CVE が多すぎる",
+          "description": "Syft/Trivy/DT は CVE を出すが、影響の判定は結局自分。Critical / High だけで毎月数十件、人手では捌けない。"
         },
-        "componentManagement": {
-          "title": "コンポーネント管理",
-          "description": "プロジェクト内の全コンポーネントを一覧表示。名前・バージョン・ライセンス情報を管理"
+        {
+          "title": "VEX の書き方が分からない",
+          "description": "CycloneDX VEX の analysis.state / justification / detail の判断基準が曖昧。誤って not_affected と書くと法的責任になりかねない。"
         },
-        "sbomDiff": {
-          "title": "SBOM差分比較",
-          "description": "バージョン間のSBOMを比較し、追加・削除・更新されたコンポーネントを可視化"
+        {
+          "title": "CRA 報告書の下書きを作る人手がない",
+          "description": "24h 早期警告 / 72h 詳細通知 / 最終報告。書式・必要項目・日本語/英語の二言語準備を専任 PSIRT なしで運用するのは無理。"
         },
-        "sbomShare": {
-          "title": "SBOM共有",
-          "description": "プロジェクトのSBOMを外部パートナーと安全に共有するための公開リンクを生成"
+        {
+          "title": "コードを海外 SaaS に出せない",
+          "description": "製造業の機密コード・SBOM を OpenAI / Anthropic に渡せない。日本語で運用したい。ローカル LLM やセルフホストが選択肢に欲しい。"
         },
-        "vulnManagement": {
-          "title": "脆弱性管理",
-          "description": "NVDデータベースと連携し、コンポーネントの脆弱性を自動検出・深刻度別に表示"
-        },
-        "vexStatements": {
-          "title": "VEXステートメント",
-          "description": "脆弱性の影響評価（VEX）を作成・管理。誤検知の除外や対応状況を記録"
-        },
-        "ssvcAssessment": {
-          "title": "SSVC評価",
-          "description": "CISAのSSVCフレームワークに基づき、脆弱性の優先度を自動・手動で評価"
-        },
-        "kevIntegration": {
-          "title": "KEV連携",
-          "description": "CISAの既知悪用脆弱性カタログと連携し、実際に悪用されている脆弱性を警告"
-        },
-        "eolCheck": {
-          "title": "EOLステータス確認",
-          "description": "コンポーネントのサポート終了状況を自動チェック。アップグレード推奨を表示"
-        },
-        "licenseManagement": {
-          "title": "ライセンス管理",
-          "description": "OSSライセンスの自動検出とポリシーチェック。許可・禁止・要確認を設定可能"
-        },
-        "dashboard": {
-          "title": "ダッシュボード",
-          "description": "脆弱性サマリー、EPSS上位脆弱性、プロジェクトリスクスコアを一覧表示"
-        },
-        "trendAnalysis": {
-          "title": "トレンド分析",
-          "description": "MTTR・SLO達成率などの脆弱性対応パフォーマンス指標を可視化"
-        },
-        "reports": {
-          "title": "レポート機能",
-          "description": "経営・技術・コンプライアンスレポートをPDF/Excel形式で自動生成"
-        },
-        "crossSearch": {
-          "title": "横断検索",
-          "description": "CVE IDやコンポーネント名で全プロジェクトを横断検索し、影響範囲を特定"
-        },
-        "compliance": {
-          "title": "コンプライアンス",
-          "description": "経済産業省SBOMガイドラインへの対応を支援する自己評価チェック機能"
-        },
-        "cicdIntegration": {
-          "title": "CI/CD連携",
-          "description": "GitHub ActionsなどのCI/CDパイプラインからAPIでSBOMを自動アップロード"
-        },
-        "ipaIntegration": {
-          "title": "IPA/JVN連携",
-          "description": "IPAセキュリティアラートとJVN脆弱性情報を自動取得。国内向け情報に対応"
-        },
-        "ticketIntegration": {
-          "title": "チケット連携",
-          "description": "Jira・Backlogと連携し、脆弱性から直接チケットを作成。ステータス同期対応"
-        },
-        "notifications": {
-          "title": "通知機能",
-          "description": "Slack・Discord・メールで新規脆弱性検出時に通知。重要度でフィルタリング可能"
-        },
-        "mcpServer": {
-          "title": "MCP Server",
-          "description": "Claude Desktop・Cursorから自然言語でSBOMHubの情報にアクセス"
-        },
-        "cli": {
-          "title": "CLIツール",
-          "description": "sbomhub-cliでコマンドラインからSBOMスキャン・アップロード・検索を実行"
-        },
-        "auditLog": {
-          "title": "監査ログ",
-          "description": "すべての操作履歴を記録・検索。コンプライアンス要件への対応に"
-        },
-        "apiKeys": {
-          "title": "APIキー管理",
-          "description": "CLI・MCP Server・CI/CD連携で使用するAPIキーを発行・管理"
-        },
-        "i18n": {
-          "title": "多言語対応",
-          "description": "日本語・英語のUIを完全サポート。日本市場向けに最適化"
+        {
+          "title": "経産省 SBOM 手引きの自己評価が手動",
+          "description": "手引きのチェックリストは全て手書き。CI/SBOM 利用履歴から自動プリフィルできれば工数 1/10 になる。"
         }
-      }
+      ]
     },
-    "pricing": {
-      "title": "料金プラン",
-      "description": "チームの規模に合わせて選べるプラン。まずは無料でお試しください。",
-      "popular": "人気",
-      "free": {
-        "name": "Self-hosted",
-        "price": "無料",
-        "description": "自社サーバーで運用",
-        "feature1": "無制限のプロジェクト",
-        "feature2": "無制限のユーザー",
-        "feature3": "全機能利用可能",
-        "feature4": "コミュニティサポート",
-        "feature5": "GitHub / Docker Hub",
-        "cta": "GitHub / Docker Hub"
-      },
-      "starter": {
-        "name": "Cloud Starter",
-        "price": "¥2,500",
-        "period": "月",
-        "description": "小規模チーム向けのクラウドホスティング版",
-        "feature1": "5 プロジェクトまで",
-        "feature2": "3 ユーザーまで",
-        "feature3": "SBOM管理・脆弱性検出・VEX",
-        "feature4": "メールサポート（営業日対応）",
-        "feature5": "自動バックアップ・SSL証明書",
-        "cta": "無料トライアル開始"
-      },
-      "pro": {
-        "name": "Cloud Pro",
-        "price": "¥8,000",
-        "period": "月",
-        "description": "成長するチーム向けのフル機能版",
-        "feature1": "無制限のプロジェクト",
-        "feature2": "10 ユーザーまで",
-        "feature3": "SBOM管理・脆弱性検出・VEX",
-        "feature4": "監査ログ",
-        "cta": "無料トライアル開始"
-      },
-      "team": {
-        "name": "Cloud Team",
-        "price": "¥20,000",
-        "period": "月",
-        "description": "大規模チーム向けの専用プラン",
-        "feature1": "無制限のプロジェクト",
-        "feature2": "30 ユーザーまで",
-        "feature3": "全機能利用可能",
-        "feature4": "監査ログ・レポート機能",
-        "cta": "無料トライアル開始"
-      }
+    "solution": {
+      "title": "AI Compliance Evidence Pack",
+      "description": "Syft/Trivy/Dependency-Track の出力を取り込み、AI が VEX/CRA 報告書/経産省自己評価の下書きを生成。最終承認は必ず人間。承認・編集・却下を監査ログに残します。",
+      "principle": "AI は下書きまで。最終判断は人間。confidence と根拠を必ず表示し、低確信は自動的に under_investigation に倒します。",
+      "evidencePack": [
+        {
+          "title": "VEX 下書き",
+          "description": "affected / not_affected / under_investigation / resolved を AI が下書き。コード到達性とアドバイザリ箇所を根拠に提示。"
+        },
+        {
+          "title": "CRA 早期警告 (24h)",
+          "description": "悪用認識後 24 時間以内に提出する早期通知のテンプレ草案を生成。製品名・CVE・暫定影響範囲を埋める。"
+        },
+        {
+          "title": "CRA 詳細通知 (72h)",
+          "description": "72 時間以内に提出する詳細通知。影響コンポーネント・対象バージョン・是正/緩和措置を AI が下書き。"
+        },
+        {
+          "title": "CRA 最終報告",
+          "description": "恒久対応・再発防止・修正バージョンを記載した最終報告書を生成。日本語/英語の両言語ドラフト。"
+        },
+        {
+          "title": "経産省自己評価プリフィル",
+          "description": "経産省『ソフトウェア管理に向けた SBOM の導入に関する手引』の自己評価項目を CI 設定・SBOM 生成履歴からプリフィル。"
+        },
+        {
+          "title": "SBOM/VEX エクスポート",
+          "description": "CycloneDX / SPDX / VEX を提出フォーマットに整形。根拠コード片を添付した監査トレース付き。"
+        },
+        {
+          "title": "共有リンク",
+          "description": "取引先・監査担当向けに Evidence Pack を公開リンクで安全に共有。期限・閲覧範囲・共有先を制御。"
+        },
+        {
+          "title": "監査ログ",
+          "description": "AI 下書き・人間の編集・承認/却下・最終提出までの全履歴を保存。CRA 監査や経産省説明への証跡として使えます。"
+        }
+      ]
     },
-    "cta": {
-      "title": "今すぐSBOM管理を始めましょう",
-      "description": "ソフトウェアサプライチェーンのセキュリティを強化。14日間の無料トライアルで全機能をお試しいただけます。",
-      "button": "無料で始める"
+    "byok": {
+      "title": "AI = BYOK (Bring Your Own Key)",
+      "description": "LLM プロバイダは利用者が選択。SBOMHub OSS 版には LLM キーは一切同梱しません。コードを外部 API に出したくない製造業向けに、ローカル LLM (Ollama) も M4 で本格対応予定。",
+      "providersTitle": "対応プロバイダ",
+      "providers": [
+        "OpenAI (gpt-4o / gpt-5)",
+        "Anthropic (Claude)",
+        "Google Gemini",
+        "Azure OpenAI",
+        "Ollama (Local LLM)"
+      ],
+      "selfHostNote": "セルフホスト環境では Local LLM のみ・BYOK・Managed のいずれかを構成ファイルで指定できます。"
+    },
+    "selfHost": {
+      "title": "セルフホストで今すぐ起動",
+      "description": "Docker Compose で 5 分で起動。コードを社内から出したくない製造業向け、AGPL-3.0 で全機能を提供。",
+      "command": "git clone https://github.com/youichi-uda/sbomhub.git\ncd sbomhub\ndocker compose up -d\n# → http://localhost:3000",
+      "githubCta": "GitHub リポジトリを見る",
+      "dockerHint": "本番運用では暗号鍵の初期化と Postgres ロール分離 (Trust Rescue) を必ず実施してください。"
+    },
+    "cli": {
+      "title": "CLI でローカル解析",
+      "description": "sbomhub-cli は Syft / Trivy / cdxgen を自動検出してラップ。スキャン → AI トリアージ → VEX エクスポートをワンコマンドで。",
+      "command": "sbomhub scan . --project my-device\nsbomhub triage . --project my-device --ecosystem go\nsbomhub vex export --project my-device --output vex.json\nsbomhub cra draft --project my-device --cve CVE-XXXX-YYYY --lang ja,en"
+    },
+    "roadmap": {
+      "title": "ロードマップ",
+      "description": "CRA 2026-09-11 から逆算した直近 90 日。Trust Rescue (RLS / 暗号鍵 / API 契約 / CI / 配布) は M0/M1 で先行実施。",
+      "milestones": [
+        {
+          "id": "M0",
+          "title": "戦略確定 + Trust Rescue 着手",
+          "duration": "〜2 週間",
+          "description": "新ポジショニング固定、CRA 中小ベンダー向け LP/waitlist 公開、RLS・暗号鍵・API 契約・配布・CI の P0 修正に着手。"
+        },
+        {
+          "id": "M1",
+          "title": "AI VEX トリアージ MVP",
+          "duration": "〜6 週間",
+          "description": "Go / npm の reachability 一次解析、LLM 判断、VEX draft 保存、UI 承認/編集/却下、CycloneDX VEX エクスポート、confidence/evidence/監査ログ。"
+        },
+        {
+          "id": "M2",
+          "title": "CRA 報告書ドラフト生成",
+          "duration": "〜4 週間",
+          "description": "24h 早期警告 / 72h 詳細通知 / 最終報告のテンプレと AI 草案生成。日本語/英語ドラフト、Evidence Pack への統合。"
+        },
+        {
+          "id": "M3",
+          "title": "経産省自己評価プリフィル",
+          "duration": "〜3 週間",
+          "description": "CI/SBOMHub 利用履歴から自己評価項目を達成/未達/要確認に分類、根拠と改善アクションを提示。"
+        },
+        {
+          "id": "M4",
+          "title": "Local LLM / Enterprise Self-host 磨き込み",
+          "duration": "M3 後",
+          "description": "BYO Key / Ollama 等の Local LLM 実装、Managed と Local の品質比較ベンチ、Enterprise 商用ライセンス・SLA 資料。"
+        }
+      ]
+    },
+    "waitlist": {
+      "title": "Waitlist に登録",
+      "description": "AI VEX MVP / CRA 報告書ドラフト / 経産省自己評価プリフィルの公開時にメールでお知らせします。CRA 対応で困っている内容を任意で記載いただけると、優先的にご連絡します。",
+      "placeholder": "you@company.co.jp",
+      "cta": "登録する",
+      "submitting": "送信中...",
+      "success": "ご登録ありがとうございます。新機能の公開時に hello@sbomhub.app からご連絡します。",
+      "error": "送信に失敗しました。時間を置いて再度お試しいただくか、hello@sbomhub.app へ直接ご連絡ください。",
+      "fallbackNote": "メールクライアントが開きます。送信ボタンを押して送信を完了してください。"
+    },
+    "faqCta": {
+      "title": "もっと詳しく知りたい",
+      "description": "再起動計画の戦略・市場タイミング・Evidence Pack 仕様の詳細は GitHub リポジトリの内部資料を参照してください。",
+      "github": "GitHub で詳細を見る"
     },
     "footer": {
-      "description": "ソフトウェア部品表（SBOM）を管理・可視化するオープンソースプラットフォーム",
+      "description": "CRA 2026/9 に直面する日本の中小製造業向けの、AI コンプラ成果物レイヤー (AGPL-3.0)。",
       "product": "プロダクト",
       "resources": "リソース",
       "legal": "法的情報",
       "privacy": "プライバシーポリシー",
       "terms": "利用規約",
       "commercialLaw": "特定商取引法に基づく表記",
+      "sunset": "SaaS サンセット告知",
       "rights": "All rights reserved."
     }
+  },
+  "Sunset": {
+    "title": "SBOMHub SaaS (sbomhub.app) は現在サンセット中です",
+    "subtitle": "新ポジショニング『CRA 2026/9 対応 × AI コンプラ成果物レイヤー』への移行のため、SaaS の新規受付・新規プラン契約・Cloud Checkout を一時停止しています。",
+    "selfHostTitle": "セルフホスト版は引き続きご利用いただけます",
+    "selfHostDescription": "SBOMHub OSS (AGPL-3.0) は GitHub で公開しています。Docker Compose で 5 分で起動でき、SaaS と同等の全機能を自社環境でご利用いただけます。AI 機能を使う場合はご自身の LLM API キー (BYOK) または Local LLM をご用意ください。",
+    "waitlistTitle": "新機能の公開時にお知らせ",
+    "waitlistDescription": "AI VEX MVP / CRA 報告書ドラフト / 経産省自己評価プリフィルの公開時に通知をご希望の方は Waitlist にご登録ください。",
+    "existingTitle": "既存サブスクリプションのキャンセル・データ移行",
+    "existingDescription": "既存のサブスクリプションのキャンセル、エクスポート、データ移行のお問い合わせは hello@sbomhub.app までご連絡ください。担当者から営業日内にご返信します。",
+    "contactCta": "hello@sbomhub.app へメール",
+    "repoCta": "GitHub リポジトリを開く",
+    "backToTop": "トップに戻る",
+    "viewDetailsCta": "サンセット詳細を見る",
+    "lastUpdated": "最終更新: 2026 年 6 月"
   },
   "Home": {
     "title": "SBOMHub",
@@ -789,7 +752,12 @@
     "selectPlanPromptDescription": "SBOMHub を利用するにはプランを選択する必要があります。無料プランから始めることもできます。",
     "startWithFree": "Freeで始める",
     "downgrade": "ダウングレード",
-    "billingDisabled": "課金機能は現在無効になっています。"
+    "billingDisabled": "課金機能は現在無効になっています。",
+    "sunsetTitle": "現行 SaaS はサンセット中です",
+    "sunsetMessage": "SBOMHub は新ポジショニング (CRA 2026/9 対応 × AI コンプラ成果物レイヤー) への移行のため、新規プラン契約と Cloud Checkout を停止しています。既存のサブスクリプションは引き続きご利用可能です。解約・データ移行は hello@sbomhub.app へご連絡ください。",
+    "sunsetCta": "サンセット詳細を見る",
+    "checkoutDisabled": "新規プラン契約は停止しています",
+    "checkoutDisabledHint": "新規プランの契約・アップグレードは現在受け付けていません。"
   },
   "Common": {
     "loading": "読み込み中...",
@@ -1017,17 +985,15 @@
   },
   "FAQ": {
     "title": "よくある質問",
-    "q1": "SBOMとは何ですか？",
-    "a1": "SBOM（Software Bill of Materials）は、ソフトウェアを構成するコンポーネント（ライブラリ、フレームワーク等）の一覧表です。ソフトウェアサプライチェーンの透明性を確保し、脆弱性管理やライセンスコンプライアンスに不可欠な文書です。",
-    "q2": "SBOMHubは無料で使えますか？",
-    "a2": "はい。SBOMHubはAGPL-3.0ライセンスのオープンソースソフトウェアです。セルフホスト版は完全無料で全機能をご利用いただけます。クラウド版は14日間の無料トライアル後、月額¥2,500からご利用いただけます。",
-    "q3": "CycloneDXとSPDXの違いは何ですか？",
-    "a3": "CycloneDXとSPDXはどちらもSBOMの標準フォーマットです。CycloneDXはOWASPが開発し、セキュリティに焦点を当てています。SPDXはLinux Foundationが管理し、ライセンスコンプライアンスに強みがあります。SBOMHubは両方のフォーマットに対応しています。",
-    "q4": "VEX（Vulnerability Exploitability eXchange）とは何ですか？",
-    "a4": "VEXは、報告された脆弱性が実際に自社の製品に影響を与えるかどうかを伝えるための標準形式です。SBOMHubでは、脆弱性ごとに「調査中」「影響なし」「影響あり」「修正済み」のステータスを設定し、誤検知の管理や対応状況の記録ができます。",
-    "q5": "経済産業省のSBOMガイドラインに対応していますか？",
-    "a5": "SBOMHubは経済産業省が策定した「ソフトウェア管理に向けたSBOMの導入に関する手引」に基づく自己評価チェック機能を提供しています。ただし、これは公式な準拠認定ではなく、ガイドラインへの対応を支援するツールです。",
-    "q6": "どのSBOM生成ツールに対応していますか？",
-    "a6": "SBOMHubはSyft（Anchore）、cdxgen（CycloneDX）、Trivy（Aqua Security）など主要なSBOM生成ツールの出力に対応しています。CycloneDXまたはSPDX JSON形式であれば、その他のツールで生成したSBOMもインポート可能です。"
+    "q1": "CRA 2026/9 とは何ですか？",
+    "a1": "EU Cyber Resilience Act (CRA) は、EU 市場で販売されるデジタル製品 (IoT・組込みを含む) のメーカーに対し脆弱性報告義務を課す規則です。2024-12-10 発効、2026-09-11 から脆弱性・インシデント報告義務が適用開始。悪用認識後 24 時間以内の早期通知、72 時間以内の詳細報告、最終報告の提出が必要で、違反時は最大 1,500 万ユーロまたは全世界年商 2.5% の制裁が課されます。",
+    "q2": "VEX とは何ですか？",
+    "a2": "VEX (Vulnerability Exploitability eXchange) は、報告された脆弱性が実際に自社製品に影響するかを表明する標準形式です。CycloneDX VEX では analysis.state を not_affected / affected / under_investigation / resolved から選び、justification (code_not_present / code_not_reachable など) と detail で根拠を示します。SBOMHub は AI が下書きを生成し、人間が承認・編集・却下する human-in-the-loop の形で VEX を運用します。",
+    "q3": "BYOK (Bring Your Own Key) とは何ですか？",
+    "a3": "SBOMHub OSS / セルフホスト版には LLM API キーを一切同梱しません。利用者が OpenAI / Anthropic / Google Gemini / Azure OpenAI / Ollama (ローカル) のいずれかのキーまたはエンドポイントをご自身で設定します。これにより、機密コードを外部 API に出したくない製造業も Ollama 経由でローカル LLM を選択でき、AI 機能を組織のセキュリティポリシー内で利用できます。",
+    "q4": "セルフホストと SaaS はどう違いますか？",
+    "a4": "現在 SBOMHub の SaaS (sbomhub.app) は新ポジショニング移行のためサンセット中で、新規受付は停止しています。OSS セルフホスト版は AGPL-3.0 で公開しており Docker Compose で 5 分で起動可能、SaaS と同等の全機能を自社環境で利用できます。新 SaaS の再開時期は GitHub と Waitlist でご案内します。",
+    "q5": "経産省自己評価とは何ですか？",
+    "a5": "経済産業省が策定した『ソフトウェア管理に向けた SBOM の導入に関する手引』には、組織の SBOM 管理体制を確認する自己評価チェックリストが含まれます。SBOMHub は M3 で、CI 設定 / SBOM 生成履歴 / 脆弱性突合履歴から自己評価項目を自動プリフィルし、達成 / 未達 / 要確認に分類して根拠と改善アクションを提示します。これは公式な準拠認定ではなく、自己評価作業を支援するツールです。"
   }
 }
