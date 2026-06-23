@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -20,6 +21,12 @@ func NewIssueTrackerRepository(db *sql.DB) *IssueTrackerRepository {
 	return &IssueTrackerRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+func (r *IssueTrackerRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 // CreateConnection creates a new issue tracker connection
 func (r *IssueTrackerRepository) CreateConnection(ctx context.Context, conn *model.IssueTrackerConnection) error {
 	query := `
@@ -29,7 +36,7 @@ func (r *IssueTrackerRepository) CreateConnection(ctx context.Context, conn *mod
 			created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		conn.ID, conn.TenantID, conn.TrackerType, conn.Name, conn.BaseURL,
 		conn.AuthType, conn.AuthEmail, conn.AuthTokenEncrypted,
 		conn.DefaultProjectKey, conn.DefaultIssueType, conn.IsActive,
@@ -48,7 +55,7 @@ func (r *IssueTrackerRepository) GetConnection(ctx context.Context, id uuid.UUID
 	`
 
 	var conn model.IssueTrackerConnection
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&conn.ID, &conn.TenantID, &conn.TrackerType, &conn.Name, &conn.BaseURL,
 		&conn.AuthType, &conn.AuthEmail, &conn.AuthTokenEncrypted,
 		&conn.DefaultProjectKey, &conn.DefaultIssueType, &conn.IsActive,
@@ -75,7 +82,7 @@ func (r *IssueTrackerRepository) ListConnections(ctx context.Context, tenantID u
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +116,7 @@ func (r *IssueTrackerRepository) ListConnectionsByType(ctx context.Context, tena
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, trackerType)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, trackerType)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +148,7 @@ func (r *IssueTrackerRepository) UpdateConnection(ctx context.Context, conn *mod
 			is_active = $9, updated_at = NOW()
 		WHERE id = $1
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		conn.ID, conn.Name, conn.BaseURL, conn.AuthType, conn.AuthEmail,
 		conn.AuthTokenEncrypted, conn.DefaultProjectKey, conn.DefaultIssueType,
 		conn.IsActive,
@@ -152,14 +159,14 @@ func (r *IssueTrackerRepository) UpdateConnection(ctx context.Context, conn *mod
 // DeleteConnection deletes a connection
 func (r *IssueTrackerRepository) DeleteConnection(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM issue_tracker_connections WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	_, err := r.q(ctx).ExecContext(ctx, query, id)
 	return err
 }
 
 // UpdateConnectionSyncTime updates the last sync time for a connection
 func (r *IssueTrackerRepository) UpdateConnectionSyncTime(ctx context.Context, id uuid.UUID) error {
 	query := `UPDATE issue_tracker_connections SET last_sync_at = NOW(), updated_at = NOW() WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	_, err := r.q(ctx).ExecContext(ctx, query, id)
 	return err
 }
 
@@ -173,7 +180,7 @@ func (r *IssueTrackerRepository) CreateTicket(ctx context.Context, ticket *model
 			last_synced_at, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		ticket.ID, ticket.TenantID, ticket.VulnerabilityID, ticket.ProjectID,
 		ticket.ConnectionID, ticket.ExternalTicketID, ticket.ExternalTicketKey,
 		ticket.ExternalTicketURL, ticket.LocalStatus, ticket.ExternalStatus,
@@ -194,7 +201,7 @@ func (r *IssueTrackerRepository) GetTicket(ctx context.Context, id uuid.UUID) (*
 	`
 
 	var ticket model.VulnerabilityTicket
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&ticket.ID, &ticket.TenantID, &ticket.VulnerabilityID, &ticket.ProjectID,
 		&ticket.ConnectionID, &ticket.ExternalTicketID, &ticket.ExternalTicketKey,
 		&ticket.ExternalTicketURL, &ticket.LocalStatus, &ticket.ExternalStatus,
@@ -223,7 +230,7 @@ func (r *IssueTrackerRepository) GetTicketByVulnerability(ctx context.Context, v
 	`
 
 	var ticket model.VulnerabilityTicket
-	err := r.db.QueryRowContext(ctx, query, vulnID, connectionID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, vulnID, connectionID).Scan(
 		&ticket.ID, &ticket.TenantID, &ticket.VulnerabilityID, &ticket.ProjectID,
 		&ticket.ConnectionID, &ticket.ExternalTicketID, &ticket.ExternalTicketKey,
 		&ticket.ExternalTicketURL, &ticket.LocalStatus, &ticket.ExternalStatus,
@@ -256,7 +263,7 @@ func (r *IssueTrackerRepository) ListTicketsByVulnerability(ctx context.Context,
 		ORDER BY t.created_at DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, vulnID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, vulnID)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +301,7 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 	}
 
 	var total int
-	if err := r.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+	if err := r.q(ctx).QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -323,7 +330,7 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 	query += fmt.Sprintf(` ORDER BY t.created_at DESC LIMIT $%d OFFSET $%d`, argIndex, argIndex+1)
 	args = append(args, limit, offset)
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.q(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -355,7 +362,7 @@ func (r *IssueTrackerRepository) UpdateTicket(ctx context.Context, ticket *model
 			assignee = $5, summary = $6, last_synced_at = $7, updated_at = NOW()
 		WHERE id = $1
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		ticket.ID, ticket.LocalStatus, ticket.ExternalStatus,
 		ticket.Priority, ticket.Assignee, ticket.Summary, ticket.LastSyncedAt,
 	)
@@ -378,7 +385,7 @@ func (r *IssueTrackerRepository) GetTicketsToSync(ctx context.Context, olderThan
 		LIMIT 100
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, cutoff)
+	rows, err := r.q(ctx).QueryContext(ctx, query, cutoff)
 	if err != nil {
 		return nil, err
 	}

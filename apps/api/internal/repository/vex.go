@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -17,12 +18,18 @@ func NewVEXRepository(db *sql.DB) *VEXRepository {
 	return &VEXRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+func (r *VEXRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 func (r *VEXRepository) Create(ctx context.Context, v *model.VEXStatement) error {
 	query := `
 		INSERT INTO vex_statements (id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		v.ID, v.ProjectID, v.VulnerabilityID, v.ComponentID,
 		v.Status, v.Justification, v.ActionStatement, v.ImpactStatement,
 		v.CreatedBy, v.CreatedAt, v.UpdatedAt,
@@ -36,7 +43,7 @@ func (r *VEXRepository) Update(ctx context.Context, v *model.VEXStatement) error
 		SET status = $1, justification = $2, action_statement = $3, impact_statement = $4, updated_at = $5
 		WHERE id = $6
 	`
-	result, err := r.db.ExecContext(ctx, query,
+	result, err := r.q(ctx).ExecContext(ctx, query,
 		v.Status, v.Justification, v.ActionStatement, v.ImpactStatement, v.UpdatedAt, v.ID,
 	)
 	if err != nil {
@@ -59,7 +66,7 @@ func (r *VEXRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.VEXSt
 		WHERE id = $1
 	`
 	var v model.VEXStatement
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&v.ID, &v.ProjectID, &v.VulnerabilityID, &v.ComponentID,
 		&v.Status, &v.Justification, &v.ActionStatement, &v.ImpactStatement,
 		&v.CreatedBy, &v.CreatedAt, &v.UpdatedAt,
@@ -87,7 +94,7 @@ func (r *VEXRepository) ListByProject(ctx context.Context, projectID uuid.UUID) 
 		WHERE vs.project_id = $1
 		ORDER BY vs.updated_at DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, projectID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +124,7 @@ func (r *VEXRepository) ListByVulnerability(ctx context.Context, vulnerabilityID
 		WHERE vulnerability_id = $1
 		ORDER BY updated_at DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, vulnerabilityID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, vulnerabilityID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +147,7 @@ func (r *VEXRepository) ListByVulnerability(ctx context.Context, vulnerabilityID
 
 func (r *VEXRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM vex_statements WHERE id = $1`
-	result, err := r.db.ExecContext(ctx, query, id)
+	result, err := r.q(ctx).ExecContext(ctx, query, id)
 	if err != nil {
 		return err
 	}
@@ -176,7 +183,7 @@ func (r *VEXRepository) GetByProjectAndVulnerability(ctx context.Context, projec
 	}
 
 	var v model.VEXStatement
-	err := r.db.QueryRowContext(ctx, query, args...).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, args...).Scan(
 		&v.ID, &v.ProjectID, &v.VulnerabilityID, &v.ComponentID,
 		&v.Status, &v.Justification, &v.ActionStatement, &v.ImpactStatement,
 		&v.CreatedBy, &v.CreatedAt, &v.UpdatedAt,

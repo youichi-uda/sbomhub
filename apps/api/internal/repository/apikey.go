@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -18,12 +19,28 @@ func NewAPIKeyRepository(db *sql.DB) *APIKeyRepository {
 	return &APIKeyRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+//
+// NOTE: GetByKeyHash runs during MultiAuth / APIKeyAuth BEFORE TenantTx
+// opens its tx, so at that point ctx carries no transaction and we are
+// querying `api_keys` directly against *sql.DB. The `api_keys` table is
+// FORCE ROW LEVEL SECURITY since migration 023, so under the NOBYPASSRLS
+// runtime role this lookup would normally return zero rows because the
+// `app.current_tenant_id` GUC is not set yet. Tracking that as a known
+// pre-existing chicken-and-egg in the Trust Rescue 9.1.2 report; a
+// follow-up RLS policy adjustment (separate migration) is required to
+// resolve it.
+func (r *APIKeyRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 func (r *APIKeyRepository) Create(ctx context.Context, k *model.APIKey) error {
 	query := `
 		INSERT INTO api_keys (id, tenant_id, project_id, name, key_hash, key_prefix, permissions, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		k.ID, k.TenantID, k.ProjectID, k.Name, k.KeyHash, k.KeyPrefix, k.Permissions, k.ExpiresAt, k.CreatedAt,
 	)
 	return err
@@ -36,7 +53,7 @@ func (r *APIKeyRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.AP
 		WHERE id = $1
 	`
 	var k model.APIKey
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&k.ID, &k.TenantID, &k.ProjectID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.Permissions, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -55,7 +72,7 @@ func (r *APIKeyRepository) GetByKeyHash(ctx context.Context, keyHash string) (*m
 		WHERE key_hash = $1
 	`
 	var k model.APIKey
-	err := r.db.QueryRowContext(ctx, query, keyHash).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, keyHash).Scan(
 		&k.ID, &k.TenantID, &k.ProjectID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.Permissions, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -75,7 +92,7 @@ func (r *APIKeyRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID)
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +119,7 @@ func (r *APIKeyRepository) ListByProject(ctx context.Context, projectID uuid.UUI
 		WHERE project_id = $1
 		ORDER BY created_at DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, projectID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +140,7 @@ func (r *APIKeyRepository) ListByProject(ctx context.Context, projectID uuid.UUI
 
 func (r *APIKeyRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM api_keys WHERE id = $1`
-	result, err := r.db.ExecContext(ctx, query, id)
+	result, err := r.q(ctx).ExecContext(ctx, query, id)
 	if err != nil {
 		return err
 	}
@@ -140,7 +157,7 @@ func (r *APIKeyRepository) Delete(ctx context.Context, id uuid.UUID) error {
 // DeleteByTenant deletes an API key ensuring it belongs to the specified tenant
 func (r *APIKeyRepository) DeleteByTenant(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	query := `DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2`
-	result, err := r.db.ExecContext(ctx, query, id, tenantID)
+	result, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
 	if err != nil {
 		return err
 	}
@@ -156,6 +173,6 @@ func (r *APIKeyRepository) DeleteByTenant(ctx context.Context, id uuid.UUID, ten
 
 func (r *APIKeyRepository) UpdateLastUsed(ctx context.Context, id uuid.UUID) error {
 	query := `UPDATE api_keys SET last_used_at = $1 WHERE id = $2`
-	_, err := r.db.ExecContext(ctx, query, time.Now(), id)
+	_, err := r.q(ctx).ExecContext(ctx, query, time.Now(), id)
 	return err
 }

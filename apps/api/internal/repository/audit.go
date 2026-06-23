@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -18,6 +19,14 @@ type AuditRepository struct {
 
 func NewAuditRepository(db *sql.DB) *AuditRepository {
 	return &AuditRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// audit_logs is FORCE ROW LEVEL SECURITY (migration 023), so writes from
+// the audit middleware MUST land inside the same tx that TenantTx opened.
+func (r *AuditRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
@@ -32,7 +41,7 @@ func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
 			details, ip_address, user_agent, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
-	_, err = r.db.ExecContext(ctx, query,
+	_, err = r.q(ctx).ExecContext(ctx, query,
 		a.ID, a.TenantID, a.UserID, a.Action, a.ResourceType, a.ResourceID,
 		detailsJSON, a.IPAddress.String(), a.UserAgent, a.CreatedAt)
 	return err
@@ -47,7 +56,7 @@ func (r *AuditRepository) List(ctx context.Context, tenantID uuid.UUID, limit, o
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, limit, offset)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +93,7 @@ func (r *AuditRepository) ListByUser(ctx context.Context, tenantID, userID uuid.
 		ORDER BY created_at DESC
 		LIMIT $3 OFFSET $4
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, userID, limit, offset)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, userID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +130,7 @@ func (r *AuditRepository) ListByResource(ctx context.Context, tenantID uuid.UUID
 		ORDER BY created_at DESC
 		LIMIT $4 OFFSET $5
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, resourceType, resourceID, limit, offset)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, resourceType, resourceID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -152,14 +161,14 @@ func (r *AuditRepository) ListByResource(ctx context.Context, tenantID uuid.UUID
 func (r *AuditRepository) Count(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	query := `SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1`
 	var count int
-	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(&count)
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID).Scan(&count)
 	return count, err
 }
 
 // DeleteOlderThan deletes audit logs older than the specified duration
 func (r *AuditRepository) DeleteOlderThan(ctx context.Context, tenantID uuid.UUID, before time.Time) (int64, error) {
 	query := `DELETE FROM audit_logs WHERE tenant_id = $1 AND created_at < $2`
-	result, err := r.db.ExecContext(ctx, query, tenantID, before)
+	result, err := r.q(ctx).ExecContext(ctx, query, tenantID, before)
 	if err != nil {
 		return 0, err
 	}
@@ -242,7 +251,7 @@ func (r *AuditRepository) ListWithFilter(ctx context.Context, tenantID uuid.UUID
 	// Get total count
 	countQuery := `SELECT COUNT(*) ` + baseQuery
 	var total int
-	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := r.q(ctx).QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -264,7 +273,7 @@ func (r *AuditRepository) ListWithFilter(ctx context.Context, tenantID uuid.UUID
 		LIMIT $%d OFFSET $%d`, baseQuery, argIndex, argIndex+1)
 	args = append(args, limit, offset)
 
-	rows, err := r.db.QueryContext(ctx, selectQuery, args...)
+	rows, err := r.q(ctx).QueryContext(ctx, selectQuery, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -308,7 +317,7 @@ func (r *AuditRepository) GetActionCounts(ctx context.Context, tenantID uuid.UUI
 		GROUP BY action
 		ORDER BY count DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, start, end)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +343,7 @@ func (r *AuditRepository) GetDailyActionCounts(ctx context.Context, tenantID uui
 		GROUP BY DATE(created_at), action
 		ORDER BY date DESC, count DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, days)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, days)
 	if err != nil {
 		return nil, err
 	}

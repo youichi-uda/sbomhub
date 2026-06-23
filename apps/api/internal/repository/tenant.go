@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -15,6 +16,19 @@ type TenantRepository struct {
 
 func NewTenantRepository(db *sql.DB) *TenantRepository {
 	return &TenantRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// The `tenants` table itself has no RLS, so this is purely about keeping
+// reads/writes on the same pinned connection as the rest of the request.
+//
+// Note: Create() below opens its own BeginTx because it must seed both
+// `tenants` and `scan_settings` atomically; it is only invoked from
+// pre-request paths (Auth middleware bootstrap, Clerk webhook handler)
+// where no request-scoped tx is open yet.
+func (r *TenantRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 func (r *TenantRepository) Create(ctx context.Context, t *model.Tenant) error {
@@ -56,7 +70,7 @@ func (r *TenantRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Te
 		FROM tenants WHERE id = $1
 	`
 	var t model.Tenant
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&t.ID, &t.ClerkOrgID, &t.Name, &t.Slug, &t.Plan, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -70,7 +84,7 @@ func (r *TenantRepository) GetByClerkOrgID(ctx context.Context, clerkOrgID strin
 		FROM tenants WHERE clerk_org_id = $1
 	`
 	var t model.Tenant
-	err := r.db.QueryRowContext(ctx, query, clerkOrgID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, clerkOrgID).Scan(
 		&t.ID, &t.ClerkOrgID, &t.Name, &t.Slug, &t.Plan, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -84,7 +98,7 @@ func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (*model.T
 		FROM tenants WHERE slug = $1
 	`
 	var t model.Tenant
-	err := r.db.QueryRowContext(ctx, query, slug).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, slug).Scan(
 		&t.ID, &t.ClerkOrgID, &t.Name, &t.Slug, &t.Plan, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -98,19 +112,19 @@ func (r *TenantRepository) Update(ctx context.Context, t *model.Tenant) error {
 		WHERE id = $5
 	`
 	t.UpdatedAt = time.Now()
-	_, err := r.db.ExecContext(ctx, query, t.Name, t.Slug, t.Plan, t.UpdatedAt, t.ID)
+	_, err := r.q(ctx).ExecContext(ctx, query, t.Name, t.Slug, t.Plan, t.UpdatedAt, t.ID)
 	return err
 }
 
 func (r *TenantRepository) UpdatePlan(ctx context.Context, id uuid.UUID, plan string) error {
 	query := `UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3`
-	_, err := r.db.ExecContext(ctx, query, plan, time.Now(), id)
+	_, err := r.q(ctx).ExecContext(ctx, query, plan, time.Now(), id)
 	return err
 }
 
 func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM tenants WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	_, err := r.q(ctx).ExecContext(ctx, query, id)
 	return err
 }
 
@@ -124,7 +138,7 @@ func (r *TenantRepository) GetWithStats(ctx context.Context, id uuid.UUID) (*mod
 		WHERE t.id = $1
 	`
 	var ts model.TenantWithStats
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&ts.ID, &ts.ClerkOrgID, &ts.Name, &ts.Slug, &ts.Plan,
 		&ts.CreatedAt, &ts.UpdatedAt, &ts.UserCount, &ts.ProjectCount)
 	if err != nil {
@@ -138,14 +152,14 @@ func (r *TenantRepository) GetWithStats(ctx context.Context, id uuid.UUID) (*mod
 // This prevents tenant ID leakage across pooled connections
 func (r *TenantRepository) SetCurrentTenant(ctx context.Context, tenantID uuid.UUID) error {
 	query := `SELECT set_config('app.current_tenant_id', $1, true)`
-	_, err := r.db.ExecContext(ctx, query, tenantID.String())
+	_, err := r.q(ctx).ExecContext(ctx, query, tenantID.String())
 	return err
 }
 
 // ClearCurrentTenant clears the current tenant setting
 func (r *TenantRepository) ClearCurrentTenant(ctx context.Context) error {
 	query := `SELECT set_config('app.current_tenant_id', '', true)`
-	_, err := r.db.ExecContext(ctx, query)
+	_, err := r.q(ctx).ExecContext(ctx, query)
 	return err
 }
 

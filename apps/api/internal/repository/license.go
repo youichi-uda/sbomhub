@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -18,12 +19,18 @@ func NewLicensePolicyRepository(db *sql.DB) *LicensePolicyRepository {
 	return &LicensePolicyRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+func (r *LicensePolicyRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 func (r *LicensePolicyRepository) Create(ctx context.Context, p *model.LicensePolicy) error {
 	query := `
 		INSERT INTO license_policies (id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		p.ID, p.ProjectID, p.LicenseID, p.LicenseName, p.PolicyType, p.Reason, p.CreatedAt, p.UpdatedAt,
 	)
 	return err
@@ -35,7 +42,7 @@ func (r *LicensePolicyRepository) Update(ctx context.Context, p *model.LicensePo
 		SET policy_type = $1, reason = $2, updated_at = $3
 		WHERE id = $4
 	`
-	result, err := r.db.ExecContext(ctx, query, p.PolicyType, p.Reason, p.UpdatedAt, p.ID)
+	result, err := r.q(ctx).ExecContext(ctx, query, p.PolicyType, p.Reason, p.UpdatedAt, p.ID)
 	if err != nil {
 		return err
 	}
@@ -56,7 +63,7 @@ func (r *LicensePolicyRepository) GetByID(ctx context.Context, id uuid.UUID) (*m
 		WHERE id = $1
 	`
 	var p model.LicensePolicy
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&p.ID, &p.ProjectID, &p.LicenseID, &p.LicenseName, &p.PolicyType, &p.Reason, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -75,7 +82,7 @@ func (r *LicensePolicyRepository) ListByProject(ctx context.Context, projectID u
 		WHERE project_id = $1
 		ORDER BY license_name
 	`
-	rows, err := r.db.QueryContext(ctx, query, projectID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +103,7 @@ func (r *LicensePolicyRepository) ListByProject(ctx context.Context, projectID u
 
 func (r *LicensePolicyRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM license_policies WHERE id = $1`
-	result, err := r.db.ExecContext(ctx, query, id)
+	result, err := r.q(ctx).ExecContext(ctx, query, id)
 	if err != nil {
 		return err
 	}
@@ -117,7 +124,7 @@ func (r *LicensePolicyRepository) GetByLicenseID(ctx context.Context, projectID 
 		WHERE project_id = $1 AND license_id = $2
 	`
 	var p model.LicensePolicy
-	err := r.db.QueryRowContext(ctx, query, projectID, licenseID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID, licenseID).Scan(
 		&p.ID, &p.ProjectID, &p.LicenseID, &p.LicenseName, &p.PolicyType, &p.Reason, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -140,7 +147,7 @@ func (r *LicensePolicyRepository) GetPoliciesForLicenses(ctx context.Context, pr
 		FROM license_policies
 		WHERE project_id = $1 AND license_id = ANY($2)
 	`
-	rows, err := r.db.QueryContext(ctx, query, projectID, pq.Array(licenseIDs))
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID, pq.Array(licenseIDs))
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -15,6 +16,12 @@ type ProjectRepository struct {
 
 func NewProjectRepository(db *sql.DB) *ProjectRepository {
 	return &ProjectRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+func (r *ProjectRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // Create creates a project (DEPRECATED: use CreateWithTenant instead)
@@ -40,7 +47,7 @@ func (r *ProjectRepository) Get(ctx context.Context, id uuid.UUID) (*model.Proje
 	query := `SELECT id, tenant_id, name, description, created_at, updated_at FROM projects WHERE id = $1`
 	var p model.Project
 	var tenantID uuid.UUID
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&p.ID, &tenantID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&p.ID, &tenantID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +59,7 @@ func (r *ProjectRepository) Get(ctx context.Context, id uuid.UUID) (*model.Proje
 func (r *ProjectRepository) GetByTenant(ctx context.Context, tenantID, projectID uuid.UUID) (*model.Project, error) {
 	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE id = $1 AND tenant_id = $2`
 	var p model.Project
-	err := r.db.QueryRowContext(ctx, query, projectID, tenantID).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID, tenantID).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +69,7 @@ func (r *ProjectRepository) GetByTenant(ctx context.Context, tenantID, projectID
 func (r *ProjectRepository) GetTenantID(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
 	query := `SELECT tenant_id FROM projects WHERE id = $1`
 	var tenantID uuid.UUID
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&tenantID)
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&tenantID)
 	return tenantID, err
 }
 
@@ -76,7 +83,7 @@ func (r *ProjectRepository) Delete(ctx context.Context, id uuid.UUID) error {
 // SECURITY: Always verify tenant ownership before deletion
 func (r *ProjectRepository) DeleteByTenant(ctx context.Context, tenantID, projectID uuid.UUID) error {
 	query := `DELETE FROM projects WHERE id = $1 AND tenant_id = $2`
-	result, err := r.db.ExecContext(ctx, query, projectID, tenantID)
+	result, err := r.q(ctx).ExecContext(ctx, query, projectID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -94,7 +101,7 @@ func (r *ProjectRepository) DeleteByTenant(ctx context.Context, tenantID, projec
 func (r *ProjectRepository) CountByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	query := `SELECT COUNT(*) FROM projects WHERE tenant_id = $1`
 	var count int
-	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(&count)
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID).Scan(&count)
 	return count, err
 }
 
@@ -103,7 +110,7 @@ func (r *ProjectRepository) CountByTenant(ctx context.Context, tenantID uuid.UUI
 func (r *ProjectRepository) GetByName(ctx context.Context, tenantID uuid.UUID, name string) (*model.Project, error) {
 	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = $1 AND name = $2`
 	var p model.Project
-	err := r.db.QueryRowContext(ctx, query, tenantID, name).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID, name).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -116,14 +123,14 @@ func (r *ProjectRepository) GetByName(ctx context.Context, tenantID uuid.UUID, n
 // CreateWithTenant creates a project associated with a tenant.
 func (r *ProjectRepository) CreateWithTenant(ctx context.Context, tenantID uuid.UUID, p *model.Project) error {
 	query := `INSERT INTO projects (id, tenant_id, name, description, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err := r.db.ExecContext(ctx, query, p.ID, tenantID, p.Name, p.Description, p.CreatedAt, p.UpdatedAt)
+	_, err := r.q(ctx).ExecContext(ctx, query, p.ID, tenantID, p.Name, p.Description, p.CreatedAt, p.UpdatedAt)
 	return err
 }
 
 // ListByTenant lists projects for a specific tenant.
 func (r *ProjectRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]model.Project, error) {
 	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = $1 ORDER BY created_at DESC`
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}

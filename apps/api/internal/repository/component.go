@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -14,6 +15,12 @@ type ComponentRepository struct {
 
 func NewComponentRepository(db *sql.DB) *ComponentRepository {
 	return &ComponentRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+func (r *ComponentRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // Create inserts a new component row.
@@ -28,13 +35,13 @@ func NewComponentRepository(db *sql.DB) *ComponentRepository {
 // CLIService.UploadSBOM, since every component is scoped to a single SBOM.
 func (r *ComponentRepository) Create(ctx context.Context, c *model.Component) error {
 	query := `INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-	_, err := r.db.ExecContext(ctx, query, c.ID, c.TenantID, c.SbomID, c.Name, c.Version, c.Type, c.Purl, c.License, c.CreatedAt)
+	_, err := r.q(ctx).ExecContext(ctx, query, c.ID, c.TenantID, c.SbomID, c.Name, c.Version, c.Type, c.Purl, c.License, c.CreatedAt)
 	return err
 }
 
 func (r *ComponentRepository) ListBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error) {
 	query := `SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id = $1 ORDER BY name`
-	rows, err := r.db.QueryContext(ctx, query, sbomID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +69,7 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 		WHERE c.sbom_id = $1
 		ORDER BY v.cvss_score DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, sbomID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +97,7 @@ func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Con
 		WHERE c.sbom_id = $1
 		ORDER BY v.cvss_score DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, sbomID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +126,7 @@ func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Con
 func (r *ComponentRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Component, error) {
 	query := `SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE id = $1`
 	var c model.Component
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&c.ID, &c.SbomID, &c.Name, &c.Version, &c.Type, &c.Purl, &c.License, &c.CreatedAt)
+	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&c.ID, &c.SbomID, &c.Name, &c.Version, &c.Type, &c.Purl, &c.License, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

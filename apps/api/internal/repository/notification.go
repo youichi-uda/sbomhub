@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -14,6 +15,12 @@ type NotificationRepository struct {
 
 func NewNotificationRepository(db *sql.DB) *NotificationRepository {
 	return &NotificationRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+func (r *NotificationRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 func (r *NotificationRepository) GetSettings(ctx context.Context, projectID uuid.UUID) (*model.NotificationSettings, error) {
@@ -26,7 +33,7 @@ func (r *NotificationRepository) GetSettings(ctx context.Context, projectID uuid
 	`
 	var settings model.NotificationSettings
 	var slackURL, discordURL, emailAddresses sql.NullString
-	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID).Scan(
 		&settings.ID,
 		&settings.ProjectID,
 		&slackURL,
@@ -81,7 +88,7 @@ func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *m
 		emailAddresses = sql.NullString{String: settings.EmailAddresses, Valid: true}
 	}
 
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		settings.ID,
 		settings.ProjectID,
 		slackURL,
@@ -107,7 +114,7 @@ func (r *NotificationRepository) CreateLog(ctx context.Context, log *model.Notif
 		errMsg = sql.NullString{String: log.ErrorMessage, Valid: true}
 	}
 
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		log.ID,
 		log.ProjectID,
 		log.Channel,
@@ -128,7 +135,7 @@ func (r *NotificationRepository) GetLogs(ctx context.Context, projectID uuid.UUI
 		LIMIT $2
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, projectID, limit)
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +182,7 @@ func (r *NotificationRepository) GetAllSettingsForSeverity(ctx context.Context, 
 		return []model.NotificationSettings{}, nil
 	}
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.q(ctx).QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
