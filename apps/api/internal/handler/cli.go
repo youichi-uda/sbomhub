@@ -44,7 +44,24 @@ type UploadResponse struct {
 // - sbom: SBOM file (required)
 // - project_name: Project name (required)
 // - description: Project description (optional)
+//
+// DEPRECATED (Trust Rescue 9.3.1 / #9): clients must migrate to the canonical
+// POST /api/v1/projects/:id/sbom endpoint, which is reachable with the same
+// Bearer sbh_... API key via the MultiAuth middleware. This route is kept
+// alive for a 3-month overlap window so existing CI pipelines do not break.
+// We deliberately do NOT 308-redirect here: the new endpoint takes a raw body
+// (vs multipart) and not all HTTP clients re-emit a multipart body on a
+// redirect, so silent failures would be hard to debug. Removal is tracked at
+// the Sunset date below.
 func (h *CLIHandler) Upload(c echo.Context) error {
+	// RFC 8594 (Sunset) + RFC 8288 (Link rel=successor-version): advertise the
+	// deprecation in-band so SDKs / curl users see it on every response.
+	// 2026-06-24 + 3 months = 2026-09-24 (the legacy route is removed on or
+	// after this date; the deadline doubles as the Trust Rescue M0 cut-off).
+	c.Response().Header().Set("Deprecation", "true")
+	c.Response().Header().Set("Sunset", "Thu, 24 Sep 2026 00:00:00 GMT")
+	c.Response().Header().Set("Link", `</api/v1/projects/{id}/sbom>; rel="successor-version"`)
+
 	// Get tenant ID from context
 	tenantID := middleware.GetTenantID(c)
 	if tenantID == uuid.Nil {
