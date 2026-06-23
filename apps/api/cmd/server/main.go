@@ -25,6 +25,72 @@ import (
 	"github.com/sbomhub/sbomhub/migrations"
 )
 
+// knownDefaultEncryptionKeys enumerates placeholder values that must never be
+// used outside development. The list includes:
+//   - generic placeholders found in tutorials / sample configs (changeme,
+//     default, test, your-encryption-key-here)
+//   - keys we historically bundled in docker-compose.yml or config defaults
+//     (P0 #5 / Trust Rescue 9.2.1, removed alongside this guard)
+//
+// Anything matching one of these is treated as if no key were set at all.
+var knownDefaultEncryptionKeys = []string{
+	"changeme",
+	"change-me",
+	"default",
+	"test",
+	"your-encryption-key-here",
+	// Previously bundled defaults — kept in the denylist so any operator that
+	// copy-pasted them is hard-failed.
+	"V5jgaCSCV/Mdf8JbVX42aWYAB6dG1Dp9G9Bo0Nw+qjY=",
+	"sbomhub-default-encryption-key-32",
+	"dev-only-insecure-key-32bytes!!",
+}
+
+// validateEncryptionKey enforces P0 #7 / Trust Rescue 9.2.3: refuse to start
+// when ENCRYPTION_KEY is unset, a known default placeholder, or shorter than
+// 32 bytes (AES-256 needs 32 bytes). Only APP_ENV="development" downgrades a
+// violation to a warning so contributors can run locally without a key.
+//
+// Note: APP_ENV (not Config.Environment) drives this gate intentionally — it
+// mirrors assertAppRoleNotBypassRLS below so both Trust Rescue guards share a
+// single env-var contract.
+func validateEncryptionKey(rawKey, appEnv string) error {
+	var reason string
+	switch {
+	case rawKey == "":
+		reason = "未設定"
+	case len(rawKey) < 32:
+		reason = fmt.Sprintf("長さ不足 (got %d bytes, need >= 32)", len(rawKey))
+	default:
+		for _, d := range knownDefaultEncryptionKeys {
+			if rawKey == d {
+				reason = "既知デフォルト値"
+				break
+			}
+		}
+	}
+
+	if reason == "" {
+		slog.Info("ENCRYPTION_KEY check passed",
+			"length", len(rawKey), "app_env", appEnv)
+		return nil
+	}
+
+	if appEnv == "development" {
+		slog.Warn("ENCRYPTION_KEY is unsafe — DO NOT deploy this way. "+
+			"Generate a real key with: openssl rand -base64 32",
+			"reason", reason, "app_env", appEnv)
+		return nil
+	}
+
+	return fmt.Errorf(
+		"ENCRYPTION_KEY が未設定または既知デフォルトです (%s)。 "+
+			"`openssl rand -base64 32` で生成して .env / 環境変数に設定してください "+
+			"(APP_ENV=%q)",
+		reason, appEnv,
+	)
+}
+
 // assertAppRoleNotBypassRLS verifies that the runtime DB role does not have
 // the BYPASSRLS attribute. In production we hard-fail; in development we log
 // a warning so contributors can keep running against a single-role local DB
@@ -63,6 +129,15 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfg := config.Load()
+
+	// SECURITY (P0 #7 / Trust Rescue 9.2.3): refuse to start when
+	// ENCRYPTION_KEY is unset, a known default placeholder, or under 32 bytes.
+	// We read the raw environment variable so that any downstream fallback in
+	// config.Load cannot mask an empty key in non-development environments.
+	if err := validateEncryptionKey(os.Getenv("ENCRYPTION_KEY"), os.Getenv("APP_ENV")); err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
 
 	// SECURITY: Validate configuration before starting
 	if err := cfg.Validate(); err != nil {

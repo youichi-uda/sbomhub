@@ -1,0 +1,79 @@
+# SBOMHub - Docker Compose smoke
+#
+# Trust Rescue P0 #5 / 9.2.1 acceptance gate.
+# Verifies that docker-compose.yml refuses to start without an operator-
+# provided ENCRYPTION_KEY (the bundled default key was removed). Catches a
+# regression where someone re-introduces a hard-coded fallback like
+#   ENCRYPTION_KEY=${ENCRYPTION_KEY:-V5jga...}
+# which would silently make every self-host instance share the same key.
+
+name: docker-compose smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docker-compose.yml"
+      - ".env.example"
+      - ".github/workflows/docker-compose-smoke.yml"
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - ".env.example"
+      - ".github/workflows/docker-compose-smoke.yml"
+
+jobs:
+  refuse-without-encryption-key:
+    name: docker compose must abort without ENCRYPTION_KEY
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show docker compose version
+        run: docker compose version
+
+      - name: Assert no .env exists at repo root
+        run: |
+          if [ -f .env ]; then
+            echo "::error::.env unexpectedly committed to the repo; refusing to run smoke."
+            exit 1
+          fi
+
+      - name: docker compose config must fail when ENCRYPTION_KEY is unset
+        shell: bash
+        env:
+          # Intentionally unset ENCRYPTION_KEY — make sure no inherited value
+          # masks the regression we are trying to catch.
+          ENCRYPTION_KEY: ""
+        run: |
+          set +e
+          # We expect this to FAIL because of ${ENCRYPTION_KEY:?...} expansion.
+          out=$(docker compose config 2>&1)
+          rc=$?
+          set -e
+
+          echo "--- docker compose config exit: $rc ---"
+          echo "$out"
+          echo "--- end ---"
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::docker compose config succeeded without ENCRYPTION_KEY — bundled default key may have been re-introduced."
+            exit 1
+          fi
+
+          if ! grep -qi 'ENCRYPTION_KEY' <<<"$out"; then
+            echo "::error::docker compose failed but the error message does not mention ENCRYPTION_KEY (expected our :? guard)."
+            exit 1
+          fi
+
+          echo "OK: docker compose refused to start without ENCRYPTION_KEY."
+
+      - name: docker compose config must succeed when ENCRYPTION_KEY is provided
+        shell: bash
+        run: |
+          # Use a fresh random key; do not rely on the .env file.
+          export ENCRYPTION_KEY="$(openssl rand -base64 32)"
+          docker compose config >/dev/null
+          echo "OK: docker compose accepted an operator-provided ENCRYPTION_KEY."
