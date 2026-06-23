@@ -25,7 +25,10 @@ services:
       - DATABASE_URL=postgres://sbomhub_app:${APP_PASSWORD:-sbomhub_app_dev}@postgres:5432/sbomhub?sslmode=disable
       - MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIGRATOR_PASSWORD:-sbomhub_migrator_dev}@postgres:5432/sbomhub?sslmode=disable
       - REDIS_URL=redis://redis:6379
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-V5jgaCSCV/Mdf8JbVX42aWYAB6dG1Dp9G9Bo0Nw+qjY=}
+      # SECURITY (P0 #5 / Trust Rescue 9.2.1): no bundled default. The api will
+      # refuse to start when this is unset, a known default, or shorter than 32
+      # bytes. Generate one with: openssl rand -base64 32
+      - "ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is not set. Copy .env.example to .env and generate one with openssl rand -base64 32}"
       - NVD_API_KEY=${NVD_API_KEY:-}
       - APP_ENV=${APP_ENV:-development}
     depends_on:
