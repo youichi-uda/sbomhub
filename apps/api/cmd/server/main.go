@@ -333,9 +333,17 @@ func main() {
 	api.GET("/public/:token/download", publicLinkHandler.PublicDownload)
 
 	// MCP endpoints (API key auth)
+	// Trust Rescue 9.1.2 (#3): TenantTx is wedged in between the auth pair
+	// (APIKeyAuth + APIKeyTenant) and the rest of the chain so every MCP
+	// request runs inside a single Postgres transaction with
+	// `SET LOCAL app.current_tenant_id` bound. The MCPAudit middleware runs
+	// inside that tx, which means its audit_logs insert (RLS-enforced)
+	// sees the GUC; rollback on failure also rolls back the audit record —
+	// see TenantTx godoc for the trade-off rationale.
 	mcp := api.Group("/mcp",
 		appmw.APIKeyAuth(apiKeyService),
 		appmw.APIKeyTenant(projectRepo, tenantRepo),
+		appmw.TenantTx(db),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.MCPAudit(auditRepo),
 	)
@@ -354,9 +362,13 @@ func main() {
 	cliHandler := handler.NewCLIHandler(cliService)
 
 	// CLI endpoints (API key auth)
+	// Trust Rescue 9.1.2 (#3): TenantTx wraps the rest of the chain so
+	// rate limit / audit / handler all share the same per-request tx with
+	// `SET LOCAL app.current_tenant_id` bound.
 	cli := api.Group("/cli",
 		appmw.APIKeyAuth(apiKeyService),
 		appmw.APIKeyTenant(projectRepo, tenantRepo),
+		appmw.TenantTx(db),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.MCPAudit(auditRepo),
 	)
@@ -372,8 +384,16 @@ func main() {
 	// Audit middleware - logs all authenticated requests
 	auditMiddleware := appmw.Audit(auditRepo)
 
-	// Authenticated endpoints with audit logging
-	auth := api.Group("", authMiddleware, auditMiddleware)
+	// Authenticated endpoints with audit logging.
+	// Trust Rescue 9.1.2 (#3): TenantTx slots between Auth (which populates
+	// ContextKeyTenantID) and the audit middleware so every request in this
+	// group runs in a single tx with `SET LOCAL app.current_tenant_id`
+	// bound. Audit writes hit audit_logs inside that same tx, which is
+	// required because audit_logs is FORCE ROW LEVEL SECURITY (migration
+	// 023). The trade-off — audit records for failed/4xx requests get
+	// rolled back along with the rest of the request — is documented in
+	// TenantTx's godoc and flagged in the Trust Rescue follow-up list.
+	auth := api.Group("", authMiddleware, appmw.TenantTx(db), auditMiddleware)
 
 	auth.GET("/stats", statsHandler.Get)
 
@@ -419,7 +439,14 @@ func main() {
 	// Rescue 9.3.1 (#9) unified the two paths behind MultiAuth so we have a
 	// single source of truth; the deprecated /api/v1/cli/upload route is kept
 	// alive on the legacy CLI group below for one release of overlap.
-	e.POST("/api/v1/projects/:id/sbom", sbomHandler.Upload, appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService), auditMiddleware)
+	// Trust Rescue 9.1.2 (#3): the canonical upload route gets the same
+	// per-request transaction treatment as the auth group above. Middleware
+	// order here is MultiAuth → TenantTx → audit → handler (Echo applies
+	// the variadic middleware list outer-to-inner).
+	e.POST("/api/v1/projects/:id/sbom", sbomHandler.Upload,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	auth.GET("/projects/:id/sbom", sbomHandler.Get)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)
