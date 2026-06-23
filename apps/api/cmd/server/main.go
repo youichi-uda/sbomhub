@@ -414,7 +414,12 @@ func main() {
 	auth.DELETE("/projects/:id", projectHandler.Delete)
 
 	// SBOM endpoints
-	auth.POST("/projects/:id/sbom", sbomHandler.Upload)
+	// SBOM upload is the canonical endpoint that both the web UI (Clerk JWT)
+	// and the CLI / GitHub Actions (Bearer sbh_... API key) target. Trust
+	// Rescue 9.3.1 (#9) unified the two paths behind MultiAuth so we have a
+	// single source of truth; the deprecated /api/v1/cli/upload route is kept
+	// alive on the legacy CLI group below for one release of overlap.
+	e.POST("/api/v1/projects/:id/sbom", sbomHandler.Upload, appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService), auditMiddleware)
 	auth.GET("/projects/:id/sbom", sbomHandler.Get)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)

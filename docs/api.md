@@ -77,23 +77,43 @@ DELETE /api/v1/projects/:id
 
 ### SBOM
 
-#### Upload SBOM
+#### Upload SBOM (canonical)
 
 ```
 POST /api/v1/projects/:id/sbom
 ```
 
-**Request:**
-- Content-Type: `multipart/form-data`
-- Body: `sbom` file (CycloneDX or SPDX JSON)
+This is the single canonical SBOM upload endpoint (Trust Rescue 9.3.1 / #9).
+The web UI (Clerk session) and the CLI / GitHub Actions (`Authorization: Bearer sbh_...`)
+both target this route through the `MultiAuth` middleware.
 
-**Example:**
+**Request:**
+- `Authorization: Bearer <CLERK_JWT|sbh_API_KEY>`
+- Content-Type: `application/json` (raw CycloneDX or SPDX JSON body — format is auto-detected server-side)
+
+**Example (API key):**
 ```bash
 curl -X POST \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -F "sbom=@sbom.json" \
+  -H "Authorization: Bearer sbh_..." \
+  -H "Content-Type: application/json" \
+  --data-binary "@sbom.json" \
   http://localhost:8080/api/v1/projects/{project_id}/sbom
 ```
+
+#### Upload SBOM via CLI (deprecated)
+
+```
+POST /api/v1/cli/upload   # DEPRECATED, Sunset: 2026-09-24
+```
+
+The multipart `/cli/upload` endpoint is kept alive for a 3-month overlap so
+existing CI pipelines continue to work, but every response carries:
+
+- `Deprecation: true`
+- `Sunset: Thu, 24 Sep 2026 00:00:00 GMT`
+- `Link: </api/v1/projects/{id}/sbom>; rel="successor-version"`
+
+Migrate to the canonical endpoint above.
 
 #### Get Components
 

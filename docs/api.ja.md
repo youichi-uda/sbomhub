@@ -77,23 +77,43 @@ DELETE /api/v1/projects/:id
 
 ### SBOM
 
-#### SBOMアップロード
+#### SBOMアップロード（正本）
 
 ```
 POST /api/v1/projects/:id/sbom
 ```
 
-**リクエスト:**
-- Content-Type: `multipart/form-data`
-- ボディ: `sbom` ファイル（CycloneDXまたはSPDX JSON）
+SBOM アップロードの唯一の正本エンドポイントです（Trust Rescue 9.3.1 / #9）。
+Web UI (Clerk セッション) と CLI / GitHub Actions (`Authorization: Bearer sbh_...`)
+は両方ともこの経路を `MultiAuth` ミドルウェア経由で呼びます。
 
-**例:**
+**リクエスト:**
+- `Authorization: Bearer <CLERK_JWT|sbh_API_KEY>`
+- Content-Type: `application/json`（CycloneDX または SPDX JSON の raw body をそのまま送ります。 フォーマットはサーバ側で自動検出します）
+
+**例 (API key):**
 ```bash
 curl -X POST \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -F "sbom=@sbom.json" \
+  -H "Authorization: Bearer sbh_..." \
+  -H "Content-Type: application/json" \
+  --data-binary "@sbom.json" \
   http://localhost:8080/api/v1/projects/{project_id}/sbom
 ```
+
+#### CLI 経由 SBOM アップロード（非推奨）
+
+```
+POST /api/v1/cli/upload   # 非推奨 (Sunset: 2026-09-24)
+```
+
+multipart の `/cli/upload` は既存 CI パイプライン互換のため 3 ヶ月間共存させますが、
+すべてのレスポンスに以下のヘッダを付与します。
+
+- `Deprecation: true`
+- `Sunset: Thu, 24 Sep 2026 00:00:00 GMT`
+- `Link: </api/v1/projects/{id}/sbom>; rel="successor-version"`
+
+新規連携は上記の正本エンドポイントに切り替えてください。
 
 #### コンポーネント取得
 
