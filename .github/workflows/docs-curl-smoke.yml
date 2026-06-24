@@ -98,6 +98,20 @@ jobs:
           docker compose up -d --wait postgres redis
           docker compose ps
 
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        # docker-compose.yml no longer bind-mounts init.sh (codex-r8 P1 /
+        # R8-8a, 760b9f1) — sbomhub_app / sbomhub_migrator are not created
+        # automatically on `docker compose up postgres` any more. The api
+        # service starts as MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:...
+        # so without this step it would fail health checks with
+        # "password authentication failed for user 'sbomhub_migrator'".
+        # install.sh --bootstrap-roles reads MIGRATOR_PASSWORD / APP_PASSWORD
+        # from .env (generated above) and runs the bootstrap SQL via
+        # `docker compose exec postgres psql`. Idempotent.
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
       - name: Start api (locally built image)
         run: |
           # --pull never guards against compose silently swapping our local
