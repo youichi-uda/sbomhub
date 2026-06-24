@@ -1029,6 +1029,63 @@
       "description": "[設定 > LLM] から LLM プロバイダを設定すると、 AI による VEX トリアージ / CRA レポート下書き / 経産省自己評価プリフィルが利用できるようになります。",
       "reasonLabel": "理由",
       "ctaLabel": "LLM 設定を開く"
+    },
+    "Page": {
+      "title": "AI VEX トリアージ",
+      "description": "AI が下書きした VEX を人間が承認・編集・却下します。 すべての判断は監査ログに記録されます。",
+      "backToProject": "プロジェクトに戻る",
+      "refresh": "再読み込み",
+      "emptyTitle": "保留中の下書きはありません",
+      "emptyDescription": "判断待ちの AI 下書きはありません。 CLI (`sbomhub triage`) または API からトリアージサイクルを実行するとここに表示されます。",
+      "hiddenEvidenceless": "{count} 件の下書きを非表示にしました (evidence がありません)。 通常は発生しないはずです、 API ログを確認してください。",
+      "loadProjectFailed": "プロジェクトの読み込みに失敗しました",
+      "loadDraftsFailed": "トリアージ下書きの読み込みに失敗しました",
+      "approveFailed": "承認に失敗しました",
+      "editFailed": "編集の保存に失敗しました",
+      "rejectFailed": "却下に失敗しました",
+      "reanalyseFailed": "再トリアージに失敗しました"
+    },
+    "DraftCard": {
+      "confidenceLabel": "信頼度",
+      "lowConfidence": "閾値 {threshold}% を下回るため under_investigation として扱います。",
+      "detailLabel": "詳細",
+      "evidenceLabel": "根拠",
+      "stateLabel": "状態",
+      "justificationLabel": "判定理由",
+      "justificationNone": "(なし)",
+      "noteLabel": "レビュー者メモ (任意)",
+      "notePlaceholder": "編集理由を残してください",
+      "expand": "もっと見る",
+      "collapse": "折りたたむ",
+      "approve": "承認",
+      "edit": "編集",
+      "reject": "却下",
+      "reanalyse": "再分析",
+      "saving": "保存中...",
+      "saveEdit": "編集を保存",
+      "cancel": "キャンセル",
+      "rejectReasonLabel": "却下理由",
+      "rejectReasonPlaceholder": "任意 — この AI 下書きが不適切な理由を記入してください",
+      "rejectConfirm": "却下を確定",
+      "addToCRA": "CRA レポートに追加",
+      "addToCRADisabled": "CRA レポート下書きは M2 で実装予定です"
+    },
+    "State": {
+      "not_affected": "影響なし",
+      "affected": "影響あり",
+      "under_investigation": "調査中",
+      "resolved": "解消済み"
+    },
+    "Justification": {
+      "code_not_present": "該当コード不在",
+      "code_not_reachable": "該当コード到達不能",
+      "requires_configuration": "特定設定が必要",
+      "requires_dependency": "特定依存が必要",
+      "requires_environment": "特定環境が必要",
+      "protected_by_compiler": "コンパイラ保護",
+      "protected_at_perimeter": "境界保護",
+      "protected_at_runtime": "実行時保護",
+      "inline_mitigations_already_exist": "インライン緩和済み"
     }
   },
   "FAQ": {

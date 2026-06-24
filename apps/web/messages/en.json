@@ -1028,6 +1028,63 @@
       "description": "Configure an LLM provider in Settings > LLM to enable AI-assisted VEX triage, CRA report drafting, and METI self-assessment prefill.",
       "reasonLabel": "Reason",
       "ctaLabel": "Open LLM settings"
+    },
+    "Page": {
+      "title": "AI VEX triage",
+      "description": "AI-drafted VEX statements awaiting human approval. Every decision is recorded in the audit log.",
+      "backToProject": "Back to project",
+      "refresh": "Refresh",
+      "emptyTitle": "No pending drafts",
+      "emptyDescription": "There are no AI drafts waiting for a decision. Run a new triage cycle from the CLI ('sbomhub triage') or via the API to populate this queue.",
+      "hiddenEvidenceless": "{count} draft(s) hidden — no evidence attached. This should not happen; check the API logs.",
+      "loadProjectFailed": "Failed to load the project",
+      "loadDraftsFailed": "Failed to load triage drafts",
+      "approveFailed": "Failed to approve draft",
+      "editFailed": "Failed to save edited draft",
+      "rejectFailed": "Failed to reject draft",
+      "reanalyseFailed": "Failed to re-run triage"
+    },
+    "DraftCard": {
+      "confidenceLabel": "Confidence",
+      "lowConfidence": "Below the {threshold}% threshold — surfaced as under_investigation.",
+      "detailLabel": "Detail",
+      "evidenceLabel": "Evidence",
+      "stateLabel": "State",
+      "justificationLabel": "Justification",
+      "justificationNone": "(none)",
+      "noteLabel": "Reviewer note (optional)",
+      "notePlaceholder": "Why are you editing this draft?",
+      "expand": "Show more",
+      "collapse": "Show less",
+      "approve": "Approve",
+      "edit": "Edit",
+      "reject": "Reject",
+      "reanalyse": "Re-analyse",
+      "saving": "Saving...",
+      "saveEdit": "Save edit",
+      "cancel": "Cancel",
+      "rejectReasonLabel": "Reject reason",
+      "rejectReasonPlaceholder": "Optional — why is this AI draft wrong?",
+      "rejectConfirm": "Confirm reject",
+      "addToCRA": "Add to CRA report",
+      "addToCRADisabled": "CRA report drafting lands in M2"
+    },
+    "State": {
+      "not_affected": "Not affected",
+      "affected": "Affected",
+      "under_investigation": "Under investigation",
+      "resolved": "Resolved"
+    },
+    "Justification": {
+      "code_not_present": "Code not present",
+      "code_not_reachable": "Code not reachable",
+      "requires_configuration": "Requires configuration",
+      "requires_dependency": "Requires dependency",
+      "requires_environment": "Requires environment",
+      "protected_by_compiler": "Protected by compiler",
+      "protected_at_perimeter": "Protected at perimeter",
+      "protected_at_runtime": "Protected at runtime",
+      "inline_mitigations_already_exist": "Inline mitigations exist"
     }
   },
   "FAQ": {
