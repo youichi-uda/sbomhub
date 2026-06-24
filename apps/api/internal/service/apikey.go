@@ -6,11 +6,30 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+)
+
+// ErrInvalidPermissions is returned by CreateKey / CreateProjectKey when
+// the caller supplies a permissions string that is not in the documented
+// allowlist (read / write / admin / owner). M1 Codex review #F17 fix:
+// previously CreateKey accepted any value verbatim and the MultiAuth
+// validation step silently promoted unknown values to write-capable. The
+// sentinel allows handlers to map this error to 400 rather than 500
+// without string-matching against the wrapped error message.
+//
+// The error message is intentionally generic — it lists the recognised
+// values rather than echoing back the rejected input — so callers
+// receive a fix-it-yourself hint without confirming whether a probe
+// string was rejected for being outside the allowlist or for some other
+// validation failure further down. The 400 body emitted by the handler
+// wraps this with `{"error":"invalid permissions"}`.
+var ErrInvalidPermissions = fmt.Errorf(
+	"permissions must be one of: read, write, admin",
 )
 
 type APIKeyService struct {
@@ -38,7 +57,20 @@ type CreateProjectAPIKeyInput struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
-// CreateKey creates a new tenant-level API key (recommended)
+// CreateKey creates a new tenant-level API key (recommended).
+//
+// M1 Codex review #F17: permissions are validated against the allowlist
+// (read / write / admin / owner) before persistence. Empty input is
+// substituted with the documented default "write" first so callers that
+// rely on the historical "omit permissions for a default write key"
+// shorthand keep working. Anything not in the allowlist returns
+// ErrInvalidPermissions; the handler maps that to 400. The reason for
+// validating at this layer rather than relying on the middleware's
+// fail-closed default is that an unknown value silently downgraded to
+// RoleViewer at validation time looks like a write key in the API
+// response (the persisted permissions column echoes the caller's input)
+// but functions as a read key in practice — a confusing UX that the
+// allowlist eliminates by rejecting the input up front.
 func (s *APIKeyService) CreateKey(ctx context.Context, input CreateAPIKeyInput) (*model.APIKeyWithSecret, error) {
 	if input.Name == "" {
 		return nil, fmt.Errorf("name is required")
@@ -46,6 +78,12 @@ func (s *APIKeyService) CreateKey(ctx context.Context, input CreateAPIKeyInput) 
 
 	if input.Permissions == "" {
 		input.Permissions = "write" // Default permission
+	}
+	// F17: normalise + validate against the MultiAuth allowlist BEFORE
+	// persistence so unknown values cannot land in the column at all.
+	input.Permissions = strings.ToLower(strings.TrimSpace(input.Permissions))
+	if !model.IsKnownAPIKeyPermission(input.Permissions) {
+		return nil, ErrInvalidPermissions
 	}
 
 	// Generate a random key: sbh_<32 random hex chars>
@@ -83,7 +121,11 @@ func (s *APIKeyService) CreateKey(ctx context.Context, input CreateAPIKeyInput) 
 	}, nil
 }
 
-// CreateProjectKey creates a legacy project-level API key (deprecated, for backwards compatibility)
+// CreateProjectKey creates a legacy project-level API key (deprecated,
+// for backwards compatibility). The same F17 permissions validation as
+// CreateKey applies — the legacy path is not exempt because, after the
+// F14 MultiAuth integration, both tenant- and project-level keys land
+// on the same TenantContext role allowlist via roleFromAPIKeyPermissions.
 func (s *APIKeyService) CreateProjectKey(ctx context.Context, input CreateProjectAPIKeyInput) (*model.APIKeyWithSecret, error) {
 	if input.Name == "" {
 		return nil, fmt.Errorf("name is required")
@@ -91,6 +133,12 @@ func (s *APIKeyService) CreateProjectKey(ctx context.Context, input CreateProjec
 
 	if input.Permissions == "" {
 		input.Permissions = "write" // Default permission
+	}
+	// F17: see CreateKey for the rationale — same allowlist, same
+	// rejection contract.
+	input.Permissions = strings.ToLower(strings.TrimSpace(input.Permissions))
+	if !model.IsKnownAPIKeyPermission(input.Permissions) {
+		return nil, ErrInvalidPermissions
 	}
 
 	// Generate a random key: sbh_<32 random hex chars>

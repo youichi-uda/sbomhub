@@ -153,25 +153,56 @@ func handleAPIKeyAuth(
 
 // roleFromAPIKeyPermissions maps the api_keys.permissions string to the
 // TenantContext role allowlist (model.RoleViewer / RoleMember / RoleAdmin /
-// RoleOwner). The default — including the empty string and any
-// unrecognised value — is RoleMember so legacy keys created before this
-// mapping behave like the documented APIKeyService default of "write"
-// (the implicit "you can upload SBOMs and run triage" baseline).
+// RoleOwner).
 //
-// "admin" elevates to RoleAdmin (CanAdmin() true), which is required for
-// any future endpoint that consults CanAdmin (e.g. tenant LLM config
-// updates) from an API key. "read" downgrades to RoleViewer so a
-// read-scoped key cannot accidentally drive write endpoints if the route
-// is added to the MultiAuth chain without a CanWrite() guard.
+// Recognised values (case-insensitive, trimmed):
+//   - "read"          → RoleViewer (no CanWrite, no CanAdmin)
+//   - "write"         → RoleMember (CanWrite, no CanAdmin)
+//   - "admin"/"owner" → RoleAdmin  (CanWrite, CanAdmin)
+//
+// Default (empty string OR any unrecognised value) → RoleViewer.
+//
+// M1 Codex review #F17 fix: the previous default was RoleMember, which
+// meant a stored permission of "readonly", "none", or simply a typo got
+// silently promoted to write-capable on every MultiAuth-fronted endpoint.
+// That is a fail-open default in a security product. The fix flips the
+// default to RoleViewer (fail-closed) so any value the service-side
+// validation in apikey.go::CreateKey did not bless — including direct DB
+// INSERTs and rows persisted before that validation was in place — is
+// treated as the lowest-privilege role.
+//
+// Companion validation lives in IsKnownAPIKeyPermission below; callers
+// that need to reject unknown values at creation time (rather than
+// silently downgrade them at validation time) use that helper. The two
+// together implement the fail-closed contract end-to-end: at creation
+// the service refuses unknown values with 400; at validation the
+// middleware refuses to grant them write power even if they slipped in
+// through some other path.
 func roleFromAPIKeyPermissions(perm string) string {
 	switch strings.ToLower(strings.TrimSpace(perm)) {
 	case "read":
 		return model.RoleViewer
 	case "admin", "owner":
 		return model.RoleAdmin
-	case "write", "":
+	case "write":
 		return model.RoleMember
 	default:
-		return model.RoleMember
+		// F17: fail-closed. An empty string here normally only reaches
+		// this branch via direct DB injection — APIKeyService.CreateKey
+		// fills in "write" when the request omits permissions. Mapping
+		// the unknown branch to RoleViewer rather than RoleMember means
+		// that even if a row somehow ends up empty / typo'd, it cannot
+		// be used to drive write endpoints.
+		return model.RoleViewer
 	}
+}
+
+// IsKnownAPIKeyPermission is re-exported here for callers that already
+// import the middleware package; the canonical definition lives in
+// model.IsKnownAPIKeyPermission. The helper had to move to the model
+// package to break the middleware ↔ service import cycle introduced
+// when APIKeyService.CreateKey started validating permissions through
+// it (M1 Codex review #F17). See model/apikey.go for the rationale.
+func IsKnownAPIKeyPermission(perm string) bool {
+	return model.IsKnownAPIKeyPermission(perm)
 }

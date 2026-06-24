@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -139,6 +140,57 @@ func TestAPIKey_DeleteTenant_NonAdmin_Rejected(t *testing.T) {
 				t.Fatal("F16: DeleteTenant handler MUST NOT run for a below-admin role")
 			}
 		})
+	}
+}
+
+// TestAPIKey_CreateTenant_InvalidPermissionsBody pins the F17 wire
+// contract at the handler boundary: a request that an admin makes with
+// an out-of-allowlist permissions value receives a 400 with the generic
+// body `{"error":"invalid permissions"}` — not the raw service error
+// message and not 500.
+//
+// The handler delegates to mapCreateKeyError, which special-cases
+// service.ErrInvalidPermissions. The test exercises the full handler
+// (not just the middleware) so the body-shape contract is pinned end
+// to end.
+func TestAPIKey_CreateTenant_InvalidPermissionsBody(t *testing.T) {
+	// Use a real APIKeyHandler wired against a real APIKeyService.
+	// The service rejects unknown permissions before reaching the
+	// repository, so an unwired (nil) repository is fine — no SQL
+	// will run. (CreateKey returns ErrInvalidPermissions before
+	// touching s.keyRepo.) If a future refactor reorders the
+	// validation, the test will panic on the nil repo and surface
+	// the regression.
+	h := newTestAPIKeyHandler(nil)
+
+	body := map[string]string{"name": "test", "permissions": "readonly"}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/apikeys", strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleAdmin)
+
+	if err := h.CreateTenant(c); err != nil {
+		t.Fatalf("CreateTenant returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F17: status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	got := strings.TrimSpace(rec.Body.String())
+	want := `{"error":"invalid permissions"}`
+	if got != want {
+		t.Errorf("F17: body = %s, want %s", got, want)
+	}
+	// The raw service message (which lists the allowed values) must not
+	// leak through the wire body — the F17 contract is generic body +
+	// detailed slog only.
+	if strings.Contains(got, "permissions must be one of") {
+		t.Errorf("F17: wire body must NOT echo the service-side allowlist message, got %s", got)
 	}
 }
 

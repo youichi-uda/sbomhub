@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -10,6 +12,35 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
+
+// errInvalidPermissionsBody is the F17 wire body returned for any
+// CreateKey / CreateProjectKey call that is rejected because the
+// caller's permissions string was not in the allowlist. Kept as a
+// package-level value so both the tenant and the legacy project
+// handlers emit the same body and a probe caller cannot distinguish
+// "validation failed because of permissions" from another 400 by body
+// content alone (matches the F10 sentinel-opacity contract).
+var errInvalidPermissionsBody = map[string]string{"error": "invalid permissions"}
+
+// mapCreateKeyError converts a service-layer CreateKey error into the
+// canonical handler response. F17: ErrInvalidPermissions specifically
+// maps to a generic 400 body so the service's allowlist error message
+// does not leak the recognised values verbatim through the wire
+// response (the message stays in server logs for operator
+// diagnostics). Every other error is rendered as a 400 with the
+// service message — these are caller-fixable validation errors (e.g.
+// "name is required") that we do want to echo back.
+func mapCreateKeyError(c echo.Context, err error) error {
+	if errors.Is(err, service.ErrInvalidPermissions) {
+		slog.Warn("apikey: rejected create with invalid permissions",
+			"path", c.Path(),
+			"tenant_id", middleware.NewTenantContext(c).TenantID(),
+			"sentinel", err.Error(),
+		)
+		return c.JSON(http.StatusBadRequest, errInvalidPermissionsBody)
+	}
+	return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+}
 
 type APIKeyHandler struct {
 	keyService *service.APIKeyService
@@ -61,7 +92,7 @@ func (h *APIKeyHandler) CreateTenant(c echo.Context) error {
 
 	key, err := h.keyService.CreateKey(c.Request().Context(), input)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return mapCreateKeyError(c, err)
 	}
 
 	return c.JSON(http.StatusCreated, key)
@@ -149,7 +180,7 @@ func (h *APIKeyHandler) Create(c echo.Context) error {
 
 	key, err := h.keyService.CreateProjectKey(c.Request().Context(), input)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return mapCreateKeyError(c, err)
 	}
 
 	return c.JSON(http.StatusCreated, key)
