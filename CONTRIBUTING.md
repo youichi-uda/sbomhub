@@ -24,6 +24,7 @@ SBOMHub is an AGPL-3.0 **AI compliance evidence layer** built on top of Dependen
 ```bash
 git clone https://github.com/YOUR_USERNAME/sbomhub.git
 cd sbomhub
+./install.sh   # generates .env with a random ENCRYPTION_KEY + DB passwords (idempotent)
 ```
 
 2. Start the development environment
@@ -217,6 +218,7 @@ SBOMHub は AGPL-3.0 の OSS で、CRA (EU Cyber Resilience Act 2026/9) 対応�
 ```bash
 git clone https://github.com/YOUR_USERNAME/sbomhub.git
 cd sbomhub
+./install.sh   # .env を生成し ENCRYPTION_KEY と DB パスワードをランダム発行 (冪等)
 ```
 
 2. 開発環境を起動
