@@ -937,6 +937,46 @@
       "saving": "Saving...",
       "saveSettings": "Save Settings"
     },
+    "LLM": {
+      "navTitle": "LLM Provider",
+      "title": "LLM Provider (BYOK)",
+      "description": "Configure the LLM provider used for AI VEX triage, CRA report drafting, and METI self-assessment prefill. SBOMHub OSS ships zero credentials — bring your own key.",
+      "byokTitle": "Bring Your Own Key",
+      "byokDescription": "API keys are encrypted with AES-256-GCM before being persisted and are never logged. For air-gapped manufacturers, select Ollama to keep all AI processing local.",
+      "providerSection": "Provider Configuration",
+      "providerSectionDescription": "Select a provider and supply the corresponding API key. Switching providers does not delete previously configured keys.",
+      "providerLabel": "Provider",
+      "provider": {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic (Claude)",
+        "gemini": "Google Gemini",
+        "azure_openai": "Azure OpenAI Service",
+        "ollama": "Ollama (Local)"
+      },
+      "apiKeyLabel": "API Key",
+      "apiKeyPlaceholder": "Paste your API key",
+      "apiKeyPlaceholderConfigured": "Leave unchanged to keep the existing key, or paste a new key to rotate",
+      "apiKeyHelp": "Stored encrypted on the server. Once saved it is replaced by *** in API responses and cannot be retrieved.",
+      "apiKeyRequired": "An API key is required for this provider.",
+      "modelLabel": "Model",
+      "modelHelp": "Provider-specific model identifier. Leave blank to use the provider's default.",
+      "modelPlaceholder": {
+        "openai": "gpt-4o-mini",
+        "anthropic": "claude-opus-4-7",
+        "gemini": "gemini-2.5-flash",
+        "azure_openai": "gpt-4o-deployment",
+        "ollama": "llama3.1:8b"
+      },
+      "azureEndpointLabel": "Azure Endpoint",
+      "azureDeploymentLabel": "Azure Deployment",
+      "ollamaUrlLabel": "Ollama Base URL",
+      "ollamaUrlHelp": "Defaults to http://localhost:11434 if blank.",
+      "statusConfigured": "API key configured.",
+      "statusUnconfigured": "No API key configured — AI features are disabled.",
+      "loadError": "Failed to load LLM settings",
+      "saveError": "Failed to save LLM settings",
+      "saveSuccess": "LLM settings saved."
+    },
     "APIKeys": {
       "title": "API Keys",
       "description": "Manage API keys for CLI, MCP Server, and CI/CD integrations",
@@ -980,6 +1020,14 @@
       "usageCLI": "CLI (sbomhub-cli)",
       "usageMCP": "MCP Server",
       "usageCI": "CI/CD (GitHub Actions, etc.)"
+    }
+  },
+  "Triage": {
+    "AIDisabledBanner": {
+      "title": "AI features are disabled",
+      "description": "Configure an LLM provider in Settings > LLM to enable AI-assisted VEX triage, CRA report drafting, and METI self-assessment prefill.",
+      "reasonLabel": "Reason",
+      "ctaLabel": "Open LLM settings"
     }
   },
   "FAQ": {

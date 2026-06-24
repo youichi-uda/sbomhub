@@ -4,11 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
-import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileText, CreditCard, Key, Settings, Plug } from "lucide-react";
+import { FolderOpen, LayoutDashboard, Search, ClipboardList, TrendingUp, FileText, CreditCard, Key, Settings, Plug, Sparkles } from "lucide-react";
 
 export function Sidebar() {
   const t = useTranslations("Navigation");
   const tSettings = useTranslations("Settings.APIKeys");
+  const tLLM = useTranslations("Settings.LLM");
   const pathname = usePathname();
 
   const links = [
@@ -24,6 +25,7 @@ export function Sidebar() {
   const settingsLinks = [
     { href: "/settings/apikeys", icon: Key, label: tSettings("title") },
     { href: "/settings/integrations", icon: Plug, label: t("integrations") },
+    { href: "/settings/llm", icon: Sparkles, label: tLLM("navTitle") },
   ];
 
   return (

@@ -65,6 +65,13 @@ const (
 
 	// Settings actions
 	ActionSettingsUpdated = "settings.updated"
+
+	// LLM / BYOK actions (issue #22). The key itself is NEVER logged —
+	// only the action verb and provider name. See
+	// internal/handler/settings_llm.go for the call sites.
+	ActionLLMKeySet     = "llm_key_set"
+	ActionLLMKeyRotated = "llm_key_rotated"
+	ActionLLMKeyCleared = "llm_key_cleared"
 )
 
 // Resource type constants
@@ -77,6 +84,7 @@ const (
 	ResourceAPIKey       = "apikey"
 	ResourceSubscription = "subscription"
 	ResourceSettings     = "settings"
+	ResourceLLMConfig    = "llm_config"
 )
 
 // CreateAuditLogInput is the input for creating an audit log

@@ -938,6 +938,46 @@
       "saving": "保存中...",
       "saveSettings": "設定を保存"
     },
+    "LLM": {
+      "navTitle": "LLM プロバイダ",
+      "title": "LLM プロバイダ設定 (BYOK)",
+      "description": "AI VEX トリアージ / CRA レポート下書き / 経産省自己評価プリフィルで使用する LLM プロバイダを設定します。 SBOMHub OSS は LLM API キーを一切同梱しないため、 ご自身の API キーを設定してください。",
+      "byokTitle": "BYOK (Bring Your Own Key)",
+      "byokDescription": "API キーは AES-256-GCM で暗号化してから保存され、 ログにも一切出力されません。 機密コードを外部 API に送れない場合は Ollama を選択すると、 AI 処理を全て社内ネットワーク内で完結できます。",
+      "providerSection": "プロバイダ設定",
+      "providerSectionDescription": "プロバイダを選択して対応する API キーを入力してください。 プロバイダを切り替えても以前に保存したキーは削除されません。",
+      "providerLabel": "プロバイダ",
+      "provider": {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic (Claude)",
+        "gemini": "Google Gemini",
+        "azure_openai": "Azure OpenAI Service",
+        "ollama": "Ollama (ローカル)"
+      },
+      "apiKeyLabel": "API キー",
+      "apiKeyPlaceholder": "API キーを貼り付けてください",
+      "apiKeyPlaceholderConfigured": "既存キーを保持する場合はそのまま、 ローテートする場合は新しいキーを貼り付けてください",
+      "apiKeyHelp": "サーバー側で暗号化して保存します。 保存後は API レスポンスでは *** に置き換えられ、 再表示はできません。",
+      "apiKeyRequired": "このプロバイダでは API キーの設定が必須です。",
+      "modelLabel": "モデル",
+      "modelHelp": "プロバイダ固有のモデル ID。 空欄ならプロバイダのデフォルトモデルを使用します。",
+      "modelPlaceholder": {
+        "openai": "gpt-4o-mini",
+        "anthropic": "claude-opus-4-7",
+        "gemini": "gemini-2.5-flash",
+        "azure_openai": "gpt-4o-deployment",
+        "ollama": "llama3.1:8b"
+      },
+      "azureEndpointLabel": "Azure エンドポイント",
+      "azureDeploymentLabel": "Azure デプロイメント名",
+      "ollamaUrlLabel": "Ollama ベース URL",
+      "ollamaUrlHelp": "空欄の場合 http://localhost:11434 を使用します。",
+      "statusConfigured": "API キーは設定済みです。",
+      "statusUnconfigured": "API キー未設定 — AI 機能は無効になっています。",
+      "loadError": "LLM 設定の読み込みに失敗しました",
+      "saveError": "LLM 設定の保存に失敗しました",
+      "saveSuccess": "LLM 設定を保存しました。"
+    },
     "APIKeys": {
       "title": "APIキー管理",
       "description": "CLI、MCP Server、CI/CD連携で使用するAPIキーを管理します",
@@ -981,6 +1021,14 @@
       "usageCLI": "CLI (sbomhub-cli)",
       "usageMCP": "MCP Server",
       "usageCI": "CI/CD (GitHub Actions など)"
+    }
+  },
+  "Triage": {
+    "AIDisabledBanner": {
+      "title": "AI 機能が無効です",
+      "description": "[設定 > LLM] から LLM プロバイダを設定すると、 AI による VEX トリアージ / CRA レポート下書き / 経産省自己評価プリフィルが利用できるようになります。",
+      "reasonLabel": "理由",
+      "ctaLabel": "LLM 設定を開く"
     }
   },
   "FAQ": {

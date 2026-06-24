@@ -244,6 +244,11 @@ func main() {
 	ssvcRepo := repository.NewSSVCRepository(db)
 	eolRepo := repository.NewEOLRepository(db)
 
+	// BYOK LLM provider config (issue #22). Stores per-tenant provider
+	// selection and an AES-256-GCM encrypted API key. Surface via
+	// /api/v1/settings/llm.
+	tenantLLMConfigRepo := repository.NewTenantLLMConfigRepository(db)
+
 	// NVD Cache for vulnerability scanning
 	nvdCache := cache.NewNVDCache(rdb)
 
@@ -624,6 +629,14 @@ func main() {
 	auth.GET("/settings/scan", scanSettingsHandler.Get)
 	auth.PUT("/settings/scan", scanSettingsHandler.Update)
 	auth.GET("/settings/scan/logs", scanSettingsHandler.GetLogs)
+
+	// BYOK LLM provider configuration (issue #22). The handler encrypts the
+	// supplied API key with internal/service/llm.Encrypt before persisting;
+	// GET returns "***" as a placeholder so plaintext never leaves the
+	// process. Admin-only on PUT (enforced inside the handler).
+	settingsLLMHandler := handler.NewSettingsLLMHandler(tenantLLMConfigRepo, auditRepo, cfg)
+	auth.GET("/settings/llm", settingsLLMHandler.Get)
+	auth.PUT("/settings/llm", settingsLLMHandler.Update)
 
 	// KEV (Known Exploited Vulnerabilities) integration endpoints
 	auth.POST("/kev/sync", kevHandler.SyncCatalog)
