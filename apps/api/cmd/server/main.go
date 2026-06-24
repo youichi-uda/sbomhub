@@ -365,6 +365,15 @@ func main() {
 		}
 		return p, nil
 	}
+	// M1 Codex review #F19: TxManager drives the runner's Stage 1 / Stage
+	// 3 transactions so the slow Provider.Complete (Stage 2) runs with
+	// NO Postgres tx held — fixing the DB connection pool exhaustion DoS
+	// where 25 concurrent triage requests could pin every connection in
+	// the pool waiting on the upstream LLM. LLMTimeoutFromEnv bounds the
+	// Provider.Complete call (default 90s, override
+	// SBOMHUB_LLM_TIMEOUT_SECONDS).
+	triageTxManager := triage.NewDBTxManager(db)
+	triageLLMTimeout := triage.LLMTimeoutFromEnv()
 	triageRunner := triage.NewRunner(triage.RunnerConfig{
 		Drafts:                   newVexDraftsStore(db),
 		Advisories:               &triage.AdvisoryExcerptsAdapter{Repo: advisoryExcerptsRepo},
@@ -381,11 +390,15 @@ func main() {
 		Provider:         triageDefaultProvider,
 		ProviderResolver: triageProviderResolver,
 		Threshold:        triage.ConfidenceThresholdFromEnv(),
+		TxManager:        triageTxManager,
+		LLMTimeout:       triageLLMTimeout,
 	})
 	slog.Info("AI VEX triage runner initialised",
 		"default_provider", triageDefaultProvider.Name(),
 		"threshold", triage.ConfidenceThresholdFromEnv(),
-		"per_tenant_resolver", "tenant_llm_config")
+		"per_tenant_resolver", "tenant_llm_config",
+		"llm_timeout", triageLLMTimeout,
+		"tx_manager", "DBTxManager (F19)")
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -703,13 +716,35 @@ func main() {
 	// before the handler sees it, which means RateLimitByAPIKey and
 	// TenantTx never run for a denied caller.
 	triageMultiAuth := appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService)
+	// M1 Codex review #F19: TenantTx + auditMiddleware are deliberately
+	// stripped from /triage/run and /vex-drafts/:id/reanalyse because
+	// those two routes call the runner's 2-stage flow, which manages
+	// its own Stage 1 read tx and Stage 3 write tx internally so the
+	// slow LLM upstream call (Stage 2) does not pin a Postgres
+	// connection. Wrapping them in TenantTx would re-introduce the
+	// connection-pool exhaustion DoS. Lifecycle audit_logs rows are
+	// still emitted by runner.writeAudit (vex_draft_ai_generated /
+	// vex_draft_reanalysed / vex_draft_ai_disabled) inside Stage 3 —
+	// the request-level audit middleware (path + method + latency)
+	// is the only loss on these specific routes.
+	//
+	// TriageConcurrencyLimit caps concurrent runs per-tenant and
+	// globally (defaults 5 / 20, overridable via env) so the API has
+	// route-level back-pressure even when the runner's per-request
+	// connection-hygiene fix is doing its job. It sits after the
+	// role guard so denied requests do not consume slots, and after
+	// the rate limiter so the 60/min budget still gates per-key
+	// volume.
+	triageConcurrencyLimiter := appmw.NewTriageConcurrencyLimiterFromEnv()
+	slog.Info("triage concurrency limiter initialised",
+		"per_tenant", triageConcurrencyLimiter.PerTenant(),
+		"global", triageConcurrencyLimiter.Global())
 	e.POST("/api/v1/projects/:id/triage/run",
 		vexDraftsHandler.RunTriage,
 		triageMultiAuth,
 		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
-		appmw.TenantTx(db),
-		auditMiddleware)
+		triageConcurrencyLimiter.Middleware())
 	e.GET("/api/v1/projects/:id/vex-drafts",
 		vexDraftsHandler.ListDrafts,
 		triageMultiAuth,
@@ -729,13 +764,17 @@ func main() {
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
+	// /vex-drafts/:id/reanalyse calls runner.Run() like /triage/run, so
+	// it gets the same F19 treatment (no TenantTx, concurrency limit).
+	// The handler's loadDraftScoped → runner.GetDraft now opens its
+	// own short read tx via the runner's TxManager so the lookup
+	// still RLS-scopes despite the missing ambient TenantTx.
 	e.POST("/api/v1/projects/:id/vex-drafts/:draft_id/reanalyse",
 		vexDraftsHandler.Reanalyse,
 		triageMultiAuth,
 		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
-		appmw.TenantTx(db),
-		auditMiddleware)
+		triageConcurrencyLimiter.Middleware())
 
 	// License policy endpoints
 	auth.GET("/licenses/common", licensePolicyHandler.GetCommonLicenses)
