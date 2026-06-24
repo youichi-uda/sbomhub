@@ -242,6 +242,16 @@ const AuditActionVexDraftAIDisabled = "vex_draft_ai_disabled"
 // 404 "vulnerability not found in tenant scope" (M1 Codex review #F3).
 var ErrVulnerabilityNotInTenant = errors.New("triage: vulnerability not found in tenant scope")
 
+// ErrComponentNotInVulnerabilityScope is returned by Run when the caller
+// supplies a ComponentID that is NOT among the resolved
+// (tenant, project, vulnerability) → []component_id set. M1 Codex review
+// #F6: vex_drafts soft-references component_id / vulnerability_id (no
+// composite FK), so the runner MUST cross-check the caller-supplied id
+// against the server-resolved set or a stranger component from a
+// neighbouring project could be persisted into a draft. The handler
+// maps this to 404 "component not in vulnerability scope".
+var ErrComponentNotInVulnerabilityScope = errors.New("triage: component not in vulnerability scope")
+
 // ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
@@ -383,8 +393,8 @@ type RunInput struct {
 	// Reanalyse marks the run as a re-triage of an existing draft so
 	// the audit row is `vex_draft_reanalysed`. The original draft is
 	// not mutated — a fresh row is inserted.
-	Reanalyse                bool
-	ReanalyseFromDraft       *uuid.UUID
+	Reanalyse          bool
+	ReanalyseFromDraft *uuid.UUID
 }
 
 // RunResult is what Run returns to its caller.
@@ -434,7 +444,7 @@ type RunResult struct {
 //
 // Error contract:
 //   - input validation failures              → returns a sentinel input
-//                                                error (caller maps to 400)
+//     error (caller maps to 400)
 //   - ErrVulnerabilityNotInTenant            → caller maps to 404
 //   - non-Disabled llm.Provider failure      → wrapped (caller maps 5xx)
 //   - ValidateEvidence ErrEmptyEvidence      → wrapped (caller maps 422)
@@ -687,19 +697,30 @@ func (r *Runner) resolveProvider(ctx context.Context, tenantID uuid.UUID) (llm.P
 }
 
 // resolveComponentIDs implements the component_id resolution contract
-// (M1 Codex review #F3). Caller-supplied ComponentID always wins so
-// per-component triage requests still work; otherwise the resolver
-// enumerates every component in tenant scope linked to the
-// vulnerability. The runner refuses to fabricate an ID when both are
-// missing — the production wiring always supplies a resolver, but
-// surfacing the misconfig loudly is preferable to a silent broken
-// draft.
+// (M1 Codex review #F3 + #F6). The resolver always enumerates the
+// authoritative (tenant, project, vulnerability) → []component_id set
+// via componentVulns.ListIDsByVulnerability. Behaviour then forks:
+//
+//   - No ComponentID supplied: the full resolved set is returned and the
+//     runner fans out one draft per (component, vuln) pair (#F3). Zero
+//     matches → ErrVulnerabilityNotInTenant.
+//   - ComponentID supplied: the caller-supplied id MUST be a member of
+//     the resolved set, otherwise ErrComponentNotInVulnerabilityScope
+//     (#F6). vex_drafts has no composite FK over (project_id,
+//     component_id, vulnerability_id), so without this check a caller
+//     could persist a draft pointing at a component from a neighbouring
+//     project / vulnerability — silently bypassing project membership.
+//
+// When the production wiring is missing a ComponentVulnerabilityResolver
+// the runner still refuses to fabricate an ID. Without a resolver we
+// cannot perform the #F6 membership check either, so a caller-supplied
+// ComponentID is also rejected in that mode — surfacing the misconfig
+// loudly is preferable to a silently unscoped draft.
 func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.UUID, error) {
-	if in.ComponentID != nil && *in.ComponentID != uuid.Nil {
-		return []uuid.UUID{*in.ComponentID}, nil
-	}
 	if r.componentVulns == nil {
-		return nil, errors.New("triage.Run: component_id is required (no ComponentVulnerabilityResolver wired)")
+		// Maintains the original #F3 contract: handler-fixable misconfig
+		// reads as a 400 ("is required ...") via mapRunnerError.
+		return nil, errors.New("triage.Run: component_id resolver is required (no ComponentVulnerabilityResolver wired)")
 	}
 	ids, err := r.componentVulns.ListIDsByVulnerability(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID)
 	if err != nil {
@@ -707,6 +728,18 @@ func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.U
 	}
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("triage.Run: %w", ErrVulnerabilityNotInTenant)
+	}
+	// F6: validate caller-supplied component_id against the resolved
+	// set. We compare uuid values directly — the ID set is small (one
+	// per affected component in this project) so a linear scan is fine.
+	if in.ComponentID != nil && *in.ComponentID != uuid.Nil {
+		want := *in.ComponentID
+		for _, id := range ids {
+			if id == want {
+				return []uuid.UUID{want}, nil
+			}
+		}
+		return nil, fmt.Errorf("triage.Run: %w", ErrComponentNotInVulnerabilityScope)
 	}
 	return ids, nil
 }

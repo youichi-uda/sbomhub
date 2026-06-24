@@ -58,7 +58,7 @@ type runTriageRequest struct {
 }
 
 type runTriageResponse struct {
-	Draft     *repository.VEXDraft   `json:"draft"`
+	Draft *repository.VEXDraft `json:"draft"`
 	// Drafts carries every persisted draft when the run fanned out
 	// across multiple components (M1 Codex review #F3). For a single-
 	// component triage Drafts is a one-element slice with the same
@@ -403,11 +403,13 @@ func userIDOrNil(tc *middleware.TenantContext) *uuid.UUID {
 // otherwise so the caller can fall through to the success path.
 //
 // Status mapping:
-//   - llm.DisabledError                            → 503
-//   - triage.ErrEmptyEvidence                       → 422 (spec §8.5)
-//   - triage.ErrInvalidEvidence                     → 422
-//   - input-validation errors (missing fields)      → 400
-//   - everything else                               → 500
+//   - llm.DisabledError                                → 503
+//   - triage.ErrEmptyEvidence                           → 422 (spec §8.5)
+//   - triage.ErrInvalidEvidence                         → 422
+//   - triage.ErrVulnerabilityNotInTenant                → 404 (#F3)
+//   - triage.ErrComponentNotInVulnerabilityScope        → 404 (#F6)
+//   - input-validation errors (missing fields)          → 400
+//   - everything else                                   → 500
 func mapRunnerError(err error) (int, map[string]string, bool) {
 	if err == nil {
 		return 0, nil, false
@@ -426,6 +428,17 @@ func mapRunnerError(err error) (int, map[string]string, bool) {
 	}
 	if errors.Is(err, triage.ErrInvalidEvidence) {
 		return http.StatusUnprocessableEntity, map[string]string{
+			"error": err.Error(),
+		}, true
+	}
+	// F3 / F6 (Codex M1): both surface as 404 so the client cannot
+	// distinguish "vuln has no components in this project scope" from
+	// "supplied component_id is not in the vuln scope" — that
+	// distinction is intentionally hidden to avoid leaking tenant
+	// internals via probe responses.
+	if errors.Is(err, triage.ErrVulnerabilityNotInTenant) ||
+		errors.Is(err, triage.ErrComponentNotInVulnerabilityScope) {
+		return http.StatusNotFound, map[string]string{
 			"error": err.Error(),
 		}, true
 	}

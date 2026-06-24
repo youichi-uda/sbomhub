@@ -294,6 +294,11 @@ func TestRunner_Run_HappyPath_InsertsDraftLLMCallAndAudit(t *testing.T) {
 		Provider:     stub,
 		Threshold:    0.7,
 		Clock:        fixedClock(now),
+		// F6: caller-supplied component_id must be cross-checked against
+		// the resolver's authoritative (tenant, project, vulnerability)
+		// → []component_id set. Wire a permissive resolver here so the
+		// supplied componentID is accepted.
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 
 	uid := userID
@@ -428,6 +433,7 @@ func TestRunner_Run_BelowThreshold_ClampsToUnderInvestigation(t *testing.T) {
 		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 
 	res, err := r.Run(context.Background(), RunInput{
@@ -463,6 +469,7 @@ func TestRunner_Run_EmptyEvidence_Returns422Compatible(t *testing.T) {
 		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 	_, err := r.Run(context.Background(), RunInput{
 		TenantID: uuid.New(), ProjectID: uuid.New(),
@@ -497,6 +504,7 @@ func TestRunner_Run_LLMTransientError_PersistsCallWithErrorMessageAndReturnsErr(
 		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 	_, err := r.Run(context.Background(), RunInput{
 		TenantID: uuid.New(), ProjectID: uuid.New(),
@@ -555,7 +563,7 @@ func TestRunner_UpdateDecision_Approve_SyncsToVEXStatementsAndAudits(t *testing.
 		ComponentID:     componentID,
 		VulnerabilityID: vulnID, CVEID: "CVE-2026-0005",
 		State: "not_affected", Justification: "code_not_reachable",
-		Detail: "Imported but unreachable",
+		Detail:   "Imported but unreachable",
 		Decision: DecisionPending,
 	}}}
 	audit := &fakeAuditWriter{}
@@ -710,10 +718,10 @@ func TestRunner_UpdateDecision_Edit_PropagatesOverwrites(t *testing.T) {
 	uid := uuid.New()
 	updated, err := r.UpdateDecision(context.Background(), DecisionInput{
 		TenantID: tenantID, DraftID: draftID, UserID: &uid,
-		Decision:            DecisionEdited,
-		EditedState:         "affected",
-		EditedDetail:        "Human reviewer disagrees with AI; production observed traffic to vulnerable endpoint.",
-		Note:                "manual review override",
+		Decision:     DecisionEdited,
+		EditedState:  "affected",
+		EditedDetail: "Human reviewer disagrees with AI; production observed traffic to vulnerable endpoint.",
+		Note:         "manual review override",
 	})
 	if err != nil {
 		t.Fatalf("UpdateDecision error: %v", err)
@@ -738,6 +746,7 @@ func TestRunner_Run_Reanalyse_EmitsReanalysedAudit(t *testing.T) {
 		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 	original := uuid.New()
 	_, err := r.Run(context.Background(), RunInput{
@@ -809,6 +818,7 @@ func TestRunner_Run_AuditFailure_PropagatesError(t *testing.T) {
 		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -877,6 +887,7 @@ func TestRunner_Run_Reanalyse_AuditFailure_PropagatesError(t *testing.T) {
 		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 	original := uuid.New()
 	_, err := r.Run(context.Background(), RunInput{
@@ -920,10 +931,10 @@ func TestRunner_Run_Reanalyse_AuditFailure_PropagatesError(t *testing.T) {
 // fakeTenantProviderResolver captures the tenant id passed to the resolver
 // so the test can verify the runner asks per-request (not per-startup).
 type fakeProviderResolver struct {
-	called   int
+	called    int
 	gotTenant uuid.UUID
-	provider llm.Provider
-	err      error
+	provider  llm.Provider
+	err       error
 }
 
 func (r *fakeProviderResolver) resolve(_ context.Context, tenantID uuid.UUID) (llm.Provider, error) {
@@ -960,7 +971,8 @@ func TestRunner_Run_PerTenantProviderResolved(t *testing.T) {
 		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: defaultStub, Threshold: 0.7,
-		ProviderResolver: resolver.resolve,
+		ProviderResolver:         resolver.resolve,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -1133,6 +1145,7 @@ func TestRunner_Run_AIDisabled_PersistsUnderInvestigationDraft(t *testing.T) {
 		Drafts: drafts, Advisories: advisories,
 		Reachability: reach, LLMCalls: llmCalls,
 		Audit: audit, Provider: disabled, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
 	})
 
 	res, err := r.Run(context.Background(), RunInput{
@@ -1174,6 +1187,95 @@ func TestRunner_Run_AIDisabled_PersistsUnderInvestigationDraft(t *testing.T) {
 	}
 	if audit.entries[0].Action != AuditActionVexDraftAIDisabled {
 		t.Errorf("audit action = %s, want %s", audit.entries[0].Action, AuditActionVexDraftAIDisabled)
+	}
+}
+
+// TestRunner_Run_CallerSuppliedComponentIDOutsideVulnerabilityScope_Rejected
+// pins the F6 contract (Codex M1 round 2): when a caller supplies a
+// ComponentID that is NOT among the (tenant, project, vulnerability) →
+// []component_id set resolved by ComponentVulnerabilityResolver, the
+// runner MUST refuse to persist the draft and return
+// ErrComponentNotInVulnerabilityScope. The handler maps this to 404.
+//
+// Without the F6 fix vex_drafts (which stores project_id / component_id
+// / vulnerability_id as soft references, no composite FK) would happily
+// accept a drift draft pointing at a stranger component from a
+// neighbouring project — silently bypassing tenant project membership.
+func TestRunner_Run_CallerSuppliedComponentIDOutsideVulnerabilityScope_Rejected(t *testing.T) {
+	// The vulnerability links to component c1 in this project; the caller
+	// (maliciously or buggily) supplies stranger component c2 instead.
+	c1 := uuid.New()
+	stranger := uuid.New()
+	resolver := &fakeComponentVulnResolver{ids: []uuid.UUID{c1}}
+
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+	llmCalls := &fakeLLMCallWriter{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
+		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0200",
+		ComponentID: &stranger,
+	})
+	if err == nil {
+		t.Fatalf("expected error when caller supplies component_id outside the vulnerability scope")
+	}
+	if !errors.Is(err, ErrComponentNotInVulnerabilityScope) {
+		t.Errorf("error %v should wrap ErrComponentNotInVulnerabilityScope", err)
+	}
+	if got := len(drafts.inserted); got != 0 {
+		t.Errorf("expected no draft persisted on rejection, got %d", got)
+	}
+	if got := len(llmCalls.records); got != 0 {
+		t.Errorf("expected no llm_calls persisted on rejection (provider must never run), got %d", got)
+	}
+	if got := len(audit.entries); got != 0 {
+		t.Errorf("expected no audit row on rejection, got %d", got)
+	}
+	if resolver.called != 1 {
+		t.Errorf("resolver.called = %d, want 1 (membership check must consult the resolver)", resolver.called)
+	}
+}
+
+// TestRunner_Run_CallerSuppliedComponentIDInScope_Accepted is the
+// positive companion to the F6 rejection test: when the caller-supplied
+// ComponentID IS in the resolved set, the runner accepts it and creates
+// exactly one draft for that component (no fan-out across the other
+// components in scope).
+func TestRunner_Run_CallerSuppliedComponentIDInScope_Accepted(t *testing.T) {
+	c1, c2 := uuid.New(), uuid.New()
+	resolver := &fakeComponentVulnResolver{ids: []uuid.UUID{c1, c2}}
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0201",
+		ComponentID: &c1,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 draft (single-component scope), got %d", got)
+	}
+	if drafts.inserted[0].ComponentID != c1 {
+		t.Errorf("draft.ComponentID = %v, want %v", drafts.inserted[0].ComponentID, c1)
 	}
 }
 
