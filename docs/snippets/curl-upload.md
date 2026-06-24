@@ -21,6 +21,7 @@ The canonical SBOM upload endpoint is `POST /api/v1/projects/:id/sbom`. It
 accepts the **raw CycloneDX or SPDX JSON body** (auto-detected server-side)
 and authenticates via `Authorization: Bearer <api-key>` (Trust Rescue 9.3.1 / #9).
 
+<!-- ci:smoke-test:start -->
 ```bash
 curl -X POST \
   -H "Authorization: Bearer $SBOMHUB_API_KEY" \
@@ -28,6 +29,13 @@ curl -X POST \
   --data-binary "@sbom.json" \
   "$SBOMHUB_URL/api/v1/projects/$SBOMHUB_PROJECT_ID/sbom"
 ```
+<!-- /ci:smoke-test -->
+
+> This block is executed verbatim in CI against a live api on every PR that
+> touches the snippet or the SBOM upload code path. See
+> [.github/workflows/docs-curl-smoke.yml](../../.github/workflows/docs-curl-smoke.yml)
+> (Trust Rescue 9.3.3 / #11). If you edit the command, the smoke job will
+> re-run it; if the new form does not produce HTTP 201, CI fails.
 
 > Do **not** use `-F sbom=@sbom.json` against `/projects/:id/sbom`. The
 > canonical endpoint reads the raw request body; multipart form data is

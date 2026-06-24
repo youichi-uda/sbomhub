@@ -1,0 +1,274 @@
+# SBOMHub - docs/snippets/curl-upload.md smoke test
+#
+# Trust Rescue P1 #11 / 9.3.3 acceptance gate.
+#
+# Boots the api + postgres + redis via docker compose, seeds a tenant + API
+# key + project, then executes the canonical `curl` block extracted verbatim
+# from docs/snippets/curl-upload.md. The point is to catch drift between the
+# documented command and the live API contract: if a maintainer renames the
+# endpoint, changes the auth header, or breaks request body parsing, this
+# job is the only thing that re-runs the exact lines the docs ship to users.
+#
+# The snippet is the single source of truth (Wave 4b / #10); this workflow
+# is the executable proof that the snippet still works.
+
+name: docs curl smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/snippets/curl-upload.md"
+      - "apps/api/**"
+      - "docker-compose.yml"
+      - ".github/workflows/docs-curl-smoke.yml"
+      - "scripts/extract-snippet-block.sh"
+      - "test/fixtures/minimal-cyclonedx.json"
+  pull_request:
+    paths:
+      - "docs/snippets/curl-upload.md"
+      - "apps/api/**"
+      - "docker-compose.yml"
+      - ".github/workflows/docs-curl-smoke.yml"
+      - "scripts/extract-snippet-block.sh"
+      - "test/fixtures/minimal-cyclonedx.json"
+  workflow_dispatch:
+
+jobs:
+  curl-smoke:
+    name: docs curl upload must succeed against live api
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
+        run: |
+          docker version
+          docker compose version
+          curl --version | head -n1
+          jq --version
+          openssl version
+
+      - name: Generate .env with per-run secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          # Generate fresh per-run secrets so no key material is hardcoded
+          # in the repo or in the workflow file.
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          # Strip any pre-existing assignment of these vars in .env.example,
+          # then append our overrides at the end so they win.
+          sed -i '/^ENCRYPTION_KEY=/d'    .env
+          sed -i '/^MIGRATOR_PASSWORD=/d' .env
+          sed -i '/^APP_PASSWORD=/d'      .env
+          sed -i '/^APP_ENV=/d'           .env
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+          } >> .env
+
+          # Sanity log (do NOT echo the secrets themselves).
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Build api image locally
+        # docker-compose.yml pins api to y1uda/sbomhub-api:latest (no build:
+        # directive — that file is frozen, Wave 4a / #10). We re-tag a local
+        # build under the same name so `docker compose up` picks ours
+        # instead of pulling the registry copy.
+        run: |
+          docker build \
+            -t y1uda/sbomhub-api:latest \
+            -f apps/api/Dockerfile \
+            apps/api
+
+      - name: Start postgres + redis
+        run: |
+          docker compose up -d --wait postgres redis
+          docker compose ps
+
+      - name: Start api (locally built image)
+        run: |
+          # --pull never guards against compose silently swapping our local
+          # build for the registry copy when caches are warm.
+          docker compose up -d --pull never api
+          docker compose ps
+
+      - name: Wait for /api/v1/health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS http://localhost:8080/api/v1/health 2>/dev/null); then
+              echo "api healthy after $((i*2))s: $body"
+              exit 0
+            fi
+            echo "waiting for api... ($i/60)"
+            sleep 2
+          done
+          echo "::error::api did not become healthy within ~120s"
+          echo "--- last 200 lines of api logs ---"
+          docker compose logs --tail=200 api || true
+          echo "--- last 100 lines of postgres logs ---"
+          docker compose logs --tail=100 postgres || true
+          exit 1
+
+      - name: Seed tenant + API key + project
+        id: seed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Pick an API key shape that matches what the api itself generates:
+          # `sbh_` + 32 hex chars (see apps/api/internal/service/apikey.go
+          # generateAPIKey). The middleware looks at the literal `sbh_`
+          # prefix to decide API-key vs Clerk JWT, so the prefix matters.
+          RAW_KEY="sbh_$(openssl rand -hex 16)"
+          KEY_HASH="$(printf '%s' "$RAW_KEY" | sha256sum | awk '{print $1}')"
+          KEY_PREFIX="${RAW_KEY:0:12}"
+          TENANT_ID="$(uuidgen)"
+          API_KEY_ID="$(uuidgen)"
+
+          # Insert tenant + api_key directly via the postgres superuser.
+          #   - tenants is not RLS-enabled, so the insert is unambiguous.
+          #   - api_keys had its RLS dropped in migration 028 / Trust Rescue
+          #     P0 #18; the lookup-by-key_hash path the middleware uses runs
+          #     unscoped on purpose, so this direct insert is exactly what
+          #     the real /api/v1/apikeys POST would persist.
+          docker compose exec -T postgres \
+            psql -v ON_ERROR_STOP=1 -U sbomhub -d sbomhub <<SQL
+          INSERT INTO tenants (id, clerk_org_id, name, slug, plan)
+          VALUES ('${TENANT_ID}',
+                  'ci_${TENANT_ID}',
+                  'ci-smoke',
+                  'ci-smoke-${TENANT_ID:0:8}',
+                  'free');
+
+          INSERT INTO api_keys (
+              id, tenant_id, project_id, name,
+              key_hash, key_prefix, permissions, created_at
+          ) VALUES (
+              '${API_KEY_ID}', '${TENANT_ID}', NULL, 'ci-smoke',
+              '${KEY_HASH}', '${KEY_PREFIX}', 'write', NOW()
+          );
+          SQL
+
+          # Now go through the public CLI endpoint to create the project so
+          # the path through MultiAuth + tenant context + RLS is exercised
+          # end-to-end (rather than INSERTing the project directly with the
+          # superuser, which would mask any RLS regression).
+          PROJECT_RESP="$(curl -fsS -X POST \
+            -H "Authorization: Bearer ${RAW_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"ci-smoke","description":"docs curl smoke test"}' \
+            http://localhost:8080/api/v1/cli/projects)"
+          echo "create-project response: ${PROJECT_RESP}"
+
+          PROJECT_ID="$(printf '%s' "${PROJECT_RESP}" \
+            | jq -r '.id // .project_id // .ID // empty')"
+          if [ -z "${PROJECT_ID}" ] || [ "${PROJECT_ID}" = "null" ]; then
+            echo "::error::could not parse project id from CLI response"
+            exit 1
+          fi
+          echo "project_id=${PROJECT_ID}"
+
+          # Mask the API key in subsequent logs and expose both as step outputs.
+          echo "::add-mask::${RAW_KEY}"
+          {
+            echo "raw_key=${RAW_KEY}"
+            echo "project_id=${PROJECT_ID}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stage SBOM fixture as sbom.json (matches snippet's path)
+        run: |
+          cp test/fixtures/minimal-cyclonedx.json ./sbom.json
+          ls -l sbom.json
+          jq -r '.bomFormat, .specVersion' sbom.json
+
+      - name: Extract canonical curl block from the snippet
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          BLOCK="$(bash scripts/extract-snippet-block.sh \
+            docs/snippets/curl-upload.md ci:smoke-test)"
+          if [ -z "${BLOCK//[[:space:]]/}" ]; then
+            echo "::error::no ci:smoke-test block found in docs/snippets/curl-upload.md"
+            echo "Hint: wrap the canonical \`curl\` example with"
+            echo "  <!-- ci:smoke-test:start -->"
+            echo "  \`\`\`bash"
+            echo "  ...curl..."
+            echo "  \`\`\`"
+            echo "  <!-- /ci:smoke-test -->"
+            exit 1
+          fi
+
+          echo "--- extracted snippet (this is what CI will execute) ---"
+          printf '%s\n' "${BLOCK}"
+          echo "--- end ---"
+
+          # Stash to a file so the next step runs it byte-identical, no
+          # quoting drift through environment variables.
+          printf '%s\n' "${BLOCK}" > /tmp/snippet.sh
+
+      - name: Run the snippet against the live api
+        env:
+          SBOMHUB_URL: http://localhost:8080
+          SBOMHUB_API_KEY: ${{ steps.seed.outputs.raw_key }}
+          SBOMHUB_PROJECT_ID: ${{ steps.seed.outputs.project_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "--- executing extracted snippet ---"
+          # Pipe through tee so we can inspect the api response in the log
+          # while still failing the step if bash returns non-zero.
+          if ! bash -e /tmp/snippet.sh | tee /tmp/snippet.out; then
+            echo "::error::snippet execution returned non-zero"
+            docker compose logs --tail=200 api
+            exit 1
+          fi
+          echo "--- snippet exited 0 ---"
+
+          # The snippet uses plain curl (no --fail), so a 4xx/5xx body
+          # would still exit 0. Do an independent verification round-trip:
+          # GET the latest SBOM with the same API key and assert the upload
+          # actually landed.
+          echo "--- verifying via GET /api/v1/projects/:id/sbom ---"
+          GET_RESP="$(curl -fsS \
+            -H "Authorization: Bearer ${SBOMHUB_API_KEY}" \
+            "${SBOMHUB_URL}/api/v1/projects/${SBOMHUB_PROJECT_ID}/sbom")"
+          echo "latest sbom: ${GET_RESP}"
+
+          SBOM_ID="$(printf '%s' "${GET_RESP}" | jq -r '.id // .ID // empty')"
+          if [ -z "${SBOM_ID}" ]; then
+            echo "::error::GET /sbom returned no id; the documented curl example did NOT land a record."
+            echo "snippet stdout was:"
+            cat /tmp/snippet.out
+            exit 1
+          fi
+          echo "OK: docs/snippets/curl-upload.md uploaded SBOM ${SBOM_ID}."
+
+      - name: Dump api logs on failure
+        if: failure()
+        run: |
+          echo "--- api ---"
+          docker compose logs --tail=400 api || true
+          echo "--- postgres ---"
+          docker compose logs --tail=200 postgres || true
+          echo "--- redis ---"
+          docker compose logs --tail=100 redis || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
