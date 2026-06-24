@@ -637,7 +637,35 @@ func main() {
 		auditMiddleware)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)
-	auth.GET("/projects/:id/vulnerabilities", sbomHandler.GetVulnerabilities)
+	// M1 Codex review #F20: /api/v1/projects/:id/vulnerabilities used to
+	// sit on the Clerk-only `auth` group above, so the CLI's
+	// `sbomhub triage` (which sends `Authorization: Bearer sbh_...`)
+	// could never enumerate vulnerabilities — every request hit Auth()'s
+	// Clerk JWT verifier and returned 401. The MCP-mounted twin at
+	// /api/v1/mcp/projects/:id/vulnerabilities exists for the MCP server
+	// only and is not what the triage CLI targets.
+	//
+	// We now register the canonical /vulnerabilities read-back route
+	// through MultiAuth + RateLimitByAPIKey + TenantTx + audit, the same
+	// chain the SBOM read-back (GET /api/v1/projects/:id/sbom) and
+	// scan-status routes use. The Clerk JWT / self-hosted path is
+	// preserved by MultiAuth's clerkChain fallback so the web UI's
+	// vulnerability list view is unaffected. The handler is read-only so
+	// RequireWrite is deliberately omitted — read-scoped (RoleViewer)
+	// API keys can enumerate vulnerabilities, matching /sbom GET /
+	// /sboms/.../scan-status.
+	//
+	// Rate-limit budget mirrors the SBOM read-back (60 req/min per API
+	// key) — `sbomhub triage` calls this once per session, not in a
+	// polling loop. RateLimitByAPIKey is a no-op for the Clerk JWT path
+	// so the web UI is unaffected.
+	// Middleware chain: MultiAuth -> RateLimitByAPIKey -> TenantTx -> audit -> handler.
+	e.GET("/api/v1/projects/:id/vulnerabilities",
+		sbomHandler.GetVulnerabilities,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	// Per-SBOM background-scan status endpoint observed by `sbomhub scan
 	// --fail-on <severity>` (Trust Rescue P1 #12). It reports
 	// running/completed/failed plus current per-severity counts so CLI
