@@ -135,6 +135,14 @@ func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
 }
 
+// IsDevelopment returns true if running in the development environment.
+// This is the single source of truth for the "warn instead of hard-fail"
+// downgrade applied to Trust Rescue startup guards
+// (validateEncryptionKey / assertAppRoleNotBypassRLS in cmd/server/main.go).
+func (c *Config) IsDevelopment() bool {
+	return c.Environment == "development"
+}
+
 // IsEmailEnabled returns true if email notifications are configured
 func (c *Config) IsEmailEnabled() bool {
 	return c.SMTPHost != "" && c.SMTPFrom != ""

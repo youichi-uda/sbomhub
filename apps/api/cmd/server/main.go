@@ -48,12 +48,14 @@ var knownDefaultEncryptionKeys = []string{
 
 // validateEncryptionKey enforces P0 #7 / Trust Rescue 9.2.3: refuse to start
 // when ENCRYPTION_KEY is unset, a known default placeholder, or shorter than
-// 32 bytes (AES-256 needs 32 bytes). Only APP_ENV="development" downgrades a
-// violation to a warning so contributors can run locally without a key.
+// 32 bytes (AES-256 needs 32 bytes). Only the development environment
+// downgrades a violation to a warning so contributors can run locally without
+// a key.
 //
-// Note: APP_ENV (not Config.Environment) drives this gate intentionally — it
-// mirrors assertAppRoleNotBypassRLS below so both Trust Rescue guards share a
-// single env-var contract.
+// Callers pass cfg.EncryptionKey / cfg.Environment so this guard agrees with
+// the rest of config (post codex-r18 APP_ENV → ENVIRONMENT precedence). The
+// appEnv parameter is the resolved Config.Environment string, not a raw env
+// var read.
 func validateEncryptionKey(rawKey, appEnv string) error {
 	var reason string
 	switch {
@@ -92,10 +94,15 @@ func validateEncryptionKey(rawKey, appEnv string) error {
 }
 
 // assertAppRoleNotBypassRLS verifies that the runtime DB role does not have
-// the BYPASSRLS attribute. In production we hard-fail; in development we log
-// a warning so contributors can keep running against a single-role local DB
-// while they migrate.
-func assertAppRoleNotBypassRLS(db *sql.DB) error {
+// the BYPASSRLS attribute. In development we log a warning so contributors
+// can keep running against a single-role local DB while they migrate;
+// everywhere else (production / staging / unset) we hard-fail.
+//
+// Environment classification comes from cfg.IsDevelopment() so the
+// APP_ENV → ENVIRONMENT precedence resolved by config.Load (codex-r18)
+// is the single source of truth — see validateEncryptionKey for the
+// matching contract.
+func assertAppRoleNotBypassRLS(db *sql.DB, cfg *config.Config) error {
 	var bypass bool
 	var role string
 	if err := db.QueryRow(
@@ -107,17 +114,16 @@ func assertAppRoleNotBypassRLS(db *sql.DB) error {
 		slog.Info("DB role check passed", "role", role, "bypass_rls", false)
 		return nil
 	}
-	appEnv := os.Getenv("APP_ENV")
-	if appEnv == "development" {
+	if cfg.IsDevelopment() {
 		slog.Warn("DB role has BYPASSRLS — tenant isolation is NOT enforced. "+
 			"Switch DATABASE_URL to the sbomhub_app role before deploying.",
-			"role", role, "app_env", appEnv)
+			"role", role, "app_env", cfg.Environment)
 		return nil
 	}
 	return fmt.Errorf(
 		"RLS bypass 権限を持つロールでの起動は禁止です。 sbomhub_app ロールを使用してください "+
 			"(current_user=%s, rolbypassrls=true, APP_ENV=%q)",
-		role, appEnv,
+		role, cfg.Environment,
 	)
 }
 
@@ -132,9 +138,11 @@ func main() {
 
 	// SECURITY (P0 #7 / Trust Rescue 9.2.3): refuse to start when
 	// ENCRYPTION_KEY is unset, a known default placeholder, or under 32 bytes.
-	// We read the raw environment variable so that any downstream fallback in
-	// config.Load cannot mask an empty key in non-development environments.
-	if err := validateEncryptionKey(os.Getenv("ENCRYPTION_KEY"), os.Getenv("APP_ENV")); err != nil {
+	// cfg.EncryptionKey is the raw value loaded from ENCRYPTION_KEY (no default
+	// is filled in for it inside config.Load — Validate handles the dev-only
+	// fallback after this guard runs), and cfg.Environment honours the codex-r18
+	// APP_ENV → ENVIRONMENT precedence so the gate agrees with cfg.IsProduction.
+	if err := validateEncryptionKey(cfg.EncryptionKey, cfg.Environment); err != nil {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
@@ -178,7 +186,7 @@ func main() {
 	// DB role that bypasses Row-Level Security. RLS policies are how we
 	// enforce tenant isolation, so a BYPASSRLS runtime role silently breaks
 	// the entire multi-tenant boundary.
-	if err := assertAppRoleNotBypassRLS(db); err != nil {
+	if err := assertAppRoleNotBypassRLS(db, cfg); err != nil {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
