@@ -483,12 +483,19 @@ func main() {
 	// (Clerk-only) group with MultiAuth so the API-key Bearer header is
 	// accepted. Previously the API key was decoded as a Clerk JWT, the
 	// request fell through to the default tenant in self-host mode, and the
-	// verification step in docs-curl-smoke.yml saw a 404. Middleware chain
-	// mirrors the canonical upload route above:
-	// MultiAuth -> TenantTx -> audit -> handler.
+	// verification step in docs-curl-smoke.yml saw a 404.
+	//
+	// Codex R21 fix: rate-limit the API-key path to mirror the canonical
+	// upload above (60 req/min per API key). RateLimitByAPIKey is a no-op
+	// when ContextKeyAPI is unset (i.e. Clerk JWT / self-hosted default
+	// path), so this leaves the web UI un-throttled while protecting the
+	// SBOM read-back from being used as a content-exfiltration loop with a
+	// leaked `sbh_...` key.
+	// Middleware chain: MultiAuth -> RateLimitByAPIKey -> TenantTx -> audit -> handler.
 	e.GET("/api/v1/projects/:id/sbom",
 		sbomHandler.Get,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
@@ -503,11 +510,19 @@ func main() {
 	// MultiAuth so the CLI's `Authorization: Bearer sbh_...` API-key polling
 	// works after the canonical upload. Previously the CLI received 401
 	// because the API key was decoded as a Clerk JWT, defeating the purpose
-	// of scan-status. Middleware chain mirrors the canonical upload route
-	// above: MultiAuth -> TenantTx -> audit -> handler.
+	// of scan-status.
+	//
+	// Codex R21 fix: rate-limit the API-key path. This endpoint is a polling
+	// surface for `sbomhub scan --fail-on <severity>`, so a higher ceiling
+	// of 300 req/min per API key (≈5 req/sec, comfortably above a 1s poll
+	// cadence even with multiple concurrent CLI invocations) is applied
+	// instead of the 60 req/min used for upload / read-back. RateLimitByAPIKey
+	// is a no-op for the Clerk JWT path so the web UI is unaffected.
+	// Middleware chain: MultiAuth -> RateLimitByAPIKey -> TenantTx -> audit -> handler.
 	e.GET("/api/v1/projects/:id/sboms/:sbom_id/scan-status",
 		sbomHandler.ScanStatus,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	auth.POST("/projects/:id/scan", vulnHandler.Scan)
