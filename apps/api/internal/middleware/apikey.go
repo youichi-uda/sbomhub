@@ -86,7 +86,19 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 }
 
 // APIKeyTenant sets tenant context based on API key's tenant_id (direct)
-// Falls back to project->tenant lookup for legacy project-level keys
+// Falls back to project->tenant lookup for legacy project-level keys.
+//
+// M1 Codex review #F18: in addition to ContextKeyTenantID, this middleware
+// now also populates ContextKeyRole by mapping api_keys.permissions through
+// roleFromAPIKeyPermissions (shared with MultiAuth's handleAPIKeyAuth in
+// multiauth.go). Without that mapping, RequireWrite() — which we want to
+// apply to the legacy /api/v1/cli/* write group — would reject every
+// API-key caller with 403 because Role() defaulted to "". With the mapping
+// in place, read-scoped keys (permissions="read" → RoleViewer) correctly
+// fail RequireWrite while write/admin/owner keys (RoleMember / RoleAdmin)
+// pass through. The F17 fail-closed default for unknown / empty values
+// applies here too — a row that escaped CreateKey's allowlist cannot be
+// used to drive writes on the legacy CLI group either.
 func APIKeyTenant(projectRepo *repository.ProjectRepository, tenantRepo *repository.TenantRepository) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -105,6 +117,15 @@ func APIKeyTenant(projectRepo *repository.ProjectRepository, tenantRepo *reposit
 				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to set tenant context"})
 			}
 			c.Set(ContextKeyTenantID, tenantID)
+
+			// F18: map api_keys.permissions → ContextKeyRole so
+			// downstream RequireWrite() on the legacy /api/v1/cli/* write
+			// group (and any other route that adds the F15 role guard
+			// behind APIKeyAuth + APIKeyTenant) can reject read-scoped
+			// keys instead of silently accepting them. Mirrors what
+			// MultiAuth.handleAPIKeyAuth does on the canonical path —
+			// keep the two in sync via roleFromAPIKeyPermissions.
+			c.Set(ContextKeyRole, roleFromAPIKeyPermissions(key.Permissions))
 
 			return next(c)
 		}

@@ -486,6 +486,18 @@ func main() {
 	// Trust Rescue 9.1.2 (#3): TenantTx wraps the rest of the chain so
 	// rate limit / audit / handler all share the same per-request tx with
 	// `SET LOCAL app.current_tenant_id` bound.
+	//
+	// M1 Codex review #F18: the legacy /api/v1/cli/* group historically
+	// used APIKeyAuth + APIKeyTenant only, neither of which consulted
+	// api_keys.permissions. That meant a read-scoped sbh_... key could
+	// still write through cliHandler.Upload / cliHandler.CreateProject
+	// even after F15 locked down the canonical MultiAuth-fronted write
+	// routes. APIKeyTenant now populates ContextKeyRole from the API
+	// key's permissions (mirroring MultiAuth.handleAPIKeyAuth), and the
+	// mutating routes below add appmw.RequireWrite() so a read-scoped
+	// key gets the same 403 it would receive on the canonical endpoint.
+	// Read-only routes (GET /projects, GET /projects/:id) intentionally
+	// remain reachable by every tier including RoleViewer.
 	cli := api.Group("/cli",
 		appmw.APIKeyAuth(apiKeyService),
 		appmw.APIKeyTenant(projectRepo, tenantRepo),
@@ -493,11 +505,11 @@ func main() {
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.MCPAudit(auditRepo),
 	)
-	cli.POST("/upload", cliHandler.Upload)
+	cli.POST("/upload", cliHandler.Upload, appmw.RequireWrite())
 	cli.POST("/check", cliHandler.Check)
 	cli.GET("/projects", cliHandler.ListProjects)
 	cli.GET("/projects/:id", cliHandler.GetProject)
-	cli.POST("/projects", cliHandler.CreateProject)
+	cli.POST("/projects", cliHandler.CreateProject, appmw.RequireWrite())
 
 	// Auth middleware - applies to most endpoints
 	authMiddleware := appmw.Auth(cfg, tenantRepo, userRepo)
