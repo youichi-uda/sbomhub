@@ -1,0 +1,182 @@
+# SBOMHub - RLS integration tests
+#
+# Trust Rescue P1 #17-followup / ci-inventory.md §4 Action items.
+#
+# apps/api/internal/repository/*_rls_test.go and
+# apps/api/internal/middleware/tx_test.go are gated behind
+# `//go:build integration` and require a live postgres with the role-split
+# bootstrap (sbomhub_app / sbomhub_migrator) plus the schema migrations
+# applied. They are deliberately excluded from `go test ./...` in
+# go-test.yml because they cannot run without docker compose.
+#
+# This workflow is the executable proof that those RLS contracts still
+# hold. It boots postgres via docker compose, applies role bootstrap +
+# migrations, and runs the integration tests against the real
+# sbomhub_app (NOBYPASSRLS) and sbomhub_migrator roles. A regression in
+# an RLS policy or a migration that quietly drops policy enforcement
+# would surface here, not in production.
+#
+# Port note (docker-compose.yml stays frozen, R8 / #10):
+#   docker-compose.yml does NOT publish postgres:5432 to the host (only
+#   the api container is reachable from outside the compose network).
+#   The Go test process runs on the runner host and dials localhost,
+#   so this workflow drops a transient docker-compose.override.yml that
+#   adds `ports: - 5432:5432` for postgres. The override is created at
+#   step time, never committed to the repo, and torn down with the
+#   stack at the end of the job.
+
+name: RLS integration tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/rls-integration.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/rls-integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rls-integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Show tool versions
+        run: |
+          go version
+          docker version
+          docker compose version
+
+      - name: Generate .env with per-run secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          # Strip any pre-existing assignments so our explicit ones win.
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+
+          # The Go test process runs on the runner host (not inside a
+          # compose container), so DATABASE_URL / MIGRATE_DATABASE_URL
+          # must point at the postgres port published to the host by
+          # the override (see "Write docker-compose.override.yml" step
+          # below). Hostname is localhost; password is per-run.
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@localhost:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@localhost:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+          # Sanity log (do NOT echo the secrets themselves).
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Write docker-compose.override.yml (expose postgres:5432)
+        # docker-compose.yml is frozen (R8 / #10) and does not publish
+        # postgres:5432 to the host. The override is a transient,
+        # workflow-local file that adds the port publish so the Go test
+        # process on the runner host can dial localhost:5432.
+        shell: bash
+        run: |
+          cat > docker-compose.override.yml <<'YML'
+          services:
+            postgres:
+              ports:
+                - "5432:5432"
+          YML
+          docker compose config | grep -A2 '^  postgres:' | head -n 20 || true
+
+      - name: Start postgres
+        run: docker compose up -d --wait postgres
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        # install.sh --bootstrap-roles reads MIGRATOR_PASSWORD /
+        # APP_PASSWORD from the .env generated above and runs the
+        # bootstrap SQL via `docker compose exec postgres psql`.
+        # Idempotent — also exercised by docs-curl-smoke.yml.
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Apply migrations
+        # cmd/migrate prefers MIGRATE_DATABASE_URL over DATABASE_URL,
+        # so this runs as sbomhub_migrator (DDL-capable, NOT BYPASSRLS).
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go run ./cmd/migrate up
+
+      - name: Run integration tests
+        # `-tags=integration` enables the //go:build integration files:
+        #   - internal/repository/rls_test.go              (Wave 1)
+        #   - internal/repository/apikey_rls_test.go       (#18)
+        #   - internal/repository/audit_rls_test.go        (#19)
+        #   - internal/repository/public_link_rls_test.go  (R5-5a)
+        #   - internal/repository/subscription_rls_test.go (R15-15a)
+        #   - internal/middleware/tx_test.go               (Wave 3)
+        # Each one t.Skip()s when DATABASE_URL / MIGRATE_DATABASE_URL
+        # is unset; sourcing .env into the environment here makes them
+        # actually run instead of skipping.
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go test -count=1 -tags=integration -timeout 5m \
+            ./internal/repository/... \
+            ./internal/middleware/...
+
+      - name: Dump postgres logs on failure
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs --tail=200 postgres || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true
