@@ -163,6 +163,41 @@ func (r *TenantRepository) ClearCurrentTenant(ctx context.Context) error {
 	return err
 }
 
+// ListAllIDs returns the IDs of every tenant in creation order.
+//
+// This is the system-level (cross-tenant) enumeration used by background jobs
+// — the scheduler must visit every tenant in turn so it can open a
+// `WithTxFunc` per tenant with `SET LOCAL app.current_tenant_id` set before it
+// touches RLS-enabled tables. Without this, a job running on a `sbomhub_app`
+// connection (NOBYPASSRLS) silently sees zero rows for projects / sboms /
+// report_settings / vulnerability_tickets etc. (codex-r4 Finding P1).
+//
+// The `tenants` table itself is intentionally NOT RLS-enabled (see migration
+// 007 — only the per-tenant resource tables are protected), so this query is
+// safe to run on the raw pool without any tenant GUC.
+func (r *TenantRepository) ListAllIDs(ctx context.Context) ([]uuid.UUID, error) {
+	// Use r.db directly (not r.q): this is a system-level enumeration that
+	// must not piggyback on any request-scoped tenant tx.
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM tenants ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // GetOrCreateDefault returns the default tenant for self-hosted mode
 // Creates one if it doesn't exist
 func (r *TenantRepository) GetOrCreateDefault(ctx context.Context) (*model.Tenant, error) {
