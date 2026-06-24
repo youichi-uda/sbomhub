@@ -286,6 +286,8 @@ Counted backwards from CRA 11 September 2026.
 
 Shipped features stay in. New milestones land on top.
 
+The rename plan for distribution channels (GitHub org, Docker image, Homebrew, Scoop, Go module path) in M2+ lives in [`docs/distribution-rename-plan.md`](./docs/distribution-rename-plan.md).
+
 ## License
 
 This project is licensed under [AGPL-3.0](./LICENSE).

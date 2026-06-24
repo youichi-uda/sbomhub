@@ -289,6 +289,8 @@ CRA 2026-09-11 から逆算した M0-M4 マイルストーン。
 
 実装済み機能 (現状の機能一覧) はそのまま維持し、上記マイルストーンを順次追加していきます。
 
+配布チャネル (GitHub org / Docker image / Homebrew / Scoop / Go module path) の M2 以降の rename 計画は [`docs/distribution-rename-plan.md`](./docs/distribution-rename-plan.md) を参照。
+
 ## ライセンス
 
 本プロジェクトは [AGPL-3.0 ライセンス](./LICENSE) の下で公開されています。
