@@ -500,7 +500,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if in.Reanalyse {
 		action = AuditActionVexDraftReanalysed
 	}
-	r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
+	if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
 		"cve_id":              in.CVEID,
 		"vulnerability_id":    in.VulnerabilityID.String(),
 		"project_id":          in.ProjectID.String(),
@@ -513,7 +513,12 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		"state":               finalState,
 		"justification":       string(parsed.Justification),
 		"reanalyse_from":      uuidStringOrEmpty(in.ReanalyseFromDraft),
-	}, in.IPAddress, in.UserAgent)
+	}, in.IPAddress, in.UserAgent); err != nil {
+		// Audit write failed — propagate so TenantTx rolls back the
+		// draft INSERT above. PRODUCT_REBOOT_PLAN.md §8.5 requires the
+		// audit row to land with the draft or neither persists.
+		return nil, fmt.Errorf("triage.Run: %w", err)
+	}
 
 	return &RunResult{
 		Draft:     draft,
@@ -658,7 +663,7 @@ func (r *Runner) UpdateDecision(ctx context.Context, in DecisionInput) (*reposit
 
 	// Audit row.
 	action := decisionAuditAction(in.Decision)
-	r.writeAudit(ctx, in.TenantID, in.UserID, action, in.DraftID, map[string]interface{}{
+	if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, in.DraftID, map[string]interface{}{
 		"cve_id":               updated.CVEID,
 		"vulnerability_id":     updated.VulnerabilityID.String(),
 		"project_id":           updated.ProjectID.String(),
@@ -668,7 +673,16 @@ func (r *Runner) UpdateDecision(ctx context.Context, in DecisionInput) (*reposit
 		"edited_justification": in.EditedJustification,
 		"edited_detail":        in.EditedDetail,
 		"note":                 in.Note,
-	}, in.IPAddress, in.UserAgent)
+	}, in.IPAddress, in.UserAgent); err != nil {
+		// Audit write failed — propagate so TenantTx rolls back the
+		// vex_drafts UPDATE and any vex_statements INSERT performed
+		// above. PRODUCT_REBOOT_PLAN.md §8.5 requires the audit row to
+		// land with the decision change or neither persists. We return
+		// `updated` alongside the error so debugging the failure does
+		// not lose the would-be state, but the handler maps the error
+		// to 5xx and the client never sees `updated`.
+		return updated, fmt.Errorf("triage.UpdateDecision: %w", err)
+	}
 
 	return updated, nil
 }
@@ -702,11 +716,17 @@ func (r *Runner) syncToVEXStatements(ctx context.Context, draft *repository.VEXD
 }
 
 // writeAudit emits one audit_logs row carrying details about the draft
-// lifecycle event. Failure to write is logged but not propagated to the
-// caller — the spec requires audit, but the runner already persisted
-// the load-bearing data and we do not want a transient audit_logs
-// failure to roll back the user-visible decision.
-func (r *Runner) writeAudit(ctx context.Context, tenantID uuid.UUID, userID *uuid.UUID, action string, resourceID uuid.UUID, details map[string]interface{}, ipAddress, userAgent string) {
+// lifecycle event. Failures are returned to the caller so the surrounding
+// TenantTx (apps/api/internal/middleware/tx.go) rolls back the draft
+// INSERT / decision UPDATE alongside the would-be audit row.
+//
+// Codex M1 round 1 #F5: previously this swallowed errors with a slog.Warn,
+// which let Run / UpdateDecision commit a VEX-draft mutation while its
+// audit row silently failed — a §8.5 violation (the compliance reviewer
+// could not see who approved what). We now fail-closed: any audit_logs
+// write failure aborts the request, the handler maps it to 5xx, and
+// TenantTx drops everything written on the request-bound transaction.
+func (r *Runner) writeAudit(ctx context.Context, tenantID uuid.UUID, userID *uuid.UUID, action string, resourceID uuid.UUID, details map[string]interface{}, ipAddress, userAgent string) error {
 	rid := resourceID
 	input := &model.CreateAuditLogInput{
 		TenantID:     uuidPtr(tenantID),
@@ -719,9 +739,14 @@ func (r *Runner) writeAudit(ctx context.Context, tenantID uuid.UUID, userID *uui
 		UserAgent:    userAgent,
 	}
 	if err := r.audit.Log(ctx, input); err != nil {
+		// slog.Warn keeps the operator-visible signal for the
+		// dashboards that already alarm on this string; the returned
+		// error is what drives rollback.
 		slog.Warn("triage.writeAudit: audit log failed",
 			"tenant_id", tenantID, "action", action, "resource_id", resourceID, "error", err)
+		return fmt.Errorf("triage.writeAudit: persist audit_logs row (action=%s): %w", action, err)
 	}
+	return nil
 }
 
 // ----------------------------------------------------------------------------

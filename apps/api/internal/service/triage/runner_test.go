@@ -170,13 +170,18 @@ func (l *fakeLLMCallWriter) Insert(_ context.Context, c *LLMCallRecord) error {
 type fakeAuditWriter struct {
 	mu      sync.Mutex
 	entries []model.CreateAuditLogInput
+	// err, when non-nil, is returned by every Log call AFTER recording the
+	// would-be entry. Used by the audit-failure regression tests to assert
+	// that runner errors propagate (PRODUCT_REBOOT_PLAN.md §8.5: audit
+	// rows must land or the whole VEX-draft write rolls back).
+	err error
 }
 
 func (a *fakeAuditWriter) Log(_ context.Context, input *model.CreateAuditLogInput) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.entries = append(a.entries, *input)
-	return nil
+	return a.err
 }
 
 type fakeVEXSync struct {
@@ -754,6 +759,120 @@ func TestRunner_Run_RejectsMissingInputs(t *testing.T) {
 		if _, err := r.Run(context.Background(), in); err == nil {
 			t.Errorf("case %d: expected validation error, got nil", i)
 		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Audit atomicity regression tests (Codex M1 round 1 #F5)
+// ----------------------------------------------------------------------------
+//
+// PRODUCT_REBOOT_PLAN.md §8.5 requires that the VEX-draft lifecycle
+// audit row (vex_draft_ai_generated / approved / edited / rejected /
+// reanalysed) be persisted alongside the draft / decision write. Until
+// the F5 fix, writeAudit logged failures and swallowed them — meaning a
+// transient audit_logs INSERT failure would let the request commit a
+// draft with no audit trail, silently violating §8.5.
+//
+// The contract the runner now enforces:
+//
+//   1. audit.Log returning a non-nil error makes Run() / UpdateDecision()
+//      return a wrapped error to the caller. The caller (handler) maps
+//      it to 5xx, and TenantTx (apps/api/internal/middleware/tx.go)
+//      rolls back the request — so the draft INSERT / decision UPDATE
+//      and the would-be audit row are dropped together.
+//   2. The fake stores used here are not transactional, so the in-memory
+//      `inserted` slice still shows the draft row even after Run returns
+//      an error. That mirrors what the real *repository.VEXDraftsRepository
+//      sees mid-transaction: the write happened on the tx-bound connection
+//      but is rolled back at request finalisation. Asserting on the
+//      runner's returned error is sufficient to prove the new contract.
+
+func TestRunner_Run_AuditFailure_PropagatesError(t *testing.T) {
+	componentID := uuid.New()
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{err: errors.New("audit_logs INSERT failed: connection reset")}
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: audit, Provider: stub, Threshold: 0.7,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0050",
+		ComponentID: &componentID,
+	})
+	if err == nil {
+		t.Fatalf("Run must propagate audit failures (PRODUCT_REBOOT_PLAN.md §8.5: VEX-draft writes are not allowed to commit without their audit row)")
+	}
+	if !strings.Contains(err.Error(), "audit") {
+		t.Errorf("expected audit error wrap, got %v", err)
+	}
+	// The fake recorded the attempt — proves we did reach writeAudit, not
+	// some earlier validation path. (We do not assert on drafts.inserted:
+	// the in-memory fake is non-transactional; production rollback is the
+	// TenantTx middleware's job, exercised by middleware/tx_test.go.)
+	if got := len(audit.entries); got != 1 {
+		t.Errorf("expected one audit attempt before failure, got %d", got)
+	}
+}
+
+func TestRunner_UpdateDecision_AuditFailure_PropagatesError(t *testing.T) {
+	tenantID := uuid.New()
+	draftID := uuid.New()
+	componentID := uuid.New()
+	drafts := &fakeVexDraftStore{inserted: []repository.VEXDraft{{
+		ID: draftID, TenantID: tenantID, ProjectID: uuid.New(),
+		ComponentID:     componentID,
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0051",
+		State: "affected", Decision: DecisionPending,
+	}}}
+	audit := &fakeAuditWriter{err: errors.New("audit_logs INSERT failed: deadlock")}
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: audit, Provider: &stubProvider{}, Threshold: 0.7,
+		// VEXSync deliberately nil — rejected decision does not sync, so
+		// the audit step is the only thing between the UPDATE and return.
+	})
+	uid := uuid.New()
+	_, err := r.UpdateDecision(context.Background(), DecisionInput{
+		TenantID: tenantID, DraftID: draftID, UserID: &uid,
+		Decision: DecisionRejected, Note: "not actionable",
+	})
+	if err == nil {
+		t.Fatalf("UpdateDecision must propagate audit failures (PRODUCT_REBOOT_PLAN.md §8.5)")
+	}
+	if !strings.Contains(err.Error(), "audit") {
+		t.Errorf("expected audit error wrap, got %v", err)
+	}
+	if got := len(audit.entries); got != 1 {
+		t.Errorf("expected one audit attempt before failure, got %d", got)
+	}
+}
+
+func TestRunner_Run_Reanalyse_AuditFailure_PropagatesError(t *testing.T) {
+	// Reanalyse runs the same code path as Run but emits the
+	// `vex_draft_reanalysed` audit action — make sure the propagation
+	// holds for the reanalyse variant too so the regression cannot
+	// reappear on that branch alone.
+	componentID := uuid.New()
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.85)}}
+	audit := &fakeAuditWriter{err: errors.New("audit_logs INSERT failed: tenant guc unset")}
+	r := NewRunner(RunnerConfig{
+		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: audit, Provider: stub, Threshold: 0.7,
+	})
+	original := uuid.New()
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(), VulnerabilityID: uuid.New(),
+		CVEID: "CVE-2026-0052", ComponentID: &componentID,
+		Reanalyse: true, ReanalyseFromDraft: &original,
+	})
+	if err == nil {
+		t.Fatalf("reanalyse Run must propagate audit failures (PRODUCT_REBOOT_PLAN.md §8.5)")
 	}
 }
 
