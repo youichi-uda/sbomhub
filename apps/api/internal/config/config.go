@@ -49,6 +49,19 @@ type Config struct {
 }
 
 func Load() *Config {
+	// SECURITY (codex-r18 P1): APP_ENV is the canonical deployment-mode env,
+	// matching docker-compose.yml and the startup guards in cmd/server/main.go
+	// (assertAppRoleNotBypassRLS, validateEncryptionKey). The legacy
+	// ENVIRONMENT variable is kept as a backward-compat fallback for pre-M0
+	// self-host deployments. Reading APP_ENV first ensures cfg.IsProduction()
+	// agrees with the startup gate, so webhook handlers that fall back to
+	// "skip signature verification when not production" cannot be tricked into
+	// skipping in a production deployment that only sets APP_ENV.
+	env := getEnv("APP_ENV", "")
+	if env == "" {
+		env = getEnv("ENVIRONMENT", "development")
+	}
+
 	cfg := &Config{
 		// Core
 		Port:        getEnv("PORT", "8080"),
@@ -56,7 +69,7 @@ func Load() *Config {
 		RedisURL:    getEnv("REDIS_URL", "redis://localhost:6379"),
 		NVDAPIKey:   getEnv("NVD_API_KEY", ""),
 		BaseURL:     getEnv("BASE_URL", "http://localhost:3000"),
-		Environment: getEnv("ENVIRONMENT", "development"),
+		Environment: env,
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),
