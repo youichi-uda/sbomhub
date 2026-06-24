@@ -266,6 +266,169 @@ func (r *fakeComponentResolver) ListIDsByVulnerability(_ context.Context, _, _, 
 }
 
 // ----------------------------------------------------------------------------
+// F8 regression — GetDraft must enforce route-project boundary
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 3 #F8: GET /api/v1/projects/:id/vex-drafts/:draft_id
+// previously parsed but discarded c.Param("id") and called
+// h.runner.GetDraft(tenantID, draftID); repository.Get scopes by
+// (tenant, draft_id) only. A tenant operator could therefore enumerate
+// drafts from another project of the same tenant by guessing draft IDs
+// against a project they belong to. The handler MUST refuse with 404
+// when the loaded draft's ProjectID does not match the URL's project_id.
+func TestVEXDraftsHandler_GetDraft_CrossProjectDraft_Returns404(t *testing.T) {
+	tenantID := uuid.New()
+	projectA := uuid.New()
+	projectB := uuid.New()
+	draftID := uuid.New()
+
+	store := &fakeVexDraftStore{
+		inserted: []repository.VEXDraft{{
+			ID:              draftID,
+			TenantID:        tenantID,
+			ProjectID:       projectA,
+			ComponentID:     uuid.New(),
+			VulnerabilityID: uuid.New(),
+			CVEID:           "CVE-2026-0400",
+			State:           "not_affected",
+			Justification:   "code_not_reachable",
+			Evidence:        json.RawMessage(`[{"kind":"llm_rationale","source":"llm"}]`),
+			Decision:        triage.DecisionPending,
+		}},
+	}
+
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       store,
+		Advisories:   &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{},
+		LLMCalls:     &fakeLLMCallWriter{},
+		Audit:        &fakeAuditWriter{},
+		Provider:     disabledProvider(),
+		Threshold:    0.7,
+	})
+	h := NewVexDraftsHandler(runner)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+projectB.String()+"/vex-drafts/"+draftID.String(),
+		nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "draft_id")
+	c.SetParamValues(projectB.String(), draftID.String())
+
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleAdmin)
+
+	if err := h.GetDraft(c); err != nil {
+		t.Fatalf("GetDraft returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-project GET, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	// Body must NOT leak the draft's actual project / component / cve.
+	body := rec.Body.String()
+	if strings.Contains(body, projectA.String()) ||
+		strings.Contains(body, "CVE-2026-0400") {
+		t.Errorf("404 body must not leak draft contents: %s", body)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F9 regression — Decide must enforce route-project boundary
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 3 #F9: PUT /api/v1/projects/:id/vex-drafts/:draft_id/decision
+// previously parsed but discarded c.Param("id") and called
+// runner.UpdateDecision(tenantID, draftID); the update + sync-to-
+// vex_statements then ran against the draft's *own* project_id, so a
+// caller scoped to project B could approve / edit / reject a draft
+// belonging to project A and mirror the verdict into vex_statements
+// under project A. The handler MUST refuse with 404 when the loaded
+// draft's ProjectID does not match the URL's project_id, and the sync
+// fan-out MUST NOT fire.
+func TestVEXDraftsHandler_Decide_CrossProjectDraft_Returns404(t *testing.T) {
+	tenantID := uuid.New()
+	projectA := uuid.New()
+	projectB := uuid.New()
+	draftID := uuid.New()
+
+	store := &fakeVexDraftStore{
+		inserted: []repository.VEXDraft{{
+			ID:              draftID,
+			TenantID:        tenantID,
+			ProjectID:       projectA,
+			ComponentID:     uuid.New(),
+			VulnerabilityID: uuid.New(),
+			CVEID:           "CVE-2026-0401",
+			State:           "not_affected",
+			Justification:   "code_not_reachable",
+			Evidence:        json.RawMessage(`[{"kind":"llm_rationale","source":"llm"}]`),
+			Decision:        triage.DecisionPending,
+		}},
+	}
+
+	// Wire a VEXSync fake so we can assert it NEVER receives a call when
+	// the cross-project decision is rejected.
+	sync := &fakeVEXSyncRecorder{}
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       store,
+		Advisories:   &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{},
+		LLMCalls:     &fakeLLMCallWriter{},
+		Audit:        &fakeAuditWriter{},
+		VEXSync:      sync,
+		Provider:     disabledProvider(),
+		Threshold:    0.7,
+	})
+	h := NewVexDraftsHandler(runner)
+
+	bodyBytes, _ := json.Marshal(map[string]string{"decision": triage.DecisionApproved})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+projectB.String()+"/vex-drafts/"+draftID.String()+"/decision",
+		strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "draft_id")
+	c.SetParamValues(projectB.String(), draftID.String())
+
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleAdmin)
+
+	if err := h.Decide(c); err != nil {
+		t.Fatalf("Decide returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-project decide, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	// Sync to vex_statements MUST NOT have fired — that would have
+	// mirrored the unauthorised verdict into the draft's real project.
+	if got := len(sync.created); got != 0 {
+		t.Fatalf("cross-project decide must NOT call vex_statements sync, got %d calls", got)
+	}
+	// And the draft's decision in the store should still be pending.
+	if d, _ := store.Get(context.Background(), tenantID, draftID); d == nil || d.Decision != triage.DecisionPending {
+		t.Errorf("cross-project decide must not mutate the draft decision; got %+v", d)
+	}
+}
+
+// fakeVEXSyncRecorder is a minimal triage.VEXStatementSync that records
+// every CreateStatement call so the F9 test can assert it received zero
+// invocations.
+type fakeVEXSyncRecorder struct {
+	created []triage.VEXStatementSyncInput
+}
+
+func (s *fakeVEXSyncRecorder) CreateStatement(_ context.Context, input triage.VEXStatementSyncInput) error {
+	s.created = append(s.created, input)
+	return nil
+}
+
+// ----------------------------------------------------------------------------
 // F10 regression — 404 body must be identical for both sentinel reasons
 // ----------------------------------------------------------------------------
 //

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -211,13 +212,23 @@ func (h *VexDraftsHandler) ListDrafts(c echo.Context) error {
 // GET /api/v1/projects/:id/vex-drafts/:draft_id
 // ----------------------------------------------------------------------------
 
-// GetDraft returns one vex_drafts row scoped to the caller's tenant.
+// GetDraft returns one vex_drafts row scoped to the caller's tenant
+// AND to the route's project. M1 Codex review #F8: the previous version
+// validated c.Param("id") but discarded it before calling
+// runner.GetDraft(tenant, draftID); repository.Get is scoped only to
+// (tenant_id, id), so a tenant operator could enumerate drafts from
+// another project of the same tenant by guessing draft IDs. We now load
+// via loadDraftScoped which enforces draft.ProjectID == route projectID
+// and folds both "missing" and "wrong project" into the same opaque 404
+// to avoid leaking cross-project draft existence (see also #F10 for the
+// equivalent 404-body opacity on runner sentinels).
 func (h *VexDraftsHandler) GetDraft(c echo.Context) error {
 	tc := middleware.NewTenantContext(c)
 	if tc == nil || tc.TenantID() == uuid.Nil {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
-	if _, err := uuid.Parse(c.Param("id")); err != nil {
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 	draftID, err := uuid.Parse(c.Param("draft_id"))
@@ -225,12 +236,9 @@ func (h *VexDraftsHandler) GetDraft(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid draft id"})
 	}
 
-	draft, err := h.runner.GetDraft(c.Request().Context(), tc.TenantID(), draftID)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load vex draft"})
-	}
-	if draft == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "vex draft not found"})
+	draft, status, body := h.loadDraftScoped(c.Request().Context(), tc.TenantID(), projectID, draftID, "GetDraft")
+	if status != 0 {
+		return c.JSON(status, body)
 	}
 	return c.JSON(http.StatusOK, draft)
 }
@@ -241,6 +249,16 @@ func (h *VexDraftsHandler) GetDraft(c echo.Context) error {
 
 // Decide applies a human approve / edit / reject decision and (on
 // approve/edit) mirrors the verdict into vex_statements.
+//
+// M1 Codex review #F9: previously the route's project_id was parsed but
+// discarded, and runner.UpdateDecision was called with only
+// (tenant, draft_id). syncToVEXStatements then used the draft's *own*
+// ProjectID, so a caller scoped to project B could approve / edit /
+// reject a draft belonging to project A and silently mirror the verdict
+// into project A's vex_statements. We now load the draft via
+// loadDraftScoped (the same helper #F8 / #F7 use) and reject 404 before
+// dispatching the decision — folding "missing draft" and "draft in
+// another project" into one opaque body.
 func (h *VexDraftsHandler) Decide(c echo.Context) error {
 	tc := middleware.NewTenantContext(c)
 	if tc == nil || tc.TenantID() == uuid.Nil {
@@ -249,7 +267,8 @@ func (h *VexDraftsHandler) Decide(c echo.Context) error {
 	if !tc.CanWrite() {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "write permission required"})
 	}
-	if _, err := uuid.Parse(c.Param("id")); err != nil {
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 	draftID, err := uuid.Parse(c.Param("draft_id"))
@@ -282,6 +301,16 @@ func (h *VexDraftsHandler) Decide(c echo.Context) error {
 			"error": "user identity required to decide a vex draft (audit trail)",
 		})
 	}
+
+	// #F9: load + enforce project boundary BEFORE delegating to the
+	// runner. The runner's UpdateDecision is scoped only by (tenant,
+	// draft_id), so without this pre-flight check a cross-project URL
+	// would mutate the foreign draft and (on approve/edit) sync into the
+	// foreign project's vex_statements via syncToVEXStatements.
+	if _, status, body := h.loadDraftScoped(c.Request().Context(), tc.TenantID(), projectID, draftID, "Decide"); status != 0 {
+		return c.JSON(status, body)
+	}
+
 	updated, err := h.runner.UpdateDecision(c.Request().Context(), triage.DecisionInput{
 		TenantID:            tc.TenantID(),
 		DraftID:             draftID,
@@ -332,22 +361,18 @@ func (h *VexDraftsHandler) Reanalyse(c echo.Context) error {
 	// Load the source draft so we can default CVEID / VulnerabilityID
 	// / ComponentID from it (the UI typically calls reanalyse with an
 	// empty body — "redo what you just did").
-	source, err := h.runner.GetDraft(c.Request().Context(), tc.TenantID(), draftID)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load source draft"})
-	}
-	if source == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "source vex draft not found"})
-	}
-	// F7 (Codex M1 round 2): GetDraft scopes by (tenant, draft_id) only —
-	// no project boundary check. Without the equality below a draft from
-	// project A could be reanalysed via project B's route, persisting a
-	// new draft under project B that still carries project A's
-	// component_id (vex_drafts has no composite FK over project_id /
-	// component_id). Reject the cross-project case as 404 so the URL's
-	// project_id stays authoritative.
-	if source.ProjectID != projectID {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "source vex draft not found in project scope"})
+	//
+	// F7 (Codex M1 round 2) + #F8 / #F9 (round 3): GetDraft scopes by
+	// (tenant, draft_id) only — no project boundary check. Without the
+	// loadDraftScoped helper below a draft from project A could be
+	// reanalysed via project B's route, persisting a new draft under
+	// project B that still carries project A's component_id (vex_drafts
+	// has no composite FK over project_id / component_id). The helper
+	// folds "missing source draft" and "draft in another project" into
+	// the same opaque 404 body to avoid leaking cross-project existence.
+	source, status, body := h.loadDraftScoped(c.Request().Context(), tc.TenantID(), projectID, draftID, "Reanalyse")
+	if status != 0 {
+		return c.JSON(status, body)
 	}
 
 	var override runTriageRequest
@@ -407,6 +432,68 @@ func userIDOrNil(tc *middleware.TenantContext) *uuid.UUID {
 	}
 	v := uid
 	return &v
+}
+
+// loadDraftScoped loads a vex_drafts row and enforces the route's
+// project boundary (M1 Codex review #F7 / #F8 / #F9). It is the single
+// gatekeeper for GetDraft, Decide, and Reanalyse — three endpoints that
+// previously each had different (or missing) project-scope checks even
+// though they all sit behind the same /projects/:id/vex-drafts/:draft_id
+// prefix.
+//
+// Return contract:
+//   - (*draft, 0, nil) on success.
+//   - (nil, status, body) when the handler should return a JSON error
+//     response; status is 404 for both "draft does not exist" and
+//     "draft belongs to another project of this tenant", and 500 for
+//     storage failures. The body is intentionally identical for the
+//     two 404 cases so a probe caller cannot distinguish them.
+//
+// The endpointName argument is recorded on the slog warning emitted for
+// 404 / 500 cases so operators can trace which endpoint surfaced the
+// boundary violation (the user-facing body is generic; the precise
+// reason lives in server logs — matches the #F10 contract on sentinel
+// 404s).
+func (h *VexDraftsHandler) loadDraftScoped(
+	ctx context.Context,
+	tenantID, projectID, draftID uuid.UUID,
+	endpointName string,
+) (*repository.VEXDraft, int, map[string]string) {
+	draft, err := h.runner.GetDraft(ctx, tenantID, draftID)
+	if err != nil {
+		slog.Warn("vex_drafts: load draft failed",
+			"endpoint", endpointName,
+			"tenant_id", tenantID,
+			"project_id", projectID,
+			"draft_id", draftID,
+			"error", err,
+		)
+		return nil, http.StatusInternalServerError, map[string]string{"error": "failed to load vex draft"}
+	}
+	if draft == nil {
+		slog.Warn("vex_drafts: draft not found",
+			"endpoint", endpointName,
+			"tenant_id", tenantID,
+			"project_id", projectID,
+			"draft_id", draftID,
+		)
+		return nil, http.StatusNotFound, map[string]string{"error": "vex draft not found"}
+	}
+	if draft.ProjectID != projectID {
+		// Distinct slog so operators can alarm on cross-project probes
+		// (#F8 / #F9). User-facing body is identical to the "draft does
+		// not exist" branch above so the caller cannot tell the
+		// difference (would otherwise be a tenant-internal disclosure).
+		slog.Warn("vex_drafts: draft in another project of the same tenant",
+			"endpoint", endpointName,
+			"tenant_id", tenantID,
+			"route_project_id", projectID,
+			"draft_project_id", draft.ProjectID,
+			"draft_id", draftID,
+		)
+		return nil, http.StatusNotFound, map[string]string{"error": "vex draft not found"}
+	}
+	return draft, 0, nil
 }
 
 // mapRunnerError translates runner errors into HTTP status + JSON body.
