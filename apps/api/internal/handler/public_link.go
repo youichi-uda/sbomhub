@@ -81,7 +81,7 @@ func (h *PublicLinkHandler) List(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 
-	links, err := h.publicLinkService.ListByProject(c.Request().Context(), projectID)
+	links, err := h.publicLinkService.ListByProject(c.Request().Context(), middleware.GetTenantID(c), projectID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -122,7 +122,7 @@ func (h *PublicLinkHandler) Update(c echo.Context) error {
 		sbomID = &id
 	}
 
-	link, err := h.publicLinkService.Update(c.Request().Context(), linkID, service.UpdatePublicLinkInput{
+	link, err := h.publicLinkService.Update(c.Request().Context(), middleware.GetTenantID(c), linkID, service.UpdatePublicLinkInput{
 		Name:             strings.TrimSpace(req.Name),
 		SbomID:           sbomID,
 		ExpiresAt:        expiresAt,
@@ -143,7 +143,7 @@ func (h *PublicLinkHandler) Delete(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid public link id"})
 	}
 
-	if err := h.publicLinkService.Delete(c.Request().Context(), linkID); err != nil {
+	if err := h.publicLinkService.Delete(c.Request().Context(), middleware.GetTenantID(c), linkID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -161,7 +161,11 @@ func (h *PublicLinkHandler) PublicGet(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": err.Error()})
 	}
 
-	_ = h.publicLinkService.IncrementView(c.Request().Context(), link.ID)
+	// The anonymous /public/:token route has no tenant middleware; the
+	// link returned by GetByToken (above, application-layer secret) is
+	// what supplies the tenant id for these defense-in-depth scoped
+	// mutations. See PublicLinkRepository.IncrementView for rationale.
+	_ = h.publicLinkService.IncrementView(c.Request().Context(), link.TenantID, link.ID)
 	_ = h.publicLinkService.LogAccess(c.Request().Context(), link.ID, "view", c.RealIP(), c.Request().UserAgent())
 
 	return c.JSON(http.StatusOK, view)
@@ -179,7 +183,10 @@ func (h *PublicLinkHandler) PublicDownload(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": err.Error()})
 	}
 
-	limitReached, err := h.publicLinkService.IsDownloadLimitReached(c.Request().Context(), link.ID)
+	// Same defense-in-depth tenant scoping as PublicGet: the anonymous
+	// route has no tenant middleware, so link.TenantID (derived from the
+	// token lookup) is what we pass to the counter/log calls.
+	limitReached, err := h.publicLinkService.IsDownloadLimitReached(c.Request().Context(), link.TenantID, link.ID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -187,7 +194,7 @@ func (h *PublicLinkHandler) PublicDownload(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "download limit reached"})
 	}
 
-	_ = h.publicLinkService.IncrementDownload(c.Request().Context(), link.ID)
+	_ = h.publicLinkService.IncrementDownload(c.Request().Context(), link.TenantID, link.ID)
 	_ = h.publicLinkService.LogAccess(c.Request().Context(), link.ID, "download", c.RealIP(), c.Request().UserAgent())
 
 	c.Response().Header().Set("Content-Type", "application/json")

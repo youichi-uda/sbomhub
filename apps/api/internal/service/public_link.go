@@ -16,9 +16,9 @@ import (
 )
 
 type PublicLinkService struct {
-	linkRepo     *repository.PublicLinkRepository
-	projectRepo  *repository.ProjectRepository
-	sbomRepo     *repository.SbomRepository
+	linkRepo      *repository.PublicLinkRepository
+	projectRepo   *repository.ProjectRepository
+	sbomRepo      *repository.SbomRepository
 	componentRepo *repository.ComponentRepository
 }
 
@@ -99,14 +99,22 @@ func (s *PublicLinkService) Create(ctx context.Context, input CreatePublicLinkIn
 	return link, nil
 }
 
-func (s *PublicLinkService) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.PublicLink, error) {
-	return s.linkRepo.ListByProject(ctx, projectID)
+// ListByProject is the dashboard list view. tenantID MUST come from the
+// authenticated session middleware — see PublicLinkRepository.ListByProject
+// for the load-bearing tenant filter rationale.
+func (s *PublicLinkService) ListByProject(ctx context.Context, tenantID, projectID uuid.UUID) ([]model.PublicLink, error) {
+	return s.linkRepo.ListByProject(ctx, tenantID, projectID)
 }
 
-func (s *PublicLinkService) Update(ctx context.Context, id uuid.UUID, input UpdatePublicLinkInput) (*model.PublicLink, error) {
-	link, err := s.linkRepo.GetByID(ctx, id)
+// Update applies dashboard-side edits to a public link. tenantID MUST come
+// from the authenticated session middleware.
+func (s *PublicLinkService) Update(ctx context.Context, tenantID, id uuid.UUID, input UpdatePublicLinkInput) (*model.PublicLink, error) {
+	link, err := s.linkRepo.GetByID(ctx, tenantID, id)
 	if err != nil {
 		return nil, err
+	}
+	if link == nil {
+		return nil, errors.New("public link not found")
 	}
 
 	link.Name = input.Name
@@ -129,20 +137,24 @@ func (s *PublicLinkService) Update(ctx context.Context, id uuid.UUID, input Upda
 	}
 
 	link.UpdatedAt = time.Now()
-	if err := s.linkRepo.Update(ctx, link); err != nil {
+	if err := s.linkRepo.Update(ctx, tenantID, link); err != nil {
 		return nil, err
 	}
 	return link, nil
 }
 
-func (s *PublicLinkService) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.linkRepo.Delete(ctx, id)
+// Delete removes a public link restricted to the authenticated tenant.
+func (s *PublicLinkService) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
+	return s.linkRepo.Delete(ctx, tenantID, id)
 }
 
 func (s *PublicLinkService) GetPublicView(ctx context.Context, token string, password string) (*model.PublicSbomView, *model.PublicLink, error) {
 	link, err := s.linkRepo.GetByToken(ctx, token)
 	if err != nil {
 		return nil, nil, err
+	}
+	if link == nil {
+		return nil, nil, errors.New("link not found")
 	}
 	if !link.IsActive {
 		return nil, nil, errors.New("link inactive")
@@ -199,6 +211,9 @@ func (s *PublicLinkService) GetPublicSbomRaw(ctx context.Context, token string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	if link == nil {
+		return nil, nil, errors.New("link not found")
+	}
 	if !link.IsActive {
 		return nil, nil, errors.New("link inactive")
 	}
@@ -239,16 +254,23 @@ func (s *PublicLinkService) LogAccess(ctx context.Context, linkID uuid.UUID, act
 	return s.linkRepo.CreateAccessLog(ctx, log)
 }
 
-func (s *PublicLinkService) IsDownloadLimitReached(ctx context.Context, linkID uuid.UUID) (bool, error) {
-	return s.linkRepo.IsDownloadLimitReached(ctx, linkID)
+// IsDownloadLimitReached is invoked from the anonymous public-download
+// flow; the caller passes the tenant id derived from the link returned by
+// GetByToken, so the repository-level tenant filter is satisfied without
+// requiring tenant middleware on the route.
+func (s *PublicLinkService) IsDownloadLimitReached(ctx context.Context, tenantID, linkID uuid.UUID) (bool, error) {
+	return s.linkRepo.IsDownloadLimitReached(ctx, tenantID, linkID)
 }
 
-func (s *PublicLinkService) IncrementView(ctx context.Context, linkID uuid.UUID) error {
-	return s.linkRepo.IncrementView(ctx, linkID)
+// IncrementView / IncrementDownload run after a successful token lookup.
+// The link's own TenantID is what the caller passes here — see
+// handler.PublicLinkHandler.PublicGet / PublicDownload.
+func (s *PublicLinkService) IncrementView(ctx context.Context, tenantID, linkID uuid.UUID) error {
+	return s.linkRepo.IncrementView(ctx, tenantID, linkID)
 }
 
-func (s *PublicLinkService) IncrementDownload(ctx context.Context, linkID uuid.UUID) error {
-	return s.linkRepo.IncrementDownload(ctx, linkID)
+func (s *PublicLinkService) IncrementDownload(ctx context.Context, tenantID, linkID uuid.UUID) error {
+	return s.linkRepo.IncrementDownload(ctx, tenantID, linkID)
 }
 
 func generateToken(n int) (string, error) {

@@ -1237,7 +1237,7 @@ func (s *ComplianceService) GetChecklist(ctx context.Context, tenantID, projectI
 	}
 
 	// Get auto-verification results
-	autoResults := s.getAutoVerificationResults(ctx, projectID)
+	autoResults := s.getAutoVerificationResults(ctx, tenantID, projectID)
 
 	// Group items by phase
 	phaseItems := map[model.ChecklistPhase][]model.ChecklistItemResult{
@@ -1314,8 +1314,11 @@ func (s *ComplianceService) GetChecklist(ctx context.Context, tenantID, projectI
 	}, nil
 }
 
-// getAutoVerificationResults performs auto-verification for applicable checklist items
-func (s *ComplianceService) getAutoVerificationResults(ctx context.Context, projectID uuid.UUID) map[string]bool {
+// getAutoVerificationResults performs auto-verification for applicable checklist items.
+// tenantID is required because PublicLinkRepository.ListByProject now enforces
+// tenant scope at the application layer (migration 030 removed RLS on
+// public_links — codex-r5).
+func (s *ComplianceService) getAutoVerificationResults(ctx context.Context, tenantID, projectID uuid.UUID) map[string]bool {
 	results := make(map[string]bool)
 
 	// Get SBOM data
@@ -1344,7 +1347,7 @@ func (s *ComplianceService) getAutoVerificationResults(ctx context.Context, proj
 
 	// create_06: SBOMを共有 - Public link exists
 	if s.publicLinkRepo != nil {
-		links, err := s.publicLinkRepo.ListByProject(ctx, projectID)
+		links, err := s.publicLinkRepo.ListByProject(ctx, tenantID, projectID)
 		results["create_06"] = err == nil && len(links) > 0
 	} else {
 		results["create_06"] = false
