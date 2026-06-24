@@ -7,6 +7,7 @@
     "build": "echo \"=== BUILD ENV CHECK ===\"  && echo \"CLERK_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY\" && echo \"API_URL=$NEXT_PUBLIC_API_URL\" && echo \"=== END CHECK ===\" && next build",
     "start": "next start",
     "lint": "next lint",
+    "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "dev:test": "cross-env NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY= CLERK_SECRET_KEY= next dev"

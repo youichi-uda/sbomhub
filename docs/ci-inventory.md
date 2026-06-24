@@ -34,6 +34,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | `golangci-lint.yml` | push main / PR (`apps/api/**`) | `golangci-lint run` against apps/api (warn-only initial landing) | Trust Rescue P1 #17-followup |
 | `rls-integration.yml` | push main / PR (`apps/api/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + migrate → `go test -tags=integration ./internal/repository/... ./internal/middleware/...` | Trust Rescue P1 #17-followup |
 | `migration-roundtrip.yml` | push main / PR (`apps/api/migrations/**`, `apps/api/cmd/migrate/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + `migrate up` → `migrate down 999` → `migrate up` (regression check)。 schema diff は warn-only で初回 landing | Trust Rescue P1 #17-followup |
+| `frontend-ci.yml` | push main / PR (`apps/web/**`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `package.json` paths) | pnpm install → `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`)。 Node 22 LTS / pnpm 9、 warn-only initial landing | Trust Rescue P1 #17-followup |
 
 ### 2.2 Required quality gates
 
@@ -44,9 +45,9 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | `golangci-lint` (apps/api) | `golangci-lint.yml` + `apps/api/.golangci.yml` で実装、 `continue-on-error: true` の warn-only で初回 landing | (P2) 既存 lint 違反 fix 後に strict 化 (continue-on-error 削除 + Required status checks 追加) |
 | migration test (up/down/up roundtrip) | `migration-roundtrip.yml` (#17-followup) で docker compose postgres + role bootstrap + `cmd/migrate up && down 999 && up` を実行。 up/down/up が success することを block、 schema diff は warn-only で初回 landing | OK (本 wave、 strict 化は P2) |
 | RLS integration test | `apps/api/internal/repository/*_rls_test.go` (rls / apikey / audit / public_link / subscription) + `internal/middleware/tx_test.go` に `//go:build integration` で実装済、 `rls-integration.yml` (#17-followup) で CI 実行 | OK (本 wave) |
-| frontend build (`pnpm build`) | **未設定** | (P1) `apps/web` の `pnpm install && pnpm build` workflow 追加 |
-| frontend typecheck (`pnpm tsc --noEmit`) | **未設定** | (P1) 同上の workflow に統合 |
-| frontend lint (`pnpm lint`) | **未設定** | (P1) 同上 |
+| frontend build (`pnpm build`) | `frontend-ci.yml` (#17-followup) で Node 22 / pnpm 9 + dummy env で `pnpm --filter web build` を実行、 `continue-on-error: true` の warn-only で初回 landing | OK (本 wave、 strict 化は P2) |
+| frontend typecheck (`pnpm tsc --noEmit`) | 同上 workflow に `pnpm --filter web typecheck` step として統合 (`tsc --noEmit` 経由)、 warn-only | OK (本 wave、 strict 化は P2) |
+| frontend lint (`pnpm lint`) | 同上 workflow に `pnpm --filter web lint` step として統合 (`next lint` 経由)、 warn-only | OK (本 wave、 strict 化は P2) |
 | compose smoke (`/api/v1/health` まで通る) | `docs-curl-smoke.yml` と `install-smoke.yml` で間接カバー (compose up → health 待ち) | OK (専用 workflow 不要) |
 | docs curl smoke | `docs-curl-smoke.yml` | OK |
 | install.sh smoke | `install-smoke.yml` (Ubuntu + macOS) | OK |
@@ -118,7 +119,7 @@ P3 = それ以降):
 - [x] (P1) sbomhub: `.golangci.yml` 設定 + golangci-lint workflow 追加 — `apps/api/.golangci.yml` + `golangci-lint.yml` で warn-only landing (#17-followup)。 既存 lint 違反 fix と strict 化 (continue-on-error 削除) は P2 で別 wave
 - [x] (P1) sbomhub: migration roundtrip workflow 追加 — `migration-roundtrip.yml` (#17-followup) で docker compose postgres + role bootstrap + `cmd/migrate up && down 999 && up` を実行。 up/down/up が完走することを block、 schema diff (pg_dump --schema-only) は 027 backfill 等 known non-roundtrippable migration を抱えるため warn-only で初回 landing。 strict 化 (diff → exit 1) は P2 で別 wave
 - [x] (P1) sbomhub: RLS integration test workflow 追加 — `rls-integration.yml` で docker compose postgres + role bootstrap + migrate → `go test -tags=integration ./internal/repository/... ./internal/middleware/...` を実行 (#17-followup)
-- [ ] (P1) sbomhub: frontend lint/typecheck/build workflow 追加 (`apps/web` の pnpm)
+- [x] (P1) sbomhub: frontend lint/typecheck/build workflow 追加 — `frontend-ci.yml` (#17-followup) で Node 22 LTS + pnpm 9 で `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`) を実行。 各 step `continue-on-error: true` の warn-only で初回 landing (apps/web に既存 lint / type 違反が残存している可能性があり、 無関係 PR を block しないため)。 strict 化 (continue-on-error 削除 + Required status checks 追加) は既存違反 fix 後 P2 で別 wave。 `apps/web/package.json` に `typecheck` script (`tsc --noEmit`) を追加
 - [ ] (USER) GitHub UI で `main` ブランチに上記 Required status checks 設定 (§2.3 / §3.3)
 - [ ] (P2) sbomhub: Golden Path E2E skeleton (M1 で本格化、 Playwright を CI で実行)
 - [ ] (P2) sbomhub-cli: golangci-lint の `continue-on-error: true` 解除 (Go 1.25 対応待ち)

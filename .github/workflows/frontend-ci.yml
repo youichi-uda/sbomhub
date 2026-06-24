@@ -1,0 +1,101 @@
+# SBOMHub - Frontend CI (lint / typecheck / build)
+#
+# Trust Rescue P1 #17-followup / docs/ci-inventory.md §4 Action items.
+#
+# Companion to go-test.yml / golangci-lint.yml / rls-integration.yml. While
+# those gates cover the Go backend (apps/api), this workflow covers the
+# Next.js frontend (apps/web): ESLint, TypeScript noEmit, and a production
+# `next build`.
+#
+# Enforcement policy (initial landing):
+#   Each of the lint / typecheck / build steps runs with
+#   `continue-on-error: true`. This mirrors the golangci-lint.yml policy:
+#   this is the first time these gates are wired against apps/web, and
+#   the current main branch is not guaranteed to be clean. Blocking
+#   unrelated PRs on pre-existing violations would be hostile to small
+#   bug-fix / docs PRs.
+#
+#   Once existing violations are cleaned up in a follow-up wave, these
+#   flags will be removed and the workflow becomes a hard gate (and gets
+#   added to the Required status checks list in docs/ci-inventory.md
+#   §2.3).
+#
+# Versions:
+#   - Node 22 LTS — engines.node in root package.json is `>=18.0.0` and
+#     apps/web pins `@types/node@^22`. Node 22 is the current LTS.
+#   - pnpm 9 — pnpm-lock.yaml is `lockfileVersion: '9.0'`.
+
+name: Frontend CI
+
+on:
+  pull_request:
+    paths:
+      - "apps/web/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - ".github/workflows/frontend-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/web/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - ".github/workflows/frontend-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: lint / typecheck / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Show versions
+        run: |
+          node --version
+          pnpm --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # First-landing enforcement policy: warn-only. See header comment.
+      - name: Lint (next lint)
+        continue-on-error: true
+        run: pnpm --filter web lint
+
+      - name: Typecheck (tsc --noEmit)
+        continue-on-error: true
+        run: pnpm --filter web typecheck
+
+      - name: Build (next build)
+        continue-on-error: true
+        env:
+          # next build requires these env vars to be present (referenced
+          # in next.config.mjs and the build script). They are dummy
+          # placeholders for CI — the actual values are injected at
+          # deploy time. Without them next.config.mjs logs "EMPTY" but
+          # the build itself does not fail on missing values.
+          NEXT_PUBLIC_API_URL: http://localhost:8080
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_placeholder
+          CLERK_SECRET_KEY: sk_test_placeholder
+        run: pnpm --filter web build
