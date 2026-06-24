@@ -373,9 +373,14 @@ func main() {
 		Audit:                    auditRepo,
 		VEXSync:                  &triage.VEXServiceAdapter{Service: vexService},
 		ComponentVulnerabilities: componentRepo,
-		Provider:                 triageDefaultProvider,
-		ProviderResolver:         triageProviderResolver,
-		Threshold:                triage.ConfidenceThresholdFromEnv(),
+		// M1 Codex review #F12: re-resolve cve_id server-side from the
+		// (scoped) vulnerability_id so callers cannot pair an in-scope
+		// vulnerability_id with an arbitrary cve_id and have the runner
+		// fetch / persist mismatched evidence.
+		VulnerabilityCVE: vulnRepo,
+		Provider:         triageDefaultProvider,
+		ProviderResolver: triageProviderResolver,
+		Threshold:        triage.ConfidenceThresholdFromEnv(),
 	})
 	slog.Info("AI VEX triage runner initialised",
 		"default_provider", triageDefaultProvider.Name(),

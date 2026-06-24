@@ -127,6 +127,26 @@ type ComponentVulnerabilityResolver interface {
 	ListIDsByVulnerability(ctx context.Context, tenantID, projectID, vulnerabilityID uuid.UUID) ([]uuid.UUID, error)
 }
 
+// VulnerabilityCVELookup returns the authoritative cve_id for a
+// vulnerabilities.id row. M1 Codex review #F12: RunInput accepts both
+// VulnerabilityID and CVEID from the request — the former gets scoped
+// against the (tenant, project) graph via ComponentVulnerabilityResolver
+// (#F3 / #F6), but CVEID was previously trusted blindly. Without a
+// server-side cross-check a caller could pair a valid VulnerabilityID
+// with an arbitrary CVEID and have the runner fetch advisory_excerpts /
+// reachability_results for the stranger CVE, then persist a draft whose
+// vulnerability_id and evidence point at different vulnerabilities.
+// This lookup closes that gap.
+//
+// Satisfied by *repository.VulnerabilityRepository via GetCVEIDByID.
+// Returns sql.ErrNoRows when the vulnerabilities row does not exist
+// (the runner treats that as an internal data-integrity error since
+// componentVulns has already vouched for tenant scope by the time the
+// lookup fires).
+type VulnerabilityCVELookup interface {
+	GetCVEIDByID(ctx context.Context, vulnerabilityID uuid.UUID) (string, error)
+}
+
 // ----------------------------------------------------------------------------
 // Pass-through DTOs
 // ----------------------------------------------------------------------------
@@ -252,6 +272,19 @@ var ErrVulnerabilityNotInTenant = errors.New("triage: vulnerability not found in
 // maps this to 404 "component not in vulnerability scope".
 var ErrComponentNotInVulnerabilityScope = errors.New("triage: component not in vulnerability scope")
 
+// ErrCVEIDMismatch is returned by Run when the caller-supplied CVEID
+// disagrees with the cve_id stored on the vulnerabilities row identified
+// by VulnerabilityID. M1 Codex review #F12: previously the runner
+// validated VulnerabilityID against the (tenant, project) graph via
+// ComponentVulnerabilityResolver but treated CVEID as caller-trusted —
+// advisory_excerpts and reachability_results were both fetched by CVEID,
+// so an attacker who knew an in-scope vulnerability_id could swap in any
+// CVE-XXXX-YYYY string and have the runner build prompts / persist
+// drafts using mismatched evidence. The handler maps this to a generic
+// 400 ("triage target invalid") that does not disclose which of
+// vulnerability_id / cve_id was at fault.
+var ErrCVEIDMismatch = errors.New("triage: cve_id does not match vulnerability_id")
+
 // ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
@@ -274,6 +307,7 @@ type Runner struct {
 	audit          AuditLogWriter
 	vexSync        VEXStatementSync
 	componentVulns ComponentVulnerabilityResolver
+	vulnCVE        VulnerabilityCVELookup
 
 	// defaultProvider is the env-configured Provider used when no
 	// ProviderResolver is wired or the resolver returns nil. In OSS this
@@ -314,6 +348,14 @@ type RunnerConfig struct {
 	// review #F3). Production wiring passes
 	// *repository.ComponentRepository; tests may pass a fake.
 	ComponentVulnerabilities ComponentVulnerabilityResolver
+
+	// VulnerabilityCVE re-resolves the authoritative cve_id from a
+	// vulnerabilities row so the runner can reject mismatched
+	// caller-supplied CVEIDs (M1 Codex review #F12). Production wiring
+	// passes *repository.VulnerabilityRepository; tests that exercise
+	// Run() must pass a fake (UpdateDecision-only tests can leave it nil
+	// because the CVE check is gated on the Run() path).
+	VulnerabilityCVE VulnerabilityCVELookup
 
 	// Threshold defaults to ConfidenceThresholdFromEnv() when zero.
 	Threshold float64
@@ -360,6 +402,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		audit:            cfg.Audit,
 		vexSync:          cfg.VEXSync,
 		componentVulns:   cfg.ComponentVulnerabilities,
+		vulnCVE:          cfg.VulnerabilityCVE,
 		defaultProvider:  cfg.Provider,
 		providerResolver: cfg.ProviderResolver,
 		threshold:        threshold,
@@ -446,6 +489,8 @@ type RunResult struct {
 //   - input validation failures              → returns a sentinel input
 //     error (caller maps to 400)
 //   - ErrVulnerabilityNotInTenant            → caller maps to 404
+//   - ErrComponentNotInVulnerabilityScope    → caller maps to 404
+//   - ErrCVEIDMismatch                       → caller maps to 400 (#F12)
 //   - non-Disabled llm.Provider failure      → wrapped (caller maps 5xx)
 //   - ValidateEvidence ErrEmptyEvidence      → wrapped (caller maps 422)
 //   - persistence failures                    → wrapped (caller maps 500)
@@ -480,7 +525,24 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		return nil, err
 	}
 
-	// Step 0c: if the resolved provider is disabled, branch into the
+	// Step 0c: re-resolve the CVEID server-side from the vulnerabilities
+	// row (#F12). RunInput accepts both VulnerabilityID and CVEID from
+	// the request, and VulnerabilityID has just been validated against
+	// the (tenant, project) graph by resolveComponentIDs — but the
+	// downstream advisory / reachability fetches both index by CVEID,
+	// so without this cross-check a caller could pair an in-scope
+	// VulnerabilityID with an arbitrary CVE-XXXX-YYYY string and have
+	// the runner build prompts + persist drafts using stranger evidence.
+	// We rebind in.CVEID to the resolved value so every later step
+	// (prompt, advisory_excerpts fetch, reachability fetch, draft, audit,
+	// llm_calls row) sees the same authoritative CVE id.
+	resolvedCVEID, err := r.resolveAuthoritativeCVEID(ctx, in.VulnerabilityID, in.CVEID)
+	if err != nil {
+		return nil, err
+	}
+	in.CVEID = resolvedCVEID
+
+	// Step 0d: if the resolved provider is disabled, branch into the
 	// AI-disabled persistence path (#F4). No advisory / reachability
 	// fetch and no LLM call.
 	if _, ok := provider.(*llm.DisabledProvider); ok {
@@ -772,6 +834,56 @@ func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.U
 		return nil, fmt.Errorf("triage.Run: %w", ErrComponentNotInVulnerabilityScope)
 	}
 	return ids, nil
+}
+
+// resolveAuthoritativeCVEID looks up the canonical cve_id for the
+// supplied vulnerability_id and rejects requests where the caller's
+// CVEID disagrees (M1 Codex review #F12). It MUST run after
+// resolveComponentIDs so the tenant-scope check (which goes through the
+// RLS-protected components / sboms join) fires first — the
+// vulnerabilities table is a global NVD/EPSS cache with no RLS of its
+// own, so the join-based (tenant, project, vuln) membership check is
+// what makes the lookup safe to perform here.
+//
+// Returns the resolved CVEID on success. On mismatch returns a wrapped
+// ErrCVEIDMismatch which the handler folds into a generic 400 body
+// ("triage target invalid") so a probe caller cannot distinguish
+// "mismatched cve_id" from "unknown vulnerability_id" via the response.
+//
+// When the lookup itself is not wired (vulnCVE == nil) the runner
+// refuses to fabricate trust in the caller-supplied CVEID — mirroring
+// the resolveComponentIDs misconfig contract. Production wiring always
+// supplies *repository.VulnerabilityRepository.
+func (r *Runner) resolveAuthoritativeCVEID(ctx context.Context, vulnID uuid.UUID, suppliedCVEID string) (string, error) {
+	if r.vulnCVE == nil {
+		// Fail closed — same posture as resolveComponentIDs when
+		// componentVulns is missing. The handler maps "is required ..." to
+		// 400, which surfaces the misconfig loudly without persisting an
+		// unscoped draft.
+		return "", errors.New("triage.Run: vulnerability cve lookup is required (no VulnerabilityCVELookup wired)")
+	}
+	resolved, err := r.vulnCVE.GetCVEIDByID(ctx, vulnID)
+	if err != nil {
+		// componentVulns has just vouched for (tenant, project, vuln)
+		// membership, so a missing vulnerabilities row here is a
+		// data-integrity issue (caller maps to 5xx via mapRunnerError's
+		// default branch). We deliberately do NOT fold this into the
+		// ErrCVEIDMismatch path: the failure mode is server-side, not
+		// caller-supplied.
+		return "", fmt.Errorf("triage.Run: resolve cve_id for vulnerability_id: %w", err)
+	}
+	if resolved == "" {
+		return "", fmt.Errorf("triage.Run: vulnerability_id %s has empty cve_id (corrupt vulnerabilities row)", vulnID)
+	}
+	if resolved != suppliedCVEID {
+		// Intentional: do NOT include the resolved CVE id in the error
+		// message. The handler maps this to a generic 400 body, and we
+		// log the precise mismatch in server logs (mapRunnerError +
+		// slog.Warn). Leaking the resolved CVE here would defeat the
+		// generic-body discipline (#F10 / #F12).
+		return "", fmt.Errorf("triage.Run: %w", ErrCVEIDMismatch)
+	}
+	return resolved, nil
 }
 
 // provider_Complete is a tiny indirection that lets us swap the bound

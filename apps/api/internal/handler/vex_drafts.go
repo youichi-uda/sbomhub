@@ -506,6 +506,7 @@ func (h *VexDraftsHandler) loadDraftScoped(
 //   - triage.ErrInvalidEvidence                         → 422
 //   - triage.ErrVulnerabilityNotInTenant                → 404 (#F3)
 //   - triage.ErrComponentNotInVulnerabilityScope        → 404 (#F6)
+//   - triage.ErrCVEIDMismatch                           → 400 (#F12)
 //   - input-validation errors (missing fields)          → 400
 //   - everything else                                   → 500
 func mapRunnerError(err error) (int, map[string]string, bool) {
@@ -549,6 +550,20 @@ func mapRunnerError(err error) (int, map[string]string, bool) {
 		)
 		return http.StatusNotFound, map[string]string{
 			"error": "triage target not found",
+		}, true
+	}
+	// F12 (Codex M1 round 4): caller-supplied cve_id did not match the
+	// authoritative cve_id stored on the vulnerabilities row. We return
+	// a generic 400 body ("triage target invalid") rather than echoing
+	// the sentinel string so a probe caller cannot distinguish
+	// "mismatched cve_id" from other targeting errors via the response.
+	// Precise reason stays in server logs.
+	if errors.Is(err, triage.ErrCVEIDMismatch) {
+		slog.Warn("triage: cve_id mismatch rejected",
+			"sentinel", err.Error(),
+		)
+		return http.StatusBadRequest, map[string]string{
+			"error": "triage target invalid",
 		}, true
 	}
 	// Heuristic — runner returns "X is required" / "is not in allowlist"

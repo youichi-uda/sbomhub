@@ -299,6 +299,10 @@ func TestRunner_Run_HappyPath_InsertsDraftLLMCallAndAudit(t *testing.T) {
 		// → []component_id set. Wire a permissive resolver here so the
 		// supplied componentID is accepted.
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		// F12: re-resolve the authoritative cve_id from
+		// (tenant, vulnerability) and reject mismatches. The happy-path
+		// fake returns the same cve id the test sends in RunInput.
+		VulnerabilityCVE: okVulnCVE("CVE-2026-0001"),
 	})
 
 	uid := userID
@@ -434,6 +438,7 @@ func TestRunner_Run_BelowThreshold_ClampsToUnderInvestigation(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0002"),
 	})
 
 	res, err := r.Run(context.Background(), RunInput{
@@ -470,6 +475,7 @@ func TestRunner_Run_EmptyEvidence_Returns422Compatible(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0003"),
 	})
 	_, err := r.Run(context.Background(), RunInput{
 		TenantID: uuid.New(), ProjectID: uuid.New(),
@@ -505,6 +511,7 @@ func TestRunner_Run_LLMTransientError_PersistsCallWithErrorMessageAndReturnsErr(
 		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0004"),
 	})
 	_, err := r.Run(context.Background(), RunInput{
 		TenantID: uuid.New(), ProjectID: uuid.New(),
@@ -747,6 +754,7 @@ func TestRunner_Run_Reanalyse_EmitsReanalysedAudit(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0009"),
 	})
 	original := uuid.New()
 	_, err := r.Run(context.Background(), RunInput{
@@ -819,6 +827,7 @@ func TestRunner_Run_AuditFailure_PropagatesError(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0050"),
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -888,6 +897,7 @@ func TestRunner_Run_Reanalyse_AuditFailure_PropagatesError(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0052"),
 	})
 	original := uuid.New()
 	_, err := r.Run(context.Background(), RunInput{
@@ -955,6 +965,37 @@ func (r *fakeComponentVulnResolver) ListIDsByVulnerability(_ context.Context, _ 
 	return r.ids, r.err
 }
 
+// fakeVulnerabilityCVELookup returns a canned cve_id for the supplied
+// vulnerability_id (M1 Codex review #F12 regression coverage). When err
+// is non-nil it is returned in place of the cve_id so the test can
+// exercise the data-integrity 5xx branch.
+//
+// `cveID` is the value the runner's resolveAuthoritativeCVEID will see
+// as the "authoritative" cve. Tests that want a happy-path Run() wire a
+// fake whose cveID equals the RunInput.CVEID they intend to send; the
+// F12 rejection test wires a fake whose cveID differs from the supplied
+// RunInput.CVEID and asserts ErrCVEIDMismatch.
+type fakeVulnerabilityCVELookup struct {
+	called  int
+	gotVuln uuid.UUID
+	cveID   string
+	err     error
+}
+
+func (f *fakeVulnerabilityCVELookup) GetCVEIDByID(_ context.Context, vulnID uuid.UUID) (string, error) {
+	f.called++
+	f.gotVuln = vulnID
+	return f.cveID, f.err
+}
+
+// okVulnCVE is a tiny convenience that returns a permissive lookup
+// matching the supplied CVE id. Most existing tests use a fixed CVE id
+// per case ("CVE-2026-XXXX") so they can wire `VulnerabilityCVE:
+// okVulnCVE("CVE-2026-XXXX")` with the same string.
+func okVulnCVE(cveID string) *fakeVulnerabilityCVELookup {
+	return &fakeVulnerabilityCVELookup{cveID: cveID}
+}
+
 // TestRunner_Run_PerTenantProviderResolved verifies F2: a per-request
 // ProviderResolver overrides the default Provider so a tenant's
 // /settings/llm BYOK key actually drives the triage call (rather than
@@ -973,6 +1014,7 @@ func TestRunner_Run_PerTenantProviderResolved(t *testing.T) {
 		Audit: &fakeAuditWriter{}, Provider: defaultStub, Threshold: 0.7,
 		ProviderResolver:         resolver.resolve,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0100"),
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -1014,6 +1056,7 @@ func TestRunner_Run_ResolveComponentIDFromVulnerability(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0101"),
 	})
 
 	res, err := r.Run(context.Background(), RunInput{
@@ -1055,6 +1098,7 @@ func TestRunner_Run_FanOutOverMultipleComponents(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
 		Audit: audit, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0102"),
 	})
 
 	res, err := r.Run(context.Background(), RunInput{
@@ -1146,6 +1190,7 @@ func TestRunner_Run_AIDisabled_PersistsUnderInvestigationDraft(t *testing.T) {
 		Reachability: reach, LLMCalls: llmCalls,
 		Audit: audit, Provider: disabled, Threshold: 0.7,
 		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0104"),
 	})
 
 	res, err := r.Run(context.Background(), RunInput{
@@ -1218,6 +1263,7 @@ func TestRunner_Run_CallerSuppliedComponentIDOutsideVulnerabilityScope_Rejected(
 		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
 		Audit: audit, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0200"),
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -1261,6 +1307,7 @@ func TestRunner_Run_CallerSuppliedComponentIDInScope_Accepted(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
 		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0201"),
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -1295,6 +1342,7 @@ func TestRunner_Run_AIDisabled_FanOutAcrossComponents(t *testing.T) {
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: audit, Provider: disabled, Threshold: 0.7,
 		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0105"),
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -1364,6 +1412,7 @@ func TestRunner_Run_FanOut_PerComponentReachabilityFK(t *testing.T) {
 		Provider:                 stub,
 		Threshold:                0.7,
 		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE(cve),
 	})
 
 	_, err := r.Run(context.Background(), RunInput{
@@ -1417,6 +1466,161 @@ func uuidValOrNil(p *uuid.UUID) string {
 		return "<nil>"
 	}
 	return p.String()
+}
+
+// ----------------------------------------------------------------------------
+// Caller-supplied cve_id bypass regression (Codex M1 round 4 #F12)
+// ----------------------------------------------------------------------------
+//
+// Until the F12 fix, runner.Run accepted both VulnerabilityID and CVEID
+// from the request, validated VulnerabilityID against the (tenant,
+// project) graph via ComponentVulnerabilityResolver, then used the
+// caller-supplied CVEID to fetch advisory_excerpts and reachability_results
+// and to populate the draft's cve_id column. A caller who knew an
+// in-scope vulnerability_id could pair it with an arbitrary CVE-XXXX-YYYY
+// string and have the runner build prompts + persist drafts using
+// stranger evidence — the draft's vulnerability_id and cve_id ended up
+// pointing at different vulnerabilities, and the LLM prompt was assembled
+// from advisory text that had nothing to do with the targeted vuln.
+//
+// The contract the runner now enforces:
+//
+//   1. Run consults VulnerabilityCVELookup.GetCVEIDByID(vulnerability_id)
+//      after resolveComponentIDs has vouched for tenant scope.
+//   2. If the resolved cve_id disagrees with RunInput.CVEID, Run returns
+//      a wrapped ErrCVEIDMismatch. No advisory / reachability fetch, no
+//      LLM call, no draft INSERT, no llm_calls INSERT, no audit row.
+//   3. On match, Run uses the resolved cve_id for every downstream
+//      access (advisory_excerpts fetch, reachability fetch, draft
+//      column, audit details) so the supplied value cannot drift out
+//      through a code path that re-uses RunInput.CVEID.
+
+func TestRunner_Run_MismatchedCVEID_Rejected(t *testing.T) {
+	// Vulnerability A is in scope (resolver knows it links to componentID),
+	// but the caller supplies CVE-2024-9999 while the authoritative cve_id
+	// for that vulnerability is CVE-2024-1111 — classic F12 bypass attempt.
+	componentID := uuid.New()
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+	llmCalls := &fakeLLMCallWriter{}
+	advisories := &fakeAdvisoryReader{}
+	reach := &fakeReachabilityReader{}
+	vulnLookup := &fakeVulnerabilityCVELookup{cveID: "CVE-2024-1111"}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: advisories,
+		Reachability: reach, LLMCalls: llmCalls,
+		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         vulnLookup,
+	})
+
+	vulnID := uuid.New()
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: vulnID,
+		CVEID:           "CVE-2024-9999", // attacker-supplied, does NOT match
+		ComponentID:     &componentID,
+	})
+	if err == nil {
+		t.Fatalf("Run must reject mismatched caller-supplied cve_id (F12: caller paired in-scope vuln id with stranger CVE)")
+	}
+	if !errors.Is(err, ErrCVEIDMismatch) {
+		t.Errorf("error %v should wrap ErrCVEIDMismatch", err)
+	}
+	// The lookup MUST have been consulted exactly once with the supplied
+	// vulnerability_id — proves the runner is not skipping the check.
+	if vulnLookup.called != 1 {
+		t.Errorf("vulnLookup.called = %d, want 1 (cve re-resolve must consult the lookup)", vulnLookup.called)
+	}
+	if vulnLookup.gotVuln != vulnID {
+		t.Errorf("vulnLookup.gotVuln = %v, want %v (lookup must be by RunInput.VulnerabilityID)", vulnLookup.gotVuln, vulnID)
+	}
+	// Nothing else may have happened — the rejection MUST land before
+	// the LLM call, the draft INSERT, and the audit write.
+	if got := len(drafts.inserted); got != 0 {
+		t.Errorf("expected no draft persisted on cve mismatch, got %d", got)
+	}
+	if got := len(llmCalls.records); got != 0 {
+		t.Errorf("expected no llm_calls persisted on cve mismatch (provider must never run), got %d", got)
+	}
+	if got := len(audit.entries); got != 0 {
+		t.Errorf("expected no audit row on cve mismatch, got %d", got)
+	}
+	if stub.captured.Purpose != "" {
+		t.Errorf("LLM provider must not be invoked on cve mismatch (got Purpose=%q)", stub.captured.Purpose)
+	}
+}
+
+// TestRunner_Run_MatchedCVEID_Accepted is the positive companion to the
+// rejection test: when the caller-supplied CVE matches the authoritative
+// cve_id for the vulnerability row, Run() proceeds normally and the
+// draft persists with the resolved CVE (regression-proof against future
+// refactors that might drop the supplied value but accidentally also
+// drop the lookup result).
+func TestRunner_Run_MatchedCVEID_Accepted(t *testing.T) {
+	componentID := uuid.New()
+	cve := "CVE-2024-2222"
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	vulnLookup := &fakeVulnerabilityCVELookup{cveID: cve}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         vulnLookup,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(),
+		CVEID:           cve,
+		ComponentID:     &componentID,
+	})
+	if err != nil {
+		t.Fatalf("Run error on matched cve_id: %v", err)
+	}
+	if vulnLookup.called != 1 {
+		t.Errorf("vulnLookup.called = %d, want 1", vulnLookup.called)
+	}
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 draft, got %d", got)
+	}
+	if drafts.inserted[0].CVEID != cve {
+		t.Errorf("draft.CVEID = %q, want %q (draft must carry the authoritative cve)", drafts.inserted[0].CVEID, cve)
+	}
+}
+
+// TestRunner_Run_MissingVulnerabilityCVELookup_Rejected pins the
+// fail-closed contract: when production wiring forgets to supply a
+// VulnerabilityCVELookup, the runner refuses to fabricate trust in the
+// caller-supplied CVEID. This mirrors the resolveComponentIDs misconfig
+// posture and surfaces the misconfig loudly via mapRunnerError's
+// "is required" → 400 heuristic.
+func TestRunner_Run_MissingVulnerabilityCVELookup_Rejected(t *testing.T) {
+	componentID := uuid.New()
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	r := NewRunner(RunnerConfig{
+		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		// VulnerabilityCVE deliberately omitted.
+	})
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0300",
+		ComponentID: &componentID,
+	})
+	if err == nil {
+		t.Fatalf("expected error when VulnerabilityCVELookup is not wired (fail-closed)")
+	}
+	if !strings.Contains(err.Error(), "cve lookup") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 // ----------------------------------------------------------------------------
