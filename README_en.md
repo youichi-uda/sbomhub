@@ -101,9 +101,11 @@ If no provider is configured, AI features stay off. Manual VEX authoring, manual
 # 1. Pull docker-compose.yml (no clone required)
 curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
 
-# 2. Create .env with at minimum an encryption key
-cat > .env <<'EOF'
-SBOMHUB_ENCRYPTION_KEY=$(openssl rand -base64 32)
+# 2. Create .env with at minimum an encryption key.
+#    The Go server reads ENCRYPTION_KEY (no SBOMHUB_ prefix); docker
+#    compose refuses to start if it is missing or set to the placeholder.
+cat > .env <<EOF
+ENCRYPTION_KEY=$(openssl rand -base64 32)
 # Optional: enable AI features
 # SBOMHUB_LLM_PROVIDER=openai
 # SBOMHUB_LLM_MODEL=gpt-5
@@ -116,13 +118,19 @@ docker compose up -d
 # 4. Open http://localhost:3000
 ```
 
+For a one-line bootstrap (or the equivalent manual steps as a single source
+of truth), see [`docs/snippets/install.sh.md`](./docs/snippets/install.sh.md).
+
 Or clone the repo:
 
 ```bash
 git clone https://github.com/youichi-uda/sbomhub.git
 cd sbomhub
+./install.sh                # generates .env with a random ENCRYPTION_KEY (idempotent)
 docker compose up -d
 ```
+
+> `./install.sh` is idempotent: an existing `.env` is left untouched. Re-run with `--force` to back the old file up to `.env.bak.YYYYMMDD` and issue fresh secrets.
 
 ### CLI (`sbomhub scan`)
 
@@ -135,20 +143,14 @@ brew install sbomhub/tap/sbomhub
 # Or with Go
 go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
 
-# Point at your self-hosted instance
-sbomhub login --api-key YOUR_API_KEY --url http://localhost:8080
-
-# Scan & upload
-sbomhub scan . --project my-device
-
 # Local vulnerability check only (no upload)
 sbomhub check .
-
-# CI mode (exit 1 on Critical findings)
-sbomhub scan . --project my-device --fail-on critical
 ```
 
-Under the hood, the CLI auto-detects Syft, Trivy, or cdxgen. See [sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli) for details.
+The canonical `login → scan → doctor` flow lives in
+[`docs/snippets/cli-quickstart.md`](./docs/snippets/cli-quickstart.md).
+Under the hood, the CLI auto-detects Syft, Trivy, or cdxgen. See
+[sbomhub-cli](https://github.com/youichi-uda/sbomhub-cli) for details.
 
 ### From source
 
@@ -251,25 +253,23 @@ See [packages/mcp-server/README.md](./packages/mcp-server/README.md) for details
 
 ## CI/CD (GitHub Actions)
 
-```yaml
-name: Upload SBOM
-on:
-  push:
-    branches: [main]
-jobs:
-  sbom:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Generate SBOM
-        run: syft . -o cyclonedx-json > sbom.json
-      - name: Upload to SBOMHub
-        run: |
-          curl -X POST \
-            -H "Authorization: Bearer ${{ secrets.SBOMHUB_API_KEY }}" \
-            -F "sbom=@sbom.json" \
-            ${{ secrets.SBOMHUB_URL }}/api/v1/projects/${{ secrets.PROJECT_ID }}/sbom
-```
+The canonical workflow snippet lives in
+[`docs/snippets/github-actions.yml.md`](./docs/snippets/github-actions.yml.md).
+The recommended path is to install `sbomhub-cli` and call `sbomhub scan` in
+one step; a raw-`curl` fallback is included for runners where the CLI
+cannot be installed.
+
+| Use case                                            | Snippet                                                                          |
+|-----------------------------------------------------|----------------------------------------------------------------------------------|
+| Full GitHub Actions workflow                        | [`docs/snippets/github-actions.yml.md`](./docs/snippets/github-actions.yml.md)   |
+| Equivalent GitLab CI job                            | [`docs/snippets/gitlab-ci.yml.md`](./docs/snippets/gitlab-ci.yml.md)             |
+| Single `curl` upload (any runner)                   | [`docs/snippets/curl-upload.md`](./docs/snippets/curl-upload.md)                 |
+| CLI three-step flow (local + runner)                | [`docs/snippets/cli-quickstart.md`](./docs/snippets/cli-quickstart.md)           |
+
+All snippets target the canonical upload contract:
+`POST /api/v1/projects/:id/sbom` + `Authorization: Bearer sbh_...` + raw
+JSON body. The legacy multipart `/cli/upload` route is deprecated with a
+2026-09-24 sunset — see [docs/api.md](./docs/api.md) for details.
 
 ## Roadmap (Phase 7: strategy pivot)
 

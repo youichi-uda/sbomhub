@@ -408,14 +408,17 @@ export default function APIKeysPage() {
               <h4 className="font-medium">{t("usageCI")}</h4>
             </div>
             <div className="bg-muted p-3 rounded-md font-mono text-sm overflow-x-auto">
-              <pre>{`# GitHub Actions
+              {/* Canonical source: docs/snippets/curl-upload.md and
+                  docs/snippets/github-actions.yml.md. Keep this snippet
+                  in sync with those files (Trust Rescue #10). */}
+              <pre>{`# GitHub Actions (canonical contract; see docs/snippets/github-actions.yml.md)
 - name: Upload SBOM
   run: |
-    curl -X POST \\
-      -H "X-API-Key: \${{ secrets.SBOMHUB_API_KEY }}" \\
+    curl -fsS -X POST \\
+      -H "Authorization: Bearer \${{ secrets.SBOMHUB_API_KEY }}" \\
       -H "Content-Type: application/json" \\
-      -d @sbom.json \\
-      https://api.sbomhub.app/api/v1/cli/upload`}</pre>
+      --data-binary "@sbom.json" \\
+      "\${{ secrets.SBOMHUB_URL }}/api/v1/projects/\${{ secrets.SBOMHUB_PROJECT_ID }}/sbom"`}</pre>
             </div>
           </div>
         </CardContent>

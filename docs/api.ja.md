@@ -92,13 +92,18 @@ Web UI (Clerk セッション) と CLI / GitHub Actions (`Authorization: Bearer 
 - Content-Type: `application/json`（CycloneDX または SPDX JSON の raw body をそのまま送ります。 フォーマットはサーバ側で自動検出します）
 
 **例 (API key):**
-```bash
-curl -X POST \
-  -H "Authorization: Bearer sbh_..." \
-  -H "Content-Type: application/json" \
-  --data-binary "@sbom.json" \
-  http://localhost:8080/api/v1/projects/{project_id}/sbom
-```
+
+`curl` の正本コマンド (スモークテストの後続ステップ・CI 例を含む) は
+[`snippets/curl-upload.md`](./snippets/curl-upload.md) を参照してください。
+GitHub Actions / GitLab CI 用は
+[`snippets/github-actions.yml.md`](./snippets/github-actions.yml.md) /
+[`snippets/gitlab-ci.yml.md`](./snippets/gitlab-ci.yml.md) にあります。
+いずれも同一の正本契約を使っています。
+
+- `POST /api/v1/projects/:id/sbom`
+- `Authorization: Bearer sbh_...`
+- `Content-Type: application/json` で CycloneDX / SPDX JSON の raw body を送信
+  (`--data-binary @sbom.json`、`-F sbom=@sbom.json` は **不可**)。
 
 #### CLI 経由 SBOM アップロード（非推奨）
 

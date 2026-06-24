@@ -92,13 +92,19 @@ both target this route through the `MultiAuth` middleware.
 - Content-Type: `application/json` (raw CycloneDX or SPDX JSON body — format is auto-detected server-side)
 
 **Example (API key):**
-```bash
-curl -X POST \
-  -H "Authorization: Bearer sbh_..." \
-  -H "Content-Type: application/json" \
-  --data-binary "@sbom.json" \
-  http://localhost:8080/api/v1/projects/{project_id}/sbom
-```
+
+The verbatim `curl` command, including a smoke-test follow-up and
+matching CI variants, is the single source of truth in
+[`snippets/curl-upload.md`](./snippets/curl-upload.md). For embedding in
+GitHub Actions / GitLab CI, see
+[`snippets/github-actions.yml.md`](./snippets/github-actions.yml.md) and
+[`snippets/gitlab-ci.yml.md`](./snippets/gitlab-ci.yml.md). All three
+target the same canonical contract:
+
+- `POST /api/v1/projects/:id/sbom`
+- `Authorization: Bearer sbh_...`
+- `Content-Type: application/json` with the raw CycloneDX / SPDX JSON body
+  (`--data-binary @sbom.json`, **not** `-F sbom=@sbom.json`).
 
 #### Upload SBOM via CLI (deprecated)
 
