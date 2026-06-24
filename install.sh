@@ -1,5 +1,5 @@
 #!/bin/sh
-# SBOMHub install.sh — self-host を始めるための .env bootstrapper.
+# SBOMHub install.sh — self-host bootstrap (.env + DB roles + optional stack up).
 #
 # 何をするか:
 #   - .env.example を雛形に .env を生成
@@ -7,11 +7,12 @@
 #   - sbomhub_app / sbomhub_migrator の DB パスワードをランダム発行し、
 #     DATABASE_URL / MIGRATE_DATABASE_URL にも反映
 #   - 既存 .env は壊さない (再生成は --force、 元 .env は .env.bak.<date> に退避)
-#   - --bootstrap-roles モードで、 既存 postgres ボリュームに対して
-#     sbomhub_app / sbomhub_migrator ロールを冪等に作成 (M0 アップグレード用)
+#   - 既存 postgres ボリュームに対して sbomhub_app / sbomhub_migrator ロールを
+#     冪等に作成する (--bootstrap-roles、 M0 アップグレード用 / fresh install
+#     共通の経路)
 #
 # 何をしないか:
-#   - docker compose pull / up は実行しない (operator の判断に委ねる)
+#   - docker compose pull は実行しない (image 更新は operator 判断)
 #   - 既に流れている DB のパスワード変更は出来ない (rotation は別作業)
 #
 # Trust Rescue P1 #6 / 9.2.2: ENCRYPTION_KEY の既定値削除と起動拒否が入り、
@@ -23,26 +24,42 @@
 # 存在せず api 起動が password authentication failed で死ぬ。
 # --bootstrap-roles はその救済のための公式導線 (詳細: docs/UPGRADE.md)。
 #
+# Trust Rescue codex-r8 P1: docker-compose.yml に居た init.sh の bind mount は
+# host file 依存 (curl-only install では host に存在しない) で stack 全体を
+# 落とす罠だったため削除した。 fresh install / existing-volume upgrade を
+# 問わず、 ロール作成はこの install.sh が docker compose exec 経由で行う
+# (= bootstrap SQL の single source of truth)。
+#
 # 使い方:
 #   ./install.sh                    # .env を生成 (既存があれば保持)
 #   ./install.sh --force            # 既存 .env を退避して再生成
 #   ./install.sh --bootstrap-roles  # 既存 postgres コンテナにロールを作成
+#   ./install.sh --start            # .env 生成 + docker compose up + ロール投入
+#                                   # まで一気通貫 (curl-only install 向け)
 #   ./install.sh --help             # ヘルプ表示
 
 set -eu
 
+# docker-compose.yml の canonical URL (--start で host に未配置なら download)。
+COMPOSE_URL="https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml"
+
 print_usage() {
     cat <<'EOF'
-Usage: ./install.sh [--force | --bootstrap-roles] [--help]
+Usage: ./install.sh [--force | --bootstrap-roles | --start] [--help]
 
 Modes (mutually exclusive):
   (default)            .env を生成する。既存 .env がある場合は何もしない (冪等)。
+                       stack は起動しない。
   --force              既存の .env を .env.bak.YYYYMMDD[.N] に退避し、新規に生成する。
+                       stack は起動しない。
   --bootstrap-roles    既存 postgres コンテナに sbomhub_app / sbomhub_migrator を
                        作成する (docs/UPGRADE.md §4.2)。.env から MIGRATOR_PASSWORD /
-                       APP_PASSWORD を読み出し、docker compose exec で
-                       /docker-entrypoint-initdb.d/10-roles.sh を冪等に実行する。
-                       postgres コンテナが起動している必要がある。
+                       APP_PASSWORD を読み出し、docker compose exec で psql 経由に
+                       冪等な SQL を流す。postgres コンテナが起動している必要がある。
+  --start              curl-only install 向けのワンショット。
+                       .env を生成 (なければ) → docker-compose.yml を download (なければ)
+                       → docker compose up -d --wait postgres → ロール投入
+                       → docker compose up -d で残りを起動、 までを一気に実行する。
 
 Options:
   --help               このメッセージを表示する。
@@ -53,22 +70,29 @@ APP_PASSWORD をランダム生成して書き込みます。 既存 .env があ
 EOF
 }
 
-MODE=generate   # generate | force | bootstrap_roles
+MODE=generate   # generate | force | bootstrap_roles | start
 for arg in "$@"; do
     case "$arg" in
         --force)
             if [ "$MODE" != "generate" ]; then
-                printf '[FAIL] --force と --bootstrap-roles は同時指定できません。\n' >&2
+                printf '[FAIL] --force / --bootstrap-roles / --start は同時指定できません。\n' >&2
                 exit 1
             fi
             MODE=force
             ;;
         --bootstrap-roles)
             if [ "$MODE" != "generate" ]; then
-                printf '[FAIL] --force と --bootstrap-roles は同時指定できません。\n' >&2
+                printf '[FAIL] --force / --bootstrap-roles / --start は同時指定できません。\n' >&2
                 exit 1
             fi
             MODE=bootstrap_roles
+            ;;
+        --start)
+            if [ "$MODE" != "generate" ]; then
+                printf '[FAIL] --force / --bootstrap-roles / --start は同時指定できません。\n' >&2
+                exit 1
+            fi
+            MODE=start
             ;;
         -h|--help) print_usage; exit 0 ;;
         *)
@@ -80,22 +104,195 @@ for arg in "$@"; do
 done
 
 # ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+# postgres コンテナに対して role bootstrap SQL を流す。
+#   $1: MIGRATOR_PASSWORD (raw)
+#   $2: APP_PASSWORD (raw)
+# 前提: docker / docker compose 利用可能、 postgres サービスが running 状態。
+#
+# Password handling (codex-r8 P2 と同じ規律):
+#   - 旧実装は heredoc で '${MIGRATOR_PASSWORD}' / '${APP_PASSWORD}' を
+#     SQL string literal の中に shell interpolate していた。 single quote を
+#     含む password で SQL injection / 構文エラーになる。
+#   - 本実装は password を psql の -v migrator_password=... / -v app_password=...
+#     経由で渡し、 SQL 側では :'var' (psql client-side literal quoting) と
+#     format(... %L ...) (server-side literal quoting、 belt-and-suspenders)
+#     を使う。 raw value は SQL string literal の中に直接出現しないので、
+#     任意 byte を含む password でも安全 (codex-r8 で初期 R8-8b commit が
+#     init.sh に同じ規律を入れた、 install.sh も同じ規律を継承)。
+#   - psql の :'var' 置換は dollar-quoted ($$ ... $$) body の中では効かないので、
+#     CREATE ROLE は SELECT ... \gexec パターン (top-level の SELECT で :'var'
+#     を展開 → 生成された CREATE ROLE を実行) で書く。
+#   - ALTER ROLE は top-level なので :'var' を直接書ける。
+#
+# Password 値の経路:
+#   install.sh ($1, $2)
+#     → docker compose exec の argv (環境変数 PSQL_MIGRATOR_PASSWORD /
+#        PSQL_APP_PASSWORD を -e で注入)
+#     → コンテナ内 sh -c 'psql -v ... -v ... -f -' の引数展開
+#     → psql の -v 値 (内部的に :'var' で SQL literal にエスケープされる)
+#     → SELECT format('CREATE ROLE ... PASSWORD %L', :'var') \gexec
+apply_role_bootstrap() {
+    # POSTGRES_USER / POSTGRES_DB はコンテナ起動時の env として既に定義。
+    # psql は Unix socket 経由 (-h 省略) で trust 認証されるためパスワード不要。
+    # ヒアドキュメントは quoted (`<<'SQL'`) にして install.sh 側の shell 展開
+    # を完全に抑制 (= SQL の中に install.sh の変数値が紛れ込む経路を絶つ)。
+    docker compose exec -T \
+        -e "PSQL_MIGRATOR_PASSWORD=$1" \
+        -e "PSQL_APP_PASSWORD=$2" \
+        postgres sh -c '
+            psql -v ON_ERROR_STOP=1 \
+                 -v migrator_password="$PSQL_MIGRATOR_PASSWORD" \
+                 -v app_password="$PSQL_APP_PASSWORD" \
+                 -U sbomhub -d sbomhub -X -q -f -
+        ' <<'SQL'
+-- Create migrator role (DDL / migrations). NOT BYPASSRLS.
+--
+-- psql variable interpolation (:'var') is NOT performed inside
+-- dollar-quoted ($$ ... $$) bodies, so the older
+--   DO $$ ... CREATE ROLE ... PASSWORD '${MIGRATOR_PASSWORD}' ... $$
+-- pattern is replaced by SELECT ... \gexec, which substitutes :'var'
+-- at the SELECT (outside any dollar-quote) and then executes the
+-- resulting CREATE ROLE statement. format(... %L ...) ensures the
+-- password is emitted as a properly quoted SQL literal.
+SELECT format(
+    'CREATE ROLE sbomhub_migrator WITH LOGIN PASSWORD %L CREATEDB CREATEROLE',
+    :'migrator_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_migrator')
+\gexec
+
+-- Create app role (runtime). NOBYPASSRLS so policies are enforced.
+SELECT format(
+    'CREATE ROLE sbomhub_app WITH LOGIN PASSWORD %L NOBYPASSRLS',
+    :'app_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_app')
+\gexec
+
+-- Idempotent password rotation + NOBYPASSRLS assertion. ALTER ROLE is
+-- a plain top-level statement (not inside a DO block), so psql will
+-- substitute :'var' into a properly quoted SQL literal here.
+ALTER ROLE sbomhub_migrator WITH PASSWORD :'migrator_password';
+ALTER ROLE sbomhub_app      WITH PASSWORD :'app_password' NOBYPASSRLS;
+
+-- Connect / schema usage.
+GRANT CONNECT ON DATABASE sbomhub TO sbomhub_migrator, sbomhub_app;
+GRANT USAGE   ON SCHEMA   public  TO sbomhub_migrator, sbomhub_app;
+
+-- Postgres 15+ revoked the implicit CREATE on the public schema for
+-- non-owners (https://www.postgresql.org/docs/15/release-15.html), so
+-- without this grant the very first migrator-driven statement
+--   CREATE TABLE IF NOT EXISTS schema_migrations ...
+-- fails with "permission denied for schema public" on a fresh
+-- docker compose up. sbomhub_app intentionally does NOT receive CREATE;
+-- DDL is exclusively the migrator's job (Trust Rescue R1 / codex-r1).
+GRANT CREATE ON SCHEMA public TO sbomhub_migrator;
+
+-- Existing tables (no-op on a fresh DB; needed if re-run against a populated schema).
+GRANT ALL ON ALL TABLES IN SCHEMA public TO sbomhub_migrator;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sbomhub_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sbomhub_migrator, sbomhub_app;
+
+-- Future tables created by the migrator role inherit the right grants
+-- for sbomhub_app, so we never have to remember to GRANT after each
+-- new CREATE TABLE in a migration.
+ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sbomhub_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO sbomhub_app;
+
+-- Existing-volume upgrade fix (codex-r3 P1):
+-- On legacy self-host volumes every table / sequence was created by the
+-- POSTGRES_USER role 'sbomhub' and is therefore owned by it. GRANT ALL
+-- above is insufficient for owner-only operations (ALTER TABLE, DROP,
+-- ALTER COLUMN ... SET NOT NULL etc.), so migrations 027 / 028 / 029
+-- abort with "must be owner of table sboms" when run as sbomhub_migrator.
+--
+-- REASSIGN OWNED transfers every object in the current database owned by
+-- 'sbomhub' to 'sbomhub_migrator'. On a fresh volume the migrator has
+-- not yet created anything as 'sbomhub', so this is a no-op. The
+-- pg_roles guard keeps the script safe if an operator customised
+-- POSTGRES_USER away from the default name.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub') THEN
+        EXECUTE 'REASSIGN OWNED BY sbomhub TO sbomhub_migrator';
+    END IF;
+END
+$$;
+SQL
+}
+
+# .env から MIGRATOR_PASSWORD / APP_PASSWORD を抽出して RUN_MIGRATOR_PASSWORD /
+# RUN_APP_PASSWORD にセット。 失敗時に exit 1 を呼ぶ side-effect あり。
+load_passwords_from_env() {
+    RUN_MIGRATOR_PASSWORD=$(sed -n 's/^MIGRATOR_PASSWORD=\(.*\)$/\1/p' .env | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1)
+    RUN_APP_PASSWORD=$(sed -n 's/^APP_PASSWORD=\(.*\)$/\1/p' .env | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1)
+
+    if [ -z "${RUN_MIGRATOR_PASSWORD:-}" ] || [ -z "${RUN_APP_PASSWORD:-}" ]; then
+        printf '[FAIL] .env に MIGRATOR_PASSWORD または APP_PASSWORD が設定されていません。\n' >&2
+        printf '       `./install.sh --force` で .env を再生成するか、\n' >&2
+        printf '       手動で 2 行を追加してから再実行してください。\n' >&2
+        exit 1
+    fi
+}
+
+# .env を新規生成する (上書きしない側のチェックは呼び元の責任)。
+# ENCRYPTION_KEY / MIGRATOR_PASSWORD / APP_PASSWORD をランダム発行して
+# DATABASE_URL / MIGRATE_DATABASE_URL にも反映。 副作用: chmod 600 .env。
+# 生成したパスワードを GENERATED_MIGRATOR_PASSWORD / GENERATED_APP_PASSWORD に export。
+generate_env_file() {
+    if ! command -v openssl >/dev/null 2>&1; then
+        printf '[FAIL] openssl が見つかりません。インストールしてから再実行してください。\n' >&2
+        exit 1
+    fi
+    if [ ! -f .env.example ]; then
+        printf '[FAIL] .env.example がカレントディレクトリにありません。\n' >&2
+        printf '       sbomhub リポジトリのルート、 または docker-compose.yml と .env.example\n' >&2
+        printf '       を取得済みのディレクトリで実行してください。\n' >&2
+        exit 1
+    fi
+
+    cp .env.example .env
+
+    # ランダム生成。 base64 32B = 256bit (AES-256 要件)、 hex 16B = 128bit。
+    GENERATED_ENCRYPTION_KEY=$(openssl rand -base64 32)
+    GENERATED_MIGRATOR_PASSWORD=$(openssl rand -hex 16)
+    GENERATED_APP_PASSWORD=$(openssl rand -hex 16)
+
+    # sed -i の inplace は GNU と BSD で挙動が違う。
+    # 共通解として `-i.bak` を使い、 .bak を後で削除する形にする。
+    # sed の区切り文字は `|` を使用: base64 出力に `/` `+` `=` が含まれる可能性
+    # があるが `|` は base64 alphabet に無いので衝突しない。
+    sed -i.bak \
+        -e "s|^ENCRYPTION_KEY=.*$|ENCRYPTION_KEY=${GENERATED_ENCRYPTION_KEY}|" \
+        -e "s|^MIGRATOR_PASSWORD=.*$|MIGRATOR_PASSWORD=${GENERATED_MIGRATOR_PASSWORD}|" \
+        -e "s|^APP_PASSWORD=.*$|APP_PASSWORD=${GENERATED_APP_PASSWORD}|" \
+        .env
+    rm -f .env.bak
+
+    # DATABASE_URL / MIGRATE_DATABASE_URL は .env.example で既定値 (dev パスワード)
+    # が埋め込まれているので、 上で生成したパスワードに置換する。
+    sed -i.bak \
+        -e "s|postgres://sbomhub_app:[^@]*@|postgres://sbomhub_app:${GENERATED_APP_PASSWORD}@|" \
+        -e "s|postgres://sbomhub_migrator:[^@]*@|postgres://sbomhub_migrator:${GENERATED_MIGRATOR_PASSWORD}@|" \
+        .env
+    rm -f .env.bak
+
+    # Secret なので世界書き込み禁止。 chmod は best-effort (Windows は no-op)。
+    chmod 600 .env 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------------
 # Mode: --bootstrap-roles
 # ----------------------------------------------------------------------------
-# Idempotently apply the role-creation SQL from apps/api/cmd/migrate/init.sh
-# to an EXISTING postgres volume. Required for self-host users upgrading from
-# any pre-M0 release — init.sh only runs on fresh volume initialisation, so
-# their volumes never received the sbomhub_app / sbomhub_migrator roles, and
-# api startup dies with `password authentication failed`.
-#
-# Idempotency: init.sh wraps CREATE ROLE in DO $$ ... EXCEPTION WHEN
-# duplicate_object $$ blocks and ALTER ROLE on every run, so re-execution is
-# safe even after the roles already exist.
-#
-# Ownership transfer (codex-r3 P1): init.sh additionally runs REASSIGN OWNED
-# BY sbomhub TO sbomhub_migrator, which moves every legacy-owned table /
-# sequence to the migrator so migrations 027 / 028 / 029 can ALTER TABLE
-# without hitting "must be owner of table ...". No-op on fresh volumes.
+# Idempotently apply the role-creation SQL to an EXISTING postgres volume.
+# Required for self-host users upgrading from any pre-M0 release — fresh
+# bootstrap previously relied on a host file bind mount that codex-r8
+# removed, so all role creation (fresh OR existing volume) is now this path.
 if [ "$MODE" = "bootstrap_roles" ]; then
     if [ ! -f .env ]; then
         printf '[FAIL] .env が見つかりません。\n' >&2
@@ -108,20 +305,9 @@ if [ "$MODE" = "bootstrap_roles" ]; then
         exit 1
     fi
 
-    # .env から MIGRATOR_PASSWORD / APP_PASSWORD を取り出す (末尾の改行や
-    # quote を保守的に剥がす)。POSIX sh では IFS=  を使わずに sed で抽出。
-    MIGRATOR_PASSWORD=$(sed -n 's/^MIGRATOR_PASSWORD=\(.*\)$/\1/p' .env | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1)
-    APP_PASSWORD=$(sed -n 's/^APP_PASSWORD=\(.*\)$/\1/p' .env | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1)
-
-    if [ -z "${MIGRATOR_PASSWORD:-}" ] || [ -z "${APP_PASSWORD:-}" ]; then
-        printf '[FAIL] .env に MIGRATOR_PASSWORD または APP_PASSWORD が設定されていません。\n' >&2
-        printf '       `./install.sh --force` で .env を再生成するか、\n' >&2
-        printf '       手動で 2 行を追加してから再実行してください。\n' >&2
-        exit 1
-    fi
+    load_passwords_from_env
 
     # postgres コンテナが起動していることを確認 (docker compose ps で state を見る)。
-    # `docker compose` v2 のサブコマンド形式に依存。
     if ! docker compose ps --status running --services 2>/dev/null | grep -qx postgres; then
         printf '[FAIL] postgres コンテナが起動していません。\n' >&2
         printf '       `docker compose up -d postgres` で起動してから再実行してください。\n' >&2
@@ -129,15 +315,9 @@ if [ "$MODE" = "bootstrap_roles" ]; then
     fi
 
     printf '[INFO] postgres コンテナに sbomhub_app / sbomhub_migrator ロールを\n'
-    printf '       投入します (init.sh を docker compose exec 経由で実行)。\n'
+    printf '       投入します (psql を docker compose exec 経由で実行)。\n'
 
-    # init.sh はコンテナ内で /docker-entrypoint-initdb.d/10-roles.sh としてマウント済み。
-    # 中身は psql に対する DO $$ ... CREATE ROLE / ALTER ROLE / GRANT を含む冪等スクリプト。
-    # POSTGRES_USER / POSTGRES_DB はコンテナ起動時の環境変数として既に設定されている。
-    if ! docker compose exec -T \
-        -e "MIGRATOR_PASSWORD=$MIGRATOR_PASSWORD" \
-        -e "APP_PASSWORD=$APP_PASSWORD" \
-        postgres sh /docker-entrypoint-initdb.d/10-roles.sh; then
+    if ! apply_role_bootstrap "$RUN_MIGRATOR_PASSWORD" "$RUN_APP_PASSWORD"; then
         printf '[FAIL] ロール投入に失敗しました。 docker compose logs postgres を確認してください。\n' >&2
         exit 1
     fi
@@ -148,7 +328,87 @@ if [ "$MODE" = "bootstrap_roles" ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Mode: (default) / --force — .env generation
+# Mode: --start
+# ----------------------------------------------------------------------------
+# curl-only install 向けワンショット。 .env を生成 → docker-compose.yml を
+# download (なければ) → docker compose up -d --wait postgres → ロール投入 →
+# docker compose up -d 全体起動、 までを実行する。
+if [ "$MODE" = "start" ]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        printf '[FAIL] docker が見つかりません。 --start は docker compose を必要とします。\n' >&2
+        exit 1
+    fi
+
+    # docker-compose.yml が無ければ download (curl-only install path)。
+    if [ ! -f docker-compose.yml ]; then
+        if ! command -v curl >/dev/null 2>&1; then
+            printf '[FAIL] docker-compose.yml が無く、 curl も見つかりません。\n' >&2
+            printf '       手動で docker-compose.yml を配置してから再実行してください: %s\n' "$COMPOSE_URL" >&2
+            exit 1
+        fi
+        printf '[INFO] docker-compose.yml が無いため download します (%s)。\n' "$COMPOSE_URL"
+        if ! curl -fsSL "$COMPOSE_URL" -o docker-compose.yml; then
+            printf '[FAIL] docker-compose.yml の download に失敗しました。\n' >&2
+            exit 1
+        fi
+    fi
+
+    # .env.example が無ければ download (curl-only install では未配置)。
+    if [ ! -f .env.example ]; then
+        if ! command -v curl >/dev/null 2>&1; then
+            printf '[FAIL] .env.example が無く、 curl も見つかりません。\n' >&2
+            exit 1
+        fi
+        printf '[INFO] .env.example が無いため download します。\n'
+        if ! curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/.env.example" -o .env.example; then
+            printf '[FAIL] .env.example の download に失敗しました。\n' >&2
+            exit 1
+        fi
+    fi
+
+    # .env を生成 (既存なら保持し、 そこから password を読む)。
+    if [ ! -f .env ]; then
+        printf '[INFO] .env を生成します。\n'
+        generate_env_file
+        START_MIGRATOR_PASSWORD="$GENERATED_MIGRATOR_PASSWORD"
+        START_APP_PASSWORD="$GENERATED_APP_PASSWORD"
+    else
+        printf '[INFO] .env が既にあります。 既存の MIGRATOR_PASSWORD / APP_PASSWORD を使用します。\n'
+        load_passwords_from_env
+        START_MIGRATOR_PASSWORD="$RUN_MIGRATOR_PASSWORD"
+        START_APP_PASSWORD="$RUN_APP_PASSWORD"
+    fi
+
+    # postgres を先に上げて healthy 待ち。 docker compose v2.1+ の --wait を使用。
+    printf '[INFO] postgres を起動して healthy を待ちます (docker compose up -d --wait postgres)。\n'
+    if ! docker compose up -d --wait postgres; then
+        printf '[FAIL] postgres の起動に失敗しました。 docker compose logs postgres を確認してください。\n' >&2
+        exit 1
+    fi
+
+    printf '[INFO] sbomhub_app / sbomhub_migrator ロールを投入します。\n'
+    if ! apply_role_bootstrap "$START_MIGRATOR_PASSWORD" "$START_APP_PASSWORD"; then
+        printf '[FAIL] ロール投入に失敗しました。 docker compose logs postgres を確認してください。\n' >&2
+        exit 1
+    fi
+
+    # 全体起動。 api 起動時に migrations 027/028/029 が走る。
+    printf '[INFO] 残りのサービスを起動します (docker compose up -d)。\n'
+    if ! docker compose up -d; then
+        printf '[FAIL] サービス起動に失敗しました。 docker compose logs を確認してください。\n' >&2
+        exit 1
+    fi
+
+    cat <<'EOF'
+[OK] セットアップが完了しました。
+     ダッシュボード: http://localhost:3000
+     API ヘルスチェック: curl -fsS http://localhost:8080/api/v1/health
+EOF
+    exit 0
+fi
+
+# ----------------------------------------------------------------------------
+# Mode: (default) / --force — .env generation only (stack は起動しない)
 # ----------------------------------------------------------------------------
 
 # 必須前提: openssl がなければランダム生成できないので即死する。
@@ -186,38 +446,7 @@ if [ -f .env ]; then
     fi
 fi
 
-cp .env.example .env
-
-# ランダム生成。 base64 32B = 256bit (AES-256 要件)、 hex 16B = 128bit。
-ENCRYPTION_KEY=$(openssl rand -base64 32)
-MIGRATOR_PASSWORD=$(openssl rand -hex 16)
-APP_PASSWORD=$(openssl rand -hex 16)
-
-# sed -i の inplace は GNU と BSD で挙動が違う。
-# 共通解として `-i.bak` を使い、 .bak を後で削除する形にする。
-#
-# sed の区切り文字は `|` を使用: base64 出力に `/` `+` `=` が含まれる可能性
-# があるが `|` は base64 alphabet に無いので衝突しない。 `&` は RHS の
-# back-reference 扱いだが base64 alphabet に無いので問題なし。
-sed -i.bak \
-    -e "s|^ENCRYPTION_KEY=.*$|ENCRYPTION_KEY=${ENCRYPTION_KEY}|" \
-    -e "s|^MIGRATOR_PASSWORD=.*$|MIGRATOR_PASSWORD=${MIGRATOR_PASSWORD}|" \
-    -e "s|^APP_PASSWORD=.*$|APP_PASSWORD=${APP_PASSWORD}|" \
-    .env
-rm -f .env.bak
-
-# DATABASE_URL / MIGRATE_DATABASE_URL は .env.example で既定値 (dev パスワード)
-# が埋め込まれているので、 上で生成したパスワードに置換する。
-# `postgres://sbomhub_app:<old>@host:port/db` の <old> を <new> に差し替え。
-# `[^@]*` で @ までを greedy にしないことで、 後続の host 部に影響しない。
-sed -i.bak \
-    -e "s|postgres://sbomhub_app:[^@]*@|postgres://sbomhub_app:${APP_PASSWORD}@|" \
-    -e "s|postgres://sbomhub_migrator:[^@]*@|postgres://sbomhub_migrator:${MIGRATOR_PASSWORD}@|" \
-    .env
-rm -f .env.bak
-
-# Secret なので世界書き込み禁止。 chmod は best-effort (Windows は no-op)。
-chmod 600 .env 2>/dev/null || true
+generate_env_file
 
 cat <<EOF
 [OK] .env を生成しました。
@@ -229,11 +458,18 @@ cat <<EOF
   MIGRATOR_PASSWORD  : (16 bytes hex)
   APP_PASSWORD       : (16 bytes hex)
 
-次のステップ (任意、 自動実行はしません):
-  docker compose pull     # 最新 image を取得
-  docker compose up -d    # サービス起動
+次のステップ (自動実行はしません):
+  # postgres を先に起動して healthy 待ち
+  docker compose up -d --wait postgres
+  # sbomhub_app / sbomhub_migrator ロールを投入 (fresh / existing 共通)
+  ./install.sh --bootstrap-roles
+  # 残りを起動
+  docker compose up -d
+  # ダッシュボード
   open http://localhost:3000
 
-既存 postgres ボリュームを持つアップグレードの場合は
+ワンショットで全部やる場合は \`./install.sh --start\` を使ってください。
+
+既存 postgres ボリュームを持つアップグレードは
 docs/UPGRADE.md §4.2 (./install.sh --bootstrap-roles) を参照してください。
 EOF

@@ -39,7 +39,7 @@ README quick start.
 
 | Area | Pre-M0 behaviour | M0 behaviour | Notes |
 |---|---|---|---|
-| **DB roles** | App + migrations both ran as the `sbomhub` superuser of the DB. | Two distinct roles: `sbomhub_migrator` (DDL, CREATEDB + CREATEROLE, **NOBYPASSRLS**) and `sbomhub_app` (DML only, NOBYPASSRLS). | `docker-compose.yml` now wires the api container to the `_app` role and migrations to the `_migrator` role. Roles are created by `apps/api/cmd/migrate/init.sh` but **only on a fresh postgres volume**. Existing volumes need section 4.2 below. |
+| **DB roles** | App + migrations both ran as the `sbomhub` superuser of the DB. | Two distinct roles: `sbomhub_migrator` (DDL, CREATEDB + CREATEROLE, **NOBYPASSRLS**) and `sbomhub_app` (DML only, NOBYPASSRLS). | `docker-compose.yml` now wires the api container to the `_app` role and migrations to the `_migrator` role. Roles are created by `./install.sh --bootstrap-roles` (or by `./install.sh --start` on a fresh curl-only install), which runs the bootstrap SQL inside the running postgres container via `docker compose exec ... psql`. Both fresh installs and existing volumes use the same code path (codex-r8). |
 | **`ENCRYPTION_KEY`** | Defaulted to `changeme` / `default` placeholder if unset. | No bundled default. The api refuses to boot unless `ENCRYPTION_KEY` is set, at least 32 bytes, and not one of the known placeholders (`changeme`, `default`, `test`, …). | `docker compose up` itself now errors out at variable-substitution time, before the api container is even started. |
 | **SBOM upload API** | `POST /cli/upload` (multipart). | `POST /api/v1/projects/:id/sbom` with `Authorization: Bearer sbh_…` and raw JSON body. The legacy `/cli/upload` is deprecated and scheduled for removal on 2026-09-24. | Update any custom integrations against [docs/api.md](./api.md) / [docs/snippets/curl-upload.md](./snippets/curl-upload.md). |
 | **`tenant_id` NOT NULL** | `sboms.tenant_id` / `components.tenant_id` were nullable (legacy rows from before migration 023 may have had NULL). | Migration **027** backfills any NULL `tenant_id` from the parent project / sbom and then promotes the column to `NOT NULL`. Truly orphaned rows abort the migration loudly. | See section 5 for remediation if 027 aborts on your DB. |
@@ -85,15 +85,19 @@ the new `_app` / `_migrator` DB roles do not exist on your existing volume.
 
 ### 4.2 Bootstrap the new DB roles into the existing volume
 
-The two new roles (`sbomhub_app`, `sbomhub_migrator`) are normally created by
-`apps/api/cmd/migrate/init.sh`, which postgres only runs when the data
-directory is empty. Existing self-hosters therefore need to invoke the same
-SQL against the live database explicitly.
+The two new roles (`sbomhub_app`, `sbomhub_migrator`) live outside the
+default `POSTGRES_USER` and must be created against the live database
+explicitly. (Prior to codex-r8 a host-side bind mount of
+`apps/api/cmd/migrate/init.sh` ran inside postgres on fresh volume init,
+but that bind mount broke curl-only installs — the host file was simply
+missing — so role creation now runs via `docker compose exec ... psql`
+in every install path.)
 
 `install.sh --bootstrap-roles` does this in one command. It reads
-`MIGRATOR_PASSWORD` / `APP_PASSWORD` out of the **existing** `.env` (or
-generates and persists them if absent), then runs the SQL inside the
-running postgres container.
+`MIGRATOR_PASSWORD` / `APP_PASSWORD` out of the **existing** `.env` (run
+plain `./install.sh` first if those keys are absent), then pipes an
+idempotent bootstrap SQL into `psql` inside the running postgres
+container.
 
 ```bash
 # 1. If your .env does not yet contain MIGRATOR_PASSWORD / APP_PASSWORD /

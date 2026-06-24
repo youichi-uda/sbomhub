@@ -12,35 +12,55 @@
 curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/install.sh | sh
 ```
 
-The `install.sh` script will:
+The `install.sh` script will, when invoked with `--start`:
 
-1. Download `docker-compose.yml` to the current directory.
-2. Generate an `ENCRYPTION_KEY` and write a minimal `.env` (if one does not exist).
-3. Run `docker compose up -d` and print the dashboard URL.
+1. Download `docker-compose.yml` and `.env.example` to the current directory
+   if they are not already present.
+2. Generate `ENCRYPTION_KEY`, `MIGRATOR_PASSWORD`, `APP_PASSWORD` and write a
+   secure `.env` (if one does not exist).
+3. `docker compose up -d --wait postgres` so postgres reaches a healthy
+   state before the rest of the stack tries to connect.
+4. Create the `sbomhub_app` / `sbomhub_migrator` roles inside the running
+   postgres container via `docker compose exec ... psql` (idempotent;
+   re-runs are safe).
+5. `docker compose up -d` to start `api` / `web` / `redis`, then print the
+   dashboard URL.
 
-> `install.sh` ships in a follow-up milestone (#6). Until then, use the manual
-> equivalent below — both end at the same state.
+> The pipe-to-`sh` one-liner above lands in a follow-up milestone (#6).
+> Until then, the closest equivalent is the two-command manual flow below.
 
-## Manual equivalent
+## Manual equivalent (curl-only, no `git clone`)
 
 ```bash
-# 1. Download docker-compose.yml (no git clone required).
+# 1. Download install.sh and docker-compose.yml (no git clone required).
+curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/install.sh \
+  -o install.sh && chmod +x install.sh
 curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml \
   -o docker-compose.yml
 
-# 2. Generate an encryption key and write .env.
-#    The Go server reads ENCRYPTION_KEY (no SBOMHUB_ prefix). docker compose
-#    refuses to start if it is missing or set to the placeholder value.
-cat > .env <<EOF
-ENCRYPTION_KEY=$(openssl rand -base64 32)
-EOF
+# 2. Run the one-shot installer. This:
+#    - generates a .env with a random ENCRYPTION_KEY / MIGRATOR_PASSWORD / APP_PASSWORD,
+#    - starts postgres and waits for healthy,
+#    - creates the sbomhub_app / sbomhub_migrator roles (codex-r8: previously
+#      bind-mounted into postgres, now applied via `docker compose exec ... psql`
+#      so the curl-only path no longer needs the apps/api/cmd/migrate/init.sh
+#      host file),
+#    - brings up api / web / redis.
+./install.sh --start
 
-# 3. Start the stack.
-docker compose up -d
+# 3. Open the dashboard.
+#    open http://localhost:3000        # macOS
+#    xdg-open http://localhost:3000    # Linux
+```
 
-# 4. Open the dashboard.
-#    open http://localhost:3000   # macOS
-#    xdg-open http://localhost:3000   # Linux
+If you prefer to drive the stack manually instead of letting `install.sh` run
+`docker compose`, split it into:
+
+```bash
+./install.sh                              # just generate .env
+docker compose up -d --wait postgres      # start postgres first
+./install.sh --bootstrap-roles            # create sbomhub_app / sbomhub_migrator
+docker compose up -d                      # start api / web / redis
 ```
 
 ## Verifying the install

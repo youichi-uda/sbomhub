@@ -98,24 +98,19 @@ If no provider is configured, AI features stay off. Manual VEX authoring, manual
 ### Docker Compose (self-host, recommended)
 
 ```bash
-# 1. Pull docker-compose.yml (no clone required)
-curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
+# 1. Pull install.sh and docker-compose.yml (no clone required)
+curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/install.sh \
+  -o install.sh && chmod +x install.sh
+curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml \
+  -o docker-compose.yml
 
-# 2. Create .env with at minimum an encryption key.
-#    The Go server reads ENCRYPTION_KEY (no SBOMHUB_ prefix); docker
-#    compose refuses to start if it is missing or set to the placeholder.
-cat > .env <<EOF
-ENCRYPTION_KEY=$(openssl rand -base64 32)
-# Optional: enable AI features
-# SBOMHUB_LLM_PROVIDER=openai
-# SBOMHUB_LLM_MODEL=gpt-5
-# OPENAI_API_KEY=sk-...
-EOF
+# 2. One-shot bootstrap:
+#    - generates .env (random ENCRYPTION_KEY / MIGRATOR_PASSWORD / APP_PASSWORD),
+#    - starts postgres and seeds the sbomhub_app / sbomhub_migrator roles,
+#    - brings up api / web / redis.
+./install.sh --start
 
-# 3. Start
-docker compose up -d
-
-# 4. Open http://localhost:3000
+# 3. Open http://localhost:3000
 ```
 
 For a one-line bootstrap (or the equivalent manual steps as a single source
@@ -126,8 +121,10 @@ Or clone the repo:
 ```bash
 git clone https://github.com/youichi-uda/sbomhub.git
 cd sbomhub
-./install.sh                # generates .env with a random ENCRYPTION_KEY (idempotent)
-docker compose up -d
+./install.sh                              # generates .env (idempotent)
+docker compose up -d --wait postgres      # bring postgres up first
+./install.sh --bootstrap-roles            # create sbomhub_app / sbomhub_migrator
+docker compose up -d                      # start api / web / redis
 ```
 
 > `./install.sh` is idempotent: an existing `.env` is left untouched. Re-run with `--force` to back the old file up to `.env.bak.YYYYMMDD` and issue fresh secrets.
