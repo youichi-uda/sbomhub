@@ -6,7 +6,31 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
+
+// EnvLLMTimeoutSeconds is the env var consulted by LLMTimeoutFromEnv.
+const EnvLLMTimeoutSeconds = "SBOMHUB_LLM_TIMEOUT_SECONDS"
+
+// LLMTimeoutFromEnv returns the operator-configured LLM call timeout,
+// falling back to DefaultLLMTimeout seconds when the env var is unset
+// or unparseable. Negative / zero values are rejected so a misconfigured
+// operator cannot silently disable the bound by setting 0.
+//
+// M1 Codex review #F19 (part 3): every triage Provider.Complete is
+// wrapped in context.WithTimeout(ctx, LLMTimeoutFromEnv()) so a slow /
+// hanging upstream LLM cannot pin a goroutine forever.
+func LLMTimeoutFromEnv() time.Duration {
+	raw := os.Getenv(EnvLLMTimeoutSeconds)
+	if raw == "" {
+		return time.Duration(DefaultLLMTimeout) * time.Second
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return time.Duration(DefaultLLMTimeout) * time.Second
+	}
+	return time.Duration(v) * time.Second
+}
 
 // DefaultConfidenceThreshold is the M1 default below which any LLM
 // decision is clamped to under_investigation. Calibrated against the
@@ -18,6 +42,13 @@ const DefaultConfidenceThreshold = 0.7
 
 // EnvConfidenceThreshold is the env var consulted by ConfidenceThresholdFromEnv.
 const EnvConfidenceThreshold = "SBOMHUB_AI_CONFIDENCE_THRESHOLD"
+
+// DefaultLLMTimeout bounds Provider.Complete during triage so a hanging
+// upstream cannot block a request forever. Configurable per-deployment via
+// SBOMHUB_LLM_TIMEOUT_SECONDS. 90s is the M1 default — most LLM providers
+// cap at 60s of model think-time and we keep a 30s margin for TLS / first
+// byte / response decoding. M1 Codex review #F19 (part 3).
+const DefaultLLMTimeout = 90
 
 // Sentinel errors returned by the guards layer. The runner converts them
 // to the appropriate HTTP status (422 for ErrEmptyEvidence, 400 for the

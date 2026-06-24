@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
@@ -1127,8 +1128,12 @@ func TestRunner_Run_ResolveComponentIDFromVulnerability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	if resolver.called != 1 {
-		t.Errorf("resolver.called = %d, want 1", resolver.called)
+	// F19: the resolver is consulted twice — once in Stage 1 to enumerate
+	// affected components, once in Stage 3 to re-validate scope (TOCTOU
+	// defense — a component could have been deleted while the LLM call
+	// was running). Pre-F19 the count was 1.
+	if resolver.called != 2 {
+		t.Errorf("resolver.called = %d, want 2 (Stage 1 enumerate + Stage 3 revalidate)", resolver.called)
 	}
 	if got := len(drafts.inserted); got != 1 {
 		t.Fatalf("expected 1 draft inserted, got %d", got)
@@ -1680,6 +1685,269 @@ func TestRunner_Run_MissingVulnerabilityCVELookup_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cve lookup") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// DB connection pool exhaustion regression (Codex M1 round 10 #F19)
+// ----------------------------------------------------------------------------
+//
+// Until the F19 fix, runner.Run() executed entirely inside the
+// request-scoped TenantTx (apps/api/internal/middleware/tx.go). That tx
+// pinned one Postgres connection from the 25-slot pool for the entire
+// request, including the up-to-60s Provider.Complete call. Twenty-five
+// concurrent triage requests could therefore exhaust the pool and
+// block every other DB-backed route.
+//
+// The runner now drives a 2-stage flow via TxManager:
+//
+//   1. Stage 1 (short read tx): resolve provider / componentIDs /
+//      cve_id, read advisory_excerpts + reachability_results, commit.
+//   2. Stage 2 (NO tx, bounded ctx): Provider.Complete with
+//      context.WithTimeout(ctx, r.llmTimeout).
+//   3. Stage 3 (short write tx): re-validate component scope (TOCTOU),
+//      persist llm_calls + drafts + per-draft audit. Commit.
+//
+// Tests below pin:
+//   F19.1 (TestRunner_Run_DoesNotHoldDBConnectionDuringLLMCall):
+//         RunRead / RunWrite are each called exactly once and the LLM
+//         call sees no tx bound to its ctx.
+//   F19.2 (TestRunner_Run_Stage3_ReValidatesComponentScope):
+//         A component deleted between Stage 1 and Stage 3 surfaces
+//         ErrVulnerabilityNotInTenant instead of silently persisting a
+//         draft pointing at the gone row.
+//   F19.3 (TestRunner_Run_LLMTimeout_BoundedContext):
+//         A provider that blocks past r.llmTimeout fires
+//         context.DeadlineExceeded and the runner surfaces the error
+//         instead of waiting forever.
+
+// countingTxManager wraps another TxManager and counts how many times
+// each method fired so the F19 tests can assert on Stage 1 vs Stage 3
+// separation. The inner manager is invoked for actual behaviour so the
+// fakes still see their normal call sequence.
+type countingTxManager struct {
+	mu        sync.Mutex
+	inner     TxManager
+	readCnt   int
+	writeCnt  int
+	// inReadDuringFn captures whether ctx had a tx bound while fn ran.
+	// Set on every RunRead call so test assertions can stay simple.
+	lastReadHadTx  bool
+	lastWriteHadTx bool
+}
+
+func (m *countingTxManager) RunRead(ctx context.Context, tenantID uuid.UUID, fn func(context.Context) error) error {
+	m.mu.Lock()
+	m.readCnt++
+	m.mu.Unlock()
+	return m.inner.RunRead(ctx, tenantID, func(c context.Context) error {
+		_, has := database.TxFromContext(c)
+		m.mu.Lock()
+		m.lastReadHadTx = has
+		m.mu.Unlock()
+		return fn(c)
+	})
+}
+
+func (m *countingTxManager) RunWrite(ctx context.Context, tenantID uuid.UUID, fn func(context.Context) error) error {
+	m.mu.Lock()
+	m.writeCnt++
+	m.mu.Unlock()
+	return m.inner.RunWrite(ctx, tenantID, func(c context.Context) error {
+		_, has := database.TxFromContext(c)
+		m.mu.Lock()
+		m.lastWriteHadTx = has
+		m.mu.Unlock()
+		return fn(c)
+	})
+}
+
+// ctxAwareStubProvider records whether the ctx passed into Complete()
+// carried an active *sql.Tx. The F19 contract is "no tx is held during
+// the LLM upstream call"; this lets us assert it directly.
+type ctxAwareStubProvider struct {
+	resp           *llm.CompleteResponse
+	err            error
+	sawTxInCtx    bool
+	receivedCtx   context.Context
+	blockUntilCtx bool // if true, Complete blocks until ctx.Done()
+}
+
+func (p *ctxAwareStubProvider) Name() string  { return "ctx-stub" }
+func (p *ctxAwareStubProvider) Model() string { return "ctx-stub-model" }
+func (p *ctxAwareStubProvider) Complete(ctx context.Context, _ llm.CompleteRequest) (*llm.CompleteResponse, error) {
+	_, p.sawTxInCtx = database.TxFromContext(ctx)
+	p.receivedCtx = ctx
+	if p.blockUntilCtx {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
+	return p.resp, nil
+}
+func (p *ctxAwareStubProvider) Embed(_ context.Context, _ llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	return nil, llm.ErrNotImplemented
+}
+func (p *ctxAwareStubProvider) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+
+// TestRunner_Run_DoesNotHoldDBConnectionDuringLLMCall verifies the F19
+// 2-stage architecture: Stage 1 RunRead, Stage 2 LLM call with NO tx
+// in ctx, Stage 3 RunWrite. Pre-F19 the runner ran everything inside a
+// single ambient TenantTx so the LLM call inherited a tx-bound ctx and
+// pinned a Postgres connection for the entire upstream wait.
+func TestRunner_Run_DoesNotHoldDBConnectionDuringLLMCall(t *testing.T) {
+	componentID := uuid.New()
+	provider := &ctxAwareStubProvider{resp: &llm.CompleteResponse{
+		Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9),
+	}}
+	txMgr := &countingTxManager{inner: PassthroughTxManager{}}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: provider, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F19"),
+		TxManager:                txMgr,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F19",
+		ComponentID: &componentID,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	// Stage 1 + Stage 3 each open exactly one tx.
+	if txMgr.readCnt != 1 {
+		t.Errorf("txManager.RunRead called %d times, want 1 (Stage 1 only)", txMgr.readCnt)
+	}
+	if txMgr.writeCnt != 1 {
+		t.Errorf("txManager.RunWrite called %d times, want 1 (Stage 3 only)", txMgr.writeCnt)
+	}
+
+	// The load-bearing assertion: at LLM call time the runner MUST NOT
+	// have a tx bound to ctx. Pre-F19 (TenantTx-wrapped) the ambient tx
+	// stayed alive across the upstream wait; post-F19 Stage 1 committed
+	// before Stage 2 fired.
+	if provider.sawTxInCtx {
+		t.Errorf("Provider.Complete saw a *sql.Tx on ctx — F19 regression: LLM call is holding a DB connection")
+	}
+
+	// Sanity: the LLM call MUST have happened (otherwise the "no tx"
+	// assertion above is vacuous because Complete never ran).
+	if provider.receivedCtx == nil {
+		t.Fatalf("Provider.Complete was never called — F19 regression test is vacuous")
+	}
+}
+
+// TestRunner_Run_Stage3_ReValidatesComponentScope pins the TOCTOU
+// defense: between Stage 1 (reads componentIDs = [c1]) and Stage 3
+// (re-validates) the component is deleted. The runner must NOT persist
+// a draft pointing at the gone row.
+func TestRunner_Run_Stage3_ReValidatesComponentScope(t *testing.T) {
+	c1 := uuid.New()
+	resolver := &shrinkingComponentResolver{
+		stage1: []uuid.UUID{c1},
+		stage3: nil, // component deleted between stages
+	}
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	llmCalls := &fakeLLMCallWriter{}
+	audit := &fakeAuditWriter{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
+		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F19A"),
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F19A",
+		// No ComponentID supplied — fan-out path. Stage 1 resolves
+		// [c1]; Stage 3 re-resolve returns []; intersection empty.
+	})
+	if err == nil {
+		t.Fatalf("Run must reject a TOCTOU scope drift (component deleted between Stage 1 and Stage 3)")
+	}
+	if !errors.Is(err, ErrVulnerabilityNotInTenant) {
+		t.Errorf("error %v should wrap ErrVulnerabilityNotInTenant (empty Stage 3 intersection)", err)
+	}
+	if got := len(drafts.inserted); got != 0 {
+		t.Errorf("expected no draft persisted on TOCTOU drift, got %d", got)
+	}
+	if got := len(audit.entries); got != 0 {
+		t.Errorf("expected no audit row on TOCTOU drift, got %d", got)
+	}
+	if resolver.callCount != 2 {
+		t.Errorf("resolver called %d times, want 2 (Stage 1 + Stage 3)", resolver.callCount)
+	}
+}
+
+// shrinkingComponentResolver returns different componentID slices on
+// each call so the test can simulate "component existed at Stage 1
+// time, gone by Stage 3 time".
+type shrinkingComponentResolver struct {
+	mu        sync.Mutex
+	stage1    []uuid.UUID
+	stage3    []uuid.UUID
+	callCount int
+}
+
+func (r *shrinkingComponentResolver) ListIDsByVulnerability(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID) ([]uuid.UUID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.callCount++
+	if r.callCount == 1 {
+		return r.stage1, nil
+	}
+	return r.stage3, nil
+}
+
+// TestRunner_Run_LLMTimeout_BoundedContext pins the F19 part-3 contract:
+// every Provider.Complete is wrapped in context.WithTimeout(ctx,
+// r.llmTimeout) so a hanging upstream cannot block a goroutine forever.
+func TestRunner_Run_LLMTimeout_BoundedContext(t *testing.T) {
+	componentID := uuid.New()
+	// blockUntilCtx=true makes Complete wait for ctx.Done() then return
+	// ctx.Err() — that's the canonical "slow upstream" behaviour.
+	provider := &ctxAwareStubProvider{blockUntilCtx: true}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: provider, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F19B"),
+		LLMTimeout:               50 * time.Millisecond,
+	})
+
+	start := time.Now()
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F19B",
+		ComponentID: &componentID,
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Run must surface a timeout error when provider hangs past r.llmTimeout")
+	}
+	if !strings.Contains(err.Error(), "deadline exceeded") &&
+		!strings.Contains(err.Error(), "context canceled") {
+		t.Errorf("expected wrapped context error, got %v", err)
+	}
+	// 50ms timeout with generous slack — must NOT have waited the full
+	// minute the provider would otherwise block for.
+	if elapsed > 2*time.Second {
+		t.Errorf("Run took %s, well past the 50ms bound — F19 timeout did not fire", elapsed)
 	}
 }
 

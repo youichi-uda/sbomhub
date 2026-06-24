@@ -320,6 +320,21 @@ type Runner struct {
 
 	threshold float64
 	clock     func() time.Time
+
+	// txManager opens short-lived per-tenant transactions for the 2-stage
+	// Run() flow. M1 Codex review #F19: previously the runner ran inside
+	// the request-scoped TenantTx, so a slow Provider.Complete pinned a
+	// Postgres connection from the 25-slot pool for up to 60s while doing
+	// no DB work. The runner now drives its own tx lifecycle via this
+	// field — Stage 1 read tx → commit → LLM call (no tx) → Stage 3 write
+	// tx with re-validation → commit. Defaults to PassthroughTxManager
+	// (no-op) for unit tests so the in-memory fakes stay simple.
+	txManager TxManager
+
+	// llmTimeout bounds each Provider.Complete call (M1 Codex review #F19
+	// part 3). Default DefaultLLMTimeout seconds, overridable via
+	// SBOMHUB_LLM_TIMEOUT_SECONDS (LLMTimeoutFromEnv).
+	llmTimeout time.Duration
 }
 
 // RunnerConfig is the constructor input for NewRunner.
@@ -361,6 +376,18 @@ type RunnerConfig struct {
 	Threshold float64
 	// Clock is overrideable for tests; defaults to time.Now.
 	Clock func() time.Time
+
+	// TxManager drives Stage 1 / Stage 3 transaction lifecycle (M1 Codex
+	// review #F19). Production wiring MUST pass *DBTxManager so the
+	// connection-pool fix takes effect; nil defaults to
+	// PassthroughTxManager which is unit-test only.
+	TxManager TxManager
+
+	// LLMTimeout bounds Provider.Complete during Stage 2 (M1 Codex review
+	// #F19 part 3). Zero falls back to LLMTimeoutFromEnv() (default
+	// DefaultLLMTimeout seconds, overridable via
+	// SBOMHUB_LLM_TIMEOUT_SECONDS).
+	LLMTimeout time.Duration
 }
 
 // NewRunner constructs a Runner. Required fields (Drafts, Advisories,
@@ -394,6 +421,16 @@ func NewRunner(cfg RunnerConfig) *Runner {
 	if clock == nil {
 		clock = time.Now
 	}
+	txMgr := cfg.TxManager
+	if txMgr == nil {
+		// Tests + legacy wiring fall through to no-op; production wires
+		// *DBTxManager explicitly (see cmd/server/main.go).
+		txMgr = PassthroughTxManager{}
+	}
+	llmTimeout := cfg.LLMTimeout
+	if llmTimeout <= 0 {
+		llmTimeout = LLMTimeoutFromEnv()
+	}
 	return &Runner{
 		drafts:           cfg.Drafts,
 		advisories:       cfg.Advisories,
@@ -407,6 +444,8 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		providerResolver: cfg.ProviderResolver,
 		threshold:        threshold,
 		clock:            clock,
+		txManager:        txMgr,
+		llmTimeout:       llmTimeout,
 	}
 }
 
@@ -470,20 +509,30 @@ type RunResult struct {
 
 // Run executes one triage cycle for (TenantID, ProjectID, CVEID).
 //
-// Per-request flow (M1 Codex review #F2 / #F3 / #F4):
+// 2-stage architecture (M1 Codex review #F19):
 //
-//  1. Resolve the LLM provider via ProviderResolver (tenant_llm_config →
-//     decrypt → llm.NewProviderFromConfig). Falls back to defaultProvider
-//     (env-resolved at startup), then to DisabledProvider.
-//  2. Resolve component_id(s) — caller-supplied ComponentID wins;
-//     otherwise the ComponentVulnerabilityResolver enumerates every
-//     component in (tenant, project) linked to the vulnerability. Zero
-//     matches → ErrVulnerabilityNotInTenant (caller maps to 404).
-//  3. If the resolved provider is *llm.DisabledProvider, skip the LLM
-//     call and persist one under_investigation draft per component +
-//     `vex_draft_ai_disabled` audit row. AIDisabled=true on the result.
-//  4. Otherwise call provider.Complete once, then fan out one draft per
-//     component sharing the same parsed decision / evidence / llm_call.
+//  1. Stage 1 — short read tx via TxManager.RunRead. Resolves the LLM
+//     provider (tenant_llm_config BYOK decrypt), component_id(s),
+//     authoritative cve_id, advisory_excerpts, reachability_results.
+//     Commits before Stage 2 so the Postgres connection is released
+//     during the slow upstream call.
+//  2. Stage 2 — Provider.Complete with a bounded context (default
+//     DefaultLLMTimeout seconds, env-overridable). NO Postgres
+//     transaction is held during this step. AI-disabled providers skip
+//     this stage entirely.
+//  3. Stage 3 — short write tx via TxManager.RunWrite. Re-validates
+//     component scope + cve_id (TOCTOU defense — a component could
+//     have been deleted between Stage 1 and Stage 3) then persists
+//     llm_calls, fans out one vex_drafts row per (component, vuln)
+//     pair, and emits the per-draft audit_logs rows. All atomic.
+//
+// Connection-pool hygiene contract: at no point does the runner hold a
+// Postgres connection across the Stage 2 LLM call. The previous
+// architecture pinned the request's TenantTx connection for up to 60s
+// while waiting for the upstream, allowing 25 concurrent triage
+// requests to exhaust the entire pool and block unrelated DB-backed
+// routes. See cmd/server/main.go for the route-level concurrency
+// limiter that complements this fix.
 //
 // Error contract:
 //   - input validation failures              → returns a sentinel input
@@ -492,6 +541,7 @@ type RunResult struct {
 //   - ErrComponentNotInVulnerabilityScope    → caller maps to 404
 //   - ErrCVEIDMismatch                       → caller maps to 400 (#F12)
 //   - non-Disabled llm.Provider failure      → wrapped (caller maps 5xx)
+//   - LLM bounded-context timeout            → wrapped (caller maps 5xx)
 //   - ValidateEvidence ErrEmptyEvidence      → wrapped (caller maps 422)
 //   - persistence failures                    → wrapped (caller maps 500)
 func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
@@ -508,67 +558,71 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		return nil, errors.New("triage.Run: vulnerability_id is required")
 	}
 
-	// Step 0a: resolve the per-request LLM provider (#F2). Resolver wins;
-	// fall back to the env-resolved default; final fallback is a
-	// DisabledProvider so the #F4 AI-disabled path can fire.
-	provider, err := r.resolveProvider(ctx, in.TenantID)
-	if err != nil {
-		return nil, fmt.Errorf("triage.Run: resolve provider: %w", err)
-	}
+	// ----------------------------------------------------------------
+	// Stage 1: short read tx — resolve provider + componentIDs +
+	// authoritative cve_id + advisory_excerpts + reachability_results.
+	// ----------------------------------------------------------------
+	var (
+		provider     llm.Provider
+		componentIDs []uuid.UUID
+		advisories   []AdvisoryExcerptRow
+		reach        []ReachabilityRow
+	)
+	if err := r.txManager.RunRead(ctx, in.TenantID, func(ctx context.Context) error {
+		var err error
+		// Step 0a: resolve the per-request LLM provider (#F2).
+		provider, err = r.resolveProvider(ctx, in.TenantID)
+		if err != nil {
+			return fmt.Errorf("triage.Run: resolve provider: %w", err)
+		}
 
-	// Step 0b: resolve component IDs (#F3). The CLI omits ComponentID
-	// because /vulnerabilities does not project the component join; the
-	// server resolves it here. Caller-supplied wins; otherwise the
-	// resolver enumerates every (component, vuln) pair in tenant scope.
-	componentIDs, err := r.resolveComponentIDs(ctx, in)
-	if err != nil {
+		// Step 0b: resolve component IDs (#F3 / #F6).
+		componentIDs, err = r.resolveComponentIDs(ctx, in)
+		if err != nil {
+			return err
+		}
+
+		// Step 0c: re-resolve the authoritative cve_id (#F12).
+		resolvedCVEID, err := r.resolveAuthoritativeCVEID(ctx, in.VulnerabilityID, in.CVEID)
+		if err != nil {
+			return err
+		}
+		in.CVEID = resolvedCVEID
+
+		// Step 0d: AI-disabled providers do not need advisory /
+		// reachability reads — runAIDisabled handles its own
+		// persistence inside Stage 3. Skip the extra queries.
+		if _, isDisabled := provider.(*llm.DisabledProvider); isDisabled {
+			return nil
+		}
+
+		// Step 1: gather context (advisory + reachability reads).
+		advisories, err = r.advisories.GetByCVE(ctx, in.TenantID, in.CVEID)
+		if err != nil {
+			return fmt.Errorf("triage.Run: load advisory excerpts: %w", err)
+		}
+		reachFilter := ReachabilityFilter{
+			CVEID:       in.CVEID,
+			ComponentID: in.ComponentID,
+		}
+		reach, err = r.reachability.ListByProject(ctx, in.TenantID, in.ProjectID, reachFilter)
+		if err != nil {
+			return fmt.Errorf("triage.Run: load reachability results: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
-	// Step 0c: re-resolve the CVEID server-side from the vulnerabilities
-	// row (#F12). RunInput accepts both VulnerabilityID and CVEID from
-	// the request, and VulnerabilityID has just been validated against
-	// the (tenant, project) graph by resolveComponentIDs — but the
-	// downstream advisory / reachability fetches both index by CVEID,
-	// so without this cross-check a caller could pair an in-scope
-	// VulnerabilityID with an arbitrary CVE-XXXX-YYYY string and have
-	// the runner build prompts + persist drafts using stranger evidence.
-	// We rebind in.CVEID to the resolved value so every later step
-	// (prompt, advisory_excerpts fetch, reachability fetch, draft, audit,
-	// llm_calls row) sees the same authoritative CVE id.
-	resolvedCVEID, err := r.resolveAuthoritativeCVEID(ctx, in.VulnerabilityID, in.CVEID)
-	if err != nil {
-		return nil, err
-	}
-	in.CVEID = resolvedCVEID
-
-	// Step 0d: if the resolved provider is disabled, branch into the
-	// AI-disabled persistence path (#F4). No advisory / reachability
-	// fetch and no LLM call.
+	// AI-disabled path: skip Stage 2 entirely; Stage 3 is a write tx
+	// that re-validates scope + persists under_investigation drafts.
 	if _, ok := provider.(*llm.DisabledProvider); ok {
 		return r.runAIDisabled(ctx, in, provider, componentIDs)
 	}
 
-	// Step 1: gather context.
-	advisories, err := r.advisories.GetByCVE(ctx, in.TenantID, in.CVEID)
-	if err != nil {
-		return nil, fmt.Errorf("triage.Run: load advisory excerpts: %w", err)
-	}
-	reachFilter := ReachabilityFilter{
-		CVEID: in.CVEID,
-		// When fanning out we leave ComponentID nil so reachability rows
-		// across all affected components are visible to the LLM; per-
-		// component filtering happens at draft persistence time. When
-		// the caller supplied an explicit component_id we still scope
-		// the reachability fetch to that component (backward compat).
-		ComponentID: in.ComponentID,
-	}
-	reach, err := r.reachability.ListByProject(ctx, in.TenantID, in.ProjectID, reachFilter)
-	if err != nil {
-		return nil, fmt.Errorf("triage.Run: load reachability results: %w", err)
-	}
-
-	// Step 2: build LLM prompt + call provider.
+	// ----------------------------------------------------------------
+	// Stage 2: LLM call with bounded context. NO Postgres tx is held.
+	// ----------------------------------------------------------------
 	prompt := buildPrompt(in.CVEID, advisories, reach)
 	completeReq := llm.CompleteRequest{
 		System:      vexTriageSystemPrompt,
@@ -582,18 +636,15 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		completeReq.UserID = in.UserID.String()
 	}
 
+	llmCtx, cancel := context.WithTimeout(ctx, r.llmTimeout)
+	defer cancel()
 	llmStart := r.clock()
-	resp, llmErr := r.provider_Complete(ctx, provider, completeReq)
+	resp, llmErr := r.provider_Complete(llmCtx, provider, completeReq)
 	llmDuration := r.clock().Sub(llmStart)
 
-	// Persist the llm_calls row whether the call succeeded or failed,
-	// so the audit trail captures transient-failure cases. NOTE: the
-	// AI-disabled case has its own path (runAIDisabled) and does not
-	// reach here, so r.provider here is always a real provider.
+	// Build the llm_calls record up-front so success and failure paths
+	// share a single source of truth for the audit row.
 	llmCallID := uuid.New()
-	// For audit purposes record the first component (or nil) — the
-	// llm_calls row predates fan-out. If we want per-component
-	// attribution, that lives on vex_drafts.component_id directly.
 	var llmTargetComponent *uuid.UUID
 	if len(componentIDs) > 0 {
 		c := componentIDs[0]
@@ -622,48 +673,41 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		callRecord.FinishReason = resp.FinishReason
 	}
 	if llmErr != nil {
-		// M1 Codex review #F13: scrub any auth-shaped material out of
-		// the provider error before BOTH the audit-row persistence and
-		// the wrapped return. Net/http surfaces transport failures as
-		// `*url.Error` whose Error() method echoes the full request
-		// URL, so a Gemini call that historically used `?key=...` auth
-		// would leak the BYOK key into:
-		//   - llm_calls.error_message (plaintext DB persistence),
-		//   - the wrapped return error → handler 500 body
-		//     (mapRunnerError falls through to {"error": err.Error()}).
-		// RedactProviderError is a no-op when no auth-shaped material
-		// is present, so OpenAI / Anthropic (Bearer / x-api-key auth)
-		// pass through unchanged. Gemini now authenticates via header
-		// too (see llm/gemini.go) but the scrub stays as defense in
-		// depth against future regressions / third-party wrappers.
+		// M1 Codex review #F13: scrub auth-shaped material from any
+		// provider error before persistence + wrapped return.
 		llmErr = llm.RedactProviderError(llmErr)
 		callRecord.ErrorMessage = llmErr.Error()
 	}
-	if persistErr := r.llmCalls.Insert(ctx, callRecord); persistErr != nil {
-		// Surfaceable but not fatal — we still want to propagate the
-		// underlying llmErr if there was one, but logging makes ops
-		// aware of audit-write failures.
-		slog.Warn("triage.Run: persist llm_calls failed",
-			"tenant_id", in.TenantID, "cve_id", in.CVEID, "error", persistErr)
-	}
 
+	// On LLM failure: persist the llm_calls audit row in its own short
+	// write tx (so operators can trace failed cycles), then surface the
+	// error. No drafts, no per-draft audit row.
 	if llmErr != nil {
+		if persistErr := r.txManager.RunWrite(ctx, in.TenantID, func(ctx context.Context) error {
+			return r.llmCalls.Insert(ctx, callRecord)
+		}); persistErr != nil {
+			slog.Warn("triage.Run: persist llm_calls failed",
+				"tenant_id", in.TenantID, "cve_id", in.CVEID, "error", persistErr)
+		}
 		return nil, fmt.Errorf("triage.Run: llm provider failed: %w", llmErr)
 	}
 
-	// Step 3: parse + guard.
+	// Step 3: parse + guard (no tx needed — pure CPU).
 	parsed, _ := ParseLLMResponse(resp.Content)
 	if parsed == nil {
-		// ParseLLMResponse contract: never returns nil + nil. Defensive.
 		return nil, fmt.Errorf("triage.Run: nil parsed decision (provider=%s)", provider.Name())
 	}
 	finalState, clamped := ApplyConfidenceThreshold(string(parsed.State), parsed.Confidence, r.threshold)
 
-	// Step 4: validate evidence. If the LLM emitted no evidence, the
-	// fallback path in ParseLLMResponse always tacks on an llm_rationale
-	// pointer, but real success-path responses with empty evidence are
-	// 422 per the issue spec.
+	// Step 4: validate evidence (no tx needed). On rejection we still
+	// persist the llm_calls audit row so the failed parse is traceable.
 	if err := ValidateEvidence(parsed.Evidence); err != nil {
+		if persistErr := r.txManager.RunWrite(ctx, in.TenantID, func(ctx context.Context) error {
+			return r.llmCalls.Insert(ctx, callRecord)
+		}); persistErr != nil {
+			slog.Warn("triage.Run: persist llm_calls failed",
+				"tenant_id", in.TenantID, "cve_id", in.CVEID, "error", persistErr)
+		}
 		return nil, fmt.Errorf("triage.Run: %w", err)
 	}
 
@@ -671,107 +715,107 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("triage.Run: marshal evidence: %w", err)
 	}
-	// Optional FK pointers into advisory_excerpts / llm_calls. We
-	// populate AdvisoryExcerptID with the first matching row id so the
-	// UI can drill back without scanning the evidence array; advisory
-	// rows are per-(tenant, cve) so the same FK is correct for every
-	// fan-out component.
 	var advisoryFK *uuid.UUID
 	if len(advisories) > 0 {
 		v := advisories[0].ID
 		advisoryFK = &v
 	}
-	// M1 Codex review #F11: reachability_results rows are per-component
-	// (one per (component, cve) pair). The previous version sampled
-	// reach[0].ID once before the fan-out loop and reused it for every
-	// draft, which pointed component B / C / ...'s drafts at component
-	// A's reachability evidence — the draft viewer then surfaced the
-	// wrong "imported but unreachable from main()" rationale on the
-	// other components. We now index by component_id and look up the
-	// FK per fan-out iteration; components without a matching
-	// reachability row get a nil FK (NOT a stranger row).
 	reachByComponent := make(map[uuid.UUID]uuid.UUID, len(reach))
 	for _, rr := range reach {
 		if rr.ComponentID == uuid.Nil {
-			// Defensive — reachability_results.component_id is NOT NULL
-			// at the DB layer (migration 034), so a zero UUID here is
-			// either a fixture bug or a future schema drift. Skip rather
-			// than seeding the map with a zero key that would silently
-			// collide across components.
 			continue
 		}
-		// First write wins. If multiple reachability rows exist for the
-		// same component (e.g. multiple analyser runs), the UI drill-back
-		// only renders one — picking the first observed keeps draft
-		// behaviour deterministic. The full set is still visible via
-		// the reachability_results endpoint.
 		if _, exists := reachByComponent[rr.ComponentID]; !exists {
 			reachByComponent[rr.ComponentID] = rr.ID
 		}
 	}
 	llmFK := llmCallID
-
-	// Step 5: persist one vex_drafts row per (component, vuln) pair —
-	// the fan-out from #F3. Each draft carries the same parsed decision
-	// / evidence / llm_call FK; ComponentID, ReachabilityResultID, and
-	// the audit row's resource_id differ per component (#F11).
 	conf := parsed.Confidence
-	drafts := make([]*repository.VEXDraft, 0, len(componentIDs))
 	action := AuditActionVexDraftAIGenerated
 	if in.Reanalyse {
 		action = AuditActionVexDraftReanalysed
 	}
-	for _, compID := range componentIDs {
-		var reachFK *uuid.UUID
-		if rid, ok := reachByComponent[compID]; ok {
-			v := rid
-			reachFK = &v
+
+	// ----------------------------------------------------------------
+	// Stage 3: short write tx — re-validate scope (TOCTOU) + persist
+	// llm_calls + fan out drafts + per-draft audit rows. All atomic.
+	// ----------------------------------------------------------------
+	var drafts []*repository.VEXDraft
+	if err := r.txManager.RunWrite(ctx, in.TenantID, func(ctx context.Context) error {
+		// Re-validate component scope. Between Stage 1 and Stage 3 a
+		// component (or the whole vulnerability link) could have been
+		// deleted — silently persisting drafts pointing at gone rows
+		// would corrupt the audit trail. We intersect the freshly
+		// resolved set with the Stage 1 ids so we never grow the
+		// fan-out beyond what the LLM was asked about.
+		revalidatedIDs, err := r.revalidateComponentIDs(ctx, in, componentIDs)
+		if err != nil {
+			return err
 		}
-		draft := &repository.VEXDraft{
-			ID:                   uuid.New(),
-			TenantID:             in.TenantID,
-			ProjectID:            in.ProjectID,
-			ComponentID:          compID,
-			VulnerabilityID:      in.VulnerabilityID,
-			CVEID:                in.CVEID,
-			State:                finalState,
-			Justification:        string(parsed.Justification),
-			Detail:               parsed.Detail,
-			Confidence:           &conf,
-			Provider:             provider.Name(),
-			Model:                provider.Model(),
-			PromptHash:           callRecord.PromptHash,
-			ResponseHash:         callRecord.ResponseHash,
-			Evidence:             evidenceJSON,
-			AdvisoryExcerptID:    advisoryFK,
-			ReachabilityResultID: reachFK,
-			LLMCallID:            &llmFK,
-			Decision:             DecisionPending,
-			CreatedBy:            in.UserID,
+
+		// Persist the llm_calls audit row first so it commits even if
+		// a downstream draft INSERT fails for a different reason.
+		if err := r.llmCalls.Insert(ctx, callRecord); err != nil {
+			slog.Warn("triage.Run: persist llm_calls failed",
+				"tenant_id", in.TenantID, "cve_id", in.CVEID, "error", err)
+			// Audit-row failure is not fatal — keep the lifecycle
+			// drafts going so the user gets their verdict.
 		}
-		if err := r.drafts.Insert(ctx, draft); err != nil {
-			return nil, fmt.Errorf("triage.Run: persist vex_draft: %w", err)
+
+		drafts = make([]*repository.VEXDraft, 0, len(revalidatedIDs))
+		for _, compID := range revalidatedIDs {
+			var reachFK *uuid.UUID
+			if rid, ok := reachByComponent[compID]; ok {
+				v := rid
+				reachFK = &v
+			}
+			draft := &repository.VEXDraft{
+				ID:                   uuid.New(),
+				TenantID:             in.TenantID,
+				ProjectID:            in.ProjectID,
+				ComponentID:          compID,
+				VulnerabilityID:      in.VulnerabilityID,
+				CVEID:                in.CVEID,
+				State:                finalState,
+				Justification:        string(parsed.Justification),
+				Detail:               parsed.Detail,
+				Confidence:           &conf,
+				Provider:             provider.Name(),
+				Model:                provider.Model(),
+				PromptHash:           callRecord.PromptHash,
+				ResponseHash:         callRecord.ResponseHash,
+				Evidence:             evidenceJSON,
+				AdvisoryExcerptID:    advisoryFK,
+				ReachabilityResultID: reachFK,
+				LLMCallID:            &llmFK,
+				Decision:             DecisionPending,
+				CreatedBy:            in.UserID,
+			}
+			if err := r.drafts.Insert(ctx, draft); err != nil {
+				return fmt.Errorf("triage.Run: persist vex_draft: %w", err)
+			}
+			if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
+				"cve_id":               in.CVEID,
+				"vulnerability_id":     in.VulnerabilityID.String(),
+				"project_id":           in.ProjectID.String(),
+				"component_id":         compID.String(),
+				"llm_provider":         provider.Name(),
+				"llm_model":            provider.Model(),
+				"llm_call_id":          llmCallID.String(),
+				"confidence":           parsed.Confidence,
+				"confidence_threshold": r.threshold,
+				"clamped":              clamped,
+				"state":                finalState,
+				"justification":        string(parsed.Justification),
+				"reanalyse_from":       uuidStringOrEmpty(in.ReanalyseFromDraft),
+			}, in.IPAddress, in.UserAgent); err != nil {
+				return fmt.Errorf("triage.Run: %w", err)
+			}
+			drafts = append(drafts, draft)
 		}
-		// Step 6: audit log — one row per draft so compliance reviewers
-		// can trace the AI verdict on each (component, vuln) pair.
-		if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
-			"cve_id":               in.CVEID,
-			"vulnerability_id":     in.VulnerabilityID.String(),
-			"project_id":           in.ProjectID.String(),
-			"component_id":         compID.String(),
-			"llm_provider":         provider.Name(),
-			"llm_model":            provider.Model(),
-			"llm_call_id":          llmCallID.String(),
-			"confidence":           parsed.Confidence,
-			"confidence_threshold": r.threshold,
-			"clamped":              clamped,
-			"state":                finalState,
-			"justification":        string(parsed.Justification),
-			"reanalyse_from":       uuidStringOrEmpty(in.ReanalyseFromDraft),
-		}, in.IPAddress, in.UserAgent); err != nil {
-			return nil, fmt.Errorf("triage.Run: %w", err)
-		}
-		drafts = append(drafts, draft)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return &RunResult{
@@ -851,6 +895,59 @@ func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.U
 	return ids, nil
 }
 
+// revalidateComponentIDs re-runs the componentVulns resolver inside the
+// Stage 3 write tx and intersects the result with the Stage 1 set so the
+// runner never persists drafts for components that disappeared during
+// the LLM call (M1 Codex review #F19 TOCTOU defense).
+//
+// Behaviour:
+//   - Caller-supplied ComponentID path: if the supplied id is still in
+//     the resolver's set the result is [id]; otherwise the call returns
+//     ErrComponentNotInVulnerabilityScope.
+//   - Fan-out path: returns the intersection of the freshly resolved
+//     set with stage1IDs. An empty intersection returns
+//     ErrVulnerabilityNotInTenant — the same sentinel Stage 1 would
+//     have returned had the deletion happened earlier — so the handler
+//     surfaces a 404 the caller already knows how to handle (mapped to
+//     the generic "triage target not found" body by mapRunnerError).
+//   - When the resolver is not wired (legacy/unit-test path) we trust
+//     stage1IDs verbatim since there is no authoritative source to
+//     re-check against. This matches the original resolveComponentIDs
+//     fail-closed contract for the WHOLE call (handler maps 400).
+func (r *Runner) revalidateComponentIDs(ctx context.Context, in RunInput, stage1IDs []uuid.UUID) ([]uuid.UUID, error) {
+	if r.componentVulns == nil {
+		return stage1IDs, nil
+	}
+	resolved, err := r.componentVulns.ListIDsByVulnerability(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID)
+	if err != nil {
+		return nil, fmt.Errorf("triage.Run: revalidate component_ids: %w", err)
+	}
+	resolvedSet := make(map[uuid.UUID]struct{}, len(resolved))
+	for _, id := range resolved {
+		resolvedSet[id] = struct{}{}
+	}
+	// Caller-supplied component path: stage1IDs is [supplied], must still
+	// be in the resolver set.
+	if in.ComponentID != nil && *in.ComponentID != uuid.Nil {
+		want := *in.ComponentID
+		if _, ok := resolvedSet[want]; !ok {
+			return nil, fmt.Errorf("triage.Run: %w", ErrComponentNotInVulnerabilityScope)
+		}
+		return []uuid.UUID{want}, nil
+	}
+	// Fan-out path: intersect stage1 set with the freshly resolved set.
+	out := make([]uuid.UUID, 0, len(stage1IDs))
+	for _, id := range stage1IDs {
+		if _, ok := resolvedSet[id]; ok {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("triage.Run: %w", ErrVulnerabilityNotInTenant)
+	}
+	return out, nil
+}
+
 // resolveAuthoritativeCVEID looks up the canonical cve_id for the
 // supplied vulnerability_id and rejects requests where the caller's
 // CVEID disagrees (M1 Codex review #F12). It MUST run after
@@ -921,6 +1018,11 @@ func (r *Runner) provider_Complete(ctx context.Context, p llm.Provider, req llm.
 // surfaces the "APIキー未設定" hint and increments the
 // under_investigation counter (UX kept; persistence is now on the
 // server, not invented locally on the CLI).
+//
+// F19: wrapped in a single TxManager.RunWrite so the AI-disabled path
+// gets the same connection-pool discipline as the LLM-enabled path —
+// it re-validates component scope (TOCTOU defense) then persists in
+// one short write tx.
 func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Provider, componentIDs []uuid.UUID) (*RunResult, error) {
 	reason := "BYOK key not configured"
 	if dp, ok := provider.(*llm.DisabledProvider); ok && dp.Reason != "" {
@@ -942,43 +1044,53 @@ func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Pr
 	}
 
 	zeroConf := 0.0
-	drafts := make([]*repository.VEXDraft, 0, len(componentIDs))
+	var drafts []*repository.VEXDraft
 	action := AuditActionVexDraftAIDisabled
-	for _, compID := range componentIDs {
-		draft := &repository.VEXDraft{
-			ID:              uuid.New(),
-			TenantID:        in.TenantID,
-			ProjectID:       in.ProjectID,
-			ComponentID:     compID,
-			VulnerabilityID: in.VulnerabilityID,
-			CVEID:           in.CVEID,
-			State:           string(StateUnderInvestigation),
-			// No justification — under_investigation does not need one
-			// per CycloneDX 1.5 (justification is allowlisted to
-			// not_affected variants).
-			Detail:     "AI triage skipped: " + reason,
-			Confidence: &zeroConf,
-			Provider:   provider.Name(),
-			Model:      provider.Model(),
-			Evidence:   evidenceJSON,
-			Decision:   DecisionPending,
-			CreatedBy:  in.UserID,
+
+	if err := r.txManager.RunWrite(ctx, in.TenantID, func(ctx context.Context) error {
+		// F19 TOCTOU: re-validate componentIDs in the write tx so a
+		// deletion between Stage 1 and Stage 3 is caught.
+		revalidatedIDs, err := r.revalidateComponentIDs(ctx, in, componentIDs)
+		if err != nil {
+			return err
 		}
-		if err := r.drafts.Insert(ctx, draft); err != nil {
-			return nil, fmt.Errorf("triage.runAIDisabled: persist vex_draft: %w", err)
+		drafts = make([]*repository.VEXDraft, 0, len(revalidatedIDs))
+		for _, compID := range revalidatedIDs {
+			draft := &repository.VEXDraft{
+				ID:              uuid.New(),
+				TenantID:        in.TenantID,
+				ProjectID:       in.ProjectID,
+				ComponentID:     compID,
+				VulnerabilityID: in.VulnerabilityID,
+				CVEID:           in.CVEID,
+				State:           string(StateUnderInvestigation),
+				Detail:          "AI triage skipped: " + reason,
+				Confidence:      &zeroConf,
+				Provider:        provider.Name(),
+				Model:           provider.Model(),
+				Evidence:        evidenceJSON,
+				Decision:        DecisionPending,
+				CreatedBy:       in.UserID,
+			}
+			if err := r.drafts.Insert(ctx, draft); err != nil {
+				return fmt.Errorf("triage.runAIDisabled: persist vex_draft: %w", err)
+			}
+			if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
+				"cve_id":           in.CVEID,
+				"vulnerability_id": in.VulnerabilityID.String(),
+				"project_id":       in.ProjectID.String(),
+				"component_id":     compID.String(),
+				"reason":           reason,
+				"provider":         provider.Name(),
+				"state":            string(StateUnderInvestigation),
+			}, in.IPAddress, in.UserAgent); err != nil {
+				return fmt.Errorf("triage.runAIDisabled: %w", err)
+			}
+			drafts = append(drafts, draft)
 		}
-		if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
-			"cve_id":           in.CVEID,
-			"vulnerability_id": in.VulnerabilityID.String(),
-			"project_id":       in.ProjectID.String(),
-			"component_id":     compID.String(),
-			"reason":           reason,
-			"provider":         provider.Name(),
-			"state":            string(StateUnderInvestigation),
-		}, in.IPAddress, in.UserAgent); err != nil {
-			return nil, fmt.Errorf("triage.runAIDisabled: %w", err)
-		}
-		drafts = append(drafts, draft)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return &RunResult{
@@ -990,6 +1102,14 @@ func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Pr
 }
 
 // GetDraft returns one draft scoped to tenant.
+//
+// F19: wrapped in TxManager.RunRead so the call works without an ambient
+// TenantTx — required because /triage/run and /vex-drafts/:id/reanalyse
+// have TenantTx stripped (the runner manages its own tx lifecycle to
+// release the Postgres connection during the slow Stage 2 LLM call).
+// When an ambient tx already exists on ctx (other vex-drafts routes
+// still wrap in TenantTx), the TxManager detects it and reuses — no
+// nested tx is opened.
 func (r *Runner) GetDraft(ctx context.Context, tenantID, draftID uuid.UUID) (*repository.VEXDraft, error) {
 	if tenantID == uuid.Nil {
 		return nil, errors.New("triage.GetDraft: tenant_id is required")
@@ -997,7 +1117,18 @@ func (r *Runner) GetDraft(ctx context.Context, tenantID, draftID uuid.UUID) (*re
 	if draftID == uuid.Nil {
 		return nil, errors.New("triage.GetDraft: draft_id is required")
 	}
-	return r.drafts.Get(ctx, tenantID, draftID)
+	var draft *repository.VEXDraft
+	if err := r.txManager.RunRead(ctx, tenantID, func(ctx context.Context) error {
+		d, err := r.drafts.Get(ctx, tenantID, draftID)
+		if err != nil {
+			return err
+		}
+		draft = d
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return draft, nil
 }
 
 // ListDrafts returns drafts for a project, scoped to tenant.
