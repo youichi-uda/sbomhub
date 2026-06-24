@@ -40,13 +40,12 @@ type AnthropicProvider struct {
 var _ Provider = (*AnthropicProvider)(nil)
 
 // NewAnthropic constructs an AnthropicProvider with the default endpoint.
-// If model is empty, defaults to "claude-sonnet-4-7" (balanced cost/quality
-// for VEX triage). ※要確認: default model. "claude-sonnet-4-7" is current
-// stable per workspace conventions; check Anthropic model catalogue before M1
-// ships.
+// If model is empty, defaults to "claude-sonnet-4-6" (balanced cost/quality
+// for VEX triage; Sonnet 4.x stops at 4-6 — there is no claude-sonnet-4-7).
+// ※要確認: revisit if Anthropic releases a newer balanced-tier Sonnet.
 func NewAnthropic(apiKey, model string) *AnthropicProvider {
 	if model == "" {
-		model = "claude-sonnet-4-7"
+		model = "claude-sonnet-4-6"
 	}
 	return &AnthropicProvider{
 		apiKey:           apiKey,

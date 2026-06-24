@@ -65,7 +65,7 @@ func TestAnthropic_Complete_Success(t *testing.T) {
 	})
 	defer srv.Close()
 
-	p := NewAnthropicWithEndpoint("sk-ant-test", "claude-sonnet-4-7", srv.URL)
+	p := NewAnthropicWithEndpoint("sk-ant-test", "claude-sonnet-4-6", srv.URL)
 	out, err := p.Complete(context.Background(), CompleteRequest{
 		System:   "you are a test",
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
@@ -100,7 +100,7 @@ func TestAnthropic_Complete_DefaultMaxTokens(t *testing.T) {
 	})
 	defer srv.Close()
 
-	p := NewAnthropicWithEndpoint("k", "claude-sonnet-4-7", srv.URL)
+	p := NewAnthropicWithEndpoint("k", "claude-sonnet-4-6", srv.URL)
 	_, err := p.Complete(context.Background(), CompleteRequest{
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
 		// MaxTokens deliberately 0
@@ -120,7 +120,7 @@ func TestAnthropic_Complete_HTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewAnthropicWithEndpoint("k", "claude-sonnet-4-7", srv.URL)
+	p := NewAnthropicWithEndpoint("k", "claude-sonnet-4-6", srv.URL)
 	_, err := p.Complete(context.Background(), CompleteRequest{
 		Messages: []Message{{Role: RoleUser, Content: "x"}},
 	})
@@ -133,7 +133,7 @@ func TestAnthropic_Complete_HTTPError(t *testing.T) {
 }
 
 func TestAnthropic_Complete_EmptyAPIKey(t *testing.T) {
-	p := NewAnthropic("", "claude-sonnet-4-7")
+	p := NewAnthropic("", "claude-sonnet-4-6")
 	_, err := p.Complete(context.Background(), CompleteRequest{Messages: []Message{{Role: RoleUser, Content: "x"}}})
 	if !IsDisabled(err) {
 		t.Errorf("expected DisabledError, got %v", err)
@@ -141,7 +141,7 @@ func TestAnthropic_Complete_EmptyAPIKey(t *testing.T) {
 }
 
 func TestAnthropic_Embed_NotImplemented(t *testing.T) {
-	p := NewAnthropic("k", "claude-sonnet-4-7")
+	p := NewAnthropic("k", "claude-sonnet-4-6")
 	_, err := p.Embed(context.Background(), EmbedRequest{})
 	if err != ErrNotImplemented {
 		t.Errorf("err = %v, want ErrNotImplemented", err)
@@ -149,7 +149,7 @@ func TestAnthropic_Embed_NotImplemented(t *testing.T) {
 }
 
 func TestAnthropic_Capabilities(t *testing.T) {
-	p := NewAnthropic("k", "claude-sonnet-4-7")
+	p := NewAnthropic("k", "claude-sonnet-4-6")
 	cap := p.Capabilities()
 	if !cap.SupportsFunctionCall {
 		t.Error("claude-sonnet-4 should support function calling")
@@ -163,7 +163,7 @@ func TestAnthropic_Capabilities(t *testing.T) {
 }
 
 func TestAnthropic_LogValueDoesNotLeakAPIKey(t *testing.T) {
-	p := NewAnthropic("sk-ant-supersecret-12345", "claude-sonnet-4-7")
+	p := NewAnthropic("sk-ant-supersecret-12345", "claude-sonnet-4-6")
 	var sb strings.Builder
 	logger := slog.New(slog.NewTextHandler(&sb, nil))
 	logger.Info("test", "provider", p)
@@ -190,7 +190,7 @@ func TestAnthropic_RoleNormalization(t *testing.T) {
 	})
 	defer srv.Close()
 
-	p := NewAnthropicWithEndpoint("k", "claude-sonnet-4-7", srv.URL)
+	p := NewAnthropicWithEndpoint("k", "claude-sonnet-4-6", srv.URL)
 	_, err := p.Complete(context.Background(), CompleteRequest{
 		Messages: []Message{
 			{Role: RoleTool, Content: "tool result"},
