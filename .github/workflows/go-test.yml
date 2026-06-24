@@ -1,0 +1,81 @@
+# SBOMHub - Go unit test + build
+#
+# Trust Rescue P1 #17 / 9.5.1 acceptance gate.
+#
+# Until this workflow landed, the only thing CI ran against apps/api was a
+# black-box smoke (`docs-curl-smoke.yml` brings the binary up and POSTs an
+# SBOM, `install-smoke.yml` runs install.sh end-to-end). A regression that
+# broke a unit test or a `go build` of a package not on the request hot path
+# would still merge to main silently.
+#
+# This workflow is the minimum acceptable Go quality gate: `go build ./...`
+# + `go test ./...` against the apps/api Go module. Integration tests
+# (gated behind `//go:build integration`) are intentionally excluded — they
+# require docker compose postgres and will land in a dedicated workflow
+# (see docs/ci-inventory.md §4 Action items).
+
+name: Go test
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - ".github/workflows/go-test.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - ".github/workflows/go-test.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/api
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Pin to the module's declared toolchain (apps/api/go.mod is
+          # `go 1.24.11`). actions/setup-go honors patch versions and
+          # falls forward to the latest compatible 1.24.x.
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Show Go version
+        run: go version
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify go.mod / go.sum are tidy
+        # Belt-and-braces: a missing `go mod tidy` is one of the most
+        # common review findings and is cheap to catch in CI.
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod / go.sum are not tidy. Run 'go mod tidy' locally and commit the result."
+            git --no-pager diff -- go.mod go.sum
+            exit 1
+          fi
+
+      - name: Build all packages
+        run: go build ./...
+
+      - name: Run unit tests
+        # Integration tests live under //go:build integration and require
+        # docker compose postgres — they will be wired in a separate
+        # workflow (docs/ci-inventory.md §4). Without -tags they are
+        # excluded by the build system, so `go test ./...` runs only the
+        # unit tests here.
+        run: go test -race -count=1 ./...
