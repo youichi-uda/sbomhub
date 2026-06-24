@@ -52,11 +52,14 @@ var knownDefaultEncryptionKeys = []string{
 // downgrades a violation to a warning so contributors can run locally without
 // a key.
 //
-// Callers pass cfg.EncryptionKey / cfg.Environment so this guard agrees with
-// the rest of config (post codex-r18 APP_ENV → ENVIRONMENT precedence). The
-// appEnv parameter is the resolved Config.Environment string, not a raw env
-// var read.
-func validateEncryptionKey(rawKey, appEnv string) error {
+// It reads cfg.EncryptionKey / cfg.Environment so this guard agrees with the
+// rest of config (post codex-r18 APP_ENV → ENVIRONMENT precedence) and matches
+// the cfg-driven contract of assertAppRoleNotBypassRLS — both guards now share
+// a single source of truth for environment classification.
+func validateEncryptionKey(cfg *config.Config) error {
+	rawKey := cfg.EncryptionKey
+	appEnv := cfg.Environment
+
 	var reason string
 	switch {
 	case rawKey == "":
@@ -142,7 +145,7 @@ func main() {
 	// is filled in for it inside config.Load — Validate handles the dev-only
 	// fallback after this guard runs), and cfg.Environment honours the codex-r18
 	// APP_ENV → ENVIRONMENT precedence so the gate agrees with cfg.IsProduction.
-	if err := validateEncryptionKey(cfg.EncryptionKey, cfg.Environment); err != nil {
+	if err := validateEncryptionKey(cfg); err != nil {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}

@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/sbomhub/sbomhub/internal/config"
 )
 
 // validBase64Key32 is a 44-char base64 string that decodes to 32 bytes —
@@ -10,6 +12,17 @@ import (
 // 32 bytes when measured as a raw string (len(rawKey) is what the guard
 // inspects).
 const validBase64Key32 = "9b3a1f6d2e8c4a7b9d5e0f2c1a3b4d6e8f0a2c4b6d8e0f1a3c5b7d9e1f3a5c7=" // 64 chars
+
+// newTestCfg builds a minimal *config.Config carrying just the two fields
+// validateEncryptionKey inspects. validateEncryptionKey now takes the full
+// cfg (R18-A follow-up) so this helper keeps the table-driven tests readable
+// without re-introducing the old string-string signature.
+func newTestCfg(key, env string) *config.Config {
+	return &config.Config{
+		EncryptionKey: key,
+		Environment:   env,
+	}
+}
 
 func TestValidateEncryptionKey(t *testing.T) {
 	cases := []struct {
@@ -125,7 +138,7 @@ func TestValidateEncryptionKey(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateEncryptionKey(tc.key, tc.appEnv)
+			err := validateEncryptionKey(newTestCfg(tc.key, tc.appEnv))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
@@ -151,7 +164,7 @@ func TestValidateEncryptionKey_ExactPlaceholderMatch(t *testing.T) {
 	// "your-encryption-key-here" is 24 chars, padded to 56 → length OK, exact
 	// match fails → passes.
 	key := "your-encryption-key-here-" + strings.Repeat("z", 32)
-	if err := validateEncryptionKey(key, "production"); err != nil {
+	if err := validateEncryptionKey(newTestCfg(key, "production")); err != nil {
 		t.Fatalf("unexpected error for non-exact placeholder: %v", err)
 	}
 }
