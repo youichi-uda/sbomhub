@@ -457,7 +457,22 @@ func main() {
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
 		appmw.TenantTx(db),
 		auditMiddleware)
-	auth.GET("/projects/:id/sbom", sbomHandler.Get)
+	// GET /sbom is the companion read-back to the canonical upload above:
+	// after a CLI / GitHub Actions client uploads with
+	// `Authorization: Bearer sbh_...`, the docs-curl-smoke workflow (and any
+	// external verifier — `sbomhub` CLI included) reads back the latest SBOM
+	// with the same API key. Codex R11 fix: registered outside the `auth`
+	// (Clerk-only) group with MultiAuth so the API-key Bearer header is
+	// accepted. Previously the API key was decoded as a Clerk JWT, the
+	// request fell through to the default tenant in self-host mode, and the
+	// verification step in docs-curl-smoke.yml saw a 404. Middleware chain
+	// mirrors the canonical upload route above:
+	// MultiAuth -> TenantTx -> audit -> handler.
+	e.GET("/api/v1/projects/:id/sbom",
+		sbomHandler.Get,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)
 	auth.GET("/projects/:id/vulnerabilities", sbomHandler.GetVulnerabilities)
