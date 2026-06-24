@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"log/slog"
@@ -80,6 +81,104 @@ func RegisterPostCommit(c echo.Context, fn func()) {
 		return
 	}
 	registry.append(fn)
+}
+
+// bufferedResponseWriter is an http.ResponseWriter shim that records the
+// handler's status code, headers and body in memory instead of pushing them
+// onto the wire immediately.
+//
+// Codex R20 P2: previously `c.JSON(http.StatusCreated, ...)` inside a
+// TenantTx-wrapped handler wrote the response status + body to the client
+// connection BEFORE the deferred `tx.Commit()` decided whether the
+// underlying rows would actually persist. A commit that failed afterwards
+// (constraint violation, network blip, ctx cancel, statement timeout)
+// rolled the DB back while the client kept its 201 + body — and any
+// RegisterPostCommit hook (notably the SBOM upload background-scan launch)
+// never ran. Buffering moves the wire flush past the commit decision so
+// the bytes that reach the client always reflect DB durability.
+//
+// The wrapper keeps its own header map and body buffer so that on
+// commit-failure we can drop the handler's response cleanly without having
+// to scrub already-set headers off the real writer. On commit success (or
+// any rollback-with-response path) flushTo() copies headers + status code +
+// body onto the real writer in one shot. Handlers that wrote nothing leave
+// the buffer untouched, in which case flushTo is a no-op and the outer
+// Echo error handler (or recovery middleware) can still own the response.
+//
+// No SBOMHub handler currently relies on streaming response writers (SSE,
+// websockets, chunked file streaming): every JSON / Blob / NoContent path
+// materialises the full body before writing, and a project-wide grep for
+// http.Hijacker / http.Flusher / ResponseController over apps/api/internal
+// turns up zero hits. If a future handler needs streaming under TenantTx
+// it must either opt out of the middleware or skip the buffer (e.g. by
+// detecting `text/event-stream` and bypassing the wrapper).
+type bufferedResponseWriter struct {
+	header     http.Header
+	body       bytes.Buffer
+	statusCode int
+	// written becomes true the first time the handler called WriteHeader or
+	// Write. We need to distinguish "handler never touched the response"
+	// (flush should be a no-op so Echo can produce the response itself)
+	// from "handler wrote an empty 200" (flush must still call WriteHeader
+	// on the real writer so the client gets a status line).
+	written bool
+}
+
+func newBufferedResponseWriter() *bufferedResponseWriter {
+	return &bufferedResponseWriter{
+		header:     make(http.Header),
+		statusCode: http.StatusOK,
+	}
+}
+
+func (b *bufferedResponseWriter) Header() http.Header { return b.header }
+
+func (b *bufferedResponseWriter) WriteHeader(code int) {
+	if b.written {
+		// Mirror net/http semantics: a second WriteHeader is a no-op (and
+		// would normally log "superfluous WriteHeader"). Echo's Response
+		// wrapper guards this above us, but defend in depth.
+		return
+	}
+	b.statusCode = code
+	b.written = true
+}
+
+func (b *bufferedResponseWriter) Write(p []byte) (int, error) {
+	if !b.written {
+		// net/http auto-sends 200 on the first Write if WriteHeader was not
+		// called. Echo's Response.Write also sets Status = 200 in this case
+		// before calling our WriteHeader, but again defend in depth.
+		b.statusCode = http.StatusOK
+		b.written = true
+	}
+	return b.body.Write(p)
+}
+
+// flushTo copies the buffered headers, status code, and body onto actual.
+// If the handler never wrote anything (no WriteHeader, no Write, no
+// Header().Set on this wrapper), flushTo is a no-op so the caller can let
+// Echo or downstream middleware own the response.
+func (b *bufferedResponseWriter) flushTo(actual http.ResponseWriter) {
+	if !b.written && b.body.Len() == 0 && len(b.header) == 0 {
+		return
+	}
+	// Replace any pre-existing values on the actual writer with what the
+	// handler set. Pass-through would be simpler but leaves stale headers
+	// in place if the actual writer was pre-populated upstream.
+	dst := actual.Header()
+	for k, vv := range b.header {
+		dst.Del(k)
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+	if b.written {
+		actual.WriteHeader(b.statusCode)
+	}
+	if b.body.Len() > 0 {
+		_, _ = actual.Write(b.body.Bytes())
+	}
 }
 
 // TenantTx wraps every authenticated request in an explicit Postgres
@@ -179,6 +278,25 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 			origReq := c.Request()
 			c.SetRequest(origReq.WithContext(txCtx))
 
+			// Wrap the response writer so the handler's status code + body
+			// land in memory instead of on the wire. We can then decide,
+			// based on tx commit outcome, whether to flush the handler's
+			// response (success / handler-driven 4xx) or replace it with a
+			// 500 (commit failure). See bufferedResponseWriter godoc.
+			originalWriter := c.Response().Writer
+			buffer := newBufferedResponseWriter()
+			c.Response().Writer = buffer
+
+			// restoreWriter swaps the real writer back into echo.Response so
+			// any caller (Echo's error handler, outer recovery middleware,
+			// our own c.JSON fallback below) writes to the wire rather than
+			// to our discarded buffer. Idempotent.
+			restoreWriter := func() {
+				if c.Response().Writer == buffer {
+					c.Response().Writer = originalWriter
+				}
+			}
+
 			// Track whether we have already finalised the tx so the
 			// deferred handler does not double-rollback / leak. Without
 			// this guard, if Commit succeeds we would still hit
@@ -189,8 +307,11 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 					if !finalised {
 						_ = tx.Rollback()
 					}
-					// Restore the original request so any outer recovery
-					// middleware sees the unmodified context.
+					// Discard whatever the handler partially buffered — a
+					// panic through here leaves the response undefined, so
+					// let the outer recovery middleware write a clean 500
+					// to the real writer.
+					restoreWriter()
 					c.SetRequest(origReq)
 					panic(p)
 				}
@@ -199,6 +320,11 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 					// committed (e.g. unexpected control flow). Be safe.
 					_ = tx.Rollback()
 				}
+				// Belt-and-suspenders: the success / rollback paths below
+				// restore the writer themselves, but if anything in the
+				// finalisation slipped past, make sure the real writer is
+				// back in place before we return to Echo.
+				restoreWriter()
 				c.SetRequest(origReq)
 			}()
 
@@ -216,6 +342,16 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 						"status", status, "handler_err", rerr)
 				}
 				finalised = true
+				// Flush whatever the handler wrote (a 4xx body, an error
+				// payload, or nothing at all) to the real writer. The DB
+				// side is rolled back, but the handler-shaped response —
+				// notably the 4xx body it crafted — is what the client
+				// expects to see. If the handler wrote nothing AND
+				// returned an error, the buffer is empty, flush is a
+				// no-op, and Echo's error handler will own the response
+				// on the now-restored real writer.
+				restoreWriter()
+				buffer.flushTo(originalWriter)
 				return rerr
 			}
 
@@ -223,18 +359,46 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 				finalised = true
 				slog.Error("TenantTx: commit failed",
 					"error", cErr, "tenant_id", tenantID, "status", status)
-				return cErr
+				// Critical: do NOT flush the handler's buffered 2xx. The DB
+				// rolled back, so the client must not see the success
+				// response. Reset Echo's response bookkeeping so c.JSON
+				// will actually write a fresh 500 (otherwise Committed=true
+				// from the handler would short-circuit the write).
+				restoreWriter()
+				resp := c.Response()
+				resp.Status = 0
+				resp.Size = 0
+				resp.Committed = false
+				// Also clear any headers the handler set in the buffer
+				// that we intentionally did NOT propagate — the real
+				// writer should reflect the error response, not the
+				// rolled-back success response. (Headers set directly on
+				// the real writer by upstream middleware survive.)
+				if err := c.JSON(http.StatusInternalServerError, map[string]string{
+					"error": "transaction commit failed",
+				}); err != nil {
+					slog.Error("TenantTx: failed to write commit-failure response",
+						"error", err, "tenant_id", tenantID)
+					return err
+				}
+				// Post-commit hooks must NOT run on commit failure — the
+				// data they depend on never landed. The early return here
+				// preserves that invariant.
+				return nil
 			}
 			finalised = true
 
-			// Run post-commit hooks now that the request's writes are
-			// durable. Hooks run sequentially in registration order on
-			// this goroutine; if a hook needs to outlive the request it
-			// is the hook's job to spawn its own goroutine (this matches
-			// how SbomHandler.startBackgroundScan kicks off the NVD/JVN
-			// scan). Panics are recovered so one buggy hook cannot crash
-			// the response. See RegisterPostCommit godoc for the
-			// guarantees.
+			// Commit succeeded: flush the handler's buffered response to
+			// the wire so the client finally sees the 2xx + body, then
+			// run any post-commit hooks. Hooks run sequentially in
+			// registration order on this goroutine; if a hook needs to
+			// outlive the request it is the hook's job to spawn its own
+			// goroutine (this matches how SbomHandler.startBackgroundScan
+			// kicks off the NVD/JVN scan). Panics are recovered so one
+			// buggy hook cannot crash the response. See
+			// RegisterPostCommit godoc for the guarantees.
+			restoreWriter()
+			buffer.flushTo(originalWriter)
 			for i, fn := range postCommit.drain() {
 				runPostCommitHook(tenantID, i, fn)
 			}
