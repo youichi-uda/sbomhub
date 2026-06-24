@@ -176,7 +176,7 @@ jobs:
           echo "create-project response: ${PROJECT_RESP}"
 
           PROJECT_ID="$(printf '%s' "${PROJECT_RESP}" \
-            | jq -r '.id // .project_id // .ID // empty')"
+            | jq -r '.project.id // .id // .project_id // .ID // empty')"
           if [ -z "${PROJECT_ID}" ] || [ "${PROJECT_ID}" = "null" ]; then
             echo "::error::could not parse project id from CLI response"
             exit 1
