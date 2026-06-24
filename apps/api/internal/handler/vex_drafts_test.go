@@ -660,6 +660,111 @@ func TestVEXDraftsHandler_Decide_APIKeyAuth_Allowed(t *testing.T) {
 	}
 }
 
+// TestVEXDraftsHandler_RunTriage_ReadOnlyAPIKey_Rejected is the
+// handler-side companion to the F15 RequireWrite route guard. The
+// triage routes are now wrapped in appmw.RequireWrite() at
+// cmd/server/main.go, so a read-scoped sbh_... key (RoleViewer)
+// never reaches the handler. The handler still keeps its own
+// CanWrite() check as defence-in-depth — this test exercises that
+// in-handler guard directly so we catch a regression where a future
+// refactor removes the RequireWrite middleware AND the handler check
+// in the same commit.
+//
+// The route-level guard test lives in
+// internal/middleware/role_guard_test.go::TestRequireWrite_F15_ReadOnlyAPIKeyRejected
+// (matrix + read-only API-key simulation). Together the two pins
+// require both layers to regress before a read-scoped key can drive
+// triage/run.
+func TestVEXDraftsHandler_RunTriage_ReadOnlyAPIKey_Rejected(t *testing.T) {
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:                   &fakeVexDraftStore{},
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             &fakeReachabilityReader{},
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 disabledProvider(),
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentResolver{ids: []uuid.UUID{uuid.New()}},
+	})
+	h := NewVexDraftsHandler(runner)
+
+	projectID := uuid.New()
+	body := map[string]string{
+		"vulnerability_id": uuid.NewString(),
+		"cve_id":           "CVE-2026-0700",
+	}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/triage/run",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+
+	// Simulate MultiAuth's read-scoped API-key path: tenant set,
+	// synthetic user set, role = RoleViewer (what
+	// roleFromAPIKeyPermissions("read") returns).
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleViewer)
+
+	if err := h.RunTriage(c); err != nil {
+		t.Fatalf("RunTriage returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("F15: RunTriage with RoleViewer must return 403, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestVEXDraftsHandler_Decide_ReadOnlyAPIKey_Rejected mirrors the
+// RunTriage F15 test for the decision endpoint. Both write surfaces
+// must refuse a read-scoped API key — F15 is about every triage write
+// route, not just RunTriage.
+func TestVEXDraftsHandler_Decide_ReadOnlyAPIKey_Rejected(t *testing.T) {
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       &fakeVexDraftStore{},
+		Advisories:   &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{},
+		LLMCalls:     &fakeLLMCallWriter{},
+		Audit:        &fakeAuditWriter{},
+		Provider:     disabledProvider(),
+		Threshold:    0.7,
+	})
+	h := NewVexDraftsHandler(runner)
+
+	projectID := uuid.New()
+	draftID := uuid.New()
+	body := map[string]string{"decision": triage.DecisionApproved}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+projectID.String()+"/vex-drafts/"+draftID.String()+"/decision",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "draft_id")
+	c.SetParamValues(projectID.String(), draftID.String())
+
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleViewer)
+
+	if err := h.Decide(c); err != nil {
+		t.Fatalf("Decide returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("F15: Decide with RoleViewer must return 403, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+}
+
 // TestVEXDraftsHandler_RunTriage_NoAuthContext_Returns401 pins the
 // negative direction of #F14: a request with no tenant context (the
 // state both the Clerk JWT failure path and an entirely-missing

@@ -573,8 +573,17 @@ func main() {
 	// when ContextKeyAPI is unset (i.e. Clerk JWT / self-hosted default
 	// path), so this preserves the web UI's existing un-throttled behaviour
 	// while matching the legacy CLI guard (60 req/min per API key).
+	// M1 Codex review #F15: appmw.RequireWrite() sits between MultiAuth
+	// (which sets ContextKeyRole) and RateLimitByAPIKey/TenantTx so a
+	// read-scoped sbh_... key receives a 403 BEFORE pinning the rate
+	// limit token bucket and opening a Postgres transaction. SbomHandler.
+	// Upload itself never consulted CanWrite — the entire write gate
+	// lives in this guard now, and any future write route added to the
+	// canonical MultiAuth chain must include it (see role_guard.go for
+	// the rationale and body policy).
 	e.POST("/api/v1/projects/:id/sbom", sbomHandler.Upload,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
@@ -668,10 +677,24 @@ func main() {
 	// runs inside the same `SET LOCAL app.current_tenant_id` tx that
 	// audit_logs INSERT uses, satisfying Trust Rescue 9.1.3 + 9.1.2.
 	// Middleware chain: MultiAuth -> RateLimitByAPIKey -> TenantTx -> audit -> handler.
+	// M1 Codex review #F15: the three write routes in this group
+	// (triage/run, decision, reanalyse) now sit behind RequireWrite so a
+	// read-scoped API key cannot mint AI drafts or apply human
+	// decisions. The two read routes (ListDrafts, GetDraft) stay
+	// unguarded — reading vex_drafts is a CanWrite-not-required
+	// operation by design (the CLI uses the list endpoint to render
+	// triage history with a read-only audit key).
+	//
+	// The handler-side CanWrite() check in VexDraftsHandler.RunTriage /
+	// Decide / Reanalyse is retained (defence in depth) but is no longer
+	// the sole guard — the route-level RequireWrite stops the request
+	// before the handler sees it, which means RateLimitByAPIKey and
+	// TenantTx never run for a denied caller.
 	triageMultiAuth := appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService)
 	e.POST("/api/v1/projects/:id/triage/run",
 		vexDraftsHandler.RunTriage,
 		triageMultiAuth,
+		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
@@ -690,12 +713,14 @@ func main() {
 	e.PUT("/api/v1/projects/:id/vex-drafts/:draft_id/decision",
 		vexDraftsHandler.Decide,
 		triageMultiAuth,
+		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.POST("/api/v1/projects/:id/vex-drafts/:draft_id/reanalyse",
 		vexDraftsHandler.Reanalyse,
 		triageMultiAuth,
+		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
