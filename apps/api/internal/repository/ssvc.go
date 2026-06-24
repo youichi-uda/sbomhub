@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -19,6 +20,16 @@ func NewSSVCRepository(db *sql.DB) *SSVCRepository {
 	return &SSVCRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// ssvc_assessments and ssvc_project_defaults both have RLS (migration 021),
+// and the per-component scoring queries join sboms/components which also have
+// FORCE RLS, so handler calls outside the tenant tx silently return no rows
+// (codex-r1 Finding 2).
+func (r *SSVCRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 // GetProjectDefaults gets SSVC defaults for a project
 func (r *SSVCRepository) GetProjectDefaults(ctx context.Context, projectID uuid.UUID) (*model.SSVCProjectDefaults, error) {
 	query := `
@@ -30,7 +41,7 @@ func (r *SSVCRepository) GetProjectDefaults(ctx context.Context, projectID uuid.
 	`
 
 	var d model.SSVCProjectDefaults
-	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID).Scan(
 		&d.ID, &d.ProjectID, &d.TenantID, &d.MissionPrevalence, &d.SafetyImpact,
 		&d.SystemExposure, &d.AutoAssessEnabled, &d.AutoAssessExploitation,
 		&d.AutoAssessAutomatable, &d.CreatedAt, &d.UpdatedAt,
@@ -59,7 +70,7 @@ func (r *SSVCRepository) UpsertProjectDefaults(ctx context.Context, d *model.SSV
 			auto_assess_enabled = $7, auto_assess_exploitation = $8,
 			auto_assess_automatable = $9, updated_at = NOW()
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		d.ID, d.ProjectID, d.TenantID, d.MissionPrevalence, d.SafetyImpact,
 		d.SystemExposure, d.AutoAssessEnabled, d.AutoAssessExploitation,
 		d.AutoAssessAutomatable,
@@ -79,7 +90,7 @@ func (r *SSVCRepository) GetAssessment(ctx context.Context, projectID, vulnerabi
 	`
 
 	var a model.SSVCAssessment
-	err := r.db.QueryRowContext(ctx, query, projectID, vulnerabilityID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID, vulnerabilityID).Scan(
 		&a.ID, &a.ProjectID, &a.TenantID, &a.VulnerabilityID, &a.CVEID,
 		&a.Exploitation, &a.Automatable, &a.TechnicalImpact, &a.MissionPrevalence, &a.SafetyImpact,
 		&a.Decision, &a.ExploitationAuto, &a.AutomatableAuto, &a.AssessedBy, &a.AssessedAt,
@@ -107,7 +118,7 @@ func (r *SSVCRepository) GetAssessmentByCVE(ctx context.Context, projectID uuid.
 	`
 
 	var a model.SSVCAssessment
-	err := r.db.QueryRowContext(ctx, query, projectID, cveID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID, cveID).Scan(
 		&a.ID, &a.ProjectID, &a.TenantID, &a.VulnerabilityID, &a.CVEID,
 		&a.Exploitation, &a.Automatable, &a.TechnicalImpact, &a.MissionPrevalence, &a.SafetyImpact,
 		&a.Decision, &a.ExploitationAuto, &a.AutomatableAuto, &a.AssessedBy, &a.AssessedAt,
@@ -133,7 +144,7 @@ func (r *SSVCRepository) CreateAssessment(ctx context.Context, a *model.SSVCAsse
 			notes, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		a.ID, a.ProjectID, a.TenantID, a.VulnerabilityID, a.CVEID,
 		a.Exploitation, a.Automatable, a.TechnicalImpact, a.MissionPrevalence, a.SafetyImpact,
 		a.Decision, a.ExploitationAuto, a.AutomatableAuto, a.AssessedBy, a.AssessedAt,
@@ -152,7 +163,7 @@ func (r *SSVCRepository) UpdateAssessment(ctx context.Context, a *model.SSVCAsse
 			assessed_at = $10, notes = $11, updated_at = NOW()
 		WHERE id = $12
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		a.Exploitation, a.Automatable, a.TechnicalImpact,
 		a.MissionPrevalence, a.SafetyImpact, a.Decision,
 		a.ExploitationAuto, a.AutomatableAuto, a.AssessedBy,
@@ -173,7 +184,7 @@ func (r *SSVCRepository) CreateAssessmentHistory(ctx context.Context, h *model.S
 			changed_by, changed_at, change_reason
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		h.ID, h.AssessmentID,
 		h.PrevExploitation, h.PrevAutomatable, h.PrevTechnicalImpact,
 		h.PrevMissionPrevalence, h.PrevSafetyImpact, h.PrevDecision,
@@ -195,7 +206,7 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 	}
 
 	var total int
-	if err := r.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+	if err := r.q(ctx).QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -230,7 +241,7 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 		LIMIT $%d OFFSET $%d`, argIndex, argIndex+1)
 	args = append(args, limit, offset)
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.q(ctx).QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -271,7 +282,7 @@ func (r *SSVCRepository) GetSummary(ctx context.Context, projectID uuid.UUID) (*
 	var summary model.SSVCSummary
 	summary.ProjectID = projectID
 
-	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID).Scan(
 		&summary.Immediate, &summary.OutOfCycle, &summary.Scheduled,
 		&summary.Defer, &summary.TotalAssessed,
 	)
@@ -291,7 +302,7 @@ func (r *SSVCRepository) GetSummary(ctx context.Context, projectID uuid.UUID) (*
 			WHERE sa.project_id = $1 AND sa.vulnerability_id = cv.vulnerability_id
 		)
 	`
-	if err := r.db.QueryRowContext(ctx, unassessedQuery, projectID).Scan(&summary.Unassessed); err != nil {
+	if err := r.q(ctx).QueryRowContext(ctx, unassessedQuery, projectID).Scan(&summary.Unassessed); err != nil {
 		// Ignore error, default to 0
 		summary.Unassessed = 0
 	}
@@ -302,14 +313,14 @@ func (r *SSVCRepository) GetSummary(ctx context.Context, projectID uuid.UUID) (*
 // DeleteAssessment deletes an assessment
 func (r *SSVCRepository) DeleteAssessment(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM ssvc_assessments WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	_, err := r.q(ctx).ExecContext(ctx, query, id)
 	return err
 }
 
 // UpdateVulnerabilitySSVCDecision updates the SSVC decision on the vulnerability record
 func (r *SSVCRepository) UpdateVulnerabilitySSVCDecision(ctx context.Context, vulnerabilityID uuid.UUID, decision model.SSVCDecision) error {
 	query := `UPDATE vulnerabilities SET ssvc_decision = $1, updated_at = NOW() WHERE id = $2`
-	_, err := r.db.ExecContext(ctx, query, decision, vulnerabilityID)
+	_, err := r.q(ctx).ExecContext(ctx, query, decision, vulnerabilityID)
 	return err
 }
 
@@ -327,7 +338,7 @@ func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, assessmentID 
 		ORDER BY changed_at DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, assessmentID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, assessmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +377,7 @@ func (r *SSVCRepository) GetImmediateAssessments(ctx context.Context) ([]model.S
 		ORDER BY a.assessed_at DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.q(ctx).QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -15,6 +16,14 @@ type DashboardRepository struct {
 
 func NewDashboardRepository(db *sql.DB) *DashboardRepository {
 	return &DashboardRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// Required so dashboard aggregations join projects/sboms/components under the
+// tenant GUC set by TenantTx (codex-r1 Finding 2).
+func (r *DashboardRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // Deprecated: Use GetTotalProjectsByTenant for proper tenant isolation
@@ -35,7 +44,7 @@ func (r *DashboardRepository) GetVulnerabilityCounts(ctx context.Context) (model
 // GetTotalProjectsByTenant returns the total number of projects for a tenant
 func (r *DashboardRepository) GetTotalProjectsByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE tenant_id = $1`, tenantID).Scan(&count)
+	err := r.q(ctx).QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE tenant_id = $1`, tenantID).Scan(&count)
 	return count, err
 }
 
@@ -48,7 +57,7 @@ func (r *DashboardRepository) GetTotalComponentsByTenant(ctx context.Context, te
 		INNER JOIN projects p ON s.project_id = p.id
 		WHERE p.tenant_id = $1
 	`
-	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(&count)
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID).Scan(&count)
 	return count, err
 }
 
@@ -68,7 +77,7 @@ func (r *DashboardRepository) GetVulnerabilityCountsByTenant(ctx context.Context
 		WHERE p.tenant_id = $1
 	`
 	var counts model.VulnerabilityCounts
-	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID).Scan(
 		&counts.Critical,
 		&counts.High,
 		&counts.Medium,
@@ -112,7 +121,7 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 		LIMIT $2
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, limit)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +178,7 @@ func (r *DashboardRepository) GetProjectScoresByTenant(ctx context.Context, tena
 			COALESCE(SUM(CASE WHEN v.severity = 'HIGH' THEN 1 ELSE 0 END), 0) DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +250,7 @@ func (r *DashboardRepository) GetTrendByTenant(ctx context.Context, tenantID uui
 		ORDER BY ds.date
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, days, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, days, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +317,7 @@ func (r *DashboardRepository) GetProjectVulnerabilityCounts(ctx context.Context,
 		WHERE s.project_id = $1
 	`
 	var counts model.VulnerabilityCounts
-	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID).Scan(
 		&counts.Critical,
 		&counts.High,
 		&counts.Medium,

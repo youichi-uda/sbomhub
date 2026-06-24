@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -17,6 +18,16 @@ type AnalyticsRepository struct {
 // NewAnalyticsRepository creates a new AnalyticsRepository
 func NewAnalyticsRepository(db *sql.DB) *AnalyticsRepository {
 	return &AnalyticsRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// compliance_snapshots / slo_targets / vulnerability_snapshots /
+// vulnerability_resolution_events all have RLS via migration 012, so analytics
+// endpoints must run inside the per-request tx that TenantTx opens, or every
+// chart silently flatlines (codex-r1 Finding 2).
+func (r *AnalyticsRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // GetMTTR calculates Mean Time To Remediate by severity
@@ -56,7 +67,7 @@ func (r *AnalyticsRepository) GetMTTR(ctx context.Context, tenantID uuid.UUID, s
 			END
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, start, end)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +104,7 @@ func (r *AnalyticsRepository) GetVulnerabilityTrend(ctx context.Context, tenantI
 		ORDER BY snapshot_date ASC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, days)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, days)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +173,7 @@ func (r *AnalyticsRepository) calculateVulnerabilityTrend(ctx context.Context, t
 		ORDER BY ds.date ASC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, days)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, days)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +239,7 @@ func (r *AnalyticsRepository) GetSLOAchievement(ctx context.Context, tenantID uu
 			END
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, start, end)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +275,7 @@ func (r *AnalyticsRepository) GetComplianceTrend(ctx context.Context, tenantID u
 		ORDER BY snapshot_date ASC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, days)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, days)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +298,7 @@ func (r *AnalyticsRepository) GetQuickStats(ctx context.Context, tenantID uuid.U
 	stats := &model.AnalyticsQuickStats{}
 
 	// Get open vulnerabilities count
-	err := r.db.QueryRowContext(ctx, `
+	err := r.q(ctx).QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM vulnerability_resolution_events
 		WHERE tenant_id = $1 AND resolved_at IS NULL
@@ -297,7 +308,7 @@ func (r *AnalyticsRepository) GetQuickStats(ctx context.Context, tenantID uuid.U
 	}
 
 	// Get resolved in last 30 days
-	err = r.db.QueryRowContext(ctx, `
+	err = r.q(ctx).QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM vulnerability_resolution_events
 		WHERE tenant_id = $1
@@ -309,7 +320,7 @@ func (r *AnalyticsRepository) GetQuickStats(ctx context.Context, tenantID uuid.U
 	}
 
 	// Get average MTTR
-	err = r.db.QueryRowContext(ctx, `
+	err = r.q(ctx).QueryRowContext(ctx, `
 		SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (resolved_at - detected_at)) / 3600), 0)
 		FROM vulnerability_resolution_events
 		WHERE tenant_id = $1
@@ -321,7 +332,7 @@ func (r *AnalyticsRepository) GetQuickStats(ctx context.Context, tenantID uuid.U
 	}
 
 	// Get latest compliance score
-	err = r.db.QueryRowContext(ctx, `
+	err = r.q(ctx).QueryRowContext(ctx, `
 		SELECT overall_score, max_score
 		FROM compliance_snapshots
 		WHERE tenant_id = $1 AND project_id IS NULL
@@ -345,7 +356,7 @@ func (r *AnalyticsRepository) GetSLOTargets(ctx context.Context, tenantID uuid.U
 		ORDER BY severity, tenant_id NULLS LAST
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +382,7 @@ func (r *AnalyticsRepository) UpsertSLOTarget(ctx context.Context, tenantID uuid
 		ON CONFLICT (tenant_id, severity)
 		DO UPDATE SET target_hours = $4, updated_at = NOW()
 	`
-	_, err := r.db.ExecContext(ctx, query, uuid.New(), tenantID, severity, targetHours)
+	_, err := r.q(ctx).ExecContext(ctx, query, uuid.New(), tenantID, severity, targetHours)
 	return err
 }
 
@@ -387,7 +398,7 @@ func (r *AnalyticsRepository) CreateVulnerabilitySnapshot(ctx context.Context, s
 			critical_count = $4, high_count = $5, medium_count = $6, low_count = $7,
 			total_count = $8, resolved_count = $9, mttr_hours = $10
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		snapshot.ID, snapshot.TenantID, snapshot.SnapshotDate,
 		snapshot.CriticalCount, snapshot.HighCount, snapshot.MediumCount, snapshot.LowCount,
 		snapshot.TotalCount, snapshot.ResolvedCount, snapshot.MTTRHours,
@@ -407,7 +418,7 @@ func (r *AnalyticsRepository) CreateComplianceSnapshot(ctx context.Context, snap
 			overall_score = $5, max_score = $6,
 			sbom_generation_score = $7, vulnerability_management_score = $8, license_management_score = $9
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		snapshot.ID, snapshot.TenantID, snapshot.ProjectID, snapshot.SnapshotDate,
 		snapshot.OverallScore, snapshot.MaxScore,
 		snapshot.SBOMGenerationScore, snapshot.VulnerabilityManagementScore, snapshot.LicenseManagementScore,
@@ -428,7 +439,7 @@ func (r *AnalyticsRepository) RecordVulnerabilityResolution(ctx context.Context,
 			resolution_notes = $10,
 			updated_at = NOW()
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		event.ID, event.TenantID, event.VulnerabilityID, event.ProjectID,
 		event.CVEID, event.Severity, event.DetectedAt, event.ResolvedAt,
 		event.ResolutionType, event.ResolutionNotes,

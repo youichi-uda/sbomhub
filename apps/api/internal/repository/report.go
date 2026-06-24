@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -20,6 +21,17 @@ func NewReportRepository(db *sql.DB) *ReportRepository {
 	return &ReportRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// report_settings and generated_reports both have RLS enabled (migration 013),
+// so listing/upserting these from a non-tx pool connection silently returns no
+// rows for sbomhub_app (codex-r1 Finding 2). The scheduler path
+// (GetEnabledSettings) keeps falling back to r.db because it runs outside any
+// request and intentionally needs the cross-tenant view.
+func (r *ReportRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 // GetSettings returns report settings for a tenant and report type
 func (r *ReportRepository) GetSettings(ctx context.Context, tenantID uuid.UUID, reportType string) (*model.ReportSettings, error) {
 	query := `
@@ -30,7 +42,7 @@ func (r *ReportRepository) GetSettings(ctx context.Context, tenantID uuid.UUID, 
 	`
 
 	var s model.ReportSettings
-	err := r.db.QueryRowContext(ctx, query, tenantID, reportType).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID, reportType).Scan(
 		&s.ID, &s.TenantID, &s.Enabled, &s.ReportType, &s.ScheduleType, &s.ScheduleDay, &s.ScheduleHour,
 		&s.Format, &s.EmailEnabled, pq.Array(&s.EmailRecipients), pq.Array(&s.IncludeSections),
 		&s.CreatedAt, &s.UpdatedAt,
@@ -55,7 +67,7 @@ func (r *ReportRepository) GetAllSettings(ctx context.Context, tenantID uuid.UUI
 		ORDER BY report_type
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +103,7 @@ func (r *ReportRepository) UpsertSettings(ctx context.Context, s *model.ReportSe
 			updated_at = NOW()
 	`
 
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		s.ID, s.TenantID, s.Enabled, s.ReportType, s.ScheduleType, s.ScheduleDay, s.ScheduleHour,
 		s.Format, s.EmailEnabled, pq.Array(s.EmailRecipients), pq.Array(s.IncludeSections),
 	)
@@ -107,7 +119,7 @@ func (r *ReportRepository) GetEnabledSettings(ctx context.Context) ([]model.Repo
 		WHERE enabled = true
 	`
 
-	rows, err := r.db.QueryContext(ctx, query)
+	rows, err := r.q(ctx).QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +150,7 @@ func (r *ReportRepository) CreateReport(ctx context.Context, report *model.Gener
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
 	`
 
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		report.ID, report.TenantID, report.SettingsID, report.ReportType, report.Format,
 		report.Title, report.PeriodStart, report.PeriodEnd,
 		report.FilePath, report.FileSize, report.Status, report.GeneratedBy,
@@ -155,7 +167,7 @@ func (r *ReportRepository) UpdateReport(ctx context.Context, report *model.Gener
 		WHERE id = $1
 	`
 
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		report.ID, report.FilePath, report.FileSize, report.FileContent, report.Status, report.ErrorMessage,
 		report.EmailSentAt, pq.Array(report.EmailRecipients), report.CompletedAt,
 	)
@@ -174,7 +186,7 @@ func (r *ReportRepository) GetReportWithContent(ctx context.Context, tenantID, r
 
 	var report model.GeneratedReport
 	var emailRecipients []string
-	err := r.db.QueryRowContext(ctx, query, reportID, tenantID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, reportID, tenantID).Scan(
 		&report.ID, &report.TenantID, &report.SettingsID, &report.ReportType, &report.Format,
 		&report.Title, &report.PeriodStart, &report.PeriodEnd,
 		&report.FilePath, &report.FileSize, &report.FileContent, &report.Status, &report.ErrorMessage,
@@ -201,7 +213,7 @@ func (r *ReportRepository) GetReport(ctx context.Context, tenantID, reportID uui
 
 	var report model.GeneratedReport
 	var emailRecipients []string
-	err := r.db.QueryRowContext(ctx, query, reportID, tenantID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, reportID, tenantID).Scan(
 		&report.ID, &report.TenantID, &report.SettingsID, &report.ReportType, &report.Format,
 		&report.Title, &report.PeriodStart, &report.PeriodEnd,
 		&report.FilePath, &report.FileSize, &report.Status, &report.ErrorMessage,
@@ -221,7 +233,7 @@ func (r *ReportRepository) ListReports(ctx context.Context, tenantID uuid.UUID, 
 	// Get total count
 	countQuery := `SELECT COUNT(*) FROM generated_reports WHERE tenant_id = $1`
 	var total int
-	if err := r.db.QueryRowContext(ctx, countQuery, tenantID).Scan(&total); err != nil {
+	if err := r.q(ctx).QueryRowContext(ctx, countQuery, tenantID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -235,7 +247,7 @@ func (r *ReportRepository) ListReports(ctx context.Context, tenantID uuid.UUID, 
 		LIMIT $2 OFFSET $3
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, tenantID, limit, offset)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -264,7 +276,7 @@ func (r *ReportRepository) ListReports(ctx context.Context, tenantID uuid.UUID, 
 // DeleteOldReports deletes reports older than the specified time
 func (r *ReportRepository) DeleteOldReports(ctx context.Context, tenantID uuid.UUID, before time.Time) (int64, error) {
 	query := `DELETE FROM generated_reports WHERE tenant_id = $1 AND created_at < $2`
-	result, err := r.db.ExecContext(ctx, query, tenantID, before)
+	result, err := r.q(ctx).ExecContext(ctx, query, tenantID, before)
 	if err != nil {
 		return 0, err
 	}

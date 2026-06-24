@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -18,6 +19,16 @@ func NewSubscriptionRepository(db *sql.DB) *SubscriptionRepository {
 	return &SubscriptionRepository{db: db}
 }
 
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// subscriptions / subscription_events / usage_records all enforce tenant-scoped
+// RLS (migration 008), so billing / usage endpoints need the tenant GUC set by
+// TenantTx to see the caller's own rows (codex-r1 Finding 2). plan_limits has
+// no RLS (it is a shared catalog) and gracefully reads through the fallback.
+func (r *SubscriptionRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
+}
+
 func (r *SubscriptionRepository) Create(ctx context.Context, s *model.Subscription) error {
 	query := `
 		INSERT INTO subscriptions (
@@ -26,7 +37,7 @@ func (r *SubscriptionRepository) Create(ctx context.Context, s *model.Subscripti
 			trial_ends_at, renews_at, ends_at, cancelled_at, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		s.ID, s.TenantID, s.LSSubscriptionID, s.LSCustomerID, s.LSVariantID, s.LSProductID,
 		s.Status, s.Plan, s.BillingAnchor, s.CurrentPeriodStart, s.CurrentPeriodEnd,
 		s.TrialEndsAt, s.RenewsAt, s.EndsAt, s.CancelledAt, s.CreatedAt, s.UpdatedAt)
@@ -41,7 +52,7 @@ func (r *SubscriptionRepository) GetByTenantID(ctx context.Context, tenantID uui
 		FROM subscriptions WHERE tenant_id = $1
 	`
 	var s model.Subscription
-	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID).Scan(
 		&s.ID, &s.TenantID, &s.LSSubscriptionID, &s.LSCustomerID, &s.LSVariantID, &s.LSProductID,
 		&s.Status, &s.Plan, &s.BillingAnchor, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
 		&s.TrialEndsAt, &s.RenewsAt, &s.EndsAt, &s.CancelledAt, &s.CreatedAt, &s.UpdatedAt)
@@ -59,7 +70,7 @@ func (r *SubscriptionRepository) GetByLSSubscriptionID(ctx context.Context, lsSu
 		FROM subscriptions WHERE ls_subscription_id = $1
 	`
 	var s model.Subscription
-	err := r.db.QueryRowContext(ctx, query, lsSubID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, lsSubID).Scan(
 		&s.ID, &s.TenantID, &s.LSSubscriptionID, &s.LSCustomerID, &s.LSVariantID, &s.LSProductID,
 		&s.Status, &s.Plan, &s.BillingAnchor, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
 		&s.TrialEndsAt, &s.RenewsAt, &s.EndsAt, &s.CancelledAt, &s.CreatedAt, &s.UpdatedAt)
@@ -80,7 +91,7 @@ func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscripti
 		WHERE id = $14
 	`
 	s.UpdatedAt = time.Now()
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		s.LSCustomerID, s.LSVariantID, s.LSProductID,
 		s.Status, s.Plan, s.BillingAnchor,
 		s.CurrentPeriodStart, s.CurrentPeriodEnd,
@@ -91,13 +102,13 @@ func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscripti
 
 func (r *SubscriptionRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
 	query := `UPDATE subscriptions SET status = $1, updated_at = $2 WHERE id = $3`
-	_, err := r.db.ExecContext(ctx, query, status, time.Now(), id)
+	_, err := r.q(ctx).ExecContext(ctx, query, status, time.Now(), id)
 	return err
 }
 
 func (r *SubscriptionRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM subscriptions WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	_, err := r.q(ctx).ExecContext(ctx, query, id)
 	return err
 }
 
@@ -114,7 +125,7 @@ func (r *SubscriptionRepository) CreateEvent(ctx context.Context, e *model.Subsc
 			previous_status, new_status, previous_plan, new_plan, metadata, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
-	_, err = r.db.ExecContext(ctx, query,
+	_, err = r.q(ctx).ExecContext(ctx, query,
 		e.ID, e.SubscriptionID, e.TenantID, e.EventType, e.LSEventID,
 		e.PreviousStatus, e.NewStatus, e.PreviousPlan, e.NewPlan, metadataJSON, e.CreatedAt)
 	return err
@@ -130,7 +141,7 @@ func (r *SubscriptionRepository) GetEvents(ctx context.Context, tenantID uuid.UU
 		ORDER BY created_at DESC
 		LIMIT $2
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, limit)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +174,7 @@ func (r *SubscriptionRepository) GetPlanLimits(ctx context.Context, plan string)
 	`
 	var pl model.PlanLimits
 	var featuresJSON []byte
-	err := r.db.QueryRowContext(ctx, query, plan).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, plan).Scan(
 		&pl.ID, &pl.Plan, &pl.MaxUsers, &pl.MaxProjects, &pl.MaxSBOMsPerProject, &pl.MaxAPIKeys,
 		&pl.APIRateLimit, &featuresJSON, &pl.CreatedAt, &pl.UpdatedAt)
 	if err != nil {
@@ -188,7 +199,7 @@ func (r *SubscriptionRepository) RecordUsage(ctx context.Context, u *model.Usage
 		ON CONFLICT (tenant_id, metric, period_start) DO UPDATE SET
 			quantity = usage_records.quantity + EXCLUDED.quantity
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		u.ID, u.TenantID, u.Metric, u.Quantity, u.PeriodStart, u.PeriodEnd, u.CreatedAt)
 	return err
 }
@@ -201,7 +212,7 @@ func (r *SubscriptionRepository) GetUsage(ctx context.Context, tenantID uuid.UUI
 		WHERE tenant_id = $1 AND metric = $2 AND period_start >= $3 AND period_end <= $4
 		ORDER BY period_start ASC
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, metric, start, end)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, metric, start, end)
 	if err != nil {
 		return nil, err
 	}

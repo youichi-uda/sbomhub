@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -15,6 +16,15 @@ type SearchRepository struct {
 
 func NewSearchRepository(db *sql.DB) *SearchRepository {
 	return &SearchRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// Every search query below joins projects/sboms/components, all of which
+// enforce RLS — without the tenant GUC set by TenantTx, results collapse to
+// zero rows for callers using the sbomhub_app role (codex-r1 Finding 2).
+func (r *SearchRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // SearchByCVE searches for all projects affected by a specific CVE
@@ -29,7 +39,7 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 	`
 	var vulnID uuid.UUID
 	var result model.CVESearchResult
-	err := r.db.QueryRowContext(ctx, vulnQuery, cveID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, vulnQuery, cveID).Scan(
 		&vulnID,
 		&result.CVEID,
 		&result.Description,
@@ -60,7 +70,7 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 		ORDER BY p.name, c.name
 	`
 
-	rows, err := r.db.QueryContext(ctx, affectedQuery, vulnID)
+	rows, err := r.q(ctx).QueryContext(ctx, affectedQuery, vulnID)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +115,7 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 		ORDER BY p.name
 	`
 
-	unaffectedRows, err := r.db.QueryContext(ctx, unaffectedQuery, vulnID)
+	unaffectedRows, err := r.q(ctx).QueryContext(ctx, unaffectedQuery, vulnID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +160,7 @@ func (r *SearchRepository) SearchByComponent(ctx context.Context, name string, v
 	`
 
 	searchPattern := "%" + name + "%"
-	rows, err := r.db.QueryContext(ctx, query, searchPattern)
+	rows, err := r.q(ctx).QueryContext(ctx, query, searchPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +209,7 @@ func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, comp
 		ORDER BY v.cvss_score DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, componentID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, componentID)
 	if err != nil {
 		return nil, err
 	}
