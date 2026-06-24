@@ -1,0 +1,251 @@
+# SBOMHub - install.sh smoke test
+#
+# Trust Rescue P1 #15 / 9.4.3 acceptance gate.
+#
+# install.sh is the canonical one-line bootstrap surface (the same script that
+# `curl -fsSL .../install.sh | sh` downloads). Wave 4a (9afa941) introduced the
+# .env generator, R8-8a (760b9f1) added --start for the docker compose path,
+# R12-12a / R13-13a fixed several fresh-install bugs. None of those landings
+# had a CI smoke that would have caught a regression *before* a maintainer
+# merged it to main and published the broken install.sh to GitHub raw.
+#
+# This workflow is the executable proof that the one-liner still works:
+#
+#   - Ubuntu runs the *full* install.sh --start path: it generates .env, brings
+#     up postgres + api + web + redis via docker compose, runs the role
+#     bootstrap, and asserts /api/v1/health returns 200.
+#   - macOS runs the *env-generation-only* path (no Docker Desktop on the
+#     GitHub-hosted macOS runner), and asserts that .env is created with
+#     non-empty ENCRYPTION_KEY / MIGRATOR_PASSWORD / APP_PASSWORD.
+#
+# Windows is intentionally out of scope for this issue and is tracked
+# separately.
+#
+# Note on image source: docker-compose.yml pins api/web to
+# y1uda/sbomhub-{api,web}:latest from Docker Hub. The Ubuntu job lets compose
+# pull those — the point of this workflow is to verify that the install.sh
+# script itself still drives the install flow to a healthy api. PRs that
+# change apps/api/** are covered by .github/workflows/docs-curl-smoke.yml
+# (which builds the api image locally); this workflow only triggers on
+# install.sh / docker-compose.yml / .env.example changes.
+
+name: install.sh smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "install.sh"
+      - "docker-compose.yml"
+      - ".env.example"
+      - ".github/workflows/install-smoke.yml"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "docker-compose.yml"
+      - ".env.example"
+      - ".github/workflows/install-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  install-smoke:
+    name: install.sh must succeed on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          echo "--- shell ---"
+          sh --version 2>&1 | head -n1 || true
+          bash --version | head -n1
+          echo "--- core utils ---"
+          curl --version | head -n1
+          openssl version
+          sed --version 2>/dev/null | head -n1 || sed --help 2>&1 | head -n1 || true
+          echo "--- runner os ---"
+          uname -a
+
+      - name: Show docker versions (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          docker version
+          docker compose version
+          docker info >/dev/null
+
+      - name: Syntax check install.sh
+        # install.sh starts with `#!/bin/sh` + `set -eu`, so a `sh -n` syntax
+        # check is the cheapest possible regression gate. Catches stray bash
+        # constructs (process substitution, [[ ... ]] etc.) that would break
+        # the one-liner on a minimal /bin/sh.
+        shell: bash
+        run: |
+          sh -n install.sh
+          echo "install.sh syntax OK"
+
+      # ------------------------------------------------------------------
+      # Ubuntu: full --start smoke (docker compose up + role bootstrap)
+      # ------------------------------------------------------------------
+      - name: Run install.sh --start (Ubuntu, full smoke)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x install.sh
+          # `--start` itself runs: .env gen -> docker compose up -d --wait
+          # postgres -> apply_role_bootstrap -> docker compose up -d.
+          # install.sh has `set -eu` so any failure inside aborts with a
+          # non-zero exit and the step fails loudly.
+          ./install.sh --start
+
+      - name: Assert .env generated with non-empty secrets (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .env || { echo "::error::.env was not generated"; exit 1; }
+
+          for key in ENCRYPTION_KEY MIGRATOR_PASSWORD APP_PASSWORD; do
+            line="$(grep -E "^${key}=" .env || true)"
+            if [ -z "$line" ]; then
+              echo "::error::${key} missing from .env"
+              exit 1
+            fi
+            value="${line#*=}"
+            # Strip optional surrounding quotes.
+            value="${value%\"}"; value="${value#\"}"
+            value="${value%\'}"; value="${value#\'}"
+            if [ -z "$value" ]; then
+              echo "::error::${key} is empty in .env"
+              exit 1
+            fi
+            echo "${key}=<redacted, len=${#value}>"
+          done
+
+      - name: Verify compose services running (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose ps
+          # All four services must be present and running. postgres has a
+          # healthcheck and must be healthy; api/web/redis don't have
+          # healthchecks in docker-compose.yml so we just assert they are
+          # running.
+          running="$(docker compose ps --status running --services 2>/dev/null | sort -u)"
+          echo "--- running services ---"
+          echo "${running}"
+          echo "--- end ---"
+          for svc in postgres redis api web; do
+            if ! echo "${running}" | grep -qx "${svc}"; then
+              echo "::error::service '${svc}' is not running"
+              docker compose ps
+              exit 1
+            fi
+          done
+          # Postgres must specifically be healthy.
+          pg_state="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q postgres)" 2>/dev/null || echo unknown)"
+          echo "postgres health: ${pg_state}"
+          if [ "${pg_state}" != "healthy" ]; then
+            echo "::error::postgres is not healthy (state=${pg_state})"
+            exit 1
+          fi
+
+      - name: Wait for /api/v1/health (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # api has no healthcheck in docker-compose.yml, so poll /health
+          # ourselves. Migrations 027/028/029 run on first boot against the
+          # bootstrapped roles, so the warm-up window can be 30-60s on a
+          # cold runner.
+          for i in $(seq 1 90); do
+            if body=$(curl -fsS http://localhost:8080/api/v1/health 2>/dev/null); then
+              echo "api healthy after $((i*2))s: ${body}"
+              exit 0
+            fi
+            echo "waiting for api... (${i}/90)"
+            sleep 2
+          done
+          echo "::error::api did not become healthy within ~180s"
+          exit 1
+
+      - name: Dump api / postgres logs on failure (Ubuntu)
+        if: failure() && matrix.os == 'ubuntu-latest'
+        run: |
+          echo "--- docker compose ps ---"
+          docker compose ps || true
+          echo "--- api logs ---"
+          docker compose logs --tail=400 api || true
+          echo "--- postgres logs ---"
+          docker compose logs --tail=200 postgres || true
+          echo "--- redis logs ---"
+          docker compose logs --tail=100 redis || true
+          echo "--- web logs ---"
+          docker compose logs --tail=100 web || true
+          echo "--- .env (redacted) ---"
+          # Show only keys, not values.
+          if [ -f .env ]; then
+            sed -E 's/=.*/=<redacted>/' .env || true
+          fi
+
+      - name: Tear down (Ubuntu)
+        if: always() && matrix.os == 'ubuntu-latest'
+        run: docker compose down -v || true
+
+      # ------------------------------------------------------------------
+      # macOS: env-generation-only smoke (no Docker Desktop on the runner)
+      # ------------------------------------------------------------------
+      - name: Run install.sh (macOS, .env generation only)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x install.sh
+          # Default mode: just generates .env. install.sh has `set -eu` so
+          # any failure inside aborts with a non-zero exit.
+          ./install.sh
+
+      - name: Assert .env generated with non-empty secrets (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .env || { echo "::error::.env was not generated"; exit 1; }
+
+          for key in ENCRYPTION_KEY MIGRATOR_PASSWORD APP_PASSWORD; do
+            line="$(grep -E "^${key}=" .env || true)"
+            if [ -z "$line" ]; then
+              echo "::error::${key} missing from .env"
+              exit 1
+            fi
+            value="${line#*=}"
+            value="${value%\"}"; value="${value#\"}"
+            value="${value%\'}"; value="${value#\'}"
+            if [ -z "$value" ]; then
+              echo "::error::${key} is empty in .env"
+              exit 1
+            fi
+            echo "${key}=<redacted, len=${#value}>"
+          done
+
+          # Sanity: ENCRYPTION_KEY must be at least 32 bytes after the
+          # base64 decode (`openssl rand -base64 32` -> 44-char base64).
+          enc_line="$(grep -E '^ENCRYPTION_KEY=' .env)"
+          enc_value="${enc_line#ENCRYPTION_KEY=}"
+          if [ "${#enc_value}" -lt 40 ]; then
+            echo "::error::ENCRYPTION_KEY looks too short (len=${#enc_value}); expected base64 of 32 bytes"
+            exit 1
+          fi
