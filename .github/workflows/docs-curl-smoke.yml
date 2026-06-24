@@ -67,19 +67,37 @@ jobs:
 
           # Strip any pre-existing assignment of these vars in .env.example,
           # then append our overrides at the end so they win.
-          sed -i '/^ENCRYPTION_KEY=/d'    .env
-          sed -i '/^MIGRATOR_PASSWORD=/d' .env
-          sed -i '/^APP_PASSWORD=/d'      .env
-          sed -i '/^APP_ENV=/d'           .env
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          # codex-r17 P1: also strip DATABASE_URL / MIGRATE_DATABASE_URL.
+          # docker-compose.yml (codex-r16) reads them with
+          #   ${DATABASE_URL:-postgres://...@postgres:5432/...}
+          # which means any non-empty value in .env wins over the
+          # compose-side fallback. .env.example ships these with
+          # host=localhost (the value is correct for `go run ./cmd/server`
+          # against a host-published postgres port), so leaving the
+          # .env.example values in place would make the api container
+          # dial localhost inside its own network namespace and fail
+          # health checks. Rewrite them to use the docker network
+          # hostname `postgres` and the per-run passwords generated
+          # above. Stripping + appending guarantees the explicit
+          # assignment wins regardless of any future shuffling of the
+          # .env.example layout.
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
           {
             echo "ENCRYPTION_KEY=${ENC_KEY}"
             echo "MIGRATOR_PASSWORD=${MIG_PW}"
             echo "APP_PASSWORD=${APP_PW}"
             echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@postgres:5432/sbomhub?sslmode=disable"
           } >> .env
 
           # Sanity log (do NOT echo the secrets themselves).
-          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV)=' .env \
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
             | sed -E 's/=.*/=<redacted>/'
 
       - name: Build api image locally
