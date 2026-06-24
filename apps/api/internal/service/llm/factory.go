@@ -70,3 +70,46 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 		return nil, fmt.Errorf("llm: unknown provider %q (expected openai|anthropic|gemini|azure_openai|ollama)", providerName)
 	}
 }
+
+// NewProviderFromConfig constructs a Provider from explicit values rather than
+// process environment. Used by per-tenant BYOK resolution (M1 Codex review #F2):
+// /settings/llm stores the encrypted API key in tenant_llm_config, the triage
+// runner decrypts it per request, then calls this helper to build a
+// tenant-scoped Provider so the request uses the tenant's chosen model rather
+// than the server-startup env defaults.
+//
+// Behaviour matches NewProviderFromEnv except the inputs come from
+// tenant_llm_config:
+//   - provider == "" → DisabledProvider (caller should fall back to default).
+//   - apiKey required for all providers except "ollama"; missing → DisabledProvider.
+//   - unknown provider → error.
+//   - azure_openai / ollama → not implemented in M1 (returns error). // ※要確認
+//
+// SECURITY: apiKey is a decrypted secret. The caller must zero its backing
+// buffer after this returns. We deliberately do NOT log apiKey here (provider
+// implementations honour the slog.LogValuer contract from provider.go).
+func NewProviderFromConfig(provider, model, apiKey string) (Provider, error) {
+	name := strings.ToLower(strings.TrimSpace(provider))
+	if name == "" {
+		return &DisabledProvider{Reason: "tenant_llm_config.provider is empty (BYOK required)"}, nil
+	}
+	if name != "ollama" && apiKey == "" {
+		return &DisabledProvider{Reason: "tenant_llm_config.encrypted_api_key is empty (BYOK required for provider " + name + ")"}, nil
+	}
+	switch name {
+	case "openai":
+		return NewOpenAI(apiKey, model), nil
+	case "anthropic":
+		return NewAnthropic(apiKey, model), nil
+	case "gemini":
+		return NewGemini(apiKey, model), nil
+	case "azure_openai":
+		// ※要確認: M2 will implement Azure OpenAI per LLM_PROVIDER_DESIGN.md.
+		return nil, fmt.Errorf("llm: provider %q is not implemented in M1 (planned for M2)", name)
+	case "ollama":
+		// ※要確認: M4 will implement Ollama (local LLM).
+		return nil, fmt.Errorf("llm: provider %q is not implemented in M1 (planned for M4)", name)
+	default:
+		return nil, fmt.Errorf("llm: unknown provider %q (expected openai|anthropic|gemini|azure_openai|ollama)", name)
+	}
+}

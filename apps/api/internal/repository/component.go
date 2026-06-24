@@ -132,3 +132,45 @@ func (r *ComponentRepository) GetByID(ctx context.Context, id uuid.UUID) (*model
 	}
 	return &c, nil
 }
+
+// ListIDsByVulnerability returns the distinct component IDs in (tenant, project)
+// scope that are linked to the given vulnerability via component_vulnerabilities.
+//
+// component_vulnerabilities is a global join table with no tenant_id column,
+// so tenant scoping is enforced via:
+//   - the explicit s.tenant_id = $1 / s.project_id = $2 predicates (belt),
+//   - and the RLS policy on `sboms` / `components` activated by the surrounding
+//     TenantTx middleware (braces). Callers MUST invoke this from inside a
+//     TenantTx so SET LOCAL app.current_tenant_id is bound.
+//
+// Used by triage.Runner (M1 Codex review #F3) to fan out a single triage
+// request across every (component, vuln) pair affected in the project. A
+// zero-length slice means "vulnerability does not affect any component in
+// this tenant's scope" — the runner translates that to a 404.
+func (r *ComponentRepository) ListIDsByVulnerability(ctx context.Context, tenantID, projectID, vulnID uuid.UUID) ([]uuid.UUID, error) {
+	const query = `
+		SELECT DISTINCT cv.component_id
+		FROM component_vulnerabilities cv
+		JOIN components c ON c.id = cv.component_id
+		JOIN sboms s ON s.id = c.sbom_id
+		WHERE s.tenant_id = $1 AND s.project_id = $2 AND cv.vulnerability_id = $3
+		ORDER BY cv.component_id
+	`
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, projectID, vulnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

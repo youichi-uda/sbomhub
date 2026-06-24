@@ -138,6 +138,63 @@ func TestNewProviderFromEnv_UnknownProvider(t *testing.T) {
 	}
 }
 
+// TestNewProviderFromConfig_DisabledWhenEmpty verifies the helper returns a
+// DisabledProvider (no error) when the tenant_llm_config row carries no
+// provider or no API key — the runner is expected to fall back to the env
+// default in those cases (M1 Codex review #F2).
+func TestNewProviderFromConfig_DisabledWhenEmpty(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		apiKey   string
+	}{
+		{"provider blank", "", "k"},
+		{"openai missing key", "openai", ""},
+		{"anthropic missing key", "  Anthropic  ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewProviderFromConfig(tc.provider, "", tc.apiKey)
+			if err != nil {
+				t.Fatalf("err = %v, want nil (DisabledProvider should be returned in-band)", err)
+			}
+			if p.Name() != "disabled" {
+				t.Errorf("Name() = %q, want disabled", p.Name())
+			}
+		})
+	}
+}
+
+func TestNewProviderFromConfig_HappyPaths(t *testing.T) {
+	cases := []struct {
+		provider string
+		wantName string
+	}{
+		{"openai", "openai"},
+		{"anthropic", "anthropic"},
+		{"gemini", "gemini"},
+		{"OpenAI", "openai"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			p, err := NewProviderFromConfig(tc.provider, "", "dummy-key")
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if p.Name() != tc.wantName {
+				t.Errorf("Name() = %q, want %q", p.Name(), tc.wantName)
+			}
+		})
+	}
+}
+
+func TestNewProviderFromConfig_UnknownProviderIsError(t *testing.T) {
+	_, err := NewProviderFromConfig("vertex_ai", "", "dummy")
+	if err == nil {
+		t.Fatal("expected error for unknown provider")
+	}
+}
+
 func TestNewProviderFromEnv_AzureAndOllamaReturnNotImplemented(t *testing.T) {
 	cases := []struct {
 		provider string
