@@ -206,6 +206,28 @@ HIGH = fork URLs, CI configs, and import paths break unless mirrored).
 The following are blockers for Phase 1 onward. Phase 0 (drift fix) does
 not depend on any of them.
 
+### Phase 0 status (2026-06-24, issue #13 close-out)
+
+- [x] **Homebrew / Scoop README drift fixed.** Both READMEs
+  (`sbomhub-cli/README{,_en}.md`, `sbomhub/README{,_en}.md`) now point at
+  the already-published tap / bucket (`youichi-uda/homebrew-sbomhub`,
+  `youichi-uda/scoop-sbomhub`). No goreleaser change needed — config was
+  already correct. The decision about whether to *keep* this owner or move
+  to a `<new-org>/...` tap is still open (see §8 Decision log items).
+- [ ] **Go module path drift (`apps/api/go.mod` =
+  `github.com/sbomhub/sbomhub`)** intentionally **not** touched in this
+  pass. Rewriting the module path is breaking for every internal import
+  (api crates) and for any external consumer that wires the api as a
+  library, and the api is consumed via Docker / source build today, so the
+  drift is harmless in practice. Aligning to the canonical path is part of
+  Phase 1 (§4.4 last paragraph) and will land bundled with the GitHub org
+  move.
+- [ ] **Docker image namespace (`y1uda/sbomhub-{api,web}`)** unchanged. The
+  README references in `sbomhub/README{,_en}.md` already match the
+  reality (the Docker Pulls badge and the `docker-compose.yml` image
+  references all point at `y1uda/*`), so there is no in-repo drift to fix.
+  Renaming to `<new-org>` / GHCR is Phase 1.
+
 - [ ] **New GitHub org name.** Candidates:
   - `sbomhub-io` — most idiomatic, communicates project identity.
   - `sbomhub` — requires the personal account to give up the matching

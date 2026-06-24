@@ -140,7 +140,8 @@ docker compose up -d                      # 残りを起動
 
 ```bash
 # インストール (Homebrew, macOS/Linux)
-brew install sbomhub/tap/sbomhub
+brew tap youichi-uda/sbomhub https://github.com/youichi-uda/homebrew-sbomhub
+brew install sbomhub
 
 # または Go install
 go install github.com/youichi-uda/sbomhub-cli/cmd/sbomhub@latest
