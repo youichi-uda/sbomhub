@@ -734,15 +734,35 @@ func main() {
 	auth.PUT("/projects/:id/licenses/:policy_id", licensePolicyHandler.Update)
 	auth.DELETE("/projects/:id/licenses/:policy_id", licensePolicyHandler.Delete)
 
-	// API key endpoints (tenant-level - recommended)
-	auth.GET("/apikeys", apiKeyHandler.ListTenant)
-	auth.POST("/apikeys", apiKeyHandler.CreateTenant)
-	auth.DELETE("/apikeys/:key_id", apiKeyHandler.DeleteTenant)
+	// M1 Codex review #F16: API-key management is admin-only across
+	// every CRUD verb (LIST included). Previously the routes sat on
+	// the bare `auth` group, so any authenticated tenant user — a
+	// Member or even a Viewer with Clerk JWT auth — could mint a
+	// write-capable sbh_... key for themselves and then bypass their
+	// own role on every MultiAuth-fronted endpoint (F14 made the API
+	// key path map to CanWrite). The escalation chain was
+	// Viewer → POST /apikeys → sbh_... write key → triage/run /
+	// SBOM upload as if they were a Member. RequireAdmin closes the
+	// chain at the management routes themselves.
+	//
+	// LIST is also Admin-gated because the key metadata (name, last
+	// used, expires) is itself an attack surface: a Member who can
+	// enumerate the tenant's keys learns who has write access and
+	// can target social-engineering attacks at those specific people.
+	// The audit log of key creation events stays on the audit-logs
+	// endpoint group (which has its own subscription gate).
+	adminOnly := appmw.RequireAdmin()
+	auth.GET("/apikeys", apiKeyHandler.ListTenant, adminOnly)
+	auth.POST("/apikeys", apiKeyHandler.CreateTenant, adminOnly)
+	auth.DELETE("/apikeys/:key_id", apiKeyHandler.DeleteTenant, adminOnly)
 
-	// API key endpoints (project-level - deprecated, for backwards compatibility)
-	auth.GET("/projects/:id/apikeys", apiKeyHandler.List)
-	auth.POST("/projects/:id/apikeys", apiKeyHandler.Create)
-	auth.DELETE("/projects/:id/apikeys/:key_id", apiKeyHandler.Delete)
+	// API key endpoints (project-level - deprecated, for backwards compatibility).
+	// Same #F16 admin gate — the legacy path is not exempt: it issues
+	// keys with the same TenantContext role mapping and the same
+	// escalation vector once F14 made permissions live.
+	auth.GET("/projects/:id/apikeys", apiKeyHandler.List, adminOnly)
+	auth.POST("/projects/:id/apikeys", apiKeyHandler.Create, adminOnly)
+	auth.DELETE("/projects/:id/apikeys/:key_id", apiKeyHandler.Delete, adminOnly)
 
 	// Notification endpoints
 	auth.GET("/projects/:id/notifications", notificationHandler.GetSettings)
