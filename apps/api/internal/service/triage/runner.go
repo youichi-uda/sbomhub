@@ -91,6 +91,42 @@ type VEXStatementSync interface {
 	CreateStatement(ctx context.Context, input VEXStatementSyncInput) error
 }
 
+// ProviderResolver returns the LLM provider to use for one triage run.
+// M1 Codex review #F2: the runner consults this on every Run() so that
+// /settings/llm BYOK config (tenant_llm_config) actually drives the call
+// rather than the server-startup env default.
+//
+// Implementations are typically:
+//
+//	func(ctx, tenantID) {
+//	    cfg, err := tenantLLMConfigRepo.Get(ctx, tenantID)
+//	    if errors.Is(err, ErrTenantLLMConfigNotFound) || !cfg.HasAPIKey() {
+//	        return defaultProvider, nil // env-configured fallback
+//	    }
+//	    plaintext, _ := llm.Decrypt(cfg.EncryptedAPIKey, masterKey)
+//	    return llm.NewProviderFromConfig(cfg.Provider, cfg.Model, string(plaintext))
+//	}
+//
+// The resolver MUST run inside the request-scoped TenantTx so the
+// tenant_llm_config SELECT obeys RLS. Returning (nil, nil) is treated as
+// "no provider available" and falls back to the runner's defaultProvider;
+// if that is also nil the runner uses *llm.DisabledProvider which
+// triggers the AI-disabled draft path (#F4).
+type ProviderResolver func(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error)
+
+// ComponentVulnerabilityResolver resolves (tenant, project, vulnerability)
+// → []component_id. M1 Codex review #F3: the CLI cannot supply
+// component_id from /vulnerabilities (which has no projection of the
+// component join), so the server resolves it. A zero-length result
+// means "this vulnerability does not affect any component in the
+// tenant's project" → runner returns ErrVulnerabilityNotInTenant.
+//
+// Satisfied by *repository.ComponentRepository via
+// ListIDsByVulnerability.
+type ComponentVulnerabilityResolver interface {
+	ListIDsByVulnerability(ctx context.Context, tenantID, projectID, vulnerabilityID uuid.UUID) ([]uuid.UUID, error)
+}
+
 // ----------------------------------------------------------------------------
 // Pass-through DTOs
 // ----------------------------------------------------------------------------
@@ -192,6 +228,20 @@ const (
 // LLMCallPurposeVexTriage tags llm_calls rows produced by this runner.
 const LLMCallPurposeVexTriage = "vex_triage"
 
+// AuditActionVexDraftAIDisabled is the audit_logs.action emitted when the
+// runner persists an under_investigation draft because BYOK is not
+// configured (no tenant_llm_config + no env default). M1 Codex review #F4:
+// the operator-side audit trail MUST distinguish "AI rendered an
+// under_investigation verdict" (vex_draft_ai_generated) from "AI was not
+// even called because no provider is configured" (vex_draft_ai_disabled).
+const AuditActionVexDraftAIDisabled = "vex_draft_ai_disabled"
+
+// ErrVulnerabilityNotInTenant is returned by Run when component_id is not
+// supplied AND the ComponentVulnerabilityResolver reports no matching
+// (tenant, project, vulnerability) link. The handler translates this to
+// 404 "vulnerability not found in tenant scope" (M1 Codex review #F3).
+var ErrVulnerabilityNotInTenant = errors.New("triage: vulnerability not found in tenant scope")
+
 // ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
@@ -207,14 +257,23 @@ const LLMCallPurposeVexTriage = "vex_triage"
 // All persistence runs against the caller's context, which is expected
 // to be inside a TenantTx (see middleware/tx.go) so RLS GUC is bound.
 type Runner struct {
-	drafts       VexDraftStore
-	advisories   AdvisoryExcerptReader
-	reachability ReachabilityReader
-	llmCalls     LLMCallWriter
-	audit        AuditLogWriter
-	vexSync      VEXStatementSync
+	drafts         VexDraftStore
+	advisories     AdvisoryExcerptReader
+	reachability   ReachabilityReader
+	llmCalls       LLMCallWriter
+	audit          AuditLogWriter
+	vexSync        VEXStatementSync
+	componentVulns ComponentVulnerabilityResolver
 
-	provider  llm.Provider
+	// defaultProvider is the env-configured Provider used when no
+	// ProviderResolver is wired or the resolver returns nil. In OSS this
+	// is whatever SBOMHUB_LLM_PROVIDER + SBOMHUB_LLM_API_KEY produced at
+	// startup (via llm.NewProviderFromEnv). In SaaS — when the
+	// ProviderResolver is wired — this is the fallback for tenants
+	// without their own BYOK row.
+	defaultProvider  llm.Provider
+	providerResolver ProviderResolver
+
 	threshold float64
 	clock     func() time.Time
 }
@@ -227,7 +286,25 @@ type RunnerConfig struct {
 	LLMCalls     LLMCallWriter
 	Audit        AuditLogWriter
 	VEXSync      VEXStatementSync
-	Provider     llm.Provider
+
+	// Provider is the default (server-startup env) LLM provider used
+	// when ProviderResolver is nil or returns nil. Existing tests pass
+	// this directly; production wiring passes the env-resolved provider
+	// as Provider and the tenant-aware closure as ProviderResolver.
+	Provider llm.Provider
+
+	// ProviderResolver lets the runner pick a per-tenant Provider for
+	// each Run() request (M1 Codex review #F2). Wired in production
+	// from cmd/server/main.go; left nil in unit tests that only need
+	// the default provider path.
+	ProviderResolver ProviderResolver
+
+	// ComponentVulnerabilities resolves vulnerability_id →
+	// []component_id when the caller omits ComponentID (M1 Codex
+	// review #F3). Production wiring passes
+	// *repository.ComponentRepository; tests may pass a fake.
+	ComponentVulnerabilities ComponentVulnerabilityResolver
+
 	// Threshold defaults to ConfidenceThresholdFromEnv() when zero.
 	Threshold float64
 	// Clock is overrideable for tests; defaults to time.Now.
@@ -266,15 +343,17 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		clock = time.Now
 	}
 	return &Runner{
-		drafts:       cfg.Drafts,
-		advisories:   cfg.Advisories,
-		reachability: cfg.Reachability,
-		llmCalls:     cfg.LLMCalls,
-		audit:        cfg.Audit,
-		vexSync:      cfg.VEXSync,
-		provider:     cfg.Provider,
-		threshold:    threshold,
-		clock:        clock,
+		drafts:           cfg.Drafts,
+		advisories:       cfg.Advisories,
+		reachability:     cfg.Reachability,
+		llmCalls:         cfg.LLMCalls,
+		audit:            cfg.Audit,
+		vexSync:          cfg.VEXSync,
+		componentVulns:   cfg.ComponentVulnerabilities,
+		defaultProvider:  cfg.Provider,
+		providerResolver: cfg.ProviderResolver,
+		threshold:        threshold,
+		clock:            clock,
 	}
 }
 
@@ -309,11 +388,17 @@ type RunInput struct {
 }
 
 // RunResult is what Run returns to its caller.
+//
+// When a single vulnerability fans out across multiple components (M1
+// Codex review #F3), the runner persists one draft per (component,
+// vuln) pair and returns them in Drafts. Draft remains the first entry
+// for backward compatibility with handlers that render a single draft.
 type RunResult struct {
-	Draft  *repository.VEXDraft
+	Draft  *repository.VEXDraft   // primary draft (== Drafts[0])
+	Drafts []*repository.VEXDraft // all drafts persisted in this run
 	Parsed *ParsedDecision
 	// LLMCallID is the persisted llm_calls.id so the handler can return
-	// it to clients that want to audit.
+	// it to clients that want to audit. uuid.Nil when AI was disabled.
 	LLMCallID uuid.UUID
 	// Clamped reports whether ApplyConfidenceThreshold forced the state
 	// to under_investigation. Carried out-of-band on the result since
@@ -322,18 +407,38 @@ type RunResult struct {
 	// Threshold records the confidence threshold in effect at draft
 	// generation time. Same out-of-band note as Clamped.
 	Threshold float64
+	// AIDisabled reports whether the runner skipped the LLM call because
+	// no provider was configured (BYOK absent) and instead persisted an
+	// under_investigation draft. M1 Codex review #F4: the CLI uses this
+	// flag to surface the "APIキー未設定" hint without inventing a
+	// counter-only fallback path.
+	AIDisabled bool
 }
 
 // Run executes one triage cycle for (TenantID, ProjectID, CVEID).
 //
+// Per-request flow (M1 Codex review #F2 / #F3 / #F4):
+//
+//  1. Resolve the LLM provider via ProviderResolver (tenant_llm_config →
+//     decrypt → llm.NewProviderFromConfig). Falls back to defaultProvider
+//     (env-resolved at startup), then to DisabledProvider.
+//  2. Resolve component_id(s) — caller-supplied ComponentID wins;
+//     otherwise the ComponentVulnerabilityResolver enumerates every
+//     component in (tenant, project) linked to the vulnerability. Zero
+//     matches → ErrVulnerabilityNotInTenant (caller maps to 404).
+//  3. If the resolved provider is *llm.DisabledProvider, skip the LLM
+//     call and persist one under_investigation draft per component +
+//     `vex_draft_ai_disabled` audit row. AIDisabled=true on the result.
+//  4. Otherwise call provider.Complete once, then fan out one draft per
+//     component sharing the same parsed decision / evidence / llm_call.
+//
 // Error contract:
-//   - input validation failures            → returns the sentinel input
-//                                              error (caller maps to 400)
-//   - llm.Provider returns *llm.DisabledError → wrapped and returned
-//                                              (caller maps to 503)
-//   - ValidateEvidence returns ErrEmptyEvidence → wrapped (caller maps
-//                                              to 422; spec requirement)
-//   - persistence failures                  → wrapped, caller maps to 500
+//   - input validation failures              → returns a sentinel input
+//                                                error (caller maps to 400)
+//   - ErrVulnerabilityNotInTenant            → caller maps to 404
+//   - non-Disabled llm.Provider failure      → wrapped (caller maps 5xx)
+//   - ValidateEvidence ErrEmptyEvidence      → wrapped (caller maps 422)
+//   - persistence failures                    → wrapped (caller maps 500)
 func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if in.TenantID == uuid.Nil {
 		return nil, errors.New("triage.Run: tenant_id is required")
@@ -348,13 +453,42 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		return nil, errors.New("triage.Run: vulnerability_id is required")
 	}
 
+	// Step 0a: resolve the per-request LLM provider (#F2). Resolver wins;
+	// fall back to the env-resolved default; final fallback is a
+	// DisabledProvider so the #F4 AI-disabled path can fire.
+	provider, err := r.resolveProvider(ctx, in.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("triage.Run: resolve provider: %w", err)
+	}
+
+	// Step 0b: resolve component IDs (#F3). The CLI omits ComponentID
+	// because /vulnerabilities does not project the component join; the
+	// server resolves it here. Caller-supplied wins; otherwise the
+	// resolver enumerates every (component, vuln) pair in tenant scope.
+	componentIDs, err := r.resolveComponentIDs(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 0c: if the resolved provider is disabled, branch into the
+	// AI-disabled persistence path (#F4). No advisory / reachability
+	// fetch and no LLM call.
+	if _, ok := provider.(*llm.DisabledProvider); ok {
+		return r.runAIDisabled(ctx, in, provider, componentIDs)
+	}
+
 	// Step 1: gather context.
 	advisories, err := r.advisories.GetByCVE(ctx, in.TenantID, in.CVEID)
 	if err != nil {
 		return nil, fmt.Errorf("triage.Run: load advisory excerpts: %w", err)
 	}
 	reachFilter := ReachabilityFilter{
-		CVEID:       in.CVEID,
+		CVEID: in.CVEID,
+		// When fanning out we leave ComponentID nil so reachability rows
+		// across all affected components are visible to the LLM; per-
+		// component filtering happens at draft persistence time. When
+		// the caller supplied an explicit component_id we still scope
+		// the reachability fetch to that component (backward compat).
 		ComponentID: in.ComponentID,
 	}
 	reach, err := r.reachability.ListByProject(ctx, in.TenantID, in.ProjectID, reachFilter)
@@ -377,25 +511,34 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	}
 
 	llmStart := r.clock()
-	resp, llmErr := r.provider.Complete(ctx, completeReq)
+	resp, llmErr := r.provider_Complete(ctx, provider, completeReq)
 	llmDuration := r.clock().Sub(llmStart)
 
 	// Persist the llm_calls row whether the call succeeded or failed,
-	// so the audit trail captures DisabledProvider /
-	// transient-failure cases too.
+	// so the audit trail captures transient-failure cases. NOTE: the
+	// AI-disabled case has its own path (runAIDisabled) and does not
+	// reach here, so r.provider here is always a real provider.
 	llmCallID := uuid.New()
+	// For audit purposes record the first component (or nil) — the
+	// llm_calls row predates fan-out. If we want per-component
+	// attribution, that lives on vex_drafts.component_id directly.
+	var llmTargetComponent *uuid.UUID
+	if len(componentIDs) > 0 {
+		c := componentIDs[0]
+		llmTargetComponent = &c
+	}
 	callRecord := &LLMCallRecord{
 		ID:                      llmCallID,
 		TenantID:                in.TenantID,
 		UserID:                  in.UserID,
 		Purpose:                 LLMCallPurposeVexTriage,
-		Provider:                r.provider.Name(),
-		Model:                   r.provider.Model(),
+		Provider:                provider.Name(),
+		Model:                   provider.Model(),
 		PromptHash:              sha256Hex(prompt),
 		PromptPreview:           preview(prompt, 256),
 		DurationMs:              int(llmDuration.Milliseconds()),
 		TriageTargetCVE:         in.CVEID,
-		TriageTargetComponentID: in.ComponentID,
+		TriageTargetComponentID: llmTargetComponent,
 	}
 	if resp != nil {
 		callRecord.ResponseHash = sha256Hex(resp.Content)
@@ -417,7 +560,6 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			"tenant_id", in.TenantID, "cve_id", in.CVEID, "error", persistErr)
 	}
 
-	// Surface a DisabledProvider distinctly so the caller can map to 503.
 	if llmErr != nil {
 		return nil, fmt.Errorf("triage.Run: llm provider failed: %w", llmErr)
 	}
@@ -426,7 +568,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	parsed, _ := ParseLLMResponse(resp.Content)
 	if parsed == nil {
 		// ParseLLMResponse contract: never returns nil + nil. Defensive.
-		return nil, fmt.Errorf("triage.Run: nil parsed decision (provider=%s)", r.provider.Name())
+		return nil, fmt.Errorf("triage.Run: nil parsed decision (provider=%s)", provider.Name())
 	}
 	finalState, clamped := ApplyConfidenceThreshold(string(parsed.State), parsed.Confidence, r.threshold)
 
@@ -438,13 +580,6 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		return nil, fmt.Errorf("triage.Run: %w", err)
 	}
 
-	// Step 5: persist vex_drafts row. Agent A's schema requires
-	// ComponentID to be non-nil; if the caller did not supply one we
-	// have no per-component verdict, so the runner refuses to insert
-	// (rather than guessing a component id from the reachability set).
-	if in.ComponentID == nil || *in.ComponentID == uuid.Nil {
-		return nil, errors.New("triage.Run: component_id is required (vex_drafts schema requires per-component verdict)")
-	}
 	evidenceJSON, err := json.Marshal(parsed.Evidence)
 	if err != nil {
 		return nil, fmt.Errorf("triage.Run: marshal evidence: %w", err)
@@ -464,68 +599,203 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	}
 	llmFK := llmCallID
 
+	// Step 5: persist one vex_drafts row per (component, vuln) pair —
+	// the fan-out from #F3. Each draft carries the same parsed decision
+	// / evidence / llm_call FK; only ComponentID and the audit row's
+	// resource_id differ.
 	conf := parsed.Confidence
-	draft := &repository.VEXDraft{
-		ID:                   uuid.New(),
-		TenantID:             in.TenantID,
-		ProjectID:            in.ProjectID,
-		ComponentID:          *in.ComponentID,
-		VulnerabilityID:      in.VulnerabilityID,
-		CVEID:                in.CVEID,
-		State:                finalState,
-		Justification:        string(parsed.Justification),
-		Detail:               parsed.Detail,
-		Confidence:           &conf,
-		Provider:             r.provider.Name(),
-		Model:                r.provider.Model(),
-		PromptHash:           callRecord.PromptHash,
-		ResponseHash:         callRecord.ResponseHash,
-		Evidence:             evidenceJSON,
-		AdvisoryExcerptID:    advisoryFK,
-		ReachabilityResultID: reachFK,
-		LLMCallID:            &llmFK,
-		Decision:             DecisionPending,
-		CreatedBy:            in.UserID,
-	}
-	if err := r.drafts.Insert(ctx, draft); err != nil {
-		return nil, fmt.Errorf("triage.Run: persist vex_draft: %w", err)
-	}
-
-	// Step 6: audit log (twin write — the per-request audit middleware
-	// also captures the HTTP-level row, but PRODUCT_REBOOT_PLAN.md §8.5
-	// requires an explicit `vex_draft_ai_generated` row carrying
-	// confidence + provider + model + threshold so the compliance
-	// reviewer can audit "did we clamp?" without a join).
+	drafts := make([]*repository.VEXDraft, 0, len(componentIDs))
 	action := AuditActionVexDraftAIGenerated
 	if in.Reanalyse {
 		action = AuditActionVexDraftReanalysed
 	}
-	if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
-		"cve_id":              in.CVEID,
-		"vulnerability_id":    in.VulnerabilityID.String(),
-		"project_id":          in.ProjectID.String(),
-		"llm_provider":        r.provider.Name(),
-		"llm_model":           r.provider.Model(),
-		"llm_call_id":         llmCallID.String(),
-		"confidence":          parsed.Confidence,
-		"confidence_threshold": r.threshold,
-		"clamped":             clamped,
-		"state":               finalState,
-		"justification":       string(parsed.Justification),
-		"reanalyse_from":      uuidStringOrEmpty(in.ReanalyseFromDraft),
-	}, in.IPAddress, in.UserAgent); err != nil {
-		// Audit write failed — propagate so TenantTx rolls back the
-		// draft INSERT above. PRODUCT_REBOOT_PLAN.md §8.5 requires the
-		// audit row to land with the draft or neither persists.
-		return nil, fmt.Errorf("triage.Run: %w", err)
+	for _, compID := range componentIDs {
+		draft := &repository.VEXDraft{
+			ID:                   uuid.New(),
+			TenantID:             in.TenantID,
+			ProjectID:            in.ProjectID,
+			ComponentID:          compID,
+			VulnerabilityID:      in.VulnerabilityID,
+			CVEID:                in.CVEID,
+			State:                finalState,
+			Justification:        string(parsed.Justification),
+			Detail:               parsed.Detail,
+			Confidence:           &conf,
+			Provider:             provider.Name(),
+			Model:                provider.Model(),
+			PromptHash:           callRecord.PromptHash,
+			ResponseHash:         callRecord.ResponseHash,
+			Evidence:             evidenceJSON,
+			AdvisoryExcerptID:    advisoryFK,
+			ReachabilityResultID: reachFK,
+			LLMCallID:            &llmFK,
+			Decision:             DecisionPending,
+			CreatedBy:            in.UserID,
+		}
+		if err := r.drafts.Insert(ctx, draft); err != nil {
+			return nil, fmt.Errorf("triage.Run: persist vex_draft: %w", err)
+		}
+		// Step 6: audit log — one row per draft so compliance reviewers
+		// can trace the AI verdict on each (component, vuln) pair.
+		if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
+			"cve_id":               in.CVEID,
+			"vulnerability_id":     in.VulnerabilityID.String(),
+			"project_id":           in.ProjectID.String(),
+			"component_id":         compID.String(),
+			"llm_provider":         provider.Name(),
+			"llm_model":            provider.Model(),
+			"llm_call_id":          llmCallID.String(),
+			"confidence":           parsed.Confidence,
+			"confidence_threshold": r.threshold,
+			"clamped":              clamped,
+			"state":                finalState,
+			"justification":        string(parsed.Justification),
+			"reanalyse_from":       uuidStringOrEmpty(in.ReanalyseFromDraft),
+		}, in.IPAddress, in.UserAgent); err != nil {
+			return nil, fmt.Errorf("triage.Run: %w", err)
+		}
+		drafts = append(drafts, draft)
 	}
 
 	return &RunResult{
-		Draft:     draft,
+		Draft:     drafts[0],
+		Drafts:    drafts,
 		Parsed:    parsed,
 		LLMCallID: llmCallID,
 		Clamped:   clamped,
 		Threshold: r.threshold,
+	}, nil
+}
+
+// resolveProvider implements the per-request provider lookup contract
+// (M1 Codex review #F2): resolver → defaultProvider → DisabledProvider.
+// A resolver that returns (nil, nil) is treated as "use the default".
+func (r *Runner) resolveProvider(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error) {
+	if r.providerResolver != nil {
+		p, err := r.providerResolver(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			return p, nil
+		}
+	}
+	if r.defaultProvider != nil {
+		return r.defaultProvider, nil
+	}
+	return &llm.DisabledProvider{Reason: "no LLM provider configured (set tenant_llm_config or SBOMHUB_LLM_PROVIDER env)"}, nil
+}
+
+// resolveComponentIDs implements the component_id resolution contract
+// (M1 Codex review #F3). Caller-supplied ComponentID always wins so
+// per-component triage requests still work; otherwise the resolver
+// enumerates every component in tenant scope linked to the
+// vulnerability. The runner refuses to fabricate an ID when both are
+// missing — the production wiring always supplies a resolver, but
+// surfacing the misconfig loudly is preferable to a silent broken
+// draft.
+func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.UUID, error) {
+	if in.ComponentID != nil && *in.ComponentID != uuid.Nil {
+		return []uuid.UUID{*in.ComponentID}, nil
+	}
+	if r.componentVulns == nil {
+		return nil, errors.New("triage.Run: component_id is required (no ComponentVulnerabilityResolver wired)")
+	}
+	ids, err := r.componentVulns.ListIDsByVulnerability(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID)
+	if err != nil {
+		return nil, fmt.Errorf("triage.Run: resolve component_ids: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("triage.Run: %w", ErrVulnerabilityNotInTenant)
+	}
+	return ids, nil
+}
+
+// provider_Complete is a tiny indirection that lets us swap the bound
+// provider per request without touching the rest of the Run() body. The
+// odd name avoids collision with the `provider` interface field that
+// used to live on the receiver.
+func (r *Runner) provider_Complete(ctx context.Context, p llm.Provider, req llm.CompleteRequest) (*llm.CompleteResponse, error) {
+	return p.Complete(ctx, req)
+}
+
+// runAIDisabled implements the F4 AI-disabled draft path. For every
+// component in scope:
+//
+//   - inserts a vex_drafts row with state=under_investigation,
+//     confidence=0.0, evidence=[{kind:"ai_disabled", ...}]
+//   - emits a `vex_draft_ai_disabled` audit_logs row
+//
+// No LLM call is attempted and no llm_calls row is written — there was
+// no call to record. The handler returns the drafts to the CLI which
+// surfaces the "APIキー未設定" hint and increments the
+// under_investigation counter (UX kept; persistence is now on the
+// server, not invented locally on the CLI).
+func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Provider, componentIDs []uuid.UUID) (*RunResult, error) {
+	reason := "BYOK key not configured"
+	if dp, ok := provider.(*llm.DisabledProvider); ok && dp.Reason != "" {
+		reason = dp.Reason
+	}
+
+	// Synthetic evidence — the schema requires at least one entry, and
+	// "ai_disabled" gives the UI / compliance auditor a clear marker
+	// that this draft was NOT a real AI verdict.
+	evidence := []EvidencePointer{{
+		Kind:        "ai_disabled",
+		Source:      "system",
+		Description: "AI triage skipped: " + reason,
+		Note:        "BYOK key not configured for this tenant; draft auto-created as under_investigation",
+	}}
+	evidenceJSON, err := json.Marshal(evidence)
+	if err != nil {
+		return nil, fmt.Errorf("triage.runAIDisabled: marshal evidence: %w", err)
+	}
+
+	zeroConf := 0.0
+	drafts := make([]*repository.VEXDraft, 0, len(componentIDs))
+	action := AuditActionVexDraftAIDisabled
+	for _, compID := range componentIDs {
+		draft := &repository.VEXDraft{
+			ID:              uuid.New(),
+			TenantID:        in.TenantID,
+			ProjectID:       in.ProjectID,
+			ComponentID:     compID,
+			VulnerabilityID: in.VulnerabilityID,
+			CVEID:           in.CVEID,
+			State:           string(StateUnderInvestigation),
+			// No justification — under_investigation does not need one
+			// per CycloneDX 1.5 (justification is allowlisted to
+			// not_affected variants).
+			Detail:     "AI triage skipped: " + reason,
+			Confidence: &zeroConf,
+			Provider:   provider.Name(),
+			Model:      provider.Model(),
+			Evidence:   evidenceJSON,
+			Decision:   DecisionPending,
+			CreatedBy:  in.UserID,
+		}
+		if err := r.drafts.Insert(ctx, draft); err != nil {
+			return nil, fmt.Errorf("triage.runAIDisabled: persist vex_draft: %w", err)
+		}
+		if err := r.writeAudit(ctx, in.TenantID, in.UserID, action, draft.ID, map[string]interface{}{
+			"cve_id":           in.CVEID,
+			"vulnerability_id": in.VulnerabilityID.String(),
+			"project_id":       in.ProjectID.String(),
+			"component_id":     compID.String(),
+			"reason":           reason,
+			"provider":         provider.Name(),
+			"state":            string(StateUnderInvestigation),
+		}, in.IPAddress, in.UserAgent); err != nil {
+			return nil, fmt.Errorf("triage.runAIDisabled: %w", err)
+		}
+		drafts = append(drafts, draft)
+	}
+
+	return &RunResult{
+		Draft:      drafts[0],
+		Drafts:     drafts,
+		Threshold:  r.threshold,
+		AIDisabled: true,
 	}, nil
 }
 

@@ -42,19 +42,38 @@ func NewVexDraftsHandler(runner *triage.Runner) *VexDraftsHandler {
 // ----------------------------------------------------------------------------
 
 type runTriageRequest struct {
-	// VulnerabilityID is the local vulnerabilities row id. Either this
-	// or CVEID + (optional) ComponentID must be supplied.
+	// VulnerabilityID is the local vulnerabilities row id. CVEID is also
+	// required (server uses it both for advisory_excerpts lookup and as
+	// the audit log target).
 	VulnerabilityID string `json:"vulnerability_id"`
 	CVEID           string `json:"cve_id"`
-	ComponentID     string `json:"component_id,omitempty"`
+	// ComponentID is optional and now deprecated as a wire field. When
+	// omitted, the server resolves component_id(s) from
+	// (tenant, project, vulnerability_id) via the
+	// ComponentVulnerabilityResolver and fans out one draft per
+	// (component, vuln) pair (M1 Codex review #F3). Callers that have a
+	// pinned component_id may still supply it; the server uses that one
+	// component without fanning out.
+	ComponentID string `json:"component_id,omitempty"`
 }
 
 type runTriageResponse struct {
 	Draft     *repository.VEXDraft   `json:"draft"`
-	LLMCallID string                 `json:"llm_call_id"`
-	Parsed    *triage.ParsedDecision `json:"parsed_decision"`
+	// Drafts carries every persisted draft when the run fanned out
+	// across multiple components (M1 Codex review #F3). For a single-
+	// component triage Drafts is a one-element slice with the same
+	// element as Draft.
+	Drafts    []*repository.VEXDraft `json:"drafts"`
+	LLMCallID string                 `json:"llm_call_id,omitempty"`
+	Parsed    *triage.ParsedDecision `json:"parsed_decision,omitempty"`
 	Clamped   bool                   `json:"clamped"`
 	Threshold float64                `json:"threshold"`
+	// AIDisabled reports whether the runner skipped the LLM call because
+	// no BYOK provider is configured. The server still persisted
+	// under_investigation drafts + audit rows; the CLI uses this flag to
+	// surface the "APIキー未設定" hint without inventing a counter-only
+	// path (M1 Codex review #F4).
+	AIDisabled bool `json:"ai_disabled,omitempty"`
 }
 
 type vexDraftListResponse struct {
@@ -122,13 +141,28 @@ func (h *VexDraftsHandler) RunTriage(c echo.Context) error {
 	if status, body, ok := mapRunnerError(err); ok {
 		return c.JSON(status, body)
 	}
-	return c.JSON(http.StatusCreated, runTriageResponse{
-		Draft:     res.Draft,
-		LLMCallID: res.LLMCallID.String(),
-		Parsed:    res.Parsed,
-		Clamped:   res.Clamped,
-		Threshold: res.Threshold,
-	})
+	return c.JSON(http.StatusCreated, buildRunTriageResponse(res))
+}
+
+// buildRunTriageResponse projects a triage.RunResult into the wire DTO.
+// AI-disabled runs leave LLMCallID and Parsed zero-valued; the JSON
+// `omitempty` tags drop them so the response stays compact.
+func buildRunTriageResponse(res *triage.RunResult) runTriageResponse {
+	if res == nil {
+		return runTriageResponse{}
+	}
+	resp := runTriageResponse{
+		Draft:      res.Draft,
+		Drafts:     res.Drafts,
+		Parsed:     res.Parsed,
+		Clamped:    res.Clamped,
+		Threshold:  res.Threshold,
+		AIDisabled: res.AIDisabled,
+	}
+	if res.LLMCallID != uuid.Nil {
+		resp.LLMCallID = res.LLMCallID.String()
+	}
+	return resp
 }
 
 // ----------------------------------------------------------------------------
@@ -346,13 +380,7 @@ func (h *VexDraftsHandler) Reanalyse(c echo.Context) error {
 	if status, body, ok := mapRunnerError(err); ok {
 		return c.JSON(status, body)
 	}
-	return c.JSON(http.StatusCreated, runTriageResponse{
-		Draft:     res.Draft,
-		LLMCallID: res.LLMCallID.String(),
-		Parsed:    res.Parsed,
-		Clamped:   res.Clamped,
-		Threshold: res.Threshold,
-	})
+	return c.JSON(http.StatusCreated, buildRunTriageResponse(res))
 }
 
 // ----------------------------------------------------------------------------

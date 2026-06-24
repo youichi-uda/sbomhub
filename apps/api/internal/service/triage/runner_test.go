@@ -477,9 +477,20 @@ func TestRunner_Run_EmptyEvidence_Returns422Compatible(t *testing.T) {
 	}
 }
 
-func TestRunner_Run_LLMDisabled_PersistsCallWithErrorMessageAndReturnsErr(t *testing.T) {
+// TestRunner_Run_LLMTransientError_PersistsCallWithErrorMessageAndReturnsErr
+// covers the case where the provider returns a non-Disabled error (e.g. 5xx
+// from the upstream LLM). The runner must persist the llm_calls record with
+// the error_message populated so operators can trace failed cycles, then
+// surface a wrapped error so the handler maps it to 5xx.
+//
+// (The original variant of this test exercised *llm.DisabledError. After
+// the F4 fix that path no longer errors — the runner instead persists an
+// under_investigation draft and returns AIDisabled=true. See
+// TestRunner_Run_AIDisabled_PersistsUnderInvestigationDraft for the
+// new contract.)
+func TestRunner_Run_LLMTransientError_PersistsCallWithErrorMessageAndReturnsErr(t *testing.T) {
 	componentID := uuid.New()
-	stub := &stubProvider{err: &llm.DisabledError{Reason: "BYOK not configured"}}
+	stub := &stubProvider{err: errors.New("upstream LLM 503 (transient)")}
 	llmCalls := &fakeLLMCallWriter{}
 	drafts := &fakeVexDraftStore{}
 	r := NewRunner(RunnerConfig{
@@ -493,11 +504,7 @@ func TestRunner_Run_LLMDisabled_PersistsCallWithErrorMessageAndReturnsErr(t *tes
 		ComponentID: &componentID,
 	})
 	if err == nil {
-		t.Fatalf("expected error when provider is disabled")
-	}
-	var disabled *llm.DisabledError
-	if !errors.As(err, &disabled) {
-		t.Errorf("expected wrapped *llm.DisabledError, got %T", err)
+		t.Fatalf("expected error when provider returns a transient failure")
 	}
 	if got := len(llmCalls.records); got != 1 {
 		t.Fatalf("expected llm_calls audit row even on failure, got %d", got)
@@ -510,12 +517,18 @@ func TestRunner_Run_LLMDisabled_PersistsCallWithErrorMessageAndReturnsErr(t *tes
 	}
 }
 
-func TestRunner_Run_MissingComponentID_Returns400(t *testing.T) {
+// TestRunner_Run_MissingComponentID_WithoutResolver_Returns400 verifies
+// that without a ComponentVulnerabilityResolver and without an explicit
+// ComponentID, the runner still refuses to fabricate a component_id. The
+// production wiring always supplies a resolver, but tests that need the
+// legacy behaviour can opt out by leaving the field nil.
+func TestRunner_Run_MissingComponentID_WithoutResolver_Returns400(t *testing.T) {
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
 	r := NewRunner(RunnerConfig{
 		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
 		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
 		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		// ComponentVulnerabilities deliberately omitted.
 	})
 	_, err := r.Run(context.Background(), RunInput{
 		TenantID: uuid.New(), ProjectID: uuid.New(),
@@ -523,9 +536,9 @@ func TestRunner_Run_MissingComponentID_Returns400(t *testing.T) {
 		// ComponentID omitted
 	})
 	if err == nil {
-		t.Fatalf("expected error when component_id is missing")
+		t.Fatalf("expected error when component_id is missing and no resolver wired")
 	}
-	if !strings.Contains(err.Error(), "component_id is required") {
+	if !strings.Contains(err.Error(), "component_id") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -873,6 +886,332 @@ func TestRunner_Run_Reanalyse_AuditFailure_PropagatesError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("reanalyse Run must propagate audit failures (PRODUCT_REBOOT_PLAN.md §8.5)")
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Per-tenant provider + component_id resolution + AI-disabled draft
+// (Codex M1 round 1 #F2 / #F3 / #F4)
+// ----------------------------------------------------------------------------
+//
+// PRODUCT_REBOOT_PLAN.md §7.1 + LLM_PROVIDER_DESIGN.md §4 say AI VEX triage
+// MUST honour per-tenant BYOK (#F2), MUST resolve component_id from
+// (tenant, project, vulnerability_id) when the caller omits it (#F3), and
+// MUST persist an under_investigation draft + audit row when AI is disabled
+// rather than silently counting locally on the CLI (#F4).
+//
+// Until this fix:
+//   - the runner only ever called the server-startup env provider, ignoring
+//     tenant_llm_config (Codex #F2),
+//   - the runner refused to run unless the caller supplied component_id, so
+//     the CLI either had to send one (which it could not derive from
+//     /vulnerabilities) or fall into a 400 (#F3),
+//   - the runner propagated llm.DisabledError back to the CLI which then
+//     incremented a local counter without persisting a draft — leaving no
+//     audit trail (#F4).
+//
+// The tests below pin the new contract:
+//   1. ProviderResolver overrides the default Provider per-request.
+//   2. Missing ComponentID is resolved via ComponentVulnerabilityResolver;
+//      one row → one draft, multiple rows → fan-out one draft per component.
+//   3. DisabledProvider triggers the under_investigation draft + audit
+//      action `vex_draft_ai_disabled` and never calls LLM.
+
+// fakeTenantProviderResolver captures the tenant id passed to the resolver
+// so the test can verify the runner asks per-request (not per-startup).
+type fakeProviderResolver struct {
+	called   int
+	gotTenant uuid.UUID
+	provider llm.Provider
+	err      error
+}
+
+func (r *fakeProviderResolver) resolve(_ context.Context, tenantID uuid.UUID) (llm.Provider, error) {
+	r.called++
+	r.gotTenant = tenantID
+	return r.provider, r.err
+}
+
+// fakeComponentVulnResolver supplies a canned []componentID for the runner.
+type fakeComponentVulnResolver struct {
+	called int
+	ids    []uuid.UUID
+	err    error
+}
+
+func (r *fakeComponentVulnResolver) ListIDsByVulnerability(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID) ([]uuid.UUID, error) {
+	r.called++
+	return r.ids, r.err
+}
+
+// TestRunner_Run_PerTenantProviderResolved verifies F2: a per-request
+// ProviderResolver overrides the default Provider so a tenant's
+// /settings/llm BYOK key actually drives the triage call (rather than
+// the env-configured default).
+func TestRunner_Run_PerTenantProviderResolved(t *testing.T) {
+	tenantID := uuid.New()
+	componentID := uuid.New()
+
+	defaultStub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	tenantStub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "affected", "", 0.95)}}
+	resolver := &fakeProviderResolver{provider: tenantStub}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: defaultStub, Threshold: 0.7,
+		ProviderResolver: resolver.resolve,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: tenantID, ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0100",
+		ComponentID: &componentID,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if resolver.called != 1 {
+		t.Errorf("ProviderResolver called %d times, want 1 (per-request resolve)", resolver.called)
+	}
+	if resolver.gotTenant != tenantID {
+		t.Errorf("ProviderResolver got tenant %v, want %v", resolver.gotTenant, tenantID)
+	}
+	// Only the tenant-scoped provider should have been invoked; the
+	// default stub stays untouched (its captured request stays at zero
+	// value).
+	if tenantStub.captured.Purpose == "" {
+		t.Errorf("expected tenant-scoped provider to receive the LLM request")
+	}
+	if defaultStub.captured.Purpose != "" {
+		t.Errorf("default provider should NOT have been called when ProviderResolver returned a tenant override")
+	}
+}
+
+// TestRunner_Run_ResolveComponentIDFromVulnerability verifies F3: the
+// runner consults ComponentVulnerabilityResolver when ComponentID is nil
+// and uses the resolved id for the draft.
+func TestRunner_Run_ResolveComponentIDFromVulnerability(t *testing.T) {
+	componentID := uuid.New()
+	resolver := &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}}
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	res, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0101",
+		// ComponentID omitted on purpose — the resolver should fill it.
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if resolver.called != 1 {
+		t.Errorf("resolver.called = %d, want 1", resolver.called)
+	}
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 draft inserted, got %d", got)
+	}
+	if drafts.inserted[0].ComponentID != componentID {
+		t.Errorf("draft.ComponentID = %v, want %v", drafts.inserted[0].ComponentID, componentID)
+	}
+	if res.Draft == nil || res.Draft.ComponentID != componentID {
+		t.Errorf("result Draft.ComponentID mismatch")
+	}
+}
+
+// TestRunner_Run_FanOutOverMultipleComponents verifies F3 fan-out: when
+// multiple components in the project are affected by the same
+// vulnerability, the runner persists one draft per component rather than
+// picking one arbitrarily.
+func TestRunner_Run_FanOutOverMultipleComponents(t *testing.T) {
+	c1, c2, c3 := uuid.New(), uuid.New(), uuid.New()
+	resolver := &fakeComponentVulnResolver{ids: []uuid.UUID{c1, c2, c3}}
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+	llmCalls := &fakeLLMCallWriter{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
+		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	res, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0102",
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := len(drafts.inserted); got != 3 {
+		t.Fatalf("expected 3 drafts (fan-out), got %d", got)
+	}
+	if got := len(res.Drafts); got != 3 {
+		t.Errorf("RunResult.Drafts len = %d, want 3", got)
+	}
+	if res.Draft == nil {
+		t.Errorf("RunResult.Draft (primary) should be the first fan-out draft")
+	}
+	gotIDs := map[uuid.UUID]struct{}{
+		drafts.inserted[0].ComponentID: {},
+		drafts.inserted[1].ComponentID: {},
+		drafts.inserted[2].ComponentID: {},
+	}
+	for _, want := range []uuid.UUID{c1, c2, c3} {
+		if _, ok := gotIDs[want]; !ok {
+			t.Errorf("expected draft for component %v, did not find one", want)
+		}
+	}
+	// Each draft must carry its own vex_draft_ai_generated audit row.
+	if got := len(audit.entries); got != 3 {
+		t.Errorf("expected 3 audit entries (one per draft), got %d", got)
+	}
+	for _, a := range audit.entries {
+		if a.Action != AuditActionVexDraftAIGenerated {
+			t.Errorf("audit action = %s, want vex_draft_ai_generated", a.Action)
+		}
+	}
+}
+
+// TestRunner_Run_VulnerabilityNotInTenant_Returns404 verifies F3: when
+// the resolver returns no components, the runner returns a typed error
+// the handler can map to 404 ("vulnerability not found in tenant scope").
+func TestRunner_Run_VulnerabilityNotInTenant_Returns404(t *testing.T) {
+	resolver := &fakeComponentVulnResolver{ids: nil}
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0103",
+	})
+	if err == nil {
+		t.Fatalf("expected error when no components are linked to the vulnerability")
+	}
+	if !errors.Is(err, ErrVulnerabilityNotInTenant) {
+		t.Errorf("error %v should wrap ErrVulnerabilityNotInTenant", err)
+	}
+	if got := len(drafts.inserted); got != 0 {
+		t.Errorf("expected no draft persisted on 404, got %d", got)
+	}
+}
+
+// TestRunner_Run_AIDisabled_PersistsUnderInvestigationDraft verifies F4:
+// a DisabledProvider triggers a server-side under_investigation draft
+// rather than bubbling a 503 up to the CLI. Evidence carries the
+// "ai_disabled" sentinel and the audit row uses action
+// `vex_draft_ai_disabled` so compliance reviewers can distinguish
+// AI-skipped drafts from real AI verdicts.
+func TestRunner_Run_AIDisabled_PersistsUnderInvestigationDraft(t *testing.T) {
+	tenantID := uuid.New()
+	componentID := uuid.New()
+
+	disabled := &llm.DisabledProvider{Reason: "BYOK key not configured"}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+	llmCalls := &fakeLLMCallWriter{}
+	advisories := &fakeAdvisoryReader{}
+	reach := &fakeReachabilityReader{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: advisories,
+		Reachability: reach, LLMCalls: llmCalls,
+		Audit: audit, Provider: disabled, Threshold: 0.7,
+	})
+
+	res, err := r.Run(context.Background(), RunInput{
+		TenantID: tenantID, ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0104",
+		ComponentID: &componentID,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v (AI-disabled path must succeed with a draft, not return an error)", err)
+	}
+	if res == nil || !res.AIDisabled {
+		t.Fatalf("expected RunResult.AIDisabled=true; got %+v", res)
+	}
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 under_investigation draft, got %d", got)
+	}
+	d := drafts.inserted[0]
+	if d.State != string(StateUnderInvestigation) {
+		t.Errorf("state = %q, want under_investigation", d.State)
+	}
+	if d.Confidence == nil || *d.Confidence != 0.0 {
+		t.Errorf("confidence = %v, want 0.0 pointer", d.Confidence)
+	}
+	if d.Provider != "disabled" {
+		t.Errorf("draft.Provider = %q, want disabled", d.Provider)
+	}
+	// Evidence must carry the ai_disabled kind sentinel so the UI can
+	// distinguish "AI skipped" from "AI rendered an under_investigation".
+	if !strings.Contains(string(d.Evidence), "ai_disabled") {
+		t.Errorf("evidence missing ai_disabled marker: %s", string(d.Evidence))
+	}
+	// No LLM call must be attempted on the AI-disabled path — that would
+	// just waste a network round-trip.
+	if got := len(llmCalls.records); got != 0 {
+		t.Errorf("expected 0 llm_calls records on AI-disabled path, got %d", got)
+	}
+	if got := len(audit.entries); got != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", got)
+	}
+	if audit.entries[0].Action != AuditActionVexDraftAIDisabled {
+		t.Errorf("audit action = %s, want %s", audit.entries[0].Action, AuditActionVexDraftAIDisabled)
+	}
+}
+
+// TestRunner_Run_AIDisabled_FanOutAcrossComponents combines F3+F4: when
+// AI is disabled AND multiple components are affected, the runner must
+// still create one under_investigation draft per component so the audit
+// trail covers every (component, vuln) pair.
+func TestRunner_Run_AIDisabled_FanOutAcrossComponents(t *testing.T) {
+	c1, c2 := uuid.New(), uuid.New()
+	resolver := &fakeComponentVulnResolver{ids: []uuid.UUID{c1, c2}}
+	disabled := &llm.DisabledProvider{Reason: "BYOK key not configured"}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: audit, Provider: disabled, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0105",
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := len(drafts.inserted); got != 2 {
+		t.Fatalf("expected 2 under_investigation drafts (one per component), got %d", got)
+	}
+	if got := len(audit.entries); got != 2 {
+		t.Errorf("expected 2 audit entries, got %d", got)
+	}
+	for _, a := range audit.entries {
+		if a.Action != AuditActionVexDraftAIDisabled {
+			t.Errorf("audit action = %s, want %s", a.Action, AuditActionVexDraftAIDisabled)
+		}
 	}
 }
 

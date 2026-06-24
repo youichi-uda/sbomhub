@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -313,27 +316,71 @@ func main() {
 
 	// AI VEX triage runner (issue #30 / Wave M1-5). Composes the four
 	// input repositories above with the BYOK LLM provider and the
-	// guards layer (#29 / agent C). Wired unconditionally — if BYOK is
-	// not configured the provider returns *llm.DisabledError on every
-	// call, which the handler translates to 503.
-	triageProvider, err := llm.NewProviderFromEnv(context.Background())
+	// guards layer (#29 / agent C).
+	//
+	// Provider resolution (M1 Codex review #F2): per-request resolver
+	// reads tenant_llm_config and decrypts the BYOK key when set; falls
+	// back to the env-resolved default (NewProviderFromEnv) for tenants
+	// without their own row; final fallback is DisabledProvider which
+	// triggers the under_investigation draft path (#F4).
+	triageDefaultProvider, err := llm.NewProviderFromEnv(context.Background())
 	if err != nil {
 		slog.Error("Failed to initialise LLM provider", "error", err)
 		os.Exit(1)
 	}
+	triageProviderResolver := func(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error) {
+		cfg, err := tenantLLMConfigRepo.Get(ctx, tenantID)
+		if errors.Is(err, repository.ErrTenantLLMConfigNotFound) {
+			// Tenant has not configured BYOK — fall back to env default.
+			return triageDefaultProvider, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load tenant_llm_config: %w", err)
+		}
+		// Ollama (M4) has no API key. For everything else, a missing key
+		// means "BYOK configured but incomplete" — fall back to env so
+		// the runner's #F4 ai_disabled path only fires when BOTH are
+		// missing.
+		needsKey := strings.ToLower(strings.TrimSpace(cfg.Provider)) != "ollama"
+		if needsKey && !cfg.HasAPIKey() {
+			return triageDefaultProvider, nil
+		}
+		var apiKey string
+		if cfg.HasAPIKey() {
+			plaintext, decErr := llm.Decrypt(cfg.EncryptedAPIKey, encryptionKey)
+			if decErr != nil {
+				return nil, fmt.Errorf("decrypt tenant llm key: %w", decErr)
+			}
+			apiKey = string(plaintext)
+			// Best-effort: zero the plaintext buffer once we've handed
+			// the string to the provider. (Go strings are immutable, so
+			// once apiKey is built the byte slice can be wiped.)
+			for i := range plaintext {
+				plaintext[i] = 0
+			}
+		}
+		p, perr := llm.NewProviderFromConfig(cfg.Provider, cfg.Model, apiKey)
+		if perr != nil {
+			return nil, fmt.Errorf("build tenant provider: %w", perr)
+		}
+		return p, nil
+	}
 	triageRunner := triage.NewRunner(triage.RunnerConfig{
-		Drafts:       newVexDraftsStore(db),
-		Advisories:   &triage.AdvisoryExcerptsAdapter{Repo: advisoryExcerptsRepo},
-		Reachability: &triage.ReachabilityAdapter{Repo: reachabilityResultsRepo},
-		LLMCalls:     &triage.LLMCallsAdapter{Repo: llmCallsRepo},
-		Audit:        auditRepo,
-		VEXSync:      &triage.VEXServiceAdapter{Service: vexService},
-		Provider:     triageProvider,
-		Threshold:    triage.ConfidenceThresholdFromEnv(),
+		Drafts:                   newVexDraftsStore(db),
+		Advisories:               &triage.AdvisoryExcerptsAdapter{Repo: advisoryExcerptsRepo},
+		Reachability:             &triage.ReachabilityAdapter{Repo: reachabilityResultsRepo},
+		LLMCalls:                 &triage.LLMCallsAdapter{Repo: llmCallsRepo},
+		Audit:                    auditRepo,
+		VEXSync:                  &triage.VEXServiceAdapter{Service: vexService},
+		ComponentVulnerabilities: componentRepo,
+		Provider:                 triageDefaultProvider,
+		ProviderResolver:         triageProviderResolver,
+		Threshold:                triage.ConfidenceThresholdFromEnv(),
 	})
 	slog.Info("AI VEX triage runner initialised",
-		"provider", triageProvider.Name(),
-		"threshold", triage.ConfidenceThresholdFromEnv())
+		"default_provider", triageDefaultProvider.Name(),
+		"threshold", triage.ConfidenceThresholdFromEnv(),
+		"per_tenant_resolver", "tenant_llm_config")
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
