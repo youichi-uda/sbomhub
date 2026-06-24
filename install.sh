@@ -91,6 +91,11 @@ done
 # Idempotency: init.sh wraps CREATE ROLE in DO $$ ... EXCEPTION WHEN
 # duplicate_object $$ blocks and ALTER ROLE on every run, so re-execution is
 # safe even after the roles already exist.
+#
+# Ownership transfer (codex-r3 P1): init.sh additionally runs REASSIGN OWNED
+# BY sbomhub TO sbomhub_migrator, which moves every legacy-owned table /
+# sequence to the migrator so migrations 027 / 028 / 029 can ALTER TABLE
+# without hitting "must be owner of table ...". No-op on fresh volumes.
 if [ "$MODE" = "bootstrap_roles" ]; then
     if [ ! -f .env ]; then
         printf '[FAIL] .env が見つかりません。\n' >&2

@@ -115,6 +115,14 @@ docker compose up -d postgres
 The script is idempotent. Re-running it after a successful bootstrap is a
 safe no-op that re-asserts the password and the `NOBYPASSRLS` flag.
 
+In addition to creating the roles, `--bootstrap-roles` runs
+`REASSIGN OWNED BY sbomhub TO sbomhub_migrator` against the live database.
+This transfers ownership of every legacy table / sequence (created by the
+pre-M0 `sbomhub` superuser-equivalent role) to `sbomhub_migrator` so that
+migrations 027 / 028 / 029 can `ALTER TABLE ... SET NOT NULL` without
+tripping PostgreSQL's owner-only check. On a fresh volume the REASSIGN is
+a no-op.
+
 ### 4.3 Decide on `ENCRYPTION_KEY`
 
 You have two choices:

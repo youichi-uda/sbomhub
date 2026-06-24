@@ -72,4 +72,24 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sbomhub_app;
     ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
         GRANT USAGE, SELECT ON SEQUENCES TO sbomhub_app;
+
+    -- Existing-volume upgrade fix (codex-r3 P1):
+    -- On legacy self-host volumes every table / sequence was created by the
+    -- POSTGRES_USER role 'sbomhub' and is therefore owned by it. GRANT ALL
+    -- above is insufficient for owner-only operations (ALTER TABLE, DROP,
+    -- ALTER COLUMN ... SET NOT NULL etc.), so migrations 027 / 028 / 029
+    -- abort with "must be owner of table sboms" when run as sbomhub_migrator.
+    --
+    -- REASSIGN OWNED transfers every object in the current database owned by
+    -- 'sbomhub' to 'sbomhub_migrator'. On a fresh volume the migrator has
+    -- not yet created anything as 'sbomhub', so this is a no-op. The
+    -- pg_roles guard keeps the script safe if an operator customised
+    -- POSTGRES_USER away from the default name.
+    DO \$\$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub') THEN
+            EXECUTE 'REASSIGN OWNED BY sbomhub TO sbomhub_migrator';
+        END IF;
+    END
+    \$\$;
 EOSQL
