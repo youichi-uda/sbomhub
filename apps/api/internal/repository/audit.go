@@ -23,12 +23,26 @@ func NewAuditRepository(db *sql.DB) *AuditRepository {
 
 // q routes the statement through the request-scoped transaction when one is
 // attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
-// audit_logs is FORCE ROW LEVEL SECURITY (migration 023), so writes from
-// the audit middleware MUST land inside the same tx that TenantTx opened.
+//
+// RLS history note: migration 023 originally put audit_logs under FORCE ROW
+// LEVEL SECURITY with a tenant-scoped policy. That broke webhook-driven
+// audit INSERTs (Clerk / Lemon Squeezy handlers run with no tenant GUC, so
+// the policy evaluated to NULL and silently rejected the row). Migration
+// 029 dropped the policy; tenant scope on every audit_logs read is now
+// enforced by explicit `WHERE tenant_id = $N` clauses in this file. The
+// `q(ctx)` indirection still matters: when the caller is inside a TenantTx
+// transaction the INSERT should join that tx so it commits/rolls back
+// atomically with the rest of the request. Webhook callers have no tx and
+// fall through to r.db, which is fine now that RLS is off.
 func (r *AuditRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
 }
 
+// Create inserts an audit log row. After migration 029 there is no RLS on
+// audit_logs, so this INSERT succeeds even when the caller has no tenant
+// GUC set (webhook handlers, background jobs, etc.). a.TenantID MAY be nil
+// for system-level events; such rows are invisible to tenant-scoped reads
+// by construction (every List/Get below filters with `tenant_id = $1`).
 func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
 	detailsJSON, err := json.Marshal(a.Details)
 	if err != nil {
@@ -47,6 +61,15 @@ func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
 	return err
 }
 
+// List returns paginated audit log rows for a single tenant.
+//
+// The `WHERE tenant_id = $1` filter is load-bearing: migration 029 removed
+// the RLS policy on audit_logs, so this clause is what isolates tenants.
+// Callers MUST pass the tenant id from the authenticated session — never a
+// tenant_id read from a user-supplied request body — otherwise this becomes
+// a cross-tenant information-disclosure primitive. The filter also excludes
+// rows with `tenant_id IS NULL` (system-level events written by webhook
+// handlers), which is the intended behavior for a tenant audit view.
 func (r *AuditRepository) List(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]model.AuditLog, error) {
 	query := `
 		SELECT id, tenant_id, user_id, action, resource_type, resource_id,
