@@ -1,14 +1,86 @@
 package middleware
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/database"
 )
+
+// postCommitHooksKey is the unexported context key for the per-request
+// post-commit hook registry. Hooks registered through RegisterPostCommit are
+// run by TenantTx after the request's transaction commits successfully — see
+// RegisterPostCommit godoc for the contract.
+type postCommitHooksKey struct{}
+
+// postCommitHookRegistry holds the slice of callbacks to run after a
+// successful commit. A mutex guards the slice so handlers that fan out into
+// goroutines and register hooks from each can still do so safely.
+type postCommitHookRegistry struct {
+	mu    sync.Mutex
+	hooks []func()
+}
+
+func (r *postCommitHookRegistry) append(fn func()) {
+	r.mu.Lock()
+	r.hooks = append(r.hooks, fn)
+	r.mu.Unlock()
+}
+
+func (r *postCommitHookRegistry) drain() []func() {
+	r.mu.Lock()
+	out := r.hooks
+	r.hooks = nil
+	r.mu.Unlock()
+	return out
+}
+
+// RegisterPostCommit queues fn to run after the current request's TenantTx
+// transaction commits successfully.
+//
+// Semantics:
+//   - Hooks run sequentially in registration order on the request goroutine,
+//     after Commit() returns nil and before TenantTx returns to the response
+//     writer chain.
+//   - Hooks DO NOT run if the request rolls back: any handler-returned error,
+//     any 4xx/5xx response, any panic, or a Commit() failure.
+//   - A panic inside a hook is recovered and logged so one bad hook cannot
+//     take down the request — sibling hooks still run, the response is not
+//     affected.
+//   - Calling RegisterPostCommit outside of a TenantTx-wrapped route logs a
+//     warning and silently drops the hook (no panic), to match the
+//     middleware's "not on a tenant route → refuse the request" stance
+//     without crashing exotic call sites.
+//
+// Typical use: a handler that has issued tenant-scoped INSERTs in the request
+// transaction and wants to kick off a background job that depends on those
+// rows being visible. Registering the launch as a post-commit hook avoids the
+// race in which the background goroutine opens its own transaction before the
+// request transaction commits, sees zero rows, and silently completes.
+//
+// Codex R2 P1: previously the SBOM upload handler launched its background
+// vulnerability scan goroutine inside the request tx; the goroutine opened
+// its own tx and called ComponentRepository.ListBySbom, which (correctly)
+// could not see the un-committed parent INSERTs and so completed with 0
+// components, 0 vulnerabilities — `sbomhub scan --fail-on critical` always
+// exited 0.
+func RegisterPostCommit(c echo.Context, fn func()) {
+	if fn == nil {
+		return
+	}
+	registry, _ := c.Request().Context().Value(postCommitHooksKey{}).(*postCommitHookRegistry)
+	if registry == nil {
+		slog.Warn("RegisterPostCommit called outside TenantTx — hook will not run",
+			"path", c.Path(), "method", c.Request().Method)
+		return
+	}
+	registry.append(fn)
+}
 
 // TenantTx wraps every authenticated request in an explicit Postgres
 // transaction with `SET LOCAL app.current_tenant_id = '<uuid>'` so that
@@ -98,8 +170,12 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 			// Attach the tx to the request context so repositories that go
 			// through database.Querier pick it up transparently. Echo
 			// caches Request() so we have to swap the request in for the
-			// new context to be visible downstream.
+			// new context to be visible downstream. We also stash an empty
+			// post-commit hook registry so handlers can opt into "run X
+			// after my tenant tx commits" via RegisterPostCommit.
+			postCommit := &postCommitHookRegistry{}
 			txCtx := database.WithTx(ctx, tx)
+			txCtx = context.WithValue(txCtx, postCommitHooksKey{}, postCommit)
 			origReq := c.Request()
 			c.SetRequest(origReq.WithContext(txCtx))
 
@@ -150,7 +226,34 @@ func TenantTx(db *sql.DB) echo.MiddlewareFunc {
 				return cErr
 			}
 			finalised = true
+
+			// Run post-commit hooks now that the request's writes are
+			// durable. Hooks run sequentially in registration order on
+			// this goroutine; if a hook needs to outlive the request it
+			// is the hook's job to spawn its own goroutine (this matches
+			// how SbomHandler.startBackgroundScan kicks off the NVD/JVN
+			// scan). Panics are recovered so one buggy hook cannot crash
+			// the response. See RegisterPostCommit godoc for the
+			// guarantees.
+			for i, fn := range postCommit.drain() {
+				runPostCommitHook(tenantID, i, fn)
+			}
 			return nil
 		}
 	}
+}
+
+// runPostCommitHook invokes fn with a recover so a panicking hook does not
+// take down sibling hooks or the response writer. The recovery only logs;
+// hooks that need to surface failure must do so out-of-band (e.g. via
+// ScanTracker), exactly as they would in a goroutine they launched
+// themselves.
+func runPostCommitHook(tenantID uuid.UUID, idx int, fn func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("post-commit hook panicked",
+				"tenant_id", tenantID, "hook_index", idx, "panic", p)
+		}
+	}()
+	fn()
 }
