@@ -3,6 +3,7 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -18,11 +19,22 @@ import (
 
 var base64StdEncoding = base64.StdEncoding
 
-// ReportGenerationJob handles periodic report generation
+// ReportGenerationJob handles periodic report generation.
+//
+// codex-r4 P1 fix:
+//   `report_settings` and `generated_reports` are RLS-enabled (migration
+//   013). The previous job called `reportRepo.GetEnabledSettings(ctx)` and
+//   `reportRepo.GetReport*` on a bare scheduler context with no
+//   `app.current_tenant_id` GUC, so under sbomhub_app it received zero
+//   rows and never generated anything. The job now enumerates tenants via
+//   TenantRepository and runs all read/write paths inside per-tenant
+//   transactions. A direct *sql.DB handle is required for that — the
+//   `db` field is the source for `runWithTenantTx`.
 type ReportGenerationJob struct {
 	reportService *service.ReportService
 	reportRepo    *repository.ReportRepository
 	tenantRepo    *repository.TenantRepository
+	db            *sql.DB
 	cfg           *config.Config
 	interval      time.Duration
 	logger        *slog.Logger
@@ -33,12 +45,14 @@ func NewReportGenerationJob(
 	reportService *service.ReportService,
 	reportRepo *repository.ReportRepository,
 	tenantRepo *repository.TenantRepository,
+	db *sql.DB,
 	interval time.Duration,
 ) *ReportGenerationJob {
 	return &ReportGenerationJob{
 		reportService: reportService,
 		reportRepo:    reportRepo,
 		tenantRepo:    tenantRepo,
+		db:            db,
 		interval:      interval,
 		logger:        slog.Default().With("job", "report_generation"),
 	}
@@ -49,6 +63,7 @@ func NewReportGenerationJobFull(
 	reportService *service.ReportService,
 	reportRepo *repository.ReportRepository,
 	tenantRepo *repository.TenantRepository,
+	db *sql.DB,
 	cfg *config.Config,
 	interval time.Duration,
 ) *ReportGenerationJob {
@@ -56,6 +71,7 @@ func NewReportGenerationJobFull(
 		reportService: reportService,
 		reportRepo:    reportRepo,
 		tenantRepo:    tenantRepo,
+		db:            db,
 		cfg:           cfg,
 		interval:      interval,
 		logger:        slog.Default().With("job", "report_generation"),
@@ -81,34 +97,58 @@ func (j *ReportGenerationJob) Start(ctx context.Context) {
 	}
 }
 
-// run executes a single check cycle
+// run executes a single check cycle, enumerating every tenant under its
+// own RLS-pinned transaction. Inside each tx we list the tenant's enabled
+// report settings (RLS-bound) and decide which are due. The actual
+// per-setting generation is launched outside the tx so we do not hold a
+// transaction open while reportService.GenerateReport runs (which itself
+// spawns long-lived goroutines).
 func (j *ReportGenerationJob) run(ctx context.Context) {
 	now := time.Now()
 	j.logger.Debug("Checking scheduled reports", "time", now.Format("15:04"))
 
-	// Get all enabled report settings
-	settings, err := j.reportRepo.GetEnabledSettings(ctx)
+	tenantIDs, err := j.tenantRepo.ListAllIDs(ctx)
 	if err != nil {
-		j.logger.Error("Failed to get enabled settings", "error", err)
+		j.logger.Error("Failed to list tenants", "error", err)
 		return
 	}
 
-	if len(settings) == 0 {
-		j.logger.Debug("No enabled report schedules found")
-		return
-	}
+	var due []model.ReportSettings
 
-	j.logger.Debug("Found enabled report settings", "count", len(settings))
-
-	for _, setting := range settings {
-		if j.shouldGenerate(&setting, now) {
-			j.logger.Info("Triggering scheduled report generation",
-				"tenant_id", setting.TenantID,
-				"report_type", setting.ReportType,
-				"format", setting.Format,
+	for _, tid := range tenantIDs {
+		terr := runWithTenantTx(ctx, j.db, tid, func(txCtx context.Context, _ *sql.Tx) error {
+			settings, err := j.reportRepo.GetEnabledSettings(txCtx)
+			if err != nil {
+				return err
+			}
+			for _, s := range settings {
+				if j.shouldGenerate(&s, now) {
+					due = append(due, s)
+				}
+			}
+			return nil
+		})
+		if terr != nil {
+			j.logger.Warn("Failed to enumerate report settings for tenant",
+				"tenant_id", tid,
+				"error", terr,
 			)
-			go j.generateReport(ctx, &setting)
 		}
+	}
+
+	if len(due) == 0 {
+		j.logger.Debug("No report schedules due this tick")
+		return
+	}
+
+	for _, setting := range due {
+		j.logger.Info("Triggering scheduled report generation",
+			"tenant_id", setting.TenantID,
+			"report_type", setting.ReportType,
+			"format", setting.Format,
+		)
+		setting := setting // capture per iteration
+		go j.generateReport(ctx, &setting)
 	}
 }
 
@@ -133,7 +173,13 @@ func (j *ReportGenerationJob) shouldGenerate(setting *model.ReportSettings, now 
 	}
 }
 
-// generateReport generates a report for a tenant
+// generateReport generates a report for a tenant.
+//
+// reportService.GenerateReport synchronously persists a `generated_reports`
+// row (RLS-bound, requires tenant GUC) and then spawns its own
+// `generateReportAsync` goroutine for the actual PDF/XLSX build. We only
+// need the GUC for the synchronous DB insert, so the tenant tx wraps just
+// the call into reportService.
 func (j *ReportGenerationJob) generateReport(ctx context.Context, setting *model.ReportSettings) {
 	startTime := time.Now()
 
@@ -160,7 +206,15 @@ func (j *ReportGenerationJob) generateReport(ctx context.Context, setting *model
 	// Use system user ID for scheduled reports
 	systemUserID := uuid.Nil
 
-	report, err := j.reportService.GenerateReport(ctx, setting.TenantID, systemUserID, input)
+	var report *model.GeneratedReport
+	err := runWithTenantTx(ctx, j.db, setting.TenantID, func(txCtx context.Context, _ *sql.Tx) error {
+		r, gerr := j.reportService.GenerateReport(txCtx, setting.TenantID, systemUserID, input)
+		if gerr != nil {
+			return gerr
+		}
+		report = r
+		return nil
+	})
 	if err != nil {
 		j.logger.Error("Failed to generate scheduled report",
 			"tenant_id", setting.TenantID,
@@ -181,12 +235,15 @@ func (j *ReportGenerationJob) generateReport(ctx context.Context, setting *model
 
 	// Send email if configured
 	if setting.EmailEnabled && len(setting.EmailRecipients) > 0 {
-		// Wait for report generation to complete (with timeout)
+		// Wait for report generation to complete (with timeout). Each poll
+		// inside sendReportEmailWhenReady opens its own tenant tx.
 		go j.sendReportEmailWhenReady(ctx, setting, report.ID)
 	}
 }
 
-// sendReportEmailWhenReady waits for report completion and sends email
+// sendReportEmailWhenReady waits for report completion and sends email.
+// Each poll opens a fresh tenant tx so we never hold a transaction open
+// across the 10-second sleep between polls.
 func (j *ReportGenerationJob) sendReportEmailWhenReady(ctx context.Context, setting *model.ReportSettings, reportID uuid.UUID) {
 	// Poll for report completion (max 5 minutes)
 	maxWait := 5 * time.Minute
@@ -194,7 +251,15 @@ func (j *ReportGenerationJob) sendReportEmailWhenReady(ctx context.Context, sett
 	startTime := time.Now()
 
 	for time.Since(startTime) < maxWait {
-		report, err := j.reportRepo.GetReport(ctx, setting.TenantID, reportID)
+		var report *model.GeneratedReport
+		err := runWithTenantTx(ctx, j.db, setting.TenantID, func(txCtx context.Context, _ *sql.Tx) error {
+			r, gerr := j.reportRepo.GetReport(txCtx, setting.TenantID, reportID)
+			if gerr != nil {
+				return gerr
+			}
+			report = r
+			return nil
+		})
 		if err != nil {
 			j.logger.Error("Failed to get report for email",
 				"report_id", reportID,
@@ -224,7 +289,9 @@ func (j *ReportGenerationJob) sendReportEmailWhenReady(ctx context.Context, sett
 	)
 }
 
-// sendReportEmail sends the generated report via email
+// sendReportEmail sends the generated report via email.
+// generated_reports is RLS-bound; both the content fetch and the
+// post-email status update run inside per-tenant tx wrappers.
 func (j *ReportGenerationJob) sendReportEmail(ctx context.Context, setting *model.ReportSettings, report *model.GeneratedReport) {
 	if j.cfg == nil || !j.cfg.IsEmailEnabled() {
 		j.logger.Debug("Email not configured, skipping report email")
@@ -232,8 +299,16 @@ func (j *ReportGenerationJob) sendReportEmail(ctx context.Context, setting *mode
 	}
 
 	// Get report content
-	reportWithContent, err := j.reportRepo.GetReportWithContent(ctx, setting.TenantID, report.ID)
-	if err != nil || len(reportWithContent.FileContent) == 0 {
+	var reportWithContent *model.GeneratedReport
+	err := runWithTenantTx(ctx, j.db, setting.TenantID, func(txCtx context.Context, _ *sql.Tx) error {
+		rwc, gerr := j.reportRepo.GetReportWithContent(txCtx, setting.TenantID, report.ID)
+		if gerr != nil {
+			return gerr
+		}
+		reportWithContent = rwc
+		return nil
+	})
+	if err != nil || reportWithContent == nil || len(reportWithContent.FileContent) == 0 {
 		j.logger.Error("Failed to get report content for email",
 			"report_id", report.ID,
 			"error", err,
@@ -280,14 +355,17 @@ func (j *ReportGenerationJob) sendReportEmail(ctx context.Context, setting *mode
 		}
 	}
 
-	// Update report status to emailed
+	// Update report status to emailed (RLS-bound, run inside tenant tx).
 	now := time.Now()
 	report.Status = model.ReportStatusEmailed
 	report.EmailSentAt = &now
-	if err := j.reportRepo.UpdateReport(ctx, report); err != nil {
+	updErr := runWithTenantTx(ctx, j.db, setting.TenantID, func(txCtx context.Context, _ *sql.Tx) error {
+		return j.reportRepo.UpdateReport(txCtx, report)
+	})
+	if updErr != nil {
 		j.logger.Error("Failed to update report status after email",
 			"report_id", report.ID,
-			"error", err,
+			"error", updErr,
 		)
 	}
 }
@@ -433,23 +511,43 @@ type ReportGenerationResult struct {
 	Failed    int
 }
 
-// RunOnce runs a single check and returns results
+// RunOnce runs a single check and returns results.
+//
+// Walks every tenant under a tenant-scoped tx so the RLS-bound
+// `report_settings` table is actually visible.
 func (j *ReportGenerationJob) RunOnce(ctx context.Context) (*ReportGenerationResult, error) {
 	now := time.Now()
 	result := &ReportGenerationResult{}
 
-	settings, err := j.reportRepo.GetEnabledSettings(ctx)
+	tenantIDs, err := j.tenantRepo.ListAllIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	result.Checked = len(settings)
-
-	for _, setting := range settings {
-		if j.shouldGenerate(&setting, now) {
-			j.generateReport(ctx, &setting)
-			result.Generated++
+	var due []model.ReportSettings
+	for _, tid := range tenantIDs {
+		terr := runWithTenantTx(ctx, j.db, tid, func(txCtx context.Context, _ *sql.Tx) error {
+			settings, ferr := j.reportRepo.GetEnabledSettings(txCtx)
+			if ferr != nil {
+				return ferr
+			}
+			result.Checked += len(settings)
+			for _, s := range settings {
+				if j.shouldGenerate(&s, now) {
+					due = append(due, s)
+				}
+			}
+			return nil
+		})
+		if terr != nil {
+			j.logger.Warn("RunOnce: failed to enumerate settings for tenant", "tenant_id", tid, "error", terr)
 		}
+	}
+
+	for _, setting := range due {
+		setting := setting // capture
+		j.generateReport(ctx, &setting)
+		result.Generated++
 	}
 
 	return result, nil

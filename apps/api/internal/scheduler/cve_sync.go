@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
+	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
 const (
@@ -22,18 +24,34 @@ const (
 	cveSyncResultsPerPage = 2000
 )
 
-// CVESyncJob fetches new/updated CVEs from NVD and matches against components
+// CVESyncJob fetches new/updated CVEs from NVD and matches against components.
+//
+// codex-r4 P1 fix:
+//   The `components` table is FORCE ROW LEVEL SECURITY (migration 023 /
+//   027). The previous matching loop ran a single system-wide LIKE query
+//   on `j.db` and silently matched zero rows under sbomhub_app. The fix
+//   keeps vulnerability upsert on the non-RLS `vulnerabilities` table at
+//   the system level (one row per CVE, shared across tenants) but moves
+//   the component-match phase into a per-tenant tx so RLS policies see
+//   the right tenant. `component_vulnerabilities` is not RLS-enabled, so
+//   the link writes happen on the same tenant tx without further policy
+//   plumbing.
 type CVESyncJob struct {
 	db         *sql.DB
+	tenantRepo *repository.TenantRepository
 	httpClient *http.Client
 	nvdAPIKey  string
 	interval   time.Duration
 }
 
-// NewCVESyncJob creates a new CVE sync job
-func NewCVESyncJob(db *sql.DB, nvdAPIKey string, interval time.Duration) *CVESyncJob {
+// NewCVESyncJob creates a new CVE sync job.
+//
+// tenantRepo is required to enumerate tenants for the per-tenant matching
+// loop. Constructing without it would re-introduce the silent-no-op bug.
+func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKey string, interval time.Duration) *CVESyncJob {
 	return &CVESyncJob{
 		db:         db,
+		tenantRepo: tenantRepo,
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 		nvdAPIKey:  nvdAPIKey,
 		interval:   interval,
@@ -85,19 +103,39 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 
 	slog.Info("fetched modified CVEs", "count", len(cves), "since", lastSync.Format(time.RFC3339))
 
-	// Match CVEs against components
-	matchedCount := 0
-	newVulnCount := 0
+	// Phase 1: upsert vulnerability rows at the system level
+	// (`vulnerabilities` is non-RLS and shared across tenants — one row per
+	// CVE). We cache the resulting vuln IDs so the per-tenant matching loop
+	// below doesn't have to re-look them up.
+	vulnIndex := make(map[string]cveVulnEntry, len(cves))
 	for _, cve := range cves {
-		matched, newVulns, err := j.matchCVEToComponents(ctx, cve)
-		if err != nil {
-			slog.Warn("failed to match CVE", "cve_id", cve.ID, "error", err)
+		if len(cve.Keywords) == 0 {
 			continue
 		}
-		if matched {
-			matchedCount++
-			newVulnCount += newVulns
+		vulnID, isNew, err := j.upsertVulnerability(ctx, cve)
+		if err != nil {
+			slog.Warn("failed to upsert vulnerability", "cve_id", cve.ID, "error", err)
+			continue
 		}
+		vulnIndex[cve.ID] = cveVulnEntry{id: vulnID, isNew: isNew}
+	}
+
+	// Phase 2: per-tenant matching against `components` (RLS-bound).
+	tenantIDs, terr := j.tenantRepo.ListAllIDs(ctx)
+	if terr != nil {
+		return fmt.Errorf("failed to list tenants for CVE match: %w", terr)
+	}
+
+	matchedCount := 0
+	newVulnCount := 0
+	for _, tid := range tenantIDs {
+		tMatched, tNewVulns, err := j.matchTenant(ctx, tid, cves, vulnIndex)
+		if err != nil {
+			slog.Warn("failed to match CVEs for tenant", "tenant_id", tid, "error", err)
+			continue
+		}
+		matchedCount += tMatched
+		newVulnCount += tNewVulns
 	}
 
 	// Update last sync time
@@ -340,20 +378,74 @@ func extractKeywordsFromCPE(configs []struct {
 	return result
 }
 
-// matchCVEToComponents matches a CVE to components in the database
-func (j *CVESyncJob) matchCVEToComponents(ctx context.Context, cve CVEInfo) (bool, int, error) {
+// cveVulnEntry is the lookup record used by the per-tenant matching phase
+// to avoid re-querying the system-level `vulnerabilities` table once per
+// (tenant, CVE).
+type cveVulnEntry struct {
+	id    uuid.UUID
+	isNew bool
+}
+
+// matchTenant runs the component-match phase for one tenant inside a single
+// RLS-pinned transaction. It returns:
+//   - matched: number of CVEs that linked to at least one component in this tenant
+//   - newVulns: number of NEW vulnerabilities (isNew && linked) for this tenant
+//
+// Holding one tx per tenant is much cheaper than one tx per (tenant, CVE)
+// — the GUC is set once, then the loop can hammer through hundreds of
+// CVEs against the same tenant's components.
+func (j *CVESyncJob) matchTenant(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	cves []CVEInfo,
+	vulnIndex map[string]cveVulnEntry,
+) (matched, newVulns int, err error) {
+	err = runWithTenantTx(ctx, j.db, tenantID, func(txCtx context.Context, _ *sql.Tx) error {
+		q := database.Querier(txCtx, j.db)
+		for _, cve := range cves {
+			entry, ok := vulnIndex[cve.ID]
+			if !ok {
+				continue
+			}
+
+			linked, lerr := j.linkCVEToTenantComponents(txCtx, q, cve, entry.id)
+			if lerr != nil {
+				slog.Warn("failed to link CVE for tenant",
+					"tenant_id", tenantID,
+					"cve_id", cve.ID,
+					"error", lerr)
+				continue
+			}
+			if linked > 0 {
+				matched++
+				if entry.isNew {
+					newVulns++
+				}
+				slog.Debug("matched CVE to components",
+					"tenant_id", tenantID,
+					"cve_id", cve.ID,
+					"components_linked", linked,
+					"is_new", entry.isNew)
+			}
+		}
+		return nil
+	})
+	return matched, newVulns, err
+}
+
+// linkCVEToTenantComponents finds tenant-scoped components matching cve.Keywords
+// and inserts component_vulnerabilities rows for them. Returns the number of
+// link rows inserted (or already present, since ON CONFLICT DO NOTHING).
+func (j *CVESyncJob) linkCVEToTenantComponents(
+	ctx context.Context,
+	q database.Queryable,
+	cve CVEInfo,
+	vulnID uuid.UUID,
+) (int, error) {
 	if len(cve.Keywords) == 0 {
-		return false, 0, nil
+		return 0, nil
 	}
 
-	// First, upsert the vulnerability record
-	vulnID, isNew, err := j.upsertVulnerability(ctx, cve)
-	if err != nil {
-		return false, 0, fmt.Errorf("failed to upsert vulnerability: %w", err)
-	}
-
-	// Find matching components using keywords
-	// This uses a LIKE query against component names
 	query := `
 		SELECT DISTINCT c.id
 		FROM components c
@@ -361,16 +453,15 @@ func (j *CVESyncJob) matchCVEToComponents(ctx context.Context, cve CVEInfo) (boo
 		   OR LOWER(c.name) LIKE ANY($2)
 	`
 
-	// Create exact match array and LIKE patterns
 	exactMatches := cve.Keywords
 	likePatterns := make([]string, len(cve.Keywords))
 	for i, kw := range cve.Keywords {
 		likePatterns[i] = "%" + kw + "%"
 	}
 
-	rows, err := j.db.QueryContext(ctx, query, exactMatches, likePatterns)
+	rows, err := q.QueryContext(ctx, query, exactMatches, likePatterns)
 	if err != nil {
-		return false, 0, fmt.Errorf("failed to query components: %w", err)
+		return 0, fmt.Errorf("query components: %w", err)
 	}
 	defer rows.Close()
 
@@ -380,14 +471,13 @@ func (j *CVESyncJob) matchCVEToComponents(ctx context.Context, cve CVEInfo) (boo
 		if err := rows.Scan(&componentID); err != nil {
 			continue
 		}
-
-		// Link component to vulnerability
-		_, err = j.db.ExecContext(ctx, `
+		// component_vulnerabilities is not RLS-bound; this write still
+		// goes through the tx (q is the tx) which is fine.
+		if _, err := q.ExecContext(ctx, `
 			INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at)
 			VALUES ($1, $2, NOW())
 			ON CONFLICT (component_id, vulnerability_id) DO NOTHING
-		`, componentID, vulnID)
-		if err != nil {
+		`, componentID, vulnID); err != nil {
 			slog.Warn("failed to link component to vulnerability",
 				"component_id", componentID,
 				"vuln_id", vulnID,
@@ -396,20 +486,7 @@ func (j *CVESyncJob) matchCVEToComponents(ctx context.Context, cve CVEInfo) (boo
 		}
 		linkedCount++
 	}
-
-	newVulns := 0
-	if isNew && linkedCount > 0 {
-		newVulns = 1
-	}
-
-	if linkedCount > 0 {
-		slog.Debug("matched CVE to components",
-			"cve_id", cve.ID,
-			"components_linked", linkedCount,
-			"is_new", isNew)
-	}
-
-	return linkedCount > 0, newVulns, nil
+	return linkedCount, nil
 }
 
 // upsertVulnerability creates or updates a vulnerability record

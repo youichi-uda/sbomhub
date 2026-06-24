@@ -626,13 +626,15 @@ func main() {
 	// Start background jobs
 	ctx := context.Background()
 
-	// Ticket sync job - runs every 5 minutes to sync ticket statuses with Jira/Backlog
-	ticketSyncJob := scheduler.NewTicketSyncJob(issueTrackerService, issueTrackerRepo, 5*time.Minute)
+	// Ticket sync job - runs every 5 minutes to sync ticket statuses with Jira/Backlog.
+	// tenantRepo + db are required for the per-tenant RLS tx wrap (codex-r4 P1).
+	ticketSyncJob := scheduler.NewTicketSyncJob(issueTrackerService, issueTrackerRepo, tenantRepo, db, 5*time.Minute)
 	go ticketSyncJob.Start(ctx)
 	slog.Info("Ticket sync job started", "interval", "5m")
 
-	// Report generation job - runs every hour to check scheduled reports
-	reportGenJob := scheduler.NewReportGenerationJobFull(reportService, reportRepo, tenantRepo, cfg, 1*time.Hour)
+	// Report generation job - runs every hour to check scheduled reports.
+	// db is required for per-tenant RLS tx wrap (codex-r4 P1).
+	reportGenJob := scheduler.NewReportGenerationJobFull(reportService, reportRepo, tenantRepo, db, cfg, 1*time.Hour)
 	go reportGenJob.Start(ctx)
 	slog.Info("Report generation job started", "interval", "1h")
 
@@ -646,8 +648,10 @@ func main() {
 	go eolSyncJob.Start(ctx)
 	slog.Info("EOL sync job started", "interval", "24h")
 
-	// CVE sync job - runs daily to fetch new/updated CVEs and match against components
-	cveSyncJob := scheduler.NewCVESyncJob(db, cfg.NVDAPIKey, 24*time.Hour)
+	// CVE sync job - runs daily to fetch new/updated CVEs and match against components.
+	// tenantRepo is required for the per-tenant matching loop against RLS-bound
+	// `components` (codex-r4 P1).
+	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour)
 	go cveSyncJob.Start(ctx)
 	slog.Info("CVE sync job started", "interval", "24h")
 
