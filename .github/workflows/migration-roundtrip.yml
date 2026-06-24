@@ -1,0 +1,256 @@
+# SBOMHub - Migration roundtrip test
+#
+# Trust Rescue P1 #17-followup / ci-inventory.md §4 Action items.
+#
+# Catches schema regressions where a migration's .down.sql does not
+# faithfully reverse its .up.sql, or where the resulting state cannot
+# accept a second `migrate up` cleanly. Either failure mode would brick
+# self-host upgrades (operators rolling forward / backward between
+# versions) and is not visible in go-test.yml or rls-integration.yml,
+# which only ever migrate up once on a fresh database.
+#
+# What this workflow proves:
+#   1. `migrate up` from empty schema succeeds on the current migration set.
+#   2. `migrate down N` (with N >= number of applied migrations) rolls
+#      back every migration without erroring. A buggy .down.sql -- e.g.
+#      one that references a column already dropped, or that drops a
+#      table some earlier migration depends on -- surfaces here.
+#   3. `migrate up` re-applies cleanly after the full rollback. This
+#      catches the class of bug where `down` leaves leftover state
+#      (orphaned indexes, sequences, RLS policies) that breaks the next
+#      `up`.
+#
+# What it does NOT yet enforce (initial landing is warning-only):
+#   - Strict schema byte-equality between the first `up` and the second
+#     `up`. Several existing migrations are explicitly non-roundtrippable
+#     by design (e.g. 027_sbom_tenant_id_not_null backfills tenant_id
+#     from parent rows and notes in its .down.sql that the backfill is
+#     intentionally NOT reversed; 025_backfill_scan_settings is a pure
+#     data backfill with no schema delta). pg_dump diffs would still flag
+#     ordering / comment drift that is not a real regression.
+#   - "All tables dropped after `down`". Same reason: leaving a warning
+#     visible in the job log is more useful than a red CI that operators
+#     learn to ignore.
+#
+# Strictening (separate wave once the migration set stabilises): wire the
+# schema diff and the "tables remaining" check to `exit 1` instead of
+# warning, after auditing each known non-roundtrippable migration and
+# either making it roundtrip or excluding the affected tables from the
+# diff baseline.
+#
+# Port note (mirrors rls-integration.yml):
+#   docker-compose.yml does NOT publish postgres:5432 to the host (R8 /
+#   #10). The host-side `migrate` CLI dials localhost, so we drop a
+#   transient docker-compose.override.yml that publishes 5432. The
+#   override is never committed and is torn down with `docker compose
+#   down -v` at the end of the job.
+
+name: Migration roundtrip
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/migrations/**"
+      - "apps/api/cmd/migrate/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/migration-roundtrip.yml"
+  pull_request:
+    paths:
+      - "apps/api/migrations/**"
+      - "apps/api/cmd/migrate/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/migration-roundtrip.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migration-roundtrip:
+    name: roundtrip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Show tool versions
+        run: |
+          go version
+          docker version
+          docker compose version
+
+      - name: Generate .env with per-run secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          # Strip any pre-existing assignments so our explicit ones win.
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+
+          # `migrate` runs on the runner host, so URLs point at
+          # localhost:5432 (published by the override below).
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@localhost:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@localhost:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+          # Sanity log (do NOT echo the secrets themselves).
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Write docker-compose.override.yml (expose postgres:5432)
+        shell: bash
+        run: |
+          cat > docker-compose.override.yml <<'YML'
+          services:
+            postgres:
+              ports:
+                - "5432:5432"
+          YML
+
+      - name: Start postgres
+        run: docker compose up -d --wait postgres
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Migrate up (initial)
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go run ./cmd/migrate up
+
+      - name: Capture schema after first up
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Dump as the bootstrap owner role (sbomhub, POSTGRES_USER) so
+          # every object created by sbomhub_migrator is visible. Using
+          # sbomhub_app would hide tables it lacks SELECT on under RLS.
+          docker compose exec -T postgres \
+            pg_dump -U sbomhub -d sbomhub --schema-only --no-owner --no-acl \
+            > /tmp/schema_after_up1.sql
+          wc -l /tmp/schema_after_up1.sql
+
+      - name: Migrate down (full rollback)
+        # cmd/migrate "down" takes an explicit step count (default 1).
+        # `migrateDown` reads `SELECT version FROM schema_migrations
+        # ORDER BY version DESC LIMIT $1`, so passing a number larger
+        # than the applied set just rolls back everything that exists.
+        # Using 999 keeps the workflow robust as new migrations are added
+        # without needing to bump the count manually.
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go run ./cmd/migrate down 999
+
+      - name: Verify tables remaining after full down (warn-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # schema_migrations is created by cmd/migrate itself (not by any
+          # migration file) and intentionally persists across down/up.
+          REMAINING=$(docker compose exec -T postgres \
+            psql -U sbomhub -d sbomhub -tAc \
+            "SELECT COUNT(*) FROM pg_tables WHERE schemaname='public' AND tablename != 'schema_migrations';")
+          REMAINING=$(echo "$REMAINING" | tr -d '[:space:]')
+          echo "Tables remaining in public schema after full down: $REMAINING"
+          if [ "$REMAINING" != "0" ]; then
+            echo "::warning::${REMAINING} tables remained in public schema after migrate down 999."
+            echo "::warning::This is informational while the diff is warn-only; see workflow header."
+            docker compose exec -T postgres \
+              psql -U sbomhub -d sbomhub -c \
+              "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;"
+          fi
+
+      - name: Migrate up (after down, regression check)
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go run ./cmd/migrate up
+
+      - name: Capture schema after second up
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose exec -T postgres \
+            pg_dump -U sbomhub -d sbomhub --schema-only --no-owner --no-acl \
+            > /tmp/schema_after_up2.sql
+          wc -l /tmp/schema_after_up2.sql
+
+      - name: Compare schemas (warn-only)
+        # Initial landing is warn-only: known non-roundtrippable
+        # migrations (e.g. 027 tenant_id backfill, 025 scan_settings
+        # backfill) make a strict diff failure-loud. The critical
+        # regression check is that the up/down/up sequence itself
+        # completed without erroring; that has already passed by the
+        # time we reach this step.
+        shell: bash
+        run: |
+          set -uo pipefail
+          if diff -u /tmp/schema_after_up1.sql /tmp/schema_after_up2.sql > /tmp/schema.diff; then
+            echo "Schema roundtrip OK: no diff between first and second up."
+          else
+            DIFF_LINES=$(wc -l < /tmp/schema.diff)
+            echo "::warning::Schema diff detected after up/down/up roundtrip (${DIFF_LINES} diff lines)."
+            echo "::warning::Initial landing is warn-only; see .github/workflows/migration-roundtrip.yml header for the strictening plan."
+            echo "----- schema diff (first up vs second up) -----"
+            cat /tmp/schema.diff
+            echo "----- end schema diff -----"
+          fi
+
+      - name: Dump postgres logs on failure
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs --tail=200 postgres || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true
