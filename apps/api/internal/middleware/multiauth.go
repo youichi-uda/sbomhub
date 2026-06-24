@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/config"
+	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -59,7 +60,7 @@ func MultiAuth(
 			// `sbh_` as API keys — anything else (Clerk JWTs, empty, garbage)
 			// goes through the Clerk/Self-hosted path.
 			if token != authHeader && strings.HasPrefix(token, apiKeyPrefix) {
-				return handleAPIKeyAuth(c, token, tenantRepo, apiKeyService, next)
+				return handleAPIKeyAuth(c, token, tenantRepo, userRepo, apiKeyService, next)
 			}
 
 			// Fall back to Clerk JWT (or self-hosted default) path.
@@ -72,10 +73,22 @@ func MultiAuth(
 // inline step so MultiAuth can swap between auth strategies without re-entering
 // Echo's middleware chain. Keep the order in sync with apikey.go (validate →
 // set ContextKeyAPI → SetCurrentTenant → ContextKeyTenantID).
+//
+// M1 Codex review #F14: in addition to tenant + API-key context, the
+// API-key path now also populates ContextKeyRole (mapped from
+// api_keys.permissions) and ContextKeyUserID (a synthetic per-tenant
+// user). Without these, handlers that gate on TenantContext.CanWrite()
+// would reject every CLI sbh_... key with 403, and Decide / Reanalyse
+// would reject every API-key call with "user identity required". The
+// previous implementation worked for the SBOM upload / read-back routes
+// only because those handlers did not consult CanWrite() or UserID; the
+// triage / vex-drafts routes do, and the CLI's `sbomhub triage` command
+// targets them with Bearer sbh_... auth.
 func handleAPIKeyAuth(
 	c echo.Context,
 	rawKey string,
 	tenantRepo *repository.TenantRepository,
+	userRepo *repository.UserRepository,
 	apiKeyService *service.APIKeyService,
 	next echo.HandlerFunc,
 ) error {
@@ -100,5 +113,65 @@ func handleAPIKeyAuth(
 	}
 	c.Set(ContextKeyTenantID, key.TenantID)
 
+	// F14: map api_keys.permissions → ContextKeyRole so
+	// TenantContext.CanWrite() / CanAdmin() behave correctly for the
+	// API-key path. Triage / vex-drafts handlers gate on CanWrite() and
+	// were previously unreachable for API-key clients because this
+	// context value was never set (Role() defaulted to "" which fails
+	// every allowlist check). The mapping defaults to RoleMember when
+	// `permissions` is empty (matches APIKeyService's default of "write")
+	// or unrecognised, so legacy keys created before this mapping keep
+	// working with the documented write-capable default.
+	c.Set(ContextKeyRole, roleFromAPIKeyPermissions(key.Permissions))
+
+	// F14: resolve a synthetic per-tenant API-key user so
+	// audit_logs.user_id (FK to users.id) and vex_drafts.decision_by
+	// have a stable, non-NULL pointer to attribute API-key activity to.
+	// One user is created per tenant on first use (idempotent lookup by
+	// clerk_user_id = "api-key:<tenant_uuid>"), shared across all
+	// subsequent API-key requests for that tenant. Operators can filter
+	// audit_logs by name "API Key User" to isolate CLI/Actions traffic.
+	apiUser, err := userRepo.GetOrCreateAPIKeyUser(ctx, key.TenantID)
+	if err != nil {
+		slog.Error("MultiAuth: failed to resolve API-key user", "error", err, "tenant_id", key.TenantID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to resolve api-key user context",
+		})
+	}
+	c.Set(ContextKeyUserID, apiUser.ID)
+	c.Set(ContextKeyUser, apiUser)
+	// ClerkUserID lets TenantContext.IsSelfHosted() distinguish API-key
+	// requests from genuine self-hosted default-tenant requests. We do
+	// not claim "self-hosted" here — the API key may have been issued in
+	// SaaS mode — but we do leave a recognisable marker so future
+	// debugging (and the Codex round 7+ reviewer) can tell the two
+	// pathways apart in logs.
+	c.Set(ContextKeyClerkUserID, "api-key:"+key.TenantID.String())
+
 	return next(c)
+}
+
+// roleFromAPIKeyPermissions maps the api_keys.permissions string to the
+// TenantContext role allowlist (model.RoleViewer / RoleMember / RoleAdmin /
+// RoleOwner). The default — including the empty string and any
+// unrecognised value — is RoleMember so legacy keys created before this
+// mapping behave like the documented APIKeyService default of "write"
+// (the implicit "you can upload SBOMs and run triage" baseline).
+//
+// "admin" elevates to RoleAdmin (CanAdmin() true), which is required for
+// any future endpoint that consults CanAdmin (e.g. tenant LLM config
+// updates) from an API key. "read" downgrades to RoleViewer so a
+// read-scoped key cannot accidentally drive write endpoints if the route
+// is added to the MultiAuth chain without a CanWrite() guard.
+func roleFromAPIKeyPermissions(perm string) string {
+	switch strings.ToLower(strings.TrimSpace(perm)) {
+	case "read":
+		return model.RoleViewer
+	case "admin", "owner":
+		return model.RoleAdmin
+	case "write", "":
+		return model.RoleMember
+	default:
+		return model.RoleMember
+	}
 }

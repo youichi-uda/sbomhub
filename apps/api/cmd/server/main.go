@@ -641,15 +641,64 @@ func main() {
 	auth.PUT("/projects/:id/vex/:vex_id", vexHandler.Update)
 	auth.DELETE("/projects/:id/vex/:vex_id", vexHandler.Delete)
 
-	// AI VEX triage endpoints (issue #30 / Wave M1-5). Wired into the
-	// existing auth group so tenant id, audit middleware, and
-	// TenantTx all apply (Trust Rescue 9.1.3 — vex_drafts INSERT
-	// requires the tenant_id GUC bound by TenantTx).
-	auth.POST("/projects/:id/triage/run", vexDraftsHandler.RunTriage)
-	auth.GET("/projects/:id/vex-drafts", vexDraftsHandler.ListDrafts)
-	auth.GET("/projects/:id/vex-drafts/:draft_id", vexDraftsHandler.GetDraft)
-	auth.PUT("/projects/:id/vex-drafts/:draft_id/decision", vexDraftsHandler.Decide)
-	auth.POST("/projects/:id/vex-drafts/:draft_id/reanalyse", vexDraftsHandler.Reanalyse)
+	// AI VEX triage endpoints (issue #30 / Wave M1-5).
+	//
+	// M1 Codex review #F14: these five routes were originally registered
+	// under the `auth` group above, which uses authMiddleware =
+	// Clerk-or-self-hosted-only. That made `sbomhub triage` (the CLI
+	// command shipped in Wave M1-4) unreachable: the CLI sends
+	// `Authorization: Bearer sbh_<api_key>` which the Clerk JWT verifier
+	// rejects as invalid, so every call landed on 401. The M1 completion
+	// claim ("CLI can run triage") was therefore vacuously false.
+	//
+	// We now wire each triage / vex-drafts route through MultiAuth +
+	// RateLimitByAPIKey + TenantTx + audit, the same chain the canonical
+	// SBOM upload (POST /api/v1/projects/:id/sbom) and the SBOM read-back
+	// + scan-status routes use. MultiAuth's API-key path was upgraded in
+	// the same review (see internal/middleware/multiauth.go) to populate
+	// ContextKeyRole + ContextKeyUserID so the handler's CanWrite() guard
+	// and the runner's "user identity required" guard both accept
+	// sbh_... keys. The Clerk JWT / self-hosted path remains unchanged so
+	// the web UI is unaffected.
+	//
+	// RateLimitByAPIKey is a no-op when ContextKeyAPI is unset, so this
+	// throttles only the CLI path (60 req/min for write / decision, 300
+	// req/min for the read-back list to mirror the scan-status polling
+	// budget). TenantTx wraps the rest so vex_drafts INSERT / UPDATE
+	// runs inside the same `SET LOCAL app.current_tenant_id` tx that
+	// audit_logs INSERT uses, satisfying Trust Rescue 9.1.3 + 9.1.2.
+	// Middleware chain: MultiAuth -> RateLimitByAPIKey -> TenantTx -> audit -> handler.
+	triageMultiAuth := appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService)
+	e.POST("/api/v1/projects/:id/triage/run",
+		vexDraftsHandler.RunTriage,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.GET("/api/v1/projects/:id/vex-drafts",
+		vexDraftsHandler.ListDrafts,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.GET("/api/v1/projects/:id/vex-drafts/:draft_id",
+		vexDraftsHandler.GetDraft,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.PUT("/api/v1/projects/:id/vex-drafts/:draft_id/decision",
+		vexDraftsHandler.Decide,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.POST("/api/v1/projects/:id/vex-drafts/:draft_id/reanalyse",
+		vexDraftsHandler.Reanalyse,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 
 	// License policy endpoints
 	auth.GET("/licenses/common", licensePolicyHandler.GetCommonLicenses)

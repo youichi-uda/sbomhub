@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -209,6 +210,79 @@ func (r *UserRepository) GetOrCreateDefault(ctx context.Context, tenantID uuid.U
 		TenantID:  tenantID,
 		UserID:    u.ID,
 		Role:      model.RoleOwner,
+		CreatedAt: now,
+	}
+	if err := r.AddToTenant(ctx, tu); err != nil {
+		return nil, err
+	}
+
+	return u, nil
+}
+
+// GetOrCreateAPIKeyUser returns a synthetic per-tenant user that
+// represents requests authenticated via API key (CLI / GitHub Actions).
+//
+// M1 Codex review #F14: API keys are tenant-scoped but carry no human
+// user, while several downstream surfaces require a non-NULL user_id:
+//   - audit_logs.user_id REFERENCES users(id) (migration 007), so a
+//     synthetic uuid that does not exist in `users` would violate the FK.
+//   - vex_drafts.decision_by is a soft uuid (no FK) but the handler's
+//     own "user identity required to decide a vex draft (audit trail)"
+//     guard and triage.UpdateDecision both reject nil user_id.
+//
+// We synthesise exactly one user per tenant so every API-key request for
+// the same tenant shares the same created_by / decision_by pointer.
+// Operators can filter audit_logs by `name = 'API Key User'` (or by the
+// clerk_user_id prefix `api-key:`) to isolate CLI activity without
+// inflating the user table per request.
+//
+// clerk_user_id is namespaced as `api-key:<tenant_uuid>` so SaaS mode
+// does not collide on the global UNIQUE (clerk_user_id) constraint when
+// multiple tenants each get their own synthetic user. The email is
+// namespaced similarly but the schema only indexes — not UNIQUEs —
+// email, so this is belt-and-braces.
+func (r *UserRepository) GetOrCreateAPIKeyUser(ctx context.Context, tenantID uuid.UUID) (*model.User, error) {
+	if tenantID == uuid.Nil {
+		// Defensive — MultiAuth always supplies a non-nil tenant from the
+		// API key row, but a nil tenant here would silently create a
+		// global "api-key:00000000-..." user shared across tenants. Fail
+		// loudly so the caller's misuse surfaces at the auth boundary
+		// instead of leaking cross-tenant user ids into audit_logs.
+		return nil, errors.New("GetOrCreateAPIKeyUser: tenantID is required")
+	}
+
+	clerkUserID := "api-key:" + tenantID.String()
+
+	u, err := r.GetByClerkUserID(ctx, clerkUserID)
+	if err == nil {
+		return u, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	now := time.Now()
+	u = &model.User{
+		ID:          uuid.New(),
+		ClerkUserID: clerkUserID,
+		Email:       "api-key+" + tenantID.String() + "@localhost",
+		Name:        "API Key User",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := r.Create(ctx, u); err != nil {
+		return nil, err
+	}
+
+	// Bind to the tenant with member role so any downstream code path
+	// that consults tenant_users.role (rather than ContextKeyRole set by
+	// MultiAuth) still sees a writable role. MultiAuth is the source of
+	// truth for ContextKeyRole — the API key's `permissions` field
+	// determines whether this request can write, not tenant_users.role.
+	tu := &model.TenantUser{
+		TenantID:  tenantID,
+		UserID:    u.ID,
+		Role:      model.RoleMember,
 		CreatedAt: now,
 	}
 	if err := r.AddToTenant(ctx, tu); err != nil {

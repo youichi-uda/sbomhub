@@ -485,6 +485,232 @@ func TestVEXDraftsHandler_RunTriage_404Body_IsGeneric(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// F14 regression — triage / vex-drafts routes must be reachable for the
+// API-key auth path (MultiAuth) used by the CLI
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 6 #F14: the CLI's `sbomhub triage` command sends
+// `Authorization: Bearer sbh_<api_key>` to /api/v1/projects/:id/triage/run
+// and /api/v1/projects/:id/vex-drafts/:draft_id/decision. Before this
+// fix:
+//   - the five triage routes were registered on the Clerk-only `auth`
+//     group, so MultiAuth was not in the chain at all and every API-key
+//     call returned 401 from the Clerk JWT verifier; and
+//   - even if a route was moved under MultiAuth, the API-key path set
+//     no role on the request, so TenantContext.CanWrite() returned false
+//     and RunTriage / Decide / Reanalyse failed with 403.
+//
+// These three tests pin the post-fix contract at the handler boundary:
+// when MultiAuth's API-key path runs (we simulate its outputs by setting
+// the same context keys it now writes — ContextKeyRole = RoleMember from
+// roleFromAPIKeyPermissions("write"), ContextKeyUserID = synthetic
+// per-tenant user), the handler proceeds past the auth gate. The
+// route-wiring-side companion check lives in
+// internal/middleware/multiauth_test.go (TestRoleFromAPIKeyPermissions_F14).
+
+// TestVEXDraftsHandler_RunTriage_APIKeyAuth_Allowed verifies the F14 fix
+// at the handler boundary: a request arriving with the context an
+// API-key MultiAuth call now produces (tenant + synthetic user +
+// RoleMember) must NOT be rejected by the CanWrite() / "unauthorized"
+// guard. Before #F14 the handler returned 403 because ContextKeyRole was
+// unset under the API-key auth path.
+//
+// We do not assert a 201 status here — the runner is wired with the
+// disabled provider, so it persists an under_investigation draft only
+// when the resolver yields a component. The contract under test is the
+// auth-gate behaviour: the response code must NOT be 401 / 403, and the
+// body must NOT be the "unauthorized" / "write permission required"
+// sentinels that #F14 was supposed to remove.
+func TestVEXDraftsHandler_RunTriage_APIKeyAuth_Allowed(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	componentID := uuid.New()
+	vulnID := uuid.New()
+	apiKeyUserID := uuid.New() // synthetic per-tenant API-key user
+
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:                   &fakeVexDraftStore{},
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             &fakeReachabilityReader{},
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 disabledProvider(),
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentResolver{ids: []uuid.UUID{componentID}},
+	})
+	h := NewVexDraftsHandler(runner)
+
+	body := map[string]string{
+		"vulnerability_id": vulnID.String(),
+		"cve_id":           "CVE-2026-0600",
+	}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/triage/run",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+
+	// Simulate the post-#F14 MultiAuth API-key path. Role comes from
+	// roleFromAPIKeyPermissions("write") = RoleMember; UserID is the
+	// synthetic per-tenant user GetOrCreateAPIKeyUser returns.
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, apiKeyUserID)
+	c.Set(middleware.ContextKeyRole, model.RoleMember)
+
+	if err := h.RunTriage(c); err != nil {
+		t.Fatalf("RunTriage returned unexpected error: %v", err)
+	}
+
+	// The bug under test is 401 / 403 specifically. Other failure codes
+	// (e.g. 404 from a resolver corner case) would still be regressions
+	// vs the previous green path, but the #F14 fix is about removing the
+	// auth-gate block, not the runner's downstream behaviour.
+	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Fatalf("F14: RunTriage must not reject API-key auth context with %d; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "write permission required") {
+		t.Fatalf("F14: RunTriage body still mentions write-permission gate: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "unauthorized") {
+		t.Fatalf("F14: RunTriage body still mentions unauthorized: %s", rec.Body.String())
+	}
+}
+
+// TestVEXDraftsHandler_Decide_APIKeyAuth_Allowed mirrors the RunTriage
+// test for the decision endpoint. Decide additionally enforces a
+// non-nil UserID (via userIDOrNil + the "user identity required" 403
+// branch), so this test also confirms the synthetic API-key user
+// satisfies that guard.
+func TestVEXDraftsHandler_Decide_APIKeyAuth_Allowed(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	componentID := uuid.New()
+	vulnID := uuid.New()
+	draftID := uuid.New()
+	apiKeyUserID := uuid.New()
+
+	// Seed a pending draft in the project so Decide has something to
+	// transition. The decision payload approves it.
+	store := &fakeVexDraftStore{
+		inserted: []repository.VEXDraft{{
+			ID:              draftID,
+			TenantID:        tenantID,
+			ProjectID:       projectID,
+			ComponentID:     componentID,
+			VulnerabilityID: vulnID,
+			CVEID:           "CVE-2026-0601",
+			State:           "not_affected",
+			Justification:   "code_not_reachable",
+			Detail:          "synthetic",
+			Evidence:        json.RawMessage(`[{"kind":"llm_rationale","source":"llm"}]`),
+			Decision:        triage.DecisionPending,
+			CreatedAt:       time.Now().UTC(),
+			UpdatedAt:       time.Now().UTC(),
+		}},
+	}
+
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       store,
+		Advisories:   &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{},
+		LLMCalls:     &fakeLLMCallWriter{},
+		Audit:        &fakeAuditWriter{},
+		Provider:     disabledProvider(),
+		Threshold:    0.7,
+	})
+	h := NewVexDraftsHandler(runner)
+
+	body := map[string]string{"decision": triage.DecisionApproved}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+projectID.String()+"/vex-drafts/"+draftID.String()+"/decision",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "draft_id")
+	c.SetParamValues(projectID.String(), draftID.String())
+
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, apiKeyUserID)
+	c.Set(middleware.ContextKeyRole, model.RoleMember)
+
+	if err := h.Decide(c); err != nil {
+		t.Fatalf("Decide returned unexpected error: %v", err)
+	}
+	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+		t.Fatalf("F14: Decide must not reject API-key auth context with %d; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "user identity required") {
+		t.Fatalf("F14: Decide body still mentions user-identity gate: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "write permission required") {
+		t.Fatalf("F14: Decide body still mentions write-permission gate: %s", rec.Body.String())
+	}
+}
+
+// TestVEXDraftsHandler_RunTriage_NoAuthContext_Returns401 pins the
+// negative direction of #F14: a request with no tenant context (the
+// state both the Clerk JWT failure path and an entirely-missing
+// Authorization header produce) must still be rejected with 401. The
+// fix moves triage routes from `auth` (Clerk-only) to a MultiAuth chain;
+// the regression-prevention contract is that MultiAuth still refuses
+// unauthenticated requests, not that the handler itself becomes
+// auth-less.
+func TestVEXDraftsHandler_RunTriage_NoAuthContext_Returns401(t *testing.T) {
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       &fakeVexDraftStore{},
+		Advisories:   &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{},
+		LLMCalls:     &fakeLLMCallWriter{},
+		Audit:        &fakeAuditWriter{},
+		Provider:     disabledProvider(),
+		Threshold:    0.7,
+	})
+	h := NewVexDraftsHandler(runner)
+
+	projectID := uuid.New()
+	body := map[string]string{
+		"vulnerability_id": uuid.NewString(),
+		"cve_id":           "CVE-2026-0602",
+	}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/triage/run",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+
+	// Intentionally do not set any auth context keys — this simulates a
+	// request that did not pass through MultiAuth (e.g. a misconfigured
+	// route registration that bypassed it). The handler's own guard
+	// must still refuse.
+
+	if err := h.RunTriage(c); err != nil {
+		t.Fatalf("RunTriage returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("F14: RunTriage without auth context must return 401, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+}
+
 // runTriageAndCapture404 drives RunTriage with the given input and asserts
 // a 404 response, returning the response body for cross-case comparison.
 func runTriageAndCapture404(t *testing.T, runner *triage.Runner, tenantID, projectID, vulnID uuid.UUID, componentID *uuid.UUID) string {
