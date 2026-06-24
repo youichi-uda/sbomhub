@@ -361,6 +361,10 @@ docker compose build
 - **TypeScript**: ESLint, Prettier
 - **Commits**: [Conventional Commits](https://www.conventionalcommits.org/)
 
+### CI
+
+For the workflow inventory, missing quality gates, and branch protection TODOs, see [`docs/ci-inventory.md`](./docs/ci-inventory.md).
+
 ## Security
 
 ### Reporting vulnerabilities

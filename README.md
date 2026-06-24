@@ -364,6 +364,10 @@ docker compose build
 - **TypeScript**: ESLint, Prettier
 - **コミット**: [Conventional Commits](https://www.conventionalcommits.org/ja/)
 
+### CI
+
+各 workflow の一覧と、 不足している quality gate / ブランチ保護設定の TODO は [`docs/ci-inventory.md`](./docs/ci-inventory.md) を参照。
+
 ## セキュリティ
 
 ### 脆弱性の報告
