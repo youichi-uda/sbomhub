@@ -1250,6 +1250,64 @@ export const api = {
       request<Component[]>(`/api/v1/projects/${id}/components`),
     getVulnerabilities: (id: string) =>
       request<Vulnerability[]>(`/api/v1/projects/${id}/vulnerabilities`),
+    // getVulnerabilitiesWithMeta returns the visible page plus the
+    // authoritative server-side total (X-Total-Count). M1 Codex review
+    // #F28: the bare getVulnerabilities path silently treats the
+    // default 100-row response as the complete set — tab counts and
+    // per-row actions for vulnerabilities past that page are dropped
+    // without warning. Callers that render a visible count or trip a
+    // truncation warning MUST use this method so they read the
+    // server-side total rather than the visible page length.
+    //
+    // The server emits X-Total-Count via the SbomService.CountVulnerabilities
+    // SQL COUNT(*) over the same join the page query uses, and the
+    // header is in the CORS ExposeHeaders allow-list so cross-origin
+    // fetches can read it. If the header is absent (older server, or
+    // a future CORS misconfiguration), totalCount falls back to the
+    // visible page length so existing UI does not crash — but the
+    // truncation banner will silently disappear, which is the visible
+    // regression signal.
+    getVulnerabilitiesWithMeta: async (
+      id: string,
+      opts?: { limit?: number; offset?: number },
+    ): Promise<{ data: Vulnerability[]; totalCount: number }> => {
+      const params = new URLSearchParams();
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      const path = `/api/v1/projects/${id}/vulnerabilities${qs ? `?${qs}` : ""}`;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (getAuthToken) {
+        const token = await getAuthToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+      }
+      if (getOrgId) {
+        const orgId = getOrgId();
+        if (orgId) headers["X-Clerk-Org-ID"] = orgId;
+      }
+
+      const res = await fetch(`${API_URL}${path}`, { headers });
+      if (!res.ok) {
+        let body: Record<string, unknown> | undefined;
+        try {
+          const text = await res.text();
+          if (text) body = JSON.parse(text);
+        } catch {
+          // body left undefined
+        }
+        throw new APIError(res.status, body);
+      }
+      const data: Vulnerability[] = res.status === 204 ? [] : await res.json();
+      const headerVal = res.headers.get("X-Total-Count");
+      const totalCount =
+        headerVal !== null && !Number.isNaN(parseInt(headerVal, 10))
+          ? parseInt(headerVal, 10)
+          : data.length;
+      return { data, totalCount };
+    },
     getSboms: (id: string) =>
       request<Sbom[]>(`/api/v1/projects/${id}/sboms`),
     // VEX methods

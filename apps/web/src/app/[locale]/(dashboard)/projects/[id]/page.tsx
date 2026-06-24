@@ -27,6 +27,12 @@ export default function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [components, setComponents] = useState<Component[]>([]);
   const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
+  // vulnTotalCount carries the server-side X-Total-Count (M1 Codex
+  // review #F28). Without it we previously used vulnerabilities.length
+  // as the tab counter — silently truncated to the default page size
+  // (100) for projects with more matched vulns. The truncation banner
+  // below trips when this value exceeds the page we actually loaded.
+  const [vulnTotalCount, setVulnTotalCount] = useState<number>(0);
   const [vexStatements, setVexStatements] = useState<VEXStatementWithDetails[]>([]);
   const [licensePolicies, setLicensePolicies] = useState<LicensePolicy[]>([]);
   const [licenseViolations, setLicenseViolations] = useState<LicenseViolation[]>([]);
@@ -62,8 +68,11 @@ export default function ProjectDetailPage() {
 
   const loadVulnerabilities = useCallback(async () => {
     try {
-      const data = await api.projects.getVulnerabilities(projectId);
+      // #F28: use the meta variant so we read X-Total-Count instead
+      // of inferring the count from the (page-truncated) array length.
+      const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId);
       setVulnerabilities(data || []);
+      setVulnTotalCount(totalCount);
     } catch (error) {
       console.error("Failed to load vulnerabilities:", error);
     }
@@ -231,7 +240,11 @@ export default function ProjectDetailPage() {
           onClick={() => setActiveTab("vulnerabilities")}
         >
           <AlertTriangle className="h-4 w-4 mr-2" />
-          {t("Vulnerabilities.title")} ({vulnerabilities.length})
+          {/* #F28: render the server-side total, not the visible page
+              length. Without this the tab counter silently capped at
+              the default page size (100) for any project with more
+              matched vulnerabilities. */}
+          {t("Vulnerabilities.title")} ({vulnTotalCount})
         </Button>
         <Button
           variant={activeTab === "vex" ? "default" : "outline"}
@@ -340,9 +353,31 @@ export default function ProjectDetailPage() {
       {activeTab === "vulnerabilities" && (
         <Card>
           <CardHeader>
-            <CardTitle>{t("Vulnerabilities.title")}</CardTitle>
+            <CardTitle>
+              {t("Vulnerabilities.title")}{" "}
+              <span className="text-sm font-normal text-muted-foreground">
+                ({vulnerabilities.length} / {vulnTotalCount})
+              </span>
+            </CardTitle>
           </CardHeader>
           <CardContent>
+            {/* #F28: warn when the server reports more matches than the
+                visible page holds. Until UI pagination ships, later
+                rows are not actionable from here — operators should
+                triage them via the CLI (`sbomhub triage`) or via the
+                paginated API directly. */}
+            {vulnTotalCount > vulnerabilities.length && (
+              <div className="mb-4 rounded-md border border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-900/30 p-3 text-sm">
+                <p className="font-semibold text-yellow-800 dark:text-yellow-200">
+                  脆弱性が表示件数を超えています ({vulnerabilities.length} / {vulnTotalCount})
+                </p>
+                <p className="text-yellow-700 dark:text-yellow-300 mt-1">
+                  サーバーは {vulnTotalCount} 件中 {vulnerabilities.length} 件のみを返しています。
+                  追加分のトリアージは CLI (sbomhub triage) または API のページネーション
+                  (?limit=&amp;offset=) を利用してください。
+                </p>
+              </div>
+            )}
             {vulnerabilities.length === 0 ? (
               <p className="text-center text-muted-foreground py-8">
                 {tp("noVulnerabilities")}
