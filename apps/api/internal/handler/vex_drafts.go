@@ -338,6 +338,16 @@ func (h *VexDraftsHandler) Reanalyse(c echo.Context) error {
 	if source == nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "source vex draft not found"})
 	}
+	// F7 (Codex M1 round 2): GetDraft scopes by (tenant, draft_id) only —
+	// no project boundary check. Without the equality below a draft from
+	// project A could be reanalysed via project B's route, persisting a
+	// new draft under project B that still carries project A's
+	// component_id (vex_drafts has no composite FK over project_id /
+	// component_id). Reject the cross-project case as 404 so the URL's
+	// project_id stays authoritative.
+	if source.ProjectID != projectID {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "source vex draft not found in project scope"})
+	}
 
 	var override runTriageRequest
 	_ = c.Bind(&override) // tolerated when body is empty
