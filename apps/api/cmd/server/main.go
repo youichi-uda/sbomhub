@@ -273,9 +273,15 @@ func main() {
 	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
 	eolService := service.NewEOLService(eolRepo)
 
+	// In-memory tracker for background SBOM scans. Observed by
+	// GET /api/v1/projects/:id/sboms/:sbom_id/scan-status so the CLI
+	// (`sbomhub scan --fail-on <severity>`) can block until scanning
+	// completes and then enforce the threshold. Trust Rescue P1 #12.
+	scanTracker := service.NewScanTracker()
+
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
-	sbomHandler := handler.NewSbomHandler(sbomService, nvdService, jvnService)
+	sbomHandler := handler.NewSbomHandler(sbomService, nvdService, jvnService, scanTracker)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
@@ -451,6 +457,11 @@ func main() {
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)
 	auth.GET("/projects/:id/vulnerabilities", sbomHandler.GetVulnerabilities)
+	// Per-SBOM background-scan status endpoint observed by `sbomhub scan
+	// --fail-on <severity>` (Trust Rescue P1 #12). It reports
+	// running/completed/failed plus current per-severity counts so CLI
+	// clients can block CI on threshold violations.
+	auth.GET("/projects/:id/sboms/:sbom_id/scan-status", sbomHandler.ScanStatus)
 	auth.POST("/projects/:id/scan", vulnHandler.Scan)
 
 	// SBOM Diff endpoints
