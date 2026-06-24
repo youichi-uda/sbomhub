@@ -251,7 +251,7 @@ func main() {
 	epssService := service.NewEPSSService(vulnRepo)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
-	publicLinkService := service.NewPublicLinkService(publicLinkRepo, projectRepo, sbomRepo, componentRepo)
+	publicLinkService := service.NewPublicLinkService(db, publicLinkRepo, projectRepo, sbomRepo, componentRepo)
 	auditService := service.NewAuditService(auditRepo, userRepo)
 	analyticsService := service.NewAnalyticsService(analyticsRepo, dashboardRepo)
 	reportService := service.NewReportService(reportRepo, dashboardRepo, analyticsRepo, tenantRepo, checklistRepo, visualizationRepo, "./reports")
