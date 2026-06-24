@@ -139,12 +139,22 @@ func TestRequireRole(t *testing.T) {
 	}
 }
 
+// TestRequireAdmin pins the positive-path contract of the
+// TenantContext-aware RequireAdmin guard introduced in role_guard.go for
+// M1 Codex review #F16. The legacy RequireAdmin (a thin wrapper around
+// RequireRole) was removed in the same commit; the new helper additionally
+// requires a tenant context (ContextKeyTenantID) so a misconfigured route
+// that bypassed Auth / MultiAuth is rejected with 401 rather than silently
+// proceeding because ContextKeyRole happened to be set. Negative cases
+// (insufficient role, missing tenant) are exhaustively covered in
+// role_guard_test.go.
 func TestRequireAdmin(t *testing.T) {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
+	c.Set(ContextKeyTenantID, uuid.New())
 	c.Set(ContextKeyRole, model.RoleAdmin)
 
 	handler := RequireAdmin()(func(c echo.Context) error {

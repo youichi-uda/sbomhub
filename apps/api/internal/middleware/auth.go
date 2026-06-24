@@ -331,12 +331,16 @@ func RequireRole(roles ...string) echo.MiddlewareFunc {
 	}
 }
 
-// RequireAdmin is a convenience middleware for admin-only endpoints
-func RequireAdmin() echo.MiddlewareFunc {
-	return RequireRole(model.RoleOwner, model.RoleAdmin)
-}
-
-// RequireOwner is a convenience middleware for owner-only endpoints
+// RequireOwner is a convenience middleware for owner-only endpoints.
+//
+// The companion RequireAdmin helper that previously lived in this file
+// was replaced by the TenantContext-aware middleware.RequireAdmin
+// implemented in role_guard.go (M1 Codex review #F16). The new helper
+// returns the generic `{"error":"forbidden"}` 403 body (matching the
+// #F10 sentinel-opacity contract) and shares its log/audit format with
+// the F15 RequireWrite guard, so every privileged route reports
+// privilege probes through the same operator-facing pipeline. The
+// allowlist semantics are unchanged (Owner or Admin).
 func RequireOwner() echo.MiddlewareFunc {
 	return RequireRole(model.RoleOwner)
 }
