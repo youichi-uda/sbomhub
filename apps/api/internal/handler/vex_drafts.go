@@ -30,6 +30,16 @@ import (
 const (
 	DefaultListLimit = 100
 	MaxListLimit     = 500
+	// MaxListOffset bounds the `?offset=` query parameter for
+	// ListDrafts (M1 Codex review #F27). Same loud-failure posture
+	// as the #F24 limit clamp: a request like `?offset=2147483647`
+	// would otherwise force the DB to skip billions of rows before
+	// producing any output (the underlying vex_drafts query carries
+	// a tenant + project + cve_id + decision filter, but Postgres
+	// still materialises the offset before discarding rows). The
+	// cap mirrors VulnsMaxOffset in sbom.go so operators have a
+	// single mental model for "deep pagination probe → 400".
+	MaxListOffset = 10000
 )
 
 // VexDraftsHandler serves the M1-5 VEX draft endpoints (issue #30):
@@ -230,9 +240,26 @@ func (h *VexDraftsHandler) ListDrafts(c echo.Context) error {
 		// n < 1 falls through to DefaultListLimit (already set above).
 	}
 	if v := c.QueryParam("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid offset"})
+		}
+		// #F27: explicit reject on out-of-band offset. Same posture as
+		// the #F24 limit clamp — a silent clamp would hide the
+		// deep-pagination probe behaviour from telemetry.
+		if n > MaxListOffset {
+			slog.Warn("vex_drafts: offset exceeds maximum",
+				"tenant_id", tc.TenantID(),
+				"project_id", projectID,
+				"requested_offset", n,
+				"max_offset", MaxListOffset,
+			)
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "offset exceeds maximum"})
+		}
+		if n >= 0 {
 			filter.Offset = n
 		}
+		// n < 0 falls through to 0 (default zero value on filter.Offset).
 	}
 
 	drafts, err := h.runner.ListDrafts(c.Request().Context(), tc.TenantID(), projectID, filter)

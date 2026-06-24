@@ -444,10 +444,16 @@ func main() {
 	// 10MB should be sufficient for most SBOM files while preventing abuse
 	e.Use(middleware.BodyLimit("10M"))
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins:  []string{"http://localhost:3000", "http://localhost:13000", "http://localhost:*", "https://sbomhub.app"},
-		AllowMethods:  []string{echo.GET, echo.POST, echo.PUT, echo.DELETE},
-		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "X-Clerk-Org-ID"},
-		ExposeHeaders: []string{echo.HeaderContentDisposition, echo.HeaderContentLength, echo.HeaderContentType},
+		AllowOrigins: []string{"http://localhost:3000", "http://localhost:13000", "http://localhost:*", "https://sbomhub.app"},
+		AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.DELETE},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "X-Clerk-Org-ID"},
+		// X-Total-Count must be in ExposeHeaders so the Web UI can
+		// read it from a cross-origin /api/v1/projects/:id/vulnerabilities
+		// fetch — M1 Codex review #F28 (Web UI data integrity). Without
+		// the exposure the browser silently strips the header before the
+		// fetch handler sees it, and the UI falls back to the old
+		// truncated-page behaviour.
+		ExposeHeaders: []string{echo.HeaderContentDisposition, echo.HeaderContentLength, echo.HeaderContentType, "X-Total-Count"},
 	}))
 
 	// Webhook endpoints (no auth required)

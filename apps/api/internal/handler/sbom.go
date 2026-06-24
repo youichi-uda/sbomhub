@@ -42,6 +42,18 @@ import (
 const (
 	VulnsDefaultLimit = 100
 	VulnsMaxLimit     = 500
+	// VulnsMaxOffset bounds the `?offset=` query parameter (M1 Codex
+	// review #F27). Same loud-failure posture as the limit clamp: a
+	// request like `?offset=2147483647` would force the DB to skip
+	// billions of rows before producing any output, burning CPU /
+	// I/O on the server and yielding an empty page to the caller.
+	// 10000 is the realistic upper bound for a useful "deep" page
+	// (max-limit 500 × 20 pages = 10000) — pagination this deep is
+	// already a signal the caller should be using a more targeted
+	// query (e.g. filter by severity), so we reject rather than
+	// silently clamp so probes show up in telemetry alongside the
+	// #F26 limit clamp.
+	VulnsMaxOffset = 10000
 )
 
 // componentScanner is the narrow interface SbomHandler depends on for the
@@ -347,11 +359,42 @@ func (h *SbomHandler) GetVulnerabilities(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid offset"})
 		}
+		// #F27: reject offsets beyond VulnsMaxOffset BEFORE the DB
+		// runs. Same posture as the #F26 limit clamp — a silent clamp
+		// would hide the probe behaviour from telemetry and a request
+		// like `?offset=2147483647` would otherwise force the DB to
+		// skip billions of rows on its way to producing zero output.
+		if n > VulnsMaxOffset {
+			slog.Warn("vulnerabilities: offset exceeds maximum",
+				"project_id", projectID,
+				"requested_offset", n,
+				"max_offset", VulnsMaxOffset,
+			)
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "offset exceeds maximum"})
+		}
 		if n >= 0 {
 			offset = n
 		}
 		// n < 0 falls through to 0.
 	}
+
+	// #F28 (Web UI data integrity): emit X-Total-Count so the Web UI
+	// can render an accurate "N / total 件" indicator and trip a
+	// warning banner when there is more than one page of vulns. The
+	// count is fetched BEFORE the paginated SELECT — a cheap
+	// COUNT(*) over the same join — so the header always reflects the
+	// authoritative total even when the caller pages past the end of
+	// the result set. CORS must expose this header for cross-origin
+	// fetches; see apps/api/cmd/server/main.go ExposeHeaders.
+	//
+	// The CLI ignores this header (it pages until a short page
+	// arrives, see sbomhub-cli #F26), so the addition is
+	// backward-compatible.
+	total, err := h.sbomService.CountVulnerabilities(c.Request().Context(), projectID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	c.Response().Header().Set("X-Total-Count", strconv.Itoa(total))
 
 	vulns, err := h.sbomService.GetVulnerabilitiesPaginated(c.Request().Context(), projectID, limit, offset)
 	if err != nil {

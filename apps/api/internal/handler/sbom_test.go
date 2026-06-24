@@ -362,7 +362,19 @@ func TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26(t *testing.T) {
 	sbomID := uuid.New()
 	now := time.Now()
 
-	// GetLatest returns a stub sbom row.
+	// CountVulnerabilities (added by #F28) runs first: GetLatest +
+	// COUNT(*) — both required so the handler can emit X-Total-Count.
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT v.id\) FROM vulnerabilities v`).
+		WithArgs(sbomID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	// GetVulnerabilitiesPaginated repeats GetLatest then runs the
+	// page query.
 	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -449,6 +461,17 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 	sbomID := uuid.New()
 	now := time.Now()
 
+	// CountVulnerabilities (#F28) runs first: GetLatest + COUNT(*).
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT v.id\) FROM vulnerabilities v`).
+		WithArgs(sbomID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(350))
+
+	// GetVulnerabilitiesPaginated repeats GetLatest then runs the page.
 	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -487,6 +510,174 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 	}
 	if len(out) != 1 {
 		t.Errorf("F26: expected 1 vuln in response, got %d", len(out))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F27 regression — GetVulnerabilities must reject offsets above the cap
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 17 #F27 (high / correctness + DoS): the #F26 fix
+// added a limit clamp but left `?offset=` unbounded. A request such
+// as `?offset=2147483647` would force the DB to skip billions of
+// rows on its way to producing zero output — a cheap DoS primitive
+// reachable via the same read-scoped API-key path that motivated
+// #F26. The handler now rejects offsets > VulnsMaxOffset (10000) at
+// the same boundary as the limit clamp.
+
+// TestSBOMHandler_GetVulnerabilities_OffsetOverflow_F27 pins the
+// upper bound: a 32-bit overflow probe must be rejected with 400
+// BEFORE any SQL runs. If a regression slips, sqlmock's
+// "unexpected query" trip would fire alongside the response-code
+// check because no GetLatest / SELECT expectations are registered.
+func TestSBOMHandler_GetVulnerabilities_OffsetOverflow_F27(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "offset=2147483647")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F27: offset=2147483647 must return 400, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), "offset exceeds maximum") {
+		t.Errorf("F27: expected 'offset exceeds maximum' body, got %s", rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_GetVulnerabilities_OffsetAtCap_F27 pins the
+// boundary: an offset exactly at VulnsMaxOffset must succeed (off-
+// by-one trap — a `>=` vs `>` typo in the clamp would silently
+// reject the boundary value and break legitimate deep-pagination).
+func TestSBOMHandler_GetVulnerabilities_OffsetAtCap_F27(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	now := time.Now()
+
+	// GetLatest is called twice: once by CountVulnerabilities (for
+	// the X-Total-Count header) and once by GetVulnerabilitiesPaginated.
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT v.id\) FROM vulnerabilities v`).
+		WithArgs(sbomID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, VulnsDefaultLimit, VulnsMaxOffset).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}))
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "offset=10000")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F27: offset=%d (boundary) must succeed, got %d (body=%s)",
+			VulnsMaxOffset, rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F28 regression — GetVulnerabilities must emit X-Total-Count
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 17 #F28 (high / data integrity): the Web UI used
+// to fetch /api/v1/projects/:id/vulnerabilities without pagination
+// and treat the default 100-row response as the complete set —
+// tab counts and workflow actions for vulns past row 100 were
+// silently truncated. The handler now emits X-Total-Count as a
+// response header so the UI can render the authoritative count and
+// trip a warning banner when total > visible page. CORS must
+// expose this header (see ExposeHeaders in cmd/server/main.go) for
+// the cross-origin fetch to pick it up.
+func TestSBOMHandler_GetVulnerabilities_TotalCountHeader_F28(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	now := time.Now()
+
+	// CountVulnerabilities calls GetLatest + COUNT(*).
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT v.id\) FROM vulnerabilities v`).
+		WithArgs(sbomID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(742))
+
+	// GetVulnerabilitiesPaginated repeats GetLatest then runs the
+	// page query.
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, VulnsDefaultLimit, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}))
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F28: expected 200, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "742" {
+		t.Errorf("F28: expected X-Total-Count=742, got %q", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)

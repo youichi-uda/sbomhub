@@ -136,6 +136,29 @@ func (s *SbomService) GetVulnerabilitiesPaginated(ctx context.Context, projectID
 	return s.componentRepo.GetVulnerabilitiesPaginated(ctx, sbom.ID, limit, offset)
 }
 
+// CountVulnerabilities returns the total number of vulnerabilities
+// matched for the project's latest SBOM. M1 Codex review #F28: the
+// /vulnerabilities route emits this as X-Total-Count so the Web UI
+// can render an accurate "N / total" indicator + warning banner when
+// the total exceeds the default page size — without it the UI
+// treated the first 100 rows as the complete set and silently
+// truncated the tab counter / workflow actions for later rows.
+//
+// Behaviour mirrors GetVulnerabilities for the "no SBOM yet" branch:
+// sql.ErrNoRows collapses to (0, nil) so the handler does not need a
+// separate 404 path when a freshly-created project has yet to receive
+// its first upload.
+func (s *SbomService) CountVulnerabilities(ctx context.Context, projectID uuid.UUID) (int, error) {
+	sbom, err := s.sbomRepo.GetLatest(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return s.componentRepo.CountVulnerabilities(ctx, sbom.ID)
+}
+
 // GetVulnerabilitiesBySbom returns the vulnerabilities matched for one
 // specific SBOM. Unlike GetVulnerabilities (which resolves the "latest" SBOM
 // for the project), this preserves the caller-supplied sbom_id so polling a

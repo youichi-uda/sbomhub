@@ -1097,3 +1097,60 @@ func TestVEXDraftsHandler_ListDrafts_MaxLimit_Allowed_F24(t *testing.T) {
 			store.lastFilter.Limit, MaxListLimit)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// F27 regression — ListDrafts must clamp the `offset` query parameter
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 17 #F27 (high / correctness + DoS): the #F24 fix
+// added a limit clamp but left `?offset=` unbounded. A request such
+// as `?offset=2147483647` would silently fall through to the repo and
+// force the DB to skip billions of rows on its way to producing zero
+// output. The handler now rejects offsets > MaxListOffset (10000) at
+// the same boundary as the limit clamp.
+
+// TestVEXDraftsHandler_ListDrafts_OffsetOverflow_F27 pins the core
+// #F27 contract: a 32-bit overflow probe must be rejected at the
+// handler boundary before the repository runs.
+func TestVEXDraftsHandler_ListDrafts_OffsetOverflow_F27(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	h, store := listDraftsHandlerForF24(t)
+	rec := driveListDrafts(t, h, tenantID, projectID, "offset=2147483647")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F27: unbounded offset must return 400, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "offset exceeds maximum") {
+		t.Errorf("F27: expected 'offset exceeds maximum' in body, got %s", rec.Body.String())
+	}
+	if store.called {
+		t.Errorf("F27: repository ListByProject MUST NOT be invoked when offset is rejected; was called with filter=%+v",
+			store.lastFilter)
+	}
+}
+
+// TestVEXDraftsHandler_ListDrafts_OffsetAtCap_F27 pins the boundary:
+// offset=MaxListOffset must succeed (off-by-one trap — `>=` vs `>`
+// typo would silently reject the boundary value).
+func TestVEXDraftsHandler_ListDrafts_OffsetAtCap_F27(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	h, store := listDraftsHandlerForF24(t)
+	rec := driveListDrafts(t, h, tenantID, projectID, "offset=10000")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F27: offset=%d (boundary) must succeed, got %d (body=%s)",
+			MaxListOffset, rec.Code, rec.Body.String())
+	}
+	if !store.called {
+		t.Fatalf("F27: repository ListByProject should be invoked at the boundary")
+	}
+	if store.lastFilter.Offset != MaxListOffset {
+		t.Errorf("F27: boundary offset must pass through to the repo verbatim, got %d (want %d)",
+			store.lastFilter.Offset, MaxListOffset)
+	}
+}

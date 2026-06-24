@@ -88,6 +88,35 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	return vulns, nil
 }
 
+// CountVulnerabilities returns the total number of distinct
+// vulnerability rows matched for the given SBOM via the
+// component_vulnerabilities join. M1 Codex review #F28 (Web UI data
+// integrity): the canonical /vulnerabilities route returns at most
+// VulnsDefaultLimit (100) rows, so without an independent COUNT(*)
+// the Web UI silently treats the first page as the complete set. The
+// handler now emits this count as the X-Total-Count response header
+// so the UI can render "N / total 件" and trip a "more than one
+// page" warning banner when total > limit.
+//
+// The query mirrors GetVulnerabilities — DISTINCT is implicit
+// because the join is already 1:1 between (component, vulnerability),
+// but we COUNT(DISTINCT v.id) defensively so a future de-duplication
+// change to the join shape does not silently inflate the header.
+func (r *ComponentRepository) CountVulnerabilities(ctx context.Context, sbomID uuid.UUID) (int, error) {
+	const query = `
+		SELECT COUNT(DISTINCT v.id)
+		FROM vulnerabilities v
+		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
+		JOIN components c ON c.id = cv.component_id
+		WHERE c.sbom_id = $1
+	`
+	var n int
+	if err := r.q(ctx).QueryRowContext(ctx, query, sbomID).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // GetVulnerabilitiesPaginated mirrors GetVulnerabilities but pages the
 // result via SQL LIMIT/OFFSET. M1 Codex review #F26: the F20 fix
 // exposed GET /api/v1/projects/:id/vulnerabilities to read-scoped API
