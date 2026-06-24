@@ -174,12 +174,21 @@ type ScanStatusResponse struct {
 // VulnerabilitySummaryCount aggregates vulnerability counts by severity
 // for one SBOM. Severity values are normalised to uppercase to match the
 // `vulnerabilities.severity` column convention (CRITICAL/HIGH/...).
+//
+// `KEV` is an *orthogonal* bucket: it counts vulnerabilities flagged in the
+// CISA Known Exploited Vulnerabilities catalogue (migration 020) and is
+// emitted alongside the CVSS-derived severity buckets so the CLI's
+// `--fail-on kev` threshold has an authoritative source (Codex R1 fix —
+// previously the CLI only saw upload-time KEV counts which the canonical
+// upload endpoint does not populate, so `--fail-on kev` silently never
+// tripped).
 type VulnerabilitySummaryCount struct {
 	Critical int `json:"critical"`
 	High     int `json:"high"`
 	Medium   int `json:"medium"`
 	Low      int `json:"low"`
 	Unknown  int `json:"unknown"`
+	KEV      int `json:"kev"`
 	Total    int `json:"total"`
 }
 
@@ -250,6 +259,10 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 // `unknown`. `total` is the input slice length, not the sum of named
 // buckets, so callers always get a reliable "any vulnerabilities at all?"
 // signal even if a new severity label appears upstream.
+//
+// `KEV` is incremented orthogonally to the CVSS bucket: a KEV-listed CVE
+// also counts in its CRITICAL/HIGH/etc. bucket. The CLI uses this for the
+// `--fail-on kev` threshold (see severity.LevelKEV in sbomhub-cli).
 func summariseVulnerabilities(vulns []model.Vulnerability) VulnerabilitySummaryCount {
 	out := VulnerabilitySummaryCount{Total: len(vulns)}
 	for _, v := range vulns {
@@ -264,6 +277,9 @@ func summariseVulnerabilities(vulns []model.Vulnerability) VulnerabilitySummaryC
 			out.Low++
 		default:
 			out.Unknown++
+		}
+		if v.InKEV {
+			out.KEV++
 		}
 	}
 	return out
