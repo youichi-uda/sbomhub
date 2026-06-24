@@ -451,10 +451,20 @@ func main() {
 	// alive on the legacy CLI group below for one release of overlap.
 	// Trust Rescue 9.1.2 (#3): the canonical upload route gets the same
 	// per-request transaction treatment as the auth group above. Middleware
-	// order here is MultiAuth → TenantTx → audit → handler (Echo applies
-	// the variadic middleware list outer-to-inner).
+	// order here is MultiAuth → RateLimitByAPIKey → TenantTx → audit →
+	// handler (Echo applies the variadic middleware list outer-to-inner).
+	//
+	// Codex R19 fix: the legacy /api/v1/cli/upload route is rate-limited per
+	// API key (see the `cli` group above), but the canonical MultiAuth
+	// upload was not — a leaked `sbh_...` key could DoS the server with
+	// unbounded large-SBOM uploads, and after the 2026-09 sunset of the
+	// legacy CLI route all clients land here. RateLimitByAPIKey is a no-op
+	// when ContextKeyAPI is unset (i.e. Clerk JWT / self-hosted default
+	// path), so this preserves the web UI's existing un-throttled behaviour
+	// while matching the legacy CLI guard (60 req/min per API key).
 	e.POST("/api/v1/projects/:id/sbom", sbomHandler.Upload,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// GET /sbom is the companion read-back to the canonical upload above:
