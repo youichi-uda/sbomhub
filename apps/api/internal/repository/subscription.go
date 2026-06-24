@@ -21,10 +21,39 @@ func NewSubscriptionRepository(db *sql.DB) *SubscriptionRepository {
 
 // q routes the statement through the request-scoped transaction when one is
 // attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
-// subscriptions / subscription_events / usage_records all enforce tenant-scoped
-// RLS (migration 008), so billing / usage endpoints need the tenant GUC set by
-// TenantTx to see the caller's own rows (codex-r1 Finding 2). plan_limits has
-// no RLS (it is a shared catalog) and gracefully reads through the fallback.
+//
+// RLS history note: migration 008 originally put `subscriptions`,
+// `subscription_events`, and `usage_records` under ENABLE ROW LEVEL
+// SECURITY with a USING-only tenant policy (which also implies a WITH
+// CHECK fallback for INSERTs). That broke the Lemon Squeezy webhook path
+// (`handler/webhook_lemonsqueezy.go`): the webhook route is mounted
+// directly on the Echo instance, so by the time `GetByLSSubscriptionID`
+// runs no `app.current_tenant_id` GUC is set under the `sbomhub_app`
+// (NOBYPASSRLS) role, the predicate reduces to NULL, and every
+// subscription_updated / cancelled / expired / paused / resumed event
+// returned "subscription not found". Migration 031 dropped the policy
+// on all three tables.
+//
+// Tenant scope is now enforced exclusively in this file:
+//
+//   - GetByLSSubscriptionID is intentionally tenant-unscoped (it is the
+//     webhook lookup that REVEALS which tenant an event belongs to —
+//     the equivalent of GetByKeyHash on api_keys, see migration 028).
+//   - GetByTenantID / GetEvents / GetUsage are tenant-scoped by
+//     parameter and always carry `WHERE tenant_id = $1`.
+//   - Update / UpdateStatus / Delete add an explicit `AND tenant_id = $N`
+//     guard so a buggy handler can't cross tenant boundaries even though
+//     RLS is no longer the backstop.
+//   - Create / CreateEvent / RecordUsage write the caller-supplied
+//     TenantID; the FK to `tenants(id) ON DELETE CASCADE` still enforces
+//     referential integrity.
+//
+// The q(ctx) indirection still matters for the billing endpoints that
+// DO run inside a TenantTx — they should still join the request tx so
+// reads/writes commit atomically with the rest of the request. Webhook
+// callers have no tx and fall through to r.db, which is fine now that
+// RLS is off. plan_limits has no RLS (it is a shared catalog) and reads
+// gracefully through the fallback as before.
 func (r *SubscriptionRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
 }
@@ -62,6 +91,14 @@ func (r *SubscriptionRepository) GetByTenantID(ctx context.Context, tenantID uui
 	return &s, nil
 }
 
+// GetByLSSubscriptionID is the Lemon Squeezy webhook lookup: given the
+// opaque subscription ID delivered over an HMAC-verified webhook (see
+// handler/webhook_lemonsqueezy.go verifySignature), return the owning
+// row (which carries tenant_id). It is intentionally tenant-UNSCOPED —
+// this is the call that decides which tenant the event belongs to. All
+// other reads MUST go through tenant-scoped helpers (GetByTenantID,
+// GetEvents, GetUsage). Mirrors the GetByKeyHash invariant on api_keys
+// (migration 028).
 func (r *SubscriptionRepository) GetByLSSubscriptionID(ctx context.Context, lsSubID string) (*model.Subscription, error) {
 	query := `
 		SELECT id, tenant_id, ls_subscription_id, ls_customer_id, ls_variant_id, ls_product_id,
@@ -80,6 +117,13 @@ func (r *SubscriptionRepository) GetByLSSubscriptionID(ctx context.Context, lsSu
 	return &s, nil
 }
 
+// Update mutates an existing subscription row. The `AND tenant_id = $N`
+// guard is load-bearing now that RLS is gone (migration 031) — without
+// it a buggy or malicious caller that supplies a subscription struct
+// whose ID belongs to tenant A but TenantID has been swapped to tenant
+// B's id could rewrite tenant A's billing state. Callers MUST set
+// s.TenantID from the trusted lookup (GetByLSSubscriptionID or
+// GetByTenantID) and not from user input.
 func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscription) error {
 	query := `
 		UPDATE subscriptions SET
@@ -88,7 +132,7 @@ func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscripti
 			current_period_start = $7, current_period_end = $8,
 			trial_ends_at = $9, renews_at = $10, ends_at = $11, cancelled_at = $12,
 			updated_at = $13
-		WHERE id = $14
+		WHERE id = $14 AND tenant_id = $15
 	`
 	s.UpdatedAt = time.Now()
 	_, err := r.q(ctx).ExecContext(ctx, query,
@@ -96,19 +140,27 @@ func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscripti
 		s.Status, s.Plan, s.BillingAnchor,
 		s.CurrentPeriodStart, s.CurrentPeriodEnd,
 		s.TrialEndsAt, s.RenewsAt, s.EndsAt, s.CancelledAt,
-		s.UpdatedAt, s.ID)
+		s.UpdatedAt, s.ID, s.TenantID)
 	return err
 }
 
-func (r *SubscriptionRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	query := `UPDATE subscriptions SET status = $1, updated_at = $2 WHERE id = $3`
-	_, err := r.q(ctx).ExecContext(ctx, query, status, time.Now(), id)
+// UpdateStatus narrowly updates the status of a subscription, restricted
+// to the calling tenant. The `tenant_id = $3` guard is defense-in-depth
+// against cross-tenant mutation now that RLS is no longer enforcing it
+// (migration 031).
+func (r *SubscriptionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error {
+	query := `UPDATE subscriptions SET status = $1, updated_at = $2 WHERE id = $3 AND tenant_id = $4`
+	_, err := r.q(ctx).ExecContext(ctx, query, status, time.Now(), id, tenantID)
 	return err
 }
 
-func (r *SubscriptionRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM subscriptions WHERE id = $1`
-	_, err := r.q(ctx).ExecContext(ctx, query, id)
+// Delete removes a subscription row, restricted to the calling tenant.
+// With RLS off (migration 031) the `tenant_id = $2` clause is what
+// stops any authenticated session from deleting another tenant's
+// subscription by ID.
+func (r *SubscriptionRepository) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
+	query := `DELETE FROM subscriptions WHERE id = $1 AND tenant_id = $2`
+	_, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
 	return err
 }
 
