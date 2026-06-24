@@ -50,6 +50,45 @@ const EnvConfidenceThreshold = "SBOMHUB_AI_CONFIDENCE_THRESHOLD"
 // byte / response decoding. M1 Codex review #F19 (part 3).
 const DefaultLLMTimeout = 90
 
+// DefaultMaxFanOut bounds the number of (component, vuln) drafts a single
+// triage request may create when the caller omits ComponentID. M1 Codex
+// review #F25: without this cap a write-scoped API key could target a CVE
+// linked to thousands of components in the project and force the runner
+// to persist one vex_drafts row + one audit_logs row per component inside
+// a single transaction — a single-request DoS that bloats both the
+// response body and the audit table. Operators with legitimate large
+// fan-outs override via SBOMHUB_TRIAGE_MAX_FANOUT.
+//
+// ※要確認: 20 is a conservative default; once we have real-world data on
+// triage fan-out distribution this can be tuned. The cap is intentionally
+// low enough that a single accidentally over-broad CVE (e.g. an OpenSSL
+// transitive used by every container) cannot fill the response body / audit
+// table without an explicit operator opt-in.
+const DefaultMaxFanOut = 20
+
+// EnvMaxFanOut is the env var consulted by MaxFanOutFromEnv.
+const EnvMaxFanOut = "SBOMHUB_TRIAGE_MAX_FANOUT"
+
+// MaxFanOutFromEnv returns the operator-configured fan-out cap, falling
+// back to DefaultMaxFanOut when the env var is unset or unparseable.
+// Negative / zero values are rejected so a misconfigured operator cannot
+// silently disable the cap by setting 0.
+//
+// M1 Codex review #F25: the runner consults this once at construction
+// time (NewRunner) to fill Runner.maxFanOut. Callers that need a fixed
+// cap for tests pass RunnerConfig.MaxFanOut explicitly.
+func MaxFanOutFromEnv() int {
+	raw := os.Getenv(EnvMaxFanOut)
+	if raw == "" {
+		return DefaultMaxFanOut
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return DefaultMaxFanOut
+	}
+	return v
+}
+
 // Sentinel errors returned by the guards layer. The runner converts them
 // to the appropriate HTTP status (422 for ErrEmptyEvidence, 400 for the
 // allowlist errors).

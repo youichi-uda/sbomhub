@@ -285,6 +285,20 @@ var ErrComponentNotInVulnerabilityScope = errors.New("triage: component not in v
 // vulnerability_id / cve_id was at fault.
 var ErrCVEIDMismatch = errors.New("triage: cve_id does not match vulnerability_id")
 
+// ErrFanOutExceeded is returned by Run when the caller omits ComponentID
+// AND the (tenant, project, vulnerability) → []component_id resolver
+// returns more components than r.maxFanOut. The handler maps this to
+// 413 with an "supply component_id" hint. M1 Codex review #F25: without
+// this cap, a write-scoped API-key caller could trigger a single triage
+// run that persists one vex_drafts + one audit_logs row per affected
+// component inside a single transaction — DoS by widely-used CVE.
+//
+// Bypass: callers with a legitimate need to triage one specific
+// (component, vuln) pair from a high-fan-out CVE supply ComponentID
+// explicitly; that path skips the cap because it persists exactly one
+// draft regardless of how many components the resolver knows about.
+var ErrFanOutExceeded = errors.New("triage: fan-out exceeds configured cap (supply component_id to triage one pair)")
+
 // ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
@@ -335,6 +349,13 @@ type Runner struct {
 	// part 3). Default DefaultLLMTimeout seconds, overridable via
 	// SBOMHUB_LLM_TIMEOUT_SECONDS (LLMTimeoutFromEnv).
 	llmTimeout time.Duration
+
+	// maxFanOut caps how many components a single ComponentID-less triage
+	// request may fan out across (M1 Codex review #F25). Default
+	// DefaultMaxFanOut, overridable via SBOMHUB_TRIAGE_MAX_FANOUT
+	// (MaxFanOutFromEnv). Caller-supplied ComponentID bypasses the cap
+	// (always exactly 1 draft regardless of the resolver's full set size).
+	maxFanOut int
 }
 
 // RunnerConfig is the constructor input for NewRunner.
@@ -388,6 +409,13 @@ type RunnerConfig struct {
 	// DefaultLLMTimeout seconds, overridable via
 	// SBOMHUB_LLM_TIMEOUT_SECONDS).
 	LLMTimeout time.Duration
+
+	// MaxFanOut caps how many components a single ComponentID-less triage
+	// request may fan out across (M1 Codex review #F25). Zero falls back to
+	// MaxFanOutFromEnv() (default DefaultMaxFanOut, overridable via
+	// SBOMHUB_TRIAGE_MAX_FANOUT). Caller-supplied ComponentID bypasses the
+	// cap (single-pair triage is always allowed).
+	MaxFanOut int
 }
 
 // NewRunner constructs a Runner. Required fields (Drafts, Advisories,
@@ -431,6 +459,10 @@ func NewRunner(cfg RunnerConfig) *Runner {
 	if llmTimeout <= 0 {
 		llmTimeout = LLMTimeoutFromEnv()
 	}
+	maxFanOut := cfg.MaxFanOut
+	if maxFanOut <= 0 {
+		maxFanOut = MaxFanOutFromEnv()
+	}
 	return &Runner{
 		drafts:           cfg.Drafts,
 		advisories:       cfg.Advisories,
@@ -446,6 +478,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		clock:            clock,
 		txManager:        txMgr,
 		llmTimeout:       llmTimeout,
+		maxFanOut:        maxFanOut,
 	}
 }
 
@@ -883,6 +916,13 @@ func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.U
 	// F6: validate caller-supplied component_id against the resolved
 	// set. We compare uuid values directly — the ID set is small (one
 	// per affected component in this project) so a linear scan is fine.
+	//
+	// F25: caller-supplied ComponentID intentionally bypasses the
+	// maxFanOut cap. The cap exists to protect against unbounded fan-out
+	// of (component, vuln) drafts in a single transaction; a request
+	// pinned to one component creates exactly one draft regardless of
+	// how widely the CVE spreads in the project, so the operator opt-in
+	// of supplying ComponentID is the documented escape hatch.
 	if in.ComponentID != nil && *in.ComponentID != uuid.Nil {
 		want := *in.ComponentID
 		for _, id := range ids {
@@ -891,6 +931,15 @@ func (r *Runner) resolveComponentIDs(ctx context.Context, in RunInput) ([]uuid.U
 			}
 		}
 		return nil, fmt.Errorf("triage.Run: %w", ErrComponentNotInVulnerabilityScope)
+	}
+	// F25: reject fan-out when the resolver returns more components than
+	// the configured cap. We do NOT silently truncate the slice — a
+	// partial fan-out would leave the operator uncertain about which
+	// components were triaged and which were skipped. The caller is
+	// expected to retry with an explicit ComponentID for each pair.
+	if r.maxFanOut > 0 && len(ids) > r.maxFanOut {
+		return nil, fmt.Errorf("triage.Run: %w (resolved %d components, cap is %d)",
+			ErrFanOutExceeded, len(ids), r.maxFanOut)
 	}
 	return ids, nil
 }

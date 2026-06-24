@@ -854,6 +854,82 @@ func runTriageAndCapture404(t *testing.T, runner *triage.Runner, tenantID, proje
 }
 
 // ----------------------------------------------------------------------------
+// F25 regression — RunTriage must surface ErrFanOutExceeded as 413
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 16 #F25 (high / DoS): when the caller omits
+// component_id, runner.resolveComponentIDs now rejects any resolver
+// that returns more components than r.maxFanOut with the
+// ErrFanOutExceeded sentinel. The handler MUST map that sentinel to
+// 413 Payload Too Large with a body that hints the caller can retry
+// with an explicit component_id. The runner-level regression
+// (TestRunner_Run_FanOutExceedsCap_F25_Rejected) pins the sentinel
+// path; this test pins the HTTP mapping.
+func TestVEXDraftsHandler_RunTriage_FanOutExceededMaps413_F25(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	vulnID := uuid.New()
+
+	// 21 components in scope, cap=20 (the runner's default) — fan-out
+	// trips. ComponentID is intentionally omitted in the request body
+	// below so the runner takes the fan-out path.
+	ids := make([]uuid.UUID, 21)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:                   &fakeVexDraftStore{},
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             &fakeReachabilityReader{},
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 disabledProvider(),
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentResolver{ids: ids},
+		MaxFanOut:                20, // explicit so the test is robust to env override
+	})
+	h := NewVexDraftsHandler(runner)
+
+	body := map[string]string{
+		"vulnerability_id": vulnID.String(),
+		"cve_id":           "CVE-2026-0F25H",
+		// No component_id — exercise the fan-out path.
+	}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/triage/run",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleAdmin)
+
+	if err := h.RunTriage(c); err != nil {
+		t.Fatalf("RunTriage returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("F25: ErrFanOutExceeded must surface as 413, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	// Body must contain the actionable hint ("supply component_id") so the
+	// CLI can render a useful error.
+	if !strings.Contains(rec.Body.String(), "component_id") {
+		t.Errorf("F25: 413 body must hint at the component_id bypass, got %s", rec.Body.String())
+	}
+	// Body must NOT leak the precise resolved-count / cap (kept in logs).
+	if strings.Contains(rec.Body.String(), "21") || strings.Contains(rec.Body.String(), "cap is") {
+		t.Errorf("F25: 413 body must not leak topology (resolved-count / cap), got %s", rec.Body.String())
+	}
+}
+
+// ----------------------------------------------------------------------------
 // F24 regression — ListDrafts must clamp the `limit` query parameter
 // ----------------------------------------------------------------------------
 //

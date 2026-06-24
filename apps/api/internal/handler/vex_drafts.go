@@ -603,6 +603,20 @@ func mapRunnerError(err error) (int, map[string]string, bool) {
 			"error": "triage target invalid",
 		}, true
 	}
+	// F25 (Codex M1 round 16): ComponentID-less request resolved to more
+	// components than the configured fan-out cap. We return 413 Payload
+	// Too Large with an actionable hint ("supply component_id") rather
+	// than truncating the fan-out silently. The full sentinel message
+	// (which includes resolved-count and cap) lands in server logs only
+	// to avoid leaking the precise project topology back to the caller.
+	if errors.Is(err, triage.ErrFanOutExceeded) {
+		slog.Warn("triage: fan-out exceeds cap",
+			"sentinel", err.Error(),
+		)
+		return http.StatusRequestEntityTooLarge, map[string]string{
+			"error": "too many affected components — supply component_id to triage one (component, vulnerability) pair",
+		}, true
+	}
 	// Heuristic — runner returns "X is required" / "is not in allowlist"
 	// for caller-fixable problems. Be conservative: anything we do not
 	// explicitly recognise becomes 500.

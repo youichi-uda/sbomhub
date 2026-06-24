@@ -1952,6 +1952,164 @@ func TestRunner_Run_LLMTimeout_BoundedContext(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// Fan-out cap regression (Codex M1 round 16 #F25)
+// ----------------------------------------------------------------------------
+//
+// Without the F25 fix, a write-scoped triage request that omitted
+// component_id could fan out to every component a CVE links to in the
+// project — one vex_drafts INSERT + one audit_logs INSERT per component,
+// all in a single transaction, with the full draft slice mirrored back
+// in the JSON response body. A single API-key holder pointing at a
+// widely-shared CVE (e.g. an OpenSSL transitive present in hundreds of
+// images) could therefore mount a 1-request DoS that bloats both the
+// response and the audit table.
+//
+// The runner now enforces a cap (Runner.maxFanOut, default
+// DefaultMaxFanOut, env override SBOMHUB_TRIAGE_MAX_FANOUT). When the
+// resolver returns more components than the cap AND the caller did NOT
+// pin a ComponentID, Run() short-circuits with ErrFanOutExceeded. The
+// handler maps that sentinel to 413 with an "supply component_id" hint.
+//
+// Tests below pin:
+//   F25.1 (TestRunner_Run_FanOutExceedsCap_F25_Rejected):
+//         resolver returns N > cap components, ComponentID nil →
+//         ErrFanOutExceeded, no LLM call, no draft, no audit row.
+//   F25.2 (TestRunner_Run_FanOutAtCap_F25_Accepted):
+//         resolver returns exactly cap components → fan-out succeeds
+//         (boundary pinning).
+//   F25.3 (TestRunner_Run_ComponentIDSupplied_BypassesFanOutCap_F25):
+//         resolver returns N >> cap, but ComponentID is pinned to one
+//         in-scope component → single draft persists, cap is not
+//         consulted.
+
+func TestRunner_Run_FanOutExceedsCap_F25_Rejected(t *testing.T) {
+	cap := 20
+	// 21 components, ComponentID omitted → fan-out would be 21, exceeds cap.
+	ids := make([]uuid.UUID, 21)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	resolver := &fakeComponentVulnResolver{ids: ids}
+
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+	llmCalls := &fakeLLMCallWriter{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
+		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F25A"),
+		MaxFanOut:                cap,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F25A",
+		// ComponentID intentionally omitted — exercise the fan-out path.
+	})
+	if err == nil {
+		t.Fatalf("Run must reject ComponentID-less request when resolver returns more components than cap=%d", cap)
+	}
+	if !errors.Is(err, ErrFanOutExceeded) {
+		t.Errorf("error %v should wrap ErrFanOutExceeded", err)
+	}
+	// Nothing else may have happened — rejection lands before the LLM
+	// call, the draft INSERT, and the audit write.
+	if got := len(drafts.inserted); got != 0 {
+		t.Errorf("expected no draft persisted on fan-out cap rejection, got %d", got)
+	}
+	if got := len(llmCalls.records); got != 0 {
+		t.Errorf("expected no llm_calls persisted (provider must never run on cap rejection), got %d", got)
+	}
+	if got := len(audit.entries); got != 0 {
+		t.Errorf("expected no audit row on fan-out cap rejection, got %d", got)
+	}
+	if stub.captured.Purpose != "" {
+		t.Errorf("LLM provider must not be invoked on fan-out cap rejection (got Purpose=%q)", stub.captured.Purpose)
+	}
+}
+
+func TestRunner_Run_FanOutAtCap_F25_Accepted(t *testing.T) {
+	cap := 20
+	// Exactly cap components — fan-out boundary, must succeed.
+	ids := make([]uuid.UUID, cap)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	resolver := &fakeComponentVulnResolver{ids: ids}
+
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	audit := &fakeAuditWriter{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: audit, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F25B"),
+		MaxFanOut:                cap,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F25B",
+	})
+	if err != nil {
+		t.Fatalf("Run error at fan-out boundary cap=%d: %v", cap, err)
+	}
+	if got := len(drafts.inserted); got != cap {
+		t.Errorf("expected %d drafts at boundary, got %d", cap, got)
+	}
+	if got := len(audit.entries); got != cap {
+		t.Errorf("expected %d audit entries at boundary, got %d", cap, got)
+	}
+}
+
+func TestRunner_Run_ComponentIDSupplied_BypassesFanOutCap_F25(t *testing.T) {
+	cap := 20
+	// 100 components in scope, but caller pins one — cap must NOT trip.
+	ids := make([]uuid.UUID, 100)
+	for i := range ids {
+		ids[i] = uuid.New()
+	}
+	pinned := ids[42] // deliberate in-scope component
+	resolver := &fakeComponentVulnResolver{ids: ids}
+
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: resolver,
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F25C"),
+		MaxFanOut:                cap,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F25C",
+		ComponentID: &pinned,
+	})
+	if err != nil {
+		t.Fatalf("Run error when ComponentID pinned (cap bypass): %v", err)
+	}
+	// Exactly one draft persists despite 100 in-scope components — the
+	// pinned-component path is the documented bypass for the cap.
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 draft (pinned-component bypass), got %d", got)
+	}
+	if drafts.inserted[0].ComponentID != pinned {
+		t.Errorf("draft.ComponentID = %v, want %v (pinned)", drafts.inserted[0].ComponentID, pinned)
+	}
+}
+
+// ----------------------------------------------------------------------------
 // Tiny helper used by multiple test cases above.
 // ----------------------------------------------------------------------------
 
