@@ -131,6 +131,8 @@ docker compose up -d
 ```
 
 > `./install.sh` is idempotent: an existing `.env` is left untouched. Re-run with `--force` to back the old file up to `.env.bak.YYYYMMDD` and issue fresh secrets.
+>
+> **Production**: rotate `ENCRYPTION_KEY` per the runbook at [`docs/encryption-key-rotation.md`](./docs/encryption-key-rotation.md) (90-day cycle recommended).
 
 ### CLI (`sbomhub scan`)
 
