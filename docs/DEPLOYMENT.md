@@ -76,7 +76,7 @@ services:
 DATABASE_URL=<PostgreSQL URL>
 REDIS_URL=<Redis URL>
 PORT=8080
-ENVIRONMENT=production
+APP_ENV=production
 CLERK_SECRET_KEY=sk_live_xxxxx
 CLERK_WEBHOOK_SECRET=whsec_xxxxx
 LEMONSQUEEZY_API_KEY=xxxxx

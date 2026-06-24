@@ -15,7 +15,7 @@ SBOMHub は環境変数で設定できます。
 | `DATABASE_URL` | `postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable` | PostgreSQL接続文字列 |
 | `REDIS_URL` | `redis://localhost:6379` | Redis接続文字列 |
 | `BASE_URL` | `http://localhost:3000` | WebアプリケーションのベースURL |
-| `ENVIRONMENT` | `development` | 環境: `development`, `staging`, `production` |
+| `APP_ENV` | `development` | 環境: `development`, `staging`, `production`。旧名 `ENVIRONMENT` は `APP_ENV` 未設定時のフォールバックとして引き続き読まれます (M0 Trust Rescue, codex-r18)。 |
 
 ### NVD連携
 
@@ -67,7 +67,7 @@ services:
 # 基本設定
 DATABASE_URL=postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable
 REDIS_URL=redis://localhost:6379
-ENVIRONMENT=production
+APP_ENV=production
 
 # NVD
 NVD_API_KEY=your-nvd-api-key
@@ -131,7 +131,7 @@ maxmemory-policy allkeys-lru
 - [ ] 強力なデータベースパスワードを使用
 - [ ] データベース接続でSSLを有効化（`sslmode=require`）
 - [ ] 有効な証明書でHTTPSを設定
-- [ ] `ENVIRONMENT=production`を設定
+- [ ] `APP_ENV=production`を設定
 - [ ] データベースアクセスをアプリケーションサーバーに制限
 - [ ] PostgreSQLデータの定期バックアップ
 - [ ] セキュリティ問題のログ監視

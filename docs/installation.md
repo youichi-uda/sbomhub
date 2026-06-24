@@ -147,7 +147,7 @@ go build -o sbomhub-api ./cmd/server
 # Run with production settings
 export DATABASE_URL="postgres://user:pass@localhost:5432/sbomhub?sslmode=require"
 export REDIS_URL="redis://localhost:6379"
-export ENVIRONMENT="production"
+export APP_ENV="production"
 
 ./sbomhub-api
 ```

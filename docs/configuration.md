@@ -15,7 +15,7 @@ SBOMHub can be configured through environment variables.
 | `DATABASE_URL` | `postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable` | PostgreSQL connection string |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
 | `BASE_URL` | `http://localhost:3000` | Base URL for the web application |
-| `ENVIRONMENT` | `development` | Environment: `development`, `staging`, `production` |
+| `APP_ENV` | `development` | Environment: `development`, `staging`, `production`. The legacy name `ENVIRONMENT` is still read as a fallback when `APP_ENV` is unset (M0 Trust Rescue, codex-r18). |
 
 ### NVD Integration
 
@@ -67,7 +67,7 @@ Create a `.env` file in the project root:
 # Core
 DATABASE_URL=postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable
 REDIS_URL=redis://localhost:6379
-ENVIRONMENT=production
+APP_ENV=production
 
 # NVD
 NVD_API_KEY=your-nvd-api-key
@@ -131,7 +131,7 @@ maxmemory-policy allkeys-lru
 - [ ] Use strong database passwords
 - [ ] Enable SSL for database connections (`sslmode=require`)
 - [ ] Configure HTTPS with valid certificates
-- [ ] Set `ENVIRONMENT=production`
+- [ ] Set `APP_ENV=production`
 - [ ] Restrict database access to application servers
 - [ ] Regular backup of PostgreSQL data
 - [ ] Monitor logs for security issues
