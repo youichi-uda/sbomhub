@@ -1,9 +1,16 @@
 package service
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
 func TestDetectFormat_CycloneDX(t *testing.T) {
@@ -576,5 +583,88 @@ func TestExtractSPDX3Version(t *testing.T) {
 				t.Errorf("extractSPDX3Version(%q) = %q, expected %q", tt.ctx, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestGetVulnerabilitiesBySbom_VerifiesProjectMembership is the Codex R2 P2
+// guard test. The scan-status handler must NOT silently fall back to "the
+// latest SBOM in the project" — it must scope the vulnerability lookup to
+// the exact sbom_id from the URL. Two parallel uploads (sbom1, sbom2) should
+// not cross-pollute their scan-status responses.
+func TestGetVulnerabilitiesBySbom_VerifiesProjectMembership(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	sbomRepo := repository.NewSbomRepository(db)
+	compRepo := repository.NewComponentRepository(db)
+	svc := NewSbomService(sbomRepo, compRepo)
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	now := time.Now()
+
+	t.Run("happy path returns componentRepo vulns scoped to sbom_id", func(t *testing.T) {
+		mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+			WithArgs(sbomID).
+			WillReturnRows(sqlmock.NewRows([]string{
+				"id", "project_id", "format", "version", "raw_data", "created_at",
+			}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+
+		// The vulnerability query must be parameterised by sbomID (the URL
+		// param), NOT by projectID. Bind exactly sbomID — if a regression
+		// reroutes through GetLatest(projectID) the WithArgs assertion will
+		// fail because GetLatest emits a different SQL string entirely.
+		mock.ExpectQuery("FROM vulnerabilities v").
+			WithArgs(sbomID).
+			WillReturnRows(sqlmock.NewRows([]string{
+				"id", "cve_id", "description", "severity", "cvss_score", "source",
+				"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+				"published_at", "updated_at",
+			}).AddRow(uuid.New(), "CVE-2024-1", "desc", "CRITICAL", 9.8, "NVD",
+				false, nil, nil, nil, now, now))
+
+		vulns, err := svc.GetVulnerabilitiesBySbom(context.Background(), projectID, sbomID)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if len(vulns) != 1 {
+			t.Fatalf("got %d vulns, want 1", len(vulns))
+		}
+	})
+
+	t.Run("project mismatch returns sql.ErrNoRows without hitting componentRepo", func(t *testing.T) {
+		wrongProject := uuid.New()
+		mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+			WithArgs(sbomID).
+			WillReturnRows(sqlmock.NewRows([]string{
+				"id", "project_id", "format", "version", "raw_data", "created_at",
+			}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+		// Intentionally DO NOT register a componentRepo expectation: if the
+		// implementation calls through to it, ExpectationsWereMet will flag a
+		// stray query.
+
+		_, err := svc.GetVulnerabilitiesBySbom(context.Background(), wrongProject, sbomID)
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for cross-project sbom_id, got %v", err)
+		}
+	})
+
+	t.Run("missing sbom returns sql.ErrNoRows", func(t *testing.T) {
+		missing := uuid.New()
+		mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+			WithArgs(missing).
+			WillReturnError(sql.ErrNoRows)
+
+		_, err := svc.GetVulnerabilitiesBySbom(context.Background(), projectID, missing)
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected sql.ErrNoRows for missing sbom, got %v", err)
+		}
+	})
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}
 }

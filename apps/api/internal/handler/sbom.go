@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -87,16 +88,35 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 		return c.JSON(http.StatusCreated, sbom)
 	}
 
-	// Start vulnerability scan in background.
+	// Start vulnerability scan in background AFTER the request transaction
+	// commits.
 	//
-	// MarkRunning is called synchronously (before the goroutine) so that a
-	// CLI client that polls scan-status immediately after the upload sees
-	// "running" rather than "unknown". Without that ordering there is a
-	// race where the poller would think the scan never started.
+	// MarkRunning is called synchronously here so that a CLI client polling
+	// scan-status immediately after the upload sees "running" rather than
+	// "unknown". The actual scan launch is deferred via RegisterPostCommit
+	// so the background goroutine never opens its own tx before the parent
+	// INSERTs are visible — Codex R2 P1 fix. The previous code launched the
+	// goroutine inline, which raced the TenantTx commit: the goroutine
+	// opened its own tx, ListBySbom saw zero components, and the scan
+	// completed with 0 findings even when the SBOM had vulnerable
+	// components. `sbomhub scan --fail-on critical` therefore always exited
+	// 0.
+	//
+	// If the request rolls back (handler error, 4xx, panic, commit failure)
+	// the hook will not run — which is what we want: no SBOM, no scan.
+	// MarkRunning still happened, but the matching MarkCompleted/MarkFailed
+	// won't, so scan-status for that (never-committed) sbom_id will report
+	// "running" indefinitely. That window is bounded by the ScanTracker's
+	// retention and is acceptable because the sbom_id itself was never
+	// persisted — a client polling for it is asking about a row that does
+	// not exist.
 	if h.scanTracker != nil {
 		h.scanTracker.MarkRunning(sbom.ID)
 	}
-	h.startBackgroundScan(sbom.ID, tenantID)
+	scanSbomID := sbom.ID
+	appmw.RegisterPostCommit(c, func() {
+		h.startBackgroundScan(scanSbomID, tenantID)
+	})
 
 	return c.JSON(http.StatusCreated, sbom)
 }
@@ -307,8 +327,17 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	// the background scan has matched so far. We always return them even
 	// for status=running so the CLI can show progress; the threshold check
 	// is gated on status=completed by the client.
-	vulns, err := h.sbomService.GetVulnerabilities(c.Request().Context(), projectID)
+	//
+	// Codex R2 P2: the lookup MUST be scoped by the URL sbom_id rather than
+	// by "the latest SBOM for this project". The previous implementation
+	// called GetVulnerabilities(projectID), which silently switched to the
+	// most recent SBOM — so polling status(sbom1) right after uploading
+	// sbom2 returned sbom2's counts and the CLI's threshold check raced.
+	vulns, err := h.sbomService.GetVulnerabilitiesBySbom(c.Request().Context(), projectID, sbomID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom not found"})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	summary := summariseVulnerabilities(vulns)

@@ -133,6 +133,8 @@ docker compose up -d
 
 > `./install.sh` は既存 `.env` を壊しません。再生成したい場合は `--force` を指定すると `.env.bak.YYYYMMDD` に退避してから新しい値を発行します。
 >
+> **既存ユーザーのアップグレード**: M0 Trust Rescue 以前のバージョンから `docker compose pull` で更新する場合は、 必ず [`docs/UPGRADE.md`](./docs/UPGRADE.md) の手順 (DB バックアップ + `./install.sh --bootstrap-roles` で既存ボリュームに新ロールを投入) を先に実施してください。 そのまま `docker compose up -d` すると api が `password authentication failed` で起動しません。
+>
 > **本番運用向け**: `ENCRYPTION_KEY` のローテーション手順は [`docs/encryption-key-rotation.ja.md`](./docs/encryption-key-rotation.ja.md) を参照してください (定期回転は 90 日推奨)。
 
 ### CLI (sbomhub scan)

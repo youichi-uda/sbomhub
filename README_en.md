@@ -132,6 +132,8 @@ docker compose up -d
 
 > `./install.sh` is idempotent: an existing `.env` is left untouched. Re-run with `--force` to back the old file up to `.env.bak.YYYYMMDD` and issue fresh secrets.
 >
+> **Upgrading from a pre-M0 install**: if you are bringing forward an existing `postgres_data` volume, follow [`docs/UPGRADE.md`](./docs/UPGRADE.md) (DB backup + `./install.sh --bootstrap-roles` to seed the new `sbomhub_app` / `sbomhub_migrator` roles) **before** `docker compose up -d`. Otherwise the api will exit with `password authentication failed`.
+>
 > **Production**: rotate `ENCRYPTION_KEY` per the runbook at [`docs/encryption-key-rotation.md`](./docs/encryption-key-rotation.md) (90-day cycle recommended).
 
 ### CLI (`sbomhub scan`)

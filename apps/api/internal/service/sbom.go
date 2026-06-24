@@ -106,6 +106,34 @@ func (s *SbomService) GetVulnerabilities(ctx context.Context, projectID uuid.UUI
 	return s.componentRepo.GetVulnerabilities(ctx, sbom.ID)
 }
 
+// GetVulnerabilitiesBySbom returns the vulnerabilities matched for one
+// specific SBOM. Unlike GetVulnerabilities (which resolves the "latest" SBOM
+// for the project), this preserves the caller-supplied sbom_id so polling a
+// specific upload's scan progress is not corrupted by a sibling upload that
+// happens to land between poll iterations.
+//
+// Codex R2 P2: the scan-status handler used to call GetVulnerabilities and
+// thereby read whichever SBOM happened to be latest at the moment of the
+// poll. Two parallel uploads (sbom1, then sbom2) would cause status(sbom1)
+// to report sbom2's counts, racing the CLI's --fail-on threshold.
+//
+// The sbom_id is verified to belong to projectID before any vulnerability
+// query is issued. A mismatch (or a missing sbom) returns sql.ErrNoRows so
+// the handler can map it to 404 cleanly without leaking whether the row
+// exists in another project.
+func (s *SbomService) GetVulnerabilitiesBySbom(ctx context.Context, projectID, sbomID uuid.UUID) ([]model.Vulnerability, error) {
+	sbom, err := s.sbomRepo.GetByID(ctx, sbomID)
+	if err != nil {
+		return nil, err
+	}
+	if sbom.ProjectID != projectID {
+		// Do not differentiate "wrong project" from "not found" — that
+		// would let a caller probe sbom_id existence across projects.
+		return nil, sql.ErrNoRows
+	}
+	return s.componentRepo.GetVulnerabilities(ctx, sbomID)
+}
+
 // detectFormat is deprecated, use detectFormatAndVersion instead
 func detectFormat(data []byte) (model.SbomFormat, error) {
 	info, err := detectFormatAndVersion(data)
