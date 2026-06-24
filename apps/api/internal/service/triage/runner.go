@@ -594,25 +594,50 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("triage.Run: marshal evidence: %w", err)
 	}
-	// Optional FK pointers into advisory_excerpts / reachability_results
-	// / llm_calls. We populate them with the first matching row id so
-	// the UI can drill back without scanning the evidence array.
+	// Optional FK pointers into advisory_excerpts / llm_calls. We
+	// populate AdvisoryExcerptID with the first matching row id so the
+	// UI can drill back without scanning the evidence array; advisory
+	// rows are per-(tenant, cve) so the same FK is correct for every
+	// fan-out component.
 	var advisoryFK *uuid.UUID
 	if len(advisories) > 0 {
 		v := advisories[0].ID
 		advisoryFK = &v
 	}
-	var reachFK *uuid.UUID
-	if len(reach) > 0 {
-		v := reach[0].ID
-		reachFK = &v
+	// M1 Codex review #F11: reachability_results rows are per-component
+	// (one per (component, cve) pair). The previous version sampled
+	// reach[0].ID once before the fan-out loop and reused it for every
+	// draft, which pointed component B / C / ...'s drafts at component
+	// A's reachability evidence — the draft viewer then surfaced the
+	// wrong "imported but unreachable from main()" rationale on the
+	// other components. We now index by component_id and look up the
+	// FK per fan-out iteration; components without a matching
+	// reachability row get a nil FK (NOT a stranger row).
+	reachByComponent := make(map[uuid.UUID]uuid.UUID, len(reach))
+	for _, rr := range reach {
+		if rr.ComponentID == uuid.Nil {
+			// Defensive — reachability_results.component_id is NOT NULL
+			// at the DB layer (migration 034), so a zero UUID here is
+			// either a fixture bug or a future schema drift. Skip rather
+			// than seeding the map with a zero key that would silently
+			// collide across components.
+			continue
+		}
+		// First write wins. If multiple reachability rows exist for the
+		// same component (e.g. multiple analyser runs), the UI drill-back
+		// only renders one — picking the first observed keeps draft
+		// behaviour deterministic. The full set is still visible via
+		// the reachability_results endpoint.
+		if _, exists := reachByComponent[rr.ComponentID]; !exists {
+			reachByComponent[rr.ComponentID] = rr.ID
+		}
 	}
 	llmFK := llmCallID
 
 	// Step 5: persist one vex_drafts row per (component, vuln) pair —
 	// the fan-out from #F3. Each draft carries the same parsed decision
-	// / evidence / llm_call FK; only ComponentID and the audit row's
-	// resource_id differ.
+	// / evidence / llm_call FK; ComponentID, ReachabilityResultID, and
+	// the audit row's resource_id differ per component (#F11).
 	conf := parsed.Confidence
 	drafts := make([]*repository.VEXDraft, 0, len(componentIDs))
 	action := AuditActionVexDraftAIGenerated
@@ -620,6 +645,11 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		action = AuditActionVexDraftReanalysed
 	}
 	for _, compID := range componentIDs {
+		var reachFK *uuid.UUID
+		if rid, ok := reachByComponent[compID]; ok {
+			v := rid
+			reachFK = &v
+		}
 		draft := &repository.VEXDraft{
 			ID:                   uuid.New(),
 			TenantID:             in.TenantID,

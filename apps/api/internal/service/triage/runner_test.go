@@ -1318,6 +1318,108 @@ func TestRunner_Run_AIDisabled_FanOutAcrossComponents(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// Fan-out reachability FK regression (Codex M1 round 3 #F11)
+// ----------------------------------------------------------------------------
+//
+// Until the F11 fix, runner.Run() computed `reachFK` once from
+// reach[0].ID before the component loop and assigned that same FK to
+// every fan-out draft. With multiple components affected by the same
+// vulnerability — each with its own reachability_results row — this
+// pointed all of component B / C / ...'s drafts at component A's
+// evidence row. The draft viewer then surfaced the wrong "imported but
+// unreachable from main()" rationale for components where the
+// reachability analyser reached the opposite conclusion.
+//
+// The contract the runner now enforces:
+//   - Build a map[component_id]reachability_result_id from the fetched
+//     reachability rows.
+//   - For each fan-out component, look up its FK from the map; if no
+//     matching reachability row exists, the draft's
+//     ReachabilityResultID stays nil (NOT pointing at a stranger).
+
+func TestRunner_Run_FanOut_PerComponentReachabilityFK(t *testing.T) {
+	c1 := uuid.New()
+	c2 := uuid.New()
+	c3 := uuid.New() // no reachability row — FK must stay nil
+
+	reachA := uuid.New()
+	reachB := uuid.New()
+	cve := "CVE-2026-0600"
+
+	resolver := &fakeComponentVulnResolver{ids: []uuid.UUID{c1, c2, c3}}
+	reach := &fakeReachabilityReader{rows: []ReachabilityRow{
+		{ID: reachA, ComponentID: c1, CVEID: cve, Ecosystem: "go", Status: "import_only"},
+		{ID: reachB, ComponentID: c2, CVEID: cve, Ecosystem: "go", Status: "reachable"},
+		// c3 has no reachability row on purpose.
+	}}
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "not_affected", "code_not_reachable", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+
+	r := NewRunner(RunnerConfig{
+		Drafts:                   drafts,
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             reach,
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 stub,
+		Threshold:                0.7,
+		ComponentVulnerabilities: resolver,
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: cve,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := len(drafts.inserted); got != 3 {
+		t.Fatalf("expected 3 fan-out drafts, got %d", got)
+	}
+
+	// Index by component_id so the assertion is order-independent.
+	byComp := map[uuid.UUID]repository.VEXDraft{}
+	for _, d := range drafts.inserted {
+		byComp[d.ComponentID] = d
+	}
+
+	// c1 must point at reachA — NOT reachB and NOT nil.
+	if d, ok := byComp[c1]; !ok {
+		t.Fatalf("missing draft for component c1")
+	} else if d.ReachabilityResultID == nil || *d.ReachabilityResultID != reachA {
+		t.Errorf("c1 draft ReachabilityResultID = %v, want %v", uuidValOrNil(d.ReachabilityResultID), reachA)
+	}
+
+	// c2 must point at reachB — NOT reachA (the pre-F11 bug). This is
+	// the load-bearing assertion: pre-fix, c2's FK was reachA because
+	// reachFK was sampled from reach[0] before the loop.
+	if d, ok := byComp[c2]; !ok {
+		t.Fatalf("missing draft for component c2")
+	} else if d.ReachabilityResultID == nil || *d.ReachabilityResultID != reachB {
+		t.Errorf("c2 draft ReachabilityResultID = %v, want %v (pre-F11 bug would surface reachA=%v here)",
+			uuidValOrNil(d.ReachabilityResultID), reachB, reachA)
+	}
+
+	// c3 has no reachability row, so its FK MUST be nil. Pre-F11, it
+	// would also have pointed at reachA.
+	if d, ok := byComp[c3]; !ok {
+		t.Fatalf("missing draft for component c3")
+	} else if d.ReachabilityResultID != nil {
+		t.Errorf("c3 draft ReachabilityResultID = %v, want nil (no reachability row for c3; must NOT borrow another component's FK)",
+			*d.ReachabilityResultID)
+	}
+}
+
+// uuidValOrNil formats a *uuid.UUID for assertion messages without
+// nil-deref panics.
+func uuidValOrNil(p *uuid.UUID) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return p.String()
+}
+
+// ----------------------------------------------------------------------------
 // Tiny helper used by multiple test cases above.
 // ----------------------------------------------------------------------------
 
