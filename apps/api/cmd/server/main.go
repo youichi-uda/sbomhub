@@ -281,7 +281,11 @@ func main() {
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
-	sbomHandler := handler.NewSbomHandler(sbomService, nvdService, jvnService, scanTracker)
+	// NewSbomHandler needs `db` so the post-upload background scan goroutine
+	// can open its own tx with `SET LOCAL app.current_tenant_id` bound —
+	// the request's TenantTx has already committed by the time the
+	// goroutine starts. Codex R1 fix.
+	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)

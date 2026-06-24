@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/database"
+	appmw "github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -18,6 +22,12 @@ type SbomHandler struct {
 	nvdService  *service.NVDService
 	jvnService  *service.JVNService
 	scanTracker *service.ScanTracker
+	// db is used by startBackgroundScan to open a fresh transaction so the
+	// goroutine can bind its own `app.current_tenant_id` GUC. The parent
+	// request's tx (TenantTx middleware) commits as soon as Upload returns,
+	// so the goroutine must NOT reuse it — it would be closed by then.
+	// See startBackgroundScan godoc.
+	db *sql.DB
 }
 
 // NewSbomHandler wires the handler with the services it needs.
@@ -27,12 +37,19 @@ type SbomHandler struct {
 // CLI polls that endpoint after upload so `sbomhub scan --fail-on
 // <severity>` can actually fail a CI job on threshold violations — Trust
 // Rescue P1 #12.
-func NewSbomHandler(ss *service.SbomService, nvd *service.NVDService, jvn *service.JVNService, tracker *service.ScanTracker) *SbomHandler {
+//
+// `db` is required so the post-upload background scan can run inside its
+// own transaction with `SET LOCAL app.current_tenant_id` bound — Codex R1
+// found that the previous `context.Background()` path stripped the tenant
+// GUC, which caused RLS on `components` to filter every row and made
+// `--fail-on critical` silently report 0 vulnerabilities.
+func NewSbomHandler(db *sql.DB, ss *service.SbomService, nvd *service.NVDService, jvn *service.JVNService, tracker *service.ScanTracker) *SbomHandler {
 	return &SbomHandler{
 		sbomService: ss,
 		nvdService:  nvd,
 		jvnService:  jvn,
 		scanTracker: tracker,
+		db:          db,
 	}
 }
 
@@ -52,6 +69,24 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
+	// The background scan goroutine outlives this request and cannot rely
+	// on the request's TenantTx (which commits as soon as Upload returns).
+	// Capture the tenant ID here so the goroutine can open its own tx and
+	// re-bind `app.current_tenant_id` — see startBackgroundScan godoc.
+	tenantID := appmw.GetTenantID(c)
+	if tenantID == uuid.Nil {
+		// Upload should never reach here without a tenant context (it sits
+		// behind MultiAuth + TenantTx in main.go) but if it ever does, we
+		// refuse to start a scan that would silently run with no GUC and
+		// produce an empty result the CLI would then trust.
+		slog.Error("Upload reached without tenant context — refusing to start background scan",
+			"sbom_id", sbom.ID, "project_id", projectID)
+		if h.scanTracker != nil {
+			h.scanTracker.MarkFailed(sbom.ID, "tenant context missing")
+		}
+		return c.JSON(http.StatusCreated, sbom)
+	}
+
 	// Start vulnerability scan in background.
 	//
 	// MarkRunning is called synchronously (before the goroutine) so that a
@@ -61,7 +96,7 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 	if h.scanTracker != nil {
 		h.scanTracker.MarkRunning(sbom.ID)
 	}
-	h.startBackgroundScan(sbom.ID)
+	h.startBackgroundScan(sbom.ID, tenantID)
 
 	return c.JSON(http.StatusCreated, sbom)
 }
@@ -69,29 +104,73 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 // startBackgroundScan initiates vulnerability scanning in the background
 // and reports completion to the in-memory ScanTracker so the CLI
 // scan-status endpoint can return an authoritative state.
-func (h *SbomHandler) startBackgroundScan(sbomID uuid.UUID) {
+//
+// The goroutine outlives the request that started it, so it CANNOT borrow
+// the request's TenantTx (already committed/rolled back by the time the
+// goroutine starts working). Instead it opens its own transaction via
+// database.WithTxFunc and binds `app.current_tenant_id` to that tx with
+// `set_config(..., true)` (the same pattern as the TenantTx middleware).
+// Without this, the inner `ComponentRepository.ListBySbom` call — which is
+// tx-aware via database.Querier and protected by FORCE ROW LEVEL SECURITY
+// — would see no tenant GUC and the RLS predicate
+// `tenant_id = current_setting('app.current_tenant_id', true)::UUID` would
+// either reject the cast (NULL → UUID) or evaluate to false, returning 0
+// components. The vulnerability scan would then "complete" with 0 findings
+// and `sbomhub scan --fail-on critical` would always exit 0 — Codex R1
+// production blocker.
+//
+// Concurrency: the NVD scan internally spawns a worker pool, but those
+// workers only touch the global `vulnerabilities` and
+// `component_vulnerabilities` tables (no RLS) via the raw `*sql.DB`, not
+// the tx — so they do not contend on the single tx connection. Only the
+// initial ListBySbom (read on `components`) and the JVN sequential pass
+// flow through the tx. The tx therefore stays effectively idle for most
+// of the scan but pins one pooled connection for the scan's duration;
+// that is an acknowledged trade-off (see ※要確認 in completion report).
+func (h *SbomHandler) startBackgroundScan(sbomID, tenantID uuid.UUID) {
 	go func() {
 		ctx := context.Background()
 		var errs []string
 
-		// Scan with NVD
-		if h.nvdService != nil {
-			if err := h.nvdService.ScanComponents(ctx, sbomID); err != nil {
-				slog.Error("Auto NVD scan failed", "sbom_id", sbomID, "error", err)
-				errs = append(errs, "nvd: "+err.Error())
-			} else {
-				slog.Info("Auto NVD scan completed", "sbom_id", sbomID)
+		txErr := database.WithTxFunc(ctx, h.db, func(txCtx context.Context, tx *sql.Tx) error {
+			if _, err := tx.ExecContext(txCtx,
+				`SELECT set_config('app.current_tenant_id', $1, true)`,
+				tenantID.String(),
+			); err != nil {
+				return fmt.Errorf("set tenant context: %w", err)
 			}
-		}
 
-		// Scan with JVN
-		if h.jvnService != nil {
-			if err := h.jvnService.ScanComponents(ctx, sbomID); err != nil {
-				slog.Error("Auto JVN scan failed", "sbom_id", sbomID, "error", err)
-				errs = append(errs, "jvn: "+err.Error())
-			} else {
-				slog.Info("Auto JVN scan completed", "sbom_id", sbomID)
+			// Scan with NVD
+			if h.nvdService != nil {
+				if err := h.nvdService.ScanComponents(txCtx, sbomID); err != nil {
+					slog.Error("Auto NVD scan failed", "sbom_id", sbomID, "error", err)
+					errs = append(errs, "nvd: "+err.Error())
+				} else {
+					slog.Info("Auto NVD scan completed", "sbom_id", sbomID)
+				}
 			}
+
+			// Scan with JVN
+			if h.jvnService != nil {
+				if err := h.jvnService.ScanComponents(txCtx, sbomID); err != nil {
+					slog.Error("Auto JVN scan failed", "sbom_id", sbomID, "error", err)
+					errs = append(errs, "jvn: "+err.Error())
+				} else {
+					slog.Info("Auto JVN scan completed", "sbom_id", sbomID)
+				}
+			}
+
+			// Always commit so per-component-vulnerability links inserted
+			// outside this tx (NVD worker pool uses raw db) and any future
+			// tx-aware writes are durable. Per-scan failures are recorded
+			// in `errs` and surfaced through ScanTracker, not through tx
+			// rollback.
+			return nil
+		})
+		if txErr != nil {
+			slog.Error("Background scan tx failed",
+				"sbom_id", sbomID, "tenant_id", tenantID, "error", txErr)
+			errs = append(errs, "tx: "+txErr.Error())
 		}
 
 		if h.scanTracker != nil {
