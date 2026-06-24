@@ -2,12 +2,18 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
@@ -288,6 +294,202 @@ func TestRunScan_TxBeginFailureMarksFailed(t *testing.T) {
 	}
 	if !contains(errMsg, "tx:") || !contains(errMsg, "db down") {
 		t.Fatalf("tracker errMsg = %q, want 'tx:' + 'db down'", errMsg)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F26 regression — GetVulnerabilities must paginate
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 16 #F26 (high / DoS): the F20 fix exposed
+// GET /api/v1/projects/:id/vulnerabilities to read-scoped API keys,
+// but the handler returned the entire matched-vulns slice with no
+// pagination. The CLI then io.ReadAll'd the entire response — a
+// read-only API-key holder targeting a project with thousands of
+// matched vulns could repeatedly mount a single-request DoS against
+// both server and CLI memory. The handler now clamps `?limit=` /
+// `?offset=` (default 100, max 500) and passes them through to
+// SbomService.GetVulnerabilitiesPaginated. Response shape is
+// preserved (`[]Vulnerability` — no envelope) so the Web UI's fetch
+// path is unaffected; the CLI is updated to page through (separate
+// sbomhub-cli commit).
+//
+// The tests below pin:
+//   F26.1 (TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26):
+//         no `?limit=` → SQL LIMIT 100 OFFSET 0.
+//   F26.2 (TestSBOMHandler_GetVulnerabilities_LimitClamp_F26):
+//         `?limit=1000` → 400 (rejected, same posture as F24).
+//   F26.3 (TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26):
+//         `?limit=200&offset=100` → SQL LIMIT 200 OFFSET 100.
+
+// driveGetVulnerabilities wires the handler with a sqlmock-backed
+// service, dispatches the request with the supplied query string, and
+// returns the recorder. The first sqlmock expectation MUST cover the
+// initial SbomRepository.GetLatest call; the second covers the
+// paginated vulnerabilities SELECT (or no second expectation when the
+// handler short-circuits on the limit clamp).
+func driveGetVulnerabilities(t *testing.T, mock sqlmock.Sqlmock, h *SbomHandler, projectID uuid.UUID, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	_ = mock // sqlmock expectations are set by callers; suppress unused-param
+
+	e := echo.New()
+	url := "/api/v1/projects/" + projectID.String() + "/vulnerabilities"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+
+	if err := h.GetVulnerabilities(c); err != nil {
+		t.Fatalf("GetVulnerabilities returned unexpected error: %v", err)
+	}
+	return rec
+}
+
+// TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26 pins the default
+// pagination contract: no `?limit=` query param → SQL LIMIT 100.
+func TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	now := time.Now()
+
+	// GetLatest returns a stub sbom row.
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+
+	// The paginated query MUST be invoked with LIMIT=VulnsDefaultLimit
+	// (100) OFFSET=0 — the load-bearing assertion is `WithArgs(sbomID,
+	// 100, 0)` which would fail if the handler dropped the clamp or
+	// silently chose a different default.
+	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, VulnsDefaultLimit, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}))
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F26: default limit path must succeed, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_GetVulnerabilities_LimitClamp_F26 pins the upper
+// bound: `?limit=1000` MUST be rejected with 400 BEFORE the
+// repository runs. Same posture as F24's ListDrafts clamp — silent
+// truncation would hide DoS probes from telemetry.
+func TestSBOMHandler_GetVulnerabilities_LimitClamp_F26(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+
+	// No mock expectations — the handler MUST reject before any SQL
+	// runs. If a regression slips and the query fires, sqlmock's
+	// "unexpected query" will trip alongside the response-code check.
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "limit=1000")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F26: limit=1000 must return 400, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), "limit exceeds maximum") {
+		t.Errorf("F26: expected 'limit exceeds maximum' body, got %s", rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26 pins the
+// happy-path pagination: `?limit=200&offset=100` flows through as SQL
+// LIMIT 200 OFFSET 100 (sub-MaxLimit so allowed). Response stays a
+// bare JSON array — no envelope — so the Web UI's existing fetch path
+// is preserved.
+func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+
+	// `WithArgs(sbomID, 200, 100)` is the load-bearing assertion — a
+	// regression that dropped the offset (e.g. forgot to parse it) or
+	// transposed the args would surface here as a sqlmock mismatch.
+	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, 200, 100).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}).AddRow(uuid.New(), "CVE-2024-1", "desc", "HIGH", 7.5, "NVD",
+			false, nil, nil, nil, now, now))
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "limit=200&offset=100")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F26: limit=200 offset=100 must succeed, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	// Response stays a bare JSON array (no envelope) so the Web UI's
+	// fetch path is preserved.
+	var out []model.Vulnerability
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("F26: response body must be a JSON array, got error %v (body=%s)",
+			err, rec.Body.String())
+	}
+	if len(out) != 1 {
+		t.Errorf("F26: expected 1 vuln in response, got %d", len(out))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
 }
 

@@ -88,6 +88,66 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	return vulns, nil
 }
 
+// GetVulnerabilitiesPaginated mirrors GetVulnerabilities but pages the
+// result via SQL LIMIT/OFFSET. M1 Codex review #F26: the F20 fix
+// exposed GET /api/v1/projects/:id/vulnerabilities to read-scoped API
+// keys, but the handler returned the entire matched-vulns slice
+// without any pagination — a single API-key request against a project
+// with thousands of matches forced the server to scan + marshal +
+// transmit the whole set, and the CLI then io.ReadAll'd the whole
+// response body before unmarshalling. A read-only API key could
+// therefore mount a cheap DoS by repeatedly hitting that route.
+//
+// Semantics:
+//   - limit <= 0 falls back to no LIMIT (caller responsibility); the
+//     handler clamps to MaxListLimit before calling this method, so the
+//     "no LIMIT" path is reserved for internal aggregators (which we
+//     currently do not have — every external call site clamps).
+//   - offset < 0 is normalised to 0.
+//
+// Order is preserved (cvss_score DESC) so a consistent pagination
+// cursor walks the most-severe vulns first; offset is stable across
+// calls assuming the underlying join does not change between pages.
+func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, sbomID uuid.UUID, limit, offset int) ([]model.Vulnerability, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	// We always emit ORDER BY + LIMIT/OFFSET when limit > 0; when limit <=
+	// 0 fall through to the unpaginated query so internal aggregators
+	// (e.g. scan-status severity counts) can opt out explicitly.
+	if limit <= 0 {
+		return r.GetVulnerabilities(ctx, sbomID)
+	}
+	const query = `
+		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score, COALESCE(v.source, 'NVD'),
+		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
+		       v.published_at, v.updated_at
+		FROM vulnerabilities v
+		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
+		JOIN components c ON c.id = cv.component_id
+		WHERE c.sbom_id = $1
+		ORDER BY v.cvss_score DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var vulns []model.Vulnerability
+	for rows.Next() {
+		var v model.Vulnerability
+		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.Source,
+			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
+			&v.PublishedAt, &v.UpdatedAt); err != nil {
+			return nil, err
+		}
+		vulns = append(vulns, v)
+	}
+	return vulns, nil
+}
+
 func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.ComponentVulnerability, error) {
 	query := `
 		SELECT c.id, c.name, c.version, c.purl, c.license, v.cve_id, v.severity

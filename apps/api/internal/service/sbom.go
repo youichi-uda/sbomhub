@@ -106,6 +106,36 @@ func (s *SbomService) GetVulnerabilities(ctx context.Context, projectID uuid.UUI
 	return s.componentRepo.GetVulnerabilities(ctx, sbom.ID)
 }
 
+// GetVulnerabilitiesPaginated returns a single page of the latest
+// SBOM's matched vulnerabilities. M1 Codex review #F26: the canonical
+// route GET /api/v1/projects/:id/vulnerabilities is reachable from the
+// CLI's read-scoped API-key auth path (#F20), so the response shape
+// MUST be bounded — without a per-request page the underlying SQL
+// scanned + materialised every matching row inside the request
+// goroutine and forced the CLI to io.ReadAll the whole body.
+//
+// Contract:
+//   - limit > 0 issues a paginated query with SQL LIMIT/OFFSET; the
+//     handler clamps to [1, MaxListLimit] before calling.
+//   - limit <= 0 reuses the existing un-paginated GetVulnerabilities
+//     path. Reserved for internal aggregators that need every row in
+//     one shot (none currently exist on this method — every external
+//     call site routes through the handler's clamp).
+//   - sbom.ErrNoRows on the "no SBOM yet" branch is mapped to an empty
+//     slice to mirror GetVulnerabilities' historical behaviour (the
+//     CLI's triage loop short-circuits on len==0 with a "脆弱性は検出
+//     されませんでした" message rather than treating it as an error).
+func (s *SbomService) GetVulnerabilitiesPaginated(ctx context.Context, projectID uuid.UUID, limit, offset int) ([]model.Vulnerability, error) {
+	sbom, err := s.sbomRepo.GetLatest(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return []model.Vulnerability{}, nil
+		}
+		return nil, err
+	}
+	return s.componentRepo.GetVulnerabilitiesPaginated(ctx, sbom.ID, limit, offset)
+}
+
 // GetVulnerabilitiesBySbom returns the vulnerabilities matched for one
 // specific SBOM. Unlike GetVulnerabilities (which resolves the "latest" SBOM
 // for the project), this preserves the caller-supplied sbom_id so polling a

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -16,6 +17,31 @@ import (
 	appmw "github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
+)
+
+// Pagination bounds for GetVulnerabilities (M1 Codex review #F26).
+//
+// The route GET /api/v1/projects/:id/vulnerabilities used to return the
+// full matched-vulns slice with no LIMIT/OFFSET — a single read-scoped
+// API-key request against a project with thousands of matches forced
+// the server to materialise + transmit the entire set, and the CLI then
+// io.ReadAll'd the full body before unmarshalling. The handler now:
+//
+//   - accepts `?limit=N&offset=M` query parameters,
+//   - defaults limit to VulnsDefaultLimit when missing / zero / negative,
+//   - rejects limit > VulnsMaxLimit with 400 (the same loud-failure
+//     posture as #F24's ListDrafts clamp so probes show up in telemetry
+//     rather than silent truncation), and
+//   - passes the clamped (limit, offset) through to
+//     SbomService.GetVulnerabilitiesPaginated.
+//
+// The response shape stays `[]Vulnerability` (no envelope) so the
+// existing Web UI fetch path keeps working unchanged. The CLI pages
+// through with limit=VulnsMaxLimit and stops when a page returns fewer
+// than VulnsMaxLimit rows (truncation signal).
+const (
+	VulnsDefaultLimit = 100
+	VulnsMaxLimit     = 500
 )
 
 // componentScanner is the narrow interface SbomHandler depends on for the
@@ -290,9 +316,49 @@ func (h *SbomHandler) GetVulnerabilities(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 
-	vulns, err := h.sbomService.GetVulnerabilities(c.Request().Context(), projectID)
+	// #F26: parse + clamp `?limit=` / `?offset=` query params. Same
+	// "reject out-of-band, default on missing / zero / negative" posture
+	// as #F24's ListDrafts clamp so out-of-band probes show up in
+	// telemetry rather than getting silently truncated. The response
+	// shape stays a bare `[]Vulnerability` so the Web UI's existing
+	// fetch path is unaffected — only the CLI is changed to page.
+	limit := VulnsDefaultLimit
+	if v := c.QueryParam("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid limit"})
+		}
+		if n > VulnsMaxLimit {
+			slog.Warn("vulnerabilities: limit exceeds maximum",
+				"project_id", projectID,
+				"requested_limit", n,
+				"max_limit", VulnsMaxLimit,
+			)
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "limit exceeds maximum"})
+		}
+		if n >= 1 {
+			limit = n
+		}
+		// n < 1 falls through to VulnsDefaultLimit (already set above).
+	}
+	offset := 0
+	if v := c.QueryParam("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid offset"})
+		}
+		if n >= 0 {
+			offset = n
+		}
+		// n < 0 falls through to 0.
+	}
+
+	vulns, err := h.sbomService.GetVulnerabilitiesPaginated(c.Request().Context(), projectID, limit, offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if vulns == nil {
+		vulns = []model.Vulnerability{}
 	}
 
 	return c.JSON(http.StatusOK, vulns)
