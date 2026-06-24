@@ -955,6 +955,175 @@ export interface UsageResponse {
   isSelfHosted: boolean;
 }
 
+// -----------------------------------------------------------------------------
+// VEX draft (AI triage, M1-6, issue #28) types
+// -----------------------------------------------------------------------------
+//
+// The Go side (apps/api/internal/handler/vex_drafts.go) returns
+// repository.VEXDraft, which has no `json:` tags — so wire field names are
+// PascalCase. The inner Evidence array is a JSONB column whose items use the
+// snake_case tags declared on triage.EvidencePointer in
+// apps/api/internal/service/triage/types.go.
+//
+// Keep these in sync with the Go side; if either drifts the triage UI breaks
+// silently.
+
+export type VexDraftState =
+  | "not_affected"
+  | "affected"
+  | "under_investigation"
+  | "resolved";
+
+export type VexDraftDecision = "pending" | "approved" | "edited" | "rejected";
+
+/**
+ * VEX draft justification (CycloneDX VEX 1.5 names, per
+ * triage.types.Justification). Empty string means "no justification" (valid
+ * for state=affected / state=under_investigation).
+ */
+export type VexDraftJustification =
+  | ""
+  | "code_not_present"
+  | "code_not_reachable"
+  | "requires_configuration"
+  | "requires_dependency"
+  | "requires_environment"
+  | "protected_by_compiler"
+  | "protected_at_perimeter"
+  | "protected_at_runtime"
+  | "inline_mitigations_already_exist";
+
+export type VexDraftEvidenceKind =
+  | "import_path"
+  | "symbol_ref"
+  | "advisory_excerpt"
+  | "llm_rationale"
+  | "analyzer_error"
+  | string;
+
+export interface VexDraftEvidence {
+  kind: VexDraftEvidenceKind;
+  file_path?: string;
+  line?: number;
+  column?: number;
+  symbol?: string;
+  import_path?: string;
+  description?: string;
+  raw_snippet?: string;
+  source?: string;
+  note?: string;
+}
+
+/** PascalCase mirrors Go's default JSON marshalling for repository.VEXDraft. */
+export interface VexDraft {
+  ID: string;
+  TenantID: string;
+  ProjectID: string;
+  SBOMID?: string | null;
+  ComponentID: string;
+  VulnerabilityID: string;
+  CVEID: string;
+  State: VexDraftState;
+  Justification: VexDraftJustification;
+  Detail: string;
+  Confidence?: number | null;
+  Provider: string;
+  Model: string;
+  PromptHash: string;
+  ResponseHash: string;
+  Evidence: VexDraftEvidence[] | null;
+  AdvisoryExcerptID?: string | null;
+  ReachabilityResultID?: string | null;
+  LLMCallID?: string | null;
+  Decision: VexDraftDecision;
+  DecisionBy?: string | null;
+  DecisionAt?: string | null;
+  DecisionNote: string;
+  CreatedBy?: string | null;
+  CreatedAt: string;
+  UpdatedAt: string;
+}
+
+export interface VexDraftListResponse {
+  drafts: VexDraft[];
+}
+
+export interface VexDraftListFilter {
+  cve_id?: string;
+  decision?: VexDraftDecision;
+  limit?: number;
+  offset?: number;
+}
+
+export interface VexDraftDecisionInput {
+  decision: "approved" | "edited" | "rejected";
+  edited_state?: VexDraftState;
+  edited_justification?: VexDraftJustification;
+  edited_detail?: string;
+  note?: string;
+}
+
+export interface RunTriageInput {
+  vulnerability_id: string;
+  cve_id: string;
+  component_id?: string;
+}
+
+export interface ParsedDecision {
+  state: VexDraftState;
+  justification?: VexDraftJustification;
+  detail?: string;
+  confidence: number;
+  evidence?: VexDraftEvidence[];
+}
+
+export interface RunTriageResponse {
+  draft: VexDraft;
+  llm_call_id: string;
+  parsed_decision: ParsedDecision;
+  clamped: boolean;
+  threshold: number;
+}
+
+/**
+ * APIError surfaces non-2xx responses from the backend with the parsed JSON
+ * body (when present). Triage callers need to differentiate
+ * 503 + {"error":"AI features are disabled","reason":...} from generic
+ * failures so the AIDisabledBanner can render the backend's reason verbatim
+ * (LLM_PROVIDER_DESIGN.md §4.1).
+ */
+export class APIError extends Error {
+  status: number;
+  body?: Record<string, unknown>;
+
+  constructor(status: number, body?: Record<string, unknown>) {
+    super(
+      typeof body?.error === "string"
+        ? (body.error as string)
+        : `API error: ${status}`
+    );
+    this.name = "APIError";
+    this.status = status;
+    this.body = body;
+  }
+
+  /** True when the backend reports llm.IsDisabled (LLM_PROVIDER_DESIGN.md §4.1). */
+  isAIDisabled(): boolean {
+    return (
+      this.status === 503 &&
+      typeof this.body?.error === "string" &&
+      (this.body.error as string).toLowerCase().includes("ai")
+    );
+  }
+
+  /** Backend-supplied reason for llm.DisabledError (never a secret). */
+  disabledReason(): string | undefined {
+    if (!this.isAIDisabled()) return undefined;
+    const r = this.body?.reason;
+    return typeof r === "string" ? r : undefined;
+  }
+}
+
 // Token getter function - will be set by AuthProvider
 let getAuthToken: (() => Promise<string | null>) | null = null;
 let getOrgId: (() => string | null) | null = null;
@@ -1007,7 +1176,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
         hasOrgHeader: !!headers["X-Clerk-Org-ID"],
       });
     }
-    throw new Error(`API error: ${res.status}`);
+    // Parse the error body so callers (notably the triage UI, which needs
+    // to differentiate 503 "AI features are disabled" from generic 5xx) can
+    // act on the backend's structured error. Older call sites only check
+    // `err.message`, which APIError still populates via its super(...) call.
+    let body: Record<string, unknown> | undefined;
+    try {
+      const text = await res.text();
+      if (text) body = JSON.parse(text);
+    } catch {
+      // body is left undefined; APIError falls back to "API error: <status>".
+    }
+    throw new APIError(res.status, body);
   }
 
   // Handle 204 No Content and empty responses
@@ -1227,6 +1407,55 @@ export const api = {
   },
   licenses: {
     getCommon: () => request<Record<string, string>>("/api/v1/licenses/common"),
+  },
+  // AI VEX triage (M1-6, issue #28). Maps to the five endpoints wired by
+  // apps/api/cmd/server/main.go around line 596:
+  //   POST   /api/v1/projects/:id/triage/run
+  //   GET    /api/v1/projects/:id/vex-drafts
+  //   GET    /api/v1/projects/:id/vex-drafts/:draft_id
+  //   PUT    /api/v1/projects/:id/vex-drafts/:draft_id/decision
+  //   POST   /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse
+  triage: {
+    listDrafts: (projectId: string, filter?: VexDraftListFilter) => {
+      const params = new URLSearchParams();
+      if (filter?.cve_id) params.set("cve_id", filter.cve_id);
+      if (filter?.decision) params.set("decision", filter.decision);
+      if (typeof filter?.limit === "number") params.set("limit", String(filter.limit));
+      if (typeof filter?.offset === "number") params.set("offset", String(filter.offset));
+      const query = params.toString();
+      return request<VexDraftListResponse>(
+        `/api/v1/projects/${projectId}/vex-drafts${query ? `?${query}` : ""}`
+      );
+    },
+    getDraft: (projectId: string, draftId: string) =>
+      request<VexDraft>(
+        `/api/v1/projects/${projectId}/vex-drafts/${draftId}`
+      ),
+    run: (projectId: string, input: RunTriageInput) =>
+      request<RunTriageResponse>(`/api/v1/projects/${projectId}/triage/run`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    decide: (projectId: string, draftId: string, input: VexDraftDecisionInput) =>
+      request<VexDraft>(
+        `/api/v1/projects/${projectId}/vex-drafts/${draftId}/decision`,
+        {
+          method: "PUT",
+          body: JSON.stringify(input),
+        }
+      ),
+    reanalyse: (
+      projectId: string,
+      draftId: string,
+      input?: Partial<RunTriageInput>
+    ) =>
+      request<RunTriageResponse>(
+        `/api/v1/projects/${projectId}/vex-drafts/${draftId}/reanalyse`,
+        {
+          method: "POST",
+          body: JSON.stringify(input ?? {}),
+        }
+      ),
   },
   sbom: {
     diff: (data: { base_sbom_id: string; target_sbom_id: string }) =>
