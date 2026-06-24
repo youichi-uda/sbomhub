@@ -18,6 +18,7 @@ const (
 // LicensePolicy represents a license policy rule
 type LicensePolicy struct {
 	ID          uuid.UUID         `json:"id" db:"id"`
+	TenantID    uuid.UUID         `json:"tenant_id" db:"tenant_id"`
 	ProjectID   uuid.UUID         `json:"project_id" db:"project_id"`
 	LicenseID   string            `json:"license_id" db:"license_id"` // SPDX license identifier
 	LicenseName string            `json:"license_name" db:"license_name"`

@@ -25,15 +25,35 @@ func (r *LicensePolicyRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
 }
 
+// Create inserts a new license_policies row.
+//
+// tenant_id is required because license_policies is FORCE ROW LEVEL
+// SECURITY (migration 023) with `WITH CHECK (tenant_id = current_setting(
+// 'app.current_tenant_id')::UUID)`. The application runtime role
+// (sbomhub_app) is NOBYPASSRLS, so a missing or wrong tenant_id is rejected
+// at INSERT time. Callers must populate p.TenantID before calling Create;
+// LicensePolicyService resolves it from the parent project via
+// LookupProjectTenantID below.
 func (r *LicensePolicyRepository) Create(ctx context.Context, p *model.LicensePolicy) error {
 	query := `
-		INSERT INTO license_policies (id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO license_policies (id, tenant_id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 	_, err := r.q(ctx).ExecContext(ctx, query,
-		p.ID, p.ProjectID, p.LicenseID, p.LicenseName, p.PolicyType, p.Reason, p.CreatedAt, p.UpdatedAt,
+		p.ID, p.TenantID, p.ProjectID, p.LicenseID, p.LicenseName, p.PolicyType, p.Reason, p.CreatedAt, p.UpdatedAt,
 	)
 	return err
+}
+
+// LookupProjectTenantID returns the tenant_id of the project that owns
+// projectID. It mirrors SbomRepository.LookupProjectTenantID and exists so
+// LicensePolicyService can populate LicensePolicy.TenantID before insert
+// without growing its constructor surface (which would force a
+// cmd/server/main.go change owned by a different wave).
+func (r *LicensePolicyRepository) LookupProjectTenantID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
+	var tenantID uuid.UUID
+	err := r.q(ctx).QueryRowContext(ctx, `SELECT tenant_id FROM projects WHERE id = $1`, projectID).Scan(&tenantID)
+	return tenantID, err
 }
 
 func (r *LicensePolicyRepository) Update(ctx context.Context, p *model.LicensePolicy) error {

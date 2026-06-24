@@ -24,17 +24,37 @@ func (r *VEXRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
 }
 
+// Create inserts a new vex_statements row.
+//
+// tenant_id is required because vex_statements is FORCE ROW LEVEL SECURITY
+// (migration 023) with `WITH CHECK (tenant_id = current_setting(
+// 'app.current_tenant_id')::UUID)`. The application runtime role
+// (sbomhub_app) is NOBYPASSRLS, so a missing or wrong tenant_id is rejected
+// at INSERT time. Callers must populate v.TenantID before calling Create;
+// VEXService resolves it from the parent project via
+// LookupProjectTenantID below.
 func (r *VEXRepository) Create(ctx context.Context, v *model.VEXStatement) error {
 	query := `
-		INSERT INTO vex_statements (id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO vex_statements (id, tenant_id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
 	_, err := r.q(ctx).ExecContext(ctx, query,
-		v.ID, v.ProjectID, v.VulnerabilityID, v.ComponentID,
+		v.ID, v.TenantID, v.ProjectID, v.VulnerabilityID, v.ComponentID,
 		v.Status, v.Justification, v.ActionStatement, v.ImpactStatement,
 		v.CreatedBy, v.CreatedAt, v.UpdatedAt,
 	)
 	return err
+}
+
+// LookupProjectTenantID returns the tenant_id of the project that owns
+// projectID. It mirrors SbomRepository.LookupProjectTenantID and exists so
+// VEXService can populate VEXStatement.TenantID before insert without
+// growing its constructor surface (which would force a cmd/server/main.go
+// change owned by a different wave).
+func (r *VEXRepository) LookupProjectTenantID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
+	var tenantID uuid.UUID
+	err := r.q(ctx).QueryRowContext(ctx, `SELECT tenant_id FROM projects WHERE id = $1`, projectID).Scan(&tenantID)
+	return tenantID, err
 }
 
 func (r *VEXRepository) Update(ctx context.Context, v *model.VEXStatement) error {

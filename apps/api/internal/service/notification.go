@@ -56,9 +56,18 @@ func (s *NotificationService) GetSettings(ctx context.Context, projectID uuid.UU
 
 // UpdateSettings updates notification settings for a project
 func (s *NotificationService) UpdateSettings(ctx context.Context, projectID uuid.UUID, input UpdateNotificationSettingsInput) (*model.NotificationSettings, error) {
+	// Resolve the tenant_id of the parent project so the INSERT/UPSERT
+	// satisfies the FORCE RLS WITH CHECK clause on notification_settings
+	// (see migration 023).
+	tenantID, err := s.projectRepo.GetTenantID(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	now := time.Now()
 	settings := &model.NotificationSettings{
 		ID:                uuid.New(),
+		TenantID:          tenantID,
 		ProjectID:         projectID,
 		SlackWebhookURL:   input.SlackWebhookURL,
 		DiscordWebhookURL: input.DiscordWebhookURL,
@@ -103,6 +112,15 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 		return err
 	}
 
+	// Resolve the tenant_id of the parent project once so every
+	// notification_logs INSERT downstream satisfies the FORCE RLS WITH
+	// CHECK clause (see migration 023). Reusing the lookup keeps the
+	// per-channel send paths from each issuing their own query.
+	tenantID, err := s.projectRepo.GetTenantID(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	testNotif := model.VulnerabilityNotification{
 		CVEID:            "CVE-0000-0000",
 		CVSSScore:        9.8,
@@ -116,19 +134,19 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 	}
 
 	if settings.SlackWebhookURL != "" {
-		if err := s.sendSlackNotification(ctx, settings.SlackWebhookURL, testNotif, projectID); err != nil {
+		if err := s.sendSlackNotification(ctx, settings.SlackWebhookURL, testNotif, tenantID, projectID); err != nil {
 			return fmt.Errorf("slack notification failed: %w", err)
 		}
 	}
 
 	if settings.DiscordWebhookURL != "" {
-		if err := s.sendDiscordNotification(ctx, settings.DiscordWebhookURL, testNotif, projectID); err != nil {
+		if err := s.sendDiscordNotification(ctx, settings.DiscordWebhookURL, testNotif, tenantID, projectID); err != nil {
 			return fmt.Errorf("discord notification failed: %w", err)
 		}
 	}
 
 	if settings.EmailAddresses != "" {
-		if err := s.sendEmailNotification(ctx, settings.EmailAddresses, testNotif, projectID); err != nil {
+		if err := s.sendEmailNotification(ctx, settings.EmailAddresses, testNotif, tenantID, projectID); err != nil {
 			return fmt.Errorf("email notification failed: %w", err)
 		}
 	}
@@ -163,23 +181,33 @@ func (s *NotificationService) NotifyVulnerability(ctx context.Context, projectID
 		return nil
 	}
 
+	// Resolve the tenant_id of the parent project once so every
+	// notification_logs INSERT downstream satisfies the FORCE RLS WITH
+	// CHECK clause (see migration 023). The scheduler caller already runs
+	// inside a tx with `app.current_tenant_id` set, so this SELECT is
+	// permitted.
+	tenantID, err := s.projectRepo.GetTenantID(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	notif.DetailsURL = fmt.Sprintf("%s/projects/%s/vulnerabilities", s.cfg.BaseURL, projectID)
 
 	var errs []error
 	if settings.SlackWebhookURL != "" {
-		if err := s.sendSlackNotification(ctx, settings.SlackWebhookURL, notif, projectID); err != nil {
+		if err := s.sendSlackNotification(ctx, settings.SlackWebhookURL, notif, tenantID, projectID); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
 	if settings.DiscordWebhookURL != "" {
-		if err := s.sendDiscordNotification(ctx, settings.DiscordWebhookURL, notif, projectID); err != nil {
+		if err := s.sendDiscordNotification(ctx, settings.DiscordWebhookURL, notif, tenantID, projectID); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
 	if settings.EmailAddresses != "" {
-		if err := s.sendEmailNotification(ctx, settings.EmailAddresses, notif, projectID); err != nil {
+		if err := s.sendEmailNotification(ctx, settings.EmailAddresses, notif, tenantID, projectID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -190,7 +218,7 @@ func (s *NotificationService) NotifyVulnerability(ctx context.Context, projectID
 	return nil
 }
 
-func (s *NotificationService) sendSlackNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, projectID uuid.UUID) error {
+func (s *NotificationService) sendSlackNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
 	severityEmoji := map[string]string{
 		"CRITICAL": ":red_circle:",
 		"HIGH":     ":orange_circle:",
@@ -238,10 +266,10 @@ func (s *NotificationService) sendSlackNotification(ctx context.Context, webhook
 		},
 	}
 
-	return s.sendWebhook(ctx, webhookURL, payload, model.NotificationChannelSlack, projectID)
+	return s.sendWebhook(ctx, webhookURL, payload, model.NotificationChannelSlack, tenantID, projectID)
 }
 
-func (s *NotificationService) sendDiscordNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, projectID uuid.UUID) error {
+func (s *NotificationService) sendDiscordNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
 	colorMap := map[string]int{
 		"CRITICAL": 15158332, // Red
 		"HIGH":     15105570, // Orange
@@ -272,10 +300,10 @@ func (s *NotificationService) sendDiscordNotification(ctx context.Context, webho
 		},
 	}
 
-	return s.sendWebhook(ctx, webhookURL, payload, model.NotificationChannelDiscord, projectID)
+	return s.sendWebhook(ctx, webhookURL, payload, model.NotificationChannelDiscord, tenantID, projectID)
 }
 
-func (s *NotificationService) sendWebhook(ctx context.Context, webhookURL string, payload interface{}, channel model.NotificationChannel, projectID uuid.UUID) error {
+func (s *NotificationService) sendWebhook(ctx context.Context, webhookURL string, payload interface{}, channel model.NotificationChannel, tenantID, projectID uuid.UUID) error {
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -289,24 +317,25 @@ func (s *NotificationService) sendWebhook(ctx context.Context, webhookURL string
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		s.logNotification(ctx, projectID, channel, string(jsonPayload), "failed", err.Error())
+		s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "failed", err.Error())
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		errMsg := fmt.Sprintf("webhook returned status %d", resp.StatusCode)
-		s.logNotification(ctx, projectID, channel, string(jsonPayload), "failed", errMsg)
+		s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "failed", errMsg)
 		return fmt.Errorf("%s", errMsg)
 	}
 
-	s.logNotification(ctx, projectID, channel, string(jsonPayload), "sent", "")
+	s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "sent", "")
 	return nil
 }
 
-func (s *NotificationService) logNotification(ctx context.Context, projectID uuid.UUID, channel model.NotificationChannel, payload, status, errMsg string) {
+func (s *NotificationService) logNotification(ctx context.Context, tenantID, projectID uuid.UUID, channel model.NotificationChannel, payload, status, errMsg string) {
 	log := &model.NotificationLog{
 		ID:           uuid.New(),
+		TenantID:     tenantID,
 		ProjectID:    projectID,
 		Channel:      channel,
 		Payload:      payload,
@@ -328,7 +357,7 @@ func (s *NotificationService) GetLogs(ctx context.Context, projectID uuid.UUID, 
 }
 
 // sendEmailNotification sends email notifications for a vulnerability
-func (s *NotificationService) sendEmailNotification(ctx context.Context, emailAddresses string, notif model.VulnerabilityNotification, projectID uuid.UUID) error {
+func (s *NotificationService) sendEmailNotification(ctx context.Context, emailAddresses string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
 	if !s.cfg.IsEmailEnabled() {
 		slog.Debug("Email notifications disabled - SMTP not configured")
 		return nil
@@ -345,10 +374,10 @@ func (s *NotificationService) sendEmailNotification(ctx context.Context, emailAd
 
 	for _, to := range recipients {
 		if err := s.sendSMTPEmail(to, subject, htmlBody, textBody); err != nil {
-			s.logNotification(ctx, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "failed", err.Error())
+			s.logNotification(ctx, tenantID, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "failed", err.Error())
 			return err
 		}
-		s.logNotification(ctx, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "sent", "")
+		s.logNotification(ctx, tenantID, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "sent", "")
 	}
 
 	return nil

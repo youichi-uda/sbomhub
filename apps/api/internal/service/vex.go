@@ -54,9 +54,17 @@ func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStateme
 		return nil, fmt.Errorf("VEX statement already exists for this vulnerability")
 	}
 
+	// Resolve the tenant_id of the parent project so the INSERT satisfies
+	// the FORCE RLS WITH CHECK clause on vex_statements (see migration 023).
+	tenantID, err := s.vexRepo.LookupProjectTenantID(ctx, input.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	now := time.Now()
 	statement := &model.VEXStatement{
 		ID:              uuid.New(),
+		TenantID:        tenantID,
 		ProjectID:       input.ProjectID,
 		VulnerabilityID: input.VulnerabilityID,
 		ComponentID:     input.ComponentID,

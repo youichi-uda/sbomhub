@@ -9,6 +9,7 @@ import (
 // NotificationSettings represents notification configuration for a project
 type NotificationSettings struct {
 	ID                uuid.UUID `json:"id" db:"id"`
+	TenantID          uuid.UUID `json:"tenant_id" db:"tenant_id"`
 	ProjectID         uuid.UUID `json:"project_id" db:"project_id"`
 	SlackWebhookURL   string    `json:"slack_webhook_url,omitempty" db:"slack_webhook_url"`
 	DiscordWebhookURL string    `json:"discord_webhook_url,omitempty" db:"discord_webhook_url"`
@@ -33,6 +34,7 @@ const (
 // NotificationLog represents a notification send log
 type NotificationLog struct {
 	ID           uuid.UUID           `json:"id" db:"id"`
+	TenantID     uuid.UUID           `json:"tenant_id" db:"tenant_id"`
 	ProjectID    uuid.UUID           `json:"project_id" db:"project_id"`
 	Channel      NotificationChannel `json:"channel" db:"channel"`
 	Payload      string              `json:"payload" db:"payload"`

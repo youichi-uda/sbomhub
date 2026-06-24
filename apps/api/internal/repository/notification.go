@@ -58,13 +58,23 @@ func (r *NotificationRepository) GetSettings(ctx context.Context, projectID uuid
 	return &settings, nil
 }
 
+// UpsertSettings inserts or updates notification_settings for a project.
+//
+// tenant_id is required because notification_settings is FORCE ROW LEVEL
+// SECURITY (migration 023) with `WITH CHECK (tenant_id = current_setting(
+// 'app.current_tenant_id')::UUID)`. The application runtime role
+// (sbomhub_app) is NOBYPASSRLS, so the INSERT (and any RLS-checked UPDATE)
+// is rejected without a matching tenant_id. tenant_id is treated as
+// immutable per project, so the ON CONFLICT branch does not touch it.
+// Callers must populate settings.TenantID before calling; NotificationService
+// resolves it from the parent project.
 func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *model.NotificationSettings) error {
 	query := `
 		INSERT INTO notification_settings (
-			id, project_id, slack_webhook_url, discord_webhook_url, email_addresses,
+			id, tenant_id, project_id, slack_webhook_url, discord_webhook_url, email_addresses,
 			notify_critical, notify_high, notify_medium, notify_low,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (project_id)
 		DO UPDATE SET
 			slack_webhook_url = EXCLUDED.slack_webhook_url,
@@ -90,6 +100,7 @@ func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *m
 
 	_, err := r.q(ctx).ExecContext(ctx, query,
 		settings.ID,
+		settings.TenantID,
 		settings.ProjectID,
 		slackURL,
 		discordURL,
@@ -104,10 +115,16 @@ func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *m
 	return err
 }
 
+// CreateLog inserts a new notification_logs row.
+//
+// tenant_id is required because notification_logs is FORCE ROW LEVEL
+// SECURITY (migration 023) with `WITH CHECK (tenant_id = current_setting(
+// 'app.current_tenant_id')::UUID)`. Callers must populate log.TenantID
+// before calling; NotificationService resolves it from the parent project.
 func (r *NotificationRepository) CreateLog(ctx context.Context, log *model.NotificationLog) error {
 	query := `
-		INSERT INTO notification_logs (id, project_id, channel, payload, status, error_message, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO notification_logs (id, tenant_id, project_id, channel, payload, status, error_message, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 	var errMsg sql.NullString
 	if log.ErrorMessage != "" {
@@ -116,6 +133,7 @@ func (r *NotificationRepository) CreateLog(ctx context.Context, log *model.Notif
 
 	_, err := r.q(ctx).ExecContext(ctx, query,
 		log.ID,
+		log.TenantID,
 		log.ProjectID,
 		log.Channel,
 		log.Payload,

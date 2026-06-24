@@ -56,9 +56,18 @@ func (s *LicensePolicyService) CreatePolicy(ctx context.Context, input CreateLic
 		}
 	}
 
+	// Resolve the tenant_id of the parent project so the INSERT satisfies
+	// the FORCE RLS WITH CHECK clause on license_policies (see migration
+	// 023).
+	tenantID, err := s.policyRepo.LookupProjectTenantID(ctx, input.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+
 	now := time.Now()
 	policy := &model.LicensePolicy{
 		ID:          uuid.New(),
+		TenantID:    tenantID,
 		ProjectID:   input.ProjectID,
 		LicenseID:   input.LicenseID,
 		LicenseName: licenseName,

@@ -30,6 +30,7 @@ const (
 // VEXStatement represents a VEX statement about a vulnerability's status
 type VEXStatement struct {
 	ID              uuid.UUID        `json:"id" db:"id"`
+	TenantID        uuid.UUID        `json:"tenant_id" db:"tenant_id"`
 	ProjectID       uuid.UUID        `json:"project_id" db:"project_id"`
 	VulnerabilityID uuid.UUID        `json:"vulnerability_id" db:"vulnerability_id"`
 	ComponentID     *uuid.UUID       `json:"component_id,omitempty" db:"component_id"`
