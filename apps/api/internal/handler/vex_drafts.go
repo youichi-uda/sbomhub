@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -441,15 +442,26 @@ func mapRunnerError(err error) (int, map[string]string, bool) {
 			"error": err.Error(),
 		}, true
 	}
-	// F3 / F6 (Codex M1): both surface as 404 so the client cannot
-	// distinguish "vuln has no components in this project scope" from
-	// "supplied component_id is not in the vuln scope" — that
-	// distinction is intentionally hidden to avoid leaking tenant
-	// internals via probe responses.
+	// F3 / F6 (Codex M1 rounds 1+2): both surface as 404 so the client
+	// cannot distinguish "vuln has no components in this project scope"
+	// from "supplied component_id is not in the vuln scope".
+	//
+	// F10 (Codex M1 round 3): the previous version still leaked which
+	// sentinel fired through the response body — {"error": err.Error()}
+	// yielded "triage: vulnerability not found in tenant scope" vs
+	// "triage: component not in vulnerability scope", letting a probe
+	// caller infer tenant-internal state (does this vulnerability exist
+	// in my scope at all? is the component graph wrong?). We now return
+	// a single generic body for both sentinels and keep the precise
+	// reason only in server logs so operators can still triage failed
+	// requests.
 	if errors.Is(err, triage.ErrVulnerabilityNotInTenant) ||
 		errors.Is(err, triage.ErrComponentNotInVulnerabilityScope) {
+		slog.Warn("triage: 404 sentinel mapped to generic body",
+			"sentinel", err.Error(),
+		)
 		return http.StatusNotFound, map[string]string{
-			"error": err.Error(),
+			"error": "triage target not found",
 		}, true
 	}
 	// Heuristic — runner returns "X is required" / "is not in allowlist"

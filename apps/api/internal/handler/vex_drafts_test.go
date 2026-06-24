@@ -264,3 +264,97 @@ type fakeComponentResolver struct {
 func (r *fakeComponentResolver) ListIDsByVulnerability(_ context.Context, _, _, _ uuid.UUID) ([]uuid.UUID, error) {
 	return r.ids, nil
 }
+
+// ----------------------------------------------------------------------------
+// F10 regression — 404 body must be identical for both sentinel reasons
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 3 #F10: mapRunnerError previously returned
+// {"error": err.Error()} for both 404 sentinels, yielding distinct
+// bodies ("triage: vulnerability not found in tenant scope" vs
+// "triage: component not in vulnerability scope"). A probe caller could
+// then distinguish "vulnerability does not exist in this tenant" from
+// "the (vulnerability, component) link is wrong" — leaking tenant
+// internals through the 404 body. The handler MUST emit a single
+// generic body for both cases. The precise reason stays in server logs.
+func TestVEXDraftsHandler_RunTriage_404Body_IsGeneric(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	vulnID := uuid.New()
+	componentInScope := uuid.New()
+	componentOutOfScope := uuid.New()
+
+	// Case 1 — vulnerability has no components in tenant scope.
+	runnerNoVuln := triage.NewRunner(triage.RunnerConfig{
+		Drafts:                   &fakeVexDraftStore{},
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             &fakeReachabilityReader{},
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 disabledProvider(),
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentResolver{ids: nil},
+	})
+	bodyNoVuln := runTriageAndCapture404(t, runnerNoVuln, tenantID, projectID, vulnID, &componentInScope)
+
+	// Case 2 — caller-supplied component outside vulnerability scope.
+	runnerOutOfScope := triage.NewRunner(triage.RunnerConfig{
+		Drafts:                   &fakeVexDraftStore{},
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             &fakeReachabilityReader{},
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 disabledProvider(),
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentResolver{ids: []uuid.UUID{componentInScope}},
+	})
+	bodyOutOfScope := runTriageAndCapture404(t, runnerOutOfScope, tenantID, projectID, vulnID, &componentOutOfScope)
+
+	if bodyNoVuln != bodyOutOfScope {
+		t.Fatalf("F10: 404 bodies must be identical for both sentinels.\n  vuln-not-in-tenant : %s\n  comp-out-of-scope  : %s",
+			bodyNoVuln, bodyOutOfScope)
+	}
+	// Body must NOT contain either sentinel reason string verbatim.
+	for _, leak := range []string{"vulnerability not found in tenant scope", "component not in vulnerability scope"} {
+		if strings.Contains(bodyNoVuln, leak) {
+			t.Errorf("F10: generic 404 body must not contain sentinel reason %q; got %s", leak, bodyNoVuln)
+		}
+	}
+}
+
+// runTriageAndCapture404 drives RunTriage with the given input and asserts
+// a 404 response, returning the response body for cross-case comparison.
+func runTriageAndCapture404(t *testing.T, runner *triage.Runner, tenantID, projectID, vulnID uuid.UUID, componentID *uuid.UUID) string {
+	t.Helper()
+	h := NewVexDraftsHandler(runner)
+
+	body := map[string]string{
+		"vulnerability_id": vulnID.String(),
+		"cve_id":           "CVE-2026-0500",
+	}
+	if componentID != nil {
+		body["component_id"] = componentID.String()
+	}
+	raw, _ := json.Marshal(body)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/triage/run",
+		strings.NewReader(string(raw)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleAdmin)
+
+	if err := h.RunTriage(c); err != nil {
+		t.Fatalf("RunTriage returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	return strings.TrimSpace(rec.Body.String())
+}
