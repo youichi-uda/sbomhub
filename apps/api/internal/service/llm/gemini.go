@@ -13,6 +13,26 @@ import (
 	"time"
 )
 
+// geminiAPIKeyHeader is the HTTP header Google's Generative Language REST
+// API recognises for inline API-key authentication.
+//
+// M1 Codex review #F13: SBOMHub previously authenticated Gemini via the
+// `?key=AIza...` query string, which net/http echoed back through
+// *url.Error on any transport failure — leaking the BYOK key into the
+// runner's llm_calls.error_message column and the handler's 500 response
+// body. Migrating to the header form removes the key from the URL
+// entirely, closing the leak at the source. RedactProviderError below is
+// a defense-in-depth scrubber that catches the same shape if any future
+// regression reintroduces URL auth.
+//
+// Web reference (2026-06): ai.google.dev/gemini-api/docs/api-key uses
+// `x-goog-api-key: YOUR_API_KEY` in the canonical curl example, and the
+// header form is what Google recommends going forward (Standard keys
+// without explicit restrictions are scheduled for rejection in
+// September 2026). ※要確認 in M2 if Google standardises on a different
+// header (e.g. `Authorization: Bearer ...` with service-account auth).
+const geminiAPIKeyHeader = "x-goog-api-key"
+
 // defaultGeminiEndpoint is the base URL for the Google Generative Language
 // API. The model name is appended as a path segment, e.g.
 // /v1beta/models/gemini-2.5-flash:generateContent
@@ -170,12 +190,18 @@ func (p *GeminiProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		return nil, fmt.Errorf("gemini: marshal request: %w", err)
 	}
 
-	// Gemini auth is via ?key=... query string. We use url.Values to safely
-	// escape the key (paranoia: keys are normally ASCII but never trust).
-	u := fmt.Sprintf("%s/models/%s:generateContent?%s",
+	// Gemini auth travels via the `x-goog-api-key` request header (M1
+	// Codex review #F13). The URL deliberately carries NO `?key=` query
+	// parameter — net/http would otherwise echo it through *url.Error on
+	// any transport failure, leaking the BYOK key into the runner's
+	// llm_calls.error_message column and the handler's 500 response body.
+	//
+	// url.PathEscape is still applied to the model id so a hypothetical
+	// colon-bearing model name cannot break the path-vs-action split
+	// (":generateContent" is the action segment).
+	u := fmt.Sprintf("%s/models/%s:generateContent",
 		p.endpoint,
 		url.PathEscape(p.model),
-		url.Values{"key": []string{p.apiKey}}.Encode(),
 	)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(buf))
@@ -183,10 +209,16 @@ func (p *GeminiProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 		return nil, fmt.Errorf("gemini: new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(geminiAPIKeyHeader, p.apiKey)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("gemini: http call: %w", err)
+		// Defense-in-depth: even though the URL no longer carries the
+		// key, run the transport error through RedactProviderError so a
+		// future SDK / proxy that reintroduces ?key= auth cannot leak
+		// silently. The helper is a no-op when no auth-shaped material
+		// is present.
+		return nil, fmt.Errorf("gemini: http call: %w", RedactProviderError(err))
 	}
 	defer resp.Body.Close()
 

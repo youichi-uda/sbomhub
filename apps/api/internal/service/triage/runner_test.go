@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -529,6 +530,65 @@ func TestRunner_Run_LLMTransientError_PersistsCallWithErrorMessageAndReturnsErr(
 	}
 	if got := len(drafts.inserted); got != 0 {
 		t.Errorf("expected no draft persisted on LLM failure, got %d", got)
+	}
+}
+
+// TestRunner_Run_LLMError_AuditedErrorMessage_DoesNotLeakAPIKey regresses
+// M1 Codex review #F13 on the audit layer: a provider transport failure
+// must not leak the BYOK API key into either:
+//
+//   - llm_calls.error_message (persisted plaintext in the audit table),
+//   - the wrapped error returned to the handler (the handler maps any
+//     unrecognised runner error to `{"error": err.Error()}`, so a key
+//     in the chain reaches the HTTP 500 response body verbatim).
+//
+// The runner achieves this by routing every provider error through
+// llm.RedactProviderError before persistence + wrapping. The fake
+// provider here returns a synthetic `*url.Error` whose URL carries the
+// historical `?key=AIza...` form Gemini used pre-fix; both assertions
+// below are pinned so a regression that removes the scrub or replaces
+// the helper with something weaker (e.g. log-only) breaks this test.
+func TestRunner_Run_LLMError_AuditedErrorMessage_DoesNotLeakAPIKey(t *testing.T) {
+	const apiKey = "AIzaSyTEST_F13_RUNNER_LEAK_PROBE"
+	urlLeak := &url.Error{
+		Op:  "Post",
+		URL: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey,
+		Err: errors.New("EOF"),
+	}
+	componentID := uuid.New()
+	stub := &stubProvider{err: urlLeak}
+	llmCalls := &fakeLLMCallWriter{}
+	r := NewRunner(RunnerConfig{
+		Drafts: &fakeVexDraftStore{}, Advisories: &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{}, LLMCalls: llmCalls,
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0F13"),
+	})
+
+	_, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0F13",
+		ComponentID: &componentID,
+	})
+	if err == nil {
+		t.Fatal("expected runner to surface the provider error")
+	}
+	// Path 1: returned-to-handler error string must be scrubbed (this is
+	// what the 500 response body echoes via mapRunnerError's fallthrough).
+	if strings.Contains(err.Error(), apiKey) {
+		t.Errorf("returned error leaked API key: %q", err.Error())
+	}
+	// Path 2: persisted llm_calls.error_message must be scrubbed (this is
+	// what lands in the DB and is read back by audit consumers).
+	if got := len(llmCalls.records); got != 1 {
+		t.Fatalf("expected 1 llm_calls record, got %d", got)
+	}
+	if msg := llmCalls.records[0].ErrorMessage; strings.Contains(msg, apiKey) {
+		t.Errorf("llm_calls.error_message leaked API key: %q", msg)
+	}
+	if msg := llmCalls.records[0].ErrorMessage; strings.Contains(msg, "key=AIza") {
+		t.Errorf("llm_calls.error_message retained `key=AIza...` fragment: %q", msg)
 	}
 }
 

@@ -18,8 +18,16 @@ func fakeGeminiServer(t *testing.T, handler func(t *testing.T, body geminiReques
 		if !strings.HasPrefix(r.URL.Path, "/models/") || !strings.HasSuffix(r.URL.Path, ":generateContent") {
 			t.Errorf("path = %q, want /models/<model>:generateContent", r.URL.Path)
 		}
-		if r.URL.Query().Get("key") == "" {
-			t.Error("missing ?key= auth parameter")
+		// M1 Codex review #F13: Gemini auth must travel via the
+		// `x-goog-api-key` header, never as a `?key=` query parameter.
+		// Reject both halves so a regression cannot reintroduce URL
+		// auth (which would leak the BYOK key through *url.Error on
+		// any transport failure — see TestGemini_Complete_NetworkError_DoesNotLeakAPIKey).
+		if r.Header.Get("x-goog-api-key") == "" {
+			t.Error("missing x-goog-api-key header (Gemini auth must use header, not query)")
+		}
+		if r.URL.Query().Get("key") != "" {
+			t.Errorf("unexpected ?key= query param present: %q (Gemini auth must use header)", r.URL.Query().Get("key"))
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -205,5 +213,100 @@ func TestGemini_LogValueDoesNotLeakAPIKey(t *testing.T) {
 	logger.Info("test", "provider", p)
 	if strings.Contains(sb.String(), "supersecret") {
 		t.Errorf("LogValue leaked API key: %q", sb.String())
+	}
+}
+
+// TestGemini_Complete_NetworkError_DoesNotLeakAPIKey regresses M1 Codex
+// review #F13: a transport failure during a Gemini call used to surface
+// the BYOK key verbatim. net/http returns the failure as `*url.Error`
+// whose `Error()` method renders the full request URL — and Gemini's
+// historical auth used a `?key=AIza...` query string, so the wrapped
+// error would carry the secret into:
+//
+//   - the rewrapped error returned by GeminiProvider.Complete,
+//   - llm_calls.error_message (persisted by the triage runner),
+//   - the HTTP 500 JSON body returned to the caller.
+//
+// The fix is two-layered: (1) switch Gemini auth to the
+// `x-goog-api-key` header so the URL itself no longer carries the key,
+// (2) wrap the transport error through llm.RedactProviderError as
+// defense in depth. This test exercises both layers — it forces a
+// transport error by hijacking and slamming the connection at the
+// server side, then asserts the API key is nowhere in the returned
+// error string.
+func TestGemini_Complete_NetworkError_DoesNotLeakAPIKey(t *testing.T) {
+	const apiKey = "AIzaSyTEST_F13_SUPER_SECRET_KEY_12345"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Hijack and immediately close so the client sees EOF /
+		// connection reset — net/http turns that into a *url.Error
+		// whose .Error() includes the URL.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("test server does not support hijacking")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	p := NewGeminiWithEndpoint(apiKey, "gemini-2.5-flash", srv.URL)
+	_, err := p.Complete(context.Background(), CompleteRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected transport error from hijacked connection, got nil")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, apiKey) {
+		t.Errorf("Gemini transport error leaked the API key:\nerror = %q", msg)
+	}
+	// Belt and braces: the older `?key=AIza...` URL shape must not appear
+	// even in scrubbed form (the regex would have replaced the value but
+	// not the param name; the auth migration removes the param entirely).
+	if strings.Contains(msg, "key=AIza") {
+		t.Errorf("Gemini transport error retained a key=AIza... fragment:\nerror = %q", msg)
+	}
+}
+
+// TestGemini_Complete_SendsAPIKeyHeader pins the auth-migration
+// contract from #F13: the BYOK key MUST be sent via `x-goog-api-key`
+// header, NOT as a `?key=` query parameter. Both halves are asserted so
+// a future refactor cannot silently fall back to URL auth and reopen
+// the leak path.
+func TestGemini_Complete_SendsAPIKeyHeader(t *testing.T) {
+	const apiKey = "AIzaSyHEADER_AUTH_KEY"
+	var sawHeader string
+	var sawQueryKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHeader = r.Header.Get("x-goog-api-key")
+		sawQueryKey = r.URL.Query().Get("key")
+		resp := geminiResponse{}
+		resp.Candidates = append(resp.Candidates, struct {
+			Content      geminiContent `json:"content"`
+			FinishReason string        `json:"finishReason"`
+		}{
+			Content:      geminiContent{Role: "model", Parts: []geminiPart{{Text: "ok"}}},
+			FinishReason: "STOP",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := NewGeminiWithEndpoint(apiKey, "gemini-2.5-flash", srv.URL)
+	if _, err := p.Complete(context.Background(), CompleteRequest{
+		Messages: []Message{{Role: RoleUser, Content: "x"}},
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if sawHeader != apiKey {
+		t.Errorf("x-goog-api-key header = %q, want %q", sawHeader, apiKey)
+	}
+	if sawQueryKey != "" {
+		t.Errorf("request still carried ?key= query parameter = %q (URL-auth must be removed)", sawQueryKey)
 	}
 }

@@ -622,6 +622,21 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		callRecord.FinishReason = resp.FinishReason
 	}
 	if llmErr != nil {
+		// M1 Codex review #F13: scrub any auth-shaped material out of
+		// the provider error before BOTH the audit-row persistence and
+		// the wrapped return. Net/http surfaces transport failures as
+		// `*url.Error` whose Error() method echoes the full request
+		// URL, so a Gemini call that historically used `?key=...` auth
+		// would leak the BYOK key into:
+		//   - llm_calls.error_message (plaintext DB persistence),
+		//   - the wrapped return error → handler 500 body
+		//     (mapRunnerError falls through to {"error": err.Error()}).
+		// RedactProviderError is a no-op when no auth-shaped material
+		// is present, so OpenAI / Anthropic (Bearer / x-api-key auth)
+		// pass through unchanged. Gemini now authenticates via header
+		// too (see llm/gemini.go) but the scrub stays as defense in
+		// depth against future regressions / third-party wrappers.
+		llmErr = llm.RedactProviderError(llmErr)
 		callRecord.ErrorMessage = llmErr.Error()
 	}
 	if persistErr := r.llmCalls.Insert(ctx, callRecord); persistErr != nil {
