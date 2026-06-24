@@ -465,7 +465,18 @@ func main() {
 	// --fail-on <severity>` (Trust Rescue P1 #12). It reports
 	// running/completed/failed plus current per-severity counts so CLI
 	// clients can block CI on threshold violations.
-	auth.GET("/projects/:id/sboms/:sbom_id/scan-status", sbomHandler.ScanStatus)
+	//
+	// Codex R3 fix: registered outside the `auth` (Clerk-only) group with
+	// MultiAuth so the CLI's `Authorization: Bearer sbh_...` API-key polling
+	// works after the canonical upload. Previously the CLI received 401
+	// because the API key was decoded as a Clerk JWT, defeating the purpose
+	// of scan-status. Middleware chain mirrors the canonical upload route
+	// above: MultiAuth -> TenantTx -> audit -> handler.
+	e.GET("/api/v1/projects/:id/sboms/:sbom_id/scan-status",
+		sbomHandler.ScanStatus,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	auth.POST("/projects/:id/scan", vulnHandler.Scan)
 
 	// SBOM Diff endpoints
