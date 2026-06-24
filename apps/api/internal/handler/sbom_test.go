@@ -684,6 +684,133 @@ func TestSBOMHandler_GetVulnerabilities_TotalCountHeader_F28(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------------
+// F29 regression — paginated /vulnerabilities rows match X-Total-Count units
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 18 #F29 (high / data integrity): CountVulnerabilities
+// adjudicates the X-Total-Count header on COUNT(DISTINCT v.id), but
+// the pre-fix GetVulnerabilitiesPaginated SELECTed from the join
+// `vulnerabilities JOIN component_vulnerabilities JOIN components`
+// without de-duplication. A CVE linked to N components produced N
+// duplicate rows in the page response, so:
+//
+//	X-Total-Count = 2  (distinct vulns CVE-A, CVE-B)
+//	len(response) = 50 (50 duplicate rows of CVE-A)
+//
+// The Web UI's truncation banner condition
+// `vulnTotalCount > vulnerabilities.length` (2 > 50 → false) stayed
+// silent while CVE-B was inaccessible from the UI — no warning, no
+// way to reach the hidden distinct vulnerability.
+//
+// The repository now uses `WHERE EXISTS (...)` so the page returns
+// exactly one row per matched vulnerability, matching the COUNT
+// cardinality. This test pins the server-side invariant:
+//
+//	len(response body) <= X-Total-Count
+//
+// and verifies CVE-B is present in the response (it would have been
+// hidden behind 50 duplicate CVE-A rows under the pre-fix query).
+func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	cveAID := uuid.New() // would be linked to 100 components in production
+	cveBID := uuid.New() // linked to a single component
+	now := time.Now()
+
+	// CountVulnerabilities (#F28) — returns the DISTINCT count: 2.
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT v.id\) FROM vulnerabilities v`).
+		WithArgs(sbomID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+
+	// GetVulnerabilitiesPaginated — the load-bearing assertion is the
+	// `WHERE EXISTS` pattern (pins #F29 de-duplication strategy). A
+	// regression that reverts to the unfiltered JOIN form would fail to
+	// match this regex and surface as a sqlmock "unexpected query".
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, VulnsDefaultLimit, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}).
+			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, "NVD",
+				false, nil, nil, nil, now, now).
+			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, "NVD",
+				false, nil, nil, nil, now, now))
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F29: expected 200, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+
+	// 1. X-Total-Count and response length must be adjudicated on the
+	//    same units (one row per distinct vulnerability).
+	totalHeader := rec.Header().Get("X-Total-Count")
+	if totalHeader != "2" {
+		t.Errorf("F29: expected X-Total-Count=2, got %q", totalHeader)
+	}
+
+	var out []model.Vulnerability
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("F29: response must be a JSON array, got error %v (body=%s)",
+			err, rec.Body.String())
+	}
+	// Under the pre-fix query this would be a full page of duplicates
+	// (e.g. 50 rows of CVE-A), with len > X-Total-Count, and the UI
+	// banner condition `vulnTotalCount > visibleRows` would stay false
+	// while CVE-B was hidden behind the duplicates. The fix makes
+	// len(response) == X-Total-Count when the page covers all rows.
+	if len(out) != 2 {
+		t.Fatalf("F29: expected 2 distinct rows (one per vuln), got %d", len(out))
+	}
+
+	// 2. CVE-B must be reachable — under the pre-fix duplicate-row
+	//    query it would be hidden behind 50+ CVE-A duplicates.
+	sawA, sawB := false, false
+	for _, v := range out {
+		if v.ID == cveAID {
+			sawA = true
+		}
+		if v.ID == cveBID {
+			sawB = true
+		}
+	}
+	if !sawA {
+		t.Errorf("F29: CVE-A must be in the response")
+	}
+	if !sawB {
+		t.Errorf("F29: CVE-B must be in the response (would be hidden behind CVE-A duplicates under the pre-fix query)")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 // contains is a tiny strings.Contains shim kept local to this file to
 // avoid importing the stdlib `strings` package just for one helper —
 // keeps the test file's import list aligned with what production code in

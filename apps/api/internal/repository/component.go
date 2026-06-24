@@ -127,6 +127,21 @@ func (r *ComponentRepository) CountVulnerabilities(ctx context.Context, sbomID u
 // response body before unmarshalling. A read-only API key could
 // therefore mount a cheap DoS by repeatedly hitting that route.
 //
+// M1 Codex review #F29 (high / data integrity): the original
+// implementation selected from
+// `vulnerabilities JOIN component_vulnerabilities JOIN components`
+// without de-duplicating, so a single CVE linked to N components in
+// the same SBOM produced N duplicate rows in the page response. The
+// sibling CountVulnerabilities uses COUNT(DISTINCT v.id), so the
+// X-Total-Count header (e.g. 2) could be smaller than the page size
+// (e.g. 100 duplicate rows of CVE-A), causing the Web UI's
+// `vulnTotalCount > vulnerabilities.length` truncation banner to
+// stay silent while later distinct CVEs were hidden behind the
+// duplicates. The query now uses `WHERE EXISTS (...)` on the join
+// table, which yields exactly one row per vulnerability — the same
+// cardinality as the COUNT query — so X-Total-Count and the page
+// length are now adjudicated on the same units.
+//
 // Semantics:
 //   - limit <= 0 falls back to no LIMIT (caller responsibility); the
 //     handler clamps to MaxListLimit before calling this method, so the
@@ -134,9 +149,12 @@ func (r *ComponentRepository) CountVulnerabilities(ctx context.Context, sbomID u
 //     currently do not have — every external call site clamps).
 //   - offset < 0 is normalised to 0.
 //
-// Order is preserved (cvss_score DESC) so a consistent pagination
-// cursor walks the most-severe vulns first; offset is stable across
-// calls assuming the underlying join does not change between pages.
+// Order is preserved (cvss_score DESC) with v.id as a stable
+// tiebreaker so the offset cursor walks the most-severe vulns first
+// and pages remain consistent across calls even when several CVEs
+// share the same CVSS score (or NULL). `NULLS LAST` keeps unscored
+// rows at the tail rather than letting Postgres' default
+// `NULLS FIRST` for DESC float them above scored CRITICAL/HIGH rows.
 func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, sbomID uuid.UUID, limit, offset int) ([]model.Vulnerability, error) {
 	if offset < 0 {
 		offset = 0
@@ -147,15 +165,24 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	if limit <= 0 {
 		return r.GetVulnerabilities(ctx, sbomID)
 	}
+	// #F29: EXISTS subquery dedupes by vulnerability_id — exactly one
+	// row per matched vulnerability, matching CountVulnerabilities'
+	// COUNT(DISTINCT v.id) cardinality. Without this, a join-based
+	// SELECT would multiply rows by the number of (component_id)
+	// linkages per vulnerability and silently hide later CVEs behind
+	// duplicates within a page.
 	const query = `
 		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score, COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at
 		FROM vulnerabilities v
-		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
-		JOIN components c ON c.id = cv.component_id
-		WHERE c.sbom_id = $1
-		ORDER BY v.cvss_score DESC
+		WHERE EXISTS (
+			SELECT 1
+			FROM component_vulnerabilities cv
+			JOIN components c ON c.id = cv.component_id
+			WHERE cv.vulnerability_id = v.id AND c.sbom_id = $1
+		)
+		ORDER BY v.cvss_score DESC NULLS LAST, v.id
 		LIMIT $2 OFFSET $3
 	`
 	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID, limit, offset)

@@ -605,6 +605,100 @@ func TestComponentRepository_ListBySbom_OrderedByName(t *testing.T) {
 	}
 }
 
+// TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29
+// is the regression guard for M1 Codex review #F29 (high / data
+// integrity).
+//
+// Symptom: the original implementation selected from
+//
+//	vulnerabilities v
+//	JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
+//	JOIN components c ON c.id = cv.component_id
+//	WHERE c.sbom_id = $1
+//
+// without a DISTINCT clause, so a single vulnerability linked to N
+// components in the same SBOM produced N duplicate rows. The sibling
+// CountVulnerabilities used COUNT(DISTINCT v.id), so a project where
+// CVE-A was linked to (say) 100 components and CVE-B to 1 component
+// returned an X-Total-Count of 2 but a 50-row default page that was
+// entirely duplicate CVE-A rows — the Web UI banner condition
+// `vulnTotalCount > vulnerabilities.length` (2 > 50 → false) stayed
+// silent while CVE-B was inaccessible from the UI.
+//
+// Guard: the new implementation uses `WHERE EXISTS (...)` on the join
+// table so the result has exactly one row per matched vulnerability.
+// This test pins "EXISTS" in the SQL pattern via go-sqlmock's regex
+// matcher — a future revert that re-introduces the unfiltered join
+// would fail to match and trip this test before landing in production.
+//
+// We assert two scenarios:
+//  1. A vulnerability linked to >50 components and a second linked to 1
+//     would, under the old query, fill a default page with duplicate
+//     rows of the first. The mocked response shape (2 distinct rows)
+//     mirrors what the fixed query produces — paired with the SQL
+//     regex pin, sqlmock will refuse to match the old join query and
+//     surface the regression as "unexpected query".
+//  2. The X-Total-Count cardinality (mirrored at the repository layer
+//     via CountVulnerabilities) and the page row count are now adjudi-
+//     cated on the same units (one row per vulnerability), so the UI
+//     truncation banner cannot be silenced by duplicate rows.
+func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewComponentRepository(db)
+	sbomID := uuid.New()
+	cveAID := uuid.New() // linked to 100 components
+	cveBID := uuid.New() // linked to 1 component
+	now := time.Now()
+
+	// The load-bearing assertions are:
+	//   - "EXISTS" in the SQL pattern (pins #F29 de-duplication strategy);
+	//   - WithArgs(sbomID, 50, 0) (the handler's default-page contract
+	//     remains: limit=50 here mirrors what the handler would clamp).
+	// A regression that drops EXISTS for the old JOIN form would no longer
+	// match this regex and surface as a sqlmock "unexpected query".
+	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, 50, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}).
+			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, "NVD",
+				false, nil, nil, nil, now, now).
+			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, "NVD",
+				false, nil, nil, nil, now, now))
+
+	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0)
+	if err != nil {
+		t.Fatalf("GetVulnerabilitiesPaginated: %v", err)
+	}
+	// 2 distinct vulnerabilities — NOT 100 duplicates of CVE-A. Under the
+	// pre-fix query the response shape would have been 50 rows of CVE-A
+	// with CVE-B never reached.
+	if len(got) != 2 {
+		t.Fatalf("F29: expected 2 distinct vulnerabilities, got %d", len(got))
+	}
+	seen := map[uuid.UUID]int{}
+	for _, v := range got {
+		seen[v.ID]++
+	}
+	if seen[cveAID] != 1 {
+		t.Errorf("F29: CVE-A must appear exactly once, got %d occurrences", seen[cveAID])
+	}
+	if seen[cveBID] != 1 {
+		t.Errorf("F29: CVE-B must appear exactly once (would be 0 under the pre-fix duplicate-row query), got %d occurrences", seen[cveBID])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 // TestComponentRepository_Create_PassesTenantID locks the tenant_id column to
 // position 2 of the INSERT. Symmetric guard to the sbom-side test: makes a
 // silent reorder loud.
