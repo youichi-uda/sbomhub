@@ -16,6 +16,22 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service/triage"
 )
 
+// Pagination bounds for ListDrafts (M1 Codex review #F24). The bug was
+// that GET /api/v1/projects/:id/vex-drafts accepted any positive int
+// from `?limit=` and passed it straight to the repository, which
+// reflected it into SQL `LIMIT $N`. A single API-key-reachable request
+// such as `?limit=2147483647` would force the DB to scan + materialise
+// the full vex_drafts page for the project, then accumulate every row
+// in memory before JSON-marshaling — an unauthenticated-grade DoS
+// against tenants with a non-trivial backlog. The handler now rejects
+// out-of-band values with 400 BEFORE the repository runs, and the
+// repository clamps as defense-in-depth in case a future internal caller
+// supplies an unfiltered Limit.
+const (
+	DefaultListLimit = 100
+	MaxListLimit     = 500
+)
+
 // VexDraftsHandler serves the M1-5 VEX draft endpoints (issue #30):
 //
 //	POST   /api/v1/projects/:id/triage/run
@@ -186,11 +202,32 @@ func (h *VexDraftsHandler) ListDrafts(c echo.Context) error {
 	filter := repository.VEXDraftListFilter{
 		CVEID:    c.QueryParam("cve_id"),
 		Decision: c.QueryParam("decision"),
+		Limit:    DefaultListLimit,
 	}
+	// #F24: explicit reject on out-of-band limit. A silent clamp would
+	// hide the DoS-probe behaviour from telemetry and could mask buggy
+	// clients that hard-code a too-large page. Empty / unparseable /
+	// non-positive values fall through to DefaultListLimit so the
+	// pre-#F24 callers (CLI, web UI without an explicit page) keep their
+	// behaviour.
 	if v := c.QueryParam("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid limit"})
+		}
+		if n > MaxListLimit {
+			slog.Warn("vex_drafts: limit exceeds maximum",
+				"tenant_id", tc.TenantID(),
+				"project_id", projectID,
+				"requested_limit", n,
+				"max_limit", MaxListLimit,
+			)
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "limit exceeds maximum"})
+		}
+		if n >= 1 {
 			filter.Limit = n
 		}
+		// n < 1 falls through to DefaultListLimit (already set above).
 	}
 	if v := c.QueryParam("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {

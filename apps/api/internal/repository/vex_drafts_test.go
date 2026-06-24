@@ -468,7 +468,7 @@ func TestVEXDraftsRepository_ListByProject_PassesTenantID(t *testing.T) {
 	}
 
 	mock.ExpectQuery(`SELECT[\s\S]+FROM vex_drafts[\s\S]+WHERE tenant_id = \$1 AND project_id = \$2`).
-		WithArgs(tenantID, projectID, 200, 0).
+		WithArgs(tenantID, projectID, 100, 0). // default limit lowered from 200 → 100 by #F24 DoS clamp
 		WillReturnRows(sqlmock.NewRows(rowCols).AddRow(
 			rowID, tenantID,
 			projectID, nil, componentID, vulnID,
@@ -565,6 +565,62 @@ func TestVEXDraftsRepository_ListByProject_AppliesFilters(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestVEXDraftsRepo_ListByProject_LimitClamp_F24 pins the repository-
+// level defense-in-depth clamp for the M1 Codex #F24 DoS fix. The
+// handler already rejects out-of-band limits with 400, but the
+// repository is reachable from any internal caller that builds a
+// VEXDraftListFilter directly. The constants
+// (vexDraftsListDefaultLimit=100, vexDraftsListMaxLimit=500) must be
+// honored regardless of caller hygiene.
+//
+// Contract pinned here:
+//   - filter.Limit = 10000 → SQL LIMIT 500 (clamped down).
+//   - The clamped 500 is bound into the SQL argument slot, not the raw
+//     10000 — otherwise the DB still receives the unbounded value.
+//
+// The handler-side companion (which exercises 4xx-vs-200 boundaries and
+// the default fallback) lives in
+// internal/handler/vex_drafts_test.go::
+// TestVEXDraftsHandler_ListDrafts_*_F24.
+func TestVEXDraftsRepo_ListByProject_LimitClamp_F24(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewVEXDraftsRepository(db)
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	rowCols := []string{
+		"id", "tenant_id",
+		"project_id", "sbom_id", "component_id", "vulnerability_id",
+		"cve_id",
+		"state", "justification", "detail", "confidence",
+		"provider", "model", "prompt_hash", "response_hash",
+		"evidence",
+		"advisory_excerpt_id", "reachability_result_id", "llm_call_id",
+		"decision", "decision_by", "decision_at", "decision_note",
+		"created_by",
+		"created_at", "updated_at",
+	}
+
+	// LIMIT $3 OFFSET $4. The repo must bind 500 (clamped), NOT 10000.
+	mock.ExpectQuery(`SELECT[\s\S]+FROM vex_drafts[\s\S]+WHERE tenant_id = \$1 AND project_id = \$2[\s\S]+LIMIT \$3 OFFSET \$4`).
+		WithArgs(tenantID, projectID, 500, 0).
+		WillReturnRows(sqlmock.NewRows(rowCols))
+
+	if _, err := repo.ListByProject(context.Background(), tenantID, projectID, VEXDraftListFilter{
+		Limit: 10000,
+	}); err != nil {
+		t.Fatalf("ListByProject with oversized limit: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("F24: expected SQL LIMIT to be clamped to 500, but: %v", err)
 	}
 }
 

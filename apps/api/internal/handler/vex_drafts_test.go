@@ -852,3 +852,172 @@ func runTriageAndCapture404(t *testing.T, runner *triage.Runner, tenantID, proje
 	}
 	return strings.TrimSpace(rec.Body.String())
 }
+
+// ----------------------------------------------------------------------------
+// F24 regression — ListDrafts must clamp the `limit` query parameter
+// ----------------------------------------------------------------------------
+//
+// Codex M1 round 15 #F24 (high / DoS): GET /api/v1/projects/:id/vex-drafts
+// previously parsed any positive int from `?limit=` and reflected it
+// straight into the repository's SQL `LIMIT $N`. A single API-key-
+// reachable request such as `?limit=2147483647` could force a full-table
+// page scan + in-memory row accumulation + JSON-marshaling, which on a
+// tenant with a non-trivial backlog reduces to a cheap DoS primitive
+// usable with read-only API keys. The handler now:
+//   - rejects any limit > MaxListLimit (500) with 400 BEFORE the query
+//     runs (the user-facing failure makes the probe loud in logs); and
+//   - falls back to DefaultListLimit (100) on missing / zero / negative
+//     / unparseable values so legitimate clients without an explicit
+//     page size do not see an empty result.
+//
+// The repository-side companion clamp (defense in depth against future
+// internal callers that bypass the handler) lives in
+// internal/repository/vex_drafts_test.go::
+// TestVEXDraftsRepo_ListByProject_LimitClamp_F24.
+
+// listDraftsHandlerForF24 wires a runner whose fake store records the
+// VEXDraftListFilter the handler hands down. Tests inspect filter.Limit
+// to confirm the handler's clamp/default behaviour reaches the repo
+// layer (rather than just inspecting the HTTP response code).
+type recordingDraftStore struct {
+	fakeVexDraftStore
+	lastFilter repository.VEXDraftListFilter
+	called     bool
+}
+
+func (s *recordingDraftStore) ListByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.VEXDraftListFilter) ([]repository.VEXDraft, error) {
+	s.called = true
+	s.lastFilter = filter
+	return s.fakeVexDraftStore.ListByProject(ctx, tenantID, projectID, filter)
+}
+
+func listDraftsHandlerForF24(t *testing.T) (*VexDraftsHandler, *recordingDraftStore) {
+	t.Helper()
+	store := &recordingDraftStore{}
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       store,
+		Advisories:   &fakeAdvisoryReader{},
+		Reachability: &fakeReachabilityReader{},
+		LLMCalls:     &fakeLLMCallWriter{},
+		Audit:        &fakeAuditWriter{},
+		Provider:     disabledProvider(),
+		Threshold:    0.7,
+	})
+	return NewVexDraftsHandler(runner), store
+}
+
+func driveListDrafts(t *testing.T, h *VexDraftsHandler, tenantID, projectID uuid.UUID, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	e := echo.New()
+	url := "/api/v1/projects/" + projectID.String() + "/vex-drafts"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleViewer)
+	if err := h.ListDrafts(c); err != nil {
+		t.Fatalf("ListDrafts returned unexpected error: %v", err)
+	}
+	return rec
+}
+
+// TestVEXDraftsHandler_ListDrafts_UnboundedLimit_Rejected_F24 pins the
+// core #F24 contract: an attacker-chosen huge limit must be rejected at
+// the handler boundary before the repository runs, so the DB never
+// receives `LIMIT 2147483647`.
+func TestVEXDraftsHandler_ListDrafts_UnboundedLimit_Rejected_F24(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	h, store := listDraftsHandlerForF24(t)
+	rec := driveListDrafts(t, h, tenantID, projectID, "limit=2147483647")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F24: unbounded limit must return 400, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "limit exceeds maximum") {
+		t.Errorf("F24: expected 'limit exceeds maximum' in body, got %s", rec.Body.String())
+	}
+	if store.called {
+		t.Errorf("F24: repository ListByProject MUST NOT be invoked when limit is rejected; was called with filter=%+v",
+			store.lastFilter)
+	}
+}
+
+// TestVEXDraftsHandler_ListDrafts_ZeroLimit_Default_F24 pins the
+// fallback: `?limit=0` (and analogously a missing limit) must NOT be
+// treated as "unbounded" — the handler defaults to DefaultListLimit so
+// the repository receives a known-small bound.
+func TestVEXDraftsHandler_ListDrafts_ZeroLimit_Default_F24(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	h, store := listDraftsHandlerForF24(t)
+	rec := driveListDrafts(t, h, tenantID, projectID, "limit=0")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F24: limit=0 must succeed with default, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !store.called {
+		t.Fatalf("F24: repository ListByProject should be invoked for limit=0 (default path)")
+	}
+	if store.lastFilter.Limit != DefaultListLimit {
+		t.Errorf("F24: limit=0 must default to %d at the handler boundary, got %d",
+			DefaultListLimit, store.lastFilter.Limit)
+	}
+}
+
+// TestVEXDraftsHandler_ListDrafts_NegativeLimit_Default_F24 mirrors the
+// zero-limit fallback for an explicitly negative value. The fix must
+// not treat negative numbers as "ignore the cap" — they fall back to
+// DefaultListLimit just like zero.
+func TestVEXDraftsHandler_ListDrafts_NegativeLimit_Default_F24(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	h, store := listDraftsHandlerForF24(t)
+	rec := driveListDrafts(t, h, tenantID, projectID, "limit=-1")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F24: limit=-1 must succeed with default, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !store.called {
+		t.Fatalf("F24: repository ListByProject should be invoked for limit=-1 (default path)")
+	}
+	if store.lastFilter.Limit != DefaultListLimit {
+		t.Errorf("F24: limit=-1 must default to %d at the handler boundary, got %d",
+			DefaultListLimit, store.lastFilter.Limit)
+	}
+}
+
+// TestVEXDraftsHandler_ListDrafts_MaxLimit_Allowed_F24 pins the upper
+// boundary: requests at exactly MaxListLimit must succeed (off-by-one
+// trap — a `>` vs `>=` typo in the clamp would reject the boundary).
+func TestVEXDraftsHandler_ListDrafts_MaxLimit_Allowed_F24(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	h, store := listDraftsHandlerForF24(t)
+	rec := driveListDrafts(t, h, tenantID, projectID, "limit=500")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F24: limit=%d (boundary) must succeed, got %d (body=%s)",
+			MaxListLimit, rec.Code, rec.Body.String())
+	}
+	if !store.called {
+		t.Fatalf("F24: repository ListByProject should be invoked at the boundary")
+	}
+	if store.lastFilter.Limit != MaxListLimit {
+		t.Errorf("F24: boundary limit must pass through to the repo verbatim, got %d (want %d)",
+			store.lastFilter.Limit, MaxListLimit)
+	}
+}

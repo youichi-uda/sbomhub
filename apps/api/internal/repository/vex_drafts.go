@@ -78,14 +78,29 @@ type VEXDraft struct {
 }
 
 // VEXDraftListFilter narrows ListByProject. Zero values mean "do not
-// filter on this field"; Limit defaults to 200 (covers "list every
-// CVE for this project" in one page in the common case), Offset to 0.
+// filter on this field"; Limit defaults to listDefaultLimit
+// (vexDraftsListDefaultLimit, 100) and is clamped to
+// vexDraftsListMaxLimit (500) as defense-in-depth against handler
+// misuse (M1 Codex review #F24). Offset defaults to 0.
 type VEXDraftListFilter struct {
 	CVEID    string
 	Decision string
 	Limit    int
 	Offset   int
 }
+
+// Bounds applied by ListByProject. The handler layer has its own
+// higher-precedence clamp + 400 reject (handler.DefaultListLimit /
+// handler.MaxListLimit) — these constants exist so a misbehaving
+// internal caller cannot bypass the handler bound by constructing a
+// VEXDraftListFilter directly. Keep these values aligned with the
+// handler constants; the package boundary stops us from importing the
+// handler symbols directly, so the alignment is asserted by the F24
+// regression tests in both packages.
+const (
+	vexDraftsListDefaultLimit = 100
+	vexDraftsListMaxLimit     = 500
+)
 
 // VEXDraftDecisionUpdate is the input shape for UpdateDecision. It
 // is a separate type from VEXDraft to make it impossible to acci-
@@ -290,9 +305,19 @@ func (r *VEXDraftsRepository) ListByProject(ctx context.Context, tenantID, proje
 		return nil, fmt.Errorf("VEXDraftsRepository.ListByProject: project_id is required")
 	}
 
+	// #F24: defense-in-depth pagination bounds. The handler layer
+	// already rejects ?limit=<huge> with 400 BEFORE this method runs,
+	// but the repo is a reachable surface for any internal caller that
+	// builds a VEXDraftListFilter directly (e.g. future report jobs,
+	// triage runner re-list helpers). Without this clamp, a caller that
+	// trusts user input upstream and forgets to bound it could still
+	// trigger the DoS pattern #F24 closed at the handler.
 	limit := filter.Limit
 	if limit <= 0 {
-		limit = 200
+		limit = vexDraftsListDefaultLimit
+	}
+	if limit > vexDraftsListMaxLimit {
+		limit = vexDraftsListMaxLimit
 	}
 	offset := filter.Offset
 	if offset < 0 {
