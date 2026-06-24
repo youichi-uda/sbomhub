@@ -18,10 +18,24 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
+// componentScanner is the narrow interface SbomHandler depends on for the
+// post-upload NVD/JVN sweeps. Defining it inside the handler package keeps
+// the scanner implementations (service.NVDService, service.JVNService)
+// pluggable in tests without exporting an interface across packages.
+//
+// The interface is intentionally minimal — only the per-SBOM entry point
+// the background goroutine calls — so any future scanner that exposes the
+// same surface (e.g. a future OSV scanner) drops in without changing the
+// handler. *service.NVDService and *service.JVNService both satisfy it
+// via their existing `ScanComponents(ctx, sbomID) error` methods.
+type componentScanner interface {
+	ScanComponents(ctx context.Context, sbomID uuid.UUID) error
+}
+
 type SbomHandler struct {
 	sbomService *service.SbomService
-	nvdService  *service.NVDService
-	jvnService  *service.JVNService
+	nvdService  componentScanner
+	jvnService  componentScanner
 	scanTracker *service.ScanTracker
 	// db is used by startBackgroundScan to open a fresh transaction so the
 	// goroutine can bind its own `app.current_tenant_id` GUC. The parent
@@ -148,59 +162,84 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 // of the scan but pins one pooled connection for the scan's duration;
 // that is an acknowledged trade-off (see ※要確認 in completion report).
 func (h *SbomHandler) startBackgroundScan(sbomID, tenantID uuid.UUID) {
-	go func() {
-		ctx := context.Background()
-		var errs []string
+	go h.runScan(context.Background(), sbomID, tenantID)
+}
 
-		txErr := database.WithTxFunc(ctx, h.db, func(txCtx context.Context, tx *sql.Tx) error {
-			if _, err := tx.ExecContext(txCtx,
-				`SELECT set_config('app.current_tenant_id', $1, true)`,
-				tenantID.String(),
-			); err != nil {
-				return fmt.Errorf("set tenant context: %w", err)
-			}
+// runScan executes the post-upload NVD + JVN sweep synchronously and
+// updates ScanTracker with the terminal state. It is the body of the
+// goroutine spawned by startBackgroundScan, extracted as a method so tests
+// can drive the scan flow without dealing with goroutine timing
+// (handler/sbom_test.go).
+//
+// Error surfacing contract (Codex R15 P2):
+//   - Any scanner that returns a non-nil error is recorded in `errs`.
+//   - Any tx-level failure (BeginTx / set_config / Commit) is recorded
+//     under the "tx:" prefix.
+//   - If `errs` is non-empty at the end of the run, ScanTracker.MarkFailed
+//     is called with the joined error string. ONLY when every scanner
+//     returns nil AND the tx commits cleanly is MarkCompleted called.
+//
+// Without this contract, a transient NVD/JVN outage would land the
+// CLI-observed scan status at "completed, 0 vulnerabilities" and
+// `sbomhub scan --fail-on critical` would silently exit 0. See also the
+// known limitation in NVDService.processComponentsParallel: per-component
+// failures inside the scanner are logged but the function still returns
+// nil, so this top-level err propagation is only an upper bound — it
+// catches catastrophic failures (cannot reach NVD at all) but not
+// partial-result conditions. A stricter threshold (e.g. "N% of components
+// failed → return error") belongs inside the scanner itself and is
+// tracked separately (※要確認).
+func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
+	var errs []string
 
-			// Scan with NVD
-			if h.nvdService != nil {
-				if err := h.nvdService.ScanComponents(txCtx, sbomID); err != nil {
-					slog.Error("Auto NVD scan failed", "sbom_id", sbomID, "error", err)
-					errs = append(errs, "nvd: "+err.Error())
-				} else {
-					slog.Info("Auto NVD scan completed", "sbom_id", sbomID)
-				}
-			}
-
-			// Scan with JVN
-			if h.jvnService != nil {
-				if err := h.jvnService.ScanComponents(txCtx, sbomID); err != nil {
-					slog.Error("Auto JVN scan failed", "sbom_id", sbomID, "error", err)
-					errs = append(errs, "jvn: "+err.Error())
-				} else {
-					slog.Info("Auto JVN scan completed", "sbom_id", sbomID)
-				}
-			}
-
-			// Always commit so per-component-vulnerability links inserted
-			// outside this tx (NVD worker pool uses raw db) and any future
-			// tx-aware writes are durable. Per-scan failures are recorded
-			// in `errs` and surfaced through ScanTracker, not through tx
-			// rollback.
-			return nil
-		})
-		if txErr != nil {
-			slog.Error("Background scan tx failed",
-				"sbom_id", sbomID, "tenant_id", tenantID, "error", txErr)
-			errs = append(errs, "tx: "+txErr.Error())
+	txErr := database.WithTxFunc(ctx, h.db, func(txCtx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(txCtx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			tenantID.String(),
+		); err != nil {
+			return fmt.Errorf("set tenant context: %w", err)
 		}
 
-		if h.scanTracker != nil {
-			if len(errs) > 0 {
-				h.scanTracker.MarkFailed(sbomID, strings.Join(errs, "; "))
+		// Scan with NVD
+		if h.nvdService != nil {
+			if err := h.nvdService.ScanComponents(txCtx, sbomID); err != nil {
+				slog.Error("Auto NVD scan failed", "sbom_id", sbomID, "error", err)
+				errs = append(errs, "nvd: "+err.Error())
 			} else {
-				h.scanTracker.MarkCompleted(sbomID)
+				slog.Info("Auto NVD scan completed", "sbom_id", sbomID)
 			}
 		}
-	}()
+
+		// Scan with JVN
+		if h.jvnService != nil {
+			if err := h.jvnService.ScanComponents(txCtx, sbomID); err != nil {
+				slog.Error("Auto JVN scan failed", "sbom_id", sbomID, "error", err)
+				errs = append(errs, "jvn: "+err.Error())
+			} else {
+				slog.Info("Auto JVN scan completed", "sbom_id", sbomID)
+			}
+		}
+
+		// Always commit so per-component-vulnerability links inserted
+		// outside this tx (NVD worker pool uses raw db) and any future
+		// tx-aware writes are durable. Per-scan failures are recorded
+		// in `errs` and surfaced through ScanTracker, not through tx
+		// rollback.
+		return nil
+	})
+	if txErr != nil {
+		slog.Error("Background scan tx failed",
+			"sbom_id", sbomID, "tenant_id", tenantID, "error", txErr)
+		errs = append(errs, "tx: "+txErr.Error())
+	}
+
+	if h.scanTracker != nil {
+		if len(errs) > 0 {
+			h.scanTracker.MarkFailed(sbomID, strings.Join(errs, "; "))
+		} else {
+			h.scanTracker.MarkCompleted(sbomID)
+		}
+	}
 }
 
 func (h *SbomHandler) Get(c echo.Context) error {
