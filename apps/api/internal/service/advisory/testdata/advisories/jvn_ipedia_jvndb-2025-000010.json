@@ -1,0 +1,9 @@
+{
+  "vulinfo_id": "JVNDB-2025-000010",
+  "cve_id": "CVE-2025-00010",
+  "title": "Acme widget XSS",
+  "description": "Plain Japanese-style summary with no extractable function or path tokens.",
+  "references": [
+    {"id": "CVE-2025-00010", "title": "https://nvd.nist.gov/vuln/detail/CVE-2025-00010"}
+  ]
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "ghsa_id": "GHSA-xxxx-yyyy-zzzz",
+    "cve_id": "",
+    "summary": "Test array shape",
+    "description": "Plain description with no extractable hints.",
+    "severity": "low",
+    "identifiers": [{"type": "GHSA", "value": "GHSA-xxxx-yyyy-zzzz"}],
+    "references": [],
+    "vulnerabilities": []
+  }
+]

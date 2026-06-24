@@ -1,0 +1,31 @@
+{
+  "ghsa_id": "GHSA-9763-4f94-gfch",
+  "cve_id": "CVE-2024-24786",
+  "url": "https://api.github.com/advisories/GHSA-9763-4f94-gfch",
+  "html_url": "https://github.com/advisories/GHSA-9763-4f94-gfch",
+  "summary": "protojson.Unmarshal infinite loop when unmarshaling certain forms of invalid JSON",
+  "description": "The `protojson.Unmarshal` function can enter an infinite loop when unmarshaling certain forms of invalid JSON. This bug affects `google.golang.org/protobuf/encoding/protojson` and is reachable whenever attacker-controlled JSON reaches the unmarshaler. Affected file `encoding/protojson/decode.go`. Only triggers when the environment variable `GODEBUG=protojson=1` is set.",
+  "severity": "high",
+  "identifiers": [
+    {"type": "GHSA", "value": "GHSA-9763-4f94-gfch"},
+    {"type": "CVE", "value": "CVE-2024-24786"}
+  ],
+  "references": [
+    "https://github.com/protocolbuffers/protobuf-go/security/advisories/GHSA-9763-4f94-gfch"
+  ],
+  "published_at": "2024-03-05T23:00:00Z",
+  "updated_at": "2024-03-05T23:00:00Z",
+  "vulnerabilities": [
+    {
+      "package": {"ecosystem": "go", "name": "google.golang.org/protobuf"},
+      "vulnerable_version_range": "< 1.33.0",
+      "first_patched_version": "1.33.0",
+      "vulnerable_functions": [
+        "encoding/protojson.Unmarshal",
+        "encoding/protojson.UnmarshalOptions.Unmarshal"
+      ]
+    }
+  ],
+  "cwes": [{"cwe_id": "CWE-835", "name": "Infinite Loop"}],
+  "cvss": {"vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", "score": 7.5}
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RDF xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <channel rdf:about="https://jvndb.jvn.jp/myjvn">
+    <title>JVNDB</title>
+    <description>JVN database feed</description>
+  </channel>
+  <item>
+    <title>Example Go package vulnerable to path traversal</title>
+    <link>https://jvndb.jvn.jp/ja/contents/2024/JVNDB-2024-000001.html</link>
+    <description>The vulnerable function `filepath.Clean` is bypassed when the environment variable `GO_FILEPATH_RELAXED` is set. Affected file `path/filepath/path.go`. Only triggers when the configuration `allow_dotdot = true` is enabled.</description>
+    <identifier>JVNDB-2024-000001</identifier>
+    <references id="CVE-2024-99999" source="CVE">https://nvd.nist.gov/vuln/detail/CVE-2024-99999</references>
+  </item>
+</RDF>

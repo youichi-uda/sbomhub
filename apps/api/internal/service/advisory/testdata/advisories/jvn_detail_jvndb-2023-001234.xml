@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Vulinfo>
+  <VulinfoID>JVNDB-2023-001234</VulinfoID>
+  <VulinfoData>
+    <Title>Sample CMS RCE via debug mode</Title>
+    <VulinfoDescription>
+      <Overview>The product is vulnerable to remote code execution when configured with debug mode enabled. The vulnerable function `cms.handleUpload` accepts unauthenticated requests.</Overview>
+    </VulinfoDescription>
+    <Impact>
+      <ImpactItem>
+        <Description>This bug only triggers when the environment variable `DEBUG=1` is set. Affected file `cms/upload.go`.</Description>
+      </ImpactItem>
+    </Impact>
+    <Related>
+      <RelatedItem id="CVE-2023-12345" source="CVE">CVE</RelatedItem>
+    </Related>
+  </VulinfoData>
+</Vulinfo>
