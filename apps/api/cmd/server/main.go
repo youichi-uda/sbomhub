@@ -22,8 +22,18 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/scheduler"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/service/llm"
+	"github.com/sbomhub/sbomhub/internal/service/triage"
 	"github.com/sbomhub/sbomhub/migrations"
 )
+
+// newVexDraftsStore returns the concrete vex_drafts store wired
+// against the runtime DB pool. Agent A's *repository.VEXDraftsRepository
+// satisfies triage.VexDraftStore by construction (matching method set).
+func newVexDraftsStore(db *sql.DB) triage.VexDraftStore {
+	return repository.NewVEXDraftsRepository(db)
+}
+
 
 // knownDefaultEncryptionKeys enumerates placeholder values that must never be
 // used outside development. The list includes:
@@ -249,6 +259,12 @@ func main() {
 	// /api/v1/settings/llm.
 	tenantLLMConfigRepo := repository.NewTenantLLMConfigRepository(db)
 
+	// AI VEX triage inputs (Wave M1-1..M1-3 / issue #30).
+	// Pre-existing repositories wired through the triage runner below.
+	advisoryExcerptsRepo := repository.NewAdvisoryExcerptsRepository(db)
+	reachabilityResultsRepo := repository.NewReachabilityResultsRepository(db)
+	llmCallsRepo := repository.NewLLMCallsRepository(db)
+
 	// NVD Cache for vulnerability scanning
 	nvdCache := cache.NewNVDCache(rdb)
 
@@ -295,6 +311,30 @@ func main() {
 	// completes and then enforce the threshold. Trust Rescue P1 #12.
 	scanTracker := service.NewScanTracker()
 
+	// AI VEX triage runner (issue #30 / Wave M1-5). Composes the four
+	// input repositories above with the BYOK LLM provider and the
+	// guards layer (#29 / agent C). Wired unconditionally — if BYOK is
+	// not configured the provider returns *llm.DisabledError on every
+	// call, which the handler translates to 503.
+	triageProvider, err := llm.NewProviderFromEnv(context.Background())
+	if err != nil {
+		slog.Error("Failed to initialise LLM provider", "error", err)
+		os.Exit(1)
+	}
+	triageRunner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:       newVexDraftsStore(db),
+		Advisories:   &triage.AdvisoryExcerptsAdapter{Repo: advisoryExcerptsRepo},
+		Reachability: &triage.ReachabilityAdapter{Repo: reachabilityResultsRepo},
+		LLMCalls:     &triage.LLMCallsAdapter{Repo: llmCallsRepo},
+		Audit:        auditRepo,
+		VEXSync:      &triage.VEXServiceAdapter{Service: vexService},
+		Provider:     triageProvider,
+		Threshold:    triage.ConfidenceThresholdFromEnv(),
+	})
+	slog.Info("AI VEX triage runner initialised",
+		"provider", triageProvider.Name(),
+		"threshold", triage.ConfidenceThresholdFromEnv())
+
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
 	// NewSbomHandler needs `db` so the post-upload background scan goroutine
@@ -314,6 +354,9 @@ func main() {
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	complianceHandler := handler.NewComplianceHandler(complianceService)
 	publicLinkHandler := handler.NewPublicLinkHandler(publicLinkService)
+
+	// AI VEX triage handler (issue #30).
+	vexDraftsHandler := handler.NewVexDraftsHandler(triageRunner)
 
 	// SaaS Handlers
 	clerkWebhookHandler := handler.NewClerkWebhookHandler(cfg, tenantRepo, userRepo, auditRepo)
@@ -545,6 +588,16 @@ func main() {
 	auth.GET("/projects/:id/vex/:vex_id", vexHandler.Get)
 	auth.PUT("/projects/:id/vex/:vex_id", vexHandler.Update)
 	auth.DELETE("/projects/:id/vex/:vex_id", vexHandler.Delete)
+
+	// AI VEX triage endpoints (issue #30 / Wave M1-5). Wired into the
+	// existing auth group so tenant id, audit middleware, and
+	// TenantTx all apply (Trust Rescue 9.1.3 — vex_drafts INSERT
+	// requires the tenant_id GUC bound by TenantTx).
+	auth.POST("/projects/:id/triage/run", vexDraftsHandler.RunTriage)
+	auth.GET("/projects/:id/vex-drafts", vexDraftsHandler.ListDrafts)
+	auth.GET("/projects/:id/vex-drafts/:draft_id", vexDraftsHandler.GetDraft)
+	auth.PUT("/projects/:id/vex-drafts/:draft_id/decision", vexDraftsHandler.Decide)
+	auth.POST("/projects/:id/vex-drafts/:draft_id/reanalyse", vexDraftsHandler.Reanalyse)
 
 	// License policy endpoints
 	auth.GET("/licenses/common", licensePolicyHandler.GetCommonLicenses)
