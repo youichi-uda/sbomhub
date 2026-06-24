@@ -17,34 +17,52 @@
 #
 # All statements are idempotent (re-running ALTER ROLE is OK) so the script
 # is safe to keep mounted even after the first init.
+#
+# Passwords are passed to psql via the -v flag and referenced as :'var'
+# (psql client-side quoting) plus format(... %L ...) (server-side literal
+# escaping). The previous heredoc inlined '${MIGRATOR_PASSWORD}' directly,
+# which broke (and was SQL-injectable) for passwords containing a single
+# quote (codex-r8 P2). Operator-supplied passwords with arbitrary bytes are
+# now handled safely.
 
 set -e
 
 : "${MIGRATOR_PASSWORD:=sbomhub_migrator_dev}"
 : "${APP_PASSWORD:=sbomhub_app_dev}"
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+psql -v ON_ERROR_STOP=1 \
+     -v migrator_password="$MIGRATOR_PASSWORD" \
+     -v app_password="$APP_PASSWORD" \
+     --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     -- Create migrator role (DDL / migrations). NOT BYPASSRLS.
-    DO \$\$
-    BEGIN
-        CREATE ROLE sbomhub_migrator WITH LOGIN PASSWORD '${MIGRATOR_PASSWORD}' CREATEDB CREATEROLE;
-    EXCEPTION WHEN duplicate_object THEN
-        NULL;
-    END
-    \$\$;
+    --
+    -- psql variable interpolation (:'var') is NOT performed inside
+    -- dollar-quoted (\$\$ ... \$\$) bodies, so the previous
+    --   DO \$\$ ... CREATE ROLE ... PASSWORD '\${MIGRATOR_PASSWORD}' ... \$\$
+    -- pattern is replaced by SELECT ... \\gexec, which substitutes :'var'
+    -- at the SELECT (outside any dollar-quote) and then executes the
+    -- resulting CREATE ROLE statement. format(... %L ...) ensures the
+    -- password is emitted as a properly quoted SQL literal.
+    SELECT format(
+        'CREATE ROLE sbomhub_migrator WITH LOGIN PASSWORD %L CREATEDB CREATEROLE',
+        :'migrator_password'
+    )
+    WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_migrator')
+    \gexec
 
     -- Create app role (runtime). NOBYPASSRLS so policies are enforced.
-    DO \$\$
-    BEGIN
-        CREATE ROLE sbomhub_app WITH LOGIN PASSWORD '${APP_PASSWORD}' NOBYPASSRLS;
-    EXCEPTION WHEN duplicate_object THEN
-        NULL;
-    END
-    \$\$;
+    SELECT format(
+        'CREATE ROLE sbomhub_app WITH LOGIN PASSWORD %L NOBYPASSRLS',
+        :'app_password'
+    )
+    WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_app')
+    \gexec
 
-    -- Idempotent password rotation + NOBYPASSRLS assertion.
-    ALTER ROLE sbomhub_migrator WITH PASSWORD '${MIGRATOR_PASSWORD}';
-    ALTER ROLE sbomhub_app WITH PASSWORD '${APP_PASSWORD}' NOBYPASSRLS;
+    -- Idempotent password rotation + NOBYPASSRLS assertion. ALTER ROLE is
+    -- a plain top-level statement (not inside a DO block), so psql will
+    -- substitute :'var' into a properly quoted SQL literal here.
+    ALTER ROLE sbomhub_migrator WITH PASSWORD :'migrator_password';
+    ALTER ROLE sbomhub_app WITH PASSWORD :'app_password' NOBYPASSRLS;
 
     -- Connect / schema usage.
     GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO sbomhub_migrator, sbomhub_app;
