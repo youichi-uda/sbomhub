@@ -44,10 +44,11 @@ type ReportService struct {
 	//
 	// Why this exists (codex-r5 P2):
 	//   GenerateReport persists a "generating" row inside the caller's tenant
-	//   tx, then spawns generateReportAsync on a fresh goroutine. By the time
-	//   the goroutine wakes up the parent tx has long committed, so the ctx
-	//   it inherits carries no tenant_id GUC. Without opening a new tenant tx
-	//   here, repository.q(ctx) degrades to a raw pool connection,
+	//   tx, then hands back a launcher that the caller invokes after commit
+	//   to spawn generateReportAsync (codex-r6 P1). By the time the goroutine
+	//   wakes up the parent tx has long committed, so the ctx it inherits
+	//   carries no tenant_id GUC. Without opening a new tenant tx here,
+	//   repository.q(ctx) degrades to a raw pool connection,
 	//   `app.current_tenant_id` is unset, the RLS UPDATE on generated_reports
 	//   silently matches 0 rows, and the report sticks at "generating"
 	//   forever with no file content saved.
@@ -201,8 +202,28 @@ func (s *ReportService) UpdateSettings(ctx context.Context, tenantID uuid.UUID, 
 	return settings, nil
 }
 
-// GenerateReport generates a report manually
-func (s *ReportService) GenerateReport(ctx context.Context, tenantID, userID uuid.UUID, input model.GenerateReportInput) (*model.GeneratedReport, error) {
+// GenerateReport persists the initial `generating` report row inside the
+// caller's tenant transaction and returns a launcher closure that starts the
+// background PDF/XLSX build. The launcher MUST be invoked AFTER the caller's
+// transaction commits — typically via middleware.RegisterPostCommit on the
+// HTTP path, or right after runWithTenantTx returns on the scheduler path.
+//
+// codex-r6 P1: previously this method spawned generateReportAsync inline with
+// `go ...` before returning. The goroutine opens its own tenant tx to issue
+// the terminal UpdateReport (codex-r5 P2), but it raced the caller's tx
+// commit on fast generators: if UpdateReport landed before the CreateReport
+// INSERT became visible to other transactions, UPDATE matched 0 rows.
+// ReportRepository.UpdateReport does not check rows affected, so the failure
+// was silent — the report stuck at "generating" with the UI showing
+// "generating now..." forever. Deferring the launch until the parent tx has
+// committed makes the INSERT visible before the launcher's UpdateReport
+// looks for it.
+//
+// A non-nil launcher is returned together with a non-nil report on success.
+// On error both report and launcher are nil so the caller does not have to
+// nil-check the launcher before invoking it (RegisterPostCommit is itself
+// nil-safe, but the scheduler path calls launcher() directly).
+func (s *ReportService) GenerateReport(ctx context.Context, tenantID, userID uuid.UUID, input model.GenerateReportInput) (*model.GeneratedReport, func(), error) {
 	// Default locale to Japanese if not specified
 	locale := input.Locale
 	if locale == "" {
@@ -231,16 +252,19 @@ func (s *ReportService) GenerateReport(ctx context.Context, tenantID, userID uui
 	}
 
 	if err := s.reportRepo.CreateReport(ctx, report); err != nil {
-		return nil, fmt.Errorf("failed to create report record: %w", err)
+		return nil, nil, fmt.Errorf("failed to create report record: %w", err)
 	}
 
-	// Generate report asynchronously. tenantID is captured explicitly so the
-	// goroutine does not depend on the caller's request ctx (which carries
-	// the parent tx that will commit and release its connection before the
-	// goroutine runs — see runWithTenantTx for the replacement RLS path).
-	go s.generateReportAsync(tenantID, report, locale)
+	// tenantID/report/locale are captured explicitly so the launcher (and
+	// the goroutine it spawns) do not depend on the caller's request ctx —
+	// that ctx carries the parent tx, which will commit and release its
+	// connection before the goroutine runs. The goroutine opens its own
+	// tenant-scoped tx via runWithTenantTx for the terminal UpdateReport.
+	launcher := func() {
+		go s.generateReportAsync(tenantID, report, locale)
+	}
 
-	return report, nil
+	return report, launcher, nil
 }
 
 // generateReportAsync generates the report file asynchronously.

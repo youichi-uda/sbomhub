@@ -133,10 +133,19 @@ func (h *ReportHandler) Generate(c echo.Context) error {
 		input.Format = model.ReportFormatPDF
 	}
 
-	report, err := h.reportService.GenerateReport(c.Request().Context(), tenantID, userID, input)
+	report, launcher, err := h.reportService.GenerateReport(c.Request().Context(), tenantID, userID, input)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+
+	// Defer the async PDF/XLSX build until the request's tenant tx commits.
+	// generateReportAsync opens its own tenant tx to issue the terminal
+	// UpdateReport, but it raced the parent CreateReport INSERT on fast
+	// generators — leaving the report stuck at "generating" forever (codex-r6
+	// P1). RegisterPostCommit is a no-op (logged) outside TenantTx and is
+	// nil-safe, so non-tenant call sites and error paths above degrade
+	// gracefully.
+	middleware.RegisterPostCommit(c, launcher)
 
 	return c.JSON(http.StatusAccepted, report)
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -170,6 +171,114 @@ func TestMarkReportFailed_OpensFreshTenantTxForFailureUpdate(t *testing.T) {
 	}
 	if report.ErrorMessage != "boom" {
 		t.Fatalf("report.ErrorMessage = %q, want %q", report.ErrorMessage, "boom")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// codex-r6 P1 regression guard.
+//
+// Previously GenerateReport spawned generateReportAsync inline with `go ...`
+// before returning. On fast generators the goroutine's UpdateReport landed
+// before the parent CreateReport INSERT became visible, silently matched 0
+// rows, and the report stuck at "generating" forever. The fix returns a
+// launcher closure that the caller invokes AFTER the parent tx commits
+// (handler via middleware.RegisterPostCommit, scheduler directly after
+// runWithTenantTx returns).
+//
+// These tests pin down: (a) GenerateReport runs CreateReport synchronously
+// inside the caller's context and returns a non-nil launcher on success,
+// (b) the goroutine is NOT spawned until the launcher is called, and (c) an
+// error path returns nil report + nil launcher so callers can wire
+// RegisterPostCommit unconditionally.
+func TestGenerateReport_ReturnsLauncherAndDoesNotLaunchInline(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tenantID := uuid.New()
+	userID := uuid.New()
+
+	// Only the synchronous CreateReport INSERT must hit the DB during
+	// GenerateReport. If the launcher had fired inline, sqlmock would also
+	// see the goroutine's BEGIN / set_config / UPDATE / COMMIT (or fail with
+	// unmet expectations on its own schedule). The absence of any "extra"
+	// matcher here is the load-bearing assertion.
+	mock.ExpectExec("INSERT INTO generated_reports").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	svc := newTestReportService(t, db)
+
+	now := time.Now()
+	input := model.GenerateReportInput{
+		ReportType:  model.ReportTypeExecutive,
+		Format:      model.ReportFormatPDF,
+		PeriodStart: now.AddDate(0, -1, 0),
+		PeriodEnd:   now,
+		Locale:      "ja",
+	}
+
+	report, launcher, err := svc.GenerateReport(context.Background(), tenantID, userID, input)
+	if err != nil {
+		t.Fatalf("GenerateReport: %v", err)
+	}
+	if report == nil {
+		t.Fatal("report is nil on success")
+	}
+	if launcher == nil {
+		t.Fatal("launcher is nil on success — would race the tx commit")
+	}
+	if report.TenantID != tenantID {
+		t.Fatalf("report.TenantID = %v, want %v", report.TenantID, tenantID)
+	}
+	if report.Status != model.ReportStatusGenerating {
+		t.Fatalf("report.Status = %q, want %q", report.Status, model.ReportStatusGenerating)
+	}
+
+	// At this point only the INSERT must have happened. Anything beyond
+	// that — BEGIN/COMMIT for the async UPDATE — means the launcher fired
+	// inline and the codex-r6 race is back.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unexpected DB activity before launcher invoked: %v", err)
+	}
+}
+
+func TestGenerateReport_ErrorPathReturnsNilLauncher(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tenantID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectExec("INSERT INTO generated_reports").
+		WillReturnError(errors.New("insert blew up"))
+
+	svc := newTestReportService(t, db)
+
+	input := model.GenerateReportInput{
+		ReportType: model.ReportTypeExecutive,
+		Format:     model.ReportFormatPDF,
+	}
+
+	report, launcher, gerr := svc.GenerateReport(context.Background(), tenantID, userID, input)
+	if gerr == nil {
+		t.Fatal("expected error on CreateReport failure")
+	}
+	if report != nil {
+		t.Fatalf("report should be nil on error, got %+v", report)
+	}
+	// Nil launcher lets the scheduler path call launcher() unconditionally
+	// only when err is nil, and lets the handler hand the launcher to
+	// RegisterPostCommit (which is nil-safe by design — see middleware/tx.go)
+	// without an extra nil branch.
+	if launcher != nil {
+		t.Fatal("launcher should be nil when GenerateReport returns an error")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)

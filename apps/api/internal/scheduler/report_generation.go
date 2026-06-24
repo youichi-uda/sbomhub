@@ -191,10 +191,13 @@ func (j *ReportGenerationJob) shouldGenerate(setting *model.ReportSettings, now 
 // generateReport generates a report for a tenant.
 //
 // reportService.GenerateReport synchronously persists a `generated_reports`
-// row (RLS-bound, requires tenant GUC) and then spawns its own
-// `generateReportAsync` goroutine for the actual PDF/XLSX build. We only
-// need the GUC for the synchronous DB insert, so the tenant tx wraps just
-// the call into reportService.
+// row (RLS-bound, requires tenant GUC) and returns a launcher closure that
+// kicks off the actual PDF/XLSX build on a goroutine (codex-r6 P1). We
+// only need the GUC for the synchronous DB insert, so the tenant tx wraps
+// just the call into reportService. The launcher is invoked AFTER the tx
+// returns so that the goroutine's terminal UpdateReport never races the
+// CreateReport INSERT — when they ran inside the same tx the UPDATE could
+// land first against a stale snapshot and silently match 0 rows.
 func (j *ReportGenerationJob) generateReport(ctx context.Context, setting *model.ReportSettings) {
 	startTime := time.Now()
 
@@ -221,13 +224,17 @@ func (j *ReportGenerationJob) generateReport(ctx context.Context, setting *model
 	// Use system user ID for scheduled reports
 	systemUserID := uuid.Nil
 
-	var report *model.GeneratedReport
+	var (
+		report   *model.GeneratedReport
+		launcher func()
+	)
 	err := runWithTenantTx(ctx, j.db, setting.TenantID, func(txCtx context.Context, _ *sql.Tx) error {
-		r, gerr := j.reportService.GenerateReport(txCtx, setting.TenantID, systemUserID, input)
+		r, l, gerr := j.reportService.GenerateReport(txCtx, setting.TenantID, systemUserID, input)
 		if gerr != nil {
 			return gerr
 		}
 		report = r
+		launcher = l
 		return nil
 	})
 	if err != nil {
@@ -238,6 +245,14 @@ func (j *ReportGenerationJob) generateReport(ctx context.Context, setting *model
 			"duration_ms", time.Since(startTime).Milliseconds(),
 		)
 		return
+	}
+
+	// Now that the tenant tx has committed and the CreateReport row is
+	// durable, fire the async builder. nil-check is defensive — on a nil
+	// error GenerateReport guarantees a non-nil launcher, but we would
+	// rather drop the launch than panic if that contract ever drifts.
+	if launcher != nil {
+		launcher()
 	}
 
 	j.logger.Info("Scheduled report generation initiated",
