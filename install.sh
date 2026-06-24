@@ -191,6 +191,31 @@ GRANT USAGE   ON SCHEMA   public  TO sbomhub_migrator, sbomhub_app;
 -- DDL is exclusively the migrator's job (Trust Rescue R1 / codex-r1).
 GRANT CREATE ON SCHEMA public TO sbomhub_migrator;
 
+-- Pre-install required extensions as the bootstrap superuser
+-- (= POSTGRES_USER = sbomhub, the role this psql session is logged in as).
+--
+-- codex-r13 P1: migration 001 starts with
+--   CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- which requires database-level CREATE privilege. The application roles
+-- created above (sbomhub_migrator / sbomhub_app) are intentionally not
+-- superusers — sbomhub_migrator has CREATEDB / CREATEROLE / schema-level
+-- CREATE but NOT database-level CREATE, so running migration 001 as the
+-- migrator role on a fresh install fails with
+--   permission denied to create extension "uuid-ossp"
+-- and the whole `./install.sh --start` path (plus the docs-curl-smoke
+-- workflow) dies before any application schema is created.
+--
+-- Installing the extension here, while still connected as the bootstrap
+-- superuser, sidesteps that limitation. Migration 001's CREATE EXTENSION
+-- IF NOT EXISTS becomes a no-op on every subsequent run (fresh installs
+-- and existing-volume upgrades alike), so we keep extension provisioning
+-- centralised in install.sh without changing the migration itself.
+--
+-- Only uuid-ossp is currently required (the sole CREATE EXTENSION in
+-- apps/api/migrations/*). Add any future extensions here, not in the
+-- migrations, so the same superuser-only privilege is satisfied.
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 -- Existing tables (no-op on a fresh DB; needed if re-run against a populated schema).
 GRANT ALL ON ALL TABLES IN SCHEMA public TO sbomhub_migrator;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sbomhub_app;
