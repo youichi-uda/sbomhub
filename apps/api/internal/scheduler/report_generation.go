@@ -40,7 +40,14 @@ type ReportGenerationJob struct {
 	logger        *slog.Logger
 }
 
-// NewReportGenerationJob creates a new report generation job
+// NewReportGenerationJob creates a new report generation job.
+//
+// codex-r5 P2: the constructor also wires `db` into reportService via
+// ReportService.SetDB so that generateReportAsync can open its own
+// tenant-scoped tx for the terminal UPDATE on generated_reports. Without
+// this, the HTTP-driven path leaves reports stuck at "generating" forever.
+// NewReportService cannot take db directly because the cmd/server wiring
+// file is settled in the review queue and must stay untouched.
 func NewReportGenerationJob(
 	reportService *service.ReportService,
 	reportRepo *repository.ReportRepository,
@@ -48,6 +55,9 @@ func NewReportGenerationJob(
 	db *sql.DB,
 	interval time.Duration,
 ) *ReportGenerationJob {
+	if reportService != nil {
+		reportService.SetDB(db)
+	}
 	return &ReportGenerationJob{
 		reportService: reportService,
 		reportRepo:    reportRepo,
@@ -58,7 +68,9 @@ func NewReportGenerationJob(
 	}
 }
 
-// NewReportGenerationJobFull creates a new report generation job with full configuration
+// NewReportGenerationJobFull creates a new report generation job with full
+// configuration. Mirrors NewReportGenerationJob's codex-r5 db injection so
+// the production wiring (which uses ...Full) also gets the fix.
 func NewReportGenerationJobFull(
 	reportService *service.ReportService,
 	reportRepo *repository.ReportRepository,
@@ -67,6 +79,9 @@ func NewReportGenerationJobFull(
 	cfg *config.Config,
 	interval time.Duration,
 ) *ReportGenerationJob {
+	if reportService != nil {
+		reportService.SetDB(db)
+	}
 	return &ReportGenerationJob{
 		reportService: reportService,
 		reportRepo:    reportRepo,

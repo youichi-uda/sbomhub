@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/johnfercher/maroto/v2/pkg/core/entity"
 	"github.com/johnfercher/maroto/v2/pkg/props"
 	"github.com/sbomhub/sbomhub/internal/assets"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/xuri/excelize/v2"
@@ -35,10 +37,32 @@ type ReportService struct {
 	tenantRepo        *repository.TenantRepository
 	checklistRepo     *repository.ChecklistRepository
 	visualizationRepo *repository.VisualizationRepository
-	reportDir         string
+	// db is the raw *sql.DB handle used by background goroutines (notably
+	// generateReportAsync) to open their own tenant-scoped transactions via
+	// database.WithTxFunc. Request-driven paths do NOT use this field — they
+	// inherit the middleware-opened tx through ctx.
+	//
+	// Why this exists (codex-r5 P2):
+	//   GenerateReport persists a "generating" row inside the caller's tenant
+	//   tx, then spawns generateReportAsync on a fresh goroutine. By the time
+	//   the goroutine wakes up the parent tx has long committed, so the ctx
+	//   it inherits carries no tenant_id GUC. Without opening a new tenant tx
+	//   here, repository.q(ctx) degrades to a raw pool connection,
+	//   `app.current_tenant_id` is unset, the RLS UPDATE on generated_reports
+	//   silently matches 0 rows, and the report sticks at "generating"
+	//   forever with no file content saved.
+	db        *sql.DB
+	reportDir string
 }
 
-// NewReportService creates a new ReportService
+// NewReportService creates a new ReportService.
+//
+// Note: this constructor does NOT take *sql.DB to keep the signature
+// (and therefore the cmd/server/main.go wiring, which is a settled
+// "DO NOT touch" file in the codex review queue) stable. The db handle
+// needed by generateReportAsync is injected later via SetDB — in
+// practice from NewReportGenerationJob[Full] during scheduler init,
+// which runs before HTTP serving starts. See SetDB for details.
 func NewReportService(
 	reportRepo *repository.ReportRepository,
 	dashboardRepo *repository.DashboardRepository,
@@ -60,6 +84,22 @@ func NewReportService(
 		visualizationRepo: visualizationRepo,
 		reportDir:         reportDir,
 	}
+}
+
+// SetDB attaches the raw *sql.DB handle used by background goroutines to open
+// their own tenant-scoped transactions (see ReportService.db doc comment for
+// the full why).
+//
+// This is called from scheduler.NewReportGenerationJob[Full] so that both the
+// HTTP-driven path (handler -> GenerateReport -> generateReportAsync) and the
+// scheduler-driven path see the same db wiring. Calling it more than once is
+// idempotent — the last db wins. Calling it with a nil db is a no-op so we
+// never accidentally tear down a previously-attached handle.
+func (s *ReportService) SetDB(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	s.db = db
 }
 
 // GetSettings returns report settings for a tenant
@@ -194,17 +234,37 @@ func (s *ReportService) GenerateReport(ctx context.Context, tenantID, userID uui
 		return nil, fmt.Errorf("failed to create report record: %w", err)
 	}
 
-	// Generate report asynchronously
-	go s.generateReportAsync(context.Background(), tenantID, report, locale)
+	// Generate report asynchronously. tenantID is captured explicitly so the
+	// goroutine does not depend on the caller's request ctx (which carries
+	// the parent tx that will commit and release its connection before the
+	// goroutine runs — see runWithTenantTx for the replacement RLS path).
+	go s.generateReportAsync(tenantID, report, locale)
 
 	return report, nil
 }
 
-// generateReportAsync generates the report file asynchronously
-func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.UUID, report *model.GeneratedReport, locale string) {
+// generateReportAsync generates the report file asynchronously.
+//
+// This runs on a goroutine spawned by GenerateReport. The caller's tenant
+// transaction has already committed by the time we wake up, so we MUST open
+// our own tenant-scoped transaction to do anything against RLS-bound tables
+// — both the data-gathering reads (projects / dashboard / analytics views
+// joined on tenant_id) and the terminal UpdateReport.
+//
+// codex-r5 P2: previously this function used context.Background() and relied
+// on the now-noop tenantRepo.SetCurrentTenant call. Because
+// `set_config(..., is_local=true)` only takes effect inside a transaction,
+// the GUC was never actually set on the pool connection serving UpdateReport,
+// and RLS WITH CHECK rejected every UPDATE — leaving the report stuck at
+// "generating" with no file content saved.
+func (s *ReportService) generateReportAsync(tenantID uuid.UUID, report *model.GeneratedReport, locale string) {
 	startTime := time.Now()
+	ctx := context.Background()
 
-	// Panic recovery to ensure status is updated even if something goes wrong
+	// Panic recovery: even on panic we still try to record "failed". The
+	// generation tx (if any) has already been rolled back and re-raised by
+	// WithTxFunc by the time we land here, so the status-update goes in its
+	// own fresh tenant tx via markReportFailed.
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("panic in report generation",
@@ -213,9 +273,7 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 				"panic", r,
 				"duration_ms", time.Since(startTime).Milliseconds(),
 			)
-			report.Status = model.ReportStatusFailed
-			report.ErrorMessage = fmt.Sprintf("Internal error: %v", r)
-			s.reportRepo.UpdateReport(ctx, report)
+			s.markReportFailed(ctx, tenantID, report, fmt.Sprintf("Internal error: %v", r))
 		}
 	}()
 
@@ -226,22 +284,50 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 		"format", report.Format,
 	)
 
-	// Set tenant context for RLS
-	if s.tenantRepo != nil {
-		s.tenantRepo.SetCurrentTenant(ctx, tenantID)
+	err := s.runWithTenantTx(ctx, tenantID, func(txCtx context.Context) error {
+		return s.runReportGeneration(txCtx, tenantID, report, locale)
+	})
+	if err != nil {
+		slog.Error("report generation failed",
+			"report_id", report.ID,
+			"tenant_id", tenantID,
+			"error", err,
+			"duration_ms", time.Since(startTime).Milliseconds(),
+		)
+		// Generation tx rolled back. Record the failure in its own fresh
+		// tenant tx so the row reflects "failed" instead of staying
+		// "generating" forever.
+		s.markReportFailed(ctx, tenantID, report, err.Error())
+		return
 	}
 
-	// Gather report data
-	data, err := s.gatherReportData(ctx, tenantID, report.PeriodStart, report.PeriodEnd)
+	slog.Info("report generation completed",
+		"report_id", report.ID,
+		"file_size", report.FileSize,
+		"duration_ms", time.Since(startTime).Milliseconds(),
+	)
+}
+
+// runReportGeneration is the body of generateReportAsync that runs inside a
+// tenant-scoped tx (txCtx carries it). It gathers data, renders the file, and
+// writes the terminal UpdateReport — all three need RLS context to see /
+// update the right tenant's rows.
+//
+// Returning an error here causes WithTxFunc to roll back; the caller
+// (generateReportAsync) will then open a separate tenant tx via
+// markReportFailed to persist the "failed" status.
+//
+// Trade-off (acknowledged in the codex-r5 task): the tx is held for the full
+// duration of file IO + PDF/XLSX rendering, which can be several seconds.
+// This mirrors the existing ScanService background scan pattern (R1-1b) and
+// is acceptable for current report volumes. ※要確認 if parallel report
+// generation ever ramps up to the point of saturating the connection pool.
+func (s *ReportService) runReportGeneration(txCtx context.Context, tenantID uuid.UUID, report *model.GeneratedReport, locale string) error {
+	// Gather report data (RLS-bound reads via repos that pick up the tx
+	// through database.Querier).
+	data, err := s.gatherReportData(txCtx, tenantID, report.PeriodStart, report.PeriodEnd)
 	if err != nil {
-		slog.Error("failed to gather report data",
-			"report_id", report.ID,
-			"error", err,
-		)
-		report.Status = model.ReportStatusFailed
-		report.ErrorMessage = fmt.Sprintf("Failed to gather data: %v", err)
-		s.reportRepo.UpdateReport(ctx, report)
-		return
+		return fmt.Errorf("gather report data: %w", err)
 	}
 
 	// Generate file
@@ -254,17 +340,8 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 	default:
 		err = fmt.Errorf("unsupported format: %s", report.Format)
 	}
-
 	if err != nil {
-		slog.Error("failed to generate report file",
-			"report_id", report.ID,
-			"format", report.Format,
-			"error", err,
-		)
-		report.Status = model.ReportStatusFailed
-		report.ErrorMessage = fmt.Sprintf("Failed to generate file: %v", err)
-		s.reportRepo.UpdateReport(ctx, report)
-		return
+		return fmt.Errorf("generate report file: %w", err)
 	}
 
 	// Generate filename for reference
@@ -275,27 +352,66 @@ func (s *ReportService) generateReportAsync(ctx context.Context, tenantID uuid.U
 		report.Format,
 	)
 
-	// Update report record - store content in database
+	// Stamp success fields and write the terminal UPDATE inside the same
+	// tenant tx so RLS WITH CHECK passes and the row flips from "generating"
+	// to "completed" atomically with the content bytes.
 	now := time.Now()
-	report.FilePath = filename // Store filename for reference
+	report.FilePath = filename
 	report.FileSize = len(fileData)
-	report.FileContent = fileData // Store content in DB
+	report.FileContent = fileData
 	report.Status = model.ReportStatusCompleted
 	report.CompletedAt = &now
 
-	if err := s.reportRepo.UpdateReport(ctx, report); err != nil {
-		slog.Error("failed to update report record",
-			"report_id", report.ID,
-			"error", err,
-		)
-		return
+	if err := s.reportRepo.UpdateReport(txCtx, report); err != nil {
+		return fmt.Errorf("update report record: %w", err)
 	}
+	return nil
+}
 
-	slog.Info("report generation completed",
-		"report_id", report.ID,
-		"file_size", report.FileSize,
-		"duration_ms", time.Since(startTime).Milliseconds(),
-	)
+// markReportFailed records a generation failure (panic or error path) by
+// running UpdateReport inside its own fresh tenant tx. This is a second-best
+// effort — if it also fails we log loudly but cannot do more without
+// risking infinite recursion.
+func (s *ReportService) markReportFailed(ctx context.Context, tenantID uuid.UUID, report *model.GeneratedReport, errMsg string) {
+	report.Status = model.ReportStatusFailed
+	report.ErrorMessage = errMsg
+	if updErr := s.runWithTenantTx(ctx, tenantID, func(txCtx context.Context) error {
+		return s.reportRepo.UpdateReport(txCtx, report)
+	}); updErr != nil {
+		slog.Error("failed to mark report as failed",
+			"report_id", report.ID,
+			"tenant_id", tenantID,
+			"original_error", errMsg,
+			"update_error", updErr,
+		)
+	}
+}
+
+// runWithTenantTx opens a fresh transaction on s.db, pins
+// `app.current_tenant_id` to tenantID for the duration of that tx, and runs
+// fn with a ctx that carries the tx via database.WithTx. This mirrors
+// scheduler.runWithTenantTx — the two could be unified later, but keeping a
+// private copy here keeps the codex-r5 fix scope-local and the
+// scheduler.runWithTenantTx untouched (it is referenced from multiple
+// "DO NOT touch" files).
+//
+// `is_local=true` scopes the GUC to the transaction only, so once the tx
+// commits or rolls back the pooled connection returns to the pool with no
+// tenant residue.
+func (s *ReportService) runWithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(txCtx context.Context) error) error {
+	if s.db == nil {
+		return fmt.Errorf("report service: db handle is nil; cannot open tenant-scoped tx")
+	}
+	return database.WithTxFunc(ctx, s.db, func(txCtx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(
+			txCtx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			tenantID.String(),
+		); err != nil {
+			return fmt.Errorf("set tenant context for %s: %w", tenantID, err)
+		}
+		return fn(txCtx)
+	})
 }
 
 // gatherReportData collects all data needed for the report
