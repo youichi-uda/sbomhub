@@ -1,0 +1,59 @@
+# SBOMHub apps/api - golangci-lint configuration
+#
+# Trust Rescue P1 #17-followup / docs/ci-inventory.md §4 Action items.
+#
+# Until this file landed, `apps/api` had `go build ./...` + `go test ./...`
+# (see go-test.yml) but no static-analysis quality gate. CLAUDE.md mandates
+# `golangci-lint run` as part of the Go style policy.
+#
+# This is the initial enforcement baseline. The companion workflow
+# (.github/workflows/golangci-lint.yml) currently runs in **warning mode**
+# (continue-on-error: true) so the first lint pass surfaces violations
+# without blocking merges. Once the existing-code violations are cleaned up
+# in a follow-up wave, the workflow will be flipped to strict mode.
+
+run:
+  timeout: 5m
+  go: '1.24'
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck       # error 戻り値の無視検知
+    - gosimple       # コード簡素化
+    - govet          # go vet
+    - ineffassign    # 未使用 assign
+    - staticcheck    # 静的解析
+    - unused         # 未使用 symbol
+    - gofmt          # gofmt 違反
+    - goimports      # import 順序
+    - misspell       # spell check
+    - bodyclose      # http.Response.Body close 忘れ
+    - rowserrcheck   # rows.Err() check
+    - sqlclosecheck  # sql resource close
+    - gosec          # security issues
+    - revive         # style (golint replacement)
+    - unparam        # unused parameters
+
+linters-settings:
+  gosec:
+    excludes:
+      - G104  # error 無視 (errcheck で別に検知)
+      - G304  # file path inclusion (false positive 多い)
+  revive:
+    rules:
+      - name: exported
+        arguments: ["disableStutteringCheck"]
+      - name: unused-parameter
+        disabled: true  # unparam で検知
+
+issues:
+  exclude-rules:
+    # test ファイルの厳密性緩和
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - bodyclose
+  max-issues-per-linter: 0
+  max-same-issues: 0

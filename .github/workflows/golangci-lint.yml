@@ -1,0 +1,76 @@
+# SBOMHub - golangci-lint
+#
+# Trust Rescue P1 #17-followup / docs/ci-inventory.md §4 Action items.
+#
+# Companion to go-test.yml. While go-test runs `go build` + `go test`, this
+# workflow runs the static-analysis quality gate (`golangci-lint run`)
+# against apps/api per the linter set declared in apps/api/.golangci.yml.
+#
+# Enforcement policy (initial landing):
+#   The lint job runs with `continue-on-error: true`. This is intentional.
+#   This is the first time `golangci-lint` is wired against the existing
+#   apps/api codebase, so the very first run will most likely surface
+#   pre-existing violations (errcheck / gosec / revive). Blocking merges
+#   on those before they are triaged would force every unrelated PR to fix
+#   them, which is hostile to small bug-fix / docs PRs.
+#
+#   Once existing violations are cleaned up in a follow-up wave, this flag
+#   will be removed and the workflow becomes a hard gate (and gets added
+#   to the Required status checks list in docs/ci-inventory.md §2.3).
+
+name: golangci-lint
+
+on:
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "apps/api/.golangci.yml"
+      - ".github/workflows/golangci-lint.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - "apps/api/.golangci.yml"
+      - ".github/workflows/golangci-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  golangci:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # First-landing enforcement policy: warn-only. See header comment.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Pin to the module's declared toolchain (apps/api/go.mod is
+          # `go 1.24.11`). Mirrors go-test.yml.
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Show versions
+        run: |
+          go version
+          go env GOVERSION GOMOD GOFLAGS
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # Pin a known-good v1.x release. golangci-lint v2.x uses a
+          # different config schema; switching to v2 will be a separate
+          # migration wave.
+          version: v1.62
+          working-directory: apps/api
+          args: --timeout=5m

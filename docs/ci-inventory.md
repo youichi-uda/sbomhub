@@ -31,6 +31,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | Workflow | Trigger | Job | Status |
 |---|---|---|---|
 | `go-test.yml` | push main / PR (`apps/api/**`) | `go build ./...` + `go test ./...` (integration 除外) | Trust Rescue P1 #17 / 9.5.1 |
+| `golangci-lint.yml` | push main / PR (`apps/api/**`) | `golangci-lint run` against apps/api (warn-only initial landing) | Trust Rescue P1 #17-followup |
 
 ### 2.2 Required quality gates
 
@@ -38,7 +39,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 |---|---|---|
 | `go build ./...` (apps/api) | 新規 `go-test.yml` で実装 | OK (本 wave) |
 | `go test ./...` (apps/api、 unit のみ) | 新規 `go-test.yml` で実装 | OK (本 wave) |
-| `golangci-lint` (apps/api) | **未設定** (リポジトリに `.golangci.yml` も存在せず) | (P1) `golangci-lint` workflow + 設定ファイル追加 |
+| `golangci-lint` (apps/api) | `golangci-lint.yml` + `apps/api/.golangci.yml` で実装、 `continue-on-error: true` の warn-only で初回 landing | (P2) 既存 lint 違反 fix 後に strict 化 (continue-on-error 削除 + Required status checks 追加) |
 | migration test (up/down/up roundtrip) | **未設定** | (P1) docker compose postgres + golang-migrate で round-trip 確認する workflow 追加 |
 | RLS integration test | `apps/api/internal/repository/rls_test.go` に `//go:build integration` で実装済、 CI 実行は **未設定** | (P1) docker compose 起動 → `go test -tags=integration ./internal/repository/...` を実行する workflow 追加 |
 | frontend build (`pnpm build`) | **未設定** | (P1) `apps/web` の `pnpm install && pnpm build` workflow 追加 |
@@ -112,7 +113,7 @@ sbomhub と同様の方針 (Settings → Branches → `main`):
 P3 = それ以降):
 
 - [x] (P1) sbomhub: Go test workflow 追加 — 本 wave (#17) で `go-test.yml` 追加済
-- [ ] (P1) sbomhub: `.golangci.yml` 設定 + golangci-lint workflow 追加
+- [x] (P1) sbomhub: `.golangci.yml` 設定 + golangci-lint workflow 追加 — `apps/api/.golangci.yml` + `golangci-lint.yml` で warn-only landing (#17-followup)。 既存 lint 違反 fix と strict 化 (continue-on-error 削除) は P2 で別 wave
 - [ ] (P1) sbomhub: migration roundtrip workflow 追加 (docker compose postgres + `cmd/migrate up && down && up`)
 - [ ] (P1) sbomhub: RLS integration test workflow 追加 (docker compose 経由で `go test -tags=integration ./internal/repository/...`)
 - [ ] (P1) sbomhub: frontend lint/typecheck/build workflow 追加 (`apps/web` の pnpm)
