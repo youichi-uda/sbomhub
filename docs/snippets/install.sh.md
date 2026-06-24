@@ -47,7 +47,7 @@ docker compose up -d
 
 ```bash
 # API health (expects 200 OK)
-curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/api/v1/health
 
 # Or, once the CLI is installed:
 sbomhub doctor
