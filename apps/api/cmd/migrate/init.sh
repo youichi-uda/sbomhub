@@ -50,6 +50,15 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO sbomhub_migrator, sbomhub_app;
     GRANT USAGE ON SCHEMA public TO sbomhub_migrator, sbomhub_app;
 
+    -- Postgres 15+ revoked the implicit CREATE on the public schema for
+    -- non-owners (https://www.postgresql.org/docs/15/release-15.html), so
+    -- without this grant the very first migrator-driven statement
+    --   CREATE TABLE IF NOT EXISTS schema_migrations ...
+    -- fails with "permission denied for schema public" on a fresh
+    -- docker compose up. sbomhub_app intentionally does NOT receive CREATE;
+    -- DDL is exclusively the migrator's job (Trust Rescue R1 / codex-r1).
+    GRANT CREATE ON SCHEMA public TO sbomhub_migrator;
+
     -- Existing tables (no-op on a fresh DB; needed if init.sh is re-run
     -- against a populated schema).
     GRANT ALL ON ALL TABLES IN SCHEMA public TO sbomhub_migrator;
