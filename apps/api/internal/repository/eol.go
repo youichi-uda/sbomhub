@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -18,6 +19,19 @@ type EOLRepository struct {
 // NewEOLRepository creates a new EOLRepository
 func NewEOLRepository(db *sql.DB) *EOLRepository {
 	return &EOLRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// Only methods that touch RLS-protected tables (`components`, `sboms`,
+// `projects`) need this — the eol_* cache tables have no RLS and either path
+// works for them. codex-r6 fix: GetEOLSummary / GetComponentsWithEOL /
+// GetComponentsForEOLCheck / UpdateComponentEOLStatus were running on a raw
+// pool connection, so the JOIN through `sboms` / `components` lost the tenant
+// GUC and the dashboard's /projects/:id/eol panel returned empty under FORCE
+// ROW LEVEL SECURITY.
+func (r *EOLRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // UpsertProduct creates or updates an EOL product
@@ -357,7 +371,9 @@ func (r *EOLRepository) UpdateComponentEOLStatus(ctx context.Context, componentI
 			eol_date = $4, eos_date = $5, eol_checked_at = NOW()
 		WHERE id = $6
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	// `components` is RLS-enforced — route through the tenant tx so the
+	// UPDATE is visible to the policy (otherwise affected-row count is 0).
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		info.Status, info.ProductID, info.CycleID,
 		info.EOLDate, info.EOSDate, componentID,
 	)
@@ -377,7 +393,9 @@ func (r *EOLRepository) GetComponentsForEOLCheck(ctx context.Context, projectID 
 		LIMIT $2
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, projectID, limit)
+	// JOIN through sboms (RLS-enforced) — must route through the tenant tx
+	// or the policy on `sboms` returns zero rows (codex-r6 P2).
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +430,9 @@ func (r *EOLRepository) GetEOLSummary(ctx context.Context, projectID uuid.UUID) 
 	`
 
 	summary := &model.EOLSummary{ProjectID: projectID}
-	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
+	// JOIN through sboms (RLS-enforced) — must route through the tenant tx
+	// or the policy on `sboms` collapses every COUNT to 0 (codex-r6 P2).
+	err := r.q(ctx).QueryRowContext(ctx, query, projectID).Scan(
 		&summary.TotalComponents,
 		&summary.Active,
 		&summary.EOL,
@@ -447,8 +467,11 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		WHERE %s
 	`, where)
 
+	// JOIN through sboms (RLS-enforced) — both the COUNT and the list query
+	// must route through the tenant tx (codex-r6 P2).
+	q := r.q(ctx)
 	var total int
-	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := q.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -467,7 +490,7 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 
 	args = append(args, limit, offset)
 
-	rows, err := r.db.QueryContext(ctx, listQuery, args...)
+	rows, err := q.QueryContext(ctx, listQuery, args...)
 	if err != nil {
 		return nil, 0, err
 	}

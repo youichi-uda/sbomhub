@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -18,6 +19,18 @@ type KEVRepository struct {
 // NewKEVRepository creates a new KEVRepository
 func NewKEVRepository(db *sql.DB) *KEVRepository {
 	return &KEVRepository{db: db}
+}
+
+// q routes the statement through the request-scoped transaction when one is
+// attached to ctx (Trust Rescue 9.1.2 / #3); falls back to r.db otherwise.
+// Only methods that JOIN RLS-protected tables (projects / sboms / components /
+// vulnerabilities path) need this — kev_catalog / kev_sync_settings /
+// kev_sync_logs are global caches without RLS and would work either way.
+// codex-r6 fix: GetKEVVulnerabilities was running on a raw pool connection,
+// so the JOIN through `sboms` lost the tenant GUC and the dashboard's
+// /projects/:id/kev panel returned empty under FORCE ROW LEVEL SECURITY.
+func (r *KEVRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // UpsertEntry creates or updates a KEV catalog entry
@@ -329,7 +342,10 @@ func (r *KEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uui
 		ORDER BY v.kev_due_date ASC NULLS LAST
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, projectID)
+	// JOIN through sboms (RLS-enforced) — must route through the tenant tx
+	// or the FORCE ROW LEVEL SECURITY policy on `sboms` hides every row and
+	// the dashboard's /projects/:id/kev panel shows zero (codex-r6 P2).
+	rows, err := r.q(ctx).QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, err
 	}
