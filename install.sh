@@ -362,11 +362,25 @@ generate_env_file() {
         .env
     rm -f .env.bak
 
-    # DATABASE_URL / MIGRATE_DATABASE_URL は .env.example で既定値 (dev パスワード)
-    # が埋め込まれているので、 上で生成したパスワードに置換する。
+    # DATABASE_URL / MIGRATE_DATABASE_URL は .env.example で既定値 (dev パスワード
+    # + localhost host) が埋め込まれているので、 上で生成したパスワードに置換し
+    # つつ host を compose 内部 DNS の `postgres` に書き換える。
+    #
+    # codex-r16: docker-compose の environment が `${DATABASE_URL:-...}` 形式に
+    # なったため、 .env の DATABASE_URL がそのまま container 環境に伝播する
+    # (旧構造では environment が env_file を上書きしていたので host=localhost
+    # の .env でも container 内で postgres に強制差し替えされていた)。 ここで
+    # host=postgres を書いておかないと compose 起動時に container が localhost
+    # に接続しに行き必ず失敗する。 .env.example 自体は `go run` 用に localhost
+    # のままにしてある。
+    #
+    # 生成 password は openssl rand -hex 16 で `[0-9a-f]{32}` なので URL-safe、
+    # URL-encode 不要。 operator が production password で `@ : / # ?` 等の
+    # URL 区切り文字を使う場合は .env を編集して URL-encoded 値で DATABASE_URL
+    # を直接書き換えること (.env.example の DATABASE roles セクション参照)。
     sed -i.bak \
-        -e "s|postgres://sbomhub_app:[^@]*@|postgres://sbomhub_app:${GENERATED_APP_PASSWORD}@|" \
-        -e "s|postgres://sbomhub_migrator:[^@]*@|postgres://sbomhub_migrator:${GENERATED_MIGRATOR_PASSWORD}@|" \
+        -e "s|postgres://sbomhub_app:[^@]*@localhost:|postgres://sbomhub_app:${GENERATED_APP_PASSWORD}@postgres:|" \
+        -e "s|postgres://sbomhub_migrator:[^@]*@localhost:|postgres://sbomhub_migrator:${GENERATED_MIGRATOR_PASSWORD}@postgres:|" \
         .env
     rm -f .env.bak
 

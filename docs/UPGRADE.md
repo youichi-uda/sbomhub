@@ -248,6 +248,18 @@ that role does not exist on the volume yet. Run:
 docker compose up -d api
 ```
 
+If the api logs `parse "postgres://...": ...` or `pq: SSL is not enabled on
+the server` style errors instead — or it tries to dial a host that looks like
+part of your password — your `APP_PASSWORD` / `MIGRATOR_PASSWORD` contains a
+character that the URL parser treats as a delimiter (`@ : / # ? & % +`). The
+docker-compose fallback substitutes the raw password into the connect string,
+so any of those characters break parsing. Either rotate to a URL-safe
+password (alphanumerics, `-`, `.`, `_`, `~`) or set `DATABASE_URL` /
+`MIGRATE_DATABASE_URL` in `.env` to the full URL with the password
+URL-encoded (`@` → `%40`, `/` → `%2F`, `#` → `%23`, etc.). The values you
+put there are forwarded verbatim via the `${DATABASE_URL:-...}` fallback in
+`docker-compose.yml`.
+
 ### 5.3 `ENCRYPTION_KEY` mismatch — old tokens fail to decrypt
 
 If you regenerated `ENCRYPTION_KEY` without first running the rotation

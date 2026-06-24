@@ -35,8 +35,15 @@ services:
       - path: .env
         required: false
     environment:
-      - DATABASE_URL=postgres://sbomhub_app:${APP_PASSWORD:-sbomhub_app_dev}@postgres:5432/sbomhub?sslmode=disable
-      - MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIGRATOR_PASSWORD:-sbomhub_migrator_dev}@postgres:5432/sbomhub?sslmode=disable
+      # codex-r16: operator が .env で DATABASE_URL / MIGRATE_DATABASE_URL を
+      # 完全形で override できるように `${VAR:-default}` 形式にする。 password
+      # に URL 区切り文字 (@ : / # ? & 等) を含む production password を使う
+      # 場合は、 .env に URL-encoded password 込みの完全 URL を直接書くこと
+      # (例: postgres://app:p%40ss@db.internal:5432/sbomhub?sslmode=require)。
+      # install.sh が生成する default password は openssl rand -hex 16 で
+      # URL-safe な hex のみなので、 fallback 経路は escape 不要。
+      - DATABASE_URL=${DATABASE_URL:-postgres://sbomhub_app:${APP_PASSWORD:-sbomhub_app_dev}@postgres:5432/sbomhub?sslmode=disable}
+      - MIGRATE_DATABASE_URL=${MIGRATE_DATABASE_URL:-postgres://sbomhub_migrator:${MIGRATOR_PASSWORD:-sbomhub_migrator_dev}@postgres:5432/sbomhub?sslmode=disable}
       - REDIS_URL=redis://redis:6379
       # SECURITY (P0 #5 / Trust Rescue 9.2.1): no bundled default. The api will
       # refuse to start when this is unset, a known default, or shorter than 32
