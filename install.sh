@@ -204,23 +204,86 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO sbomhub_app;
 
--- Existing-volume upgrade fix (codex-r3 P1):
+-- Existing-volume upgrade fix (codex-r3 P1, refined codex-r12 P1):
 -- On legacy self-host volumes every table / sequence was created by the
 -- POSTGRES_USER role 'sbomhub' and is therefore owned by it. GRANT ALL
 -- above is insufficient for owner-only operations (ALTER TABLE, DROP,
 -- ALTER COLUMN ... SET NOT NULL etc.), so migrations 027 / 028 / 029
 -- abort with "must be owner of table sboms" when run as sbomhub_migrator.
 --
--- REASSIGN OWNED transfers every object in the current database owned by
--- 'sbomhub' to 'sbomhub_migrator'. On a fresh volume the migrator has
--- not yet created anything as 'sbomhub', so this is a no-op. The
--- pg_roles guard keeps the script safe if an operator customised
--- POSTGRES_USER away from the default name.
+-- We deliberately do NOT use `REASSIGN OWNED BY sbomhub TO
+-- sbomhub_migrator` here: on a fresh `docker compose up` with
+-- POSTGRES_USER=sbomhub, that role also owns the database itself
+-- (CREATE DATABASE side-effect) plus other system-tied objects, and
+-- REASSIGN aborts with "cannot reassign ownership of objects owned by
+-- role sbomhub because they are required by the database system",
+-- which would break every fresh `./install.sh --start` install and the
+-- docs-curl-smoke workflow that follows.
+--
+-- Instead, iterate over the application-owned objects in the `public`
+-- schema only (tables, sequences, views, materialized views) and ALTER
+-- each one's owner individually. Fresh installs see zero matches and
+-- the DO block is a no-op; legacy upgrades transfer exactly the app
+-- objects without touching pg_catalog or the database owner.
 DO $$
+DECLARE
+    obj record;
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub') THEN
-        EXECUTE 'REASSIGN OWNED BY sbomhub TO sbomhub_migrator';
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub') THEN
+        RETURN;
     END IF;
+
+    -- Tables (including partitioned + foreign) currently owned by sbomhub.
+    FOR obj IN
+        SELECT schemaname, tablename
+        FROM pg_tables
+        WHERE schemaname = 'public' AND tableowner = 'sbomhub'
+    LOOP
+        EXECUTE format('ALTER TABLE %I.%I OWNER TO sbomhub_migrator',
+            obj.schemaname, obj.tablename);
+    END LOOP;
+
+    -- Sequences (own row in pg_class, relkind = 'S').
+    FOR obj IN
+        SELECT n.nspname AS schemaname, c.relname AS objname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_roles r ON r.oid = c.relowner
+        WHERE c.relkind = 'S'
+          AND n.nspname = 'public'
+          AND r.rolname = 'sbomhub'
+    LOOP
+        EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO sbomhub_migrator',
+            obj.schemaname, obj.objname);
+    END LOOP;
+
+    -- Views (relkind = 'v').
+    FOR obj IN
+        SELECT n.nspname AS schemaname, c.relname AS objname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_roles r ON r.oid = c.relowner
+        WHERE c.relkind = 'v'
+          AND n.nspname = 'public'
+          AND r.rolname = 'sbomhub'
+    LOOP
+        EXECUTE format('ALTER VIEW %I.%I OWNER TO sbomhub_migrator',
+            obj.schemaname, obj.objname);
+    END LOOP;
+
+    -- Materialized views (relkind = 'm').
+    FOR obj IN
+        SELECT n.nspname AS schemaname, c.relname AS objname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_roles r ON r.oid = c.relowner
+        WHERE c.relkind = 'm'
+          AND n.nspname = 'public'
+          AND r.rolname = 'sbomhub'
+    LOOP
+        EXECUTE format('ALTER MATERIALIZED VIEW %I.%I OWNER TO sbomhub_migrator',
+            obj.schemaname, obj.objname);
+    END LOOP;
 END
 $$;
 SQL
