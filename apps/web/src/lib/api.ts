@@ -1085,6 +1085,138 @@ export interface RunTriageResponse {
   threshold: number;
 }
 
+// -----------------------------------------------------------------------------
+// CRA report (AI drafting, M2-4 issue #36 + M2-5 issue #32) types
+// -----------------------------------------------------------------------------
+//
+// Unlike the M1 vex_drafts wire shape (PascalCase — Go struct has no json
+// tags), repository.CRAReport DOES declare snake_case `json:` tags on every
+// field, so the wire shape is snake_case. See
+// apps/api/internal/repository/cra_reports.go header comment for the
+// rationale (M1 #F28 lessons → lock JSON shape at struct definition).
+//
+// Keep these types in sync with that struct; if either drifts the CRA UI
+// silently breaks the same way the M1 triage UI did before #F28.
+
+/** CRA reporting milestone (matches DB CHECK constraint). */
+export type CRAReportType =
+  | "early_warning" // 24h notice
+  | "detailed_notification" // 72h follow-up
+  | "final_report";
+
+/** CRA report language allow-list. */
+export type CRAReportLang = "ja" | "en";
+
+/** Publication lifecycle, independent of `decision`. */
+export type CRAReportState =
+  | "draft"
+  | "under_investigation" // future state for highlight; backend may emit
+  | "approved"
+  | "submitted"
+  | "archived"
+  | string;
+
+/** Human decision lifecycle, independent of `state`. */
+export type CRAReportDecision = "pending" | "approved" | "edited" | "rejected";
+
+/**
+ * One evidence pointer attached to a CRA report. The CRA runner emits
+ * objects shaped `{kind, ref, ...}` where `ref` typically links back to
+ * the source VEX draft id, the LLM call id, or an advisory excerpt id.
+ * The exact shape is open-ended (jsonb), so we keep the type permissive.
+ * ※要確認: lock the shape once cra.Runner stabilises which keys the UI
+ * is meant to surface (`source_vex_draft` deep link in particular).
+ */
+export interface CRAReportEvidence {
+  kind: string;
+  ref?: string;
+  description?: string;
+  note?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * CRA report wire shape (snake_case — repository.CRAReport `json:` tags).
+ * Evidence is unmarshalled as an array; the backend stores it as JSONB.
+ */
+export interface CRAReport {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  vulnerability_id: string;
+  cve_id: string;
+  report_type: CRAReportType | string;
+  lang: CRAReportLang | string;
+  state: CRAReportState;
+  draft_text: string;
+  provider?: string;
+  model?: string;
+  prompt_hash?: string;
+  response_hash?: string;
+  // Evidence is JSONB on the wire. Treat null defensively for forward
+  // compatibility — the UI fail-safe per F4 hides cards with 0 evidence.
+  evidence: CRAReportEvidence[] | null;
+  source_vex_draft_id?: string | null;
+  llm_call_id?: string | null;
+  decision: CRAReportDecision;
+  decision_by?: string | null;
+  decision_at?: string | null;
+  decision_note?: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CRAReportListResponse {
+  reports: CRAReport[];
+}
+
+export interface CRAReportListFilter {
+  cve_id?: string;
+  report_type?: CRAReportType | string;
+  lang?: CRAReportLang | string;
+  state?: string;
+  decision?: CRAReportDecision;
+  limit?: number;
+  offset?: number;
+}
+
+/** PUT decision body — see handler/cra_reports.go.craDecisionRequest. */
+export interface CRAReportDecisionInput {
+  decision: "approved" | "edited" | "rejected";
+  decision_note?: string;
+  /**
+   * Pointer-nullable in the backend: omitted → preserve AI draft_text;
+   * set (even to "") → overwrite. Use undefined to omit.
+   */
+  edited_draft_text?: string;
+}
+
+/** POST run body — handler/cra_reports.go.runReportRequest. */
+export interface RunCRAReportInput {
+  vulnerability_id: string;
+  cve_id: string;
+  source_vex_draft_id?: string;
+  report_type: CRAReportType | string;
+  lang: CRAReportLang | string;
+  product_name?: string;
+  product_version?: string;
+  vendor_name?: string;
+  reporter_name?: string;
+  reporter_role?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  awareness_time?: string;
+  report_id?: string;
+}
+
+/** POST run / reanalyse response. */
+export interface RunCRAReportResponse {
+  report: CRAReport | null;
+  llm_call_id?: string;
+  ai_disabled?: boolean;
+}
+
 /**
  * APIError surfaces non-2xx responses from the backend with the parsed JSON
  * body (when present). Triage callers need to differentiate
@@ -1201,6 +1333,25 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
 
   return JSON.parse(text);
+}
+
+/**
+ * Build URLSearchParams for CRAReportListFilter. Centralised so list()
+ * and listWithMeta() emit identical query strings — drift between the
+ * two would surface as "the count says N but the page shows M" which
+ * is the exact bug class M1 #F28 chased down.
+ */
+function cleanCRAReportFilter(filter?: CRAReportListFilter): URLSearchParams {
+  const params = new URLSearchParams();
+  if (!filter) return params;
+  if (filter.cve_id) params.set("cve_id", filter.cve_id);
+  if (filter.report_type) params.set("report_type", filter.report_type);
+  if (filter.lang) params.set("lang", filter.lang);
+  if (filter.state) params.set("state", filter.state);
+  if (filter.decision) params.set("decision", filter.decision);
+  if (typeof filter.limit === "number") params.set("limit", String(filter.limit));
+  if (typeof filter.offset === "number") params.set("offset", String(filter.offset));
+  return params;
 }
 
 export const api = {
@@ -1598,6 +1749,111 @@ export const api = {
           method: "POST",
           body: JSON.stringify(input ?? {}),
         }
+      ),
+  },
+  // AI CRA report drafting (M2-4 / M2-5, issues #36 + #32). Maps to the
+  // five endpoints wired by apps/api/cmd/server/main.go around the
+  // /cra-reports route group:
+  //   POST   /api/v1/projects/:id/cra-reports/run
+  //   GET    /api/v1/projects/:id/cra-reports
+  //   GET    /api/v1/projects/:id/cra-reports/:report_id
+  //   PUT    /api/v1/projects/:id/cra-reports/:report_id/decision
+  //   POST   /api/v1/projects/:id/cra-reports/:report_id/reanalyse
+  craReports: {
+    /**
+     * GET list — returns the JSON envelope only. The X-Total-Count
+     * header is dropped here, so paginated UIs MUST use listWithMeta
+     * instead (M1 #F28 lesson re-applied for the CRA queue UI).
+     */
+    list: (projectId: string, filter?: CRAReportListFilter) => {
+      const params = cleanCRAReportFilter(filter);
+      const query = params.toString();
+      return request<CRAReportListResponse>(
+        `/api/v1/projects/${projectId}/cra-reports${query ? `?${query}` : ""}`,
+      );
+    },
+    /**
+     * GET list + total count from X-Total-Count (M1 #F28 pattern, see
+     * projects.getVulnerabilitiesWithMeta). totalCount falls back to
+     * the visible page length when the header is absent (older API or
+     * CORS misconfig); the truncation banner silently disappears in
+     * that case — same visible-regression contract as F28.
+     */
+    listWithMeta: async (
+      projectId: string,
+      filter?: CRAReportListFilter,
+    ): Promise<{ data: CRAReport[]; totalCount: number }> => {
+      const params = cleanCRAReportFilter(filter);
+      const query = params.toString();
+      const path = `/api/v1/projects/${projectId}/cra-reports${query ? `?${query}` : ""}`;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (getAuthToken) {
+        const token = await getAuthToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+      }
+      if (getOrgId) {
+        const orgId = getOrgId();
+        if (orgId) headers["X-Clerk-Org-ID"] = orgId;
+      }
+      const res = await fetch(`${API_URL}${path}`, { headers });
+      if (!res.ok) {
+        let body: Record<string, unknown> | undefined;
+        try {
+          const text = await res.text();
+          if (text) body = JSON.parse(text);
+        } catch {
+          // body left undefined
+        }
+        throw new APIError(res.status, body);
+      }
+      const envelope: CRAReportListResponse =
+        res.status === 204 ? { reports: [] } : await res.json();
+      const data = Array.isArray(envelope?.reports) ? envelope.reports : [];
+      const headerVal = res.headers.get("X-Total-Count");
+      const totalCount =
+        headerVal !== null && !Number.isNaN(parseInt(headerVal, 10))
+          ? parseInt(headerVal, 10)
+          : data.length;
+      return { data, totalCount };
+    },
+    get: (projectId: string, reportId: string) =>
+      request<CRAReport>(
+        `/api/v1/projects/${projectId}/cra-reports/${reportId}`,
+      ),
+    run: (projectId: string, input: RunCRAReportInput) =>
+      request<RunCRAReportResponse>(
+        `/api/v1/projects/${projectId}/cra-reports/run`,
+        {
+          method: "POST",
+          body: JSON.stringify(input),
+        },
+      ),
+    decide: (
+      projectId: string,
+      reportId: string,
+      input: CRAReportDecisionInput,
+    ) =>
+      request<CRAReport>(
+        `/api/v1/projects/${projectId}/cra-reports/${reportId}/decision`,
+        {
+          method: "PUT",
+          body: JSON.stringify(input),
+        },
+      ),
+    reanalyse: (
+      projectId: string,
+      reportId: string,
+      input?: Partial<RunCRAReportInput>,
+    ) =>
+      request<RunCRAReportResponse>(
+        `/api/v1/projects/${projectId}/cra-reports/${reportId}/reanalyse`,
+        {
+          method: "POST",
+          body: JSON.stringify(input ?? {}),
+        },
       ),
   },
   sbom: {
