@@ -1092,6 +1092,76 @@
       "inline_mitigations_already_exist": "Inline mitigations exist"
     }
   },
+  "CRAReports": {
+    "Page": {
+      "title": "AI CRA report drafts",
+      "description": "AI-drafted CRA reports (24h early warning / 72h detailed notification / final report) awaiting human approval. Every decision is recorded in the audit log. Submission to the regulator lands in M3; today this surface manages the drafts only.",
+      "backToProject": "Back to project",
+      "refresh": "Refresh",
+      "emptyTitle": "No CRA reports yet",
+      "emptyDescription": "There are no AI drafts waiting for a decision. Run a new CRA drafting cycle from the CLI ('sbomhub cra draft') or via the API to populate this queue. At least one approved VEX draft for the target CVE is required first.",
+      "hiddenEvidenceless": "{count} report(s) hidden — no evidence attached. This should not happen; check the API logs.",
+      "truncated": "Showing {visible} of {total} reports. Narrow the filters or process the top of the queue first.",
+      "loadProjectFailed": "Failed to load the project",
+      "loadReportsFailed": "Failed to load CRA reports",
+      "approveFailed": "Failed to approve report",
+      "editFailed": "Failed to save edited report",
+      "rejectFailed": "Failed to reject report",
+      "reanalyseFailed": "Failed to re-run drafting"
+    },
+    "Filter": {
+      "title": "Filters",
+      "reportType": "Report type",
+      "lang": "Language",
+      "state": "State",
+      "decision": "Decision",
+      "any": "Any"
+    },
+    "ReportType": {
+      "early_warning": "24h early warning",
+      "detailed_notification": "72h detailed notification",
+      "final_report": "Final report"
+    },
+    "Lang": {
+      "ja": "Japanese",
+      "en": "English"
+    },
+    "State": {
+      "draft": "Draft",
+      "approved": "Approved",
+      "submitted": "Submitted",
+      "archived": "Archived",
+      "under_investigation": "Under investigation"
+    },
+    "Decision": {
+      "pending": "Pending",
+      "approved": "Approved",
+      "edited": "Edited",
+      "rejected": "Rejected"
+    },
+    "ReportCard": {
+      "draftLabel": "Report body",
+      "sourceVEXLabel": "Source VEX draft",
+      "evidenceLabel": "Evidence",
+      "noteLabel": "Reviewer note (optional)",
+      "notePlaceholder": "Why are you editing this draft?",
+      "expand": "Show more",
+      "collapse": "Show less",
+      "approve": "Approve",
+      "edit": "Edit",
+      "reject": "Reject",
+      "reanalyse": "Re-analyse",
+      "submit": "Submit to authority",
+      "submitDisabled": "Submission to the regulator lands in M3",
+      "saving": "Saving...",
+      "saveEdit": "Save edit",
+      "cancel": "Cancel",
+      "rejectReasonLabel": "Reject reason",
+      "rejectReasonPlaceholder": "Optional — why is this AI draft wrong?",
+      "rejectConfirm": "Confirm reject",
+      "alreadyDecided": "This report has already been marked as {decision}. A new decision will overwrite the audit trail."
+    }
+  },
   "FAQ": {
     "title": "Frequently Asked Questions",
     "q1": "What is CRA 2026/9?",

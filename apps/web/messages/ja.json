@@ -1093,6 +1093,76 @@
       "inline_mitigations_already_exist": "インライン緩和済み"
     }
   },
+  "CRAReports": {
+    "Page": {
+      "title": "AI CRA 報告書ドラフト",
+      "description": "AI が下書きした CRA 報告書 (24h 早期警告 / 72h 詳細通知 / 最終報告) を人間が承認・編集・却下します。 すべての判断は監査ログに記録されます。 提出は M3 で実装予定で、 現時点では下書きの管理までを対象とします。",
+      "backToProject": "プロジェクトに戻る",
+      "refresh": "再読み込み",
+      "emptyTitle": "CRA 報告書はありません",
+      "emptyDescription": "判断待ちの AI 下書きはありません。 CLI (`sbomhub cra draft`) または API から CRA 報告書ドラフトサイクルを実行するとここに表示されます。 承認済みの VEX 下書きが先に 1 件以上必要です。",
+      "hiddenEvidenceless": "{count} 件の報告書を非表示にしました (evidence がありません)。 通常は発生しないはずです、 API ログを確認してください。",
+      "truncated": "{visible} 件を表示中 (合計 {total} 件)。 フィルタを絞り込むか、 上位の報告書から処理してください。",
+      "loadProjectFailed": "プロジェクトの読み込みに失敗しました",
+      "loadReportsFailed": "CRA 報告書一覧の読み込みに失敗しました",
+      "approveFailed": "承認に失敗しました",
+      "editFailed": "編集の保存に失敗しました",
+      "rejectFailed": "却下に失敗しました",
+      "reanalyseFailed": "再生成に失敗しました"
+    },
+    "Filter": {
+      "title": "フィルタ",
+      "reportType": "報告書タイプ",
+      "lang": "言語",
+      "state": "状態",
+      "decision": "判断",
+      "any": "すべて"
+    },
+    "ReportType": {
+      "early_warning": "24h 早期警告",
+      "detailed_notification": "72h 詳細通知",
+      "final_report": "最終報告"
+    },
+    "Lang": {
+      "ja": "日本語",
+      "en": "英語"
+    },
+    "State": {
+      "draft": "下書き",
+      "approved": "承認済み",
+      "submitted": "提出済み",
+      "archived": "アーカイブ",
+      "under_investigation": "調査中"
+    },
+    "Decision": {
+      "pending": "未判断",
+      "approved": "承認",
+      "edited": "編集",
+      "rejected": "却下"
+    },
+    "ReportCard": {
+      "draftLabel": "報告書本文",
+      "sourceVEXLabel": "ソース VEX 下書き",
+      "evidenceLabel": "根拠",
+      "noteLabel": "レビュー者メモ (任意)",
+      "notePlaceholder": "編集理由を残してください",
+      "expand": "もっと見る",
+      "collapse": "折りたたむ",
+      "approve": "承認",
+      "edit": "編集",
+      "reject": "却下",
+      "reanalyse": "再生成",
+      "submit": "監督機関に提出",
+      "submitDisabled": "監督機関への提出は M3 で実装予定です",
+      "saving": "保存中...",
+      "saveEdit": "編集を保存",
+      "cancel": "キャンセル",
+      "rejectReasonLabel": "却下理由",
+      "rejectReasonPlaceholder": "任意 — この AI 下書きが不適切な理由を記入してください",
+      "rejectConfirm": "却下を確定",
+      "alreadyDecided": "この報告書は既に {decision} の判断が記録されています。 新規判断は監査ログに上書きされます。"
+    }
+  },
   "FAQ": {
     "title": "よくある質問",
     "q1": "CRA 2026/9 とは何ですか？",
