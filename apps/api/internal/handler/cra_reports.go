@@ -325,12 +325,14 @@ func (h *CRAReportsHandler) GetReport(c echo.Context) error {
 // cra_reports row. The audit row is written immediately after the
 // repository update so the (decision, audit) pair lands inside the
 // same ambient TenantTx the route is wrapped in — Trust Rescue
-// audit-or-nothing carried over from M1 F5 (※要確認: hard tx wrap
-// for the (UPDATE + audit) pair could be tightened in M2-6 once
-// CRA audit semantics stabilise). State-machine guard (M2 Codex
-// review #F31): an already-decided report is rejected with 409 BEFORE
-// the UPDATE attempt (and the repository UPDATE also carries
-// `decision = 'pending'` for the load-then-update TOCTOU race).
+// audit-or-nothing carried over from M1 F5 and tightened by M2
+// Codex review #F32: a domain audit failure now returns 500 so the
+// TenantTx middleware rolls back the cra_reports UPDATE, preventing
+// a decision from committing without its CRA Article 14 audit trail.
+// State-machine guard (M2 Codex review #F31): an already-decided
+// report is rejected with 409 BEFORE the UPDATE attempt (and the
+// repository UPDATE also carries `decision = 'pending'` for the
+// load-then-update TOCTOU race).
 func (h *CRAReportsHandler) Decide(c echo.Context) error {
 	tc := middleware.NewTenantContext(c)
 	if tc == nil || tc.TenantID() == uuid.Nil {
@@ -456,12 +458,21 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 		IPAddress:    c.RealIP(),
 		UserAgent:    c.Request().UserAgent(),
 	}); err != nil {
-		// Audit failure on a successful decision is a soft warning: the
-		// data already mutated and the request-level audit middleware
-		// will still record the path/method/status. F5 audit-or-nothing
-		// would require a tx wrap here (※要確認: tighten in M2-6).
-		slog.Warn("cra_reports: domain audit log failed",
+		// F32 (M2 Codex review): hard-fail on domain audit failure so
+		// the ambient TenantTx middleware rolls back the UpdateDecision
+		// row. Compliance evidence MUST land atomically with the
+		// decision it documents — a "decision applied but audit lost"
+		// outcome would silently let an approved / rejected /
+		// edited CRA report skip the required CRA Article 14 audit
+		// trail. This mirrors M1 F5 (triage audit-or-nothing) and is
+		// the wire-up reason the Decide route is wrapped in TenantTx
+		// (cmd/server/main.go) — TenantTx rolls back on any 4xx/5xx,
+		// including this 500.
+		slog.Error("cra_reports: domain audit log failed; rolling back decision (F32 audit-or-nothing)",
 			"tenant_id", tc.TenantID(), "report_id", reportID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to persist cra report decision audit trail; decision rolled back",
+		})
 	}
 
 	// Reload so the response reflects the persisted decision_at / updated_at.

@@ -901,6 +901,63 @@ func TestCRAReportsHandler_Decide_AlreadyDecided_TOCTOU_Returns409_F31(t *testin
 }
 
 // ----------------------------------------------------------------------------
+// M2 Codex review #F32 — Decide audit failure must hard-fail (500) so
+// the ambient TenantTx middleware rolls back the UpdateDecision row
+// ----------------------------------------------------------------------------
+
+// TestCRAReportsHandler_Decide_AuditFailure_RollsBack_F32 pins the
+// audit-or-nothing contract for CRA decisions. The pre-F32 code did
+// `slog.Warn` on audit failure and returned 200 with the fresh report
+// — that meant an approved / edited / rejected CRA report could
+// commit without its mandatory CRA Article 14 audit trail. The fix
+// returns 500 so TenantTx (cmd/server/main.go wraps this route in
+// TenantTx) rolls back the UpdateDecision UPDATE. The handler-level
+// test cannot observe the actual DB rollback (the fake CRAReportStore
+// has no tx semantics), so we pin the necessary precondition for
+// rollback: the 500 status code. The TenantTx rollback behaviour is
+// pinned separately in middleware/tx_test.go.
+func TestCRAReportsHandler_Decide_AuditFailure_RollsBack_F32(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReport(rid, h.projectID)
+	// Force domain audit failure.
+	h.audit.err = errors.New("audit storm — F32 regression scenario")
+
+	body, _ := json.Marshal(map[string]string{"decision": "approved"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String()+"/decision",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), rid.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.Decide(c); err != nil {
+		t.Fatalf("Decide returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("F32: audit failure status = %d, want 500 (so TenantTx rolls back); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "audit trail") {
+		t.Errorf("F32: 500 body should mention audit trail; got %s", rec.Body.String())
+	}
+	// UpdateDecision was called (the fake committed it in-memory) BUT
+	// the 500 status above is exactly what TenantTx needs to roll back
+	// the real DB write — in production the cra_reports row never
+	// commits. Audit row MUST also be attempted exactly once.
+	if h.store.updateCalls != 1 {
+		t.Errorf("F32: UpdateDecision call count = %d, want 1 (audit runs AFTER)", h.store.updateCalls)
+	}
+	if got := len(h.audit.entries); got != 1 {
+		t.Errorf("F32: audit.Log should be attempted once (it then fails), got %d entries", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
 // No auth context → 401 (defensive)
 // ----------------------------------------------------------------------------
 
