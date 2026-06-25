@@ -25,6 +25,8 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/scheduler"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/service/cra"
+	"github.com/sbomhub/sbomhub/internal/service/evidence_pack"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 	"github.com/sbomhub/sbomhub/internal/service/triage"
 	"github.com/sbomhub/sbomhub/migrations"
@@ -267,6 +269,13 @@ func main() {
 	advisoryExcerptsRepo := repository.NewAdvisoryExcerptsRepository(db)
 	reachabilityResultsRepo := repository.NewReachabilityResultsRepository(db)
 	llmCallsRepo := repository.NewLLMCallsRepository(db)
+	vexDraftsRepo := repository.NewVEXDraftsRepository(db)
+
+	// CRA report inputs (Wave M2-2 / issue #32, Wave M2-3 / issue #31).
+	// Wired through cra.Runner (constructed below) for RunReport /
+	// Reanalyse and through the handler directly for List / Get /
+	// UpdateDecision.
+	craReportsRepo := repository.NewCRAReportsRepository(db)
 
 	// NVD Cache for vulnerability scanning
 	nvdCache := cache.NewNVDCache(rdb)
@@ -400,6 +409,30 @@ func main() {
 		"llm_timeout", triageLLMTimeout,
 		"tx_manager", "DBTxManager (F19)")
 
+	// CRA report drafting runner (issue #31 / Wave M2-3, wired in M2-4
+	// / issue #36). Reuses the triage TxManager + per-tenant provider
+	// resolver so CRA generation inherits the same F19 connection-pool
+	// hygiene and #F2 BYOK provider routing as VEX triage.
+	craRunner := cra.NewRunner(cra.RunnerConfig{
+		VEXDrafts:           vexDraftsRepo,
+		AdvisoryExcerpts:    advisoryExcerptsRepo,
+		ReachabilityResults: reachabilityResultsRepo,
+		CRAReports:          craReportsRepo,
+		LLMCalls:            llmCallsRepo,
+		VulnerabilityCVE:    vulnRepo,
+		Audit:               auditRepo,
+		Provider:            triageDefaultProvider,
+		ProviderResolver:    triageProviderResolver,
+		TxManager:           triageTxManager,
+		LLMTimeout:          triageLLMTimeout,
+		GeneratedBy:         "SBOMHub (LLM: " + triageDefaultProvider.Name() + "/" + triageDefaultProvider.Model() + ")",
+	})
+	slog.Info("CRA report drafting runner initialised",
+		"default_provider", triageDefaultProvider.Name(),
+		"per_tenant_resolver", "tenant_llm_config",
+		"llm_timeout", triageLLMTimeout,
+		"tx_manager", "DBTxManager (F19, shared with triage)")
+
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
 	// NewSbomHandler needs `db` so the post-upload background scan goroutine
@@ -422,6 +455,30 @@ func main() {
 
 	// AI VEX triage handler (issue #30).
 	vexDraftsHandler := handler.NewVexDraftsHandler(triageRunner)
+
+	// CRA report handler (Wave M2-4 / issue #36). Holds the cra.Runner
+	// for RunReport / Reanalyse (the 2-stage LLM path) and the
+	// cra_reports repository directly for List / Get / UpdateDecision
+	// (pure CRUD). The audit writer is wired for the
+	// `cra_report_decided` domain audit row emitted by the Decide
+	// endpoint — the AI-generated / AI-disabled audit rows are emitted
+	// by the runner inside its Stage 3 write tx.
+	craReportsHandler := handler.NewCRAReportsHandler(craRunner, craReportsRepo, auditRepo)
+
+	// Evidence Pack builder + handler (Wave M2-6 / issue #34). The
+	// builder composes the existing vex_drafts (M1) + cra_reports
+	// (M2-2) repositories with project metadata into a single Markdown
+	// bundle. Reads run inside the request-scoped TenantTx (route
+	// registered below) so RLS bounds every SELECT to the caller's
+	// tenant. The repository instances are reused from the triage /
+	// cra runner wiring above so a request hits a single shared
+	// connection-pool slot per repo type.
+	evidencePackBuilder := evidence_pack.NewBuilder(
+		vexDraftsRepo,
+		craReportsRepo,
+		projectRepo,
+	)
+	evidencePackHandler := handler.NewEvidencePackHandler(evidencePackBuilder, auditRepo)
 
 	// SaaS Handlers
 	clerkWebhookHandler := handler.NewClerkWebhookHandler(cfg, tenantRepo, userRepo, auditRepo)
@@ -809,6 +866,97 @@ func main() {
 		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		triageConcurrencyLimiter.Middleware())
+
+	// CRA report endpoints (Wave M2-4 / issue #36).
+	//
+	// Same MultiAuth + RequireWrite + per-tenant concurrency cap shape
+	// the triage / vex-drafts routes use, with a distinct CRA-scoped
+	// concurrency limiter so a CRA drafting burst (compliance deadline
+	// rush) cannot starve concurrent VEX triage requests (and
+	// vice-versa). The cra.Runner manages its own Stage 1 / Stage 3
+	// tx via the shared *triage.DBTxManager (F19), so RunReport and
+	// Reanalyse intentionally skip the ambient TenantTx + request-
+	// level audit middleware — runner.writeAudit emits the domain-
+	// level cra_report_ai_generated / cra_report_ai_disabled rows
+	// inside the Stage 3 write tx. The read + decide routes go
+	// through TenantTx + audit middleware in the same shape as the
+	// vex-drafts read + decide endpoints so cra_reports.Get /
+	// ListByProject / UpdateDecision run with `SET LOCAL
+	// app.current_tenant_id` bound (cra_reports is FORCE ROW LEVEL
+	// SECURITY per migration 038, so the GUC is load-bearing).
+	// Middleware chain mirrors vex-drafts for parity: RunReport and
+	// Reanalyse skip TenantTx + audit middleware; List / Get / Decide
+	// include both. ※要確認: the task brief asks for a single unified
+	// chain with no TenantTx on any of the 5 routes, but the
+	// read/decide paths interact with FORCE RLS tables — falling back
+	// to the vex-drafts split keeps reads functional without
+	// requiring a fresh runner-level wrapper for those paths.
+	craConcurrencyLimiter := appmw.NewCRAConcurrencyLimiterFromEnv()
+	slog.Info("cra concurrency limiter initialised",
+		"per_tenant", craConcurrencyLimiter.PerTenant(),
+		"global", craConcurrencyLimiter.Global())
+	e.POST("/api/v1/projects/:id/cra-reports/run",
+		craReportsHandler.RunReport,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		craConcurrencyLimiter.Middleware())
+	e.GET("/api/v1/projects/:id/cra-reports",
+		craReportsHandler.ListReports,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.GET("/api/v1/projects/:id/cra-reports/:report_id",
+		craReportsHandler.GetReport,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.PUT("/api/v1/projects/:id/cra-reports/:report_id/decision",
+		craReportsHandler.Decide,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.POST("/api/v1/projects/:id/cra-reports/:report_id/reanalyse",
+		craReportsHandler.Reanalyse,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		craConcurrencyLimiter.Middleware())
+
+	// Evidence Pack endpoint (Wave M2-6 / issue #34).
+	//
+	// POST /api/v1/projects/:id/evidence-pack/build renders a Markdown
+	// bundle of approved VEX drafts + approved CRA reports + METI
+	// placeholder. MVP is synchronous — the builder does ≤ 2 read
+	// queries against repositories already cached on the request tx,
+	// so even a project at the per-section cap (500 rows each) returns
+	// in well under a second. PDF / Zip / background-job + separate
+	// download endpoint ship in M3 (issue #34 Acceptance Criteria).
+	//
+	// Middleware chain mirrors the canonical pattern for write
+	// endpoints: MultiAuth → RequireWrite → RateLimitByAPIKey →
+	// TenantTx → audit → handler. Rationale:
+	//   - RequireWrite: read-scoped (Viewer) API keys must not mint
+	//     compliance packets for projects they only have read access to
+	//     (see M1 #F15).
+	//   - RateLimitByAPIKey: 60 req/min per API key matches the
+	//     /cra-reports/decision rate — building a bundle is a deliberate
+	//     auditor-facing action, not a polling surface.
+	//   - TenantTx wraps the rest so the builder's vex_drafts +
+	//     cra_reports SELECTs and the handler's audit_logs INSERT all
+	//     share a single `SET LOCAL app.current_tenant_id` tx. Audit-row
+	//     failure rolls the whole request back (#F5 fail-closed).
+	e.POST("/api/v1/projects/:id/evidence-pack/build",
+		evidencePackHandler.Build,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 
 	// License policy endpoints
 	auth.GET("/licenses/common", licensePolicyHandler.GetCommonLicenses)
