@@ -1,0 +1,119 @@
+# CRA 第14条 詳細通知 (72時間以内通知)
+
+> **法的注記**
+> 本文書は SBOMHub による下書きであり、最終的な確認・承認は事業者が行うものとします。
+> SBOMHub は提出支援のためのドラフト生成を行いますが、法的助言を提供するものではありません。
+> 72時間カウントの起点判断、および欧州 CSIRT / ENISA への提出可否は、事業者の責任者が決定してください。
+
+## 1. 報告区分
+
+- **報告種別**: CRA 第14条(2)(b) 詳細通知 (Detailed Notification)
+- **対象期限**: 認識後 72 時間以内
+- **言語**: 日本語
+{{- if .EarlyWarningReportID }}
+- **関連早期警告 ID**: {{ .EarlyWarningReportID }}
+{{- end }}
+
+## 2. 製品情報
+
+- **製品名**: {{ .ProductName }}
+{{- if .ProductVersion }}
+- **製品バージョン**: {{ .ProductVersion }}
+{{- end }}
+{{- if .VendorName }}
+- **製造業者**: {{ .VendorName }}
+{{- end }}
+
+## 3. 脆弱性詳細
+
+- **CVE ID**: {{ .CVEID }}
+{{- if .CVSSScore }}
+- **CVSS スコア**: {{ .CVSSScore }}{{ if .CVSSVector }} ({{ .CVSSVector }}){{ end }}
+{{- end }}
+{{- if .Severity }}
+- **重大度**: {{ .Severity }}
+{{- end }}
+- **技術的説明**:
+
+{{ if .VulnerabilityDetail }}{{ .VulnerabilityDetail }}{{ else }}{{ .VulnerabilitySummary }}{{ end }}
+
+{{- if .RootCause }}
+
+### 根本原因
+{{ .RootCause }}
+{{- end }}
+
+## 4. 影響コンポーネント (Affected Components)
+
+{{ if .AffectedComponents -}}
+| コンポーネント | 影響バージョン | 修正バージョン | PURL |
+|---|---|---|---|
+{{ range .AffectedComponents }}| {{ .Name }} | {{ if .Version }}{{ .Version }}{{ else }}-{{ end }} | {{ if .FixedVersion }}{{ .FixedVersion }}{{ else }}_未定_{{ end }} | {{ if .PURL }}`{{ .PURL }}`{{ else }}-{{ end }} |
+{{ end }}
+{{- else -}}
+_（影響コンポーネントを記入）_
+{{- end }}
+
+## 5. 対象バージョン (Affected Product Versions)
+
+{{ if .AffectedProductVersions -}}
+{{ range .AffectedProductVersions }}- {{ . }}
+{{ end }}
+{{- else -}}
+_（影響を受ける製品バージョンを記入）_
+{{- end }}
+
+## 6. 緩和策 (Mitigation Steps)
+
+{{ if .MitigationSteps -}}
+{{ range $i, $step := .MitigationSteps }}{{ add1 $i }}. {{ $step }}
+{{ end }}
+{{- else -}}
+_（実施可能な緩和策を記入）_
+{{- end }}
+
+## 7. 是正予定 (Remediation Plan)
+
+{{ if .RemediationPlan }}{{ .RemediationPlan }}{{ else }}_（恒久的な是正措置の計画を記入）_{{ end }}
+
+{{ if .FixedVersions -}}
+### 修正版リリース予定
+
+| 修正バージョン | リリース予定日 | 配布チャネル |
+|---|---|---|
+{{ range .FixedVersions }}| {{ .Version }} | {{ if .ReleaseDate }}{{ .ReleaseDate }}{{ else }}_未定_{{ end }} | {{ if .Channel }}{{ .Channel }}{{ else }}-{{ end }} |
+{{ end }}
+{{- end }}
+
+## 8. 悪用状況の更新
+
+- **悪用状況の判定**: {{ .ExploitationStatus }}
+{{- if .ExploitationEvidence }}
+- **悪用の根拠**:
+
+{{ .ExploitationEvidence }}
+{{- end }}
+
+## 9. 報告者情報
+
+- **報告者氏名**: {{ if .ReporterName }}{{ .ReporterName }}{{ else }}_（要記入）_{{ end }}
+- **役職**: {{ if .ReporterRole }}{{ .ReporterRole }}{{ else }}_（要記入）_{{ end }}
+- **連絡先メール**: {{ if .ContactEmail }}{{ .ContactEmail }}{{ else }}_（要記入）_{{ end }}
+{{- if .ContactPhone }}
+- **連絡先電話**: {{ .ContactPhone }}
+{{- end }}
+
+## 10. 提出メタ情報
+
+- **提出日時 (UTC)**: {{ .SubmittedAt }}
+{{- if .AwarenessTime }}
+- **認識日時 (UTC, 72h カウント起点)**: {{ .AwarenessTime }}
+{{- end }}
+{{- if .ReportID }}
+- **報告 ID (社内管理)**: {{ .ReportID }}
+{{- end }}
+
+---
+
+_本書は SBOMHub ({{ .GeneratedBy }}) により {{ .GeneratedAt }} に生成された下書きです。_
+_提出前に事業者の最終確認・承認を経てください。_
