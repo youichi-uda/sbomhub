@@ -121,6 +121,19 @@ var (
 	// case so the response cannot be used as an oracle.
 	ErrSourceVEXDraftCrossProject = errors.New("cra: source vex_draft does not belong to the target project")
 
+	// ErrSourceVEXDraftCVEMismatch is returned when a caller-supplied
+	// (or auto-resolved) source vex_draft carries a non-empty CVE id
+	// that does NOT match RunInput.CVEID. Without this guard a caller
+	// could draft a CRA report for one CVE while attaching an approved
+	// VEX draft for a DIFFERENT CVE in the same project — the rendered
+	// regulatory submission would then claim evidence ("approved triage
+	// for CVE-Y") that does not in fact cover the CVE being reported
+	// (CVE-X). Mapped to 409 by the handler so the operator must either
+	// approve a VEX draft for the correct CVE or correct the request.
+	// M3 may relax this with a validated alias mapping; until then the
+	// rule is "strict reject" (M2 Codex review #F30, was warn-only).
+	ErrSourceVEXDraftCVEMismatch = errors.New("cra: source vex_draft cve_id does not match input cve_id")
+
 	// ErrNoApprovedVEXDraft is returned when SourceVEXDraftID is nil and
 	// no approved vex_draft exists for the (project, cve) pair. The
 	// handler maps this to 409 (the operator must approve a VEX draft
@@ -897,15 +910,23 @@ func (r *Runner) resolveSourceVEXDraft(ctx context.Context, in RunInput) (*repos
 		if draft.ProjectID != in.ProjectID {
 			return nil, fmt.Errorf("cra.Run: %w", ErrSourceVEXDraftCrossProject)
 		}
-		// Optional additional invariant: the source draft's CVE id
-		// should also match the CRA report's. We log a warning rather
-		// than reject so the operator can intentionally draft a report
-		// from a near-duplicate triage row if the CVE id was later
-		// canonicalised (e.g. CVE alias rename). ※要確認: confirm with
-		// PM whether this should be a hard reject.
+		// Hard reject when the source draft's CVE id disagrees with the
+		// CRA report's CVE id. The earlier (warn-only) version let a
+		// caller draft a CRA report for CVE-X while attaching an
+		// approved VEX draft for CVE-Y in the same project — the
+		// rendered submission would then claim evidence ("approved
+		// triage for CVE-Y") that does not in fact cover CVE-X. We log
+		// the precise mismatch via slog at the warn level (so probe
+		// alarms still fire) and surface the generic
+		// ErrSourceVEXDraftCVEMismatch sentinel to the handler. M3
+		// may relax this with a validated CVE alias mapping; until then
+		// the rule is strict reject (M2 Codex review #F30, ※要確認: PM
+		// has not signed off on the M3 alias mapping shape, so the
+		// reject side stays unconditional).
 		if draft.CVEID != "" && draft.CVEID != in.CVEID {
-			slog.Warn("cra.Run: source vex_draft cve_id does not match input cve_id (allowed; alias rename possible)",
+			slog.Warn("cra.Run: source vex_draft cve_id does not match input cve_id (rejected)",
 				"tenant_id", in.TenantID, "draft_cve", draft.CVEID, "input_cve", in.CVEID)
+			return nil, fmt.Errorf("cra.Run: %w", ErrSourceVEXDraftCVEMismatch)
 		}
 		return draft, nil
 	}

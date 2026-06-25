@@ -677,6 +677,9 @@ func (h *CRAReportsHandler) loadReportScoped(
 //   - cra.ErrCVEIDMismatch                           → 400 (#F12, generic body)
 //   - cra.ErrSourceVEXDraftNotFound                  → 404 (generic body)
 //   - cra.ErrSourceVEXDraftCrossProject              → 404 (#F7/F8/F9, generic body)
+//   - cra.ErrSourceVEXDraftCVEMismatch               → 409 (#F30, operator must
+//                                                     attach a VEX draft for the
+//                                                     correct CVE)
 //   - cra.ErrNoApprovedVEXDraft                      → 409 (operator must triage first)
 //   - cra.ErrUnknownTemplate                         → 400
 //   - input-validation errors (missing fields)       → 400
@@ -724,6 +727,19 @@ func mapCRARunnerError(err error) (int, map[string]string, bool) {
 		slog.Warn("cra_reports: no approved vex_draft for this (project, cve)")
 		return http.StatusConflict, map[string]string{
 			"error": "no approved vex_draft available — approve a VEX triage decision for this (project, cve) first",
+		}, true
+	}
+	// 409 (#F30): caller attached a VEX draft for a DIFFERENT CVE than
+	// the CRA report target. The body surfaces an actionable hint —
+	// "attach a VEX draft for THIS CVE" — without disclosing which CVE
+	// the foreign draft covered (that would let an attacker probe for
+	// approved triage decisions across CVEs by URL-stuffing draft ids).
+	if errors.Is(err, cra.ErrSourceVEXDraftCVEMismatch) {
+		slog.Warn("cra_reports: source vex_draft cve_id mismatch rejected",
+			"sentinel", err.Error(),
+		)
+		return http.StatusConflict, map[string]string{
+			"error": "source vex_draft cve_id does not match the CRA report cve_id — attach a VEX draft approved for this CVE",
 		}, true
 	}
 	if errors.Is(err, cra.ErrUnknownTemplate) {

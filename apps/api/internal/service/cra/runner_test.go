@@ -845,6 +845,80 @@ func TestRunner_Run_SourceVEXDraftNotFound_Rejected(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// Test (M2 Codex review #F30): source vex_draft with mismatched CVE id rejected
+// ----------------------------------------------------------------------------
+
+// TestRunner_Run_SourceVEXDraftCVEMismatch_Rejected_F30 pins the F30
+// fix: when the caller explicitly attaches a source vex_draft whose
+// CVE id does NOT match RunInput.CVEID, the runner must reject the
+// drafting cycle with ErrSourceVEXDraftCVEMismatch and persist
+// nothing. The previous warn-only behaviour let a caller draft a CRA
+// report for CVE-X while attaching an approved VEX draft for a
+// DIFFERENT CVE (CVE-Y) in the same project — the rendered
+// regulatory submission would then claim evidence that did not in
+// fact cover the CVE being reported.
+func TestRunner_Run_SourceVEXDraftCVEMismatch_Rejected_F30(t *testing.T) {
+	h := newTestHarness(t)
+	// Make a draft for the SAME project (so the cross-project guard
+	// does not fire first), but with a DIFFERENT CVE id.
+	mismatched := makeApprovedVEXDraft(h.tenantID, h.projectID, h.vulnID, h.componentID, "CVE-2099-0001")
+	h.drafts.byID[mismatched.ID] = mismatched
+
+	in := h.baseInput()
+	in.SourceVEXDraftID = &mismatched.ID
+	in.CVEID = h.cveID // CVE-2026-3100 — differs from the draft's CVE-2099-0001
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangJA
+
+	_, err := h.runner.Run(context.Background(), in)
+	if err == nil {
+		t.Fatalf("F30: expected error when source vex_draft cve_id does not match input cve_id")
+	}
+	if !errors.Is(err, ErrSourceVEXDraftCVEMismatch) {
+		t.Errorf("F30: error %v should wrap ErrSourceVEXDraftCVEMismatch", err)
+	}
+	if got := len(h.craReports.inserted); got != 0 {
+		t.Errorf("F30: expected no cra_reports insert on cve mismatch, got %d", got)
+	}
+	if got := len(h.llmCalls.records); got != 0 {
+		t.Errorf("F30: expected no llm_calls on cve mismatch, got %d", got)
+	}
+	if got := len(h.audit.entries); got != 0 {
+		t.Errorf("F30: expected no audit row on cve mismatch, got %d", got)
+	}
+	if h.provider.captured.Purpose != "" {
+		t.Errorf("F30: provider must not be called on cve mismatch (got Purpose=%q)", h.provider.captured.Purpose)
+	}
+}
+
+// TestRunner_Run_SourceVEXDraftEmptyCVE_Accepted_F30 documents the
+// one carve-out in the F30 guard: a source draft with an empty cve_id
+// column is still accepted (the guard's `draft.CVEID != ""` clause).
+// Without this carve-out, legacy rows that pre-date the cve_id column
+// would be unreachable. ※要確認: confirm with PM whether empty CVE
+// drafts should also be hard-rejected once the legacy backfill is
+// complete; for now the conservative behaviour matches the pre-F30
+// allow-on-empty path.
+func TestRunner_Run_SourceVEXDraftEmptyCVE_Accepted_F30(t *testing.T) {
+	h := newTestHarness(t)
+	legacy := makeApprovedVEXDraft(h.tenantID, h.projectID, h.vulnID, h.componentID, "")
+	h.drafts.byID[legacy.ID] = legacy
+
+	in := h.baseInput()
+	in.SourceVEXDraftID = &legacy.ID
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangJA
+
+	_, err := h.runner.Run(context.Background(), in)
+	if err != nil {
+		t.Fatalf("F30 carve-out: empty draft cve_id should NOT trip the mismatch guard; got %v", err)
+	}
+	if got := len(h.craReports.inserted); got != 1 {
+		t.Errorf("F30 carve-out: expected 1 cra_reports insert, got %d", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
 // Test 8: audit failure rolls back Stage 3 (F5 audit-or-nothing)
 // ----------------------------------------------------------------------------
 

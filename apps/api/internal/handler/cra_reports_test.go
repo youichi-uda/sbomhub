@@ -759,6 +759,53 @@ func TestCRAReportsHandler_RunReport_ErrNoApprovedVEXDraft_Maps409(t *testing.T)
 }
 
 // ----------------------------------------------------------------------------
+// M2 Codex review #F30 — source vex_draft cve mismatch maps to 409
+// ----------------------------------------------------------------------------
+
+// TestCRAReportsHandler_RunReport_VEXDraftCVEMismatch_Returns409_F30
+// pins the handler's mapping of the new sentinel
+// cra.ErrSourceVEXDraftCVEMismatch to a 409 Conflict with an
+// actionable hint in the body. The previous warn-only behaviour
+// silently rendered a CRA report whose attached VEX draft covered a
+// different CVE than the report's target — the F30 fix turns this
+// into a hard reject at the runner layer (see runner_test.go), and
+// this handler test ensures the sentinel propagates to the right
+// status code so the UI / CLI can surface "attach a VEX draft for
+// the correct CVE" rather than a generic 500.
+func TestCRAReportsHandler_RunReport_VEXDraftCVEMismatch_Returns409_F30(t *testing.T) {
+	h := newCRAHarness()
+	h.runner.err = cra.ErrSourceVEXDraftCVEMismatch
+
+	body := runReportRequestBody(t)
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/run",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.RunReport(c); err != nil {
+		t.Fatalf("RunReport returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("F30: ErrSourceVEXDraftCVEMismatch status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "vex_draft cve_id does not match") {
+		t.Errorf("F30: 409 body should surface actionable hint, got %s", rec.Body.String())
+	}
+	// Defensive: response body MUST NOT echo the sentinel verbatim
+	// (which would leak the foreign draft's CVE id once the runner
+	// wraps the error with provider-side details).
+	if strings.Contains(rec.Body.String(), "cra: source vex_draft") {
+		t.Errorf("F30: 409 body must be generic, not leak sentinel verbatim: %s", rec.Body.String())
+	}
+}
+
+// ----------------------------------------------------------------------------
 // No auth context → 401 (defensive)
 // ----------------------------------------------------------------------------
 
