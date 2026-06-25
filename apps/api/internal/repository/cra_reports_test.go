@@ -778,8 +778,9 @@ func TestCRAReportsRepository_UpdateDecision_RejectsZero(t *testing.T) {
 
 // TestCRAReportsRepository_UpdateDecision_NoRowsErrors verifies the
 // "silent no-op" guard: when the UPDATE matches zero rows (wrong id,
-// wrong tenant), the repository returns a wrapped sql.ErrNoRows so
-// handlers can distinguish "decision landed" from "id not found".
+// wrong tenant, OR already decided per F31), the repository returns a
+// wrapped sql.ErrNoRows so handlers can distinguish "decision landed"
+// from "could not apply".
 func TestCRAReportsRepository_UpdateDecision_NoRowsErrors(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -797,6 +798,52 @@ func TestCRAReportsRepository_UpdateDecision_NoRowsErrors(t *testing.T) {
 	})
 	if err == nil || !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected wrapped sql.ErrNoRows, got %v", err)
+	}
+}
+
+// TestCRAReportsRepo_UpdateDecision_AlreadyApproved_F31 pins the
+// state-machine guard (M2 Codex review #F31): the WHERE clause carries
+// `AND decision = 'pending'`, so an already-decided row matches zero
+// rows and the repository returns wrapped sql.ErrNoRows. Without this
+// guard, a follow-up decision='edited' call against an already-
+// approved report would silently rewrite the approved draft_text (the
+// AI evidence trail), and any party with write permission could
+// "re-decide" a previously rejected report — silently swapping the
+// compliance verdict.
+//
+// The test asserts both the strict regex match on the guard literal in
+// the SQL AND the wrapped sql.ErrNoRows return contract that the
+// handler relies on to surface a 409.
+func TestCRAReportsRepo_UpdateDecision_AlreadyApproved_F31(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	tenantID := uuid.New()
+	id := uuid.New()
+	by := uuid.New()
+
+	// Regex matcher requires the guard literal to appear in the SQL.
+	// A regression that drops the `AND decision = 'pending'` clause
+	// fails this test even before the result-shape assertion runs.
+	mock.ExpectExec(`UPDATE cra_reports SET[\s\S]+WHERE tenant_id = \$1 AND id = \$2 AND decision = 'pending'`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err = repo.UpdateDecision(context.Background(), tenantID, id, CRAReportDecisionUpdate{
+		Decision:   "edited",
+		DecisionBy: by,
+	})
+	if err == nil {
+		t.Fatal("F31: expected sql.ErrNoRows when row already decided, got nil")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("F31: expected wrapped sql.ErrNoRows, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("F31: SQL guard expectation not met: %v", err)
 	}
 }
 

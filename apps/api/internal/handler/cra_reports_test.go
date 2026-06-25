@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -802,6 +804,99 @@ func TestCRAReportsHandler_RunReport_VEXDraftCVEMismatch_Returns409_F30(t *testi
 	// wraps the error with provider-side details).
 	if strings.Contains(rec.Body.String(), "cra: source vex_draft") {
 		t.Errorf("F30: 409 body must be generic, not leak sentinel verbatim: %s", rec.Body.String())
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M2 Codex review #F31 — re-decide on an already-decided report → 409
+// ----------------------------------------------------------------------------
+
+// TestCRAReportsHandler_Decide_AlreadyDecided_Returns409_F31 pins the
+// state-machine guard at the handler layer: when loadReportScoped
+// returns a report whose decision is NOT 'pending' (already approved
+// / edited / rejected), the handler must reject with 409 BEFORE
+// calling UpdateDecision and BEFORE emitting an audit row. Without
+// this guard, a follow-up decision='edited' on an already-approved
+// report would silently rewrite the approved draft_text (the AI
+// evidence trail).
+func TestCRAReportsHandler_Decide_AlreadyDecided_Returns409_F31(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	seeded := h.seedReport(rid, h.projectID)
+	// Flip the seeded report into the 'approved' terminal state so the
+	// state-machine guard in Decide trips.
+	seeded.Decision = "approved"
+	h.store.byID[rid] = seeded
+
+	body, _ := json.Marshal(map[string]string{"decision": "edited"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String()+"/decision",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), rid.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.Decide(c); err != nil {
+		t.Fatalf("Decide returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("F31: already-decided Decide status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "already been decided") {
+		t.Errorf("F31: 409 body should mention 'already been decided', got %s", rec.Body.String())
+	}
+	if h.store.updateCalls != 0 {
+		t.Errorf("F31: UpdateDecision MUST NOT run when report is already decided, got %d", h.store.updateCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F31: audit row MUST NOT be emitted when re-decision is rejected, got %d", len(h.audit.entries))
+	}
+}
+
+// TestCRAReportsHandler_Decide_AlreadyDecided_TOCTOU_Returns409_F31
+// pins the secondary path for F31: the report was 'pending' at
+// loadReportScoped step but became non-pending between then and the
+// UpdateDecision call (a concurrent request decided it). The
+// repository's `decision = 'pending'` guard then returns sql.ErrNoRows,
+// and the handler must translate this into a consistent 409 rather
+// than the bare 500 that the pre-F31 code would have produced.
+func TestCRAReportsHandler_Decide_AlreadyDecided_TOCTOU_Returns409_F31(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReport(rid, h.projectID) // loaded report sees Decision = "pending"
+	// Simulate the race: by the time UpdateDecision runs in the
+	// repository layer, a concurrent decision has already landed, so
+	// the WHERE-with-pending matches zero rows and the repo returns
+	// wrapped sql.ErrNoRows.
+	h.store.updateErr = fmt.Errorf("update cra_reports decision: %w", sql.ErrNoRows)
+
+	body, _ := json.Marshal(map[string]string{"decision": "approved"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String()+"/decision",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), rid.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.Decide(c); err != nil {
+		t.Fatalf("Decide returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("F31 (TOCTOU): status = %d, want 409 on repo ErrNoRows; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "already been decided") {
+		t.Errorf("F31 (TOCTOU): 409 body should mention 'already been decided', got %s", rec.Body.String())
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F31 (TOCTOU): audit row MUST NOT land when UPDATE rejected, got %d", len(h.audit.entries))
 	}
 }
 

@@ -478,16 +478,36 @@ func (r *CRAReportsRepository) CountByProject(ctx context.Context, tenantID, pro
 // lifecycle fields and, for the 'edited' case, the draft_text itself
 // may be overwritten.
 //
+// State-machine guard (M2 Codex review #F31): the UPDATE only matches
+// rows whose current decision is 'pending'. Previously an already
+// approved / rejected / edited report could be re-decided, and an
+// approved report's draft_text could be silently overwritten via a
+// follow-up decision='edited' call (COALESCE($7, draft_text) treats a
+// non-nil EditedDraftText as an overwrite). With the guard in place
+// any re-decision attempt returns sql.ErrNoRows so the handler can
+// surface a 409 ("already decided") instead of silently rewriting
+// compliance evidence. The state column (draft / approved / submitted
+// / archived) is intentionally NOT guarded here — it's the
+// publication lifecycle, not the decision lifecycle, and a separate
+// submit endpoint will own those transitions.
+//
 // Validation:
 //   - tenantID / id / upd.Decision / upd.DecisionBy must all be set.
 //   - Decision must be one of 'approved' | 'edited' | 'rejected'.
 //     'pending' is rejected because Insert already defaults to it
 //     and there is no UI affordance for "un-decide" a draft.
 //
-// Returns sql.ErrNoRows wrapped as a typed error when the (tenant, id)
-// pair does not match an existing row -- this guards against the
-// silent no-op where a handler thinks the decision landed but the
-// id was wrong / belonged to a foreign tenant.
+// Returns sql.ErrNoRows wrapped as a typed error when the UPDATE
+// matches zero rows. After the F31 guard, that happens in either of
+// two cases:
+//   1. (tenant, id) does not match any existing row (wrong id /
+//      foreign tenant).
+//   2. The row exists but its current decision is not 'pending'
+//      (already decided — re-decision rejected).
+// Handlers that load the report first (loadReportScoped) can
+// disambiguate by inspecting the report's prior decision; bare
+// callers should treat ErrNoRows as "could not apply decision" and
+// surface a 409 to the operator.
 func (r *CRAReportsRepository) UpdateDecision(ctx context.Context, tenantID, id uuid.UUID, upd CRAReportDecisionUpdate) error {
 	if tenantID == uuid.Nil {
 		return fmt.Errorf("CRAReportsRepository.UpdateDecision: tenant_id is required")
@@ -516,8 +536,15 @@ func (r *CRAReportsRepository) UpdateDecision(ctx context.Context, tenantID, id 
 	// not change" -- only meaningful for the edited case but harmless
 	// for approved/rejected (we pass nil from the Go side either
 	// way). The decision lifecycle columns are unconditionally set
-	// so an approved decision after a previous rejected one
-	// overwrites decision_at / decision_note correctly.
+	// so an approved decision after a previous rejected one would
+	// overwrite decision_at / decision_note correctly -- HOWEVER, the
+	// `decision = 'pending'` guard below means an already-decided
+	// report cannot reach this code path at all (returns ErrNoRows
+	// instead, which the handler surfaces as 409). The 'pending'
+	// literal is intentionally inline (not a bind parameter) so the
+	// argument count stays at 7 and the mock-based unit tests do not
+	// have to add a placeholder. M2 Codex review #F31 state-machine
+	// guard.
 	const query = `
 		UPDATE cra_reports SET
 			decision      = $3,
@@ -526,7 +553,7 @@ func (r *CRAReportsRepository) UpdateDecision(ctx context.Context, tenantID, id 
 			decision_note = $6,
 			draft_text    = COALESCE($7, draft_text),
 			updated_at    = NOW()
-		WHERE tenant_id = $1 AND id = $2
+		WHERE tenant_id = $1 AND id = $2 AND decision = 'pending'
 	`
 
 	res, err := r.q(ctx).ExecContext(ctx, query,

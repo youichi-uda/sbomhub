@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -326,7 +327,10 @@ func (h *CRAReportsHandler) GetReport(c echo.Context) error {
 // same ambient TenantTx the route is wrapped in — Trust Rescue
 // audit-or-nothing carried over from M1 F5 (※要確認: hard tx wrap
 // for the (UPDATE + audit) pair could be tightened in M2-6 once
-// CRA audit semantics stabilise).
+// CRA audit semantics stabilise). State-machine guard (M2 Codex
+// review #F31): an already-decided report is rejected with 409 BEFORE
+// the UPDATE attempt (and the repository UPDATE also carries
+// `decision = 'pending'` for the load-then-update TOCTOU race).
 func (h *CRAReportsHandler) Decide(c echo.Context) error {
 	tc := middleware.NewTenantContext(c)
 	if tc == nil || tc.TenantID() == uuid.Nil {
@@ -376,6 +380,25 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 		return c.JSON(status, body)
 	}
 
+	// F31: state-machine pre-check. Reject the re-decide case at the
+	// handler layer with a meaningful 409 BEFORE attempting the UPDATE
+	// (and surface a distinct slog line for compliance-trail probes).
+	// The repository also guards the UPDATE with `decision = 'pending'`
+	// as belt-and-braces protection against the load-then-update TOCTOU
+	// race; that path is handled below by the sql.ErrNoRows mapping.
+	if report.Decision != "pending" {
+		slog.Warn("cra_reports: re-decide rejected; report already decided",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"report_id", reportID,
+			"prior_decision", report.Decision,
+			"requested_decision", req.Decision,
+		)
+		return c.JSON(http.StatusConflict, map[string]string{
+			"error": "cra report has already been decided; re-decision is not permitted",
+		})
+	}
+
 	upd := repository.CRAReportDecisionUpdate{
 		Decision:        req.Decision,
 		DecisionBy:      *uid,
@@ -383,6 +406,22 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 		EditedDraftText: req.EditedDraftText,
 	}
 	if err := h.reports.UpdateDecision(c.Request().Context(), tc.TenantID(), reportID, upd); err != nil {
+		// F31 carry-over: sql.ErrNoRows after the state-machine guard
+		// means the row was decided by a concurrent request between our
+		// loadReportScoped above and this UPDATE (TOCTOU race). Surface
+		// the same 409 as the pre-check so the operator gets a
+		// consistent error rather than a misleading 500.
+		if errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("cra_reports: re-decide rejected via state-machine guard (TOCTOU)",
+				"tenant_id", tc.TenantID(),
+				"project_id", projectID,
+				"report_id", reportID,
+				"requested_decision", req.Decision,
+			)
+			return c.JSON(http.StatusConflict, map[string]string{
+				"error": "cra report has already been decided; re-decision is not permitted",
+			})
+		}
 		slog.Warn("cra_reports: UpdateDecision failed",
 			"tenant_id", tc.TenantID(), "project_id", projectID, "report_id", reportID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update cra report decision"})
