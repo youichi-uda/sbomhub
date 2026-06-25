@@ -1348,6 +1348,91 @@ export const api = {
       }),
     exportVEX: (projectId: string) =>
       `${API_URL}/api/v1/projects/${projectId}/vex/export`,
+    // Evidence Pack download (Wave M2-6 / issue #34). POSTs to the
+    // sync builder and triggers a browser-native file download via a
+    // dynamic anchor with the Content-Disposition filename.
+    //
+    // We deliberately use fetch() + Blob() here rather than the shared
+    // request() helper because:
+    //   - the response body is text/markdown, not JSON
+    //   - we want the server's Content-Disposition filename
+    //   - request() throws APIError on non-2xx; we want to surface the
+    //     error text to the operator without losing the response body
+    buildEvidencePack: async (
+      projectId: string,
+      opts?: {
+        includeVEXApproved?: boolean;
+        includeCRAApproved?: boolean;
+        includeMETIPlaceholder?: boolean;
+      }
+    ): Promise<{ filename: string; sizeBytes: number; vexCount: number; craCount: number }> => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (getAuthToken) {
+        const token = await getAuthToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+      }
+      if (getOrgId) {
+        const orgId = getOrgId();
+        if (orgId) headers["X-Clerk-Org-ID"] = orgId;
+      }
+      const body: Record<string, unknown> = {};
+      if (opts?.includeVEXApproved !== undefined) {
+        body.include_vex_approved = opts.includeVEXApproved;
+      }
+      if (opts?.includeCRAApproved !== undefined) {
+        body.include_cra_approved = opts.includeCRAApproved;
+      }
+      if (opts?.includeMETIPlaceholder !== undefined) {
+        body.include_meti_placeholder = opts.includeMETIPlaceholder;
+      }
+      const res = await fetch(
+        `${API_URL}/api/v1/projects/${projectId}/evidence-pack/build`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res.ok) {
+        let errBody: Record<string, unknown> | undefined;
+        try {
+          const txt = await res.text();
+          if (txt) errBody = JSON.parse(txt);
+        } catch {
+          // fall through
+        }
+        throw new APIError(res.status, errBody);
+      }
+      // Parse the server-supplied filename out of Content-Disposition
+      // ("attachment; filename=\"evidence-pack-<id>-<ts>.md\""). Falling
+      // back to a sensible default if the header is missing keeps the
+      // UI working but loses the timestamped name.
+      const cd = res.headers.get("Content-Disposition") || "";
+      const match = cd.match(/filename="([^"]+)"/i);
+      const filename = match ? match[1] : `evidence-pack-${projectId}.md`;
+      const vexCount = parseInt(res.headers.get("X-Evidence-Pack-VEX-Count") || "0", 10) || 0;
+      const craCount = parseInt(res.headers.get("X-Evidence-Pack-CRA-Count") || "0", 10) || 0;
+      const blob = await res.blob();
+      // Browser-native download via dynamic anchor. typeof check
+      // guards SSR — Next.js bundles this module for both server and
+      // client and any module-load reference to `window` would crash
+      // SSR.
+      if (typeof window !== "undefined" && typeof document !== "undefined") {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Defer revoke to next tick so the browser has time to start
+        // the download before the URL is invalidated.
+        setTimeout(() => window.URL.revokeObjectURL(url), 0);
+      }
+      return { filename, sizeBytes: blob.size, vexCount, craCount };
+    },
     // License policy methods
     getLicensePolicies: (id: string) =>
       request<LicensePolicy[]>(`/api/v1/projects/${id}/licenses`),

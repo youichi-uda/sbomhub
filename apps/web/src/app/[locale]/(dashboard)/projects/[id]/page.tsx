@@ -45,6 +45,11 @@ export default function ProjectDetailPage() {
   const [sbomId, setSbomId] = useState<string | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
+  // Evidence Pack (Wave M2-6 / issue #34): synchronous build → browser
+  // download. Tracking a separate state flag rather than re-using
+  // `uploading` so the button label stays accurate during long
+  // generations of large projects.
+  const [evidencePackBuilding, setEvidencePackBuilding] = useState(false);
 
   const loadProject = useCallback(async () => {
     try {
@@ -160,6 +165,28 @@ export default function ProjectDetailPage() {
     }
   }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadNotificationSettings, loadNotificationLogs]);
 
+  // handleBuildEvidencePack drives the M2-6 (issue #34) Markdown
+  // bundle download. The server emits the file body with
+  // Content-Disposition: attachment, and api.projects.buildEvidencePack
+  // triggers the browser-native download via a dynamic <a> element.
+  // We surface success/failure with alert() to match the rest of this
+  // page (notification + license forms use the same pattern); a
+  // toast-based UX upgrade is tracked for M3 alongside background-job
+  // status.
+  async function handleBuildEvidencePack() {
+    if (evidencePackBuilding) return;
+    setEvidencePackBuilding(true);
+    try {
+      const { filename, vexCount, craCount } = await api.projects.buildEvidencePack(projectId);
+      alert(tp("evidencePackSuccess", { filename, vex: vexCount, cra: craCount }));
+    } catch (error) {
+      console.error("Failed to build Evidence Pack:", error);
+      alert(tp("evidencePackFailed"));
+    } finally {
+      setEvidencePackBuilding(false);
+    }
+  }
+
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -216,6 +243,21 @@ export default function ProjectDetailPage() {
             <Link href={`/projects/${projectId}/share`}>
               <Button variant="outline">{tp("share")}</Button>
             </Link>
+            {/* M2-6 / issue #34: Evidence Pack 生成 (synchronous
+                Markdown export). Disabled while a build is in-flight
+                so a double-click does not fire two concurrent
+                downloads. The success / failure alert surfaces the
+                returned filename + per-section counts so the operator
+                knows immediately what they got. */}
+            <Button
+              variant="outline"
+              onClick={handleBuildEvidencePack}
+              disabled={evidencePackBuilding}
+              title={tp("evidencePackDescription")}
+            >
+              <Download className="h-4 w-4 mr-2" />
+              {evidencePackBuilding ? tp("evidencePackGenerating") : tp("evidencePack")}
+            </Button>
           </div>
         </div>
       </div>
