@@ -168,3 +168,149 @@ func TestValidateEncryptionKey_ExactPlaceholderMatch(t *testing.T) {
 		t.Fatalf("unexpected error for non-exact placeholder: %v", err)
 	}
 }
+
+// TestEvaluateAppRoleRLS exercises the pure decision branch of
+// assertAppRoleNotBypassRLS (M4 Codex review #F72). The F72 finding flagged
+// that the original guard only checked rolbypassrls and silently accepted a
+// PostgreSQL superuser, because PostgreSQL bypasses RLS for superusers
+// regardless of rolbypassrls. The bundled enterprise compose file launches
+// the official `postgres` image with POSTGRES_USER=sbomhub, which the image
+// creates as a superuser, so production deployments using the default
+// runtime user had tenant isolation silently disabled while this guard
+// logged "DB role check passed".
+//
+// The table below pins every (bypassRLS, superuser, env) combination so
+// the rejection contract — superuser=true OR bypassRLS=true must fail in
+// production/staging/unset, and warn-only in development — cannot regress.
+func TestEvaluateAppRoleRLS(t *testing.T) {
+	cases := []struct {
+		name       string
+		role       string
+		bypassRLS  bool
+		superuser  bool
+		appEnv     string
+		wantErr    bool
+		errSubstrs []string
+	}{
+		// F72: the bug fix. rolsuper=true, rolbypassrls=false in
+		// production must now hard-fail.
+		{
+			name:      "F72 reject superuser in production (rolbypassrls=false)",
+			role:      "sbomhub",
+			bypassRLS: false,
+			superuser: true,
+			appEnv:    "production",
+			wantErr:   true,
+			errSubstrs: []string{
+				"RLS startup guard FAIL",
+				"rolsuper=true",
+				"sbomhub_app",
+			},
+		},
+		{
+			name:       "F72 reject superuser in staging",
+			role:       "sbomhub",
+			bypassRLS:  false,
+			superuser:  true,
+			appEnv:     "staging",
+			wantErr:    true,
+			errSubstrs: []string{"rolsuper=true"},
+		},
+		{
+			name:       "F72 reject superuser when APP_ENV is unset (default-deny)",
+			role:       "sbomhub",
+			bypassRLS:  false,
+			superuser:  true,
+			appEnv:     "",
+			wantErr:    true,
+			errSubstrs: []string{"rolsuper=true"},
+		},
+		// Regression: rolbypassrls=true must still fail.
+		{
+			name:       "reject rolbypassrls in production",
+			role:       "sbomhub",
+			bypassRLS:  true,
+			superuser:  false,
+			appEnv:     "production",
+			wantErr:    true,
+			errSubstrs: []string{"rolbypassrls=true", "rolsuper=false"},
+		},
+		// Both attributes true (e.g. a superuser that also has the
+		// explicit BYPASSRLS attribute) — error message must surface
+		// both so the operator gets one clear diagnostic.
+		{
+			name:       "reject when both attributes true",
+			role:       "postgres",
+			bypassRLS:  true,
+			superuser:  true,
+			appEnv:     "production",
+			wantErr:    true,
+			errSubstrs: []string{"rolbypassrls=true", "rolsuper=true"},
+		},
+		// The happy path: sbomhub_app-style role created with
+		// NOSUPERUSER NOBYPASSRLS.
+		{
+			name:      "accept normal role in production",
+			role:      "sbomhub_app",
+			bypassRLS: false,
+			superuser: false,
+			appEnv:    "production",
+			wantErr:   false,
+		},
+		{
+			name:      "accept normal role with empty APP_ENV",
+			role:      "sbomhub_app",
+			bypassRLS: false,
+			superuser: false,
+			appEnv:    "",
+			wantErr:   false,
+		},
+		// Development downgrades both attributes to a warning so
+		// contributors can keep running against a single-role local DB.
+		{
+			name:      "development warn-only on superuser",
+			role:      "postgres",
+			bypassRLS: false,
+			superuser: true,
+			appEnv:    "development",
+			wantErr:   false,
+		},
+		{
+			name:      "development warn-only on rolbypassrls",
+			role:      "postgres",
+			bypassRLS: true,
+			superuser: false,
+			appEnv:    "development",
+			wantErr:   false,
+		},
+		{
+			name:      "development warn-only when both attributes true",
+			role:      "postgres",
+			bypassRLS: true,
+			superuser: true,
+			appEnv:    "development",
+			wantErr:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := evaluateAppRoleRLS(tc.role, tc.bypassRLS, tc.superuser,
+				newTestCfg("", tc.appEnv))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				for _, want := range tc.errSubstrs {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error %q does not contain %q", err.Error(), want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+		})
+	}
+}

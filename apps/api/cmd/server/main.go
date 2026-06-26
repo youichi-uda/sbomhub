@@ -123,37 +123,70 @@ func validateEncryptionKey(cfg *config.Config) error {
 	)
 }
 
-// assertAppRoleNotBypassRLS verifies that the runtime DB role does not have
-// the BYPASSRLS attribute. In development we log a warning so contributors
-// can keep running against a single-role local DB while they migrate;
-// everywhere else (production / staging / unset) we hard-fail.
+// assertAppRoleNotBypassRLS verifies that the runtime DB role does not
+// bypass Row-Level Security. RLS is bypassed by *two* PostgreSQL role
+// attributes, and the original guard only checked one of them (M4 Codex
+// review #F72 — security blocker):
+//
+//  1. rolbypassrls=true — the explicit BYPASSRLS attribute.
+//  2. rolsuper=true     — superusers ALWAYS bypass RLS regardless of
+//     rolbypassrls. The PostgreSQL docs are explicit:
+//     "Superusers and roles with the BYPASSRLS attribute
+//     always bypass the row security system." The
+//     official `postgres` image creates POSTGRES_USER
+//     as a superuser, so the `sbomhub` runtime user
+//     bundled with the enterprise compose file (which
+//     reports rolbypassrls=false) was silently
+//     disabling tenant isolation in production while
+//     this guard happily logged "DB role check passed".
+//
+// We now reject either attribute. In development we log a warning so
+// contributors can keep running against a single-role local DB while they
+// migrate; everywhere else (production / staging / unset) we hard-fail.
 //
 // Environment classification comes from cfg.IsDevelopment() so the
 // APP_ENV → ENVIRONMENT precedence resolved by config.Load (codex-r18)
 // is the single source of truth — see validateEncryptionKey for the
 // matching contract.
 func assertAppRoleNotBypassRLS(db *sql.DB, cfg *config.Config) error {
-	var bypass bool
+	var bypassRLS, superuser bool
 	var role string
 	if err := db.QueryRow(
-		`SELECT current_user, rolbypassrls FROM pg_roles WHERE rolname = current_user`,
-	).Scan(&role, &bypass); err != nil {
-		return fmt.Errorf("failed to query rolbypassrls for current_user: %w", err)
+		`SELECT current_user, rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&role, &bypassRLS, &superuser); err != nil {
+		return fmt.Errorf("failed to query pg_roles for current_user: %w", err)
 	}
-	if !bypass {
-		slog.Info("DB role check passed", "role", role, "bypass_rls", false)
+	return evaluateAppRoleRLS(role, bypassRLS, superuser, cfg)
+}
+
+// evaluateAppRoleRLS is the pure decision branch of
+// assertAppRoleNotBypassRLS, split out so the F72 rolsuper-rejection
+// regression is unit-testable without a live Postgres connection. The
+// function deliberately accepts already-scanned values so tests can drive
+// every (bypassRLS, superuser, env) combination directly.
+func evaluateAppRoleRLS(role string, bypassRLS, superuser bool, cfg *config.Config) error {
+	if !bypassRLS && !superuser {
+		slog.Info("DB role check passed",
+			"role", role,
+			"bypass_rls", false,
+			"superuser", false)
 		return nil
 	}
 	if cfg.IsDevelopment() {
-		slog.Warn("DB role has BYPASSRLS — tenant isolation is NOT enforced. "+
-			"Switch DATABASE_URL to the sbomhub_app role before deploying.",
-			"role", role, "app_env", cfg.Environment)
+		slog.Warn("DB role bypasses Row-Level Security — tenant isolation is NOT enforced. "+
+			"Switch DATABASE_URL to the sbomhub_app role (NOSUPERUSER NOBYPASSRLS) before deploying.",
+			"role", role,
+			"bypass_rls", bypassRLS,
+			"superuser", superuser,
+			"app_env", cfg.Environment)
 		return nil
 	}
 	return fmt.Errorf(
-		"RLS bypass 権限を持つロールでの起動は禁止です。 sbomhub_app ロールを使用してください "+
-			"(current_user=%s, rolbypassrls=true, APP_ENV=%q)",
-		role, cfg.Environment,
+		"RLS startup guard FAIL: current DB user %q has rolbypassrls=%v rolsuper=%v — "+
+			"RLS will be bypassed (PostgreSQL superusers bypass RLS regardless of rolbypassrls), "+
+			"refusing to start. sbomhub_app ロール (NOSUPERUSER NOBYPASSRLS) を使用してください "+
+			"(APP_ENV=%q, see docs/security/self-host-deployment.md §3)",
+		role, bypassRLS, superuser, cfg.Environment,
 	)
 }
 
