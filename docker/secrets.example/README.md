@@ -9,7 +9,19 @@
 | File | 用途 | 生成コマンド |
 |---|---|---|
 | `encryption_key.txt` | アプリ層 AES-256-GCM のマスタ鍵。 `issue_tracker_connections.auth_token_encrypted` 等を守る。 32 byte 必須。 | `openssl rand -base64 32` |
-| `postgres_password.txt` | PostgreSQL `sbomhub` ロールの password。 base64 推奨 (URL escape 注意)。 | `openssl rand -base64 24` |
+| `postgres_password.txt` | PostgreSQL の **bootstrap superuser** (`sbomhub`、 POSTGRES_USER) の password。 postgres service の initdb と `db-bootstrap` one-shot service の admin 接続専用 (sbomhub-api 本体はこれを使わない)。 | `openssl rand -base64 24` |
+| `postgres_app_password.txt` | sbomhub-api runtime 接続用 (`sbomhub_app` ロール、 NOSUPERUSER NOBYPASSRLS)。 M4 Codex review #F76 fix で default 化。 | `openssl rand -base64 24` |
+| `postgres_migrator_password.txt` | 自動 migration 接続用 (`sbomhub_migrator` ロール、 NOBYPASSRLS + schema CREATE)。 M4 Codex review #F76 fix で default 化。 | `openssl rand -base64 24` |
+
+> **役割分担 (M4 Codex review #F76 fix 以降)**:
+> `postgres_password` は **bootstrap superuser** 専用、 sbomhub-api には渡らない。
+> sbomhub-api は `sbomhub_app` (runtime) / `sbomhub_migrator` (migrations) の
+> 2 ロールに分離されており、 それぞれ専用 password file を mount する。
+> 役割分離は `db-bootstrap` one-shot service が compose 起動時に自動で
+> 投入するため、 manual 操作は不要 (詳細: `../README.enterprise.md` §3)。
+> 旧構成 (`install.sh --bootstrap-roles` 経由 manual setup) は依然として
+> advanced operator 向けに動作する (SQL pattern が完全に一致しているため、
+> どちらを実行しても結果は同じ)。
 
 ## 初期セットアップ
 
@@ -19,14 +31,17 @@ cd docker
 cp -r secrets.example secrets
 
 # 2. それぞれを安全なランダム値で生成 (sample placeholder は使用禁止)
-openssl rand -base64 32 > secrets/encryption_key.txt
-openssl rand -base64 24 > secrets/postgres_password.txt
+openssl rand -base64 32 | tr -d '\n' > secrets/encryption_key.txt
+openssl rand -base64 24 | tr -d '\n' > secrets/postgres_password.txt
+openssl rand -base64 24 | tr -d '\n' > secrets/postgres_app_password.txt
+openssl rand -base64 24 | tr -d '\n' > secrets/postgres_migrator_password.txt
 
 # 3. パーミッションを厳格化 (owner only)
 chmod 600 secrets/*
 chmod 700 secrets
 
-# 4. 起動
+# 4. 起動 (db-bootstrap が起動時に sbomhub_app / sbomhub_migrator ロールを
+#    冪等作成する。 manual install.sh --bootstrap-roles は不要)
 docker compose -f docker-compose.enterprise.yml up -d
 ```
 
@@ -53,27 +68,35 @@ docker compose -f docker-compose.enterprise.yml up -d
   rotation 時は `docker compose -f docker-compose.enterprise.yml up -d --force-recreate sbomhub-api`
   で再起動が必要。
 
-## production への移行 (RLS role 分離)
+## production への移行 (RLS role 分離) — M4 Codex review #F76 で default 化
 
-このディレクトリの sample は **最小構成** (単一 `sbomhub` ロール) を想定する。
-M4-4 §3 で説明される sbomhub_app / sbomhub_migrator の 2 ロール分離
-(RLS bypass 禁止) を有効にする場合、 以下を追加する:
+このディレクトリの sample は **default で sbomhub_app / sbomhub_migrator の
+2 ロール分離** (RLS bypass 禁止) を前提とする。 `docker-compose.enterprise.yml`
+の `db-bootstrap` one-shot service が postgres healthy 直後に起動し、
+`secrets/postgres_app_password.txt` / `secrets/postgres_migrator_password.txt`
+の値で `sbomhub_app` (NOSUPERUSER NOBYPASSRLS) / `sbomhub_migrator`
+(NOBYPASSRLS + schema CREATE) ロールを冪等作成 → privilege grant → 必要なら
+legacy 所有 tables の ALTER OWNER 移譲、 までを自動で完了する。
+
+sbomhub-api はこの 2 ロール + 各 password file を読んで接続するため、 manual
+`install.sh --bootstrap-roles` の実行は **不要** (旧 M4-6 では必須だった、
+[#F76](https://github.com/youichi-uda/sbomhub/issues/) で default 起動 path
+を修正)。
 
 ```bash
-# 追加 secrets
-openssl rand -base64 24 > secrets/postgres_app_password.txt
-openssl rand -base64 24 > secrets/postgres_migrator_password.txt
-chmod 600 secrets/postgres_*_password.txt
+# default 起動 (sbomhub_app / sbomhub_migrator は db-bootstrap が自動投入)
+docker compose -f docker-compose.enterprise.yml up -d
 
-# 既存 postgres コンテナにロールを bootstrap
-# (本リポジトリの install.sh を流用する)
-../install.sh --bootstrap-roles
+# 起動 log で sbomhub_app の RLS 強制を確認
+docker compose -f docker-compose.enterprise.yml logs db-bootstrap   # 期待: "role bootstrap complete"
+docker compose -f docker-compose.enterprise.yml logs sbomhub-api | grep 'DB role check'
+# 期待: "DB role check passed role=sbomhub_app bypass_rls=false superuser=false"
 ```
 
-その後 `docker-compose.enterprise.yml` の `sbomhub-api.environment` を編集して
-`POSTGRES_APP_USER` / `POSTGRES_MIGRATOR_USER` を `sbomhub_app` / `sbomhub_migrator`
-に切り替え、 secrets として `postgres_app_password` / `postgres_migrator_password`
-を mount し、 wrapper script が読む `*_PASSWORD_FILE` パスを更新する。
+**advanced operator 向け**: `install.sh --bootstrap-roles` も依然として動作する
+(SQL pattern が `db-bootstrap` service と一致しているため重複実行しても無害)。
+host から OSS compose を使っていて、 そこに後付けで role 分離を入れたい場合は
+従来通り [`../../install.sh`](../../install.sh) を参照。
 
 詳細は [`../README.enterprise.md`](../README.enterprise.md) §3 を参照。
 
