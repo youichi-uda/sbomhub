@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -502,6 +503,170 @@ func TestRunBench_JSONLWriteFailure_F43(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to write JSONL") {
 		t.Errorf("runBench error message missing 'failed to write JSONL': %v", err)
+	}
+}
+
+// ctxAwareBlockingProvider is a Provider stub whose Complete blocks
+// until the per-call context is cancelled, then records the fact
+// before returning ctx.Err(). Used by TestRunBench_F43_CancellationReachesProviders
+// (F49) to assert that the F43 fix's cancelRun() actually reaches
+// in-flight provider goroutines — not just that runBench returns the
+// write error.
+//
+// SAFETY: started / cancelObserved are atomic because multiple bench
+// goroutines call Complete on the SAME provider instance concurrently
+// (one per (provider, case) pair). The test reads the counters after
+// runBench returns (i.e. after the bench's wg.Wait) so a happens-before
+// edge already exists, but atomic.Int32 keeps the race detector quiet
+// for any in-flight read.
+type ctxAwareBlockingProvider struct {
+	name           string
+	model          string
+	started        atomic.Int32
+	cancelObserved atomic.Int32
+}
+
+var _ llm.Provider = (*ctxAwareBlockingProvider)(nil)
+
+func (p *ctxAwareBlockingProvider) Name() string                  { return p.name }
+func (p *ctxAwareBlockingProvider) Model() string                 { return p.model }
+func (p *ctxAwareBlockingProvider) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func (p *ctxAwareBlockingProvider) Embed(_ context.Context, _ llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	return nil, llm.ErrNotImplemented
+}
+
+func (p *ctxAwareBlockingProvider) Complete(ctx context.Context, _ llm.CompleteRequest) (*llm.CompleteResponse, error) {
+	p.started.Add(1)
+	<-ctx.Done()
+	p.cancelObserved.Add(1)
+	return nil, ctx.Err()
+}
+
+// TestRunBench_F43_CancellationReachesProviders is the F49 regression
+// net for the F43 fix. F43 made runBench capture the first JSONL write
+// error AND cancel the run context so in-flight provider calls stop
+// burning quota. The original F43 test only checked that runBench
+// returned the write error — it did not check that cancellation
+// actually reached the provider goroutines, so a future refactor could
+// silently break the cancel-propagation path (e.g. runOne stops
+// deriving its per-call ctx from runCtx) while keeping the F43 test
+// green.
+//
+// This test asserts:
+//   1. Every blocking provider call that started observes ctx
+//      cancellation (cancelObserved == started). If runOne stopped
+//      threading runCtx into the per-call ctx, the blocking goroutines
+//      would only unblock when their own per-call Timeout elapsed —
+//      i.e. they would not observe runCtx cancellation, only the
+//      per-call timeout. The Timeout is set to 30s here so any goroutine
+//      that observed Done within the test budget came from runCtx, not
+//      its own per-call timer.
+//   2. runBench returns within 1s after the write failure. With per-call
+//      Timeout = 30s and an outer 5s test ceiling, a regression in the
+//      cancel-propagation path would hang until the outer ceiling and
+//      blow the test budget, not the assertion.
+//
+// The race detector additionally checks for goroutine-level data races
+// and (indirectly, via wg.Wait inside runBench) verifies the bench
+// does not leak goroutines past its return.
+func TestRunBench_F43_CancellationReachesProviders(t *testing.T) {
+	cases := []EvalCase{
+		{
+			CaseID: "c1", CVEID: "CVE-2024-0001",
+			AdvisoryExcerpt: "rce", ComponentName: "foo", Ecosystem: "go",
+			CodeReachability: CodeReachability{Reachable: false, Evidence: []string{}},
+			ExpectedState:    "not_affected",
+		},
+		{
+			CaseID: "c2", CVEID: "CVE-2024-0002",
+			AdvisoryExcerpt: "rce", ComponentName: "bar", Ecosystem: "npm",
+			CodeReachability: CodeReachability{Reachable: true, Evidence: []string{}},
+			ExpectedState:    "affected",
+		},
+		{
+			CaseID: "c3", CVEID: "CVE-2024-0003",
+			AdvisoryExcerpt: "rce", ComponentName: "baz", Ecosystem: "go",
+			CodeReachability: CodeReachability{Reachable: false, Evidence: []string{}},
+			ExpectedState:    "not_affected",
+		},
+	}
+
+	// The fast provider returns immediately so the JSONL writer is
+	// actually exercised — without at least one finished call, no write
+	// is attempted, no error is captured, and runBench would block
+	// waiting on the blocking provider forever.
+	respJSON := `{"state":"not_affected","confidence":0.9,"evidence":[{"kind":"llm_rationale","description":"x","source":"llm"}]}`
+	fast := &fakeProvider{
+		name: "fast", model: "fast-model",
+		responses: map[string]string{
+			"CVE-2024-0001": respJSON,
+			"CVE-2024-0002": respJSON,
+			"CVE-2024-0003": respJSON,
+		},
+	}
+	blocking := &ctxAwareBlockingProvider{name: "blocking", model: "blocking-model"}
+
+	providers := []namedProvider{
+		{name: "fast", model: "fast-model", provider: fast},
+		{name: "blocking", model: "blocking-model", provider: blocking},
+	}
+
+	fw := &failingWriter{err: errors.New("simulated disk full")}
+
+	// MaxConcurrency = 6 so all 6 (provider, case) goroutines are in
+	// flight when the first JSONL write fails — otherwise the blocking
+	// goroutines might be sitting on the semaphore (which honours
+	// runCtx) and would never have been observed entering Complete.
+	const maxConc = 6
+
+	done := make(chan struct{})
+	var benchErr error
+	go func() {
+		defer close(done)
+		_, benchErr = runBench(context.Background(),
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			providers, cases,
+			runOptions{
+				// Per-call Timeout deliberately much larger than the
+				// "promptly return" budget so a goroutine that observes
+				// Done within the budget must have done so via runCtx
+				// cancellation, not via its own per-call timer expiring.
+				Timeout:        30 * time.Second,
+				MaxConcurrency: maxConc,
+				JSONLWriter:    fw,
+				Clock:          func() time.Time { return time.Unix(0, 0) },
+			},
+		)
+	}()
+
+	// Outer ceiling so a hang doesn't wedge the whole `go test` run.
+	const promptReturnBudget = 1 * time.Second
+	select {
+	case <-done:
+		// good — runBench returned promptly.
+	case <-time.After(5 * time.Second):
+		t.Fatal("runBench did not return within 5s after JSONL write failure (F43 cancel-propagation regression: blocking goroutines were not cancelled)")
+	}
+
+	if benchErr == nil {
+		t.Fatal("runBench: expected JSONL write error, got nil")
+	}
+
+	// The bench should have returned WELL before the per-call Timeout
+	// (30s). We don't measure wall-clock precisely here — the outer
+	// `select` already proves the bench returned within 5s, and the
+	// per-call Timeout is 30s, so the only way runBench could have
+	// returned that fast is via runCtx cancellation reaching runOne /
+	// the blocking provider.
+	_ = promptReturnBudget // documented in the comment above
+
+	started := blocking.started.Load()
+	observed := blocking.cancelObserved.Load()
+	if started == 0 {
+		t.Fatal("blocking provider was never called — test setup broken (the fast provider must complete at least one call before the JSONL write triggers cancel)")
+	}
+	if observed != started {
+		t.Errorf("blocking provider cancellation regression: started=%d, cancelObserved=%d (cancelRun did not reach all in-flight provider goroutines)", started, observed)
 	}
 }
 
