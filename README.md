@@ -181,6 +181,32 @@ cd apps/api && go run ./cmd/server
 cd apps/web && pnpm install && pnpm dev
 ```
 
+### LLM ベンチ用バイナリ (`llm-bench`) のダウンロード
+
+`apps/api/cmd/llm-bench` は Managed AI と Local LLM (Ollama 等) の VEX トリアージ品質を同一プロンプトで比較するための専用バイナリで、 sbomhub OSS のリリースタグごとに **スタンドアロン archive** を [GitHub Releases](https://github.com/youichi-uda/sbomhub/releases) に同梱しています (M5-2)。sbomhub のソースを clone してビルドしなくても、 `sbomhub-cli` の `sbomhub llm bench` ラッパーや CI から直接ダウンロードして実行できます。
+
+```bash
+# 例: Linux x86_64 用の最新リリースを取得 (タグは適宜置換)
+VERSION=v1.4.0
+curl -fsSL -o llm-bench.tar.gz \
+  https://github.com/youichi-uda/sbomhub/releases/download/${VERSION}/llm-bench-${VERSION}-linux-amd64.tar.gz
+tar -xzf llm-bench.tar.gz
+./llm-bench --version
+./llm-bench --eval-set fixtures/llm-bench/cve-20-50.json --providers openai
+```
+
+提供アーカイブ:
+
+| OS | アーキテクチャ | ファイル名 |
+|----|----------------|------------|
+| Linux | amd64 / arm64 | `llm-bench-<VERSION>-linux-{amd64,arm64}.tar.gz` |
+| macOS | amd64 / arm64 | `llm-bench-<VERSION>-darwin-{amd64,arm64}.tar.gz` |
+| Windows | amd64 / arm64 | `llm-bench-<VERSION>-windows-{amd64,arm64}.zip` |
+
+`checksums.txt` (SHA-256) もリリースに同梱されるので、 ダウンロード後はチェックサム検証を推奨します。 環境変数の契約 (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `SBOMHUB_LLM_BENCH_OLLAMA_MODEL` 等) と終了コード表 (F42) は `./llm-bench --help` で確認できます。
+
+> sbomhub OSS のサーバ本体 (`server` / `migrate`) は引き続き [Docker Hub の y1uda/sbomhub-api](https://hub.docker.com/r/y1uda/sbomhub-api) でのみ配布しています。 `llm-bench` だけがスタンドアロン archive で配布される理由は、 ラッパー (`sbomhub llm bench`) が任意のホストから単独で実行できる必要があるためです。
+
 ### SaaS 版について
 
 > SaaS 版 (https://sbomhub.app) は **2026-06-23 時点で新規受付停止 (sunset)** です。新ポジショニング下での再開時期は未定。当面はセルフホスト + CLI を主導線にしてください。再開時はリポジトリ上でアナウンスします。
