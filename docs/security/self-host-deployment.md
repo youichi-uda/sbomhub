@@ -644,39 +644,45 @@ shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 > sanity check) を必ず適用すること。
 
 ```bash
-# 復号 + 展開
+# Step 1: 復号 + 展開
 age -d -i $PRIVATE_KEY \
     -o sbomhub-backup-YYYYMMDD.tar.gz \
     sbomhub-backup-YYYYMMDD.tar.gz.age
 tar xzf sbomhub-backup-YYYYMMDD.tar.gz
 
-# .env を所定位置に戻す
-cp backup-env-YYYYMMDD.env .env
-chmod 600 .env
-
-# DB を restore (既存スキーマを drop してから入れ直す形)
+# Step 2: DB を restore (既存スキーマを drop してから入れ直す形)
 # --single-transaction を付けることで、 途中 failure 時に全 restore が rollback され、
 # 部分適用による DB と secrets の不整合を防ぐ (F65 fix と同じ fail-safe)。
+# ※ この時点で .env (secrets) はまだ触らない。 sanity check が両方 PASS するまで
+#    現行の .env を untouched で保持し、 DB と secrets の不整合 window を排除する
+#    (F69 fix: 旧 .env を残しておけば sanity FAIL 時に「DB は restore 開始前に rollback、
+#    secrets も触れていない」 という clean fail-safe を保てる)。
 docker compose -f docker-compose.enterprise.yml exec -T postgres \
     pg_restore -U sbomhub_migrator -d sbomhub \
     --clean --if-exists --single-transaction \
     < backup-YYYYMMDD.dump
 
-# Sanity check 1: migration version が最新まで適用されていることを確認
-# (空文字や error が返るなら restore は不完全、 secrets を戻さず調査)
+# Step 3: Sanity check 1 — migration version が最新まで適用されていることを確認
+# (空文字や error が返るなら restore は不完全、 .env を戻さず調査)
 docker compose -f docker-compose.enterprise.yml exec -T postgres \
     psql -U sbomhub_migrator -d sbomhub -c \
     "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;"
 
-# Sanity check 2: tenants table が query 可能で、 production data が入っていることを確認
+# Step 4: Sanity check 2 — tenants table が query 可能で、 production data が入っていることを確認
 # (production restore のはずなのに count が 0 なら fresh-install 用 backup を誤投入した
 # 可能性があり、 要調査)
 docker compose -f docker-compose.enterprise.yml exec -T postgres \
     psql -U sbomhub_migrator -d sbomhub -c \
     "SELECT count(*) FROM tenants;"
 
-# 上記 sanity check が両方 PASS した場合のみ api を再起動。 FAIL なら secrets を
-# 戻さず DB volume を rollback (snapshot or 旧 dump 再投入) して原因調査する。
+# Step 5: 上記 sanity check が両方 PASS した場合のみ .env を所定位置に戻す。
+# いずれかが FAIL したら本 step に進まず DB volume を rollback (snapshot or
+# 旧 dump 再投入) して原因調査する。 旧 .env はこの時点でも untouched なので、
+# DB と secrets はそのまま整合した「restore 開始前の状態」 に戻せる。
+cp backup-env-YYYYMMDD.env .env
+chmod 600 .env
+
+# Step 6: api を再起動 (DB + .env が両方更新された後)
 docker compose -f docker-compose.enterprise.yml restart sbomhub-api
 docker compose -f docker-compose.enterprise.yml logs -f sbomhub-api | head -50
 ```
