@@ -78,7 +78,7 @@ func (f *fakeProvider) Complete(_ context.Context, req llm.CompleteRequest) (*ll
 // --eval-set guard.
 func TestParseFlags(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
-		f, err := parseFlags([]string{"--eval-set", "x.json"})
+		f, err := parseFlags([]string{"--eval-set", "x.json"}, io.Discard)
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
@@ -96,25 +96,25 @@ func TestParseFlags(t *testing.T) {
 		}
 	})
 	t.Run("eval-set required", func(t *testing.T) {
-		_, err := parseFlags([]string{})
+		_, err := parseFlags([]string{}, io.Discard)
 		if err == nil {
 			t.Fatal("expected error when --eval-set missing")
 		}
 	})
 	t.Run("max-cases must be positive", func(t *testing.T) {
-		_, err := parseFlags([]string{"--eval-set", "x", "--max-cases", "0"})
+		_, err := parseFlags([]string{"--eval-set", "x", "--max-cases", "0"}, io.Discard)
 		if err == nil {
 			t.Fatal("expected error when --max-cases=0")
 		}
 	})
 	t.Run("max-concurrency must be positive", func(t *testing.T) {
-		_, err := parseFlags([]string{"--eval-set", "x", "--max-concurrency", "-1"})
+		_, err := parseFlags([]string{"--eval-set", "x", "--max-concurrency", "-1"}, io.Discard)
 		if err == nil {
 			t.Fatal("expected error when --max-concurrency=-1")
 		}
 	})
 	t.Run("timeout must be positive", func(t *testing.T) {
-		_, err := parseFlags([]string{"--eval-set", "x", "--timeout", "0"})
+		_, err := parseFlags([]string{"--eval-set", "x", "--timeout", "0"}, io.Discard)
 		if err == nil {
 			t.Fatal("expected error when --timeout=0")
 		}
@@ -538,6 +538,49 @@ func TestRealMain_JSONLWriteFailure_ExitCode5_F43(t *testing.T) {
 	}
 	if ee.Code != exitExecutionFailed {
 		t.Errorf("exit code = %d, want %d (exitExecutionFailed)", ee.Code, exitExecutionFailed)
+	}
+}
+
+// TestRealMain_HelpExitsZero_F48 verifies the F48 fix: `llm-bench --help`
+// (and the -h alias) must exit 0 and print the Usage block + the F42
+// exit-code contract to stderr. Before F48 the FlagSet's output was
+// wired to io.Discard so --help produced no output AND surfaced as an
+// exitUsageError (exit 2) — operators / CI pipelines had to read the
+// package doc to map exit codes to failure modes.
+func TestRealMain_HelpExitsZero_F48(t *testing.T) {
+	for _, arg := range []string{"--help", "-h"} {
+		arg := arg
+		t.Run(arg, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			ee := realMain([]string{arg}, &out, &errb)
+			if ee != nil {
+				t.Fatalf("realMain(%q): got exitError %+v, want nil (help is success)", arg, ee)
+			}
+			s := errb.String()
+			// The Usage block must include both the flag listing header
+			// AND the F42 exit-code table — the whole point of F48 is
+			// that the exit codes are discoverable without grepping the
+			// package doc.
+			// Go's flag package renders flag names with a single leading
+			// dash (PrintDefaults uses "-name", not "--name") even when
+			// the operator typed --name. Assert on the canonical form.
+			wantSubs := []string{
+				"Usage: llm-bench",
+				"Flags:",
+				"-eval-set",
+				"-providers",
+				"Exit codes",
+				"2  Usage / flag validation error",
+				"3  Fixture / config validation error",
+				"4  No providers available",
+				"5  Execution / output failure",
+			}
+			for _, sub := range wantSubs {
+				if !strings.Contains(s, sub) {
+					t.Errorf("--help output missing substring %q\n--- stderr ---\n%s", sub, s)
+				}
+			}
+		})
 	}
 }
 

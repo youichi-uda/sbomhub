@@ -43,11 +43,16 @@
 //	4  no providers available (no BYOK env configured)
 //	5  execution / output failure (e.g. JSONL write failed)
 //
+// The same exit-code table is also surfaced via `llm-bench --help`
+// (F48) so operators / CI pipelines do not have to read this comment
+// to dispatch on failure mode.
+//
 // Reference: M4_AGENT_PROMPT_TEMPLATE.md §1.K (Provider 実装規律, F19, F25).
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -78,9 +83,19 @@ type cliFlags struct {
 	maxConcurrency int
 }
 
-func parseFlags(args []string) (*cliFlags, error) {
+// parseFlags wires the CLI surface and parses argv into *cliFlags.
+//
+// F48 (M4 Codex review): the FlagSet's output is wired to the caller-
+// supplied stderr writer (was io.Discard) and the Usage hook prints the
+// flag list followed by the F42 exit-code contract. Without this, the
+// package doc's exit-code table was discoverable only by reading the
+// source — `llm-bench --help` printed nothing, so operators and CI
+// pipelines had to scrape stderr text to map failure modes. Help is
+// detected by realMain via errors.Is(err, flag.ErrHelp) and treated as
+// a successful (exit 0) invocation.
+func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 	fs := flag.NewFlagSet("llm-bench", flag.ContinueOnError)
-	fs.SetOutput(io.Discard) // silence default Usage on parse failure; main prints its own.
+	fs.SetOutput(stderr) // F48: stderr (was io.Discard) so --help / parse errors print Usage.
 
 	f := &cliFlags{}
 	fs.StringVar(&f.providers, "providers", "all",
@@ -100,7 +115,31 @@ func parseFlags(args []string) (*cliFlags, error) {
 	fs.IntVar(&f.maxConcurrency, "max-concurrency", 4,
 		"max parallel LLM calls across all (provider, case) pairs (default 4)")
 
+	// F48: Usage prints flag list + F42 exit-code contract so operators
+	// can map exit codes without reading the source. Kept in sync with
+	// the exitOK / exitUsageError / ... constants below — if you add a
+	// new exit code, add a line here too.
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: llm-bench [flags]")
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Compare Managed AI vs Local LLM quality on a fixed VEX-triage eval-set.")
+		fmt.Fprintln(stderr, "Results are emitted as JSON Lines (one row per (provider, case) pair).")
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Flags:")
+		fs.PrintDefaults()
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Exit codes (F42):")
+		fmt.Fprintln(stderr, "  0  Success")
+		fmt.Fprintln(stderr, "  2  Usage / flag validation error")
+		fmt.Fprintln(stderr, "  3  Fixture / config validation error")
+		fmt.Fprintln(stderr, "  4  No providers available (env not set for any provider)")
+		fmt.Fprintln(stderr, "  5  Execution / output failure (e.g. JSONL write failed)")
+	}
+
 	if err := fs.Parse(args); err != nil {
+		// flag.ErrHelp is returned when --help / -h is seen with
+		// ContinueOnError; realMain detects it and exits 0. We keep the
+		// wrap with %w so errors.Is downstream still matches.
 		return nil, fmt.Errorf("parse flags: %w", err)
 	}
 	if f.evalSet == "" {
@@ -345,8 +384,14 @@ func main() {
 // contract in the package doc (F42). Callers must use the typed-nil
 // pattern (`if ee := realMain(...); ee != nil`) not `err != nil`.
 func realMain(args []string, stdout, stderr io.Writer) *exitError {
-	flags, err := parseFlags(args)
+	flags, err := parseFlags(args, stderr)
 	if err != nil {
+		// F48: --help / -h is a successful invocation. flag.Parse already
+		// printed the Usage text (via the FlagSet's Usage hook), so we
+		// just exit 0 without surfacing an error or echoing the wrap.
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return newExitError(exitUsageError, err)
 	}
 
