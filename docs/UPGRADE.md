@@ -279,16 +279,82 @@ maintenance window:
 ```bash
 docker compose down
 
-# Restore the pre-upgrade DB dump.
+# Wipe the post-upgrade DB volume so the pre-upgrade dump can be loaded
+# into a clean cluster (the upgrade may have applied new migrations whose
+# DDL would conflict with the older dump otherwise).
 docker volume rm sbomhub_postgres_data
 docker compose up -d postgres
-docker compose exec -T postgres \
-    pg_restore -U sbomhub -d sbomhub --clean --if-exists \
-    < sbomhub-preupgrade-$(date +%Y%m%d).dump
+```
 
-# Restore the previous .env if you ran install.sh --force.
-cp .env.bak.$(date +%Y%m%d) .env
+**DB と secrets の復元には canonical `restore.sh` を使用すること**
+(F70 fix 後)。 以前は `pg_restore -U sbomhub -d sbomhub --clean --if-exists`
+を `--single-transaction` なし + sanity check なしでこの場で直接実行する
+手順を載せていたが、 partial restore でも `cp .env.bak.* .env` と service
+startup に進んでしまい DB と secrets の不整合を生む production blocker と
+なっていた。 §9.3 manual restore (F65/F67/F69 fix) と rollback runbook で
+別々の `pg_restore` を持つと regression が再発するため、 両者とも
+`docker/scripts/restore.sh` の fail-safe (`--single-transaction` +
+`schema_migrations` / `tenants` sanity check + sanity 通過後に secrets 復元)
+を single source of truth とする。
 
+ただし backup の **format / 配置** に応じて 2 通りある:
+
+- **upgrade 前に `backup.sh` で取った tar (`sbomhub-backup-*.tar.gz`)
+  がある場合**: `restore.sh` をそのまま使う (推奨)。 詳細手順と
+  `AGE_IDENTITY` / `FORCE=yes` の指定方法は
+  [`../docker/README.enterprise.md`](../docker/README.enterprise.md) §5.3
+  および [`./security/self-host-deployment.md`](./security/self-host-deployment.md)
+  §9.3 を参照。 fail-safe 動作 (sanity FAIL 時に secrets を戻さず exit 1)
+  は §5.3 「fail-safe 動作 (F65 fix 後)」 節に記載。
+
+  ```bash
+  # 例: 平文 tar
+  ./docker/scripts/restore.sh /path/to/sbomhub-backup-YYYYMMDD-HHMMSS.tar.gz
+
+  # 例: age 暗号化 tar
+  export AGE_IDENTITY=/path/to/your-age-key.txt
+  ./docker/scripts/restore.sh /path/to/sbomhub-backup-YYYYMMDD-HHMMSS.tar.gz.age
+  ```
+
+- **section 3 で `pg_dump` 単体 (`sbomhub-preupgrade-*.dump`) しか
+  取っていない場合**: `restore.sh` の tar 形式 (`<timestamp>/db.dump` +
+  `<timestamp>/secrets/`) に揃える wrapping が必要なので、 後続の
+  M0 patch までは `restore.sh` の §「DB restore」 と同じ command を
+  手動でなぞること — すなわち以下の **全ステップ** を順守する
+  (途中で抜けない):
+
+  ```bash
+  # 1) pg_restore は --single-transaction + --no-owner --no-privileges 必須
+  #    (partial apply による DB と secrets の不整合を排除する fail-safe)。
+  docker compose exec -T postgres \
+      pg_restore -U sbomhub -d sbomhub \
+      --clean --if-exists --single-transaction --no-owner --no-privileges \
+      < sbomhub-preupgrade-$(date +%Y%m%d).dump
+
+  # 2) Sanity check 1: schema_migrations 最新 version が取れること
+  #    (空 / error なら restore 不完全、 .env を戻さず調査)
+  docker compose exec -T postgres \
+      psql -U sbomhub -d sbomhub -tA -v ON_ERROR_STOP=1 -c \
+      "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;"
+
+  # 3) Sanity check 2: tenants table が query 可能なこと
+  #    (失敗なら schema 自体が壊れている、 .env を戻さず調査)
+  docker compose exec -T postgres \
+      psql -U sbomhub -d sbomhub -tA -v ON_ERROR_STOP=1 -c \
+      "SELECT count(*) FROM tenants;"
+
+  # 4) 上記 1-3 が全て通った場合のみ .env を復元 (install.sh --force を
+  #    実行していた場合)。 sanity FAIL 時は本 step に進まず、 旧 .env を
+  #    untouched にしたまま原因調査する。
+  cp .env.bak.$(date +%Y%m%d) .env
+  ```
+
+`.env` 復元と service startup は **必ず sanity check 両方 PASS の後**。
+これは §9.3 / `restore.sh` (F65/F67/F69 fix) と同じ fail-safe contract で、
+DRY のため将来 backup format を tar 化したら本節の inline pg_restore も
+削除して `restore.sh` 1 本に寄せる予定。
+
+```bash
 # Roll the code back to the previous release tag.
 git checkout <previous-tag>
 docker compose pull
