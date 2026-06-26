@@ -28,9 +28,14 @@
 //	OPENAI_API_KEY                    # openai
 //	ANTHROPIC_API_KEY                 # anthropic
 //	GOOGLE_API_KEY                    # gemini
-//	SBOMHUB_LLM_API_KEY +             # azure_openai
-//	SBOMHUB_LLM_AZURE_ENDPOINT +      #
-//	SBOMHUB_LLM_AZURE_DEPLOYMENT      #
+//	SBOMHUB_LLM_API_KEY or            # azure_openai (key; canonical wins,
+//	AZURE_OPENAI_API_KEY              #   AZURE_OPENAI_API_KEY is an alias)
+//	SBOMHUB_LLM_AZURE_ENDPOINT or     # azure_openai (endpoint; canonical
+//	AZURE_OPENAI_ENDPOINT             #   wins, AZURE_OPENAI_ENDPOINT alias)
+//	SBOMHUB_LLM_AZURE_DEPLOYMENT or   # azure_openai (deployment; canonical
+//	AZURE_OPENAI_DEPLOYMENT           #   wins, AZURE_OPENAI_DEPLOYMENT alias)
+//	SBOMHUB_LLM_AZURE_API_VERSION or  # azure_openai (api-version, optional;
+//	AZURE_OPENAI_API_VERSION          #   canonical wins, alias fallback)
 //	SBOMHUB_LLM_OLLAMA_URL or         # ollama (URL; canonical wins,
 //	OLLAMA_HOST                       #   OLLAMA_HOST is an alias)
 //	SBOMHUB_LLM_BENCH_OLLAMA_MODEL    # ollama (model, required)
@@ -69,6 +74,26 @@ import (
 // not reachable the per-case call surfaces a per-row error rather than
 // blocking the whole run).
 var allProviderNames = []string{"openai", "anthropic", "gemini", "azure_openai", "ollama"}
+
+// firstNonEmptyEnv walks env names in canonical-first precedence and
+// returns the first non-empty trimmed value (or "" if none set).
+// Mirrors factory.resolveAPIKey / factory.resolveAzureField (M4 Codex
+// review #F47 / #F52) so the bench's env contract matches what the
+// runtime factory reads.
+//
+// ※要確認: the factory's own helpers are unexported. Exporting them
+// would let the bench DRY this, but the bench's env contract also
+// includes SBOMHUB_LLM_BENCH_<NAME>_MODEL overrides that have no
+// runtime equivalent, so a 1:1 reuse isn't quite right. A small local
+// helper keeps the bench env contract self-contained.
+func firstNonEmptyEnv(names ...string) string {
+	for _, name := range names {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // cliFlags is the parsed command-line surface. Kept as a single struct
 // so unit tests can drive the bench without re-parsing os.Args.
@@ -259,16 +284,25 @@ func resolveProviderSpec(name string) providerSpec {
 			spec.skipReason = "GOOGLE_API_KEY is not set"
 		}
 	case "azure_openai":
-		spec.apiKey = strings.TrimSpace(os.Getenv("SBOMHUB_LLM_API_KEY"))
-		spec.azureEndpoint = strings.TrimSpace(os.Getenv("SBOMHUB_LLM_AZURE_ENDPOINT"))
-		spec.azureDeployment = strings.TrimSpace(os.Getenv("SBOMHUB_LLM_AZURE_DEPLOYMENT"))
-		spec.azureAPIVersion = strings.TrimSpace(os.Getenv("SBOMHUB_LLM_AZURE_API_VERSION"))
+		// F53 alignment with F47 + F52: each Azure field walks the same
+		// canonical-first precedence the runtime factory uses, so an
+		// Azure-only operator who set the Microsoft-documented envs
+		// (AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT +
+		// AZURE_OPENAI_API_VERSION + AZURE_OPENAI_DEPLOYMENT) can bench
+		// without also exporting the SBOMHUB_LLM_* canonical envs. Pre-F53
+		// the bench only read SBOMHUB_LLM_AZURE_* so the same operator
+		// got "azure_openai skipped: SBOMHUB_LLM_API_KEY is not set"
+		// and an exit-4 even though their Azure-side config was complete.
+		spec.apiKey = firstNonEmptyEnv("SBOMHUB_LLM_API_KEY", llm.EnvAzureAPIKey)
+		spec.azureEndpoint = firstNonEmptyEnv(llm.EnvAzureEndpoint, llm.EnvAzureEndpointAlias)
+		spec.azureAPIVersion = firstNonEmptyEnv(llm.EnvAzureAPIVersion, llm.EnvAzureAPIVersionAlias)
+		spec.azureDeployment = firstNonEmptyEnv(llm.EnvAzureDeployment, llm.EnvAzureDeploymentAlias)
 		if spec.apiKey == "" {
-			spec.skipReason = "SBOMHUB_LLM_API_KEY is not set"
+			spec.skipReason = "neither SBOMHUB_LLM_API_KEY nor " + llm.EnvAzureAPIKey + " is set"
 		} else if spec.azureEndpoint == "" {
-			spec.skipReason = "SBOMHUB_LLM_AZURE_ENDPOINT is not set"
+			spec.skipReason = "neither " + llm.EnvAzureEndpoint + " nor " + llm.EnvAzureEndpointAlias + " is set"
 		} else if spec.azureDeployment == "" {
-			spec.skipReason = "SBOMHUB_LLM_AZURE_DEPLOYMENT is not set"
+			spec.skipReason = "neither " + llm.EnvAzureDeployment + " nor " + llm.EnvAzureDeploymentAlias + " is set"
 		}
 	case "ollama":
 		// Ollama is local; no API key. Model is required (no auto-detect
@@ -447,7 +481,7 @@ func realMain(args []string, stdout, stderr io.Writer) *exitError {
 		providers = append(providers, namedProvider{name: name, provider: p, model: spec.model})
 	}
 	if len(providers) == 0 {
-		return newExitError(exitNoProviders, fmt.Errorf("no providers available: set at least one of OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / SBOMHUB_LLM_API_KEY+SBOMHUB_LLM_AZURE_* / SBOMHUB_LLM_BENCH_OLLAMA_MODEL"))
+		return newExitError(exitNoProviders, fmt.Errorf("no providers available: set at least one of OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / (SBOMHUB_LLM_API_KEY|AZURE_OPENAI_API_KEY)+(SBOMHUB_LLM_AZURE_ENDPOINT|AZURE_OPENAI_ENDPOINT)+(SBOMHUB_LLM_AZURE_DEPLOYMENT|AZURE_OPENAI_DEPLOYMENT) / SBOMHUB_LLM_BENCH_OLLAMA_MODEL"))
 	}
 
 	// Decide JSONL sink. We default to stdout so the operator can pipe

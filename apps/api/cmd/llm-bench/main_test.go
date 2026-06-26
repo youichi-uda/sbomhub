@@ -909,18 +909,36 @@ func TestComputeCost(t *testing.T) {
 	}
 }
 
-// TestResolveProviderSpec covers env-driven skip behaviour: every
-// provider that fails its env check must surface a non-empty
-// skipReason so realMain logs + skips rather than calling the factory
-// with garbage.
-func TestResolveProviderSpec(t *testing.T) {
+// clearBenchBYOK wipes every BYOK env the bench reads — both the
+// canonical SBOMHUB_LLM_* names and the provider-native aliases
+// (OPENAI_API_KEY etc. and the F53 AZURE_OPENAI_* aliases). Tests that
+// assert "every provider should skip" must use this so a stray env in
+// the developer's shell does not mask the assertion. Centralised as a
+// helper so adding a new alias updates every test in lockstep.
+func clearBenchBYOK(t *testing.T) {
+	t.Helper()
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("GOOGLE_API_KEY", "")
 	t.Setenv("SBOMHUB_LLM_API_KEY", "")
 	t.Setenv("SBOMHUB_LLM_AZURE_ENDPOINT", "")
 	t.Setenv("SBOMHUB_LLM_AZURE_DEPLOYMENT", "")
+	t.Setenv("SBOMHUB_LLM_AZURE_API_VERSION", "")
 	t.Setenv("SBOMHUB_LLM_BENCH_OLLAMA_MODEL", "")
+	// F53: bench now reads AZURE_OPENAI_* aliases too, so test wipes
+	// must include them.
+	t.Setenv(llm.EnvAzureAPIKey, "")
+	t.Setenv(llm.EnvAzureEndpointAlias, "")
+	t.Setenv(llm.EnvAzureDeploymentAlias, "")
+	t.Setenv(llm.EnvAzureAPIVersionAlias, "")
+}
+
+// TestResolveProviderSpec covers env-driven skip behaviour: every
+// provider that fails its env check must surface a non-empty
+// skipReason so realMain logs + skips rather than calling the factory
+// with garbage.
+func TestResolveProviderSpec(t *testing.T) {
+	clearBenchBYOK(t)
 
 	for _, name := range []string{"openai", "anthropic", "gemini", "azure_openai", "ollama"} {
 		spec := resolveProviderSpec(name)
@@ -937,6 +955,111 @@ func TestResolveProviderSpec(t *testing.T) {
 	if spec.apiKey != "sk-test" {
 		t.Errorf("openai apiKey = %q, want sk-test", spec.apiKey)
 	}
+}
+
+// TestResolveProviderSpec_AzureAliasOnly is the F53 happy-path test:
+// the operator set only the Microsoft-documented AZURE_OPENAI_* envs
+// (no SBOMHUB_LLM_AZURE_*) and the bench must resolve a non-skipped
+// spec that the factory builds into a real azure_openai provider.
+// Pre-F53 the bench only consulted SBOMHUB_LLM_AZURE_* so this
+// configuration silently skipped with "SBOMHUB_LLM_API_KEY is not set".
+func TestResolveProviderSpec_AzureAliasOnly(t *testing.T) {
+	clearBenchBYOK(t)
+	t.Setenv(llm.EnvAzureAPIKey, "azure-alias-key")
+	t.Setenv(llm.EnvAzureEndpointAlias, "https://example.openai.azure.com")
+	t.Setenv(llm.EnvAzureDeploymentAlias, "gpt-4o-deployment")
+	t.Setenv(llm.EnvAzureAPIVersionAlias, "2024-08-01-preview")
+
+	spec := resolveProviderSpec("azure_openai")
+	if spec.skipReason != "" {
+		t.Fatalf("skipReason = %q, want empty (F53 regression: alias envs not honoured)", spec.skipReason)
+	}
+	if spec.apiKey != "azure-alias-key" {
+		t.Errorf("apiKey = %q, want azure-alias-key", spec.apiKey)
+	}
+	if spec.azureEndpoint != "https://example.openai.azure.com" {
+		t.Errorf("azureEndpoint = %q, want https://example.openai.azure.com", spec.azureEndpoint)
+	}
+	if spec.azureDeployment != "gpt-4o-deployment" {
+		t.Errorf("azureDeployment = %q, want gpt-4o-deployment", spec.azureDeployment)
+	}
+	if spec.azureAPIVersion != "2024-08-01-preview" {
+		t.Errorf("azureAPIVersion = %q, want 2024-08-01-preview", spec.azureAPIVersion)
+	}
+
+	// End-to-end: buildProvider must succeed with the alias-only spec.
+	p, err := buildProvider(spec)
+	if err != nil {
+		t.Fatalf("buildProvider: %v", err)
+	}
+	if _, isDisabled := p.(*llm.DisabledProvider); isDisabled {
+		t.Errorf("got DisabledProvider, want real azure_openai provider")
+	}
+}
+
+// TestResolveProviderSpec_AzureCanonicalWinsOnTie locks in the
+// canonical-first precedence for every Azure field: existing bench
+// runs that set the SBOMHUB_LLM_AZURE_* canonical envs must continue
+// to use them even when the AZURE_OPENAI_* aliases are also set.
+func TestResolveProviderSpec_AzureCanonicalWinsOnTie(t *testing.T) {
+	clearBenchBYOK(t)
+	t.Setenv("SBOMHUB_LLM_API_KEY", "canonical-key")
+	t.Setenv("SBOMHUB_LLM_AZURE_ENDPOINT", "https://canonical.openai.azure.com")
+	t.Setenv("SBOMHUB_LLM_AZURE_DEPLOYMENT", "canonical-deployment")
+	t.Setenv("SBOMHUB_LLM_AZURE_API_VERSION", "2024-10-21")
+	// Set every alias to a distinguishable losing value.
+	t.Setenv(llm.EnvAzureAPIKey, "alias-key")
+	t.Setenv(llm.EnvAzureEndpointAlias, "https://alias.openai.azure.com")
+	t.Setenv(llm.EnvAzureDeploymentAlias, "alias-deployment")
+	t.Setenv(llm.EnvAzureAPIVersionAlias, "2024-08-01-preview")
+
+	spec := resolveProviderSpec("azure_openai")
+	if spec.apiKey != "canonical-key" {
+		t.Errorf("apiKey = %q, want canonical-key (canonical did not win)", spec.apiKey)
+	}
+	if spec.azureEndpoint != "https://canonical.openai.azure.com" {
+		t.Errorf("azureEndpoint = %q, want canonical to win", spec.azureEndpoint)
+	}
+	if spec.azureDeployment != "canonical-deployment" {
+		t.Errorf("azureDeployment = %q, want canonical-deployment", spec.azureDeployment)
+	}
+	if spec.azureAPIVersion != "2024-10-21" {
+		t.Errorf("azureAPIVersion = %q, want canonical to win", spec.azureAPIVersion)
+	}
+}
+
+// TestResolveProviderSpec_AzureSkipReasonMentionsBothEnvs verifies the
+// F53 skipReason format names both candidates when a required field is
+// missing — operators who typo'd one of the four envs need the bench
+// log to mention the alias so they can diff against their shell env.
+func TestResolveProviderSpec_AzureSkipReasonMentionsBothEnvs(t *testing.T) {
+	t.Run("missing api key", func(t *testing.T) {
+		clearBenchBYOK(t)
+		spec := resolveProviderSpec("azure_openai")
+		if !strings.Contains(spec.skipReason, "SBOMHUB_LLM_API_KEY") ||
+			!strings.Contains(spec.skipReason, llm.EnvAzureAPIKey) {
+			t.Errorf("skipReason = %q, want it to mention both canonical and alias", spec.skipReason)
+		}
+	})
+	t.Run("missing endpoint", func(t *testing.T) {
+		clearBenchBYOK(t)
+		t.Setenv(llm.EnvAzureAPIKey, "k")
+		spec := resolveProviderSpec("azure_openai")
+		if !strings.Contains(spec.skipReason, llm.EnvAzureEndpoint) ||
+			!strings.Contains(spec.skipReason, llm.EnvAzureEndpointAlias) {
+			t.Errorf("skipReason = %q, want it to mention both endpoint envs", spec.skipReason)
+		}
+	})
+	t.Run("missing deployment", func(t *testing.T) {
+		clearBenchBYOK(t)
+		t.Setenv(llm.EnvAzureAPIKey, "k")
+		t.Setenv(llm.EnvAzureEndpointAlias, "https://example.openai.azure.com")
+		spec := resolveProviderSpec("azure_openai")
+		if !strings.Contains(spec.skipReason, llm.EnvAzureDeployment) ||
+			!strings.Contains(spec.skipReason, llm.EnvAzureDeploymentAlias) {
+			t.Errorf("skipReason = %q, want it to mention both deployment envs", spec.skipReason)
+		}
+	})
 }
 
 // TestOllamaBaseURLPropagatedToFactory_F41 verifies the F41 fix:
@@ -1026,14 +1149,10 @@ func TestRealMainNoProviders(t *testing.T) {
 			"expected_state":"not_affected"
 		}]
 	}`)
-	// Wipe every BYOK env so all providers skip.
-	t.Setenv("OPENAI_API_KEY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("GOOGLE_API_KEY", "")
-	t.Setenv("SBOMHUB_LLM_API_KEY", "")
-	t.Setenv("SBOMHUB_LLM_AZURE_ENDPOINT", "")
-	t.Setenv("SBOMHUB_LLM_AZURE_DEPLOYMENT", "")
-	t.Setenv("SBOMHUB_LLM_BENCH_OLLAMA_MODEL", "")
+	// Wipe every BYOK env so all providers skip. clearBenchBYOK covers
+	// both canonical SBOMHUB_LLM_* and the provider-native aliases
+	// (incl. F53 AZURE_OPENAI_*).
+	clearBenchBYOK(t)
 
 	var stdout, stderr bytes.Buffer
 	ee := realMain([]string{"--eval-set", path}, &stdout, &stderr)
@@ -1060,17 +1179,11 @@ func TestRealMainNoProviders(t *testing.T) {
 //	5 (exitExecutionFailed) — output-creation / run failure
 func TestRealMain_ExitCodes_F42(t *testing.T) {
 	// Clean BYOK env so the no-providers branch is deterministic in
-	// every sub-test that reaches provider resolution.
-	clearBYOK := func(t *testing.T) {
-		t.Helper()
-		t.Setenv("OPENAI_API_KEY", "")
-		t.Setenv("ANTHROPIC_API_KEY", "")
-		t.Setenv("GOOGLE_API_KEY", "")
-		t.Setenv("SBOMHUB_LLM_API_KEY", "")
-		t.Setenv("SBOMHUB_LLM_AZURE_ENDPOINT", "")
-		t.Setenv("SBOMHUB_LLM_AZURE_DEPLOYMENT", "")
-		t.Setenv("SBOMHUB_LLM_BENCH_OLLAMA_MODEL", "")
-	}
+	// every sub-test that reaches provider resolution. clearBenchBYOK
+	// (centralised in TestResolveProviderSpec) wipes both the canonical
+	// SBOMHUB_LLM_* envs and the provider-native aliases (incl. F53
+	// AZURE_OPENAI_*) so adding a new alias updates every test together.
+	clearBYOK := clearBenchBYOK
 
 	dir := t.TempDir()
 	goodFixture := writeFixture(t, dir, "ok.json", `{
