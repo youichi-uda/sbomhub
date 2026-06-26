@@ -284,8 +284,9 @@ restore 後、 script が表示する Next steps に従って sbomhub-api / sbom
 - restore 後に **sanity check** (`schema_migrations` 最新 version 取得 +
   `tenants` table の query 可能性確認) が走り、 いずれかが失敗した場合は
   secrets の上書きと完了 message を **出さずに `exit 1`** で abort する。
-  「`Restore completed successfully.`」 が出力された場合のみ成功扱いとする
-  (自動化スクリプト側で string match して進捗判定して良い)。
+  成功時は標準出力末尾に `Restore completed successfully` で始まる行
+  (現在の完全 string は `Restore completed successfully (pg_restore + sanity
+  checks passed).`) が出力される。
 - ※要確認: `--single-transaction` は数十 GB 級の大規模 DB で WAL / memory
   圧迫を引き起こす可能性がある。 該当する規模で運用する場合は事前に
   staging で挙動確認のこと (後続 issue で transaction 分割オプションを検討予定)。
@@ -293,6 +294,26 @@ restore 後、 script が表示する Next steps に従って sbomhub-api / sbom
   別 issue で `verify-encryption.sh` として用意予定。 暫定では API 起動 log の
   `ENCRYPTION_KEY check passed` と既存暗号化レコード (issue tracker 連携等) が
   UI から開けることを手動確認する。
+
+**Automation success detection (F68 fix 後)**:
+
+自動化スクリプトが `restore.sh` の成功を判定する場合は、 **prefix-match** で
+`Restore completed successfully` を検出すること。 **exact-match は使わない**
+(F65 以降、 `(pg_restore + sanity checks passed)` 等の operational detail が
+末尾に付与されており、 将来の fix で追加情報が増える可能性もあるため、 exact
+string-match は false-negative になる)。
+
+```bash
+# OK: prefix-match (行頭から始まる success marker を grep)
+./scripts/restore.sh /path/to/backup.tar.gz 2>&1 | tee restore.log
+grep -q "^\[restore\] Restore completed successfully" restore.log || {
+    echo "restore.sh did not emit success marker — abort automation" >&2
+    exit 1
+}
+
+# NG: exact-match (operational detail で false-negative になる)
+# grep -Fxq "[restore] Restore completed successfully." restore.log
+```
 
 ### 5.4 offsite backup
 
