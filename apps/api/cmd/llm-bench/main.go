@@ -23,6 +23,26 @@
 //	    --eval-set test/fixtures/llm-bench/cve-20-50.json \
 //	    --max-cases 20 --markdown --out result.jsonl
 //
+// Env (per provider):
+//
+//	OPENAI_API_KEY                    # openai
+//	ANTHROPIC_API_KEY                 # anthropic
+//	GOOGLE_API_KEY                    # gemini
+//	SBOMHUB_LLM_API_KEY +             # azure_openai
+//	SBOMHUB_LLM_AZURE_ENDPOINT +      #
+//	SBOMHUB_LLM_AZURE_DEPLOYMENT      #
+//	SBOMHUB_LLM_OLLAMA_URL or         # ollama (URL; canonical wins,
+//	OLLAMA_HOST                       #   OLLAMA_HOST is an alias)
+//	SBOMHUB_LLM_BENCH_OLLAMA_MODEL    # ollama (model, required)
+//
+// Exit codes (F42):
+//
+//	0  success
+//	2  usage / flag validation error
+//	3  fixture / config validation error
+//	4  no providers available (no BYOK env configured)
+//	5  execution / output failure (e.g. JSONL write failed)
+//
 // Reference: M4_AGENT_PROMPT_TEMPLATE.md §1.K (Provider 実装規律, F19, F25).
 package main
 
@@ -162,9 +182,13 @@ type providerSpec struct {
 
 // resolveProviderSpec reads env for one provider. The env names follow
 // the existing sbomhub OSS contract (project CLAUDE.md > LLM Provider
-// Policy): OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY /
-// OLLAMA_HOST. Azure OpenAI uses the SBOMHUB_LLM_AZURE_* trio that the
-// factory already validates (no separate bench env contract).
+// Policy): OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY. For
+// Ollama the base URL may be supplied via SBOMHUB_LLM_OLLAMA_URL
+// (canonical, factory-internal — see llm.EnvOllamaURL) or OLLAMA_HOST
+// (Ollama project's official env, accepted here as an alias for
+// operator muscle-memory); SBOMHUB_LLM_OLLAMA_URL wins when both are
+// set. Azure OpenAI uses the SBOMHUB_LLM_AZURE_* trio that the factory
+// already validates (no separate bench env contract).
 //
 // Per-provider model overrides come from SBOMHUB_LLM_BENCH_<NAME>_MODEL
 // so a bench run can target a specific managed-vs-local pair without
@@ -210,7 +234,18 @@ func resolveProviderSpec(name string) providerSpec {
 	case "ollama":
 		// Ollama is local; no API key. Model is required (no auto-detect
 		// in the factory either — see factory.go ※要確認).
-		spec.ollamaURL = strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+		//
+		// F41 fix: precedence is SBOMHUB_LLM_OLLAMA_URL (canonical env
+		// the factory reads, see llm.EnvOllamaURL) > OLLAMA_HOST (Ollama
+		// project's official env, retained as an alias for operator
+		// muscle-memory) > factory default (http://localhost:11434).
+		// Before F41 the bench only read OLLAMA_HOST and exported it,
+		// but the factory's ollamaBaseURLFromEnv only reads
+		// SBOMHUB_LLM_OLLAMA_URL, so the value was silently dropped.
+		spec.ollamaURL = strings.TrimSpace(os.Getenv(llm.EnvOllamaURL))
+		if spec.ollamaURL == "" {
+			spec.ollamaURL = strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+		}
 		if spec.ollamaURL == "" {
 			// Match the factory default so a stock `ollama serve` on
 			// localhost works out of the box.
@@ -234,14 +269,17 @@ func resolveProviderSpec(name string) providerSpec {
 func buildProvider(spec providerSpec) (llm.Provider, error) {
 	// Ollama is the only provider that needs its base URL fed in via
 	// env at factory call time (the factory's NewProviderFromConfig
-	// re-reads OLLAMA_HOST internally — see factory.go). For all other
-	// providers the existing env-driven defaults are sufficient.
+	// re-reads SBOMHUB_LLM_OLLAMA_URL via ollamaBaseURLFromEnv — see
+	// factory.go). For all other providers the existing env-driven
+	// defaults are sufficient.
+	//
+	// F41 fix: write to the canonical env (llm.EnvOllamaURL) the factory
+	// reads, not OLLAMA_HOST. The previous Setenv("OLLAMA_HOST", ...)
+	// was a silent no-op because ollamaBaseURLFromEnv never consults
+	// OLLAMA_HOST, so the operator's non-default base URL was discarded
+	// and Ollama always hit http://localhost:11434.
 	if spec.name == "ollama" && spec.ollamaURL != "" {
-		// The factory reads OLLAMA_HOST internally via ollamaBaseURLFromEnv;
-		// honour whatever the operator exported. The spec resolution
-		// above already mirrored the factory default, so there is no
-		// need to call NewOllama directly.
-		_ = os.Setenv("OLLAMA_HOST", spec.ollamaURL)
+		_ = os.Setenv(llm.EnvOllamaURL, spec.ollamaURL)
 	}
 	return llm.NewProviderFromConfigWithAzure(
 		spec.name, spec.model, spec.apiKey,

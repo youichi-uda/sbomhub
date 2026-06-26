@@ -526,6 +526,79 @@ func TestResolveProviderSpec(t *testing.T) {
 	}
 }
 
+// TestOllamaBaseURLPropagatedToFactory_F41 verifies the F41 fix:
+// the bench must propagate the operator's Ollama base URL to the
+// factory via the canonical SBOMHUB_LLM_OLLAMA_URL env, not OLLAMA_HOST
+// (which the factory's ollamaBaseURLFromEnv never reads).
+//
+// Three sub-tests cover the documented precedence:
+//   - SBOMHUB_LLM_OLLAMA_URL set → spec uses it (canonical wins).
+//   - only OLLAMA_HOST set       → spec falls back to it (alias kept).
+//   - both set                   → SBOMHUB_LLM_OLLAMA_URL wins.
+//
+// After buildProvider, llm.EnvOllamaURL must hold the resolved URL so
+// the factory's ollamaBaseURLFromEnv (which only reads that env) sees
+// the right value when constructing the Ollama provider.
+func TestOllamaBaseURLPropagatedToFactory_F41(t *testing.T) {
+	// SBOMHUB_LLM_BENCH_OLLAMA_MODEL is required for the spec not to
+	// short-circuit on skipReason. Set once for all sub-tests; t.Setenv
+	// is per-test so each sub-test restores the previous value.
+	t.Setenv("SBOMHUB_LLM_BENCH_OLLAMA_MODEL", "qwen2.5-coder:7b")
+
+	t.Run("SBOMHUB_LLM_OLLAMA_URL is canonical", func(t *testing.T) {
+		t.Setenv(llm.EnvOllamaURL, "http://canonical:11434")
+		t.Setenv("OLLAMA_HOST", "")
+		spec := resolveProviderSpec("ollama")
+		if spec.ollamaURL != "http://canonical:11434" {
+			t.Errorf("ollamaURL = %q, want http://canonical:11434", spec.ollamaURL)
+		}
+		if spec.skipReason != "" {
+			t.Fatalf("unexpected skipReason: %q", spec.skipReason)
+		}
+		if _, err := buildProvider(spec); err != nil {
+			t.Fatalf("buildProvider: %v", err)
+		}
+		if got := os.Getenv(llm.EnvOllamaURL); got != "http://canonical:11434" {
+			t.Errorf("after buildProvider, %s = %q, want http://canonical:11434 (factory wouldn't see the operator's URL)", llm.EnvOllamaURL, got)
+		}
+	})
+
+	t.Run("OLLAMA_HOST alias fallback when canonical unset", func(t *testing.T) {
+		t.Setenv(llm.EnvOllamaURL, "")
+		t.Setenv("OLLAMA_HOST", "http://alias:11434")
+		spec := resolveProviderSpec("ollama")
+		if spec.ollamaURL != "http://alias:11434" {
+			t.Errorf("ollamaURL = %q, want http://alias:11434 (OLLAMA_HOST alias not honoured)", spec.ollamaURL)
+		}
+		if _, err := buildProvider(spec); err != nil {
+			t.Fatalf("buildProvider: %v", err)
+		}
+		// After buildProvider the alias must have been promoted into the
+		// canonical env so the factory picks it up.
+		if got := os.Getenv(llm.EnvOllamaURL); got != "http://alias:11434" {
+			t.Errorf("after buildProvider, %s = %q, want http://alias:11434 (alias should be promoted to canonical for factory)", llm.EnvOllamaURL, got)
+		}
+	})
+
+	t.Run("canonical wins over alias when both set", func(t *testing.T) {
+		t.Setenv(llm.EnvOllamaURL, "http://canonical:11434")
+		t.Setenv("OLLAMA_HOST", "http://alias:11434")
+		spec := resolveProviderSpec("ollama")
+		if spec.ollamaURL != "http://canonical:11434" {
+			t.Errorf("ollamaURL = %q, want http://canonical:11434 (canonical did not win precedence)", spec.ollamaURL)
+		}
+	})
+
+	t.Run("factory default when neither set", func(t *testing.T) {
+		t.Setenv(llm.EnvOllamaURL, "")
+		t.Setenv("OLLAMA_HOST", "")
+		spec := resolveProviderSpec("ollama")
+		if spec.ollamaURL != "http://localhost:11434" {
+			t.Errorf("ollamaURL = %q, want http://localhost:11434 (factory default mismatch)", spec.ollamaURL)
+		}
+	})
+}
+
 // TestRealMainNoProviders exercises the top-level guard that aborts
 // when zero providers resolve — the operator gets a clear error rather
 // than an empty JSONL stream that looks like a silent success.
