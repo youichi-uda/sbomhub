@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -24,12 +25,35 @@ import (
 // SQL filters by it. The two layers are independent and either alone
 // is sufficient; we ship both so a regression in one is caught by the
 // other.
+//
+// M4 Codex review round 14 / F74: every query routes through r.q(ctx)
+// rather than r.db directly, so the request-scoped *sql.Tx attached by
+// middleware.TenantTx is reused. RLS depends on
+// `SET LOCAL app.current_tenant_id` which only lives on the connection
+// owning the transaction -- a stray r.db.QueryContext lands on a
+// different pooled connection, sees the GUC as NULL, and the migration
+// 040 policy silently strips every row (production blocker). The
+// Querier helper (internal/database/tx.go) is the single hook for this.
 type ChecklistRepository struct {
 	db *sql.DB
 }
 
 func NewChecklistRepository(db *sql.DB) *ChecklistRepository {
 	return &ChecklistRepository{db: db}
+}
+
+// q routes the statement through the request-scoped *sql.Tx attached to
+// ctx by middleware.TenantTx when one is present; otherwise it falls back
+// to r.db. This is the load-bearing hook for migration 040's RLS:
+// `SET LOCAL app.current_tenant_id` only survives on the connection that
+// owns the transaction, so a repository that issues queries through
+// r.db.QueryContext / ExecContext on a different pooled connection sees
+// the GUC as NULL and the RLS predicate strips every row. Tracking the
+// request tx via Querier keeps the GUC visible and is the F74 production
+// blocker fix that complements the F73 SQL-layer hardening (migration 040)
+// and app-layer tenant_id enforcement (part 2).
+func (r *ChecklistRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // ListByProject returns all checklist responses for a project, scoped
@@ -48,7 +72,7 @@ func (r *ChecklistRepository) ListByProject(ctx context.Context, tenantID, proje
 		WHERE tenant_id = $1 AND project_id = $2
 		ORDER BY check_id
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, projectID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +108,7 @@ func (r *ChecklistRepository) ListByTenant(ctx context.Context, tenantID uuid.UU
 		WHERE tenant_id = $1
 		ORDER BY check_id, updated_at DESC
 	`
-	rows, err := r.db.QueryContext(ctx, query, tenantID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +148,7 @@ func (r *ChecklistRepository) GetByCheckID(ctx context.Context, tenantID, projec
 	`
 	var resp model.ChecklistResponse
 	var note sql.NullString
-	err := r.db.QueryRowContext(ctx, query, tenantID, projectID, checkID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID, projectID, checkID).Scan(
 		&resp.ID, &resp.TenantID, &resp.ProjectID, &resp.CheckID,
 		&resp.Response, &note, &resp.UpdatedBy, &resp.UpdatedAt,
 	)
@@ -170,7 +194,7 @@ func (r *ChecklistRepository) Upsert(ctx context.Context, resp *model.ChecklistR
 		              updated_at = EXCLUDED.updated_at
 		WHERE compliance_checklist_responses.tenant_id = EXCLUDED.tenant_id
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	_, err := r.q(ctx).ExecContext(ctx, query,
 		resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
 		resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
 	)
@@ -188,7 +212,7 @@ func (r *ChecklistRepository) Delete(ctx context.Context, tenantID, projectID uu
 		return fmt.Errorf("ChecklistRepository.Delete: project_id is required")
 	}
 	query := `DELETE FROM compliance_checklist_responses WHERE tenant_id = $1 AND project_id = $2 AND check_id = $3`
-	_, err := r.db.ExecContext(ctx, query, tenantID, projectID, checkID)
+	_, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID, checkID)
 	return err
 }
 
@@ -202,7 +226,7 @@ func (r *ChecklistRepository) DeleteByProject(ctx context.Context, tenantID, pro
 		return fmt.Errorf("ChecklistRepository.DeleteByProject: project_id is required")
 	}
 	query := `DELETE FROM compliance_checklist_responses WHERE tenant_id = $1 AND project_id = $2`
-	_, err := r.db.ExecContext(ctx, query, tenantID, projectID)
+	_, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID)
 	return err
 }
 
@@ -211,6 +235,17 @@ func (r *ChecklistRepository) DeleteByProject(ctx context.Context, tenantID, pro
 // Each response's TenantID must be non-nil. The ON CONFLICT DO UPDATE
 // WHERE clause mirrors Upsert -- it refuses to overwrite a row that
 // belongs to a different tenant. F73 regression class.
+//
+// F74: when middleware.TenantTx has attached a *sql.Tx to ctx (the
+// production request path), BulkUpsert MUST reuse that tx so the
+// `SET LOCAL app.current_tenant_id` GUC is visible to the WITH CHECK
+// predicate -- a `r.db.BeginTx(ctx, nil)` opens a fresh transaction on
+// a different pooled connection, the GUC reads NULL there, and migration
+// 040's RLS policy rejects every INSERT. We detect that case via
+// database.TxFromContext and prepare on the request tx. Outside the
+// request path (background jobs, batch importers, tests against the
+// migrator role) we fall back to the legacy "open my own tx for
+// atomicity" behaviour.
 func (r *ChecklistRepository) BulkUpsert(ctx context.Context, responses []model.ChecklistResponse) error {
 	if len(responses) == 0 {
 		return nil
@@ -224,13 +259,7 @@ func (r *ChecklistRepository) BulkUpsert(ctx context.Context, responses []model.
 		}
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `
+	const stmtSQL = `
 		INSERT INTO compliance_checklist_responses (id, tenant_id, project_id, check_id, response, note, updated_by, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (project_id, check_id)
@@ -239,23 +268,59 @@ func (r *ChecklistRepository) BulkUpsert(ctx context.Context, responses []model.
 		              updated_by = EXCLUDED.updated_by,
 		              updated_at = EXCLUDED.updated_at
 		WHERE compliance_checklist_responses.tenant_id = EXCLUDED.tenant_id
-	`)
+	`
+	now := time.Now()
+
+	// Production path: TenantTx middleware attached a *sql.Tx — reuse it
+	// so SET LOCAL app.current_tenant_id stays visible and atomicity is
+	// inherited from the request transaction (commit/rollback is owned by
+	// the middleware, NOT by us).
+	if tx, ok := database.TxFromContext(ctx); ok {
+		stmt, err := tx.PrepareContext(ctx, stmtSQL)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, resp := range responses {
+			if resp.ID == uuid.Nil {
+				resp.ID = uuid.New()
+			}
+			resp.UpdatedAt = now
+			if _, err := stmt.ExecContext(ctx,
+				resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
+				resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Legacy / out-of-request path: open our own tx for atomicity across
+	// rows. Callers in this branch must already be running outside RLS
+	// scope (migrator role / superuser tests / one-off CLI imports) --
+	// otherwise migration 040 will (correctly) reject every INSERT.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, stmtSQL)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
-	now := time.Now()
 	for _, resp := range responses {
 		if resp.ID == uuid.Nil {
 			resp.ID = uuid.New()
 		}
 		resp.UpdatedAt = now
-		_, err := stmt.ExecContext(ctx,
+		if _, err := stmt.ExecContext(ctx,
 			resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
 			resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
-		)
-		if err != nil {
+		); err != nil {
 			return err
 		}
 	}

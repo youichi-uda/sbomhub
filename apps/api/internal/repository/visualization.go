@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -22,12 +23,27 @@ import (
 // hardening -- the SQL-layer (migration 040) and app-layer guards are
 // independent and either alone is sufficient; we ship both so a
 // regression in one is caught by the other.
+//
+// M4 Codex review round 14 / F74: every query routes through r.q(ctx)
+// rather than r.db directly, so the request-scoped *sql.Tx attached by
+// middleware.TenantTx is reused. Without this, RLS would not see the
+// SET LOCAL app.current_tenant_id GUC and every read/write would return
+// 0 rows / be rejected by WITH CHECK (production blocker).
 type VisualizationRepository struct {
 	db *sql.DB
 }
 
 func NewVisualizationRepository(db *sql.DB) *VisualizationRepository {
 	return &VisualizationRepository{db: db}
+}
+
+// q routes the statement through the request-scoped *sql.Tx attached to
+// ctx by middleware.TenantTx when one is present; otherwise it falls
+// back to r.db. See the ChecklistRepository.q docstring for the full
+// rationale -- this is the F74 production-blocker fix that makes the
+// SET LOCAL app.current_tenant_id GUC visible to migration 040's RLS.
+func (r *VisualizationRepository) q(ctx context.Context) database.Queryable {
+	return database.Querier(ctx, r.db)
 }
 
 // GetByProject returns visualization settings for a project, scoped to
@@ -49,7 +65,7 @@ func (r *VisualizationRepository) GetByProject(ctx context.Context, tenantID, pr
 	`
 	var settings model.VisualizationSettings
 	var utilizationScopeJSON []byte
-	err := r.db.QueryRowContext(ctx, query, tenantID, projectID).Scan(
+	err := r.q(ctx).QueryRowContext(ctx, query, tenantID, projectID).Scan(
 		&settings.ID, &settings.TenantID, &settings.ProjectID,
 		&settings.SBOMAuthorScope, &settings.DependencyScope,
 		&settings.GenerationMethod, &settings.DataFormat,
@@ -119,7 +135,7 @@ func (r *VisualizationRepository) Upsert(ctx context.Context, settings *model.Vi
 		settings.ID = uuid.New()
 		settings.CreatedAt = now
 	}
-	_, err = r.db.ExecContext(ctx, query,
+	_, err = r.q(ctx).ExecContext(ctx, query,
 		settings.ID, settings.TenantID, settings.ProjectID,
 		settings.SBOMAuthorScope, settings.DependencyScope,
 		settings.GenerationMethod, settings.DataFormat,
@@ -140,6 +156,6 @@ func (r *VisualizationRepository) Delete(ctx context.Context, tenantID, projectI
 		return fmt.Errorf("VisualizationRepository.Delete: project_id is required")
 	}
 	query := `DELETE FROM sbom_visualization_settings WHERE tenant_id = $1 AND project_id = $2`
-	_, err := r.db.ExecContext(ctx, query, tenantID, projectID)
+	_, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID)
 	return err
 }

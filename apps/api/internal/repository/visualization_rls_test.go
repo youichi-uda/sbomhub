@@ -35,6 +35,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -295,5 +296,122 @@ func TestVisualization_RepositoryRejectsMissingTenantID(t *testing.T) {
 		UtilizationScope: []string{"vuln_identification"}, UtilizationActor: "product_vendor",
 	}); err == nil {
 		t.Error("VisualizationRepository.Upsert(tenant=nil) should fail fast (F73 guard)")
+	}
+}
+
+// TestVisualizationRepository_TenantTxFlow_RLSAllows is the F74 production-
+// path companion of TestVisualization_TenantIsolation_RLS. See the
+// equivalent checklist test for the full rationale.
+//
+// In short: F73 fix made the repo tenant-aware in SQL, but every query
+// went through r.db directly -- not the request-scoped *sql.Tx. So a
+// legit same-tenant request (the production path) had no
+// app.current_tenant_id GUC visible on the repo's connection and RLS
+// silently denied everything. This test exercises the fixed path: open
+// a tx, SET LOCAL, WithTx into ctx, call the repo, assert reads/writes
+// land.
+func TestVisualizationRepository_TenantTxFlow_RLSAllows(t *testing.T) {
+	appURL, migURL := visualizationTestEnv(t)
+
+	migDB := openOrSkipVisualization(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyVisualization(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVisualization(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForVisualization(t, migDB, "txflowA")
+	projectA := seedProjectForVisualization(t, migDB, tenantA, "txflowA")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantA)
+	})
+
+	repo := NewVisualizationRepository(appDB)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// --- TenantTx-mimicking path: open tx, SET LOCAL, WithTx into ctx.
+	tx, err := appDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("appDB.BeginTx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT set_config('app.current_tenant_id', $1, true)`,
+		tenantA.String(),
+	); err != nil {
+		t.Fatalf("set_config tenantA: %v", err)
+	}
+	txCtx := database.WithTx(ctx, tx)
+
+	settings := &model.VisualizationSettings{
+		TenantID:         tenantA,
+		ProjectID:        projectA,
+		SBOMAuthorScope:  "self",
+		DependencyScope:  "direct_only",
+		GenerationMethod: "tool_with_review",
+		DataFormat:       "standard",
+		UtilizationScope: []string{"vuln_identification", "incident_response"},
+		UtilizationActor: "product_vendor",
+	}
+
+	// Upsert via the tx ctx: without F74 this would land on r.db, miss
+	// the GUC, and RLS WITH CHECK would reject.
+	if err := repo.Upsert(txCtx, settings); err != nil {
+		t.Fatalf("repo.Upsert via TenantTx ctx: %v -- F74 regression "+
+			"(RLS GUC not visible to the repo's connection)", err)
+	}
+	if settings.ID == uuid.Nil {
+		t.Fatalf("Upsert did not assign an ID")
+	}
+
+	// GetByProject must surface the row through the same tx.
+	got, err := repo.GetByProject(txCtx, tenantA, projectA)
+	if err != nil {
+		t.Fatalf("repo.GetByProject via TenantTx ctx: %v -- F74 regression", err)
+	}
+	if got == nil {
+		t.Fatalf("repo.GetByProject returned nil; want row (F74 regression: RLS predicate "+
+			"stripped the row because the repo connection has no app.current_tenant_id GUC)")
+	}
+	if got.TenantID != tenantA || got.ProjectID != projectA {
+		t.Fatalf("repo.GetByProject mismatch: %+v", got)
+	}
+	if got.SBOMAuthorScope != "self" || len(got.UtilizationScope) != 2 {
+		t.Fatalf("repo.GetByProject body mismatch: %+v", got)
+	}
+
+	// Second Upsert (UPDATE branch) must also succeed via the tx ctx.
+	settings.SBOMAuthorScope = "supplier_thirdparty"
+	if err := repo.Upsert(txCtx, settings); err != nil {
+		t.Fatalf("repo.Upsert (UPDATE) via TenantTx ctx: %v -- F74 regression", err)
+	}
+	got2, err := repo.GetByProject(txCtx, tenantA, projectA)
+	if err != nil || got2 == nil {
+		t.Fatalf("repo.GetByProject after UPDATE: row=%v err=%v", got2, err)
+	}
+	if got2.SBOMAuthorScope != "supplier_thirdparty" {
+		t.Fatalf("UPDATE branch did not persist new sbom_author_scope (got %q); F74 regression "+
+			"(WHERE tenant_id = EXCLUDED.tenant_id did not match because GUC-less RLS already "+
+			"filtered the row out)", got2.SBOMAuthorScope)
+	}
+
+	// Delete via the tx ctx must succeed.
+	if err := repo.Delete(txCtx, tenantA, projectA); err != nil {
+		t.Fatalf("repo.Delete via TenantTx ctx: %v -- F74 regression", err)
+	}
+	gotAfterDelete, err := repo.GetByProject(txCtx, tenantA, projectA)
+	if err != nil {
+		t.Fatalf("repo.GetByProject after delete: %v", err)
+	}
+	if gotAfterDelete != nil {
+		t.Fatalf("repo.GetByProject after delete returned %+v; want nil (F74 regression: "+
+			"Delete ran on a non-tx connection with NULL GUC and affected 0 rows)", gotAfterDelete)
+	}
+
+	// Rollback so the test is side-effect-free.
+	if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		t.Logf("rollback tx: %v", err)
 	}
 }

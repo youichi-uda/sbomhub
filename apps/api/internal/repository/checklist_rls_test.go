@@ -39,6 +39,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -340,5 +341,156 @@ func TestComplianceChecklist_RepositoryRejectsMissingTenantID(t *testing.T) {
 	}
 	if _, err := repo.ListByTenant(ctx, uuid.Nil); err == nil {
 		t.Error("ChecklistRepository.ListByTenant(tenant=nil) should fail fast (F73 guard)")
+	}
+}
+
+// TestChecklistRepository_TenantTxFlow_RLSAllows is the F74 production-
+// path companion of TestComplianceChecklist_TenantIsolation_RLS.
+//
+// F73 fix part 2 made the repository methods take tenantID and SQL-filter
+// by it, but every query was issued via r.db.QueryContext /
+// r.db.ExecContext directly. When middleware.TenantTx wraps the request
+// in a *sql.Tx and runs `SET LOCAL app.current_tenant_id`, that GUC only
+// lives on the pinned connection that owns the tx -- a stray r.db call
+// lands on a different pooled connection where the GUC reads NULL, RLS
+// predicate evaluates against NULL, SELECT returns 0 rows and INSERT is
+// rejected by WITH CHECK. The cross-tenant probe in
+// TestComplianceChecklist_TenantIsolation_RLS verifies the deny side
+// (RLS rejects forged writes); this test verifies the allow side (legit
+// same-tenant writes / reads succeed through the production tx path).
+//
+// Procedure:
+//  1. Open a *sql.Tx on the app role.
+//  2. SET LOCAL app.current_tenant_id = '<tenant A uuid>'.
+//  3. Wrap the tx into ctx via database.WithTx (what TenantTx does).
+//  4. Repository Upsert + ListByProject must succeed and return the row.
+//  5. Repeat with no tx in ctx (r.q falls back to r.db) on the migrator
+//     role to confirm the fallback path still works for background jobs.
+func TestChecklistRepository_TenantTxFlow_RLSAllows(t *testing.T) {
+	appURL, migURL := complianceChecklistTestEnv(t)
+
+	migDB := openOrSkipComplianceChecklist(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyComplianceChecklist(t, migDB) {
+		return
+	}
+	appDB := openOrSkipComplianceChecklist(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForComplianceChecklist(t, migDB, "txflowA")
+	projectA := seedProjectForComplianceChecklist(t, migDB, tenantA, "txflowA")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantA)
+	})
+
+	repo := NewChecklistRepository(appDB)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// --- TenantTx-mimicking path: open tx, SET LOCAL, WithTx into ctx.
+	tx, err := appDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("appDB.BeginTx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT set_config('app.current_tenant_id', $1, true)`,
+		tenantA.String(),
+	); err != nil {
+		t.Fatalf("set_config tenantA: %v", err)
+	}
+	txCtx := database.WithTx(ctx, tx)
+
+	rowID := uuid.New()
+	resp := &model.ChecklistResponse{
+		ID:        rowID,
+		TenantID:  tenantA,
+		ProjectID: projectA,
+		CheckID:   "txflow_setup_01",
+		Response:  true,
+		UpdatedBy: "txflow@tenantA",
+		UpdatedAt: time.Now(),
+	}
+	note := "tenant-A txflow note"
+	resp.Note = &note
+
+	// Upsert must succeed: without F74 it would hit r.db, miss the GUC,
+	// and WITH CHECK would reject.
+	if err := repo.Upsert(txCtx, resp); err != nil {
+		t.Fatalf("repo.Upsert via TenantTx ctx: %v -- F74 regression (RLS GUC not visible to the repo's connection)", err)
+	}
+
+	// ListByProject must surface the row through the same tx.
+	rows, err := repo.ListByProject(txCtx, tenantA, projectA)
+	if err != nil {
+		t.Fatalf("repo.ListByProject via TenantTx ctx: %v -- F74 regression", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("repo.ListByProject returned %d rows; want 1 (F74 regression: RLS predicate "+
+			"stripped the row because the repo connection has no app.current_tenant_id GUC)",
+			len(rows))
+	}
+	if rows[0].ID != rowID || rows[0].TenantID != tenantA || rows[0].ProjectID != projectA {
+		t.Fatalf("repo.ListByProject row mismatch: %+v", rows[0])
+	}
+
+	// GetByCheckID must surface the same row.
+	got, err := repo.GetByCheckID(txCtx, tenantA, projectA, "txflow_setup_01")
+	if err != nil {
+		t.Fatalf("repo.GetByCheckID via TenantTx ctx: %v -- F74 regression", err)
+	}
+	if got == nil {
+		t.Fatalf("repo.GetByCheckID returned nil; want row (F74 regression)")
+	}
+	if got.Note == nil || *got.Note != note {
+		t.Fatalf("repo.GetByCheckID note mismatch: got %v want %q", got.Note, note)
+	}
+
+	// BulkUpsert on the tx ctx must also reuse the tx (covers the
+	// BeginTx branch's F74 fix).
+	bulkRows := []model.ChecklistResponse{
+		{
+			TenantID: tenantA, ProjectID: projectA,
+			CheckID: "txflow_setup_02", Response: false,
+			UpdatedBy: "txflow@tenantA", UpdatedAt: time.Now(),
+		},
+		{
+			TenantID: tenantA, ProjectID: projectA,
+			CheckID: "txflow_setup_03", Response: true,
+			UpdatedBy: "txflow@tenantA", UpdatedAt: time.Now(),
+		},
+	}
+	if err := repo.BulkUpsert(txCtx, bulkRows); err != nil {
+		t.Fatalf("repo.BulkUpsert via TenantTx ctx: %v -- F74 regression "+
+			"(legacy code path opened a fresh BeginTx that did not inherit the GUC)", err)
+	}
+
+	rowsAfterBulk, err := repo.ListByProject(txCtx, tenantA, projectA)
+	if err != nil {
+		t.Fatalf("repo.ListByProject after bulk: %v", err)
+	}
+	if len(rowsAfterBulk) != 3 {
+		t.Fatalf("after BulkUpsert want 3 rows, got %d (F74 regression)", len(rowsAfterBulk))
+	}
+
+	// Delete must also work through the tx ctx.
+	if err := repo.Delete(txCtx, tenantA, projectA, "txflow_setup_01"); err != nil {
+		t.Fatalf("repo.Delete via TenantTx ctx: %v -- F74 regression", err)
+	}
+	rowsAfterDelete, err := repo.ListByProject(txCtx, tenantA, projectA)
+	if err != nil {
+		t.Fatalf("repo.ListByProject after delete: %v", err)
+	}
+	if len(rowsAfterDelete) != 2 {
+		t.Fatalf("after Delete want 2 rows, got %d (F74 regression: Delete ran on a non-tx "+
+			"connection where the GUC was NULL, so it affected 0 rows)", len(rowsAfterDelete))
+	}
+
+	// Commit so the migrator-role fallback test below can see the data
+	// (or rollback -- we do not actually care about persistence here
+	// since the cleanup hook reaps tenantA anyway). Choose rollback to
+	// keep the test side-effect-free in case something below fails.
+	if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+		t.Logf("rollback tx: %v", err)
 	}
 }
