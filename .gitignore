@@ -69,3 +69,8 @@ temp/
 # Misc
 *.pem
 .turbo
+
+# Enterprise self-host (M4-6): actual secrets and backups must never be committed.
+# Only the *.sample files under docker/secrets.example/ are tracked.
+/docker/secrets/
+/docker/backups/

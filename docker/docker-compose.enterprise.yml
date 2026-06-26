@@ -1,0 +1,331 @@
+# SBOMHub Enterprise Self-host Compose
+#
+# OSS の docker-compose.yml は開発者向け (DB / Redis を host port に 15432 /
+# 16379 で expose、 ENCRYPTION_KEY は dev placeholder)。 本 file は **製造業
+# enterprise self-host** 向けに、 以下を上乗せ / 差し替える:
+#
+#   1. Local LLM (Ollama) を同梱、 localhost-only bind で外部公開しない。
+#   2. ENCRYPTION_KEY / DB password を docker secrets 経由で渡す
+#      (平文 .env / image レイヤーに残さない)。
+#   3. backend ネットワーク (postgres / redis / ollama / api) を internal
+#      ネットワークとして分離し、 web / api だけが frontend (外向け) に居る。
+#   4. host port は **localhost-only bind** をデフォルト
+#      (`127.0.0.1:PORT:PORT`)。 公開はリバースプロキシ (Caddy / nginx /
+#      Cloudflare Tunnel) で TLS 終端後に行う前提 (docs/security/
+#      self-host-deployment.md §6 参照)。
+#
+# 起動: 既存 OSS docker-compose.yml を override せず、 本 file を `-f` で
+# 明示指定して単独使用する。
+#
+#     cd docker
+#     cp -r secrets.example secrets
+#     openssl rand -base64 32 > secrets/encryption_key.txt
+#     openssl rand -base64 24 > secrets/postgres_password.txt
+#     chmod 600 secrets/*
+#     docker compose -f docker-compose.enterprise.yml up -d
+#
+# 初回 `ollama` pull は数 GB のダウンロード + 数十分要する。 進捗は
+# `docker compose -f docker-compose.enterprise.yml logs -f ollama-init` で確認。
+#
+# 関連 issue: https://github.com/youichi-uda/sbomhub/issues/49 (M4-6)
+# 関連 docs:  ../docs/security/self-host-deployment.md  (M4-4)
+
+# ※要確認: compose top-level "version:" は v2 では deprecated (warning) なので
+# 削除済み。 古い docker compose v1 でも parse できるが、 enterprise self-host
+# の前提 (Docker Engine 24+ + Compose v2) ではこの形が推奨。
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  # M4-4 docs §3 で説明している通り、 production では sbomhub_app /
+  # sbomhub_migrator の 2 role 分離 (RLS 強制) を行うこと。 本 compose は
+  # 起動を妨げない最小構成として POSTGRES_USER=sbomhub の単一 role で起動するが、
+  # **首回起動後に `../install.sh --bootstrap-roles` を実行** し、 さらに
+  # `secrets/postgres_app_password.txt` / `secrets/postgres_migrator_password.txt`
+  # を作成して下の `sbomhub-api` の DATABASE_URL / MIGRATE_DATABASE_URL を
+  # 切り替えることを強く推奨する。 詳細は README.enterprise.md §3。
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sbomhub
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: sbomhub
+      # POSTGRES_INITDB_ARGS で encoding / locale を固定。 日本語 PSIRT 環境
+      # で en_US.UTF-8 を確実に取るための保険 (postgres:15-alpine は UTF-8 が
+      # default だが、 ベースイメージ更新時の drift を防ぐ意味で明示する)。
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # host への port 公開は不要 (compose internal network 経由でのみアクセス)。
+    # 外部から psql で繋ぎたい場合は SSH local-forward を使うこと (M4-4 §7.1)。
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sbomhub -d sbomhub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Redis (cache / queue)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Ollama (Local LLM)
+  # ---------------------------------------------------------------------------
+  # ※要確認: 2026-06 時点の Ollama stable tag は `ollama/ollama:latest`。
+  # GPU 利用時 (NVIDIA) は `latest` で問題なく動く (image に CUDA libs を
+  # 同梱、 host 側に NVIDIA Container Toolkit 必須)。 ROCm / AMD GPU 利用時は
+  # `ollama/ollama:rocm` を選択する。 CPU-only でも動くが latency 10-30× 遅
+  # ([self-host-deployment.md §11.2](../docs/security/self-host-deployment.md))。
+  #
+  # localhost-only bind (127.0.0.1:11434:11434) は **強制** 規律。 0.0.0.0
+  # 公開すると第三者が prompt 投入して model を悪用するリスクがある
+  # (self-host-deployment.md §7.2 参照)。 SBOMHub api コンテナからは
+  # backend network 経由で `http://ollama:11434` でアクセスするので、 host
+  # への bind は基本的に不要。 ただし host CLI / 別ツールから直接叩く
+  # ユースケースがあるため localhost bind は残す (本当に不要なら ports:
+  # ブロックごと削除可)。
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      # ollama serve のホスト側 health endpoint は GET / が "Ollama is running" を返す。
+      # /api/tags は model 一覧 (空でも 200) なので、 init 前後どちらでも通る。
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks:
+      - backend
+    # ※要確認: GPU passthrough (NVIDIA) 利用時は以下を有効化する
+    # (docker compose v2.3+ の `deploy.resources.reservations.devices` syntax)。
+    # NVIDIA Container Toolkit が host 側に install 済みであること。
+    # CPU-only / AMD ROCm 環境ではコメントアウトのままで OK。
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all          # or 1 / 2 / ...
+    #           capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # ollama-init: 起動時に必要な model を一度だけ pull する one-shot service
+  # ---------------------------------------------------------------------------
+  # ollama-init は ollama service が healthy になってから model を pull し、
+  # 完了したら exit 0 で終了する。 既に pull 済みの場合 `ollama pull` は
+  # diff layer のみ確認するので no-op (数秒) で終わる。
+  #
+  # 別 entrypoint 化することで:
+  #   - ollama 本体の health check が pull 時間に引きずられない
+  #   - pull の進捗を `docker compose logs -f ollama-init` で個別に追える
+  #
+  # ※要確認: default model は `qwen2.5-coder:7b`。 M4-3 比較 bench で他 model
+  # を採用したい場合、 `SBOMHUB_OLLAMA_MODEL` env を override する。 README.enterprise.md
+  # §3 参照。
+  ollama-init:
+    image: ollama/ollama:latest
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # OLLAMA_HOST は ollama CLI が ollama サーバへ接続するための env。
+      # backend network 内の DNS 名 `ollama` を参照する。
+      OLLAMA_HOST: "http://ollama:11434"
+      SBOMHUB_OLLAMA_MODEL: "${SBOMHUB_OLLAMA_MODEL:-qwen2.5-coder:7b}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        echo "[ollama-init] pulling model: $${SBOMHUB_OLLAMA_MODEL}"
+        ollama pull "$${SBOMHUB_OLLAMA_MODEL}"
+        echo "[ollama-init] model pull complete; current models:"
+        ollama list
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # SBOMHub API (Go / Echo)
+  # ---------------------------------------------------------------------------
+  # secrets pattern: docker secrets は /run/secrets/<name> に file mount される。
+  # apps/api 本体は ENCRYPTION_KEY / DATABASE_URL を env var で読むため、
+  # entrypoint wrapper で *_FILE → env var に変換する。
+  # ※要確認: apps/api 自体に *_FILE envelope を直接サポートする PR を別 issue で
+  # 出すと wrapper script を消せる (M4-4 docs §5.2 TODO 参照)。
+  sbomhub-api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    secrets:
+      - encryption_key
+      - postgres_password
+    environment:
+      APP_ENV: "production"
+      PORT: "8080"
+      # DB / Redis 接続情報は wrapper script で組み立てる (password を secret
+      # から差し込むため)。 wrapper script に渡す host / db / user は env で
+      # 受ける (※要確認: production で sbomhub_app / sbomhub_migrator ロール
+      # 分離に切り替える際は README.enterprise.md §3 の手順で、 これらを
+      # sbomhub_app / sbomhub_migrator + 別 secret に置き換える)。
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "sbomhub"
+      POSTGRES_APP_USER: "sbomhub"
+      POSTGRES_MIGRATOR_USER: "sbomhub"
+      POSTGRES_APP_PASSWORD_FILE: "/run/secrets/postgres_password"
+      POSTGRES_MIGRATOR_PASSWORD_FILE: "/run/secrets/postgres_password"
+      REDIS_URL: "redis://redis:6379"
+      ENCRYPTION_KEY_FILE: "/run/secrets/encryption_key"
+      # LLM provider 設定: Local LLM (Ollama) を default として配線する。
+      # 外部 API key を別 provider に切り替える場合は SBOMHUB_LLM_PROVIDER を
+      # openai / anthropic / gemini / azure_openai に変え、 SBOMHUB_LLM_API_KEY
+      # を secret 経由で渡す形に拡張する (README.enterprise.md §4)。
+      SBOMHUB_LLM_PROVIDER: "ollama"
+      SBOMHUB_LLM_OLLAMA_URL: "http://ollama:11434"
+      SBOMHUB_LLM_MODEL: "${SBOMHUB_OLLAMA_MODEL:-qwen2.5-coder:7b}"
+      # 監査ログ retention 設定 (M4-4 docs §8 参照)。
+      SBOMHUB_LLM_AUDIT_STORE_RESPONSE: "false"
+    ports:
+      # host への bind は localhost-only。 外部公開はリバースプロキシで
+      # TLS 終端後に行う (M4-4 docs §6)。
+      - "127.0.0.1:8080:8080"
+    networks:
+      - backend
+      - frontend
+    # entrypoint wrapper: secrets file を env var に展開してから本体 server を exec。
+    # 本体 image (apps/api/Dockerfile) は `./server` を CMD としているが、
+    # wrapper script を image に焼くと OSS Dockerfile を弄ることになるので
+    # ここでは inline sh -c で対応する (image 改変なし、 compose file 単独で完結)。
+    # ※要確認: M4-4 docs §5.2 TODO で本体に *_FILE envelope を入れれば wrapper 削減可。
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        # secrets file が存在しない場合は明示的に fail する (silently fall back
+        # to dev defaults はセキュリティ事故のもと、 F1-F37 §1.K secrets-never-log
+        # 規律相当)。
+        for f in "$$ENCRYPTION_KEY_FILE" "$$POSTGRES_APP_PASSWORD_FILE" "$$POSTGRES_MIGRATOR_PASSWORD_FILE"; do
+          if [ ! -r "$$f" ]; then
+            echo "[sbomhub-api entrypoint] FATAL: required secret file not readable: $$f" >&2
+            exit 1
+          fi
+        done
+        ENCRYPTION_KEY="$$(cat "$$ENCRYPTION_KEY_FILE")"
+        export ENCRYPTION_KEY
+        PG_APP_PW="$$(cat "$$POSTGRES_APP_PASSWORD_FILE")"
+        PG_MIG_PW="$$(cat "$$POSTGRES_MIGRATOR_PASSWORD_FILE")"
+        # url-encode (man-in-the-middle attack ではなく、 password に @ / : / + が
+        # 含まれていた場合の URL parse 事故防止)。 sh で簡易 encode:
+        # ※要確認: 完全な URL escape ではない (printable ASCII の特殊文字のみ)、
+        # base64 password 想定 (alnum + `+ / =`) では十分。
+        urlenc() {
+          printf '%s' "$$1" | sed -e 's/+/%2B/g' -e 's|/|%2F|g' -e 's/=/%3D/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/&/%26/g'
+        }
+        PG_APP_PW_ENC="$$(urlenc "$$PG_APP_PW")"
+        PG_MIG_PW_ENC="$$(urlenc "$$PG_MIG_PW")"
+        export DATABASE_URL="postgres://$$POSTGRES_APP_USER:$$PG_APP_PW_ENC@$$POSTGRES_HOST:$$POSTGRES_PORT/$$POSTGRES_DB?sslmode=disable"
+        export MIGRATE_DATABASE_URL="postgres://$$POSTGRES_MIGRATOR_USER:$$PG_MIG_PW_ENC@$$POSTGRES_HOST:$$POSTGRES_PORT/$$POSTGRES_DB?sslmode=disable"
+        # 平文 password を env / log に残さないように unset (server プロセスには
+        # 渡さない)。
+        unset PG_APP_PW PG_MIG_PW PG_APP_PW_ENC PG_MIG_PW_ENC
+        echo "[sbomhub-api entrypoint] secrets loaded; starting server"
+        exec /app/server
+
+  # ---------------------------------------------------------------------------
+  # SBOMHub Web (Next.js)
+  # ---------------------------------------------------------------------------
+  sbomhub-web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        # production では reverse proxy 経由で `https://api.example.com` を
+        # 指定する想定。 開発 / PoC 用 default は host の localhost:8080。
+        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8080}"
+    restart: unless-stopped
+    depends_on:
+      sbomhub-api:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - frontend
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+# backend: postgres / redis / ollama / api 専用、 外部から到達不可。
+# frontend: api / web。 reverse proxy がここから接続する。
+networks:
+  backend:
+    driver: bridge
+    internal: false
+    # ※要確認: internal: true にすると ollama が外部 model registry から
+    # pull できなくなる (HuggingFace / Ollama Hub への outbound が必要)。
+    # outbound proxy を別途用意する enterprise 環境では internal: true +
+    # NetworkPolicy で proxy 経由に絞ることを推奨。 default は false。
+  frontend:
+    driver: bridge
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+# postgres_data / redis_data / ollama_data は named volume として永続化。
+# backup.sh が pg_dump で吸い出すのは postgres_data の中身。 ollama_data
+# (model file、 数〜数十 GB) は backup 対象外 (再 pull 可能なので)。
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+
+# -----------------------------------------------------------------------------
+# Secrets
+# -----------------------------------------------------------------------------
+# ※要確認: docker compose の secrets は swarm mode と standalone で挙動が
+# 異なる。 standalone (`docker compose up`) では file: source を tmpfs マウント
+# として container 内 /run/secrets/<name> に出すだけで、 image レイヤーには
+# 残らない。 swarm mode と異なり TTL / rotation の管理機能はないため、
+# rotation 時は `docker compose up -d --force-recreate sbomhub-api` で
+# 再起動する必要がある (M4-4 docs §4.4 鍵 rotation ranbook を踏襲)。
+secrets:
+  encryption_key:
+    file: ./secrets/encryption_key.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
