@@ -1,0 +1,99 @@
+# sbomhub OSS — bench-variant image (M5-2 / #54).
+#
+# Pairs with .goreleaser.yaml's `llm-bench` build matrix: this Dockerfile
+# packages the standalone `apps/api/cmd/llm-bench` binary so an operator
+# can `docker run ghcr.io/youichi-uda/sbomhub:bench-${VERSION} llm-bench
+# --eval-set <path>` without a sbomhub OSS source checkout (M4 F54
+# option (c) → M5-2 packaged-binary contract).
+#
+# Two build modes are supported via BENCH_MODE:
+#
+#   BENCH_MODE=source  (default, backwards-compat with the M4 F54 image)
+#     Builds llm-bench from the in-repo source. Used by CI smoke tests
+#     and by operators on tag-less main branches where no GoReleaser
+#     archive exists yet.
+#
+#   BENCH_MODE=binary  (M5-2 packaged path)
+#     Copies a pre-built llm-bench binary from the build context (the
+#     release workflow extracts the goreleaser-produced linux/amd64
+#     tarball into ./bin/ before running `docker build`). Skips Go and
+#     produces an image roughly 10× smaller than the source mode.
+#
+# F61 (exit code contract): both modes finish with
+# `RUN /usr/local/bin/llm-bench --version` so a broken release tarball
+# (wrong arch, corrupted binary, missing ldflags) fails the build
+# rather than shipping a silently-broken image.
+#
+# Build examples:
+#
+#   # Source mode (default, fall-back path).
+#   docker build -f docker/Dockerfile.bench -t sbomhub:bench-source .
+#
+#   # Binary mode — release workflow stages the pre-built binary at
+#   # ./bin/llm-bench (linux/amd64) before invoking docker build.
+#   docker build -f docker/Dockerfile.bench \
+#       --build-arg BENCH_MODE=binary \
+#       -t sbomhub:bench-${VERSION} .
+#
+# ※要確認: GHCR push of the binary-mode image is not wired into
+# release.yml yet (see workflow header). The image build itself works
+# locally; the publish step is a follow-up (M5-2-followup, captured in
+# the report).
+
+ARG BENCH_MODE=source
+
+# ---------- builder stage (only used when BENCH_MODE=source) ----------
+FROM golang:1.25-alpine AS builder-source
+
+WORKDIR /src
+
+# Copy only the apps/api Go module to keep the build context tight.
+# A wider COPY would pull in node_modules / .next / etc. and bust the
+# layer cache on every web-side change.
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN go mod download
+
+COPY apps/api/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags "-s -w -X main.Version=source -X main.Commit=unknown -X main.Date=unknown" \
+        -o /out/llm-bench ./cmd/llm-bench
+
+# ---------- staging stage for BENCH_MODE=binary ----------
+# The release workflow extracts the goreleaser linux/amd64 tarball into
+# ./bin/llm-bench before running `docker build`. We stage it via a
+# tiny scratch image so the final-stage COPY does not depend on the
+# host filesystem layout (and so the multi-stage cache still works).
+FROM alpine:3.20 AS builder-binary
+WORKDIR /out
+COPY bin/llm-bench /out/llm-bench
+RUN chmod +x /out/llm-bench
+
+# ---------- mode-selection alias ----------
+# Docker's multi-stage `FROM ${ARG}` substitution is the trick that lets
+# us pick a builder stage from a build-arg without docker-bake / external
+# tooling.
+FROM builder-${BENCH_MODE} AS builder
+
+# ---------- final runtime image ----------
+FROM alpine:3.20
+
+# ca-certificates: HTTPS to OpenAI / Anthropic / Gemini / Azure.
+# tzdata:        slog timestamps + log rotation use TZ-aware times.
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /out/llm-bench /usr/local/bin/llm-bench
+
+# Bundle the canonical eval-set fixture at a stable path so operators
+# can `docker run sbomhub:bench llm-bench --eval-set
+# /fixtures/cve-20-50.json` out of the box. The fixture is only ~50KB,
+# negligible vs. the binary itself.
+COPY apps/api/test/fixtures/llm-bench/ /fixtures/
+
+# F61 smoke test: a corrupt or wrong-arch binary fails the build here
+# rather than at first `docker run`. Cheap to run (a few ms) and pays
+# for itself the first time a release tarball is broken.
+RUN /usr/local/bin/llm-bench --version
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/llm-bench"]
+CMD ["--help"]
