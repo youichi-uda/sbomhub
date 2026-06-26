@@ -357,3 +357,232 @@ func Test041_ComplianceVisualizationTenantFK_ContainsHardening(t *testing.T) {
 			"because the child FK still references it")
 	}
 }
+
+// Test042_RLSForceUniformity_ContainsHardening guards the M5 Wave M5-1
+// (issue #50) FORCE + WITH CHECK harmonisation sweep over 9 tables
+// originally shipped in migrations 012 / 013 / 014 / 021 with USING-
+// only policies and no FORCE. If anyone edits 042 to remove a load-
+// bearing FORCE / policy recreation (or merges it forward into the
+// originals), this test fires before review.
+func Test042_RLSForceUniformity_ContainsHardening(t *testing.T) {
+	up := readMigration(t, "042_rls_force_uniformity.up.sql")
+	upUpper := strings.ToUpper(up)
+
+	// All 9 tables in M5-1 (b) must get FORCE.
+	forceTables := []string{
+		"vulnerability_resolution_events",
+		"slo_targets",
+		"vulnerability_snapshots",
+		"compliance_snapshots",
+		"report_settings",
+		"generated_reports",
+		"ipa_sync_settings",
+		"ssvc_project_defaults",
+		"ssvc_assessments",
+	}
+	for _, tbl := range forceTables {
+		needle := strings.ToUpper("ALTER TABLE " + tbl + " FORCE ROW LEVEL SECURITY")
+		if !strings.Contains(upUpper, needle) {
+			t.Errorf("042_rls_force_uniformity.up.sql missing %q -- M5-1 (b) FORCE sweep regression", needle)
+		}
+	}
+
+	// All 9 must get a renamed tenant_isolation_<table> policy.
+	policyTables := []string{
+		"vulnerability_resolution_events",
+		"slo_targets",
+		"vulnerability_snapshots",
+		"compliance_snapshots",
+		"report_settings",
+		"generated_reports",
+		"ipa_sync_settings",
+		"ssvc_project_defaults",
+		"ssvc_assessments",
+	}
+	for _, tbl := range policyTables {
+		needle := strings.ToUpper("CREATE POLICY tenant_isolation_" + tbl + " ON " + tbl)
+		if !strings.Contains(upUpper, needle) {
+			t.Errorf("042_rls_force_uniformity.up.sql missing %q -- M5-1 policy rename regression", needle)
+		}
+	}
+
+	// Every new policy must use the missing-OK GUC read and explicit
+	// WITH CHECK so an unset GUC fails closed (zero rows / rejected
+	// INSERT) rather than raising a SQL error.
+	if !strings.Contains(upUpper, "CURRENT_SETTING('APP.CURRENT_TENANT_ID', TRUE)::UUID") {
+		t.Error("042: must use current_setting('app.current_tenant_id', true)::UUID (M4 convention)")
+	}
+	if !strings.Contains(upUpper, "WITH CHECK") {
+		t.Error("042: must contain explicit WITH CHECK clauses (M4 convention)")
+	}
+
+	// slo_targets special case: WRITE-side WITH CHECK must require
+	// tenant_id IS NOT NULL so a tenant cannot forge new global rows.
+	if !strings.Contains(upUpper, "TENANT_ID IS NOT NULL") {
+		t.Error("042: slo_targets policy must require tenant_id IS NOT NULL on the WRITE side " +
+			"so tenants cannot forge new NULL-tenant global defaults")
+	}
+
+	// slo_targets READ side must preserve the NULL-tenant global
+	// defaults, otherwise every tenant loses visibility to
+	// CRITICAL=24h / HIGH=168h / MEDIUM=720h / LOW=2160h seeded in
+	// migration 012.
+	if !strings.Contains(upUpper, "TENANT_ID IS NULL") {
+		t.Error("042: slo_targets USING side must keep `tenant_id IS NULL` so global default " +
+			"rows (CRITICAL=24h / HIGH=168h / ... seeded in migration 012) remain readable")
+	}
+
+	// Down migration sanity: must restore the original USING-only
+	// policy names so 042 is fully reversible.
+	down := readMigration(t, "042_rls_force_uniformity.down.sql")
+	downUpper := strings.ToUpper(down)
+	for _, m := range []struct {
+		needle string
+		why    string
+	}{
+		{"NO FORCE ROW LEVEL SECURITY", "down must unforce RLS on every table"},
+		{`"VULN_RESOLUTION_TENANT_ISOLATION"`,
+			"down must restore the original vuln_resolution policy name"},
+		{`"SLO_TARGETS_TENANT_ISOLATION"`,
+			"down must restore the original slo_targets policy name"},
+		{`"SSVC_ASSESSMENTS_TENANT_ISOLATION"`,
+			"down must restore the original ssvc_assessments policy name"},
+	} {
+		if !strings.Contains(downUpper, m.needle) {
+			t.Errorf("042_rls_force_uniformity.down.sql missing %q: %s", m.needle, m.why)
+		}
+	}
+}
+
+// Test043_RLSEnableGitHubSSVCHistory_ContainsHardening guards the M5
+// Wave M5-1 ENABLE + FORCE + policy sweep over three previously-
+// unguarded tenant-scoped tables: github_connections,
+// github_repositories, ssvc_assessment_history. If anyone edits 043 to
+// remove a load-bearing statement, this test fires before review.
+func Test043_RLSEnableGitHubSSVCHistory_ContainsHardening(t *testing.T) {
+	up := readMigration(t, "043_rls_enable_github_ssvc_history.up.sql")
+	upUpper := strings.ToUpper(up)
+
+	for _, tbl := range []string{
+		"github_connections",
+		"github_repositories",
+		"ssvc_assessment_history",
+	} {
+		enableNeedle := strings.ToUpper("ALTER TABLE " + tbl + " ENABLE ROW LEVEL SECURITY")
+		if !strings.Contains(upUpper, enableNeedle) {
+			t.Errorf("043 missing %q -- M5-1 (a) ENABLE regression", enableNeedle)
+		}
+		// Note we tolerate both single- and double-space between
+		// FORCE and ROW (the original migration uses a double space
+		// for alignment with ENABLE).
+		if !strings.Contains(upUpper, strings.ToUpper("ALTER TABLE "+tbl+" FORCE")) ||
+			!strings.Contains(upUpper, "ROW LEVEL SECURITY") {
+			t.Errorf("043 missing FORCE ROW LEVEL SECURITY on %s -- M5-1 (a) FORCE regression", tbl)
+		}
+		policyNeedle := strings.ToUpper("CREATE POLICY tenant_isolation_" + tbl + " ON " + tbl)
+		if !strings.Contains(upUpper, policyNeedle) {
+			t.Errorf("043 missing %q -- M5-1 (a) policy regression", policyNeedle)
+		}
+	}
+
+	// ssvc_assessment_history-specific: the policy MUST use an
+	// EXISTS subquery to ssvc_assessments because the table has no
+	// tenant_id column. If a future refactor adds a tenant_id column
+	// and switches to the standard pattern, this test will fire and
+	// the maintainer should rewrite this assertion to match.
+	if !strings.Contains(upUpper, "FROM SSVC_ASSESSMENTS A") {
+		t.Error("043: ssvc_assessment_history policy must use EXISTS subquery to ssvc_assessments " +
+			"(no tenant_id column on the history table). If you intentionally moved to a tenant_id " +
+			"column, update this assertion.")
+	}
+
+	// Every policy must use the missing-OK GUC read.
+	if !strings.Contains(upUpper, "CURRENT_SETTING('APP.CURRENT_TENANT_ID', TRUE)::UUID") {
+		t.Error("043: must use current_setting('app.current_tenant_id', true)::UUID (M4 convention)")
+	}
+	if !strings.Contains(upUpper, "WITH CHECK") {
+		t.Error("043: must contain explicit WITH CHECK clauses (M4 convention)")
+	}
+
+	// Down migration sanity.
+	down := readMigration(t, "043_rls_enable_github_ssvc_history.down.sql")
+	downUpper := strings.ToUpper(down)
+	for _, tbl := range []string{
+		"github_connections",
+		"github_repositories",
+		"ssvc_assessment_history",
+	} {
+		policyDrop := strings.ToUpper("DROP POLICY IF EXISTS tenant_isolation_" + tbl + " ON " + tbl)
+		if !strings.Contains(downUpper, policyDrop) {
+			t.Errorf("043 down missing %q -- reversibility regression", policyDrop)
+		}
+		if !strings.Contains(downUpper, strings.ToUpper("ALTER TABLE "+tbl+" DISABLE")) {
+			t.Errorf("043 down missing DISABLE on %s -- reversibility regression", tbl)
+		}
+	}
+}
+
+// Test044_CompositeFKTenantProject_ContainsHardening guards the M5
+// Wave M5-1 composite (tenant_id, project_id) FK sweep over the five
+// remaining tables with hard project_id FKs (github_repositories,
+// vulnerability_resolution_events, compliance_snapshots,
+// ssvc_project_defaults, ssvc_assessments). F75 pattern from migration
+// 041, horizontally applied.
+func Test044_CompositeFKTenantProject_ContainsHardening(t *testing.T) {
+	up := readMigration(t, "044_composite_fk_tenant_project.up.sql")
+	upUpper := strings.ToUpper(up)
+
+	// Pre-flight orphan check must exist and abort loudly. If anyone
+	// removes it, ops would get an opaque generic FK violation
+	// instead of a precise diagnostic.
+	if !strings.Contains(upUpper, "DO $$") {
+		t.Error("044: pre-flight orphan check DO $$ block must exist")
+	}
+	if !strings.Contains(upUpper, "RAISE EXCEPTION 'MIGRATION 044") {
+		t.Error("044: orphan check must RAISE EXCEPTION with the migration tag so ops can grep logs")
+	}
+
+	for _, fkPair := range []struct {
+		table, fkName string
+	}{
+		{"github_repositories", "github_repositories_tenant_project_fk"},
+		{"vulnerability_resolution_events", "vuln_resolution_events_tenant_project_fk"},
+		{"compliance_snapshots", "compliance_snapshots_tenant_project_fk"},
+		{"ssvc_project_defaults", "ssvc_project_defaults_tenant_project_fk"},
+		{"ssvc_assessments", "ssvc_assessments_tenant_project_fk"},
+	} {
+		fkNeedle := strings.ToUpper("ADD CONSTRAINT " + fkPair.fkName)
+		if !strings.Contains(upUpper, fkNeedle) {
+			t.Errorf("044 missing %q -- M5-1 (c) composite FK regression on %s",
+				fkNeedle, fkPair.table)
+		}
+	}
+
+	if !strings.Contains(upUpper, "FOREIGN KEY (TENANT_ID, PROJECT_ID)") {
+		t.Error("044: every FK must reference the (tenant_id, project_id) pair, not project_id alone")
+	}
+	if !strings.Contains(upUpper, "REFERENCES PROJECTS (TENANT_ID, ID)") {
+		t.Error("044: every FK must target the composite UNIQUE on projects(tenant_id, id) " +
+			"(installed in migration 041)")
+	}
+	if !strings.Contains(upUpper, "ON DELETE CASCADE") {
+		t.Error("044: every composite FK must CASCADE to keep parity with the existing project_id FK")
+	}
+
+	// Down migration must drop FKs in a safe order (children before
+	// parents) and must use IF EXISTS for idempotency.
+	down := readMigration(t, "044_composite_fk_tenant_project.down.sql")
+	downUpper := strings.ToUpper(down)
+	for _, fkName := range []string{
+		"github_repositories_tenant_project_fk",
+		"vuln_resolution_events_tenant_project_fk",
+		"compliance_snapshots_tenant_project_fk",
+		"ssvc_project_defaults_tenant_project_fk",
+		"ssvc_assessments_tenant_project_fk",
+	} {
+		dropNeedle := strings.ToUpper("DROP CONSTRAINT IF EXISTS " + fkName)
+		if !strings.Contains(downUpper, dropNeedle) {
+			t.Errorf("044 down missing %q -- reversibility regression", dropNeedle)
+		}
+	}
+}
