@@ -45,6 +45,26 @@ const (
 	EnvGeminiAPIKeyAlt = "GEMINI_API_KEY" // Some Google docs / SDK paths use GEMINI_API_KEY in addition to GOOGLE_API_KEY.
 	EnvAzureAPIKey     = "AZURE_OPENAI_API_KEY"
 	EnvOllamaHost      = "OLLAMA_HOST"
+
+	// Azure OpenAI endpoint / api-version / deployment env aliases
+	// (M4 Codex review #F52). The factory's canonical envs (the
+	// SBOMHUB_LLM_AZURE_* trio above) keep precedence so existing
+	// self-host deployments are not disturbed; these aliases are the
+	// names Microsoft Learn / official Azure SDK examples direct
+	// operators at (see
+	// https://learn.microsoft.com/en-us/azure/developer/ai/keyless-connections),
+	// so operators who follow Azure docs verbatim now get a real
+	// provider instead of a DisabledProvider with "endpoint missing".
+	//
+	// ※要確認: AZURE_OPENAI_DEPLOYMENT is the form most Azure code
+	// samples use. AZURE_OPENAI_DEPLOYMENT_NAME is also used in some
+	// Microsoft SDK paths (Azure SDK for JS / Python OpenAI library)
+	// — we accept only the bare form here to avoid a confusing 3-deep
+	// precedence ladder; operators on _NAME can either rename their
+	// env or set the canonical SBOMHUB_LLM_AZURE_DEPLOYMENT.
+	EnvAzureEndpointAlias   = "AZURE_OPENAI_ENDPOINT"
+	EnvAzureAPIVersionAlias = "AZURE_OPENAI_API_VERSION"
+	EnvAzureDeploymentAlias = "AZURE_OPENAI_DEPLOYMENT"
 )
 
 // apiKeyEnvCandidates returns the env var names checked for the given
@@ -80,6 +100,41 @@ func apiKeyEnvCandidates(providerName string) []string {
 // the key value itself. Callers MUST NOT log the first return value.
 func resolveAPIKey(providerName string) (key, source string) {
 	for _, name := range apiKeyEnvCandidates(providerName) {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v, name
+		}
+	}
+	return "", ""
+}
+
+// azureFieldEnvCandidates returns the env var names checked for one
+// Azure OpenAI config field (endpoint / api_version / deployment), in
+// canonical-first precedence order. Mirrors apiKeyEnvCandidates so the
+// DisabledProvider Reason can list every env the resolver consulted
+// without re-deriving the list. M4 Codex review #F52.
+func azureFieldEnvCandidates(field string) []string {
+	switch field {
+	case "endpoint":
+		return []string{EnvAzureEndpoint, EnvAzureEndpointAlias}
+	case "api_version":
+		return []string{EnvAzureAPIVersion, EnvAzureAPIVersionAlias}
+	case "deployment":
+		return []string{EnvAzureDeployment, EnvAzureDeploymentAlias}
+	}
+	return nil
+}
+
+// resolveAzureField returns the value + the env var name it was
+// resolved from for one Azure config field, walking canonical-first
+// precedence (azureFieldEnvCandidates). Returns ("", "") when neither
+// env is set. M4 Codex review #F52.
+//
+// Unlike API keys, Azure endpoint / deployment / api-version are NOT
+// secrets, so the resolved value is safe to log if needed. The second
+// return value is still surfaced for symmetry with resolveAPIKey and
+// so operator-facing logs can name the env that won.
+func resolveAzureField(field string) (value, source string) {
+	for _, name := range azureFieldEnvCandidates(field) {
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 			return v, name
 		}
@@ -150,15 +205,40 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 		// the model name (Azure routes by deployment, not body field),
 		// so both endpoint + deployment are required. apiVersion is
 		// optional — azure_openai.go defaults to a GA-stable value.
-		endpoint := strings.TrimSpace(os.Getenv(EnvAzureEndpoint))
-		deployment := strings.TrimSpace(os.Getenv(EnvAzureDeployment))
+		//
+		// M4 Codex review #F52: each field walks canonical-first
+		// precedence (SBOMHUB_LLM_AZURE_* > AZURE_OPENAI_*) so an
+		// operator who configured Azure with Microsoft's documented env
+		// names (AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_VERSION /
+		// AZURE_OPENAI_DEPLOYMENT, the names Azure SDK examples use)
+		// gets a real provider instead of "endpoint missing".
+		endpoint, endpointSrc := resolveAzureField("endpoint")
+		deployment, deploymentSrc := resolveAzureField("deployment")
+		apiVersion, apiVersionSrc := resolveAzureField("api_version")
 		if endpoint == "" {
-			return &DisabledProvider{Reason: EnvAzureEndpoint + " is required for azure_openai"}, nil
+			candidates := azureFieldEnvCandidates("endpoint")
+			return &DisabledProvider{
+				Reason: fmt.Sprintf("no Azure endpoint found for azure_openai (set one of %s; %s wins on tie)",
+					strings.Join(candidates, ", "), EnvAzureEndpoint),
+			}, nil
 		}
 		if deployment == "" {
-			return &DisabledProvider{Reason: EnvAzureDeployment + " is required for azure_openai"}, nil
+			candidates := azureFieldEnvCandidates("deployment")
+			return &DisabledProvider{
+				Reason: fmt.Sprintf("no Azure deployment found for azure_openai (set one of %s; %s wins on tie)",
+					strings.Join(candidates, ", "), EnvAzureDeployment),
+			}, nil
 		}
-		apiVersion := strings.TrimSpace(os.Getenv(EnvAzureAPIVersion))
+		// Operator observability: log which env each Azure field was
+		// resolved from. The values are not secrets (unlike apiKey) so
+		// it would be safe to log them too, but env names alone are
+		// sufficient for "I set AZURE_OPENAI_ENDPOINT but it says
+		// disabled"-style diagnosis without contaminating logs with
+		// per-tenant URLs.
+		slog.Debug("llm: resolved Azure config from env",
+			"endpoint_env", endpointSrc,
+			"deployment_env", deploymentSrc,
+			"api_version_env", apiVersionSrc)
 		return NewAzureOpenAI(apiKey, endpoint, deployment, apiVersion, model), nil
 	case "ollama":
 		// M4 Wave M4-1: Local LLM path for manufacturers who cannot

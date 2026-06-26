@@ -22,6 +22,10 @@ func withEnv(t *testing.T, kv map[string]string) {
 		EnvOpenAIAPIKey, EnvAnthropicAPIKey,
 		EnvGeminiAPIKey, EnvGeminiAPIKeyAlt,
 		EnvAzureAPIKey, EnvOllamaHost,
+		// F52 Azure endpoint / api-version / deployment aliases — clear
+		// so a stray AZURE_OPENAI_* in the developer's shell does not
+		// mask a "factory disables when endpoint missing" regression.
+		EnvAzureEndpointAlias, EnvAzureAPIVersionAlias, EnvAzureDeploymentAlias,
 	} {
 		t.Setenv(k, "")
 	}
@@ -568,4 +572,197 @@ func TestNewProviderFromEnv_OllamaRespectsHostAlias(t *testing.T) {
 	if op.baseURL != "http://ollama-host.test:11434" {
 		t.Errorf("baseURL = %q, want %q", op.baseURL, "http://ollama-host.test:11434")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// M4 Codex review #F52 — Azure endpoint / api-version / deployment env aliases.
+//
+// Before F52 the factory only consulted the SBOMHUB_LLM_AZURE_* canonical
+// envs for Azure endpoint / api-version / deployment. An operator who
+// followed Microsoft Learn (which directs at AZURE_OPENAI_ENDPOINT /
+// AZURE_OPENAI_API_VERSION / AZURE_OPENAI_DEPLOYMENT) plus the F47 API
+// key alias (AZURE_OPENAI_API_KEY) got API key resolved but endpoint
+// missing → DisabledProvider. These tests lock in canonical-first
+// precedence + alias fallback for every Azure config field.
+// ---------------------------------------------------------------------------
+
+// TestResolveAzureField_CanonicalWinsOnTie covers the precedence
+// guarantee for each Azure field: existing self-host deployments that
+// already set SBOMHUB_LLM_AZURE_* must continue to use it even when a
+// stray AZURE_OPENAI_* alias is also set in the shell environment.
+func TestResolveAzureField_CanonicalWinsOnTie(t *testing.T) {
+	cases := []struct {
+		field        string
+		canonicalEnv string
+		aliasEnv     string
+	}{
+		{"endpoint", EnvAzureEndpoint, EnvAzureEndpointAlias},
+		{"api_version", EnvAzureAPIVersion, EnvAzureAPIVersionAlias},
+		{"deployment", EnvAzureDeployment, EnvAzureDeploymentAlias},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			withEnv(t, map[string]string{
+				tc.canonicalEnv: "canonical-wins",
+				tc.aliasEnv:     "alias-loses",
+			})
+			value, source := resolveAzureField(tc.field)
+			if value != "canonical-wins" {
+				t.Errorf("value = %q, want canonical-wins", value)
+			}
+			if source != tc.canonicalEnv {
+				t.Errorf("source = %q, want %q", source, tc.canonicalEnv)
+			}
+		})
+	}
+}
+
+// TestResolveAzureField_AliasOnly covers the doc-following operator
+// path: only the Microsoft-documented alias is set, the factory must
+// pick it up.
+func TestResolveAzureField_AliasOnly(t *testing.T) {
+	cases := []struct {
+		field    string
+		aliasEnv string
+	}{
+		{"endpoint", EnvAzureEndpointAlias},
+		{"api_version", EnvAzureAPIVersionAlias},
+		{"deployment", EnvAzureDeploymentAlias},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			withEnv(t, map[string]string{tc.aliasEnv: "alias-value"})
+			value, source := resolveAzureField(tc.field)
+			if value != "alias-value" {
+				t.Errorf("value = %q, want alias-value (alias not honoured)", value)
+			}
+			if source != tc.aliasEnv {
+				t.Errorf("source = %q, want %q", source, tc.aliasEnv)
+			}
+		})
+	}
+}
+
+// TestResolveAzureField_Empty pins the "no env at all" path: empty
+// value + empty source signals to the caller that DisabledProvider
+// should be returned.
+func TestResolveAzureField_Empty(t *testing.T) {
+	for _, field := range []string{"endpoint", "api_version", "deployment"} {
+		t.Run(field, func(t *testing.T) {
+			withEnv(t, nil)
+			value, source := resolveAzureField(field)
+			if value != "" || source != "" {
+				t.Errorf("value=%q source=%q, want both empty", value, source)
+			}
+		})
+	}
+}
+
+// TestNewProviderFromEnv_AzureAliasEndpointHappyPath is the end-to-end
+// Azure alias test: the operator set the full Microsoft-documented env
+// trio (AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT +
+// AZURE_OPENAI_API_VERSION + AZURE_OPENAI_DEPLOYMENT) and zero
+// SBOMHUB_LLM_AZURE_* canonical envs. NewProviderFromEnv must build a
+// real azure_openai provider rather than DisabledProvider — this is
+// the operator-facing assertion that F52 is fixed.
+func TestNewProviderFromEnv_AzureAliasEndpointHappyPath(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:             "azure_openai",
+		EnvAzureAPIKey:          "azure-alias-key",
+		EnvAzureEndpointAlias:   "https://example.openai.azure.com",
+		EnvAzureAPIVersionAlias: "2024-08-01-preview",
+		EnvAzureDeploymentAlias: "gpt-4o-deployment",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if p.Name() != "azure_openai" {
+		t.Errorf("Name() = %q, want azure_openai", p.Name())
+	}
+	if _, isDisabled := p.(*DisabledProvider); isDisabled {
+		t.Errorf("got DisabledProvider, want real azure_openai provider (F52 regression: alias envs not honoured)")
+	}
+}
+
+// TestNewProviderFromEnv_AzureCanonicalWinsAtFactory locks in the
+// end-to-end precedence guarantee — when both canonical and alias envs
+// are set for Azure endpoint/deployment, the canonical value must
+// reach the provider constructor. We exercise this via a happy-path
+// build with both envs distinguishable, and rely on the unit-level
+// TestResolveAzureField_CanonicalWinsOnTie above for the precedence
+// assertion at the helper level.
+func TestNewProviderFromEnv_AzureCanonicalWinsAtFactory(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:             "azure_openai",
+		EnvAPIKey:               "canonical-key",
+		EnvAzureEndpoint:        "https://canonical.openai.azure.com",
+		EnvAzureDeployment:      "canonical-deployment",
+		EnvAzureEndpointAlias:   "https://alias.openai.azure.com",
+		EnvAzureDeploymentAlias: "alias-deployment",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	azp, ok := p.(*AzureOpenAIProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *AzureOpenAIProvider", p)
+	}
+	if !strings.Contains(azp.endpoint, "canonical") {
+		t.Errorf("endpoint = %q, want canonical to win", azp.endpoint)
+	}
+	if !strings.Contains(azp.deployment, "canonical") {
+		t.Errorf("deployment = %q, want canonical to win", azp.deployment)
+	}
+}
+
+// TestNewProviderFromEnv_AzureDisabledReasonListsAliases verifies the
+// DisabledProvider Reason message names every Azure endpoint /
+// deployment env the factory consulted — operators who set
+// AZURE_OPENAI_ENDPOINT but typo'd AZURE_OPENAI_DEPLOYMENT need the
+// error to mention both candidates so they can diff their shell env
+// against the ones the factory checked.
+func TestNewProviderFromEnv_AzureDisabledReasonListsAliases(t *testing.T) {
+	t.Run("endpoint missing", func(t *testing.T) {
+		// API key satisfied via alias; endpoint deliberately omitted.
+		withEnv(t, map[string]string{
+			EnvProvider:    "azure_openai",
+			EnvAzureAPIKey: "k",
+		})
+		p, err := NewProviderFromEnv(context.Background())
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		de, ok := p.(*DisabledProvider)
+		if !ok {
+			t.Fatalf("type = %T, want *DisabledProvider", p)
+		}
+		for _, want := range []string{EnvAzureEndpoint, EnvAzureEndpointAlias} {
+			if !strings.Contains(de.Reason, want) {
+				t.Errorf("Reason = %q, want substring %q", de.Reason, want)
+			}
+		}
+	})
+	t.Run("deployment missing", func(t *testing.T) {
+		// API key + endpoint present, deployment missing.
+		withEnv(t, map[string]string{
+			EnvProvider:           "azure_openai",
+			EnvAzureAPIKey:        "k",
+			EnvAzureEndpointAlias: "https://example.openai.azure.com",
+		})
+		p, err := NewProviderFromEnv(context.Background())
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		de, ok := p.(*DisabledProvider)
+		if !ok {
+			t.Fatalf("type = %T, want *DisabledProvider", p)
+		}
+		for _, want := range []string{EnvAzureDeployment, EnvAzureDeploymentAlias} {
+			if !strings.Contains(de.Reason, want) {
+				t.Errorf("Reason = %q, want substring %q", de.Reason, want)
+			}
+		}
+	})
 }
