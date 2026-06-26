@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -18,6 +19,36 @@ import (
 	metisvc "github.com/sbomhub/sbomhub/internal/service/meti"
 	"github.com/sbomhub/sbomhub/internal/service/meti/criteria"
 )
+
+// Override-note bounds enforced by /override (PUT) — and shared by
+// the M4 follow-up clear-override endpoint. Required + length-capped
+// is the M3 Codex review #F34 fix: a manual override that wins over
+// the evaluator in Evidence Pack output must carry a human rationale
+// the auditor can review. The 4096-char cap is enough for a paragraph
+// of explanation (the production catalog's description_ja strings are
+// <500 chars, so 4096 is ~8× headroom) while keeping the
+// audit_logs.details JSONB bounded against a probe submitting a
+// multi-MB note.
+const (
+	MinMetiOverrideNoteLen = 1
+	MaxMetiOverrideNoteLen = 4096
+)
+
+// validateMetiOverrideNote enforces the #F34 contract: trim
+// whitespace, reject empty, reject over MaxMetiOverrideNoteLen.
+// Returns the cleaned (trimmed) note on success, or (zero, status,
+// body) for the caller to forward as the HTTP error. The error body
+// is intentionally generic (F10 carry-over) — the precise reason
+// lands in slog at the caller's site.
+func validateMetiOverrideNote(note string) (string, int, map[string]string) {
+	cleaned := strings.TrimSpace(note)
+	if len(cleaned) < MinMetiOverrideNoteLen || len(cleaned) > MaxMetiOverrideNoteLen {
+		return "", http.StatusBadRequest, map[string]string{
+			"error": "override_note is required and must be 1-4096 characters",
+		}
+	}
+	return cleaned, 0, nil
+}
 
 // Pagination bounds for ListAssessments / ListImprovementActions
 // (M3-4 carries over M1 #F24 / #F27). Explicit reject on out-of-band
@@ -170,9 +201,15 @@ type metiRefreshResponse struct {
 // meti_assessments row. ImprovementAction is a pointer so the caller
 // can distinguish "do not change" (omitted / null) from "set to empty"
 // (explicit "") — mirrors the CRA EditedDraftText contract.
+//
+// OverrideNote is REQUIRED (M3 Codex review #F34): an override that
+// wins over the evaluator in Evidence Pack output without a human
+// rationale leaves no audit trail for METI auditor review. The
+// validation (1..MaxMetiOverrideNoteLen, trimmed) is enforced by
+// validateMetiOverrideNote at OverrideAssessment entry.
 type metiOverrideRequest struct {
 	OverrideStatus    string  `json:"override_status"`              // required: achieved | not_achieved | needs_review | not_applicable
-	OverrideNote      string  `json:"override_note,omitempty"`      // optional human note
+	OverrideNote      string  `json:"override_note"`                // required: 1..4096 chars after trim (#F34)
 	ImprovementAction *string `json:"improvement_action,omitempty"` // optional remediation plan
 }
 
@@ -420,6 +457,21 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 			"error": "override_status must be one of: achieved, not_achieved, needs_review, not_applicable",
 		})
 	}
+	// F34: every override must carry a human rationale (auditor review
+	// requirement). Validate + trim BEFORE the pre-load so an empty /
+	// whitespace-only / oversized note never reaches the repository
+	// layer. The cleaned note is what we persist + audit.
+	cleanedNote, status, body := validateMetiOverrideNote(req.OverrideNote)
+	if status != 0 {
+		slog.Warn("meti_assessments: override rejected; note failed validation (F34)",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+			"raw_note_len", len(req.OverrideNote),
+		)
+		return c.JSON(status, body)
+	}
+	req.OverrideNote = cleanedNote
 
 	uid := userIDOrNil(tc)
 	if uid == nil {
@@ -504,16 +556,19 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 	resourceID := prior.ID
 	tenantID := tc.TenantID()
 	auditDetails := map[string]interface{}{
-		"project_id":                projectID.String(),
-		"criterion_id":              criterionID,
-		"criterion_phase":           prior.CriterionPhase,
-		"prior_status":              prior.Status,
-		"prior_override_status":     prior.OverrideStatus, // empty for the new-override path
-		"new_override_status":       req.OverrideStatus,
-		"improvement_action_set":    req.ImprovementAction != nil,
-	}
-	if note := req.OverrideNote; note != "" {
-		auditDetails["override_note_len"] = len(note)
+		"project_id":             projectID.String(),
+		"criterion_id":           criterionID,
+		"criterion_phase":        prior.CriterionPhase,
+		"prior_status":           prior.Status,
+		"prior_override_status":  prior.OverrideStatus, // empty for the new-override path
+		"new_override_status":    req.OverrideStatus,
+		"improvement_action_set": req.ImprovementAction != nil,
+		// F34: every override carries a human rationale (validated
+		// non-empty at handler entry). The note length lands in audit
+		// so an auditor can spot one-character / boilerplate notes
+		// without us persisting the raw text in audit_logs.details
+		// (the full note already lives in meti_assessments.override_note).
+		"override_note_len": len(req.OverrideNote),
 	}
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,

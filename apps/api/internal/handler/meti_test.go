@@ -507,7 +507,12 @@ func TestMetiHandler_RefreshAssessment_ReadOnly_Returns403_F15(t *testing.T) {
 func TestMetiHandler_OverrideAssessment_ReadOnly_Returns403_F15(t *testing.T) {
 	h := newMetiHarness()
 	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: criteria.StatusAchieved})
+	// Body carries a valid note so the 403 is triggered by RoleViewer
+	// (RequireWrite check) and NOT by the F34 note-required guard.
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
@@ -682,7 +687,10 @@ func TestMetiHandler_OverrideAssessment_AlreadyOverridden_Returns409_F31(t *test
 	seeded.OverrideBy = &by
 	h.store.byKey[metiKey(h.projectID, realCriterionID)] = seeded
 
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: criteria.StatusNotAchieved})
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusNotAchieved,
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
@@ -722,7 +730,10 @@ func TestMetiHandler_OverrideAssessment_AlreadyOverridden_TOCTOU_Returns409_F31(
 	// (simulated) returns wrapped sql.ErrNoRows.
 	h.store.overErr = fmt.Errorf("update meti_assessments override: %w", sql.ErrNoRows)
 
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: criteria.StatusAchieved})
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
@@ -788,7 +799,10 @@ func TestMetiHandler_OverrideAssessment_AuditFailure_Returns500_F32(t *testing.T
 	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
 	h.audit.err = errors.New("audit storm — F32 regression scenario")
 
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: criteria.StatusAchieved})
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
@@ -818,7 +832,12 @@ func TestMetiHandler_OverrideAssessment_AuditFailure_Returns500_F32(t *testing.T
 
 func TestMetiHandler_OverrideAssessment_UnknownCriterion_Returns404(t *testing.T) {
 	h := newMetiHarness()
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: criteria.StatusAchieved})
+	// F26 unknown-criterion check fires BEFORE bind/validation, so the
+	// note value here does not matter — keep a valid one for clarity.
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/meti.fake.99/override",
@@ -845,7 +864,10 @@ func TestMetiHandler_OverrideAssessment_NoRowYet_Returns404(t *testing.T) {
 	h := newMetiHarness()
 	// realCriterionID is in the catalog (passes F26) but no
 	// meti_assessments row exists for it yet (operator must /refresh first).
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: criteria.StatusAchieved})
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
@@ -872,7 +894,11 @@ func TestMetiHandler_OverrideAssessment_NoRowYet_Returns404(t *testing.T) {
 func TestMetiHandler_OverrideAssessment_InvalidStatus_Returns400(t *testing.T) {
 	h := newMetiHarness()
 	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
-	body, _ := json.Marshal(metiOverrideRequest{OverrideStatus: "wrong"})
+	// Note is valid so the 400 must come from the status validation.
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: "wrong",
+		OverrideNote:   "manual override rationale",
+	})
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPut,
 		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
@@ -983,5 +1009,164 @@ func TestMetiHandler_RefreshAssessment_PreservesOverrides(t *testing.T) {
 	}
 	if post.OverrideNote != "vendor confirmed" {
 		t.Errorf("override note not preserved: %q", post.OverrideNote)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F34 — override_note required + bounded (auditor review)
+// ----------------------------------------------------------------------------
+
+// TestMetiHandler_Override_EmptyNote_Rejected_F34 pins the F34 fix:
+// a manual override without a human rationale must be rejected with
+// 400 BEFORE the OverrideStatus UPDATE runs. Without the guard, an
+// override with empty note silently wins over the evaluator in
+// Evidence Pack output with no audit-grade explanation.
+func TestMetiHandler_Override_EmptyNote_Rejected_F34(t *testing.T) {
+	h := newMetiHarness()
+	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		// OverrideNote intentionally empty
+	})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.OverrideAssessment(c); err != nil {
+		t.Fatalf("OverrideAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F34: empty-note status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "override_note is required") {
+		t.Errorf("F34: 400 body should mention 'override_note is required'; got %s", rec.Body.String())
+	}
+	if h.store.overrideCalls != 0 {
+		t.Errorf("F34: OverrideStatus MUST NOT run when note is rejected, got %d", h.store.overrideCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F34: audit row MUST NOT be emitted when override is rejected, got %d", len(h.audit.entries))
+	}
+}
+
+// TestMetiHandler_Override_OnlyWhitespaceNote_Rejected_F34 pins the
+// trim-then-validate rule. A whitespace-only note is semantically
+// empty for the auditor and must be rejected.
+func TestMetiHandler_Override_OnlyWhitespaceNote_Rejected_F34(t *testing.T) {
+	h := newMetiHarness()
+	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "   \t\n  ",
+	})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.OverrideAssessment(c); err != nil {
+		t.Fatalf("OverrideAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F34: whitespace-only note status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.overrideCalls != 0 {
+		t.Errorf("F34: OverrideStatus MUST NOT run for whitespace-only note, got %d", h.store.overrideCalls)
+	}
+}
+
+// TestMetiHandler_Override_NoteTooLong_Rejected_F34 pins the max-len
+// cap. A 4097-char note must be rejected so audit_logs.details JSONB
+// stays bounded against a probe submitting a multi-MB note.
+func TestMetiHandler_Override_NoteTooLong_Rejected_F34(t *testing.T) {
+	h := newMetiHarness()
+	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	oversized := strings.Repeat("x", MaxMetiOverrideNoteLen+1)
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   oversized,
+	})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.OverrideAssessment(c); err != nil {
+		t.Fatalf("OverrideAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F34: oversized-note status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "1-4096") {
+		t.Errorf("F34: 400 body should mention '1-4096'; got %s", rec.Body.String())
+	}
+	if h.store.overrideCalls != 0 {
+		t.Errorf("F34: OverrideStatus MUST NOT run for oversized note, got %d", h.store.overrideCalls)
+	}
+}
+
+// TestMetiHandler_Override_ValidNote_Accepted_F34 is the regression-
+// preventing happy path: a normal valid note still lands the override
+// + audit row. Without this, a future "tighten the validator" change
+// could make every override 400 and we would not notice through the
+// negative-only F34 cases above.
+func TestMetiHandler_Override_ValidNote_Accepted_F34(t *testing.T) {
+	h := newMetiHarness()
+	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "vendor confirmed via signed advisory 2026-06-24",
+	})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.OverrideAssessment(c); err != nil {
+		t.Fatalf("OverrideAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F34: valid-note status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.overrideCalls != 1 {
+		t.Errorf("F34: OverrideStatus call count = %d, want 1", h.store.overrideCalls)
+	}
+	if got := len(h.audit.entries); got != 1 {
+		t.Fatalf("F34: audit entry count = %d, want 1", got)
+	}
+	// The persisted note must be the trimmed form (we expect no
+	// surrounding whitespace here, so trim leaves it unchanged).
+	post := h.store.byKey[metiKey(h.projectID, realCriterionID)]
+	if post.OverrideNote != "vendor confirmed via signed advisory 2026-06-24" {
+		t.Errorf("F34: persisted note mismatch: %q", post.OverrideNote)
 	}
 }
