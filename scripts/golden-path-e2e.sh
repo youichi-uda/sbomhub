@@ -214,7 +214,10 @@ assert_eq "${AI_DISABLED}" "true" "triage ai_disabled flag (M1 F4 fallback)"
 # Pick the first draft id from the fan-out. With one log4j-core link
 # the fan-out collapses to one draft, but the response shape uses an
 # array regardless.
-DRAFT_ID=$(printf '%s' "${TRIAGE_RESP}" | jq -r '.drafts[0].id // .draft.id // empty')
+# ※要確認 (M1 残課題 #18): vex_drafts wire shape は現状 PascalCase
+# (repository.VEXDraft が json tag 未付与、 cra_reports + meti_assessments で M2/M3 完了済)。
+# .drafts[0].ID / .draft.ID を先に試し、 将来 snake_case 統一時の .id も fallback。
+DRAFT_ID=$(printf '%s' "${TRIAGE_RESP}" | jq -r '.drafts[0].ID // .draft.ID // .drafts[0].id // .draft.id // empty')
 if [ -z "${DRAFT_ID}" ] || [ "${DRAFT_ID}" = "null" ]; then
   echo "::error::triage/run did not return a draft id"
   exit 1
@@ -226,7 +229,8 @@ echo "  OK draft_id = ${DRAFT_ID}"
 # ----------------------------------------------------------------------------
 echo "=== Step 5: list vex_drafts ==="
 DRAFTS_RESP=$(auth_curl GET "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/vex-drafts")
-DRAFT_COUNT=$(printf '%s' "${DRAFTS_RESP}" | jq -r '.drafts | length')
+# response shape: bare array or {drafts: [...]} — try both
+DRAFT_COUNT=$(printf '%s' "${DRAFTS_RESP}" | jq -r 'if type == "array" then length elif .drafts then (.drafts | length) else 0 end')
 assert_ge "${DRAFT_COUNT}" 1 "vex_drafts row count"
 
 # ----------------------------------------------------------------------------
@@ -237,7 +241,7 @@ DECISION_RESP=$(auth_curl PUT \
   "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/vex-drafts/${DRAFT_ID}/decision" \
   -d '{"decision":"approved","note":"Golden Path E2E approved"}')
 echo "decision response: ${DECISION_RESP}"
-NEW_DECISION=$(printf '%s' "${DECISION_RESP}" | jq -r '.decision // .Decision // empty')
+NEW_DECISION=$(printf '%s' "${DECISION_RESP}" | jq -r '.Decision // .decision // empty')
 assert_eq "${NEW_DECISION}" "approved" "vex_draft decision"
 
 # ----------------------------------------------------------------------------
