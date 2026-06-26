@@ -1162,6 +1162,77 @@
       "alreadyDecided": "This report has already been marked as {decision}. A new decision will overwrite the audit trail."
     }
   },
+  "METIAssessment": {
+    "Page": {
+      "title": "METI SBOM self-assessment",
+      "description": "Auto-scores the METI 'Guide for Introducing SBOM for Software Management ver 2.0' self-assessment checklist ({total} items) from the project's SBOM / vulnerability / VEX / CRA history. Every row can be manually overridden, and all actions are recorded in the audit log.",
+      "backToProject": "Back to project",
+      "refresh": "Re-evaluate",
+      "refreshing": "Re-evaluating...",
+      "refreshSuccess": "Re-evaluated {count} items (evaluator: {version}).",
+      "evaluatorVersion": "evaluator: {version}",
+      "lastEvaluatedAt": "Last evaluated: {timestamp}",
+      "emptyTitle": "No assessment yet",
+      "emptyDescription": "Press 'Re-evaluate' to score all 27 criteria from the project's SBOM / vulnerability / VEX / CRA history. Each row can then be manually overridden.",
+      "summaryAchieved": "Achieved {count}",
+      "summaryNotAchieved": "Not achieved {count}",
+      "summaryNeedsReview": "Needs review {count}",
+      "summaryNotApplicable": "N/A {count}",
+      "summaryOverridden": "Overridden {count}",
+      "improvementOnlyToggle": "Show improvement actions only",
+      "improvementCount": "{count} improvement action(s)",
+      "loadProjectFailed": "Failed to load project",
+      "loadAssessmentFailed": "Failed to load self-assessment",
+      "refreshFailed": "Re-evaluation failed",
+      "overrideFailed": "Manual override failed"
+    },
+    "Filter": {
+      "title": "Filters",
+      "phase": "Phase",
+      "status": "Status",
+      "hasOverride": "Override",
+      "any": "Any",
+      "overrideOnly": "Overridden only",
+      "noOverride": "No override"
+    },
+    "Phase": {
+      "env_setup": "Environment setup",
+      "sbom_creation": "SBOM creation",
+      "sbom_operation": "SBOM operation"
+    },
+    "Status": {
+      "achieved": "Achieved",
+      "not_achieved": "Not achieved",
+      "needs_review": "Needs review",
+      "not_applicable": "N/A"
+    },
+    "CriterionCard": {
+      "evidenceLabel": "Evidence",
+      "evidenceEmpty": "No evidence (normal for needs_review / not_applicable rows)",
+      "improvementActionLabel": "Improvement action",
+      "improvementActionEmpty": "No improvement action recorded",
+      "overrideStatusLabel": "Override status",
+      "overrideByLabel": "Overridden by",
+      "overrideNoteLabel": "Override note",
+      "evaluatedAtLabel": "Evaluated at",
+      "originalStatusLabel": "Evaluator verdict",
+      "evaluatorBadge": "evaluator",
+      "overrideBadge": "overridden",
+      "overrideButton": "Manual override",
+      "overrideCancel": "Cancel",
+      "overrideSubmit": "Save override",
+      "overrideSubmitting": "Saving...",
+      "overrideExistingHint": "An override is already applied. To re-override, clear the existing one first (clear-override lands in M4).",
+      "overrideFormStatusLabel": "New status",
+      "overrideFormNoteLabel": "Override reason (optional)",
+      "overrideFormNotePlaceholder": "Why are you overriding the evaluator verdict? (e.g. vendor attestation reviewed)",
+      "overrideFormImprovementLabel": "Improvement action (optional)",
+      "overrideFormImprovementPlaceholder": "Next step for this criterion (leave blank to keep existing)",
+      "overrideFormImprovementHint": "Leaving this empty keeps the existing improvement action. To clear it, enter a single space. ※要確認: an explicit 'clear' button lands in M4.",
+      "overrideValidationStatus": "Status is required",
+      "overrideValidationNote": "Note must be 2000 characters or fewer"
+    }
+  },
   "FAQ": {
     "title": "Frequently Asked Questions",
     "q1": "What is CRA 2026/9?",

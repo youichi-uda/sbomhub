@@ -1217,6 +1217,132 @@ export interface RunCRAReportResponse {
   ai_disabled?: boolean;
 }
 
+// -----------------------------------------------------------------------------
+// METI assessment (M3-4 / M3-5, issue #37 + #38) types
+// -----------------------------------------------------------------------------
+//
+// Wire shape: snake_case — repository.MetiAssessment declares `json:` tags on
+// every field (see apps/api/internal/repository/meti_assessments.go header
+// comment, M3-1 / #41 rationale). Same lesson as CRA reports: locking the
+// JSON shape at the struct definition prevents the M1 #F28-class
+// repository/handler drift that silently broke the triage UI.
+//
+// Keep these types in sync with that struct and with the handler request /
+// response DTOs in apps/api/internal/handler/meti.go; if either drifts the
+// METI matrix UI silently breaks.
+
+/** METI 手引 ver 2.0 phase allow-list (DB CHECK on meti_assessments.criterion_phase). */
+export type METIPhase = "env_setup" | "sbom_creation" | "sbom_operation";
+
+/**
+ * METI assessment status allow-list (DB CHECK on meti_assessments.status +
+ * override_status, see apps/api/internal/service/meti/criteria/criteria.go
+ * Status* constants).
+ */
+export type METIStatus =
+  | "achieved"
+  | "not_achieved"
+  | "needs_review"
+  | "not_applicable";
+
+/**
+ * One evidence pointer attached to a METI assessment. The evaluator emits
+ * `{kind, value}` objects (see criteria.evidenceEntry); operator overrides
+ * may augment with `{kind, ref}` or note fields. The shape is open-ended
+ * (jsonb), so we keep the type permissive — the UI surfaces `kind` as a
+ * badge and stringifies `value`/`ref`/`description` for display.
+ * ※要確認: lock the exact key set once operator-overridden evidence shape
+ * stabilises (M4 follow-up).
+ */
+export interface METIAssessmentEvidence {
+  kind: string;
+  value?: unknown;
+  ref?: string;
+  description?: string;
+  note?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * MetiAssessment wire shape (snake_case — repository.MetiAssessment
+ * `json:` tags). Evidence is jsonb on the server and is unmarshalled to an
+ * array on the wire; we treat null defensively for forward compatibility.
+ */
+export interface MetiAssessment {
+  id: string;
+  tenant_id: string;
+  project_id: string;
+  criterion_id: string;
+  criterion_phase: METIPhase | string;
+  status: METIStatus | string;
+  evidence: METIAssessmentEvidence[] | null;
+  evaluator_version?: string;
+  evaluated_at: string;
+  override_status?: METIStatus | string;
+  override_by?: string | null;
+  override_at?: string | null;
+  override_note?: string;
+  improvement_action?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /meti/assessment list envelope. */
+export interface MetiAssessmentListResponse {
+  assessments: MetiAssessment[];
+}
+
+/** POST /meti/assessment/refresh response — handler.metiRefreshResponse. */
+export interface MetiRefreshResponse {
+  assessments: MetiAssessment[];
+  evaluator_version: string;
+  refreshed: number;
+}
+
+/** Query-param filter for ListAssessments (mirrors handler.parseListFilter). */
+export interface MetiAssessmentListFilter {
+  phase?: METIPhase | string;
+  status?: METIStatus | string;
+  has_override?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * PUT override body — handler.metiOverrideRequest. improvement_action is
+ * pointer-nullable on the backend: omit to preserve the existing value,
+ * pass an explicit (possibly empty) string to overwrite. The TS shape uses
+ * `string | null | undefined` so `undefined` = omit and `""` = overwrite,
+ * mirroring the CRA EditedDraftText contract.
+ */
+export interface MetiAssessmentOverrideInput {
+  override_status: METIStatus;
+  override_note?: string;
+  improvement_action?: string | null;
+}
+
+/**
+ * One row of the improvement-actions response (handler.metiImprovementAction).
+ * effective_status is server-computed: override_status when set, otherwise
+ * status. The catalog title (ja/en) is denormalised here so the UI does
+ * not have to re-fetch the catalog.
+ */
+export interface MetiImprovementAction {
+  criterion_id: string;
+  criterion_phase: METIPhase | string;
+  criterion_title_ja?: string;
+  criterion_title_en?: string;
+  status: METIStatus | string;
+  override_status?: METIStatus | string;
+  effective_status: METIStatus | string;
+  evidence: METIAssessmentEvidence[] | null;
+  improvement_action?: string;
+}
+
+export interface MetiImprovementActionsResponse {
+  actions: MetiImprovementAction[];
+}
+
 /**
  * APIError surfaces non-2xx responses from the backend with the parsed JSON
  * body (when present). Triage callers need to differentiate
@@ -1855,6 +1981,95 @@ export const api = {
           body: JSON.stringify(input ?? {}),
         },
       ),
+  },
+  // METI self-assessment (M3-4 + M3-5, issues #37 + #38). Maps to the
+  // four endpoints wired by apps/api/cmd/server/main.go around
+  // /meti/assessment:
+  //   GET    /api/v1/projects/:id/meti/assessment
+  //   POST   /api/v1/projects/:id/meti/assessment/refresh
+  //   PUT    /api/v1/projects/:id/meti/assessment/:criterion_id/override
+  //   GET    /api/v1/projects/:id/meti/improvement-actions
+  //
+  // The catalog ships with 27 criteria (3 phases × ~9 items) so the
+  // matrix page never paginates in practice. We still expose limit /
+  // offset on the filter shape for parity with the handler's F24/F27
+  // bounds — see comment on handler.parseListFilter.
+  meti: {
+    /**
+     * GET assessment list (server returns the full per-criterion matrix
+     * for the project). The X-Total-Count header is emitted by the
+     * handler but the matrix page renders the whole catalog at once, so
+     * we expose only the envelope here. If a paginated view lands
+     * later, mirror the cra-reports.listWithMeta shape.
+     */
+    getAssessment: (
+      projectId: string,
+      filter?: MetiAssessmentListFilter,
+    ) => {
+      const params = new URLSearchParams();
+      if (filter?.phase) params.set("phase", filter.phase);
+      if (filter?.status) params.set("status", filter.status);
+      if (typeof filter?.has_override === "boolean") {
+        params.set("has_override", filter.has_override ? "true" : "false");
+      }
+      if (typeof filter?.limit === "number") params.set("limit", String(filter.limit));
+      if (typeof filter?.offset === "number") params.set("offset", String(filter.offset));
+      const query = params.toString();
+      return request<MetiAssessmentListResponse>(
+        `/api/v1/projects/${projectId}/meti/assessment${query ? `?${query}` : ""}`,
+      );
+    },
+    /**
+     * POST /refresh — re-runs the evaluator fan-out (27 criteria) and
+     * returns the persisted rows + evaluator version. Operator-applied
+     * overrides are preserved by the repository (Upsert does NOT touch
+     * override_*). Failures here include 503 AI-disabled (M3 is
+     * deliberately AI-free, but the env may still surface upstream
+     * outages — APIError.isAIDisabled() is harmless here, it just falls
+     * through to the generic flash error path).
+     */
+    refreshAssessment: (projectId: string) =>
+      request<MetiRefreshResponse>(
+        `/api/v1/projects/${projectId}/meti/assessment/refresh`,
+        { method: "POST" },
+      ),
+    /**
+     * PUT /override — applies one operator override to a single criterion
+     * row. Server enforces F31 state-machine guard: re-overriding an
+     * already-overridden row returns 409 ("clear the existing override
+     * first"). UI surfaces that as a flash error rather than swallowing
+     * it, so an operator sees the explicit re-override workflow.
+     */
+    overrideCriterion: (
+      projectId: string,
+      criterionId: string,
+      input: MetiAssessmentOverrideInput,
+    ) =>
+      request<MetiAssessment>(
+        `/api/v1/projects/${projectId}/meti/assessment/${encodeURIComponent(criterionId)}/override`,
+        {
+          method: "PUT",
+          body: JSON.stringify(input),
+        },
+      ),
+    /**
+     * GET /improvement-actions — server-side filter for "effective
+     * status != achieved" rows. The endpoint accepts an optional ?phase
+     * filter but intentionally NOT ?status (the whole point is "not
+     * achieved"). The page uses this as the "改善 actions のみ" toggle
+     * data source.
+     */
+    getImprovementActions: (
+      projectId: string,
+      filter?: { phase?: METIPhase | string },
+    ) => {
+      const params = new URLSearchParams();
+      if (filter?.phase) params.set("phase", filter.phase);
+      const query = params.toString();
+      return request<MetiImprovementActionsResponse>(
+        `/api/v1/projects/${projectId}/meti/improvement-actions${query ? `?${query}` : ""}`,
+      );
+    },
   },
   sbom: {
     diff: (data: { base_sbom_id: string; target_sbom_id: string }) =>

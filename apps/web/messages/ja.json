@@ -1163,6 +1163,77 @@
       "alreadyDecided": "この報告書は既に {decision} の判断が記録されています。 新規判断は監査ログに上書きされます。"
     }
   },
+  "METIAssessment": {
+    "Page": {
+      "title": "経産省 SBOM 自己評価",
+      "description": "経済産業省『ソフトウェア管理に向けた SBOM の導入に関する手引 ver 2.0』の自己評価チェックリスト ({total} 項目) を、 プロジェクトの SBOM/脆弱性/VEX/CRA 履歴から自動採点します。 各項目は手動で上書き可能で、 すべての操作は監査ログに記録されます。",
+      "backToProject": "プロジェクトに戻る",
+      "refresh": "再評価",
+      "refreshing": "再評価中...",
+      "refreshSuccess": "{count} 項目を再評価しました (evaluator: {version})。",
+      "evaluatorVersion": "evaluator: {version}",
+      "lastEvaluatedAt": "最終評価: {timestamp}",
+      "emptyTitle": "評価結果はまだありません",
+      "emptyDescription": "「再評価」 を押すと、 プロジェクトの SBOM/脆弱性/VEX/CRA 履歴から 27 項目の自己評価を一括採点します。 採点後は各項目を手動で上書き可能です。",
+      "summaryAchieved": "達成 {count}",
+      "summaryNotAchieved": "未達 {count}",
+      "summaryNeedsReview": "要確認 {count}",
+      "summaryNotApplicable": "対象外 {count}",
+      "summaryOverridden": "上書き {count}",
+      "improvementOnlyToggle": "改善 actions のみ表示",
+      "improvementCount": "{count} 件の改善アクション",
+      "loadProjectFailed": "プロジェクトの読み込みに失敗しました",
+      "loadAssessmentFailed": "自己評価結果の読み込みに失敗しました",
+      "refreshFailed": "再評価に失敗しました",
+      "overrideFailed": "手動上書きに失敗しました"
+    },
+    "Filter": {
+      "title": "フィルタ",
+      "phase": "フェーズ",
+      "status": "ステータス",
+      "hasOverride": "上書き",
+      "any": "すべて",
+      "overrideOnly": "上書きあり",
+      "noOverride": "上書きなし"
+    },
+    "Phase": {
+      "env_setup": "環境構築",
+      "sbom_creation": "SBOM 作成",
+      "sbom_operation": "SBOM 運用"
+    },
+    "Status": {
+      "achieved": "達成",
+      "not_achieved": "未達",
+      "needs_review": "要確認",
+      "not_applicable": "対象外"
+    },
+    "CriterionCard": {
+      "evidenceLabel": "根拠",
+      "evidenceEmpty": "根拠データはありません (要確認 / 対象外 項目では正常です)",
+      "improvementActionLabel": "改善アクション",
+      "improvementActionEmpty": "改善アクションは未記入です",
+      "overrideStatusLabel": "上書きステータス",
+      "overrideByLabel": "上書き実施者",
+      "overrideNoteLabel": "上書きメモ",
+      "evaluatedAtLabel": "評価日時",
+      "originalStatusLabel": "evaluator 判定",
+      "evaluatorBadge": "evaluator",
+      "overrideBadge": "上書き済み",
+      "overrideButton": "手動で上書き",
+      "overrideCancel": "キャンセル",
+      "overrideSubmit": "上書きを保存",
+      "overrideSubmitting": "保存中...",
+      "overrideExistingHint": "既に上書きが適用されています。 やり直す場合は 「上書きをクリア」 (M4 で実装予定) で先に解除してください。",
+      "overrideFormStatusLabel": "新しいステータス",
+      "overrideFormNoteLabel": "上書き理由 (任意)",
+      "overrideFormNotePlaceholder": "上書きの根拠を残してください (例: ベンダー証明書を確認済み)",
+      "overrideFormImprovementLabel": "改善アクション (任意)",
+      "overrideFormImprovementPlaceholder": "次に行うべき作業を記入してください (空欄で既存値を保持)",
+      "overrideFormImprovementHint": "空欄を送信すると既存の改善アクションを保持します。 空文字で上書きしたい場合は半角スペースを入れてください。 ※要確認: M4 で 「クリア」 専用ボタンを追加予定。",
+      "overrideValidationStatus": "ステータスを選択してください",
+      "overrideValidationNote": "メモは 2000 文字以内で入力してください"
+    }
+  },
   "FAQ": {
     "title": "よくある質問",
     "q1": "CRA 2026/9 とは何ですか？",
