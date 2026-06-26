@@ -1,0 +1,124 @@
+# GoReleaser config — sbomhub OSS (M5-2 / #54).
+#
+# Scope: this config builds and publishes ONLY the `llm-bench` binary
+# (apps/api/cmd/llm-bench). The `server` and `migrate` binaries continue
+# to ship as Docker images via docker-publish.yml; only `llm-bench` needs
+# a standalone artifact path because sbomhub-cli's `sbomhub llm bench`
+# wrapper has to download a pre-built binary on the operator's host
+# rather than `go run` against a mounted sbomhub OSS source tree (M4 F54
+# option (c) → M5-2).
+#
+# Run locally:
+#   goreleaser check                   # validate this file
+#   goreleaser release --snapshot \    # dry run, no GitHub push
+#       --clean --skip=publish
+#
+# CI invocation lives in .github/workflows/release.yml, triggered on tag
+# push (`v*`). `GITHUB_TOKEN` is the only required secret.
+#
+# DO NOT add a build entry for `apps/api/cmd/server` or `apps/api/cmd/migrate`
+# here. Those binaries are validated and shipped via Docker images
+# (docker-publish.yml); duplicating them as raw archives risks drift in
+# the runtime contract (config search paths, migration files alongside,
+# etc.). M5-2 is intentionally narrowly scoped to llm-bench.
+
+version: 2
+
+# The Go module is rooted at apps/api/, so every `builds` entry uses
+# dir: apps/api to give goreleaser the right module context. Going
+# wider (running goreleaser at apps/api/) would split the release
+# config away from the repo root and complicate the CI workflow.
+project_name: sbomhub
+
+builds:
+  - id: llm-bench
+    dir: apps/api
+    main: ./cmd/llm-bench
+    binary: llm-bench
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Windows + arm64 combination is technically valid for Go 1.22+ but
+    # nobody runs `sbomhub llm bench` on Windows ARM in practice. Keep
+    # it in the matrix; goreleaser will produce the archive cheaply and
+    # we avoid a "why was this excluded" question later.
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.Commit}}
+      - -X main.Date={{.Date}}
+
+archives:
+  - id: llm-bench
+    builds:
+      - llm-bench
+    # Naming follows the M5-2 contract documented in the issue:
+    #   llm-bench-v{VERSION}-{OS}-{ARCH}.{tar.gz|zip}
+    # sbomhub-cli's wrapper resolves the download URL by reconstructing
+    # this template from its embedded version constant — do not change
+    # the layout without bumping the wrapper.
+    name_template: "llm-bench-v{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+      # Bundle the bench's canonical fixture so an operator running
+      # `llm-bench --eval-set ./test/fixtures/llm-bench/cve-20-50.json`
+      # from the archive root does not also need to clone sbomhub.
+      # The wildcard scopes the inclusion to the bench fixtures only —
+      # we deliberately do NOT bundle apps/api/test/fixtures/* wholesale
+      # because the rest are server / migration test data unrelated to
+      # the bench.
+      - src: apps/api/test/fixtures/llm-bench/*
+        dst: fixtures/llm-bench
+        strip_parent: true
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: youichi-uda
+    name: sbomhub
+  draft: false
+  prerelease: auto
+  name_template: "{{.Tag}}"
+  header: |
+    ## sbomhub {{ .Tag }}
+
+    This release includes the standalone `llm-bench` binary used by
+    `sbomhub llm bench` (sbomhub-cli) to compare Managed AI vs Local LLM
+    quality on the VEX-triage eval-set without requiring a sbomhub OSS
+    source checkout.
+
+    See [llm-bench README](./apps/api/cmd/llm-bench) for the env
+    contract and exit-code table (F42).
+
+    The sbomhub `server` / `migrate` runtime binaries are not in this
+    archive — they continue to ship as Docker images (`y1uda/sbomhub-api`,
+    `y1uda/sbomhub-web`) via the docker-publish workflow.
