@@ -287,20 +287,67 @@ func buildProvider(spec providerSpec) (llm.Provider, error) {
 	)
 }
 
+// Exit codes (F42). Documented in the package doc so operators /
+// CI pipelines can distinguish failure modes without parsing the
+// stderr message. Anything outside this list is a bug.
+const (
+	exitOK              = 0
+	exitUsageError      = 2 // flag parse, missing required flag, unknown provider name
+	exitConfigError     = 3 // fixture load / schema validation failure
+	exitNoProviders     = 4 // every requested provider skipped (no BYOK env configured)
+	exitExecutionFailed = 5 // provider run / output write failure (JSONL write, etc.)
+)
+
+// exitError carries the typed exit code F42 introduced. main() reads
+// .Code to choose the os.Exit value; tests inspect .Code to assert the
+// classification rather than scraping stderr text.
+//
+// A nil *exitError means success — callers should check `if ee != nil`,
+// not `if ee.Err != nil`, because that's a typed-nil trap.
+type exitError struct {
+	Code int
+	Err  error
+}
+
+func (e *exitError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *exitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func newExitError(code int, err error) *exitError {
+	if err == nil {
+		return nil
+	}
+	return &exitError{Code: code, Err: err}
+}
+
 func main() {
-	if err := realMain(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "llm-bench:", err)
-		os.Exit(1)
+	if ee := realMain(os.Args[1:], os.Stdout, os.Stderr); ee != nil {
+		fmt.Fprintln(os.Stderr, "llm-bench:", ee.Err)
+		os.Exit(ee.Code)
 	}
 }
 
 // realMain is the test-friendly entry point. It takes stdout / stderr
 // explicitly so unit tests can capture both streams without redirecting
 // os.Stdout / os.Stderr globally.
-func realMain(args []string, stdout, stderr io.Writer) error {
+//
+// Returns nil on success, or a typed *exitError whose Code matches the
+// contract in the package doc (F42). Callers must use the typed-nil
+// pattern (`if ee := realMain(...); ee != nil`) not `err != nil`.
+func realMain(args []string, stdout, stderr io.Writer) *exitError {
 	flags, err := parseFlags(args)
 	if err != nil {
-		return err
+		return newExitError(exitUsageError, err)
 	}
 
 	// Wire slog so per-case warnings (skipped providers, transport
@@ -314,7 +361,9 @@ func realMain(args []string, stdout, stderr io.Writer) error {
 
 	providerNames, err := resolveProviderNames(flags.providers)
 	if err != nil {
-		return err
+		// Unknown / empty provider names are a CLI usage problem, not
+		// a fixture problem — distinguish so CI can route the failure.
+		return newExitError(exitUsageError, err)
 	}
 
 	// Load + cap the eval-set BEFORE building providers so a bad
@@ -322,7 +371,7 @@ func realMain(args []string, stdout, stderr io.Writer) error {
 	// is applied by capCases.
 	cases, err := loadEvalSet(flags.evalSet)
 	if err != nil {
-		return fmt.Errorf("load eval-set %s: %w", flags.evalSet, err)
+		return newExitError(exitConfigError, fmt.Errorf("load eval-set %s: %w", flags.evalSet, err))
 	}
 	cases = capCases(cases, flags.maxCases)
 	logger.Info("eval-set loaded", "path", flags.evalSet, "case_count", len(cases))
@@ -353,7 +402,7 @@ func realMain(args []string, stdout, stderr io.Writer) error {
 		providers = append(providers, namedProvider{name: name, provider: p, model: spec.model})
 	}
 	if len(providers) == 0 {
-		return fmt.Errorf("no providers available: set at least one of OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / SBOMHUB_LLM_API_KEY+SBOMHUB_LLM_AZURE_* / SBOMHUB_LLM_BENCH_OLLAMA_MODEL")
+		return newExitError(exitNoProviders, fmt.Errorf("no providers available: set at least one of OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / SBOMHUB_LLM_API_KEY+SBOMHUB_LLM_AZURE_* / SBOMHUB_LLM_BENCH_OLLAMA_MODEL"))
 	}
 
 	// Decide JSONL sink. We default to stdout so the operator can pipe
@@ -362,7 +411,10 @@ func realMain(args []string, stdout, stderr io.Writer) error {
 	if flags.out != "" {
 		f, err := os.Create(flags.out)
 		if err != nil {
-			return fmt.Errorf("create --out file: %w", err)
+			// File creation is an output-side failure (disk full,
+			// permission, parent missing). Exit 5 keeps it distinct
+			// from "no providers" / fixture errors.
+			return newExitError(exitExecutionFailed, fmt.Errorf("create --out file: %w", err))
 		}
 		defer f.Close()
 		jsonlSink = f
@@ -380,7 +432,11 @@ func realMain(args []string, stdout, stderr io.Writer) error {
 		JSONLWriter:    jsonlSink,
 	})
 	if err != nil {
-		return fmt.Errorf("run bench: %w", err)
+		// runBench returns non-nil only for unrecoverable execution
+		// failures (e.g. JSONL writer broke mid-run — see F43). Per-call
+		// transport errors are folded into CaseResult.Error and do NOT
+		// surface here.
+		return newExitError(exitExecutionFailed, fmt.Errorf("run bench: %w", err))
 	}
 
 	if flags.markdown {

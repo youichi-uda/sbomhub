@@ -623,11 +623,120 @@ func TestRealMainNoProviders(t *testing.T) {
 	t.Setenv("SBOMHUB_LLM_BENCH_OLLAMA_MODEL", "")
 
 	var stdout, stderr bytes.Buffer
-	err := realMain([]string{"--eval-set", path}, &stdout, &stderr)
-	if err == nil {
-		t.Fatal("expected error when no providers are configured")
+	ee := realMain([]string{"--eval-set", path}, &stdout, &stderr)
+	if ee == nil {
+		t.Fatal("expected exitError when no providers are configured")
 	}
-	if !strings.Contains(err.Error(), "no providers available") {
-		t.Errorf("expected 'no providers available' message, got %v", err)
+	if !strings.Contains(ee.Error(), "no providers available") {
+		t.Errorf("expected 'no providers available' message, got %v", ee)
 	}
+	if ee.Code != exitNoProviders {
+		t.Errorf("exit code = %d, want %d (exitNoProviders)", ee.Code, exitNoProviders)
+	}
+}
+
+// TestRealMain_ExitCodes_F42 pins the F42 exit-code contract. Each
+// sub-test triggers a distinct failure mode and asserts the typed
+// exit code so CI / orchestrators can dispatch on the classification.
+//
+// Contract:
+//
+//	2 (exitUsageError)      — flag parse, missing required flag, unknown provider
+//	3 (exitConfigError)     — fixture load / schema validation failure
+//	4 (exitNoProviders)     — every requested provider skipped (no BYOK env)
+//	5 (exitExecutionFailed) — output-creation / run failure
+func TestRealMain_ExitCodes_F42(t *testing.T) {
+	// Clean BYOK env so the no-providers branch is deterministic in
+	// every sub-test that reaches provider resolution.
+	clearBYOK := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("OPENAI_API_KEY", "")
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		t.Setenv("GOOGLE_API_KEY", "")
+		t.Setenv("SBOMHUB_LLM_API_KEY", "")
+		t.Setenv("SBOMHUB_LLM_AZURE_ENDPOINT", "")
+		t.Setenv("SBOMHUB_LLM_AZURE_DEPLOYMENT", "")
+		t.Setenv("SBOMHUB_LLM_BENCH_OLLAMA_MODEL", "")
+	}
+
+	dir := t.TempDir()
+	goodFixture := writeFixture(t, dir, "ok.json", `{
+		"version":1,
+		"cases":[{
+			"case_id":"c","cve_id":"CVE-X","advisory_excerpt":"x",
+			"component_name":"n","ecosystem":"go",
+			"code_reachability":{"reachable":false,"evidence":[]},
+			"expected_state":"not_affected"
+		}]
+	}`)
+
+	t.Run("exit 2 on missing --eval-set", func(t *testing.T) {
+		clearBYOK(t)
+		var out, errb bytes.Buffer
+		ee := realMain([]string{}, &out, &errb)
+		if ee == nil || ee.Code != exitUsageError {
+			t.Fatalf("got %+v, want exitUsageError (%d)", ee, exitUsageError)
+		}
+	})
+
+	t.Run("exit 2 on unknown flag", func(t *testing.T) {
+		clearBYOK(t)
+		var out, errb bytes.Buffer
+		ee := realMain([]string{"--not-a-flag"}, &out, &errb)
+		if ee == nil || ee.Code != exitUsageError {
+			t.Fatalf("got %+v, want exitUsageError (%d)", ee, exitUsageError)
+		}
+	})
+
+	t.Run("exit 2 on unknown provider", func(t *testing.T) {
+		clearBYOK(t)
+		var out, errb bytes.Buffer
+		ee := realMain([]string{"--eval-set", goodFixture, "--providers", "acme"}, &out, &errb)
+		if ee == nil || ee.Code != exitUsageError {
+			t.Fatalf("got %+v, want exitUsageError (%d)", ee, exitUsageError)
+		}
+	})
+
+	t.Run("exit 3 on missing fixture file", func(t *testing.T) {
+		clearBYOK(t)
+		var out, errb bytes.Buffer
+		ee := realMain([]string{"--eval-set", filepath.Join(dir, "does-not-exist.json")}, &out, &errb)
+		if ee == nil || ee.Code != exitConfigError {
+			t.Fatalf("got %+v, want exitConfigError (%d)", ee, exitConfigError)
+		}
+	})
+
+	t.Run("exit 3 on invalid fixture schema", func(t *testing.T) {
+		clearBYOK(t)
+		bad := writeFixture(t, dir, "bad.json", `{"version":1,"cases":[]}`)
+		var out, errb bytes.Buffer
+		ee := realMain([]string{"--eval-set", bad}, &out, &errb)
+		if ee == nil || ee.Code != exitConfigError {
+			t.Fatalf("got %+v, want exitConfigError (%d)", ee, exitConfigError)
+		}
+	})
+
+	t.Run("exit 4 when no providers configured", func(t *testing.T) {
+		clearBYOK(t)
+		var out, errb bytes.Buffer
+		ee := realMain([]string{"--eval-set", goodFixture}, &out, &errb)
+		if ee == nil || ee.Code != exitNoProviders {
+			t.Fatalf("got %+v, want exitNoProviders (%d)", ee, exitNoProviders)
+		}
+	})
+
+	t.Run("exit 5 when --out points to unwritable directory", func(t *testing.T) {
+		clearBYOK(t)
+		t.Setenv("OPENAI_API_KEY", "sk-test") // unblock no-providers path so we reach --out
+		var out, errb bytes.Buffer
+		// Parent dir does not exist → os.Create fails with ENOENT. This
+		// is the same class of failure as disk-full / EACCES (output
+		// surface broken before any provider call), so it maps to
+		// exitExecutionFailed.
+		badOut := filepath.Join(dir, "no-such-dir", "out.jsonl")
+		ee := realMain([]string{"--eval-set", goodFixture, "--out", badOut, "--providers", "openai"}, &out, &errb)
+		if ee == nil || ee.Code != exitExecutionFailed {
+			t.Fatalf("got %+v, want exitExecutionFailed (%d)", ee, exitExecutionFailed)
+		}
+	})
 }
