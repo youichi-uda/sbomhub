@@ -40,6 +40,7 @@ import {
   api,
   APIError,
   MetiAssessment,
+  MetiAssessmentClearOverrideInput,
   MetiAssessmentListFilter,
   MetiAssessmentOverrideInput,
   METIPhase,
@@ -269,6 +270,47 @@ export default function METIAssessmentPage() {
       }
     },
     [projectId, loadImprovementActions, handleError, t],
+  );
+
+  // M3 Codex review #F35 — clear-override wire-up. The card validates
+  // the note (zod: trim then 1..4096 chars) before calling this, so a
+  // failed validation never reaches the server. Failures returned by
+  // the server (400/404/409 from the F33 state-machine guard / TOCTOU /
+  // missing-override path) are funneled through handleError so the
+  // operator sees a flash and the row stays in clear-mode for retry.
+  const tCard = useTranslations("METIAssessment.CriterionCard");
+  const handleClearOverride = useCallback(
+    async (
+      assessment: MetiAssessment,
+      input: MetiAssessmentClearOverrideInput,
+    ) => {
+      setBusyCriterionId(assessment.criterion_id);
+      try {
+        const fresh = await api.meti.clearOverrideCriterion(
+          projectId,
+          assessment.criterion_id,
+          input,
+        );
+        // Same in-place patch path as handleOverride. After a clear,
+        // override_* are nulled and `effectiveStatus` falls back to
+        // `status`, so the card immediately re-renders without the
+        // override badge.
+        setAssessments((prev) =>
+          prev.map((a) =>
+            a.criterion_id === fresh.criterion_id ? fresh : a,
+          ),
+        );
+        // Re-pull improvement-actions: an `achieved` override that just
+        // got cleared could resurface as a `not_achieved` evaluator
+        // verdict (or vice versa).
+        loadImprovementActions();
+      } catch (err) {
+        handleError(err, tCard("clearOverrideFailed"));
+      } finally {
+        setBusyCriterionId(null);
+      }
+    },
+    [projectId, loadImprovementActions, handleError, tCard],
   );
 
   // Per-status / phase counts. Status counts use the EFFECTIVE status
@@ -522,6 +564,7 @@ export default function METIAssessmentPage() {
                           assessment={a}
                           busy={busyCriterionId === a.criterion_id}
                           onOverride={handleOverride}
+                          onClearOverride={handleClearOverride}
                         />
                       ))}
                     </div>

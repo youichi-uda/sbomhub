@@ -43,6 +43,7 @@ import {
 import {
   MetiAssessment,
   METIAssessmentEvidence,
+  MetiAssessmentClearOverrideInput,
   MetiAssessmentOverrideInput,
   METIStatus,
 } from "@/lib/api";
@@ -78,6 +79,24 @@ const overrideSchema = z.object({
 
 export type CriterionOverrideFormValues = z.infer<typeof overrideSchema>;
 
+/**
+ * zod schema for the clear-override form (M3 #F35). Mirrors
+ * handler.metiClearOverrideRequest — the server enforces 1..4096 chars
+ * AFTER trim, so we mirror the trim-then-length check here to keep the
+ * UI validation aligned. The client-side cap is set to MAX 4096 to
+ * surface the server bound; 2000 would silently truncate visually.
+ */
+const clearOverrideSchema = z.object({
+  note: z
+    .string()
+    .transform((s) => s.trim())
+    .refine((s) => s.length >= 1 && s.length <= 4096, {
+      message: "note must be 1..4096 characters after trim",
+    }),
+});
+
+export type CriterionClearOverrideFormValues = z.infer<typeof clearOverrideSchema>;
+
 export interface CriterionCardProps {
   assessment: MetiAssessment;
   /** Optional catalog title / description for locale-aware rendering. */
@@ -92,6 +111,18 @@ export interface CriterionCardProps {
   onOverride: (
     assessment: MetiAssessment,
     input: MetiAssessmentOverrideInput,
+  ) => Promise<void> | void;
+  /**
+   * Async handler invoked when the operator confirms a clear-override
+   * (M3 Codex review #F35). The page wires this to
+   * api.meti.clearOverrideCriterion. When omitted the clear-override
+   * UI is hidden — used by storybook / read-only host pages that do
+   * not want write controls. Production callers (meti page) always
+   * pass this.
+   */
+  onClearOverride?: (
+    assessment: MetiAssessment,
+    input: MetiAssessmentClearOverrideInput,
   ) => Promise<void> | void;
 }
 
@@ -180,11 +211,16 @@ export function CriterionCard({
   catalog,
   busy = false,
   onOverride,
+  onClearOverride,
 }: CriterionCardProps) {
   const t = useTranslations("METIAssessment.CriterionCard");
   const tStatus = useTranslations("METIAssessment.Status");
   const locale = useLocale();
-  const [mode, setMode] = useState<"view" | "override">("view");
+  // Three modes: idle "view", an open override form, or an open
+  // clear-override confirm form (M3 #F35). Mutually exclusive — opening
+  // one closes the other so the operator never has two write forms
+  // racing on the same row.
+  const [mode, setMode] = useState<"view" | "override" | "clear">("view");
 
   const evidence = Array.isArray(assessment.evidence) ? assessment.evidence : [];
   const eff = effectiveStatus(assessment);
@@ -359,24 +395,40 @@ export function CriterionCard({
           </section>
         )}
 
-        {/* Override controls */}
+        {/* Override controls.
+            M3 Codex review #F35: an overridden row USED TO disable the
+            override button entirely + show a "clear-override lands in M4"
+            hint. Now that DELETE /override is wired (handler.ClearOverride
+            + clearOverrideCriterion api client), the disabled-state +
+            stale hint are replaced by an explicit "Clear override" button
+            that opens an inline confirm form. The override button itself
+            stays enabled so an operator can also re-trigger the override
+            form, though the server-side F31 state-machine guard returns
+            409 if the operator tries to re-override without clearing
+            first — that path stays a flash error so the explicit
+            clear-then-reoverride workflow is preserved. */}
         {mode === "view" && (
           <div className="flex flex-wrap items-center gap-2 border-t pt-3">
             <Button
               size="sm"
               variant="outline"
               onClick={() => setMode("override")}
-              disabled={busy || isOverridden}
+              disabled={busy}
               data-testid="meti-override-trigger"
-              title={isOverridden ? t("overrideExistingHint") : undefined}
             >
               <Edit3 className="mr-1 h-4 w-4" />
               {t("overrideButton")}
             </Button>
-            {isOverridden && (
-              <span className="text-xs text-muted-foreground">
-                {t("overrideExistingHint")}
-              </span>
+            {isOverridden && onClearOverride && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setMode("clear")}
+                disabled={busy}
+                data-testid="meti-clear-override-trigger"
+              >
+                {t("clearOverrideButton")}
+              </Button>
             )}
           </div>
         )}
@@ -400,6 +452,23 @@ export function CriterionCard({
                 override_note: values.override_note || undefined,
                 improvement_action: improvement,
               });
+              setMode("view");
+            }}
+            onCancel={() => setMode("view")}
+          />
+        )}
+
+        {mode === "clear" && onClearOverride && (
+          <ClearOverrideForm
+            assessment={assessment}
+            disabled={busy}
+            onSubmit={async (values) => {
+              // values.note has already been trim-validated by
+              // clearOverrideSchema (1..4096 chars) — forward verbatim.
+              // The page wraps clearOverrideCriterion in handleError so
+              // a 400 / 404 / 409 surfaces in the flash channel without
+              // taking the row out of "clear" mode silently.
+              await onClearOverride(assessment, { note: values.note });
               setMode("view");
             }}
             onCancel={() => setMode("view")}
@@ -566,6 +635,114 @@ function OverrideForm({
           data-testid="meti-override-cancel"
         >
           {t("overrideCancel")}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ClearOverrideForm (M3 Codex review #F35)
+// ---------------------------------------------------------------------------
+
+interface ClearOverrideFormProps {
+  assessment: MetiAssessment;
+  disabled?: boolean;
+  onSubmit: (values: CriterionClearOverrideFormValues) => Promise<void> | void;
+  onCancel: () => void;
+}
+
+/**
+ * Inline confirm-form for the clear-override flow. We use an inline form
+ * rather than a modal so the operator can see the criterion title +
+ * current override metadata while writing the clear rationale — modals
+ * would hide both. The submit button stays disabled until the trimmed
+ * note is at least 1 char so a probe click cannot 400 the server.
+ *
+ * The note placeholder explicitly tells the operator the audit
+ * implications ("recorded in audit_logs") so the rationale is treated
+ * as an audit artifact rather than a UI nicety. The wording mirrors
+ * the F33 server-side audit_action description.
+ */
+function ClearOverrideForm({
+  assessment,
+  disabled,
+  onSubmit,
+  onCancel,
+}: ClearOverrideFormProps) {
+  const t = useTranslations("METIAssessment.CriterionCard");
+
+  const {
+    register,
+    handleSubmit,
+    watch,
+    formState: { errors, isSubmitting },
+  } = useForm<CriterionClearOverrideFormValues>({
+    resolver: zodResolver(clearOverrideSchema),
+    defaultValues: { note: "" },
+  });
+
+  // Watch the note field so the submit button only enables once the
+  // trimmed value is >= 1 char. Mirrors the server-side trim contract
+  // (validateMetiOverrideNote) so the operator doesn't see a 400 from
+  // a whitespace-only submission.
+  const noteRaw = watch("note") ?? "";
+  const noteValid = noteRaw.trim().length >= 1;
+
+  return (
+    <form
+      onSubmit={handleSubmit(onSubmit)}
+      className="space-y-3 border-t pt-3"
+      data-testid="meti-clear-override-form"
+    >
+      <p
+        className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"
+        data-testid="meti-clear-override-confirm"
+      >
+        {t("clearOverrideConfirm")}
+      </p>
+
+      <div>
+        <label
+          htmlFor={`clear-override-note-${assessment.criterion_id}`}
+          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          {t("clearOverrideNoteLabel")}
+        </label>
+        <Textarea
+          id={`clear-override-note-${assessment.criterion_id}`}
+          rows={3}
+          {...register("note")}
+          disabled={disabled || isSubmitting}
+          placeholder={t("clearOverrideNotePlaceholder")}
+          data-testid="meti-clear-override-note"
+        />
+        {errors.note && (
+          <p className="mt-1 text-xs text-red-600">
+            {t("clearOverrideValidationNote")}
+          </p>
+        )}
+      </div>
+
+      <div className="flex gap-2">
+        <Button
+          type="submit"
+          size="sm"
+          variant="destructive"
+          disabled={disabled || isSubmitting || !noteValid}
+          data-testid="meti-clear-override-submit"
+        >
+          {isSubmitting ? t("overrideSubmitting") : t("clearOverrideSubmit")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={disabled || isSubmitting}
+          onClick={onCancel}
+          data-testid="meti-clear-override-cancel"
+        >
+          {t("clearOverrideCancel")}
         </Button>
       </div>
     </form>

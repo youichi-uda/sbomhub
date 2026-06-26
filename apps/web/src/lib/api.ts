@@ -1322,6 +1322,19 @@ export interface MetiAssessmentOverrideInput {
 }
 
 /**
+ * DELETE override body — handler.metiClearOverrideRequest (M3 Codex
+ * review #F33 + #F35). The note is the operator's rationale for the
+ * clear ("re-evaluated, the original override was wrong") and is
+ * persisted in the audit_logs row so an auditor can reconstruct the
+ * correction. Server enforces 1..4096 chars after trim — anything
+ * shorter / longer returns 400 with `"override_note is required and
+ * must be 1-4096 characters"`.
+ */
+export interface MetiAssessmentClearOverrideInput {
+  note: string;
+}
+
+/**
  * One row of the improvement-actions response (handler.metiImprovementAction).
  * effective_status is server-computed: override_status when set, otherwise
  * status. The catalog title (ja/en) is denormalised here so the UI does
@@ -2049,6 +2062,32 @@ export const api = {
         `/api/v1/projects/${projectId}/meti/assessment/${encodeURIComponent(criterionId)}/override`,
         {
           method: "PUT",
+          body: JSON.stringify(input),
+        },
+      ),
+    /**
+     * DELETE /override — clears a prior operator override on a single
+     * criterion row (M3 Codex review #F33 + #F35). The body carries a
+     * required clear rationale note (1..4096 chars after trim) that is
+     * persisted in the audit_logs row. Server returns the post-clear
+     * MetiAssessment (override_* fields nulled) so the UI can patch
+     * the row in place without a follow-up GET. Common failure modes:
+     *   - 400 "override_note is required and must be 1-4096 characters"
+     *   - 404 "meti assessment override not found" (no override to clear)
+     *   - 409 TOCTOU race (concurrent clear / re-override)
+     *   - 403 user identity required (no authenticated user on the request)
+     * Surface them through the standard handleError flash channel; the
+     * APIError.message carries the server-side reason verbatim.
+     */
+    clearOverrideCriterion: (
+      projectId: string,
+      criterionId: string,
+      input: MetiAssessmentClearOverrideInput,
+    ) =>
+      request<MetiAssessment>(
+        `/api/v1/projects/${projectId}/meti/assessment/${encodeURIComponent(criterionId)}/override`,
+        {
+          method: "DELETE",
           body: JSON.stringify(input),
         },
       ),

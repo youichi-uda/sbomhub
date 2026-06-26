@@ -1223,15 +1223,22 @@
       "overrideCancel": "キャンセル",
       "overrideSubmit": "上書きを保存",
       "overrideSubmitting": "保存中...",
-      "overrideExistingHint": "既に上書きが適用されています。 やり直す場合は 「上書きをクリア」 (M4 で実装予定) で先に解除してください。",
       "overrideFormStatusLabel": "新しいステータス",
       "overrideFormNoteLabel": "上書き理由 (任意)",
       "overrideFormNotePlaceholder": "上書きの根拠を残してください (例: ベンダー証明書を確認済み)",
       "overrideFormImprovementLabel": "改善アクション (任意)",
       "overrideFormImprovementPlaceholder": "次に行うべき作業を記入してください (空欄で既存値を保持)",
-      "overrideFormImprovementHint": "空欄を送信すると既存の改善アクションを保持します。 空文字で上書きしたい場合は半角スペースを入れてください。 ※要確認: M4 で 「クリア」 専用ボタンを追加予定。",
+      "overrideFormImprovementHint": "空欄を送信すると既存の改善アクションを保持します。 空文字で上書きしたい場合は半角スペースを入れるか、 「上書きをクリア」 で先に解除してください。",
       "overrideValidationStatus": "ステータスを選択してください",
-      "overrideValidationNote": "メモは 2000 文字以内で入力してください"
+      "overrideValidationNote": "メモは 2000 文字以内で入力してください",
+      "clearOverrideButton": "上書きをクリア",
+      "clearOverrideConfirm": "この項目の手動上書きを解除し、 evaluator 判定に戻します。 解除の根拠 (なぜ上書きが不要になったか) は監査ログに記録されます。",
+      "clearOverrideNoteLabel": "解除理由 (必須)",
+      "clearOverrideNotePlaceholder": "上書きを解除する理由を残してください (例: 再評価したところ証拠が不十分だった)",
+      "clearOverrideSubmit": "上書きをクリア",
+      "clearOverrideCancel": "キャンセル",
+      "clearOverrideFailed": "上書きのクリアに失敗しました",
+      "clearOverrideValidationNote": "解除理由は 1〜4096 文字で入力してください (空白のみは不可)"
     }
   },
   "FAQ": {

@@ -1222,15 +1222,22 @@
       "overrideCancel": "Cancel",
       "overrideSubmit": "Save override",
       "overrideSubmitting": "Saving...",
-      "overrideExistingHint": "An override is already applied. To re-override, clear the existing one first (clear-override lands in M4).",
       "overrideFormStatusLabel": "New status",
       "overrideFormNoteLabel": "Override reason (optional)",
       "overrideFormNotePlaceholder": "Why are you overriding the evaluator verdict? (e.g. vendor attestation reviewed)",
       "overrideFormImprovementLabel": "Improvement action (optional)",
       "overrideFormImprovementPlaceholder": "Next step for this criterion (leave blank to keep existing)",
-      "overrideFormImprovementHint": "Leaving this empty keeps the existing improvement action. To clear it, enter a single space. ※要確認: an explicit 'clear' button lands in M4.",
+      "overrideFormImprovementHint": "Leaving this empty keeps the existing improvement action. To clear it, enter a single space, or use 'Clear override' to drop the override entirely.",
       "overrideValidationStatus": "Status is required",
-      "overrideValidationNote": "Note must be 2000 characters or fewer"
+      "overrideValidationNote": "Note must be 2000 characters or fewer",
+      "clearOverrideButton": "Clear override",
+      "clearOverrideConfirm": "This drops the manual override on this row and reverts to the evaluator verdict. The rationale (why the override is no longer needed) is recorded in the audit log.",
+      "clearOverrideNoteLabel": "Clear rationale (required)",
+      "clearOverrideNotePlaceholder": "Why are you clearing the override? (e.g. re-evaluated, the original override was wrong)",
+      "clearOverrideSubmit": "Clear override",
+      "clearOverrideCancel": "Cancel",
+      "clearOverrideFailed": "Failed to clear override",
+      "clearOverrideValidationNote": "Clear rationale must be 1..4096 characters (whitespace-only is not accepted)"
     }
   },
   "FAQ": {
