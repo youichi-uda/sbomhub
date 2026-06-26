@@ -4,12 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// VisualizationRepository persists per-project METI visualization
+// framework settings (the (a)-(f) classification: who made the SBOM,
+// dependency scope, generation method, data format, utilization scope
+// and actor).
+//
+// M4 Codex review round 13 / F73: every method takes tenantID as the
+// first scoping argument and includes `AND tenant_id = $N` in the
+// WHERE / DO UPDATE WHERE clause. Mirrors the ChecklistRepository
+// hardening -- the SQL-layer (migration 040) and app-layer guards are
+// independent and either alone is sufficient; we ship both so a
+// regression in one is caught by the other.
 type VisualizationRepository struct {
 	db *sql.DB
 }
@@ -18,18 +30,26 @@ func NewVisualizationRepository(db *sql.DB) *VisualizationRepository {
 	return &VisualizationRepository{db: db}
 }
 
-// GetByProject returns visualization settings for a project
-func (r *VisualizationRepository) GetByProject(ctx context.Context, projectID uuid.UUID) (*model.VisualizationSettings, error) {
+// GetByProject returns visualization settings for a project, scoped to
+// the caller's tenant. tenantID MUST come from the authenticated
+// session (NOT from request path / body) -- F73 regression class.
+func (r *VisualizationRepository) GetByProject(ctx context.Context, tenantID, projectID uuid.UUID) (*model.VisualizationSettings, error) {
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("VisualizationRepository.GetByProject: tenant_id is required")
+	}
+	if projectID == uuid.Nil {
+		return nil, fmt.Errorf("VisualizationRepository.GetByProject: project_id is required")
+	}
 	query := `
 		SELECT id, tenant_id, project_id, sbom_author_scope, dependency_scope,
 		       generation_method, data_format, utilization_scope, utilization_actor,
 		       created_at, updated_at
 		FROM sbom_visualization_settings
-		WHERE project_id = $1
+		WHERE tenant_id = $1 AND project_id = $2
 	`
 	var settings model.VisualizationSettings
 	var utilizationScopeJSON []byte
-	err := r.db.QueryRowContext(ctx, query, projectID).Scan(
+	err := r.db.QueryRowContext(ctx, query, tenantID, projectID).Scan(
 		&settings.ID, &settings.TenantID, &settings.ProjectID,
 		&settings.SBOMAuthorScope, &settings.DependencyScope,
 		&settings.GenerationMethod, &settings.DataFormat,
@@ -51,8 +71,24 @@ func (r *VisualizationRepository) GetByProject(ctx context.Context, projectID uu
 	return &settings, nil
 }
 
-// Upsert creates or updates visualization settings
+// Upsert creates or updates visualization settings.
+//
+// settings.TenantID is the WRITE intent; the ON CONFLICT DO UPDATE arm
+// carries an explicit `WHERE sbom_visualization_settings.tenant_id =
+// EXCLUDED.tenant_id` guard so a tenant-A session that happens to land
+// on a tenant-B project_id row cannot overwrite it. Defense-in-depth
+// pair with migration 040 RLS WITH CHECK. F73 regression class.
 func (r *VisualizationRepository) Upsert(ctx context.Context, settings *model.VisualizationSettings) error {
+	if settings == nil {
+		return fmt.Errorf("VisualizationRepository.Upsert: settings is required")
+	}
+	if settings.TenantID == uuid.Nil {
+		return fmt.Errorf("VisualizationRepository.Upsert: tenant_id is required")
+	}
+	if settings.ProjectID == uuid.Nil {
+		return fmt.Errorf("VisualizationRepository.Upsert: project_id is required")
+	}
+
 	now := time.Now()
 	settings.UpdatedAt = now
 
@@ -70,10 +106,14 @@ func (r *VisualizationRepository) Upsert(ctx context.Context, settings *model.Vi
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (project_id)
 		DO UPDATE SET
-			sbom_author_scope = $4, dependency_scope = $5,
-			generation_method = $6, data_format = $7,
-			utilization_scope = $8, utilization_actor = $9,
-			updated_at = $11
+			sbom_author_scope = EXCLUDED.sbom_author_scope,
+			dependency_scope  = EXCLUDED.dependency_scope,
+			generation_method = EXCLUDED.generation_method,
+			data_format       = EXCLUDED.data_format,
+			utilization_scope = EXCLUDED.utilization_scope,
+			utilization_actor = EXCLUDED.utilization_actor,
+			updated_at        = EXCLUDED.updated_at
+		WHERE sbom_visualization_settings.tenant_id = EXCLUDED.tenant_id
 	`
 	if settings.ID == uuid.Nil {
 		settings.ID = uuid.New()
@@ -89,9 +129,17 @@ func (r *VisualizationRepository) Upsert(ctx context.Context, settings *model.Vi
 	return err
 }
 
-// Delete removes visualization settings for a project
-func (r *VisualizationRepository) Delete(ctx context.Context, projectID uuid.UUID) error {
-	query := `DELETE FROM sbom_visualization_settings WHERE project_id = $1`
-	_, err := r.db.ExecContext(ctx, query, projectID)
+// Delete removes visualization settings for a project, scoped to the
+// caller's tenant. F73 regression class: a tenant-A session must not
+// be able to delete a tenant-B row by guessing the project_id.
+func (r *VisualizationRepository) Delete(ctx context.Context, tenantID, projectID uuid.UUID) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("VisualizationRepository.Delete: tenant_id is required")
+	}
+	if projectID == uuid.Nil {
+		return fmt.Errorf("VisualizationRepository.Delete: project_id is required")
+	}
+	query := `DELETE FROM sbom_visualization_settings WHERE tenant_id = $1 AND project_id = $2`
+	_, err := r.db.ExecContext(ctx, query, tenantID, projectID)
 	return err
 }

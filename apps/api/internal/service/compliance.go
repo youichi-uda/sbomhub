@@ -1220,11 +1220,13 @@ func (s *ComplianceService) GetChecklist(ctx context.Context, tenantID, projectI
 	allItems := model.GetAllChecklistItems()
 	phaseLabels := model.GetChecklistPhaseLabels()
 
-	// Get manual responses from database
+	// Get manual responses from database. tenantID MUST be passed --
+	// repository now enforces tenant scope at the application layer
+	// (M4 #F73 / migration 040).
 	var manualResponses []model.ChecklistResponse
 	if s.checklistRepo != nil {
 		var err error
-		manualResponses, err = s.checklistRepo.ListByProject(ctx, projectID)
+		manualResponses, err = s.checklistRepo.ListByProject(ctx, tenantID, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get checklist responses: %w", err)
 		}
@@ -1409,26 +1411,32 @@ func (s *ComplianceService) UpdateChecklistResponse(ctx context.Context, tenantI
 	return s.checklistRepo.Upsert(ctx, resp)
 }
 
-// DeleteChecklistResponse removes a manual checklist response
-func (s *ComplianceService) DeleteChecklistResponse(ctx context.Context, projectID uuid.UUID, checkID string) error {
+// DeleteChecklistResponse removes a manual checklist response.
+// tenantID MUST come from the authenticated session -- repository
+// enforces tenant scope at the application layer (M4 #F73 /
+// migration 040).
+func (s *ComplianceService) DeleteChecklistResponse(ctx context.Context, tenantID, projectID uuid.UUID, checkID string) error {
 	if s.checklistRepo == nil {
 		return fmt.Errorf("checklist repository not configured")
 	}
-	return s.checklistRepo.Delete(ctx, projectID, checkID)
+	return s.checklistRepo.Delete(ctx, tenantID, projectID, checkID)
 }
 
 // ============================================================================
 // Visualization Framework Methods
 // ============================================================================
 
-// GetVisualizationSettings returns visualization settings for a project
-func (s *ComplianceService) GetVisualizationSettings(ctx context.Context, projectID uuid.UUID) (*model.VisualizationFramework, error) {
+// GetVisualizationSettings returns visualization settings for a project.
+// tenantID MUST come from the authenticated session -- repository
+// enforces tenant scope at the application layer (M4 #F73 /
+// migration 040).
+func (s *ComplianceService) GetVisualizationSettings(ctx context.Context, tenantID, projectID uuid.UUID) (*model.VisualizationFramework, error) {
 	framework := &model.VisualizationFramework{
 		Options: model.GetVisualizationOptions(),
 	}
 
 	if s.visualizationRepo != nil {
-		settings, err := s.visualizationRepo.GetByProject(ctx, projectID)
+		settings, err := s.visualizationRepo.GetByProject(ctx, tenantID, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get visualization settings: %w", err)
 		}
@@ -1444,8 +1452,10 @@ func (s *ComplianceService) UpdateVisualizationSettings(ctx context.Context, ten
 		return nil, fmt.Errorf("visualization repository not configured")
 	}
 
-	// Get existing settings or create new
-	existing, err := s.visualizationRepo.GetByProject(ctx, projectID)
+	// Get existing settings or create new. tenantID is required --
+	// repository enforces tenant scope at the application layer
+	// (M4 #F73 / migration 040).
+	existing, err := s.visualizationRepo.GetByProject(ctx, tenantID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get existing settings: %w", err)
 	}
@@ -1477,10 +1487,13 @@ func (s *ComplianceService) UpdateVisualizationSettings(ctx context.Context, ten
 	return settings, nil
 }
 
-// DeleteVisualizationSettings removes visualization settings for a project
-func (s *ComplianceService) DeleteVisualizationSettings(ctx context.Context, projectID uuid.UUID) error {
+// DeleteVisualizationSettings removes visualization settings for a
+// project. tenantID MUST come from the authenticated session --
+// repository enforces tenant scope at the application layer
+// (M4 #F73 / migration 040).
+func (s *ComplianceService) DeleteVisualizationSettings(ctx context.Context, tenantID, projectID uuid.UUID) error {
 	if s.visualizationRepo == nil {
 		return fmt.Errorf("visualization repository not configured")
 	}
-	return s.visualizationRepo.Delete(ctx, projectID)
+	return s.visualizationRepo.Delete(ctx, tenantID, projectID)
 }

@@ -163,7 +163,9 @@ func (h *ComplianceHandler) DeleteChecklistResponse(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "check_id is required"})
 	}
 
-	err = h.complianceService.DeleteChecklistResponse(c.Request().Context(), projectID, checkID)
+	// tenantID from middleware -- F73 cross-tenant guard.
+	tenantID := getTenantID(c)
+	err = h.complianceService.DeleteChecklistResponse(c.Request().Context(), tenantID, projectID, checkID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -183,7 +185,9 @@ func (h *ComplianceHandler) GetVisualizationSettings(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 
-	result, err := h.complianceService.GetVisualizationSettings(c.Request().Context(), projectID)
+	// tenantID from middleware -- F73 cross-tenant guard.
+	tenantID := getTenantID(c)
+	result, err := h.complianceService.GetVisualizationSettings(c.Request().Context(), tenantID, projectID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -221,7 +225,9 @@ func (h *ComplianceHandler) DeleteVisualizationSettings(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 
-	err = h.complianceService.DeleteVisualizationSettings(c.Request().Context(), projectID)
+	// tenantID from middleware -- F73 cross-tenant guard.
+	tenantID := getTenantID(c)
+	err = h.complianceService.DeleteVisualizationSettings(c.Request().Context(), tenantID, projectID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
