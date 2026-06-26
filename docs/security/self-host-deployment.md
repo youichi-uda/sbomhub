@@ -635,6 +635,14 @@ shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 
 ### 9.3 restore
 
+> **推奨**: 本 manual 手順は **emergency fallback** であり、 通常運用では §9.5 の
+> [`../../docker/scripts/restore.sh`](../../docker/scripts/restore.sh) を canonical path
+> として使用すること (F65 fix 以降、 `--single-transaction` + sanity check による
+> fail-safe が組み込まれている)。 manual 手順は script が動かない緊急時 (例: tar 破損
+> で部分復元が必要、 docker compose 環境が壊れている等) でのみ使う。 そのため以下の
+> manual command にも script 同等の fail-safe (`--single-transaction` + 復元後の
+> sanity check) を必ず適用すること。
+
 ```bash
 # 復号 + 展開
 age -d -i $PRIVATE_KEY \
@@ -647,14 +655,30 @@ cp backup-env-YYYYMMDD.env .env
 chmod 600 .env
 
 # DB を restore (既存スキーマを drop してから入れ直す形)
-docker compose exec -T postgres \
+# --single-transaction を付けることで、 途中 failure 時に全 restore が rollback され、
+# 部分適用による DB と secrets の不整合を防ぐ (F65 fix と同じ fail-safe)。
+docker compose -f docker-compose.enterprise.yml exec -T postgres \
     pg_restore -U sbomhub_migrator -d sbomhub \
-    --clean --if-exists \
+    --clean --if-exists --single-transaction \
     < backup-YYYYMMDD.dump
 
-# api を再起動して RLS / ENCRYPTION_KEY のセルフチェックが通ることを確認
-docker compose restart api
-docker compose logs -f api | head -50
+# Sanity check 1: migration version が最新まで適用されていることを確認
+# (空文字や error が返るなら restore は不完全、 secrets を戻さず調査)
+docker compose -f docker-compose.enterprise.yml exec -T postgres \
+    psql -U sbomhub_migrator -d sbomhub -c \
+    "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;"
+
+# Sanity check 2: tenants table が query 可能で、 production data が入っていることを確認
+# (production restore のはずなのに count が 0 なら fresh-install 用 backup を誤投入した
+# 可能性があり、 要調査)
+docker compose -f docker-compose.enterprise.yml exec -T postgres \
+    psql -U sbomhub_migrator -d sbomhub -c \
+    "SELECT count(*) FROM tenants;"
+
+# 上記 sanity check が両方 PASS した場合のみ api を再起動。 FAIL なら secrets を
+# 戻さず DB volume を rollback (snapshot or 旧 dump 再投入) して原因調査する。
+docker compose -f docker-compose.enterprise.yml restart sbomhub-api
+docker compose -f docker-compose.enterprise.yml logs -f sbomhub-api | head -50
 ```
 
 ### 9.4 offsite backup
@@ -667,13 +691,17 @@ docker compose logs -f api | head -50
 ### 9.5 backup script の自動化
 
 M4-6 で公式 backup / restore スクリプトを同梱した。 単純な cron に組み合わせて運用できる。
+**production の restore はこの script を canonical path として使用し、 §9.3 manual 手順は
+script が動かない緊急時の fallback として位置付ける。**
 
 - [`../../docker/scripts/backup.sh`](../../docker/scripts/backup.sh) — `pg_dump` + `.env`/secrets +
   Ollama model list を 1 つの tar.gz に固める。 引数や保存先、 age 暗号化との繋ぎ込みは
   [`../../docker/README.enterprise.md`](../../docker/README.enterprise.md) §5.1 / §5.2 を参照。
 - [`../../docker/scripts/restore.sh`](../../docker/scripts/restore.sh) — 上記 tar.gz を読み込んで
-  PostgreSQL に `pg_restore --clean --if-exists` で投入し、 secrets を所定位置に戻す。 復元手順
-  全体は §5.3 を参照。
+  PostgreSQL に `pg_restore --clean --if-exists --single-transaction` で投入し、
+  `schema_migrations` / `tenants` の sanity check を経た後に secrets を所定位置に戻す
+  (F65 fix で fail-safe を組み込み済)。 復元手順全体および fail-safe 動作は
+  [`../../docker/README.enterprise.md`](../../docker/README.enterprise.md) §5.3 を参照。
 
 ```cron
 # /etc/cron.d/sbomhub-backup (毎日 02:00 JST 実行)
