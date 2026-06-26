@@ -164,19 +164,36 @@ SELECT format(
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_migrator')
 \gexec
 
--- Create app role (runtime). NOBYPASSRLS so policies are enforced.
+-- Create app role (runtime). NOSUPERUSER NOBYPASSRLS so RLS is enforced.
+-- M4 Codex review #F77: NOSUPERUSER is required in addition to NOBYPASSRLS
+-- because PostgreSQL superusers ALWAYS bypass RLS regardless of the
+-- BYPASSRLS attribute (see #F72 + apps/api/cmd/server/main.go
+-- assertAppRoleNotBypassRLS / evaluateAppRoleRLS — production / staging
+-- hard-fail on rolsuper || rolbypassrls). Must match the F76
+-- docker/docker-compose.enterprise.yml `db-bootstrap` SQL byte-for-byte
+-- so the manual install.sh recovery path converges on the same role
+-- attributes as the auto compose path.
 SELECT format(
-    'CREATE ROLE sbomhub_app WITH LOGIN PASSWORD %L NOBYPASSRLS',
+    'CREATE ROLE sbomhub_app WITH LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS',
     :'app_password'
 )
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_app')
 \gexec
 
--- Idempotent password rotation + NOBYPASSRLS assertion. ALTER ROLE is
--- a plain top-level statement (not inside a DO block), so psql will
--- substitute :'var' into a properly quoted SQL literal here.
-ALTER ROLE sbomhub_migrator WITH PASSWORD :'migrator_password';
-ALTER ROLE sbomhub_app      WITH PASSWORD :'app_password' NOBYPASSRLS;
+-- Idempotent password rotation + NOBYPASSRLS / NOSUPERUSER re-assertion.
+-- M4 Codex review #F77: existing roles on legacy / hand-recovered volumes
+-- may have drifted to SUPERUSER or BYPASSRLS (e.g. operator promoted the
+-- role for ad-hoc debugging and forgot to demote it). Without the explicit
+-- attribute clauses below, this advanced recovery path leaves the role in
+-- whatever attribute state the volume already has, so the F72 startup
+-- guard keeps refusing to start until the operator manually runs an
+-- ALTER ROLE. Re-asserting NOSUPERUSER / NOBYPASSRLS here is idempotent
+-- (no-op on a freshly created role) and brings the install.sh path into
+-- byte-for-byte convergence with the F76 `db-bootstrap` SQL.
+-- ALTER ROLE is a plain top-level statement (not inside a DO block), so
+-- psql will substitute :'var' into a properly quoted SQL literal here.
+ALTER ROLE sbomhub_migrator WITH PASSWORD :'migrator_password' NOBYPASSRLS;
+ALTER ROLE sbomhub_app      WITH PASSWORD :'app_password'      NOSUPERUSER NOBYPASSRLS;
 
 -- Connect / schema usage.
 GRANT CONNECT ON DATABASE sbomhub TO sbomhub_migrator, sbomhub_app;
