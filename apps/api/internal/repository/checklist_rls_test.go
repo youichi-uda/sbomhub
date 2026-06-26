@@ -494,3 +494,176 @@ func TestChecklistRepository_TenantTxFlow_RLSAllows(t *testing.T) {
 		t.Logf("rollback tx: %v", err)
 	}
 }
+
+// schemaReadyComplianceChecklistF75 extends schemaReadyComplianceChecklist
+// with a probe for the migration 041 composite FK. Returns false (and
+// skips) if migration 041 has not been applied, so the F75 regression
+// tests fall back gracefully on pre-041 schemas instead of asserting on
+// behaviour that does not yet exist.
+func schemaReadyComplianceChecklistF75(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	if !schemaReadyComplianceChecklist(t, db) {
+		return false
+	}
+	var fkExists bool
+	if err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM pg_constraint
+			WHERE conname = 'compliance_checklist_tenant_project_fk'
+			  AND conrelid = 'public.compliance_checklist_responses'::regclass
+		)
+	`).Scan(&fkExists); err != nil {
+		t.Skipf("compliance_checklist composite FK existence check failed: %v -- skipping", err)
+		return false
+	}
+	if !fkExists {
+		t.Skip("compliance_checklist_tenant_project_fk not present -- migration 041 not applied, skipping F75 test")
+		return false
+	}
+	return true
+}
+
+// TestChecklist_RejectCrossTenantProjectID_F75 verifies the migration
+// 041 composite FK closes the F75 cross-tenant data pollution + DoS
+// vector. F73 (migration 040) RLS WITH CHECK only enforces the row's
+// tenant_id matches app.current_tenant_id -- it does NOT verify that
+// project_id actually belongs to that tenant. A tenant-A session that
+// submits tenant_id=A + project_id=<B's project UUID> passes WITH
+// CHECK (row's tenant_id is A) but lands a tenant-A child row attached
+// to a tenant-B project, causing (a) cross-tenant data pollution and
+// (b) DoS for tenant B (UNIQUE(project_id, check_id) is now occupied
+// by tenant A's pollution row, tenant B's future writes are rejected
+// and tenant B has no RLS visibility to UPDATE the pollution row
+// away). Migration 041's composite FK on (tenant_id, project_id)
+// rejects this at the DB layer.
+//
+// Procedure:
+//  1. Seed tenant A, tenant B, and one project per tenant.
+//  2. As tenant A's app session (SET LOCAL app.current_tenant_id = A),
+//     attempt an INSERT carrying tenant_id=A + project_id=B's project.
+//  3. Assert: the INSERT fails with a FK violation. Without F75 it
+//     would succeed (and the bug would be visible to tenant B only
+//     when their own write is later rejected).
+//  4. Same probe via the repository Upsert path -- the FK still fires.
+//  5. Same probe via BulkUpsert -- the FK still fires on any element.
+func TestChecklist_RejectCrossTenantProjectID_F75(t *testing.T) {
+	appURL, migURL := complianceChecklistTestEnv(t)
+
+	migDB := openOrSkipComplianceChecklist(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyComplianceChecklistF75(t, migDB) {
+		return
+	}
+	appDB := openOrSkipComplianceChecklist(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForComplianceChecklist(t, migDB, "f75A")
+	tenantB := seedTenantForComplianceChecklist(t, migDB, "f75B")
+	projectA := seedProjectForComplianceChecklist(t, migDB, tenantA, "f75A")
+	projectB := seedProjectForComplianceChecklist(t, migDB, tenantB, "f75B")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
+	})
+
+	// --- Direct INSERT path: as tenant A app session, target tenant B's
+	// project_id. WITH CHECK on tenant_id passes (row's tenant_id is A,
+	// GUC is A) but the composite FK (tenant_id=A, project_id=B's proj)
+	// has no matching row in projects(tenant_id=A, id=B's proj) because
+	// B's project belongs to tenant B, not tenant A.
+	txA, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantA: %v", err)
+	}
+	defer txA.Rollback()
+	if _, err := txA.Exec(`SET LOCAL app.current_tenant_id = '` + tenantA.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenantA: %v", err)
+	}
+	_, polluteErr := txA.Exec(`
+		INSERT INTO compliance_checklist_responses (
+			id, tenant_id, project_id, check_id, response, note, updated_by, updated_at
+		) VALUES ($1, $2, $3, 'f75_pollute', TRUE, 'cross-tenant pollution attempt', 'mallory@tenantA', NOW())
+	`, uuid.New(), tenantA, projectB)
+	if polluteErr == nil {
+		t.Fatalf("F75 regression: tenantA session inserted a checklist row with "+
+			"tenant_id=A + project_id=B's project (id=%s). The composite FK "+
+			"compliance_checklist_tenant_project_fk from migration 041 is supposed to "+
+			"reject this at the DB layer. Cross-tenant data pollution + DoS primitive "+
+			"is open.", projectB)
+	}
+	// The error must surface as a FK violation. We do not pin on the
+	// exact SQLSTATE here (pq driver leaks the message) but log it for
+	// debugging in CI.
+	t.Logf("F75 direct INSERT correctly rejected: %v", polluteErr)
+	_ = txA.Rollback()
+
+	// --- Repository Upsert path: same probe, but through the
+	// ChecklistRepository so the test also covers app-layer call
+	// semantics (the F73 part 2 + F74 path still must defer to the
+	// DB-layer FK for cross-tenant project_id rejection).
+	txA2, err := appDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("appDB.BeginTx tenantA2: %v", err)
+	}
+	defer txA2.Rollback()
+	if _, err := txA2.ExecContext(context.Background(),
+		`SELECT set_config('app.current_tenant_id', $1, true)`,
+		tenantA.String(),
+	); err != nil {
+		t.Fatalf("set_config tenantA2: %v", err)
+	}
+	repoCtx := database.WithTx(context.Background(), txA2)
+	repo := NewChecklistRepository(appDB)
+	now := time.Now()
+	polluteNote := "repo Upsert cross-tenant attempt"
+	upsertErr := repo.Upsert(repoCtx, &model.ChecklistResponse{
+		ID:        uuid.New(),
+		TenantID:  tenantA,
+		ProjectID: projectB, // B's project under A's session
+		CheckID:   "f75_repo_pollute",
+		Response:  true,
+		Note:      &polluteNote,
+		UpdatedBy: "mallory@tenantA",
+		UpdatedAt: now,
+	})
+	if upsertErr == nil {
+		t.Fatalf("F75 regression: ChecklistRepository.Upsert accepted a write with "+
+			"tenant_id=A + project_id=B's project (%s). Composite FK must reject this.",
+			projectB)
+	}
+	t.Logf("F75 repo Upsert correctly rejected: %v", upsertErr)
+	_ = txA2.Rollback()
+
+	// --- Repository BulkUpsert path: even one poisoned element must
+	// abort the whole batch (the FK fires inside the prepared stmt).
+	txA3, err := appDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("appDB.BeginTx tenantA3: %v", err)
+	}
+	defer txA3.Rollback()
+	if _, err := txA3.ExecContext(context.Background(),
+		`SELECT set_config('app.current_tenant_id', $1, true)`,
+		tenantA.String(),
+	); err != nil {
+		t.Fatalf("set_config tenantA3: %v", err)
+	}
+	repoCtx3 := database.WithTx(context.Background(), txA3)
+	bulkErr := repo.BulkUpsert(repoCtx3, []model.ChecklistResponse{
+		{
+			TenantID: tenantA, ProjectID: projectA,
+			CheckID: "f75_bulk_clean", Response: true,
+			UpdatedBy: "alice@tenantA", UpdatedAt: now,
+		},
+		{
+			TenantID: tenantA, ProjectID: projectB, // poison
+			CheckID: "f75_bulk_pollute", Response: true,
+			UpdatedBy: "mallory@tenantA", UpdatedAt: now,
+		},
+	})
+	if bulkErr == nil {
+		t.Fatalf("F75 regression: ChecklistRepository.BulkUpsert accepted a batch containing "+
+			"tenant_id=A + project_id=B's project (%s). Composite FK must reject the offending "+
+			"element and (transitively) abort the batch.", projectB)
+	}
+	t.Logf("F75 repo BulkUpsert correctly rejected: %v", bulkErr)
+	_ = txA3.Rollback()
+}

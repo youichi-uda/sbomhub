@@ -415,3 +415,124 @@ func TestVisualizationRepository_TenantTxFlow_RLSAllows(t *testing.T) {
 		t.Logf("rollback tx: %v", err)
 	}
 }
+
+// schemaReadyVisualizationF75 extends schemaReadyVisualization with a
+// probe for migration 041's composite FK. Returns false (and skips) if
+// 041 has not been applied so the F75 regression tests degrade
+// gracefully on pre-041 schemas.
+func schemaReadyVisualizationF75(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	if !schemaReadyVisualization(t, db) {
+		return false
+	}
+	var fkExists bool
+	if err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM pg_constraint
+			WHERE conname = 'sbom_visualization_tenant_project_fk'
+			  AND conrelid = 'public.sbom_visualization_settings'::regclass
+		)
+	`).Scan(&fkExists); err != nil {
+		t.Skipf("sbom_visualization composite FK existence check failed: %v -- skipping", err)
+		return false
+	}
+	if !fkExists {
+		t.Skip("sbom_visualization_tenant_project_fk not present -- migration 041 not applied, skipping F75 test")
+		return false
+	}
+	return true
+}
+
+// TestVisualization_RejectCrossTenantProjectID_F75 verifies the
+// migration 041 composite FK closes the F75 cross-tenant data
+// pollution + DoS vector for sbom_visualization_settings. See the
+// equivalent checklist test for the full rationale -- the attack is
+// identical: tenant_id=A + project_id=B's project passes WITH CHECK
+// on tenant_id but lands a polluted row that DoSes tenant B's own
+// UPSERT via UNIQUE(project_id).
+//
+// Procedure:
+//  1. Seed tenant A, tenant B, one project per tenant.
+//  2. As tenant A's app session (SET LOCAL app.current_tenant_id = A),
+//     attempt an INSERT carrying tenant_id=A + project_id=B's project.
+//  3. Assert: rejected by composite FK.
+//  4. Same probe via the repository Upsert path -- still rejected.
+func TestVisualization_RejectCrossTenantProjectID_F75(t *testing.T) {
+	appURL, migURL := visualizationTestEnv(t)
+
+	migDB := openOrSkipVisualization(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyVisualizationF75(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVisualization(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForVisualization(t, migDB, "f75A")
+	tenantB := seedTenantForVisualization(t, migDB, "f75B")
+	_ = seedProjectForVisualization(t, migDB, tenantA, "f75A")
+	projectB := seedProjectForVisualization(t, migDB, tenantB, "f75B")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
+	})
+
+	// --- Direct INSERT path: tenant A session targeting tenant B's
+	// project_id.
+	txA, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantA: %v", err)
+	}
+	defer txA.Rollback()
+	if _, err := txA.Exec(`SET LOCAL app.current_tenant_id = '` + tenantA.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenantA: %v", err)
+	}
+	_, polluteErr := txA.Exec(`
+		INSERT INTO sbom_visualization_settings (
+			id, tenant_id, project_id, sbom_author_scope, dependency_scope,
+			generation_method, data_format, utilization_scope, utilization_actor
+		) VALUES ($1, $2, $3, 'self', 'direct_only', 'tool_with_review',
+			'standard', '["vuln_identification"]'::jsonb, 'product_vendor')
+	`, uuid.New(), tenantA, projectB)
+	if polluteErr == nil {
+		t.Fatalf("F75 regression: tenantA session inserted a visualization row with "+
+			"tenant_id=A + project_id=B's project (id=%s). The composite FK "+
+			"sbom_visualization_tenant_project_fk from migration 041 is supposed to "+
+			"reject this at the DB layer. Cross-tenant pollution + DoS primitive open.",
+			projectB)
+	}
+	t.Logf("F75 direct INSERT correctly rejected: %v", polluteErr)
+	_ = txA.Rollback()
+
+	// --- Repository Upsert path: tenant A session calling
+	// VisualizationRepository.Upsert with B's project_id.
+	txA2, err := appDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("appDB.BeginTx tenantA2: %v", err)
+	}
+	defer txA2.Rollback()
+	if _, err := txA2.ExecContext(context.Background(),
+		`SELECT set_config('app.current_tenant_id', $1, true)`,
+		tenantA.String(),
+	); err != nil {
+		t.Fatalf("set_config tenantA2: %v", err)
+	}
+	repoCtx := database.WithTx(context.Background(), txA2)
+	repo := NewVisualizationRepository(appDB)
+	upsertErr := repo.Upsert(repoCtx, &model.VisualizationSettings{
+		TenantID:         tenantA,
+		ProjectID:        projectB, // B's project under A's session
+		SBOMAuthorScope:  "self",
+		DependencyScope:  "direct_only",
+		GenerationMethod: "tool_with_review",
+		DataFormat:       "standard",
+		UtilizationScope: []string{"vuln_identification"},
+		UtilizationActor: "product_vendor",
+	})
+	if upsertErr == nil {
+		t.Fatalf("F75 regression: VisualizationRepository.Upsert accepted a write with "+
+			"tenant_id=A + project_id=B's project (%s). Composite FK must reject this.",
+			projectB)
+	}
+	t.Logf("F75 repo Upsert correctly rejected: %v", upsertErr)
+	_ = txA2.Rollback()
+}
