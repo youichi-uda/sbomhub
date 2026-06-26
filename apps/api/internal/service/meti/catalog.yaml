@@ -1,0 +1,442 @@
+# METI SBOM Catalog (M3-3, issue #39)
+#
+# Self-assessment criteria derived from "ソフトウェア管理に向けた SBOM
+# (Software Bill of Materials) の導入に関する手引 ver 2.0" (経済産業省, 2024-08).
+#
+# Source:
+#   https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2.pdf
+#   https://www.meti.go.jp/policy/netsecurity/wg1/sbom_gaiyo_en.pdf
+#   English appendix (xlsx):
+#   https://www.meti.go.jp/english/policy/safety_security/cybersecurity/downloadfiles/sbom_checklist02_en.xlsx
+#
+# Catalog construction note:
+#   The PDF / xlsx could not be fetched directly during this build (meti.go.jp
+#   served stalls > 5 min on the appendix downloads); items below were
+#   reconciled against:
+#     1. the already-shipped 18-item baseline in
+#        apps/api/internal/model/checklist.go (PhaseSetup / PhaseCreation /
+#        PhaseOperation), which was previously vetted against ver 2.0;
+#     2. ver 2.0 Chapter 7 (脆弱性管理プロセス具体化), Appendix SBOM 対応モデル,
+#        and Appendix SBOM 取引モデル as summarised in
+#        nikkei xtech / yamory / METI English press release (2024-08-29);
+#     3. the IPA SBOM minimum-element list already validated by
+#        apps/api/internal/service/compliance.go checkMinimumElements (7 items).
+#
+#   Items marked "verified" in the trailing comment match a wording in the
+#   18-item baseline; items marked "extension" are extrapolated from ver 2.0
+#   chapter contents (e.g. ch.7 vulnerability process, training, EOL, audit
+#   retention) and should be cross-checked with the official xlsx before GA.
+#   See README of M3-3 PR (#39) for the audit list.
+#
+# Schema (one entry):
+#   - id:               stable, dotted, lowercase. "meti.<phase>.<seq>".
+#   - phase:            "env_setup" | "sbom_creation" | "sbom_operation"
+#   - title_ja:         short Japanese title
+#   - title_en:         short English title
+#   - description_ja:   longer Japanese description (what to do, why)
+#   - description_en:   longer English description (what to do, why)
+#   - evaluator_hint:   English free-form pointer that the M3-2 evaluator
+#                       agent uses to pick which DB table / setting / scan
+#                       artefact to inspect. Keep it concrete enough that a
+#                       grep over the codebase resolves to the relevant
+#                       service (e.g. "scan_settings.enabled_scanners",
+#                       "sboms table created_at frequency").
+
+criteria:
+  # --------------------------------------------------------------------------
+  # Phase 1 — 環境構築・体制整備フェーズ (env_setup) : 8 items
+  # --------------------------------------------------------------------------
+  - id: meti.env_setup.01
+    phase: env_setup
+    title_ja: SBOM 担当部署および責任者を明確化
+    title_en: Designate the SBOM owner team and accountable role
+    description_ja: |
+      SBOM 導入・運用の責任者と担当部署を明確化し、 経営層・開発・セキュリティ部門との
+      役割分担を文書化する。 兼任を可とするが、 SBOM の最終承認者 (例: PSIRT 長)
+      を 1 名固定し、 連絡窓口を明示する。
+    description_en: |
+      Identify the team and accountable individual responsible for SBOM
+      adoption and operation, and document the division of responsibilities
+      between leadership, engineering and security. A single final approver
+      (e.g. PSIRT lead) and a contact point must be designated even when
+      the role is shared with another function.
+    evaluator_hint: "Manual-only. No auto-signal in DB. Map to checklist_responses table check_id='setup_01' for human attestation."
+
+  - id: meti.env_setup.02
+    phase: env_setup
+    title_ja: 対象ソフトウェアの開発言語・ビルド環境を整理
+    title_en: Inventory the target software's languages and build environment
+    description_ja: |
+      SBOM 生成対象とするソフトウェアの開発言語、 ビルドツール (Maven / Gradle /
+      npm / pip / Go modules 等)、 コンテナ / OS パッケージの構成を棚卸しし、
+      どの言語に対し どの SBOM ツール (Syft / Trivy / cdxgen) を充てるかを決定する。
+    description_en: |
+      Inventory the languages, build tools (Maven / Gradle / npm / pip / Go
+      modules, etc.) and container / OS-package layers used by the target
+      software, and decide which scanner (Syft / Trivy / cdxgen) covers each
+      stack so that no ecosystem is silently omitted from SBOM generation.
+    evaluator_hint: "Auto-signal: sboms.bom_format and components.purl prefixes — distinct PURL types observed across all sboms for the project indicate ecosystems covered. Map to projects.metadata for declared stack vs. coverage gap."
+
+  - id: meti.env_setup.03
+    phase: env_setup
+    title_ja: サプライヤー / OSS 配布元との契約形態・取引慣行を明確化
+    title_en: Clarify contract and trading practices with suppliers / OSS distributors
+    description_ja: |
+      ソフトウェアの調達契約 / OSS ライセンス / SBOM 提供義務 / 脆弱性開示
+      SLA を確認し、 サプライヤーから SBOM を受領する経路と頻度、 受領 SBOM の
+      取り扱いポリシー (再配布可否 / 保管期間) を契約条項として明文化する。
+    description_en: |
+      Review procurement contracts, OSS licences, SBOM-delivery obligations
+      and vulnerability-disclosure SLAs, and codify in contract clauses the
+      channel and cadence by which SBOMs are received from suppliers, plus
+      the handling policy (re-distribution rights, retention period).
+    evaluator_hint: "Manual-only. No DB signal. Map to checklist_responses check_id='setup_03'. Future hook: supplier_contracts table when added."
+
+  - id: meti.env_setup.04
+    phase: env_setup
+    title_ja: 適用される規制・要求事項を確認
+    title_en: Confirm applicable regulations and requirements
+    description_ja: |
+      自社製品が出荷される地域 / 業界の規制 (EU CRA, 米国 EO 14028, NIST SP
+      800-218, IPA 政府調達基準 等) を棚卸しし、 SBOM 形式・最小要素・提出
+      期限の各要件を満たすよう設計に反映する。
+    description_en: |
+      Inventory the regulations and standards that apply to your product's
+      shipping geography and industry (EU CRA, US EO 14028, NIST SP 800-218,
+      IPA procurement guidelines, etc.) and reflect SBOM-format, minimum-
+      element and submission-deadline requirements in the design.
+    evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_04'. Future hook: cra_reports presence indicates EU CRA scope is in play."
+
+  - id: meti.env_setup.05
+    phase: env_setup
+    title_ja: 組織内制約 (機密情報の取り扱い / 公開範囲) を明確化
+    title_en: Clarify organisational constraints (confidentiality, disclosure scope)
+    description_ja: |
+      SBOM に含まれる内部依存・社内ライブラリ情報の機密区分、 顧客への
+      公開範囲、 第三者への提供範囲を定義し、 公開用 SBOM / 内部用 SBOM
+      の使い分けポリシーを定める。
+    description_en: |
+      Define confidentiality classifications for internal dependencies and
+      proprietary libraries that may appear in an SBOM, decide the disclosure
+      scope toward customers and third parties, and establish a policy for
+      separating public from internal SBOM variants.
+    evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_05'. Future hook: public_links.is_public flag history per project."
+
+  - id: meti.env_setup.06
+    phase: env_setup
+    title_ja: SBOM 適用範囲 (5W1H) を明確化
+    title_en: Define the SBOM application scope (5W1H)
+    description_ja: |
+      いつ (リリース / 定期 / CI 毎)、 どこで (本番 / ステージング / 内部)、
+      誰が (開発 / セキュリティ / 顧客)、 何を (対象製品・モジュール)、
+      なぜ (規制 / 顧客要求 / 内部監査)、 どう (自動 / 手動) SBOM を扱うかを
+      文書化する。
+    description_en: |
+      Document who creates and consumes the SBOM, when it is produced
+      (release / scheduled / per-CI), where it covers (production / staging /
+      internal), what targets and modules are in scope, why it is required
+      (regulation / customer / internal audit) and how it is handled
+      (automated vs. manual).
+    evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_06'. Auto-augment: count of distinct project ids vs. scan_settings rows indicates whether scope is consistently configured."
+
+  - id: meti.env_setup.07
+    phase: env_setup
+    title_ja: SBOM 生成ツールを選定・導入
+    title_en: Select and install the SBOM generation tool
+    description_ja: |
+      対象スタックを網羅する SBOM 生成ツール (Syft, Trivy, cdxgen 等) を
+      選定し、 ローカル / CI 双方で実行できる環境を構築する。 ツールは
+      CycloneDX / SPDX 双方の主要出力に対応していることを確認する。
+    description_en: |
+      Select an SBOM-generation tool (Syft, Trivy, cdxgen, …) that covers
+      the entire target stack and provision an environment that runs the
+      tool both locally and in CI. Confirm the tool can emit both
+      CycloneDX and SPDX in their major output variants.
+    evaluator_hint: "Auto-signal: scan_settings.enabled_scanners is non-empty for the project (sbomhub-cli writes this) OR sboms.tool_name is non-null on the latest upload."
+
+  - id: meti.env_setup.08
+    phase: env_setup
+    title_ja: 担当者教育・トレーニングを実施
+    title_en: Train the SBOM team
+    description_ja: |
+      SBOM 形式 (CycloneDX / SPDX) の読み方、 PURL / CPE 識別子、 VEX / VDR
+      の意味、 脆弱性データベース (NVD / JVN / KEV) の使い方について
+      担当者向けトレーニングを実施し、 受講記録を保管する。
+    description_en: |
+      Train the responsible team on reading SBOM formats (CycloneDX / SPDX),
+      PURL / CPE identifiers, VEX / VDR semantics, and vulnerability
+      databases (NVD / JVN / KEV); retain training records as audit
+      evidence.
+    evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_08'. Future hook: tenant training_records table."
+
+  # --------------------------------------------------------------------------
+  # Phase 2 — SBOM 作成・共有フェーズ (sbom_creation) : 9 items
+  # --------------------------------------------------------------------------
+  - id: meti.sbom_creation.01
+    phase: sbom_creation
+    title_ja: SBOM 作成方針 (頻度 / トリガー / 粒度) を決定
+    title_en: Decide the SBOM creation policy (frequency, trigger, granularity)
+    description_ja: |
+      SBOM をいつ (リリース毎 / マージ毎 / 夜次) どの粒度 (アプリ単位 /
+      コンテナイメージ単位 / モジュール単位) で生成するかを決め、 CI に
+      組み込む。 サプライヤー納品物については受領のたびに再生成する。
+    description_en: |
+      Decide the SBOM creation cadence (per release, per merge, nightly)
+      and granularity (application, container image, module) and wire it
+      into CI. For supplier-delivered artefacts, regenerate the SBOM at
+      each delivery.
+    evaluator_hint: "Auto-signal: COUNT(sboms WHERE project_id=...) per 30 days indicates cadence. scan_settings.schedule field indicates declared trigger."
+
+  - id: meti.sbom_creation.02
+    phase: sbom_creation
+    title_ja: SBOM 形式 (CycloneDX / SPDX) を選定
+    title_en: Select the SBOM format (CycloneDX / SPDX)
+    description_ja: |
+      取引先 / 監査人 / 規制要件にあわせて CycloneDX または SPDX (あるいは
+      両形式) を選定し、 形式バージョン (例: CycloneDX 1.5+, SPDX 2.3) を
+      固定する。 VEX 同梱要件があれば CycloneDX を優先する。
+    description_en: |
+      Select CycloneDX, SPDX or both as the canonical SBOM format aligned
+      with trading partner, auditor and regulatory needs, and pin the
+      format version (e.g. CycloneDX 1.5+, SPDX 2.3). If VEX must be
+      bundled, prefer CycloneDX.
+    evaluator_hint: "Auto-signal: sboms.bom_format ('CycloneDX' or 'SPDX') and sboms.spec_version on latest upload."
+
+  - id: meti.sbom_creation.03
+    phase: sbom_creation
+    title_ja: コンポーネントを解析し SBOM を生成
+    title_en: Analyse components and generate the SBOM
+    description_ja: |
+      選定したツールでビルド成果物 / ソースリポジトリ / コンテナイメージを
+      スキャンし、 直接依存と推移依存を漏れなく抽出した SBOM を生成する。
+    description_en: |
+      Scan build artefacts, source repositories and container images with
+      the selected tool and produce an SBOM that captures direct and
+      transitive dependencies without omissions.
+    evaluator_hint: "Auto-signal: sboms exists for the project AND latest sbom has components count > 0."
+
+  - id: meti.sbom_creation.04
+    phase: sbom_creation
+    title_ja: 解析エラー (パース失敗 / バージョン不明) を確認
+    title_en: Confirm analysis errors (parse failure, unknown version)
+    description_ja: |
+      スキャナのエラーログ・警告を確認し、 「version: unknown」 や パース失敗
+      で除外されたコンポーネントを残さない。 残存する場合は理由を記録する。
+    description_en: |
+      Review scanner error logs and warnings; do not leave components
+      dropped as "version: unknown" or due to parse failures. Where they
+      cannot be resolved, record the reason for the exception.
+    evaluator_hint: "Auto-signal: COUNT(components WHERE version IS NULL OR version='unknown') for latest sbom should be 0 for a passing item."
+
+  - id: meti.sbom_creation.05
+    phase: sbom_creation
+    title_ja: 誤検出・検出漏れを確認
+    title_en: Verify false positives and false negatives
+    description_ja: |
+      ツール出力結果をそのまま用いず、 手動ビルド成果物 / package-lock /
+      go.sum 等と突き合わせ、 誤検出 (実際には含まれない) と 検出漏れ
+      (実際は含まれるが SBOM 未掲載) を確認する。
+    description_en: |
+      Do not rely on tool output as-is: cross-check against build manifests
+      (package-lock, go.sum, etc.) to flag false positives (listed but not
+      actually shipped) and false negatives (shipped but missing from the
+      SBOM).
+    evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_03'. Future hook: diff sboms generated by Syft vs. Trivy and surface unique entries."
+
+  - id: meti.sbom_creation.06
+    phase: sbom_creation
+    title_ja: METI / NTIA 最小要素を満たす SBOM を作成
+    title_en: Produce an SBOM meeting METI / NTIA minimum elements
+    description_ja: |
+      Supplier Name / Component Name / Component Version / Unique
+      Identifier (PURL or CPE) / Dependency Relationship / SBOM Author /
+      Timestamp の 7 項目を満たすことを生成時に検証する。
+    description_en: |
+      At generation time, validate that the SBOM satisfies the seven
+      minimum elements: supplier name, component name, component version,
+      unique identifier (PURL or CPE), dependency relationship, SBOM
+      author and timestamp.
+    evaluator_hint: "Auto-signal: reuse ComplianceService.checkMinimumElements (apps/api/internal/service/compliance.go) — all 7 sub-checks pass."
+
+  - id: meti.sbom_creation.07
+    phase: sbom_creation
+    title_ja: SBOM 共有方法・配布契約を整備
+    title_en: Establish SBOM sharing channels and distribution terms
+    description_ja: |
+      顧客 / 監査人 / 規制当局への配布チャネル (顧客ポータル, 暗号化メール,
+      公開リンク 等) と、 受領者の SBOM 取り扱い条項 (再配布禁止 / 保管期間 /
+      開示範囲) を契約として整備する。
+    description_en: |
+      Establish the distribution channels (customer portal, encrypted
+      e-mail, public link, …) for customers / auditors / regulators and
+      put in place contractual handling terms for recipients (no
+      redistribution, retention period, permitted disclosure scope).
+    evaluator_hint: "Auto-signal: public_links rows exist for the project (indicates shareable URL provisioned). Manual override via checklist_responses check_id='create_07'."
+
+  - id: meti.sbom_creation.08
+    phase: sbom_creation
+    title_ja: SBOM のバージョン管理と差分追跡を実施
+    title_en: Version-control SBOMs and track diffs
+    description_ja: |
+      ソフトウェアリリースごとに SBOM を版管理し、 前版との差分 (追加 / 削除 /
+      バージョン更新) を可視化する。 差分が顧客通知トリガーになる場合は
+      自動通知する。
+    description_en: |
+      Version-control the SBOM at each release and visualise the diff
+      against the previous version (added, removed, updated components).
+      If diffs should trigger customer notification, automate the alert.
+    evaluator_hint: "Auto-signal: sbom_diff service exists and ≥2 sbom revisions exist for the project (so diffs are computable)."
+
+  - id: meti.sbom_creation.09
+    phase: sbom_creation
+    title_ja: サプライヤー受領 SBOM のマージ / 検証
+    title_en: Merge and validate supplier-provided SBOMs
+    description_ja: |
+      自社が再配布する成果物にサプライヤー製コンポーネントが含まれる場合、
+      その SBOM を受領し、 自社 SBOM にマージするか リンクするかを定め、
+      受領 SBOM の妥当性 (署名・タイムスタンプ・形式準拠) を検証する。
+    description_en: |
+      When shipping artefacts that contain supplier-built components,
+      decide whether to merge or link the supplier's SBOM into your own,
+      and validate the supplier SBOM (signature, timestamp, format
+      conformance) before accepting it.
+    evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_09'. Future hook: sboms.source ('uploaded' vs. 'merged') column."
+
+  # --------------------------------------------------------------------------
+  # Phase 3 — SBOM 運用・管理フェーズ (sbom_operation) : 10 items
+  # --------------------------------------------------------------------------
+  - id: meti.sbom_operation.01
+    phase: sbom_operation
+    title_ja: 脆弱性監視プロセスを確立
+    title_en: Establish a vulnerability monitoring process
+    description_ja: |
+      手引 ver 2.0 第 7 章の脆弱性管理プロセスに従い、 SBOM 内の各コンポーネント
+      を脆弱性データベースと突き合わせる定常運用 (実行頻度・担当・SLA) を
+      確立する。
+    description_en: |
+      Following Chapter 7 of the ver 2.0 guidance, establish steady-state
+      operations (cadence, owner, SLA) that match each SBOM component
+      against vulnerability databases.
+    evaluator_hint: "Auto-signal: scan_settings.vuln_scan_enabled is true AND last scan_tracker entry is within configured cadence."
+
+  - id: meti.sbom_operation.02
+    phase: sbom_operation
+    title_ja: 脆弱性情報源 (NVD / JVN / KEV / GHSA / JPCERT) を特定
+    title_en: Identify vulnerability information sources (NVD / JVN / KEV / GHSA / JPCERT)
+    description_ja: |
+      参照する脆弱性データベースを明示し、 同期頻度 (例: NVD 24h, KEV 24h,
+      JVN 24h) と 重要度通知の閾値 (例: CVSS 7.0 以上) を定義する。
+    description_en: |
+      Enumerate the vulnerability databases consulted, define the
+      synchronisation cadence (e.g. NVD 24h, KEV 24h, JVN 24h) and the
+      severity-notification threshold (e.g. CVSS ≥ 7.0).
+    evaluator_hint: "Auto-signal: nvd, jvn, kev service tables have recent updated_at (<48h). Service files: apps/api/internal/service/{nvd,jvn,kev}.go."
+
+  - id: meti.sbom_operation.03
+    phase: sbom_operation
+    title_ja: 脆弱性を優先付け (EPSS / SSVC / CVSS / KEV)
+    title_en: Prioritise vulnerabilities (EPSS / SSVC / CVSS / KEV)
+    description_ja: |
+      検出された脆弱性に対し、 CVSS だけでなく EPSS (悪用予測スコア),
+      KEV (既知悪用), SSVC (意思決定フレーム) を併用して対応順序を決定する。
+    description_en: |
+      For each detected vulnerability, use EPSS (exploit-probability),
+      KEV (known exploited) and SSVC (decision framework) alongside CVSS
+      to set the remediation order.
+    evaluator_hint: "Auto-signal: vulnerabilities table has epss_score, ssvc_decision and kev_listed columns populated for ≥1 finding."
+
+  - id: meti.sbom_operation.04
+    phase: sbom_operation
+    title_ja: 脆弱性対応 (VEX 作成・承認・配布) を実施
+    title_en: Execute vulnerability response (VEX authoring, approval, distribution)
+    description_ja: |
+      対応中 / 影響なし / 修正済の判断を VEX (CycloneDX VEX or CSAF) で表現
+      し、 人による承認後に顧客へ配布する。 AI ドラフトは承認前の状態として
+      扱う。
+    description_en: |
+      Express decisions (under_investigation / not_affected / fixed) as VEX
+      (CycloneDX VEX or CSAF) and distribute to customers only after human
+      approval. AI-drafted statements remain unapproved until reviewed.
+    evaluator_hint: "Auto-signal: vex_statements rows exist for the project with status IN ('approved','distributed'). Service: apps/api/internal/service/vex.go."
+
+  - id: meti.sbom_operation.05
+    phase: sbom_operation
+    title_ja: ライセンス違反 / コンプライアンス逸脱を確認
+    title_en: Check for licence violations and compliance deviations
+    description_ja: |
+      組織のライセンスポリシー (禁止ライセンス / 要承認ライセンス) と SBOM
+      内コンポーネントの宣言ライセンスを照合し、 違反を是正する。
+    description_en: |
+      Reconcile each component's declared licence against the organisation's
+      licence policy (prohibited / approved-with-review) and remediate
+      violations.
+    evaluator_hint: "Auto-signal: license_policies exist for the tenant AND license violation count = 0. Service: apps/api/internal/service/license.go."
+
+  - id: meti.sbom_operation.06
+    phase: sbom_operation
+    title_ja: EOL / End-of-Support コンポーネントを特定
+    title_en: Identify EOL / end-of-support components
+    description_ja: |
+      endoflife.date 等を参照して EOL を迎えたランタイム / フレームワーク
+      を特定し、 置換ロードマップを記録する。
+    description_en: |
+      Identify runtimes and frameworks that have reached end-of-life
+      (e.g. via endoflife.date) and record a replacement roadmap.
+    evaluator_hint: "Auto-signal: eol service has produced findings for the project. Service: apps/api/internal/service/eol.go."
+
+  - id: meti.sbom_operation.07
+    phase: sbom_operation
+    title_ja: SBOM を適切な期間 保管 (監査対応)
+    title_en: Retain SBOMs for the required period (audit-ready)
+    description_ja: |
+      製品ライフタイム + 規制要求期間 (CRA: 製品サポート期間中, 業界規制
+      別途) にわたって SBOM を保管し、 改ざんなく取り出せる状態を維持する。
+      ハッシュやタイムスタンプによる完全性確認を可能にする。
+    description_en: |
+      Retain SBOMs for the product lifetime plus the period required by
+      regulation (CRA: throughout the product support window; sector
+      regulations as applicable) in a tamper-evident form retrievable on
+      demand, with hash / timestamp integrity checks available.
+    evaluator_hint: "Auto-signal: sboms table retention policy enforced — no rows hard-deleted within retention window (check audit_log for delete events)."
+
+  - id: meti.sbom_operation.08
+    phase: sbom_operation
+    title_ja: インシデント対応プロセス (悪用検知時) を整備
+    title_en: Establish an incident-response process (when exploitation is detected)
+    description_ja: |
+      KEV 追加 / EPSS 急上昇 / 悪用実例レポートを受領したコンポーネントに
+      ついて、 顧客通知・暫定緩和策・恒久対応のタイムライン (24h 早期警告 /
+      72h 詳細通知 / 最終報告) を整備する。 EU CRA Article 14 と整合させる。
+    description_en: |
+      For components added to KEV, with EPSS spikes, or with confirmed
+      exploitation reports, define a timeline for customer notification,
+      interim mitigation and permanent remediation (24h early warning /
+      72h detailed notification / final report) consistent with EU CRA
+      Article 14.
+    evaluator_hint: "Auto-signal: cra_reports rows exist for the project with report_type IN ('early_warning','detailed_notification','final_report'). Service: apps/api/internal/service/cra/."
+
+  - id: meti.sbom_operation.09
+    phase: sbom_operation
+    title_ja: SBOM 更新頻度を遵守
+    title_en: Maintain SBOM update frequency
+    description_ja: |
+      ソフトウェア改変・依存追加・依存削除のたびに SBOM を更新する。 最低
+      でも 30 日に 1 回の再生成を運用ルールとして固定する (ver 2.0 推奨)。
+    description_en: |
+      Update the SBOM on every software change, dependency addition or
+      dependency removal. Pin a minimum cadence of regeneration every 30
+      days as an operational rule (per ver 2.0 recommendation).
+    evaluator_hint: "Auto-signal: latest sboms.created_at for the project is within 30 days."
+
+  - id: meti.sbom_operation.10
+    phase: sbom_operation
+    title_ja: 監査ログ (作成 / 共有 / 承認 / 配布) を記録
+    title_en: Record audit logs (creation, sharing, approval, distribution)
+    description_ja: |
+      SBOM の生成・アップロード・共有・承認・配布の各イベントを操作者
+      付きで記録し、 監査時に時系列でトレースできるようにする。
+    description_en: |
+      Log every event (generation, upload, sharing, approval, distribution)
+      with the operator identity so an auditor can trace the lifecycle
+      chronologically.
+    evaluator_hint: "Auto-signal: audit_log table has rows for action IN ('sbom.created','sbom.shared','vex.approved','cra.distributed') for the project."
