@@ -56,15 +56,30 @@ const (
 	// so operators who follow Azure docs verbatim now get a real
 	// provider instead of a DisabledProvider with "endpoint missing".
 	//
-	// ※要確認: AZURE_OPENAI_DEPLOYMENT is the form most Azure code
-	// samples use. AZURE_OPENAI_DEPLOYMENT_NAME is also used in some
-	// Microsoft SDK paths (Azure SDK for JS / Python OpenAI library)
-	// — we accept only the bare form here to avoid a confusing 3-deep
-	// precedence ladder; operators on _NAME can either rename their
-	// env or set the canonical SBOMHUB_LLM_AZURE_DEPLOYMENT.
-	EnvAzureEndpointAlias   = "AZURE_OPENAI_ENDPOINT"
-	EnvAzureAPIVersionAlias = "AZURE_OPENAI_API_VERSION"
-	EnvAzureDeploymentAlias = "AZURE_OPENAI_DEPLOYMENT"
+	// M4 Codex review #F59: deployment-name accepts THREE Azure-side
+	// variants because Microsoft documentation is not internally
+	// consistent. AZURE_OPENAI_DEPLOYMENT is the form most Azure code
+	// samples use. AZURE_OPENAI_DEPLOYMENT_NAME is the form Microsoft
+	// Learn's AKS OpenAI quickstart and the Azure SDK for JS / Python
+	// OpenAI library use. AZURE_OPENAI_CHAT_DEPLOYMENT_NAME is the form
+	// the Azure Agent Framework documents (it disambiguates chat vs
+	// embedding deployments when both are configured). sbomhub's
+	// azure_openai provider is chat-only (Complete is the only path
+	// wired today; Embed returns ErrNotImplemented in azure_openai.go),
+	// so accepting CHAT_DEPLOYMENT_NAME is correct — the deployment the
+	// operator points us at IS the chat deployment.
+	//
+	// ※要確認: when sbomhub adds Azure embedding support (no roadmap
+	// yet — Embed is a stub), we will need a separate
+	// AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME alias resolved through a
+	// distinct azureFieldEnvCandidates("embedding_deployment") path so
+	// operators with both deployments configured do not have their
+	// embedding deployment accidentally aliased onto chat.
+	EnvAzureEndpointAlias           = "AZURE_OPENAI_ENDPOINT"
+	EnvAzureAPIVersionAlias         = "AZURE_OPENAI_API_VERSION"
+	EnvAzureDeploymentAlias         = "AZURE_OPENAI_DEPLOYMENT"
+	EnvAzureDeploymentNameAlias     = "AZURE_OPENAI_DEPLOYMENT_NAME"
+	EnvAzureChatDeploymentNameAlias = "AZURE_OPENAI_CHAT_DEPLOYMENT_NAME"
 )
 
 // apiKeyEnvCandidates returns the env var names checked for the given
@@ -119,7 +134,22 @@ func azureFieldEnvCandidates(field string) []string {
 	case "api_version":
 		return []string{EnvAzureAPIVersion, EnvAzureAPIVersionAlias}
 	case "deployment":
-		return []string{EnvAzureDeployment, EnvAzureDeploymentAlias}
+		// M4 Codex review #F59: walk all three Microsoft-documented
+		// deployment-name variants after the canonical env. Precedence
+		// is canonical-first so existing self-host deployments are
+		// untouched; the ordering among the aliases (DEPLOYMENT >
+		// DEPLOYMENT_NAME > CHAT_DEPLOYMENT_NAME) matches the
+		// frequency of each form in Microsoft Learn / Azure SDK
+		// samples — when an operator has accidentally set more than
+		// one (a common copy-paste mistake), the more general bare
+		// form wins over the chat-specific qualifier so the resolution
+		// matches the operator's most likely mental model.
+		return []string{
+			EnvAzureDeployment,
+			EnvAzureDeploymentAlias,
+			EnvAzureDeploymentNameAlias,
+			EnvAzureChatDeploymentNameAlias,
+		}
 	}
 	return nil
 }

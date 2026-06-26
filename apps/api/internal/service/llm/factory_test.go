@@ -26,6 +26,10 @@ func withEnv(t *testing.T, kv map[string]string) {
 		// so a stray AZURE_OPENAI_* in the developer's shell does not
 		// mask a "factory disables when endpoint missing" regression.
 		EnvAzureEndpointAlias, EnvAzureAPIVersionAlias, EnvAzureDeploymentAlias,
+		// F59: extra Microsoft-documented deployment-name variants
+		// (AKS quickstart + Azure Agent Framework) — clear so a stray
+		// shell env does not mask the "deployment missing" path.
+		EnvAzureDeploymentNameAlias, EnvAzureChatDeploymentNameAlias,
 	} {
 		t.Setenv(k, "")
 	}
@@ -765,4 +769,183 @@ func TestNewProviderFromEnv_AzureDisabledReasonListsAliases(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// M4 Codex review #F59 — Azure deployment-name env aliases (broader coverage).
+//
+// Microsoft documentation is not internally consistent on the env var name
+// for an Azure OpenAI deployment:
+//   - AZURE_OPENAI_DEPLOYMENT — most code samples (covered by F52)
+//   - AZURE_OPENAI_DEPLOYMENT_NAME — Microsoft Learn AKS OpenAI quickstart,
+//     Azure SDK for JS / Python OpenAI library
+//   - AZURE_OPENAI_CHAT_DEPLOYMENT_NAME — Azure Agent Framework (it
+//     disambiguates chat vs embedding deployments)
+//
+// Pre-F59 the factory accepted only the first form; operators following the
+// AKS or Agent-Framework docs got endpoint + api-version + key resolved but
+// deployment missing → DisabledProvider. These tests lock in the four-deep
+// canonical-first precedence ladder so future regressions are caught.
+// ---------------------------------------------------------------------------
+
+// TestResolveAzureField_DeploymentAliases covers each Microsoft-documented
+// deployment-name variant in isolation: when only one of the four envs is
+// set, resolveAzureField must pick it up and report it as the source.
+func TestResolveAzureField_DeploymentAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+	}{
+		{"canonical SBOMHUB_LLM_AZURE_DEPLOYMENT", EnvAzureDeployment},
+		{"alias AZURE_OPENAI_DEPLOYMENT", EnvAzureDeploymentAlias},
+		{"alias AZURE_OPENAI_DEPLOYMENT_NAME", EnvAzureDeploymentNameAlias},
+		{"alias AZURE_OPENAI_CHAT_DEPLOYMENT_NAME", EnvAzureChatDeploymentNameAlias},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withEnv(t, map[string]string{tc.env: "dep-value"})
+			value, source := resolveAzureField("deployment")
+			if value != "dep-value" {
+				t.Errorf("value = %q, want dep-value (alias %s not honoured)", value, tc.env)
+			}
+			if source != tc.env {
+				t.Errorf("source = %q, want %q", source, tc.env)
+			}
+		})
+	}
+}
+
+// TestResolveAzureField_DeploymentCanonicalWinsOverAllAliases verifies the
+// full precedence ladder: with every env set to a distinguishable value,
+// the canonical SBOMHUB_LLM_AZURE_DEPLOYMENT must win, followed by
+// AZURE_OPENAI_DEPLOYMENT > AZURE_OPENAI_DEPLOYMENT_NAME >
+// AZURE_OPENAI_CHAT_DEPLOYMENT_NAME. The test peels the precedence layers
+// one at a time so a future reorder of azureFieldEnvCandidates is caught
+// explicitly (rather than silently picking a different winner).
+func TestResolveAzureField_DeploymentCanonicalWinsOverAllAliases(t *testing.T) {
+	// Layer 1: every env set, canonical must win.
+	withEnv(t, map[string]string{
+		EnvAzureDeployment:              "win-canonical",
+		EnvAzureDeploymentAlias:         "lose-deployment",
+		EnvAzureDeploymentNameAlias:     "lose-deployment-name",
+		EnvAzureChatDeploymentNameAlias: "lose-chat",
+	})
+	value, source := resolveAzureField("deployment")
+	if value != "win-canonical" || source != EnvAzureDeployment {
+		t.Fatalf("layer 1: value=%q source=%q, want canonical win", value, source)
+	}
+
+	// Layer 2: canonical cleared, AZURE_OPENAI_DEPLOYMENT must win over
+	// the two _NAME variants.
+	withEnv(t, map[string]string{
+		EnvAzureDeploymentAlias:         "win-deployment",
+		EnvAzureDeploymentNameAlias:     "lose-deployment-name",
+		EnvAzureChatDeploymentNameAlias: "lose-chat",
+	})
+	value, source = resolveAzureField("deployment")
+	if value != "win-deployment" || source != EnvAzureDeploymentAlias {
+		t.Fatalf("layer 2: value=%q source=%q, want AZURE_OPENAI_DEPLOYMENT win", value, source)
+	}
+
+	// Layer 3: only the two _NAME variants set — DEPLOYMENT_NAME must
+	// beat CHAT_DEPLOYMENT_NAME (the bare _NAME is the more general
+	// form; CHAT_ disambiguates only when both deployments are
+	// configured, which sbomhub does not support today).
+	withEnv(t, map[string]string{
+		EnvAzureDeploymentNameAlias:     "win-deployment-name",
+		EnvAzureChatDeploymentNameAlias: "lose-chat",
+	})
+	value, source = resolveAzureField("deployment")
+	if value != "win-deployment-name" || source != EnvAzureDeploymentNameAlias {
+		t.Fatalf("layer 3: value=%q source=%q, want AZURE_OPENAI_DEPLOYMENT_NAME win", value, source)
+	}
+
+	// Layer 4: only the most-specific alias set — CHAT_DEPLOYMENT_NAME
+	// is the last-resort fallback and must still resolve.
+	withEnv(t, map[string]string{
+		EnvAzureChatDeploymentNameAlias: "win-chat",
+	})
+	value, source = resolveAzureField("deployment")
+	if value != "win-chat" || source != EnvAzureChatDeploymentNameAlias {
+		t.Fatalf("layer 4: value=%q source=%q, want AZURE_OPENAI_CHAT_DEPLOYMENT_NAME win", value, source)
+	}
+}
+
+// TestNewProviderFromEnv_AzureDeploymentNameAliasHappyPath is the
+// end-to-end AKS-quickstart operator path: only AZURE_OPENAI_DEPLOYMENT_NAME
+// is set for the deployment field (plus the other Azure envs via their
+// aliases). NewProviderFromEnv must build a real azure_openai provider
+// rather than DisabledProvider.
+func TestNewProviderFromEnv_AzureDeploymentNameAliasHappyPath(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:                 "azure_openai",
+		EnvAzureAPIKey:              "azure-alias-key",
+		EnvAzureEndpointAlias:       "https://example.openai.azure.com",
+		EnvAzureDeploymentNameAlias: "gpt-4o-deployment",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if _, isDisabled := p.(*DisabledProvider); isDisabled {
+		t.Errorf("got DisabledProvider, want real azure_openai provider (F59 regression: AZURE_OPENAI_DEPLOYMENT_NAME not honoured)")
+	}
+	if p.Name() != "azure_openai" {
+		t.Errorf("Name() = %q, want azure_openai", p.Name())
+	}
+}
+
+// TestNewProviderFromEnv_AzureChatDeploymentNameAliasHappyPath covers the
+// Azure Agent Framework operator path: only AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+// is set. The factory must still build a real provider — the chat-specific
+// qualifier is the legitimate config for sbomhub (which is chat-only today).
+func TestNewProviderFromEnv_AzureChatDeploymentNameAliasHappyPath(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:                     "azure_openai",
+		EnvAzureAPIKey:                  "azure-alias-key",
+		EnvAzureEndpointAlias:           "https://example.openai.azure.com",
+		EnvAzureChatDeploymentNameAlias: "gpt-4o-chat-deployment",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if _, isDisabled := p.(*DisabledProvider); isDisabled {
+		t.Errorf("got DisabledProvider, want real azure_openai provider (F59 regression: AZURE_OPENAI_CHAT_DEPLOYMENT_NAME not honoured)")
+	}
+	if p.Name() != "azure_openai" {
+		t.Errorf("Name() = %q, want azure_openai", p.Name())
+	}
+}
+
+// TestNewProviderFromEnv_AzureDeploymentDisabledReasonListsAllAliases
+// verifies the DisabledProvider Reason message names every deployment env
+// the factory consulted — F52 covered DEPLOYMENT + DEPLOYMENT_ALIAS; F59
+// extends to the two _NAME variants so an operator who typo'd
+// AZURE_OPENAI_DEPLOYMENT_NAME can find it in the error and diff against
+// their shell env.
+func TestNewProviderFromEnv_AzureDeploymentDisabledReasonListsAllAliases(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:           "azure_openai",
+		EnvAzureAPIKey:        "k",
+		EnvAzureEndpointAlias: "https://example.openai.azure.com",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	de, ok := p.(*DisabledProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *DisabledProvider", p)
+	}
+	for _, want := range []string{
+		EnvAzureDeployment,
+		EnvAzureDeploymentAlias,
+		EnvAzureDeploymentNameAlias,
+		EnvAzureChatDeploymentNameAlias,
+	} {
+		if !strings.Contains(de.Reason, want) {
+			t.Errorf("Reason = %q, want substring %q", de.Reason, want)
+		}
+	}
 }

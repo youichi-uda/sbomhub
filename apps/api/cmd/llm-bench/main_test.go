@@ -931,6 +931,11 @@ func clearBenchBYOK(t *testing.T) {
 	t.Setenv(llm.EnvAzureEndpointAlias, "")
 	t.Setenv(llm.EnvAzureDeploymentAlias, "")
 	t.Setenv(llm.EnvAzureAPIVersionAlias, "")
+	// F59: bench now also reads the two Microsoft-documented deployment
+	// _NAME variants (AKS quickstart + Azure Agent Framework), so wipes
+	// must extend to those too.
+	t.Setenv(llm.EnvAzureDeploymentNameAlias, "")
+	t.Setenv(llm.EnvAzureChatDeploymentNameAlias, "")
 }
 
 // TestResolveProviderSpec covers env-driven skip behaviour: every
@@ -1055,9 +1060,130 @@ func TestResolveProviderSpec_AzureSkipReasonMentionsBothEnvs(t *testing.T) {
 		t.Setenv(llm.EnvAzureAPIKey, "k")
 		t.Setenv(llm.EnvAzureEndpointAlias, "https://example.openai.azure.com")
 		spec := resolveProviderSpec("azure_openai")
-		if !strings.Contains(spec.skipReason, llm.EnvAzureDeployment) ||
-			!strings.Contains(spec.skipReason, llm.EnvAzureDeploymentAlias) {
-			t.Errorf("skipReason = %q, want it to mention both deployment envs", spec.skipReason)
+		// F59: skipReason must mention all four deployment-name envs the
+		// bench now consults so an operator who typo'd any of them can
+		// diff against their shell env.
+		for _, want := range []string{
+			llm.EnvAzureDeployment,
+			llm.EnvAzureDeploymentAlias,
+			llm.EnvAzureDeploymentNameAlias,
+			llm.EnvAzureChatDeploymentNameAlias,
+		} {
+			if !strings.Contains(spec.skipReason, want) {
+				t.Errorf("skipReason = %q, want substring %q (F59: must name every deployment env consulted)", spec.skipReason, want)
+			}
+		}
+	})
+}
+
+// TestResolveProviderSpec_AzureDeploymentNameAlias is the F59 happy-path
+// test for AZURE_OPENAI_DEPLOYMENT_NAME (Microsoft Learn AKS OpenAI
+// quickstart + Azure SDK for JS / Python OpenAI library). The operator
+// set every other Azure env via the F53 aliases and the deployment via
+// the F59 _NAME variant; the bench must resolve a non-skipped spec that
+// the factory builds into a real azure_openai provider.
+func TestResolveProviderSpec_AzureDeploymentNameAlias(t *testing.T) {
+	clearBenchBYOK(t)
+	t.Setenv(llm.EnvAzureAPIKey, "azure-alias-key")
+	t.Setenv(llm.EnvAzureEndpointAlias, "https://example.openai.azure.com")
+	t.Setenv(llm.EnvAzureDeploymentNameAlias, "gpt-4o-deployment")
+	t.Setenv(llm.EnvAzureAPIVersionAlias, "2024-08-01-preview")
+
+	spec := resolveProviderSpec("azure_openai")
+	if spec.skipReason != "" {
+		t.Fatalf("skipReason = %q, want empty (F59 regression: AZURE_OPENAI_DEPLOYMENT_NAME not honoured)", spec.skipReason)
+	}
+	if spec.azureDeployment != "gpt-4o-deployment" {
+		t.Errorf("azureDeployment = %q, want gpt-4o-deployment (resolved from DEPLOYMENT_NAME)", spec.azureDeployment)
+	}
+
+	// End-to-end: buildProvider must succeed.
+	p, err := buildProvider(spec)
+	if err != nil {
+		t.Fatalf("buildProvider: %v", err)
+	}
+	if _, isDisabled := p.(*llm.DisabledProvider); isDisabled {
+		t.Errorf("got DisabledProvider, want real azure_openai provider")
+	}
+}
+
+// TestResolveProviderSpec_AzureChatDeploymentNameAlias is the F59
+// happy-path test for AZURE_OPENAI_CHAT_DEPLOYMENT_NAME (Azure Agent
+// Framework). sbomhub's azure_openai provider is chat-only today, so the
+// chat-specific deployment is the legitimate config for an operator on
+// the Agent Framework env contract.
+func TestResolveProviderSpec_AzureChatDeploymentNameAlias(t *testing.T) {
+	clearBenchBYOK(t)
+	t.Setenv(llm.EnvAzureAPIKey, "azure-alias-key")
+	t.Setenv(llm.EnvAzureEndpointAlias, "https://example.openai.azure.com")
+	t.Setenv(llm.EnvAzureChatDeploymentNameAlias, "gpt-4o-chat-deployment")
+
+	spec := resolveProviderSpec("azure_openai")
+	if spec.skipReason != "" {
+		t.Fatalf("skipReason = %q, want empty (F59 regression: AZURE_OPENAI_CHAT_DEPLOYMENT_NAME not honoured)", spec.skipReason)
+	}
+	if spec.azureDeployment != "gpt-4o-chat-deployment" {
+		t.Errorf("azureDeployment = %q, want gpt-4o-chat-deployment (resolved from CHAT_DEPLOYMENT_NAME)", spec.azureDeployment)
+	}
+
+	// End-to-end: buildProvider must succeed.
+	p, err := buildProvider(spec)
+	if err != nil {
+		t.Fatalf("buildProvider: %v", err)
+	}
+	if _, isDisabled := p.(*llm.DisabledProvider); isDisabled {
+		t.Errorf("got DisabledProvider, want real azure_openai provider")
+	}
+}
+
+// TestResolveProviderSpec_AzureDeploymentPrecedenceLadder verifies the
+// full four-deep canonical-first precedence in the bench: when every
+// deployment env is set to a distinguishable value, SBOMHUB_LLM_AZURE_DEPLOYMENT
+// wins, then AZURE_OPENAI_DEPLOYMENT > AZURE_OPENAI_DEPLOYMENT_NAME >
+// AZURE_OPENAI_CHAT_DEPLOYMENT_NAME. Locked in at the bench layer because
+// a regression here would cause "factory resolves DEPLOYMENT_NAME, bench
+// resolves CHAT_DEPLOYMENT_NAME" split-brain that the F53 fix was
+// designed to prevent.
+func TestResolveProviderSpec_AzureDeploymentPrecedenceLadder(t *testing.T) {
+	// Other Azure fields stay constant across the layered peel; only
+	// the deployment envs are reshuffled to assert each step.
+	setBaseline := func(t *testing.T) {
+		t.Helper()
+		clearBenchBYOK(t)
+		t.Setenv(llm.EnvAzureAPIKey, "k")
+		t.Setenv(llm.EnvAzureEndpointAlias, "https://example.openai.azure.com")
+	}
+
+	t.Run("canonical wins over every alias", func(t *testing.T) {
+		setBaseline(t)
+		t.Setenv("SBOMHUB_LLM_AZURE_DEPLOYMENT", "win-canonical")
+		t.Setenv(llm.EnvAzureDeploymentAlias, "lose-deployment")
+		t.Setenv(llm.EnvAzureDeploymentNameAlias, "lose-deployment-name")
+		t.Setenv(llm.EnvAzureChatDeploymentNameAlias, "lose-chat")
+		spec := resolveProviderSpec("azure_openai")
+		if spec.azureDeployment != "win-canonical" {
+			t.Errorf("azureDeployment = %q, want win-canonical", spec.azureDeployment)
+		}
+	})
+
+	t.Run("DEPLOYMENT beats DEPLOYMENT_NAME beats CHAT_DEPLOYMENT_NAME", func(t *testing.T) {
+		setBaseline(t)
+		t.Setenv(llm.EnvAzureDeploymentAlias, "win-deployment")
+		t.Setenv(llm.EnvAzureDeploymentNameAlias, "lose-deployment-name")
+		t.Setenv(llm.EnvAzureChatDeploymentNameAlias, "lose-chat")
+		spec := resolveProviderSpec("azure_openai")
+		if spec.azureDeployment != "win-deployment" {
+			t.Errorf("azureDeployment = %q, want win-deployment", spec.azureDeployment)
+		}
+	})
+
+	t.Run("DEPLOYMENT_NAME beats CHAT_DEPLOYMENT_NAME", func(t *testing.T) {
+		setBaseline(t)
+		t.Setenv(llm.EnvAzureDeploymentNameAlias, "win-deployment-name")
+		t.Setenv(llm.EnvAzureChatDeploymentNameAlias, "lose-chat")
+		spec := resolveProviderSpec("azure_openai")
+		if spec.azureDeployment != "win-deployment-name" {
+			t.Errorf("azureDeployment = %q, want win-deployment-name", spec.azureDeployment)
 		}
 	})
 }
