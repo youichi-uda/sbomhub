@@ -3,12 +3,16 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeAzureServer mimics POST {endpoint}/openai/deployments/{deployment}/chat/completions
@@ -340,6 +344,86 @@ func TestAzureOpenAI_LogValueDoesNotLeakSecrets(t *testing.T) {
 	}
 	if strings.Contains(logged, "tenant-resource") {
 		t.Errorf("slog leaked endpoint URL: %q", logged)
+	}
+}
+
+// TestAzureOpenAI_TransportErrorRedactsEndpoint is the F63 regression
+// guard: on a DNS / connect / timeout failure, the Azure tenant resource
+// subdomain, deployment name, and api-version MUST NOT survive in the
+// returned error message (which is persisted into
+// llm_calls.error_message and may be echoed back through a 500 JSON
+// body). The default RedactProviderError only strips query / fragment;
+// RedactAzureTransportError additionally replaces the host + path with
+// `[REDACTED-AZURE-ENDPOINT]`.
+//
+// We use an unroutable-but-syntactically-valid endpoint so the *http.Client
+// call returns a *url.Error from a connect failure (port 1 is reserved
+// and the loopback refusal is portable; this avoids depending on real
+// DNS being available).
+func TestAzureOpenAI_TransportErrorRedactsEndpoint(t *testing.T) {
+	const (
+		tenantResource = "secret-tenant-resource"
+		deployment     = "legal-vex-triage"
+		apiVersion     = "2024-10-21"
+	)
+	// http://<tenant>.openai.azure.com:1 — port 1 will fail to connect
+	// on any sane OS. The hostname is what we care about leaking; the
+	// *http.Client DNS resolution may itself fail (test sandbox) or
+	// proceed to a connect refusal, but either way the resulting
+	// *url.Error.URL will contain the tenant resource subdomain.
+	endpoint := fmt.Sprintf("http://%s.openai.azure.com:1", tenantResource)
+
+	// Short timeout client so the test does not hang if the sandbox
+	// allows the connect to drift into SYN-retry territory.
+	client := &http.Client{Timeout: 2 * time.Second}
+	p := NewAzureOpenAIWithClient("k", endpoint, deployment, apiVersion, "gpt-4o", client)
+
+	_, err := p.Complete(context.Background(), CompleteRequest{
+		Messages: []Message{{Role: RoleUser, Content: "x"}},
+	})
+	if err == nil {
+		t.Fatal("expected transport error from unroutable endpoint")
+	}
+
+	msg := err.Error()
+
+	// The tenant resource subdomain MUST be gone (F63 primary leak).
+	if strings.Contains(msg, tenantResource) {
+		t.Errorf("transport error leaked tenant resource %q: %q", tenantResource, msg)
+	}
+	// Substring "openai.azure.com" MUST be gone — it identifies the
+	// service and combined with a partial fragment of the original URL
+	// would let a reader reconstruct the tenancy URL.
+	if strings.Contains(msg, "openai.azure.com") {
+		t.Errorf("transport error leaked Azure host suffix: %q", msg)
+	}
+	// The deployment name MUST be gone (operators name deployments
+	// after business units — e.g. "legal-vex-triage" — which is
+	// PII-adjacent).
+	if strings.Contains(msg, deployment) {
+		t.Errorf("transport error leaked deployment name %q: %q", deployment, msg)
+	}
+	// The api-version query value MUST be gone.
+	if strings.Contains(msg, apiVersion) {
+		t.Errorf("transport error leaked api-version %q: %q", apiVersion, msg)
+	}
+
+	// The placeholder MUST appear so an operator reading the persisted
+	// llm_calls.error_message knows the URL was scrubbed deliberately
+	// (not corrupted by a parse failure).
+	if !strings.Contains(msg, "[REDACTED-AZURE-ENDPOINT]") {
+		t.Errorf("expected redaction placeholder in error message, got %q", msg)
+	}
+
+	// Defense in depth: the *url.Error in the chain should also have its
+	// URL field scrubbed (so any downstream errors.As caller sees the
+	// scrubbed value too, not just the rendered message).
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if strings.Contains(urlErr.URL, tenantResource) ||
+			strings.Contains(urlErr.URL, "openai.azure.com") {
+			t.Errorf("*url.Error.URL still leaks endpoint: %q", urlErr.URL)
+		}
 	}
 }
 

@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -195,11 +198,18 @@ func (p *AzureOpenAIProvider) Complete(ctx context.Context, req CompleteRequest)
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		// F13: scrub any API-key-shaped query params from the transport
-		// error before propagating. Azure auth is header-based so the URL
-		// itself does not carry the key, but defense-in-depth catches
-		// regressions and third-party wrappers that echo request URLs.
-		return nil, RedactProviderError(fmt.Errorf("azure_openai: http call: %w", err))
+		// F63: Azure-specific scrub. The default RedactProviderError only
+		// strips ?query / #fragment from `*url.Error.URL`; on a DNS,
+		// connect, or timeout failure the host + path themselves still
+		// contain the tenant resource name and deployment name (e.g.
+		// `https://<tenant-resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions`).
+		// Persisting that into llm_calls.error_message — or echoing it
+		// back through a 500 JSON body — leaks tenancy metadata that the
+		// LogValue policy (see LogValue above) deliberately keeps out of
+		// structured logs. RedactAzureTransportError replaces the whole
+		// URL with a static placeholder before falling through to the
+		// generic api-key-query scrubber for defense-in-depth.
+		return nil, RedactAzureTransportError(fmt.Errorf("azure_openai: http call: %w", err))
 	}
 	defer resp.Body.Close()
 
@@ -307,4 +317,115 @@ func (p *AzureOpenAIProvider) Capabilities() Capabilities {
 			MaxContextTokens:     16000,
 		}
 	}
+}
+
+// azureEndpointURLPlaceholder is the static replacement string used in
+// transport-error redaction. Operators reading a triage / CRA / meti
+// `llm_calls.error_message` should see this token and know the original
+// URL was scrubbed deliberately — not corrupted by a parse failure.
+const azureEndpointURLPlaceholder = "[REDACTED-AZURE-ENDPOINT]"
+
+// azureEndpointHostPattern matches Azure OpenAI request URLs *and* bare
+// `<tenant-resource>.openai.azure.com` hostnames that may appear in
+// rendered error strings even after the `*url.Error.URL` field has been
+// scrubbed. Two leak surfaces we have to cover:
+//
+//  1. A wrapper that printed the full URL into its own error message
+//     before we got to the error.
+//  2. The underlying transport error itself — e.g.
+//     `dial tcp: lookup <tenant-resource>.openai.azure.com: no such host`
+//     — which embeds just the bare hostname inside the OS-level error
+//     and survives layer-1 URL scrubbing.
+//
+// Pattern: an optional `https?://` scheme followed by
+// `<resource>.openai.azure.com` followed by any optional trailing
+// `:port`, path, query, or fragment up to the next whitespace, quote,
+// or apostrophe. The trailing greedy match deliberately absorbs the
+// `:1/openai/deployments/<deployment>/chat/completions?api-version=...`
+// suffix that would otherwise leak the deployment name and api-version.
+// False-positive risk is low because `*.openai.azure.com` is unambiguous.
+//
+// Note: when the substring appears in the DNS error fragment
+// `lookup <host>.openai.azure.com:`, the trailing `:` is itself absorbed
+// before the following space terminates the match. That's a tolerable
+// cosmetic side effect — the redacted message reads
+// `lookup [REDACTED-AZURE-ENDPOINT] no such host`.
+var azureEndpointHostPattern = regexp.MustCompile(
+	`(?:https?://)?[A-Za-z0-9._-]+\.openai\.azure\.com[^\s"']*`,
+)
+
+// RedactAzureTransportError scrubs Azure tenant resource + deployment
+// metadata from a transport error chain before the error is propagated,
+// persisted, or echoed back to a client.
+//
+// The generic RedactProviderError (error_redact.go) only removes the
+// query string and fragment from `*url.Error.URL`. That is correct for
+// providers where the URL host/path are opaque (e.g. api.openai.com),
+// but for Azure OpenAI the URL itself carries:
+//
+//   - the tenant resource subdomain (`<resource>.openai.azure.com`),
+//   - the deployment name (URL path segment), and
+//   - the api-version (query parameter).
+//
+// All three are considered tenancy metadata by the LogValue policy
+// established for *AzureOpenAIProvider (see LogValue above). Leaking
+// them through a DNS, connect, or timeout error chain is the same
+// security regression we already guarded against for structured logs —
+// just on a different surface.
+//
+// Behavior:
+//
+//  1. If the chain contains a `*url.Error`, its `URL` field is replaced
+//     with the static placeholder `[REDACTED-AZURE-ENDPOINT]`. The
+//     `*url.Error` value is mutated in place for the same reason
+//     RedactProviderError mutates it — every downstream `errors.As`
+//     caller sees the scrubbed URL too.
+//
+//  2. The rendered error string is then scrubbed for any residual
+//     `*.openai.azure.com` URL substrings that survived layer 1 (e.g.
+//     wrappers that printed the URL into their own message before we
+//     got to the error).
+//
+//  3. The result is finally passed through RedactProviderError so the
+//     generic api-key query-param scrubber still runs as defense in
+//     depth (catches `?api-key=...` regressions, third-party libraries
+//     that build URLs with auth-shaped params, etc.).
+//
+// nil input returns nil so callers can use the helper unconditionally.
+//
+// ※要確認: this helper is currently Azure-specific because Azure is the
+// only provider where the URL host/path carry tenancy metadata. If a
+// future provider (e.g. a self-hosted Ollama exposed on a tenant-named
+// hostname) gains the same property, lift this to error_redact.go with
+// a per-provider pattern map rather than copy-pasting.
+func RedactAzureTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// Layer 1: scrub *url.Error.URL in place with the static placeholder.
+	// Note: this is stricter than redactURLString — we drop host + path
+	// + query + fragment all at once, not just query + fragment.
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		urlErr.URL = azureEndpointURLPlaceholder
+	}
+
+	// Layer 2: scrub the rendered text for any residual
+	// *.openai.azure.com URL substrings. After layer 1 mutated the
+	// *url.Error.URL field, calling err.Error() again should produce a
+	// URL-free message in the common case — but a wrapper that captured
+	// the URL into its own string earlier in the chain will still leak,
+	// and that's the case this pattern catches.
+	rendered := err.Error()
+	scrubbed := azureEndpointHostPattern.ReplaceAllString(rendered, azureEndpointURLPlaceholder)
+	if scrubbed != rendered {
+		err = &redactedError{msg: scrubbed, cause: err}
+	}
+
+	// Layer 3: defense in depth for api-key-shaped query params (matches
+	// the generic provider error pathway used by openai / anthropic /
+	// gemini / ollama). Returns the same error unchanged if no further
+	// scrub is needed.
+	return RedactProviderError(err)
 }
