@@ -28,6 +28,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service/cra"
 	"github.com/sbomhub/sbomhub/internal/service/evidence_pack"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
+	"github.com/sbomhub/sbomhub/internal/service/meti"
 	"github.com/sbomhub/sbomhub/internal/service/triage"
 	"github.com/sbomhub/sbomhub/migrations"
 )
@@ -277,6 +278,11 @@ func main() {
 	// UpdateDecision.
 	craReportsRepo := repository.NewCRAReportsRepository(db)
 
+	// METI self-assessment store (Wave M3-1 / issue #41). Holds the 27
+	// per-criterion verdicts the evaluator (M3-2) writes and the M3-4
+	// /meti/assessment endpoints read / override.
+	metiAssessmentsRepo := repository.NewMetiAssessmentsRepository(db)
+
 	// NVD Cache for vulnerability scanning
 	nvdCache := cache.NewNVDCache(rdb)
 
@@ -464,6 +470,40 @@ func main() {
 	// endpoint — the AI-generated / AI-disabled audit rows are emitted
 	// by the runner inside its Stage 3 write tx.
 	craReportsHandler := handler.NewCRAReportsHandler(craRunner, craReportsRepo, auditRepo)
+
+	// METI self-assessment evaluator (Wave M3-2 / issue #40). Runs the
+	// catalog (M3-3) over a (tenant, project) pair and returns one
+	// CriterionResult per criterion. Local-only: no LLM upstream, so
+	// the /refresh handler runs synchronously inside the ambient
+	// TenantTx (F19 N/A). Construction takes every read repository the
+	// per-criterion functions need — see service/meti/evaluator.go's
+	// NewEvaluator for the full dependency list.
+	metiEvaluator, err := meti.NewEvaluator(
+		sbomRepo,
+		componentRepo,
+		vulnRepo,
+		vexDraftsRepo,
+		craReportsRepo,
+		publicLinkRepo,
+		licensePolicyRepo,
+		eolRepo,
+		kevRepo,
+		auditRepo,
+	)
+	if err != nil {
+		slog.Error("Failed to initialise METI evaluator", "error", err)
+		os.Exit(1)
+	}
+
+	// METI assessment handler (Wave M3-4 / issue #37). Holds the
+	// repository for List / Get / Override / X-Total-Count, the
+	// evaluator for /refresh fan-out, and the audit writer for the
+	// `meti_assessment_refreshed` + `meti_assessment_overridden` domain
+	// audit rows. The request-level audit middleware also runs on
+	// these routes but records only path/method/latency — the domain
+	// audit captures the criterion verdict changes for the compliance
+	// trail.
+	metiHandler := handler.NewMetiHandler(metiAssessmentsRepo, metiEvaluator, auditRepo)
 
 	// Evidence Pack builder + handler (Wave M2-6 / issue #34). The
 	// builder composes the existing vex_drafts (M1) + cra_reports
@@ -926,6 +966,64 @@ func main() {
 		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		craConcurrencyLimiter.Middleware())
+
+	// METI self-assessment endpoints (Wave M3-4 / issue #37).
+	//
+	// Same MultiAuth-fronted chain the triage / CRA / evidence-pack
+	// routes use. The evaluator is fully local (no LLM upstream), so
+	// /refresh runs synchronously inside the ambient TenantTx — F19
+	// (no-TenantTx-for-LLM-stages) is intentionally NOT applied and a
+	// per-tenant concurrency limiter is not needed (the catalog is a
+	// fixed 27-item fan-out; F25 N/A).
+	//
+	// Middleware chain:
+	//   - GET assessment / GET improvement-actions:
+	//       MultiAuth -> RateLimitByAPIKey(300/min) -> TenantTx -> audit -> handler
+	//   - POST refresh / PUT override:
+	//       MultiAuth -> RequireWrite -> RateLimitByAPIKey(60/min) -> TenantTx -> audit -> handler
+	//
+	// Rationale:
+	//   - RequireWrite (F15) keeps read-scoped (Viewer) API keys out of
+	//     refresh / override.
+	//   - RateLimitByAPIKey: 60 req/min on writes (same budget as CRA
+	//     /decision and evidence-pack /build — refresh is a deliberate
+	//     auditor-facing action, not a polling surface); 300 req/min on
+	//     reads (matches the CRA /cra-reports list / get budget).
+	//   - TenantTx wraps the rest so the refresh fan-out (27 Upserts +
+	//     1 audit row) commits atomically with the audit trail, and the
+	//     override (1 UPDATE + 1 audit row) honours the F5/F32 audit-
+	//     or-nothing contract — audit failure inside the handler
+	//     returns 500 so TenantTx rolls back the write.
+	//   - audit middleware is the request-level path/method/latency
+	//     trail; the domain-level meti_assessment_* audit rows the
+	//     handler emits sit on top and capture the criterion-change
+	//     details.
+	e.GET("/api/v1/projects/:id/meti/assessment",
+		metiHandler.ListAssessments,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.POST("/api/v1/projects/:id/meti/assessment/refresh",
+		metiHandler.RefreshAssessment,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.PUT("/api/v1/projects/:id/meti/assessment/:criterion_id/override",
+		metiHandler.OverrideAssessment,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.GET("/api/v1/projects/:id/meti/improvement-actions",
+		metiHandler.ListImprovementActions,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 
 	// Evidence Pack endpoint (Wave M2-6 / issue #34).
 	//
