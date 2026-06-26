@@ -30,6 +30,12 @@ func withEnv(t *testing.T, kv map[string]string) {
 		// (AKS quickstart + Azure Agent Framework) — clear so a stray
 		// shell env does not mask the "deployment missing" path.
 		EnvAzureDeploymentNameAlias, EnvAzureChatDeploymentNameAlias,
+		// M5-3 (#51) Azure embedding envs — clear so a stray shell env
+		// (e.g. an operator running the test suite with their real
+		// embedding deployment exported) does not silently turn on
+		// SupportsEmbedding in factory tests that expect the M4 default.
+		EnvAzureEmbeddingDeployment, EnvAzureEmbeddingDeploymentAlias,
+		EnvAzureEmbeddingAPIVersion, EnvAzureEmbeddingModel,
 	} {
 		t.Setenv(k, "")
 	}
@@ -947,5 +953,187 @@ func TestNewProviderFromEnv_AzureDeploymentDisabledReasonListsAllAliases(t *test
 		if !strings.Contains(de.Reason, want) {
 			t.Errorf("Reason = %q, want substring %q", de.Reason, want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M5 Wave M5-3 (issue #51) — Azure embedding deployment env wiring.
+// ---------------------------------------------------------------------------
+
+// TestResolveAzureField_EmbeddingDeployment locks in the M5-3 embedding
+// deployment alias precedence: canonical SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT
+// beats AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME (Azure Agent Framework form).
+func TestResolveAzureField_EmbeddingDeployment(t *testing.T) {
+	t.Run("canonical wins on tie", func(t *testing.T) {
+		withEnv(t, map[string]string{
+			EnvAzureEmbeddingDeployment:      "canonical-wins",
+			EnvAzureEmbeddingDeploymentAlias: "alias-loses",
+		})
+		v, src := resolveAzureField("embedding_deployment")
+		if v != "canonical-wins" || src != EnvAzureEmbeddingDeployment {
+			t.Errorf("got value=%q src=%q, want canonical-wins / %s", v, src, EnvAzureEmbeddingDeployment)
+		}
+	})
+	t.Run("alias-only", func(t *testing.T) {
+		withEnv(t, map[string]string{
+			EnvAzureEmbeddingDeploymentAlias: "alias-value",
+		})
+		v, src := resolveAzureField("embedding_deployment")
+		if v != "alias-value" || src != EnvAzureEmbeddingDeploymentAlias {
+			t.Errorf("got value=%q src=%q, want alias-value / %s", v, src, EnvAzureEmbeddingDeploymentAlias)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		withEnv(t, nil)
+		v, src := resolveAzureField("embedding_deployment")
+		if v != "" || src != "" {
+			t.Errorf("got value=%q src=%q, want both empty", v, src)
+		}
+	})
+}
+
+// TestResolveAzureField_EmbeddingAPIVersionAndModel pins the resolution
+// of the optional embedding api-version override and the optional
+// canonical embedding model identifier.
+func TestResolveAzureField_EmbeddingAPIVersionAndModel(t *testing.T) {
+	t.Run("api_version set", func(t *testing.T) {
+		withEnv(t, map[string]string{EnvAzureEmbeddingAPIVersion: "2024-08-01-preview"})
+		v, src := resolveAzureField("embedding_api_version")
+		if v != "2024-08-01-preview" || src != EnvAzureEmbeddingAPIVersion {
+			t.Errorf("got value=%q src=%q", v, src)
+		}
+	})
+	t.Run("api_version empty", func(t *testing.T) {
+		withEnv(t, nil)
+		v, src := resolveAzureField("embedding_api_version")
+		if v != "" || src != "" {
+			t.Errorf("got value=%q src=%q, want both empty", v, src)
+		}
+	})
+	t.Run("model set", func(t *testing.T) {
+		withEnv(t, map[string]string{EnvAzureEmbeddingModel: "text-embedding-3-small"})
+		v, src := resolveAzureField("embedding_model")
+		if v != "text-embedding-3-small" || src != EnvAzureEmbeddingModel {
+			t.Errorf("got value=%q src=%q", v, src)
+		}
+	})
+}
+
+// TestNewProviderFromEnv_AzureEmbeddingDisabledByDefault verifies the
+// regression-safe default: an Azure provider built from env without the
+// new embedding envs has SupportsEmbedding=false and Embed returns
+// DisabledError. M4-2 chat-only deployments must keep working
+// unchanged.
+func TestNewProviderFromEnv_AzureEmbeddingDisabledByDefault(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:        "azure_openai",
+		EnvAPIKey:          "k",
+		EnvAzureEndpoint:   "https://example.openai.azure.com",
+		EnvAzureDeployment: "gpt-4o-deployment",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	azp, ok := p.(*AzureOpenAIProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *AzureOpenAIProvider", p)
+	}
+	cap := azp.Capabilities()
+	if cap.SupportsEmbedding {
+		t.Error("SupportsEmbedding = true, want false when no embedding deployment env is set")
+	}
+	if cap.EmbeddingDimensions != 0 {
+		t.Errorf("EmbeddingDimensions = %d, want 0", cap.EmbeddingDimensions)
+	}
+}
+
+// TestNewProviderFromEnv_AzureEmbeddingHappyPath wires the canonical
+// embedding envs and verifies that SupportsEmbedding flips true and
+// dimensions resolve from the canonical model name.
+func TestNewProviderFromEnv_AzureEmbeddingHappyPath(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:                 "azure_openai",
+		EnvAPIKey:                   "k",
+		EnvAzureEndpoint:            "https://example.openai.azure.com",
+		EnvAzureDeployment:          "gpt-4o-deployment",
+		EnvAzureEmbeddingDeployment: "text-embed-3-small-prod",
+		EnvAzureEmbeddingModel:      "text-embedding-3-small",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	azp, ok := p.(*AzureOpenAIProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *AzureOpenAIProvider", p)
+	}
+	cap := azp.Capabilities()
+	if !cap.SupportsEmbedding {
+		t.Error("SupportsEmbedding = false, want true when embedding deployment is set")
+	}
+	if cap.EmbeddingDimensions != 1536 {
+		t.Errorf("EmbeddingDimensions = %d, want 1536 (text-embedding-3-small)", cap.EmbeddingDimensions)
+	}
+}
+
+// TestNewProviderFromEnv_AzureEmbeddingAliasHappyPath covers the
+// Microsoft-documented env path (operator follows Azure Agent Framework
+// docs verbatim): only the alias is set. The factory must still build
+// an embedding-capable provider.
+func TestNewProviderFromEnv_AzureEmbeddingAliasHappyPath(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:                      "azure_openai",
+		EnvAzureAPIKey:                   "k",
+		EnvAzureEndpointAlias:            "https://example.openai.azure.com",
+		EnvAzureDeploymentAlias:          "gpt-4o-deployment",
+		EnvAzureEmbeddingDeploymentAlias: "text-embedding-3-large-prod",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	azp, ok := p.(*AzureOpenAIProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *AzureOpenAIProvider", p)
+	}
+	cap := azp.Capabilities()
+	if !cap.SupportsEmbedding {
+		t.Error("SupportsEmbedding = false, want true (alias env not honoured)")
+	}
+	// Deployment-name sniff path — embedding model env is unset, so
+	// dimensions should still resolve from the deployment name prefix.
+	if cap.EmbeddingDimensions != 3072 {
+		t.Errorf("EmbeddingDimensions = %d, want 3072 (sniffed from deployment name)", cap.EmbeddingDimensions)
+	}
+}
+
+// TestNewProviderFromConfigWithAzure_EmbeddingFallsBackToEnv pins the
+// per-tenant Azure embedding rule: tenant_llm_config does not yet have
+// embedding columns, so the embedding deployment falls back to env (the
+// same precedent ollamaBaseURLFromEnv sets for the Ollama URL). When
+// env is set, the tenant-built provider gains SupportsEmbedding.
+func TestNewProviderFromConfigWithAzure_EmbeddingFallsBackToEnv(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvAzureEmbeddingDeployment: "shared-embed-dep",
+		EnvAzureEmbeddingModel:      "text-embedding-3-small",
+	})
+	p, err := NewProviderFromConfigWithAzure(
+		"azure_openai", "gpt-4o", "tenant-api-key",
+		"https://tenant.openai.azure.com", "tenant-chat-dep", "2024-10-21",
+	)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	azp, ok := p.(*AzureOpenAIProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *AzureOpenAIProvider", p)
+	}
+	cap := azp.Capabilities()
+	if !cap.SupportsEmbedding {
+		t.Error("SupportsEmbedding = false, want true (env fallback not honoured for tenant config)")
+	}
+	if cap.EmbeddingDimensions != 1536 {
+		t.Errorf("EmbeddingDimensions = %d, want 1536", cap.EmbeddingDimensions)
 	}
 }

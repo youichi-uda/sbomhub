@@ -80,6 +80,39 @@ const (
 	EnvAzureDeploymentAlias         = "AZURE_OPENAI_DEPLOYMENT"
 	EnvAzureDeploymentNameAlias     = "AZURE_OPENAI_DEPLOYMENT_NAME"
 	EnvAzureChatDeploymentNameAlias = "AZURE_OPENAI_CHAT_DEPLOYMENT_NAME"
+
+	// M5 Wave M5-3 (issue #51): Azure embedding deployment envs.
+	//
+	// Azure routes embedding traffic through a separate deployment from
+	// chat (different model family, different URL path segment), so the
+	// operator must point sbomhub at the embedding deployment explicitly.
+	// When unset, AzureOpenAIProvider.Embed returns DisabledError and
+	// Capabilities.SupportsEmbedding stays false — the chat path
+	// (Complete) remains unaffected.
+	//
+	// Aliases follow the F59 precedent: canonical SBOMHUB_LLM_AZURE_*
+	// wins for parity with existing self-host deployments, then the
+	// Microsoft-documented AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME (the
+	// form the Azure Agent Framework prescribes for disambiguating chat
+	// vs embedding deployments — see also EnvAzureChatDeploymentNameAlias
+	// above) is honoured as fall-back. We deliberately do NOT alias the
+	// bare AZURE_OPENAI_DEPLOYMENT[_NAME] for embedding — those resolve
+	// to chat per F52/F59, so silently re-using them for embedding
+	// would point both deployments at the same name (a common operator
+	// mistake the explicit _EMBEDDING_ token guards against).
+	//
+	// EnvAzureEmbeddingAPIVersion is optional: when unset, Embed falls
+	// back to the chat api-version, matching the operator mental model
+	// that one Azure resource pins one api-version.
+	//
+	// EnvAzureEmbeddingModel is optional canonical model identifier
+	// (text-embedding-3-small / text-embedding-3-large / etc.). The
+	// provider uses it to populate Capabilities.EmbeddingDimensions
+	// when the deployment name does not embed the model family.
+	EnvAzureEmbeddingDeployment      = "SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT"
+	EnvAzureEmbeddingDeploymentAlias = "AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"
+	EnvAzureEmbeddingAPIVersion      = "SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION"
+	EnvAzureEmbeddingModel           = "SBOMHUB_LLM_AZURE_EMBEDDING_MODEL"
 )
 
 // apiKeyEnvCandidates returns the env var names checked for the given
@@ -150,6 +183,31 @@ func azureFieldEnvCandidates(field string) []string {
 			EnvAzureDeploymentNameAlias,
 			EnvAzureChatDeploymentNameAlias,
 		}
+	case "embedding_deployment":
+		// M5 Wave M5-3: canonical-first precedence on the embedding
+		// deployment name. Only one alias today (Azure Agent Framework
+		// convention) — kept short on purpose so it doesn't collide
+		// with the chat-deployment aliases above when an operator has
+		// both deployments configured.
+		return []string{
+			EnvAzureEmbeddingDeployment,
+			EnvAzureEmbeddingDeploymentAlias,
+		}
+	case "embedding_api_version":
+		// M5-3: embedding api-version override. No Microsoft-documented
+		// alias because the official samples reuse the bare
+		// AZURE_OPENAI_API_VERSION for both deployments (which is
+		// already covered by azureFieldEnvCandidates("api_version"));
+		// this override exists only for operators who deliberately
+		// diverge embedding from chat (one preview, one GA).
+		return []string{EnvAzureEmbeddingAPIVersion}
+	case "embedding_model":
+		// M5-3: optional canonical embedding model name (used for
+		// Capabilities.EmbeddingDimensions lookup). No alias —
+		// Microsoft samples do not standardise on an env var for the
+		// embedding model identifier; we expose only the sbomhub
+		// canonical form.
+		return []string{EnvAzureEmbeddingModel}
 	}
 	return nil
 }
@@ -259,6 +317,18 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 					strings.Join(candidates, ", "), EnvAzureDeployment),
 			}, nil
 		}
+		// M5 Wave M5-3 (issue #51): optional embedding deployment.
+		// Resolved independently of chat — Embed only works when the
+		// embedding deployment is set, but chat (Complete) keeps
+		// working either way. Missing embedding deployment is NOT a
+		// reason to fall through to DisabledProvider here; the
+		// AzureOpenAIProvider returns DisabledError per-call from
+		// Embed instead, so the rest of the product (chat-only AI
+		// features) continues to function.
+		embeddingDeployment, embeddingDeploymentSrc := resolveAzureField("embedding_deployment")
+		embeddingAPIVersion, embeddingAPIVersionSrc := resolveAzureField("embedding_api_version")
+		embeddingModel, embeddingModelSrc := resolveAzureField("embedding_model")
+
 		// Operator observability: log which env each Azure field was
 		// resolved from. The values are not secrets (unlike apiKey) so
 		// it would be safe to log them too, but env names alone are
@@ -268,8 +338,14 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 		slog.Debug("llm: resolved Azure config from env",
 			"endpoint_env", endpointSrc,
 			"deployment_env", deploymentSrc,
-			"api_version_env", apiVersionSrc)
-		return NewAzureOpenAI(apiKey, endpoint, deployment, apiVersion, model), nil
+			"api_version_env", apiVersionSrc,
+			"embedding_deployment_env", embeddingDeploymentSrc,
+			"embedding_api_version_env", embeddingAPIVersionSrc,
+			"embedding_model_env", embeddingModelSrc)
+		return NewAzureOpenAIWithEmbedding(
+			apiKey, endpoint, deployment, apiVersion, model,
+			embeddingDeployment, embeddingAPIVersion, embeddingModel,
+		), nil
 	case "ollama":
 		// M4 Wave M4-1: Local LLM path for manufacturers who cannot
 		// send proprietary code to external APIs. Unlike the BYOK
@@ -291,6 +367,32 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (expected openai|anthropic|gemini|azure_openai|ollama)", providerName)
 	}
+}
+
+// azureEmbeddingFromEnv resolves the Azure embedding deployment /
+// api-version / model trio from env, used by NewProviderFromConfigWithAzure
+// when the per-tenant tenant_llm_config row does not (yet) carry
+// embedding-specific columns. The tenant_llm_config schema as of
+// migration 036 has only azure_endpoint / azure_deployment / ollama_url;
+// embedding columns will require a future migration (M5-x follow-up).
+// Until then, per-tenant Azure providers inherit the server-wide
+// embedding deployment from env — mirrors ollamaBaseURLFromEnv.
+//
+// Returns empty strings when no embedding env is set; the caller passes
+// them through to NewAzureOpenAIWithEmbedding, which interprets an
+// empty embeddingDeployment as "embedding not configured" (Embed
+// returns DisabledError).
+//
+// ※要確認: when sbomhub adds per-tenant Azure embedding (likely M5
+// follow-up), the tenant_llm_config columns should override the env
+// fallback rather than be additive — operators commonly want a single
+// authoritative source per field, and silent env fallback for one
+// tenant's missing column would be a footgun.
+func azureEmbeddingFromEnv() (deployment, apiVersion, modelName string) {
+	deployment, _ = resolveAzureField("embedding_deployment")
+	apiVersion, _ = resolveAzureField("embedding_api_version")
+	modelName, _ = resolveAzureField("embedding_model")
+	return deployment, apiVersion, modelName
 }
 
 // ollamaBaseURLFromEnv reads SBOMHUB_LLM_OLLAMA_URL, falling back to
@@ -404,7 +506,14 @@ func NewProviderFromConfigWithAzure(provider, model, apiKey, azureEndpoint, azur
 		if deployment == "" {
 			return &DisabledProvider{Reason: "tenant_llm_config.azure_deployment is required for azure_openai"}, nil
 		}
-		return NewAzureOpenAI(apiKey, endpoint, deployment, strings.TrimSpace(azureAPIVersion), model), nil
+		// M5-3: per-tenant embedding deployment falls back to env
+		// (tenant_llm_config schema does not yet carry embedding
+		// columns). See azureEmbeddingFromEnv for the rationale.
+		embedDep, embedAPIVer, embedModel := azureEmbeddingFromEnv()
+		return NewAzureOpenAIWithEmbedding(
+			apiKey, endpoint, deployment, strings.TrimSpace(azureAPIVersion), model,
+			embedDep, embedAPIVer, embedModel,
+		), nil
 	case "ollama":
 		// M4 Wave M4-1: Per-tenant Ollama. The model is required (no
 		// auto-detect — see NewProviderFromEnv comment). The base URL
