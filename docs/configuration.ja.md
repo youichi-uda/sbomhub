@@ -52,6 +52,18 @@ AI VEX トリアージ / CRA 報告書ドラフト / 経産省自己評価プリ
 
 `provider=azure_openai` を選んでも endpoint / deployment / API キーのいずれかが未設定の場合は、 graceful に provider が無効化されます (他の機能はそのまま動作し、AI 機能のみが off になります)。
 
+##### Azure OpenAI embedding deployment (M5-3)
+
+Azure は embedding (`text-embedding-3-small` / `-3-large` / `text-embedding-ada-002` 等) を chat とは **別 deployment** として登録します。 embedding deployment は **任意** で、 未設定の場合は chat (`Complete`) のみ動作し、 embedding (`Embed`) は per-call で `DisabledError` (HTTP 503) を返します (chat-only 製品挙動には影響しません)。
+
+| 変数 (canonical → alias) | デフォルト | 説明 |
+|--------------------------|----------|------|
+| `SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT` → `AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME` | (空) | embedding deployment 名。 設定すると `Capabilities.SupportsEmbedding` が true になります。 |
+| `SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION` | (chat の `api-version`) | embedding 用 `api-version` 上書き (任意)。 未設定なら chat と同じ値を流用。 |
+| `SBOMHUB_LLM_AZURE_EMBEDDING_MODEL` | (deployment 名から推定) | canonical embedding model 名 (任意)。 `Capabilities.EmbeddingDimensions` lookup 用 (1536 = `text-embedding-3-small` / `ada-002`、 3072 = `text-embedding-3-large`)。 未設定時は deployment 名を sniff、 業務命名の場合は 0 にフォールバック。 |
+
+batching: 1 リクエストあたり最大 2,048 inputs (Azure 公式 hard cap)、 それを超える分は **透過的に複数 HTTP に分割**。 1 call あたり最大 16,384 inputs の安全 cap (F25 DoS 防止) で、 超過は HTTP dispatch 前に reject。 途中 chunk 失敗時は完了済 chunk を破棄して error を返します (partial Vectors の silent 切り詰めを避けるため)。
+
 ### フロントエンド設定
 
 | 変数 | デフォルト | 説明 |
@@ -99,6 +111,10 @@ OPENAI_API_KEY=sk-...
 # SBOMHUB_LLM_AZURE_DEPLOYMENT=my-chat-deployment
 # SBOMHUB_LLM_AZURE_API_VERSION=2024-10-21                      # optional。 デフォルトは GA stable チャネル
 # AZURE_OPENAI_API_KEY=...                                       # または SBOMHUB_LLM_API_KEY
+# 任意: reachability / vector search 用の embedding deployment (M5-3)
+# SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-small-prod
+# SBOMHUB_LLM_AZURE_EMBEDDING_MODEL=text-embedding-3-small      # 任意 canonical embedding model 名 (Capabilities.EmbeddingDimensions)
+# SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION=                      # 任意; 空なら chat の api-version を流用
 
 # ローカル LLM の例 (コードを外部に出さない)
 # SBOMHUB_LLM_PROVIDER=ollama

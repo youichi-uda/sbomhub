@@ -47,10 +47,22 @@ Selecting `SBOMHUB_LLM_PROVIDER=azure_openai` additionally requires the deployme
 | Variable (canonical → aliases) | Default | Description |
 |-------------------------------|---------|-------------|
 | `SBOMHUB_LLM_AZURE_ENDPOINT` → `AZURE_OPENAI_ENDPOINT` | (empty) | Azure resource endpoint URL, e.g. `https://my-resource.openai.azure.com`. |
-| `SBOMHUB_LLM_AZURE_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT_NAME` → `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME` | (empty) | Deployment name as registered in Azure (URL path segment). Three Azure-side aliases are accepted because Microsoft documentation is not internally consistent — pick whichever your existing automation already exports. |
+| `SBOMHUB_LLM_AZURE_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT_NAME` → `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME` | (empty) | Chat deployment name as registered in Azure (URL path segment). Four canonical / alias forms are accepted because Microsoft documentation is not internally consistent — pick whichever your existing automation already exports. |
 | `SBOMHUB_LLM_AZURE_API_VERSION` → `AZURE_OPENAI_API_VERSION` | `2024-10-21` | Azure OpenAI `api-version` query parameter. Defaults to the current GA stable channel; override only if your deployment is pinned to a specific contract version. |
 
 If any of `provider=azure_openai`, endpoint, deployment, or API key is missing, the provider is gracefully disabled (the rest of the product continues to work, AI features turn off).
+
+##### Azure OpenAI embedding deployment (M5-3)
+
+Azure routes embedding requests (`text-embedding-3-small` / `text-embedding-3-large` / `text-embedding-ada-002` / etc.) through their own deployment — a separate URL path segment from the chat deployment. The embedding deployment is **optional**: when unset, chat (Complete) still works and embedding (Embed) returns a "disabled" error per call.
+
+| Variable (canonical → aliases) | Default | Description |
+|-------------------------------|---------|-------------|
+| `SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT` → `AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME` | (empty) | Embedding deployment name. When set, `Capabilities.SupportsEmbedding` flips to true; when unset, `Embed` returns `DisabledError`. |
+| `SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION` | (chat `api-version`) | Optional override for the embedding `api-version` query parameter. Defaults to the chat `api-version` so a single Azure resource pinned to one api-version works without further env. |
+| `SBOMHUB_LLM_AZURE_EMBEDDING_MODEL` | (sniffed from deployment) | Optional canonical embedding model name, used to populate `Capabilities.EmbeddingDimensions` (1536 for `text-embedding-3-small` / `text-embedding-ada-002`, 3072 for `text-embedding-3-large`). When unset, the deployment name is sniffed for a known family prefix; falls back to dimensions = 0 for business-named deployments. |
+
+Request batching: a single `Embed` call accepts up to 2,048 inputs per HTTP request (the Azure documented hard cap); larger batches are chunked transparently into multiple sequential requests. A defense-in-depth safety cap rejects calls with more than 16,384 total inputs before any HTTP traffic is dispatched. Partial-failure semantics: if a mid-batch chunk fails, the entire `Embed` call returns an error and the completed chunks' vectors are discarded (the caller decides whether to retry the whole batch).
 
 ### Frontend Settings
 
@@ -99,6 +111,10 @@ OPENAI_API_KEY=sk-...
 # SBOMHUB_LLM_AZURE_DEPLOYMENT=my-chat-deployment
 # SBOMHUB_LLM_AZURE_API_VERSION=2024-10-21                      # optional; defaults to the GA stable channel
 # AZURE_OPENAI_API_KEY=...                                       # or SBOMHUB_LLM_API_KEY
+# Optional: embedding deployment for reachability / vector search (M5-3)
+# SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-small-prod
+# SBOMHUB_LLM_AZURE_EMBEDDING_MODEL=text-embedding-3-small      # optional canonical model name (Capabilities.EmbeddingDimensions)
+# SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION=                      # optional; falls back to chat api-version
 
 # Local LLM example (no code/SBOM leaves your network)
 # SBOMHUB_LLM_PROVIDER=ollama

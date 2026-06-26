@@ -92,6 +92,9 @@ OPENAI_API_KEY=sk-...
 # SBOMHUB_LLM_AZURE_ENDPOINT=https://my-resource.openai.azure.com
 # SBOMHUB_LLM_AZURE_DEPLOYMENT=my-chat-deployment
 # AZURE_OPENAI_API_KEY=...
+# 任意: reachability / vector search 用の embedding deployment (M5-3)
+# SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-small-prod
+# SBOMHUB_LLM_AZURE_EMBEDDING_MODEL=text-embedding-3-small      # 任意; Capabilities.EmbeddingDimensions 用
 
 # ローカル LLM の例
 # SBOMHUB_LLM_PROVIDER=ollama

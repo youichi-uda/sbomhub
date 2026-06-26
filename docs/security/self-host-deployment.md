@@ -355,6 +355,57 @@ sops --encrypt --age $AGE_RECIPIENT_PUBLIC_KEY .env > .env.enc
 設定値も `.env` / Docker secrets の同じ流儀で管理する。 OSS リポジトリには **絶対に bundled
 key を含めない** (M0 Trust Rescue 9.2 + §20.2 BYOK 制約)。
 
+### 5.5 LLM Provider (Azure OpenAI 用の追加 env、 M5-3)
+
+Azure OpenAI を BYOK で使う場合、 chat と embedding は **別々の deployment** として Azure 側で
+登録する必要がある (Azure OpenAI 公式仕様、 [Microsoft Learn embeddings guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/embeddings))。
+sbomhub は両方の deployment 名を別 env で受ける。 embedding deployment は **任意** で、
+未設定なら chat 経路 (`Complete`) のみ動き、 embedding 経路 (`Embed`) は per-call で
+`DisabledError` (HTTP 503) を返す (chat-only 製品挙動には影響しない)。
+
+```bash
+# 必須 (chat) — M4 で既に整備済
+SBOMHUB_LLM_PROVIDER=azure_openai
+SBOMHUB_LLM_AZURE_ENDPOINT=https://my-resource.openai.azure.com
+SBOMHUB_LLM_AZURE_DEPLOYMENT=gpt-4o-prod                   # chat deployment 名 (URL path)
+SBOMHUB_LLM_MODEL=gpt-4o                                   # canonical chat model 名 (Capabilities / 監査用)
+SBOMHUB_LLM_AZURE_API_VERSION=2024-10-21                   # 任意; 既定は GA stable
+AZURE_OPENAI_API_KEY=...                                   # または SBOMHUB_LLM_API_KEY
+
+# 任意 (embedding、 M5-3 で追加)
+SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT=text-embed-3-small-prod   # embedding deployment 名 (URL path)
+SBOMHUB_LLM_AZURE_EMBEDDING_MODEL=text-embedding-3-small         # 任意 canonical embedding model 名
+SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION=                         # 任意; 空なら chat の api-version を流用
+```
+
+Microsoft 公式 doc 互換の alias も認識する (sbomhub canonical env が優先):
+
+- `AZURE_OPENAI_ENDPOINT` (= `SBOMHUB_LLM_AZURE_ENDPOINT`)
+- `AZURE_OPENAI_API_VERSION` (= `SBOMHUB_LLM_AZURE_API_VERSION`)
+- `AZURE_OPENAI_DEPLOYMENT` / `AZURE_OPENAI_DEPLOYMENT_NAME` / `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME` (= `SBOMHUB_LLM_AZURE_DEPLOYMENT`)
+- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME` (= `SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT`、 M5-3)
+
+embedding batching:
+
+- 1 リクエストあたり最大 2,048 inputs (Azure 公式 hard cap)、 超過分は **透過的に複数 HTTP に分割**。
+- 安全 cap 16,384 inputs/call (F25 DoS 防止)、 超過は HTTP dispatch 前に即 reject。
+- 途中 chunk 失敗時は **完了済 chunk を破棄して error 返却** (partial Vectors の silent 切り詰めを避ける)。
+
+embedding deployment を立てる代表例 (Azure Portal / `az` CLI):
+
+```bash
+# 1) Azure portal で OpenAI resource に "Deployments" を 2 つ作る:
+#    - gpt-4o-prod                  (chat、 base model = gpt-4o)
+#    - text-embed-3-small-prod      (embedding、 base model = text-embedding-3-small)
+# 2) 両方の deployment が "Active" になるのを確認してから .env を更新
+```
+
+未対応 / scope 外:
+
+- per-tenant Azure embedding (`tenant_llm_config` に embedding 列がまだ無いため、 server-wide env で共有)。
+  per-tenant が必要なら M5 follow-up migration で `azure_embedding_deployment` 列追加 → repository / handler の対応が必要。
+- `dimensions` request パラメータ (text-embedding-3-{small,large} で vector を 256〜3072 で切詰めできる) は未対応。
+
 ---
 
 ## 6. TLS termination
