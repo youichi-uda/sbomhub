@@ -38,19 +38,21 @@ type fakeMetiStore struct {
 	// criterion) lookup the handler uses is exercised faithfully —
 	// adding a stray tenant_id mismatch row exposes any handler-side
 	// scoping regression.
-	byKey   map[string]repository.MetiAssessment
-	listErr error
-	getErr  error
-	overErr error
-	upsErr  error
-	cntErr  error
+	byKey    map[string]repository.MetiAssessment
+	listErr  error
+	getErr   error
+	overErr  error
+	upsErr   error
+	cntErr   error
+	clearErr error
 
-	upserts        []repository.MetiAssessment
-	overrides      []repository.MetiAssessmentOverrideInput
-	overrideCalls  int
-	lastFilter     repository.MetiAssessmentListFilter
-	listCalled     bool
-	countCalled    bool
+	upserts       []repository.MetiAssessment
+	overrides     []repository.MetiAssessmentOverrideInput
+	overrideCalls int
+	clearCalls    int
+	lastFilter    repository.MetiAssessmentListFilter
+	listCalled    bool
+	countCalled   bool
 }
 
 func newFakeMetiStore() *fakeMetiStore {
@@ -200,6 +202,31 @@ func (f *fakeMetiStore) OverrideStatus(_ context.Context, tenantID, projectID uu
 	r.UpdatedAt = at
 	f.byKey[metiKey(projectID, criterionID)] = r
 	f.overrides = append(f.overrides, upd)
+	return nil
+}
+
+func (f *fakeMetiStore) ClearOverride(_ context.Context, tenantID, projectID uuid.UUID, criterionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clearCalls++
+	if f.clearErr != nil {
+		return f.clearErr
+	}
+	r, ok := f.byKey[metiKey(projectID, criterionID)]
+	if !ok || r.TenantID != tenantID {
+		return fmt.Errorf("clear meti_assessments override: %w", sql.ErrNoRows)
+	}
+	// State-machine guard mirror: real repo's WHERE override_status
+	// IS NOT NULL clause matches zero rows for a non-overridden row.
+	if r.OverrideStatus == "" {
+		return fmt.Errorf("clear meti_assessments override: %w", sql.ErrNoRows)
+	}
+	r.OverrideStatus = ""
+	r.OverrideBy = nil
+	r.OverrideAt = nil
+	r.OverrideNote = ""
+	r.UpdatedAt = time.Now().UTC()
+	f.byKey[metiKey(projectID, criterionID)] = r
 	return nil
 }
 
@@ -1168,5 +1195,185 @@ func TestMetiHandler_Override_ValidNote_Accepted_F34(t *testing.T) {
 	post := h.store.byKey[metiKey(h.projectID, realCriterionID)]
 	if post.OverrideNote != "vendor confirmed via signed advisory 2026-06-24" {
 		t.Errorf("F34: persisted note mismatch: %q", post.OverrideNote)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F33 — DELETE clear-override endpoint
+// ----------------------------------------------------------------------------
+
+// TestMetiHandler_ClearOverride_Success_F33 pins the happy path:
+// DELETE /override on a row with a prior override clears the
+// override_* lifecycle fields, leaves the evaluator-owned columns
+// alone, and emits a `meti_assessment_override_cleared` audit row.
+// Without this verb (M3 review #F33), an erroneous override is a
+// one-way trip that continues to win in Evidence Pack output with no
+// way to correct it.
+func TestMetiHandler_ClearOverride_Success_F33(t *testing.T) {
+	h := newMetiHarness()
+	seeded := h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	// Flip the seeded row to an overridden state we then clear.
+	seeded.OverrideStatus = criteria.StatusAchieved
+	by := h.userID
+	seeded.OverrideBy = &by
+	at := time.Now().UTC()
+	seeded.OverrideAt = &at
+	seeded.OverrideNote = "previous override that turned out to be wrong"
+	h.store.byKey[metiKey(h.projectID, realCriterionID)] = seeded
+
+	body, _ := json.Marshal(metiClearOverrideRequest{
+		Note: "re-evaluated, original override was wrong",
+	})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.ClearOverride(c); err != nil {
+		t.Fatalf("ClearOverride returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F33: clear status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.clearCalls != 1 {
+		t.Errorf("F33: ClearOverride call count = %d, want 1", h.store.clearCalls)
+	}
+	post := h.store.byKey[metiKey(h.projectID, realCriterionID)]
+	if post.OverrideStatus != "" || post.OverrideBy != nil || post.OverrideNote != "" || post.OverrideAt != nil {
+		t.Errorf("F33: override fields not cleared: %+v", post)
+	}
+	// Evaluator-owned status preserved.
+	if post.Status != criteria.StatusNeedsReview {
+		t.Errorf("F33: evaluator status corrupted by clear: %q", post.Status)
+	}
+	if got := len(h.audit.entries); got != 1 {
+		t.Fatalf("F33: audit entry count = %d, want 1", got)
+	}
+	entry := h.audit.entries[0]
+	if entry.Action != AuditActionMetiAssessmentOverrideCleared {
+		t.Errorf("F33: audit action = %q, want %q", entry.Action, AuditActionMetiAssessmentOverrideCleared)
+	}
+	if entry.ResourceType != ResourceTypeMetiAssessment {
+		t.Errorf("F33: audit resource_type = %q, want %q", entry.ResourceType, ResourceTypeMetiAssessment)
+	}
+	if entry.Details["prior_override_status"] != criteria.StatusAchieved {
+		t.Errorf("F33: prior_override_status in audit details = %v, want %q", entry.Details["prior_override_status"], criteria.StatusAchieved)
+	}
+}
+
+// TestMetiHandler_ClearOverride_NoOverride_F33 pins the 404 response
+// when the row has no override to clear. Same generic body as
+// "criterion id unknown" / "row missing" so the response is not an
+// oracle for override state.
+func TestMetiHandler_ClearOverride_NoOverride_F33(t *testing.T) {
+	h := newMetiHarness()
+	// Row exists but has never been overridden.
+	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+
+	body, _ := json.Marshal(metiClearOverrideRequest{Note: "clearing"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.ClearOverride(c); err != nil {
+		t.Fatalf("ClearOverride returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F33: no-override status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.clearCalls != 0 {
+		t.Errorf("F33: ClearOverride MUST NOT run when no override exists, got %d", h.store.clearCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F33: audit row MUST NOT be emitted when clear is rejected, got %d", len(h.audit.entries))
+	}
+}
+
+// TestMetiHandler_ClearOverride_RequiresWrite_F33 pins the
+// RequireWrite role guard at the handler layer (defence in depth on
+// top of the middleware). A read-only API key cannot drop an
+// override.
+func TestMetiHandler_ClearOverride_RequiresWrite_F33(t *testing.T) {
+	h := newMetiHarness()
+	seeded := h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	seeded.OverrideStatus = criteria.StatusAchieved
+	by := h.userID
+	seeded.OverrideBy = &by
+	h.store.byKey[metiKey(h.projectID, realCriterionID)] = seeded
+
+	body, _ := json.Marshal(metiClearOverrideRequest{Note: "clearing"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleViewer)
+
+	if err := h.handler.ClearOverride(c); err != nil {
+		t.Fatalf("ClearOverride returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("F33: read-only clear status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.clearCalls != 0 {
+		t.Errorf("F33: ClearOverride MUST NOT run for read-only role, got %d", h.store.clearCalls)
+	}
+}
+
+// TestMetiHandler_ClearOverride_RequireNote_F33 pins the F33+F34
+// requirement that the clear request body carries a non-empty note.
+// Without this, an operator could drop an override silently — exactly
+// the gap F33 is closing.
+func TestMetiHandler_ClearOverride_RequireNote_F33(t *testing.T) {
+	h := newMetiHarness()
+	seeded := h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	seeded.OverrideStatus = criteria.StatusAchieved
+	by := h.userID
+	seeded.OverrideBy = &by
+	h.store.byKey[metiKey(h.projectID, realCriterionID)] = seeded
+
+	body, _ := json.Marshal(metiClearOverrideRequest{Note: ""})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.ClearOverride(c); err != nil {
+		t.Fatalf("ClearOverride returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F33: empty-note status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "override_note is required") {
+		t.Errorf("F33: 400 body should mention 'override_note is required'; got %s", rec.Body.String())
+	}
+	if h.store.clearCalls != 0 {
+		t.Errorf("F33: ClearOverride MUST NOT run when note is rejected, got %d", h.store.clearCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F33: audit row MUST NOT be emitted when note is rejected, got %d", len(h.audit.entries))
 	}
 }

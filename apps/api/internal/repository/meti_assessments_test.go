@@ -845,6 +845,94 @@ func TestMetiAssessmentsRepo_OverrideStatus_AlreadyOverridden_F31(t *testing.T) 
 	}
 }
 
+// TestMetiAssessmentsRepo_ClearOverride_Success_F33 pins the M3
+// Codex review #F33 fix: the ClearOverride UPDATE drops the override_*
+// lifecycle fields when the row currently carries an override, and
+// leaves the evaluator-owned columns + improvement_action alone. The
+// test also pins the SQL ordering: tenant_id at $1, project_id at $2,
+// criterion_id at $3 (the composite key the M3-4 handler holds), and
+// the `AND override_status IS NOT NULL` state-machine guard literal.
+func TestMetiAssessmentsRepo_ClearOverride_Success_F33(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewMetiAssessmentsRepository(db)
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	mock.ExpectExec(`UPDATE meti_assessments SET[\s\S]+override_status = NULL[\s\S]+override_by\s*= NULL[\s\S]+override_at\s*= NULL[\s\S]+override_note\s*= NULL[\s\S]+WHERE tenant_id = \$1 AND project_id = \$2 AND criterion_id = \$3[\s\S]+AND override_status IS NOT NULL`).
+		WithArgs(tenantID, projectID, "ENV-SBOM-001").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.ClearOverride(context.Background(), tenantID, projectID, "ENV-SBOM-001"); err != nil {
+		t.Fatalf("ClearOverride: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("F33: SQL expectation not met: %v", err)
+	}
+}
+
+// TestMetiAssessmentsRepo_ClearOverride_NoOverride_F33 pins the
+// state-machine guard: when the row currently has no override
+// (override_status IS NULL), the UPDATE WHERE clause matches zero
+// rows and the repository returns wrapped sql.ErrNoRows so the
+// handler can surface a 404 ("no override to clear") instead of a
+// silent no-op. Mirrors the F31 pattern on OverrideStatus.
+func TestMetiAssessmentsRepo_ClearOverride_NoOverride_F33(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewMetiAssessmentsRepository(db)
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	mock.ExpectExec(`UPDATE meti_assessments SET[\s\S]+WHERE tenant_id = \$1 AND project_id = \$2 AND criterion_id = \$3[\s\S]+AND override_status IS NOT NULL`).
+		WithArgs(tenantID, projectID, "C1").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err = repo.ClearOverride(context.Background(), tenantID, projectID, "C1")
+	if err == nil {
+		t.Fatal("F33: expected sql.ErrNoRows when no override to clear, got nil")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("F33: expected wrapped sql.ErrNoRows, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("F33: SQL guard expectation not met: %v", err)
+	}
+}
+
+// TestMetiAssessmentsRepo_ClearOverride_RejectsZero pins the per-
+// argument fail-fast on the composite key. Mirrors the OverrideStatus
+// fail-fast.
+func TestMetiAssessmentsRepo_ClearOverride_RejectsZero(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewMetiAssessmentsRepository(db)
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	if err := repo.ClearOverride(context.Background(), uuid.Nil, projectID, "C1"); err == nil {
+		t.Fatal("F33: expected error for zero tenant_id, got nil")
+	}
+	if err := repo.ClearOverride(context.Background(), tenantID, uuid.Nil, "C1"); err == nil {
+		t.Fatal("F33: expected error for zero project_id, got nil")
+	}
+	if err := repo.ClearOverride(context.Background(), tenantID, projectID, ""); err == nil {
+		t.Fatal("F33: expected error for empty criterion_id, got nil")
+	}
+}
+
 // TestMetiAssessment_JSONShape pins the wire JSON tags. M1 F28 fix
 // regression: the Web UI relies on snake_case keys; a missing or
 // renamed tag would silently break the /meti/assessment page. We do

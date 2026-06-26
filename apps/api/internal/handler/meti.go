@@ -67,7 +67,7 @@ const (
 	MaxMetiAssessmentsListOffset    = 10000
 )
 
-// Audit actions emitted by the METI handler. Both verbs are
+// Audit actions emitted by the METI handler. All three verbs are
 // product-specific (no existing model.Action* constant covers them)
 // so they live alongside the handler — same rationale as
 // AuditActionCRAReportDecided in cra_reports.go.
@@ -79,16 +79,26 @@ const (
 	AuditActionMetiAssessmentRefreshed = "meti_assessment_refreshed"
 
 	// AuditActionMetiAssessmentOverridden is emitted by /override when the
-	// operator's manual verdict is applied. Re-overrides (clear-then-set)
-	// will get their own clear-override action verb when that handler
-	// path lands (M4 follow-up — see the F31 guard comment below).
+	// operator's manual verdict is applied. Clear-then-re-override goes
+	// through the DELETE override handler path
+	// (AuditActionMetiAssessmentOverrideCleared) so each transition
+	// emits its own audit_logs row.
 	AuditActionMetiAssessmentOverridden = "meti_assessment_overridden"
 
-	// ResourceTypeMetiAssessment is the audit_logs.resource_type for both
-	// refresh and override audit rows. The resource_id is the
-	// meti_assessments.id (refresh emits one row covering the whole
-	// project fan-out; override emits one row per criterion the operator
-	// touched).
+	// AuditActionMetiAssessmentOverrideCleared is emitted by DELETE
+	// /override when the operator clears a prior manual override (M3
+	// Codex review #F33 — without this verb, an erroneous override is
+	// a one-way trip that continues to win in dashboard + Evidence Pack
+	// output). The audit row carries the prior override_status, the
+	// prior override_by, and the operator-supplied clear note in
+	// details so an auditor can reconstruct who corrected what.
+	AuditActionMetiAssessmentOverrideCleared = "meti_assessment_override_cleared"
+
+	// ResourceTypeMetiAssessment is the audit_logs.resource_type for the
+	// refresh / override / override-cleared audit rows. The resource_id
+	// is the meti_assessments.id (refresh emits one row covering the
+	// whole project fan-out; override / clear emit one row per criterion
+	// the operator touched).
 	// ※要確認: lift into internal/model/audit.go alongside the action verbs.
 	ResourceTypeMetiAssessment = "meti_assessment"
 )
@@ -103,6 +113,7 @@ type MetiAssessmentStore interface {
 	ListByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.MetiAssessmentListFilter) ([]repository.MetiAssessment, error)
 	CountByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.MetiAssessmentListFilter) (int, error)
 	OverrideStatus(ctx context.Context, tenantID, projectID uuid.UUID, criterionID string, upd repository.MetiAssessmentOverrideInput) error
+	ClearOverride(ctx context.Context, tenantID, projectID uuid.UUID, criterionID string) error
 }
 
 // MetiEvaluator is the subset of *metisvc.Evaluator the refresh
@@ -211,6 +222,16 @@ type metiOverrideRequest struct {
 	OverrideStatus    string  `json:"override_status"`              // required: achieved | not_achieved | needs_review | not_applicable
 	OverrideNote      string  `json:"override_note"`                // required: 1..4096 chars after trim (#F34)
 	ImprovementAction *string `json:"improvement_action,omitempty"` // optional remediation plan
+}
+
+// metiClearOverrideRequest captures the operator's clear-override
+// request body. The note is the operator's rationale for the clear
+// ("re-evaluated, the original override was wrong") and is persisted
+// in the audit_logs row so an auditor can reconstruct the correction
+// (M3 Codex review #F33 — without this verb, an erroneous override is
+// a one-way trip that continues to win in Evidence Pack output).
+type metiClearOverrideRequest struct {
+	Note string `json:"note"` // required: 1..4096 chars after trim
 }
 
 // metiImprovementAction is one row of the improvement-actions response.
@@ -611,6 +632,199 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 			prior.ImprovementAction = *req.ImprovementAction
 		}
 		prior.OverrideNote = req.OverrideNote
+		return c.JSON(http.StatusOK, prior)
+	}
+	return c.JSON(http.StatusOK, fresh)
+}
+
+// ----------------------------------------------------------------------------
+// DELETE /api/v1/projects/:id/meti/assessment/:criterion_id/override
+// ----------------------------------------------------------------------------
+
+// ClearOverride drops a prior operator override on a meti_assessments
+// row (M3 Codex review #F33). Without this verb, an erroneous manual
+// override is effectively a one-way trip: it continues to win over the
+// evaluator's verdict in /meti/assessment, /meti/improvement-actions,
+// and the Evidence Pack METI section with no way to correct it through
+// the public API/CLI.
+//
+// Contract:
+//   - Request body: {"note": "..."} — the operator's rationale for the
+//     clear, REQUIRED (same 1..MaxMetiOverrideNoteLen bounds as the
+//     /override note). Persisted in the audit row so an auditor can
+//     reconstruct the correction.
+//   - 404 (generic body, no oracle) when (tenant, project, criterion)
+//     does not match an existing row OR the row exists but has no
+//     override to clear. "Nothing to undo" is the same shape as "row
+//     not found" so the response is not a probe oracle for prior
+//     override state.
+//   - 409 only fires from the TOCTOU path (the repository UPDATE found
+//     zero rows after the pre-load said the row was overridden) — a
+//     concurrent clear / re-override happened between Get and the
+//     UPDATE.
+//
+// Audit-or-nothing (F5 / F32): the audit row is mandatory. If it
+// fails, return 500 so the ambient TenantTx rolls back the
+// ClearOverride UPDATE. Without that link, an operator could silently
+// drop an override without leaving a compliance trail.
+func (h *MetiHandler) ClearOverride(c echo.Context) error {
+	tc := middleware.NewTenantContext(c)
+	if tc == nil || tc.TenantID() == uuid.Nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	if !tc.CanWrite() {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "write permission required"})
+	}
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+	criterionID := c.Param("criterion_id")
+	if criterionID == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "criterion_id is required"})
+	}
+	// F26 carry-over: bound criterion_id to the production catalog so a
+	// probe caller cannot enumerate the meti_assessments table by
+	// triggering distinct error shapes for known vs unknown criteria.
+	if _, ok := metisvc.GetCriterion(criterionID); !ok {
+		slog.Warn("meti_assessments: unknown criterion id (clear-override)",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+		)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "meti assessment not found"})
+	}
+
+	var req metiClearOverrideRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	cleanedNote, status, body := validateMetiOverrideNote(req.Note)
+	if status != 0 {
+		slog.Warn("meti_assessments: clear-override rejected; note failed validation (F33/F34)",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+			"raw_note_len", len(req.Note),
+		)
+		return c.JSON(status, body)
+	}
+
+	uid := userIDOrNil(tc)
+	if uid == nil {
+		// Mirrors OverrideAssessment: an audited clear must be tied to a
+		// real user identity.
+		return c.JSON(http.StatusForbidden, map[string]string{
+			"error": "user identity required to clear a meti assessment override (audit trail)",
+		})
+	}
+
+	// Pre-load: confirm the row exists AND currently carries an
+	// override. The repository UPDATE also guards against the "no
+	// override" case (WHERE override_status IS NOT NULL) — the pre-load
+	// here gives us the prior override metadata for the audit row.
+	prior, err := h.store.Get(c.Request().Context(), tc.TenantID(), projectID, criterionID)
+	if err != nil {
+		slog.Warn("meti_assessments: pre-clear load failed",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+			"error", err,
+		)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load meti assessment"})
+	}
+	if prior == nil || prior.OverrideStatus == "" {
+		// Same generic 404 shape so the response is not an oracle for
+		// override state. slog distinguishes the two reasons.
+		slog.Warn("meti_assessments: clear-override rejected; no override to clear",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+			"row_exists", prior != nil,
+		)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "meti assessment override not found"})
+	}
+
+	priorOverrideStatus := prior.OverrideStatus
+	var priorOverrideBy string
+	if prior.OverrideBy != nil {
+		priorOverrideBy = prior.OverrideBy.String()
+	}
+
+	if err := h.store.ClearOverride(c.Request().Context(), tc.TenantID(), projectID, criterionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// TOCTOU: a concurrent request cleared / re-overrode between
+			// our Get and this UPDATE. 409 (not 404) so the operator can
+			// distinguish a race from "nothing was there".
+			slog.Warn("meti_assessments: clear-override rejected via state-machine guard (TOCTOU)",
+				"tenant_id", tc.TenantID(),
+				"project_id", projectID,
+				"criterion_id", criterionID,
+			)
+			return c.JSON(http.StatusConflict, map[string]string{
+				"error": "meti assessment override changed concurrently; reload and try again",
+			})
+		}
+		slog.Warn("meti_assessments: ClearOverride failed",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+			"error", err,
+		)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to clear meti assessment override"})
+	}
+
+	// Audit-or-nothing (F5 / F32): hard-fail on audit failure so
+	// TenantTx rolls back the clear. An "override cleared but audit
+	// lost" outcome would silently let an operator drop an override
+	// without leaving the required compliance trail — exactly the gap
+	// F33 calls out.
+	resourceID := prior.ID
+	tenantID := tc.TenantID()
+	auditDetails := map[string]interface{}{
+		"project_id":            projectID.String(),
+		"criterion_id":          criterionID,
+		"criterion_phase":       prior.CriterionPhase,
+		"prior_status":          prior.Status,
+		"prior_override_status": priorOverrideStatus,
+		"prior_override_by":     priorOverrideBy,
+		"clear_note_len":        len(cleanedNote),
+	}
+	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
+		TenantID:     &tenantID,
+		UserID:       uid,
+		Action:       AuditActionMetiAssessmentOverrideCleared,
+		ResourceType: ResourceTypeMetiAssessment,
+		ResourceID:   &resourceID,
+		Details:      auditDetails,
+		IPAddress:    c.RealIP(),
+		UserAgent:    c.Request().UserAgent(),
+	}); err != nil {
+		slog.Error("meti_assessments: domain audit log failed; rolling back clear (F5/F32 audit-or-nothing)",
+			"tenant_id", tenantID, "project_id", projectID, "criterion_id", criterionID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to persist meti assessment override-cleared audit trail; clear rolled back",
+		})
+	}
+
+	// Reload so the response reflects the post-clear state (override_*
+	// fields nulled, updated_at moved). Mirrors the OverrideAssessment
+	// post-write reload.
+	fresh, err := h.store.Get(c.Request().Context(), tc.TenantID(), projectID, criterionID)
+	if err != nil || fresh == nil {
+		slog.Warn("meti_assessments: post-clear reload failed",
+			"tenant_id", tc.TenantID(),
+			"project_id", projectID,
+			"criterion_id", criterionID,
+			"error", err,
+		)
+		// Clear + audit have already committed; we just cannot reload.
+		// Synthesise the cleared shape from prior so the client gets
+		// actionable data instead of a 500.
+		prior.OverrideStatus = ""
+		prior.OverrideBy = nil
+		prior.OverrideAt = nil
+		prior.OverrideNote = ""
 		return c.JSON(http.StatusOK, prior)
 	}
 	return c.JSON(http.StatusOK, fresh)

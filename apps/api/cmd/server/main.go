@@ -1040,6 +1040,20 @@ func main() {
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
+	// M3 Codex review #F33: DELETE override is the operator's only
+	// audited correction path for an erroneous override. Without it,
+	// the manual verdict is a one-way trip that continues to win in
+	// dashboard + Evidence Pack output. Same middleware chain as the
+	// PUT override sibling (write-only, rate-limited, tx-wrapped,
+	// request-level audit) so the F5/F32 audit-or-nothing contract
+	// the handler relies on still holds.
+	e.DELETE("/api/v1/projects/:id/meti/assessment/:criterion_id/override",
+		metiHandler.ClearOverride,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	e.GET("/api/v1/projects/:id/meti/improvement-actions",
 		metiHandler.ListImprovementActions,
 		triageMultiAuth,

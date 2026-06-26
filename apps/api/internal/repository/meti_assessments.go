@@ -500,6 +500,77 @@ func (r *MetiAssessmentsRepository) OverrideStatus(ctx context.Context, tenantID
 	return nil
 }
 
+// ClearOverride drops a prior operator override on a meti_assessments
+// row, atomically guarded so only an already-overridden row is
+// touched (M3 Codex review #F33 — without a clear path, an erroneous
+// manual override is effectively a one-way trip that continues to win
+// in dashboard + Evidence Pack output).
+//
+// The evaluator-owned fields (status / evidence / evaluator_version /
+// evaluated_at) and improvement_action are preserved UNCONDITIONALLY
+// — clearing the override does not erase the operator's remediation
+// plan or re-run the evaluator. updated_at moves to NOW().
+//
+// State-machine guard (M3 mirror of F31 pattern): the UPDATE WHERE
+// carries `AND override_status IS NOT NULL` so a row with no override
+// (or one that was cleared by a concurrent request between a
+// handler's pre-load and this call) matches zero rows. We surface a
+// wrapped sql.ErrNoRows so the handler can map the no-op to a 404
+// (no override to clear) or 409 (TOCTOU race) without parsing pq
+// codes — same return contract as OverrideStatus.
+//
+// Validation:
+//   - tenantID / projectID / criterionID must all be set.
+//
+// The audit row is the handler's responsibility — this repository
+// method is intentionally narrow (just the UPDATE) so the handler
+// captures the prior override metadata (override_by, override_at,
+// override_note) from a pre-load before calling here, and writes
+// them into the audit_logs row.
+func (r *MetiAssessmentsRepository) ClearOverride(ctx context.Context, tenantID, projectID uuid.UUID, criterionID string) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("MetiAssessmentsRepository.ClearOverride: tenant_id is required")
+	}
+	if projectID == uuid.Nil {
+		return fmt.Errorf("MetiAssessmentsRepository.ClearOverride: project_id is required")
+	}
+	if criterionID == "" {
+		return fmt.Errorf("MetiAssessmentsRepository.ClearOverride: criterion_id is required")
+	}
+
+	// State-machine guard: WHERE override_status IS NOT NULL. A row
+	// with no override (already cleared, or never overridden) matches
+	// zero rows and we return wrapped sql.ErrNoRows. The literal NULL
+	// predicate is intentionally inline (not a bind parameter) so the
+	// argument count stays predictable and the mock-based unit tests do
+	// not have to add a placeholder. Mirrors the M2 #F31 pattern used
+	// by OverrideStatus.
+	const query = `
+		UPDATE meti_assessments SET
+			override_status = NULL,
+			override_by     = NULL,
+			override_at     = NULL,
+			override_note   = NULL,
+			updated_at      = NOW()
+		WHERE tenant_id = $1 AND project_id = $2 AND criterion_id = $3
+		  AND override_status IS NOT NULL
+	`
+
+	res, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID, criterionID)
+	if err != nil {
+		return fmt.Errorf("clear meti_assessments override: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("clear meti_assessments override (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		// Same shape as sql.ErrNoRows so handlers can errors.Is-check.
+		return fmt.Errorf("clear meti_assessments override: %w", sql.ErrNoRows)
+	}
+	return nil
+}
+
 // buildMetiAssessmentWhere is the shared WHERE-clause builder for
 // ListByProject and CountByProject. Returning the (where, args) pair
 // keeps the two queries adjudicated on identical WHERE shapes, which
