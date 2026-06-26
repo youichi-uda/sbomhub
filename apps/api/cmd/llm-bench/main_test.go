@@ -519,11 +519,22 @@ func TestRunBench_JSONLWriteFailure_F43(t *testing.T) {
 // runBench returns (i.e. after the bench's wg.Wait) so a happens-before
 // edge already exists, but atomic.Int32 keeps the race detector quiet
 // for any in-flight read.
+//
+// F51 fix: enteredBarrier (optional) is a WaitGroup that Complete
+// Done()s on entry, so a coordinating gated fast provider can be sure
+// every blocking goroutine is parked on <-ctx.Done() BEFORE its own
+// canned response triggers the JSONL write failure + cancelRun(). The
+// original F49 test did not have this barrier, so it was scheduler-
+// timing dependent: the fast provider could finish + write its JSONL
+// row + trigger cancellation BEFORE any blocking goroutine entered
+// Complete, leaving started=0 and the assertion `started==0` firing
+// as a flake.
 type ctxAwareBlockingProvider struct {
 	name           string
 	model          string
 	started        atomic.Int32
 	cancelObserved atomic.Int32
+	enteredBarrier *sync.WaitGroup // optional: Done() on entry to Complete (F51).
 }
 
 var _ llm.Provider = (*ctxAwareBlockingProvider)(nil)
@@ -537,9 +548,63 @@ func (p *ctxAwareBlockingProvider) Embed(_ context.Context, _ llm.EmbedRequest) 
 
 func (p *ctxAwareBlockingProvider) Complete(ctx context.Context, _ llm.CompleteRequest) (*llm.CompleteResponse, error) {
 	p.started.Add(1)
+	if p.enteredBarrier != nil {
+		// Signal entry to the gated fast provider. Done MUST happen
+		// AFTER started.Add so that the moment the barrier is satisfied
+		// every released fast goroutine sees the same `started` count.
+		p.enteredBarrier.Done()
+	}
 	<-ctx.Done()
 	p.cancelObserved.Add(1)
 	return nil, ctx.Err()
+}
+
+// barrierGatedProvider wraps a Provider so its Complete waits for a
+// sync.WaitGroup barrier to drain to zero before delegating to the
+// inner provider. The F51 cancellation regression test uses this to
+// coordinate the fast (JSONL-write-trigger) provider with the slow
+// blocking provider: the fast provider only "returns" once every
+// blocking goroutine has entered Complete and is parked on
+// <-ctx.Done(), so the subsequent JSONL write failure + cancelRun()
+// has a deterministic reach into the blocking goroutines (the
+// assertion `cancelObserved == started` is no longer a race against
+// the scheduler).
+//
+// The barrier wait is itself ctx-cancellable so an unexpected outer
+// cancellation does not hang the wait goroutine indefinitely.
+type barrierGatedProvider struct {
+	inner   llm.Provider
+	barrier *sync.WaitGroup
+}
+
+var _ llm.Provider = (*barrierGatedProvider)(nil)
+
+func (b *barrierGatedProvider) Name() string                  { return b.inner.Name() }
+func (b *barrierGatedProvider) Model() string                 { return b.inner.Model() }
+func (b *barrierGatedProvider) Capabilities() llm.Capabilities { return b.inner.Capabilities() }
+func (b *barrierGatedProvider) Embed(ctx context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	return b.inner.Embed(ctx, req)
+}
+
+func (b *barrierGatedProvider) Complete(ctx context.Context, req llm.CompleteRequest) (*llm.CompleteResponse, error) {
+	if b.barrier != nil {
+		ready := make(chan struct{})
+		go func() {
+			b.barrier.Wait()
+			close(ready)
+		}()
+		select {
+		case <-ready:
+			// Barrier satisfied — every coordinating peer has entered
+			// its own Complete. Safe to fall through and return our
+			// canned response.
+		case <-ctx.Done():
+			// Outer cancellation while we were waiting — bail out so
+			// the bench goroutine returns rather than hanging.
+			return nil, ctx.Err()
+		}
+	}
+	return b.inner.Complete(ctx, req)
 }
 
 // TestRunBench_F43_CancellationReachesProviders is the F49 regression
@@ -569,6 +634,19 @@ func (p *ctxAwareBlockingProvider) Complete(ctx context.Context, _ llm.CompleteR
 // The race detector additionally checks for goroutine-level data races
 // and (indirectly, via wg.Wait inside runBench) verifies the bench
 // does not leak goroutines past its return.
+//
+// F51 fix: the original F49 test was scheduler-timing dependent. The
+// fast provider could finish + write its JSONL row + trigger
+// cancelRun() BEFORE any blocking goroutine entered Complete, leaving
+// started=0 and firing the `started == 0` assertion as a flake. The
+// fix wires a sync.WaitGroup barrier between the blocking provider
+// (which Done()s on entry to Complete) and a barrierGatedProvider
+// wrapping the fast provider (which Wait()s for the barrier to drain
+// to zero before returning its canned response). Now by the time the
+// fast provider triggers the JSONL write failure, EVERY blocking
+// goroutine is guaranteed to be parked on <-ctx.Done(), so cancelRun()
+// always reaches all of them and started == cancelObserved == len(cases)
+// deterministically.
 func TestRunBench_F43_CancellationReachesProviders(t *testing.T) {
 	cases := []EvalCase{
 		{
@@ -591,12 +669,22 @@ func TestRunBench_F43_CancellationReachesProviders(t *testing.T) {
 		},
 	}
 
-	// The fast provider returns immediately so the JSONL writer is
+	// F51: a sync.WaitGroup barrier sized to the number of blocking
+	// (provider, case) pairs. Each blocking Complete entry Done()s once;
+	// the fast provider Wait()s for the counter to reach zero before
+	// returning its canned response. This makes the test deterministic
+	// regardless of scheduler timing.
+	barrier := &sync.WaitGroup{}
+	barrier.Add(len(cases))
+
+	// The fast provider returns canned responses so the JSONL writer is
 	// actually exercised — without at least one finished call, no write
 	// is attempted, no error is captured, and runBench would block
-	// waiting on the blocking provider forever.
+	// waiting on the blocking provider forever. It is wrapped with
+	// barrierGatedProvider so it only "returns" after every blocking
+	// goroutine has entered Complete.
 	respJSON := `{"state":"not_affected","confidence":0.9,"evidence":[{"kind":"llm_rationale","description":"x","source":"llm"}]}`
-	fast := &fakeProvider{
+	fastInner := &fakeProvider{
 		name: "fast", model: "fast-model",
 		responses: map[string]string{
 			"CVE-2024-0001": respJSON,
@@ -604,7 +692,13 @@ func TestRunBench_F43_CancellationReachesProviders(t *testing.T) {
 			"CVE-2024-0003": respJSON,
 		},
 	}
-	blocking := &ctxAwareBlockingProvider{name: "blocking", model: "blocking-model"}
+	fast := &barrierGatedProvider{inner: fastInner, barrier: barrier}
+
+	blocking := &ctxAwareBlockingProvider{
+		name:           "blocking",
+		model:          "blocking-model",
+		enteredBarrier: barrier,
+	}
 
 	providers := []namedProvider{
 		{name: "fast", model: "fast-model", provider: fast},
@@ -614,9 +708,12 @@ func TestRunBench_F43_CancellationReachesProviders(t *testing.T) {
 	fw := &failingWriter{err: errors.New("simulated disk full")}
 
 	// MaxConcurrency = 6 so all 6 (provider, case) goroutines are in
-	// flight when the first JSONL write fails — otherwise the blocking
-	// goroutines might be sitting on the semaphore (which honours
-	// runCtx) and would never have been observed entering Complete.
+	// flight together — the blocking goroutines need to enter Complete
+	// (to Done() the barrier) before the fast goroutines can return,
+	// which only works if both sets of goroutines have semaphore slots.
+	// With maxConc < len(cases)*2 the test would deadlock (fast Wait()s
+	// for barrier, but blocking can't enter without a semaphore slot
+	// that fast is holding).
 	const maxConc = 6
 
 	done := make(chan struct{})
