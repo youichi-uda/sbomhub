@@ -260,7 +260,51 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
   rotate したい場合は **`.env` を手編集** する (詳細は ranbook §3 step 4)。
 - 一時的に API を停止する短時間メンテナンスウィンドウが必要。
 
-### 4.5 鍵の保管先
+### 4.5 復号 smoke test (`verify-encryption.sh`)
+
+ENCRYPTION_KEY が **実際に DB を復号できる** ことを確認する smoke test として
+[`../../docker/scripts/verify-encryption.sh`](../../docker/scripts/verify-encryption.sh) (M5-5、
+issue [#53](https://github.com/youichi-uda/sbomhub/issues/53)) を同梱する。
+
+**使い所**:
+
+| シナリオ | コマンド |
+|---|---|
+| restore 直後の自動 smoke (Step 8) | `VERIFY_ENCRYPTION=1 ./scripts/restore.sh backup.tar.gz` |
+| 手動 spot check (BYOK LLM key カラム) | `./scripts/verify-encryption.sh --key "$(cat docker/secrets/encryption_key.txt)" --db-url "$DATABASE_URL"` |
+| 手動 spot check (issue tracker token) | `./scripts/verify-encryption.sh --key ... --db-url ... --table issue_tracker_connections --column auth_token_encrypted` |
+| 日次 cron drift check | `0 4 * * * sbomhub /opt/sbomhub/docker/scripts/verify-encryption.sh \|\| systemctl notify-failure` |
+
+**動作**:
+
+1. DB に接続して、 対象カラムから encrypted row を 1 件 SELECT。
+2. ENCRYPTION_KEY (env or `--key`) で AES-256-GCM 復号を試行 (`apps/api/cmd/decrypt-test`
+   バイナリ経由、 内部で `internal/service/llm.Decrypt` を呼ぶ — production API 本体と
+   **同じ復号ロジック**)。
+3. 成功時は **SHA256(plaintext)** だけ stdout に印字し exit 0。 plaintext 本体は
+   ログにも stdout にも一切出ない。
+4. 失敗時は exit code で分類:
+
+   | exit | 意味 |
+   |---|---|
+   | 0 | ok (復号成功、 SHA256 印字) |
+   | 1 | 鍵不一致 / ciphertext 破損 (GCM auth tag 失敗) |
+   | 2 | DB error (DSN, role 権限不足) |
+   | 3 | encrypted row 不在 (setup 未完 / 別 table を試すよう案内) |
+   | 64 | usage error (flag 不正) |
+   | 65 | 事前準備不足 (Go toolchain / DECRYPT_TEST_BIN 不在) |
+
+**security 注意**:
+
+- ENCRYPTION_KEY は env (`ENCRYPTION_KEY=...`) で渡し、 argv (`--key ...`) を避けると
+  `/proc/<pid>/cmdline` 経由のリークを更に減らせる。 script はどちらの経路でも env に
+  正規化してから Go binary に渡す。
+- plaintext は **印字されない**。 復号成功 / 失敗の判定はこの script の exit code で行う。
+  鍵 rotation 前後で SHA256 が一致するかを比較すれば、 plaintext 自体を見ずに
+  「同じ secret が両方の鍵で復号できる」 ことが検証できる (rotation の §4 verification と
+  同じ目的)。
+
+### 4.6 鍵の保管先
 
 `.env` 平文に書く方式は最も簡単だが、 中長期的には外部 secret store に逃がすことを推奨する。
 
@@ -793,7 +837,25 @@ script が動かない緊急時の fallback として位置付ける。**
 0 2 * * *  sbomhub  /opt/sbomhub/docker/scripts/backup.sh >> /var/log/sbomhub-backup.log 2>&1
 ```
 
-### 9.6 リストア訓練
+### 9.6 ENCRYPTION_KEY 復号 smoke test (`verify-encryption.sh`)
+
+[`../../docker/scripts/verify-encryption.sh`](../../docker/scripts/verify-encryption.sh) は restore
+直後 / 鍵 rotation 直後に **「現在の ENCRYPTION_KEY が DB を復号できる」** ことを smoke 確認する
+CLI。 issue [#53](https://github.com/youichi-uda/sbomhub/issues/53) (M5-5) で導入。
+
+restore.sh とのインテグレーション (opt-in、 default off):
+
+```bash
+# Step 8 として自動実行 (smoke 失敗は warning のみで restore は continue)
+VERIFY_ENCRYPTION=1 ./scripts/restore.sh /path/to/sbomhub-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+詳細仕様 (exit code 契約、 column 切り替え、 security 注意点) は §4.5 を参照。 §4.5 の `--table
+issue_tracker_connections --column auth_token_encrypted` 例は restore 直後の typical な追加
+spot check として有用 (BYOK LLM key が未設定でも issue tracker auth_token は最も古くからある
+暗号化カラム、 production install ではほぼ常に存在する)。
+
+### 9.7 リストア訓練
 
 backup を取るだけでは「実際に復元できる」 ことは保証されない。 **四半期に 1 回** は staging 環境
 への restore 訓練を回すこと。 訓練で発見しがちな問題:

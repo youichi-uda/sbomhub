@@ -249,6 +249,35 @@ encrypted records are still readable.
    `ciphertext too short` errors. Any of those indicates a row was *not*
    re-encrypted and is now unrecoverable under the new key.
 
+5. **`verify-encryption.sh` smoke test** — run the dedicated decrypt
+   round-trip CLI (M5-5, issue
+   [#53](https://github.com/youichi-uda/sbomhub/issues/53)) to confirm the
+   new key actually decrypts the re-encrypted ciphertext at the DB layer:
+
+   ```bash
+   ./docker/scripts/verify-encryption.sh \
+       --key "$(cat docker/secrets/encryption_key.txt)" \
+       --db-url "$DATABASE_URL"
+   ```
+
+   On success the script prints `ok ... sha256=<hex>`; on failure it exits
+   non-zero with a classification:
+
+   | exit | meaning |
+   |---|---|
+   | 0  | new key decrypts a sample row (rotation OK so far) |
+   | 1  | key mismatch / ciphertext tampered — investigate before reopening traffic |
+   | 2  | DB error (DSN, role permissions) |
+   | 3  | no encrypted row to test (no BYOK / no integration configured yet) |
+
+   To verify the round-trip across **the same secret** under both old and
+   new keys (recommended sanity check), run the script twice with `--key`
+   pointing at the two keys; the SHA256 hashes printed must match. The
+   plaintext itself is never emitted.
+
+   See [`security/self-host-deployment.md`](./security/self-host-deployment.md) §4.5
+   for the full operator contract.
+
 ---
 
 ## 5. Rollback
