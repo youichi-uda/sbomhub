@@ -1,0 +1,244 @@
+# SBOMHub - Golden Path E2E (issue #43)
+#
+# 5 分 Golden Path 統合検証: drives the full M0+M1+M2+M3 happy path
+# against a freshly-booted docker compose stack and asserts the
+# Evidence Pack bundle contains the approved VEX + CRA + METI sections.
+#
+# Stack layout (re-uses the docs-curl-smoke.yml pattern that already
+# proves the boot sequence):
+#   - postgres (compose service)
+#   - redis    (compose service)
+#   - api      (locally built from apps/api, tagged y1uda/sbomhub-api:latest)
+#
+# Auth: self-host mode (no Clerk secret). We seed a tenant + sbh_...
+# API key directly via psql, then drive every endpoint through
+# MultiAuth's API-key path. BYOK LLM is intentionally NOT configured,
+# so the M1 #F4 (vex_draft_ai_disabled) + M2 #F4 (cra_report_ai_disabled)
+# fallback paths are what the assertions pin — proving the AI-disabled
+# defaults still produce reviewable artefacts (issue #43 acceptance:
+# "BYOK LLM key は CI secret に保存せず、 AI-disabled fallback path で動作確認").
+#
+# Workflow timeout is 15 min so the 10-min docker build + cold-start
+# slack still fits under a hard ceiling. The script itself targets the
+# 5-min Golden Path budget after the stack is healthy.
+
+name: golden-path e2e
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - "scripts/golden-path-e2e.sh"
+      - "test/fixtures/log4shell-cyclonedx.json"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "install.sh"
+      - ".github/workflows/golden-path-e2e.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "scripts/golden-path-e2e.sh"
+      - "test/fixtures/log4shell-cyclonedx.json"
+      - "docker-compose.yml"
+      - ".env.example"
+      - "install.sh"
+      - ".github/workflows/golden-path-e2e.yml"
+  schedule:
+    # Nightly at 17:00 UTC ≈ 02:00 JST — catches NVD / dependency
+    # drift on a calendar cadence even when no source changes land.
+    - cron: "0 17 * * *"
+  workflow_dispatch:
+
+jobs:
+  api-e2e:
+    name: Golden Path 12-step against live api (curl + jq)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
+        run: |
+          docker version
+          docker compose version
+          curl --version | head -n1
+          jq --version
+          openssl version
+          uuidgen --version 2>/dev/null || true
+
+      - name: Validate docker compose syntax (issue #43 syntax-check gate)
+        # `docker compose config` validates the YAML AND the env-var
+        # expansions; we require ENCRYPTION_KEY here so the
+        # ${ENCRYPTION_KEY:?...} guard does not abort the validation
+        # step. The real per-run ENCRYPTION_KEY is generated in the
+        # next step and written to .env so the actual `up` sees its
+        # own value.
+        env:
+          ENCRYPTION_KEY: "ci-syntax-check-placeholder-32-bytes-long"
+        run: |
+          docker compose config >/dev/null
+          echo "OK: docker-compose.yml syntax valid."
+
+      - name: Generate .env with per-run secrets
+        # Pattern lifted from docs-curl-smoke.yml — same per-run secret
+        # generation discipline (ENCRYPTION_KEY via openssl rand, app /
+        # migrator passwords via openssl rand hex, DATABASE_URL /
+        # MIGRATE_DATABASE_URL rewritten to the compose-network hostname).
+        # Crucially we do NOT set SBOMHUB_LLM_PROVIDER / *_API_KEY so
+        # the LLM factory returns DisabledProvider and the triage /
+        # cra runners take the AI-disabled fallback path the assertions
+        # below pin.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@postgres:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Build api image locally
+        # docker-compose.yml pins api to y1uda/sbomhub-api:latest with
+        # no `build:` directive (the file is frozen per Wave 4a / #10).
+        # Re-tag a local build under the same name so `docker compose
+        # up` picks ours instead of pulling the registry copy — same
+        # mechanism docs-curl-smoke.yml uses.
+        run: |
+          docker build \
+            -t y1uda/sbomhub-api:latest \
+            -f apps/api/Dockerfile \
+            apps/api
+
+      - name: Start postgres + redis
+        run: |
+          docker compose up -d --wait postgres redis
+          docker compose ps
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        # install.sh --bootstrap-roles is the canonical bootstrap path
+        # (see install.sh godoc) — docker-compose.yml no longer
+        # bind-mounts init.sh. Reads MIGRATOR_PASSWORD / APP_PASSWORD
+        # from .env (generated above) and applies the SQL via
+        # `docker compose exec postgres psql`. Idempotent.
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Start api (locally built image)
+        run: |
+          # --pull never guards against compose silently swapping our
+          # local build for the registry copy when caches are warm.
+          docker compose up -d --pull never api
+          docker compose ps
+
+      - name: Wait for /api/v1/health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS http://localhost:8080/api/v1/health 2>/dev/null); then
+              echo "api healthy after $((i*2))s: $body"
+              exit 0
+            fi
+            echo "waiting for api... ($i/60)"
+            sleep 2
+          done
+          echo "::error::api did not become healthy within ~120s"
+          docker compose logs --tail=200 api || true
+          docker compose logs --tail=100 postgres || true
+          exit 1
+
+      - name: Seed tenant + sbh_... API key for the Golden Path run
+        id: seed
+        # Mirrors docs-curl-smoke.yml's seed step: insert a tenant row
+        # plus a write-scoped api_keys row directly via psql. We do
+        # NOT use the public POST /apikeys endpoint because that is
+        # admin-gated through Clerk auth (#F16) and we want the e2e to
+        # exercise the canonical MultiAuth + CLI path the customer
+        # actually uses. tenants is not RLS-enabled; api_keys had its
+        # RLS dropped in migration 028 (Trust Rescue P0 #18) so the
+        # lookup-by-key_hash path the middleware uses runs unscoped
+        # on purpose, making this direct insert exactly what POST
+        # /apikeys would persist.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RAW_KEY="sbh_$(openssl rand -hex 16)"
+          KEY_HASH="$(printf '%s' "$RAW_KEY" | sha256sum | awk '{print $1}')"
+          KEY_PREFIX="${RAW_KEY:0:12}"
+          TENANT_ID="$(uuidgen)"
+          API_KEY_ID="$(uuidgen)"
+
+          docker compose exec -T postgres \
+            psql -v ON_ERROR_STOP=1 -U sbomhub -d sbomhub <<SQL
+          INSERT INTO tenants (id, clerk_org_id, name, slug, plan)
+          VALUES ('${TENANT_ID}',
+                  'ci_${TENANT_ID}',
+                  'golden-path-e2e',
+                  'golden-path-e2e-${TENANT_ID:0:8}',
+                  'free');
+
+          INSERT INTO api_keys (
+              id, tenant_id, project_id, name,
+              key_hash, key_prefix, permissions, created_at
+          ) VALUES (
+              '${API_KEY_ID}', '${TENANT_ID}', NULL, 'golden-path-e2e',
+              '${KEY_HASH}', '${KEY_PREFIX}', 'write', NOW()
+          );
+          SQL
+
+          # Mask the raw key in subsequent logs.
+          echo "::add-mask::${RAW_KEY}"
+          {
+            echo "raw_key=${RAW_KEY}"
+            echo "tenant_id=${TENANT_ID}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Golden Path 12-step script
+        env:
+          SBOMHUB_URL: http://localhost:8080
+          SBOMHUB_API_KEY: ${{ steps.seed.outputs.raw_key }}
+          SBOMHUB_TENANT_ID: ${{ steps.seed.outputs.tenant_id }}
+          SBOMHUB_PROJECT_NAME: golden-path-e2e
+          SBOMHUB_SBOM_FIXTURE: test/fixtures/log4shell-cyclonedx.json
+          COMPOSE_PSQL_SVC: postgres
+        run: |
+          chmod +x scripts/golden-path-e2e.sh
+          bash scripts/golden-path-e2e.sh
+
+      - name: Dump api / postgres logs on failure
+        if: failure()
+        run: |
+          echo "--- api ---"
+          docker compose logs --tail=500 api || true
+          echo "--- postgres ---"
+          docker compose logs --tail=200 postgres || true
+          echo "--- redis ---"
+          docker compose logs --tail=100 redis || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
