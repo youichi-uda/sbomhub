@@ -44,17 +44,31 @@ project name を分離する (`docker compose -p sbomhub-dev -f docker-compose.y
    / api) と `frontend` (api / web) の 2 つの docker network に分け、 web は
    直接 postgres / redis / ollama に到達できない (api 経由のみ)。
 
-> ※要確認: `backend` network は `internal: false` (**outbound egress あり**)
-> で運用する。 これは ollama-init が起動時に `ollama pull` で
-> `registry.ollama.ai` に到達する必要があるため、 また postgres / redis / api
-> の image pull 自体も `registry.docker.io` / `ghcr.io` 等への outbound に
-> 依存するため。 `internal: true` (=外部から完全遮断 + 内部から外部も遮断) に
-> 切り替えると初回起動が image pull 段階で失敗する。
+> ※要確認: `backend` network は `internal: false` (**container outbound egress
+> あり**) で運用する。 これは **container 内** から外部 registry / model hub
+> への outbound 接続が必要なためで、 具体的には以下の依存がある:
+>
+> - **model pull (container egress に依存)**: `ollama-init` container が
+>   起動時に `ollama pull` を実行し、 `registry.ollama.ai` から AI model を
+>   ダウンロードする。 これは container 内からの outbound 接続なので
+>   backend network の egress 設定の影響を受ける。 一度 pull すれば
+>   `ollama_data` named volume に永続化されるため以降は不要、 ただし新 model
+>   投入や version up 時に再度 outbound が必要になる。
+>
+> なお **Docker image pull** (`postgres:15-alpine` / `redis:7-alpine` /
+> `ollama/ollama:latest` 等を `registry.docker.io` / `ghcr.io` から取得する
+> 処理) は **host 側の docker daemon が独立して行う** ため、 container
+> network 上の `internal:` 設定の影響を **受けない**。 すなわち
+> `backend.internal: true` に切り替えても image pull 自体は成功する。
+> 失敗するのは上記の **model pull (container outbound)** のみ。
 >
 > outbound を厳しく絞りたい環境では、 docker 内部の `internal: true` ではなく
 > **host 側 firewall (iptables / nftables) や egress proxy (Squid /
-> Cloudflare Gateway)** で `registry.docker.io` / `registry.ollama.ai` /
-> `ghcr.io` などのみ allow する構成を推奨する。 詳細は
+> Cloudflare Gateway)** で `registry.ollama.ai` などの model hub を制御する
+> 構成を推奨する (なお image pull の制御は host daemon の HTTP(S) proxy /
+> firewall 側で `registry.docker.io` / `ghcr.io` を allowlist する)。
+> `ollama-init` が完了した後は ollama container の outbound は不要なので、
+> 運用上は init 後に egress を絞り直す手もある。 詳細は
 > [`../docs/security/self-host-deployment.md`](../docs/security/self-host-deployment.md) §7 参照。
 
 ---

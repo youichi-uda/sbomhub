@@ -9,16 +9,22 @@
 #      (平文 .env / image レイヤーに残さない)。
 #   3. backend / frontend の 2 ネットワーク分離 (postgres / redis / ollama /
 #      api は backend、 web / api は frontend)。 ※要確認: backend network は
-#      `internal: true` ではなく **outbound egress あり** (`internal: false`)
-#      で運用する。 理由は ollama-init が起動時に `ollama pull` で model
-#      registry (registry.ollama.ai) へ outbound 接続する必要があるため、 また
-#      api / postgres / redis image 自体も最初は registry.docker.io / ghcr 等
-#      からの pull が必要なため。 ingress (外部からの到達) は **host port を
-#      `127.0.0.1` localhost-only bind** することで遮断する (下記 4. と同じ
-#      規律)。 outbound を厳格に絞りたい enterprise 環境では、 docker 内部
-#      network ではなく host 側 firewall / egress proxy (Squid / Cloudflare
-#      Gateway 等) で制御することを推奨する。 詳細な network 分離方針は
-#      docs/security/self-host-deployment.md §7 参照。
+#      `internal: true` ではなく **container outbound egress あり**
+#      (`internal: false`) で運用する。 理由は ollama-init が起動時に
+#      `ollama pull` で model registry (registry.ollama.ai) へ container 内
+#      から outbound 接続する必要があるため (= model pull は container egress
+#      に依存する)。 なお Docker image pull (postgres / redis / ollama image
+#      を registry.docker.io / ghcr 等から取得する処理) は **host 側 docker
+#      daemon が独立して行う** ため、 container network 上の `internal:`
+#      設定の影響を **受けない** (`internal: true` にしても image pull 自体は
+#      成功する、 失敗するのは model pull のみ)。 ingress (外部からの到達) は
+#      **host port を `127.0.0.1` localhost-only bind** することで遮断する
+#      (下記 4. と同じ規律)。 outbound を厳格に絞りたい enterprise 環境では、
+#      docker 内部 network ではなく host 側 firewall / egress proxy (Squid /
+#      Cloudflare Gateway 等) で model hub (registry.ollama.ai) を制御する
+#      ことを推奨する (image pull の制御は host daemon の HTTP(S) proxy /
+#      firewall 側で registry.docker.io / ghcr.io を allowlist する)。 詳細な
+#      network 分離方針は docs/security/self-host-deployment.md §7 参照。
 #   4. host port は **localhost-only bind** をデフォルト
 #      (`127.0.0.1:PORT:PORT`)。 公開はリバースプロキシ (Caddy / nginx /
 #      Cloudflare Tunnel) で TLS 終端後に行う前提 (docs/security/
@@ -304,22 +310,30 @@ services:
 # Networks
 # -----------------------------------------------------------------------------
 # backend:  postgres / redis / ollama / api を載せる service-to-service network。
-#           ※要確認: `internal: false` (outbound egress あり)。 これは
-#           ollama-init が `ollama pull` で registry.ollama.ai に到達する必要が
-#           あるため、 また postgres / redis / api の image pull 自体も
-#           registry.docker.io / ghcr 等への outbound に依存するため。
+#           ※要確認: `internal: false` (container outbound egress あり)。
+#           これは ollama-init container が `ollama pull` で
+#           registry.ollama.ai に container 内から outbound 接続する必要が
+#           あるため (= model pull は container egress に依存する)。
+#           なお Docker image pull (postgres / redis / ollama image を
+#           registry.docker.io / ghcr 等から取得する処理) は **host 側
+#           docker daemon が独立して行う** ため、 ここでの `internal:` 設定の
+#           影響は **受けない** (`internal: true` にしても image pull 自体は
+#           成功し、 失敗するのは model pull のみ)。
 #           外部からの ingress (untrusted client が直接 backend service に到達
 #           すること) は **host port を `127.0.0.1` localhost-only bind** する
 #           ことで遮断する (上記 services 各 ports: ブロック参照)。
 #           より厳格な outbound 制御を求める enterprise 環境では、 docker
 #           内部の `internal: true` ではなく **host 側 firewall (iptables /
 #           nftables) や egress proxy (Squid / Cloudflare Gateway)** で
-#           registry / model hub のみ allow する形を推奨する (運用は
-#           docs/security/self-host-deployment.md §7 参照)。
-#           なお `internal: true` に切り替えると初回 image pull / model pull が
-#           すべて失敗するため、 切り替えるなら egress proxy を別途 attach する
-#           + ollama-init を別 egress network に attach する等の追加 surgery が
-#           必要、 本 default では行わない。
+#           model hub (registry.ollama.ai) を allow する形を推奨する
+#           (image pull の制御は host daemon の HTTP(S) proxy / firewall 側で
+#           registry.docker.io / ghcr.io を allowlist する)。 運用詳細は
+#           docs/security/self-host-deployment.md §7 参照。
+#           なお `internal: true` に切り替えると model pull が失敗するため
+#           (image pull は host daemon が行うので影響なし、 失敗するのは
+#           container 内から registry.ollama.ai への到達のみ)、 切り替えるなら
+#           ollama-init だけ別 egress network に attach する等の追加 surgery
+#           が必要、 本 default では行わない。
 # frontend: api / web を載せる ingress-facing network。 reverse proxy
 #           (Caddy / nginx / Cloudflare Tunnel) はこちらに接続して TLS 終端する。
 networks:
