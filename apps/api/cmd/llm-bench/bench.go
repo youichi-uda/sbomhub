@@ -165,6 +165,15 @@ type runOptions struct {
 //
 // F25 is enforced upstream via capCases; runBench trusts the caller to
 // have applied the cap before this entry point.
+//
+// F43: the FIRST JSONL write error is captured, the run context is
+// cancelled to stop further provider calls, and the error is returned
+// from runBench so realMain can surface exitExecutionFailed. Previously
+// the error was only logged, so a disk-full or read-only --out file
+// produced a corrupt-but-success bench (CI pipelines treated it as
+// valid evidence). Per-call provider errors are NOT promoted — those
+// are still folded into CaseResult.Error so a single 429 does not abort
+// the whole bench.
 func runBench(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -193,9 +202,21 @@ func runBench(
 	results := make([]CaseResult, len(jobs))
 
 	// jsonlMu guards opts.JSONLWriter — Encoder.Encode is not goroutine
-	// safe and concurrent writes would interleave bytes.
+	// safe and concurrent writes would interleave bytes. F43: the same
+	// mutex also guards firstWriteErr so the first failure is captured
+	// even when multiple goroutines write concurrently. We deliberately
+	// reuse jsonlMu rather than a second mutex so the (encode +
+	// firstWriteErr update + cancel) sequence is atomic per goroutine.
 	var jsonlMu sync.Mutex
 	enc := json.NewEncoder(opts.JSONLWriter)
+	var firstWriteErr error
+
+	// F43: derive a cancellable child context so the first JSONL write
+	// failure can short-circuit the remaining provider calls. We don't
+	// rely on the caller passing a cancellable ctx because the bench's
+	// own output failure is its own concern, not the caller's.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 
 	sem := make(chan struct{}, opts.MaxConcurrency)
 	var wg sync.WaitGroup
@@ -207,7 +228,7 @@ func runBench(
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
 			defer func() { <-sem }()
@@ -215,18 +236,33 @@ func runBench(
 			p := providers[j.providerIdx]
 			c := cases[j.caseIdx]
 
-			res := runOne(ctx, p, c, opts.Timeout, opts.Clock)
+			res := runOne(runCtx, p, c, opts.Timeout, opts.Clock)
 			results[i] = res
 
 			jsonlMu.Lock()
-			if err := enc.Encode(res); err != nil {
-				logger.Warn("jsonl write failed",
-					"provider", res.Provider, "case_id", res.CaseID, "error", err)
+			defer jsonlMu.Unlock()
+			// Skip the write if a previous goroutine already detected a
+			// broken writer — repeated writes to /dev/full / a closed
+			// file just spam stderr with the same error.
+			if firstWriteErr != nil {
+				return
 			}
-			jsonlMu.Unlock()
+			if err := enc.Encode(res); err != nil {
+				firstWriteErr = err
+				logger.Warn("jsonl write failed (F43: aborting run)",
+					"provider", res.Provider, "case_id", res.CaseID, "error", err)
+				// Cancel the run ctx so in-flight provider calls stop
+				// burning quota — output is already broken, no point
+				// finishing the remaining 50 cases.
+				cancelRun()
+			}
 		}()
 	}
 	wg.Wait()
+
+	if firstWriteErr != nil {
+		return results, fmt.Errorf("bench: failed to write JSONL: %w", firstWriteErr)
+	}
 	return results, nil
 }
 

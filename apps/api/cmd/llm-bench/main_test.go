@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -430,6 +431,113 @@ func TestRunBenchErrorFold(t *testing.T) {
 				t.Errorf("gemini precision = %v, want 1.0", s.Precision)
 			}
 		}
+	}
+}
+
+// failingWriter is an io.Writer that fails every call with the
+// configured error. Used by TestRunBench_JSONLWriteFailure_F43 to
+// induce a JSONL write failure without depending on platform-specific
+// devices (/dev/full is Linux-only; macOS / Windows CI would skip).
+type failingWriter struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls++
+	return 0, w.err
+}
+
+// TestRunBench_JSONLWriteFailure_F43 verifies the F43 fix: if the
+// JSONL sink errors mid-run, runBench captures the first error,
+// cancels the remaining work, and returns the error so realMain
+// surfaces exitExecutionFailed. Before F43 the error was log-only,
+// so a disk-full --out file silently produced a corrupt-but-success
+// bench (CI treated empty JSONL as valid evidence).
+func TestRunBench_JSONLWriteFailure_F43(t *testing.T) {
+	cases := []EvalCase{
+		{
+			CaseID: "c1", CVEID: "CVE-2024-0001",
+			AdvisoryExcerpt: "rce", ComponentName: "foo", Ecosystem: "go",
+			CodeReachability: CodeReachability{Reachable: false, Evidence: []string{}},
+			ExpectedState:    "not_affected",
+		},
+		{
+			CaseID: "c2", CVEID: "CVE-2024-0002",
+			AdvisoryExcerpt: "rce", ComponentName: "bar", Ecosystem: "npm",
+			CodeReachability: CodeReachability{Reachable: true, Evidence: []string{}},
+			ExpectedState:    "affected",
+		},
+	}
+	providers := []namedProvider{
+		{name: "openai", model: "gpt-4o-mini",
+			provider: &fakeProvider{name: "openai", model: "gpt-4o-mini",
+				responses: map[string]string{
+					"CVE-2024-0001": `{"state":"not_affected","confidence":0.9,"evidence":[{"kind":"llm_rationale","description":"x","source":"llm"}]}`,
+					"CVE-2024-0002": `{"state":"affected","confidence":0.9,"evidence":[{"kind":"llm_rationale","description":"x","source":"llm"}]}`,
+				}}},
+	}
+
+	writeErr := errors.New("simulated disk full")
+	fw := &failingWriter{err: writeErr}
+
+	_, err := runBench(context.Background(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		providers, cases,
+		runOptions{
+			Timeout:        5 * time.Second,
+			MaxConcurrency: 2,
+			JSONLWriter:    fw,
+			Clock:          func() time.Time { return time.Unix(0, 0) },
+		},
+	)
+	if err == nil {
+		t.Fatal("runBench: expected error when JSONL writer fails, got nil (F43 regression: silent success with corrupt output)")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("runBench error chain missing simulated writeErr: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to write JSONL") {
+		t.Errorf("runBench error message missing 'failed to write JSONL': %v", err)
+	}
+}
+
+// TestRealMain_JSONLWriteFailure_ExitCode5_F43 ties the F43 runBench
+// error back to the F42 exit-code contract: a JSONL write failure must
+// surface as exitExecutionFailed (5) rather than masquerading as
+// success or as a different code.
+func TestRealMain_JSONLWriteFailure_ExitCode5_F43(t *testing.T) {
+	// /dev/full exists on Linux (writes succeed at the syscall layer in
+	// some kernels — actually they return ENOSPC reliably for regular
+	// writes), but is unavailable on macOS / Windows. The cross-platform
+	// equivalent: point --out at an existing directory so os.Create
+	// fails with EISDIR. That triggers the "create --out file" branch
+	// (exitExecutionFailed) — same code class as the in-run JSONL write
+	// failure, so the operator's CI gets a consistent exit code.
+	dir := t.TempDir()
+	goodFixture := writeFixture(t, dir, "ok.json", `{
+		"version":1,
+		"cases":[{
+			"case_id":"c","cve_id":"CVE-X","advisory_excerpt":"x",
+			"component_name":"n","ecosystem":"go",
+			"code_reachability":{"reachable":false,"evidence":[]},
+			"expected_state":"not_affected"
+		}]
+	}`)
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+
+	var out, errb bytes.Buffer
+	// --out points at the temp directory itself, so os.Create returns
+	// EISDIR. Same exit-code class as F43's in-run write failure.
+	ee := realMain([]string{"--eval-set", goodFixture, "--out", dir, "--providers", "openai"}, &out, &errb)
+	if ee == nil {
+		t.Fatal("expected exitError when --out is unwritable")
+	}
+	if ee.Code != exitExecutionFailed {
+		t.Errorf("exit code = %d, want %d (exitExecutionFailed)", ee.Code, exitExecutionFailed)
 	}
 }
 
