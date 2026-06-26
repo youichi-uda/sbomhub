@@ -57,13 +57,21 @@ services:
   # ---------------------------------------------------------------------------
   # PostgreSQL
   # ---------------------------------------------------------------------------
-  # M4-4 docs §3 で説明している通り、 production では sbomhub_app /
-  # sbomhub_migrator の 2 role 分離 (RLS 強制) を行うこと。 本 compose は
-  # 起動を妨げない最小構成として POSTGRES_USER=sbomhub の単一 role で起動するが、
-  # **首回起動後に `../install.sh --bootstrap-roles` を実行** し、 さらに
-  # `secrets/postgres_app_password.txt` / `secrets/postgres_migrator_password.txt`
-  # を作成して下の `sbomhub-api` の DATABASE_URL / MIGRATE_DATABASE_URL を
-  # 切り替えることを強く推奨する。 詳細は README.enterprise.md §3。
+  # M4-4 docs §3 の RLS / DB role 分離は **default で有効** (M4 Codex review
+  # #F76 fix)。 本 service は POSTGRES_USER=sbomhub を **bootstrap superuser**
+  # 専用に保持し、 sbomhub-api 本体は下記 `db-bootstrap` one-shot service が
+  # 起動時に冪等作成する `sbomhub_app` (NOSUPERUSER NOBYPASSRLS) /
+  # `sbomhub_migrator` (NOBYPASSRLS) ロールで接続する。 これにより F72 の
+  # RLS startup guard (`rolbypassrls || rolsuper` で hard-fail) を default 構成で
+  # 通過し、 `docker compose -f docker-compose.enterprise.yml up -d` 一発で
+  # production-ready な multi-tenant 分離が成立する。
+  #
+  # ※要確認: 旧構成 (sbomhub_app に切り替える前) の volume を持つ環境では、
+  # db-bootstrap が legacy 所有 tables を sbomhub_migrator へ ALTER OWNER で
+  # 移譲する DO block を含む (install.sh `--bootstrap-roles` と同等)。 manual
+  # `install.sh --bootstrap-roles` 経路も **advanced operator 向けに維持**
+  # しており、 db-bootstrap と install.sh は SQL pattern が同一で冪等なので
+  # 重複実行しても問題ない (詳細: README.enterprise.md §3)。
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
@@ -191,6 +199,204 @@ services:
       - backend
 
   # ---------------------------------------------------------------------------
+  # db-bootstrap: 起動時に sbomhub_app / sbomhub_migrator ロールを冪等作成する one-shot service
+  # ---------------------------------------------------------------------------
+  # M4 Codex review #F76 fix: F72 fix (`apps/api/cmd/server/main.go`
+  # `evaluateAppRoleRLS`) が production / staging で superuser を hard-fail
+  # するように強化されたため、 official `postgres` image が POSTGRES_USER から
+  # 作成する superuser (`sbomhub`) で sbomhub-api を直接接続する旧 default 構成
+  # は startup guard で exit する。 本 service は postgres が healthy になった
+  # 直後に bootstrap superuser として psql 接続し、 以下を冪等に投入する:
+  #
+  #   1. `sbomhub_migrator` (NOBYPASSRLS / CREATEDB / CREATEROLE / schema CREATE)
+  #      および `sbomhub_app` (NOSUPERUSER / NOBYPASSRLS) ロールの CREATE
+  #      (既存時は ALTER で password rotation + 属性を強制)。
+  #   2. `GRANT CONNECT ON DATABASE` / `GRANT USAGE ON SCHEMA public`、
+  #      migrator にのみ `GRANT CREATE ON SCHEMA public` (apps/api の
+  #      auto-migration が schema_migrations を作るために必須)。
+  #   3. `uuid-ossp` extension を superuser として CREATE
+  #      (migration 001 が CREATE EXTENSION IF NOT EXISTS で呼ぶが
+  #      migrator は database-level CREATE 権限を持たないため、 ここで先回り
+  #      install して migration を no-op 化する)。
+  #   4. 既存 tables / sequences への GRANT、 および migrator が今後 CREATE する
+  #      object に対する ALTER DEFAULT PRIVILEGES (sbomhub_app へ SELECT /
+  #      INSERT / UPDATE / DELETE + USAGE / SELECT on sequences を自動付与)。
+  #   5. 旧構成 (sbomhub superuser が tables を所有していた) からの
+  #      upgrade を想定した、 `public` schema 配下 application object の
+  #      ALTER OWNER → sbomhub_migrator 移譲 (fresh install では no-op)。
+  #
+  # SQL は install.sh `--bootstrap-roles` (apply_role_bootstrap) と **同一規律**:
+  # password は psql `-v migrator_password=... -v app_password=...` で受け、
+  # SQL 本体は dollar-quoted body 外で `:'var'` (psql client-side literal quoting)
+  # + `format(... %L ...)` (server-side literal quoting) の belt-and-suspenders。
+  # password raw value は SQL string literal の中に直接出現しないため、 任意 byte
+  # を含む password でも injection / 構文エラーにならない (codex-r8 P2 と同じ規律)。
+  #
+  # exit 0 で one-shot 終了。 既に role が存在し password も一致している場合は
+  # SELECT ... WHERE NOT EXISTS / ALTER ROLE が no-op で数秒以内に完了する。
+  # restart: "no" で再起動させない (compose up 後 `docker compose ps` に
+  # `Exited (0)` として残るのが正常)。
+  db-bootstrap:
+    image: postgres:15-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets:
+      - postgres_password
+      - postgres_app_password
+      - postgres_migrator_password
+    environment:
+      POSTGRES_HOST: "postgres"
+      POSTGRES_ADMIN_USER: "sbomhub"
+      POSTGRES_DB: "sbomhub"
+      POSTGRES_ADMIN_PASSWORD_FILE: "/run/secrets/postgres_password"
+      POSTGRES_APP_PASSWORD_FILE: "/run/secrets/postgres_app_password"
+      POSTGRES_MIGRATOR_PASSWORD_FILE: "/run/secrets/postgres_migrator_password"
+    networks:
+      - backend
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        for f in "$$POSTGRES_ADMIN_PASSWORD_FILE" "$$POSTGRES_APP_PASSWORD_FILE" "$$POSTGRES_MIGRATOR_PASSWORD_FILE"; do
+          if [ ! -r "$$f" ]; then
+            echo "[db-bootstrap] FATAL: required secret file not readable: $$f" >&2
+            exit 1
+          fi
+        done
+        PGPASSWORD="$$(cat "$$POSTGRES_ADMIN_PASSWORD_FILE")"
+        export PGPASSWORD
+        APP_PW="$$(cat "$$POSTGRES_APP_PASSWORD_FILE")"
+        MIG_PW="$$(cat "$$POSTGRES_MIGRATOR_PASSWORD_FILE")"
+        echo "[db-bootstrap] applying sbomhub_app / sbomhub_migrator role bootstrap (idempotent)"
+        # PSQL_*_PASSWORD env を経由して psql -v に渡す。 SQL 本体は quoted
+        # heredoc (<<'SQL') にして shell 展開を完全に抑止 (= raw password 値が
+        # SQL literal に直接出現する経路を絶つ)。
+        PSQL_MIGRATOR_PASSWORD="$$MIG_PW" \
+        PSQL_APP_PASSWORD="$$APP_PW" \
+        psql -v ON_ERROR_STOP=1 \
+             -v migrator_password="$$MIG_PW" \
+             -v app_password="$$APP_PW" \
+             -h "$$POSTGRES_HOST" -U "$$POSTGRES_ADMIN_USER" -d "$$POSTGRES_DB" \
+             -X -q -f - <<'SQL'
+        -- Create migrator role (DDL / migrations). NOT BYPASSRLS.
+        SELECT format(
+            'CREATE ROLE sbomhub_migrator WITH LOGIN PASSWORD %L CREATEDB CREATEROLE',
+            :'migrator_password'
+        )
+        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_migrator')
+        \gexec
+
+        -- Create app role (runtime). NOSUPERUSER NOBYPASSRLS so RLS is enforced.
+        SELECT format(
+            'CREATE ROLE sbomhub_app WITH LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS',
+            :'app_password'
+        )
+        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub_app')
+        \gexec
+
+        -- Idempotent password rotation + NOBYPASSRLS / NOSUPERUSER assertion.
+        ALTER ROLE sbomhub_migrator WITH PASSWORD :'migrator_password' NOBYPASSRLS;
+        ALTER ROLE sbomhub_app      WITH PASSWORD :'app_password'      NOSUPERUSER NOBYPASSRLS;
+
+        -- Connect / schema usage.
+        GRANT CONNECT ON DATABASE sbomhub TO sbomhub_migrator, sbomhub_app;
+        GRANT USAGE   ON SCHEMA   public  TO sbomhub_migrator, sbomhub_app;
+
+        -- Postgres 15+ revoked implicit CREATE on public schema for non-owners.
+        -- sbomhub_migrator needs it to create schema_migrations and run DDL.
+        -- sbomhub_app intentionally does NOT receive CREATE.
+        GRANT CREATE ON SCHEMA public TO sbomhub_migrator;
+
+        -- Install required extensions as bootstrap superuser (sbomhub_migrator
+        -- lacks database-level CREATE, so migration 001's
+        -- `CREATE EXTENSION IF NOT EXISTS "uuid-ossp"` would fail without this).
+        CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+        -- Existing tables / sequences (no-op on fresh DB).
+        GRANT ALL ON ALL TABLES IN SCHEMA public TO sbomhub_migrator;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sbomhub_app;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sbomhub_migrator, sbomhub_app;
+
+        -- Future tables created by sbomhub_migrator inherit grants for sbomhub_app.
+        ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sbomhub_app;
+        ALTER DEFAULT PRIVILEGES FOR ROLE sbomhub_migrator IN SCHEMA public
+            GRANT USAGE, SELECT ON SEQUENCES TO sbomhub_app;
+
+        -- Legacy upgrade: pre-F76 enterprise compose ran apps/api as the
+        -- `sbomhub` superuser, so all tables / sequences / views on that volume
+        -- are owned by `sbomhub`. Transfer ownership to sbomhub_migrator so
+        -- migrations can ALTER / DROP them. Fresh installs see zero rows and
+        -- the block is a no-op. We deliberately scope to `public` schema only
+        -- and avoid REASSIGN OWNED BY (it would fail on the DB-owning bootstrap
+        -- role with "cannot reassign ownership ... required by the database
+        -- system").
+        DO $$
+        DECLARE
+            obj record;
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sbomhub') THEN
+                RETURN;
+            END IF;
+
+            FOR obj IN
+                SELECT schemaname, tablename
+                FROM pg_tables
+                WHERE schemaname = 'public' AND tableowner = 'sbomhub'
+            LOOP
+                EXECUTE format('ALTER TABLE %I.%I OWNER TO sbomhub_migrator',
+                    obj.schemaname, obj.tablename);
+            END LOOP;
+
+            FOR obj IN
+                SELECT n.nspname AS schemaname, c.relname AS objname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_roles r ON r.oid = c.relowner
+                WHERE c.relkind = 'S'
+                  AND n.nspname = 'public'
+                  AND r.rolname = 'sbomhub'
+            LOOP
+                EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO sbomhub_migrator',
+                    obj.schemaname, obj.objname);
+            END LOOP;
+
+            FOR obj IN
+                SELECT n.nspname AS schemaname, c.relname AS objname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_roles r ON r.oid = c.relowner
+                WHERE c.relkind = 'v'
+                  AND n.nspname = 'public'
+                  AND r.rolname = 'sbomhub'
+            LOOP
+                EXECUTE format('ALTER VIEW %I.%I OWNER TO sbomhub_migrator',
+                    obj.schemaname, obj.objname);
+            END LOOP;
+
+            FOR obj IN
+                SELECT n.nspname AS schemaname, c.relname AS objname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_roles r ON r.oid = c.relowner
+                WHERE c.relkind = 'm'
+                  AND n.nspname = 'public'
+                  AND r.rolname = 'sbomhub'
+            LOOP
+                EXECUTE format('ALTER MATERIALIZED VIEW %I.%I OWNER TO sbomhub_migrator',
+                    obj.schemaname, obj.objname);
+            END LOOP;
+        END
+        $$;
+        SQL
+        # 平文 password を環境変数 / log に残さない (server プロセスへの leak 防止)。
+        unset PGPASSWORD APP_PW MIG_PW PSQL_MIGRATOR_PASSWORD PSQL_APP_PASSWORD
+        echo "[db-bootstrap] role bootstrap complete; sbomhub-api can now start as sbomhub_app"
+
+  # ---------------------------------------------------------------------------
   # SBOMHub API (Go / Echo)
   # ---------------------------------------------------------------------------
   # secrets pattern: docker secrets は /run/secrets/<name> に file mount される。
@@ -210,24 +416,33 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      # M4 Codex review #F76: db-bootstrap が sbomhub_app / sbomhub_migrator
+      # ロールを冪等作成してから sbomhub-api を起動する。 これにより F72 の
+      # RLS startup guard (production で superuser を hard-fail) が default
+      # 構成で通過する。
+      db-bootstrap:
+        condition: service_completed_successfully
     secrets:
       - encryption_key
-      - postgres_password
+      - postgres_app_password
+      - postgres_migrator_password
     environment:
       APP_ENV: "production"
       PORT: "8080"
-      # DB / Redis 接続情報は wrapper script で組み立てる (password を secret
-      # から差し込むため)。 wrapper script に渡す host / db / user は env で
-      # 受ける (※要確認: production で sbomhub_app / sbomhub_migrator ロール
-      # 分離に切り替える際は README.enterprise.md §3 の手順で、 これらを
-      # sbomhub_app / sbomhub_migrator + 別 secret に置き換える)。
+      # DB 接続情報は wrapper script で組み立てる (password を secret から
+      # 差し込むため)。 wrapper script に渡す host / db / user は env で受ける。
+      #
+      # M4 Codex review #F76 fix: default で sbomhub_app (NOSUPERUSER
+      # NOBYPASSRLS) / sbomhub_migrator (NOBYPASSRLS) ロール分離 + 別 secret に
+      # 切り替え、 production / staging での F72 RLS startup guard を default
+      # 構成で通過させる。 旧構成 (sbomhub superuser 単一ロール) は廃止。
       POSTGRES_HOST: "postgres"
       POSTGRES_PORT: "5432"
       POSTGRES_DB: "sbomhub"
-      POSTGRES_APP_USER: "sbomhub"
-      POSTGRES_MIGRATOR_USER: "sbomhub"
-      POSTGRES_APP_PASSWORD_FILE: "/run/secrets/postgres_password"
-      POSTGRES_MIGRATOR_PASSWORD_FILE: "/run/secrets/postgres_password"
+      POSTGRES_APP_USER: "sbomhub_app"
+      POSTGRES_MIGRATOR_USER: "sbomhub_migrator"
+      POSTGRES_APP_PASSWORD_FILE: "/run/secrets/postgres_app_password"
+      POSTGRES_MIGRATOR_PASSWORD_FILE: "/run/secrets/postgres_migrator_password"
       REDIS_URL: "redis://redis:6379"
       ENCRYPTION_KEY_FILE: "/run/secrets/encryption_key"
       # LLM provider 設定: Local LLM (Ollama) を default として配線する。
@@ -366,5 +581,17 @@ volumes:
 secrets:
   encryption_key:
     file: ./secrets/encryption_key.txt
+  # postgres_password: POSTGRES_USER=sbomhub (bootstrap superuser) の password。
+  # postgres service の initdb / db-bootstrap の psql admin 接続のみで使われ、
+  # sbomhub-api 本体は触らない (M4 Codex review #F76 fix 以降、 API 接続は
+  # postgres_app_password / postgres_migrator_password を使用)。
   postgres_password:
     file: ./secrets/postgres_password.txt
+  # postgres_app_password: sbomhub-api runtime 接続 (sbomhub_app ロール、
+  # NOSUPERUSER NOBYPASSRLS) の password。 M4 Codex review #F76 で default 化。
+  postgres_app_password:
+    file: ./secrets/postgres_app_password.txt
+  # postgres_migrator_password: 自動 migration 接続 (sbomhub_migrator ロール、
+  # NOBYPASSRLS + schema CREATE 権限) の password。 M4 Codex review #F76 で default 化。
+  postgres_migrator_password:
+    file: ./secrets/postgres_migrator_password.txt
