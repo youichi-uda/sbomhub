@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -22,7 +23,69 @@ const (
 	// pinned to a specific contract version (e.g. preview-only features).
 	EnvAzureAPIVersion = "SBOMHUB_LLM_AZURE_API_VERSION"
 	EnvOllamaURL       = "SBOMHUB_LLM_OLLAMA_URL"
+
+	// Provider-specific API key env aliases (M4 Codex review #F47).
+	//
+	// docs/configuration.md / README.md / CLAUDE.md document the
+	// provider-native env names (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+	// GOOGLE_API_KEY, OLLAMA_HOST) — the same names each provider's
+	// official SDK and CLI honour. Before F47 the runtime factory only
+	// consulted the canonical SBOMHUB_LLM_API_KEY / SBOMHUB_LLM_OLLAMA_URL,
+	// so an operator who followed the docs got a silently disabled
+	// provider (and Ollama silently fell back to http://localhost:11434
+	// even when OLLAMA_HOST pointed at a remote GPU node).
+	//
+	// Precedence is canonical-first so existing self-host deployments
+	// that set SBOMHUB_LLM_API_KEY keep working unchanged; the aliases
+	// are pure fall-back. See resolveAPIKey / ollamaBaseURLFromEnv for
+	// the resolution order.
+	EnvOpenAIAPIKey    = "OPENAI_API_KEY"
+	EnvAnthropicAPIKey = "ANTHROPIC_API_KEY"
+	EnvGeminiAPIKey    = "GOOGLE_API_KEY"
+	EnvGeminiAPIKeyAlt = "GEMINI_API_KEY" // Some Google docs / SDK paths use GEMINI_API_KEY in addition to GOOGLE_API_KEY.
+	EnvAzureAPIKey     = "AZURE_OPENAI_API_KEY"
+	EnvOllamaHost      = "OLLAMA_HOST"
 )
+
+// apiKeyEnvCandidates returns the env var names checked for the given
+// provider, in canonical-first precedence order. Exposed (instead of inlined
+// inside resolveAPIKey) so the DisabledProvider Reason can list the same
+// envs the resolver consulted, and so factory_test.go can assert the
+// precedence without re-deriving it.
+func apiKeyEnvCandidates(providerName string) []string {
+	candidates := []string{EnvAPIKey}
+	switch providerName {
+	case "openai":
+		candidates = append(candidates, EnvOpenAIAPIKey)
+	case "anthropic":
+		candidates = append(candidates, EnvAnthropicAPIKey)
+	case "gemini":
+		candidates = append(candidates, EnvGeminiAPIKey, EnvGeminiAPIKeyAlt)
+	case "azure_openai":
+		// Azure's official SDK env name is AZURE_OPENAI_API_KEY; we do
+		// NOT alias OPENAI_API_KEY here because mixing the two would
+		// silently cause an Azure deployment to authenticate with an
+		// OpenAI.com key (and vice versa).
+		candidates = append(candidates, EnvAzureAPIKey)
+	}
+	return candidates
+}
+
+// resolveAPIKey returns the API key + the env var name it was resolved
+// from for the given provider, walking canonical-first precedence
+// (apiKeyEnvCandidates). Returns ("", "") when no key is configured.
+//
+// The second return value is the source env name — exposed so the
+// factory can log which env was selected at slog.Debug without leaking
+// the key value itself. Callers MUST NOT log the first return value.
+func resolveAPIKey(providerName string) (key, source string) {
+	for _, name := range apiKeyEnvCandidates(providerName) {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v, name
+		}
+	}
+	return "", ""
+}
 
 // NewProviderFromEnv constructs a Provider from process environment.
 //
@@ -47,12 +110,32 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 		return &DisabledProvider{Reason: EnvProvider + " is not set (BYOK required)"}, nil
 	}
 
-	apiKey := os.Getenv(EnvAPIKey)
 	model := os.Getenv(EnvModel)
 
-	// Ollama is local — no API key required.
-	if providerName != "ollama" && apiKey == "" {
-		return &DisabledProvider{Reason: EnvAPIKey + " is not set (BYOK required for provider " + providerName + ")"}, nil
+	// Ollama is local — no API key required. Every other provider has
+	// canonical-first precedence (SBOMHUB_LLM_API_KEY > provider-native
+	// alias). See M4 Codex review #F47: docs / README direct operators
+	// at the provider-native env names (OPENAI_API_KEY, etc.), so the
+	// factory must honour them as fall-backs to avoid silently disabling
+	// a correctly-configured deployment.
+	var apiKey string
+	if providerName != "ollama" {
+		var keySource string
+		apiKey, keySource = resolveAPIKey(providerName)
+		if apiKey == "" {
+			candidates := apiKeyEnvCandidates(providerName)
+			return &DisabledProvider{
+				Reason: fmt.Sprintf("no API key found for provider %s (set one of %s; %s wins on tie)",
+					providerName, strings.Join(candidates, ", "), EnvAPIKey),
+			}, nil
+		}
+		// Operator observability: log which env was selected so a
+		// misconfigured deployment ("I set OPENAI_API_KEY but it says
+		// disabled") can be diagnosed without scraping the secret value.
+		// SECURITY: keySource is the env name, NOT the key value; the
+		// key itself is never logged here.
+		slog.Debug("llm: resolved provider API key from env",
+			"provider", providerName, "env", keySource)
 	}
 
 	switch providerName {
@@ -114,6 +197,22 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 // apps/api/cmd/server/main.go).
 func ollamaBaseURLFromEnv() string {
 	if v := strings.TrimSpace(os.Getenv(EnvOllamaURL)); v != "" {
+		slog.Debug("llm: resolved Ollama base URL from env",
+			"env", EnvOllamaURL)
+		return v
+	}
+	// M4 Codex review #F47: OLLAMA_HOST is the Ollama project's official
+	// env (their CLI / SDK consult it directly). Honouring it as a
+	// fall-back means an operator who followed README / docs and only
+	// set OLLAMA_HOST gets their configured base URL instead of being
+	// silently redirected to http://localhost:11434.
+	//
+	// The value is passed through verbatim — Ollama accepts both
+	// `host:port` and `scheme://host:port` formats; URL normalisation is
+	// the provider's responsibility, not the factory's.
+	if v := strings.TrimSpace(os.Getenv(EnvOllamaHost)); v != "" {
+		slog.Debug("llm: resolved Ollama base URL from env",
+			"env", EnvOllamaHost)
 		return v
 	}
 	return defaultOllamaEndpoint

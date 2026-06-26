@@ -10,9 +10,19 @@ import (
 // they are restored when the test exits).
 func withEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
-	// Always clear the canonical contract envs so tests stay hermetic even
-	// if the developer has these set in their shell.
-	for _, k := range []string{EnvProvider, EnvAPIKey, EnvModel, EnvAzureEndpoint, EnvAzureDeployment, EnvOllamaURL} {
+	// Always clear the canonical contract envs + the M4 #F47 provider-
+	// specific aliases so tests stay hermetic even if the developer has
+	// these set in their shell (a stray OPENAI_API_KEY in the env would
+	// otherwise mask a "factory disables provider when key missing"
+	// regression).
+	for _, k := range []string{
+		EnvProvider, EnvAPIKey, EnvModel,
+		EnvAzureEndpoint, EnvAzureDeployment, EnvAzureAPIVersion,
+		EnvOllamaURL,
+		EnvOpenAIAPIKey, EnvAnthropicAPIKey,
+		EnvGeminiAPIKey, EnvGeminiAPIKeyAlt,
+		EnvAzureAPIKey, EnvOllamaHost,
+	} {
 		t.Setenv(k, "")
 	}
 	for k, v := range kv {
@@ -293,5 +303,269 @@ func TestNewProviderFromConfig_OllamaRequiresModel(t *testing.T) {
 	}
 	if p.Name() != "disabled" {
 		t.Errorf("Name() = %q, want disabled", p.Name())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M4 Codex review #F47 — provider-specific API key env aliases.
+//
+// docs/configuration.md / README.md / CLAUDE.md document the provider-native
+// env names (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY / GEMINI_API_KEY,
+// AZURE_OPENAI_API_KEY, OLLAMA_HOST). Before F47 the runtime factory only
+// consulted the canonical SBOMHUB_LLM_API_KEY / SBOMHUB_LLM_OLLAMA_URL, so an
+// operator who followed the docs got a silently disabled provider. These
+// tests lock in the canonical-first precedence and the alias fall-back for
+// every provider.
+// ---------------------------------------------------------------------------
+
+// TestResolveAPIKey_Canonical covers the "operator already on the existing
+// canonical env" path — SBOMHUB_LLM_API_KEY alone resolves for every BYOK
+// provider, regardless of which provider name is requested.
+func TestResolveAPIKey_Canonical(t *testing.T) {
+	for _, provider := range []string{"openai", "anthropic", "gemini", "azure_openai"} {
+		t.Run(provider, func(t *testing.T) {
+			withEnv(t, map[string]string{EnvAPIKey: "canonical-key"})
+			key, source := resolveAPIKey(provider)
+			if key != "canonical-key" {
+				t.Errorf("key = %q, want %q", key, "canonical-key")
+			}
+			if source != EnvAPIKey {
+				t.Errorf("source = %q, want %q", source, EnvAPIKey)
+			}
+		})
+	}
+}
+
+// TestResolveAPIKey_AliasOnly covers the doc-following operator path: only
+// the provider-native env is set, the factory must pick it up.
+func TestResolveAPIKey_AliasOnly(t *testing.T) {
+	cases := []struct {
+		provider   string
+		aliasEnv   string
+		aliasValue string
+	}{
+		{"openai", EnvOpenAIAPIKey, "openai-alias-key"},
+		{"anthropic", EnvAnthropicAPIKey, "anthropic-alias-key"},
+		{"gemini", EnvGeminiAPIKey, "gemini-google-key"},
+		{"gemini", EnvGeminiAPIKeyAlt, "gemini-alt-key"},
+		{"azure_openai", EnvAzureAPIKey, "azure-alias-key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider+"/"+tc.aliasEnv, func(t *testing.T) {
+			withEnv(t, map[string]string{tc.aliasEnv: tc.aliasValue})
+			key, source := resolveAPIKey(tc.provider)
+			if key != tc.aliasValue {
+				t.Errorf("key = %q, want %q", key, tc.aliasValue)
+			}
+			if source != tc.aliasEnv {
+				t.Errorf("source = %q, want %q", source, tc.aliasEnv)
+			}
+		})
+	}
+}
+
+// TestResolveAPIKey_CanonicalWinsOnTie covers the precedence guarantee:
+// existing self-host deployments that already set SBOMHUB_LLM_API_KEY must
+// continue to use it even when a stray provider-native alias is also set
+// in the shell environment.
+func TestResolveAPIKey_CanonicalWinsOnTie(t *testing.T) {
+	cases := []struct {
+		provider string
+		aliasEnv string
+	}{
+		{"openai", EnvOpenAIAPIKey},
+		{"anthropic", EnvAnthropicAPIKey},
+		{"gemini", EnvGeminiAPIKey},
+		{"azure_openai", EnvAzureAPIKey},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			withEnv(t, map[string]string{
+				EnvAPIKey:   "canonical-wins",
+				tc.aliasEnv: "alias-loses",
+			})
+			key, source := resolveAPIKey(tc.provider)
+			if key != "canonical-wins" {
+				t.Errorf("key = %q, want canonical to win", key)
+			}
+			if source != EnvAPIKey {
+				t.Errorf("source = %q, want %q", source, EnvAPIKey)
+			}
+		})
+	}
+}
+
+// TestResolveAPIKey_GeminiGoogleBeatsGeminiAlt locks in the documented
+// Gemini precedence: SBOMHUB_LLM_API_KEY > GOOGLE_API_KEY > GEMINI_API_KEY.
+// The first two are documented in CLAUDE.md / README; GEMINI_API_KEY is a
+// fallback used in some Google SDK paths.
+func TestResolveAPIKey_GeminiGoogleBeatsGeminiAlt(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvGeminiAPIKey:    "google-wins",
+		EnvGeminiAPIKeyAlt: "alt-loses",
+	})
+	key, source := resolveAPIKey("gemini")
+	if key != "google-wins" {
+		t.Errorf("key = %q, want %q", key, "google-wins")
+	}
+	if source != EnvGeminiAPIKey {
+		t.Errorf("source = %q, want %q", source, EnvGeminiAPIKey)
+	}
+}
+
+// TestResolveAPIKey_Empty covers the "no env at all" path: empty key + empty
+// source signals to the caller that DisabledProvider should be returned.
+func TestResolveAPIKey_Empty(t *testing.T) {
+	for _, provider := range []string{"openai", "anthropic", "gemini", "azure_openai"} {
+		t.Run(provider, func(t *testing.T) {
+			withEnv(t, nil)
+			key, source := resolveAPIKey(provider)
+			if key != "" || source != "" {
+				t.Errorf("key=%q source=%q, want both empty", key, source)
+			}
+		})
+	}
+}
+
+// TestNewProviderFromEnv_AliasHappyPath is the end-to-end alias test: only
+// the provider-native env is set, NewProviderFromEnv must build a real
+// provider (not DisabledProvider). This is the operator-facing assertion
+// that the F47 bug is fixed.
+func TestNewProviderFromEnv_AliasHappyPath(t *testing.T) {
+	cases := []struct {
+		provider string
+		aliasEnv string
+		wantName string
+	}{
+		{"openai", EnvOpenAIAPIKey, "openai"},
+		{"anthropic", EnvAnthropicAPIKey, "anthropic"},
+		{"gemini", EnvGeminiAPIKey, "gemini"},
+		{"gemini", EnvGeminiAPIKeyAlt, "gemini"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider+"/"+tc.aliasEnv, func(t *testing.T) {
+			withEnv(t, map[string]string{
+				EnvProvider: tc.provider,
+				tc.aliasEnv: "alias-key",
+			})
+			p, err := NewProviderFromEnv(context.Background())
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if p.Name() != tc.wantName {
+				t.Errorf("Name() = %q, want %q", p.Name(), tc.wantName)
+			}
+		})
+	}
+}
+
+// TestNewProviderFromEnv_AzureAliasHappyPath separates Azure because it
+// requires endpoint + deployment in addition to the API key, so the alias
+// path is exercised on top of the full Azure env contract.
+func TestNewProviderFromEnv_AzureAliasHappyPath(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:        "azure_openai",
+		EnvAzureAPIKey:     "azure-alias-key",
+		EnvAzureEndpoint:   "https://example.openai.azure.com",
+		EnvAzureDeployment: "gpt-4o-deployment",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if p.Name() != "azure_openai" {
+		t.Errorf("Name() = %q, want azure_openai", p.Name())
+	}
+}
+
+// TestNewProviderFromEnv_DisabledReasonListsAliases verifies the
+// DisabledProvider Reason message names every env the factory consulted —
+// the previous message said only "SBOMHUB_LLM_API_KEY is not set", which
+// did not help operators who had OPENAI_API_KEY (etc.) set but a typo in
+// the provider name.
+func TestNewProviderFromEnv_DisabledReasonListsAliases(t *testing.T) {
+	cases := []struct {
+		provider     string
+		wantContains []string
+	}{
+		{"openai", []string{EnvAPIKey, EnvOpenAIAPIKey}},
+		{"anthropic", []string{EnvAPIKey, EnvAnthropicAPIKey}},
+		{"gemini", []string{EnvAPIKey, EnvGeminiAPIKey, EnvGeminiAPIKeyAlt}},
+		{"azure_openai", []string{EnvAPIKey, EnvAzureAPIKey}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			withEnv(t, map[string]string{EnvProvider: tc.provider})
+			p, err := NewProviderFromEnv(context.Background())
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			de, ok := p.(*DisabledProvider)
+			if !ok {
+				t.Fatalf("type = %T, want *DisabledProvider", p)
+			}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(de.Reason, want) {
+					t.Errorf("Reason = %q, want substring %q", de.Reason, want)
+				}
+			}
+		})
+	}
+}
+
+// TestOllamaBaseURL_Canonical locks in the canonical-first precedence for
+// the Ollama base URL: SBOMHUB_LLM_OLLAMA_URL wins when set, regardless of
+// OLLAMA_HOST.
+func TestOllamaBaseURL_Canonical(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvOllamaURL:  "http://canonical.test:11434",
+		EnvOllamaHost: "http://alias.test:11434",
+	})
+	if got := ollamaBaseURLFromEnv(); got != "http://canonical.test:11434" {
+		t.Errorf("ollamaBaseURLFromEnv() = %q, want canonical", got)
+	}
+}
+
+// TestOllamaBaseURL_Alias is the F47 fix: when only OLLAMA_HOST is set
+// (the operator followed the README), the factory must respect it
+// instead of silently falling back to http://localhost:11434.
+func TestOllamaBaseURL_Alias(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvOllamaHost: "http://ollama-host.test:11434",
+	})
+	if got := ollamaBaseURLFromEnv(); got != "http://ollama-host.test:11434" {
+		t.Errorf("ollamaBaseURLFromEnv() = %q, want %q", got, "http://ollama-host.test:11434")
+	}
+}
+
+// TestOllamaBaseURL_Default covers the no-env path: factory must return
+// the documented localhost default so a stock `ollama serve` works out
+// of the box.
+func TestOllamaBaseURL_Default(t *testing.T) {
+	withEnv(t, nil)
+	if got := ollamaBaseURLFromEnv(); got != defaultOllamaEndpoint {
+		t.Errorf("ollamaBaseURLFromEnv() = %q, want %q", got, defaultOllamaEndpoint)
+	}
+}
+
+// TestNewProviderFromEnv_OllamaRespectsHostAlias is the end-to-end Ollama
+// alias test: only OLLAMA_HOST is set, the resulting OllamaProvider must
+// carry that base URL through.
+func TestNewProviderFromEnv_OllamaRespectsHostAlias(t *testing.T) {
+	withEnv(t, map[string]string{
+		EnvProvider:   "ollama",
+		EnvModel:      "qwen2.5-coder:7b",
+		EnvOllamaHost: "http://ollama-host.test:11434",
+	})
+	p, err := NewProviderFromEnv(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	op, ok := p.(*OllamaProvider)
+	if !ok {
+		t.Fatalf("type = %T, want *OllamaProvider", p)
+	}
+	if op.baseURL != "http://ollama-host.test:11434" {
+		t.Errorf("baseURL = %q, want %q", op.baseURL, "http://ollama-host.test:11434")
 	}
 }
