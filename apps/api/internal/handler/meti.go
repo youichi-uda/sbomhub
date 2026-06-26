@@ -20,6 +20,24 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service/meti/criteria"
 )
 
+// MetiProjectReader is the subset of *repository.ProjectRepository the
+// METI handler uses to confirm that the path :id belongs to the
+// authenticated tenant BEFORE any meti_assessments read / write
+// happens. Declared as an interface so meti_test.go can supply a fake
+// without a real PostgreSQL connection (matches the
+// ProjectReader pattern in evidence_pack).
+//
+// F37 (M3 Codex review round 3): the meti_assessments table treats
+// project_id as a soft reference (no FK) so without this check a probe
+// caller can persist 27 evaluator rows under an arbitrary or
+// non-existent project UUID and pollute List / Override / Evidence
+// Pack output. GetByTenant returns sql.ErrNoRows for both
+// "row does not exist" and "row belongs to another tenant" — the
+// handler maps both to a generic 404 (F10 carry-over: no oracle).
+type MetiProjectReader interface {
+	GetByTenant(ctx context.Context, tenantID, projectID uuid.UUID) (*model.Project, error)
+}
+
 // Override-note bounds enforced by /override (PUT) — and shared by
 // the M4 follow-up clear-override endpoint. Required + length-capped
 // is the M3 Codex review #F34 fix: a manual override that wins over
@@ -180,11 +198,63 @@ type MetiHandler struct {
 	store     MetiAssessmentStore
 	evaluator MetiEvaluator
 	audit     MetiAuditLogger
+	projects  MetiProjectReader
 }
 
-// NewMetiHandler wires the handler.
-func NewMetiHandler(store MetiAssessmentStore, evaluator MetiEvaluator, audit MetiAuditLogger) *MetiHandler {
-	return &MetiHandler{store: store, evaluator: evaluator, audit: audit}
+// NewMetiHandler wires the handler. The projects reader is mandatory
+// (F37 round 3): every endpoint calls requireProjectInTenant before
+// touching meti_assessments so a probe caller cannot Upsert /
+// Read / Override rows for a project that does not belong to the
+// authenticated tenant.
+func NewMetiHandler(store MetiAssessmentStore, evaluator MetiEvaluator, audit MetiAuditLogger, projects MetiProjectReader) *MetiHandler {
+	return &MetiHandler{store: store, evaluator: evaluator, audit: audit, projects: projects}
+}
+
+// requireProjectInTenant ensures projectID belongs to tenantID before
+// any meti_assessments read / write runs (F37). Returns:
+//
+//   - (0, nil)           : project exists in tenant; proceed.
+//   - (404, generic body) : project not found OR belongs to another
+//     tenant. Body is identical to "meti assessment not found" so the
+//     response is not an oracle for cross-tenant project enumeration
+//     (F10 carry-over).
+//   - (500, generic body) : storage failure; slog captures the
+//     underlying error.
+//
+// The handler-level slog line distinguishes the two 404 cases for
+// operator forensics — only the JSON body is shared.
+func (h *MetiHandler) requireProjectInTenant(ctx context.Context, tenantID, projectID uuid.UUID, endpointName string) (int, map[string]string) {
+	if h.projects == nil {
+		// Defence-in-depth: if the handler was wired without a project
+		// reader we MUST refuse to serve rather than fall through to the
+		// unscoped fan-out. NewMetiHandler now requires the reader, so
+		// this only fires on a future mis-wire regression.
+		slog.Error("meti_assessments: project reader not wired; refusing to serve (F37)",
+			"endpoint", endpointName,
+			"tenant_id", tenantID,
+			"project_id", projectID,
+		)
+		return http.StatusInternalServerError, map[string]string{"error": "meti handler misconfigured"}
+	}
+	_, err := h.projects.GetByTenant(ctx, tenantID, projectID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("meti_assessments: project not in tenant (F37)",
+				"endpoint", endpointName,
+				"tenant_id", tenantID,
+				"project_id", projectID,
+			)
+			return http.StatusNotFound, map[string]string{"error": "project not found"}
+		}
+		slog.Warn("meti_assessments: project lookup failed",
+			"endpoint", endpointName,
+			"tenant_id", tenantID,
+			"project_id", projectID,
+			"error", err,
+		)
+		return http.StatusInternalServerError, map[string]string{"error": "failed to verify project"}
+	}
+	return 0, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -280,6 +350,14 @@ func (h *MetiHandler) ListAssessments(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
 
+	// F37: confirm the project belongs to the authenticated tenant
+	// BEFORE any meti_assessments query so a probe caller cannot probe
+	// arbitrary project UUIDs and read other tenants' rows. Failure
+	// surfaces as a generic 404 (F10 no-oracle).
+	if status, body := h.requireProjectInTenant(c.Request().Context(), tc.TenantID(), projectID, "ListAssessments"); status != 0 {
+		return c.JSON(status, body)
+	}
+
 	filter, status, body := h.parseListFilter(c, tc.TenantID(), projectID)
 	if status != 0 {
 		return c.JSON(status, body)
@@ -339,6 +417,15 @@ func (h *MetiHandler) RefreshAssessment(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+
+	// F37: confirm the project belongs to the authenticated tenant
+	// BEFORE the evaluator + 27-row Upsert fan-out runs. Without this
+	// check the handler would persist meti_assessments rows for an
+	// arbitrary / non-existent project UUID (project_id is a soft
+	// reference with no FK in the migration).
+	if status, body := h.requireProjectInTenant(c.Request().Context(), tc.TenantID(), projectID, "RefreshAssessment"); status != 0 {
+		return c.JSON(status, body)
 	}
 
 	results, err := h.evaluator.Evaluate(c.Request().Context(), tc.TenantID(), projectID)
@@ -450,6 +537,13 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+	// F37: confirm the project belongs to the authenticated tenant
+	// BEFORE the criterion-id validation / load / UPDATE chain so a
+	// probe caller cannot mutate meti_assessments rows for arbitrary or
+	// cross-tenant project UUIDs.
+	if status, body := h.requireProjectInTenant(c.Request().Context(), tc.TenantID(), projectID, "OverrideAssessment"); status != 0 {
+		return c.JSON(status, body)
 	}
 	criterionID := c.Param("criterion_id")
 	if criterionID == "" {
@@ -679,6 +773,11 @@ func (h *MetiHandler) ClearOverride(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
 	}
+	// F37: confirm the project belongs to the authenticated tenant
+	// BEFORE the clear-override chain runs.
+	if status, body := h.requireProjectInTenant(c.Request().Context(), tc.TenantID(), projectID, "ClearOverride"); status != 0 {
+		return c.JSON(status, body)
+	}
 	criterionID := c.Param("criterion_id")
 	if criterionID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "criterion_id is required"})
@@ -857,6 +956,13 @@ func (h *MetiHandler) ListImprovementActions(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+
+	// F37: confirm the project belongs to the authenticated tenant
+	// BEFORE the improvement-actions read so a probe caller cannot
+	// enumerate cross-tenant project rows.
+	if status, body := h.requireProjectInTenant(c.Request().Context(), tc.TenantID(), projectID, "ListImprovementActions"); status != 0 {
+		return c.JSON(status, body)
 	}
 
 	// Optional phase filter (mirrors ListAssessments). Status filter is

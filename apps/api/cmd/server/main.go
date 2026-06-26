@@ -517,7 +517,13 @@ func main() {
 	// these routes but records only path/method/latency — the domain
 	// audit captures the criterion verdict changes for the compliance
 	// trail.
-	metiHandler := handler.NewMetiHandler(metiAssessmentsRepo, metiEvaluator, auditRepo)
+	// F37 (M3 Codex review round 3): the project repository is injected
+	// so every METI endpoint can confirm the path :id belongs to the
+	// authenticated tenant BEFORE touching meti_assessments. Without
+	// this check, /refresh would persist 27 evaluator rows under an
+	// arbitrary or non-existent project UUID (project_id is a soft
+	// reference with no FK in the migration).
+	metiHandler := handler.NewMetiHandler(metiAssessmentsRepo, metiEvaluator, auditRepo, projectRepo)
 
 	// Evidence Pack builder + handler (Wave M2-6 / issue #34). The
 	// builder composes the existing vex_drafts (M1) + cra_reports

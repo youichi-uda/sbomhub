@@ -24,6 +24,40 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service/meti/criteria"
 )
 
+// fakeMetiProjectStore is the in-memory MetiProjectReader the F37
+// regression tests exercise. The default behaviour is "this single
+// project exists in this single tenant" so the existing pre-F37 tests
+// continue to pass; the F37 negative-path tests flip notFound = true
+// to simulate "project absent or cross-tenant".
+type fakeMetiProjectStore struct {
+	mu        sync.Mutex
+	tenantID  uuid.UUID
+	projectID uuid.UUID
+	notFound  bool
+	err       error
+	calls     int
+	lastT     uuid.UUID
+	lastP     uuid.UUID
+}
+
+func (f *fakeMetiProjectStore) GetByTenant(_ context.Context, tenantID, projectID uuid.UUID) (*model.Project, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastT = tenantID
+	f.lastP = projectID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.notFound {
+		return nil, sql.ErrNoRows
+	}
+	if tenantID != f.tenantID || projectID != f.projectID {
+		return nil, sql.ErrNoRows
+	}
+	return &model.Project{ID: projectID, Name: "test"}, nil
+}
+
 // ----------------------------------------------------------------------------
 // Handler-level fakes. The MetiHandler is wired against narrow
 // interfaces (see meti.go) so the evaluator does not need real
@@ -275,6 +309,7 @@ type metiHarness struct {
 	store     *fakeMetiStore
 	evaluator *fakeMetiEvaluator
 	audit     *fakeMetiAudit
+	projects  *fakeMetiProjectStore
 	handler   *MetiHandler
 	tenantID  uuid.UUID
 	projectID uuid.UUID
@@ -288,11 +323,17 @@ func newMetiHarness() *metiHarness {
 	store := newFakeMetiStore()
 	evaluator := &fakeMetiEvaluator{}
 	audit := &fakeMetiAudit{}
-	h := NewMetiHandler(store, evaluator, audit)
+	// F37: by default the project IS in the tenant so all pre-existing
+	// happy-path / negative-path tests keep their previous behaviour.
+	// The F37 regression tests flip projects.notFound to simulate the
+	// cross-tenant / nonexistent project probe.
+	projects := &fakeMetiProjectStore{tenantID: tenantID, projectID: projectID}
+	h := NewMetiHandler(store, evaluator, audit, projects)
 	return &metiHarness{
 		store:     store,
 		evaluator: evaluator,
 		audit:     audit,
+		projects:  projects,
 		handler:   h,
 		tenantID:  tenantID,
 		projectID: projectID,
@@ -1375,5 +1416,252 @@ func TestMetiHandler_ClearOverride_RequireNote_F33(t *testing.T) {
 	}
 	if len(h.audit.entries) != 0 {
 		t.Errorf("F33: audit row MUST NOT be emitted when note is rejected, got %d", len(h.audit.entries))
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F37 — project-in-tenant boundary on every METI endpoint
+// ----------------------------------------------------------------------------
+//
+// The meti_assessments table treats project_id as a soft reference (no
+// FK). Pre-F37, the handler parsed the path :id and immediately ran
+// the evaluator / repository call against the (tenant, projectID)
+// pair, so a probe caller could:
+//
+//   - POST /refresh with a random UUID → persist 27 evaluator rows
+//     under a project that does not exist in the tenant (or worse,
+//     belongs to another tenant in a shared-cluster deployment).
+//   - GET  /assessment with a sibling tenant's project UUID → read
+//     whatever rows happened to exist (RLS would catch this in
+//     production but the handler must not rely on RLS alone — F37
+//     defence-in-depth).
+//   - PUT  /override / DELETE /override / GET /improvement-actions
+//     → same cross-project / nonexistent-project trap.
+//
+// The fix injects a MetiProjectReader and calls GetByTenant before any
+// meti_assessments operation. The tests below pin each endpoint
+// returning 404 (generic body — F10 carry-over) and NOT touching the
+// store / evaluator / audit when the project is absent or
+// cross-tenant.
+
+func TestMetiHandler_RefreshAssessment_ProjectNotInTenant_Returns404_F37(t *testing.T) {
+	h := newMetiHarness()
+	h.projects.notFound = true
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/refresh", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.RefreshAssessment(c); err != nil {
+		t.Fatalf("RefreshAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F37: refresh against missing project status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "project not found") {
+		t.Errorf("F37: 404 body should mention 'project not found'; got %s", rec.Body.String())
+	}
+	if h.projects.calls != 1 {
+		t.Errorf("F37: project lookup must run exactly once, got %d", h.projects.calls)
+	}
+	if h.evaluator.calls != 0 {
+		t.Errorf("F37: evaluator MUST NOT run when project is absent, got %d", h.evaluator.calls)
+	}
+	if got := len(h.store.upserts); got != 0 {
+		t.Errorf("F37: store.Upsert MUST NOT run when project is absent, got %d", got)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F37: audit row MUST NOT be emitted when project is absent, got %d", len(h.audit.entries))
+	}
+}
+
+func TestMetiHandler_GetAssessment_ProjectNotInTenant_Returns404_F37(t *testing.T) {
+	h := newMetiHarness()
+	h.projects.notFound = true
+	// Seed a row so we can confirm ListByProject is NOT called even
+	// when the store has matching data — the project check fires first.
+	h.seedRow("meti.env_setup.01", "env_setup", criteria.StatusAchieved)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleViewer)
+
+	if err := h.handler.ListAssessments(c); err != nil {
+		t.Fatalf("ListAssessments returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F37: list against missing project status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.listCalled {
+		t.Errorf("F37: ListByProject MUST NOT run when project is absent")
+	}
+	if h.store.countCalled {
+		t.Errorf("F37: CountByProject MUST NOT run when project is absent")
+	}
+}
+
+func TestMetiHandler_OverrideAssessment_ProjectNotInTenant_Returns404_F37(t *testing.T) {
+	h := newMetiHarness()
+	h.projects.notFound = true
+	// Seed the criterion row so the F26 / F31 guards would normally
+	// pass — this confirms the F37 check fires BEFORE those guards.
+	h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+
+	body, _ := json.Marshal(metiOverrideRequest{
+		OverrideStatus: criteria.StatusAchieved,
+		OverrideNote:   "manual override rationale",
+	})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPut,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.OverrideAssessment(c); err != nil {
+		t.Fatalf("OverrideAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F37: override against missing project status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.overrideCalls != 0 {
+		t.Errorf("F37: OverrideStatus MUST NOT run when project is absent, got %d", h.store.overrideCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F37: audit row MUST NOT be emitted when project is absent, got %d", len(h.audit.entries))
+	}
+}
+
+func TestMetiHandler_ClearOverride_ProjectNotInTenant_Returns404_F37(t *testing.T) {
+	h := newMetiHarness()
+	h.projects.notFound = true
+	// Seed an overridden row so the F33 guard would normally pass.
+	seeded := h.seedRow(realCriterionID, realCriterionPhase, criteria.StatusNeedsReview)
+	seeded.OverrideStatus = criteria.StatusAchieved
+	by := h.userID
+	seeded.OverrideBy = &by
+	h.store.byKey[metiKey(h.projectID, realCriterionID)] = seeded
+
+	body, _ := json.Marshal(metiClearOverrideRequest{Note: "re-evaluated"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/"+realCriterionID+"/override",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "criterion_id")
+	c.SetParamValues(h.projectID.String(), realCriterionID)
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.ClearOverride(c); err != nil {
+		t.Fatalf("ClearOverride returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F37: clear-override against missing project status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.clearCalls != 0 {
+		t.Errorf("F37: ClearOverride MUST NOT run when project is absent, got %d", h.store.clearCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F37: audit row MUST NOT be emitted when project is absent, got %d", len(h.audit.entries))
+	}
+}
+
+func TestMetiHandler_GetImprovementActions_ProjectNotInTenant_Returns404_F37(t *testing.T) {
+	h := newMetiHarness()
+	h.projects.notFound = true
+	// Seed a non-achieved row so the action list would normally have
+	// content — confirms the F37 check fires BEFORE the read.
+	h.seedRow("meti.env_setup.01", "env_setup", criteria.StatusNotAchieved)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/improvement-actions", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleViewer)
+
+	if err := h.handler.ListImprovementActions(c); err != nil {
+		t.Fatalf("ListImprovementActions returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F37: improvement-actions against missing project status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.listCalled {
+		t.Errorf("F37: ListByProject MUST NOT run when project is absent")
+	}
+}
+
+// TestMetiHandler_RefreshAssessment_ValidProject_Accepted_F37 is the
+// positive-companion regression that pins the F37 lookup wired into the
+// happy path. Without it, a future "tighten the project check" change
+// could make every refresh 404 and we would not notice through the
+// negative-only F37 cases above. The earlier happy-path test
+// (TestMetiHandler_RefreshAssessment_HappyPath_UpsertsAndAudits) covers
+// the same code path but does NOT explicitly assert that the project
+// lookup actually fired — this test does.
+func TestMetiHandler_RefreshAssessment_ValidProject_Accepted_F37(t *testing.T) {
+	h := newMetiHarness()
+	// Default fakeMetiProjectStore returns the project; do not flip
+	// notFound. The single evaluator row keeps the test cheap while
+	// still exercising the Upsert + audit happy path.
+	h.evaluator.results = []metisvc.CriterionResult{
+		{
+			CriterionID:      "meti.env_setup.01",
+			Phase:            "env_setup",
+			Status:           criteria.StatusAchieved,
+			Evidence:         json.RawMessage(`[]`),
+			EvaluatorVersion: metisvc.EvaluatorVersion,
+			EvaluatedAt:      time.Now().UTC(),
+		},
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/meti/assessment/refresh", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.RefreshAssessment(c); err != nil {
+		t.Fatalf("RefreshAssessment returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F37: valid-project refresh status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.projects.calls != 1 {
+		t.Errorf("F37: project lookup must run exactly once, got %d", h.projects.calls)
+	}
+	if h.projects.lastT != h.tenantID || h.projects.lastP != h.projectID {
+		t.Errorf("F37: project lookup scoped wrong; got (%s,%s) want (%s,%s)",
+			h.projects.lastT, h.projects.lastP, h.tenantID, h.projectID)
+	}
+	if h.evaluator.calls != 1 {
+		t.Errorf("F37: evaluator must run after project check, got %d", h.evaluator.calls)
+	}
+	if got := len(h.store.upserts); got != 1 {
+		t.Errorf("F37: upserts = %d, want 1", got)
+	}
+	if got := len(h.audit.entries); got != 1 {
+		t.Errorf("F37: audit entries = %d, want 1", got)
 	}
 }
