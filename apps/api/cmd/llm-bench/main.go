@@ -77,6 +77,22 @@ import (
 // blocking the whole run).
 var allProviderNames = []string{"openai", "anthropic", "gemini", "azure_openai", "ollama"}
 
+// Version / Commit / Date are populated by the release build via -ldflags
+// "-X main.Version=... -X main.Commit=... -X main.Date=...". The defaults
+// keep `go run ./cmd/llm-bench --version` working in source checkouts.
+//
+// M5 #54 (M5-2): goreleaser publishes a standalone `llm-bench` archive per
+// release tag so sbomhub-cli's `sbomhub llm bench` wrapper can download a
+// pre-built binary instead of `go run`-ing against a mounted sbomhub OSS
+// source tree. The wrapper greps `--version` to decide whether the
+// downloaded binary matches the expected release; do not rename or
+// remove these fields without bumping the wrapper contract.
+var (
+	Version = "dev"
+	Commit  = "none"
+	Date    = "unknown"
+)
+
 // firstNonEmptyEnv walks env names in canonical-first precedence and
 // returns the first non-empty trimmed value (or "" if none set).
 // Mirrors factory.resolveAPIKey / factory.resolveAzureField (M4 Codex
@@ -108,6 +124,12 @@ type cliFlags struct {
 	verbose        bool
 	timeoutSec     int
 	maxConcurrency int
+	// showVersion is the M5 #54 fast-path: when --version is passed the
+	// bench prints "llm-bench <Version> (<Commit>) built <Date>" on
+	// stdout and exits 0 without touching providers, fixtures, or env.
+	// sbomhub-cli's wrapper uses this to validate the downloaded binary
+	// matches the expected release tag (M5-2 contract).
+	showVersion bool
 }
 
 // parseFlags wires the CLI surface and parses argv into *cliFlags.
@@ -141,6 +163,13 @@ func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 		"F19 bounded-context cap per LLM call, in seconds (default 60)")
 	fs.IntVar(&f.maxConcurrency, "max-concurrency", 4,
 		"max parallel LLM calls across all (provider, case) pairs (default 4)")
+	// M5 #54 (M5-2): --version exits 0 after printing the ldflags-injected
+	// release identity. Wired as a normal bool flag so it composes with
+	// flag.ErrHelp / parseFlags' existing error contract; realMain
+	// short-circuits on it after parse succeeds so we do not require
+	// --eval-set just to print the version.
+	fs.BoolVar(&f.showVersion, "version", false,
+		"print release version (set by goreleaser ldflags) and exit 0")
 
 	// F48: Usage prints flag list + F42 exit-code contract so operators
 	// can map exit codes without reading the source. Kept in sync with
@@ -168,6 +197,13 @@ func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 		// ContinueOnError; realMain detects it and exits 0. We keep the
 		// wrap with %w so errors.Is downstream still matches.
 		return nil, fmt.Errorf("parse flags: %w", err)
+	}
+	// M5 #54 (M5-2): --version is a fast-path that bypasses the rest of
+	// the validation chain (eval-set / max-cases / timeout / concurrency
+	// are irrelevant when only the build identity is requested). realMain
+	// observes f.showVersion right after parseFlags returns and exits 0.
+	if f.showVersion {
+		return f, nil
 	}
 	if f.evalSet == "" {
 		return nil, fmt.Errorf("--eval-set is required")
@@ -451,6 +487,14 @@ func realMain(args []string, stdout, stderr io.Writer) *exitError {
 			return nil
 		}
 		return newExitError(exitUsageError, err)
+	}
+	// M5 #54 (M5-2): --version is the goreleaser-injected release identity.
+	// Printed to stdout (the F48 help text goes to stderr; --version is a
+	// machine-parseable contract sbomhub-cli's wrapper greps, so the stream
+	// choice matters). Exit 0; do not consult fixture / providers.
+	if flags.showVersion {
+		fmt.Fprintf(stdout, "llm-bench %s (%s) built %s\n", Version, Commit, Date)
+		return nil
 	}
 
 	// Wire slog so per-case warnings (skipped providers, transport
