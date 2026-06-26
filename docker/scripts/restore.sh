@@ -266,6 +266,91 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Admin role password convergence (F80 fix — DR scenario blocker)
+# ---------------------------------------------------------------------------
+# F80: pg_restore は PostgreSQL role password を **復元しない** (DB schema + data
+# のみ復元、 `pg_authid` 等の cluster-level role 情報は対象外)。 結果:
+#
+#   - **production hot restore** (同一 volume / 同一 host): 既存 `sbomhub`
+#     role password = 復元される `postgres_password.txt` なので Step 6
+#     db-bootstrap の admin TCP 接続は成功する。
+#   - **DR / fresh volume / 別 host への cold restore**: postgres image init は
+#     新 host の `secrets/postgres_password.txt` (= 新 random password) で
+#     `sbomhub` role を作成済み、 一方 Step 5 で `postgres_password.txt` が
+#     backup 取得時の password に上書きされる。 結果、 Step 6 db-bootstrap が
+#     `psql -h postgres -U sbomhub` で TCP 認証失敗 → exit 1 で restore 不能。
+#     DR は backup 運用の主目的なので fix 必須。
+#
+# Step 5.5 で `ALTER ROLE sbomhub WITH PASSWORD '<restored>'` を実行し、 実 DB
+# admin role password を restored secret 値に矯正する。 接続は postgres
+# container 内 Unix socket 経由 (`docker compose exec -T postgres psql -U sbomhub`、
+# `-h` 不使用)。 postgres:15-alpine official image は local Unix socket 接続に
+# **trust auth** を default で設定するため、 PGPASSWORD なしで admin connection
+# が成立する (Step 3 pg_restore / Step 4 sanity check も同経路で動作している、
+# 同前提を共有)。 これにより pre-restore admin password の取得手段は不要、
+# DR scenario / hot restore の両方を同一 path で処理できる。
+#
+# password 値の SQL embedding は db-bootstrap entrypoint と同じ規律 (psql `-v`
+# で client-side `:'var'` literal quoting + server-side `format('%L', ...)`)。
+# raw password 値は SQL literal に直接出現せず、 任意 byte の password でも
+# injection / 構文エラーにならない (codex-r8 P2 と同 species)。
+#
+# standard `docker-compose.yml` (OSS dev 用、 sbomhub superuser 単一ロール) では
+# sbomhub-api が `sbomhub` superuser で直接接続する旧構成のため、 admin role
+# password の converge は不要 (Step 6 db-bootstrap も非実行)。 enterprise
+# compose のみで実行する (compose file 名で判定)。
+
+echo "[restore] step 5.5/7: converge postgres admin role password to restored secret (DR scenario)"
+COMPOSE_BASENAME="$(basename "${COMPOSE_FILE}")"
+case "${COMPOSE_BASENAME}" in
+    *enterprise*)
+        if [[ ! -d "${BACKUP_SECRETS}" ]]; then
+            echo "[restore]   skip: secrets were not restored (Step 5 was a no-op, admin password unchanged)"
+        else
+            RESTORED_ADMIN_PASSWORD_FILE="${SECRETS_DIR}/postgres_password.txt"
+            if [[ ! -r "${RESTORED_ADMIN_PASSWORD_FILE}" ]]; then
+                echo "[restore] FATAL: restored admin password file not readable: ${RESTORED_ADMIN_PASSWORD_FILE}" >&2
+                echo "[restore]        secrets restore が壊れている可能性 (backup tarball の secrets/ 配下を確認)。" >&2
+                exit 1
+            fi
+            RESTORED_ADMIN_PASSWORD="$(cat "${RESTORED_ADMIN_PASSWORD_FILE}")"
+            if [[ -z "${RESTORED_ADMIN_PASSWORD}" ]]; then
+                echo "[restore] FATAL: restored postgres_password.txt is empty" >&2
+                exit 1
+            fi
+            # Unix socket trust auth で admin 接続 → ALTER ROLE。 `\gexec` は
+            # `SELECT format(...)` の結果 1 行を SQL として実行する psql 機能。
+            # `2>&1` で stderr を握り、 failure 時に raw 出力を error log に
+            # awk 整形して出す。
+            ALTER_OUTPUT="$(docker compose -f "${COMPOSE_FILE}" exec -T \
+                postgres \
+                psql -U sbomhub -d "${PG_DB}" \
+                     -tA -v ON_ERROR_STOP=1 \
+                     -v new_admin_pw="${RESTORED_ADMIN_PASSWORD}" 2>&1 <<'SQL'
+SELECT format('ALTER ROLE %I WITH PASSWORD %L', 'sbomhub', :'new_admin_pw')
+\gexec
+SQL
+            )" || {
+                unset RESTORED_ADMIN_PASSWORD
+                echo "[restore] FATAL: failed to converge postgres admin role password:" >&2
+                awk '{print "[restore]   " $0}' <<< "${ALTER_OUTPUT}" >&2
+                echo "[restore]        Step 6 db-bootstrap は restored postgres_password.txt で TCP 接続するため、" >&2
+                echo "[restore]        admin role password が DB 側と一致していないと認証失敗で abort します。" >&2
+                echo "[restore]        詳細: docker compose -f ${COMPOSE_FILE} logs postgres" >&2
+                echo "[restore]        手動 recovery: docker compose -f ${COMPOSE_FILE} exec postgres \\" >&2
+                echo "[restore]                          psql -U sbomhub -c \"ALTER ROLE sbomhub PASSWORD '<value>';\"" >&2
+                exit 1
+            }
+            unset RESTORED_ADMIN_PASSWORD
+            echo "[restore]   admin role 'sbomhub' password converged to restored secret"
+        fi
+        ;;
+    *)
+        echo "[restore]   skip: non-enterprise compose (single-role mode, no db-bootstrap re-run)"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Role grants / ownership re-bootstrap (F79 fix)
 # ---------------------------------------------------------------------------
 # F79: pg_restore は `--no-owner --no-privileges` で復元しているため、 restored
@@ -288,7 +373,6 @@ fi
 # db-bootstrap service 自体が存在しないため skip (compose file 名で判定)。
 
 echo "[restore] step 6/7: re-apply role grants and ownership (db-bootstrap)"
-COMPOSE_BASENAME="$(basename "${COMPOSE_FILE}")"
 case "${COMPOSE_BASENAME}" in
     *enterprise*)
         if ! docker compose -f "${COMPOSE_FILE}" run --rm db-bootstrap; then

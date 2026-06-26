@@ -291,7 +291,7 @@ restore 後、 script が表示する Next steps に従って sbomhub-api / sbom
 
 **fail-safe 動作 (F65 + F79 fix 後)**:
 
-restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張):
+restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張、 F80 で Step 5.5 を追加):
 
 | Step | 内容 | 失敗時の動作 |
 |---|---|---|
@@ -300,6 +300,7 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張):
 | 3/7 | pg_restore (`--single-transaction --clean --if-exists --no-owner --no-privileges`) | rollback + exit 1 |
 | 4/7 | sanity check (`schema_migrations` 最新 version、 `tenants` count) | exit 1 (secrets 上書き前) |
 | 5/7 | secrets 復元 (`docker/secrets/` 上書き、 旧 secrets は `.bak-<utc>` に退避) | exit 1 |
+| 5.5/7 | postgres admin role (`sbomhub`) password を restored secret に converge (DR scenario) | exit 1 |
 | 6/7 | db-bootstrap 再実行 (`docker compose run --rm db-bootstrap`) | exit 1 |
 | 7/7 | sbomhub_app role での `tenants` SELECT 確認 | exit 1 |
 
@@ -317,6 +318,26 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張):
   これを怠ると sbomhub-api 起動時に `sbomhub_app` が `permission denied for
   table ...` で fail し、 API が serve せず production blocker になる。
   失敗時は **完了 message を出さずに exit 1**。
+- **F80 fix (DR scenario)**: `pg_restore` は PostgreSQL role password を
+  **復元しない** (DB schema + data のみで `pg_authid` 等の cluster-level role
+  情報は対象外)。 このため fresh volume / 別 host への cold restore では:
+  postgres image init が新 host の `secrets/postgres_password.txt` で
+  `sbomhub` role を作成済み、 一方 Step 5 で `postgres_password.txt` が
+  backup 取得時の password に上書きされる → Step 6 db-bootstrap の TCP
+  admin 接続が認証失敗で abort する (DR は backup の主目的なので blocker)。
+  Step 5.5/7 は `docker compose exec -T postgres psql -U sbomhub` の Unix
+  socket trust 経路で `ALTER ROLE sbomhub WITH PASSWORD '<restored>'` を
+  実行し、 実 DB admin role password を restored secret に矯正する。
+  hot restore (同一 volume / 同一 host) では既存 password = restored secret
+  なので ALTER ROLE は実質 no-op。 失敗時の手動 recovery:
+  ```bash
+  docker compose -f docker-compose.enterprise.yml exec postgres \
+      psql -U sbomhub -c "ALTER ROLE sbomhub PASSWORD '<restored postgres_password.txt value>';"
+  ```
+  この経路は postgres:15-alpine official image の local Unix socket =
+  trust auth (default) に依存している。 `POSTGRES_HOST_AUTH_METHOD` を
+  trust 以外に上書きしている場合は Step 3-4 sanity check も同様に失敗する
+  ため、 同じ前提を共有 (= 通常の enterprise self-host では問題にならない)。
 - **F79 fix**: db-bootstrap 後、 **`sbomhub_app` role で実際に `tenants` を
   SELECT** して count が取れることを最終確認する。 db-bootstrap success だけ
   では検出できない drift (table ACL race / restored secrets と postgres role
@@ -339,7 +360,7 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張):
 
 自動化スクリプトが `restore.sh` の成功を判定する場合は、 **prefix-match** で
 `Restore completed successfully` を検出すること。 **exact-match は使わない**
-(F65 / F79 以降、 `(pg_restore + sanity + db-bootstrap + app role access
+(F65 / F79 / F80 以降、 `(pg_restore + sanity + db-bootstrap + app role access
 checks passed)` 等の operational detail が末尾に付与されており、 将来の fix で
 追加情報が増える可能性もあるため、 exact string-match は false-negative になる)。
 
