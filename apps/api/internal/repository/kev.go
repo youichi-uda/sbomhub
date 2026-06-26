@@ -192,13 +192,17 @@ func (r *KEVRepository) GetSyncSettings(ctx context.Context) (*model.KEVSyncSett
 	`
 
 	var s model.KEVSyncSettings
+	// last_catalog_version can be NULL on a fresh DB (no KEV sync ever run);
+	// scan into sql.NullString to avoid "converting NULL to string is unsupported".
+	var lastCatalogVersion sql.NullString
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&s.ID, &s.Enabled, &s.SyncIntervalHours, &s.LastSyncAt,
-		&s.LastCatalogVersion, &s.TotalEntries, &s.CreatedAt, &s.UpdatedAt,
+		&lastCatalogVersion, &s.TotalEntries, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	s.LastCatalogVersion = lastCatalogVersion.String
 	if err != nil {
 		return nil, err
 	}
