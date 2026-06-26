@@ -1,0 +1,80 @@
+name: Release
+
+# M5-2 / #54: tag-triggered GoReleaser run that publishes a standalone
+# `llm-bench` binary archive to the GitHub Release page. The companion
+# config is .goreleaser.yaml at the repo root — it intentionally scopes
+# the matrix to `apps/api/cmd/llm-bench` and leaves the runtime
+# `server` / `migrate` binaries to docker-publish.yml.
+#
+# Trigger:
+#   - tag push matching `v*` (semver tag).
+#
+# Manual run:
+#   - workflow_dispatch is wired so an operator can re-run a release
+#     against an existing tag without re-pushing it (useful when only
+#     the goreleaser config or workflow itself changed).
+#
+# Permissions:
+#   - contents: write — required by goreleaser to create the GitHub
+#     Release object + upload archives + checksums.
+#   - packages: write — placeholder for a future GHCR image variant
+#     (e.g. `sbomhub:bench-${VERSION}`); not consumed today but the
+#     permission is cheap to declare so a follow-up wave does not also
+#     have to edit the workflow.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to re-release (must already exist on the remote, e.g. v1.4.0)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # goreleaser reads the full git history for changelog generation.
+          # Without fetch-depth: 0 the changelog block silently empties out
+          # because only the tag commit is available.
+          fetch-depth: 0
+          # On workflow_dispatch the default ref is the branch, not the
+          # tag. The conditional ref forces the tag checkout so goreleaser
+          # sees the right context. On tag push this is a no-op.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Match apps/api/go.mod (`go 1.25.0`). Bumping go.mod must move
+          # this value in lockstep — goreleaser fails the build silently
+          # with `go: go.mod requires go >= 1.25.0` if the Go toolchain
+          # is older.
+          go-version: '1.25'
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pin a known-good major. The v2 series introduced the
+          # `version: 2` schema we use in .goreleaser.yaml; v1 will not
+          # parse the config.
+          distribution: goreleaser
+          version: '~> v2'
+          # `--clean` wipes ./dist before building so a stale snapshot
+          # from a previous failed run does not poison the upload.
+          args: release --clean
+        env:
+          # GITHUB_TOKEN is auto-provided by Actions and has the
+          # `contents: write` permission we declared above. No secret
+          # config required.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
