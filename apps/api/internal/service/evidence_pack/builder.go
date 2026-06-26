@@ -1,21 +1,26 @@
 // Package evidence_pack bundles approved AI compliance artefacts
-// (approved VEX drafts + approved CRA reports + METI self-assessment
-// placeholder) into a single downloadable Markdown file. Issue #34 /
-// Wave M2-6.
+// (approved VEX drafts + approved CRA reports + METI self-assessment)
+// into a single downloadable Markdown file. Issue #34 / Wave M2-6
+// (initial bundle) + issue #42 / Wave M3-6 (METI section turned from
+// placeholder into the live evaluator-driven self-assessment).
 //
 // Design notes:
 //
 //   - PRODUCT_REBOOT_PLAN.md §6 defines the Evidence Pack as the
 //     primary export surface a Japanese SMB manufacturer hands to an
 //     EU CRA auditor: "approved VEX statements + approved CRA reports
-//     + METI self-assessment, with audit trail". M2-6 ships the
-//     Markdown bundle; PDF + Zip + background-job + public-link
-//     handoff are deferred to M3 (issue #34 Acceptance Criteria).
+//     + METI self-assessment, with audit trail". M2-6 shipped the
+//     Markdown bundle with VEX + CRA + a METI placeholder; M3-6
+//     replaces the placeholder with the live meti_assessments rows
+//     produced by the M3-2 evaluator and indexed by the M3-3 catalog.
 //
 //   - PRODUCT_REBOOT_PLAN.md §8.5 ("AI は下書きまで, 人間が承認する").
-//     The bundle therefore consults ONLY rows whose `decision = 'approved'`.
-//     Pending / rejected / edited drafts are never included — surfacing
-//     unapproved AI text to an auditor would invert the entire spec.
+//     The bundle therefore consults ONLY rows whose `decision = 'approved'`
+//     for VEX / CRA. The METI section is different: it reports the
+//     evaluator's verdict (with operator overrides taking precedence
+//     when present) — METI self-assessment is not an "approve / reject"
+//     drafting workflow, it is a directly-attestable status the
+//     operator endorses by including it in the bundle.
 //
 //   - All reads run inside the request-scoped TenantTx so RLS bounds the
 //     SELECT to the caller's tenant. The builder still passes tenantID
@@ -23,15 +28,17 @@
 //     codebase.
 //
 //   - The builder does NOT take a *sql.DB. It composes narrow
-//     interfaces (VEXDraftReader, CRAReportReader, ProjectReader) so
-//     it can be tested without Postgres and so future callers (M3 job
-//     queue, public-link generator) can swap stores without
-//     re-implementing the bundle layout.
+//     interfaces (VEXDraftReader, CRAReportReader, ProjectReader,
+//     METIAssessmentReader, METICatalog) so it can be tested without
+//     Postgres and so future callers (M3 job queue, public-link
+//     generator) can swap stores without re-implementing the bundle
+//     layout.
 package evidence_pack
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -41,6 +48,7 @@ import (
 
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service/meti"
 )
 
 // FormatMarkdown is the only format M2-6 supports. PDF + Zip ship in
@@ -73,6 +81,42 @@ type ProjectReader interface {
 	GetByTenant(ctx context.Context, tenantID, projectID uuid.UUID) (*model.Project, error)
 }
 
+// METIAssessmentReader is the persistence contract for the
+// meti_assessments rows feeding the M3-6 METI section.
+// Satisfied by *repository.MetiAssessmentsRepository.ListByProject.
+//
+// The filter zero-value ("all phases, all statuses, no override
+// filter") is what the bundle uses — every criterion present in the
+// project's evaluator history is rendered so the auditor sees the
+// complete self-assessment.
+type METIAssessmentReader interface {
+	ListByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.MetiAssessmentListFilter) ([]repository.MetiAssessment, error)
+}
+
+// METICatalog resolves human-readable titles / descriptions for
+// criteria referenced by meti_assessments rows. Satisfied by the
+// meti package's package-level lookups (LoadCatalog / GetCriterion /
+// ListByPhase / Phases) via the catalogAdapter constructed in
+// cmd/server/main.go.
+//
+// The interface stays narrow — only the two methods the bundle needs
+// (per-phase iteration order + per-id title/description lookup) — so
+// future catalog implementations (e.g. tenant-customised criteria)
+// can substitute without re-implementing unused helpers.
+type METICatalog interface {
+	// GetCriterion returns the catalog entry for the given id. The
+	// second return is false when the id is not in the catalog (e.g. a
+	// row left over from an older catalog revision); the renderer
+	// falls back to showing the criterion_id only in that case so a
+	// stale row does not break the bundle.
+	GetCriterion(id string) (*meti.Criterion, bool)
+	// Phases returns the ordered list of valid phases. The bundle
+	// renders one sub-section per phase in this order so the auditor
+	// always sees env_setup → sbom_creation → sbom_operation
+	// (chronological progression of the METI ver 2.0 guidance).
+	Phases() []meti.Phase
+}
+
 // BuildInput is the request payload for Builder.Build.
 //
 // All three Include* booleans default to true semantics at the
@@ -88,9 +132,9 @@ type BuildInput struct {
 	// Section toggles. Default behaviour at the handler layer is "true,
 	// true, true" — produce a complete bundle. False omits the
 	// corresponding section entirely (header / TOC / footer adapt).
-	IncludeVEXApproved     bool
-	IncludeCRAApproved     bool
-	IncludeMETIPlaceholder bool
+	IncludeVEXApproved    bool
+	IncludeCRAApproved    bool
+	IncludeMETIAssessment bool
 
 	// Format must be FormatMarkdown for M2-6. The handler rejects
 	// other values with 400 before the builder runs.
@@ -115,21 +159,38 @@ type BuildResult struct {
 
 	// Counts of artefacts included, surfaced so the handler can mirror
 	// them into the audit_log row without re-parsing the Markdown.
-	VEXApprovedCount int
-	CRAApprovedCount int
-	METIIncluded     bool
+	VEXApprovedCount  int
+	CRAApprovedCount  int
+	METIIncluded      bool
+	METIRowCount      int
+	METIAchievedCount int
 }
 
-// Builder composes the three readers into a single Build entrypoint.
+// Builder composes the readers into a single Build entrypoint.
 type Builder struct {
 	vex      VEXDraftReader
 	cra      CRAReportReader
 	projects ProjectReader
+	meti     METIAssessmentReader
+	catalog  METICatalog
 }
 
 // NewBuilder constructs a Builder. nil arguments panic at construction
 // so misconfiguration surfaces immediately (matches triage.NewRunner).
-func NewBuilder(vex VEXDraftReader, cra CRAReportReader, projects ProjectReader) *Builder {
+//
+// metiReader / catalog may be nil ONLY when the operator has disabled
+// the METI section globally (M3-6: no current call site does this,
+// but allowing nil keeps the constructor backwards-compatible with
+// the M2-6 callers in tests that pre-date this wave). When either is
+// nil, IncludeMETIAssessment=true will return an error at Build time
+// so the misconfiguration cannot silently produce an empty section.
+func NewBuilder(
+	vex VEXDraftReader,
+	cra CRAReportReader,
+	projects ProjectReader,
+	meti METIAssessmentReader,
+	catalog METICatalog,
+) *Builder {
 	if vex == nil {
 		panic("evidence_pack.NewBuilder: vex reader is required")
 	}
@@ -139,7 +200,10 @@ func NewBuilder(vex VEXDraftReader, cra CRAReportReader, projects ProjectReader)
 	if projects == nil {
 		panic("evidence_pack.NewBuilder: projects reader is required")
 	}
-	return &Builder{vex: vex, cra: cra, projects: projects}
+	// meti + catalog are deliberately allowed nil at construction so
+	// existing test wiring keeps compiling; the Build path checks them
+	// at the point of use.
+	return &Builder{vex: vex, cra: cra, projects: projects, meti: meti, catalog: catalog}
 }
 
 // Build renders the Markdown bundle.
@@ -249,27 +313,60 @@ func (b *Builder) Build(ctx context.Context, in BuildInput) (*BuildResult, error
 		})
 	}
 
-	// Step 4: render the bundle.
+	// Step 4: fetch METI self-assessment rows. The evaluator stores at
+	// most one row per (project, criterion) — for a 27-criterion
+	// catalog the fetch is well under the 500-row clamp, so we issue a
+	// single ListByProject with the zero filter (all phases, all
+	// statuses, all override states).
+	var (
+		metiRows         []repository.MetiAssessment
+		metiFetchAll     bool
+		metiAchievedCnt  int
+	)
+	if in.IncludeMETIAssessment {
+		if b.meti == nil || b.catalog == nil {
+			return nil, fmt.Errorf("evidence_pack.Build: METI assessment requested but reader/catalog not wired (server configuration error)")
+		}
+		metiRows, err = b.meti.ListByProject(ctx, in.TenantID, in.ProjectID, repository.MetiAssessmentListFilter{
+			Limit: 500, // ※要確認: matches metiAssessmentsListMaxLimit; catalog has <30 items today
+		})
+		if err != nil {
+			return nil, fmt.Errorf("evidence_pack.Build: list meti assessments: %w", err)
+		}
+		metiFetchAll = len(metiRows) < 500
+		for i := range metiRows {
+			if effectiveStatus(&metiRows[i]) == "achieved" {
+				metiAchievedCnt++
+			}
+		}
+	}
+
+	// Step 5: render the bundle.
 	body := renderMarkdown(renderInput{
-		Project:                project,
-		Now:                    now,
-		IncludeVEXApproved:     in.IncludeVEXApproved,
-		IncludeCRAApproved:     in.IncludeCRAApproved,
-		IncludeMETIPlaceholder: in.IncludeMETIPlaceholder,
-		VEXRows:                vexRows,
-		CRARows:                craRows,
-		VEXTruncated:           !vexFetchAll,
-		CRATruncated:           !craFetchAll,
+		Project:               project,
+		Now:                   now,
+		IncludeVEXApproved:    in.IncludeVEXApproved,
+		IncludeCRAApproved:    in.IncludeCRAApproved,
+		IncludeMETIAssessment: in.IncludeMETIAssessment,
+		VEXRows:               vexRows,
+		CRARows:               craRows,
+		METIRows:              metiRows,
+		Catalog:               b.catalog,
+		VEXTruncated:          !vexFetchAll,
+		CRATruncated:          !craFetchAll,
+		METITruncated:         in.IncludeMETIAssessment && !metiFetchAll,
 	})
 
 	return &BuildResult{
-		Format:           FormatMarkdown,
-		Filename:         buildFilename(in.ProjectID, now),
-		ContentBytes:     body,
-		BuiltAt:          now,
-		VEXApprovedCount: vexFetchedCount,
-		CRAApprovedCount: craFetchedCount,
-		METIIncluded:     in.IncludeMETIPlaceholder,
+		Format:            FormatMarkdown,
+		Filename:          buildFilename(in.ProjectID, now),
+		ContentBytes:      body,
+		BuiltAt:           now,
+		VEXApprovedCount:  vexFetchedCount,
+		CRAApprovedCount:  craFetchedCount,
+		METIIncluded:      in.IncludeMETIAssessment,
+		METIRowCount:      len(metiRows),
+		METIAchievedCount: metiAchievedCnt,
 	}, nil
 }
 
@@ -294,18 +391,24 @@ type renderInput struct {
 	Project *model.Project
 	Now     time.Time
 
-	IncludeVEXApproved     bool
-	IncludeCRAApproved     bool
-	IncludeMETIPlaceholder bool
+	IncludeVEXApproved    bool
+	IncludeCRAApproved    bool
+	IncludeMETIAssessment bool
 
-	VEXRows []repository.VEXDraft
-	CRARows []repository.CRAReport
+	VEXRows  []repository.VEXDraft
+	CRARows  []repository.CRAReport
+	METIRows []repository.MetiAssessment
+
+	// Catalog is consulted for titles / descriptions when rendering
+	// METI rows. May be nil when IncludeMETIAssessment is false.
+	Catalog METICatalog
 
 	// True when the per-section fetch returned exactly the cap and
 	// might have been truncated. Surfaces a warning banner in the
 	// bundle so an auditor knows the file may be incomplete.
-	VEXTruncated bool
-	CRATruncated bool
+	VEXTruncated  bool
+	CRATruncated  bool
+	METITruncated bool
 }
 
 // renderMarkdown returns the byte body of the bundle. The layout is
@@ -326,8 +429,8 @@ func renderMarkdown(r renderInput) []byte {
 	if r.IncludeCRAApproved {
 		writeCRASection(&buf, r)
 	}
-	if r.IncludeMETIPlaceholder {
-		writeMETIPlaceholderSection(&buf)
+	if r.IncludeMETIAssessment {
+		writeMETISection(&buf, r)
 	}
 
 	writeFooter(&buf, r)
@@ -371,10 +474,13 @@ func writeDisclaimer(buf *bytes.Buffer) {
 	buf.WriteString("人間のレビュアーが **承認** したものです。 ")
 	buf.WriteString("`decision = 'approved'` の行のみがバンドル対象であり、 ")
 	buf.WriteString("AI が生成したまま未承認のドラフト (pending / rejected / edited) は含まれません。 ")
+	buf.WriteString("METI 自己評価セクションは評価器 (M3-2) の判定結果を、 ")
+	buf.WriteString("運用者の上書き (override) が存在する場合はそれを優先して表示します。 ")
 	buf.WriteString("詳細は `PRODUCT_REBOOT_PLAN.md §8.5` (\"AI は下書きまで, 人間が承認する\") を参照。\n\n")
 	buf.WriteString("> The VEX statements and CRA report drafts in this bundle were initially generated by SBOMHub's AI triage (LLM) ")
 	buf.WriteString("and subsequently **approved by a human reviewer**. Only rows with `decision = 'approved'` are included. ")
 	buf.WriteString("Pending / rejected / edited AI output is intentionally excluded. ")
+	buf.WriteString("The METI self-assessment section reports the evaluator (M3-2) verdict; an operator override, when present, takes precedence over the evaluator value. ")
 	buf.WriteString("See PRODUCT_REBOOT_PLAN.md §8.5 (\"AI drafts only. Humans approve.\").\n\n")
 	buf.WriteString("---\n\n")
 }
@@ -391,8 +497,8 @@ func writeTOC(buf *bytes.Buffer, r renderInput) {
 		fmt.Fprintf(buf, "%d. [Approved CRA Reports](#%d-approved-cra-reports) — %d entries\n", idx, idx, len(r.CRARows))
 		idx++
 	}
-	if r.IncludeMETIPlaceholder {
-		fmt.Fprintf(buf, "%d. [METI 自己評価 / METI Self-Assessment](#%d-meti-self-assessment-placeholder) — placeholder (M3)\n", idx, idx)
+	if r.IncludeMETIAssessment {
+		fmt.Fprintf(buf, "%d. [METI 自己評価 / METI Self-Assessment](#%d-meti-self-assessment) — %d entries\n", idx, idx, len(r.METIRows))
 		idx++
 	}
 	buf.WriteString("\n---\n\n")
@@ -533,18 +639,301 @@ func writeCRAEntry(buf *bytes.Buffer, n int, c *repository.CRAReport) {
 	buf.WriteString("\n")
 }
 
-// writeMETIPlaceholderSection writes the M3 placeholder per the
-// orchestrator spec ("METI 自己評価は M3 placeholder (空セクション +
-// 「(M3 で実装予定)」表記)").
-func writeMETIPlaceholderSection(buf *bytes.Buffer) {
-	buf.WriteString("## 3. METI 自己評価 / METI Self-Assessment (placeholder)\n\n")
-	buf.WriteString("経済産業省 (METI) ソフトウェア管理に向けたガイダンスの自己評価項目を、 ")
-	buf.WriteString("SBOM スキャン履歴・CI 設定・脆弱性マッチング履歴から自動充填するセクション。\n\n")
-	buf.WriteString("> 🚧 **(M3 で実装予定)** — `PRODUCT_REBOOT_PLAN.md §13 M3` (METI 自己評価 prefill)。 ")
-	buf.WriteString("本ウェーブ (M2-6) では VEX + CRA のみをバンドルし、 METI 項目は次マイルストンで追加します。\n\n")
-	buf.WriteString("> 🚧 **(Planned for M3)** — see `PRODUCT_REBOOT_PLAN.md §13 M3` (METI self-assessment prefill). ")
-	buf.WriteString("M2-6 bundles VEX + CRA only; METI items land in the next milestone.\n\n")
+// writeMETISection writes Section 3 — the live METI self-assessment.
+// M3-6 (issue #42) replaces the M2-6 placeholder with one Markdown
+// table per phase, plus an "Improvement Actions" subsection that
+// surfaces every criterion whose effective status is not 'achieved'
+// so an auditor can scan remediation commitments without paging
+// through the full table.
+//
+// Layout invariants (the regression test pins these):
+//   - phases render in catalog order (env_setup → sbom_creation →
+//     sbom_operation), even when the input rows are out of order;
+//   - within a phase, rows render in criterion_id ASC order (the same
+//     order the repository uses for ListByProject so re-builds produce
+//     byte-identical output);
+//   - status column shows the effective status (override wins over
+//     evaluator) with the evaluator-original noted in parens when an
+//     override is in effect, so the auditor sees both values;
+//   - a row whose criterion_id is not in the catalog falls back to
+//     "(unknown criterion)" — the row is still rendered so a stale
+//     catalog cannot silently drop attested evidence;
+//   - the Improvement Actions subsection lists every non-achieved row
+//     in (phase, criterion_id) order so the auditor sees the gaps
+//     grouped the same way as the main tables.
+func writeMETISection(buf *bytes.Buffer, r renderInput) {
+	buf.WriteString("## 3. METI 自己評価 / METI Self-Assessment\n\n")
+	buf.WriteString("経済産業省 (METI) 「ソフトウェア管理に向けた SBOM (Software Bill of Materials) ")
+	buf.WriteString("の導入に関する手引 ver 2.0」 に基づく自己評価結果です。 ")
+	buf.WriteString("SBOMHub の評価器 (M3-2) が SBOM スキャン履歴・脆弱性マッチング履歴・CI 設定から ")
+	buf.WriteString("自動評価し、 運用者の override が存在する場合はそれを優先します。\n\n")
+	buf.WriteString("> METI ver 2.0 self-assessment results. Auto-evaluated from SBOM scan history, vulnerability matching history, and CI settings by the SBOMHub evaluator (M3-2); operator overrides, when present, take precedence over the evaluator verdict.\n\n")
+
+	if r.METITruncated {
+		buf.WriteString("> ⚠️ **Warning**: more than the repository fetch cap (500) METI assessment rows exist for this project. ")
+		buf.WriteString("This bundle includes only the first 500 (ordered by phase, criterion_id). ")
+		buf.WriteString("The catalog currently ships ~27 criteria so truncation should not occur in practice — investigate any project that triggers this banner.\n\n")
+	}
+
+	if len(r.METIRows) == 0 {
+		buf.WriteString("_No METI self-assessment rows found for this project. ")
+		buf.WriteString("Run `POST /api/v1/projects/:id/meti/assessment/refresh` to populate._\n\n")
+		buf.WriteString("---\n\n")
+		return
+	}
+
+	// Group rows by phase. The repository already orders rows by
+	// (criterion_phase ASC, criterion_id ASC) but we re-group locally
+	// because (a) we cannot trust the caller to have done so for fake
+	// readers in tests, and (b) we want phase iteration to match the
+	// catalog's chronological Phases() order even if a stray phase
+	// string slipped in.
+	byPhase := make(map[meti.Phase][]repository.MetiAssessment, 3)
+	for i := range r.METIRows {
+		p := meti.Phase(r.METIRows[i].CriterionPhase)
+		byPhase[p] = append(byPhase[p], r.METIRows[i])
+	}
+	for p := range byPhase {
+		phaseRows := byPhase[p]
+		sort.SliceStable(phaseRows, func(i, j int) bool {
+			return phaseRows[i].CriterionID < phaseRows[j].CriterionID
+		})
+		byPhase[p] = phaseRows
+	}
+
+	// Phase iteration: catalog-provided order first (so the bundle
+	// matches the UI tab order), then any unknown phases the rows
+	// carry, alphabetically, so they still render.
+	phaseOrder := []meti.Phase{}
+	seen := map[meti.Phase]struct{}{}
+	if r.Catalog != nil {
+		for _, p := range r.Catalog.Phases() {
+			if _, ok := byPhase[p]; ok {
+				phaseOrder = append(phaseOrder, p)
+				seen[p] = struct{}{}
+			}
+		}
+	}
+	extras := []meti.Phase{}
+	for p := range byPhase {
+		if _, ok := seen[p]; !ok {
+			extras = append(extras, p)
+		}
+	}
+	sort.Slice(extras, func(i, j int) bool { return string(extras[i]) < string(extras[j]) })
+	phaseOrder = append(phaseOrder, extras...)
+
+	for idx, p := range phaseOrder {
+		writeMETIPhaseTable(buf, idx+1, p, byPhase[p], r.Catalog)
+	}
+
+	writeMETIImprovementActions(buf, r.METIRows, r.Catalog)
 	buf.WriteString("---\n\n")
+}
+
+// writeMETIPhaseTable renders one Markdown table for the rows in a
+// single phase. The table columns are pinned by the regression test:
+//
+//	| Criterion | Title (JA / EN) | Status | Evidence | Improvement Action |
+//
+// "Evidence" is rendered as a compact summary ("N items: kind1, kind2, ...")
+// so the row stays one line; the full JSON evidence column would
+// explode the table layout (full evidence is intentionally NOT
+// rendered inline — auditors who need it consult the
+// /meti/assessment API).
+func writeMETIPhaseTable(buf *bytes.Buffer, n int, phase meti.Phase, rows []repository.MetiAssessment, catalog METICatalog) {
+	// The phase identifier carries underscores that Markdown would
+	// otherwise render as emphasis; escape so the heading reads
+	// literally. The chapter-pointer suffix is appended raw so the
+	// Japanese chapter title stays human-readable.
+	fmt.Fprintf(buf, "### 3.%d Phase: %s %s\n\n", n, escapeMD(string(phase)), phaseChapterSuffix(phase))
+	if len(rows) == 0 {
+		buf.WriteString("_No assessment rows for this phase._\n\n")
+		return
+	}
+	buf.WriteString("| Criterion | Title (JA / EN) | Status | Evidence | Improvement Action |\n")
+	buf.WriteString("|-----------|-----------------|--------|----------|--------------------|\n")
+	for i := range rows {
+		row := &rows[i]
+		titleJA, titleEN := metiCriterionTitles(row.CriterionID, catalog)
+		fmt.Fprintf(buf, "| `%s` | %s / %s | %s | %s | %s |\n",
+			escapeMD(row.CriterionID),
+			escapeMD(titleJA),
+			escapeMD(titleEN),
+			metiStatusCell(row),
+			metiEvidenceSummary(row.Evidence),
+			metiImprovementCell(row.ImprovementAction),
+		)
+	}
+	buf.WriteString("\n")
+}
+
+// writeMETIImprovementActions writes the "Improvement Actions"
+// subsection — every row whose effective status is not 'achieved'.
+// 'not_applicable' rows are excluded because they represent
+// criteria that do not apply to the project, not gaps to remediate.
+func writeMETIImprovementActions(buf *bytes.Buffer, rows []repository.MetiAssessment, catalog METICatalog) {
+	gaps := make([]repository.MetiAssessment, 0, len(rows))
+	for i := range rows {
+		s := effectiveStatus(&rows[i])
+		if s == "achieved" || s == "not_applicable" {
+			continue
+		}
+		gaps = append(gaps, rows[i])
+	}
+	sort.SliceStable(gaps, func(i, j int) bool {
+		if gaps[i].CriterionPhase != gaps[j].CriterionPhase {
+			return gaps[i].CriterionPhase < gaps[j].CriterionPhase
+		}
+		return gaps[i].CriterionID < gaps[j].CriterionID
+	})
+
+	buf.WriteString("### 3.Z Improvement Actions\n\n")
+	buf.WriteString("The following criteria have an outstanding remediation gap (effective status != `achieved`, excluding `not_applicable`). ")
+	buf.WriteString("`Improvement Action` text is operator-authored when present; an empty cell means the operator has not yet recorded a plan.\n\n")
+	if len(gaps) == 0 {
+		buf.WriteString("_No outstanding improvement actions — all applicable criteria are `achieved`._\n\n")
+		return
+	}
+	for i := range gaps {
+		row := &gaps[i]
+		titleJA, _ := metiCriterionTitles(row.CriterionID, catalog)
+		fmt.Fprintf(buf, "- **`%s`** (%s) — %s — status: `%s`",
+			escapeMD(row.CriterionID),
+			escapeMD(row.CriterionPhase),
+			escapeMD(titleJA),
+			escapeMD(effectiveStatus(row)),
+		)
+		if strings.TrimSpace(row.ImprovementAction) != "" {
+			fmt.Fprintf(buf, "\n  - Improvement action: %s", escapeMDMultiline(row.ImprovementAction))
+		} else {
+			buf.WriteString("\n  - Improvement action: _(not recorded)_")
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("\n")
+}
+
+// effectiveStatus returns the operator override when present, else
+// the evaluator status. Captures the same "override wins" semantics
+// the M3-4 handler uses when rendering the project dashboard so the
+// bundle and the dashboard agree on every row.
+func effectiveStatus(a *repository.MetiAssessment) string {
+	if a.OverrideStatus != "" {
+		return a.OverrideStatus
+	}
+	return a.Status
+}
+
+// metiStatusCell renders the Status column of the phase table. When
+// an override is in effect we surface both values so the auditor sees
+// the evaluator-original alongside the operator decision.
+func metiStatusCell(a *repository.MetiAssessment) string {
+	if a.OverrideStatus != "" && a.OverrideStatus != a.Status {
+		return fmt.Sprintf("`%s` (override; evaluator: `%s`)", escapeMD(a.OverrideStatus), escapeMD(a.Status))
+	}
+	return fmt.Sprintf("`%s`", escapeMD(effectiveStatus(a)))
+}
+
+// metiCriterionTitles looks up the catalog title strings for one
+// criterion. Returns ("(unknown criterion)", "(unknown criterion)")
+// when the id is not in the catalog so the table cell still renders.
+func metiCriterionTitles(criterionID string, catalog METICatalog) (string, string) {
+	if catalog == nil {
+		return "(catalog unavailable)", "(catalog unavailable)"
+	}
+	c, ok := catalog.GetCriterion(criterionID)
+	if !ok {
+		return "(unknown criterion)", "(unknown criterion)"
+	}
+	return c.TitleJA, c.TitleEN
+}
+
+// metiEvidenceSummary renders a one-line summary of the evidence
+// JSON array for the Status table. The full JSON is intentionally
+// NOT rendered inline (table-width blowup); auditors who need the
+// raw evidence consult the /meti/assessment API.
+//
+// Empty / nil / non-array evidence renders as "—" so the column
+// width stays predictable.
+func metiEvidenceSummary(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "—"
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return "_(unparseable)_"
+	}
+	if len(items) == 0 {
+		return "—"
+	}
+	kinds := make([]string, 0, len(items))
+	seenKind := map[string]struct{}{}
+	for _, it := range items {
+		var kv struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(it, &kv); err != nil || kv.Kind == "" {
+			continue
+		}
+		if _, dup := seenKind[kv.Kind]; dup {
+			continue
+		}
+		seenKind[kv.Kind] = struct{}{}
+		kinds = append(kinds, kv.Kind)
+	}
+	sort.Strings(kinds)
+	if len(kinds) == 0 {
+		return fmt.Sprintf("%d items", len(items))
+	}
+	return fmt.Sprintf("%d items: %s", len(items), escapeMD(strings.Join(kinds, ", ")))
+}
+
+// metiImprovementCell renders the Improvement Action table cell.
+// A multi-line improvement action is collapsed to single-line text
+// (newlines → " / ") so the row stays one Markdown table row; the
+// full text is reproduced in the Improvement Actions subsection.
+func metiImprovementCell(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "—"
+	}
+	collapsed := strings.ReplaceAll(s, "\r\n", "\n")
+	collapsed = strings.ReplaceAll(collapsed, "\n", " / ")
+	return escapeMD(collapsed)
+}
+
+// escapeMDMultiline is escapeMD applied to a body that may contain
+// newlines; used in the Improvement Actions subsection where the
+// full text is preserved (vs the table cell which collapses to one
+// line). Newlines themselves are preserved but indented so the
+// rendered bullet keeps its hanging-indent shape.
+func escapeMDMultiline(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = escapeMD(lines[i])
+	}
+	return strings.Join(lines, "\n    ")
+}
+
+// phaseChapterSuffix returns the human-readable chapter pointer for
+// one phase. The phase identifier itself is emitted separately so the
+// caller can escape it for Markdown without double-escaping the
+// Japanese chapter title.
+func phaseChapterSuffix(p meti.Phase) string {
+	switch p {
+	case meti.PhaseEnvSetup:
+		return "(環境構築・体制整備 / METI ver 2.0 ch.4)"
+	case meti.PhaseSBOMCreation:
+		return "(SBOM 作成・共有 / METI ver 2.0 ch.5)"
+	case meti.PhaseSBOMOperation:
+		return "(SBOM 運用・管理 / METI ver 2.0 ch.6+7)"
+	default:
+		return ""
+	}
 }
 
 // writeFooter writes the bundle footer with counts + bundle id.
@@ -552,17 +941,25 @@ func writeFooter(buf *bytes.Buffer, r renderInput) {
 	buf.WriteString("## Bundle Summary\n\n")
 	fmt.Fprintf(buf, "- VEX approved entries: %d\n", len(r.VEXRows))
 	fmt.Fprintf(buf, "- CRA approved entries: %d\n", len(r.CRARows))
-	fmt.Fprintf(buf, "- METI self-assessment: %s\n", metiStatus(r.IncludeMETIPlaceholder))
+	fmt.Fprintf(buf, "- METI self-assessment: %s\n", metiSummaryLine(r))
 	fmt.Fprintf(buf, "- Generated at: %s (UTC)\n", r.Now.UTC().Format(time.RFC3339))
 	buf.WriteString("\n")
 	buf.WriteString("_End of Evidence Pack._\n")
 }
 
-func metiStatus(included bool) string {
-	if included {
-		return "placeholder (M3 で実装予定 / planned for M3)"
+// metiSummaryLine reports the included / count / achieved tuple for
+// the footer. Kept as a helper so the test can pin the exact string.
+func metiSummaryLine(r renderInput) string {
+	if !r.IncludeMETIAssessment {
+		return "omitted from this bundle"
 	}
-	return "omitted from this bundle"
+	achieved := 0
+	for i := range r.METIRows {
+		if effectiveStatus(&r.METIRows[i]) == "achieved" {
+			achieved++
+		}
+	}
+	return fmt.Sprintf("included (%d criteria; %d achieved)", len(r.METIRows), achieved)
 }
 
 // ----------------------------------------------------------------------------

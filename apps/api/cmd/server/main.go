@@ -40,6 +40,20 @@ func newVexDraftsStore(db *sql.DB) triage.VexDraftStore {
 	return repository.NewVEXDraftsRepository(db)
 }
 
+// metiCatalogAdapter satisfies evidence_pack.METICatalog by routing
+// the calls to the meti package's package-level lookups (M3-3, #39).
+// The adapter is a stateless struct so the server can construct one
+// inline at wiring time without an init pass. M3-6 (#42) wire.
+type metiCatalogAdapter struct{}
+
+func (metiCatalogAdapter) GetCriterion(id string) (*meti.Criterion, bool) {
+	return meti.GetCriterion(id)
+}
+
+func (metiCatalogAdapter) Phases() []meti.Phase {
+	return meti.Phases()
+}
+
 
 // knownDefaultEncryptionKeys enumerates placeholder values that must never be
 // used outside development. The list includes:
@@ -513,10 +527,18 @@ func main() {
 	// tenant. The repository instances are reused from the triage /
 	// cra runner wiring above so a request hits a single shared
 	// connection-pool slot per repo type.
+	// M3-6 (issue #42): the Evidence Pack METI section is now driven
+	// by the live meti_assessments rows (via the M3-1 repository) and
+	// the M3-3 catalog. The catalog adapter is a thin wrapper that
+	// surfaces the meti package's package-level lookups as a struct
+	// satisfying evidence_pack.METICatalog so the builder stays free
+	// of package-import order constraints.
 	evidencePackBuilder := evidence_pack.NewBuilder(
 		vexDraftsRepo,
 		craReportsRepo,
 		projectRepo,
+		metiAssessmentsRepo,
+		metiCatalogAdapter{},
 	)
 	evidencePackHandler := handler.NewEvidencePackHandler(evidencePackBuilder, auditRepo)
 

@@ -58,7 +58,13 @@ func (f *fakeProjectReaderHandler) GetByTenant(_ context.Context, _, _ uuid.UUID
 
 func newEvidencePackTestHandler(t *testing.T, vex *fakeVEXDraftReader, cra *fakeCRAReportReader, proj *fakeProjectReaderHandler) *EvidencePackHandler {
 	t.Helper()
-	builder := evidence_pack.NewBuilder(vex, cra, proj)
+	// METI reader/catalog are nil in the handler test wiring — the
+	// handler's IncludeMETIAssessment default is true but the wire-
+	// level tests below pass `{"include_meti_assessment": false}` (or
+	// the legacy `include_meti_placeholder`) so the builder never
+	// reaches the nil meti/catalog branch. The dedicated builder test
+	// (evidence_pack/builder_test.go) exercises the live METI section.
+	builder := evidence_pack.NewBuilder(vex, cra, proj, nil, nil)
 	// auditRepo is nil — production wiring supplies one, but the
 	// handler tolerates nil for tests so we can exercise the wire-
 	// level behaviour without hitting Postgres.
@@ -91,7 +97,11 @@ func TestEvidencePackHandler_Build_HappyPath(t *testing.T) {
 	h := newEvidencePackTestHandler(t, vex, cra, proj)
 
 	e := echo.New()
-	body := bytes.NewBufferString(`{}`)
+	// M3-6 (#42): opt out of the METI section here because this
+	// handler-level test wires the builder with a nil METI reader
+	// (see newEvidencePackTestHandler). The dedicated builder test
+	// exercises the live METI section.
+	body := bytes.NewBufferString(`{"include_meti_assessment": false}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/evidence-pack/build", body)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

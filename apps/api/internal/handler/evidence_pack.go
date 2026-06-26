@@ -67,9 +67,16 @@ func NewEvidencePackHandler(builder *evidence_pack.Builder, auditRepo *repositor
 // `format` defaults to "markdown" and the handler rejects anything
 // else with 400 so PDF / Zip can be added without changing the wire
 // shape.
+//
+// M3-6 (#42): the legacy `include_meti_placeholder` wire key is
+// retained as an alias for the renamed `include_meti_assessment`
+// field so clients minted against the M2-6 handler keep working.
+// The handler resolves them with assessment > placeholder if both
+// are present.
 type buildEvidencePackRequest struct {
 	IncludeVEXApproved     *bool  `json:"include_vex_approved,omitempty"`
 	IncludeCRAApproved     *bool  `json:"include_cra_approved,omitempty"`
+	IncludeMETIAssessment  *bool  `json:"include_meti_assessment,omitempty"`
 	IncludeMETIPlaceholder *bool  `json:"include_meti_placeholder,omitempty"`
 	Format                 string `json:"format,omitempty"`
 }
@@ -124,7 +131,12 @@ func (h *EvidencePackHandler) Build(c echo.Context) error {
 		includeCRA = *req.IncludeCRAApproved
 	}
 	includeMETI := true
-	if req.IncludeMETIPlaceholder != nil {
+	// M3-6 (#42): prefer the new field name; fall back to the legacy
+	// `include_meti_placeholder` so clients minted against M2-6 still
+	// resolve correctly.
+	if req.IncludeMETIAssessment != nil {
+		includeMETI = *req.IncludeMETIAssessment
+	} else if req.IncludeMETIPlaceholder != nil {
 		includeMETI = *req.IncludeMETIPlaceholder
 	}
 	format := req.Format
@@ -140,12 +152,12 @@ func (h *EvidencePackHandler) Build(c echo.Context) error {
 	}
 
 	res, err := h.builder.Build(c.Request().Context(), evidence_pack.BuildInput{
-		TenantID:               tc.TenantID(),
-		ProjectID:              projectID,
-		IncludeVEXApproved:     includeVEX,
-		IncludeCRAApproved:     includeCRA,
-		IncludeMETIPlaceholder: includeMETI,
-		Format:                 format,
+		TenantID:              tc.TenantID(),
+		ProjectID:             projectID,
+		IncludeVEXApproved:    includeVEX,
+		IncludeCRAApproved:    includeCRA,
+		IncludeMETIAssessment: includeMETI,
+		Format:                format,
 	})
 	if status, body, ok := mapEvidencePackError(err, tc.TenantID(), projectID); ok {
 		return c.JSON(status, body)
@@ -165,10 +177,12 @@ func (h *EvidencePackHandler) Build(c echo.Context) error {
 			"filename":                 res.Filename,
 			"vex_approved_count":       res.VEXApprovedCount,
 			"cra_approved_count":       res.CRAApprovedCount,
-			"meti_placeholder_included": res.METIIncluded,
+			"meti_assessment_included": res.METIIncluded,
+			"meti_row_count":           res.METIRowCount,
+			"meti_achieved_count":      res.METIAchievedCount,
 			"include_vex_approved":     includeVEX,
 			"include_cra_approved":     includeCRA,
-			"include_meti_placeholder": includeMETI,
+			"include_meti_assessment":  includeMETI,
 			"built_at":                 res.BuiltAt.UTC().Format("2006-01-02T15:04:05Z"),
 		}
 		tenantID := tc.TenantID()
