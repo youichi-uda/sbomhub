@@ -29,14 +29,28 @@ AI VEX トリアージ / CRA 報告書ドラフト / 経産省自己評価プリ
 
 | 変数 | デフォルト | 説明 |
 |------|---------|------|
-| `SBOMHUB_LLM_PROVIDER` | (空) | `openai` / `anthropic` / `gemini` / `ollama` |
-| `SBOMHUB_LLM_MODEL` | (空) | 例: `gpt-5`, `claude-opus-4-7`, `gemini-3.5-flash`, `qwen2.5-coder:7b` |
-| `OPENAI_API_KEY` | (空) | `provider=openai` の場合に必須 |
-| `ANTHROPIC_API_KEY` | (空) | `provider=anthropic` の場合に必須 |
-| `GOOGLE_API_KEY` | (空) | `provider=gemini` の場合に必須 |
+| `SBOMHUB_LLM_PROVIDER` | (空) | `openai` / `anthropic` / `gemini` / `azure_openai` / `ollama` |
+| `SBOMHUB_LLM_MODEL` | (空) | 例: `gpt-5`, `claude-opus-4-7`, `gemini-3.5-flash`, `qwen2.5-coder:7b`。`azure_openai` の場合は監査ログに記録する canonical なモデル名 (ルーティングは deployment 名で行われ、この値は使われません) |
+| `SBOMHUB_LLM_API_KEY` | (空) | 共通の API キー (canonical)。各プロバイダ純正の alias は fall-back として参照されます |
+| `OPENAI_API_KEY` | (空) | `provider=openai` で canonical キーが未設定の場合に使用 |
+| `ANTHROPIC_API_KEY` | (空) | `provider=anthropic` で canonical キーが未設定の場合に使用 |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | (空) | `provider=gemini` で canonical キーが未設定の場合に使用 |
+| `AZURE_OPENAI_API_KEY` | (空) | `provider=azure_openai` で canonical キーが未設定の場合に使用。`OPENAI_API_KEY` への alias は意図的にしていません (混在すると Azure 向けに OpenAI.com のキーを誤って送ってしまうリスクがあるため) |
 | `OLLAMA_HOST` | (空) | `provider=ollama` の場合に必須 (例: `http://localhost:11434`) |
 
-> コードや SBOM を外部に出したくない製造業セルフホスト運用では、Ollama などのローカル LLM を推奨します。
+> コードや SBOM を外部に出したくない製造業セルフホスト運用では、Ollama などのローカル LLM を推奨します。既に Microsoft の調達契約がある場合は Azure OpenAI も推奨です。
+
+#### Azure OpenAI 設定
+
+`SBOMHUB_LLM_PROVIDER=azure_openai` を選んだ場合、以下の deployment 固有の設定も必要になります。各行は canonical な SBOMHub 環境変数名と、fall-back として参照される provider 純正 alias を precedence 順 (canonical 優先、最初に非空の値が採用される) で列挙しています。
+
+| 変数 (canonical → alias) | デフォルト | 説明 |
+|--------------------------|----------|------|
+| `SBOMHUB_LLM_AZURE_ENDPOINT` → `AZURE_OPENAI_ENDPOINT` | (空) | Azure リソースのエンドポイント URL (例: `https://my-resource.openai.azure.com`) |
+| `SBOMHUB_LLM_AZURE_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT_NAME` → `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME` | (空) | Azure に登録した deployment 名 (URL パスセグメント)。Microsoft のドキュメントが内部で表記揺れがあるため、Azure 側 3 つの alias すべてを受け付けます。既存の自動化で使っているものをそのまま設定可能 |
+| `SBOMHUB_LLM_AZURE_API_VERSION` → `AZURE_OPENAI_API_VERSION` | `2024-10-21` | Azure OpenAI の `api-version` クエリ。デフォルトは現行 GA stable チャネル。deployment が特定の契約バージョンに pin されている場合のみ上書き |
+
+`provider=azure_openai` を選んでも endpoint / deployment / API キーのいずれかが未設定の場合は、 graceful に provider が無効化されます (他の機能はそのまま動作し、AI 機能のみが off になります)。
 
 ### フロントエンド設定
 
@@ -74,9 +88,17 @@ NVD_API_KEY=your-nvd-api-key
 
 # AI 機能 (BYOK)。未設定なら AI 機能は無効化されます。
 # どれか 1 つを設定してください。
-SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | azure_openai | ollama
 SBOMHUB_LLM_MODEL=gpt-5
 OPENAI_API_KEY=sk-...
+
+# Azure OpenAI の例 (Microsoft 調達契約経由)
+# SBOMHUB_LLM_PROVIDER=azure_openai
+# SBOMHUB_LLM_MODEL=gpt-4o                                      # canonical なモデル名 (audit / Capabilities 用)
+# SBOMHUB_LLM_AZURE_ENDPOINT=https://my-resource.openai.azure.com
+# SBOMHUB_LLM_AZURE_DEPLOYMENT=my-chat-deployment
+# SBOMHUB_LLM_AZURE_API_VERSION=2024-10-21                      # optional。 デフォルトは GA stable チャネル
+# AZURE_OPENAI_API_KEY=...                                       # または SBOMHUB_LLM_API_KEY
 
 # ローカル LLM の例 (コードを外部に出さない)
 # SBOMHUB_LLM_PROVIDER=ollama

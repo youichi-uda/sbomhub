@@ -75,15 +75,23 @@ OSS SBOMHub ships with **no bundled LLM credentials**. Set up a key for one of t
 | OpenAI | `gpt-5` | Yes (BYO key) |
 | Anthropic | `claude-opus-4-7` | Yes (BYO key) |
 | Google Gemini | `gemini-3.5-flash` | Yes (BYO key) |
+| Azure OpenAI | `gpt-4o`, `gpt-5` (Azure deployment) | Yes (via Microsoft procurement) |
 | Ollama (local) | `llama3.3`, `qwen2.5-coder` | No (recommended for manufacturers) |
 
 `.env` example:
 
 ```bash
 # Pick one to enable AI features
-SBOMHUB_LLM_PROVIDER=openai            # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_PROVIDER=openai            # openai | anthropic | gemini | azure_openai | ollama
 SBOMHUB_LLM_MODEL=gpt-5
 OPENAI_API_KEY=sk-...
+
+# Azure OpenAI example (full env contract: docs/configuration.md)
+# SBOMHUB_LLM_PROVIDER=azure_openai
+# SBOMHUB_LLM_MODEL=gpt-4o
+# SBOMHUB_LLM_AZURE_ENDPOINT=https://my-resource.openai.azure.com
+# SBOMHUB_LLM_AZURE_DEPLOYMENT=my-chat-deployment
+# AZURE_OPENAI_API_KEY=...
 
 # Local LLM example
 # SBOMHUB_LLM_PROVIDER=ollama

@@ -29,14 +29,28 @@ AI features (AI VEX triage, CRA report drafting, METI self-assessment prefill, e
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SBOMHUB_LLM_PROVIDER` | (empty) | `openai` / `anthropic` / `gemini` / `ollama` |
-| `SBOMHUB_LLM_MODEL` | (empty) | e.g. `gpt-5`, `claude-opus-4-7`, `gemini-3.5-flash`, `qwen2.5-coder:7b` |
-| `OPENAI_API_KEY` | (empty) | Required if `provider=openai` |
-| `ANTHROPIC_API_KEY` | (empty) | Required if `provider=anthropic` |
-| `GOOGLE_API_KEY` | (empty) | Required if `provider=gemini` |
-| `OLLAMA_HOST` | (empty) | Required if `provider=ollama` (e.g. `http://localhost:11434`) |
+| `SBOMHUB_LLM_PROVIDER` | (empty) | `openai` / `anthropic` / `gemini` / `azure_openai` / `ollama` |
+| `SBOMHUB_LLM_MODEL` | (empty) | e.g. `gpt-5`, `claude-opus-4-7`, `gemini-3.5-flash`, `qwen2.5-coder:7b`. For `azure_openai`, the canonical model name (used in audit logs); the routing is by deployment, not by this value. |
+| `SBOMHUB_LLM_API_KEY` | (empty) | Canonical provider API key. Provider-native aliases below are checked as fall-back. |
+| `OPENAI_API_KEY` | (empty) | Used if `provider=openai` and the canonical key is unset. |
+| `ANTHROPIC_API_KEY` | (empty) | Used if `provider=anthropic` and the canonical key is unset. |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | (empty) | Used if `provider=gemini` and the canonical key is unset. |
+| `AZURE_OPENAI_API_KEY` | (empty) | Used if `provider=azure_openai` and the canonical key is unset. NOT aliased to `OPENAI_API_KEY` (mixing them would silently send Azure traffic with an OpenAI.com key, or vice versa). |
+| `OLLAMA_HOST` | (empty) | Required if `provider=ollama` (e.g. `http://localhost:11434`). |
 
-> For manufacturing self-host setups that cannot send code or SBOMs to external APIs, Ollama (or any OpenAI-compatible local endpoint) is the recommended choice.
+> For manufacturing self-host setups that cannot send code or SBOMs to external APIs, Ollama (or any OpenAI-compatible local endpoint) is the recommended choice. Azure OpenAI is the recommended choice for operators who already have a Microsoft procurement contract.
+
+#### Azure OpenAI configuration
+
+Selecting `SBOMHUB_LLM_PROVIDER=azure_openai` additionally requires the deployment-specific settings below. Each row lists the canonical SBOMHub env name plus any provider-native aliases that are checked as fall-back, in precedence order (canonical first; the first non-empty value wins).
+
+| Variable (canonical → aliases) | Default | Description |
+|-------------------------------|---------|-------------|
+| `SBOMHUB_LLM_AZURE_ENDPOINT` → `AZURE_OPENAI_ENDPOINT` | (empty) | Azure resource endpoint URL, e.g. `https://my-resource.openai.azure.com`. |
+| `SBOMHUB_LLM_AZURE_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT` → `AZURE_OPENAI_DEPLOYMENT_NAME` → `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME` | (empty) | Deployment name as registered in Azure (URL path segment). Three Azure-side aliases are accepted because Microsoft documentation is not internally consistent — pick whichever your existing automation already exports. |
+| `SBOMHUB_LLM_AZURE_API_VERSION` → `AZURE_OPENAI_API_VERSION` | `2024-10-21` | Azure OpenAI `api-version` query parameter. Defaults to the current GA stable channel; override only if your deployment is pinned to a specific contract version. |
+
+If any of `provider=azure_openai`, endpoint, deployment, or API key is missing, the provider is gracefully disabled (the rest of the product continues to work, AI features turn off).
 
 ### Frontend Settings
 
@@ -74,9 +88,17 @@ NVD_API_KEY=your-nvd-api-key
 
 # AI features (BYOK). If unset, AI features are disabled.
 # Configure exactly one of the providers below.
-SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | ollama
+SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | azure_openai | ollama
 SBOMHUB_LLM_MODEL=gpt-5
 OPENAI_API_KEY=sk-...
+
+# Azure OpenAI example (managed via Microsoft procurement)
+# SBOMHUB_LLM_PROVIDER=azure_openai
+# SBOMHUB_LLM_MODEL=gpt-4o                                      # canonical model name (audit/Capabilities)
+# SBOMHUB_LLM_AZURE_ENDPOINT=https://my-resource.openai.azure.com
+# SBOMHUB_LLM_AZURE_DEPLOYMENT=my-chat-deployment
+# SBOMHUB_LLM_AZURE_API_VERSION=2024-10-21                      # optional; defaults to the GA stable channel
+# AZURE_OPENAI_API_KEY=...                                       # or SBOMHUB_LLM_API_KEY
 
 # Local LLM example (no code/SBOM leaves your network)
 # SBOMHUB_LLM_PROVIDER=ollama
