@@ -23,13 +23,39 @@
 | ENCRYPTION_KEY | dev placeholder hardcode | **Docker secrets** (file mount) |
 | DB password | dev hardcode | **Docker secrets** |
 | host port bind | `0.0.0.0` で開発者がアクセス | **`127.0.0.1` only** (reverse proxy 前提) |
-| ネットワーク分離 | 単一 default network | **backend / frontend** の 2 分離 |
+| ネットワーク分離 | 単一 default network | **backend / frontend** の 2 分離 (※ backend は outbound egress あり、 詳細は下記 1.1) |
 | restart policy | なし | `unless-stopped` |
 | API server entrypoint | image 標準 (env 直接読み) | wrapper script で secrets file → env var 展開 |
 
 OSS compose は **絶対に override しない**。 両者を同時に動かす場合は
 project name を分離する (`docker compose -p sbomhub-dev -f docker-compose.yml ...`
 と `docker compose -p sbomhub-prod -f docker-compose.enterprise.yml ...`)。
+
+### 1.1 ネットワーク分離の前提 (※要確認: docs/security/self-host-deployment.md §7 とも整合)
+
+`docker-compose.enterprise.yml` の network 設計は **二段構え** になっている:
+
+1. **Ingress 遮断 (一次防御)**: postgres / redis / ollama / api / web の各
+   host port bind を **`127.0.0.1` localhost-only** に固定 (`127.0.0.1:8080:8080`
+   等)。 これにより外部 host からこれらの port に直接到達することはできない。
+   外部公開は reverse proxy (Caddy / nginx / Cloudflare Tunnel) で TLS 終端
+   してから行う (§4.3 / [`../docs/security/self-host-deployment.md`](../docs/security/self-host-deployment.md) §6)。
+2. **Service-to-service 分離 (二次防御)**: `backend` (postgres / redis / ollama
+   / api) と `frontend` (api / web) の 2 つの docker network に分け、 web は
+   直接 postgres / redis / ollama に到達できない (api 経由のみ)。
+
+> ※要確認: `backend` network は `internal: false` (**outbound egress あり**)
+> で運用する。 これは ollama-init が起動時に `ollama pull` で
+> `registry.ollama.ai` に到達する必要があるため、 また postgres / redis / api
+> の image pull 自体も `registry.docker.io` / `ghcr.io` 等への outbound に
+> 依存するため。 `internal: true` (=外部から完全遮断 + 内部から外部も遮断) に
+> 切り替えると初回起動が image pull 段階で失敗する。
+>
+> outbound を厳しく絞りたい環境では、 docker 内部の `internal: true` ではなく
+> **host 側 firewall (iptables / nftables) や egress proxy (Squid /
+> Cloudflare Gateway)** で `registry.docker.io` / `registry.ollama.ai` /
+> `ghcr.io` などのみ allow する構成を推奨する。 詳細は
+> [`../docs/security/self-host-deployment.md`](../docs/security/self-host-deployment.md) §7 参照。
 
 ---
 
