@@ -347,10 +347,16 @@ startup に進んでしまい DB と secrets の不整合を生む production bl
   #    実行していた場合)。 sanity FAIL 時は本 step に進まず、 旧 .env を
   #    untouched にしたまま原因調査する。
   cp .env.bak.$(date +%Y%m%d) .env
+
+  # 5) **enterprise compose (role-separated) を使っている場合のみ**:
+  #    pg_restore --no-owner --no-privileges で落ちた sbomhub_app / sbomhub_migrator
+  #    用 GRANT / OWNER を db-bootstrap 再実行で再付与する (F79 fix と同等)。
+  #    省略すると sbomhub-api が `permission denied for table ...` で起動失敗する。
+  docker compose -f docker/docker-compose.enterprise.yml run --rm db-bootstrap
   ```
 
 `.env` 復元と service startup は **必ず sanity check 両方 PASS の後**。
-これは §9.3 / `restore.sh` (F65/F67/F69 fix) と同じ fail-safe contract で、
+これは §9.3 / `restore.sh` (F65/F67/F69/F79 fix) と同じ fail-safe contract で、
 DRY のため将来 backup format を tar 化したら本節の inline pg_restore も
 削除して `restore.sh` 1 本に寄せる予定。
 

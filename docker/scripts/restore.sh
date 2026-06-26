@@ -13,6 +13,11 @@
 # M4-4 docs/security/self-host-deployment.md §9.3 に沿って実装。
 # 関連 issue: https://github.com/youichi-uda/sbomhub/issues/49 (M4-6)
 #
+# F79: enterprise compose (role-separated sbomhub_app / sbomhub_migrator) では
+# pg_restore --no-owner --no-privileges が ACL を落とすため、 secrets 復元後に
+# db-bootstrap one-shot service を再実行して GRANT / OWNER を再付与し、
+# sbomhub_app 接続で実際に SELECT できることまで確認してから success を返す。
+#
 # 使い方:
 #   ./scripts/restore.sh BACKUP_TARBALL
 #   ./scripts/restore.sh /srv/sbomhub/backups/sbomhub-backup-20260626-031000.tar.gz
@@ -129,14 +134,14 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 PLAIN_TAR="${TMP_DIR}/backup.tar.gz"
 
 if [[ "${NEEDS_AGE}" -eq 1 ]]; then
-    echo "[restore] step 1/5: age decrypt"
+    echo "[restore] step 1/7: age decrypt"
     age -d -i "${AGE_IDENTITY}" -o "${PLAIN_TAR}" "${BACKUP_TARBALL}"
     chmod 600 "${PLAIN_TAR}"
 else
     PLAIN_TAR="${BACKUP_TARBALL}"
 fi
 
-echo "[restore] step 2/5: tar extract"
+echo "[restore] step 2/7: tar extract"
 tar xzf "${PLAIN_TAR}" -C "${TMP_DIR}"
 
 # tar 内構造: <timestamp>/db.dump + <timestamp>/secrets/...
@@ -165,7 +170,7 @@ if ! docker compose -f "${COMPOSE_FILE}" ps --status running --services 2>/dev/n
     exit 1
 fi
 
-echo "[restore] step 3/5: pg_restore (DROP + REPLACE, --single-transaction)"
+echo "[restore] step 3/7: pg_restore (DROP + REPLACE, --single-transaction)"
 # --single-transaction:
 #   全 restore を 1 transaction に閉じ、 途中 failure 時に rollback (DROP も含めて)。
 #   部分適用で DB を inconsistent state にしないため必須。 backup.sh は
@@ -193,7 +198,7 @@ fi
 # できないため、 主要 invariant を SQL で確認する。 失敗時は secrets 復元と
 # API 再起動には進まず exit 1 (operator の判断対象とする)。
 
-echo "[restore] step 4/5: post-restore sanity checks"
+echo "[restore] step 4/7: post-restore sanity checks"
 
 # Check 1: schema_migrations が存在し latest version が取れること。
 # migrate 機構 (apps/api/cmd/migrate, apps/api/internal/database/migrate.go) は
@@ -245,7 +250,7 @@ fi
 # ---------------------------------------------------------------------------
 
 if [[ -d "${BACKUP_SECRETS}" ]]; then
-    echo "[restore] step 5/5: secrets restore"
+    echo "[restore] step 5/7: secrets restore"
     if [[ -d "${SECRETS_DIR}" ]]; then
         # 既存 secrets を上書き前に rename して退避 (rollback 可能に)
         BACKUP_OLD_SECRETS="${SECRETS_DIR}.bak-$(date -u +%Y%m%d-%H%M%S)"
@@ -256,18 +261,105 @@ if [[ -d "${BACKUP_SECRETS}" ]]; then
     chmod -R go-rwx "${SECRETS_DIR}"
     echo "[restore]   secrets restored to: ${SECRETS_DIR}"
 else
-    echo "[restore] step 5/5: skip secrets (not present in backup)"
+    echo "[restore] step 5/7: skip secrets (not present in backup)"
     echo "[restore]          既存の docker/secrets/ をそのまま使用します。"
 fi
 
 # ---------------------------------------------------------------------------
+# Role grants / ownership re-bootstrap (F79 fix)
+# ---------------------------------------------------------------------------
+# F79: pg_restore は `--no-owner --no-privileges` で復元しているため、 restored
+# objects は `--clean --if-exists` の DROP で削除された後、 接続 user (PG_USER /
+# default `sbomhub` superuser) が owner となり ACL は付かない。 enterprise
+# compose では F76 fix 後に sbomhub-api が `sbomhub_app` (NOSUPERUSER /
+# NOBYPASSRLS) として接続する規律になったため、 ここで db-bootstrap one-shot
+# service を再実行して以下を再付与する:
+#   - sbomhub_app / sbomhub_migrator role の存在 + password rotation
+#   - tables / sequences への GRANT (sbomhub_app: SELECT/INSERT/UPDATE/DELETE,
+#     sbomhub_migrator: ALL)
+#   - 既存 `sbomhub` owned objects の `sbomhub_migrator` への ALTER OWNER
+#   - ALTER DEFAULT PRIVILEGES (将来 migrator が CREATE する table も自動付与)
+#
+# これを怠ると、 restore は sanity check (PG_USER=sbomhub_migrator/sbomhub で
+# 実行) は通るが、 sbomhub-api 起動時に sbomhub_app が table SELECT で
+# permission denied になり、 API が serve しない production blocker になる。
+#
+# standard `docker-compose.yml` (OSS dev 用、 sbomhub superuser 単一ロール) では
+# db-bootstrap service 自体が存在しないため skip (compose file 名で判定)。
+
+echo "[restore] step 6/7: re-apply role grants and ownership (db-bootstrap)"
+COMPOSE_BASENAME="$(basename "${COMPOSE_FILE}")"
+case "${COMPOSE_BASENAME}" in
+    *enterprise*)
+        if ! docker compose -f "${COMPOSE_FILE}" run --rm db-bootstrap; then
+            echo "[restore] FATAL: db-bootstrap failed after restore." >&2
+            echo "[restore]        sbomhub_app に table grants が無い状態のため、" >&2
+            echo "[restore]        sbomhub-api を起動しても permission denied になります。" >&2
+            echo "[restore]        詳細: docker compose -f ${COMPOSE_FILE} logs db-bootstrap" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "[restore]   skip db-bootstrap: '${COMPOSE_BASENAME}' is not the enterprise compose"
+        echo "[restore]   (single-role mode, no sbomhub_app / sbomhub_migrator separation)."
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# App role access check (F79 fix)
+# ---------------------------------------------------------------------------
+# db-bootstrap success だけでは「sbomhub_app が restored data を実際に SELECT
+# できる」 ことは保証できない (default privileges drift / table ACL の race 等
+# 微小確率の事故を捕捉するため)。 restored secrets file の app password で
+# 接続し、 tenants table の count を 1 件取得できることを最終確認する。
+# failure 時は API 起動に進まず exit 1 (operator の判断対象)。
+
+echo "[restore] step 7/7: verify sbomhub_app role can read restored data"
+case "${COMPOSE_BASENAME}" in
+    *enterprise*)
+        APP_PASSWORD_FILE="${SECRETS_DIR}/postgres_app_password.txt"
+        if [[ ! -r "${APP_PASSWORD_FILE}" ]]; then
+            echo "[restore] FATAL: sbomhub_app password file not readable: ${APP_PASSWORD_FILE}" >&2
+            echo "[restore]        secrets restore が壊れている可能性。" >&2
+            exit 1
+        fi
+        APP_PASSWORD="$(cat "${APP_PASSWORD_FILE}")"
+        APP_CHECK_RAW="$(PGPASSWORD="${APP_PASSWORD}" \
+            docker compose -f "${COMPOSE_FILE}" exec -T \
+                -e PGPASSWORD \
+                postgres \
+                psql -h localhost -U sbomhub_app -d "${PG_DB}" \
+                     -tA -v ON_ERROR_STOP=1 \
+                     -c "SELECT count(*) FROM tenants;" 2>&1)" || {
+            echo "[restore] FATAL: sbomhub_app cannot SELECT from tenants after restore:" >&2
+            awk '{print "[restore]   " $0}' <<< "${APP_CHECK_RAW}" >&2
+            echo "[restore]        restored tables に sbomhub_app 用の GRANT が無い可能性。" >&2
+            echo "[restore]        db-bootstrap log を確認: docker compose -f ${COMPOSE_FILE} logs db-bootstrap" >&2
+            unset APP_PASSWORD
+            exit 1
+        }
+        unset APP_PASSWORD
+        APP_TENANT_COUNT="$(printf '%s' "${APP_CHECK_RAW}" | tr -d '[:space:]')"
+        if ! [[ "${APP_TENANT_COUNT}" =~ ^[0-9]+$ ]]; then
+            echo "[restore] FATAL: sbomhub_app tenants count is not numeric: '${APP_TENANT_COUNT}'" >&2
+            exit 1
+        fi
+        echo "[restore]   sbomhub_app tenants count: ${APP_TENANT_COUNT}"
+        ;;
+    *)
+        echo "[restore]   skip app role check: non-enterprise compose (single-role mode)"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 完了通知 + 次手順
 # ---------------------------------------------------------------------------
-# ここに辿り着くのは pg_restore success + sanity checks pass + secrets 復元
-# 完了の **全てが** 通った場合のみ (途中 failure は exit 1 で abort 済)。
+# ここに辿り着くのは pg_restore success + sanity checks pass + secrets 復元 +
+# db-bootstrap re-apply + sbomhub_app access check の **全てが** 通った場合のみ
+# (途中 failure は exit 1 で abort 済)。
 
 echo ""
-echo "[restore] Restore completed successfully (pg_restore + sanity checks passed)."
+echo "[restore] Restore completed successfully (pg_restore + sanity + db-bootstrap + app role access checks passed)."
 echo ""
 echo "[restore] Next steps:"
 echo "  1. sbomhub-api / sbomhub-web を再起動 (secrets / DB が変わったため):"
