@@ -136,3 +136,96 @@ func Test036_TenantLLMConfig_TableStillExists(t *testing.T) {
 			"037 RLS hardening will fail to apply")
 	}
 }
+
+// Test040_ComplianceVisualizationRLS_ContainsHardening guards the M4
+// Codex round 13 F73 fix. compliance_checklist_responses and
+// sbom_visualization_settings shipped in migration 018 without RLS,
+// so a tenant-A user that knew or guessed a tenant-B project UUID
+// could read / overwrite / delete tenant B's manual METI checklist
+// responses and visualization settings. Migration 040 ENABLE + FORCE
+// RLS on both tables with WITH CHECK policies. If anyone edits 040 to
+// remove a load-bearing statement (or merges it into 018 forward),
+// this test fires before review.
+func Test040_ComplianceVisualizationRLS_ContainsHardening(t *testing.T) {
+	up := readMigration(t, "040_rls_compliance_visualization.up.sql")
+	upUpper := strings.ToUpper(up)
+
+	mustContain := []struct {
+		needle string
+		why    string
+	}{
+		// compliance_checklist_responses half.
+		{
+			needle: "ALTER TABLE COMPLIANCE_CHECKLIST_RESPONSES ENABLE ROW LEVEL SECURITY",
+			why:    "RLS must be ENABLED on compliance_checklist_responses (F73 fix)",
+		},
+		{
+			needle: "ALTER TABLE COMPLIANCE_CHECKLIST_RESPONSES FORCE",
+			why:    "RLS must be FORCED on compliance_checklist_responses so the owner does not bypass",
+		},
+		{
+			needle: "CREATE POLICY TENANT_ISOLATION_COMPLIANCE_CHECKLIST ON COMPLIANCE_CHECKLIST_RESPONSES",
+			why:    "policy name must match the tenant_isolation_<table> convention",
+		},
+		// sbom_visualization_settings half.
+		{
+			needle: "ALTER TABLE SBOM_VISUALIZATION_SETTINGS ENABLE ROW LEVEL SECURITY",
+			why:    "RLS must be ENABLED on sbom_visualization_settings (F73 fix)",
+		},
+		{
+			needle: "ALTER TABLE SBOM_VISUALIZATION_SETTINGS FORCE",
+			why:    "RLS must be FORCED on sbom_visualization_settings so the owner does not bypass",
+		},
+		{
+			needle: "CREATE POLICY TENANT_ISOLATION_VISUALIZATION ON SBOM_VISUALIZATION_SETTINGS",
+			why:    "policy name must match the tenant_isolation_<table> convention",
+		},
+		// Shared shape (both policies use these).
+		{needle: "FOR ALL", why: "policies must cover all command types"},
+		{needle: "USING", why: "policies must have USING (read predicate)"},
+		{needle: "WITH CHECK", why: "policies must have WITH CHECK (write predicate) -- blocks cross-tenant INSERT/UPDATE"},
+		{needle: "CURRENT_SETTING('APP.CURRENT_TENANT_ID', TRUE)::UUID",
+			why: "predicate must read app.current_tenant_id GUC with missing_ok=true and cast to UUID"},
+	}
+	for _, m := range mustContain {
+		if !strings.Contains(upUpper, m.needle) {
+			t.Errorf("040_rls_compliance_visualization.up.sql missing %q: %s",
+				m.needle, m.why)
+		}
+	}
+
+	// Down migration must clean up in the right order.
+	down := readMigration(t, "040_rls_compliance_visualization.down.sql")
+	downUpper := strings.ToUpper(down)
+	for _, m := range []struct {
+		needle string
+		why    string
+	}{
+		{"DROP POLICY IF EXISTS TENANT_ISOLATION_VISUALIZATION ON SBOM_VISUALIZATION_SETTINGS",
+			"down must drop the visualization policy"},
+		{"DROP POLICY IF EXISTS TENANT_ISOLATION_COMPLIANCE_CHECKLIST ON COMPLIANCE_CHECKLIST_RESPONSES",
+			"down must drop the checklist policy"},
+		{"NO FORCE ROW LEVEL SECURITY", "down must unforce RLS on both tables"},
+		{"DISABLE", "down must disable RLS"},
+	} {
+		if !strings.Contains(downUpper, m.needle) {
+			t.Errorf("040_rls_compliance_visualization.down.sql missing %q: %s",
+				m.needle, m.why)
+		}
+	}
+}
+
+// Test018_ComplianceChecklist_TablesStillExist ensures migration 018
+// still creates the two tables migration 040 depends on. If 018 is
+// later renamed/removed without merging 040 forward, this test
+// surfaces the dependency immediately.
+func Test018_ComplianceChecklist_TablesStillExist(t *testing.T) {
+	up := readMigration(t, "018_compliance_checklist.up.sql")
+	for _, table := range []string{"compliance_checklist_responses", "sbom_visualization_settings"} {
+		pattern := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?` + table)
+		if !pattern.MatchString(up) {
+			t.Fatalf("018_compliance_checklist.up.sql no longer creates %s; "+
+				"040 RLS hardening will fail to apply", table)
+		}
+	}
+}
