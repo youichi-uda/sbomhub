@@ -1393,14 +1393,20 @@ func (r *Runner) writeAudit(ctx context.Context, tenantID uuid.UUID, userID *uui
 // LLM prompt construction
 // ----------------------------------------------------------------------------
 
-// vexTriageSystemPrompt steers the LLM toward the strict JSON contract
+// VEXTriageSystemPrompt steers the LLM toward the strict JSON contract
 // the parser expects. We intentionally bake the allowlist into the
 // system prompt so the model has the schema in-context.
+//
+// M4-3 (※要確認): exported so the apps/api/cmd/llm-bench harness can
+// reuse the *exact* runtime prompt rather than maintaining a drifted
+// copy that would invalidate prompt_hash analytics. The original
+// unexported name remains as a const alias below so unit tests inside
+// this package keep compiling without rename churn.
 //
 // ※要確認: prompt wording may need iteration once the M1-4 eval set
 // lands. Keep prompt changes Tracked so prompt_hash analytics stay
 // meaningful (any prompt edit invalidates historical equality joins).
-const vexTriageSystemPrompt = `You are SBOMHub's AI VEX triage assistant.
+const VEXTriageSystemPrompt = `You are SBOMHub's AI VEX triage assistant.
 
 Your job: given an advisory excerpt and ecosystem reachability evidence,
 decide whether the cited CVE is exploitable in the user's project.
@@ -1426,10 +1432,21 @@ When evidence is thin or contradictory, prefer state="under_investigation"
 with confidence reflecting your uncertainty. Never set state="not_affected"
 without at least one evidence pointer.`
 
-// buildPrompt constructs the user-turn prompt body. The advisory +
+// vexTriageSystemPrompt is the legacy unexported alias kept so the
+// runner body (and any in-package tests) compile unchanged after the
+// M4-3 export rename. New callers (e.g. cmd/llm-bench) should use
+// VEXTriageSystemPrompt directly.
+const vexTriageSystemPrompt = VEXTriageSystemPrompt
+
+// BuildPrompt constructs the user-turn prompt body. The advisory +
 // reachability data is rendered as compact JSON so the LLM can address
 // individual rows by index in its evidence list.
-func buildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []ReachabilityRow) string {
+//
+// M4-3 (※要確認): exported so cmd/llm-bench can render the *exact*
+// runtime prompt. The original unexported name remains as a thin
+// wrapper below so existing in-package callers (Run() at line 659)
+// compile without churn.
+func BuildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []ReachabilityRow) string {
 	var b strings.Builder
 	b.WriteString("CVE: ")
 	b.WriteString(cveID)
@@ -1468,6 +1485,13 @@ func buildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []Reachabi
 	}
 	b.WriteString("\nProduce the VEX JSON now.")
 	return b.String()
+}
+
+// buildPrompt is the legacy unexported alias retained so the runner
+// body compiles unchanged after the M4-3 export. New callers should
+// use BuildPrompt directly.
+func buildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []ReachabilityRow) string {
+	return BuildPrompt(cveID, advisories, reach)
 }
 
 // ----------------------------------------------------------------------------
