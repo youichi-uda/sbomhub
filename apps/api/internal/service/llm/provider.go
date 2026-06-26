@@ -125,6 +125,13 @@ type Capabilities struct {
 	SupportsEmbedding    bool
 	// MaxContextTokens is the model context window. 0 if unknown.
 	MaxContextTokens int
+	// EmbeddingDimensions is the dimensionality of the embedding vectors
+	// produced by this provider/model. 0 when embeddings are not supported
+	// or when the operator has not pinned a known model (e.g. an Azure
+	// deployment whose name does not match a known family — operators can
+	// still call Embed; downstream vector storage callers should query
+	// this only as a hint, not as a contract).
+	EmbeddingDimensions int
 }
 
 // ErrNotImplemented is returned by Embed (or any optional method) when the

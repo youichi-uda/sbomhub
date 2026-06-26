@@ -55,11 +55,22 @@ const defaultAzureAPIVersion = "2024-10-21"
 type AzureOpenAIProvider struct {
 	apiKey           string
 	endpoint         string // base, e.g. https://my-resource.openai.azure.com
-	deployment       string // Azure deployment name (URL path segment)
-	apiVersion       string // api-version query string value
-	modelName        string // display / Capabilities model identifier
+	deployment       string // Azure chat deployment name (URL path segment)
+	apiVersion       string // chat api-version query string value
+	modelName        string // display / Capabilities chat model identifier
 	client           *http.Client
 	defaultMaxTokens int
+
+	// Embedding deployment (M5-3, issue #51). Azure exposes embedding
+	// models through their own deployment — a separate URL path segment
+	// from the chat deployment — so we keep the configuration parallel
+	// to the chat fields rather than overloading them. All three fields
+	// are zero-valued when the operator has not configured an embedding
+	// deployment; in that case Embed returns *DisabledError and
+	// Capabilities.SupportsEmbedding stays false.
+	embeddingDeployment string // Azure embedding deployment name
+	embeddingAPIVersion string // optional override; falls back to apiVersion
+	embeddingModelName  string // canonical embedding model identifier (text-embedding-3-small etc.)
 }
 
 // Compile-time interface conformance.
@@ -105,6 +116,59 @@ func NewAzureOpenAIWithClient(apiKey, endpoint, deployment, apiVersion, modelNam
 	return p
 }
 
+// NewAzureOpenAIWithEmbedding constructs an AzureOpenAIProvider with both
+// chat and embedding deployments configured (M5-3, issue #51).
+//
+// Azure exposes embedding models (text-embedding-3-small / text-embedding-
+// 3-large / text-embedding-ada-002 / etc.) through their own deployments
+// — the embedding deployment is a separate URL path segment from the chat
+// deployment. Operators commonly configure one Azure resource with both
+// (e.g. `gpt-4o-chat` for chat + `text-embedding-3-small` for vector
+// reachability). This constructor accepts both sets in one call rather
+// than forcing callers to mutate fields after construction.
+//
+// Defaults:
+//   - embeddingAPIVersion == "" → falls back to the chat apiVersion at
+//     request time (Embed() reads embeddingAPIVersion, then apiVersion).
+//     This matches the operator mental model that one Azure resource
+//     pins one api-version unless they explicitly diverge per deployment.
+//   - embeddingModelName == "" → Capabilities.EmbeddingDimensions falls
+//     back to deployment-name sniffing (e.g. a deployment named
+//     `text-embedding-3-small-prod` resolves to 1536). When sniffing also
+//     fails, dimensions is left at 0 and the operator should set
+//     SBOMHUB_LLM_AZURE_EMBEDDING_MODEL to a known family name.
+//
+// embeddingDeployment == "" is the explicit "embedding not configured"
+// signal — Embed() returns *DisabledError and Capabilities.SupportsEmbedding
+// stays false in that case.
+func NewAzureOpenAIWithEmbedding(
+	apiKey, endpoint, deployment, apiVersion, modelName,
+	embeddingDeployment, embeddingAPIVersion, embeddingModelName string,
+) *AzureOpenAIProvider {
+	p := NewAzureOpenAI(apiKey, endpoint, deployment, apiVersion, modelName)
+	p.embeddingDeployment = strings.TrimSpace(embeddingDeployment)
+	p.embeddingAPIVersion = strings.TrimSpace(embeddingAPIVersion)
+	p.embeddingModelName = strings.TrimSpace(embeddingModelName)
+	return p
+}
+
+// NewAzureOpenAIWithEmbeddingAndClient is the test seam that combines
+// NewAzureOpenAIWithEmbedding + a custom *http.Client. Used by
+// azure_openai_test.go for the embedding test matrix; not intended for
+// production callers.
+func NewAzureOpenAIWithEmbeddingAndClient(
+	apiKey, endpoint, deployment, apiVersion, modelName,
+	embeddingDeployment, embeddingAPIVersion, embeddingModelName string,
+	client *http.Client,
+) *AzureOpenAIProvider {
+	p := NewAzureOpenAIWithEmbedding(apiKey, endpoint, deployment, apiVersion, modelName,
+		embeddingDeployment, embeddingAPIVersion, embeddingModelName)
+	if client != nil {
+		p.client = client
+	}
+	return p
+}
+
 // Name implements Provider.
 func (p *AzureOpenAIProvider) Name() string { return "azure_openai" }
 
@@ -114,15 +178,27 @@ func (p *AzureOpenAIProvider) Name() string { return "azure_openai" }
 func (p *AzureOpenAIProvider) Model() string { return p.modelName }
 
 // LogValue implements slog.LogValuer so logging *AzureOpenAIProvider only
-// emits {provider, deployment, model} and NEVER the API key or the
-// resource endpoint URL (the latter is sometimes considered tenancy
-// metadata by enterprise operators). (§7.2 never-log policy, M4-2 §1.K)
+// emits {provider, deployment, model[, embedding_deployment,
+// embedding_model]} and NEVER the API key or the resource endpoint URL
+// (the latter is sometimes considered tenancy metadata by enterprise
+// operators). (§7.2 never-log policy, M4-2 §1.K)
+//
+// Embedding fields are surfaced only when configured (M5-3): an operator
+// who has not deployed an embedding model should see the same log shape
+// as M4-2 — adding empty attrs would be operator-confusing churn.
 func (p *AzureOpenAIProvider) LogValue() slog.Value {
-	return slog.GroupValue(
+	attrs := []slog.Attr{
 		slog.String("provider", p.Name()),
 		slog.String("deployment", p.deployment),
 		slog.String("model", p.modelName),
-	)
+	}
+	if p.embeddingDeployment != "" {
+		attrs = append(attrs, slog.String("embedding_deployment", p.embeddingDeployment))
+		if p.embeddingModelName != "" {
+			attrs = append(attrs, slog.String("embedding_model", p.embeddingModelName))
+		}
+	}
+	return slog.GroupValue(attrs...)
 }
 
 // Complete implements Provider.
@@ -258,17 +334,274 @@ func (p *AzureOpenAIProvider) Complete(ctx context.Context, req CompleteRequest)
 	}, nil
 }
 
-// Embed implements Provider. Azure OpenAI does expose embeddings via
-// separate deployments (text-embedding-3-small etc.), but wiring that up
-// requires its own deployment name + dimension config which is out of
-// scope for the M4-2 Provider implementation. Return ErrNotImplemented
-// so the contract matches openai.go / anthropic.go.
+// azureEmbedMaxBatchSize is the documented Azure OpenAI /embeddings
+// input-array hard cap (Microsoft Learn / Azure OpenAI embeddings doc,
+// confirmed 2026-06: "the maximum array size is 2,048"). Requests with a
+// longer `input` array fail server-side with HTTP 400, so Embed chunks
+// the caller's []string transparently. ※要確認: Microsoft also documents
+// an aggregate hard cap of 300,000 tokens summed across all inputs in
+// one request (HTTP 400) and a per-input cap of 8,192 tokens — we do
+// NOT enforce those client-side because we have no cheap tokeniser, and
+// surfacing the upstream 400 lets the operator see the exact failure
+// path. See azureEmbedMaxTotalInputs for the DoS safety cap.
+const azureEmbedMaxBatchSize = 2048
+
+// azureEmbedMaxTotalInputs is the per-call defense-in-depth cap on the
+// total number of input texts (F25 batch DoS protection). 16,384 is 8
+// chunks of azureEmbedMaxBatchSize — large enough for any sensible
+// reachability batch we expect M2+ to drive (one SBOM component set is
+// orders of magnitude smaller), and small enough that a single buggy
+// caller cannot pin the worker on a runaway embedding loop.
 //
-// ※要確認: M4-x may add an `embeddingDeployment` field + dedicated
-// AzureOpenAIProvider.Embed implementation when reachability features
-// land. Tracked under the same milestone as OpenAI embedding support.
-func (p *AzureOpenAIProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResponse, error) {
-	return nil, ErrNotImplemented
+// ※要確認: revisit if M2 reachability needs >16k component embeddings
+// per call. The trivial mitigation is to surface this as
+// SBOMHUB_LLM_AZURE_EMBEDDING_MAX_INPUTS env so the operator can opt
+// out of the cap when running on a large-quota deployment.
+const azureEmbedMaxTotalInputs = 16384
+
+// azureEmbeddingRequest mirrors the Azure OpenAI Embeddings REST
+// request body. The wire format is identical to OpenAI's
+// /v1/embeddings (Azure routes by deployment URL, not by `model`),
+// so we deliberately omit the `model` field for the same reason
+// openaiChatRequest does in azure_openai.go Complete.
+type azureEmbeddingRequest struct {
+	Input []string `json:"input"`
+}
+
+// azureEmbeddingResponse mirrors the relevant fields of the Azure
+// OpenAI Embeddings response. `data` is sorted by index in practice but
+// we re-index defensively (Embed below) because the spec does not
+// guarantee order.
+type azureEmbeddingResponse struct {
+	Object string                `json:"object"`
+	Data   []azureEmbeddingDatum `json:"data"`
+	Model  string                `json:"model"`
+	Usage  struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *openaiError `json:"error,omitempty"`
+}
+
+// azureEmbeddingDatum is one input's embedding vector.
+type azureEmbeddingDatum struct {
+	Object    string    `json:"object"`
+	Index     int       `json:"index"`
+	Embedding []float32 `json:"embedding"`
+}
+
+// Embed implements Provider against the Azure OpenAI Embeddings REST
+// API (M5-3, issue #51).
+//
+// Wire format (confirmed against Microsoft Learn, 2026-06):
+//
+//	POST {endpoint}/openai/deployments/{embeddingDeployment}/embeddings?api-version={apiVersion}
+//	api-key: {apiKey}
+//	Content-Type: application/json
+//	{"input": ["text", ...]}
+//
+// Behaviour:
+//
+//   - Empty req.Texts is a no-op (zero-length Vectors, no HTTP call).
+//   - len(req.Texts) > azureEmbedMaxBatchSize is chunked transparently;
+//     each chunk is a separate HTTP request. Chunks run sequentially
+//     because we want predictable ordering and to keep TPM well below
+//     the per-deployment quota (Azure's default Gen-3 embeddings quota
+//     is 350K TPM per region — bursting in parallel would risk 429s).
+//   - len(req.Texts) > azureEmbedMaxTotalInputs returns an error
+//     without dispatching any HTTP request (F25 batch DoS cap).
+//   - A failure mid-chunk discards completed chunks per the task spec.
+//     This is intentional: partial Vectors with len < len(req.Texts)
+//     would silently corrupt the caller's index mapping; failing hard
+//     lets the caller decide whether to retry the whole batch.
+//   - Transport errors are scrubbed via RedactAzureTransportError so
+//     the tenant resource + deployment name never reach
+//     llm_calls.error_message.
+//
+// ※要確認: per-chunk timeout management is delegated to the shared
+// p.client.Timeout (60s). For very large batches the *http.Client*
+// timeout is enforced per HTTP call, NOT per Embed call — a 10-chunk
+// batch can therefore run up to 10 × 60s = 10 minutes wall time. The
+// caller controls overall deadline via ctx, which is honoured per
+// chunk (http.NewRequestWithContext).
+func (p *AzureOpenAIProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
+	if p.apiKey == "" {
+		return nil, &DisabledError{Reason: "Azure OpenAI API key is empty"}
+	}
+	if p.endpoint == "" {
+		return nil, &DisabledError{Reason: "Azure OpenAI endpoint is empty"}
+	}
+	if p.embeddingDeployment == "" {
+		return nil, &DisabledError{
+			Reason: "Azure OpenAI embedding deployment is empty " +
+				"(set SBOMHUB_LLM_AZURE_EMBEDDING_DEPLOYMENT or AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME)",
+		}
+	}
+	if len(req.Texts) == 0 {
+		return &EmbedResponse{
+			Vectors: [][]float32{},
+			Model:   p.embeddingResponseModelName(),
+		}, nil
+	}
+	if len(req.Texts) > azureEmbedMaxTotalInputs {
+		// F25: refuse before issuing any HTTP traffic so a buggy
+		// caller cannot light up the upstream quota with a single
+		// request. We do NOT include the input text in the error
+		// message (no risk of leaking PII / source code).
+		return nil, fmt.Errorf("azure_openai: embed inputs %d exceed safety cap %d (set fewer or split caller-side)",
+			len(req.Texts), azureEmbedMaxTotalInputs)
+	}
+
+	// embeddingAPIVersion override falls back to the chat apiVersion.
+	// Operators commonly pin one Azure resource to one api-version; the
+	// override exists only for the rare case where chat and embedding
+	// deployments diverge (e.g. one is on a preview channel).
+	apiVersion := p.embeddingAPIVersion
+	if apiVersion == "" {
+		apiVersion = p.apiVersion
+	}
+
+	vectors := make([][]float32, len(req.Texts))
+	totalPromptTokens := 0
+	respModel := ""
+
+	for start := 0; start < len(req.Texts); start += azureEmbedMaxBatchSize {
+		end := start + azureEmbedMaxBatchSize
+		if end > len(req.Texts) {
+			end = len(req.Texts)
+		}
+		chunk := req.Texts[start:end]
+
+		body := azureEmbeddingRequest{Input: chunk}
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("azure_openai: marshal embed request: %w", err)
+		}
+
+		url := fmt.Sprintf("%s/openai/deployments/%s/embeddings?api-version=%s",
+			p.endpoint, p.embeddingDeployment, apiVersion)
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+		if err != nil {
+			return nil, fmt.Errorf("azure_openai: new embed request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		// Azure uses `api-key`, NOT `Authorization: Bearer`.
+		httpReq.Header.Set("api-key", p.apiKey)
+
+		resp, err := p.client.Do(httpReq)
+		if err != nil {
+			// F63: scrub Azure-specific tenant resource + deployment
+			// name from the transport error before propagating.
+			// Partial Vectors collected so far are discarded by
+			// returning here (chunked partial state cannot be merged
+			// safely — see Embed doc comment).
+			return nil, RedactAzureTransportError(
+				fmt.Errorf("azure_openai: embed http call (chunk start=%d): %w", start, err))
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			const errBodyCap = 4 << 10
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyCap))
+			resp.Body.Close()
+			var errResp azureEmbeddingResponse
+			_ = json.Unmarshal(errBody, &errResp)
+			if errResp.Error != nil {
+				return nil, fmt.Errorf("azure_openai: embed %s: %s", resp.Status, errResp.Error.Message)
+			}
+			return nil, fmt.Errorf("azure_openai: embed %s: %s", resp.Status, string(errBody))
+		}
+
+		rawBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("azure_openai: read embed body: %w", readErr)
+		}
+
+		var parsed azureEmbeddingResponse
+		if err := json.Unmarshal(rawBody, &parsed); err != nil {
+			return nil, fmt.Errorf("azure_openai: parse embed response: %w", err)
+		}
+		if len(parsed.Data) != len(chunk) {
+			return nil, fmt.Errorf("azure_openai: embed response data count %d != chunk size %d",
+				len(parsed.Data), len(chunk))
+		}
+		for _, d := range parsed.Data {
+			if d.Index < 0 || d.Index >= len(chunk) {
+				return nil, fmt.Errorf("azure_openai: embed response index %d out of range [0, %d)",
+					d.Index, len(chunk))
+			}
+			vectors[start+d.Index] = d.Embedding
+		}
+		totalPromptTokens += parsed.Usage.PromptTokens
+		// Azure returns the underlying model name on the embedding
+		// response (e.g. "text-embedding-3-small"); we keep the last
+		// chunk's reading on the assumption that all chunks land on the
+		// same deployment (which they do — same URL).
+		if parsed.Model != "" {
+			respModel = parsed.Model
+		}
+	}
+
+	if respModel == "" {
+		respModel = p.embeddingResponseModelName()
+	}
+	return &EmbedResponse{
+		Vectors:     vectors,
+		InputTokens: totalPromptTokens,
+		Model:       respModel,
+		// ※要確認: Azure embedding pricing is per-deployment and
+		// distinct from OpenAI direct; CostUSD is computed in the
+		// audit layer once a per-deployment price table is available
+		// (matches Complete + openai.go convention).
+		CostUSD: 0,
+	}, nil
+}
+
+// embeddingResponseModelName returns the best-effort canonical embedding
+// model identifier for the EmbedResponse.Model field when the upstream
+// response has not populated one (or when the caller asks for the model
+// without dispatching a request — e.g. empty inputs).
+func (p *AzureOpenAIProvider) embeddingResponseModelName() string {
+	if p.embeddingModelName != "" {
+		return p.embeddingModelName
+	}
+	return p.embeddingDeployment
+}
+
+// azureEmbeddingDimensions returns the embedding vector size for the
+// known Azure OpenAI embedding model families. The lookup walks
+// embeddingModelName first, then falls back to sniffing the deployment
+// name (operators commonly name a deployment after the underlying model
+// — e.g. `text-embedding-3-small-prod`).
+//
+// Returns 0 for unknown / business-named deployments; downstream vector
+// storage callers should treat 0 as "operator should set
+// SBOMHUB_LLM_AZURE_EMBEDDING_MODEL".
+//
+// ※要確認: text-embedding-3-{small,large} support a `dimensions`
+// request parameter that lets callers truncate the vector to a smaller
+// size (1536→256 etc.). sbomhub does not expose that today; if a
+// future milestone wires it through, this lookup must consult the
+// requested dimensions rather than the model default.
+func (p *AzureOpenAIProvider) azureEmbeddingDimensions() int {
+	if p.embeddingDeployment == "" {
+		return 0
+	}
+	name := strings.ToLower(p.embeddingModelName)
+	if name == "" {
+		name = strings.ToLower(p.embeddingDeployment)
+	}
+	switch {
+	case strings.Contains(name, "text-embedding-3-large"):
+		return 3072
+	case strings.Contains(name, "text-embedding-3-small"):
+		return 1536
+	case strings.Contains(name, "text-embedding-ada-002"), strings.Contains(name, "ada-002"):
+		return 1536
+	default:
+		return 0
+	}
 }
 
 // Capabilities implements Provider.
@@ -283,23 +616,22 @@ func (p *AzureOpenAIProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedRe
 // the operator pin a lower MaxTokens via CompleteRequest if their
 // deployment is constrained.
 func (p *AzureOpenAIProvider) Capabilities() Capabilities {
+	var c Capabilities
 	switch {
 	case strings.HasPrefix(p.modelName, "gpt-4o"), strings.HasPrefix(p.modelName, "gpt-4.1"), strings.HasPrefix(p.modelName, "gpt-5"):
-		return Capabilities{
+		c = Capabilities{
 			SupportsJSONMode:     true,
 			SupportsJSONSchema:   true,
 			SupportsFunctionCall: true,
 			SupportsVision:       true,
-			SupportsEmbedding:    false,
 			MaxContextTokens:     128000,
 		}
 	case strings.HasPrefix(p.modelName, "o1"), strings.HasPrefix(p.modelName, "o3"):
-		return Capabilities{
+		c = Capabilities{
 			SupportsJSONMode:     true,
 			SupportsJSONSchema:   true,
 			SupportsFunctionCall: true,
 			SupportsVision:       false,
-			SupportsEmbedding:    false,
 			MaxContextTokens:     200000,
 		}
 	default:
@@ -308,15 +640,23 @@ func (p *AzureOpenAIProvider) Capabilities() Capabilities {
 		// chat-completions deployment supports response_format=json_object;
 		// SupportsJSONSchema is the stricter feature and we only enable it
 		// for known recent families.
-		return Capabilities{
+		c = Capabilities{
 			SupportsJSONMode:     true,
 			SupportsJSONSchema:   false,
 			SupportsFunctionCall: true,
 			SupportsVision:       false,
-			SupportsEmbedding:    false,
 			MaxContextTokens:     16000,
 		}
 	}
+	// Embedding flags are independent of the chat model — Azure exposes
+	// embedding through its own deployment and an operator can ship one
+	// without the other. SupportsEmbedding flips true the moment the
+	// embedding deployment env is set; dimensions is a best-effort
+	// lookup from the canonical embedding model name (env-supplied) or
+	// the deployment name (sniffed) — see azureEmbeddingDimensions.
+	c.SupportsEmbedding = p.embeddingDeployment != ""
+	c.EmbeddingDimensions = p.azureEmbeddingDimensions()
+	return c
 }
 
 // azureEndpointURLPlaceholder is the static replacement string used in
