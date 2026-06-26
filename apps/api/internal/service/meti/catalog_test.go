@@ -3,6 +3,7 @@ package meti
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,13 @@ func TestLoadCatalog_ParseAndValidate(t *testing.T) {
 		assert.NotEmpty(t, c.DescriptionJA, "criterion[%d=%s].description_ja must be set", i, c.ID)
 		assert.NotEmpty(t, c.DescriptionEN, "criterion[%d=%s].description_en must be set", i, c.ID)
 		assert.NotEmpty(t, c.EvaluatorHint, "criterion[%d=%s].evaluator_hint must be set", i, c.ID)
+		// SourceSection (M5-6, issue #52) — required so future authoring
+		// rounds cannot drop the provenance link back to the official
+		// METI ver 2.0 chapter / sub-section.
+		assert.NotEmpty(t, c.SourceSection, "criterion[%d=%s].source_section must be set", i, c.ID)
+		assert.True(t, strings.HasPrefix(c.SourceSection, "第"),
+			"criterion[%s].source_section %q should start with 第N章 to anchor it in the ver 2.0 table of contents",
+			c.ID, c.SourceSection)
 
 		// Phase must be one of the closed set; mirrors the loader check
 		// so we get a test-time failure in addition to a load-time one.
@@ -175,4 +183,128 @@ func TestCatalog_PhaseCounts(t *testing.T) {
 	assert.GreaterOrEqual(t, envSetup, 5, "env_setup should hold ≥5 criteria")
 	assert.GreaterOrEqual(t, sbomCreation, 5, "sbom_creation should hold ≥5 criteria")
 	assert.GreaterOrEqual(t, sbomOperation, 5, "sbom_operation should hold ≥5 criteria")
+}
+
+// TestLoadMetadata_PresentAndSane is the M5-6 (issue #52) regression
+// guard. The metadata block records which version of the METI guidance
+// the catalog was reconciled against; this test pins:
+//
+//   - SourceVersion is "ver 2.0" — the dashboard renders this verbatim
+//     and a silent downgrade to ver 1.x would change the legal claim
+//     the product makes to operators;
+//   - SourcePublished and LastSynced are well-formed YYYY-MM-DD dates so
+//     the freshness badge can render without a second date-parser;
+//   - VerificationStatus is one of the closed set; the loader also
+//     enforces this but we double-check here so a regression in the
+//     loader does not silently pass the catalog with a typo'd status.
+func TestLoadMetadata_PresentAndSane(t *testing.T) {
+	meta, err := LoadMetadata()
+	require.NoError(t, err, "LoadMetadata should succeed on the embedded catalog")
+
+	assert.NotEmpty(t, meta.Source, "metadata.source must be set")
+	assert.Contains(t, meta.Source, "経済産業省",
+		"metadata.source should name 経済産業省 as the issuing authority")
+	assert.NotEmpty(t, meta.SourceURL, "metadata.source_url must be set")
+	assert.True(t, strings.HasPrefix(meta.SourceURL, "https://www.meti.go.jp/"),
+		"metadata.source_url %q should point at meti.go.jp", meta.SourceURL)
+
+	// Version lock — the dashboard surfaces this string; bumping to
+	// "ver 3.0" must be an intentional, reviewed change.
+	assert.Equal(t, "ver 2.0", meta.SourceVersion,
+		"metadata.source_version is pinned to ver 2.0; bump deliberately when METI publishes a new revision")
+
+	// Date format lock — both fields must parse so the freshness badge
+	// can render them with date arithmetic.
+	_, err = time.Parse("2006-01-02", meta.SourcePublished)
+	require.NoError(t, err, "metadata.source_published %q must parse as YYYY-MM-DD", meta.SourcePublished)
+	_, err = time.Parse("2006-01-02", meta.LastSynced)
+	require.NoError(t, err, "metadata.last_synced %q must parse as YYYY-MM-DD", meta.LastSynced)
+
+	assert.NotEmpty(t, meta.SyncedBy, "metadata.synced_by must be set so the audit surface can link to the issue")
+	assert.Contains(t, []string{"full", "partial", "deferred"}, meta.VerificationStatus,
+		"metadata.verification_status %q must be one of full|partial|deferred", meta.VerificationStatus)
+	assert.NotEmpty(t, meta.VerificationNotes,
+		"metadata.verification_notes must be set so the dashboard can render the honest provenance note")
+}
+
+// TestCatalog_OfficialWording_Regression locks down the Japanese title
+// wording for a representative slice of criteria — one per phase plus
+// the items that are most likely to drift during an authoring round
+// (5W1H scope, NTIA minimum elements, vulnerability monitoring,
+// retention, 30-day cadence). A future edit that changes any of these
+// titles will fail this test and the author must update the test
+// deliberately, which is the M5-6 contract: wording becomes catalog
+// data, not a comment.
+//
+// Why title_ja and not description_ja: titles surface in the UI as
+// short labels (dashboard rows, CRA report headings), so silent drift
+// there is highest-visibility. Descriptions are intentionally not
+// pinned so prose polish does not require a test edit per round.
+func TestCatalog_OfficialWording_Regression(t *testing.T) {
+	wantTitles := map[string]string{
+		// env_setup phase — anchor titles for the 8 criteria.
+		"meti.env_setup.01": "SBOM 担当部署および責任者を明確化",
+		"meti.env_setup.02": "対象ソフトウェアの開発言語・ビルド環境を整理",
+		"meti.env_setup.06": "SBOM 適用範囲 (5W1H) を明確化",
+		"meti.env_setup.07": "SBOM 生成ツールを選定・導入",
+		"meti.env_setup.08": "担当者教育・トレーニングを実施",
+
+		// sbom_creation phase — anchor titles tied to the 7 NTIA
+		// minimum elements + the format selection that drives the
+		// dashboard "format = CycloneDX / SPDX" badge.
+		"meti.sbom_creation.02": "SBOM 形式 (CycloneDX / SPDX) を選定",
+		"meti.sbom_creation.06": "METI / NTIA 最小要素を満たす SBOM を作成",
+
+		// sbom_operation phase — anchor titles for the items added
+		// in ver 2.0 第7章 (脆弱性管理プロセスの具体化) and the
+		// 30-day cadence that operators rely on.
+		"meti.sbom_operation.01": "脆弱性監視プロセスを確立",
+		"meti.sbom_operation.07": "SBOM を適切な期間 保管 (監査対応)",
+		"meti.sbom_operation.09": "SBOM 更新頻度を遵守",
+	}
+
+	for id, want := range wantTitles {
+		got, ok := GetCriterion(id)
+		require.True(t, ok, "criterion %s must exist", id)
+		require.NotNil(t, got)
+		assert.Equal(t, want, got.TitleJA,
+			"title_ja for %s drifted from the pinned wording; update this test only if the change is intentional",
+			id)
+	}
+}
+
+// TestCatalog_SourceSection_AnchorsVer2Chapters spot-checks that the
+// source_section field points at the expected chapter for the items
+// added by ver 2.0. This is the data-integrity gate for the M5-6
+// reconciliation: if a future edit drops the "第7章" reference from a
+// vulnerability-management criterion the link back to the ver 2.0
+// addition is lost.
+func TestCatalog_SourceSection_AnchorsVer2Chapters(t *testing.T) {
+	// 第7章 was new in ver 2.0; these criteria must continue to
+	// reference it so the dashboard can surface "(ver 2.0 新規)" badges.
+	ver2Chapter7Items := []string{
+		"meti.sbom_operation.01",
+		"meti.sbom_operation.02",
+		"meti.sbom_operation.03",
+		"meti.sbom_operation.04",
+		"meti.sbom_operation.08",
+	}
+	for _, id := range ver2Chapter7Items {
+		c, ok := GetCriterion(id)
+		require.True(t, ok, "criterion %s must exist", id)
+		assert.Contains(t, c.SourceSection, "第7章",
+			"criterion %s.source_section %q should reference 第7章 (脆弱性管理プロセスの具体化, ver 2.0 新規)",
+			id, c.SourceSection)
+	}
+
+	// Items rooted in the env_setup phase must reference 第4章; the
+	// loader cannot enforce this because the chapter mapping is not
+	// 1:1 (some operation-phase items also reference 第7章), so the
+	// pin lives here.
+	envSetupItems := ListByPhase(PhaseEnvSetup)
+	for _, c := range envSetupItems {
+		assert.Contains(t, c.SourceSection, "第4章",
+			"env_setup criterion %s.source_section %q should reference 第4章 (環境構築・体制整備フェーズ)",
+			c.ID, c.SourceSection)
+	}
 }

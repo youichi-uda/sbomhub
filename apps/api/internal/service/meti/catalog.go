@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -100,6 +101,57 @@ type Criterion struct {
 	// inspect when auto-assessing this criterion. Keep it concrete enough
 	// that a grep over the codebase resolves to the relevant service.
 	EvaluatorHint string `yaml:"evaluator_hint"`
+
+	// SourceSection is the chapter / sub-section reference in the
+	// official METI guidance that this criterion is anchored to.
+	// Required from M5-6 onward — the regression test rejects criteria
+	// without a source pointer so a future authoring round cannot
+	// silently lose the provenance link. Format: a free-form Japanese
+	// string beginning with "第N章" (e.g. "第4章 4.1 / 4.6 SBOM ツール
+	// 選定 (ver 2.0)").
+	SourceSection string `yaml:"source_section"`
+}
+
+// Metadata captures provenance for the catalog as a whole.
+//
+// M5-6 (issue #52) introduced this block so the deployed binary can
+// surface which version of the METI guidance the criteria slice was
+// reconciled against, and the date of that reconciliation. The
+// regression test enforces that the values are non-empty and that
+// LastSynced parses as a YYYY-MM-DD date so the audit / dashboard
+// surface can render a freshness badge without a second source.
+type Metadata struct {
+	// Source is the human-readable title of the upstream document
+	// (Japanese, e.g. "経済産業省 ソフトウェア管理に向けた SBOM の導入に関する手引 ver 2.0").
+	Source string `yaml:"source"`
+	// SourceURL is the canonical fetch URL of the primary PDF.
+	SourceURL string `yaml:"source_url"`
+	// SourceSummaryURL is the URL of the shorter "概要" PDF that
+	// summarises the guidance; useful for operators who want a
+	// quick orientation before opening the full text.
+	SourceSummaryURL string `yaml:"source_summary_url"`
+	// SourceVersion is the official version tag (e.g. "ver 2.0").
+	SourceVersion string `yaml:"source_version"`
+	// SourcePublished is the official publication date (YYYY-MM-DD).
+	SourcePublished string `yaml:"source_published"`
+	// LastSynced is the date this catalog was last reconciled against
+	// the upstream document (YYYY-MM-DD). Bumped only when a wording
+	// edit lands; not bumped by cosmetic edits.
+	LastSynced string `yaml:"last_synced"`
+	// SyncedBy records the milestone / issue that drove the
+	// reconciliation (e.g. "M5-6 issue #52"). Lets the audit surface
+	// link back to the change record.
+	SyncedBy string `yaml:"synced_by"`
+	// VerificationStatus is one of "full" / "partial" / "deferred".
+	// "partial" is honest about the M5-6 reality where the primary PDF
+	// could not be fetched from the build environment and the IPA
+	// secondary source was used as a cross-check; the dashboard
+	// surfaces this verbatim so operators are not told a stricter
+	// claim than the wave delivered.
+	VerificationStatus string `yaml:"verification_status"`
+	// VerificationNotes is a longer Japanese note explaining how the
+	// reconciliation was performed and what is still outstanding.
+	VerificationNotes string `yaml:"verification_notes"`
 }
 
 // catalogFile mirrors the top-level YAML shape.
@@ -108,6 +160,7 @@ type Criterion struct {
 // (version, last_updated, source_url, …) to the YAML in the future
 // without breaking the public Criterion API.
 type catalogFile struct {
+	Metadata Metadata    `yaml:"metadata"`
 	Criteria []Criterion `yaml:"criteria"`
 }
 
@@ -115,10 +168,11 @@ type catalogFile struct {
 // once per process even when LoadCatalog is called from many goroutines
 // (the evaluator can fan out per-project assessments concurrently).
 var (
-	loadOnce    sync.Once
-	cachedItems []Criterion
-	cachedByID  map[string]*Criterion
-	cachedErr   error
+	loadOnce       sync.Once
+	cachedItems    []Criterion
+	cachedByID     map[string]*Criterion
+	cachedMetadata Metadata
+	cachedErr      error
 )
 
 // LoadCatalog returns the parsed, validated criteria slice.
@@ -190,6 +244,21 @@ func Phases() []Phase {
 	return []Phase{PhaseEnvSetup, PhaseSBOMCreation, PhaseSBOMOperation}
 }
 
+// LoadMetadata returns the parsed catalog metadata block.
+//
+// Mirrors LoadCatalog's caching contract: parse-once, cached error
+// returned on every subsequent call. The returned Metadata is a value
+// (not a pointer) so callers cannot mutate the cache by writing into
+// it; that matters because the dashboard surface reads LastSynced /
+// VerificationStatus on every request.
+func LoadMetadata() (Metadata, error) {
+	loadOnce.Do(parseCatalog)
+	if cachedErr != nil {
+		return Metadata{}, cachedErr
+	}
+	return cachedMetadata, nil
+}
+
 // parseCatalog is the single-entry parser invoked under loadOnce.
 //
 // Validation rules (all enforced here so callers never see a partially
@@ -216,6 +285,11 @@ func parseCatalog() {
 		return
 	}
 
+	if err := validateMetadata(&file.Metadata); err != nil {
+		cachedErr = fmt.Errorf("meti: catalog.yaml metadata: %w", err)
+		return
+	}
+
 	byID := make(map[string]*Criterion, len(file.Criteria))
 	for i := range file.Criteria {
 		c := &file.Criteria[i]
@@ -232,6 +306,60 @@ func parseCatalog() {
 
 	cachedItems = file.Criteria
 	cachedByID = byID
+	cachedMetadata = file.Metadata
+}
+
+// validMetadataVerificationStatuses is the closed set of values for
+// metadata.verification_status. Kept here so the loader rejects typos
+// (e.g. "partially") at parse time rather than letting the dashboard
+// render an unrecognised badge.
+var validMetadataVerificationStatuses = map[string]struct{}{
+	"full":     {},
+	"partial":  {},
+	"deferred": {},
+}
+
+// validateMetadata enforces the per-field invariants for the catalog
+// metadata block.
+//
+// The dashboard surface relies on every field being non-empty, and on
+// LastSynced / SourcePublished being YYYY-MM-DD so it can render a
+// freshness badge without an extra round of date-parsing logic.
+func validateMetadata(m *Metadata) error {
+	if m.Source == "" {
+		return fmt.Errorf("missing source")
+	}
+	if m.SourceURL == "" {
+		return fmt.Errorf("missing source_url")
+	}
+	if m.SourceVersion == "" {
+		return fmt.Errorf("missing source_version")
+	}
+	if m.SourcePublished == "" {
+		return fmt.Errorf("missing source_published")
+	}
+	if _, err := time.Parse("2006-01-02", m.SourcePublished); err != nil {
+		return fmt.Errorf("source_published %q must be YYYY-MM-DD: %w", m.SourcePublished, err)
+	}
+	if m.LastSynced == "" {
+		return fmt.Errorf("missing last_synced")
+	}
+	if _, err := time.Parse("2006-01-02", m.LastSynced); err != nil {
+		return fmt.Errorf("last_synced %q must be YYYY-MM-DD: %w", m.LastSynced, err)
+	}
+	if m.SyncedBy == "" {
+		return fmt.Errorf("missing synced_by")
+	}
+	if m.VerificationStatus == "" {
+		return fmt.Errorf("missing verification_status")
+	}
+	if _, ok := validMetadataVerificationStatuses[m.VerificationStatus]; !ok {
+		return fmt.Errorf("unknown verification_status %q (want full|partial|deferred)", m.VerificationStatus)
+	}
+	if m.VerificationNotes == "" {
+		return fmt.Errorf("missing verification_notes")
+	}
+	return nil
 }
 
 // validateCriterion enforces the per-criterion schema invariants.
@@ -262,6 +390,9 @@ func validateCriterion(c *Criterion) error {
 	}
 	if c.EvaluatorHint == "" {
 		return fmt.Errorf("missing evaluator_hint")
+	}
+	if c.SourceSection == "" {
+		return fmt.Errorf("missing source_section")
 	}
 	// ID-prefix check: a criterion's id must encode its phase so authors
 	// cannot silently mis-classify a duplicated entry.

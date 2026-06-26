@@ -1,32 +1,42 @@
-# METI SBOM Catalog (M3-3, issue #39)
+# METI SBOM Catalog (M3-3, issue #39 / M5-6, issue #52)
 #
 # Self-assessment criteria derived from "ソフトウェア管理に向けた SBOM
 # (Software Bill of Materials) の導入に関する手引 ver 2.0" (経済産業省, 2024-08).
 #
 # Source:
 #   https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2.pdf
-#   https://www.meti.go.jp/policy/netsecurity/wg1/sbom_gaiyo_en.pdf
-#   English appendix (xlsx):
-#   https://www.meti.go.jp/english/policy/safety_security/cybersecurity/downloadfiles/sbom_checklist02_en.xlsx
+#   https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf (概要 PDF)
+#   https://www.meti.go.jp/english/policy/safety_security/cybersecurity/downloadfiles/sbom_tebiki02_en.pdf (English)
+#   https://www.meti.go.jp/press/2024/08/20240829001/20240829001.html (press release)
 #
-# Catalog construction note:
-#   The PDF / xlsx could not be fetched directly during this build (meti.go.jp
-#   served stalls > 5 min on the appendix downloads); items below were
-#   reconciled against:
-#     1. the already-shipped 18-item baseline in
+# M5-6 reconciliation note (issue #52, 2026-06-27):
+#   The primary PDF (3 MB) timed out on every WebFetch / curl probe against
+#   meti.go.jp from the build environment, and the appendix xlsx URL is not
+#   linked from the press page in a stable form. The wording below was
+#   reconciled against the following secondary sources whose chapter
+#   structure (env_setup / sbom_creation / sbom_operation) explicitly cites
+#   METI ver 2.0:
+#     1. IPA 産業サイバーセキュリティセンター中核人材育成プログラム
+#        「SBOM 導入・運用の手引き」 (2024年12月、 経産省 ver 2.0 を参考に構成、
+#        cited as [1] throughout):
+#        https://www.ipa.go.jp/jinzai/ics/core_human_resource/final_project/2024/sbn8o10000001y6j-att/sbn8o10000001zcl.pdf
+#        Chapter 4-6 implementation checklist tables (表：4.1.1 / 4.2.1 / 4.3.1 /
+#        4.4.1 / 4.5.1 / 5.1.1 / 5.2.1 / 5.3.1 / 6.1.1 / 6.2.1 / 6.3.1) were
+#        cross-checked against the wording fields below.
+#     2. yamory / nikkei xtech / Newton Consulting commentary on the
+#        ver 1.0 → 2.0 diff (第7章 脆弱性管理プロセスの具体化, 付録 SBOM 対応
+#        モデル, 付録 SBOM 取引モデル).
+#     3. The already-shipped 18-item baseline in
 #        apps/api/internal/model/checklist.go (PhaseSetup / PhaseCreation /
-#        PhaseOperation), which was previously vetted against ver 2.0;
-#     2. ver 2.0 Chapter 7 (脆弱性管理プロセス具体化), Appendix SBOM 対応モデル,
-#        and Appendix SBOM 取引モデル as summarised in
-#        nikkei xtech / yamory / METI English press release (2024-08-29);
-#     3. the IPA SBOM minimum-element list already validated by
-#        apps/api/internal/service/compliance.go checkMinimumElements (7 items).
+#        PhaseOperation), which itself was derived from ver 1.0.
+#     4. IPA SBOM minimum-element list already validated by
+#        apps/api/internal/service/compliance.go checkMinimumElements.
 #
-#   Items marked "verified" in the trailing comment match a wording in the
-#   18-item baseline; items marked "extension" are extrapolated from ver 2.0
-#   chapter contents (e.g. ch.7 vulnerability process, training, EOL, audit
-#   retention) and should be cross-checked with the official xlsx before GA.
-#   See README of M3-3 PR (#39) for the audit list.
+#   Outstanding: the primary PDF should be re-fetched (e.g. from a
+#   network position that reaches meti.go.jp without timeout) so that the
+#   wording can be quoted verbatim from the original. metadata.verification_status
+#   stays at "partial" until that lift is complete. See STATUS.md M5-6
+#   entry for the residual checklist.
 #
 # Schema (one entry):
 #   - id:               stable, dotted, lowercase. "meti.<phase>.<seq>".
@@ -41,6 +51,31 @@
 #                       grep over the codebase resolves to the relevant
 #                       service (e.g. "scan_settings.enabled_scanners",
 #                       "sboms table created_at frequency").
+#   - source_section:   chapter / sub-section reference in the official
+#                       METI guidance (Japanese, format "第N章 N.N 小見出し").
+#                       Required from M5-6 — the loader rejects criteria
+#                       without it so a future authoring round cannot
+#                       silently lose provenance.
+
+metadata:
+  source: "経済産業省 ソフトウェア管理に向けた SBOM (Software Bill of Materials) の導入に関する手引 ver 2.0"
+  source_url: "https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2.pdf"
+  source_summary_url: "https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf"
+  source_version: "ver 2.0"
+  source_published: "2024-08-29"
+  last_synced: "2026-06-27"
+  synced_by: "M5-6 issue #52"
+  verification_status: "partial"
+  verification_notes: |
+    M5-6 (issue #52) で METI ver 2.0 公式 PDF の WebFetch / curl 取得が全試行
+    タイムアウト。 IPA 産業サイバーセキュリティセンター中核人材育成プログラム
+    「SBOM 導入・運用の手引き」 (2024年12月、 METI ver 2.0 を [1] として明示参照)
+    の表：4.1.1 〜 表：6.3.1 (実施事項チェックリスト) と章構成 (第4-6章) を
+    二次資料として照合済。 ver 2.0 で新規追加された第7章 (脆弱性管理プロセスの
+    具体化) は meti.sbom_operation.01 / 02 / 03 / 04 / 08 に分解反映。 付録
+    「SBOM 対応モデル」 「SBOM 取引モデル」 は契約条項として
+    meti.env_setup.03 / meti.sbom_creation.07 / meti.sbom_creation.09 に
+    関連付け済。 一次 PDF の原文ママ照合は再 fetch 成功後の wave 持ち越し。
 
 criteria:
   # --------------------------------------------------------------------------
@@ -61,6 +96,7 @@ criteria:
       (e.g. PSIRT lead) and a contact point must be designated even when
       the role is shared with another function.
     evaluator_hint: "Manual-only. No auto-signal in DB. Map to checklist_responses table check_id='setup_01' for human attestation."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.2 SBOM 導入体制の整備 (表：4.2.1 No.1-2)"
 
   - id: meti.env_setup.02
     phase: env_setup
@@ -76,6 +112,7 @@ criteria:
       software, and decide which scanner (Syft / Trivy / cdxgen) covers each
       stack so that no ecosystem is silently omitted from SBOM generation.
     evaluator_hint: "Auto-signal: sboms.bom_format and components.purl prefixes — distinct PURL types observed across all sboms for the project indicate ecosystems covered. Map to projects.metadata for declared stack vs. coverage gap."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (表：4.1.1 No.3 開発言語・コンポーネント形態)"
 
   - id: meti.env_setup.03
     phase: env_setup
@@ -91,6 +128,7 @@ criteria:
       channel and cadence by which SBOMs are received from suppliers, plus
       the handling policy (re-distribution rights, retention period).
     evaluator_hint: "Manual-only. No DB signal. Map to checklist_responses check_id='setup_03'. Future hook: supplier_contracts table when added."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (契約形態・取引慣行) / 付録 SBOM 取引モデル (ver 2.0 新規)"
 
   - id: meti.env_setup.04
     phase: env_setup
@@ -106,6 +144,7 @@ criteria:
       IPA procurement guidelines, etc.) and reflect SBOM-format, minimum-
       element and submission-deadline requirements in the design.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_04'. Future hook: cra_reports presence indicates EU CRA scope is in play."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (規制や要求)"
 
   - id: meti.env_setup.05
     phase: env_setup
@@ -121,6 +160,7 @@ criteria:
       scope toward customers and third parties, and establish a policy for
       separating public from internal SBOM variants.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_05'. Future hook: public_links.is_public flag history per project."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (表：4.1.1 No.5 組織内の制約)"
 
   - id: meti.env_setup.06
     phase: env_setup
@@ -138,6 +178,7 @@ criteria:
       (regulation / customer / internal audit) and how it is handled
       (automated vs. manual).
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_06'. Auto-augment: count of distinct project ids vs. scan_settings rows indicates whether scope is consistently configured."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (表：4.1.1 No.6 / 表：4.1.2 5W1H による SBOM 適用範囲)"
 
   - id: meti.env_setup.07
     phase: env_setup
@@ -153,6 +194,7 @@ criteria:
       tool both locally and in CI. Confirm the tool can emit both
       CycloneDX and SPDX in their major output variants.
     evaluator_hint: "Auto-signal: scan_settings.enabled_scanners is non-empty for the project (sbomhub-cli writes this) OR sboms.tool_name is non-null on the latest upload."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.3 SBOM ツールの選定 (表：4.3.1) + 4.4 SBOM ツールの導入・設定 (表：4.4.1)"
 
   - id: meti.env_setup.08
     phase: env_setup
@@ -168,6 +210,7 @@ criteria:
       databases (NVD / JVN / KEV); retain training records as audit
       evidence.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_08'. Future hook: tenant training_records table."
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.5 SBOM ツールの学習 (表：4.5.1 開発・セキュリティ部門への教育)"
 
   # --------------------------------------------------------------------------
   # Phase 2 — SBOM 作成・共有フェーズ (sbom_creation) : 9 items
@@ -186,6 +229,7 @@ criteria:
       into CI. For supplier-delivered artefacts, regenerate the SBOM at
       each delivery.
     evaluator_hint: "Auto-signal: COUNT(sboms WHERE project_id=...) per 30 days indicates cadence. scan_settings.schedule field indicates declared trigger."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.2 精査範囲) / 5.2 SBOM の作成 (頻度・粒度)"
 
   - id: meti.sbom_creation.02
     phase: sbom_creation
@@ -201,6 +245,7 @@ criteria:
       format version (e.g. CycloneDX 1.5+, SPDX 2.3). If VEX must be
       bundled, prefer CycloneDX.
     evaluator_hint: "Auto-signal: sboms.bom_format ('CycloneDX' or 'SPDX') and sboms.spec_version on latest upload."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (表：5.2.1 No.1 フォーマット・出力ファイル形式の決定)"
 
   - id: meti.sbom_creation.03
     phase: sbom_creation
@@ -214,6 +259,7 @@ criteria:
       the selected tool and produce an SBOM that captures direct and
       transitive dependencies without omissions.
     evaluator_hint: "Auto-signal: sboms exists for the project AND latest sbom has components count > 0."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.1) + 5.2 SBOM の作成 (表：5.2.1 No.2)"
 
   - id: meti.sbom_creation.04
     phase: sbom_creation
@@ -227,6 +273,7 @@ criteria:
       dropped as "version: unknown" or due to parse failures. Where they
       cannot be resolved, record the reason for the exception.
     evaluator_hint: "Auto-signal: COUNT(components WHERE version IS NULL OR version='unknown') for latest sbom should be 0 for a passing item."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.3 解析エラー / version 不明検出)"
 
   - id: meti.sbom_creation.05
     phase: sbom_creation
@@ -242,6 +289,7 @@ criteria:
       actually shipped) and false negatives (shipped but missing from the
       SBOM).
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_03'. Future hook: diff sboms generated by Syft vs. Trivy and surface unique entries."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.3 抜け漏れ・過検知の精査)"
 
   - id: meti.sbom_creation.06
     phase: sbom_creation
@@ -257,6 +305,7 @@ criteria:
       unique identifier (PURL or CPE), dependency relationship, SBOM
       author and timestamp.
     evaluator_hint: "Auto-signal: reuse ComplianceService.checkMinimumElements (apps/api/internal/service/compliance.go) — all 7 sub-checks pass."
+    source_section: "第2章 SBOM の概要 — 2.3 SBOM の最小要素 (NTIA Minimum Elements) + 第5章 5.2 SBOM の作成"
 
   - id: meti.sbom_creation.07
     phase: sbom_creation
@@ -272,6 +321,7 @@ criteria:
       put in place contractual handling terms for recipients (no
       redistribution, retention period, permitted disclosure scope).
     evaluator_hint: "Auto-signal: public_links rows exist for the project (indicates shareable URL provisioned). Manual override via checklist_responses check_id='create_07'."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (表：5.3.1 No.1-3 公開範囲・共有方法) / 付録 SBOM 取引モデル (ver 2.0 新規、 受発注者間の SBOM 規定)"
 
   - id: meti.sbom_creation.08
     phase: sbom_creation
@@ -286,6 +336,7 @@ criteria:
       against the previous version (added, removed, updated components).
       If diffs should trigger customer notification, automate the alert.
     evaluator_hint: "Auto-signal: sbom_diff service exists and ≥2 sbom revisions exist for the project (so diffs are computable)."
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.3 SBOM の更新条件・時期) — リリース毎の差分追跡"
 
   - id: meti.sbom_creation.09
     phase: sbom_creation
@@ -301,6 +352,7 @@ criteria:
       and validate the supplier SBOM (signature, timestamp, format
       conformance) before accepting it.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_09'. Future hook: sboms.source ('uploaded' vs. 'merged') column."
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (第三者提供 SBOM のインポート) / 付録 SBOM 取引モデル (受領 SBOM の品質・責任、 ver 2.0 新規)"
 
   # --------------------------------------------------------------------------
   # Phase 3 — SBOM 運用・管理フェーズ (sbom_operation) : 10 items
@@ -318,6 +370,7 @@ criteria:
       operations (cadence, owner, SLA) that match each SBOM component
       against vulnerability databases.
     evaluator_hint: "Auto-signal: scan_settings.vuln_scan_enabled is true AND last scan_tracker entry is within configured cadence."
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ1 脆弱性特定 / 第6章 6.1 SBOM に基づく脆弱性管理 (表：6.1.1 No.1)"
 
   - id: meti.sbom_operation.02
     phase: sbom_operation
@@ -331,6 +384,7 @@ criteria:
       synchronisation cadence (e.g. NVD 24h, KEV 24h, JVN 24h) and the
       severity-notification threshold (e.g. CVSS ≥ 7.0).
     evaluator_hint: "Auto-signal: nvd, jvn, kev service tables have recent updated_at (<48h). Service files: apps/api/internal/service/{nvd,jvn,kev}.go."
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ1 脆弱性特定 / 第6章 6.1 SBOM に基づく脆弱性管理 (表：6.1.1 No.2 脆弱性 DB の選定)"
 
   - id: meti.sbom_operation.03
     phase: sbom_operation
@@ -344,6 +398,7 @@ criteria:
       KEV (known exploited) and SSVC (decision framework) alongside CVSS
       to set the remediation order.
     evaluator_hint: "Auto-signal: vulnerabilities table has epss_score, ssvc_decision and kev_listed columns populated for ≥1 finding."
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ2 脆弱性対応の優先付け / 第6章 6.1 (表：6.1.1 No.4 対応基準方針)"
 
   - id: meti.sbom_operation.04
     phase: sbom_operation
@@ -358,6 +413,7 @@ criteria:
       (CycloneDX VEX or CSAF) and distribute to customers only after human
       approval. AI-drafted statements remain unapproved until reviewed.
     evaluator_hint: "Auto-signal: vex_statements rows exist for the project with status IN ('approved','distributed'). Service: apps/api/internal/service/vex.go."
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ3 情報共有 / フェーズ4 脆弱性対応 (VEX 活用) — 第6章 6.1 コラム「VEX を用いた脆弱性管理」"
 
   - id: meti.sbom_operation.05
     phase: sbom_operation
@@ -371,6 +427,7 @@ criteria:
       licence policy (prohibited / approved-with-review) and remediate
       violations.
     evaluator_hint: "Auto-signal: license_policies exist for the tenant AND license violation count = 0. Service: apps/api/internal/service/license.go."
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM に基づくライセンス管理 (表：6.2.1 No.1-2 利用 OSS の洗い出し・ライセンス利用条件)"
 
   - id: meti.sbom_operation.06
     phase: sbom_operation
@@ -383,6 +440,7 @@ criteria:
       Identify runtimes and frameworks that have reached end-of-life
       (e.g. via endoflife.date) and record a replacement roadmap.
     evaluator_hint: "Auto-signal: eol service has produced findings for the project. Service: apps/api/internal/service/eol.go."
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.1 SBOM に基づく脆弱性管理 (EOL コンポーネントの脆弱性リスク) / 6.3 SBOM 情報の管理 (表：6.3.1 No.2 SBOM 提供期間)"
 
   - id: meti.sbom_operation.07
     phase: sbom_operation
@@ -398,6 +456,7 @@ criteria:
       regulations as applicable) in a tamper-evident form retrievable on
       demand, with hash / timestamp integrity checks available.
     evaluator_hint: "Auto-signal: sboms table retention policy enforced — no rows hard-deleted within retention window (check audit_log for delete events)."
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.2 SBOM 提供期間 / 図：6.3.2 SBOM 保管期間の検討例)"
 
   - id: meti.sbom_operation.08
     phase: sbom_operation
@@ -414,6 +473,7 @@ criteria:
       72h detailed notification / final report) consistent with EU CRA
       Article 14.
     evaluator_hint: "Auto-signal: cra_reports rows exist for the project with report_type IN ('early_warning','detailed_notification','final_report'). Service: apps/api/internal/service/cra/."
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ3 情報共有 / フェーズ4 脆弱性対応 (悪用検知時のインシデント対応タイムライン)"
 
   - id: meti.sbom_operation.09
     phase: sbom_operation
@@ -427,6 +487,7 @@ criteria:
       dependency removal. Pin a minimum cadence of regeneration every 30
       days as an operational rule (per ver 2.0 recommendation).
     evaluator_hint: "Auto-signal: latest sboms.created_at for the project is within 30 days."
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.3 SBOM の更新条件・時期)"
 
   - id: meti.sbom_operation.10
     phase: sbom_operation
@@ -440,3 +501,4 @@ criteria:
       with the operator identity so an auditor can trace the lifecycle
       chronologically.
     evaluator_hint: "Auto-signal: audit_log table has rows for action IN ('sbom.created','sbom.shared','vex.approved','cra.distributed') for the project."
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.1 SBOM 管理体制の整備 / SBOM 変更履歴の信頼性担保)"
