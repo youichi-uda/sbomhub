@@ -356,7 +356,7 @@ func readKeysFromEnv() ([]byte, []byte, error) {
 }
 
 func readKey(name string) ([]byte, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+	raw := os.Getenv(name)
 	if raw == "" {
 		return nil, fmt.Errorf("%s is required", name)
 	}

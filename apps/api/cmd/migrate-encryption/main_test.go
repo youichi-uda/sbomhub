@@ -114,34 +114,47 @@ func TestReadKeyRejectsTooShortRawValue(t *testing.T) {
 }
 
 func TestReadKeyMatchesRuntimeFirst32BytesAndRoundTrip(t *testing.T) {
-	raw := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
-	t.Setenv("OLD_ENCRYPTION_KEY", raw)
+	cleanBase64 := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "clean base64", raw: cleanBase64},
+		{name: "leading newline", raw: "\n" + cleanBase64},
+		{name: "leading whitespace", raw: " \t" + cleanBase64},
+		{name: "trailing whitespace", raw: cleanBase64 + " \t"},
+		{name: "trailing newline", raw: cleanBase64 + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OLD_ENCRYPTION_KEY", tc.raw)
 
-	migrateKey, err := readKey("OLD_ENCRYPTION_KEY")
-	if err != nil {
-		t.Fatalf("readKey: %v", err)
-	}
-	runtimeKey, err := (&config.Config{EncryptionKey: raw}).GetEncryptionKey()
-	if err != nil {
-		t.Fatalf("GetEncryptionKey: %v", err)
-	}
-	decryptTestKey := []byte(raw)[:32]
+			migrateKey, err := readKey("OLD_ENCRYPTION_KEY")
+			if err != nil {
+				t.Fatalf("readKey: %v", err)
+			}
+			runtimeKey, err := (&config.Config{EncryptionKey: tc.raw}).GetEncryptionKey()
+			if err != nil {
+				t.Fatalf("GetEncryptionKey: %v", err)
+			}
+			decryptTestKey := []byte(tc.raw)[:32]
 
-	if string(migrateKey) != string(runtimeKey) || string(migrateKey) != string(decryptTestKey) {
-		t.Fatalf("key semantics diverged: migrate=%q runtime=%q decrypt-test=%q", migrateKey, runtimeKey, decryptTestKey)
-	}
+			if string(migrateKey) != string(runtimeKey) || string(migrateKey) != string(decryptTestKey) {
+				t.Fatalf("key semantics diverged: migrate=%q runtime=%q decrypt-test=%q", migrateKey, runtimeKey, decryptTestKey)
+			}
 
-	plain := []byte("round-trip with raw first-32 key")
-	ct, err := llm.Encrypt(plain, migrateKey)
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-	got, err := llm.Decrypt(ct, runtimeKey)
-	if err != nil {
-		t.Fatalf("decrypt with runtime key: %v", err)
-	}
-	if string(got) != string(plain) {
-		t.Fatalf("round-trip plaintext = %q, want %q", got, plain)
+			plain := []byte("round-trip with raw first-32 key")
+			ct, err := llm.Encrypt(plain, migrateKey)
+			if err != nil {
+				t.Fatalf("encrypt: %v", err)
+			}
+			got, err := llm.Decrypt(ct, runtimeKey)
+			if err != nil {
+				t.Fatalf("decrypt with runtime key: %v", err)
+			}
+			if string(got) != string(plain) {
+				t.Fatalf("round-trip plaintext = %q, want %q", got, plain)
+			}
+		})
 	}
 }
 
