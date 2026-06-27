@@ -226,6 +226,19 @@ openssl rand -base64 32
 
 raw 32 byte は AES-256 が要求する鍵長。 base64 encode で 44 文字になる。
 
+> **Note: ENCRYPTION_KEY semantics**
+>
+> `openssl rand -base64 32` は 44 文字の base64 文字列を出力する。 SBOMHub は
+> この文字列を **AES key そのもの** として扱い、 base64 decode せずに
+> **文字列の先頭 32 raw byte** を使用する。 base64 encoding は shell でコピーしやすくする
+> transport convenience であり、 key derivation function ではない。
+>
+> Operator implications:
+> - key を保存する前に base64 decode しない。
+> - 32 文字の ASCII string も鍵として動作する (runtime は先頭 32 byte をそのまま使う)。
+> - migrate-encryption / decrypt-test も同じ semantics を使うため、 encrypted column は
+>   これらの tool 間で同一に再現される。
+
 ### 4.3 起動時 refusal
 
 `apps/api/cmd/server/main.go` の `validateEncryptionKey` は以下のいずれかで **起動を拒否** する

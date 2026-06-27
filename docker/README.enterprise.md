@@ -105,6 +105,10 @@ cp -r secrets.example secrets
 # ENCRYPTION_KEY (32 byte 必須、 末尾改行は除く)
 openssl rand -base64 32 | tr -d '\n' > secrets/encryption_key.txt
 
+# `openssl rand -base64 32` の出力は 44 文字の base64 string だが、 SBOMHub は
+# base64 decode せず、文字列の先頭 32 raw byte を AES key として使う。
+# 保存前に decode しないこと。詳細は docs/security/self-host-deployment.md §4.2。
+
 # PostgreSQL password 3 種 (base64 推奨、 special char escape の事故を避ける)
 openssl rand -base64 24 | tr -d '\n' > secrets/postgres_password.txt
 openssl rand -base64 24 | tr -d '\n' > secrets/postgres_app_password.txt

@@ -14,6 +14,12 @@ sensitive credentials at rest in the database. Rotating it is a planned,
 **short-downtime** maintenance operation: the API must be offline while
 ciphertext is re-encrypted under the new key.
 
+Key semantics are defined in
+[`docs/security/self-host-deployment.md` §4.2](./security/self-host-deployment.md#42-生成):
+SBOMHub uses the first 32 raw bytes of the `ENCRYPTION_KEY` string verbatim and
+does not base64-decode `openssl rand -base64 32` output before using it as the
+AES key.
+
 ---
 
 ## 1. When to rotate
