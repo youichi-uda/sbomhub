@@ -103,10 +103,11 @@ const (
 // harness can drive realMain without re-parsing os.Args. Mirrors the
 // llm-bench/main.go pattern.
 type cliFlags struct {
-	key    string
-	dbURL  string
-	table  string
-	column string
+	key     string
+	keyFile string
+	dbURL   string
+	table   string
+	column  string
 	// format pins the ciphertext encoding: "bytea" (raw nonce||sealed) or
 	// "base64" (base64-encoded nonce||sealed). Empty string means
 	// auto-detect from information_schema.columns.data_type at run time.
@@ -120,6 +121,8 @@ func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 	f := &cliFlags{}
 	fs.StringVar(&f.key, "key", "",
 		"32-byte ENCRYPTION_KEY (raw or longer; first 32 bytes are used, mirroring config.Config.GetEncryptionKey)")
+	fs.StringVar(&f.keyFile, "key-file", "",
+		"Path to file containing ENCRYPTION_KEY (preferred over --key)")
 	fs.StringVar(&f.dbURL, "db-url", "",
 		"Postgres DSN, e.g. postgres://sbomhub_app:...@localhost:5432/sbomhub?sslmode=disable (env DATABASE_URL also accepted)")
 	fs.StringVar(&f.table, "table", "tenant_llm_config",
@@ -155,13 +158,22 @@ func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 	if f.dbURL == "" {
 		f.dbURL = strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	}
+	// Key precedence: explicit --key wins for backward compatibility, then
+	// --key-file for operator-friendly direct invocation, then env fallback.
+	if f.key == "" && f.keyFile != "" {
+		keyBytes, err := os.ReadFile(f.keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read --key-file %q: %w", f.keyFile, err)
+		}
+		f.key = strings.TrimSpace(string(keyBytes))
+	}
 	// env fallback for key — the wrapper script may have already exported it.
 	if f.key == "" {
 		f.key = os.Getenv("ENCRYPTION_KEY")
 	}
 
 	if f.key == "" {
-		return nil, fmt.Errorf("--key (or env ENCRYPTION_KEY) is required")
+		return nil, fmt.Errorf("--key, --key-file, or env ENCRYPTION_KEY is required")
 	}
 	if f.dbURL == "" {
 		return nil, fmt.Errorf("--db-url (or env DATABASE_URL) is required")

@@ -94,6 +94,89 @@ func TestParseFlags_EnvFallback(t *testing.T) {
 	}
 }
 
+func TestParseFlags_KeyFile(t *testing.T) {
+	t.Setenv("ENCRYPTION_KEY", "")
+	t.Setenv("DATABASE_URL", "")
+
+	tmp := t.TempDir()
+	keyPath := filepath.Join(tmp, "encryption_key.txt")
+	key := strings.Repeat("f", 32)
+	if err := os.WriteFile(keyPath, []byte(key), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	f, err := parseFlags([]string{"--key-file", keyPath, "--db-url", "postgres://x"}, &stderr)
+	if err != nil {
+		t.Fatalf("parseFlags with --key-file: %v", err)
+	}
+	if f.key != key {
+		t.Fatalf("key from --key-file = %q, want file contents", f.key)
+	}
+}
+
+func TestParseFlags_KeyFileNotFound(t *testing.T) {
+	t.Setenv("ENCRYPTION_KEY", "")
+	t.Setenv("DATABASE_URL", "")
+
+	missingPath := filepath.Join(t.TempDir(), "missing.txt")
+	var stderr bytes.Buffer
+	_, err := parseFlags([]string{"--key-file", missingPath, "--db-url", "postgres://x"}, &stderr)
+	if err == nil {
+		t.Fatal("parseFlags with missing --key-file = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "read --key-file") {
+		t.Fatalf("parseFlags error = %q, want read --key-file context", err)
+	}
+}
+
+func TestParseFlags_KeyFileTrimsTrailingNewline(t *testing.T) {
+	t.Setenv("ENCRYPTION_KEY", "")
+	t.Setenv("DATABASE_URL", "")
+
+	tmp := t.TempDir()
+	keyPath := filepath.Join(tmp, "encryption_key.txt")
+	key := strings.Repeat("n", 32)
+	if err := os.WriteFile(keyPath, []byte(key+"\n"), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	f, err := parseFlags([]string{"--key-file", keyPath, "--db-url", "postgres://x"}, &stderr)
+	if err != nil {
+		t.Fatalf("parseFlags with newline-terminated --key-file: %v", err)
+	}
+	if f.key != key {
+		t.Fatalf("key from newline-terminated --key-file = %q, want trimmed %q", f.key, key)
+	}
+}
+
+func TestParseFlags_KeyFlagWinsOverKeyFile(t *testing.T) {
+	t.Setenv("ENCRYPTION_KEY", strings.Repeat("e", 32))
+	t.Setenv("DATABASE_URL", "")
+
+	tmp := t.TempDir()
+	keyPath := filepath.Join(tmp, "encryption_key.txt")
+	fileKey := strings.Repeat("f", 32)
+	if err := os.WriteFile(keyPath, []byte(fileKey), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	flagKey := strings.Repeat("k", 32)
+	var stderr bytes.Buffer
+	f, err := parseFlags([]string{
+		"--key", flagKey,
+		"--key-file", keyPath,
+		"--db-url", "postgres://x",
+	}, &stderr)
+	if err != nil {
+		t.Fatalf("parseFlags with --key and --key-file: %v", err)
+	}
+	if f.key != flagKey {
+		t.Fatalf("key precedence = %q, want explicit --key %q", f.key, flagKey)
+	}
+}
+
 func TestParseFlags_Help(t *testing.T) {
 	var stderr bytes.Buffer
 	_, err := parseFlags([]string{"--help"}, &stderr)
