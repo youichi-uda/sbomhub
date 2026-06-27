@@ -132,14 +132,14 @@ read_env_var() {
   fi
   local raw
   raw="$(grep "^${key}=" .env | cut -d= -f2-)"
-  if [ -z "$raw" ]; then
-    echo "[FATAL] ${key} is empty in .env" >&2
-    exit 1
-  fi
   raw="${raw#\"}"
   raw="${raw%\"}"
   raw="${raw#\'}"
   raw="${raw%\'}"
+  if [ -z "$raw" ]; then
+    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
+    exit 1
+  fi
   printf '%s' "$raw"
 }
 
