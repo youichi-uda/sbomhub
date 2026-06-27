@@ -449,90 +449,63 @@ esac
 # ---------------------------------------------------------------------------
 # Optional Step 8: ENCRYPTION_KEY decrypt smoke test (M5-5, issue #53)
 # ---------------------------------------------------------------------------
-# Opt-in via VERIFY_ENCRYPTION=1. Runs ./verify-encryption.sh against the
-# restored DB to confirm the restored ENCRYPTION_KEY actually decrypts the
-# restored ciphertext rows. Posture is **smoke / warning-only** — Step 6/7 are
-# the hard gates; this step exists to surface the rare class of restore where
-# the secrets directory and the DB came from different rotations (an operator
-# pulled secrets from backup #1 but DB from backup #2). Failures are logged
-# but the restore is reported as successful so an operator who knows their
-# tarball is consistent can keep going.
+# Explicit opt-in via VERIFY_ENCRYPTION=1 + VERIFY_DB_URL. Runs
+# ./verify-encryption.sh against the restored DB to confirm the restored
+# ENCRYPTION_KEY actually decrypts the restored ciphertext rows. Posture is
+# **smoke / warning-only** — Step 6/7 are the hard gates; this step exists to
+# surface the rare class of restore where the secrets directory and the DB came
+# from different rotations. Failures are logged but the restore is reported as
+# successful so an operator who knows their tarball is consistent can keep
+# going.
 #
 # This step deliberately runs AFTER 5.5 (admin password converge) + 6 + 7 so
 # that:
 #   - db-bootstrap has finished granting sbomhub_app SELECT on encrypted
 #     tables, otherwise verify-encryption.sh would falsely report DB error.
 #   - the restored secrets/encryption_key.txt is in place to read from.
+#
+# Enterprise compose does not publish postgres on the host by default, so this
+# script deliberately does not infer postgres://...@postgres:5432 for a host-run
+# smoke test. Operators must provide VERIFY_DB_URL for an address that is
+# reachable from the host where restore.sh is running.
 
-if [[ "${VERIFY_ENCRYPTION}" == "1" ]]; then
-    echo "[restore] step 8/8: verify-encryption.sh smoke test (VERIFY_ENCRYPTION=1)"
+if [[ "${VERIFY_ENCRYPTION}" == "1" && -n "${VERIFY_DB_URL}" ]]; then
+    echo "[restore] step 8/8: verify-encryption.sh smoke test (VERIFY_ENCRYPTION=1, VERIFY_DB_URL provided)"
 
     ENCRYPTION_KEY_FILE="${SECRETS_DIR}/encryption_key.txt"
     if [[ ! -r "${ENCRYPTION_KEY_FILE}" ]]; then
         echo "[restore]   WARN: ${ENCRYPTION_KEY_FILE} not readable, skipping smoke test (was secrets restore complete?)" >&2
     else
-        # Default to the sbomhub_app role for the smoke test (matches the
-        # production API server's posture: the actual code path that hits the
-        # ciphertext also runs as sbomhub_app under the RLS / NOBYPASSRLS
-        # rules; a key mismatch caught here is identical to the one users
-        # would hit at runtime). Operator can override via VERIFY_DB_URL.
-        SMOKE_DB_URL="${VERIFY_DB_URL}"
-        if [[ -z "${SMOKE_DB_URL}" ]]; then
-            case "${COMPOSE_BASENAME}" in
-                *enterprise*)
-                    APP_PASSWORD_FILE_FOR_SMOKE="${SECRETS_DIR}/postgres_app_password.txt"
-                    if [[ -r "${APP_PASSWORD_FILE_FOR_SMOKE}" ]]; then
-                        SMOKE_APP_PW="$(cat "${APP_PASSWORD_FILE_FOR_SMOKE}")"
-                        SMOKE_DB_URL="postgres://sbomhub_app:${SMOKE_APP_PW}@postgres:5432/${PG_DB}?sslmode=disable"
-                        unset SMOKE_APP_PW
-                    fi
-                    ;;
-            esac
-        fi
-
-        if [[ -z "${SMOKE_DB_URL}" ]]; then
-            echo "[restore]   WARN: cannot infer DSN for smoke test (set VERIFY_DB_URL to override); skipping." >&2
-        else
-            # Run the smoke test inside the sbomhub-api container so we get
-            # the same DNS / network namespace the API uses ("postgres" host
-            # resolves there). We bind-mount nothing — the script + binary
-            # need to already be available inside the image. To keep this
-            # zero-image-rebuild we instead exec the script + go binary on
-            # the host and let it talk to localhost-mapped postgres OR
-            # exec sbomhub-api with the pre-built binary at /usr/local/bin.
-            #
-            # Implementation choice: run on the **host**, relying on
-            # DECRYPT_TEST_BIN or go-from-source. The script will exit
-            # non-zero on key mismatch, which we capture as a warning.
-            set +e
-            ENCRYPTION_KEY="$(cat "${ENCRYPTION_KEY_FILE}")" \
-            DATABASE_URL="${SMOKE_DB_URL}" \
-                "${SCRIPT_DIR}/verify-encryption.sh"
-            SMOKE_RC=$?
-            set -e
-            case "${SMOKE_RC}" in
-                0)
-                    echo "[restore]   verify-encryption.sh PASSED (ENCRYPTION_KEY decrypts restored data)."
-                    ;;
-                1)
-                    echo "[restore]   WARN: verify-encryption.sh reported key mismatch (exit 1). " \
-                         "Restore continues, but the restored ENCRYPTION_KEY may not match the restored DB." >&2
-                    echo "[restore]         Cross-check: did the secrets tarball and the db.dump come from the same backup run?" >&2
-                    ;;
-                2)
-                    echo "[restore]   WARN: verify-encryption.sh reported DB error (exit 2). Restore continues, smoke test inconclusive." >&2
-                    ;;
-                3)
-                    echo "[restore]   INFO: verify-encryption.sh found no encrypted row to test (exit 3). Setup may be incomplete (no BYOK / no issue-tracker connections yet)." >&2
-                    ;;
-                *)
-                    echo "[restore]   WARN: verify-encryption.sh exit ${SMOKE_RC} (prereq / unexpected). Restore continues." >&2
-                    ;;
-            esac
-        fi
+        set +e
+        DATABASE_URL="${VERIFY_DB_URL}" \
+            "${SCRIPT_DIR}/verify-encryption.sh" --key-file "${ENCRYPTION_KEY_FILE}"
+        SMOKE_RC=$?
+        set -e
+        case "${SMOKE_RC}" in
+            0)
+                echo "[restore]   verify-encryption.sh PASSED (ENCRYPTION_KEY decrypts restored data)."
+                ;;
+            1)
+                echo "[restore]   WARN: verify-encryption.sh reported key mismatch (exit 1). " \
+                     "Restore continues, but the restored ENCRYPTION_KEY may not match the restored DB." >&2
+                echo "[restore]         Cross-check: did the secrets tarball and the db.dump come from the same backup run?" >&2
+                ;;
+            2)
+                echo "[restore]   WARN: verify-encryption.sh reported DB error (exit 2). Restore continues, smoke test inconclusive." >&2
+                ;;
+            3)
+                echo "[restore]   INFO: verify-encryption.sh found no encrypted row to test (exit 3). Setup may be incomplete (no BYOK / no issue-tracker connections yet)." >&2
+                ;;
+            *)
+                echo "[restore]   WARN: verify-encryption.sh exit ${SMOKE_RC} (prereq / unexpected). Restore continues." >&2
+                ;;
+        esac
     fi
+elif [[ "${VERIFY_ENCRYPTION}" == "1" ]]; then
+    echo "[restore] step 8/8: skip verify-encryption smoke test (VERIFY_ENCRYPTION=1 but VERIFY_DB_URL is unset)"
+    echo "[restore]   INFO: enterprise compose does not expose postgres on the host by default; set VERIFY_DB_URL to a host-reachable DSN to run Step 8." >&2
 else
-    echo "[restore] step 8/8: skip verify-encryption smoke test (set VERIFY_ENCRYPTION=1 to enable)"
+    echo "[restore] step 8/8: skip verify-encryption smoke test (set VERIFY_ENCRYPTION=1 and VERIFY_DB_URL to enable)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -553,9 +526,9 @@ echo "       docker compose -f ${COMPOSE_FILE} logs sbomhub-api | grep -E 'ENCRY
 echo "  3. health endpoint が 200 を返すことを確認:"
 echo "       curl -fsS http://localhost:8080/health"
 echo "  4. ENCRYPTION_KEY 復号 smoke test (BYOK token / issue tracker auth_token の round-trip):"
-echo "       ./scripts/verify-encryption.sh \\"
-echo "           --key \"\$(cat ${SECRETS_DIR}/encryption_key.txt)\" \\"
+echo "       ENCRYPTION_KEY=\"\$(cat ${SECRETS_DIR}/encryption_key.txt)\" ./scripts/verify-encryption.sh \\"
 echo "           --db-url \"postgres://sbomhub_app:...@localhost:5432/${PG_DB}?sslmode=disable\""
-echo "     restore.sh 実行時に VERIFY_ENCRYPTION=1 を渡せば Step 8 として自動実行される。"
+echo "     または --key-file ${SECRETS_DIR}/encryption_key.txt を使う。"
+echo "     restore.sh 実行時は VERIFY_ENCRYPTION=1 と VERIFY_DB_URL=<host-reachable DSN> の両方を渡せば Step 8 として自動実行される。"
 echo "     詳細: docs/security/self-host-deployment.md §4.5 + §9.6 / docker/README.enterprise.md §5.3"
 echo ""
