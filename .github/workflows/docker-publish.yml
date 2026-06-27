@@ -43,7 +43,38 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push API
+      - name: Build API image for smoke tests
+        uses: docker/build-push-action@v5
+        with:
+          context: ./apps/api
+          load: true
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test migrate-encryption binary presence
+        env:
+          API_TAGS: ${{ steps.meta-api.outputs.tags }}
+        run: |
+          API_TAG="$(printf '%s\n' "$API_TAGS" | head -n 1)"
+          docker run --rm "$API_TAG" \
+            /usr/local/bin/migrate-encryption --help \
+            > /tmp/migrate-encryption-help.txt 2>&1
+          grep -q "migrate-encryption" /tmp/migrate-encryption-help.txt
+
+      - name: Smoke test server binary presence
+        env:
+          API_TAGS: ${{ steps.meta-api.outputs.tags }}
+        run: |
+          API_TAG="$(printf '%s\n' "$API_TAGS" | head -n 1)"
+          docker run --rm --entrypoint /bin/sh "$API_TAG" \
+            -c '
+              test -x /app/server
+              test -x /usr/local/bin/migrate-encryption
+            '
+
+      - name: Push API image
         uses: docker/build-push-action@v5
         with:
           context: ./apps/api
