@@ -617,22 +617,15 @@ func Test045_CompositeFKExtension_ContainsHardening(t *testing.T) {
 		{"public_links", "public_links_tenant_project_fk"},
 		{"vulnerability_tickets", "vulnerability_tickets_tenant_project_fk"},
 	} {
-		fkNeedle := strings.ToUpper("ADD CONSTRAINT " + fkPair.fkName)
-		if !strings.Contains(upUpper, fkNeedle) {
-			t.Errorf("045 missing %q -- composite FK regression on %s",
-				fkNeedle, fkPair.table)
+		fkRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + fkPair.table +
+			`\s+ADD\s+CONSTRAINT\s+` + fkPair.fkName +
+			`\s+FOREIGN\s+KEY\s*\(\s*tenant_id\s*,\s*project_id\s*\)` +
+			`\s+REFERENCES\s+projects\s*\(\s*tenant_id\s*,\s*id\s*\)` +
+			`\s+ON\s+DELETE\s+CASCADE`)
+		if !fkRe.MatchString(up) {
+			t.Errorf("045 missing complete composite FK body for %s (%s) -- expected child(tenant_id, project_id) -> projects(tenant_id, id) ON DELETE CASCADE",
+				fkPair.table, fkPair.fkName)
 		}
-	}
-
-	if !strings.Contains(upUpper, "FOREIGN KEY (TENANT_ID, PROJECT_ID)") {
-		t.Error("045: every FK must reference the (tenant_id, project_id) pair, not project_id alone")
-	}
-	if !strings.Contains(upUpper, "REFERENCES PROJECTS (TENANT_ID, ID)") {
-		t.Error("045: every FK must target the composite UNIQUE on projects(tenant_id, id) " +
-			"(installed in migration 041)")
-	}
-	if !strings.Contains(upUpper, "ON DELETE CASCADE") {
-		t.Error("045: every composite FK must CASCADE to keep parity with the existing project_id FK")
 	}
 
 	for _, table := range []string{
@@ -644,6 +637,42 @@ func Test045_CompositeFKExtension_ContainsHardening(t *testing.T) {
 		notNullRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + table + `\s+ALTER\s+COLUMN\s+tenant_id\s+SET\s+NOT\s+NULL`)
 		if !notNullRe.MatchString(up) {
 			t.Errorf("045 missing ALTER TABLE %s ALTER COLUMN tenant_id SET NOT NULL -- legacy nullable tenant_id was not promoted",
+				table)
+		}
+	}
+}
+
+func Test045_CompositeFKExtension_DownReversibility(t *testing.T) {
+	down := readMigration(t, "045_composite_fk_extension.down.sql")
+
+	for _, fkPair := range []struct {
+		table, fkName string
+	}{
+		{"sboms", "sboms_tenant_project_fk"},
+		{"vex_statements", "vex_statements_tenant_project_fk"},
+		{"license_policies", "license_policies_tenant_project_fk"},
+		{"notification_settings", "notification_settings_tenant_project_fk"},
+		{"notification_logs", "notification_logs_tenant_project_fk"},
+		{"public_links", "public_links_tenant_project_fk"},
+		{"vulnerability_tickets", "vulnerability_tickets_tenant_project_fk"},
+	} {
+		dropRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + fkPair.table +
+			`\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+` + fkPair.fkName)
+		if !dropRe.MatchString(down) {
+			t.Errorf("045 down missing DROP CONSTRAINT IF EXISTS %s on %s -- reversibility regression",
+				fkPair.fkName, fkPair.table)
+		}
+	}
+
+	for _, table := range []string{
+		"vex_statements",
+		"license_policies",
+		"notification_settings",
+		"notification_logs",
+	} {
+		dropNotNullRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + table + `\s+ALTER\s+COLUMN\s+tenant_id\s+DROP\s+NOT\s+NULL`)
+		if !dropNotNullRe.MatchString(down) {
+			t.Errorf("045 down missing ALTER TABLE %s ALTER COLUMN tenant_id DROP NOT NULL -- nullable legacy shape not restored",
 				table)
 		}
 	}
