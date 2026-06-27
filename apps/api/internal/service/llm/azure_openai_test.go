@@ -613,6 +613,49 @@ func TestAzureOpenAI_Embed_Success_Batch10(t *testing.T) {
 	}
 }
 
+func TestAzureOpenAI_Embed_ResponseIndexIntegrity(t *testing.T) {
+	const (
+		embedDeployment = "text-embedding-3-small-prod"
+		apiVersion      = "2024-10-21"
+	)
+
+	t.Run("duplicate index", func(t *testing.T) {
+		srv := fakeAzureEmbeddingServer(t, embedDeployment, apiVersion, func(_ *testing.T, req azureEmbeddingRequest) (int, azureEmbeddingResponse, []byte) {
+			resp := makeAzureEmbeddingResponse("text-embedding-3-small", len(req.Input), 2)
+			resp.Data[1].Index = 0
+			return http.StatusOK, resp, nil
+		})
+		defer srv.Close()
+
+		p := NewAzureOpenAIWithEmbedding(
+			"k", srv.URL, "chat-dep", apiVersion, "gpt-4o",
+			embedDeployment, "", "text-embedding-3-small",
+		)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x", "y"}})
+		if err == nil || out != nil || !strings.Contains(err.Error(), "duplicate index 0") {
+			t.Fatalf("out=%+v err=%v, want duplicate index error", out, err)
+		}
+	})
+
+	t.Run("missing index", func(t *testing.T) {
+		srv := fakeAzureEmbeddingServer(t, embedDeployment, apiVersion, func(_ *testing.T, req azureEmbeddingRequest) (int, azureEmbeddingResponse, []byte) {
+			resp := makeAzureEmbeddingResponse("text-embedding-3-small", len(req.Input), 2)
+			resp.Data = resp.Data[:1]
+			return http.StatusOK, resp, nil
+		})
+		defer srv.Close()
+
+		p := NewAzureOpenAIWithEmbedding(
+			"k", srv.URL, "chat-dep", apiVersion, "gpt-4o",
+			embedDeployment, "", "text-embedding-3-small",
+		)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x", "y"}})
+		if err == nil || out != nil || !strings.Contains(err.Error(), "missing index 1") {
+			t.Fatalf("out=%+v err=%v, want missing index error", out, err)
+		}
+	})
+}
+
 // TestAzureOpenAI_Embed_Chunked covers the transparent chunking path:
 // 3000 inputs require ceil(3000 / 2048) = 2 HTTP calls. Asserts that
 // (1) two calls land at the embedding URL, (2) input ordering is

@@ -252,6 +252,32 @@ func TestOpenAI_Embed_ErrorsAndCaps(t *testing.T) {
 			t.Fatalf("out=%+v err=%v, want whole-call failure", out, err)
 		}
 	})
+	t.Run("duplicate embed index", func(t *testing.T) {
+		srv := fakeOpenAIEmbeddingServer(t, func(_ *testing.T, req openaiEmbeddingRequest) (int, openaiEmbeddingResponse, []byte) {
+			resp := makeOpenAIEmbeddingResponse(req.Model, len(req.Input), 1)
+			resp.Data[1].Index = 0
+			return http.StatusOK, resp, nil
+		})
+		defer srv.Close()
+		p := NewOpenAIWithEmbeddingAndEndpoint("sk-x", "gpt-4o-mini", "", srv.URL)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x", "y"}})
+		if err == nil || out != nil || !strings.Contains(err.Error(), "duplicate index 0") {
+			t.Fatalf("out=%+v err=%v, want duplicate index error", out, err)
+		}
+	})
+	t.Run("missing embed index", func(t *testing.T) {
+		srv := fakeOpenAIEmbeddingServer(t, func(_ *testing.T, req openaiEmbeddingRequest) (int, openaiEmbeddingResponse, []byte) {
+			resp := makeOpenAIEmbeddingResponse(req.Model, len(req.Input), 1)
+			resp.Data = resp.Data[:1]
+			return http.StatusOK, resp, nil
+		})
+		defer srv.Close()
+		p := NewOpenAIWithEmbeddingAndEndpoint("sk-x", "gpt-4o-mini", "", srv.URL)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x", "y"}})
+		if err == nil || out != nil || !strings.Contains(err.Error(), "missing index 1") {
+			t.Fatalf("out=%+v err=%v, want missing index error", out, err)
+		}
+	})
 	t.Run("safety cap", func(t *testing.T) {
 		p := NewOpenAI("sk-x", "gpt-4o-mini")
 		_, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, openAIEmbedMaxTotalInputs+1)})

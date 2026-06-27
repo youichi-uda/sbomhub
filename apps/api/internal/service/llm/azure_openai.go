@@ -522,16 +522,26 @@ func (p *AzureOpenAIProvider) Embed(ctx context.Context, req EmbedRequest) (*Emb
 		if err := json.Unmarshal(rawBody, &parsed); err != nil {
 			return nil, fmt.Errorf("azure_openai: parse embed response: %w", err)
 		}
-		if len(parsed.Data) != len(chunk) {
-			return nil, fmt.Errorf("azure_openai: embed response data count %d != chunk size %d",
-				len(parsed.Data), len(chunk))
-		}
+		seen := make([]bool, len(chunk))
 		for _, d := range parsed.Data {
 			if d.Index < 0 || d.Index >= len(chunk) {
 				return nil, fmt.Errorf("azure_openai: embed response index %d out of range [0, %d)",
 					d.Index, len(chunk))
 			}
+			if seen[d.Index] {
+				return nil, fmt.Errorf("azure_openai: embed response duplicate index %d", d.Index)
+			}
+			seen[d.Index] = true
 			vectors[start+d.Index] = d.Embedding
+		}
+		for i, ok := range seen {
+			if !ok {
+				return nil, fmt.Errorf("azure_openai: embed response missing index %d", i)
+			}
+		}
+		if len(parsed.Data) != len(chunk) {
+			return nil, fmt.Errorf("azure_openai: embed response data count %d != chunk size %d",
+				len(parsed.Data), len(chunk))
 		}
 		totalPromptTokens += parsed.Usage.PromptTokens
 		// Azure returns the underlying model name on the embedding
