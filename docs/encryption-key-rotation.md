@@ -120,11 +120,14 @@ The high-level flow is:
    `tenant_llm_config.encrypted_api_key` and
    `issue_tracker_connections.auth_token_encrypted`.
 2. Keep plaintext only in memory; never write it to disk.
+   Step 2.5: while the DB still contains old-key ciphertext, run
+   `verify-encryption.sh --key-file <old-key>` and record the SHA256 digest.
 3. Switch `ENCRYPTION_KEY` to the new key (`.env`, Docker Secrets, or KMS).
 4. Restart the server so it boots with the new key.
 5. Re-encrypt every plaintext value with the new key and update the DB in a
    per-tenant loop.
-6. Run `verify-encryption.sh` and compare SHA256 plaintext hashes.
+6. Run `verify-encryption.sh --key-file <new-key>` and compare its SHA256
+   digest with the recorded old-key digest.
 7. Destroy the old key after the agreed retention period.
 
 ### Step 1 — Decrypt all encrypted rows with the old key
@@ -193,6 +196,25 @@ them to temporary files, SQL dumps, shell history, application logs, chat, or
 ticketing systems. If the rotation program cannot keep all plaintext in memory,
 process one tenant at a time and commit only after that tenant has been
 re-encrypted and verified.
+
+### Step 2.5 — Record the old-key plaintext hash before overwriting ciphertext
+
+Before any DB row is re-encrypted with `NEW_KEY`, run the decrypt smoke test
+against the still-old-key ciphertext and save only the emitted SHA256 plaintext
+hash:
+
+```bash
+./docker/scripts/verify-encryption.sh \
+    --key-file old-encryption-key.txt \
+    --db-url "$DATABASE_URL" \
+    | tee before-rotation-hash.txt
+```
+
+The saved file must contain the `ok ... sha256=<hex>` line only; it must not
+contain the old key or plaintext. This is the only point in the rotation where
+the DB still contains ciphertext decryptable by `OLD_KEY`. After Step 5 updates
+the DB, `OLD_KEY` is expected to fail against the rewritten rows, so do not use
+an old-key rerun as the post-rotation comparison.
 
 ### Step 3 — Swap the key in `.env`, Docker Secrets, or KMS
 
@@ -263,9 +285,28 @@ for each tenant:
 
 ### Step 6 — Verify with `verify-encryption.sh`
 
-Run the verification checks in §4, including `verify-encryption.sh`. For the
-same logical secret under old and new keys, compare the emitted SHA256
-plaintext hashes; they must match. The plaintext itself must never be printed.
+Run the verification checks in §4, including `verify-encryption.sh` with
+`NEW_KEY` after Step 5 has rewritten the DB:
+
+```bash
+./docker/scripts/verify-encryption.sh \
+    --key-file docker/secrets/encryption_key.txt \
+    --db-url "$DATABASE_URL" \
+    | tee after-rotation-hash.txt
+```
+
+Compare the SHA256 plaintext hash in `after-rotation-hash.txt` with the
+old-key hash recorded in Step 2.5:
+
+```bash
+diff -u \
+    <(sed -n 's/.*sha256=\([0-9a-f]\{64\}\).*/\1/p' before-rotation-hash.txt) \
+    <(sed -n 's/.*sha256=\([0-9a-f]\{64\}\).*/\1/p' after-rotation-hash.txt)
+```
+
+The hashes must match for the same logical secret. The plaintext itself must
+never be printed. Do not run the post-rotation check with `OLD_KEY`; after
+Step 5, the DB ciphertext is expected to be decryptable only by `NEW_KEY`.
 
 ### Step 7 — Destroy the old key after retention
 
@@ -345,13 +386,16 @@ encrypted records are still readable.
    | 1  | key mismatch / ciphertext tampered — investigate before reopening traffic |
    | 2  | DB error (DSN, role permissions) |
    | 3  | no encrypted row to test (no BYOK / no integration configured yet) |
+   | 64 | usage error (invalid flag or argument) |
+   | 65 | prerequisite missing (Go toolchain / `DECRYPT_TEST_BIN`) |
 
    To verify the round-trip across **the same secret** under both old and
-   new keys (recommended sanity check), run the script twice with
-   `ENCRYPTION_KEY=...` or `--key-file` pointing at the two keys; the SHA256
-   hashes printed must match. The plaintext itself is never emitted. The legacy
-   `--key` argv path is still accepted for compatibility but is deprecated
-   because command-line arguments are easier to expose via `ps` / procfs.
+   new keys (recommended sanity check), use the old-key digest recorded in
+   §3 Step 2.5 and compare it with the new-key digest from this post-rotation
+   check; the SHA256 hashes printed must match. The plaintext itself is never
+   emitted. The legacy `--key` argv path is still accepted for compatibility
+   but is deprecated because command-line arguments are easier to expose via
+   `ps` / procfs.
 
    The default smoke target is
    `tenant_llm_config.encrypted_api_key`. To spot-check issue tracker tokens,
