@@ -605,6 +605,28 @@ func Test045_CompositeFKExtension_ContainsHardening(t *testing.T) {
 	if !strings.Contains(upUpper, "RAISE EXCEPTION 'MIGRATION 045") {
 		t.Error("045: orphan check must RAISE EXCEPTION with the migration tag so ops can grep logs")
 	}
+	if !strings.Contains(up, "M5 Phase D Round 4 / F87") {
+		t.Error("045: header must document the F87 RLS-bypassed diagnostic rationale")
+	}
+
+	for _, table := range []string{
+		"sboms",
+		"vulnerability_tickets",
+	} {
+		disableRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + table +
+			`\s+NO\s+FORCE\s+ROW\s+LEVEL\s+SECURITY\s*;\s*ALTER\s+TABLE\s+` + table +
+			`\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY`)
+		if !disableRe.MatchString(up) {
+			t.Errorf("045 missing Step 1 RLS lift for %s before diagnostic SELECTs", table)
+		}
+
+		restoreRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + table +
+			`\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\s*;\s*ALTER\s+TABLE\s+` + table +
+			`\s+FORCE\s+ROW\s+LEVEL\s+SECURITY`)
+		if !restoreRe.MatchString(up) {
+			t.Errorf("045 missing Step 5 ENABLE + FORCE RLS restore for %s", table)
+		}
+	}
 
 	for _, fkPair := range []struct {
 		table, fkName string

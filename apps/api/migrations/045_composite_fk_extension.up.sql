@@ -30,12 +30,25 @@
 --   * 041/044 tables: already hardened by their owning migrations.
 --
 -- The projects_tenant_id_id_unique anchor is owned by migration 041.
+--
+-- M5 Phase D Round 4 / F87:
+--   The Step 3 diagnostic SELECTs must see sboms and vulnerability_tickets
+--   even when the migrator role is NOBYPASSRLS and no app.current_tenant_id
+--   GUC is set. Those two tables were FORCE RLS in migration 023, so Step 1
+--   temporarily lifts their RLS alongside the other project-child tables and
+--   Step 5 restores ENABLE + FORCE before adding the composite FKs. The DDL
+--   takes ACCESS EXCLUSIVE locks, so concurrent app sessions cannot race
+--   through the lifted state; a non-tenant DBA monitoring query run during
+--   the migration could briefly observe cross-tenant rows.
 -- ============================================
 
 -- Step 1: Temporarily lift FORCE RLS so the migrator can backfill legacy
--- nullable tenant_id rows without an app.current_tenant_id GUC.
+-- nullable tenant_id rows and run diagnostics without an app.current_tenant_id
+-- GUC.
 ALTER TABLE projects              NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE projects              DISABLE ROW LEVEL SECURITY;
+ALTER TABLE sboms                 NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE sboms                 DISABLE ROW LEVEL SECURITY;
 ALTER TABLE vex_statements        NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE vex_statements        DISABLE ROW LEVEL SECURITY;
 ALTER TABLE license_policies      NO FORCE ROW LEVEL SECURITY;
@@ -44,6 +57,8 @@ ALTER TABLE notification_settings NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE notification_settings DISABLE ROW LEVEL SECURITY;
 ALTER TABLE notification_logs     NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE notification_logs     DISABLE ROW LEVEL SECURITY;
+ALTER TABLE vulnerability_tickets NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE vulnerability_tickets DISABLE ROW LEVEL SECURITY;
 
 -- Step 2: Backfill legacy nullable tenant_id columns from parent projects.
 UPDATE vex_statements v
@@ -171,6 +186,8 @@ ALTER TABLE notification_logs     ALTER COLUMN tenant_id SET NOT NULL;
 -- Step 5: Restore ENABLE + FORCE RLS to match the 023/042 hardened posture.
 ALTER TABLE projects              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE projects              FORCE  ROW LEVEL SECURITY;
+ALTER TABLE sboms                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sboms                 FORCE  ROW LEVEL SECURITY;
 ALTER TABLE vex_statements        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vex_statements        FORCE  ROW LEVEL SECURITY;
 ALTER TABLE license_policies      ENABLE ROW LEVEL SECURITY;
@@ -179,6 +196,8 @@ ALTER TABLE notification_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notification_settings FORCE  ROW LEVEL SECURITY;
 ALTER TABLE notification_logs     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notification_logs     FORCE  ROW LEVEL SECURITY;
+ALTER TABLE vulnerability_tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vulnerability_tickets FORCE  ROW LEVEL SECURITY;
 
 -- Step 6: Add composite FKs. Existing single-column project_id FKs stay in
 -- place; this migration is additive hardening.
