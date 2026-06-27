@@ -1118,9 +1118,12 @@ malware 感染した、 等。
 5. 影響テナントに通知 (CRA 第 14 条の「significant cybersecurity vulnerability」 該当判定が
    必要)
 
-> **TODO**: 鍵 rotation の自動化スクリプト (`cmd/key-rotate` や `sbomhub migrate-encryption`)
-> は本ガイド執筆時点で未実装 ([`../encryption-key-rotation.md`](../encryption-key-rotation.md)
-> "Follow-up: automation" 参照)。 手動 SQL での再暗号化が必要。
+鍵 rotation の automation は M6 issue
+[#56](https://github.com/youichi-uda/sbomhub/issues/56) で実装した
+[`apps/api/cmd/migrate-encryption`](../../apps/api/cmd/migrate-encryption) を使用する。
+標準手順は [`../encryption-key-rotation.md`](../encryption-key-rotation.md) §3 を参照。
+offline / emergency で automation binary が使えない場合のみ、 同 runbook §3.1 の manual SQL
+fallback に従う。
 
 ### 12.2 DB 侵害疑い
 
