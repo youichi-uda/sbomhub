@@ -41,7 +41,11 @@
 set -eu
 
 # Release tag pinning (M6 #56 F123):
-# Default: main (rolling). Override with SBOMHUB_RELEASE_TAG=v1.0.0 for a pinned release.
+# Default: main (rolling). SBOMHUB_RELEASE_TAG override is M7 work in progress:
+# currently published release tags (including v1.0.0 and v1.2.0) predate the
+# M6 installer packaging fix and do not include install.sh or docker/scripts/*.
+# Use SBOMHUB_RELEASE_TAG only after M7 release pipeline publishes operational
+# scripts as release artifacts (see sbomhub-internal #1).
 SBOMHUB_RELEASE_TAG="${SBOMHUB_RELEASE_TAG:-main}"
 
 # Base URL for raw repository content (M6 #56 F122):
