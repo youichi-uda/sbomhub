@@ -418,11 +418,42 @@ source of truth。 M6 issue
 enterprise compose での基本 flow:
 
 ```bash
-cd ../apps/api
-export PATH=$PATH:/usr/local/go/bin
-export OLD_ENCRYPTION_KEY="$(cat ../../docker/secrets/encryption_key.txt)"
+export OLD_ENCRYPTION_KEY="$(cat secrets/encryption_key.txt)"
 export NEW_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 
+# option 3: docker compose exec api 経由で migrate-encryption 実行 (recommended)
+docker compose exec -T api \
+  env OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" NEW_ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
+  /usr/local/bin/migrate-encryption --dry-run --report /tmp/dry-run.json
+
+docker compose exec -T api \
+  env OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" NEW_ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
+  /usr/local/bin/migrate-encryption \
+    --apply \
+    --report-input /tmp/dry-run.json \
+    --report /tmp/apply.json
+
+# docker/secrets/encryption_key.txt を NEW_ENCRYPTION_KEY に置換して api restart 後:
+docker compose exec -T api \
+  env OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" NEW_ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
+  /usr/local/bin/migrate-encryption \
+    --verify \
+    --report-input /tmp/dry-run.json \
+    --report /tmp/verify.json
+```
+
+host shell から `go run` する場合は、先に `DATABASE_URL` を明示する。
+
+```bash
+# option 1: docker compose から env を抽出
+DATABASE_URL="$(docker compose exec api printenv DATABASE_URL)"
+
+# option 2: Docker secrets から DSN を組み立て
+APP_PW="$(cat secrets/postgres_app_password.txt)"
+DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
+
+cd ../apps/api
+export PATH=$PATH:/usr/local/go/bin
 go run ./cmd/migrate-encryption \
   --db-url "$DATABASE_URL" \
   --dry-run \
@@ -441,6 +472,10 @@ go run ./cmd/migrate-encryption \
   --report-input ../../migrate-encryption-dry-run.json \
   --report ../../migrate-encryption-verify.json
 ```
+
+推奨は option 3 の `docker compose exec -T api` 経由。 host shell の
+`DATABASE_URL` は通常 export されていないため、 host で実行する場合だけ
+option 1 または 2 を使う。
 
 対象は `tenant_llm_config.encrypted_api_key` と
 `issue_tracker_connections.auth_token_encrypted`。 `api_keys.key_hash` は一方向

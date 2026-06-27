@@ -117,6 +117,28 @@ Leave `postgres` and `redis` running. The migration binary needs database
 access. Both key values are sensitive: pass them through environment variables
 only, do not put them in argv, shared logs, shell history, or tickets.
 
+Recommended execution path for Docker Compose is option 3: run the binary inside
+the `api` container, where `DATABASE_URL` is already present:
+
+```bash
+# option 3: run migrate-encryption through docker compose exec (recommended)
+docker compose exec -T api \
+  env OLD_ENCRYPTION_KEY="$OLD_KEY" NEW_ENCRYPTION_KEY="$NEW_KEY" \
+  /usr/local/bin/migrate-encryption --dry-run --report /tmp/dry-run.json
+```
+
+If you run the Go command from the host shell instead, first populate
+`DATABASE_URL` explicitly:
+
+```bash
+# option 1: read the runtime DSN from docker compose
+DATABASE_URL="$(docker compose exec api printenv DATABASE_URL)"
+
+# option 2: build the DSN from Docker secrets
+APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
+DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
+```
+
 Build or run the CLI from `apps/api`:
 
 ```bash
@@ -179,9 +201,25 @@ Operational notes:
   are reported as `already-new` and skipped; rows that decrypt with neither key
   fail.
 - If interrupted, rerun with the same dry-run report. For precise resume, pass
-  `--resume-from <row_id>`; rows already under the new key will be skipped.
+  `--resume-from <resume_token>` from the last processed report row. Resume is
+  intentionally limited to a single `--table` / `--column` target and a single
+  tenant encoded in the token. Do not use it with the default multi-target run.
 - `--continue-on-error` records row failures and continues the current batch.
   Without it, the current transaction rolls back and the command exits.
+
+Resume token example:
+
+```bash
+RESUME_TOKEN="$(jq -r '.rows[-1].resume_token' migrate-encryption-apply.json)"
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --apply \
+  --table tenant_llm_config \
+  --column encrypted_api_key \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --resume-from "$RESUME_TOKEN" \
+  --report ../../migrate-encryption-apply-resume.json
+```
 
 ### 3.1 Manual fallback (offline / emergency only)
 
