@@ -124,24 +124,35 @@ Use the service name that matches the compose file you operate.
 
 ```bash
 # standard compose (docker/docker-compose.yml service: api)
-DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
+export DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
 docker compose run --rm \
-  -e OLD_ENCRYPTION_KEY="$OLD_KEY" \
-  -e NEW_ENCRYPTION_KEY="$NEW_KEY" \
-  -e DATABASE_URL="$DATABASE_URL" \
-  api /usr/local/bin/migrate-encryption \
-  --db-url "$DATABASE_URL" --dry-run --report /tmp/dry-run.json
+  --entrypoint /usr/local/bin/migrate-encryption \
+  -e OLD_ENCRYPTION_KEY \
+  -e NEW_ENCRYPTION_KEY \
+  -e DATABASE_URL \
+  api \
+  --dry-run --report /tmp/dry-run.json
 
 # enterprise compose (docker/docker-compose.enterprise.yml service: sbomhub-api)
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
-DATABASE_URL="postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+export DATABASE_URL="postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
 docker compose -f docker/docker-compose.enterprise.yml run --rm \
-  -e OLD_ENCRYPTION_KEY="$OLD_KEY" \
-  -e NEW_ENCRYPTION_KEY="$NEW_KEY" \
-  -e DATABASE_URL="$DATABASE_URL" \
-  sbomhub-api /usr/local/bin/migrate-encryption \
-  --db-url "$DATABASE_URL" --dry-run --report /tmp/dry-run.json
+  --entrypoint /usr/local/bin/migrate-encryption \
+  -e OLD_ENCRYPTION_KEY \
+  -e NEW_ENCRYPTION_KEY \
+  -e DATABASE_URL \
+  sbomhub-api \
+  --dry-run --report /tmp/dry-run.json
 ```
+
+Use `-e VAR` (name only), after exporting the value in the host shell. Avoid
+`-e VAR=value`, because the expanded secret appears in the host `docker compose`
+process argv. The enterprise compose service normally builds `DATABASE_URL`
+inside its entrypoint wrapper from Docker secrets, but `--entrypoint
+/usr/local/bin/migrate-encryption` intentionally bypasses that wrapper so the
+host caller must provide `DATABASE_URL` explicitly. The `--db-url` flag remains
+available for backwards compatibility, but this runbook avoids it so the DSN
+does not appear in container argv.
 
 If you run the Go command from the host shell instead, first populate
 `DATABASE_URL` explicitly. Prefer building the DSN from Docker secrets when the
@@ -150,10 +161,10 @@ compose file keeps production credentials out of static environment output:
 ```bash
 # recommended: build the host-run DSN from Docker secrets
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
-DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
+export DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
 
 # alternative for standard compose only: read the static DSN from compose config
-DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
+export DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
 ```
 
 Build or run the CLI from `apps/api`:
@@ -162,7 +173,6 @@ Build or run the CLI from `apps/api`:
 cd apps/api
 export PATH=$PATH:/usr/local/go/bin
 go run ./cmd/migrate-encryption \
-  --db-url "$DATABASE_URL" \
   --dry-run \
   --report ../../migrate-encryption-dry-run.json
 ```
@@ -175,7 +185,6 @@ Apply the rotation:
 
 ```bash
 go run ./cmd/migrate-encryption \
-  --db-url "$DATABASE_URL" \
   --apply \
   --report-input ../../migrate-encryption-dry-run.json \
   --report ../../migrate-encryption-apply.json
@@ -195,7 +204,6 @@ digests:
 
 ```bash
 go run ./cmd/migrate-encryption \
-  --db-url "$DATABASE_URL" \
   --verify \
   --report-input ../../migrate-encryption-dry-run.json \
   --report ../../migrate-encryption-verify.json
@@ -231,7 +239,6 @@ Resume token example:
 ```bash
 RESUME_TOKEN="$(jq -r '.rows[-1].resume_token' migrate-encryption-apply.json)"
 go run ./cmd/migrate-encryption \
-  --db-url "$DATABASE_URL" \
   --apply \
   --table tenant_llm_config \
   --column encrypted_api_key \
