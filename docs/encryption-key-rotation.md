@@ -124,8 +124,8 @@ Use the service name that matches the compose file you operate.
 
 ```bash
 # standard compose (docker/docker-compose.yml service: api)
-export DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
-docker compose run --rm \
+export DATABASE_URL="$(docker compose -f docker/docker-compose.yml config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
+docker compose -f docker/docker-compose.yml run --rm \
   --entrypoint /usr/local/bin/migrate-encryption \
   -e OLD_ENCRYPTION_KEY \
   -e NEW_ENCRYPTION_KEY \
@@ -164,7 +164,7 @@ APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
 export DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
 
 # alternative for standard compose only: read the static DSN from compose config
-export DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
+export DATABASE_URL="$(docker compose -f docker/docker-compose.yml config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
 ```
 
 Build or run the CLI from `apps/api`:
