@@ -277,7 +277,8 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
 >
 > The operational scripts referenced below (`docker/scripts/backup.sh`,
 > `docker/scripts/restore.sh`, `docker/scripts/verify-encryption.sh`,
-> `docker/scripts/verify-encryption-cron.sh`) are downloaded automatically
+> `docker/scripts/verify-encryption-cron.sh`,
+> `docker/scripts/dr-rehearsal.sh`) are downloaded automatically
 > by `./install.sh --start` (M6 #56 F120 fix). If you installed via a
 > different path, ensure these scripts are present at the documented
 > paths before following the runbook examples. For cron / systemd examples,
@@ -287,7 +288,7 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
 >
 > ```bash
 > mkdir -p docker/scripts
-> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
 >   curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts/$s" \
 >     -o "docker/scripts/$s"
 >   chmod +x "docker/scripts/$s"
@@ -308,8 +309,8 @@ sudo install -d -m 755 -o sbomhub -g sbomhub /opt/sbomhub
 sudo install -d -m 755 -o sbomhub -g sbomhub /opt/sbomhub/docker
 sudo install -d -m 755 -o sbomhub -g sbomhub /opt/sbomhub/docker/scripts
 
-# Install all 4 operational scripts (from local docker/scripts/, downloaded by ./install.sh --start)
-for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+# Install all 5 operational scripts (from local docker/scripts/, downloaded by ./install.sh --start)
+for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
   sudo install -m 755 -o sbomhub -g sbomhub \
     docker/scripts/"$script" /opt/sbomhub/docker/scripts/"$script"
 done
@@ -1065,7 +1066,8 @@ shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 >
 > The operational scripts referenced below (`docker/scripts/backup.sh`,
 > `docker/scripts/restore.sh`, `docker/scripts/verify-encryption.sh`,
-> `docker/scripts/verify-encryption-cron.sh`) are downloaded automatically
+> `docker/scripts/verify-encryption-cron.sh`,
+> `docker/scripts/dr-rehearsal.sh`) are downloaded automatically
 > by `./install.sh --start` (M6 #56 F120 fix). If you installed via a
 > different path, ensure these scripts are present at the documented
 > paths before following the runbook examples. For cron / systemd examples,
@@ -1075,7 +1077,7 @@ shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 >
 > ```bash
 > mkdir -p docker/scripts
-> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
 >   curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts/$s" \
 >     -o "docker/scripts/$s"
 >   chmod +x "docker/scripts/$s"
