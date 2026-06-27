@@ -25,8 +25,10 @@
 #   * The plaintext is NEVER printed. The Go binary emits a SHA256 hash of the
 #     plaintext on success — the operator can compare hashes across rotations
 #     without ever seeing the API token / secret in plain text.
-#   * The ENCRYPTION_KEY is passed to the Go binary via env (ENCRYPTION_KEY)
-#     so it never appears on the process command line / ps output.
+#   * ENCRYPTION_KEY env / legacy --key are passed to the Go binary via env
+#     so they never appear on the process command line / ps output.
+#   * --key-file is passed through to decrypt-test so the Go binary reads the
+#     raw file bytes directly, including any trailing newline.
 #
 # Exit code contract (matches apps/api/cmd/decrypt-test/main.go):
 #   0   ok                        decrypt succeeded
@@ -58,6 +60,8 @@
 #   export DATABASE_URL="postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
 #   ./scripts/verify-encryption.sh \
 #       --key-file /run/secrets/encryption_key
+#   # --key-file preserves raw file bytes; unlike command substitution, a
+#   # trailing newline remains part of the key material seen by decrypt-test.
 #
 #   # 2. Issue-tracker token path (TEXT base64):
 #   ./scripts/verify-encryption.sh \
@@ -123,10 +127,9 @@ if [[ -n "${KEY_FILE}" ]]; then
         echo "[verify-encryption] FATAL: --key-file is not readable: ${KEY_FILE}" >&2
         exit 64
     fi
-    KEY="$(cat "${KEY_FILE}")"
 fi
 
-if [[ -z "${KEY}" ]]; then
+if [[ -z "${KEY}" && -z "${KEY_FILE}" ]]; then
     echo "[verify-encryption] FATAL: ENCRYPTION_KEY env or --key-file is required" >&2
     exit 64
 fi
@@ -184,10 +187,15 @@ run_decrypt_test() {
 
 # ---------------------------------------------------------------------------
 # build argv (we deliberately do NOT pass --key / --db-url on argv — the Go
-# binary reads them from env, keeping the secret out of /proc/<pid>/cmdline).
+# binary reads them from env, keeping those secret values out of
+# /proc/<pid>/cmdline. --key-file is passed through by path so decrypt-test can
+# read raw file bytes without shell command-substitution newline trimming.)
 # ---------------------------------------------------------------------------
 
 ARGS=()
+if [[ -n "${KEY_FILE}" ]]; then
+    ARGS+=("--key-file" "${KEY_FILE}")
+fi
 if [[ -n "${TABLE}" ]]; then
     ARGS+=("--table" "${TABLE}")
 fi

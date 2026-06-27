@@ -242,7 +242,7 @@ func TestSafeIdent(t *testing.T) {
 func TestVerifyEncryptionScript_KeyFile(t *testing.T) {
 	tmp := t.TempDir()
 	keyPath := filepath.Join(tmp, "encryption_key.txt")
-	key := strings.Repeat("k", 32)
+	key := strings.Repeat("k", 32) + "\n"
 	if err := os.WriteFile(keyPath, []byte(key), 0o600); err != nil {
 		t.Fatalf("write key file: %v", err)
 	}
@@ -251,9 +251,27 @@ func TestVerifyEncryptionScript_KeyFile(t *testing.T) {
 	fakeBin := filepath.Join(tmp, "decrypt-test")
 	fakeScript := `#!/usr/bin/env bash
 set -euo pipefail
+args="$*"
+key_file=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --key-file)
+            key_file="${2:-}"
+            shift 2
+            ;;
+        --key-file=*)
+            key_file="${1#--key-file=}"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 printf '%s\n' "${ENCRYPTION_KEY}" > "${CAPTURE_PATH}"
 printf '%s\n' "${DATABASE_URL}" >> "${CAPTURE_PATH}"
-printf '%s\n' "$*" >> "${CAPTURE_PATH}"
+printf '%s\n' "${args}" >> "${CAPTURE_PATH}"
+wc -c < "${key_file}" >> "${CAPTURE_PATH}"
 `
 	if err := os.WriteFile(fakeBin, []byte(fakeScript), 0o700); err != nil {
 		t.Fatalf("write fake decrypt-test: %v", err)
@@ -285,12 +303,12 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 	if err != nil {
 		t.Fatalf("read capture: %v", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(capturedBytes)), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("capture lines = %q, want key/db-url/args", string(capturedBytes))
+	lines := strings.Split(strings.TrimSuffix(string(capturedBytes), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("capture lines = %q, want env key/db-url/args/key byte count", string(capturedBytes))
 	}
-	if lines[0] != key {
-		t.Fatalf("ENCRYPTION_KEY passed to decrypt-test = %q, want key file contents", lines[0])
+	if lines[0] != "" {
+		t.Fatalf("ENCRYPTION_KEY passed to decrypt-test = %q, want empty env for --key-file pass-through", lines[0])
 	}
 	if !strings.Contains(lines[1], "127.0.0.1:5432") {
 		t.Fatalf("DATABASE_URL passed to decrypt-test = %q", lines[1])
@@ -298,8 +316,64 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 	if strings.Contains(lines[2], key) {
 		t.Fatalf("decrypt-test argv leaked key: %q", lines[2])
 	}
+	if !strings.Contains(lines[2], "--key-file "+keyPath) {
+		t.Fatalf("decrypt-test argv missing --key-file pass-through: %q", lines[2])
+	}
 	if !strings.Contains(lines[2], "--table issue_tracker_connections") ||
 		!strings.Contains(lines[2], "--column auth_token_encrypted") {
 		t.Fatalf("decrypt-test argv missing table/column flags: %q", lines[2])
+	}
+	if lines[3] != "33" {
+		t.Fatalf("decrypt-test --key-file byte count = %q, want 33 including trailing newline", lines[3])
+	}
+}
+
+func TestVerifyEncryptionScript_LegacyKeyUsesEnv(t *testing.T) {
+	tmp := t.TempDir()
+	capturePath := filepath.Join(tmp, "capture.txt")
+	fakeBin := filepath.Join(tmp, "decrypt-test")
+	fakeScript := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${ENCRYPTION_KEY}" > "${CAPTURE_PATH}"
+printf '%s\n' "$*" >> "${CAPTURE_PATH}"
+`
+	if err := os.WriteFile(fakeBin, []byte(fakeScript), 0o700); err != nil {
+		t.Fatalf("write fake decrypt-test: %v", err)
+	}
+
+	key := strings.Repeat("l", 32)
+	scriptPath := filepath.Join("..", "..", "..", "..", "docker", "scripts", "verify-encryption.sh")
+	cmd := exec.Command("bash", scriptPath,
+		"--key", key,
+		"--db-url", "postgres://sbomhub_app:test@127.0.0.1:5432/sbomhub?sslmode=disable",
+	)
+	cmd.Env = append(os.Environ(),
+		"ENCRYPTION_KEY=",
+		"DATABASE_URL=",
+		"DECRYPT_TEST_BIN="+fakeBin,
+		"CAPTURE_PATH="+capturePath,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("verify-encryption.sh --key failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--key is deprecated") {
+		t.Fatalf("--key should emit deprecation warning; stderr:\n%s", stderr.String())
+	}
+
+	capturedBytes, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(capturedBytes), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("capture lines = %q, want env key/args", string(capturedBytes))
+	}
+	if lines[0] != key {
+		t.Fatalf("ENCRYPTION_KEY passed to decrypt-test = %q, want legacy --key value", lines[0])
+	}
+	if strings.Contains(lines[1], key) {
+		t.Fatalf("legacy --key leaked into decrypt-test argv: %q", lines[1])
 	}
 }

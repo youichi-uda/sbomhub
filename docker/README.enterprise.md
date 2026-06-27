@@ -375,6 +375,8 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張、 F80 で
   ./scripts/verify-encryption.sh \
       --key-file secrets/encryption_key.txt
   ```
+  `--key-file` は wrapper が file 内容を env に読み替えず、 `decrypt-test` へ path を
+  pass-through する。 そのため file 末尾の newline も raw key bytes として扱われる。
   exit code 契約 / SHA256(plaintext)-only 出力 / column 切り替え (BYOK LLM key /
   issue_tracker_connections token) は [`docs/security/self-host-deployment.md`](../docs/security/self-host-deployment.md) §4.5 を参照。
   plaintext そのものは stdout / log に一切出ない。
