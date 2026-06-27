@@ -1,0 +1,32 @@
+name: DR Rehearsal
+
+on:
+  schedule:
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+jobs:
+  dr-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
+        run: |
+          docker compose version
+          go version
+
+      - name: Run DR rehearsal
+        run: ./docker/scripts/dr-rehearsal.sh --verbose
+
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-rehearsal-report
+          path: |
+            /tmp/dr-rehearsal-*.json
+            /tmp/dr-rehearsal-*.log
+          if-no-files-found: ignore
