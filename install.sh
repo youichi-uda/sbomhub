@@ -40,11 +40,20 @@
 
 set -eu
 
-# docker-compose.yml の canonical URL (--start で host に未配置なら download)。
-COMPOSE_URL="https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml"
+# Release tag pinning (M6 #56 F123):
+# Default: main (rolling). Override with SBOMHUB_RELEASE_TAG=v1.0.0 for a pinned release.
+SBOMHUB_RELEASE_TAG="${SBOMHUB_RELEASE_TAG:-main}"
+
+# Base URL for raw repository content (M6 #56 F122):
+# Override SBOMHUB_RAW_BASE_URL for air-gapped mirrors, forks, or pinned releases.
+SBOMHUB_RAW_BASE_URL="${SBOMHUB_RAW_BASE_URL:-https://raw.githubusercontent.com/youichi-uda/sbomhub/$SBOMHUB_RELEASE_TAG}"
+
+# docker-compose.yml / .env.example canonical URLs (--start downloads when missing).
+COMPOSE_URL="${COMPOSE_URL:-$SBOMHUB_RAW_BASE_URL/docker-compose.yml}"
+ENV_EXAMPLE_URL="${ENV_EXAMPLE_URL:-$SBOMHUB_RAW_BASE_URL/.env.example}"
 
 # Operational scripts の canonical URL / 配置先 (--start の curl-only install path 用)。
-SCRIPTS_BASE_URL="${SCRIPTS_BASE_URL:-https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts}"
+SCRIPTS_BASE_URL="${SCRIPTS_BASE_URL:-$SBOMHUB_RAW_BASE_URL/docker/scripts}"
 SCRIPTS_TARGET_DIR="${SCRIPTS_TARGET_DIR:-docker/scripts}"
 
 print_usage() {
@@ -475,6 +484,8 @@ fi
 # operational scripts を download (なければ) → docker compose up -d --wait postgres
 # → ロール投入 → docker compose up -d 全体起動、 までを実行する。
 if [ "$MODE" = "start" ]; then
+    printf '[INFO] release tag: %s\n' "$SBOMHUB_RELEASE_TAG"
+
     if ! command -v docker >/dev/null 2>&1; then
         printf '[FAIL] docker が見つかりません。 --start は docker compose を必要とします。\n' >&2
         exit 1
@@ -500,8 +511,8 @@ if [ "$MODE" = "start" ]; then
             printf '[FAIL] .env.example が無く、 curl も見つかりません。\n' >&2
             exit 1
         fi
-        printf '[INFO] .env.example が無いため download します。\n'
-        if ! curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/.env.example" -o .env.example; then
+        printf '[INFO] .env.example が無いため download します (%s)。\n' "$ENV_EXAMPLE_URL"
+        if ! curl -fsSL "$ENV_EXAMPLE_URL" -o .env.example; then
             printf '[FAIL] .env.example の download に失敗しました。\n' >&2
             exit 1
         fi
