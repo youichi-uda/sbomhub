@@ -5,19 +5,50 @@
 > SBOMHub は CRA (EU Cyber Resilience Act 2026/9) 対応を主軸とする **AI コンプラ成果物レイヤー** です (Dependency-Track / Syft / Trivy の上に乗ります)。
 > **SaaS 版 (`sbomhub.app`) は 2026-06 にサンセット**し、現在は self-host (Docker Compose) のみがサポート対象です。本ガイドの手順はすべて self-host を前提とします。
 
-## Docker Composeでクイックスタート
+## クイックスタート
 
 最も簡単な方法：
 
 ```bash
-# docker-compose.ymlをダウンロード
-curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
+# 推奨 (curl のみでインストール):
+bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/install.sh) --start
 
-# すべてのサービスを起動
-docker compose up -d
+# または、リポジトリを clone:
+git clone https://github.com/youichi-uda/sbomhub.git
+cd sbomhub
+./install.sh --start
+```
+
+同じ bootstrap を手動で分割して実行する場合：
+
+```bash
+./install.sh                              # .env を生成 (冪等)
+docker compose up -d --wait postgres      # postgres を先に起動
+./install.sh --bootstrap-roles            # sbomhub_app / sbomhub_migrator を作成
+docker compose up -d                      # 残りを起動
 ```
 
 ブラウザで http://localhost:3000 を開きます。
+
+release tag に pin する場合は、同じ tag の installer を実行し、
+`SBOMHUB_RELEASE_TAG` を指定します。これにより `docker-compose.yml`,
+`.env.example`, operational scripts も rolling `main` ではなく同じ tag から取得されます。
+
+```bash
+SBOMHUB_RELEASE_TAG=v1.0.0 \
+  bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/v1.0.0/install.sh) --start
+```
+
+社内 mirror / air-gapped staging から取得する場合は raw content の base URL を上書きできます。
+
+```bash
+SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/v1.0.0 \
+  bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/v1.0.0/install.sh) --start
+```
+
+現時点の supply-chain hardening は tag pinning が最小対応です。
+SHA256SUMS verification は release pipeline 側で checksum publish が必要なため M7 に持ち越し、
+`SBOMHUB_RELEASE_SHA256SUMS_URL` support は M7 で追加予定です。
 
 ## Docker Compose（フルインストール）
 
@@ -35,20 +66,15 @@ git clone https://github.com/youichi-uda/sbomhub.git
 cd sbomhub
 ```
 
-2. （任意）設定用の`.env`ファイルを作成：
+2. `.env` 生成、DB role bootstrap、stack 起動を実行：
 
 ```bash
-cp .env.example .env
-# .envを編集して設定をカスタマイズ
-# AI 機能を使う場合は BYOK で LLM プロバイダを設定 (OpenAI / Anthropic / Gemini / Ollama)。
-# 未設定なら AI 機能は無効化され、SBOM 管理 / 手動 VEX などは通常通り動作します。
+./install.sh --start
 ```
 
-3. サービスを起動：
-
-```bash
-docker compose up -d
-```
+3. 必要に応じて初回 bootstrap 後に `.env` を編集します。AI 機能を使う場合は
+   BYOK で LLM プロバイダを設定 (OpenAI / Anthropic / Gemini / Ollama)。
+   未設定なら AI 機能は無効化され、SBOM 管理 / 手動 VEX などは通常通り動作します。
 
 4. http://localhost:3000 でアプリケーションにアクセス
 

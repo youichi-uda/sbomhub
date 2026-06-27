@@ -5,19 +5,51 @@ This guide covers different ways to install and run SBOMHub.
 > SBOMHub is an **AI compliance evidence layer** focused on the EU Cyber Resilience Act (CRA) reporting deadline of **2026-09-11**, built on top of Dependency-Track / Syft / Trivy.
 > **The SaaS instance at `sbomhub.app` was sunset in 2026-06**; self-host (Docker Compose) is the only supported path. All instructions below assume self-host.
 
-## Quick Start with Docker Compose
+## Quick Start
 
 The fastest way to get started:
 
 ```bash
-# Download docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml -o docker-compose.yml
+# Recommended (curl-only install):
+bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/install.sh) --start
 
-# Start all services
-docker compose up -d
+# Or, full repo checkout:
+git clone https://github.com/youichi-uda/sbomhub.git
+cd sbomhub
+./install.sh --start
+```
+
+If you prefer to split the same bootstrap steps manually:
+
+```bash
+./install.sh                              # .env を生成 (冪等)
+docker compose up -d --wait postgres      # postgres を先に起動
+./install.sh --bootstrap-roles            # sbomhub_app / sbomhub_migrator を作成
+docker compose up -d                      # 残りを起動
 ```
 
 Open http://localhost:3000 in your browser.
+
+For a pinned release, run the installer from the same tag and set
+`SBOMHUB_RELEASE_TAG` so `docker-compose.yml`, `.env.example`, and operational
+scripts are downloaded from that tag instead of rolling `main`:
+
+```bash
+SBOMHUB_RELEASE_TAG=v1.0.0 \
+  bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/v1.0.0/install.sh) --start
+```
+
+For an internal mirror or air-gapped staging area, override the raw content base
+URL:
+
+```bash
+SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/v1.0.0 \
+  bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/v1.0.0/install.sh) --start
+```
+
+Current supply-chain hardening is tag pinning. SHA256SUMS verification is
+deferred to M7 because the release pipeline must publish checksums before
+`SBOMHUB_RELEASE_SHA256SUMS_URL` support can be added safely.
 
 ## Docker Compose (Full Installation)
 
@@ -35,20 +67,16 @@ git clone https://github.com/youichi-uda/sbomhub.git
 cd sbomhub
 ```
 
-2. (Optional) Create `.env` file for configuration:
+2. Generate `.env`, bootstrap database roles, and start the stack:
 
 ```bash
-cp .env.example .env
-# Edit .env with your settings
-# To enable AI features, configure a BYOK LLM provider (OpenAI / Anthropic / Gemini / Ollama).
-# If unset, AI features are gracefully disabled; SBOM management / manual VEX still work.
+./install.sh --start
 ```
 
-3. Start the services:
-
-```bash
-docker compose up -d
-```
+3. Optional: edit `.env` for site-specific settings after the initial bootstrap.
+   To enable AI features, configure a BYOK LLM provider (OpenAI / Anthropic /
+   Gemini / Ollama). If unset, AI features are gracefully disabled; SBOM
+   management / manual VEX still work.
 
 4. Access the application at http://localhost:3000
 
