@@ -11,6 +11,9 @@
 --   * Migration 041 (F75 fix for compliance_checklist + visualization).
 --     This migration is the horizontal sweep of the same pattern over
 --     every other table that has the same shape.
+--     Review Round 1 (F81) found additional legacy project-child tables
+--     with the same tenant_id + project_id shape; migration 045 extends
+--     the sweep to those tables without amending this migration body.
 --
 -- F75 vector recap (see 041 header for the full story):
 --   RLS WITH CHECK on tenant_id alone rejects "row has wrong
