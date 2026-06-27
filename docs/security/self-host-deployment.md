@@ -1205,7 +1205,11 @@ backup を取るだけでは「実際に復元できる」 ことは保証され
 
 1. sample tenants 投入 (BYOK LLM key + issue tracker token)
 2. `ENCRYPTION_KEY` rotation (`migrate-encryption --dry-run` → `--apply` → `--verify`)
-3. Backup → restore → §9.6 の `verify-encryption.sh` smoke (restore Step 8)
+3. Backup → restore → §9.6 の `verify-encryption.sh` direct hard gate
+
+restore 本体の Step 8 smoke は通常の手動 restore posture として維持しつつ、DR rehearsal では
+restore を二重実行しない。restore 後の DB に対して `verify-encryption.sh --key-file` を直接実行し、
+暗号化カラムが復号可能であることを hard gate として確認する。
 
 Exit code は `0` = 全 pass、`1` = partial fail (summary の failed steps を確認)、`2` =
 setup error (docker compose / Go toolchain / DB 到達性)。

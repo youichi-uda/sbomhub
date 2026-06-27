@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
 # shellcheck disable=SC2329
+# Functions below are invoked via EXIT trap, helper indirection, or the
+# `step "<label>" function_name` dispatcher; ShellCheck cannot track those calls.
 # SBOMHub Disaster Recovery Rehearsal (M7-4 #60)
 #
 # Performs an end-to-end DR rehearsal:
@@ -52,6 +54,27 @@ DATABASE_URL=""
 VERIFY_DB_URL=""
 BACKUP_TARBALL=""
 API_IMAGE="${API_IMAGE:-y1uda/sbomhub-api:latest}"
+
+validate_api_image() {
+    img="$1"
+    img_oneline="$(printf '%s' "$img" | tr -d '\n\r')"
+    if [ "$img" != "$img_oneline" ]; then
+        echo "[dr-rehearsal] FATAL: API_IMAGE contains newline/CR: '$img'" >&2
+        exit 2
+    fi
+    case "$img" in
+        *" "*|*"	"*|*"#"*|*"!"*|*"&"*|*"*"*)
+            echo "[dr-rehearsal] FATAL: API_IMAGE contains YAML metachar: '$img'" >&2
+            exit 2
+            ;;
+    esac
+    if ! printf '%s' "$img" | grep -E '^[a-z0-9._/-]+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$' >/dev/null; then
+        echo "[dr-rehearsal] FATAL: API_IMAGE does not match expected format: '$img'" >&2
+        exit 2
+    fi
+}
+
+validate_api_image "$API_IMAGE"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -157,6 +180,7 @@ psql_stdin() {
 }
 
 prepare_compose() {
+    validate_api_image "$API_IMAGE"
     cat >"$COMPOSE_OVERRIDE" <<YAML
 services:
   postgres:
@@ -372,23 +396,6 @@ run_restore() {
         "$SCRIPT_DIR/restore.sh" "$BACKUP_TARBALL"
 }
 
-run_restore_verify_smoke() {
-    if [ -z "$BACKUP_TARBALL" ]; then
-        echo "[dr-rehearsal] FATAL: BACKUP_TARBALL is empty" >&2
-        return 1
-    fi
-    COMPOSE_PROJECT_NAME="$REHEARSAL_PROJECT" \
-    COMPOSE_FILE="$COMPOSE_RENDERED" \
-    PG_USER="sbomhub" \
-    PG_DB="sbomhub" \
-    FORCE="yes" \
-    VERIFY_ENCRYPTION="1" \
-    VERIFY_DB_URL="$VERIFY_DB_URL" \
-    ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
-    GO_BIN="${GO_BIN:-go}" \
-        "$SCRIPT_DIR/restore.sh" "$BACKUP_TARBALL"
-}
-
 verify_encryption_hard_gate() {
     if [ -z "$VERIFY_DB_URL" ]; then
         echo "[dr-rehearsal] FATAL: VERIFY_DB_URL is empty" >&2
@@ -434,7 +441,6 @@ step "ENCRYPTION_KEY rotation (apply)" rotate_apply
 step "ENCRYPTION_KEY rotation (verify)" rotate_verify
 step "Backup" run_backup
 step "Restore" run_restore
-step "Verify encryption (restore Step 8 smoke)" run_restore_verify_smoke
 step "Verify encryption (DR rehearsal hard gate)" verify_encryption_hard_gate
 
 echo ""
