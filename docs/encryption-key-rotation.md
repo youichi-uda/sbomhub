@@ -121,7 +121,8 @@ The high-level flow is:
    `issue_tracker_connections.auth_token_encrypted`.
 2. Keep plaintext only in memory; never write it to disk.
    Step 2.5: while the DB still contains old-key ciphertext, run
-   `verify-encryption.sh --key-file <old-key>` and record the SHA256 digest.
+   `verify-encryption.sh` with `OLD_KEY` from the environment (preferred) or
+   a managed temporary key file, and record the SHA256 digest.
 3. Switch `ENCRYPTION_KEY` to the new key (`.env`, Docker Secrets, or KMS).
 4. Restart the server so it boots with the new key.
 5. Re-encrypt every plaintext value with the new key and update the DB in a
@@ -201,20 +202,36 @@ re-encrypted and verified.
 
 Before any DB row is re-encrypted with `NEW_KEY`, run the decrypt smoke test
 against the still-old-key ciphertext and save only the emitted SHA256 plaintext
-hash:
+hash. Prefer the environment path so the old master key is not written to disk:
 
 ```bash
-./docker/scripts/verify-encryption.sh \
-    --key-file old-encryption-key.txt \
-    --db-url "$DATABASE_URL" \
-    | tee before-rotation-hash.txt
+# Recommended (env path, no disk persistence):
+ENCRYPTION_KEY="$OLD_KEY" ./docker/scripts/verify-encryption.sh \
+  --db-url "$DATABASE_URL" > before-rotation-hash.txt
+# $OLD_KEY shell variable lives only in this shell session.
+```
+
+If a shell variable is impractical, use a managed temporary file only for the
+duration of the command:
+
+```bash
+# Alternative (file path, if shell variable is impractical):
+# CAREFUL: writes the old master key to disk. Use the lifecycle pattern below.
+old_key_file="$(mktemp)"
+chmod 600 "$old_key_file"
+trap 'shred -u "$old_key_file" 2>/dev/null || rm -f "$old_key_file"' EXIT
+echo "$OLD_KEY" > "$old_key_file"
+./docker/scripts/verify-encryption.sh --key-file "$old_key_file" \
+  --db-url "$DATABASE_URL" > before-rotation-hash.txt
 ```
 
 The saved file must contain the `ok ... sha256=<hex>` line only; it must not
 contain the old key or plaintext. This is the only point in the rotation where
 the DB still contains ciphertext decryptable by `OLD_KEY`. After Step 5 updates
 the DB, `OLD_KEY` is expected to fail against the rewritten rows, so do not use
-an old-key rerun as the post-rotation comparison.
+an old-key rerun as the post-rotation comparison. The temporary-file lifecycle
+is still manual; full key handling automation is tracked for M6 in
+[#56](https://github.com/youichi-uda/sbomhub/issues/56).
 
 ### Step 3 — Swap the key in `.env`, Docker Secrets, or KMS
 
@@ -285,6 +302,26 @@ for each tenant:
 
 ### Step 6 — Verify with `verify-encryption.sh`
 
+> **⚠ Sample-only verification limitation (M5 #53 F92)**
+>
+> `verify-encryption.sh` (via `decrypt-test`) samples **a single row with
+> `LIMIT 1` and no `ORDER BY`**. In a multi-tenant DB or multi-row table, Step
+> 2.5 and Step 6 may sample different rows, so a digest match proves only that
+> one row decrypts consistently across keys, **not** that every encrypted row is
+> recoverable.
+>
+> Recommended posture for production rotation:
+>
+> 1. Rehearse rotation in staging with all production tenants imported.
+> 2. Before the production rotation, run a temporary one-tenant rehearsal where
+>    the sampled logical secret is known and stable, so Step 2.5 and Step 6 are
+>    more likely to compare the same row.
+> 3. For high-stakes rotation, run a per-tenant verification loop manually or
+>    via the future `migrate-encryption` automation tool tracked as M6 work in
+>    [#56](https://github.com/youichi-uda/sbomhub/issues/56).
+> 4. Post-rotation, monitor application logs for `decrypt failed` errors for
+>    24-48h before destroying the old key.
+
 Run the verification checks in §4, including `verify-encryption.sh` with
 `NEW_KEY` after Step 5 has rewritten the DB:
 
@@ -307,6 +344,8 @@ diff -u \
 The hashes must match for the same logical secret. The plaintext itself must
 never be printed. Do not run the post-rotation check with `OLD_KEY`; after
 Step 5, the DB ciphertext is expected to be decryptable only by `NEW_KEY`.
+Because this smoke test is sample-only, treat a hash match as a mitigation
+signal rather than complete row coverage until the M6 automation exists.
 
 ### Step 7 — Destroy the old key after retention
 
@@ -495,14 +534,14 @@ Notes: Follow docs/encryption-key-rotation.md.
 ## Follow-up: automation
 
 A `sbomhub migrate-encryption` (or `apps/api/cmd/migrate-encryption`)
-subcommand that wraps the §3 decrypt/re-encrypt flow is **not yet implemented**. Tracked as a
-follow-up issue (operators or contributors should open one if missing).
+subcommand that wraps the §3 decrypt/re-encrypt flow is **not yet implemented**.
+Tracked as [#56](https://github.com/youichi-uda/sbomhub/issues/56).
 Suggested design when the follow-up is picked up:
 
-- Flags: `--old-key <base64>`, `--new-key <base64>`, `--dry-run`,
-  `--table tenant_llm_config --column encrypted_api_key` and
-  `--table issue_tracker_connections --column auth_token_encrypted`
-  (extensible).
+- Inputs: `OLD_ENCRYPTION_KEY` and `NEW_ENCRYPTION_KEY` from the environment
+  (no key files), plus flags such as `--dry-run`, `--verify`,
+  `--table tenant_llm_config --column encrypted_api_key` and `--table
+  issue_tracker_connections --column auth_token_encrypted` (extensible).
 - Runs RLS-aware tenant loops. `sbomhub_migrator` is `NOBYPASSRLS`, so the
   tool must either set `app.current_tenant_id` per tenant, temporarily lift and
   restore table RLS during the maintenance window, or route through
@@ -511,7 +550,9 @@ Suggested design when the follow-up is picked up:
   and `apps/api/internal/service/issue_tracker.go` so the cipher contracts stay
   in one place.
 - `--dry-run` reports the count of rows it *would* re-encrypt and verifies
-  every row decrypts under `--old-key`, without writing.
+  every row decrypts under `OLD_ENCRYPTION_KEY`, without writing.
+- `--verify` checks per-row digests after rotation so verification is not
+  limited to the current `LIMIT 1` smoke sample.
 - Wraps each tenant rewrite in a transaction.
 - Refuses to run if `APP_ENV=production` and `--dry-run` was not passed at
   least once with a successful decrypt count matching the row count.
