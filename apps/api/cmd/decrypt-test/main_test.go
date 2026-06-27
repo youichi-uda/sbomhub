@@ -377,3 +377,67 @@ printf '%s\n' "$*" >> "${CAPTURE_PATH}"
 		t.Fatalf("legacy --key leaked into decrypt-test argv: %q", lines[1])
 	}
 }
+
+func TestVerifyEncryptionScript_FallbackPreservesDecryptTestExitCodes(t *testing.T) {
+	goBin := os.Getenv("GO_BIN")
+	if goBin == "" {
+		var err error
+		goBin, err = exec.LookPath("go")
+		if err != nil {
+			t.Skipf("go binary not found in PATH: %v", err)
+		}
+	}
+
+	scriptPath := filepath.Join("..", "..", "..", "..", "docker", "scripts", "verify-encryption.sh")
+	key := strings.Repeat("f", 32)
+	dbURL := "postgres://sbomhub_app:test@127.0.0.1:1/sbomhub?sslmode=disable"
+
+	cases := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantStderr string
+	}{
+		{
+			name:       "db error",
+			args:       []string{"--db-url", dbURL},
+			wantExit:   2,
+			wantStderr: "DB connection or query error",
+		},
+		{
+			name:       "usage error",
+			args:       []string{"--db-url", dbURL, "--format", "json"},
+			wantExit:   64,
+			wantStderr: "usage / flag error",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("bash", append([]string{scriptPath}, tc.args...)...)
+			cmd.Env = append(os.Environ(),
+				"ENCRYPTION_KEY="+key,
+				"DATABASE_URL=",
+				"DECRYPT_TEST_BIN=",
+				"GO_BIN="+goBin,
+			)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+
+			err := cmd.Run()
+			if err == nil {
+				t.Fatalf("verify-encryption.sh fallback exited 0, want %d\nstderr:\n%s", tc.wantExit, stderr.String())
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("verify-encryption.sh fallback error = %T %v\nstderr:\n%s", err, err, stderr.String())
+			}
+			if got := exitErr.ExitCode(); got != tc.wantExit {
+				t.Fatalf("verify-encryption.sh fallback exit = %d, want %d\nstderr:\n%s", got, tc.wantExit, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("verify-encryption.sh fallback stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+		})
+	}
+}

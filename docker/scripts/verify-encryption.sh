@@ -46,8 +46,10 @@
 #   ENCRYPTION_KEY       master key (required unless --key-file is used)
 #   DATABASE_URL         Postgres DSN (required; --db-url argv overrides)
 #   DECRYPT_TEST_BIN     pre-built decrypt-test binary path; if unset the
-#                        script falls back to `go run ./cmd/decrypt-test`
-#                        from apps/api (requires Go toolchain in PATH).
+#                        script falls back to building ./cmd/decrypt-test into
+#                        a temporary binary and executing it from apps/api.
+#                        This preserves decrypt-test's native exit code
+#                        contract; `go run` would collapse child exits to 1.
 #   GO_BIN               `go` binary to use for the fallback (default: `go`)
 #
 # Examples:
@@ -145,12 +147,20 @@ fi
 #
 # Two paths, in this preference order:
 #   1. DECRYPT_TEST_BIN env (pre-built binary, fastest, suitable for cron).
-#   2. `go run ./cmd/decrypt-test` from apps/api (works in a source checkout
-#      without a separate build step). Requires Go toolchain.
+#   2. Build ./cmd/decrypt-test into a temporary binary, then execute it from
+#      apps/api. Requires Go toolchain.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 API_DIR="$(cd "${DOCKER_DIR}/../apps/api" 2>/dev/null && pwd || true)"
+TMP_DECRYPT_TEST_BIN=""
+
+# shellcheck disable=SC2329 # Invoked via EXIT trap after fallback build.
+cleanup_decrypt_test_bin() {
+    if [[ -n "${TMP_DECRYPT_TEST_BIN}" ]]; then
+        rm -f "${TMP_DECRYPT_TEST_BIN}"
+    fi
+}
 
 run_decrypt_test() {
     local args=("$@")
@@ -174,15 +184,20 @@ run_decrypt_test() {
         exit 65
     fi
     if [[ -z "${API_DIR}" || ! -d "${API_DIR}" ]]; then
-        echo "[verify-encryption] FATAL: apps/api source tree not found; cannot fall back to 'go run'." >&2
+        echo "[verify-encryption] FATAL: apps/api source tree not found; cannot build decrypt-test fallback." >&2
         echo "[verify-encryption]        Build the binary and point DECRYPT_TEST_BIN at it." >&2
         exit 65
     fi
-    (
-        cd "${API_DIR}"
-        ENCRYPTION_KEY="${KEY}" DATABASE_URL="${DB_URL}" \
-            "${go_bin}" run ./cmd/decrypt-test "${args[@]}"
-    )
+
+    TMP_DECRYPT_TEST_BIN="$(mktemp -t decrypt-test.XXXXXX)"
+    trap cleanup_decrypt_test_bin EXIT
+    if ! (cd "${API_DIR}" && "${go_bin}" build -o "${TMP_DECRYPT_TEST_BIN}" ./cmd/decrypt-test); then
+        echo "[verify-encryption] FATAL: failed to build decrypt-test fallback binary." >&2
+        return 65
+    fi
+
+    ENCRYPTION_KEY="${KEY}" DATABASE_URL="${DB_URL}" \
+        "${TMP_DECRYPT_TEST_BIN}" "${args[@]}"
 }
 
 # ---------------------------------------------------------------------------
