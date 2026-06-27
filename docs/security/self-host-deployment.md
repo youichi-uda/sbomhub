@@ -280,7 +280,8 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
 > `docker/scripts/verify-encryption-cron.sh`) are downloaded automatically
 > by `./install.sh --start` (M6 #56 F120 fix). If you installed via a
 > different path, ensure these scripts are present at the documented
-> paths before following the runbook examples.
+> paths before following the runbook examples. For cron / systemd examples,
+> also complete the `/opt/sbomhub` deployment in §4.5 first.
 >
 > Manual download example:
 >
@@ -293,7 +294,39 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
 > done
 > ```
 
-### 4.5 復号 smoke test (`verify-encryption.sh`)
+### 4.5 `/opt/sbomhub` operational script deployment
+
+cron / systemd timer から実行する operational scripts は、リポジトリ checkout の作業ディレクトリではなく
+`/opt/sbomhub` に固定配置する。`./install.sh --start` は local `docker/scripts/` へ script を取得するため、
+cron / systemd 例を使う前に以下を実行して `/opt` 側へ同期する。
+
+```bash
+# Install operational scripts to /opt/sbomhub for cron / systemd
+sudo install -d -m 755 -o sbomhub -g sbomhub /opt/sbomhub
+sudo install -d -m 755 -o sbomhub -g sbomhub /opt/sbomhub/docker
+sudo install -d -m 755 -o sbomhub -g sbomhub /opt/sbomhub/docker/scripts
+
+# Install all 4 operational scripts (from local docker/scripts/, downloaded by ./install.sh --start)
+for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+  sudo install -m 755 -o sbomhub -g sbomhub \
+    docker/scripts/"$script" /opt/sbomhub/docker/scripts/"$script"
+done
+
+# Install Docker secrets (for cron wrapper)
+sudo install -d -m 700 -o sbomhub -g sbomhub /opt/sbomhub/docker/secrets
+sudo install -m 600 -o sbomhub -g sbomhub \
+  docker/secrets/postgres_app_password.txt \
+  /opt/sbomhub/docker/secrets/postgres_app_password.txt
+sudo install -m 600 -o sbomhub -g sbomhub \
+  docker/secrets/encryption_key.txt \
+  /opt/sbomhub/docker/secrets/encryption_key.txt
+```
+
+English summary: install all four operational scripts and the two Docker secret
+files into `/opt/sbomhub` before using the cron or systemd examples below. This
+keeps unattended jobs independent from a developer checkout path.
+
+### 4.6 復号 smoke test (`verify-encryption.sh`)
 
 ENCRYPTION_KEY が **実際に DB を復号できる** ことを確認する smoke test として
 [`../../docker/scripts/verify-encryption.sh`](../../docker/scripts/verify-encryption.sh) (M5-5、
@@ -320,11 +353,7 @@ cron / systemd timer 側へそのまま返す。
 file は不要。 password に `+`, `/`, `=`, `@`, `:`, `?`, `#`, `&` などが含まれる場合に備え、 wrapper は
 F106 と同じ `urlenc` helper を使う。 Python runtime は不要。
 
-```bash
-sudo install -m 755 -o root -g root \
-  docker/scripts/verify-encryption-cron.sh \
-  /opt/sbomhub/docker/scripts/verify-encryption-cron.sh
-```
+cron 例を入れる前に、§4.5 の `/opt/sbomhub` deployment を完了しておくこと。
 
 ```cron
 # /etc/cron.d/sbomhub-verify-encryption
@@ -338,7 +367,8 @@ cron では failure を systemd の非標準通知 subcommand に渡さない。
 stdout/stderr を `logger` 経由で syslog に送り、 exit code は cron mail、 exit-code monitoring、 または
 監視 agent で拾う。
 
-継続運用では、 cron より systemd timer + service + `OnFailure` handler を推奨する。 systemd では
+継続運用では、 cron より systemd timer + service + `OnFailure` handler を推奨する。 systemd timer / service
+例を入れる前に、§4.5 の `/opt/sbomhub` deployment を完了しておくこと。 systemd では
 `.env` 全体を `EnvironmentFile` に指定しない。 `.env` には `MIGRATE_DATABASE_URL`, `APP_PASSWORD`,
 `MIGRATOR_PASSWORD`, `ENCRYPTION_KEY` など verify に不要な secrets が含まれ、 同一 user/root から
 `/proc/<pid>/environ` 経由で読める可能性がある。 verify 専用の最小 env file を作り、 service の env には
@@ -455,7 +485,7 @@ journalctl -u sbomhub-verify-encryption.service
   復号できないのが正常なので、 旧鍵で post-rotation rerun しない。 詳細な手順は
   [`../encryption-key-rotation.ja.md`](../encryption-key-rotation.ja.md) §3 Step 2.5 / Step 6 を参照。
 
-### 4.6 鍵の保管先
+### 4.7 鍵の保管先
 
 `.env` 平文に書く方式は最も簡単だが、 中長期的には外部 secret store に逃がすことを推奨する。
 
@@ -948,7 +978,8 @@ shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 > `docker/scripts/verify-encryption-cron.sh`) are downloaded automatically
 > by `./install.sh --start` (M6 #56 F120 fix). If you installed via a
 > different path, ensure these scripts are present at the documented
-> paths before following the runbook examples.
+> paths before following the runbook examples. For cron / systemd examples,
+> complete the `/opt/sbomhub` deployment in §4.5 first.
 >
 > Manual download example:
 >
@@ -1027,6 +1058,10 @@ docker compose -f docker-compose.enterprise.yml logs -f sbomhub-api | head -50
 M4-6 で公式 backup / restore スクリプトを同梱した。 単純な cron に組み合わせて運用できる。
 **production の restore はこの script を canonical path として使用し、 §9.3 manual 手順は
 script が動かない緊急時の fallback として位置付ける。**
+
+cron 例を入れる前に、§4.5 の `/opt/sbomhub` deployment を完了しておくこと。これにより
+`/opt/sbomhub/docker/scripts/backup.sh` と、wrapper が参照する `/opt/sbomhub/docker/secrets/`
+が同じ runbook 上で再現可能になる。
 
 - [`../../docker/scripts/backup.sh`](../../docker/scripts/backup.sh) — `pg_dump` + `.env`/secrets +
   Ollama model list を 1 つの tar.gz に固める。 引数や保存先、 age 暗号化との繋ぎ込みは
