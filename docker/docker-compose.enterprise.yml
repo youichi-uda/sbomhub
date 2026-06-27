@@ -270,9 +270,14 @@ services:
         PGPASSFILE="$$(mktemp)"
         chmod 600 "$$PGPASSFILE"
         trap 'shred -u "$$PGPASSFILE" 2>/dev/null || rm -f "$$PGPASSFILE"' EXIT HUP INT TERM
+        pgpass_escape() {
+          printf '%s' "$$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'
+        }
         ADMIN_PW="$$(cat "$$POSTGRES_ADMIN_PASSWORD_FILE")"
-        printf '%s:%s:%s:%s:%s\n' "$$POSTGRES_HOST" "$$POSTGRES_PORT" "*" "$$POSTGRES_ADMIN_USER" "$$ADMIN_PW" > "$$PGPASSFILE"
+        ADMIN_PW_ESCAPED="$$(pgpass_escape "$$ADMIN_PW")"
+        printf '%s:%s:%s:%s:%s\n' "$$POSTGRES_HOST" "$$POSTGRES_PORT" "*" "$$POSTGRES_ADMIN_USER" "$$ADMIN_PW_ESCAPED" > "$$PGPASSFILE"
         unset ADMIN_PW
+        unset ADMIN_PW_ESCAPED
         export PGPASSFILE
         APP_PW="$$(cat "$$POSTGRES_APP_PASSWORD_FILE")"
         MIG_PW="$$(cat "$$POSTGRES_MIGRATOR_PASSWORD_FILE")"

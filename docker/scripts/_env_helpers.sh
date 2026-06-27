@@ -57,3 +57,8 @@ urlenc() {
         -e 's/=/%3D/g' -e 's/@/%40/g' -e 's/:/%3A/g' \
         -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/&/%26/g'
 }
+
+pgpass_escape() {
+    # .pgpass field values must escape backslash and colon.
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'
+}

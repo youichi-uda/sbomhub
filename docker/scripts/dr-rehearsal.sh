@@ -1,11 +1,12 @@
 #!/usr/bin/env sh
+# shellcheck disable=SC2329
 # SBOMHub Disaster Recovery Rehearsal (M7-4 #60)
 #
 # Performs an end-to-end DR rehearsal:
 # 1. Start an ephemeral docker compose environment (postgres + redis + api)
 # 2. Insert sample tenants with BYOK LLM key + issue tracker token
 # 3. Rotate ENCRYPTION_KEY (migrate-encryption --dry-run -> --apply -> --verify)
-# 4. Backup -> restore -> verify-encryption smoke (restore Step 8)
+# 4. Backup -> restore -> verify-encryption hard gate
 # 5. Cleanup the ephemeral environment
 #
 # Exit code contract:
@@ -50,6 +51,7 @@ MIGRATOR_PASSWORD="sbomhub_migrator_dev"
 DATABASE_URL=""
 VERIFY_DB_URL=""
 BACKUP_TARBALL=""
+API_IMAGE="${API_IMAGE:-y1uda/sbomhub-api:latest}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -155,12 +157,13 @@ psql_stdin() {
 }
 
 prepare_compose() {
-    cat >"$COMPOSE_OVERRIDE" <<'YAML'
+    cat >"$COMPOSE_OVERRIDE" <<YAML
 services:
   postgres:
     ports:
       - "127.0.0.1::5432"
   api:
+    image: ${API_IMAGE}
     environment:
       - APP_ENV=development
 YAML
@@ -177,8 +180,9 @@ prepare_rehearsal_secrets() {
         echo "[dr-rehearsal]        move existing secrets aside or run in a clean checkout for rehearsal" >&2
         return 1
     fi
-    mkdir -p "$SECRETS_DIR"
     umask 077
+    mkdir -p "$SECRETS_DIR"
+    chmod 700 "$SECRETS_DIR"
     printf '%s' "$NEW_ENCRYPTION_KEY" >"$SECRETS_DIR/encryption_key.txt"
     printf '%s' "sbomhub" >"$SECRETS_DIR/postgres_password.txt"
     printf '%s' "$APP_PASSWORD" >"$SECRETS_DIR/postgres_app_password.txt"
@@ -385,6 +389,16 @@ run_restore_verify_smoke() {
         "$SCRIPT_DIR/restore.sh" "$BACKUP_TARBALL"
 }
 
+verify_encryption_hard_gate() {
+    if [ -z "$VERIFY_DB_URL" ]; then
+        echo "[dr-rehearsal] FATAL: VERIFY_DB_URL is empty" >&2
+        return 1
+    fi
+    ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
+    DATABASE_URL="$VERIFY_DB_URL" \
+        "$SCRIPT_DIR/verify-encryption.sh" --key-file "$SECRETS_DIR/encryption_key.txt"
+}
+
 if ! docker_check; then
     echo "[dr-rehearsal] FATAL: docker / docker compose not available" >&2
     exit 2
@@ -421,6 +435,7 @@ step "ENCRYPTION_KEY rotation (verify)" rotate_verify
 step "Backup" run_backup
 step "Restore" run_restore
 step "Verify encryption (restore Step 8 smoke)" run_restore_verify_smoke
+step "Verify encryption (DR rehearsal hard gate)" verify_encryption_hard_gate
 
 echo ""
 echo "===================================="

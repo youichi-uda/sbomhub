@@ -135,10 +135,42 @@ done
 # Helpers
 # ----------------------------------------------------------------------------
 
-ENV_HELPERS_PATH="$(dirname "$0")/docker/scripts/_env_helpers.sh"
-if [ -r "$ENV_HELPERS_PATH" ]; then
-    # shellcheck disable=SC1090  # source path resolved at runtime
-    . "$ENV_HELPERS_PATH"
+ENV_HELPERS_LOADED=0
+for helper_path in \
+    "$(dirname "$0")/docker/scripts/_env_helpers.sh" \
+    "$PWD/docker/scripts/_env_helpers.sh" \
+    "./docker/scripts/_env_helpers.sh"; do
+    if [ -r "$helper_path" ]; then
+        # shellcheck disable=SC1090  # source path resolved at runtime
+        . "$helper_path"
+        ENV_HELPERS_LOADED=1
+        break
+    fi
+done
+
+if ! command -v read_env_var >/dev/null 2>&1; then
+    read_env_var() {
+        key="$1"
+        count="$(grep -c "^${key}=" .env || true)"
+        if [ "$count" -eq 0 ]; then
+            echo "[FATAL] ${key} is missing in .env" >&2
+            exit 1
+        fi
+        if [ "$count" -gt 1 ]; then
+            echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
+            exit 1
+        fi
+        raw="$(grep "^${key}=" .env | cut -d= -f2-)"
+        raw="${raw#\"}"
+        raw="${raw%\"}"
+        raw="${raw#\'}"
+        raw="${raw%\'}"
+        if [ -z "$raw" ]; then
+            echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
+            exit 1
+        fi
+        printf '%s' "$raw"
+    }
 fi
 
 sql_literal_escape() {
@@ -649,7 +681,7 @@ if [ "$MODE" = "start" ]; then
 
     # operational scripts download (M6 #56 F120):
     mkdir -p "$SCRIPTS_TARGET_DIR"
-    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh _env_helpers.sh; do
+    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh _env_helpers.sh dr-rehearsal.sh; do
         target="$SCRIPTS_TARGET_DIR/$script"
         if [ ! -f "$target" ]; then
             if ! command -v curl >/dev/null 2>&1; then
@@ -669,9 +701,11 @@ if [ "$MODE" = "start" ]; then
             fi
         fi
     done
-    if ! command -v read_env_var >/dev/null 2>&1 && [ -r "$ENV_HELPERS_PATH" ]; then
-        # shellcheck disable=SC1090  # source path resolved at runtime
-        . "$ENV_HELPERS_PATH"
+    # M7 Phase D Round 1 #F138: re-source from downloaded path for curl-only install.
+    if [ "$ENV_HELPERS_LOADED" -eq 0 ] && [ -r "$SCRIPTS_TARGET_DIR/_env_helpers.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$SCRIPTS_TARGET_DIR/_env_helpers.sh"
+        ENV_HELPERS_LOADED=1
     fi
 
     # .env を生成 (既存なら保持し、 そこから password を読む)。

@@ -1,6 +1,7 @@
+---
 name: DR Rehearsal
 
-on:
+"on":
   schedule:
     - cron: "0 4 * * 0"
   workflow_dispatch:
@@ -18,7 +19,17 @@ jobs:
           docker compose version
           go version
 
+      - name: Build API image (DR rehearsal validates HEAD binary)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./apps/api
+          load: true
+          push: false
+          tags: sbomhub/api:dr-rehearsal-${{ github.sha }}
+
       - name: Run DR rehearsal
+        env:
+          API_IMAGE: sbomhub/api:dr-rehearsal-${{ github.sha }}
         run: ./docker/scripts/dr-rehearsal.sh --verbose
 
       - name: Upload report on failure

@@ -76,6 +76,8 @@ jobs:
           test -f .env.example
           test -x docker/scripts/backup.sh
           test -x docker/scripts/restore.sh
+          test -f docker/scripts/_env_helpers.sh
+          test -x docker/scripts/dr-rehearsal.sh
           test -x docker/scripts/verify-encryption.sh
           test -x docker/scripts/verify-encryption-cron.sh
 

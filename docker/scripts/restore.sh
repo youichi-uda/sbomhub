@@ -428,36 +428,40 @@ case "${COMPOSE_BASENAME}" in
             exit 1
         fi
         APP_PASSWORD="$(cat "${APP_PASSWORD_FILE}")"
-        PGPASSFILE_CONTAINER="/tmp/.pgpass-restore-$$"
         APP_CHECK_RAW="$(printf '%s\n' "${APP_PASSWORD}" | \
             docker compose -f "${COMPOSE_FILE}" exec -T \
                 postgres \
                 sh -c '
                     set -eu
-                    PGPASSFILE_CONTAINER="$1"
-                    PG_DB="$2"
+                    PG_DB="$1"
                     IFS= read -r APP_PASSWORD
+                    pgpass_escape() {
+                        printf "%s" "$1" | sed -e "s/\\\\/\\\\\\\\/g" -e "s/:/\\\\:/g"
+                    }
                     cleanup() {
                         shred -u "$PGPASSFILE_CONTAINER" 2>/dev/null || rm -f "$PGPASSFILE_CONTAINER"
                     }
+                    PGPASSFILE_CONTAINER="$(mktemp)"
                     trap cleanup EXIT HUP INT TERM
                     umask 077
-                    printf "localhost:5432:*:sbomhub_app:%s\n" "$APP_PASSWORD" > "$PGPASSFILE_CONTAINER"
+                    APP_PASSWORD_ESCAPED="$(pgpass_escape "$APP_PASSWORD")"
+                    printf "localhost:5432:*:sbomhub_app:%s\n" "$APP_PASSWORD_ESCAPED" > "$PGPASSFILE_CONTAINER"
                     unset APP_PASSWORD
+                    unset APP_PASSWORD_ESCAPED
                     chmod 600 "$PGPASSFILE_CONTAINER"
                     PGPASSFILE="$PGPASSFILE_CONTAINER" \
                         psql -h localhost -U sbomhub_app -d "$PG_DB" \
                             -tA -v ON_ERROR_STOP=1 \
                             -c "SELECT count(*) FROM tenants;"
-                ' sh "${PGPASSFILE_CONTAINER}" "${PG_DB}" 2>&1)" || {
+                ' sh "${PG_DB}" 2>&1)" || {
             echo "[restore] FATAL: sbomhub_app cannot SELECT from tenants after restore:" >&2
             awk '{print "[restore]   " $0}' <<< "${APP_CHECK_RAW}" >&2
             echo "[restore]        restored tables に sbomhub_app 用の GRANT が無い可能性。" >&2
             echo "[restore]        db-bootstrap log を確認: docker compose -f ${COMPOSE_FILE} logs db-bootstrap" >&2
-            unset APP_PASSWORD PGPASSFILE_CONTAINER
+            unset APP_PASSWORD
             exit 1
         }
-        unset APP_PASSWORD PGPASSFILE_CONTAINER
+        unset APP_PASSWORD
         APP_TENANT_COUNT="$(printf '%s' "${APP_CHECK_RAW}" | tr -d '[:space:]')"
         if ! [[ "${APP_TENANT_COUNT}" =~ ^[0-9]+$ ]]; then
             echo "[restore] FATAL: sbomhub_app tenants count is not numeric: '${APP_TENANT_COUNT}'" >&2
