@@ -426,6 +426,14 @@ func (s *IssueTrackerService) mapExternalStatus(externalStatus string) model.Tic
 }
 
 // Encryption helpers
+func EncryptIssueTrackerToken(plaintext string, key []byte) (string, error) {
+	return (&IssueTrackerService{encryptionKey: key}).encrypt(plaintext)
+}
+
+func DecryptIssueTrackerToken(ciphertext string, key []byte) (string, error) {
+	return (&IssueTrackerService{encryptionKey: key}).decrypt(ciphertext)
+}
+
 func (s *IssueTrackerService) encrypt(plaintext string) (string, error) {
 	block, err := aes.NewCipher(s.encryptionKey)
 	if err != nil {
@@ -550,9 +558,9 @@ func isPrivateIP(ip net.IP) bool {
 
 	// Private IPv6 ranges
 	privateRangesV6 := []string{
-		"::1/128",      // Loopback
-		"fc00::/7",     // Unique local
-		"fe80::/10",    // Link-local
+		"::1/128",   // Loopback
+		"fc00::/7",  // Unique local
+		"fe80::/10", // Link-local
 	}
 
 	for _, cidr := range privateRanges {
