@@ -330,6 +330,11 @@ done
 APP_PW="$(grep ^APP_PASSWORD= .env | cut -d= -f2-)"
 ENCRYPTION_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
 
+# Fail loud if .env is missing required keys
+[ -z "$APP_PW" ] && { echo "[FATAL] APP_PASSWORD is missing or empty in .env" >&2; exit 1; }
+[ -z "$ENCRYPTION_KEY" ] && { echo "[FATAL] ENCRYPTION_KEY is missing or empty in .env" >&2; exit 1; }
+
+# Now safe to install
 sudo install -d -m 700 -o sbomhub -g sbomhub /opt/sbomhub/docker/secrets
 
 printf '%s' "$APP_PW" | sudo install -m 600 -o sbomhub -g sbomhub /dev/stdin \
