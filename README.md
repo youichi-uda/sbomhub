@@ -135,6 +135,11 @@ curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-com
 [`docs/snippets/install.sh.md`](./docs/snippets/install.sh.md) を参照してください
 (`install.sh` と手動手順の single source of truth)。
 
+Docker image の publish CI は、API image に加えて web image も push 前に smoke test します。
+web image は同一 local build を `load: true` で起動し、`http://localhost:3000` の到達性、
+HTML marker、Next.js standalone runtime output (`server.js` / `.next/static`) を確認してから
+同じ tag を push します。
+
 または、リポジトリをクローンして起動:
 
 ```bash

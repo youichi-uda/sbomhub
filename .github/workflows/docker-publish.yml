@@ -91,13 +91,63 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push Web
+      - name: Build web image (local + tags for push)
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./apps/web/Dockerfile
-          push: true
+          load: true
+          push: false
           tags: ${{ steps.meta-web.outputs.tags }}
           labels: ${{ steps.meta-web.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Keep the published web image tied to the exact local build that passed
+      # smoke: runtime reachability plus Next.js standalone output presence.
+      - name: Smoke test web image
+        env:
+          WEB_TAGS: ${{ steps.meta-web.outputs.tags }}
+        run: |
+          WEB_TAG="$(printf '%s\n' "$WEB_TAGS" | head -n 1)"
+
+          docker run -d --name web-smoke -p 3000:3000 "$WEB_TAG"
+          cleanup() {
+            docker logs web-smoke || true
+            docker rm -f web-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+              echo "web image reachable"
+              break
+            fi
+            sleep 2
+          done
+
+          curl -fsS http://localhost:3000 \
+            | grep -q "SBOMHub\|<title>" \
+            || {
+              echo "web image response missing key marker"
+              exit 1
+            }
+
+          docker run --rm --entrypoint /bin/sh "$WEB_TAG" \
+            -c '
+              test -x "$(command -v node)"
+              test -f /app/apps/web/server.js
+              test -d /app/apps/web/.next/static
+            '
+
+          trap - EXIT
+          docker rm -f web-smoke
+
+      - name: Push web image
+        env:
+          WEB_TAGS: ${{ steps.meta-web.outputs.tags }}
+        run: |
+          printf '%s\n' "$WEB_TAGS" | while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done
