@@ -421,7 +421,10 @@ write_env_var() {
   local value="$2"
   local tmp
   tmp="$(mktemp)"
-  awk -v key="${key}=" -v val="${value}" '
+  # Pass replacement value via env (not argv) to avoid ps/procfs leak.
+  # awk reads it via ENVIRON[] inside BEGIN.
+  WRITE_ENV_VALUE="$value" awk -v key="${key}=" '
+    BEGIN { val = ENVIRON["WRITE_ENV_VALUE"] }
     $0 ~ "^" key { print key val; next }
     { print }
   ' .env > "$tmp"
