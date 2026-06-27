@@ -421,12 +421,12 @@ enterprise compose での基本 flow:
 export OLD_ENCRYPTION_KEY="$(cat secrets/encryption_key.txt)"
 export NEW_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 
-# option 3: docker compose exec api 経由で migrate-encryption 実行 (recommended)
-docker compose exec -T api \
+# option 3: docker compose exec sbomhub-api 経由で migrate-encryption 実行 (recommended)
+docker compose exec -T sbomhub-api \
   env OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" NEW_ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
   /usr/local/bin/migrate-encryption --dry-run --report /tmp/dry-run.json
 
-docker compose exec -T api \
+docker compose exec -T sbomhub-api \
   env OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" NEW_ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
   /usr/local/bin/migrate-encryption \
     --apply \
@@ -434,7 +434,7 @@ docker compose exec -T api \
     --report /tmp/apply.json
 
 # docker/secrets/encryption_key.txt を NEW_ENCRYPTION_KEY に置換して api restart 後:
-docker compose exec -T api \
+docker compose exec -T sbomhub-api \
   env OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" NEW_ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
   /usr/local/bin/migrate-encryption \
     --verify \
@@ -446,7 +446,7 @@ host shell から `go run` する場合は、先に `DATABASE_URL` を明示す�
 
 ```bash
 # option 1: docker compose から env を抽出
-DATABASE_URL="$(docker compose exec api printenv DATABASE_URL)"
+DATABASE_URL="$(docker compose exec sbomhub-api printenv DATABASE_URL)"
 
 # option 2: Docker secrets から DSN を組み立て
 APP_PW="$(cat secrets/postgres_app_password.txt)"
@@ -473,7 +473,7 @@ go run ./cmd/migrate-encryption \
   --report ../../migrate-encryption-verify.json
 ```
 
-推奨は option 3 の `docker compose exec -T api` 経由。 host shell の
+推奨は option 3 の `docker compose exec -T sbomhub-api` 経由。 host shell の
 `DATABASE_URL` は通常 export されていないため、 host で実行する場合だけ
 option 1 または 2 を使う。
 

@@ -118,11 +118,11 @@ access. Both key values are sensitive: pass them through environment variables
 only, do not put them in argv, shared logs, shell history, or tickets.
 
 Recommended execution path for Docker Compose is option 3: run the binary inside
-the `api` container, where `DATABASE_URL` is already present:
+the `sbomhub-api` container, where `DATABASE_URL` is already present:
 
 ```bash
 # option 3: run migrate-encryption through docker compose exec (recommended)
-docker compose exec -T api \
+docker compose exec -T sbomhub-api \
   env OLD_ENCRYPTION_KEY="$OLD_KEY" NEW_ENCRYPTION_KEY="$NEW_KEY" \
   /usr/local/bin/migrate-encryption --dry-run --report /tmp/dry-run.json
 ```
@@ -132,7 +132,7 @@ If you run the Go command from the host shell instead, first populate
 
 ```bash
 # option 1: read the runtime DSN from docker compose
-DATABASE_URL="$(docker compose exec api printenv DATABASE_URL)"
+DATABASE_URL="$(docker compose exec sbomhub-api printenv DATABASE_URL)"
 
 # option 2: build the DSN from Docker secrets
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
@@ -203,7 +203,9 @@ Operational notes:
 - If interrupted, rerun with the same dry-run report. For precise resume, pass
   `--resume-from <resume_token>` from the last processed report row. Resume is
   intentionally limited to a single `--table` / `--column` target and a single
-  tenant encoded in the token. Do not use it with the default multi-target run.
+  tenant encoded in the token. The token includes an HMAC signature derived from
+  the dry-run report file content, so use it with the same `--report-input`.
+  Do not use it with the default multi-target run.
 - `--continue-on-error` records row failures and continues the current batch.
   Without it, the current transaction rolls back and the command exits.
 
