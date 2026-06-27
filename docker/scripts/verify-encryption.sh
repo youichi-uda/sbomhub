@@ -50,14 +50,14 @@
 #
 # Examples:
 #   # 1. Manual, BYOK LLM key path (default):
+#   export DATABASE_URL="postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
 #   ENCRYPTION_KEY="$(cat /run/secrets/encryption_key)" \
-#       ./scripts/verify-encryption.sh \
-#       --db-url "postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
+#       ./scripts/verify-encryption.sh
 #
 #   # Equivalent file-based key path that avoids putting the secret in argv:
+#   export DATABASE_URL="postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
 #   ./scripts/verify-encryption.sh \
-#       --key-file /run/secrets/encryption_key \
-#       --db-url "postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
+#       --key-file /run/secrets/encryption_key
 #
 #   # 2. Issue-tracker token path (TEXT base64):
 #   ./scripts/verify-encryption.sh \

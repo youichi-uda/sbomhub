@@ -341,8 +341,8 @@ hash. Prefer the environment path so the old master key is not written to disk:
 
 ```bash
 # Recommended (env path, no disk persistence):
-ENCRYPTION_KEY="$OLD_KEY" ./docker/scripts/verify-encryption.sh \
-  --db-url "$DATABASE_URL" > before-rotation-hash.txt
+export DATABASE_URL="${DATABASE_URL:?set DATABASE_URL}"
+ENCRYPTION_KEY="$OLD_KEY" ./docker/scripts/verify-encryption.sh > before-rotation-hash.txt
 # $OLD_KEY shell variable lives only in this shell session.
 ```
 
@@ -356,8 +356,8 @@ old_key_file="$(mktemp)"
 chmod 600 "$old_key_file"
 trap 'shred -u "$old_key_file" 2>/dev/null || rm -f "$old_key_file"' EXIT
 echo "$OLD_KEY" > "$old_key_file"
-./docker/scripts/verify-encryption.sh --key-file "$old_key_file" \
-  --db-url "$DATABASE_URL" > before-rotation-hash.txt
+export DATABASE_URL="${DATABASE_URL:?set DATABASE_URL}"
+./docker/scripts/verify-encryption.sh --key-file "$old_key_file" > before-rotation-hash.txt
 ```
 
 The saved file must contain the `ok ... sha256=<hex>` line only; it must not
@@ -457,9 +457,9 @@ Run the verification checks in §4, including `verify-encryption.sh` with
 `NEW_KEY` after Step 5 has rewritten the DB:
 
 ```bash
+export DATABASE_URL="${DATABASE_URL:?set DATABASE_URL}"
 ./docker/scripts/verify-encryption.sh \
     --key-file docker/secrets/encryption_key.txt \
-    --db-url "$DATABASE_URL" \
     | tee after-rotation-hash.txt
 ```
 
@@ -535,17 +535,17 @@ encrypted records are still readable.
    new key actually decrypts the re-encrypted ciphertext at the DB layer:
 
    ```bash
+   export DATABASE_URL="${DATABASE_URL:?set DATABASE_URL}"
    ENCRYPTION_KEY="$(cat docker/secrets/encryption_key.txt)" \
-   ./docker/scripts/verify-encryption.sh \
-       --db-url "$DATABASE_URL"
+   ./docker/scripts/verify-encryption.sh
    ```
 
    Equivalent file-based invocation:
 
    ```bash
+   export DATABASE_URL="${DATABASE_URL:?set DATABASE_URL}"
    ./docker/scripts/verify-encryption.sh \
-       --key-file docker/secrets/encryption_key.txt \
-       --db-url "$DATABASE_URL"
+       --key-file docker/secrets/encryption_key.txt
    ```
 
    On success the script prints `ok ... sha256=<hex>`; on failure it exits

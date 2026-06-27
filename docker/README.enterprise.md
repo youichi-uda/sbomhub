@@ -364,12 +364,12 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張、 F80 で
   ```
   手動 spot check (restore 後の任意タイミングや、 鍵 rotation 後の最終確認) は:
   ```bash
+  export DATABASE_URL="postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
   ENCRYPTION_KEY="$(cat secrets/encryption_key.txt)" \
-      ./scripts/verify-encryption.sh --db-url "$DATABASE_URL"
+      ./scripts/verify-encryption.sh
 
   ./scripts/verify-encryption.sh \
-      --key-file secrets/encryption_key.txt \
-      --db-url "$DATABASE_URL"
+      --key-file secrets/encryption_key.txt
   ```
   exit code 契約 / SHA256(plaintext)-only 出力 / column 切り替え (BYOK LLM key /
   issue_tracker_connections token) は [`docs/security/self-host-deployment.md`](../docs/security/self-host-deployment.md) §4.5 を参照。
