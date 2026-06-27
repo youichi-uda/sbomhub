@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -35,6 +36,8 @@ const (
 	defaultBatchSize      = 1000
 	dryRunMaxAge          = 24 * time.Hour
 	defaultReportTimeForm = "20060102-150405"
+	reportSchemaVersion   = "1"
+	verifyMissingLogLimit = 100
 )
 
 var openDB = sql.Open
@@ -79,13 +82,14 @@ func (f *repeatedFlag) Set(v string) error {
 }
 
 type options struct {
-	Mode            mode
-	ContinueOnError bool
-	ReportPath      string
-	ReportInput     string
-	ResumeFrom      string
-	BatchSize       int
-	Targets         []target
+	Mode             mode
+	ContinueOnError  bool
+	ReportPath       string
+	ReportInput      string
+	ResumeFrom       string
+	ResumeSigningKey []byte
+	BatchSize        int
+	Targets          []target
 }
 
 type rowReport struct {
@@ -100,21 +104,25 @@ type rowReport struct {
 }
 
 type report struct {
-	StartedAt  time.Time   `json:"started_at"`
-	FinishedAt time.Time   `json:"finished_at"`
-	Mode       mode        `json:"mode"`
-	Tables     []string    `json:"tables"`
-	TotalRows  int         `json:"total_rows"`
-	Succeeded  int         `json:"succeeded"`
-	Failed     int         `json:"failed"`
-	Skipped    int         `json:"skipped,omitempty"`
-	Rows       []rowReport `json:"rows"`
+	SchemaVersion    string      `json:"schema_version"`
+	StartedAt        time.Time   `json:"started_at"`
+	FinishedAt       time.Time   `json:"finished_at"`
+	Mode             mode        `json:"mode"`
+	Tables           []string    `json:"tables"`
+	TotalRows        int         `json:"total_rows"`
+	Succeeded        int         `json:"succeeded"`
+	Failed           int         `json:"failed"`
+	Skipped          int         `json:"skipped,omitempty"`
+	Rows             []rowReport `json:"rows"`
+	inputPath        string      `json:"-"`
+	resumeSigningKey []byte      `json:"-"`
 }
 
 type dryRunExpectations struct {
-	digests map[string]string
-	rows    map[string]rowReport
-	seen    map[string]struct{}
+	digests    map[string]string
+	rows       map[string]rowReport
+	seen       map[string]struct{}
+	reportPath string
 }
 
 type resumeToken struct {
@@ -305,6 +313,7 @@ func realMain(args []string, stdout, stderr io.Writer) *exitError {
 		if err != nil {
 			return newExitError(exitPrecondition, err)
 		}
+		opts.ResumeSigningKey = dry.resumeSigningKey
 		expected = newDryRunExpectations(dry)
 	}
 
@@ -363,13 +372,16 @@ func readKey(name string) ([]byte, error) {
 }
 
 func run(ctx context.Context, db *sql.DB, oldKey, newKey []byte, opts options, expected *dryRunExpectations, now time.Time) (*report, int, error) {
-	rep := &report{StartedAt: now, Mode: opts.Mode, Tables: tableNames(opts.Targets)}
+	rep := &report{SchemaVersion: reportSchemaVersion, StartedAt: now, Mode: opts.Mode, Tables: tableNames(opts.Targets)}
 	tenantIDs, err := queryTenants(ctx, db)
 	if err != nil {
 		return rep, exitDBError, err
 	}
 	resume, err := parseResumeConstraint(opts, tenantIDs)
 	if err != nil {
+		if isPreconditionErr(err) {
+			return rep, exitPrecondition, err
+		}
 		return rep, exitUsageError, err
 	}
 	for _, tenantID := range tenantIDs {
@@ -524,7 +536,7 @@ func processBatch(ctx context.Context, db *sql.DB, tenantID string, tgt target, 
 
 func processRow(ctx context.Context, tx *sql.Tx, tenantID, rowID string, tgt target, ciphertext []byte, oldKey, newKey []byte, opts options, expected *dryRunExpectations) (rowReport, error) {
 	rr := rowReport{Table: tgt.Table, Column: tgt.Column, TenantID: tenantID, RowID: rowID}
-	rr.ResumeToken = encodeResumeToken(rr)
+	rr.ResumeToken = encodeResumeToken(rr, opts.ResumeSigningKey)
 	key := reportKey(tgt.Table, tgt.Column, tenantID, rowID)
 	switch opts.Mode {
 	case modeDryRun:
@@ -678,14 +690,19 @@ func writeReport(path string, rep *report) error {
 }
 
 func loadDryRunReport(path string, now time.Time, targets []target) (*report, error) {
-	f, err := os.Open(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open --report-input %s: %w", path, err)
 	}
-	defer f.Close()
 	var rep report
-	if err := json.NewDecoder(f).Decode(&rep); err != nil {
+	if err := json.Unmarshal(content, &rep); err != nil {
 		return nil, fmt.Errorf("decode --report-input %s: %w", path, err)
+	}
+	if rep.SchemaVersion == "" {
+		return nil, fmt.Errorf("--report-input missing schema_version")
+	}
+	if rep.SchemaVersion != reportSchemaVersion {
+		return nil, fmt.Errorf("--report-input schema_version=%q is not supported", rep.SchemaVersion)
 	}
 	if rep.Mode != modeDryRun {
 		return nil, fmt.Errorf("--report-input must be a dry-run report (got mode=%s)", rep.Mode)
@@ -705,23 +722,15 @@ func loadDryRunReport(path string, now time.Time, targets []target) (*report, er
 	for _, tgt := range targets {
 		targetSet[targetKey(tgt.Table, tgt.Column)] = struct{}{}
 	}
-	reportTargets := make(map[string]struct{}, len(rep.Rows))
-	for i, row := range rep.Rows {
-		if row.Table == "" || row.Column == "" || row.TenantID == "" || row.RowID == "" {
-			return nil, fmt.Errorf("--report-input row %d has empty table/column/tenant_id/row_id", i)
+	reportTargets := make(map[string]struct{}, len(rep.Tables))
+	for _, table := range rep.Tables {
+		if table == "" {
+			return nil, fmt.Errorf("--report-input has empty target in tables")
 		}
-		key := reportKey(row.Table, row.Column, row.TenantID, row.RowID)
-		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("--report-input has duplicate row key table=%s column=%s tenant=%s row=%s", row.Table, row.Column, row.TenantID, row.RowID)
+		if _, exists := reportTargets[table]; exists {
+			return nil, fmt.Errorf("--report-input has duplicate target %s in tables", table)
 		}
-		seen[key] = struct{}{}
-		if row.Status == "ok" && row.SHA256 != "" {
-			okRows++
-			reportTargets[targetKey(row.Table, row.Column)] = struct{}{}
-		}
-	}
-	if rep.TotalRows != okRows {
-		return nil, fmt.Errorf("--report-input total_rows=%d does not match ok rows with sha256=%d", rep.TotalRows, okRows)
+		reportTargets[table] = struct{}{}
 	}
 	if len(reportTargets) != len(targetSet) {
 		return nil, fmt.Errorf("--report-input target set does not match current invocation")
@@ -731,14 +740,38 @@ func loadDryRunReport(path string, now time.Time, targets []target) (*report, er
 			return nil, fmt.Errorf("--report-input target %s not selected in current invocation", key)
 		}
 	}
+	for i, row := range rep.Rows {
+		if row.Table == "" || row.Column == "" || row.TenantID == "" || row.RowID == "" {
+			return nil, fmt.Errorf("--report-input row %d has empty table/column/tenant_id/row_id", i)
+		}
+		rowTarget := targetKey(row.Table, row.Column)
+		if _, ok := reportTargets[rowTarget]; !ok {
+			return nil, fmt.Errorf("--report-input row target %s is not listed in tables", rowTarget)
+		}
+		key := reportKey(row.Table, row.Column, row.TenantID, row.RowID)
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("--report-input has duplicate row key table=%s column=%s tenant=%s row=%s", row.Table, row.Column, row.TenantID, row.RowID)
+		}
+		seen[key] = struct{}{}
+		if row.Status == "ok" && row.SHA256 != "" {
+			okRows++
+		}
+	}
+	if rep.TotalRows != okRows {
+		return nil, fmt.Errorf("--report-input total_rows=%d does not match ok rows with sha256=%d", rep.TotalRows, okRows)
+	}
+	sum := sha256.Sum256(content)
+	rep.inputPath = path
+	rep.resumeSigningKey = sum[:]
 	return &rep, nil
 }
 
 func newDryRunExpectations(rep *report) *dryRunExpectations {
 	out := &dryRunExpectations{
-		digests: make(map[string]string, len(rep.Rows)),
-		rows:    make(map[string]rowReport, len(rep.Rows)),
-		seen:    make(map[string]struct{}, len(rep.Rows)),
+		digests:    make(map[string]string, len(rep.Rows)),
+		rows:       make(map[string]rowReport, len(rep.Rows)),
+		seen:       make(map[string]struct{}, len(rep.Rows)),
+		reportPath: rep.inputPath,
 	}
 	for _, row := range rep.Rows {
 		if row.Status == "ok" && row.SHA256 != "" {
@@ -757,7 +790,10 @@ func parseResumeConstraint(opts options, tenantIDs []string) (*resumeToken, erro
 	if len(opts.Targets) != 1 {
 		return nil, fmt.Errorf("--resume-from requires exactly one target")
 	}
-	token, err := decodeResumeToken(opts.ResumeFrom)
+	if opts.Mode == modeApply && len(opts.ResumeSigningKey) == 0 {
+		return nil, preconditionErr{fmt.Errorf("--resume-from with --apply requires --report-input for token signature verification")}
+	}
+	token, err := decodeResumeToken(opts.ResumeFrom, opts.ResumeSigningKey)
 	if err != nil {
 		return nil, err
 	}
@@ -780,10 +816,26 @@ func parseResumeConstraint(opts options, tenantIDs []string) (*resumeToken, erro
 	return token, nil
 }
 
-func decodeResumeToken(raw string) (*resumeToken, error) {
-	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+func decodeResumeToken(raw string, signingKey []byte) (*resumeToken, error) {
+	payload := raw
+	if len(signingKey) > 0 {
+		parts := strings.Split(raw, ".")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, preconditionErr{fmt.Errorf("--resume-from must be a signed token")}
+		}
+		payload = parts[0]
+		signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return nil, preconditionErr{fmt.Errorf("--resume-from signature must be base64url: %w", err)}
+		}
+		want := resumeTokenSignature(payload, signingKey)
+		if !hmac.Equal(signature, want) {
+			return nil, preconditionErr{fmt.Errorf("--resume-from signature is invalid")}
+		}
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		decoded, err = base64.StdEncoding.DecodeString(raw)
+		decoded, err = base64.StdEncoding.DecodeString(payload)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("--resume-from must be a base64 JSON token: %w", err)
@@ -798,9 +850,20 @@ func decodeResumeToken(raw string) (*resumeToken, error) {
 	return &token, nil
 }
 
-func encodeResumeToken(row rowReport) string {
+func encodeResumeToken(row rowReport, signingKey []byte) string {
 	b, _ := json.Marshal(resumeToken{Table: row.Table, Column: row.Column, TenantID: row.TenantID, RowID: row.RowID})
-	return base64.RawURLEncoding.EncodeToString(b)
+	payload := base64.RawURLEncoding.EncodeToString(b)
+	if len(signingKey) == 0 {
+		return payload
+	}
+	signature := resumeTokenSignature(payload, signingKey)
+	return payload + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func resumeTokenSignature(payload string, signingKey []byte) []byte {
+	mac := hmac.New(sha256.New, signingKey)
+	_, _ = mac.Write([]byte(payload))
+	return mac.Sum(nil)
 }
 
 func resumeAfter(token *resumeToken, tenantID string, tgt target) string {
@@ -812,16 +875,28 @@ func resumeAfter(token *resumeToken, tenantID string, tgt target) string {
 
 func verifyExpectedCoverage(expected *dryRunExpectations) error {
 	var missing []string
+	totalMissing := 0
 	for key, row := range expected.rows {
 		if _, ok := expected.seen[key]; ok {
 			continue
 		}
-		missing = append(missing, fmt.Sprintf("%s.%s tenant=%s row=%s", row.Table, row.Column, row.TenantID, row.RowID))
+		totalMissing++
+		if len(missing) < verifyMissingLogLimit {
+			missing = append(missing, fmt.Sprintf("%s.%s tenant=%s row=%s", row.Table, row.Column, row.TenantID, row.RowID))
+		}
 	}
-	if len(missing) == 0 {
+	if totalMissing == 0 {
 		return nil
 	}
-	return fmt.Errorf("dry-run report row(s) missing from current DB result: %s", strings.Join(missing, "; "))
+	detail := strings.Join(missing, "; ")
+	if totalMissing > len(missing) {
+		detail += fmt.Sprintf("; ... and %d more (see report file)", totalMissing-len(missing))
+	}
+	reportPath := expected.reportPath
+	if reportPath == "" {
+		reportPath = "<unknown>"
+	}
+	return fmt.Errorf("dry-run report row(s) missing from current DB result: total=%d report=%s: %s", totalMissing, reportPath, detail)
 }
 
 func reportKey(table, column, tenantID, rowID string) string {
