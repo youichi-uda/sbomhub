@@ -319,12 +319,115 @@ func TestOllama_Complete_RoleNormalization(t *testing.T) {
 	}
 }
 
-func TestOllama_Embed_NotImplemented(t *testing.T) {
-	p := NewOllama("http://localhost:11434", "qwen2.5-coder:7b")
-	_, err := p.Embed(context.Background(), EmbedRequest{})
-	if err != ErrNotImplemented {
-		t.Errorf("err = %v, want ErrNotImplemented", err)
+func fakeOllamaEmbeddingServer(
+	t *testing.T,
+	handler func(t *testing.T, body ollamaEmbedRequest) (status int, resp ollamaEmbedResponse, rawBody []byte),
+) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			t.Errorf("path = %q, want /api/embed", r.URL.Path)
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		var req ollamaEmbedRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		status, resp, rawBody := handler(t, req)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if rawBody != nil {
+			_, _ = w.Write(rawBody)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func makeOllamaEmbeddings(count int) [][]float32 {
+	out := make([][]float32, count)
+	for i := range out {
+		out[i] = []float32{float32(i) + 0.1, float32(i) + 0.2}
 	}
+	return out
+}
+
+func TestOllama_Embed_SuccessAndChunking(t *testing.T) {
+	total := ollamaEmbedMaxBatchSize + 1
+	var calls int
+	srv := fakeOllamaEmbeddingServer(t, func(t *testing.T, req ollamaEmbedRequest) (int, ollamaEmbedResponse, []byte) {
+		calls++
+		if req.Model != "mxbai-embed-large" {
+			t.Errorf("model = %q", req.Model)
+		}
+		return http.StatusOK, ollamaEmbedResponse{
+			Model:           req.Model,
+			Embeddings:      makeOllamaEmbeddings(len(req.Input)),
+			PromptEvalCount: len(req.Input),
+		}, nil
+	})
+	defer srv.Close()
+	p := NewOllamaWithEmbedding(srv.URL, "qwen2.5-coder:7b", "mxbai-embed-large")
+	out, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, total)})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if calls != 2 || len(out.Vectors) != total || out.InputTokens != total || out.Model != "mxbai-embed-large" {
+		t.Fatalf("calls=%d out=%+v", calls, out)
+	}
+}
+
+func TestOllama_Embed_ErrorsAndCaps(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		srv := fakeOllamaEmbeddingServer(t, func(_ *testing.T, _ ollamaEmbedRequest) (int, ollamaEmbedResponse, []byte) {
+			return status, ollamaEmbedResponse{Error: "upstream error"}, nil
+		})
+		p := NewOllama(srv.URL, "qwen2.5-coder:7b")
+		_, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x"}})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "upstream error") {
+			t.Fatalf("status %d err = %v", status, err)
+		}
+	}
+	t.Run("partial failure discards", func(t *testing.T) {
+		var calls int
+		srv := fakeOllamaEmbeddingServer(t, func(_ *testing.T, req ollamaEmbedRequest) (int, ollamaEmbedResponse, []byte) {
+			calls++
+			if calls == 1 {
+				return http.StatusOK, ollamaEmbedResponse{Model: req.Model, Embeddings: makeOllamaEmbeddings(len(req.Input))}, nil
+			}
+			return http.StatusInternalServerError, ollamaEmbedResponse{}, []byte("boom")
+		})
+		defer srv.Close()
+		p := NewOllama(srv.URL, "qwen2.5-coder:7b")
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, ollamaEmbedMaxBatchSize+1)})
+		if err == nil || out != nil {
+			t.Fatalf("out=%+v err=%v, want whole-call failure", out, err)
+		}
+	})
+	p := NewOllama("http://localhost:11434", "qwen2.5-coder:7b")
+	_, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, ollamaEmbedMaxTotalInputs+1)})
+	if err == nil || !strings.Contains(err.Error(), "safety cap") {
+		t.Fatalf("err = %v", err)
+	}
+	t.Run("context cancel", func(t *testing.T) {
+		srv := fakeOllamaEmbeddingServer(t, func(_ *testing.T, req ollamaEmbedRequest) (int, ollamaEmbedResponse, []byte) {
+			return http.StatusOK, ollamaEmbedResponse{Model: req.Model, Embeddings: makeOllamaEmbeddings(len(req.Input))}, nil
+		})
+		defer srv.Close()
+		p := NewOllama(srv.URL, "qwen2.5-coder:7b")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := p.Embed(ctx, EmbedRequest{Texts: []string{"x"}})
+		if err == nil {
+			t.Fatal("expected context cancel error")
+		}
+	})
 }
 
 func TestOllama_Capabilities(t *testing.T) {
@@ -367,8 +470,11 @@ func TestOllama_Capabilities(t *testing.T) {
 			if c.SupportsVision {
 				t.Error("SupportsVision = true, want false (multimodal needs different request shape)")
 			}
-			if c.SupportsEmbedding {
-				t.Error("SupportsEmbedding = true, want false (Embed returns ErrNotImplemented)")
+			if !c.SupportsEmbedding {
+				t.Error("SupportsEmbedding = false, want true")
+			}
+			if c.EmbeddingDimensions != 768 {
+				t.Errorf("EmbeddingDimensions = %d, want 768 for default nomic-embed-text", c.EmbeddingDimensions)
 			}
 		})
 	}

@@ -176,19 +176,154 @@ func TestGemini_Complete_EmptyAPIKey(t *testing.T) {
 	}
 }
 
-func TestGemini_Embed_NotImplemented(t *testing.T) {
-	p := NewGemini("k", "gemini-2.5-flash")
-	_, err := p.Embed(context.Background(), EmbedRequest{})
-	if err != ErrNotImplemented {
-		t.Errorf("err = %v, want ErrNotImplemented", err)
+func fakeGeminiEmbeddingServer(
+	t *testing.T,
+	handler func(t *testing.T, path string, body []byte) (status int, resp geminiEmbedResponse, rawBody []byte),
+) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/models/") ||
+			(!strings.HasSuffix(r.URL.Path, ":embedContent") && !strings.HasSuffix(r.URL.Path, ":batchEmbedContents")) {
+			t.Errorf("path = %q, want Gemini embedding endpoint", r.URL.Path)
+		}
+		if r.Header.Get("x-goog-api-key") == "" {
+			t.Error("missing x-goog-api-key header")
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		status, resp, rawBody := handler(t, r.URL.Path, body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if rawBody != nil {
+			_, _ = w.Write(rawBody)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func makeGeminiEmbeddings(count int) []geminiEmbedding {
+	out := make([]geminiEmbedding, count)
+	for i := range out {
+		out[i] = geminiEmbedding{Values: []float32{float32(i) + 0.1, float32(i) + 0.2}}
 	}
+	return out
+}
+
+func TestGemini_Embed_SuccessSingleAndBatch(t *testing.T) {
+	t.Run("single uses embedContent", func(t *testing.T) {
+		srv := fakeGeminiEmbeddingServer(t, func(t *testing.T, path string, body []byte) (int, geminiEmbedResponse, []byte) {
+			if !strings.HasSuffix(path, ":embedContent") {
+				t.Errorf("path = %q, want embedContent", path)
+			}
+			var req geminiEmbedContentRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Model != "models/gemini-embedding-2" {
+				t.Errorf("model = %q", req.Model)
+			}
+			return http.StatusOK, geminiEmbedResponse{Embedding: geminiEmbedding{Values: []float32{1, 2}}}, nil
+		})
+		defer srv.Close()
+		p := NewGeminiWithEmbeddingAndEndpoint("k", "gemini-2.5-flash", "", srv.URL)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x"}})
+		if err != nil {
+			t.Fatalf("Embed: %v", err)
+		}
+		if len(out.Vectors) != 1 || out.Model != "gemini-embedding-2" {
+			t.Fatalf("out = %+v", out)
+		}
+	})
+	t.Run("batch chunks", func(t *testing.T) {
+		total := geminiEmbedMaxBatchSize + 1
+		var calls int
+		srv := fakeGeminiEmbeddingServer(t, func(t *testing.T, path string, body []byte) (int, geminiEmbedResponse, []byte) {
+			calls++
+			if calls == 1 && !strings.HasSuffix(path, ":batchEmbedContents") {
+				t.Errorf("first path = %q, want batchEmbedContents", path)
+			}
+			if calls == 2 {
+				if !strings.HasSuffix(path, ":embedContent") {
+					t.Errorf("second path = %q, want embedContent", path)
+				}
+				return http.StatusOK, geminiEmbedResponse{Embedding: geminiEmbedding{Values: []float32{1, 2}}}, nil
+			}
+			var req geminiBatchEmbedRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatal(err)
+			}
+			return http.StatusOK, geminiEmbedResponse{Embeddings: makeGeminiEmbeddings(len(req.Requests))}, nil
+		})
+		defer srv.Close()
+		p := NewGeminiWithEmbeddingAndEndpoint("k", "gemini-2.5-flash", "", srv.URL)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, total)})
+		if err != nil {
+			t.Fatalf("Embed: %v", err)
+		}
+		if calls != 2 || len(out.Vectors) != total {
+			t.Fatalf("calls=%d out=%+v", calls, out)
+		}
+	})
+}
+
+func TestGemini_Embed_ErrorsAndCaps(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		srv := fakeGeminiEmbeddingServer(t, func(_ *testing.T, _ string, _ []byte) (int, geminiEmbedResponse, []byte) {
+			return status, geminiEmbedResponse{Error: &geminiError{Message: "upstream error"}}, nil
+		})
+		p := NewGeminiWithEmbeddingAndEndpoint("k", "gemini-2.5-flash", "", srv.URL)
+		_, err := p.Embed(context.Background(), EmbedRequest{Texts: []string{"x"}})
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "upstream error") {
+			t.Fatalf("status %d err = %v", status, err)
+		}
+	}
+	t.Run("partial failure discards", func(t *testing.T) {
+		var calls int
+		srv := fakeGeminiEmbeddingServer(t, func(_ *testing.T, _ string, body []byte) (int, geminiEmbedResponse, []byte) {
+			calls++
+			if calls == 1 {
+				var req geminiBatchEmbedRequest
+				_ = json.Unmarshal(body, &req)
+				return http.StatusOK, geminiEmbedResponse{Embeddings: makeGeminiEmbeddings(len(req.Requests))}, nil
+			}
+			return http.StatusInternalServerError, geminiEmbedResponse{}, []byte("boom")
+		})
+		defer srv.Close()
+		p := NewGeminiWithEmbeddingAndEndpoint("k", "gemini-2.5-flash", "", srv.URL)
+		out, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, geminiEmbedMaxBatchSize+1)})
+		if err == nil || out != nil {
+			t.Fatalf("out=%+v err=%v, want whole-call failure", out, err)
+		}
+	})
+	p := NewGemini("k", "gemini-2.5-flash")
+	_, err := p.Embed(context.Background(), EmbedRequest{Texts: make([]string, geminiEmbedMaxTotalInputs+1)})
+	if err == nil || !strings.Contains(err.Error(), "safety cap") {
+		t.Fatalf("err = %v", err)
+	}
+	t.Run("context cancel", func(t *testing.T) {
+		srv := fakeGeminiEmbeddingServer(t, func(_ *testing.T, _ string, _ []byte) (int, geminiEmbedResponse, []byte) {
+			return http.StatusOK, geminiEmbedResponse{Embedding: geminiEmbedding{Values: []float32{1, 2}}}, nil
+		})
+		defer srv.Close()
+		p := NewGeminiWithEmbeddingAndEndpoint("k", "gemini-2.5-flash", "", srv.URL)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := p.Embed(ctx, EmbedRequest{Texts: []string{"x"}})
+		if err == nil {
+			t.Fatal("expected context cancel error")
+		}
+	})
 }
 
 func TestGemini_Capabilities(t *testing.T) {
 	cases := []struct {
-		model            string
-		wantJSONSchema   bool
-		wantMinContext   int
+		model          string
+		wantJSONSchema bool
+		wantMinContext int
 	}{
 		{"gemini-2.5-pro", true, 1000000},
 		{"gemini-2.5-flash", true, 500000},
@@ -202,6 +337,9 @@ func TestGemini_Capabilities(t *testing.T) {
 		}
 		if cap.MaxContextTokens < tc.wantMinContext {
 			t.Errorf("%s: MaxContextTokens = %d, want >= %d", tc.model, cap.MaxContextTokens, tc.wantMinContext)
+		}
+		if !cap.SupportsEmbedding {
+			t.Errorf("%s: SupportsEmbedding = false, want true", tc.model)
 		}
 	}
 }

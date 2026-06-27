@@ -37,6 +37,9 @@ AI VEX トリアージ / CRA 報告書ドラフト / 経産省自己評価プリ
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | (空) | `provider=gemini` で canonical キーが未設定の場合に使用 |
 | `AZURE_OPENAI_API_KEY` | (空) | `provider=azure_openai` で canonical キーが未設定の場合に使用。`OPENAI_API_KEY` への alias は意図的にしていません (混在すると Azure 向けに OpenAI.com のキーを誤って送ってしまうリスクがあるため) |
 | `OLLAMA_HOST` | (空) | `provider=ollama` の場合に必須 (例: `http://localhost:11434`) |
+| `SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model。既知 dimensions: `text-embedding-3-small` / `text-embedding-ada-002` = 1536、`text-embedding-3-large` = 3072。 |
+| `SBOMHUB_LLM_GEMINI_EMBEDDING_MODEL` | `gemini-embedding-2` | Gemini embedding model。2026 時点の stable は `gemini-embedding-2`。`gemini-embedding-001` / legacy `text-embedding-004` は明示指定で利用可能。既定 dimensions は `gemini-embedding-*` で 3072。 |
+| `SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama `/api/embed` で使う embedding model。代表 dimensions: `nomic-embed-text` = 768、`mxbai-embed-large` / `bge-m3` = 1024。 |
 
 > コードや SBOM を外部に出したくない製造業セルフホスト運用では、Ollama などのローカル LLM を推奨します。既に Microsoft の調達契約がある場合は Azure OpenAI も推奨です。
 
@@ -63,6 +66,17 @@ Azure は embedding (`text-embedding-3-small` / `-3-large` / `text-embedding-ada
 | `SBOMHUB_LLM_AZURE_EMBEDDING_MODEL` | (deployment 名から推定) | canonical embedding model 名 (任意)。 `Capabilities.EmbeddingDimensions` lookup 用 (1536 = `text-embedding-3-small` / `ada-002`、 3072 = `text-embedding-3-large`)。 未設定時は deployment 名を sniff、 業務命名の場合は 0 にフォールバック。 |
 
 batching: 1 リクエストあたり最大 2,048 inputs (Azure 公式 hard cap)、 それを超える分は **透過的に複数 HTTP に分割**。 1 call あたり最大 16,384 inputs の安全 cap (F25 DoS 防止) で、 超過は HTTP dispatch 前に reject。 途中 chunk 失敗時は完了済 chunk を破棄して error を返します (partial Vectors の silent 切り詰めを避けるため)。
+
+#### Azure 以外の embedding provider (M5-7)
+
+OpenAI / Gemini / Ollama も `Embed` を実装しています。Anthropic は、公式 Claude Platform docs が first-party Claude embeddings endpoint ではなく Voyage AI 利用を案内しているため、引き続き非対応です。
+
+| Provider | Endpoint | 既定 embedding model | Dimensions | Batch 挙動 |
+|----------|----------|----------------------|------------|------------|
+| OpenAI | `POST https://api.openai.com/v1/embeddings` | `text-embedding-3-small` | 1536 | 2,048 inputs/request、16,384 inputs/call safety cap。途中 chunk 失敗時は全 vector 破棄。 |
+| Gemini | 1 input は `.../models/{model}:embedContent`、複数は `:batchEmbedContents` | `gemini-embedding-2` | 3072 | sbomhub 側 cap 100 inputs/request、16,384 inputs/call safety cap。途中 chunk 失敗時は全 vector 破棄。 |
+| Ollama | `POST {OLLAMA_HOST}/api/embed` | `nomic-embed-text` | 768 | sbomhub 側 cap 2,048 inputs/request、16,384 inputs/call safety cap。途中 chunk 失敗時は全 vector 破棄。 |
+| Anthropic | N/A | N/A | N/A | `Embed` は `ErrNotImplemented`。Voyage AI 等を別途利用。 |
 
 ### フロントエンド設定
 
@@ -103,6 +117,7 @@ NVD_API_KEY=your-nvd-api-key
 SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | azure_openai | ollama
 SBOMHUB_LLM_MODEL=gpt-5
 OPENAI_API_KEY=sk-...
+SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL=text-embedding-3-small       # 任意; default
 
 # Azure OpenAI の例 (Microsoft 調達契約経由)
 # SBOMHUB_LLM_PROVIDER=azure_openai
@@ -119,6 +134,7 @@ OPENAI_API_KEY=sk-...
 # ローカル LLM の例 (コードを外部に出さない)
 # SBOMHUB_LLM_PROVIDER=ollama
 # SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+# SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 # OLLAMA_HOST=http://localhost:11434
 ```
 

@@ -10,6 +10,9 @@ import (
 
 // Env var names. Centralised so misspellings are caught at compile time and
 // so the env contract matches LLM_PROVIDER_DESIGN.md §3.1.
+// These are environment variable names, not embedded credentials.
+//
+//nolint:gosec
 const (
 	EnvProvider = "SBOMHUB_LLM_PROVIDER" // openai | anthropic | gemini | azure_openai | ollama
 	EnvAPIKey   = "SBOMHUB_LLM_API_KEY"
@@ -113,6 +116,10 @@ const (
 	EnvAzureEmbeddingDeploymentAlias = "AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME"
 	EnvAzureEmbeddingAPIVersion      = "SBOMHUB_LLM_AZURE_EMBEDDING_API_VERSION"
 	EnvAzureEmbeddingModel           = "SBOMHUB_LLM_AZURE_EMBEDDING_MODEL"
+
+	EnvOpenAIEmbeddingModel = "SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL"
+	EnvGeminiEmbeddingModel = "SBOMHUB_LLM_GEMINI_EMBEDDING_MODEL"
+	EnvOllamaEmbeddingModel = "SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL"
 )
 
 // apiKeyEnvCandidates returns the env var names checked for the given
@@ -230,6 +237,26 @@ func resolveAzureField(field string) (value, source string) {
 	return "", ""
 }
 
+func embeddingModelFromEnv(providerName string) (value, source string) {
+	var candidates []string
+	switch providerName {
+	case "openai":
+		candidates = []string{EnvOpenAIEmbeddingModel}
+	case "gemini":
+		candidates = []string{EnvGeminiEmbeddingModel}
+	case "ollama":
+		candidates = []string{EnvOllamaEmbeddingModel}
+	default:
+		return "", ""
+	}
+	for _, name := range candidates {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			return v, name
+		}
+	}
+	return "", ""
+}
+
 // NewProviderFromEnv constructs a Provider from process environment.
 //
 // Behaviour matches LLM_PROVIDER_DESIGN.md §2.3:
@@ -283,11 +310,15 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 
 	switch providerName {
 	case "openai":
-		return NewOpenAI(apiKey, model), nil
+		embeddingModel, embeddingModelSrc := embeddingModelFromEnv("openai")
+		slog.Debug("llm: resolved OpenAI embedding config from env", "embedding_model_env", embeddingModelSrc)
+		return NewOpenAIWithEmbedding(apiKey, model, embeddingModel), nil
 	case "anthropic":
 		return NewAnthropic(apiKey, model), nil
 	case "gemini":
-		return NewGemini(apiKey, model), nil
+		embeddingModel, embeddingModelSrc := embeddingModelFromEnv("gemini")
+		slog.Debug("llm: resolved Gemini embedding config from env", "embedding_model_env", embeddingModelSrc)
+		return NewGeminiWithEmbedding(apiKey, model, embeddingModel), nil
 	case "azure_openai":
 		// M4 Wave M4-2: Azure OpenAI Service. The deployment URL embeds
 		// the model name (Azure routes by deployment, not body field),
@@ -363,7 +394,9 @@ func NewProviderFromEnv(_ context.Context) (Provider, error) {
 		if model == "" {
 			return &DisabledProvider{Reason: EnvModel + " is required for Ollama (no auto-detect; set e.g. qwen2.5-coder:7b)"}, nil
 		}
-		return NewOllama(ollamaBaseURLFromEnv(), model), nil
+		embeddingModel, embeddingModelSrc := embeddingModelFromEnv("ollama")
+		slog.Debug("llm: resolved Ollama embedding config from env", "embedding_model_env", embeddingModelSrc)
+		return NewOllamaWithEmbedding(ollamaBaseURLFromEnv(), model, embeddingModel), nil
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (expected openai|anthropic|gemini|azure_openai|ollama)", providerName)
 	}
@@ -487,11 +520,13 @@ func NewProviderFromConfigWithAzure(provider, model, apiKey, azureEndpoint, azur
 	}
 	switch name {
 	case "openai":
-		return NewOpenAI(apiKey, model), nil
+		embeddingModel, _ := embeddingModelFromEnv("openai")
+		return NewOpenAIWithEmbedding(apiKey, model, embeddingModel), nil
 	case "anthropic":
 		return NewAnthropic(apiKey, model), nil
 	case "gemini":
-		return NewGemini(apiKey, model), nil
+		embeddingModel, _ := embeddingModelFromEnv("gemini")
+		return NewGeminiWithEmbedding(apiKey, model, embeddingModel), nil
 	case "azure_openai":
 		// M4 Wave M4-2: per-tenant Azure OpenAI. Both endpoint and
 		// deployment must be supplied by the caller (the resolver reads
@@ -525,7 +560,8 @@ func NewProviderFromConfigWithAzure(provider, model, apiKey, azureEndpoint, azur
 		if model == "" {
 			return &DisabledProvider{Reason: "tenant_llm_config.model is required for Ollama (no auto-detect)"}, nil
 		}
-		return NewOllama(ollamaBaseURLFromEnv(), model), nil
+		embeddingModel, _ := embeddingModelFromEnv("ollama")
+		return NewOllamaWithEmbedding(ollamaBaseURLFromEnv(), model, embeddingModel), nil
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q (expected openai|anthropic|gemini|azure_openai|ollama)", name)
 	}

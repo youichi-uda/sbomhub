@@ -31,7 +31,7 @@ import (
 // without explicit restrictions are scheduled for rejection in
 // September 2026). ※要確認 in M2 if Google standardises on a different
 // header (e.g. `Authorization: Bearer ...` with service-account auth).
-const geminiAPIKeyHeader = "x-goog-api-key"
+const geminiAPIKeyHeader = "x-goog-api-key" //nolint:gosec // header name, not a credential
 
 // defaultGeminiEndpoint is the base URL for the Google Generative Language
 // API. The model name is appended as a path segment, e.g.
@@ -40,6 +40,12 @@ const geminiAPIKeyHeader = "x-goog-api-key"
 // JSON schema features. Switch to v1 once the feature parity gap closes.
 const defaultGeminiEndpoint = "https://generativelanguage.googleapis.com/v1beta"
 
+const (
+	defaultGeminiEmbeddingModel = "gemini-embedding-2"
+	geminiEmbedMaxBatchSize     = 100
+	geminiEmbedMaxTotalInputs   = azureEmbedMaxTotalInputs
+)
+
 // GeminiProvider implements Provider against Google's Generative Language
 // REST API. We intentionally avoid the google/generative-ai-go SDK in M1 —
 // it pulls a sizeable transitive dep tree (gax-go, grpc, protobuf) for what
@@ -47,10 +53,11 @@ const defaultGeminiEndpoint = "https://generativelanguage.googleapis.com/v1beta"
 // ※要確認: revisit SDK adoption in M2 if we need streaming / function
 // calling / file uploads.
 type GeminiProvider struct {
-	apiKey   string
-	model    string
-	endpoint string
-	client   *http.Client
+	apiKey         string
+	model          string
+	endpoint       string
+	client         *http.Client
+	embeddingModel string
 }
 
 // Compile-time interface conformance.
@@ -66,16 +73,34 @@ func NewGemini(apiKey, model string) *GeminiProvider {
 		model = "gemini-2.5-flash"
 	}
 	return &GeminiProvider{
-		apiKey:   apiKey,
-		model:    model,
-		endpoint: defaultGeminiEndpoint,
-		client:   &http.Client{Timeout: 60 * time.Second},
+		apiKey:         apiKey,
+		model:          model,
+		endpoint:       defaultGeminiEndpoint,
+		client:         &http.Client{Timeout: 60 * time.Second},
+		embeddingModel: defaultGeminiEmbeddingModel,
 	}
+}
+
+// NewGeminiWithEmbedding constructs a Gemini provider with an explicit
+// embedding model. Empty embeddingModel falls back to gemini-embedding-2.
+func NewGeminiWithEmbedding(apiKey, model, embeddingModel string) *GeminiProvider {
+	p := NewGemini(apiKey, model)
+	if strings.TrimSpace(embeddingModel) != "" {
+		p.embeddingModel = strings.TrimSpace(embeddingModel)
+	}
+	return p
 }
 
 // NewGeminiWithEndpoint is used by tests (httptest.Server).
 func NewGeminiWithEndpoint(apiKey, model, endpoint string) *GeminiProvider {
 	p := NewGemini(apiKey, model)
+	p.endpoint = strings.TrimRight(endpoint, "/")
+	return p
+}
+
+// NewGeminiWithEmbeddingAndEndpoint is the httptest seam for embedding tests.
+func NewGeminiWithEmbeddingAndEndpoint(apiKey, model, embeddingModel, endpoint string) *GeminiProvider {
+	p := NewGeminiWithEmbedding(apiKey, model, embeddingModel)
 	p.endpoint = strings.TrimRight(endpoint, "/")
 	return p
 }
@@ -91,6 +116,7 @@ func (p *GeminiProvider) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("provider", p.Name()),
 		slog.String("model", p.model),
+		slog.String("embedding_model", p.embeddingModel),
 	)
 }
 
@@ -136,6 +162,26 @@ type geminiError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Status  string `json:"status"`
+}
+
+type geminiEmbedContentRequest struct {
+	Model                string        `json:"model,omitempty"`
+	Content              geminiContent `json:"content"`
+	OutputDimensionality int           `json:"output_dimensionality,omitempty"`
+}
+
+type geminiBatchEmbedRequest struct {
+	Requests []geminiEmbedContentRequest `json:"requests"`
+}
+
+type geminiEmbedding struct {
+	Values []float32 `json:"values"`
+}
+
+type geminiEmbedResponse struct {
+	Embedding  geminiEmbedding   `json:"embedding"`
+	Embeddings []geminiEmbedding `json:"embeddings"`
+	Error      *geminiError      `json:"error,omitempty"`
 }
 
 // Complete implements Provider.
@@ -261,10 +307,112 @@ func (p *GeminiProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 	}, nil
 }
 
-// Embed implements Provider. Google has a distinct :embedContent endpoint;
-// M1 leaves it unwired.
-func (p *GeminiProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResponse, error) {
-	return nil, ErrNotImplemented
+// Embed implements Provider against Gemini's :embedContent /
+// :batchEmbedContents endpoints.
+func (p *GeminiProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
+	if p.apiKey == "" {
+		return nil, &DisabledError{Reason: "Gemini API key is empty"}
+	}
+	if len(req.Texts) == 0 {
+		return &EmbedResponse{Vectors: [][]float32{}, Model: p.embeddingModel}, nil
+	}
+	if len(req.Texts) > geminiEmbedMaxTotalInputs {
+		return nil, fmt.Errorf("gemini: embed inputs %d exceed safety cap %d (set fewer or split caller-side)",
+			len(req.Texts), geminiEmbedMaxTotalInputs)
+	}
+
+	vectors := make([][]float32, len(req.Texts))
+	for start := 0; start < len(req.Texts); start += geminiEmbedMaxBatchSize {
+		end := start + geminiEmbedMaxBatchSize
+		if end > len(req.Texts) {
+			end = len(req.Texts)
+		}
+		chunk := req.Texts[start:end]
+		parsed, err := p.embedGeminiChunk(ctx, chunk, start)
+		if err != nil {
+			return nil, err
+		}
+		if len(parsed.Embeddings) != len(chunk) {
+			return nil, fmt.Errorf("gemini: embed response embeddings count %d != chunk size %d",
+				len(parsed.Embeddings), len(chunk))
+		}
+		for i, e := range parsed.Embeddings {
+			vectors[start+i] = e.Values
+		}
+	}
+	return &EmbedResponse{Vectors: vectors, Model: p.embeddingModel}, nil
+}
+
+func (p *GeminiProvider) embedGeminiChunk(ctx context.Context, chunk []string, start int) (*geminiEmbedResponse, error) {
+	modelPath := "models/" + p.embeddingModel
+	var endpoint string
+	var body any
+	if len(chunk) == 1 {
+		endpoint = fmt.Sprintf("%s/models/%s:embedContent", p.endpoint, url.PathEscape(p.embeddingModel))
+		body = geminiEmbedContentRequest{
+			Model:   modelPath,
+			Content: geminiContent{Parts: []geminiPart{{Text: chunk[0]}}},
+		}
+	} else {
+		endpoint = fmt.Sprintf("%s/models/%s:batchEmbedContents", p.endpoint, url.PathEscape(p.embeddingModel))
+		requests := make([]geminiEmbedContentRequest, 0, len(chunk))
+		for _, text := range chunk {
+			requests = append(requests, geminiEmbedContentRequest{
+				Model:   modelPath,
+				Content: geminiContent{Parts: []geminiPart{{Text: text}}},
+			})
+		}
+		body = geminiBatchEmbedRequest{Requests: requests}
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("gemini: marshal embed request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(buf))
+	if err != nil {
+		return nil, fmt.Errorf("gemini: new embed request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(geminiAPIKeyHeader, p.apiKey)
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("gemini: embed http call (chunk start=%d): %w", start, RedactProviderError(err))
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		const errBodyCap = 4 << 10
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyCap))
+		resp.Body.Close()
+		var errResp geminiEmbedResponse
+		_ = json.Unmarshal(errBody, &errResp)
+		if errResp.Error != nil {
+			return nil, fmt.Errorf("gemini: embed %s: %s", resp.Status, errResp.Error.Message)
+		}
+		return nil, fmt.Errorf("gemini: embed %s: %s", resp.Status, string(errBody))
+	}
+	rawBody, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("gemini: read embed body: %w", readErr)
+	}
+	var parsed geminiEmbedResponse
+	if err := json.Unmarshal(rawBody, &parsed); err != nil {
+		return nil, fmt.Errorf("gemini: parse embed response: %w", err)
+	}
+	if len(chunk) == 1 && len(parsed.Embeddings) == 0 {
+		parsed.Embeddings = []geminiEmbedding{parsed.Embedding}
+	}
+	return &parsed, nil
+}
+
+func geminiEmbeddingDimensions(model string) int {
+	switch {
+	case strings.Contains(model, "gemini-embedding-2"), strings.Contains(model, "gemini-embedding-001"):
+		return 3072
+	case strings.Contains(model, "text-embedding-004"):
+		return 768
+	default:
+		return 0
+	}
 }
 
 // Capabilities implements Provider.
@@ -273,31 +421,37 @@ func (p *GeminiProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedRespons
 func (p *GeminiProvider) Capabilities() Capabilities {
 	switch {
 	case strings.HasPrefix(p.model, "gemini-2.5-pro"), strings.HasPrefix(p.model, "gemini-2.0-pro"):
-		return Capabilities{
+		c := Capabilities{
 			SupportsJSONMode:     true,
 			SupportsJSONSchema:   true,
 			SupportsFunctionCall: true,
 			SupportsVision:       true,
-			SupportsEmbedding:    false,
 			MaxContextTokens:     2000000,
 		}
+		c.SupportsEmbedding = p.embeddingModel != ""
+		c.EmbeddingDimensions = geminiEmbeddingDimensions(p.embeddingModel)
+		return c
 	case strings.HasPrefix(p.model, "gemini-2.5-flash"), strings.HasPrefix(p.model, "gemini-2.0-flash"):
-		return Capabilities{
+		c := Capabilities{
 			SupportsJSONMode:     true,
 			SupportsJSONSchema:   true,
 			SupportsFunctionCall: true,
 			SupportsVision:       true,
-			SupportsEmbedding:    false,
 			MaxContextTokens:     1000000,
 		}
+		c.SupportsEmbedding = p.embeddingModel != ""
+		c.EmbeddingDimensions = geminiEmbeddingDimensions(p.embeddingModel)
+		return c
 	default:
-		return Capabilities{
+		c := Capabilities{
 			SupportsJSONMode:     true,
 			SupportsJSONSchema:   false,
 			SupportsFunctionCall: false,
 			SupportsVision:       false,
-			SupportsEmbedding:    false,
 			MaxContextTokens:     32000,
 		}
+		c.SupportsEmbedding = p.embeddingModel != ""
+		c.EmbeddingDimensions = geminiEmbeddingDimensions(p.embeddingModel)
+		return c
 	}
 }

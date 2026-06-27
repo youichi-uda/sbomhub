@@ -23,6 +23,12 @@ import (
 // without a BYOK key requirement.
 const defaultOllamaEndpoint = "http://localhost:11434"
 
+const (
+	defaultOllamaEmbeddingModel = "nomic-embed-text"
+	ollamaEmbedMaxBatchSize     = 2048
+	ollamaEmbedMaxTotalInputs   = azureEmbedMaxTotalInputs
+)
+
 // defaultOllamaMaxTokens is the per-response generation cap when the
 // caller leaves CompleteRequest.MaxTokens == 0. Ollama treats it as
 // num_predict (-1 means unlimited); we pick a conservative bound to
@@ -58,6 +64,7 @@ const ollamaResponseBodyCap = 4 << 10 // 4 KiB
 type OllamaProvider struct {
 	baseURL          string
 	model            string
+	embeddingModel   string
 	client           *http.Client
 	defaultMaxTokens int
 }
@@ -80,9 +87,20 @@ func NewOllama(baseURL, model string) *OllamaProvider {
 	return &OllamaProvider{
 		baseURL:          strings.TrimRight(baseURL, "/"),
 		model:            model,
+		embeddingModel:   defaultOllamaEmbeddingModel,
 		client:           &http.Client{Timeout: 120 * time.Second},
 		defaultMaxTokens: defaultOllamaMaxTokens,
 	}
+}
+
+// NewOllamaWithEmbedding constructs an Ollama provider with an explicit
+// embedding model. Empty embeddingModel falls back to nomic-embed-text.
+func NewOllamaWithEmbedding(baseURL, model, embeddingModel string) *OllamaProvider {
+	p := NewOllama(baseURL, model)
+	if strings.TrimSpace(embeddingModel) != "" {
+		p.embeddingModel = strings.TrimSpace(embeddingModel)
+	}
+	return p
 }
 
 // NewOllamaWithClient is used by tests (httptest.Server) and by callers
@@ -90,6 +108,15 @@ func NewOllama(baseURL, model string) *OllamaProvider {
 // stricter timeout). Not intended for production callers.
 func NewOllamaWithClient(baseURL, model string, c *http.Client) *OllamaProvider {
 	p := NewOllama(baseURL, model)
+	if c != nil {
+		p.client = c
+	}
+	return p
+}
+
+// NewOllamaWithEmbeddingAndClient is the httptest seam for embedding tests.
+func NewOllamaWithEmbeddingAndClient(baseURL, model, embeddingModel string, c *http.Client) *OllamaProvider {
+	p := NewOllamaWithEmbedding(baseURL, model, embeddingModel)
 	if c != nil {
 		p.client = c
 	}
@@ -112,6 +139,7 @@ func (p *OllamaProvider) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("provider", p.Name()),
 		slog.String("model", p.model),
+		slog.String("embedding_model", p.embeddingModel),
 	)
 }
 
@@ -154,6 +182,18 @@ type ollamaChatResponse struct {
 	// (e.g. {"error":"model 'foo' not found"} with HTTP 404). It is not
 	// used for non-2xx generic transport errors.
 	Error string `json:"error,omitempty"`
+}
+
+type ollamaEmbedRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type ollamaEmbedResponse struct {
+	Model           string      `json:"model"`
+	Embeddings      [][]float32 `json:"embeddings"`
+	PromptEvalCount int         `json:"prompt_eval_count"`
+	Error           string      `json:"error,omitempty"`
 }
 
 // Complete implements Provider.
@@ -305,15 +345,77 @@ func (p *OllamaProvider) Complete(ctx context.Context, req CompleteRequest) (*Co
 	}, nil
 }
 
-// Embed implements Provider.
-//
-// Ollama exposes a /api/embed endpoint, but SBOMHub does not consume
-// embeddings yet (M2+ reachability / search may use them). Return
-// ErrNotImplemented so the interface stays consistent with the other
-// providers in M1/M4.
-// ※要確認: wire /api/embed when M2 introduces vector search.
-func (p *OllamaProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResponse, error) {
-	return nil, ErrNotImplemented
+// Embed implements Provider against Ollama's current POST /api/embed endpoint.
+func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
+	if p.embeddingModel == "" {
+		return nil, fmt.Errorf("ollama: embedding model is empty (set SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL)")
+	}
+	if len(req.Texts) == 0 {
+		return &EmbedResponse{Vectors: [][]float32{}, Model: p.embeddingModel}, nil
+	}
+	if len(req.Texts) > ollamaEmbedMaxTotalInputs {
+		return nil, fmt.Errorf("ollama: embed inputs %d exceed safety cap %d (set fewer or split caller-side)",
+			len(req.Texts), ollamaEmbedMaxTotalInputs)
+	}
+
+	vectors := make([][]float32, len(req.Texts))
+	totalPromptTokens := 0
+	respModel := ""
+	for start := 0; start < len(req.Texts); start += ollamaEmbedMaxBatchSize {
+		end := start + ollamaEmbedMaxBatchSize
+		if end > len(req.Texts) {
+			end = len(req.Texts)
+		}
+		chunk := req.Texts[start:end]
+		body := ollamaEmbedRequest{Model: p.embeddingModel, Input: chunk}
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("ollama: marshal embed request: %w", err)
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/api/embed", bytes.NewReader(buf))
+		if err != nil {
+			return nil, fmt.Errorf("ollama: new embed request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		resp, err := p.client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("ollama: embed http call (chunk start=%d): %w", start, RedactProviderError(err))
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, ollamaResponseBodyCap))
+			resp.Body.Close()
+			var errResp ollamaEmbedResponse
+			if err := json.Unmarshal(errBody, &errResp); err == nil && errResp.Error != "" {
+				return nil, fmt.Errorf("ollama: embed %s: %s", resp.Status, errResp.Error)
+			}
+			return nil, fmt.Errorf("ollama: embed %s: %s", resp.Status, string(errBody))
+		}
+		rawBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("ollama: read embed body: %w", readErr)
+		}
+		var parsed ollamaEmbedResponse
+		if err := json.Unmarshal(rawBody, &parsed); err != nil {
+			return nil, fmt.Errorf("ollama: parse embed response: %w", err)
+		}
+		if parsed.Error != "" {
+			return nil, fmt.Errorf("ollama: embed model error: %s", parsed.Error)
+		}
+		if len(parsed.Embeddings) != len(chunk) {
+			return nil, fmt.Errorf("ollama: embed response embeddings count %d != chunk size %d",
+				len(parsed.Embeddings), len(chunk))
+		}
+		copy(vectors[start:end], parsed.Embeddings)
+		totalPromptTokens += parsed.PromptEvalCount
+		if parsed.Model != "" {
+			respModel = parsed.Model
+		}
+	}
+	if respModel == "" {
+		respModel = p.embeddingModel
+	}
+	return &EmbedResponse{Vectors: vectors, InputTokens: totalPromptTokens, Model: respModel}, nil
 }
 
 // Capabilities implements Provider.
@@ -327,7 +429,7 @@ func (p *OllamaProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedRespons
 // land (e.g. qwen3-coder, llama-4). M4-3 bench will surface drift.
 func (p *OllamaProvider) Capabilities() Capabilities {
 	maxCtx := ollamaContextWindow(p.model)
-	return Capabilities{
+	c := Capabilities{
 		// format=json + grammar-constrained sampling — supported on the
 		// llama / qwen / mistral families that Ollama ships templates
 		// for. We advertise it on for all models and rely on the
@@ -343,10 +445,30 @@ func (p *OllamaProvider) Capabilities() Capabilities {
 		SupportsFunctionCall: false,
 		// Vision: llava / bakllava etc. support multimodal input via a
 		// different request shape (images[] field). Out of scope.
-		SupportsVision: false,
-		// Embed not wired — see Embed().
-		SupportsEmbedding: false,
+		SupportsVision:    false,
+		SupportsEmbedding: p.embeddingModel != "",
 		MaxContextTokens:  maxCtx,
+	}
+	c.EmbeddingDimensions = ollamaEmbeddingDimensions(p.embeddingModel)
+	return c
+}
+
+func ollamaEmbeddingDimensions(model string) int {
+	bare := strings.ToLower(model)
+	if i := strings.Index(bare, ":"); i >= 0 {
+		bare = bare[:i]
+	}
+	switch {
+	case strings.HasPrefix(bare, "nomic-embed-text"):
+		return 768
+	case strings.HasPrefix(bare, "mxbai-embed-large"),
+		strings.HasPrefix(bare, "bge-m3"):
+		return 1024
+	case strings.HasPrefix(bare, "all-minilm"),
+		strings.HasPrefix(bare, "granite-embedding"):
+		return 384
+	default:
+		return 0
 	}
 }
 

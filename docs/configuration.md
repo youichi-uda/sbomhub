@@ -37,6 +37,9 @@ AI features (AI VEX triage, CRA report drafting, METI self-assessment prefill, e
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | (empty) | Used if `provider=gemini` and the canonical key is unset. |
 | `AZURE_OPENAI_API_KEY` | (empty) | Used if `provider=azure_openai` and the canonical key is unset. NOT aliased to `OPENAI_API_KEY` (mixing them would silently send Azure traffic with an OpenAI.com key, or vice versa). |
 | `OLLAMA_HOST` | (empty) | Required if `provider=ollama` (e.g. `http://localhost:11434`). |
+| `SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model for `Embed` / future reachability search. Known dimensions: `text-embedding-3-small` / `text-embedding-ada-002` = 1536, `text-embedding-3-large` = 3072. |
+| `SBOMHUB_LLM_GEMINI_EMBEDDING_MODEL` | `gemini-embedding-2` | Gemini embedding model. `gemini-embedding-2` is the stable 2026 model; `gemini-embedding-001` and legacy `text-embedding-004` can be selected explicitly. Default dimensions = 3072 for `gemini-embedding-*`. |
+| `SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model used with `/api/embed`. Common dimensions: `nomic-embed-text` = 768, `mxbai-embed-large` / `bge-m3` = 1024. |
 
 > For manufacturing self-host setups that cannot send code or SBOMs to external APIs, Ollama (or any OpenAI-compatible local endpoint) is the recommended choice. Azure OpenAI is the recommended choice for operators who already have a Microsoft procurement contract.
 
@@ -63,6 +66,17 @@ Azure routes embedding requests (`text-embedding-3-small` / `text-embedding-3-la
 | `SBOMHUB_LLM_AZURE_EMBEDDING_MODEL` | (sniffed from deployment) | Optional canonical embedding model name, used to populate `Capabilities.EmbeddingDimensions` (1536 for `text-embedding-3-small` / `text-embedding-ada-002`, 3072 for `text-embedding-3-large`). When unset, the deployment name is sniffed for a known family prefix; falls back to dimensions = 0 for business-named deployments. |
 
 Request batching: a single `Embed` call accepts up to 2,048 inputs per HTTP request (the Azure documented hard cap); larger batches are chunked transparently into multiple sequential requests. A defense-in-depth safety cap rejects calls with more than 16,384 total inputs before any HTTP traffic is dispatched. Partial-failure semantics: if a mid-batch chunk fails, the entire `Embed` call returns an error and the completed chunks' vectors are discarded (the caller decides whether to retry the whole batch).
+
+#### Non-Azure embedding providers (M5-7)
+
+OpenAI, Gemini, and Ollama also implement `Embed`. Anthropic remains unsupported because Anthropic's official Claude Platform documentation still routes embeddings users to Voyage AI rather than a first-party Claude embeddings endpoint.
+
+| Provider | Endpoint | Default embedding model | Dimensions | Batch behavior |
+|----------|----------|-------------------------|------------|----------------|
+| OpenAI | `POST https://api.openai.com/v1/embeddings` | `text-embedding-3-small` | 1536 | 2,048 inputs/request; 16,384 inputs/call safety cap; partial chunk failure discards all vectors. |
+| Gemini | `POST .../models/{model}:embedContent` for one input, `:batchEmbedContents` for batches | `gemini-embedding-2` | 3072 | 100 inputs/request sbomhub cap; 16,384 inputs/call safety cap; partial chunk failure discards all vectors. |
+| Ollama | `POST {OLLAMA_HOST}/api/embed` | `nomic-embed-text` | 768 | 2,048 inputs/request sbomhub cap; 16,384 inputs/call safety cap; partial chunk failure discards all vectors. |
+| Anthropic | N/A | N/A | N/A | `Embed` returns `ErrNotImplemented`; use Voyage AI or another embedding provider separately. |
 
 ### Frontend Settings
 
@@ -103,6 +117,7 @@ NVD_API_KEY=your-nvd-api-key
 SBOMHUB_LLM_PROVIDER=openai          # openai | anthropic | gemini | azure_openai | ollama
 SBOMHUB_LLM_MODEL=gpt-5
 OPENAI_API_KEY=sk-...
+SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL=text-embedding-3-small       # optional; default
 
 # Azure OpenAI example (managed via Microsoft procurement)
 # SBOMHUB_LLM_PROVIDER=azure_openai
@@ -119,6 +134,7 @@ OPENAI_API_KEY=sk-...
 # Local LLM example (no code/SBOM leaves your network)
 # SBOMHUB_LLM_PROVIDER=ollama
 # SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+# SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 # OLLAMA_HOST=http://localhost:11434
 ```
 

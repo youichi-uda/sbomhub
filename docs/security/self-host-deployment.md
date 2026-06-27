@@ -399,7 +399,41 @@ sops --encrypt --age $AGE_RECIPIENT_PUBLIC_KEY .env > .env.enc
 設定値も `.env` / Docker secrets の同じ流儀で管理する。 OSS リポジトリには **絶対に bundled
 key を含めない** (M0 Trust Rescue 9.2 + §20.2 BYOK 制約)。
 
-### 5.5 LLM Provider (Azure OpenAI 用の追加 env、 M5-3)
+### 5.5 LLM Provider embedding 設定 (M5-7)
+
+OpenAI / Gemini / Ollama は `Embed` を実装済み。将来の reachability / vector search 用に、
+chat model とは別に embedding model env を持つ。Anthropic は 2026-06 時点で first-party
+embedding API がなく、公式 Claude Platform docs も Voyage AI を案内しているため、
+`Embed` は `ErrNotImplemented` のまま。
+
+```bash
+# OpenAI (default: text-embedding-3-small, 1536 dimensions)
+SBOMHUB_LLM_PROVIDER=openai
+SBOMHUB_LLM_MODEL=gpt-5
+OPENAI_API_KEY=...
+SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL=text-embedding-3-small  # 任意; text-embedding-3-large は 3072 dimensions
+
+# Gemini (default: gemini-embedding-2, 3072 dimensions)
+SBOMHUB_LLM_PROVIDER=gemini
+SBOMHUB_LLM_MODEL=gemini-2.5-flash
+GOOGLE_API_KEY=...
+SBOMHUB_LLM_GEMINI_EMBEDDING_MODEL=gemini-embedding-2      # 任意
+
+# Ollama (default: nomic-embed-text, 768 dimensions)
+SBOMHUB_LLM_PROVIDER=ollama
+SBOMHUB_LLM_OLLAMA_URL=http://ollama:11434
+SBOMHUB_LLM_MODEL=qwen2.5-coder:7b
+SBOMHUB_LLM_OLLAMA_EMBEDDING_MODEL=nomic-embed-text        # 任意; mxbai-embed-large は 1024 dimensions
+```
+
+batching:
+
+- OpenAI: 1 HTTP request あたり最大 2,048 inputs、1 call safety cap 16,384 inputs。
+- Gemini: sbomhub 側で 100 inputs/request に chunk、1 call safety cap 16,384 inputs。
+- Ollama: `/api/embed` を使用し、sbomhub 側で 2,048 inputs/request に chunk、1 call safety cap 16,384 inputs。
+- いずれも途中 chunk 失敗時は **完了済 chunk を破棄して error 返却**。
+
+### 5.6 LLM Provider (Azure OpenAI 用の追加 env、 M5-3)
 
 Azure OpenAI を BYOK で使う場合、 chat と embedding は **別々の deployment** として Azure 側で
 登録する必要がある (Azure OpenAI 公式仕様、 [Microsoft Learn embeddings guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/embeddings))。

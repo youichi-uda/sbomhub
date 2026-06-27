@@ -36,6 +36,7 @@ func withEnv(t *testing.T, kv map[string]string) {
 		// SupportsEmbedding in factory tests that expect the M4 default.
 		EnvAzureEmbeddingDeployment, EnvAzureEmbeddingDeploymentAlias,
 		EnvAzureEmbeddingAPIVersion, EnvAzureEmbeddingModel,
+		EnvOpenAIEmbeddingModel, EnvGeminiEmbeddingModel, EnvOllamaEmbeddingModel,
 	} {
 		t.Setenv(k, "")
 	}
@@ -145,6 +146,61 @@ func TestNewProviderFromEnv_RespectsExplicitModel(t *testing.T) {
 	}
 	if p.Model() != "gpt-4o" {
 		t.Errorf("Model() = %q, want %q", p.Model(), "gpt-4o")
+	}
+}
+
+func TestNewProviderFromEnv_EmbeddingModelEnv(t *testing.T) {
+	cases := []struct {
+		name      string
+		env       map[string]string
+		wantDim   int
+		wantEmbed bool
+	}{
+		{
+			name: "openai explicit large",
+			env: map[string]string{
+				EnvProvider:             "openai",
+				EnvAPIKey:               "dummy",
+				EnvOpenAIEmbeddingModel: "text-embedding-3-large",
+			},
+			wantDim:   3072,
+			wantEmbed: true,
+		},
+		{
+			name: "gemini default",
+			env: map[string]string{
+				EnvProvider: "gemini",
+				EnvAPIKey:   "dummy",
+			},
+			wantDim:   3072,
+			wantEmbed: true,
+		},
+		{
+			name: "ollama explicit mxbai",
+			env: map[string]string{
+				EnvProvider:             "ollama",
+				EnvModel:                "qwen2.5-coder:7b",
+				EnvOllamaEmbeddingModel: "mxbai-embed-large",
+			},
+			wantDim:   1024,
+			wantEmbed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withEnv(t, tc.env)
+			p, err := NewProviderFromEnv(context.Background())
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			cap := p.Capabilities()
+			if cap.SupportsEmbedding != tc.wantEmbed {
+				t.Fatalf("SupportsEmbedding = %v, want %v", cap.SupportsEmbedding, tc.wantEmbed)
+			}
+			if cap.EmbeddingDimensions != tc.wantDim {
+				t.Fatalf("EmbeddingDimensions = %d, want %d", cap.EmbeddingDimensions, tc.wantDim)
+			}
+		})
 	}
 }
 

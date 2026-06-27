@@ -25,11 +25,11 @@ const defaultAnthropicVersion = "2023-06-01"
 // We hit /v1/messages directly via net/http for the same reason as OpenAI:
 // keep the dependency surface small in M1.
 type AnthropicProvider struct {
-	apiKey         string
-	model          string
-	endpoint       string
-	versionHeader  string
-	client         *http.Client
+	apiKey        string
+	model         string
+	endpoint      string
+	versionHeader string
+	client        *http.Client
 	// defaultMaxTokens is required by the Anthropic API (no implicit
 	// default). We provide a sane fallback if the caller leaves
 	// CompleteRequest.MaxTokens == 0.
@@ -213,6 +213,9 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req CompleteRequest) (
 // Embed implements Provider. Anthropic does not currently expose a first-
 // party embeddings endpoint; M1 returns ErrNotImplemented.
 func (p *AnthropicProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResponse, error) {
+	slog.Warn("llm: Anthropic embeddings are not first-party supported; use Voyage AI or another embedding provider",
+		"provider", p.Name(),
+		"model", p.model)
 	return nil, ErrNotImplemented
 }
 
