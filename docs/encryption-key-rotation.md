@@ -117,26 +117,43 @@ Leave `postgres` and `redis` running. The migration binary needs database
 access. Both key values are sensitive: pass them through environment variables
 only, do not put them in argv, shared logs, shell history, or tickets.
 
-Recommended execution path for Docker Compose is option 3: run the binary inside
-the `sbomhub-api` container, where `DATABASE_URL` is already present:
+Recommended execution path for Docker Compose is to start a one-shot migration
+container with `docker compose run --rm`. Do not use `docker compose exec`
+after stopping the API service: `exec` requires a running service container.
+Use the service name that matches the compose file you operate.
 
 ```bash
-# option 3: run migrate-encryption through docker compose exec (recommended)
-docker compose exec -T sbomhub-api \
-  env OLD_ENCRYPTION_KEY="$OLD_KEY" NEW_ENCRYPTION_KEY="$NEW_KEY" \
-  /usr/local/bin/migrate-encryption --dry-run --report /tmp/dry-run.json
+# standard compose (docker/docker-compose.yml service: api)
+DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
+docker compose run --rm \
+  -e OLD_ENCRYPTION_KEY="$OLD_KEY" \
+  -e NEW_ENCRYPTION_KEY="$NEW_KEY" \
+  -e DATABASE_URL="$DATABASE_URL" \
+  api /usr/local/bin/migrate-encryption \
+  --db-url "$DATABASE_URL" --dry-run --report /tmp/dry-run.json
+
+# enterprise compose (docker/docker-compose.enterprise.yml service: sbomhub-api)
+APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
+DATABASE_URL="postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+docker compose -f docker/docker-compose.enterprise.yml run --rm \
+  -e OLD_ENCRYPTION_KEY="$OLD_KEY" \
+  -e NEW_ENCRYPTION_KEY="$NEW_KEY" \
+  -e DATABASE_URL="$DATABASE_URL" \
+  sbomhub-api /usr/local/bin/migrate-encryption \
+  --db-url "$DATABASE_URL" --dry-run --report /tmp/dry-run.json
 ```
 
 If you run the Go command from the host shell instead, first populate
-`DATABASE_URL` explicitly:
+`DATABASE_URL` explicitly. Prefer building the DSN from Docker secrets when the
+compose file keeps production credentials out of static environment output:
 
 ```bash
-# option 1: read the runtime DSN from docker compose
-DATABASE_URL="$(docker compose exec sbomhub-api printenv DATABASE_URL)"
-
-# option 2: build the DSN from Docker secrets
+# recommended: build the host-run DSN from Docker secrets
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
 DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
+
+# alternative for standard compose only: read the static DSN from compose config
+DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
 ```
 
 Build or run the CLI from `apps/api`:

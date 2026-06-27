@@ -110,25 +110,43 @@ export NEW_ENCRYPTION_KEY="$NEW_KEY"
 両値とも機密であり、 environment 経由だけで渡す。 argv、 共有ログ、
 shell history、 ticket には載せない。
 
-Docker Compose では option 3 を推奨する。 `DATABASE_URL` が既に存在する
-`sbomhub-api` container 内で binary を実行する。
+Docker Compose では `docker compose run --rm` で 1 回限りの migration
+container を起動する path を推奨する。 API service 停止後に `docker compose
+exec` は使わない。 `exec` は対象 service container が running であることを要求
+する。 運用している compose file に合う service 名を使う。
 
 ```bash
-# option 3: docker compose exec sbomhub-api 経由で migrate-encryption 実行 (recommended)
-docker compose exec -T sbomhub-api \
-  env OLD_ENCRYPTION_KEY="$OLD_KEY" NEW_ENCRYPTION_KEY="$NEW_KEY" \
-  /usr/local/bin/migrate-encryption --dry-run --report /tmp/dry-run.json
+# standard compose (docker/docker-compose.yml service: api)
+DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
+docker compose run --rm \
+  -e OLD_ENCRYPTION_KEY="$OLD_KEY" \
+  -e NEW_ENCRYPTION_KEY="$NEW_KEY" \
+  -e DATABASE_URL="$DATABASE_URL" \
+  api /usr/local/bin/migrate-encryption \
+  --db-url "$DATABASE_URL" --dry-run --report /tmp/dry-run.json
+
+# enterprise compose (docker/docker-compose.enterprise.yml service: sbomhub-api)
+APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
+DATABASE_URL="postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+docker compose -f docker/docker-compose.enterprise.yml run --rm \
+  -e OLD_ENCRYPTION_KEY="$OLD_KEY" \
+  -e NEW_ENCRYPTION_KEY="$NEW_KEY" \
+  -e DATABASE_URL="$DATABASE_URL" \
+  sbomhub-api /usr/local/bin/migrate-encryption \
+  --db-url "$DATABASE_URL" --dry-run --report /tmp/dry-run.json
 ```
 
 host shell から `go run` する場合は、先に `DATABASE_URL` を明示的に用意する。
+production credential を static environment output に置かない compose では、
+Docker secrets から DSN を組み立てる方法を優先する。
 
 ```bash
-# option 1: docker compose から runtime DSN を取得
-DATABASE_URL="$(docker compose exec sbomhub-api printenv DATABASE_URL)"
-
-# option 2: Docker secrets から DSN を組み立て
+# recommended: Docker secrets から host-run 用 DSN を組み立て
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
 DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
+
+# alternative for standard compose only: compose config から static DSN を取得
+DATABASE_URL="$(docker compose config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
 ```
 
 `apps/api` から CLI を実行する。
