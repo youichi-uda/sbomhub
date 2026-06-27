@@ -327,12 +327,36 @@ done
 
 ```bash
 # OSS install + cron path: build the wrapper secrets from .env
-APP_PW="$(grep ^APP_PASSWORD= .env | cut -d= -f2-)"
-ENCRYPTION_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
+# Defensive .env value extractor (matches install.sh load_passwords_from_env semantics)
+# - Single match only (duplicate key detected as fail-loud)
+# - Quote stripped (matches Compose env loader behavior)
+read_env_var() {
+  local key="$1"
+  local count
+  count="$(grep -c "^${key}=" .env || true)"
+  if [ "$count" -eq 0 ]; then
+    echo "[FATAL] ${key} is missing in .env" >&2
+    exit 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
+    exit 1
+  fi
+  local raw
+  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
+  if [ -z "$raw" ]; then
+    echo "[FATAL] ${key} is empty in .env" >&2
+    exit 1
+  fi
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  printf '%s' "$raw"
+}
 
-# Fail loud if .env is missing required keys
-[ -z "$APP_PW" ] && { echo "[FATAL] APP_PASSWORD is missing or empty in .env" >&2; exit 1; }
-[ -z "$ENCRYPTION_KEY" ] && { echo "[FATAL] ENCRYPTION_KEY is missing or empty in .env" >&2; exit 1; }
+APP_PW="$(read_env_var APP_PASSWORD)"
+ENCRYPTION_KEY="$(read_env_var ENCRYPTION_KEY)"
 
 # Now safe to install
 sudo install -d -m 700 -o sbomhub -g sbomhub /opt/sbomhub/docker/secrets

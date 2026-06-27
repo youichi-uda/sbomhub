@@ -114,7 +114,36 @@ Stop the API and prepare both keys:
 ```bash
 docker compose stop api
 NEW_KEY="$(openssl rand -base64 32)"
-OLD_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
+
+# Defensive .env value extractor (matches install.sh load_passwords_from_env semantics)
+# - Single match only (duplicate key detected as fail-loud)
+# - Quote stripped (matches Compose env loader behavior)
+read_env_var() {
+  local key="$1"
+  local count
+  count="$(grep -c "^${key}=" .env || true)"
+  if [ "$count" -eq 0 ]; then
+    echo "[FATAL] ${key} is missing in .env" >&2
+    exit 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
+    exit 1
+  fi
+  local raw
+  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
+  if [ -z "$raw" ]; then
+    echo "[FATAL] ${key} is empty in .env" >&2
+    exit 1
+  fi
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  printf '%s' "$raw"
+}
+
+OLD_KEY="$(read_env_var ENCRYPTION_KEY)"
 export OLD_ENCRYPTION_KEY="$OLD_KEY"
 export NEW_ENCRYPTION_KEY="$NEW_KEY"
 ```
