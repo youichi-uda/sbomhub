@@ -129,8 +129,8 @@ done
 #
 # Password 値の経路:
 #   install.sh ($1, $2)
-#     → docker compose exec の argv (環境変数 PSQL_MIGRATOR_PASSWORD /
-#        PSQL_APP_PASSWORD を -e で注入)
+#     → host shell の環境変数 PSQL_MIGRATOR_PASSWORD / PSQL_APP_PASSWORD
+#     → docker compose exec -e NAME (name-only) でコンテナ環境へ転送
 #     → コンテナ内 sh -c 'psql -v ... -v ... -f -' の引数展開
 #     → psql の -v 値 (内部的に :'var' で SQL literal にエスケープされる)
 #     → SELECT format('CREATE ROLE ... PASSWORD %L', :'var') \gexec
@@ -139,9 +139,13 @@ apply_role_bootstrap() {
     # psql は Unix socket 経由 (-h 省略) で trust 認証されるためパスワード不要。
     # ヒアドキュメントは quoted (`<<'SQL'`) にして install.sh 側の shell 展開
     # を完全に抑制 (= SQL の中に install.sh の変数値が紛れ込む経路を絶つ)。
+    PSQL_MIGRATOR_PASSWORD=$1
+    PSQL_APP_PASSWORD=$2
+    export PSQL_MIGRATOR_PASSWORD PSQL_APP_PASSWORD
+
     docker compose exec -T \
-        -e "PSQL_MIGRATOR_PASSWORD=$1" \
-        -e "PSQL_APP_PASSWORD=$2" \
+        -e PSQL_MIGRATOR_PASSWORD \
+        -e PSQL_APP_PASSWORD \
         postgres sh -c '
             psql -v ON_ERROR_STOP=1 \
                  -v migrator_password="$PSQL_MIGRATOR_PASSWORD" \
@@ -368,17 +372,6 @@ generate_env_file() {
     GENERATED_MIGRATOR_PASSWORD=$(openssl rand -hex 16)
     GENERATED_APP_PASSWORD=$(openssl rand -hex 16)
 
-    # sed -i の inplace は GNU と BSD で挙動が違う。
-    # 共通解として `-i.bak` を使い、 .bak を後で削除する形にする。
-    # sed の区切り文字は `|` を使用: base64 出力に `/` `+` `=` が含まれる可能性
-    # があるが `|` は base64 alphabet に無いので衝突しない。
-    sed -i.bak \
-        -e "s|^ENCRYPTION_KEY=.*$|ENCRYPTION_KEY=${GENERATED_ENCRYPTION_KEY}|" \
-        -e "s|^MIGRATOR_PASSWORD=.*$|MIGRATOR_PASSWORD=${GENERATED_MIGRATOR_PASSWORD}|" \
-        -e "s|^APP_PASSWORD=.*$|APP_PASSWORD=${GENERATED_APP_PASSWORD}|" \
-        .env
-    rm -f .env.bak
-
     # DATABASE_URL / MIGRATE_DATABASE_URL は .env.example で既定値 (dev パスワード
     # + localhost host) が埋め込まれているので、 上で生成したパスワードに置換し
     # つつ host を compose 内部 DNS の `postgres` に書き換える。
@@ -395,11 +388,36 @@ generate_env_file() {
     # URL-encode 不要。 operator が production password で `@ : / # ?` 等の
     # URL 区切り文字を使う場合は .env を編集して URL-encoded 値で DATABASE_URL
     # を直接書き換えること (.env.example の DATABASE roles セクション参照)。
-    sed -i.bak \
-        -e "s|postgres://sbomhub_app:[^@]*@localhost:|postgres://sbomhub_app:${GENERATED_APP_PASSWORD}@postgres:|" \
-        -e "s|postgres://sbomhub_migrator:[^@]*@localhost:|postgres://sbomhub_migrator:${GENERATED_MIGRATOR_PASSWORD}@postgres:|" \
-        .env
-    rm -f .env.bak
+    # Secret 値を sed/awk の argv に載せない。環境変数で awk に渡し、
+    # awk 側は ENVIRON から読む。
+    ENCRYPTION_KEY_VALUE=$GENERATED_ENCRYPTION_KEY \
+    MIGRATOR_PASSWORD_VALUE=$GENERATED_MIGRATOR_PASSWORD \
+    APP_PASSWORD_VALUE=$GENERATED_APP_PASSWORD \
+    awk '
+        BEGIN {
+            encryption_key = ENVIRON["ENCRYPTION_KEY_VALUE"]
+            migrator_password = ENVIRON["MIGRATOR_PASSWORD_VALUE"]
+            app_password = ENVIRON["APP_PASSWORD_VALUE"]
+        }
+        /^ENCRYPTION_KEY=/ {
+            print "ENCRYPTION_KEY=" encryption_key
+            next
+        }
+        /^MIGRATOR_PASSWORD=/ {
+            print "MIGRATOR_PASSWORD=" migrator_password
+            next
+        }
+        /^APP_PASSWORD=/ {
+            print "APP_PASSWORD=" app_password
+            next
+        }
+        {
+            gsub("postgres://sbomhub_app:[^@]*@localhost:", "postgres://sbomhub_app:" app_password "@postgres:")
+            gsub("postgres://sbomhub_migrator:[^@]*@localhost:", "postgres://sbomhub_migrator:" migrator_password "@postgres:")
+            print
+        }
+    ' .env > .env.tmp
+    mv .env.tmp .env
 
     # Secret なので世界書き込み禁止。 chmod は best-effort (Windows は no-op)。
     chmod 600 .env 2>/dev/null || true
