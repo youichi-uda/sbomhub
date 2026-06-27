@@ -354,9 +354,29 @@ SQL
 
 # .env から MIGRATOR_PASSWORD / APP_PASSWORD を抽出して RUN_MIGRATOR_PASSWORD /
 # RUN_APP_PASSWORD にセット。 失敗時に exit 1 を呼ぶ side-effect あり。
+load_env_value_or_empty() {
+    env_key="$1"
+    env_count=""
+    env_count="$(grep -c "^${env_key}=" .env || true)"
+    if [ "$env_count" -eq 0 ]; then
+        return
+    fi
+    if [ "$env_count" -gt 1 ]; then
+        printf '[FATAL] %s is duplicated in .env (%s occurrences); resolve manually\n' "$env_key" "$env_count" >&2
+        exit 1
+    fi
+    env_raw=""
+    env_raw="$(grep "^${env_key}=" .env | cut -d= -f2-)"
+    env_raw="${env_raw#\"}"
+    env_raw="${env_raw%\"}"
+    env_raw="${env_raw#\'}"
+    env_raw="${env_raw%\'}"
+    printf '%s' "$env_raw"
+}
+
 load_passwords_from_env() {
-    RUN_MIGRATOR_PASSWORD=$(sed -n 's/^MIGRATOR_PASSWORD=\(.*\)$/\1/p' .env | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1)
-    RUN_APP_PASSWORD=$(sed -n 's/^APP_PASSWORD=\(.*\)$/\1/p' .env | sed 's/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1)
+    RUN_MIGRATOR_PASSWORD=$(load_env_value_or_empty MIGRATOR_PASSWORD) || exit 1
+    RUN_APP_PASSWORD=$(load_env_value_or_empty APP_PASSWORD) || exit 1
 
     if [ -z "${RUN_MIGRATOR_PASSWORD:-}" ] || [ -z "${RUN_APP_PASSWORD:-}" ]; then
         printf '[FAIL] .env に MIGRATOR_PASSWORD または APP_PASSWORD が設定されていません。\n' >&2
