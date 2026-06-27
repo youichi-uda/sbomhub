@@ -426,10 +426,14 @@ func (s *IssueTrackerService) mapExternalStatus(externalStatus string) model.Tic
 }
 
 // Encryption helpers
+// EncryptIssueTrackerToken encrypts an issue tracker token with the same
+// AES-GCM/base64 format used by IssueTrackerService.
 func EncryptIssueTrackerToken(plaintext string, key []byte) (string, error) {
 	return (&IssueTrackerService{encryptionKey: key}).encrypt(plaintext)
 }
 
+// DecryptIssueTrackerToken decrypts an issue tracker token with the same
+// AES-GCM/base64 format used by IssueTrackerService.
 func DecryptIssueTrackerToken(ciphertext string, key []byte) (string, error) {
 	return (&IssueTrackerService{encryptionKey: key}).decrypt(ciphertext)
 }
