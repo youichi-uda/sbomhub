@@ -271,7 +271,12 @@ services:
         chmod 600 "$$PGPASSFILE"
         trap 'shred -u "$$PGPASSFILE" 2>/dev/null || rm -f "$$PGPASSFILE"' EXIT HUP INT TERM
         pgpass_escape() {
-          printf '%s' "$$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'
+          raw="$$1"
+          if [ "$$(printf '%s' "$$raw" | tr -d '\n\r')" != "$$raw" ]; then
+            echo "[db-bootstrap] FATAL: pgpass_escape: password contains newline/CR, refusing (.pgpass is line-based)" >&2
+            exit 1
+          fi
+          printf '%s' "$$raw" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'
         }
         ADMIN_PW="$$(cat "$$POSTGRES_ADMIN_PASSWORD_FILE")"
         ADMIN_PW_ESCAPED="$$(pgpass_escape "$$ADMIN_PW")"

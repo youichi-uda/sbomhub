@@ -59,6 +59,12 @@ urlenc() {
 }
 
 pgpass_escape() {
+    raw="$1"
+    # .pgpass is line-based; embedded newline/CR would corrupt record boundaries.
+    if [ "$(printf '%s' "$raw" | tr -d '\n\r')" != "$raw" ]; then
+        echo "[FATAL] pgpass_escape: password contains newline/CR, refusing (.pgpass is line-based)" >&2
+        exit 1
+    fi
     # .pgpass field values must escape backslash and colon.
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'
+    printf '%s' "$raw" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'
 }

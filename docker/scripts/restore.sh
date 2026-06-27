@@ -436,7 +436,12 @@ case "${COMPOSE_BASENAME}" in
                     PG_DB="$1"
                     IFS= read -r APP_PASSWORD
                     pgpass_escape() {
-                        printf "%s" "$1" | sed -e "s/\\\\/\\\\\\\\/g" -e "s/:/\\\\:/g"
+                        raw="$1"
+                        if [ "$(printf "%s" "$raw" | tr -d "\n\r")" != "$raw" ]; then
+                            echo "[restore] FATAL: pgpass_escape: password contains newline/CR, refusing (.pgpass is line-based)" >&2
+                            exit 1
+                        fi
+                        printf "%s" "$raw" | sed -e "s/\\\\/\\\\\\\\/g" -e "s/:/\\\\:/g"
                     }
                     cleanup() {
                         shred -u "$PGPASSFILE_CONTAINER" 2>/dev/null || rm -f "$PGPASSFILE_CONTAINER"
