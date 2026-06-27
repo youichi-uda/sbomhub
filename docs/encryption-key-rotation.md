@@ -1,10 +1,11 @@
 # ENCRYPTION_KEY rotation procedure
 
 > **Status**: This document is the canonical operator runbook for rotating
-> SBOMHub's `ENCRYPTION_KEY`. A turnkey `sbomhub migrate-encryption` subcommand
-> is **not yet implemented** (tracked as a follow-up — see
-> "Follow-up: automation" below). Until then, operators must follow the manual
-> SQL procedure documented in this runbook.
+> SBOMHub's `ENCRYPTION_KEY`. The automation-first path is
+> [`apps/api/cmd/migrate-encryption`](../apps/api/cmd/migrate-encryption),
+> implemented for M6 issue
+> [#56](https://github.com/youichi-uda/sbomhub/issues/56). The older manual
+> seven-step flow is kept as an offline / emergency fallback in §3.1.
 >
 > Japanese version: [`encryption-key-rotation.ja.md`](./encryption-key-rotation.ja.md).
 
@@ -100,29 +101,100 @@ grep -rn 'EncryptionKey\|encryptionKey\|GetEncryptionKey' apps/api/ --include='*
 
 ---
 
-## 3. Rotation procedure (short downtime)
+## 3. Rotation procedure (automation-first, short downtime)
 
-Before the seven-step rewrite, stop the API and prepare both keys:
+Stop the API and prepare both keys:
 
 ```bash
 docker compose stop api
 NEW_KEY="$(openssl rand -base64 32)"
 OLD_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
+export OLD_ENCRYPTION_KEY="$OLD_KEY"
+export NEW_ENCRYPTION_KEY="$NEW_KEY"
 ```
 
-Leave `postgres` and `redis` running. The migration script needs database
-access. Both values are sensitive. Keep them in the shell session only; do not
-echo them into shared logs or chat.
+Leave `postgres` and `redis` running. The migration binary needs database
+access. Both key values are sensitive: pass them through environment variables
+only, do not put them in argv, shared logs, shell history, or tickets.
 
-The high-level flow is:
+Build or run the CLI from `apps/api`:
+
+```bash
+cd apps/api
+export PATH=$PATH:/usr/local/go/bin
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --dry-run \
+  --report ../../migrate-encryption-dry-run.json
+```
+
+The dry run decrypts every encrypted row with `OLD_ENCRYPTION_KEY`, writes no
+database changes, and stores only per-row `SHA256(plaintext)` digests in the
+report. Review the summary and keep the report for the apply and verify steps.
+
+Apply the rotation:
+
+```bash
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --apply \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --report ../../migrate-encryption-apply.json
+```
+
+The tool loops tenants with `SELECT set_config('app.current_tenant_id', ..., true)`
+inside each transaction so `tenant_llm_config` and
+`issue_tracker_connections` stay under the same FORCE RLS posture as the
+runtime app. Use a `DATABASE_URL` for `sbomhub_app` when possible; it is
+`NOBYPASSRLS` and matches production runtime behavior. `sbomhub_migrator` is
+also `NOBYPASSRLS` and acceptable when operational policy reserves data
+maintenance for that role. In both cases the per-tenant GUC is mandatory.
+
+After apply succeeds, swap `ENCRYPTION_KEY` to `NEW_KEY` in `.env`, Docker
+Secrets, or KMS, restart the API, then verify every row against the dry-run
+digests:
+
+```bash
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --verify \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --report ../../migrate-encryption-verify.json
+```
+
+`--verify` replaces the old Step 2.5 / Step 6 sample-hash comparison. It
+decrypts every target row with `NEW_ENCRYPTION_KEY` and compares the per-row
+digest with the dry-run report, so verification is not limited to the legacy
+`LIMIT 1` smoke sample.
+
+Operational notes:
+
+- Default targets are `tenant_llm_config.encrypted_api_key` (BYTEA) and
+  `issue_tracker_connections.auth_token_encrypted` (TEXT base64).
+- `--batch-size` defaults to 1000 rows per tenant transaction. Large tenants
+  are split into multiple transactions, reducing lock duration and rollback
+  scope. ※要確認: rehearse tenants above 10k encrypted rows in staging to size
+  lock impact for your DB hardware.
+- `--apply` is idempotent. Rows that already decrypt with `NEW_ENCRYPTION_KEY`
+  are reported as `already-new` and skipped; rows that decrypt with neither key
+  fail.
+- If interrupted, rerun with the same dry-run report. For precise resume, pass
+  `--resume-from <row_id>`; rows already under the new key will be skipped.
+- `--continue-on-error` records row failures and continues the current batch.
+  Without it, the current transaction rolls back and the command exits.
+
+### 3.1 Manual fallback (offline / emergency only)
+
+Use this fallback only when the Go binary cannot be built or run. The high-level
+manual flow is:
 
 1. Decrypt every encrypted row with the old key in a per-tenant loop:
    `tenant_llm_config.encrypted_api_key` and
    `issue_tracker_connections.auth_token_encrypted`.
 2. Keep plaintext only in memory; never write it to disk.
-   Step 2.5: while the DB still contains old-key ciphertext, run
-   `verify-encryption.sh` with `OLD_KEY` from the environment (preferred) or
-   a managed temporary key file, and record the SHA256 digest.
+   The automation path's `--dry-run` report is the preferred digest record; if
+   you are fully manual, use the old Step 2.5 sample check below only as a
+   limited fallback.
 3. Switch `ENCRYPTION_KEY` to the new key (`.env`, Docker Secrets, or KMS).
 4. Restart the server so it boots with the new key.
 5. Re-encrypt every plaintext value with the new key and update the DB in a
@@ -131,11 +203,10 @@ The high-level flow is:
    digest with the recorded old-key digest.
 7. Destroy the old key after the agreed retention period.
 
-### Step 1 — Decrypt all encrypted rows with the old key
+### Manual Step 1 — Decrypt all encrypted rows with the old key
 
-A turnkey subcommand is **not yet implemented**. Until it lands, run the
-manual procedure in tenant-scoped transactions so a partial failure rolls back
-cleanly.
+Run the manual procedure in tenant-scoped transactions so a partial failure
+rolls back cleanly.
 
 The encryption scheme is **AES-256-GCM** with a 12-byte random nonce.
 `tenant_llm_config.encrypted_api_key` stores raw BYTEA `nonce || sealed` via
@@ -190,7 +261,7 @@ Operational guard rails:
 - Log row counts (`before` / `decrypted` / `re-encrypted`); they must all
   match. Do **not** log plaintext tokens or either key.
 
-### Step 2 — Keep plaintext in memory only
+### Manual Step 2 — Keep plaintext in memory only
 
 The plaintext values from Step 1 must stay in process memory only. Do not write
 them to temporary files, SQL dumps, shell history, application logs, chat, or
@@ -198,7 +269,7 @@ ticketing systems. If the rotation program cannot keep all plaintext in memory,
 process one tenant at a time and commit only after that tenant has been
 re-encrypted and verified.
 
-### Step 2.5 — Record the old-key plaintext hash before overwriting ciphertext
+### Manual Step 2.5 — Record the old-key plaintext hash before overwriting ciphertext
 
 Before any DB row is re-encrypted with `NEW_KEY`, run the decrypt smoke test
 against the still-old-key ciphertext and save only the emitted SHA256 plaintext
@@ -230,10 +301,10 @@ contain the old key or plaintext. This is the only point in the rotation where
 the DB still contains ciphertext decryptable by `OLD_KEY`. After Step 5 updates
 the DB, `OLD_KEY` is expected to fail against the rewritten rows, so do not use
 an old-key rerun as the post-rotation comparison. The temporary-file lifecycle
-is still manual; full key handling automation is tracked for M6 in
-[#56](https://github.com/youichi-uda/sbomhub/issues/56).
+is still manual. Prefer the `migrate-encryption --dry-run` report whenever the
+automation binary is available.
 
-### Step 3 — Swap the key in `.env`, Docker Secrets, or KMS
+### Manual Step 3 — Swap the key in `.env`, Docker Secrets, or KMS
 
 The most robust way is to re-run the installer with `--force`, which backs the
 existing `.env` up to `.env.bak.YYYYMMDD` and issues a fresh
@@ -261,7 +332,7 @@ For enterprise Docker Secrets, replace `docker/secrets/encryption_key.txt` with
 the KMS secret version or alias used by the API before the restart. Keep the
 maintenance window closed to user traffic until Step 6 passes.
 
-### Step 4 — Restart the server with the new key
+### Manual Step 4 — Restart the server with the new key
 
 ```bash
 docker compose up -d api
@@ -273,7 +344,7 @@ new key is a known placeholder or shorter than 32 bytes the server refuses to
 boot. A clean startup is the first confirmation that `.env` was edited
 correctly.
 
-### Step 5 — Re-encrypt all rows with the new key
+### Manual Step 5 — Re-encrypt all rows with the new key
 
 With the API booted under `NEW_KEY`, update the encrypted columns from the
 in-memory plaintext captured in Steps 1-2:
@@ -300,9 +371,9 @@ for each tenant:
     COMMIT
 ```
 
-### Step 6 — Verify with `verify-encryption.sh`
+### Manual Step 6 — Verify with `migrate-encryption --verify` or `verify-encryption.sh`
 
-> **⚠ Sample-only verification limitation (M5 #53 F92)**
+> **Sample-only verification limitation for the legacy smoke test (M5 #53 F92)**
 >
 > `verify-encryption.sh` (via `decrypt-test`) samples **a single row with
 > `LIMIT 1` and no `ORDER BY`**. In a multi-tenant DB or multi-row table, Step
@@ -312,13 +383,9 @@ for each tenant:
 >
 > Recommended posture for production rotation:
 >
-> 1. Rehearse rotation in staging with all production tenants imported.
-> 2. Before the production rotation, run a temporary one-tenant rehearsal where
->    the sampled logical secret is known and stable, so Step 2.5 and Step 6 are
->    more likely to compare the same row.
-> 3. For high-stakes rotation, run a per-tenant verification loop manually or
->    via the future `migrate-encryption` automation tool tracked as M6 work in
->    [#56](https://github.com/youichi-uda/sbomhub/issues/56).
+> 1. Prefer `migrate-encryption --verify --report-input <dry-run-report>`.
+> 2. Rehearse rotation in staging with all production tenants imported.
+> 3. If forced onto the legacy smoke test, treat it as a sample-only signal.
 > 4. Post-rotation, monitor application logs for `decrypt failed` errors for
 >    24-48h before destroying the old key.
 
@@ -345,9 +412,10 @@ The hashes must match for the same logical secret. The plaintext itself must
 never be printed. Do not run the post-rotation check with `OLD_KEY`; after
 Step 5, the DB ciphertext is expected to be decryptable only by `NEW_KEY`.
 Because this smoke test is sample-only, treat a hash match as a mitigation
-signal rather than complete row coverage until the M6 automation exists.
+signal rather than complete row coverage. The automation `--verify` mode is the
+complete per-row check.
 
-### Step 7 — Destroy the old key after retention
+### Manual Step 7 — Destroy the old key after retention
 
 Keep `OLD_KEY` only for the retention period approved for this maintenance
 window. After §4 passes and the rollback window closes, delete the old `.env`
@@ -531,30 +599,16 @@ Notes: Follow docs/encryption-key-rotation.md.
 
 ---
 
-## Follow-up: automation
+## Automation implementation
 
-A `sbomhub migrate-encryption` (or `apps/api/cmd/migrate-encryption`)
-subcommand that wraps the §3 decrypt/re-encrypt flow is **not yet implemented**.
-Tracked as [#56](https://github.com/youichi-uda/sbomhub/issues/56).
-Suggested design when the follow-up is picked up:
+M6 issue [#56](https://github.com/youichi-uda/sbomhub/issues/56) implements the
+turnkey rotation binary at
+[`apps/api/cmd/migrate-encryption`](../apps/api/cmd/migrate-encryption).
+Implementation commit: `50be30f` (`feat(api): migrate-encryption rotation CLI
+(M6 #56)`).
 
-- Inputs: `OLD_ENCRYPTION_KEY` and `NEW_ENCRYPTION_KEY` from the environment
-  (no key files), plus flags such as `--dry-run`, `--verify`,
-  `--table tenant_llm_config --column encrypted_api_key` and `--table
-  issue_tracker_connections --column auth_token_encrypted` (extensible).
-- Runs RLS-aware tenant loops. `sbomhub_migrator` is `NOBYPASSRLS`, so the
-  tool must either set `app.current_tenant_id` per tenant, temporarily lift and
-  restore table RLS during the maintenance window, or route through
-  tenant-scoped API calls.
-- Reuses the AES-GCM helpers from `apps/api/internal/service/llm/crypto.go`
-  and `apps/api/internal/service/issue_tracker.go` so the cipher contracts stay
-  in one place.
-- `--dry-run` reports the count of rows it *would* re-encrypt and verifies
-  every row decrypts under `OLD_ENCRYPTION_KEY`, without writing.
-- `--verify` checks per-row digests after rotation so verification is not
-  limited to the current `LIMIT 1` smoke sample.
-- Wraps each tenant rewrite in a transaction.
-- Refuses to run if `APP_ENV=production` and `--dry-run` was not passed at
-  least once with a successful decrypt count matching the row count.
-
-Until the subcommand exists, treat the §3 manual flow as the source of truth.
+The binary uses env-only `OLD_ENCRYPTION_KEY` / `NEW_ENCRYPTION_KEY`, imports
+the production LLM and issue-tracker encryption helpers, loops per tenant with
+`app.current_tenant_id`, emits JSON digest reports, and supports `--dry-run`,
+`--apply`, `--verify`, `--resume-from`, `--batch-size`, and
+`--continue-on-error`. Treat §3 as the source of truth for the operator flow.

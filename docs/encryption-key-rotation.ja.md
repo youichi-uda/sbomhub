@@ -1,10 +1,10 @@
 # ENCRYPTION_KEY ローテーション手順
 
 > **ステータス**: 本ドキュメントは SBOMHub の `ENCRYPTION_KEY` を回す際の
-> 公式オペレータ向けランブックです。ターンキーな
-> `sbomhub migrate-encryption` サブコマンドは**未実装**です (フォローアップ
-> として追跡 — 本ドキュメント末尾「フォローアップ: 自動化」 参照)。
-> 実装されるまで、 オペレータは本ランブックの手動 SQL 手順に従ってください。
+> 公式オペレータ向けランブックです。標準 path は M6 issue
+> [#56](https://github.com/youichi-uda/sbomhub/issues/56) で実装した
+> [`apps/api/cmd/migrate-encryption`](../apps/api/cmd/migrate-encryption) です。
+> 旧 7 step 手動 flow は offline / 緊急時用 fallback として §3.1 に残します。
 >
 > 英語版 (canonical): [`encryption-key-rotation.md`](./encryption-key-rotation.md)。
 
@@ -94,29 +94,94 @@ grep -rn 'EncryptionKey\|encryptionKey\|GetEncryptionKey' apps/api/ --include='*
 
 ---
 
-## 3. ローテーション手順 (短時間ダウンタイム)
+## 3. ローテーション手順 (automation-first、短時間ダウンタイム)
 
-7 step の再書き込みに入る前に、 API を停止し両方の鍵を用意する。
+API を停止し両方の鍵を用意する。
 
 ```bash
 docker compose stop api
 NEW_KEY="$(openssl rand -base64 32)"
 OLD_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
+export OLD_ENCRYPTION_KEY="$OLD_KEY"
+export NEW_ENCRYPTION_KEY="$NEW_KEY"
 ```
 
-`postgres` と `redis` は起動したまま。 移行スクリプトが DB にアクセスする
-ため。 両値とも機密。 共有ログやチャットに echo しないこと。
+`postgres` と `redis` は起動したまま。 移行 binary が DB にアクセスするため。
+両値とも機密であり、 environment 経由だけで渡す。 argv、 共有ログ、
+shell history、 ticket には載せない。
 
-大枠は以下の 7 step。
+`apps/api` から CLI を実行する。
+
+```bash
+cd apps/api
+export PATH=$PATH:/usr/local/go/bin
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --dry-run \
+  --report ../../migrate-encryption-dry-run.json
+```
+
+dry-run は `OLD_ENCRYPTION_KEY` で全 encrypted row を復号し、 DB には書き込ま
+ない。 report には per-row の `SHA256(plaintext)` だけを書く。 次の apply /
+verify で同じ report を使う。
+
+apply:
+
+```bash
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --apply \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --report ../../migrate-encryption-apply.json
+```
+
+tool は transaction 内で tenant ごとに
+`SELECT set_config('app.current_tenant_id', ..., true)` を実行する。 これにより
+`tenant_llm_config` と `issue_tracker_connections` は runtime と同じ FORCE RLS
+posture で処理される。 推奨 role は production runtime と同じ
+`sbomhub_app` (`NOBYPASSRLS`)。 data maintenance を migrator role に限定する
+運用なら `sbomhub_migrator` も使用可能だが、 同じく `NOBYPASSRLS` なので
+per-tenant GUC は必須。
+
+apply 成功後、 `.env` / Docker Secrets / KMS の `ENCRYPTION_KEY` を `NEW_KEY`
+へ差し替え、 API を restart し、 dry-run digest と全行比較する。
+
+```bash
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --verify \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --report ../../migrate-encryption-verify.json
+```
+
+`--verify` は旧 Step 2.5 / Step 6 の sample hash 比較を置き換える。 全 target
+row を `NEW_ENCRYPTION_KEY` で復号し、 dry-run report の per-row digest と比較
+するため、 旧 `LIMIT 1` smoke sample の限界を受けない。
+
+運用メモ:
+
+- default target は `tenant_llm_config.encrypted_api_key` (BYTEA) と
+  `issue_tracker_connections.auth_token_encrypted` (TEXT base64)。
+- `--batch-size` default は tenant transaction あたり 1000 row。 大規模 tenant
+  は transaction 分割され、 lock 時間と rollback 範囲を抑える。 ※要確認:
+  10k row 超の tenant は staging で lock 影響を確認すること。
+- `--apply` は冪等。 既に `NEW_ENCRYPTION_KEY` で復号できる行は
+  `already-new` として skip。 旧鍵・新鍵の両方で復号不能な行は error。
+- 中断時は同じ dry-run report で再実行できる。 厳密に再開したい場合は
+  `--resume-from <row_id>` を渡す。 既に新鍵化済みの行は skip される。
+- `--continue-on-error` は row failure を report しつつ batch 内の次行へ進む。
+  未指定なら現在 transaction を rollback して終了する。
+
+### 3.1 手動 fallback (offline / 緊急時のみ)
+
+Go binary を build / 実行できない場合だけ以下を使う。 大枠は旧 7 step。
 
 1. 全 tenant の暗号化済み行を旧 KEY で復号する (per-tenant loop):
    `tenant_llm_config.encrypted_api_key` と
    `issue_tracker_connections.auth_token_encrypted`。
 2. plaintext は memory 内だけに一時保持し、 disk には書き出さない。
-   Step 2.5: DB がまだ旧鍵 ciphertext を保持している間に、 `OLD_KEY` を
-   environment から渡す形を first choice として `verify-encryption.sh` を実行
-   する。 shell 変数が実用的でない場合のみ、 managed temporary key file を
-   使い、 SHA256 digest を記録する。
+   digest 記録は automation path の `--dry-run` report が推奨。 完全手動の場合
+   のみ、 下記 Step 2.5 の sample check を限定的 fallback として使う。
 3. `ENCRYPTION_KEY` を新 KEY に切り替える (`.env` / Docker Secrets / KMS)。
 4. server を restart し、 新 KEY で起動する。
 5. 全 plaintext を新 KEY で再暗号化し、 DB を更新する (per-tenant loop)。
@@ -124,10 +189,10 @@ OLD_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
    SHA256 digest と比較する。
 7. 合意した保持期間後に旧 KEY を destroy する。
 
-### Step 1 — 全暗号化済み行を旧鍵で復号
+### Manual Step 1 — 全暗号化済み行を旧鍵で復号
 
-ターンキーなサブコマンドは**未実装**。 実装まで、 部分失敗時にクリーンに
-ロールバックできるよう、 手動手順はトランザクション内で実行する。
+部分失敗時にクリーンにロールバックできるよう、 手動手順はトランザクション
+内で実行する。
 
 暗号化方式は **AES-256-GCM**、 12-byte ランダム nonce。
 `tenant_llm_config.encrypted_api_key` は
@@ -181,14 +246,14 @@ for each tenant:
 - 行数 (`before` / `decrypted` / `re-encrypted`) をログ。 3 つは一致する
   必要がある。 平文トークン / どちらの鍵もログに出さない。
 
-### Step 2 — plaintext は memory 内だけに保持
+### Manual Step 2 — plaintext は memory 内だけに保持
 
 Step 1 の plaintext は process memory 内だけに保持する。 temporary file、 SQL
 dump、 shell history、 application log、 chat、 ticketing system へ書き出さない。
 全 plaintext を memory に保持できない場合は tenant 単位で処理し、 その tenant
 の再暗号化と検証が終わってから commit する。
 
-### Step 2.5 — ciphertext 上書き前に旧鍵 plaintext hash を記録
+### Manual Step 2.5 — ciphertext 上書き前に旧鍵 plaintext hash を記録
 
 DB 行を `NEW_KEY` で再暗号化する前に、 まだ旧鍵 ciphertext が残っている DB に
 対して decrypt smoke test を実行し、 出力された SHA256 plaintext hash だけを
@@ -220,10 +285,10 @@ echo "$OLD_KEY" > "$old_key_file"
 含めてはならない。 DB 上の ciphertext が `OLD_KEY` で復号できるのはこの時点
 だけ。 Step 5 で DB を更新した後は、 書き換え済み行を `OLD_KEY` で復号でき
 ないのが正常なので、 post-rotation 比較として旧鍵で再実行しない。
-temporary-file lifecycle はまだ手動運用であり、 完全な鍵取り扱い自動化は M6
-の [#56](https://github.com/youichi-uda/sbomhub/issues/56) で追跡する。
+temporary-file lifecycle は手動運用になる。 automation binary が利用可能なら
+`migrate-encryption --dry-run` report を優先する。
 
-### Step 3 — `.env` / Docker Secrets / KMS の鍵を差し替え
+### Manual Step 3 — `.env` / Docker Secrets / KMS の鍵を差し替え
 
 最も堅牢な方法は `install.sh --force` の再実行で、 既存 `.env` を
 `.env.bak.YYYYMMDD` へ退避し新規 `ENCRYPTION_KEY` (および新規 DB
@@ -250,7 +315,7 @@ enterprise Docker Secrets では `docker/secrets/encryption_key.txt` を `NEW_KE
 restart 前に API が参照する KMS secret version / alias を更新する。 Step 6 が
 pass するまでは maintenance window を閉じたままにする。
 
-### Step 4 — 新鍵で server を restart
+### Manual Step 4 — 新鍵で server を restart
 
 ```bash
 docker compose up -d api
@@ -261,7 +326,7 @@ docker compose logs -f api | head -50
 新鍵が既知プレースホルダだったり 32 バイト未満だと起動拒否。 クリーンに
 起動することが `.env` 編集が正しかった最初の確認。
 
-### Step 5 — 全行を新鍵で再暗号化
+### Manual Step 5 — 全行を新鍵で再暗号化
 
 新鍵で API が起動した状態で、 Step 1-2 で memory に保持した plaintext から
 暗号化カラムを更新する。
@@ -288,9 +353,9 @@ for each tenant:
     COMMIT
 ```
 
-### Step 6 — `verify-encryption.sh` で検証
+### Manual Step 6 — `migrate-encryption --verify` または `verify-encryption.sh` で検証
 
-> **⚠ Sample-only verification limitation (M5 #53 F92)**
+> **legacy smoke test の sample-only verification limitation (M5 #53 F92)**
 >
 > `verify-encryption.sh` (`decrypt-test` 経由) は **`LIMIT 1` かつ
 > `ORDER BY` なしで単一行だけを sample** する。 multi-tenant DB や複数行を
@@ -300,13 +365,9 @@ for each tenant:
 >
 > production rotation の推奨 posture:
 >
-> 1. staging に production tenant を全て import して rotation を rehearse する。
-> 2. production rotation 前に、 一時的に 1 tenant のみの rehearsal を実施し、
->    sample される logical secret が既知かつ stable な状態で Step 2.5 と
->    Step 6 が同じ row を比較しやすくする。
-> 3. high-stakes rotation では、 手動の per-tenant verification loop、 または
->    M6 work として [#56](https://github.com/youichi-uda/sbomhub/issues/56) で
->    追跡する将来の `migrate-encryption` automation tool を使う。
+> 1. `migrate-encryption --verify --report-input <dry-run-report>` を優先する。
+> 2. staging に production tenant を全て import して rotation を rehearse する。
+> 3. legacy smoke test しか使えない場合は sample-only signal として扱う。
 > 4. post-rotation は旧鍵 destroy 前に 24-48h、 application log の
 >    `decrypt failed` error を監視する。
 
@@ -331,10 +392,11 @@ diff -u \
 同じ logical secret なら hash は一致する必要がある。 plaintext 自体は絶対に
 出力しない。 post-rotation check を `OLD_KEY` で実行しないこと。 Step 5 後の
 DB ciphertext は `NEW_KEY` だけで復号できるのが正常。
-この smoke test は sample-only なので、 hash 一致は M6 automation が実装される
-まで完全な row coverage ではなく mitigation signal として扱う。
+この smoke test は sample-only なので、 hash 一致は完全な row coverage では
+なく mitigation signal として扱う。 完全な per-row check は automation の
+`--verify` mode を使う。
 
-### Step 7 — 保持期間後に旧鍵を destroy
+### Manual Step 7 — 保持期間後に旧鍵を destroy
 
 `OLD_KEY` はこの maintenance window で承認された保持期間だけ保持する。 §4 が
 pass し rollback window が閉じたら、 旧 `.env` snapshot、 Docker Secret
@@ -512,30 +574,16 @@ Notes: docs/encryption-key-rotation.ja.md に従う。
 
 ---
 
-## フォローアップ: 自動化
+## 自動化実装
 
-§3 の decrypt / re-encrypt flow をラップする `sbomhub migrate-encryption` (もしくは
-`apps/api/cmd/migrate-encryption`) サブコマンドは**未実装**。 フォロー
-アップ [#56](https://github.com/youichi-uda/sbomhub/issues/56) として追跡。
-実装時の推奨設計:
+M6 issue [#56](https://github.com/youichi-uda/sbomhub/issues/56) で
+turnkey rotation binary を
+[`apps/api/cmd/migrate-encryption`](../apps/api/cmd/migrate-encryption) に実装済み。
+実装 commit: `50be30f` (`feat(api): migrate-encryption rotation CLI (M6 #56)`)。
 
-- 入力: `OLD_ENCRYPTION_KEY` と `NEW_ENCRYPTION_KEY` を environment から受け取る
-  (key file 不要)。 追加フラグとして `--dry-run`、 `--verify`、
-  `--table tenant_llm_config --column encrypted_api_key` と
-  `--table issue_tracker_connections --column auth_token_encrypted` (拡張可)。
-- RLS-aware な tenant loop で実行。 `sbomhub_migrator` は `NOBYPASSRLS` なので、
-  tool は tenant ごとに `app.current_tenant_id` を set するか、 maintenance
-  window 中だけ table RLS を lift して restore するか、 tenant-scoped API call
-  経由で処理する必要がある。
-- `apps/api/internal/service/llm/crypto.go` と
-  `apps/api/internal/service/issue_tracker.go` の AES-GCM ヘルパを再利用し、
-  cipher 契約を 1 箇所に集約。
-- `--dry-run` は再暗号化する*予定*の行数を報告し、 全行が
-  `OLD_ENCRYPTION_KEY` で復号可能なことを書き込まずに検証する。
-- `--verify` は rotation 後に per-row digest を確認し、 現在の `LIMIT 1`
-  smoke sample に限定されない検証を行う。
-- tenant ごとの再書き込みをトランザクションでラップ。
-- `APP_ENV=production` かつ `--dry-run` が 1 度も実行されていない、 もしくは
-  復号件数が行数と一致していない場合は実行拒否。
-
-サブコマンドが実装されるまでは、 §3 の手動 flow を真理 source として扱う。
+binary は env-only の `OLD_ENCRYPTION_KEY` / `NEW_ENCRYPTION_KEY` を使い、
+production の LLM / issue tracker 暗号化 helper を import する。 tenant ごとに
+`app.current_tenant_id` を bind し、 JSON digest report を出力し、
+`--dry-run`、 `--apply`、 `--verify`、 `--resume-from`、 `--batch-size`、
+`--continue-on-error` をサポートする。 operator flow は §3 を source of truth
+として扱う。

@@ -407,25 +407,46 @@ backup を取るだけでは「実際に復元できる」 ことは保証され
 は staging 環境で restore.sh を回し、 復元後に api が起動 + Web UI から既存
 データが見えることを確認する。 訓練で発見しがちな問題は M4-4 docs §9.6 参照。
 
-### 5.6 future work: ENCRYPTION_KEY rotation automation
+### 5.6 ENCRYPTION_KEY rotation automation
 
 `ENCRYPTION_KEY` rotation の公式手順は
 [`../docs/encryption-key-rotation.md`](../docs/encryption-key-rotation.md) が
-source of truth。 現時点では手動 runbook であり、 `sbomhub keys rotate` /
-`sbomhub migrate-encryption` のような turnkey subcommand は**未実装**。
+source of truth。 M6 issue
+[#56](https://github.com/youichi-uda/sbomhub/issues/56) で
+`apps/api/cmd/migrate-encryption` を実装済み。
 
-実装する場合の方向性:
+enterprise compose での基本 flow:
 
-- `tenant_llm_config.encrypted_api_key` と
-  `issue_tracker_connections.auth_token_encrypted` を両方対象にする。
-- `api_keys.key_hash` は一方向ハッシュなので rotation 対象外にする。
-- `sbomhub_migrator` は `NOBYPASSRLS` で FORCE RLS を bypass しないため、
-  tenant ごとの `SET LOCAL app.current_tenant_id`、 rotation 中だけの RLS lift
-  + restore、 または tenant-scoped API call のいずれかで実装する。
-- plaintext は memory 内だけに保持し、 stdout / log / temp file に出さない。
+```bash
+cd ../apps/api
+export PATH=$PATH:/usr/local/go/bin
+export OLD_ENCRYPTION_KEY="$(cat ../../docker/secrets/encryption_key.txt)"
+export NEW_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 
-※要確認: この automation を M5 内で実装するか、 M6 以降の follow-up として
-切り出すかは未確定。
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --dry-run \
+  --report ../../migrate-encryption-dry-run.json
+
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --apply \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --report ../../migrate-encryption-apply.json
+
+# docker/secrets/encryption_key.txt を NEW_ENCRYPTION_KEY に置換して api restart 後:
+go run ./cmd/migrate-encryption \
+  --db-url "$DATABASE_URL" \
+  --verify \
+  --report-input ../../migrate-encryption-dry-run.json \
+  --report ../../migrate-encryption-verify.json
+```
+
+対象は `tenant_llm_config.encrypted_api_key` と
+`issue_tracker_connections.auth_token_encrypted`。 `api_keys.key_hash` は一方向
+ハッシュなので対象外。 tool は tenant ごとに
+`app.current_tenant_id` を bind し、 FORCE RLS を bypass しない。
+plaintext は memory 内だけに保持し、 stdout / log / temp file には出さない。
 
 ---
 
