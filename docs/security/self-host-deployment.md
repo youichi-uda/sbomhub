@@ -293,28 +293,66 @@ cron 環境は通常の login shell と異なり、 `.env` や shell profile を
 `ENCRYPTION_KEY` (または `--key-file`) は cron entry 内で明示的に渡す。 また、 secrets の相対 path を
 解決できるよう sbomhub install dir (例: `/opt/sbomhub`) から実行する。
 
+`DATABASE_URL` は既存の `docker/secrets/postgres_app_password.txt` から組み立てる。 専用の DSN secret
+file は不要。 password に `+`, `/`, `=`, `@`, `:`, `?`, `#`, `&` などが含まれる場合に備え、 URL encode
+してから DSN に埋め込む。 通常 shell の手順では F106 と同じ `urlenc` helper を使う。 cron の 1 行例では
+cron が `%` を改行として扱う問題を避けるため、 `%` を command text に含まない Python encoder を使う。
+
 ```cron
 # /etc/cron.d/sbomhub-verify-encryption (毎日 04:00 JST 実行)
 # Run from sbomhub install dir (e.g. /opt/sbomhub) so secrets paths resolve.
 # ENCRYPTION_KEY can be passed via env, but cron examples should prefer --key-file.
-0 4 * * * sbomhub cd /opt/sbomhub && DATABASE_URL="$(cat /opt/sbomhub/secrets/db-dsn.txt)" ./docker/scripts/verify-encryption.sh --key-file /opt/sbomhub/docker/secrets/encryption_key.txt || systemctl notify-failure
+0 4 * * * sbomhub cd /opt/sbomhub && APP_PW_ENC="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read().rstrip("\n"), safe=""))' < docker/secrets/postgres_app_password.txt)" && DATABASE_URL="postgres://sbomhub_app:${APP_PW_ENC}@127.0.0.1:5432/sbomhub?sslmode=disable" ./docker/scripts/verify-encryption.sh --key-file docker/secrets/encryption_key.txt 2>&1 | logger -t sbomhub-verify -p daemon.info
 ```
 
-systemd timer で管理する場合は service 側に `WorkingDirectory` と `EnvironmentFile` を置き、 cron
-固有の env 欠落を避ける。
+cron では failure を systemd の非標準通知 subcommand に渡さない。 上記の例では
+stdout/stderr を `logger` 経由で syslog に送り、 oncall agent、 local mail、 または監視側で拾う。
+
+継続運用では、 cron より systemd timer + service + `OnFailure` handler を推奨する。 systemd では
+`.env` 全体を `EnvironmentFile` に指定しない。 `.env` には `MIGRATE_DATABASE_URL`, `APP_PASSWORD`,
+`MIGRATOR_PASSWORD`, `ENCRYPTION_KEY` など verify に不要な secrets が含まれ、 同一 user/root から
+`/proc/<pid>/environ` 経由で読める可能性がある。 verify 専用の最小 env file を作り、 service の env には
+`DATABASE_URL` だけを入れる。 `ENCRYPTION_KEY` は `--key-file` で読み、 process environment へ置かない。
+
+```bash
+# 初回 setup (root or sudo)
+install -d -m 700 -o sbomhub -g sbomhub /etc/sbomhub
+
+urlenc() {
+  printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's|/|%2F|g' -e 's/=/%3D/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/&/%26/g'
+}
+
+APP_PW="$(cat /opt/sbomhub/docker/secrets/postgres_app_password.txt)"
+APP_PW_ENC="$(urlenc "$APP_PW")"
+echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW_ENC}@127.0.0.1:5432/sbomhub?sslmode=disable" | \
+  install -m 600 -o sbomhub -g sbomhub /dev/stdin /etc/sbomhub/verify-encryption.env
+```
+
+> Warning: systemd service の `EnvironmentFile` に `/opt/sbomhub/.env` は使わない。 verify に不要な secrets を service の
+> environment に載せ、 `/proc/<pid>/environ` exposure を広げる。
 
 ```ini
 # /etc/systemd/system/sbomhub-verify-encryption.service
 [Unit]
-Description=SBOMHub encryption decrypt smoke test
+Description=SBOMHub ENCRYPTION_KEY smoke test
+OnFailure=sbomhub-verify-encryption-failure.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/sbomhub
-EnvironmentFile=/opt/sbomhub/.env
+EnvironmentFile=/etc/sbomhub/verify-encryption.env
 ExecStart=/opt/sbomhub/docker/scripts/verify-encryption.sh \
   --key-file /opt/sbomhub/docker/secrets/encryption_key.txt
 User=sbomhub
+```
+
+optional な failure handler は、 site の通知手段に合わせて置き換える。
+
+```ini
+# /etc/systemd/system/sbomhub-verify-encryption-failure.service
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo "sbomhub verify-encryption failed at $(date)" | mail -s "[sbomhub] verify-encryption fail" oncall@example.com'
 ```
 
 ```ini
@@ -328,6 +366,14 @@ Persistent=true
 
 [Install]
 WantedBy=timers.target
+```
+
+実行結果は次で確認する。
+
+```bash
+systemctl daemon-reload
+systemctl enable --now sbomhub-verify-encryption.timer
+journalctl -u sbomhub-verify-encryption.service
 ```
 
 **動作**:
