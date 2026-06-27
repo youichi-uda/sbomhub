@@ -288,7 +288,7 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
 >
 > ```bash
 > mkdir -p docker/scripts
-> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
+> for s in _env_helpers.sh backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
 >   curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts/$s" \
 >     -o "docker/scripts/$s"
 >   chmod +x "docker/scripts/$s"
@@ -390,7 +390,7 @@ done
 ```
 
 English summary: before using the cron or systemd examples below, install all
-four operational scripts into `/opt/sbomhub`, then choose exactly one secret
+five operational scripts into `/opt/sbomhub`, then choose exactly one secret
 source path. Path A is the standard OSS `.env` path: derive only the wrapper
 secrets from `.env`, write them under `/opt/sbomhub/docker/secrets/`, and unset
 the temporary shell variables. Path B is the Enterprise Docker secrets path:
@@ -1077,7 +1077,7 @@ shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 >
 > ```bash
 > mkdir -p docker/scripts
-> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
+> for s in _env_helpers.sh backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh dr-rehearsal.sh; do
 >   curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts/$s" \
 >     -o "docker/scripts/$s"
 >   chmod +x "docker/scripts/$s"
