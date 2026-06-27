@@ -255,8 +255,16 @@ encrypted records are still readable.
    new key actually decrypts the re-encrypted ciphertext at the DB layer:
 
    ```bash
+   ENCRYPTION_KEY="$(cat docker/secrets/encryption_key.txt)" \
    ./docker/scripts/verify-encryption.sh \
-       --key "$(cat docker/secrets/encryption_key.txt)" \
+       --db-url "$DATABASE_URL"
+   ```
+
+   Equivalent file-based invocation:
+
+   ```bash
+   ./docker/scripts/verify-encryption.sh \
+       --key-file docker/secrets/encryption_key.txt \
        --db-url "$DATABASE_URL"
    ```
 
@@ -271,9 +279,11 @@ encrypted records are still readable.
    | 3  | no encrypted row to test (no BYOK / no integration configured yet) |
 
    To verify the round-trip across **the same secret** under both old and
-   new keys (recommended sanity check), run the script twice with `--key`
-   pointing at the two keys; the SHA256 hashes printed must match. The
-   plaintext itself is never emitted.
+   new keys (recommended sanity check), run the script twice with
+   `ENCRYPTION_KEY=...` or `--key-file` pointing at the two keys; the SHA256
+   hashes printed must match. The plaintext itself is never emitted. The legacy
+   `--key` argv path is still accepted for compatibility but is deprecated
+   because command-line arguments are easier to expose via `ps` / procfs.
 
    See [`security/self-host-deployment.md`](./security/self-host-deployment.md) §4.5
    for the full operator contract.

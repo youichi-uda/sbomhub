@@ -37,11 +37,11 @@
 #   65  Go toolchain / binary missing (script-level prereq error)
 #
 # Usage:
-#   ./scripts/verify-encryption.sh [--key <ENCRYPTION_KEY>] [--db-url <DSN>] \
-#                                  [--table T] [--column C] [--format bytea|base64]
+#   ENCRYPTION_KEY=... ./scripts/verify-encryption.sh [--db-url <DSN>] \
+#       [--key-file <path>] [--table T] [--column C] [--format bytea|base64]
 #
 # Env (defaults):
-#   ENCRYPTION_KEY       master key (required; --key argv overrides)
+#   ENCRYPTION_KEY       master key (required unless --key-file is used)
 #   DATABASE_URL         Postgres DSN (required; --db-url argv overrides)
 #   DECRYPT_TEST_BIN     pre-built decrypt-test binary path; if unset the
 #                        script falls back to `go run ./cmd/decrypt-test`
@@ -50,9 +50,14 @@
 #
 # Examples:
 #   # 1. Manual, BYOK LLM key path (default):
+#   ENCRYPTION_KEY="$(cat /run/secrets/encryption_key)" \
+#       ./scripts/verify-encryption.sh \
+#       --db-url "postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
+#
+#   # Equivalent file-based key path that avoids putting the secret in argv:
 #   ./scripts/verify-encryption.sh \
-#       --key "$(cat /run/secrets/encryption_key)" \
-#       --db-url "postgres://sbomhub_app:...@postgres:5432/sbomhub?sslmode=disable"
+#       --key-file /run/secrets/encryption_key \
+#       --db-url "postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable"
 #
 #   # 2. Issue-tracker token path (TEXT base64):
 #   ./scripts/verify-encryption.sh \
@@ -69,6 +74,7 @@ set -euo pipefail
 
 KEY="${ENCRYPTION_KEY:-}"
 DB_URL="${DATABASE_URL:-}"
+KEY_FILE=""
 TABLE=""
 COLUMN=""
 FORMAT=""
@@ -76,9 +82,15 @@ FORMAT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --key)
+            echo "[verify-encryption] WARN: --key is deprecated because secrets in argv can leak via ps; use ENCRYPTION_KEY env or --key-file instead." >&2
             KEY="${2:-}"; shift 2 ;;
         --key=*)
+            echo "[verify-encryption] WARN: --key is deprecated because secrets in argv can leak via ps; use ENCRYPTION_KEY env or --key-file instead." >&2
             KEY="${1#--key=}"; shift ;;
+        --key-file)
+            KEY_FILE="${2:-}"; shift 2 ;;
+        --key-file=*)
+            KEY_FILE="${1#--key-file=}"; shift ;;
         --db-url)
             DB_URL="${2:-}"; shift 2 ;;
         --db-url=*)
@@ -106,8 +118,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "${KEY_FILE}" ]]; then
+    if [[ ! -r "${KEY_FILE}" ]]; then
+        echo "[verify-encryption] FATAL: --key-file is not readable: ${KEY_FILE}" >&2
+        exit 64
+    fi
+    KEY="$(cat "${KEY_FILE}")"
+fi
+
 if [[ -z "${KEY}" ]]; then
-    echo "[verify-encryption] FATAL: ENCRYPTION_KEY (env or --key) is required" >&2
+    echo "[verify-encryption] FATAL: ENCRYPTION_KEY env or --key-file is required" >&2
     exit 64
 fi
 if [[ -z "${DB_URL}" ]]; then
