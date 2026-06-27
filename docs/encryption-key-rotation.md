@@ -433,10 +433,27 @@ In-place edit:
 
 ```bash
 # Replace the ENCRYPTION_KEY line in .env with the prepared NEW_KEY.
-# (Use your editor of choice; the example below uses awk to be POSIX-portable.)
+# Precondition: read_env_var ENCRYPTION_KEY already passed (single match, non-empty).
+write_env_var() {
+  local key="$1"
+  local value="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="${key}=" -v val="${value}" '
+    $0 ~ "^" key { print key val; next }
+    { print }
+  ' .env > "$tmp"
+  local count
+  count="$(grep -c "^${key}=" "$tmp" || true)"
+  if [ "$count" -ne 1 ]; then
+    rm -f "$tmp"
+    echo "[FATAL] write_env_var: ${key} count after update is ${count}, expected 1" >&2
+    exit 1
+  fi
+  mv "$tmp" .env
+}
 
-awk -v new="$NEW_KEY" 'BEGIN{FS=OFS="="} /^ENCRYPTION_KEY=/{$2=new; print; next} 1' \
-  .env > .env.tmp && mv .env.tmp .env
+write_env_var ENCRYPTION_KEY "$NEW_KEY"
 chmod 600 .env
 ```
 
