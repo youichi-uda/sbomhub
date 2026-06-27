@@ -51,11 +51,15 @@
 //
 // Usage:
 //
-//	decrypt-test \
-//	    --key "$ENCRYPTION_KEY" \
-//	    --db-url "$DATABASE_URL" \
-//	    [--table tenant_llm_config] \
-//	    [--column encrypted_api_key]
+//	ENCRYPTION_KEY="$(cat key.txt)" decrypt-test --db-url "$DATABASE_URL"
+//
+// Alternatively:
+//
+//	decrypt-test --key-file key.txt --db-url "$DATABASE_URL"
+//
+// The --key flag is still accepted for backward compatibility, but it is
+// discouraged because argv is visible via /proc/<pid>/cmdline on typical Linux
+// hosts.
 //
 // The default table / column pair targets the BYOK LLM API key (BYTEA, raw
 // nonce||sealed bytes from llm.Encrypt — see migration 036_tenant_llm_config).
@@ -126,8 +130,9 @@ func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 		"ciphertext format: 'bytea' (raw) or 'base64' (TEXT). Empty = auto-detect via information_schema.")
 
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: decrypt-test --key <ENCRYPTION_KEY> --db-url <DSN> [--table T] [--column C] [--format bytea|base64]")
+		fmt.Fprintln(stderr, "Usage: decrypt-test [--db-url DSN] [--key-file PATH] [--table NAME] [--column NAME]")
 		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "ENCRYPTION_KEY env var is the recommended way to pass the key.")
 		fmt.Fprintln(stderr, "Smoke-tests that ENCRYPTION_KEY decrypts a sample encrypted-column row.")
 		fmt.Fprintln(stderr, "Prints SHA256(plaintext) on success; the plaintext itself is never emitted.")
 		fmt.Fprintln(stderr, "")
