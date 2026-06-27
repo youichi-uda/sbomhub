@@ -407,6 +407,26 @@ backup を取るだけでは「実際に復元できる」 ことは保証され
 は staging 環境で restore.sh を回し、 復元後に api が起動 + Web UI から既存
 データが見えることを確認する。 訓練で発見しがちな問題は M4-4 docs §9.6 参照。
 
+### 5.6 future work: ENCRYPTION_KEY rotation automation
+
+`ENCRYPTION_KEY` rotation の公式手順は
+[`../docs/encryption-key-rotation.md`](../docs/encryption-key-rotation.md) が
+source of truth。 現時点では手動 runbook であり、 `sbomhub keys rotate` /
+`sbomhub migrate-encryption` のような turnkey subcommand は**未実装**。
+
+実装する場合の方向性:
+
+- `tenant_llm_config.encrypted_api_key` と
+  `issue_tracker_connections.auth_token_encrypted` を両方対象にする。
+- `api_keys.key_hash` は一方向ハッシュなので rotation 対象外にする。
+- `sbomhub_migrator` は `NOBYPASSRLS` で FORCE RLS を bypass しないため、
+  tenant ごとの `SET LOCAL app.current_tenant_id`、 rotation 中だけの RLS lift
+  + restore、 または tenant-scoped API call のいずれかで実装する。
+- plaintext は memory 内だけに保持し、 stdout / log / temp file に出さない。
+
+※要確認: この automation を M5 内で実装するか、 M6 以降の follow-up として
+切り出すかは未確定。
+
 ---
 
 ## 6. アップデート手順

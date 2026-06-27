@@ -49,10 +49,11 @@ grep -rn 'EncryptionKey\|encryptionKey\|GetEncryptionKey' apps/api/ --include='*
   | grep -v '_test.go'
 ```
 
-| Table | Column | What it stores | Encryption | Re-encrypt needed? |
-| --- | --- | --- | --- | --- |
-| `issue_tracker_connections` | `auth_token_encrypted` | API token for the connected Jira / Backlog instance (per tenant) | AES-256-GCM (random 12-byte nonce, base64-encoded ciphertext) | **Yes** |
-| `api_keys` | `key_hash` | SHA-256 hash of an issued SBOMHub API key | SHA-256 (one-way hash, **not** encrypted with `ENCRYPTION_KEY`) | No — hashes are unaffected by rotation |
+| Table | Column | Format | What it stores | Encryption path | Re-encrypt needed? |
+| --- | --- | --- | --- | --- | --- |
+| `tenant_llm_config` | `encrypted_api_key` | BYTEA `nonce \|\| sealed` | BYOK LLM API key (per tenant) | `internal/service/llm/crypto.go`; saved by `internal/handler/settings_llm.go`; decrypted by `cmd/server/llm_resolver.go` | **Yes** |
+| `issue_tracker_connections` | `auth_token_encrypted` | TEXT base64 `nonce \|\| sealed` | API token for the connected Jira / Backlog instance (per tenant) | `internal/service/issue_tracker.go` | **Yes** |
+| `api_keys` | `key_hash` | SHA-256 one-way hash | Issued SBOMHub API key verifier | `internal/service/apikey.go` verification path only | No — hashes are not encrypted with `ENCRYPTION_KEY` and are unaffected by rotation |
 
 > The exhaustive enumeration above is current as of this document's commit. If
 > future work adds another encrypted column it **must** be added to this table
@@ -86,9 +87,10 @@ grep -rn 'EncryptionKey\|encryptionKey\|GetEncryptionKey' apps/api/ --include='*
    ```
 
 3. **Schedule a maintenance window** and notify users. The API is offline for
-   the duration of the migration. For a fresh install with no issue tracker
-   integrations the window is seconds; in environments with many connections it
-   scales linearly with the row count of `issue_tracker_connections`.
+   the duration of the migration. For a fresh install with no BYOK LLM keys or
+   issue tracker integrations the window is seconds; in environments with many
+   connections it scales linearly with the encrypted row count across
+   `tenant_llm_config` and `issue_tracker_connections`.
 
 4. **Confirm you actually have the current key.** Rotation requires both the
    *old* key (to decrypt) and the *new* key (to re-encrypt). If you no longer
@@ -100,49 +102,43 @@ grep -rn 'EncryptionKey\|encryptionKey\|GetEncryptionKey' apps/api/ --include='*
 
 ## 3. Rotation procedure (short downtime)
 
-The high-level flow is:
-
-```
-stop API → generate new key → re-encrypt ciphertext with new key
-  → swap .env → start API → verify
-```
-
-### Step 1 — Stop the API
+Before the seven-step rewrite, stop the API and prepare both keys:
 
 ```bash
 docker compose stop api
+NEW_KEY="$(openssl rand -base64 32)"
+OLD_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
 ```
 
 Leave `postgres` and `redis` running. The migration script needs database
-access.
+access. Both values are sensitive. Keep them in the shell session only; do not
+echo them into shared logs or chat.
 
-### Step 2 — Generate the new key and keep the old one
+The high-level flow is:
 
-```bash
-NEW_KEY="$(openssl rand -base64 32)"
+1. Decrypt every encrypted row with the old key in a per-tenant loop:
+   `tenant_llm_config.encrypted_api_key` and
+   `issue_tracker_connections.auth_token_encrypted`.
+2. Keep plaintext only in memory; never write it to disk.
+3. Switch `ENCRYPTION_KEY` to the new key (`.env`, Docker Secrets, or KMS).
+4. Restart the server so it boots with the new key.
+5. Re-encrypt every plaintext value with the new key and update the DB in a
+   per-tenant loop.
+6. Run `verify-encryption.sh` and compare SHA256 plaintext hashes.
+7. Destroy the old key after the agreed retention period.
 
-# Save the old key into your shell session for the migration step.
-# (Do not write it back to .env until step 4.)
-OLD_KEY="$(grep ^ENCRYPTION_KEY= .env | cut -d= -f2-)"
-
-echo "OLD: $OLD_KEY"
-echo "NEW: $NEW_KEY"
-```
-
-Both values are sensitive. Keep them in the shell session only; do not echo
-them into shared logs or chat.
-
-### Step 3 — Re-encrypt the affected ciphertext
+### Step 1 — Decrypt all encrypted rows with the old key
 
 A turnkey subcommand is **not yet implemented**. Until it lands, run the
-following manual procedure inside a single transaction so a partial failure
-rolls back cleanly.
+manual procedure in tenant-scoped transactions so a partial failure rolls back
+cleanly.
 
-The encryption scheme is **AES-256-GCM** with a 12-byte random nonce, where
-the on-disk format is `base64( nonce || ciphertext || gcm_tag )`. The cipher
-implementation lives at
-[`apps/api/internal/service/issue_tracker.go`](../apps/api/internal/service/issue_tracker.go)
-(see `encrypt` / `decrypt`).
+The encryption scheme is **AES-256-GCM** with a 12-byte random nonce.
+`tenant_llm_config.encrypted_api_key` stores raw BYTEA `nonce || sealed` via
+[`apps/api/internal/service/llm/crypto.go`](../apps/api/internal/service/llm/crypto.go).
+`issue_tracker_connections.auth_token_encrypted` stores base64-encoded
+`nonce || sealed` via
+[`apps/api/internal/service/issue_tracker.go`](../apps/api/internal/service/issue_tracker.go).
 
 > **Why this needs a real program, not shell.** AES-256-GCM with a random
 > nonce per record cannot be expressed safely in pure SQL. The recommended
@@ -151,31 +147,54 @@ implementation lives at
 > automation" below). The pseudocode is:
 
 ```text
-for each row in issue_tracker_connections:
-    plaintext  := AES-256-GCM-decrypt(old_key, base64_decode(row.auth_token_encrypted))
-    new_cipher := AES-256-GCM-encrypt(new_key, plaintext)   # fresh random nonce
-    UPDATE issue_tracker_connections
-       SET auth_token_encrypted = base64_encode(new_cipher),
-           updated_at = NOW()
-     WHERE id = row.id
+for each tenant:
+    BEGIN
+    SET LOCAL app.current_tenant_id = tenant.id
+
+    for each row in tenant_llm_config where encrypted_api_key is not null:
+        plaintext := llm.Decrypt(row.encrypted_api_key, old_key)
+        keep plaintext in memory, keyed by row.tenant_id
+
+    for each row in issue_tracker_connections:
+        plaintext := issueTrackerDecrypt(base64_decode(row.auth_token_encrypted), old_key)
+        keep plaintext in memory, keyed by row.id
+
+    COMMIT
 ```
 
 Operational guard rails:
 
-- Run the loop inside one transaction (`BEGIN ... COMMIT`). On any error,
-  `ROLLBACK` and abort the rotation. The DB snapshot from §2.2 is the safety
-  net behind the transaction.
-- Connect with the `sbomhub_migrator` role, not `sbomhub_app`. The migrator
-  role owns the schema and is not subject to RLS (RLS is enforced on the
-  application role only — see `apps/api/migrations/023_rls_security_hardening.up.sql`).
+- Run each tenant loop inside a transaction (`BEGIN ... COMMIT`). On any
+  error, `ROLLBACK` and abort the rotation. The DB snapshot from §2.2 is the
+  safety net behind the transaction.
+- The `sbomhub_migrator` role is `NOBYPASSRLS`, the same RLS posture as
+  `sbomhub_app`. Because `tenant_llm_config` and
+  `issue_tracker_connections` use `FORCE ROW LEVEL SECURITY`, a migrator
+  SELECT without `app.current_tenant_id` returns zero tenant rows instead of
+  bypassing the policy.
+- To read every tenant row manually, use one of these RLS-aware options:
+  option A (recommended), loop tenants and run
+  `SET LOCAL app.current_tenant_id = '<tenant uuid>'` before each SELECT /
+  UPDATE; option B, temporarily `DISABLE ROW LEVEL SECURITY` only during the
+  rotation and restore `ENABLE` + `FORCE` before reopening traffic, matching
+  the migration 045 maintenance pattern; option C, re-encrypt through the API
+  per tenant so `sbomhub_app` and the normal tenant context enforce RLS.
 - Verify every row decrypts under the *old* key before encrypting *any* row
   under the new key. A single undecryptable row means the on-disk ciphertext
   was not produced by `old_key`, and silently skipping it would orphan the
-  tenant's integration.
+  tenant's integration or BYOK LLM provider.
 - Log row counts (`before` / `decrypted` / `re-encrypted`); they must all
   match. Do **not** log plaintext tokens or either key.
 
-### Step 4 — Swap the key in `.env`
+### Step 2 — Keep plaintext in memory only
+
+The plaintext values from Step 1 must stay in process memory only. Do not write
+them to temporary files, SQL dumps, shell history, application logs, chat, or
+ticketing systems. If the rotation program cannot keep all plaintext in memory,
+process one tenant at a time and commit only after that tenant has been
+re-encrypted and verified.
+
+### Step 3 — Swap the key in `.env`, Docker Secrets, or KMS
 
 The most robust way is to re-run the installer with `--force`, which backs the
 existing `.env` up to `.env.bak.YYYYMMDD` and issues a fresh
@@ -190,7 +209,7 @@ existing `.env` up to `.env.bak.YYYYMMDD` and issues a fresh
 In-place edit:
 
 ```bash
-# Replace the ENCRYPTION_KEY line in .env with the NEW_KEY from step 2.
+# Replace the ENCRYPTION_KEY line in .env with the prepared NEW_KEY.
 # (Use your editor of choice; the example below uses awk to be POSIX-portable.)
 
 awk -v new="$NEW_KEY" 'BEGIN{FS=OFS="="} /^ENCRYPTION_KEY=/{$2=new; print; next} 1' \
@@ -198,7 +217,12 @@ awk -v new="$NEW_KEY" 'BEGIN{FS=OFS="="} /^ENCRYPTION_KEY=/{$2=new; print; next}
 chmod 600 .env
 ```
 
-### Step 5 — Start the API and verify
+For enterprise Docker Secrets, replace `docker/secrets/encryption_key.txt` with
+`NEW_KEY` and keep permissions at `0600`. For a KMS-backed deployment, update
+the KMS secret version or alias used by the API before the restart. Keep the
+maintenance window closed to user traffic until Step 6 passes.
+
+### Step 4 — Restart the server with the new key
 
 ```bash
 docker compose up -d api
@@ -210,7 +234,45 @@ new key is a known placeholder or shorter than 32 bytes the server refuses to
 boot. A clean startup is the first confirmation that `.env` was edited
 correctly.
 
-Then run the verification checks in §4.
+### Step 5 — Re-encrypt all rows with the new key
+
+With the API booted under `NEW_KEY`, update the encrypted columns from the
+in-memory plaintext captured in Steps 1-2:
+
+```text
+for each tenant:
+    BEGIN
+    SET LOCAL app.current_tenant_id = tenant.id
+
+    for each cached tenant_llm_config plaintext:
+        new_cipher := llm.Encrypt(plaintext, new_key)   # fresh random nonce
+        UPDATE tenant_llm_config
+           SET encrypted_api_key = new_cipher,
+               updated_at = NOW()
+         WHERE tenant_id = tenant.id
+
+    for each cached issue_tracker_connections plaintext:
+        new_cipher := issueTrackerEncrypt(plaintext, new_key)
+        UPDATE issue_tracker_connections
+           SET auth_token_encrypted = base64_encode(new_cipher),
+               updated_at = NOW()
+         WHERE id = row.id
+
+    COMMIT
+```
+
+### Step 6 — Verify with `verify-encryption.sh`
+
+Run the verification checks in §4, including `verify-encryption.sh`. For the
+same logical secret under old and new keys, compare the emitted SHA256
+plaintext hashes; they must match. The plaintext itself must never be printed.
+
+### Step 7 — Destroy the old key after retention
+
+Keep `OLD_KEY` only for the retention period approved for this maintenance
+window. After §4 passes and the rollback window closes, delete the old `.env`
+snapshot, Docker Secret version, KMS version, and any operator shell state that
+still contains the old key.
 
 ---
 
@@ -241,15 +303,21 @@ encrypted records are still readable.
    must list as active. Trigger a manual sync (or create a test ticket) to
    confirm the API token re-encrypted under the new key still authenticates
    against the upstream tracker. If the sync fails with `401 Unauthorized`
-   from the upstream, the re-encryption step (§3 step 3) skipped or corrupted
+   from the upstream, the re-encryption step (§3 step 5) skipped or corrupted
    that row — restore from the §2.2 snapshot and re-run.
 
-4. **Application logs** — `docker compose logs api` must show no
+4. **BYOK LLM providers** — for each tenant that configured a non-Ollama LLM
+   provider with its own API key, run an AI VEX triage or CRA draft generation
+   path. Provider resolution must decrypt `tenant_llm_config.encrypted_api_key`
+   under the new key. Any provider-resolution decrypt error means that tenant's
+   BYOK key was skipped or corrupted during §3.
+
+5. **Application logs** — `docker compose logs api` must show no
    `failed to decrypt`, `cipher: message authentication failed`, or
    `ciphertext too short` errors. Any of those indicates a row was *not*
    re-encrypted and is now unrecoverable under the new key.
 
-5. **`verify-encryption.sh` smoke test** — run the dedicated decrypt
+6. **`verify-encryption.sh` smoke test** — run the dedicated decrypt
    round-trip CLI (M5-5, issue
    [#53](https://github.com/youichi-uda/sbomhub/issues/53)) to confirm the
    new key actually decrypts the re-encrypted ciphertext at the DB layer:
@@ -285,6 +353,10 @@ encrypted records are still readable.
    `--key` argv path is still accepted for compatibility but is deprecated
    because command-line arguments are easier to expose via `ps` / procfs.
 
+   The default smoke target is
+   `tenant_llm_config.encrypted_api_key`. To spot-check issue tracker tokens,
+   pass `--table issue_tracker_connections --column auth_token_encrypted`.
+
    See [`security/self-host-deployment.md`](./security/self-host-deployment.md) §4.5
    for the full operator contract.
 
@@ -292,7 +364,7 @@ encrypted records are still readable.
 
 ## 5. Rollback
 
-Use this path only if §3 step 3 (re-encryption) failed mid-run or §4 detected
+Use this path only if §3 step 5 (re-encryption) failed mid-run or §4 detected
 data loss after restart. Do **not** attempt to "patch up" a half-rotated
 database in place.
 
@@ -335,18 +407,21 @@ database in place.
 
 ## 6. Fallback when the old key is lost
 
-If you reach §3 step 3 with no working "old" key — e.g. recovering from an
+If you reach §3 step 1 with no working "old" key — e.g. recovering from an
 incident where the previous `.env` was destroyed — you cannot decrypt the
 existing ciphertext. The pragmatic recovery is:
 
-1. Set a fresh `ENCRYPTION_KEY` via §3 step 4.
-2. `TRUNCATE issue_tracker_connections;` (or `DELETE` per-tenant if you can
-   identify which tenants you actually want to wipe).
-3. Notify affected tenants that their Jira / Backlog connection must be
-   re-entered through the integrations page. They will paste their token
-   again; the new key will encrypt it.
+1. Set a fresh `ENCRYPTION_KEY` via §3 step 3.
+2. Clear affected encrypted credentials:
+   `UPDATE tenant_llm_config SET encrypted_api_key = NULL` for affected
+   tenants, and `TRUNCATE issue_tracker_connections;` (or `DELETE`
+   per-tenant if you can identify which tenants you actually want to wipe).
+3. Notify affected tenants that their BYOK LLM API key and Jira / Backlog
+   connection must be re-entered through the settings and integrations pages.
+   They will paste their secrets again; the new key will encrypt them.
 
-This costs the integration tokens but preserves every other tenant artefact
+This costs the BYOK LLM keys and integration tokens but preserves every other
+tenant artefact
 (SBOMs, vulnerabilities, VEX, audit log, etc.) because none of those use
 `ENCRYPTION_KEY`.
 
@@ -357,7 +432,7 @@ This costs the integration tokens but preserves every other tenant artefact
 | Trigger | Cadence | Notes |
 | --- | --- | --- |
 | Routine rotation | Every 90 days | Calendar reminder is sufficient. Rehearse on a staging environment first if you have one. |
-| Incident (key leak) | Immediately | Treat all `issue_tracker_connections` tokens as exposed; rotating the master key does not invalidate already-exfiltrated plaintext. After rotation, advise affected tenants to also rotate their *upstream* Jira / Backlog tokens. |
+| Incident (key leak) | Immediately | Treat all BYOK LLM API keys and `issue_tracker_connections` tokens as exposed; rotating the master key does not invalidate already-exfiltrated plaintext. After rotation, advise affected tenants to also rotate their upstream LLM provider and Jira / Backlog tokens. |
 | Personnel change | Within 7 days of offboarding | If the leaver had operator access to `.env`, rotate. |
 | First boot under a known default key | As soon as `apps/api/cmd/server/main.go` `validateEncryptionKey` is updated and you upgrade | The startup check blocks new boots, but already-encrypted rows under the default key are still readable until rotated. |
 
@@ -376,19 +451,25 @@ Notes: Follow docs/encryption-key-rotation.md.
 ## Follow-up: automation
 
 A `sbomhub migrate-encryption` (or `apps/api/cmd/migrate-encryption`)
-subcommand that wraps §3 step 3 is **not yet implemented**. Tracked as a
+subcommand that wraps the §3 decrypt/re-encrypt flow is **not yet implemented**. Tracked as a
 follow-up issue (operators or contributors should open one if missing).
 Suggested design when the follow-up is picked up:
 
 - Flags: `--old-key <base64>`, `--new-key <base64>`, `--dry-run`,
-  `--table issue_tracker_connections` (extensible).
-- Connects with the `sbomhub_migrator` role (bypasses RLS, owns the schema).
-- Reuses the AES-GCM helper from `apps/api/internal/service/issue_tracker.go`
-  so the cipher contract stays in one place.
+  `--table tenant_llm_config --column encrypted_api_key` and
+  `--table issue_tracker_connections --column auth_token_encrypted`
+  (extensible).
+- Runs RLS-aware tenant loops. `sbomhub_migrator` is `NOBYPASSRLS`, so the
+  tool must either set `app.current_tenant_id` per tenant, temporarily lift and
+  restore table RLS during the maintenance window, or route through
+  tenant-scoped API calls.
+- Reuses the AES-GCM helpers from `apps/api/internal/service/llm/crypto.go`
+  and `apps/api/internal/service/issue_tracker.go` so the cipher contracts stay
+  in one place.
 - `--dry-run` reports the count of rows it *would* re-encrypt and verifies
   every row decrypts under `--old-key`, without writing.
-- Wraps the rewrite in a single transaction.
+- Wraps each tenant rewrite in a transaction.
 - Refuses to run if `APP_ENV=production` and `--dry-run` was not passed at
   least once with a successful decrypt count matching the row count.
 
-Until the subcommand exists, treat §3 step 3 as the source of truth.
+Until the subcommand exists, treat the §3 manual flow as the source of truth.
