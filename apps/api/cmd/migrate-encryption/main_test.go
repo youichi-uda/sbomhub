@@ -180,7 +180,7 @@ func TestApply_IdempotencySkipsAlreadyNew(t *testing.T) {
 		Mode:      modeApply,
 		BatchSize: 1000,
 		Targets:   []target{defaultLLMTarget()},
-	}, digestMap(dry), testNow)
+	}, newDryRunExpectations(dry), testNow)
 	if err != nil || code != exitOK {
 		t.Fatalf("run apply = code %d err %v", code, err)
 	}
@@ -190,12 +190,43 @@ func TestApply_IdempotencySkipsAlreadyNew(t *testing.T) {
 	assertExpectations(t, mock)
 }
 
+func TestApplyStrictGateMissingDryRunRowIsPrecondition(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+	plain := []byte("not-in-report")
+	ct, _ := llm.Encrypt(plain, testOldKey)
+	dry := &report{Rows: []rowReport{
+		{Table: "tenant_llm_config", Column: "encrypted_api_key", TenantID: "tenant_a", RowID: "different", SHA256: digest([]byte("different")), Status: "ok"},
+	}}
+
+	expectTenants(mock, "tenant_a")
+	expectTenantBatchNoCommit(mock, "tenant_a", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("tenant_a", ct))
+
+	rep, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:      modeApply,
+		BatchSize: 1000,
+		Targets:   []target{defaultLLMTarget()},
+	}, newDryRunExpectations(dry), testNow)
+	if err == nil || code != exitPrecondition {
+		t.Fatalf("run apply missing dry-run row = code %d err %v", code, err)
+	}
+	if rep.Failed != 1 || rep.Rows[0].Error != "row missing from dry-run report" {
+		t.Fatalf("unexpected report: %#v", rep)
+	}
+	assertExpectations(t, mock)
+}
+
 func TestVerifyDigestMismatchIsPartial(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
 	plain := []byte("new-secret")
 	ct, _ := llm.Encrypt(plain, testNewKey)
-	expected := map[string]string{reportKey("tenant_llm_config", "encrypted_api_key", "tenant_a", "tenant_a"): strings.Repeat("0", 64)}
+	expected := &dryRunExpectations{
+		digests: map[string]string{reportKey("tenant_llm_config", "encrypted_api_key", "tenant_a", "tenant_a"): strings.Repeat("0", 64)},
+		rows:    map[string]rowReport{},
+		seen:    map[string]struct{}{},
+	}
 
 	expectTenants(mock, "tenant_a")
 	expectTenantBatchNoCommit(mock, "tenant_a", defaultLLMTarget(), "", 1000,
@@ -211,6 +242,34 @@ func TestVerifyDigestMismatchIsPartial(t *testing.T) {
 	}
 	if rep.Failed != 1 || rep.Rows[0].Error != "sha256 mismatch" {
 		t.Fatalf("unexpected report: %#v", rep)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestVerifyReportsDryRunRowsMissingFromCurrentDB(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+	expected := &dryRunExpectations{
+		digests: map[string]string{reportKey("tenant_llm_config", "encrypted_api_key", "tenant_a", "missing"): strings.Repeat("a", 64)},
+		rows: map[string]rowReport{
+			reportKey("tenant_llm_config", "encrypted_api_key", "tenant_a", "missing"): {
+				Table: "tenant_llm_config", Column: "encrypted_api_key", TenantID: "tenant_a", RowID: "missing",
+			},
+		},
+		seen: map[string]struct{}{},
+	}
+
+	expectTenants(mock, "tenant_a")
+	expectTenantBatch(mock, "tenant_a", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}))
+
+	_, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:      modeVerify,
+		BatchSize: 1000,
+		Targets:   []target{defaultLLMTarget()},
+	}, expected, testNow)
+	if err == nil || code != exitPartial || !strings.Contains(err.Error(), "missing from current DB result") {
+		t.Fatalf("verify missing coverage = code %d err %v", code, err)
 	}
 	assertExpectations(t, mock)
 }
@@ -280,6 +339,107 @@ func TestPartialFailureContinueVsAbort(t *testing.T) {
 	})
 }
 
+func TestContinueOnErrorDoesNotSwallowDBErrors(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+	plain := []byte("needs-update")
+	ct, _ := llm.Encrypt(plain, testOldKey)
+	dry := &report{Rows: []rowReport{
+		{Table: "tenant_llm_config", Column: "encrypted_api_key", TenantID: "tenant_a", RowID: "tenant_a", SHA256: digest(plain), Status: "ok"},
+	}}
+
+	expectTenants(mock, "tenant_a")
+	expectTenantBatchStart(mock, "tenant_a", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("tenant_a", ct))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenant_llm_config SET encrypted_api_key = $1, updated_at = NOW() WHERE tenant_id = $2`)).
+		WithArgs(sqlmock.AnyArg(), "tenant_a").
+		WillReturnError(sql.ErrConnDone)
+	mock.ExpectRollback()
+
+	_, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:            modeApply,
+		ContinueOnError: true,
+		BatchSize:       1000,
+		Targets:         []target{defaultLLMTarget()},
+	}, newDryRunExpectations(dry), testNow)
+	if err == nil || code != exitDBError {
+		t.Fatalf("continue-on-error db error = code %d err %v", code, err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestRollbackFailureClassifiedAsDBError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+	plain := []byte("needs-update")
+	ct, _ := llm.Encrypt(plain, testOldKey)
+	dry := &report{Rows: []rowReport{
+		{Table: "tenant_llm_config", Column: "encrypted_api_key", TenantID: "tenant_a", RowID: "tenant_a", SHA256: digest(plain), Status: "ok"},
+	}}
+
+	expectTenants(mock, "tenant_a")
+	expectTenantBatchStart(mock, "tenant_a", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("tenant_a", ct))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenant_llm_config SET encrypted_api_key = $1, updated_at = NOW() WHERE tenant_id = $2`)).
+		WithArgs(sqlmock.AnyArg(), "tenant_a").
+		WillReturnError(sql.ErrConnDone)
+	mock.ExpectRollback().WillReturnError(sql.ErrConnDone)
+
+	_, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:            modeApply,
+		ContinueOnError: true,
+		BatchSize:       1000,
+		Targets:         []target{defaultLLMTarget()},
+	}, newDryRunExpectations(dry), testNow)
+	if err == nil || code != exitDBError || !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("rollback db error = code %d err %v", code, err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestCommitErrorClassifiedAsDBError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+	plain := []byte("good")
+	ct, _ := llm.Encrypt(plain, testOldKey)
+	expectTenants(mock, "tenant_a")
+	expectTenantBatchStart(mock, "tenant_a", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("tenant_a", ct))
+	mock.ExpectCommit().WillReturnError(sql.ErrConnDone)
+
+	_, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:            modeDryRun,
+		ContinueOnError: true,
+		BatchSize:       1000,
+		Targets:         []target{defaultLLMTarget()},
+	}, nil, testNow)
+	if err == nil || code != exitDBError {
+		t.Fatalf("commit db error = code %d err %v", code, err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestResumeFromStructuredToken(t *testing.T) {
+	token := encodeResumeToken(rowReport{Table: "tenant_llm_config", Column: "encrypted_api_key", TenantID: "tenant_a", RowID: "b"})
+	db, mock := newMockDB(t)
+	defer db.Close()
+	ct, _ := llm.Encrypt([]byte("after"), testOldKey)
+	expectTenants(mock, "tenant_a", "tenant_b")
+	expectTenantBatch(mock, "tenant_a", defaultLLMTarget(), "b", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("c", ct))
+
+	rep, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:       modeDryRun,
+		ResumeFrom: token,
+		BatchSize:  1000,
+		Targets:    []target{defaultLLMTarget()},
+	}, nil, testNow)
+	if err != nil || code != exitOK || rep.TotalRows != 1 {
+		t.Fatalf("resume run = code %d total %d err %v", code, rep.TotalRows, err)
+	}
+	assertExpectations(t, mock)
+}
+
 func TestExitCodesFromRun(t *testing.T) {
 	t.Run("db error", func(t *testing.T) {
 		db, mock := newMockDB(t)
@@ -312,17 +472,72 @@ func TestLoadDryRunReportPreconditions(t *testing.T) {
 		Mode:      modeDryRun,
 		TotalRows: 1,
 		Succeeded: 1,
-		Rows:      []rowReport{{Status: "ok", SHA256: strings.Repeat("a", 64)}},
+		Rows: []rowReport{{
+			Table:    "tenant_llm_config",
+			Column:   "encrypted_api_key",
+			TenantID: "tenant_a",
+			RowID:    "tenant_a",
+			Status:   "ok",
+			SHA256:   strings.Repeat("a", 64),
+		}},
 	}
 	writeJSON(t, path, rep)
-	if _, err := loadDryRunReport(path, testNow); err != nil {
+	if _, err := loadDryRunReport(path, testNow, []target{defaultLLMTarget()}); err != nil {
 		t.Fatalf("loadDryRunReport valid: %v", err)
 	}
 	rep.StartedAt = testNow.Add(-25 * time.Hour)
 	writeJSON(t, path, rep)
-	if _, err := loadDryRunReport(path, testNow); err == nil || !strings.Contains(err.Error(), "older") {
+	if _, err := loadDryRunReport(path, testNow, []target{defaultLLMTarget()}); err == nil || !strings.Contains(err.Error(), "older") {
 		t.Fatalf("old report err = %v", err)
 	}
+}
+
+func TestLoadDryRunReportValidatesRowsAndTargets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dry.json")
+	base := report{
+		StartedAt: testNow.Add(-time.Hour),
+		Mode:      modeDryRun,
+		TotalRows: 1,
+		Succeeded: 1,
+		Rows: []rowReport{{
+			Table:    "tenant_llm_config",
+			Column:   "encrypted_api_key",
+			TenantID: "tenant_a",
+			RowID:    "tenant_a",
+			Status:   "ok",
+			SHA256:   strings.Repeat("a", 64),
+		}},
+	}
+
+	t.Run("total rows must match ok sha rows", func(t *testing.T) {
+		rep := base
+		rep.TotalRows = 2
+		rep.Succeeded = 2
+		writeJSON(t, path, rep)
+		if _, err := loadDryRunReport(path, testNow, []target{defaultLLMTarget()}); err == nil || !strings.Contains(err.Error(), "total_rows") {
+			t.Fatalf("total rows err = %v", err)
+		}
+	})
+
+	t.Run("duplicate tuple rejected", func(t *testing.T) {
+		rep := base
+		rep.TotalRows = 2
+		rep.Succeeded = 2
+		rep.Rows = append(rep.Rows, rep.Rows[0])
+		writeJSON(t, path, rep)
+		if _, err := loadDryRunReport(path, testNow, []target{defaultLLMTarget()}); err == nil || !strings.Contains(err.Error(), "duplicate row key") {
+			t.Fatalf("duplicate err = %v", err)
+		}
+	})
+
+	t.Run("target set must match invocation", func(t *testing.T) {
+		writeJSON(t, path, base)
+		other := target{Table: "issue_tracker_connections", Column: "auth_token_encrypted", RowID: "id", Format: "base64", UpdateTS: true}
+		if _, err := loadDryRunReport(path, testNow, []target{other}); err == nil || !strings.Contains(err.Error(), "target") {
+			t.Fatalf("target err = %v", err)
+		}
+	})
 }
 
 func defaultLLMTarget() target {
