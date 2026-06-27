@@ -43,6 +43,10 @@ set -eu
 # docker-compose.yml の canonical URL (--start で host に未配置なら download)。
 COMPOSE_URL="https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker-compose.yml"
 
+# Operational scripts の canonical URL / 配置先 (--start の curl-only install path 用)。
+SCRIPTS_BASE_URL="${SCRIPTS_BASE_URL:-https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts}"
+SCRIPTS_TARGET_DIR="${SCRIPTS_TARGET_DIR:-docker/scripts}"
+
 print_usage() {
     cat <<'EOF'
 Usage: ./install.sh [--force | --bootstrap-roles | --start] [--help]
@@ -467,9 +471,9 @@ fi
 # ----------------------------------------------------------------------------
 # Mode: --start
 # ----------------------------------------------------------------------------
-# curl-only install 向けワンショット。 .env を生成 → docker-compose.yml を
-# download (なければ) → docker compose up -d --wait postgres → ロール投入 →
-# docker compose up -d 全体起動、 までを実行する。
+# curl-only install 向けワンショット。 .env を生成 → docker-compose.yml /
+# operational scripts を download (なければ) → docker compose up -d --wait postgres
+# → ロール投入 → docker compose up -d 全体起動、 までを実行する。
 if [ "$MODE" = "start" ]; then
     if ! command -v docker >/dev/null 2>&1; then
         printf '[FAIL] docker が見つかりません。 --start は docker compose を必要とします。\n' >&2
@@ -502,6 +506,24 @@ if [ "$MODE" = "start" ]; then
             exit 1
         fi
     fi
+
+    # operational scripts download (M6 #56 F120):
+    mkdir -p "$SCRIPTS_TARGET_DIR"
+    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+        target="$SCRIPTS_TARGET_DIR/$script"
+        if [ ! -f "$target" ]; then
+            if ! command -v curl >/dev/null 2>&1; then
+                printf '[FAIL] curl が必要です (operational scripts download)。\n' >&2
+                exit 1
+            fi
+            printf '[INFO] %s を download します。\n' "$script"
+            if ! curl -fsSL "$SCRIPTS_BASE_URL/$script" -o "$target"; then
+                printf '[FAIL] %s の download に失敗しました。\n' "$script" >&2
+                exit 1
+            fi
+            chmod +x "$target"
+        fi
+    done
 
     # .env を生成 (既存なら保持し、 そこから password を読む)。
     if [ ! -f .env ]; then

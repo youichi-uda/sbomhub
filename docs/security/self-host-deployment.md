@@ -273,6 +273,26 @@ ENCRYPTION_KEY が未設定または既知デフォルトです (未設定)。
   rotate したい場合は **`.env` を手編集** する (詳細は ranbook §3 step 4)。
 - 一時的に API を停止する短時間メンテナンスウィンドウが必要。
 
+> **Prerequisites for §4.5 and §9.x**
+>
+> The operational scripts referenced below (`docker/scripts/backup.sh`,
+> `docker/scripts/restore.sh`, `docker/scripts/verify-encryption.sh`,
+> `docker/scripts/verify-encryption-cron.sh`) are downloaded automatically
+> by `./install.sh --start` (M6 #56 F120 fix). If you installed via a
+> different path, ensure these scripts are present at the documented
+> paths before following the runbook examples.
+>
+> Manual download example:
+>
+> ```bash
+> mkdir -p docker/scripts
+> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+>   curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts/$s" \
+>     -o "docker/scripts/$s"
+>   chmod +x "docker/scripts/$s"
+> done
+> ```
+
 ### 4.5 復号 smoke test (`verify-encryption.sh`)
 
 ENCRYPTION_KEY が **実際に DB を復号できる** ことを確認する smoke test として
@@ -920,6 +940,26 @@ age -r $RECIPIENT_PUBLIC_KEY \
 # 平文ファイルは即削除
 shred -u sbomhub-backup-$(date -u +%Y%m%d).tar.gz backup-*.dump backup-env-*.env
 ```
+
+> **Prerequisites for §4.5 and §9.x**
+>
+> The operational scripts referenced below (`docker/scripts/backup.sh`,
+> `docker/scripts/restore.sh`, `docker/scripts/verify-encryption.sh`,
+> `docker/scripts/verify-encryption-cron.sh`) are downloaded automatically
+> by `./install.sh --start` (M6 #56 F120 fix). If you installed via a
+> different path, ensure these scripts are present at the documented
+> paths before following the runbook examples.
+>
+> Manual download example:
+>
+> ```bash
+> mkdir -p docker/scripts
+> for s in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+>   curl -fsSL "https://raw.githubusercontent.com/youichi-uda/sbomhub/main/docker/scripts/$s" \
+>     -o "docker/scripts/$s"
+>   chmod +x "docker/scripts/$s"
+> done
+> ```
 
 ### 9.3 restore
 
