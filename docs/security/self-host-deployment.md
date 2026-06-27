@@ -889,7 +889,7 @@ VERIFY_DB_URL="postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable
 
 `restore.sh` は host で実行されるため、 enterprise compose の `postgres` DNS 名には到達できない。
 Step 8 を自動実行する場合は `VERIFY_DB_URL` に host から到達可能な DSN を明示する。未指定時は
-warning ではなく skip する。
+skip するが、 operator が smoke 未実行を見落とさないよう WARN ログを出力する。
 
 詳細仕様 (exit code 契約、 column 切り替え、 security 注意点) は §4.5 を参照。 §4.5 の `--table
 issue_tracker_connections --column auth_token_encrypted` 例は restore 直後の typical な追加
