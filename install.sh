@@ -40,12 +40,11 @@
 
 set -eu
 
-# Release tag pinning (M6 #56 F123):
-# Default: main (rolling). SBOMHUB_RELEASE_TAG override is M7 work in progress:
-# currently published release tags predate the M6 installer packaging fix and
-# do not include install.sh or docker/scripts/*. Use SBOMHUB_RELEASE_TAG only
-# after M7 release pipeline publishes operational scripts as release artifacts
-# (see sbomhub-internal #1).
+# Release tag pinning (M6 #56 F123, M7 #57):
+# Default: main (rolling). For pinned release installs, set
+# SBOMHUB_RELEASE_TAG and point SBOMHUB_RELEASE_SHA256SUMS_URL at the matching
+# GitHub Release artifact so the files downloaded by --start are verified
+# against the release-published SHA256SUMS.
 SBOMHUB_RELEASE_TAG="${SBOMHUB_RELEASE_TAG:-main}"
 
 # Base URL for raw repository content (M6 #56 F122):
@@ -60,9 +59,14 @@ ENV_EXAMPLE_URL="${ENV_EXAMPLE_URL:-$SBOMHUB_RAW_BASE_URL/.env.example}"
 SCRIPTS_BASE_URL="${SCRIPTS_BASE_URL:-$SBOMHUB_RAW_BASE_URL/docker/scripts}"
 SCRIPTS_TARGET_DIR="${SCRIPTS_TARGET_DIR:-docker/scripts}"
 
+# Optional release checksum URL (M7 #57):
+# Keep this env-only to avoid leaking mirror / release URLs through argv.
+# Empty means warn and skip verification for backward compatibility.
+SBOMHUB_RELEASE_SHA256SUMS_URL="${SBOMHUB_RELEASE_SHA256SUMS_URL:-}"
+
 print_usage() {
     cat <<'EOF'
-Usage: ./install.sh [--force | --bootstrap-roles | --start] [--help]
+Usage: ./install.sh [--force | --bootstrap-roles | --start] [--verify-checksums] [--help]
 
 Modes (mutually exclusive):
   (default)            .env を生成する。既存 .env がある場合は何もしない (冪等)。
@@ -80,6 +84,9 @@ Modes (mutually exclusive):
 
 Options:
   --help               このメッセージを表示する。
+  --verify-checksums   --start download の SHA256SUMS verification を必須にする。
+                       SBOMHUB_RELEASE_SHA256SUMS_URL が未設定、取得失敗、または
+                       mismatch の場合は fail する。
 
 このスクリプトは .env を生成し、 ENCRYPTION_KEY / MIGRATOR_PASSWORD /
 APP_PASSWORD をランダム生成して書き込みます。 既存 .env がある場合は
@@ -88,6 +95,7 @@ EOF
 }
 
 MODE=generate   # generate | force | bootstrap_roles | start
+VERIFY_CHECKSUMS=0
 for arg in "$@"; do
     case "$arg" in
         --force)
@@ -111,6 +119,9 @@ for arg in "$@"; do
             fi
             MODE=start
             ;;
+        --verify-checksums)
+            VERIFY_CHECKSUMS=1
+            ;;
         -h|--help) print_usage; exit 0 ;;
         *)
             printf '[FAIL] 不明な引数: %s\n' "$arg" >&2
@@ -126,6 +137,94 @@ done
 
 sql_literal_escape() {
     printf '%s' "$1" | sed "s/'/''/g"
+}
+
+CHECKSUMS_FILE=""
+
+cleanup_checksums_file() {
+    if [ -n "$CHECKSUMS_FILE" ] && [ -f "$CHECKSUMS_FILE" ]; then
+        rm -f "$CHECKSUMS_FILE"
+    fi
+}
+
+prepare_checksum_verification() {
+    if [ -z "$SBOMHUB_RELEASE_SHA256SUMS_URL" ]; then
+        if [ "$VERIFY_CHECKSUMS" -eq 1 ]; then
+            printf '[FAIL] --verify-checksums requires SBOMHUB_RELEASE_SHA256SUMS_URL.\n' >&2
+            exit 1
+        fi
+        printf '[WARN] checksum verification disabled; set SBOMHUB_RELEASE_SHA256SUMS_URL to enable it.\n' >&2
+        return 0
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        printf '[FAIL] curl is required to download SHA256SUMS.\n' >&2
+        exit 1
+    fi
+
+    CHECKSUMS_FILE=$(mktemp "${TMPDIR:-/tmp}/sbomhub-SHA256SUMS.XXXXXX")
+    trap cleanup_checksums_file EXIT HUP INT TERM
+
+    printf '[INFO] SHA256SUMS を download します。\n'
+    if ! curl -fsSL "$SBOMHUB_RELEASE_SHA256SUMS_URL" -o "$CHECKSUMS_FILE"; then
+        rm -f "$CHECKSUMS_FILE"
+        CHECKSUMS_FILE=""
+        if [ "$VERIFY_CHECKSUMS" -eq 1 ]; then
+            printf '[FAIL] SHA256SUMS の download に失敗しました。\n' >&2
+            exit 1
+        fi
+        printf '[WARN] SHA256SUMS の download に失敗したため checksum verification を skip します。\n' >&2
+        return 0
+    fi
+}
+
+verify_download_checksum() {
+    target_path=$1
+    checksum_name=$2
+
+    if [ -z "$CHECKSUMS_FILE" ]; then
+        return 0
+    fi
+
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        printf '[FAIL] sha256sum is required for checksum verification.\n' >&2
+        exit 1
+    fi
+
+    expected_sha256=$(
+        awk -v name="$checksum_name" '
+            {
+                filename = $0
+                sub(/^[[:xdigit:]]+[[:space:]]+\*?/, "", filename)
+                if (filename == name) {
+                    print $1
+                    found = 1
+                    exit
+                }
+            }
+            END {
+                if (!found) {
+                    exit 1
+                }
+            }
+        ' "$CHECKSUMS_FILE"
+    ) || {
+        printf '[FAIL] SHA256SUMS に %s の entry がありません。\n' "$checksum_name" >&2
+        exit 1
+    }
+
+    checksum_dir=$(dirname "$target_path")
+    checksum_base=$(basename "$target_path")
+
+    if ! (
+        cd "$checksum_dir"
+        printf '%s  %s\n' "$expected_sha256" "$checksum_base" | sha256sum -c -
+    ); then
+        printf '[FAIL] checksum mismatch: %s\n' "$checksum_name" >&2
+        exit 1
+    fi
+
+    printf '[OK] checksum verified: %s\n' "$checksum_name"
 }
 
 # postgres コンテナに対して role bootstrap SQL を流す。
@@ -382,7 +481,7 @@ load_passwords_from_env() {
 
     if [ -z "${RUN_MIGRATOR_PASSWORD:-}" ] || [ -z "${RUN_APP_PASSWORD:-}" ]; then
         printf '[FAIL] .env に MIGRATOR_PASSWORD または APP_PASSWORD が設定されていません。\n' >&2
-        printf '       `./install.sh --force` で .env を再生成するか、\n' >&2
+        printf "       \`./install.sh --force\` で .env を再生成するか、\n" >&2
         printf '       手動で 2 行を追加してから再実行してください。\n' >&2
         exit 1
     fi
@@ -472,8 +571,8 @@ generate_env_file() {
 if [ "$MODE" = "bootstrap_roles" ]; then
     if [ ! -f .env ]; then
         printf '[FAIL] .env が見つかりません。\n' >&2
-        printf '       先に `./install.sh` を実行して .env を生成してから\n' >&2
-        printf '       `./install.sh --bootstrap-roles` を再実行してください。\n' >&2
+        printf "       先に \`./install.sh\` を実行して .env を生成してから\n" >&2
+        printf "       \`./install.sh --bootstrap-roles\` を再実行してください。\n" >&2
         exit 1
     fi
     if ! command -v docker >/dev/null 2>&1; then
@@ -486,7 +585,7 @@ if [ "$MODE" = "bootstrap_roles" ]; then
     # postgres コンテナが起動していることを確認 (docker compose ps で state を見る)。
     if ! docker compose ps --status running --services 2>/dev/null | grep -qx postgres; then
         printf '[FAIL] postgres コンテナが起動していません。\n' >&2
-        printf '       `docker compose up -d postgres` で起動してから再実行してください。\n' >&2
+        printf "       \`docker compose up -d postgres\` で起動してから再実行してください。\n" >&2
         exit 1
     fi
 
@@ -499,7 +598,7 @@ if [ "$MODE" = "bootstrap_roles" ]; then
     fi
 
     printf '[OK] sbomhub_app / sbomhub_migrator を作成 / 更新しました。\n'
-    printf '     続けて `docker compose up -d` で api / web を起動してください。\n'
+    printf "     続けて \`docker compose up -d\` で api / web を起動してください。\n"
     exit 0
 fi
 
@@ -517,6 +616,8 @@ if [ "$MODE" = "start" ]; then
         exit 1
     fi
 
+    prepare_checksum_verification
+
     # docker-compose.yml が無ければ download (curl-only install path)。
     if [ ! -f docker-compose.yml ]; then
         if ! command -v curl >/dev/null 2>&1; then
@@ -529,6 +630,7 @@ if [ "$MODE" = "start" ]; then
             printf '[FAIL] docker-compose.yml の download に失敗しました。\n' >&2
             exit 1
         fi
+        verify_download_checksum docker-compose.yml docker-compose.yml
     fi
 
     # .env.example が無ければ download (curl-only install では未配置)。
@@ -542,6 +644,7 @@ if [ "$MODE" = "start" ]; then
             printf '[FAIL] .env.example の download に失敗しました。\n' >&2
             exit 1
         fi
+        verify_download_checksum .env.example .env.example
     fi
 
     # operational scripts download (M6 #56 F120):
@@ -558,6 +661,7 @@ if [ "$MODE" = "start" ]; then
                 printf '[FAIL] %s の download に失敗しました。\n' "$script" >&2
                 exit 1
             fi
+            verify_download_checksum "$target" "$script"
             chmod +x "$target"
         fi
     done

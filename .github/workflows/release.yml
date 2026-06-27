@@ -1,10 +1,14 @@
+---
 name: Release
 
 # M5-2 / #54: tag-triggered GoReleaser run that publishes a standalone
-# `llm-bench` binary archive to the GitHub Release page. The companion
-# config is .goreleaser.yaml at the repo root — it intentionally scopes
-# the matrix to `apps/api/cmd/llm-bench` and leaves the runtime
-# `server` / `migrate` binaries to docker-publish.yml.
+# `llm-bench` binary archive to the GitHub Release page. M7 #57 extends
+# the same release with curl-only operational artifacts (`install.sh`,
+# `docker-compose.yml`, `.env.example`, `docker/scripts/*.sh`) and one
+# release-level `SHA256SUMS`. The companion config is .goreleaser.yaml at
+# the repo root — it intentionally scopes the binary matrix to
+# `apps/api/cmd/llm-bench` and leaves the runtime `server` / `migrate`
+# binaries to docker-publish.yml.
 #
 # Trigger:
 #   - tag push matching `v*` (semver tag).
@@ -22,14 +26,16 @@ name: Release
 #     permission is cheap to declare so a follow-up wave does not also
 #     have to edit the workflow.
 
-on:
+"on":
   push:
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to re-release (must already exist on the remote, e.g. v1.4.0)"
+        description: >-
+          Existing tag to re-release (must already exist on the remote,
+          e.g. v1.4.0)
         required: true
 
 permissions:
@@ -61,6 +67,17 @@ jobs:
           # is older.
           go-version: '1.25'
           cache-dependency-path: apps/api/go.sum
+
+      - name: Validate operational release artifacts
+        run: |
+          set -eu
+          test -f install.sh
+          test -f docker-compose.yml
+          test -f .env.example
+          test -x docker/scripts/backup.sh
+          test -x docker/scripts/restore.sh
+          test -x docker/scripts/verify-encryption.sh
+          test -x docker/scripts/verify-encryption-cron.sh
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

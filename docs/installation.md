@@ -30,11 +30,16 @@ docker compose up -d                      # 残りを起動
 
 Open http://localhost:3000 in your browser.
 
-Use the default `main` installer for new OSS self-host installs. Current
-published release tags, including `v1.2.0`, predate the M6 installer packaging
-fix and do not contain `install.sh` or the four operational scripts under
-`docker/scripts/`. Pinned release install should be used only after the M7
-release pipeline publishes those operational scripts with the release artifact.
+Use the default `main` installer for new OSS self-host installs when you want
+the latest rolling installer. For a pinned release install, pin both the raw
+installer tag and the matching release-published `SHA256SUMS` file:
+
+```bash
+# Pinned release install:
+SBOMHUB_RELEASE_TAG=v1.x.y \
+SBOMHUB_RELEASE_SHA256SUMS_URL=https://github.com/youichi-uda/sbomhub/releases/download/v1.x.y/SHA256SUMS \
+  bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/v1.x.y/install.sh) --start
+```
 
 For an internal mirror or air-gapped staging area, override the raw content base
 URL:
@@ -44,11 +49,12 @@ SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/main \
   bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/main/install.sh) --start
 ```
 
-Current supply-chain hardening for the curl installer is a trusted mirror or
-explicit source review before execution. Release tag pinning and SHA256SUMS
-verification are deferred to M7 because the release pipeline must first publish
-`install.sh`, `docker/scripts/*`, and checksums together before
-`SBOMHUB_RELEASE_SHA256SUMS_URL` support can be added safely.
+For production installs, explicitly setting `SBOMHUB_RELEASE_SHA256SUMS_URL` is
+recommended as supply-chain hardening. If it is not set, `install.sh --start`
+prints a warning and skips checksum verification so operators can still use
+trusted mirrors, air-gapped staging areas, or reviewed local artifacts by
+policy. Add `--verify-checksums` to fail if the checksum URL is missing,
+unreachable, incomplete, or mismatched.
 
 ## Docker Compose (Full Installation)
 

@@ -56,7 +56,7 @@ builds:
 
 archives:
   - id: llm-bench
-    builds:
+    ids:
       - llm-bench
     # Naming follows the M5-2 contract documented in the issue:
     #   llm-bench-v{VERSION}-{OS}-{ARCH}.{tar.gz|zip}
@@ -84,9 +84,20 @@ archives:
         dst: fixtures/llm-bench
         strip_parent: true
 
+# M7 #57: publish SHA256SUMS for both llm-bench archives and the operational
+# curl-only install artifacts. GoReleaser uploads checksum.extra_files entries
+# by basename, matching install.sh verification.
 checksum:
-  name_template: "checksums.txt"
+  name_template: "SHA256SUMS"
   algorithm: sha256
+  extra_files:
+    - glob: install.sh
+    - glob: docker-compose.yml
+    - glob: .env.example
+    - glob: docker/scripts/backup.sh
+    - glob: docker/scripts/restore.sh
+    - glob: docker/scripts/verify-encryption.sh
+    - glob: docker/scripts/verify-encryption-cron.sh
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
@@ -108,6 +119,14 @@ release:
   draft: false
   prerelease: auto
   name_template: "{{.Tag}}"
+  extra_files:
+    - glob: install.sh
+    - glob: docker-compose.yml
+    - glob: .env.example
+    - glob: docker/scripts/backup.sh
+    - glob: docker/scripts/restore.sh
+    - glob: docker/scripts/verify-encryption.sh
+    - glob: docker/scripts/verify-encryption-cron.sh
   header: |
     ## sbomhub {{ .Tag }}
 
