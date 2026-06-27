@@ -165,7 +165,7 @@ func parseFlags(args []string, stderr io.Writer) (*cliFlags, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read --key-file %q: %w", f.keyFile, err)
 		}
-		f.key = strings.TrimSpace(string(keyBytes))
+		f.key = string(keyBytes)
 	}
 	// env fallback for key — the wrapper script may have already exported it.
 	if f.key == "" {

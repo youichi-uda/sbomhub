@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sbomhub/sbomhub/internal/config"
 )
 
 // Coverage scope: the pure-Go bits of decrypt-test that do NOT require a live
@@ -130,24 +132,45 @@ func TestParseFlags_KeyFileNotFound(t *testing.T) {
 	}
 }
 
-func TestParseFlags_KeyFileTrimsTrailingNewline(t *testing.T) {
+func TestParseFlags_KeyFileMatchesRuntimeFirst32Bytes(t *testing.T) {
 	t.Setenv("ENCRYPTION_KEY", "")
 	t.Setenv("DATABASE_URL", "")
 
-	tmp := t.TempDir()
-	keyPath := filepath.Join(tmp, "encryption_key.txt")
-	key := strings.Repeat("n", 32)
-	if err := os.WriteFile(keyPath, []byte(key+"\n"), 0o600); err != nil {
-		t.Fatalf("write key file: %v", err)
-	}
+	baseKey := "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "leading newline", content: "\n" + baseKey},
+		{name: "trailing newline", content: baseKey + "\n"},
+		{name: "leading and trailing spaces", content: " " + baseKey + " "},
+		{name: "leading and trailing tabs", content: "\t" + baseKey + "\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			keyPath := filepath.Join(tmp, "encryption_key.txt")
+			if err := os.WriteFile(keyPath, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write key file: %v", err)
+			}
 
-	var stderr bytes.Buffer
-	f, err := parseFlags([]string{"--key-file", keyPath, "--db-url", "postgres://x"}, &stderr)
-	if err != nil {
-		t.Fatalf("parseFlags with newline-terminated --key-file: %v", err)
-	}
-	if f.key != key {
-		t.Fatalf("key from newline-terminated --key-file = %q, want trimmed %q", f.key, key)
+			var stderr bytes.Buffer
+			f, err := parseFlags([]string{"--key-file", keyPath, "--db-url", "postgres://x"}, &stderr)
+			if err != nil {
+				t.Fatalf("parseFlags with whitespace-bearing --key-file: %v", err)
+			}
+			if f.key != tc.content {
+				t.Fatalf("key from --key-file = %q, want raw file contents %q", f.key, tc.content)
+			}
+
+			decryptTestKey := []byte(f.key)[:32]
+			runtimeKey, err := (&config.Config{EncryptionKey: tc.content}).GetEncryptionKey()
+			if err != nil {
+				t.Fatalf("GetEncryptionKey: %v", err)
+			}
+			if string(decryptTestKey) != string(runtimeKey) {
+				t.Fatalf("key semantics diverged: decrypt-test=%q runtime=%q", decryptTestKey, runtimeKey)
+			}
+		})
 	}
 }
 
