@@ -135,6 +135,12 @@ done
 # Helpers
 # ----------------------------------------------------------------------------
 
+ENV_HELPERS_PATH="$(dirname "$0")/docker/scripts/_env_helpers.sh"
+if [ -r "$ENV_HELPERS_PATH" ]; then
+    # shellcheck disable=SC1090  # source path resolved at runtime
+    . "$ENV_HELPERS_PATH"
+fi
+
 sql_literal_escape() {
     printf '%s' "$1" | sed "s/'/''/g"
 }
@@ -462,17 +468,11 @@ load_env_value_or_empty() {
     if [ "$env_count" -eq 0 ]; then
         return
     fi
-    if [ "$env_count" -gt 1 ]; then
-        printf '[FATAL] %s is duplicated in .env (%s occurrences); resolve manually\n' "$env_key" "$env_count" >&2
+    if ! command -v read_env_var >/dev/null 2>&1; then
+        printf '[FATAL] docker/scripts/_env_helpers.sh is missing; cannot read %s from .env\n' "$env_key" >&2
         exit 1
     fi
-    env_raw=""
-    env_raw="$(grep "^${env_key}=" .env | cut -d= -f2-)"
-    env_raw="${env_raw#\"}"
-    env_raw="${env_raw%\"}"
-    env_raw="${env_raw#\'}"
-    env_raw="${env_raw%\'}"
-    printf '%s' "$env_raw"
+    read_env_var "$env_key"
 }
 
 load_passwords_from_env() {
@@ -649,7 +649,7 @@ if [ "$MODE" = "start" ]; then
 
     # operational scripts download (M6 #56 F120):
     mkdir -p "$SCRIPTS_TARGET_DIR"
-    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh; do
+    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh _env_helpers.sh; do
         target="$SCRIPTS_TARGET_DIR/$script"
         if [ ! -f "$target" ]; then
             if ! command -v curl >/dev/null 2>&1; then
@@ -662,9 +662,17 @@ if [ "$MODE" = "start" ]; then
                 exit 1
             fi
             verify_download_checksum "$target" "$script"
-            chmod +x "$target"
+            if [ "$script" = "_env_helpers.sh" ]; then
+                chmod 644 "$target"
+            else
+                chmod +x "$target"
+            fi
         fi
     done
+    if ! command -v read_env_var >/dev/null 2>&1 && [ -r "$ENV_HELPERS_PATH" ]; then
+        # shellcheck disable=SC1090  # source path resolved at runtime
+        . "$ENV_HELPERS_PATH"
+    fi
 
     # .env を生成 (既存なら保持し、 そこから password を読む)。
     if [ ! -f .env ]; then

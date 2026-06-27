@@ -327,33 +327,8 @@ done
 
 ```bash
 # OSS install + cron path: build the wrapper secrets from .env
-# Defensive .env value extractor (matches install.sh load_passwords_from_env semantics)
-# - Single match only (duplicate key detected as fail-loud)
-# - Quote stripped (matches Compose env loader behavior)
-read_env_var() {
-  local key="$1"
-  local count
-  count="$(grep -c "^${key}=" .env || true)"
-  if [ "$count" -eq 0 ]; then
-    echo "[FATAL] ${key} is missing in .env" >&2
-    exit 1
-  fi
-  if [ "$count" -gt 1 ]; then
-    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
-    exit 1
-  fi
-  local raw
-  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
-  raw="${raw#\"}"
-  raw="${raw%\"}"
-  raw="${raw#\'}"
-  raw="${raw%\'}"
-  if [ -z "$raw" ]; then
-    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
-    exit 1
-  fi
-  printf '%s' "$raw"
-}
+# Source shared env helpers (M7-2 #58)
+. docker/scripts/_env_helpers.sh
 
 APP_PW="$(read_env_var APP_PASSWORD)"
 ENCRYPTION_KEY="$(read_env_var ENCRYPTION_KEY)"
@@ -368,6 +343,34 @@ printf '%s' "$ENCRYPTION_KEY" | sudo install -m 600 -o sbomhub -g sbomhub /dev/s
   /opt/sbomhub/docker/secrets/encryption_key.txt
 
 unset APP_PW ENCRYPTION_KEY
+```
+
+If `docker/scripts/_env_helpers.sh` is unavailable in a copied runbook, paste
+this inline fallback before the `APP_PW=...` lines:
+
+```bash
+read_env_var() {
+  key="$1"
+  count="$(grep -c "^${key}=" .env || true)"
+  if [ "$count" -eq 0 ]; then
+    echo "[FATAL] ${key} is missing in .env" >&2
+    exit 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
+    exit 1
+  fi
+  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  if [ -z "$raw" ]; then
+    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
+    exit 1
+  fi
+  printf '%s' "$raw"
+}
 ```
 
 **Path B: Enterprise install (Docker secrets ベース)**

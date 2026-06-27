@@ -107,33 +107,8 @@ API を停止し両方の鍵を用意する。
 docker compose stop api
 NEW_KEY="$(openssl rand -base64 32)"
 
-# Defensive .env value extractor (matches install.sh load_passwords_from_env semantics)
-# - Single match only (duplicate key detected as fail-loud)
-# - Quote stripped (matches Compose env loader behavior)
-read_env_var() {
-  local key="$1"
-  local count
-  count="$(grep -c "^${key}=" .env || true)"
-  if [ "$count" -eq 0 ]; then
-    echo "[FATAL] ${key} is missing in .env" >&2
-    exit 1
-  fi
-  if [ "$count" -gt 1 ]; then
-    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
-    exit 1
-  fi
-  local raw
-  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
-  raw="${raw#\"}"
-  raw="${raw%\"}"
-  raw="${raw#\'}"
-  raw="${raw%\'}"
-  if [ -z "$raw" ]; then
-    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
-    exit 1
-  fi
-  printf '%s' "$raw"
-}
+# Source shared env helpers (M7-2 #58)
+. docker/scripts/_env_helpers.sh
 
 OLD_KEY="$(read_env_var ENCRYPTION_KEY)"
 export OLD_ENCRYPTION_KEY="$OLD_KEY"
@@ -416,19 +391,46 @@ in-place 編集:
 ```bash
 # .env の ENCRYPTION_KEY 行を準備済み NEW_KEY で置換。
 # Precondition: read_env_var ENCRYPTION_KEY already passed (single match, non-empty).
+write_env_var ENCRYPTION_KEY "$NEW_KEY"
+chmod 600 .env
+```
+
+もし `docker/scripts/_env_helpers.sh` が無い copied runbook では、
+`OLD_KEY=...` と `write_env_var ...` の行より前に以下の inline fallback を貼り付ける。
+
+```bash
+read_env_var() {
+  key="$1"
+  count="$(grep -c "^${key}=" .env || true)"
+  if [ "$count" -eq 0 ]; then
+    echo "[FATAL] ${key} is missing in .env" >&2
+    exit 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
+    exit 1
+  fi
+  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  if [ -z "$raw" ]; then
+    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
+    exit 1
+  fi
+  printf '%s' "$raw"
+}
+
 write_env_var() {
-  local key="$1"
-  local value="$2"
-  local tmp
+  key="$1"
+  value="$2"
   tmp="$(mktemp)"
-  # Pass replacement value via env (not argv) to avoid ps/procfs leak.
-  # awk reads it via ENVIRON[] inside BEGIN.
   WRITE_ENV_VALUE="$value" awk -v key="${key}=" '
     BEGIN { val = ENVIRON["WRITE_ENV_VALUE"] }
     $0 ~ "^" key { print key val; next }
     { print }
   ' .env > "$tmp"
-  local count
   count="$(grep -c "^${key}=" "$tmp" || true)"
   if [ "$count" -ne 1 ]; then
     rm -f "$tmp"
@@ -437,9 +439,6 @@ write_env_var() {
   fi
   mv "$tmp" .env
 }
-
-write_env_var ENCRYPTION_KEY "$NEW_KEY"
-chmod 600 .env
 ```
 
 enterprise Docker Secrets では `docker/secrets/encryption_key.txt` を `NEW_KEY`

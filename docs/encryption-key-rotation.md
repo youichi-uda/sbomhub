@@ -115,33 +115,8 @@ Stop the API and prepare both keys:
 docker compose stop api
 NEW_KEY="$(openssl rand -base64 32)"
 
-# Defensive .env value extractor (matches install.sh load_passwords_from_env semantics)
-# - Single match only (duplicate key detected as fail-loud)
-# - Quote stripped (matches Compose env loader behavior)
-read_env_var() {
-  local key="$1"
-  local count
-  count="$(grep -c "^${key}=" .env || true)"
-  if [ "$count" -eq 0 ]; then
-    echo "[FATAL] ${key} is missing in .env" >&2
-    exit 1
-  fi
-  if [ "$count" -gt 1 ]; then
-    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
-    exit 1
-  fi
-  local raw
-  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
-  raw="${raw#\"}"
-  raw="${raw%\"}"
-  raw="${raw#\'}"
-  raw="${raw%\'}"
-  if [ -z "$raw" ]; then
-    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
-    exit 1
-  fi
-  printf '%s' "$raw"
-}
+# Source shared env helpers (M7-2 #58)
+. docker/scripts/_env_helpers.sh
 
 OLD_KEY="$(read_env_var ENCRYPTION_KEY)"
 export OLD_ENCRYPTION_KEY="$OLD_KEY"
@@ -434,19 +409,46 @@ In-place edit:
 ```bash
 # Replace the ENCRYPTION_KEY line in .env with the prepared NEW_KEY.
 # Precondition: read_env_var ENCRYPTION_KEY already passed (single match, non-empty).
+write_env_var ENCRYPTION_KEY "$NEW_KEY"
+chmod 600 .env
+```
+
+If `docker/scripts/_env_helpers.sh` is unavailable in a copied runbook, paste
+this inline fallback before the `OLD_KEY=...` and `write_env_var ...` lines:
+
+```bash
+read_env_var() {
+  key="$1"
+  count="$(grep -c "^${key}=" .env || true)"
+  if [ "$count" -eq 0 ]; then
+    echo "[FATAL] ${key} is missing in .env" >&2
+    exit 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
+    exit 1
+  fi
+  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  if [ -z "$raw" ]; then
+    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
+    exit 1
+  fi
+  printf '%s' "$raw"
+}
+
 write_env_var() {
-  local key="$1"
-  local value="$2"
-  local tmp
+  key="$1"
+  value="$2"
   tmp="$(mktemp)"
-  # Pass replacement value via env (not argv) to avoid ps/procfs leak.
-  # awk reads it via ENVIRON[] inside BEGIN.
   WRITE_ENV_VALUE="$value" awk -v key="${key}=" '
     BEGIN { val = ENVIRON["WRITE_ENV_VALUE"] }
     $0 ~ "^" key { print key val; next }
     { print }
   ' .env > "$tmp"
-  local count
   count="$(grep -c "^${key}=" "$tmp" || true)"
   if [ "$count" -ne 1 ]; then
     rm -f "$tmp"
@@ -455,9 +457,6 @@ write_env_var() {
   fi
   mv "$tmp" .env
 }
-
-write_env_var ENCRYPTION_KEY "$NEW_KEY"
-chmod 600 .env
 ```
 
 For enterprise Docker Secrets, replace `docker/secrets/encryption_key.txt` with
