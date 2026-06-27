@@ -179,7 +179,7 @@ func parseFlags(args []string, stderr io.Writer, now time.Time) (*cliFlags, []ta
 
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: migrate-encryption [--dry-run|--apply|--verify] [--db-url DSN] [--report PATH]")
-		fmt.Fprintln(stderr, "Keys are env-only: OLD_ENCRYPTION_KEY and NEW_ENCRYPTION_KEY must be base64-encoded 32-byte values.")
+		fmt.Fprintln(stderr, "Keys are env-only: OLD_ENCRYPTION_KEY and NEW_ENCRYPTION_KEY use the first 32 bytes of the raw value, matching ENCRYPTION_KEY runtime semantics.")
 		fs.PrintDefaults()
 	}
 
@@ -360,15 +360,13 @@ func readKey(name string) ([]byte, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("%s is required", name)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, fmt.Errorf("%s must be base64: %w", name, err)
+	// Runtime semantics: take the first 32 bytes of the raw string verbatim.
+	// Base64-decoding here would diverge from internal/config.Config.GetEncryptionKey
+	// and cmd/decrypt-test.
+	if len(raw) < 32 {
+		return nil, fmt.Errorf("%s too short: need >= 32 bytes, got %d", name, len(raw))
 	}
-	if len(decoded) != 32 {
-		zero(decoded)
-		return nil, fmt.Errorf("%s must decode to exactly 32 bytes (got %d)", name, len(decoded))
-	}
-	return decoded, nil
+	return []byte(raw)[:32], nil
 }
 
 func run(ctx context.Context, db *sql.DB, oldKey, newKey []byte, opts options, expected *dryRunExpectations, now time.Time) (*report, int, error) {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/sbomhub/sbomhub/internal/config"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
 
@@ -85,21 +85,63 @@ func TestParseFlags_Help(t *testing.T) {
 	}
 }
 
-func TestReadKeysFromEnv_Base64Exact32AndEnvOnly(t *testing.T) {
-	t.Setenv("OLD_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(testOldKey))
-	t.Setenv("NEW_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(testNewKey))
+func TestReadKeysFromEnv_RawFirst32AndEnvOnly(t *testing.T) {
+	oldRaw := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	newRaw := "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZmFiY2RlZjAxMjM="
+	t.Setenv("OLD_ENCRYPTION_KEY", oldRaw)
+	t.Setenv("NEW_ENCRYPTION_KEY", newRaw)
 	oldKey, newKey, err := readKeysFromEnv()
 	if err != nil {
 		t.Fatalf("readKeysFromEnv: %v", err)
 	}
-	if string(oldKey) != string(testOldKey) || string(newKey) != string(testNewKey) {
-		t.Fatalf("decoded keys mismatch")
+	if string(oldKey) != oldRaw[:32] || string(newKey) != newRaw[:32] {
+		t.Fatalf("raw first-32 keys mismatch: old=%q new=%q", oldKey, newKey)
 	}
 
 	var stderr bytes.Buffer
 	_, _, err = parseFlags([]string{"--db-url", "postgres://x", "--old-key", "not-allowed"}, &stderr, testNow)
 	if err == nil {
 		t.Fatal("argv key-like flag should be rejected as usage error")
+	}
+}
+
+func TestReadKeyRejectsTooShortRawValue(t *testing.T) {
+	t.Setenv("OLD_ENCRYPTION_KEY", strings.Repeat("k", 31))
+	_, err := readKey("OLD_ENCRYPTION_KEY")
+	if err == nil || !strings.Contains(err.Error(), "too short") {
+		t.Fatalf("readKey too-short err = %v", err)
+	}
+}
+
+func TestReadKeyMatchesRuntimeFirst32BytesAndRoundTrip(t *testing.T) {
+	raw := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	t.Setenv("OLD_ENCRYPTION_KEY", raw)
+
+	migrateKey, err := readKey("OLD_ENCRYPTION_KEY")
+	if err != nil {
+		t.Fatalf("readKey: %v", err)
+	}
+	runtimeKey, err := (&config.Config{EncryptionKey: raw}).GetEncryptionKey()
+	if err != nil {
+		t.Fatalf("GetEncryptionKey: %v", err)
+	}
+	decryptTestKey := []byte(raw)[:32]
+
+	if string(migrateKey) != string(runtimeKey) || string(migrateKey) != string(decryptTestKey) {
+		t.Fatalf("key semantics diverged: migrate=%q runtime=%q decrypt-test=%q", migrateKey, runtimeKey, decryptTestKey)
+	}
+
+	plain := []byte("round-trip with raw first-32 key")
+	ct, err := llm.Encrypt(plain, migrateKey)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	got, err := llm.Decrypt(ct, runtimeKey)
+	if err != nil {
+		t.Fatalf("decrypt with runtime key: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("round-trip plaintext = %q, want %q", got, plain)
 	}
 }
 
@@ -111,8 +153,8 @@ func TestRealMain_ExitCodes64And65(t *testing.T) {
 	}
 
 	t.Setenv("DATABASE_URL", "postgres://x")
-	t.Setenv("OLD_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(testOldKey))
-	t.Setenv("NEW_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(testOldKey))
+	t.Setenv("OLD_ENCRYPTION_KEY", string(testOldKey))
+	t.Setenv("NEW_ENCRYPTION_KEY", string(testOldKey))
 	if ee := realMain([]string{}, &stdout, &stderr); ee == nil || ee.Code != exitPrecondition {
 		t.Fatalf("precondition ee = %#v", ee)
 	}
@@ -146,8 +188,8 @@ func TestDryRun_NoDBWriteAndReport(t *testing.T) {
 
 func TestApplyRequiresDryRunReport(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
-	t.Setenv("OLD_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(testOldKey))
-	t.Setenv("NEW_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(testNewKey))
+	t.Setenv("OLD_ENCRYPTION_KEY", string(testOldKey))
+	t.Setenv("NEW_ENCRYPTION_KEY", string(testNewKey))
 	var stdout, stderr bytes.Buffer
 	ee := realMain([]string{"--apply", "--db-url", "postgres://x"}, &stdout, &stderr)
 	if ee == nil || ee.Code != exitPrecondition {
