@@ -30,25 +30,23 @@ docker compose up -d                      # 残りを起動
 
 ブラウザで http://localhost:3000 を開きます。
 
-release tag に pin する場合は、同じ tag の installer を実行し、
-`SBOMHUB_RELEASE_TAG` を指定します。これにより `docker-compose.yml`,
-`.env.example`, operational scripts も rolling `main` ではなく同じ tag から取得されます。
-
-```bash
-SBOMHUB_RELEASE_TAG=v1.0.0 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/v1.0.0/install.sh) --start
-```
+新規の OSS self-host install では、default の `main` installer を使ってください。
+現時点で公開済みの release tag (`v1.2.0` を含む) は M6 の installer packaging fix より前の
+artifact であり、`install.sh` と `docker/scripts/` 配下の 4 本の operational scripts を含みません。
+pinned release install は、M7 の release pipeline で operational scripts を release artifact に
+同梱できるようになってから利用してください。
 
 社内 mirror / air-gapped staging から取得する場合は raw content の base URL を上書きできます。
 
 ```bash
-SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/v1.0.0 \
-  bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/v1.0.0/install.sh) --start
+SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/main \
+  bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/main/install.sh) --start
 ```
 
-現時点の supply-chain hardening は tag pinning が最小対応です。
-SHA256SUMS verification は release pipeline 側で checksum publish が必要なため M7 に持ち越し、
-`SBOMHUB_RELEASE_SHA256SUMS_URL` support は M7 で追加予定です。
+curl installer の現時点の supply-chain hardening は、信頼済み mirror の利用または実行前の
+source review です。release tag pinning と SHA256SUMS verification は、release pipeline 側で
+`install.sh`, `docker/scripts/*`, checksum をまとめて publish できるようにした後の M7 に持ち越し、
+`SBOMHUB_RELEASE_SHA256SUMS_URL` support もそこで追加予定です。
 
 ## Docker Compose（フルインストール）
 

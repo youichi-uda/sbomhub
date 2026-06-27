@@ -30,25 +30,24 @@ docker compose up -d                      # 残りを起動
 
 Open http://localhost:3000 in your browser.
 
-For a pinned release, run the installer from the same tag and set
-`SBOMHUB_RELEASE_TAG` so `docker-compose.yml`, `.env.example`, and operational
-scripts are downloaded from that tag instead of rolling `main`:
-
-```bash
-SBOMHUB_RELEASE_TAG=v1.0.0 \
-  bash <(curl -fsSL https://raw.githubusercontent.com/youichi-uda/sbomhub/v1.0.0/install.sh) --start
-```
+Use the default `main` installer for new OSS self-host installs. Current
+published release tags, including `v1.2.0`, predate the M6 installer packaging
+fix and do not contain `install.sh` or the four operational scripts under
+`docker/scripts/`. Pinned release install should be used only after the M7
+release pipeline publishes those operational scripts with the release artifact.
 
 For an internal mirror or air-gapped staging area, override the raw content base
 URL:
 
 ```bash
-SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/v1.0.0 \
-  bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/v1.0.0/install.sh) --start
+SBOMHUB_RAW_BASE_URL=https://mirror.internal.example.com/sbomhub/main \
+  bash <(curl -fsSL https://mirror.internal.example.com/sbomhub/main/install.sh) --start
 ```
 
-Current supply-chain hardening is tag pinning. SHA256SUMS verification is
-deferred to M7 because the release pipeline must publish checksums before
+Current supply-chain hardening for the curl installer is a trusted mirror or
+explicit source review before execution. Release tag pinning and SHA256SUMS
+verification are deferred to M7 because the release pipeline must first publish
+`install.sh`, `docker/scripts/*`, and checksums together before
 `SBOMHUB_RELEASE_SHA256SUMS_URL` support can be added safely.
 
 ## Docker Compose (Full Installation)
