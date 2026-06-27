@@ -503,7 +503,8 @@ if [[ "${VERIFY_ENCRYPTION}" == "1" && -n "${VERIFY_DB_URL}" ]]; then
     fi
 elif [[ "${VERIFY_ENCRYPTION}" == "1" ]]; then
     echo "[restore] step 8/8: skip verify-encryption smoke test (VERIFY_ENCRYPTION=1 but VERIFY_DB_URL is unset)"
-    echo "[restore]   INFO: enterprise compose does not expose postgres on the host by default; set VERIFY_DB_URL to a host-reachable DSN to run Step 8." >&2
+    echo "[restore]   WARN: ENCRYPTION_KEY verification was requested but VERIFY_DB_URL is not set; skipping smoke (no decryption verified)" >&2
+    echo "[restore]         enterprise compose does not expose postgres on the host by default; set VERIFY_DB_URL to a host-reachable DSN to run Step 8." >&2
 else
     echo "[restore] step 8/8: skip verify-encryption smoke test (set VERIFY_ENCRYPTION=1 and VERIFY_DB_URL to enable)"
 fi

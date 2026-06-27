@@ -586,3 +586,65 @@ func Test044_CompositeFKTenantProject_ContainsHardening(t *testing.T) {
 		}
 	}
 }
+
+// Test045_CompositeFKExtension_ContainsHardening guards the M5 Phase D
+// Round 1 F81 extension over the seven older project-child tables missed
+// by migration 044. It follows the F73/F75 content sanity pattern: no DB
+// required, but the load-bearing pre-flight, tenant_id promotion, and
+// composite FK statements must stay present.
+func Test045_CompositeFKExtension_ContainsHardening(t *testing.T) {
+	up := readMigration(t, "045_composite_fk_extension.up.sql")
+	upUpper := strings.ToUpper(up)
+
+	// Pre-flight orphan check must exist and abort loudly before the FK
+	// statements run, otherwise existing cross-tenant rows would fail with
+	// an opaque generic FK violation.
+	if !strings.Contains(upUpper, "DO $$") {
+		t.Error("045: pre-flight orphan check DO $$ block must exist")
+	}
+	if !strings.Contains(upUpper, "RAISE EXCEPTION 'MIGRATION 045") {
+		t.Error("045: orphan check must RAISE EXCEPTION with the migration tag so ops can grep logs")
+	}
+
+	for _, fkPair := range []struct {
+		table, fkName string
+	}{
+		{"sboms", "sboms_tenant_project_fk"},
+		{"vex_statements", "vex_statements_tenant_project_fk"},
+		{"license_policies", "license_policies_tenant_project_fk"},
+		{"notification_settings", "notification_settings_tenant_project_fk"},
+		{"notification_logs", "notification_logs_tenant_project_fk"},
+		{"public_links", "public_links_tenant_project_fk"},
+		{"vulnerability_tickets", "vulnerability_tickets_tenant_project_fk"},
+	} {
+		fkNeedle := strings.ToUpper("ADD CONSTRAINT " + fkPair.fkName)
+		if !strings.Contains(upUpper, fkNeedle) {
+			t.Errorf("045 missing %q -- composite FK regression on %s",
+				fkNeedle, fkPair.table)
+		}
+	}
+
+	if !strings.Contains(upUpper, "FOREIGN KEY (TENANT_ID, PROJECT_ID)") {
+		t.Error("045: every FK must reference the (tenant_id, project_id) pair, not project_id alone")
+	}
+	if !strings.Contains(upUpper, "REFERENCES PROJECTS (TENANT_ID, ID)") {
+		t.Error("045: every FK must target the composite UNIQUE on projects(tenant_id, id) " +
+			"(installed in migration 041)")
+	}
+	if !strings.Contains(upUpper, "ON DELETE CASCADE") {
+		t.Error("045: every composite FK must CASCADE to keep parity with the existing project_id FK")
+	}
+
+	for _, table := range []string{
+		"vex_statements",
+		"license_policies",
+		"notification_settings",
+		"notification_logs",
+	} {
+		notNullRe := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+` + table + `\s+ALTER\s+COLUMN\s+tenant_id\s+SET\s+NOT\s+NULL`)
+		if !notNullRe.MatchString(up) {
+			t.Errorf("045 missing ALTER TABLE %s ALTER COLUMN tenant_id SET NOT NULL -- legacy nullable tenant_id was not promoted",
+				table)
+		}
+	}
+}

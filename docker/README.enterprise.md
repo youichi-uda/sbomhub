@@ -352,18 +352,24 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張、 F80 で
   圧迫を引き起こす可能性がある。 該当する規模で運用する場合は事前に
   staging で挙動確認のこと (後続 issue で transaction 分割オプションを検討予定)。
 - **ENCRYPTION_KEY 復号 smoke test** (M5-5、 issue [#53](https://github.com/youichi-uda/sbomhub/issues/53)):
-  `VERIFY_ENCRYPTION=1` を渡すと restore は **Step 8** として
+  `VERIFY_ENCRYPTION=1` と `VERIFY_DB_URL` を渡すと restore は **Step 8** として
   [`./scripts/verify-encryption.sh`](./scripts/verify-encryption.sh) を実行し、 復元された
   `ENCRYPTION_KEY` が DB の暗号化カラムを実際に復号できることを smoke 確認する。
+  `VERIFY_DB_URL` には host から到達可能な DSN を明示すること。
   失敗 (exit 1/2/3) は **warning ログのみで restore 全体は continue** する (smoke posture)。
   ```bash
-  VERIFY_ENCRYPTION=1 ./scripts/restore.sh /path/to/sbomhub-backup-YYYYMMDD-HHMMSS.tar.gz
+  VERIFY_ENCRYPTION=1 \
+  VERIFY_DB_URL="postgres://sbomhub_app:...@127.0.0.1:5432/sbomhub?sslmode=disable" \
+      ./scripts/restore.sh /path/to/sbomhub-backup-YYYYMMDD-HHMMSS.tar.gz
   ```
   手動 spot check (restore 後の任意タイミングや、 鍵 rotation 後の最終確認) は:
   ```bash
+  ENCRYPTION_KEY="$(cat secrets/encryption_key.txt)" \
+      ./scripts/verify-encryption.sh --db-url "$DATABASE_URL"
+
   ./scripts/verify-encryption.sh \
-      --key "$(cat secrets/encryption_key.txt)" \
-      --db-url "postgres://sbomhub_app:...@localhost:5432/sbomhub?sslmode=disable"
+      --key-file secrets/encryption_key.txt \
+      --db-url "$DATABASE_URL"
   ```
   exit code 契約 / SHA256(plaintext)-only 出力 / column 切り替え (BYOK LLM key /
   issue_tracker_connections token) は [`docs/security/self-host-deployment.md`](../docs/security/self-host-deployment.md) §4.5 を参照。
