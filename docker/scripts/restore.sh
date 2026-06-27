@@ -66,6 +66,12 @@ VERIFY_DB_URL="${VERIFY_DB_URL:-}"
 
 SECRETS_DIR="${DOCKER_DIR}/secrets"
 
+sql_literal_escape() {
+    local value=$1
+    value=${value//\'/\'\'}
+    printf '%s' "${value}"
+}
+
 # ---------------------------------------------------------------------------
 # 事前チェック
 # ---------------------------------------------------------------------------
@@ -301,10 +307,11 @@ fi
 # 同前提を共有)。 これにより pre-restore admin password の取得手段は不要、
 # DR scenario / hot restore の両方を同一 path で処理できる。
 #
-# password 値の SQL embedding は db-bootstrap entrypoint と同じ規律 (psql `-v`
-# で client-side `:'var'` literal quoting + server-side `format('%L', ...)`)。
-# raw password 値は SQL literal に直接出現せず、 任意 byte の password でも
-# injection / 構文エラーにならない (codex-r8 P2 と同 species)。
+# password 値の SQL embedding は db-bootstrap entrypoint と同じ規律 (stdin
+# 先頭の SELECT ... \gset で client-side `:'var'` literal quoting +
+# server-side `format('%L', ...)`)。raw password 値は docker compose / psql
+# argv に載せず、 single quote escape 済みの SQL literal として stdin 経由で
+# 渡す (codex-r8 P2 と同 species)。
 #
 # standard `docker-compose.yml` (OSS dev 用、 sbomhub superuser 単一ロール) では
 # sbomhub-api が `sbomhub` superuser で直接接続する旧構成のため、 admin role
@@ -329,6 +336,7 @@ case "${COMPOSE_BASENAME}" in
                 echo "[restore] FATAL: restored postgres_password.txt is empty" >&2
                 exit 1
             fi
+            RESTORED_ADMIN_PASSWORD_SQL="$(sql_literal_escape "${RESTORED_ADMIN_PASSWORD}")"
             # Unix socket trust auth で admin 接続 → ALTER ROLE。 `\gexec` は
             # `SELECT format(...)` の結果 1 行を SQL として実行する psql 機能。
             # `2>&1` で stderr を握り、 failure 時に raw 出力を error log に
@@ -336,13 +344,14 @@ case "${COMPOSE_BASENAME}" in
             ALTER_OUTPUT="$(docker compose -f "${COMPOSE_FILE}" exec -T \
                 postgres \
                 psql -U sbomhub -d "${PG_DB}" \
-                     -tA -v ON_ERROR_STOP=1 \
-                     -v new_admin_pw="${RESTORED_ADMIN_PASSWORD}" 2>&1 <<'SQL'
+                     -tA -v ON_ERROR_STOP=1 2>&1 <<SQL
+SELECT '${RESTORED_ADMIN_PASSWORD_SQL}' AS new_admin_pw
+\gset
 SELECT format('ALTER ROLE %I WITH PASSWORD %L', 'sbomhub', :'new_admin_pw')
 \gexec
 SQL
             )" || {
-                unset RESTORED_ADMIN_PASSWORD
+                unset RESTORED_ADMIN_PASSWORD RESTORED_ADMIN_PASSWORD_SQL
                 echo "[restore] FATAL: failed to converge postgres admin role password:" >&2
                 awk '{print "[restore]   " $0}' <<< "${ALTER_OUTPUT}" >&2
                 echo "[restore]        Step 6 db-bootstrap は restored postgres_password.txt で TCP 接続するため、" >&2
@@ -352,7 +361,7 @@ SQL
                 echo "[restore]                          psql -U sbomhub -c \"ALTER ROLE sbomhub PASSWORD '<value>';\"" >&2
                 exit 1
             }
-            unset RESTORED_ADMIN_PASSWORD
+            unset RESTORED_ADMIN_PASSWORD RESTORED_ADMIN_PASSWORD_SQL
             echo "[restore]   admin role 'sbomhub' password converged to restored secret"
         fi
         ;;

@@ -124,6 +124,10 @@ done
 # Helpers
 # ----------------------------------------------------------------------------
 
+sql_literal_escape() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
 # postgres コンテナに対して role bootstrap SQL を流す。
 #   $1: MIGRATOR_PASSWORD (raw)
 #   $2: APP_PASSWORD (raw)
@@ -133,12 +137,12 @@ done
 #   - 旧実装は heredoc で '${MIGRATOR_PASSWORD}' / '${APP_PASSWORD}' を
 #     SQL string literal の中に shell interpolate していた。 single quote を
 #     含む password で SQL injection / 構文エラーになる。
-#   - 本実装は password を psql の -v migrator_password=... / -v app_password=...
-#     経由で渡し、 SQL 側では :'var' (psql client-side literal quoting) と
+#   - 本実装は password を stdin 先頭の SELECT ... \gset 経由で psql 変数に
+#     変換し、 SQL 側では :'var' (psql client-side literal quoting) と
 #     format(... %L ...) (server-side literal quoting、 belt-and-suspenders)
-#     を使う。 raw value は SQL string literal の中に直接出現しないので、
-#     任意 byte を含む password でも安全 (codex-r8 で初期 R8-8b commit が
-#     init.sh に同じ規律を入れた、 install.sh も同じ規律を継承)。
+#     を使う。 stdin に載せる初期 SQL literal は single quote escape 済み
+#     なので、 quote を含む password でも構文を壊さない (codex-r8 で初期
+#     R8-8b commit が init.sh に同じ規律を入れた、 install.sh も同じ規律を継承)。
 #   - psql の :'var' 置換は dollar-quoted ($$ ... $$) body の中では効かないので、
 #     CREATE ROLE は SELECT ... \gexec パターン (top-level の SELECT で :'var'
 #     を展開 → 生成された CREATE ROLE を実行) で書く。
@@ -146,29 +150,25 @@ done
 #
 # Password 値の経路:
 #   install.sh ($1, $2)
-#     → host shell の環境変数 PSQL_MIGRATOR_PASSWORD / PSQL_APP_PASSWORD
-#     → docker compose exec -e NAME (name-only) でコンテナ環境へ転送
-#     → コンテナ内 sh -c 'psql -v ... -v ... -f -' の引数展開
-#     → psql の -v 値 (内部的に :'var' で SQL literal にエスケープされる)
+#     → install.sh で SQL string literal 用に single quote escape
+#     → docker compose exec の stdin
+#     → psql の \gset 変数 (以後 :'var' で SQL literal にエスケープされる)
 #     → SELECT format('CREATE ROLE ... PASSWORD %L', :'var') \gexec
 apply_role_bootstrap() {
     # POSTGRES_USER / POSTGRES_DB はコンテナ起動時の env として既に定義。
     # psql は Unix socket 経由 (-h 省略) で trust 認証されるためパスワード不要。
-    # ヒアドキュメントは quoted (`<<'SQL'`) にして install.sh 側の shell 展開
-    # を完全に抑制 (= SQL の中に install.sh の変数値が紛れ込む経路を絶つ)。
-    PSQL_MIGRATOR_PASSWORD=$1
-    PSQL_APP_PASSWORD=$2
-    export PSQL_MIGRATOR_PASSWORD PSQL_APP_PASSWORD
+    # password は docker / psql の argv へ載せず、 stdin 先頭の SELECT ... \gset
+    # で psql 変数化する。SQL 本体は quoted heredoc にして誤展開を避ける。
+    migrator_password_sql=$(sql_literal_escape "$1")
+    app_password_sql=$(sql_literal_escape "$2")
 
-    docker compose exec -T \
-        -e PSQL_MIGRATOR_PASSWORD \
-        -e PSQL_APP_PASSWORD \
-        postgres sh -c '
-            psql -v ON_ERROR_STOP=1 \
-                 -v migrator_password="$PSQL_MIGRATOR_PASSWORD" \
-                 -v app_password="$PSQL_APP_PASSWORD" \
-                 -U sbomhub -d sbomhub -X -q -f -
-        ' <<'SQL'
+    {
+        cat <<SQL_VARS
+SELECT '${migrator_password_sql}' AS migrator_password,
+       '${app_password_sql}' AS app_password
+\gset
+SQL_VARS
+        cat <<'SQL'
 -- Create migrator role (DDL / migrations). NOT BYPASSRLS.
 --
 -- psql variable interpolation (:'var') is NOT performed inside
@@ -350,6 +350,8 @@ BEGIN
 END
 $$;
 SQL
+    } | docker compose exec -T \
+        postgres psql -v ON_ERROR_STOP=1 -U sbomhub -d sbomhub -X -q -f -
 }
 
 # .env から MIGRATOR_PASSWORD / APP_PASSWORD を抽出して RUN_MIGRATOR_PASSWORD /

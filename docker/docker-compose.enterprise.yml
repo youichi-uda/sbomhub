@@ -226,11 +226,11 @@ services:
   #      ALTER OWNER → sbomhub_migrator 移譲 (fresh install では no-op)。
   #
   # SQL は install.sh `--bootstrap-roles` (apply_role_bootstrap) と **同一規律**:
-  # password は psql `-v migrator_password=... -v app_password=...` で受け、
+  # password は psql argv に載せず stdin 先頭の SELECT ... \gset で受け、
   # SQL 本体は dollar-quoted body 外で `:'var'` (psql client-side literal quoting)
   # + `format(... %L ...)` (server-side literal quoting) の belt-and-suspenders。
-  # password raw value は SQL string literal の中に直接出現しないため、 任意 byte
-  # を含む password でも injection / 構文エラーにならない (codex-r8 P2 と同じ規律)。
+  # stdin に載せる初期 SQL literal は single quote escape 済みなので、 quote を
+  # 含む password でも injection / 構文エラーにならない (codex-r8 P2 と同じ規律)。
   #
   # exit 0 で one-shot 終了。 既に role が存在し password も一致している場合は
   # SELECT ... WHERE NOT EXISTS / ALTER ROLE が no-op で数秒以内に完了する。
@@ -270,17 +270,22 @@ services:
         export PGPASSWORD
         APP_PW="$$(cat "$$POSTGRES_APP_PASSWORD_FILE")"
         MIG_PW="$$(cat "$$POSTGRES_MIGRATOR_PASSWORD_FILE")"
+        sql_literal_escape() {
+          printf '%s' "$$1" | sed "s/'/''/g"
+        }
+        APP_PW_SQL="$$(sql_literal_escape "$$APP_PW")"
+        MIG_PW_SQL="$$(sql_literal_escape "$$MIG_PW")"
         echo "[db-bootstrap] applying sbomhub_app / sbomhub_migrator role bootstrap (idempotent)"
-        # PSQL_*_PASSWORD env を経由して psql -v に渡す。 SQL 本体は quoted
-        # heredoc (<<'SQL') にして shell 展開を完全に抑止 (= raw password 値が
-        # SQL literal に直接出現する経路を絶つ)。
-        PSQL_MIGRATOR_PASSWORD="$$MIG_PW" \
-        PSQL_APP_PASSWORD="$$APP_PW" \
-        psql -v ON_ERROR_STOP=1 \
-             -v migrator_password="$$MIG_PW" \
-             -v app_password="$$APP_PW" \
-             -h "$$POSTGRES_HOST" -U "$$POSTGRES_ADMIN_USER" -d "$$POSTGRES_DB" \
-             -X -q -f - <<'SQL'
+        # password は psql argv に載せず、 stdin 先頭の SELECT ... \gset で
+        # psql 変数化する。SQL 本体は quoted heredoc (<<'SQL') にして shell
+        # 展開を抑止する。
+        {
+          cat <<SQL_VARS
+        SELECT '$$MIG_PW_SQL' AS migrator_password,
+               '$$APP_PW_SQL' AS app_password
+        \gset
+        SQL_VARS
+          cat <<'SQL'
         -- Create migrator role (DDL / migrations). NOT BYPASSRLS.
         SELECT format(
             'CREATE ROLE sbomhub_migrator WITH LOGIN PASSWORD %L CREATEDB CREATEROLE',
@@ -392,8 +397,11 @@ services:
         END
         $$;
         SQL
+        } | psql -v ON_ERROR_STOP=1 \
+             -h "$$POSTGRES_HOST" -U "$$POSTGRES_ADMIN_USER" -d "$$POSTGRES_DB" \
+             -X -q -f -
         # 平文 password を環境変数 / log に残さない (server プロセスへの leak 防止)。
-        unset PGPASSWORD APP_PW MIG_PW PSQL_MIGRATOR_PASSWORD PSQL_APP_PASSWORD
+        unset PGPASSWORD APP_PW MIG_PW APP_PW_SQL MIG_PW_SQL
         echo "[db-bootstrap] role bootstrap complete; sbomhub-api can now start as sbomhub_app"
 
   # ---------------------------------------------------------------------------
