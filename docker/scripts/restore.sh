@@ -302,7 +302,7 @@ fi
 # admin role password を restored secret 値に矯正する。 接続は postgres
 # container 内 Unix socket 経由 (`docker compose exec -T postgres psql -U sbomhub`、
 # `-h` 不使用)。 postgres:15-alpine official image は local Unix socket 接続に
-# **trust auth** を default で設定するため、 PGPASSWORD なしで admin connection
+# **trust auth** を default で設定するため、 password env なしで admin connection
 # が成立する (Step 3 pg_restore / Step 4 sanity check も同経路で動作している、
 # 同前提を共有)。 これにより pre-restore admin password の取得手段は不要、
 # DR scenario / hot restore の両方を同一 path で処理できる。
@@ -428,21 +428,36 @@ case "${COMPOSE_BASENAME}" in
             exit 1
         fi
         APP_PASSWORD="$(cat "${APP_PASSWORD_FILE}")"
-        APP_CHECK_RAW="$(PGPASSWORD="${APP_PASSWORD}" \
+        PGPASSFILE_CONTAINER="/tmp/.pgpass-restore-$$"
+        APP_CHECK_RAW="$(printf '%s\n' "${APP_PASSWORD}" | \
             docker compose -f "${COMPOSE_FILE}" exec -T \
-                -e PGPASSWORD \
                 postgres \
-                psql -h localhost -U sbomhub_app -d "${PG_DB}" \
-                     -tA -v ON_ERROR_STOP=1 \
-                     -c "SELECT count(*) FROM tenants;" 2>&1)" || {
+                sh -c '
+                    set -eu
+                    PGPASSFILE_CONTAINER="$1"
+                    PG_DB="$2"
+                    IFS= read -r APP_PASSWORD
+                    cleanup() {
+                        shred -u "$PGPASSFILE_CONTAINER" 2>/dev/null || rm -f "$PGPASSFILE_CONTAINER"
+                    }
+                    trap cleanup EXIT HUP INT TERM
+                    umask 077
+                    printf "localhost:5432:*:sbomhub_app:%s\n" "$APP_PASSWORD" > "$PGPASSFILE_CONTAINER"
+                    unset APP_PASSWORD
+                    chmod 600 "$PGPASSFILE_CONTAINER"
+                    PGPASSFILE="$PGPASSFILE_CONTAINER" \
+                        psql -h localhost -U sbomhub_app -d "$PG_DB" \
+                            -tA -v ON_ERROR_STOP=1 \
+                            -c "SELECT count(*) FROM tenants;"
+                ' sh "${PGPASSFILE_CONTAINER}" "${PG_DB}" 2>&1)" || {
             echo "[restore] FATAL: sbomhub_app cannot SELECT from tenants after restore:" >&2
             awk '{print "[restore]   " $0}' <<< "${APP_CHECK_RAW}" >&2
             echo "[restore]        restored tables に sbomhub_app 用の GRANT が無い可能性。" >&2
             echo "[restore]        db-bootstrap log を確認: docker compose -f ${COMPOSE_FILE} logs db-bootstrap" >&2
-            unset APP_PASSWORD
+            unset APP_PASSWORD PGPASSFILE_CONTAINER
             exit 1
         }
-        unset APP_PASSWORD
+        unset APP_PASSWORD PGPASSFILE_CONTAINER
         APP_TENANT_COUNT="$(printf '%s' "${APP_CHECK_RAW}" | tr -d '[:space:]')"
         if ! [[ "${APP_TENANT_COUNT}" =~ ^[0-9]+$ ]]; then
             echo "[restore] FATAL: sbomhub_app tenants count is not numeric: '${APP_TENANT_COUNT}'" >&2

@@ -346,7 +346,8 @@ restore.sh は **7 step** 構成 (F79 で 5 step → 7 step に拡張、 F80 で
   SELECT** して count が取れることを最終確認する。 db-bootstrap success だけ
   では検出できない drift (table ACL race / restored secrets と postgres role
   password の乖離) を捕捉する。 接続には `docker/secrets/postgres_app_password.txt`
-  (Step 5/7 で復元済み) の値を `PGPASSWORD` で渡す。 失敗時は exit 1。
+  (Step 5/7 で復元済み) の値からコンテナ内に一時 `PGPASSFILE` を作成して渡す。
+  失敗時は exit 1。
 - Step 6/7 と 7/7 は compose file basename に `enterprise` が含まれる場合のみ
   実行される (standalone OSS compose は単一 role 構成のため不要)。
 - 成功時は標準出力末尾に `Restore completed successfully` で始まる行

@@ -633,6 +633,22 @@ secrets:
 > `*_FILE` → env var 展開を済ませているため、 Docker secrets 経由の運用はそのまま enterprise
 > compose で完結する。 アプリ本体へ `*_FILE` ネイティブサポートを入れるかどうかは別 issue 扱い。
 
+### 5.2.1 DB password のプロセス露出を避ける
+
+M7 では PostgreSQL password の受け渡しを `PGPASSWORD` 環境変数から PostgreSQL 標準の
+`PGPASSFILE` (`~/.pgpass` format、 `chmod 600`) へ hardening した。対象は
+Enterprise compose の `db-bootstrap` と restore 後の `sbomhub_app` 読み取り確認で、
+一時ファイルは処理終了時に `shred -u`、未対応環境では `rm -f` で削除する。
+
+これは M6 の F84 / F107 / F134 / F136 / F137 で進めた secret-handling 規律の延長である。
+M6 では `psql -v name=value` や helper argv に password を載せず、stdin 経由の psql 変数化へ
+寄せた。M7 では残っていた `PGPASSWORD` env 経路も避け、同一 user / root が
+`/proc/<pid>/environ` を読める環境で password が見える risk を軽減する。
+
+残る前提として、Docker secrets file と一時 `PGPASSFILE` を読める権限を持つ root / container
+administrator は引き続き secret に到達できる。これは local root trust boundary の範囲であり、
+外部 secret store や短命 credential への移行は別途検討する。
+
 ### 5.3 SOPS / age / GPG によるチーム間共有
 
 複数オペレーターで `.env` を共有する場合、 平文を Slack / メールで配るのは厳禁。

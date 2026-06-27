@@ -248,6 +248,7 @@ services:
       - postgres_migrator_password
     environment:
       POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
       POSTGRES_ADMIN_USER: "sbomhub"
       POSTGRES_DB: "sbomhub"
       POSTGRES_ADMIN_PASSWORD_FILE: "/run/secrets/postgres_password"
@@ -266,8 +267,13 @@ services:
             exit 1
           fi
         done
-        PGPASSWORD="$$(cat "$$POSTGRES_ADMIN_PASSWORD_FILE")"
-        export PGPASSWORD
+        PGPASSFILE="$$(mktemp)"
+        chmod 600 "$$PGPASSFILE"
+        trap 'shred -u "$$PGPASSFILE" 2>/dev/null || rm -f "$$PGPASSFILE"' EXIT HUP INT TERM
+        ADMIN_PW="$$(cat "$$POSTGRES_ADMIN_PASSWORD_FILE")"
+        printf '%s:%s:%s:%s:%s\n' "$$POSTGRES_HOST" "$$POSTGRES_PORT" "*" "$$POSTGRES_ADMIN_USER" "$$ADMIN_PW" > "$$PGPASSFILE"
+        unset ADMIN_PW
+        export PGPASSFILE
         APP_PW="$$(cat "$$POSTGRES_APP_PASSWORD_FILE")"
         MIG_PW="$$(cat "$$POSTGRES_MIGRATOR_PASSWORD_FILE")"
         sql_literal_escape() {
@@ -398,10 +404,11 @@ services:
         $$;
         SQL
         } | psql -v ON_ERROR_STOP=1 \
-             -h "$$POSTGRES_HOST" -U "$$POSTGRES_ADMIN_USER" -d "$$POSTGRES_DB" \
+             -h "$$POSTGRES_HOST" -p "$$POSTGRES_PORT" -U "$$POSTGRES_ADMIN_USER" -d "$$POSTGRES_DB" \
              -X -q -f -
         # 平文 password を環境変数 / log に残さない (server プロセスへの leak 防止)。
-        unset PGPASSWORD APP_PW MIG_PW APP_PW_SQL MIG_PW_SQL
+        # PGPASSFILE path は EXIT trap の cleanup に使うため unset しない。
+        unset APP_PW MIG_PW APP_PW_SQL MIG_PW_SQL
         echo "[db-bootstrap] role bootstrap complete; sbomhub-api can now start as sbomhub_app"
 
   # ---------------------------------------------------------------------------
