@@ -134,8 +134,13 @@ docker compose -f docker/docker-compose.yml run --rm \
   --dry-run --report /tmp/dry-run.json
 
 # enterprise compose (docker/docker-compose.enterprise.yml service: sbomhub-api)
+urlenc() {
+  printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's|/|%2F|g' -e 's/=/%3D/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/&/%26/g'
+}
+
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
-export DATABASE_URL="postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+APP_PW_ENC="$(urlenc "$APP_PW")"
+export DATABASE_URL="postgres://sbomhub_app:${APP_PW_ENC}@postgres:5432/sbomhub?sslmode=disable"
 docker compose -f docker/docker-compose.enterprise.yml run --rm \
   --entrypoint /usr/local/bin/migrate-encryption \
   -e OLD_ENCRYPTION_KEY \
@@ -154,14 +159,23 @@ host caller must provide `DATABASE_URL` explicitly. The `--db-url` flag remains
 available for backwards compatibility, but this runbook avoids it so the DSN
 does not appear in container argv.
 
+> **Warning:** Docker secrets passwords generated with base64 can contain
+> characters such as `/`, `+`, `=`, `@`, and `:`. URL-encode the password before
+> embedding it in a `postgres://` DSN, otherwise the connection can fail.
+
 If you run the Go command from the host shell instead, first populate
 `DATABASE_URL` explicitly. Prefer building the DSN from Docker secrets when the
 compose file keeps production credentials out of static environment output:
 
 ```bash
 # recommended: build the host-run DSN from Docker secrets
+urlenc() {
+  printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's|/|%2F|g' -e 's/=/%3D/g' -e 's/@/%40/g' -e 's/:/%3A/g' -e 's/?/%3F/g' -e 's/#/%23/g' -e 's/&/%26/g'
+}
+
 APP_PW="$(cat docker/secrets/postgres_app_password.txt)"
-export DATABASE_URL="postgres://sbomhub_app:${APP_PW}@127.0.0.1:5432/sbomhub?sslmode=disable"
+APP_PW_ENC="$(urlenc "$APP_PW")"
+export DATABASE_URL="postgres://sbomhub_app:${APP_PW_ENC}@127.0.0.1:5432/sbomhub?sslmode=disable"
 
 # alternative for standard compose only: read the static DSN from compose config
 export DATABASE_URL="$(docker compose -f docker/docker-compose.yml config | awk -F': ' '/DATABASE_URL:/ {print $2; exit}')"
