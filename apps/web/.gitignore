@@ -1,0 +1,21 @@
+# Next.js build output
+/.next/
+/out/
+
+# Node / pnpm
+/node_modules/
+
+# Build artefacts
+/build/
+/dist/
+*.tsbuildinfo
+
+# Playwright (M8 #67) — keep test artefacts out of git;
+# CI uploads them as a build artefact on failure instead.
+/test-results/
+/playwright-report/
+/playwright/.cache/
+
+# OS / editor
+.DS_Store
+*.log

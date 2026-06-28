@@ -35,6 +35,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | `rls-integration.yml` | push main / PR (`apps/api/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + migrate → `go test -tags=integration ./internal/repository/... ./internal/middleware/...` | Trust Rescue P1 #17-followup |
 | `migration-roundtrip.yml` | push main / PR (`apps/api/migrations/**`, `apps/api/cmd/migrate/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + `migrate up` → `migrate down 999` → `migrate up` (regression check)。 schema diff は warn-only で初回 landing | Trust Rescue P1 #17-followup |
 | `frontend-ci.yml` | push main / PR (`apps/web/**`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `package.json` paths) | pnpm install → `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`)。 Node 22 LTS / pnpm 9、 warn-only initial landing | Trust Rescue P1 #17-followup |
+| `web-e2e.yml` | push main / PR (`apps/web/**`, `apps/api/**`, compose / install.sh / env / pnpm paths) | docker compose (postgres + redis + locally built api + web) を起動 → Playwright (chromium) で `apps/web/e2e/smoke/` を実行。 home (`/` redirect + SBOMHub brand) / dashboard (auth surface に到達) / api-health (`/api/v1/health` `status=ok`) の 3 scenario | M8 #67 |
 
 ### 2.2 Required quality gates
 
@@ -52,7 +53,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | docs curl smoke | `docs-curl-smoke.yml` | OK |
 | install.sh smoke | `install-smoke.yml` (Ubuntu + macOS) | OK |
 | CLI release / install smoke | sbomhub-cli `ci.yml` (release) + sbomhub `install-smoke.yml` (install.sh) | OK |
-| Golden Path E2E (Playwright) | `apps/web/e2e/` に skeleton あり、 CI 実行は **未設定** | (P2) M1 で本格化、 M0 では doc に予告のみ |
+| Golden Path E2E (Playwright) | `apps/web/e2e/smoke/` の 3 scenario (home / dashboard / api-health) を `web-e2e.yml` (M8 #67) で実行。 docker compose 一式を立てて 本番 web image (Clerk key 空) に対し chromium で叩く、 M7-5 docker-publish.yml の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)。 旧 `apps/web/e2e/*.spec.ts` (26 spec) は `dev:test` 前提のため引き続き local-only | OK (本 wave、 認証込み深堀りは M1 で本格化) |
 | security scanning (Snyk / GitGuardian / gosec / trivy) | **未設定** | (P2) 別 wave |
 
 ### 2.3 Branch protection settings
@@ -121,7 +122,7 @@ P3 = それ以降):
 - [x] (P1) sbomhub: RLS integration test workflow 追加 — `rls-integration.yml` で docker compose postgres + role bootstrap + migrate → `go test -tags=integration ./internal/repository/... ./internal/middleware/...` を実行 (#17-followup)
 - [x] (P1) sbomhub: frontend lint/typecheck/build workflow 追加 — `frontend-ci.yml` (#17-followup) で Node 22 LTS + pnpm 9 で `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`) を実行。 各 step `continue-on-error: true` の warn-only で初回 landing (apps/web に既存 lint / type 違反が残存している可能性があり、 無関係 PR を block しないため)。 strict 化 (continue-on-error 削除 + Required status checks 追加) は既存違反 fix 後 P2 で別 wave。 `apps/web/package.json` に `typecheck` script (`tsc --noEmit`) を追加
 - [ ] (USER) GitHub UI で `main` ブランチに上記 Required status checks 設定 (§2.3 / §3.3)
-- [ ] (P2) sbomhub: Golden Path E2E skeleton (M1 で本格化、 Playwright を CI で実行)
+- [x] (P2) sbomhub: Golden Path E2E skeleton (Playwright を CI で実行) — `web-e2e.yml` (M8 #67) で docker compose 一式 (postgres + redis + locally built api + web) を立て、 chromium で `apps/web/e2e/smoke/` (home / dashboard / api-health) を実行。 docker-publish.yml (M7-5) の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)。 認証込みの深堀り spec (`apps/web/e2e/*.spec.ts` 26 件、 `dev:test` 前提) の CI 化は M1 で別 wave
 - [ ] (P2) sbomhub-cli: golangci-lint の `continue-on-error: true` 解除 (Go 1.25 対応待ち)
 - [ ] (P2) sbomhub-cli: PR 時の goreleaser snapshot dry-run 追加
 - [ ] (P2) sbomhub / sbomhub-cli: security scanning (Snyk / GitGuardian / gosec / trivy fs scan) workflow 追加
