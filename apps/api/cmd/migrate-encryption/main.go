@@ -473,13 +473,20 @@ func processBatch(ctx context.Context, db *sql.DB, tenantID string, tgt target, 
 	// Comparing the column against the text-typed `$1` parameter (Go string)
 	// directly fails in real Postgres with "operator does not exist: uuid > text"
 	// — sqlmock-based tests don't surface this because they don't enforce
-	// PG type semantics. The `($1 = '' OR ... > $1::uuid)` guard lets the
-	// first batch ($1 = '') return the leading rows and subsequent batches
-	// use the previous row's UUID (which casts cleanly to uuid) for keyset
-	// pagination. Ordering still uses the UUID column so the existing PK
-	// index remains usable.
+	// PG type semantics. The `($1 = '' OR ... > NULLIF($1, '')::uuid)` guard
+	// lets the first batch ($1 = '') return the leading rows and subsequent
+	// batches use the previous row's UUID (which casts cleanly to uuid) for
+	// keyset pagination. NULLIF is used instead of a bare `$1::uuid` because
+	// SQL boolean evaluation order is not guaranteed in PostgreSQL: the planner
+	// is free to evaluate the right-hand side of the OR first, which would
+	// fail the first batch with "invalid input syntax for type uuid" when $1
+	// is the empty string. With NULLIF, empty $1 becomes NULL::uuid (a valid
+	// SQL NULL), so `<col> > NULL` evaluates to NULL (= false) regardless of
+	// short-circuit ordering, and the OR's left-hand side ($1 = '') still
+	// admits the first batch. Ordering still uses the UUID column so the
+	// existing PK index remains usable.
 	q := fmt.Sprintf( //nolint:gosec // identifiers come from a closed allow-list in parseTargets.
-		`SELECT %s, %s FROM %s WHERE %s IS NOT NULL AND length(%s::text) > 0 AND ($1 = '' OR %s > $1::uuid) ORDER BY %s LIMIT $2 FOR UPDATE`,
+		`SELECT %s, %s FROM %s WHERE %s IS NOT NULL AND length(%s::text) > 0 AND ($1 = '' OR %s > NULLIF($1, '')::uuid) ORDER BY %s LIMIT $2 FOR UPDATE`,
 		tgt.RowID, tgt.Column, tgt.Table, tgt.Column, tgt.Column, tgt.RowID, tgt.RowID,
 	)
 	// Drain the SELECT cursor into memory before any UPDATE happens. lib/pq

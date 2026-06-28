@@ -338,10 +338,17 @@ GO
 
 insert_sample_tenants() {
     log_run write_sample_helper
+    # POSIX sh does not support `pipefail`, so a direct `go run ... | psql`
+    # pipe would mask a non-zero exit from `go run` (psql happily reads an
+    # empty pipe and exits 0, then the failure surfaces later as a confusing
+    # "no rows" downstream). Materialise the helper's SQL output to a file
+    # first so `set -e` aborts here on go-side failure, then feed psql.
+    sample_sql="$WORK_DIR/sample-tenants.sql"
     (
         cd "$REPO_ROOT/apps/api"
         OLD_ENCRYPTION_KEY="$OLD_ENCRYPTION_KEY" go run "$HELPER_GO"
-    ) | log_run psql_stdin
+    ) >"$sample_sql"
+    log_run psql_stdin <"$sample_sql"
 }
 
 rotate_dry_run() {

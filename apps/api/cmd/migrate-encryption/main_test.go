@@ -830,7 +830,7 @@ func expectTenantBatchNoCommit(mock sqlmock.Sqlmock, tenantID string, tgt target
 }
 
 func selectBatchRegex(tgt target) string {
-	return regexp.QuoteMeta(`SELECT ` + tgt.RowID + `, ` + tgt.Column + ` FROM ` + tgt.Table + ` WHERE ` + tgt.Column + ` IS NOT NULL AND length(` + tgt.Column + `::text) > 0 AND ($1 = '' OR ` + tgt.RowID + ` > $1::uuid) ORDER BY ` + tgt.RowID + ` LIMIT $2 FOR UPDATE`)
+	return regexp.QuoteMeta(`SELECT ` + tgt.RowID + `, ` + tgt.Column + ` FROM ` + tgt.Table + ` WHERE ` + tgt.Column + ` IS NOT NULL AND length(` + tgt.Column + `::text) > 0 AND ($1 = '' OR ` + tgt.RowID + ` > NULLIF($1, '')::uuid) ORDER BY ` + tgt.RowID + ` LIMIT $2 FOR UPDATE`)
 }
 
 func assertExpectations(t *testing.T, mock sqlmock.Sqlmock) {
