@@ -119,19 +119,38 @@ jobs:
           trap cleanup EXIT
 
           for _ in $(seq 1 30); do
-            if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+            # -L follows the 307 that next-intl middleware issues at `/` ->
+            # `/${defaultLocale}` when NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is
+            # empty (Next 16 `proxy.ts` falls back to intl-only middleware
+            # without Clerk). Without -L the second curl below grep'd an
+            # empty body and failed (M8 #67 F155).
+            if curl -fsSL http://localhost:3000 >/dev/null 2>&1; then
               echo "web image reachable"
               break
             fi
             sleep 2
           done
 
-          curl -fsS http://localhost:3000 \
-            | grep -q "SBOMHub\|<title>" \
-            || {
-              echo "web image response missing key marker"
-              exit 1
-            }
+          # Capture once so a single Next response is checked for both HTTP
+          # status (via -w) and Next.js boot signature. The marker set is
+          # deliberately lenient: any of these prove the standalone server
+          # rendered an app-router page, regardless of which locale the
+          # default-locale redirect lands on or whether the landing page
+          # copy was retranslated.
+          HTML="$(curl -fsSL http://localhost:3000)"
+          if ! printf '%s' "$HTML" \
+              | grep -qE 'SBOMHub|<title|__NEXT_DATA__|/_next/static/'; then
+            echo "web image response missing Next.js boot signature"
+            echo "--- HTTP status (curl -L) ---"
+            curl -sSL -o /dev/null \
+              -w 'final_status=%{http_code} effective_url=%{url_effective}\n' \
+              http://localhost:3000 || true
+            echo "--- first 800 bytes of body ---"
+            printf '%s' "$HTML" | head -c 800
+            echo
+            echo "--- end body preview ---"
+            exit 1
+          fi
 
           docker run --rm --entrypoint /bin/sh "$WEB_TAG" \
             -c '
