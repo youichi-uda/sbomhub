@@ -290,7 +290,6 @@ write_sample_helper() {
 package main
 
 import (
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -325,7 +324,13 @@ func main() {
 	fmt.Printf("INSERT INTO tenants (id, clerk_org_id, name, slug, plan) VALUES (%s, 'org_dr_a', 'DR Rehearsal A', 'dr-rehearsal-a', 'free') ON CONFLICT (id) DO NOTHING;\n", sqlQuote(tenantA))
 	fmt.Printf("INSERT INTO tenants (id, clerk_org_id, name, slug, plan) VALUES (%s, 'org_dr_b', 'DR Rehearsal B', 'dr-rehearsal-b', 'free') ON CONFLICT (id) DO NOTHING;\n", sqlQuote(tenantB))
 	fmt.Printf("INSERT INTO tenant_llm_config (tenant_id, mode, provider, encrypted_api_key, model) VALUES (%s, 'byok', 'openai', decode('%s', 'hex'), 'gpt-4o-mini') ON CONFLICT (tenant_id) DO UPDATE SET encrypted_api_key = EXCLUDED.encrypted_api_key, updated_at = NOW();\n", sqlQuote(tenantA), hex.EncodeToString(llmCipher))
-	fmt.Printf("INSERT INTO issue_tracker_connections (id, tenant_id, tracker_type, name, base_url, auth_type, auth_email, auth_token_encrypted, default_project_key, default_issue_type, is_active) VALUES (%s, %s, 'jira', 'DR Jira', 'https://dr-rehearsal.atlassian.net', 'api_token', 'dr@example.com', %s, 'DR', 'Task', true) ON CONFLICT (tenant_id, tracker_type, name) DO UPDATE SET auth_token_encrypted = EXCLUDED.auth_token_encrypted, updated_at = NOW();\n", sqlQuote(connectionID), sqlQuote(tenantA), sqlQuote(base64.StdEncoding.EncodeToString([]byte(trackerCipher))))
+	// trackerCipher is ALREADY base64 (see service.EncryptIssueTrackerToken
+	// → IssueTrackerService.encrypt which returns base64.StdEncoding string).
+	// The auth_token_encrypted column is TEXT and stores that single-base64
+	// blob directly — wrapping it in another base64.StdEncoding would make
+	// migrate-encryption / verify-encryption decrypt fail with
+	// "gcm.Open: message authentication failed".
+	fmt.Printf("INSERT INTO issue_tracker_connections (id, tenant_id, tracker_type, name, base_url, auth_type, auth_email, auth_token_encrypted, default_project_key, default_issue_type, is_active) VALUES (%s, %s, 'jira', 'DR Jira', 'https://dr-rehearsal.atlassian.net', 'api_token', 'dr@example.com', %s, 'DR', 'Task', true) ON CONFLICT (tenant_id, tracker_type, name) DO UPDATE SET auth_token_encrypted = EXCLUDED.auth_token_encrypted, updated_at = NOW();\n", sqlQuote(connectionID), sqlQuote(tenantA), sqlQuote(trackerCipher))
 	fmt.Println("COMMIT;")
 }
 GO

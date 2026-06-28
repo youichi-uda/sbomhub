@@ -468,37 +468,70 @@ func processBatch(ctx context.Context, db *sql.DB, tenantID string, tgt target, 
 		return 0, after, dbErr{fmt.Errorf("set tenant context %s: %w", tenantID, err)}
 	}
 
+	// `tgt.RowID` is always a UUID column under the closed allow-list in
+	// parseTargets (`tenant_llm_config.tenant_id`, `issue_tracker_connections.id`).
+	// Comparing the column against the text-typed `$1` parameter (Go string)
+	// directly fails in real Postgres with "operator does not exist: uuid > text"
+	// — sqlmock-based tests don't surface this because they don't enforce
+	// PG type semantics. The `($1 = '' OR ... > $1::uuid)` guard lets the
+	// first batch ($1 = '') return the leading rows and subsequent batches
+	// use the previous row's UUID (which casts cleanly to uuid) for keyset
+	// pagination. Ordering still uses the UUID column so the existing PK
+	// index remains usable.
 	q := fmt.Sprintf( //nolint:gosec // identifiers come from a closed allow-list in parseTargets.
-		`SELECT %s, %s FROM %s WHERE %s IS NOT NULL AND length(%s::text) > 0 AND %s > $1 ORDER BY %s LIMIT $2 FOR UPDATE`,
+		`SELECT %s, %s FROM %s WHERE %s IS NOT NULL AND length(%s::text) > 0 AND ($1 = '' OR %s > $1::uuid) ORDER BY %s LIMIT $2 FOR UPDATE`,
 		tgt.RowID, tgt.Column, tgt.Table, tgt.Column, tgt.Column, tgt.RowID, tgt.RowID,
 	)
+	// Drain the SELECT cursor into memory before any UPDATE happens. lib/pq
+	// does not support issuing a new Exec on the same transaction while a
+	// Query iterator is still open — the second statement's Parse message
+	// races against the still-buffered Portal output and the driver surfaces
+	// it as `pq: unexpected Parse response 'C'; driver: bad connection`.
+	// The SELECT carries FOR UPDATE so the row locks persist until the
+	// surrounding transaction commits / rolls back; reading the batch into a
+	// slice does not relax the locking contract.
+	type batchRow struct {
+		rowID string
+		raw   []byte
+	}
 	rows, err := tx.QueryContext(ctx, q, after, opts.BatchSize)
 	if err != nil {
 		return 0, after, dbErr{fmt.Errorf("query %s.%s tenant=%s: %w", tgt.Table, tgt.Column, tenantID, err)}
 	}
-	defer rows.Close()
+	batch := make([]batchRow, 0, opts.BatchSize)
+	for rows.Next() {
+		var br batchRow
+		if tgt.Format == "bytea" {
+			if err := rows.Scan(&br.rowID, &br.raw); err != nil {
+				rows.Close()
+				return 0, after, dbErr{fmt.Errorf("scan row: %w", err)}
+			}
+		} else {
+			var text string
+			if err := rows.Scan(&br.rowID, &text); err != nil {
+				rows.Close()
+				return 0, after, dbErr{fmt.Errorf("scan row: %w", err)}
+			}
+			br.raw = []byte(text)
+		}
+		batch = append(batch, br)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, after, dbErr{fmt.Errorf("iterate rows: %w", err)}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, after, dbErr{fmt.Errorf("close rows: %w", err)}
+	}
 
 	count := 0
 	last := after
-	for rows.Next() {
-		var rowID string
-		var raw []byte
-		var text string
-		if tgt.Format == "bytea" {
-			if err := rows.Scan(&rowID, &raw); err != nil {
-				return count, last, dbErr{fmt.Errorf("scan row: %w", err)}
-			}
-		} else {
-			if err := rows.Scan(&rowID, &text); err != nil {
-				return count, last, dbErr{fmt.Errorf("scan row: %w", err)}
-			}
-			raw = []byte(text)
-		}
+	for _, br := range batch {
 		count++
-		last = rowID
+		last = br.rowID
 		rep.TotalRows++
 
-		rr, err := processRow(ctx, tx, tenantID, rowID, tgt, raw, oldKey, newKey, opts, expected)
+		rr, err := processRow(ctx, tx, tenantID, br.rowID, tgt, br.raw, oldKey, newKey, opts, expected)
 		rep.Rows = append(rep.Rows, rr)
 		switch rr.Status {
 		case "ok", "re-encrypted":
@@ -521,9 +554,6 @@ func processBatch(ctx context.Context, db *sql.DB, tenantID string, tgt target, 
 		if err != nil && isPreconditionErr(err) {
 			return count, last, err
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return count, last, dbErr{fmt.Errorf("iterate rows: %w", err)}
 	}
 	if err := tx.Commit(); err != nil {
 		return count, last, dbErr{fmt.Errorf("commit tenant=%s target=%s.%s: %w", tenantID, tgt.Table, tgt.Column, err)}
