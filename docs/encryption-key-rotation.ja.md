@@ -395,25 +395,19 @@ write_env_var ENCRYPTION_KEY "$NEW_KEY"
 chmod 600 .env
 ```
 
-もし `docker/scripts/_env_helpers.sh` が無い copied runbook では、 sole
-source of truth は引き続き
+production の runbook では helper を inline 再実装しないこと。
 [`../docker/scripts/_env_helpers.sh`](../docker/scripts/_env_helpers.sh)
 (defensive parsing: 重複検出、 quote strip、 空値検出、 書き換え後の count
-verification を伴う atomic write) を参照する。 学習用としてのみ、 同じ
-signature (`read_env_var KEY` / `write_env_var KEY VALUE`、 いずれも `.env`
-に対して動作) の最小スタブを以下に示す。
+verification を伴う atomic write — いずれも `ENCRYPTION_KEY` rotation 用途で
+最小スタブが安全に再現できない要件) を repo から復元 (または download) し、
+rotation 手順を実行する前に source する:
 
 ```bash
-# 学習用の最小スタブ。 production runbook では必ず
-# docker/scripts/_env_helpers.sh を source すること (defensive parsing はそちらに集約)。
-read_env_var() { grep "^${1}=" .env | tail -1 | cut -d= -f2- ; }
-write_env_var() {
-  if grep -q "^${1}=" .env; then
-    sed -i "s|^${1}=.*|${1}=${2}|" .env
-  else
-    printf '%s=%s\n' "${1}" "${2}" >> .env
-  fi
+test -r docker/scripts/_env_helpers.sh || {
+  echo "docker/scripts/_env_helpers.sh is required; restore it from the repo" >&2
+  exit 1
 }
+. docker/scripts/_env_helpers.sh
 ```
 
 enterprise Docker Secrets では `docker/secrets/encryption_key.txt` を `NEW_KEY`

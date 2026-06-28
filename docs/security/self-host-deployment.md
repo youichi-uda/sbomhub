@@ -346,17 +346,18 @@ printf '%s' "$ENCRYPTION_KEY" | sudo install -m 600 -o sbomhub -g sbomhub /dev/s
 unset APP_PW ENCRYPTION_KEY
 ```
 
-If `docker/scripts/_env_helpers.sh` is unavailable in a copied runbook, the
-single source of truth still lives in
+Production runbooks must not inline a replacement helper. Restore or download
 [`../../docker/scripts/_env_helpers.sh`](../../docker/scripts/_env_helpers.sh)
-(defensive parsing: duplicate detect, quote strip, empty check). For ad-hoc
-learning only, the following minimum stub matches the same signature
-(`read_env_var KEY` reads from `.env`):
+(defensive parsing: duplicate detect, quote strip, empty check — none of which
+a minimum stub can safely reproduce when reading `ENCRYPTION_KEY` or
+`APP_PASSWORD`), then source it:
 
 ```bash
-# Learning-only minimum stub. Production runbooks MUST source
-# docker/scripts/_env_helpers.sh instead (defensive parsing applied there).
-read_env_var() { grep "^${1}=" .env | tail -1 | cut -d= -f2- ; }
+test -r docker/scripts/_env_helpers.sh || {
+  echo "docker/scripts/_env_helpers.sh is required; restore it from the repo" >&2
+  exit 1
+}
+. docker/scripts/_env_helpers.sh
 ```
 
 **Path B: Enterprise install (Docker secrets ベース)**

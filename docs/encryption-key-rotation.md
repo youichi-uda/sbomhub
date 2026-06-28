@@ -413,25 +413,19 @@ write_env_var ENCRYPTION_KEY "$NEW_KEY"
 chmod 600 .env
 ```
 
-If `docker/scripts/_env_helpers.sh` is unavailable in a copied runbook, the
-single source of truth still lives in
+Production runbooks must not inline a replacement helper. Restore or download
 [`../docker/scripts/_env_helpers.sh`](../docker/scripts/_env_helpers.sh)
 (defensive parsing: duplicate detect, quote strip, empty check, atomic write
-with post-update count verification). For ad-hoc learning only, the following
-minimum stubs match the same signatures (`read_env_var KEY` /
-`write_env_var KEY VALUE`, both operate on `.env`):
+with post-update count verification — none of which a minimum stub can safely
+reproduce for an `ENCRYPTION_KEY` rotation), then source it before running the
+rotation steps:
 
 ```bash
-# Learning-only minimum stubs. Production runbooks MUST source
-# docker/scripts/_env_helpers.sh instead (defensive parsing applied there).
-read_env_var() { grep "^${1}=" .env | tail -1 | cut -d= -f2- ; }
-write_env_var() {
-  if grep -q "^${1}=" .env; then
-    sed -i "s|^${1}=.*|${1}=${2}|" .env
-  else
-    printf '%s=%s\n' "${1}" "${2}" >> .env
-  fi
+test -r docker/scripts/_env_helpers.sh || {
+  echo "docker/scripts/_env_helpers.sh is required; restore it from the repo" >&2
+  exit 1
 }
+. docker/scripts/_env_helpers.sh
 ```
 
 For enterprise Docker Secrets, replace `docker/secrets/encryption_key.txt` with
