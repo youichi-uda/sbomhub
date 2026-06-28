@@ -242,6 +242,45 @@ func TestEnvSetup08_AlwaysNeedsReview(t *testing.T) {
 	assert.Equal(t, StatusNeedsReview, res.Status)
 }
 
+// ── M8-1 (issue #62) で追加された stub evaluator の hint テスト ──────────
+
+func TestEnvSetup09_AlwaysNeedsReview_M8_1Stub(t *testing.T) {
+	tenant, project := helperTenantProject()
+	res, err := EvaluateEnvSetup09(context.Background(), &fakeDeps{}, tenant, project)
+	require.NoError(t, err)
+	assert.Equal(t, StatusNeedsReview, res.Status,
+		"M8-1 stub: 4.1.4 構成図可視化 は auto-signal 未実装、 needs_review 固定")
+	assert.NotEmpty(t, res.ImprovementAction)
+	assert.Contains(t, res.ImprovementAction, "M8-1",
+		"hint should advertise M8-1 provenance so audits trace the stub")
+	assert.Contains(t, res.ImprovementAction, "構成図",
+		"hint should mention 構成図 (architecture diagram) to guide the operator")
+}
+
+func TestEnvSetup10_AlwaysNeedsReview_M8_1Stub(t *testing.T) {
+	tenant, project := helperTenantProject()
+	res, err := EvaluateEnvSetup10(context.Background(), &fakeDeps{}, tenant, project)
+	require.NoError(t, err)
+	assert.Equal(t, StatusNeedsReview, res.Status,
+		"M8-1 stub: 4.4 ツール導入・設定 は auto-signal 未実装、 needs_review 固定")
+	assert.NotEmpty(t, res.ImprovementAction)
+	assert.Contains(t, res.ImprovementAction, "M8-1")
+	assert.Contains(t, res.ImprovementAction, "個別設定",
+		"hint should reference 個別設定 to distinguish from tool selection (env_setup.07)")
+}
+
+func TestEnvSetup11_AlwaysNeedsReview_M8_1Stub(t *testing.T) {
+	tenant, project := helperTenantProject()
+	res, err := EvaluateEnvSetup11(context.Background(), &fakeDeps{}, tenant, project)
+	require.NoError(t, err)
+	assert.Equal(t, StatusNeedsReview, res.Status,
+		"M8-1 stub: 4.5 ツール学習 (運用習熟度) は auto-signal 未実装、 needs_review 固定")
+	assert.NotEmpty(t, res.ImprovementAction)
+	assert.Contains(t, res.ImprovementAction, "M8-1")
+	assert.Contains(t, res.ImprovementAction, "ハンズオン",
+		"hint should reference ハンズオン to distinguish from baseline training (env_setup.08)")
+}
+
 // =============================================================================
 // sbom_creation phase
 // =============================================================================
@@ -439,6 +478,19 @@ func TestSBOMCreation09_AlwaysNeedsReview(t *testing.T) {
 	res, err := EvaluateSBOMCreation09(context.Background(), &fakeDeps{}, tenant, project)
 	require.NoError(t, err)
 	assert.Equal(t, StatusNeedsReview, res.Status)
+}
+
+// M8-1 (issue #62) stub: 5.3 共有 個別運用
+func TestSBOMCreation10_AlwaysNeedsReview_M8_1Stub(t *testing.T) {
+	tenant, project := helperTenantProject()
+	res, err := EvaluateSBOMCreation10(context.Background(), &fakeDeps{}, tenant, project)
+	require.NoError(t, err)
+	assert.Equal(t, StatusNeedsReview, res.Status,
+		"M8-1 stub: 5.3 共有 個別運用 は auto-signal 未実装、 needs_review 固定")
+	assert.NotEmpty(t, res.ImprovementAction)
+	assert.Contains(t, res.ImprovementAction, "M8-1")
+	assert.Contains(t, res.ImprovementAction, "受領者",
+		"hint should reference 受領者 to distinguish from distribution contract (sbom_creation.07)")
 }
 
 // =============================================================================
@@ -647,6 +699,19 @@ func TestSBOMOperation10_NotAchievedWhenEmpty(t *testing.T) {
 	res, err := EvaluateSBOMOperation10(context.Background(), &fakeDeps{}, tenant, project)
 	require.NoError(t, err)
 	assert.Equal(t, StatusNotAchieved, res.Status)
+}
+
+// M8-1 (issue #62) stub: 6.3 SBOM 提供期間 個別運用
+func TestSBOMOperation11_AlwaysNeedsReview_M8_1Stub(t *testing.T) {
+	tenant, project := helperTenantProject()
+	res, err := EvaluateSBOMOperation11(context.Background(), &fakeDeps{}, tenant, project)
+	require.NoError(t, err)
+	assert.Equal(t, StatusNeedsReview, res.Status,
+		"M8-1 stub: 6.3 提供期間 個別運用 は auto-signal 未実装、 needs_review 固定")
+	assert.NotEmpty(t, res.ImprovementAction)
+	assert.Contains(t, res.ImprovementAction, "M8-1")
+	assert.Contains(t, res.ImprovementAction, "顧客",
+		"hint should reference 顧客 to distinguish from base retention (sbom_operation.07)")
 }
 
 // =============================================================================

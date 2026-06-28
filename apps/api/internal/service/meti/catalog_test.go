@@ -165,6 +165,11 @@ func TestPhases_Order(t *testing.T) {
 // catalog covers 20-30 items distributed across all three phases. The
 // concrete counts double as a guard against accidental deletions during
 // future edits.
+//
+// M8-1 (issue #62, 2026-06-28): pinned the exact 32-item distribution
+// (env_setup 11 / sbom_creation 10 / sbom_operation 11) so a future
+// regression that drops one of the IPA 32-item full-coverage items is
+// caught here at test time rather than silently shrinking the catalog.
 func TestCatalog_PhaseCounts(t *testing.T) {
 	items, err := LoadCatalog()
 	require.NoError(t, err)
@@ -183,6 +188,47 @@ func TestCatalog_PhaseCounts(t *testing.T) {
 	assert.GreaterOrEqual(t, envSetup, 5, "env_setup should hold ≥5 criteria")
 	assert.GreaterOrEqual(t, sbomCreation, 5, "sbom_creation should hold ≥5 criteria")
 	assert.GreaterOrEqual(t, sbomOperation, 5, "sbom_operation should hold ≥5 criteria")
+
+	// M8-1 exact-count pin: bump these intentionally when adding new
+	// criteria (do not silently relax — the dashboard surfaces the
+	// IPA 32-item coverage claim verbatim).
+	assert.Equal(t, 32, total,
+		"M8-1 (#62): catalog must hold exactly 32 criteria for IPA full-coverage; got %d", total)
+	assert.Equal(t, 11, envSetup,
+		"M8-1 (#62): env_setup must hold exactly 11 criteria; got %d", envSetup)
+	assert.Equal(t, 10, sbomCreation,
+		"M8-1 (#62): sbom_creation must hold exactly 10 criteria; got %d", sbomCreation)
+	assert.Equal(t, 11, sbomOperation,
+		"M8-1 (#62): sbom_operation must hold exactly 11 criteria; got %d", sbomOperation)
+}
+
+// TestCatalog_M8_1_NewCriteriaPresent pins the 5 IDs added by M8-1
+// (#62) so a regression that silently drops any of them — and thereby
+// regresses the IPA 32-item coverage claim — is caught at test time.
+// Title / wording exact-match is the M8-2 wave's responsibility; here
+// we only assert presence + phase classification.
+func TestCatalog_M8_1_NewCriteriaPresent(t *testing.T) {
+	wantPhase := map[string]Phase{
+		"meti.env_setup.09":     PhaseEnvSetup,     // 4.1.4 構成図可視化
+		"meti.env_setup.10":     PhaseEnvSetup,     // 4.4 ツール導入・設定
+		"meti.env_setup.11":     PhaseEnvSetup,     // 4.5 ツール学習
+		"meti.sbom_creation.10": PhaseSBOMCreation, // 5.3 共有 個別運用
+		"meti.sbom_operation.11": PhaseSBOMOperation, // 6.3 提供期間 個別運用
+	}
+	for id, phase := range wantPhase {
+		got, ok := GetCriterion(id)
+		require.True(t, ok, "M8-1 criterion %s must exist in catalog", id)
+		require.NotNil(t, got)
+		assert.Equal(t, phase, got.Phase,
+			"M8-1 criterion %s phase should be %s; got %s", id, phase, got.Phase)
+		assert.NotEmpty(t, got.TitleJA, "M8-1 criterion %s should have title_ja", id)
+		assert.NotEmpty(t, got.EvaluatorHint, "M8-1 criterion %s should have evaluator_hint", id)
+		// stub evaluators advertise themselves as M8-1-added in the hint
+		// so a grep over the codebase quickly finds the auto-signal TODO.
+		assert.Contains(t, got.EvaluatorHint, "M8-1",
+			"M8-1 criterion %s evaluator_hint should mention M8-1 provenance; got %q",
+			id, got.EvaluatorHint)
+	}
 }
 
 // TestLoadMetadata_PresentAndSane is the M5-6 (issue #52) regression

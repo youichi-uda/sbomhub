@@ -1,8 +1,8 @@
 package criteria
 
-// env_setup.go — phase 1 (環境構築・体制整備) evaluators (8 criteria).
+// env_setup.go — phase 1 (環境構築・体制整備) evaluators (11 criteria).
 //
-// Mapping notes per the catalog.yaml evaluator_hint (M3-3 / #39):
+// Mapping notes per the catalog.yaml evaluator_hint (M3-3 / #39 + M8-1 / #62):
 //
 //   01 担当部署 / 責任者     — manual only, no DB signal -> needs_review.
 //   02 開発言語 / ビルド環境 — auto via distinct PURL prefixes across the
@@ -17,6 +17,15 @@ package criteria
 //   07 SBOM 生成ツール       — auto: sboms count >= 1 implies a tool was
 //                              chosen and installed.
 //   08 担当者教育            — manual only -> needs_review.
+//   09 構成図可視化 (4.1.4)  — M8-1 で追加。 auto-signal 未実装の stub。
+//                              architecture diagram は現状 DB 表現を持たず
+//                              manual attestation 必須 -> needs_review。
+//   10 ツール導入・設定 (4.4) — M8-1 で追加。 auto-signal 未実装の stub。
+//                              ツール選定 (07) との重複を避け個別運用設定
+//                              の妥当性を将来的に scan_settings から判定。
+//   11 ツール学習 (4.5)       — M8-1 で追加。 auto-signal 未実装の stub。
+//                              担当者教育 (08) との重複を避けハンズオン
+//                              実績 (sbom.created actor 多様性) を将来判定。
 //
 // Status of "needs_review" is deliberate for the manual items: the
 // evaluator does NOT default to not_achieved for those, because the
@@ -211,6 +220,49 @@ func EvaluateEnvSetup08(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, erro
 		Status:            StatusNeedsReview,
 		Evidence:          emptyEvidence(),
 		ImprovementAction: "CycloneDX / SPDX / PURL / VEX / 脆弱性 DB の利用方法について担当者向け教育を実施し、 受講記録を保管してください。",
+	}, nil
+}
+
+// EvaluateEnvSetup09 — 対象ソフトウェアの構成図を可視化 (4.1.4).
+//
+// M8-1 (issue #62) で追加。 auto-signal 未実装の stub。 構成図 (architecture
+// diagram) は現状 DB 表現を持たないため manual attestation を要する。 M8-2
+// 以降の hook 候補: projects.architecture_diagram_url / sboms.RawData の
+// metadata.component 階層解析。
+func EvaluateEnvSetup09(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, error) {
+	return Result{
+		Status:            StatusNeedsReview,
+		Evidence:          emptyEvidence(),
+		ImprovementAction: "M8-1 で追加: 対象ソフトウェアの構成図 (アプリ / コンテナ / OS / ファームウェア / サプライヤー提供コンポーネントのレイヤと境界) を可視化し、 SBOM 対象範囲を識別してください。 auto-signal pending、 manual assessment 推奨。",
+	}, nil
+}
+
+// EvaluateEnvSetup10 — SBOM ツールを導入・設定 (個別運用) (4.4).
+//
+// M8-1 (issue #62) で追加。 auto-signal 未実装の stub。 ツール選定
+// (EvaluateEnvSetup07) との重複を避け、 ここでは個別設定値 (scan_settings
+// .enabled_scanners 詳細 / exclusion patterns / output spec_version 固定) の
+// 妥当性を将来的に判定したい。 現状は sbomhub-cli の `doctor` 出力 / 個別
+// scan_settings の整備状況を踏まえ manual attestation を要する。
+func EvaluateEnvSetup10(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, error) {
+	return Result{
+		Status:            StatusNeedsReview,
+		Evidence:          emptyEvidence(),
+		ImprovementAction: "M8-1 で追加: ツール選定 (env_setup.07) 後、 対象スタック毎の個別設定 (スキャン対象 / 除外パターン / 出力形式 / lockfile 解決ポリシー 等) を最適化してください。 auto-signal pending、 manual assessment 推奨。",
+	}, nil
+}
+
+// EvaluateEnvSetup11 — SBOM ツールの学習 (運用習熟度確認) (4.5).
+//
+// M8-1 (issue #62) で追加。 auto-signal 未実装の stub。 担当者教育
+// (EvaluateEnvSetup08) との重複を避け、 ここでは「教育受講後に実機で動かしたか」
+// のハンズオン実績 (sboms.created_by ユーザ多様性 / 直近 90 日の operator 数) を
+// 将来的に判定したい。
+func EvaluateEnvSetup11(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, error) {
+	return Result{
+		Status:            StatusNeedsReview,
+		Evidence:          emptyEvidence(),
+		ImprovementAction: "M8-1 で追加: 教育 (env_setup.08) 後に実機ハンズオンを実施し、 生成所要時間 / エラー復旧時間 / 解釈精度等の運用習熟度ベースラインを記録してください。 auto-signal pending、 manual assessment 推奨。",
 	}, nil
 }
 

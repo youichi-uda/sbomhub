@@ -1,8 +1,8 @@
 package criteria
 
-// sbom_creation.go — phase 2 (SBOM 作成・共有) evaluators (9 criteria).
+// sbom_creation.go — phase 2 (SBOM 作成・共有) evaluators (10 criteria).
 //
-// Mapping per catalog.yaml evaluator_hint (M3-3 / #39):
+// Mapping per catalog.yaml evaluator_hint (M3-3 / #39 + M8-1 / #62):
 //
 //   01 作成方針 / 頻度        — auto via sbom count within last 30 days.
 //   02 形式選定               — auto: latest sbom.format is CycloneDX or SPDX.
@@ -21,6 +21,9 @@ package criteria
 //   07 共有チャネル / 配布契約 — auto: public_links exist for the project.
 //   08 版管理 / 差分追跡       — auto: >=2 sboms exist (diff computable).
 //   09 サプライヤー SBOM マージ — manual only (sboms.source column TBD).
+//   10 共有 個別運用 (5.3)     — M8-1 で追加。 auto-signal 未実装の stub。
+//                                配布契約整備 (07) との重複を避け、 受領者管理
+//                                / 通知 / 更新版差替えの個別運用状況を将来判定。
 
 import (
 	"context"
@@ -301,6 +304,21 @@ func EvaluateSBOMCreation09(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, 
 		Status:            StatusNeedsReview,
 		Evidence:          emptyEvidence(),
 		ImprovementAction: "サプライヤー受領 SBOM を自社 SBOM とマージ or リンクし、 署名 / タイムスタンプ / 形式準拠を検証してください。",
+	}, nil
+}
+
+// EvaluateSBOMCreation10 — SBOM 共有プロセスを個別運用 (受領者管理 / 通知) (5.3).
+//
+// M8-1 (issue #62) で追加。 auto-signal 未実装の stub。 配布契約整備
+// (EvaluateSBOMCreation07) との重複を避け、 ここでは「個別運用が回っているか」
+// (公開リンクのアクセスログ / public_links.created_at 系列 / 通知配信履歴) を
+// 将来的に判定したい。 M8-2 以降の hook 候補: public_link_access_logs テーブル、
+// notification_deliveries テーブル。
+func EvaluateSBOMCreation10(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, error) {
+	return Result{
+		Status:            StatusNeedsReview,
+		Evidence:          emptyEvidence(),
+		ImprovementAction: "M8-1 で追加: 共有契約整備 (sbom_creation.07) 後、 受領者毎の共有実績 (誰に / いつ / どの版を / どのチャネルで) を台帳化し、 更新版発行時の通知・差替えを運用してください。 auto-signal pending、 manual assessment 推奨。",
 	}, nil
 }
 

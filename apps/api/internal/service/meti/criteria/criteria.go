@@ -1,14 +1,15 @@
 // Package criteria holds the per-criterion evaluation logic for the
 // METI self-assessment catalog (apps/api/internal/service/meti/catalog.yaml,
-// 27 criteria across env_setup / sbom_creation / sbom_operation phases).
+// 32 criteria across env_setup / sbom_creation / sbom_operation phases
+// after M8-1, issue #62 reached IPA 32-item full coverage).
 //
-// Layering (M3-2, issue #40):
+// Layering (M3-2, issue #40 / M8-1, issue #62):
 //
 //   - criteria.go        — Deps interface, Result type, Func signature,
 //                          shared evidence / status helpers.
-//   - env_setup.go       — 8 per-criterion functions (phase 1).
-//   - sbom_creation.go   — 9 per-criterion functions (phase 2).
-//   - sbom_operation.go  — 10 per-criterion functions (phase 3).
+//   - env_setup.go       — 11 per-criterion functions (phase 1; +3 in M8-1).
+//   - sbom_creation.go   — 10 per-criterion functions (phase 2; +1 in M8-1).
+//   - sbom_operation.go  — 11 per-criterion functions (phase 3; +1 in M8-1).
 //   - registry.go        — Registry map criterion_id -> Func, the single
 //                          dispatch surface consumed by service/meti
 //                          .Evaluator.

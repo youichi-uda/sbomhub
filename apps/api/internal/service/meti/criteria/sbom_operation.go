@@ -1,8 +1,8 @@
 package criteria
 
-// sbom_operation.go — phase 3 (SBOM 運用・管理) evaluators (10 criteria).
+// sbom_operation.go — phase 3 (SBOM 運用・管理) evaluators (11 criteria).
 //
-// Mapping per catalog.yaml evaluator_hint (M3-3 / #39):
+// Mapping per catalog.yaml evaluator_hint (M3-3 / #39 + M8-1 / #62):
 //
 //   01 脆弱性監視プロセス      — auto: vulnerabilities matched for the
 //                                project (any row implies a scan ran).
@@ -32,6 +32,9 @@ package criteria
 //                                tracked).
 //   09 更新頻度遵守            — auto: latest sboms.created_at within 30 days.
 //   10 監査ログ記録            — auto: tenant audit_logs total >= 1.
+//   11 提供期間 個別運用 (6.3) — M8-1 で追加。 auto-signal 未実装の stub。
+//                                保管 (07) との重複を避け、 顧客 / 製品ライン別
+//                                の提供期間個別運用を将来判定。
 
 import (
 	"context"
@@ -364,5 +367,21 @@ func EvaluateSBOMOperation10(ctx context.Context, deps Deps, tenantID, _ uuid.UU
 		Status:            StatusNotAchieved,
 		Evidence:          ev,
 		ImprovementAction: "監査ログがゼロです。 SBOM 生成 / 共有 / 承認 / 配布の各イベントが audit_logs に記録されるか確認してください。",
+	}, nil
+}
+
+// EvaluateSBOMOperation11 — SBOM 提供期間を個別運用 (顧客 / 製品ライン別) (6.3).
+//
+// M8-1 (issue #62) で追加。 auto-signal 未実装の stub。 保管
+// (EvaluateSBOMOperation07) との重複を避け、 ここでは「顧客 / 製品ライン
+// 毎の提供期間が個別運用されているか」 (project metadata の retention_window /
+// customer_id 紐付け / provision_end_at 配列) を将来的に判定したい。 M8-2
+// 以降の hook 候補: project_customer_provision_windows テーブル、
+// sboms.retention_end_at 個別列。
+func EvaluateSBOMOperation11(_ context.Context, _ Deps, _, _ uuid.UUID) (Result, error) {
+	return Result{
+		Status:            StatusNeedsReview,
+		Evidence:          emptyEvidence(),
+		ImprovementAction: "M8-1 で追加: 保管枠組み (sbom_operation.07) を前提に、 顧客 / 製品ライン / 出荷地域 / 契約タイプ毎に SBOM 提供期間 (開始 / 終了 / 延長条件 / 再提供 SLA) を個別運用してください。 auto-signal pending、 manual assessment 推奨。",
 	}, nil
 }

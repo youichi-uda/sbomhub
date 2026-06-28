@@ -18,7 +18,7 @@ package criteria
 // without adding a Registry entry is a build-time error caught by
 // TestRegistry_CoversCatalog in evaluator_test.go.
 var Registry = map[string]Func{
-	// env_setup (8) -------------------------------------------------------
+	// env_setup (11; +3 in M8-1 / #62) -------------------------------------
 	"meti.env_setup.01": EvaluateEnvSetup01,
 	"meti.env_setup.02": EvaluateEnvSetup02,
 	"meti.env_setup.03": EvaluateEnvSetup03,
@@ -27,8 +27,11 @@ var Registry = map[string]Func{
 	"meti.env_setup.06": EvaluateEnvSetup06,
 	"meti.env_setup.07": EvaluateEnvSetup07,
 	"meti.env_setup.08": EvaluateEnvSetup08,
+	"meti.env_setup.09": EvaluateEnvSetup09, // M8-1: 4.1.4 構成図可視化
+	"meti.env_setup.10": EvaluateEnvSetup10, // M8-1: 4.4 ツール導入・設定
+	"meti.env_setup.11": EvaluateEnvSetup11, // M8-1: 4.5 ツール学習
 
-	// sbom_creation (9) ---------------------------------------------------
+	// sbom_creation (10; +1 in M8-1 / #62) ---------------------------------
 	"meti.sbom_creation.01": EvaluateSBOMCreation01,
 	"meti.sbom_creation.02": EvaluateSBOMCreation02,
 	"meti.sbom_creation.03": EvaluateSBOMCreation03,
@@ -38,8 +41,9 @@ var Registry = map[string]Func{
 	"meti.sbom_creation.07": EvaluateSBOMCreation07,
 	"meti.sbom_creation.08": EvaluateSBOMCreation08,
 	"meti.sbom_creation.09": EvaluateSBOMCreation09,
+	"meti.sbom_creation.10": EvaluateSBOMCreation10, // M8-1: 5.3 共有 個別運用
 
-	// sbom_operation (10) -------------------------------------------------
+	// sbom_operation (11; +1 in M8-1 / #62) --------------------------------
 	"meti.sbom_operation.01": EvaluateSBOMOperation01,
 	"meti.sbom_operation.02": EvaluateSBOMOperation02,
 	"meti.sbom_operation.03": EvaluateSBOMOperation03,
@@ -50,6 +54,7 @@ var Registry = map[string]Func{
 	"meti.sbom_operation.08": EvaluateSBOMOperation08,
 	"meti.sbom_operation.09": EvaluateSBOMOperation09,
 	"meti.sbom_operation.10": EvaluateSBOMOperation10,
+	"meti.sbom_operation.11": EvaluateSBOMOperation11, // M8-1: 6.3 提供期間 個別運用
 }
 
 // Lookup returns the evaluator function for id, or (nil, false) when

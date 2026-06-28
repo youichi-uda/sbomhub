@@ -1,7 +1,16 @@
-# METI SBOM Catalog (M3-3, issue #39 / M5-6, issue #52)
+# METI SBOM Catalog (M3-3, issue #39 / M5-6, issue #52 / M8-1, issue #62)
 #
 # Self-assessment criteria derived from "ソフトウェア管理に向けた SBOM
 # (Software Bill of Materials) の導入に関する手引 ver 2.0" (経済産業省, 2024-08).
+#
+# M8-1 (issue #62, 2026-06-28): 27 → 32 criteria。 IPA 中核人材育成プログラム
+# 「SBOM 導入・運用の手引き」 (2024-12 版) の 32-item 全項目との 1:1 対応を
+# 達成。 追加項目は env_setup +3 (4.1.4 構成図可視化 / 4.4 ツール導入設定 /
+# 4.5 ツール学習)、 sbom_creation +1 (5.3 SBOM 共有)、 sbom_operation +1
+# (6.3 SBOM 提供期間 個別運用)。 phase 配分: env_setup 11 / sbom_creation 10
+# / sbom_operation 11 = 32 items。 追加 5 件はいずれも auto-signal 未実装の
+# stub evaluator (StatusNeedsReview) として登録、 wording exact-match と
+# auto-signal 実装は M8-2 wave で対応。
 #
 # Source:
 #   https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2.pdf
@@ -79,7 +88,9 @@ metadata:
 
 criteria:
   # --------------------------------------------------------------------------
-  # Phase 1 — 環境構築・体制整備フェーズ (env_setup) : 8 items
+  # Phase 1 — 環境構築・体制整備フェーズ (env_setup) : 11 items
+  #   (M3-3 で 8 items / M8-1 で +3: 4.1.4 構成図可視化 / 4.4 ツール導入設定 /
+  #    4.5 ツール学習)
   # --------------------------------------------------------------------------
   - id: meti.env_setup.01
     phase: env_setup
@@ -212,8 +223,66 @@ criteria:
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_08'. Future hook: tenant training_records table."
     source_section: "第4章 環境構築・体制整備フェーズ — 4.5 SBOM ツールの学習 (表：4.5.1 開発・セキュリティ部門への教育)"
 
+  # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
+  - id: meti.env_setup.09
+    phase: env_setup
+    title_ja: 対象ソフトウェアの構成図を可視化
+    title_en: Visualise the target software's architecture diagram
+    description_ja: |
+      SBOM 適用範囲を明確化するため、 対象ソフトウェアの構成図 (アプリ /
+      コンテナ / OS / ファームウェア / サプライヤー提供コンポーネントの
+      レイヤと境界) を可視化し、 SBOM 生成対象として組み込むコンポーネントの
+      範囲・除外範囲を識別する。 構成図はリリース毎に更新する。
+    description_en: |
+      To clarify the SBOM application scope, visualise the target software's
+      architecture diagram — the application, container, OS, firmware and
+      supplier-supplied component layers and their boundaries — and identify
+      which components are in / out of SBOM scope. Refresh the diagram on
+      every release.
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 構成図 (architecture diagram) は現状 DB 表現を持たないため manual attestation 必須。 M8-2 以降の hook 候補: projects.architecture_diagram_url / sboms.RawData の metadata.component 階層解析。"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (4.1.4 対象ソフトウェアの構成図 / 表：4.1.4 構成図可視化)"
+
+  - id: meti.env_setup.10
+    phase: env_setup
+    title_ja: SBOM ツールを導入・設定 (個別運用)
+    title_en: Install and configure the SBOM tool (per-deployment settings)
+    description_ja: |
+      選定済 SBOM 生成ツール (env_setup.07) を実行環境にインストールし、
+      対象スタック毎の設定 (スキャン対象ディレクトリ / 除外パターン /
+      ライセンス検出オプション / 出力形式 / lockfile 解決ポリシー 等) を
+      個別に最適化する。 ツール選定 (4.3) とは独立した運用工程として
+      導入・設定の妥当性を確認する (4.4)。
+    description_en: |
+      Install the previously-selected SBOM generation tool (env_setup.07) into
+      the runtime environment, and tune per-stack settings (scan target
+      directories, exclusion patterns, licence-detection options, output
+      format, lockfile-resolution policy, etc.). Validate installation /
+      configuration adequacy as an operational step distinct from tool
+      selection (4.3).
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 ツール選定 (env_setup.07) との重複を避けるため、 ここでは個別設定値 (scan_settings.enabled_scanners 詳細 / exclusion patterns / output spec_version 固定) の妥当性を判定したい。 M8-2 以降の hook 候補: scan_settings.config_json 拡張、 sbomhub-cli の `doctor` 出力との突合。"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.4 SBOM ツールの導入・設定 (表：4.4.1 ツール導入手順・設定項目)"
+
+  - id: meti.env_setup.11
+    phase: env_setup
+    title_ja: SBOM ツールの学習 (運用習熟度確認)
+    title_en: Practise with the SBOM tool (operator proficiency check)
+    description_ja: |
+      担当者教育 (env_setup.08) で習得した知識をもとに、 実際の対象ソフトウェアに
+      対して SBOM 生成・解析エラー対応・出力検証を一通り実施し、 運用習熟度
+      (生成所要時間 / エラー復旧時間 / 解釈の正確性) を測定する。 習熟度
+      ベースラインを記録し、 ローテーション / 新規参画時の引き継ぎ基準とする。
+    description_en: |
+      Building on the basic training (env_setup.08), have operators run the
+      tool end-to-end against the actual target software — generation, error
+      handling, output validation — and measure proficiency (generation time,
+      error-recovery time, interpretation accuracy). Record proficiency
+      baselines and reuse them for rotation / onboarding handovers.
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 担当者教育 (env_setup.08) との重複を避けるため、 ここでは「教育受講後に実機で動かしたか」 のハンズオン実績 (sboms.created_by ユーザ多様性 / 直近 90 日の operator 数) を判定したい。 M8-2 以降の hook 候補: audit_logs の sbom.created actor 集計、 training_completion テーブル。"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.5 SBOM ツールの学習 (表：4.5.1 ハンズオン演習・運用習熟度評価)"
+
   # --------------------------------------------------------------------------
-  # Phase 2 — SBOM 作成・共有フェーズ (sbom_creation) : 9 items
+  # Phase 2 — SBOM 作成・共有フェーズ (sbom_creation) : 10 items
+  #   (M3-3 で 9 items / M8-1 で +1: 5.3 SBOM 共有 個別運用)
   # --------------------------------------------------------------------------
   - id: meti.sbom_creation.01
     phase: sbom_creation
@@ -354,8 +423,30 @@ criteria:
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_09'. Future hook: sboms.source ('uploaded' vs. 'merged') column."
     source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (第三者提供 SBOM のインポート) / 付録 SBOM 取引モデル (受領 SBOM の品質・責任、 ver 2.0 新規)"
 
+  # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
+  - id: meti.sbom_creation.10
+    phase: sbom_creation
+    title_ja: SBOM 共有プロセスを個別運用 (受領者管理 / 通知)
+    title_en: Operate SBOM sharing per recipient (audience management, notifications)
+    description_ja: |
+      SBOM 共有方法・配布契約 (sbom_creation.07) を整備した上で、 個別受領者
+      毎の共有実績 (誰に / いつ / どの版を / どのチャネルで送付したか) を
+      記録し、 更新版発行時の通知・引き渡し済 SBOM の差替えを運用する。
+      受領者リスト / 連絡先 / 共有 SBOM 履歴を台帳化し、 監査時に提示できる
+      状態を維持する (5.3)。
+    description_en: |
+      After establishing sharing channels and distribution terms
+      (sbom_creation.07), operate per-recipient SBOM sharing: record who
+      received which SBOM revision, when, through which channel; notify
+      recipients on new revisions; and replace previously delivered SBOMs
+      as needed. Maintain a ledger of recipients, contacts and shared-SBOM
+      history that can be presented on audit (5.3).
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 配布契約整備 (sbom_creation.07) との重複を避けるため、 ここでは「個別運用が回っているか」 (公開リンクのアクセスログ / public_links.created_at 系列 / 通知配信履歴) を判定したい。 M8-2 以降の hook 候補: public_link_access_logs テーブル、 notification_deliveries テーブル。"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (表：5.3.1 No.4 受領者管理・通知・更新版差替え)"
+
   # --------------------------------------------------------------------------
-  # Phase 3 — SBOM 運用・管理フェーズ (sbom_operation) : 10 items
+  # Phase 3 — SBOM 運用・管理フェーズ (sbom_operation) : 11 items
+  #   (M3-3 で 10 items / M8-1 で +1: 6.3 SBOM 提供期間 個別運用)
   # --------------------------------------------------------------------------
   - id: meti.sbom_operation.01
     phase: sbom_operation
@@ -502,3 +593,23 @@ criteria:
       chronologically.
     evaluator_hint: "Auto-signal: audit_log table has rows for action IN ('sbom.created','sbom.shared','vex.approved','cra.distributed') for the project."
     source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.1 SBOM 管理体制の整備 / SBOM 変更履歴の信頼性担保)"
+
+  # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
+  - id: meti.sbom_operation.11
+    phase: sbom_operation
+    title_ja: SBOM 提供期間を個別運用 (顧客 / 製品ライン別)
+    title_en: Operate per-customer / per-product SBOM provision windows
+    description_ja: |
+      製品ライフタイム + 規制要求期間 (sbom_operation.07) の枠組みを前提として、
+      顧客 / 製品ライン / 出荷地域 / 契約タイプ毎に個別の SBOM 提供期間
+      (開始日 / 終了日 / 延長条件 / 再提供 SLA) を運用する。 期間満了時の
+      通知・延長判断・終了処理を SLA として定義し、 監査ログに記録する (6.3)。
+    description_en: |
+      Building on the lifetime + regulatory retention framework
+      (sbom_operation.07), operate per-customer / per-product-line /
+      per-shipping-region / per-contract-type SBOM provision windows
+      (start, end, renewal conditions, re-provision SLA). Define
+      notification, renewal-decision and termination procedures as an
+      SLA and capture them in the audit log (6.3).
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 保管 (sbom_operation.07) との重複を避けるため、 ここでは「顧客 / 製品ライン毎の提供期間が個別運用されているか」 (project metadata の retention_window / customer_id 紐付け / provision_end_at 配列) を判定したい。 M8-2 以降の hook 候補: project_customer_provision_windows テーブル、 sboms.retention_end_at 個別列。"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.2 SBOM 提供期間 — 顧客 / 製品ライン別個別運用)"
