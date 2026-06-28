@@ -346,32 +346,17 @@ printf '%s' "$ENCRYPTION_KEY" | sudo install -m 600 -o sbomhub -g sbomhub /dev/s
 unset APP_PW ENCRYPTION_KEY
 ```
 
-If `docker/scripts/_env_helpers.sh` is unavailable in a copied runbook, paste
-this inline fallback before the `APP_PW=...` lines:
+If `docker/scripts/_env_helpers.sh` is unavailable in a copied runbook, the
+single source of truth still lives in
+[`../../docker/scripts/_env_helpers.sh`](../../docker/scripts/_env_helpers.sh)
+(defensive parsing: duplicate detect, quote strip, empty check). For ad-hoc
+learning only, the following minimum stub matches the same signature
+(`read_env_var KEY` reads from `.env`):
 
 ```bash
-read_env_var() {
-  key="$1"
-  count="$(grep -c "^${key}=" .env || true)"
-  if [ "$count" -eq 0 ]; then
-    echo "[FATAL] ${key} is missing in .env" >&2
-    exit 1
-  fi
-  if [ "$count" -gt 1 ]; then
-    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
-    exit 1
-  fi
-  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
-  raw="${raw#\"}"
-  raw="${raw%\"}"
-  raw="${raw#\'}"
-  raw="${raw%\'}"
-  if [ -z "$raw" ]; then
-    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
-    exit 1
-  fi
-  printf '%s' "$raw"
-}
+# Learning-only minimum stub. Production runbooks MUST source
+# docker/scripts/_env_helpers.sh instead (defensive parsing applied there).
+read_env_var() { grep "^${1}=" .env | tail -1 | cut -d= -f2- ; }
 ```
 
 **Path B: Enterprise install (Docker secrets ベース)**

@@ -395,49 +395,24 @@ write_env_var ENCRYPTION_KEY "$NEW_KEY"
 chmod 600 .env
 ```
 
-もし `docker/scripts/_env_helpers.sh` が無い copied runbook では、
-`OLD_KEY=...` と `write_env_var ...` の行より前に以下の inline fallback を貼り付ける。
+もし `docker/scripts/_env_helpers.sh` が無い copied runbook では、 sole
+source of truth は引き続き
+[`../docker/scripts/_env_helpers.sh`](../docker/scripts/_env_helpers.sh)
+(defensive parsing: 重複検出、 quote strip、 空値検出、 書き換え後の count
+verification を伴う atomic write) を参照する。 学習用としてのみ、 同じ
+signature (`read_env_var KEY` / `write_env_var KEY VALUE`、 いずれも `.env`
+に対して動作) の最小スタブを以下に示す。
 
 ```bash
-read_env_var() {
-  key="$1"
-  count="$(grep -c "^${key}=" .env || true)"
-  if [ "$count" -eq 0 ]; then
-    echo "[FATAL] ${key} is missing in .env" >&2
-    exit 1
-  fi
-  if [ "$count" -gt 1 ]; then
-    echo "[FATAL] ${key} is duplicated in .env (${count} occurrences); resolve manually" >&2
-    exit 1
-  fi
-  raw="$(grep "^${key}=" .env | cut -d= -f2-)"
-  raw="${raw#\"}"
-  raw="${raw%\"}"
-  raw="${raw#\'}"
-  raw="${raw%\'}"
-  if [ -z "$raw" ]; then
-    echo "[FATAL] ${key} is empty (or only whitespace/quotes) in .env" >&2
-    exit 1
-  fi
-  printf '%s' "$raw"
-}
-
+# 学習用の最小スタブ。 production runbook では必ず
+# docker/scripts/_env_helpers.sh を source すること (defensive parsing はそちらに集約)。
+read_env_var() { grep "^${1}=" .env | tail -1 | cut -d= -f2- ; }
 write_env_var() {
-  key="$1"
-  value="$2"
-  tmp="$(mktemp)"
-  WRITE_ENV_VALUE="$value" awk -v key="${key}=" '
-    BEGIN { val = ENVIRON["WRITE_ENV_VALUE"] }
-    $0 ~ "^" key { print key val; next }
-    { print }
-  ' .env > "$tmp"
-  count="$(grep -c "^${key}=" "$tmp" || true)"
-  if [ "$count" -ne 1 ]; then
-    rm -f "$tmp"
-    echo "[FATAL] write_env_var: ${key} count after update is ${count}, expected 1" >&2
-    exit 1
+  if grep -q "^${1}=" .env; then
+    sed -i "s|^${1}=.*|${1}=${2}|" .env
+  else
+    printf '%s=%s\n' "${1}" "${2}" >> .env
   fi
-  mv "$tmp" .env
 }
 ```
 
