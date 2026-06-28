@@ -83,16 +83,16 @@ ALTER TABLE compliance_snapshots ENABLE ROW LEVEL SECURITY;
 
 -- RLS policies
 CREATE POLICY "vuln_resolution_tenant_isolation" ON vulnerability_resolution_events
-    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
 
 CREATE POLICY "slo_targets_tenant_isolation" ON slo_targets
     FOR ALL USING (
         tenant_id IS NULL OR
-        tenant_id = current_setting('app.current_tenant_id')::uuid
+        tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
     );
 
 CREATE POLICY "vuln_snapshot_tenant_isolation" ON vulnerability_snapshots
-    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
 
 CREATE POLICY "compliance_snapshot_tenant_isolation" ON compliance_snapshots
-    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
