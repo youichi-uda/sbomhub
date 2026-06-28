@@ -1,6 +1,7 @@
 {
   "name": "sbomhub",
   "private": true,
+  "packageManager": "pnpm@10.34.3",
   "scripts": {
     "dev:web": "pnpm --filter web dev",
     "dev:api": "cd apps/api && go run ./cmd/server",

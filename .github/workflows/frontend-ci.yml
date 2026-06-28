@@ -23,7 +23,11 @@
 # Versions:
 #   - Node 22 LTS — engines.node in root package.json is `>=18.0.0` and
 #     apps/web pins `@types/node@^22`. Node 22 is the current LTS.
-#   - pnpm 9 — pnpm-lock.yaml is `lockfileVersion: '9.0'`.
+#   - pnpm 10.34.3 — pinned to match root `package.json` `packageManager`
+#     field (M8 #67 F154). pnpm 11.x requires Node 22+ but also breaks
+#     the Docker web image (node:20-alpine) when corepack auto-pulls it,
+#     so we hold the whole project on the 10.x line. pnpm-lock.yaml is
+#     `lockfileVersion: '9.0'`, which pnpm 10 reads and writes natively.
 
 name: Frontend CI
 
@@ -62,7 +66,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.34.3
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
