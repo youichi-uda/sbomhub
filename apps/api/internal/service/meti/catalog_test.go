@@ -274,40 +274,80 @@ func TestLoadMetadata_PresentAndSane(t *testing.T) {
 }
 
 // TestCatalog_OfficialWording_Regression locks down the Japanese title
-// wording for a representative slice of criteria — one per phase plus
-// the items that are most likely to drift during an authoring round
-// (5W1H scope, NTIA minimum elements, vulnerability monitoring,
-// retention, 30-day cadence). A future edit that changes any of these
-// titles will fail this test and the author must update the test
-// deliberately, which is the M5-6 contract: wording becomes catalog
-// data, not a comment.
+// wording for ALL 32 catalog criteria. Originally (M5-6, issue #52)
+// only a 10-item representative slice was pinned; M8-2 (issue #63,
+// 2026-06-28) expanded it to full 32-criteria coverage so that any
+// title drift — including for items that don't appear in dashboard
+// shortlists — is caught at test time.
+//
+// A future edit that changes any of these titles will fail this test
+// and the author must update the test deliberately, which is the
+// M5-6 / M8-2 contract: wording becomes catalog data, not a comment.
+//
+// Provenance note: these strings are the M8-1 (issue #62) wording,
+// which was reconciled against the IPA 2024-12 secondary source
+// (METI ver 2.0 を [1] として明示参照). A direct char-by-char
+// comparison against the primary METI ver 2.0 PDF is still pending
+// because the build environment cannot reach meti.go.jp (M5-6 timeout
+// pattern re-confirmed in M8-2: WebFetch / curl 60s timeout on all
+// three PDF URLs; meti.go.jp index itself does not respond within
+// 15s while google.com responds in 0.19s). See metadata.verification_notes
+// in catalog.yaml for the residual checklist.
 //
 // Why title_ja and not description_ja: titles surface in the UI as
 // short labels (dashboard rows, CRA report headings), so silent drift
 // there is highest-visibility. Descriptions are intentionally not
 // pinned so prose polish does not require a test edit per round.
 func TestCatalog_OfficialWording_Regression(t *testing.T) {
+	// 32 criteria full coverage (M8-2, issue #63). Keep in id order so
+	// review diffs read top-to-bottom against the catalog file.
 	wantTitles := map[string]string{
-		// env_setup phase — anchor titles for the 8 criteria.
+		// env_setup phase — 11 items (M3-3 で 8 + M8-1 で +3).
 		"meti.env_setup.01": "SBOM 担当部署および責任者を明確化",
 		"meti.env_setup.02": "対象ソフトウェアの開発言語・ビルド環境を整理",
+		"meti.env_setup.03": "サプライヤー / OSS 配布元との契約形態・取引慣行を明確化",
+		"meti.env_setup.04": "適用される規制・要求事項を確認",
+		"meti.env_setup.05": "組織内制約 (機密情報の取り扱い / 公開範囲) を明確化",
 		"meti.env_setup.06": "SBOM 適用範囲 (5W1H) を明確化",
 		"meti.env_setup.07": "SBOM 生成ツールを選定・導入",
 		"meti.env_setup.08": "担当者教育・トレーニングを実施",
+		"meti.env_setup.09": "対象ソフトウェアの構成図を可視化",
+		"meti.env_setup.10": "SBOM ツールを導入・設定 (個別運用)",
+		"meti.env_setup.11": "SBOM ツールの学習 (運用習熟度確認)",
 
-		// sbom_creation phase — anchor titles tied to the 7 NTIA
-		// minimum elements + the format selection that drives the
-		// dashboard "format = CycloneDX / SPDX" badge.
+		// sbom_creation phase — 10 items (M3-3 で 9 + M8-1 で +1).
+		"meti.sbom_creation.01": "SBOM 作成方針 (頻度 / トリガー / 粒度) を決定",
 		"meti.sbom_creation.02": "SBOM 形式 (CycloneDX / SPDX) を選定",
+		"meti.sbom_creation.03": "コンポーネントを解析し SBOM を生成",
+		"meti.sbom_creation.04": "解析エラー (パース失敗 / バージョン不明) を確認",
+		"meti.sbom_creation.05": "誤検出・検出漏れを確認",
 		"meti.sbom_creation.06": "METI / NTIA 最小要素を満たす SBOM を作成",
+		"meti.sbom_creation.07": "SBOM 共有方法・配布契約を整備",
+		"meti.sbom_creation.08": "SBOM のバージョン管理と差分追跡を実施",
+		"meti.sbom_creation.09": "サプライヤー受領 SBOM のマージ / 検証",
+		"meti.sbom_creation.10": "SBOM 共有プロセスを個別運用 (受領者管理 / 通知)",
 
-		// sbom_operation phase — anchor titles for the items added
-		// in ver 2.0 第7章 (脆弱性管理プロセスの具体化) and the
-		// 30-day cadence that operators rely on.
+		// sbom_operation phase — 11 items (M3-3 で 10 + M8-1 で +1).
 		"meti.sbom_operation.01": "脆弱性監視プロセスを確立",
+		"meti.sbom_operation.02": "脆弱性情報源 (NVD / JVN / KEV / GHSA / JPCERT) を特定",
+		"meti.sbom_operation.03": "脆弱性を優先付け (EPSS / SSVC / CVSS / KEV)",
+		"meti.sbom_operation.04": "脆弱性対応 (VEX 作成・承認・配布) を実施",
+		"meti.sbom_operation.05": "ライセンス違反 / コンプライアンス逸脱を確認",
+		"meti.sbom_operation.06": "EOL / End-of-Support コンポーネントを特定",
 		"meti.sbom_operation.07": "SBOM を適切な期間 保管 (監査対応)",
+		"meti.sbom_operation.08": "インシデント対応プロセス (悪用検知時) を整備",
 		"meti.sbom_operation.09": "SBOM 更新頻度を遵守",
+		"meti.sbom_operation.10": "監査ログ (作成 / 共有 / 承認 / 配布) を記録",
+		"meti.sbom_operation.11": "SBOM 提供期間を個別運用 (顧客 / 製品ライン別)",
 	}
+
+	// Full-coverage guard: the map must hold exactly 32 entries (one
+	// per IPA full-coverage criterion). If the catalog grows or shrinks
+	// the author must update this map deliberately — silent drift is
+	// not allowed.
+	require.Len(t, wantTitles, 32,
+		"M8-2 (#63): wantTitles must hold exactly 32 entries to match the IPA full-coverage catalog; got %d",
+		len(wantTitles))
 
 	for id, want := range wantTitles {
 		got, ok := GetCriterion(id)
@@ -316,6 +356,18 @@ func TestCatalog_OfficialWording_Regression(t *testing.T) {
 		assert.Equal(t, want, got.TitleJA,
 			"title_ja for %s drifted from the pinned wording; update this test only if the change is intentional",
 			id)
+	}
+
+	// Inverse coverage: every catalog criterion must have a pinned
+	// title. This catches the case where a new criterion is added
+	// without a corresponding regression entry above.
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+	for _, c := range items {
+		_, pinned := wantTitles[c.ID]
+		assert.True(t, pinned,
+			"catalog criterion %s has no pinned title in TestCatalog_OfficialWording_Regression; add it to wantTitles",
+			c.ID)
 	}
 }
 

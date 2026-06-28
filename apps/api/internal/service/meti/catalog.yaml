@@ -72,8 +72,8 @@ metadata:
   source_summary_url: "https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf"
   source_version: "ver 2.0"
   source_published: "2024-08-29"
-  last_synced: "2026-06-27"
-  synced_by: "M5-6 issue #52"
+  last_synced: "2026-06-28"
+  synced_by: "M8-2 issue #63 (M5-6 issue #52 / M8-1 issue #62 を継承)"
   verification_status: "partial"
   verification_notes: |
     M5-6 (issue #52) で METI ver 2.0 公式 PDF の WebFetch / curl 取得が全試行
@@ -85,6 +85,18 @@ metadata:
     「SBOM 対応モデル」 「SBOM 取引モデル」 は契約条項として
     meti.env_setup.03 / meti.sbom_creation.07 / meti.sbom_creation.09 に
     関連付け済。 一次 PDF の原文ママ照合は再 fetch 成功後の wave 持ち越し。
+
+    M8-2 (issue #63, 2026-06-28) で再 fetch を試行: 一次 (SBOMv2.pdf) / 概要
+    (SBOMv2gaiyou.pdf) / 英語版 (sbom_tebiki02_en.pdf) の 3 URL いずれも
+    WebFetch (60s) / curl (60s) で完全タイムアウト。 build 環境からの
+    `https://www.meti.go.jp/` 自体が 15s 内に応答せず (google.com は 0.19s で
+    200 応答)、 M5-6 で観測した meti.go.jp 全面遮断パターンが継続している
+    ことを確認。 一次 PDF の原文ママ照合は user 環境での offline PDF
+    取得 + repo fixture 配置 (例: testdata/meti/SBOMv2.pdf) 後の follow-up
+    wave に持ち越し。 verification_status は引き続き "partial"。 一方、
+    catalog_test.go の title_ja exact-match regression は M8-1 で確定した
+    32 件全件に拡張 (公式照合と独立した、 既存 wording の意図せぬ drift を
+    防ぐ regression gate)。
 
 criteria:
   # --------------------------------------------------------------------------
