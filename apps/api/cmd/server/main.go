@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -26,6 +27,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service/diff"
 	"github.com/sbomhub/sbomhub/internal/service/diff_export"
 	"github.com/sbomhub/sbomhub/internal/service/diff_summary"
+	"github.com/sbomhub/sbomhub/internal/service/diff_webhook"
 	"github.com/sbomhub/sbomhub/internal/service/evidence_pack"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 	"github.com/sbomhub/sbomhub/internal/service/meti"
@@ -312,6 +314,14 @@ func main() {
 	// /api/v1/settings/llm.
 	tenantLLMConfigRepo := repository.NewTenantLLMConfigRepository(db)
 
+	// M11-4 (#79) — per-tenant SBOM diff webhook settings. Migration 046
+	// adds the tenant_diff_webhook_settings table. The repository drives
+	// the diff_webhook service (POST to operator URL with HMAC-SHA256
+	// signature when an SBOM ingest produces a diff that exceeds the
+	// per-tenant thresholds) AND the /api/v1/tenant/settings/diff-webhook
+	// settings endpoint.
+	diffWebhookRepo := repository.NewDiffWebhookRepository(db)
+
 	// AI VEX triage inputs (Wave M1-1..M1-3 / issue #30).
 	// Pre-existing repositories wired through the triage runner below.
 	advisoryExcerptsRepo := repository.NewAdvisoryExcerptsRepository(db)
@@ -496,6 +506,29 @@ func main() {
 		"default_provider", triageDefaultProvider.Name(),
 		"per_tenant_resolver", "tenant_llm_config",
 		"llm_timeout", triageLLMTimeout)
+
+	// M11-4 (#79) — diff webhook firing service. Posts the diff summary
+	// to an operator-configured URL with an HMAC-SHA256 signature when
+	// the (critical / high / license_violation) thresholds are
+	// exceeded. The auto-trigger from SBOM ingest is deferred to M12
+	// (would require touching internal/handler/sbom.go which is
+	// outside the M11-4 file scope); operators can still verify the
+	// configuration via POST /api/v1/tenant/settings/diff-webhook/test
+	// which fires a synthetic-diff event.
+	encryptionKeyForWebhook, kerr := cfg.GetEncryptionKey()
+	if kerr != nil {
+		slog.Error("Failed to get encryption key for diff webhook", "error", kerr)
+		os.Exit(1)
+	}
+	projectDiffWebhookService := diff_webhook.NewService(diff_webhook.Config{
+		Settings:      diffWebhookRepo,
+		Audit:         auditRepo,
+		EncryptionKey: encryptionKeyForWebhook,
+	})
+	slog.Info("Diff webhook firing service initialised",
+		"timeout", diff_webhook.DefaultHTTPTimeout,
+		"auto_trigger_on_ingest", false,
+		"note", "M11-4: auto-trigger deferred to M12 (sbom.go scope guard)")
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -1276,6 +1309,62 @@ func main() {
 	settingsLLMHandler := handler.NewSettingsLLMHandler(tenantLLMConfigRepo, auditRepo, cfg)
 	auth.GET("/settings/llm", settingsLLMHandler.Get)
 	auth.PUT("/settings/llm", settingsLLMHandler.Update)
+
+	// M11-4 (#79) — diff webhook settings. Same auth+TenantTx chain as
+	// /settings/llm; handler-side CanAdmin() check refuses writes from
+	// non-admin Clerk roles / non-admin API keys. The webhook secret
+	// is AES-256-GCM ciphertext on disk; the handler surfaces "***"
+	// on GET and refuses to overwrite an existing secret unless the
+	// caller explicitly supplies a new plaintext (re-submitting "***"
+	// preserves the existing ciphertext).
+	settingsDiffWebhookHandler := handler.NewSettingsDiffWebhookHandler(diffWebhookRepo, auditRepo, cfg)
+	auth.GET("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Get)
+	auth.PUT("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Update)
+	// Manual fire test: builds a synthetic diff envelope and fires the
+	// configured webhook. Lets the operator verify URL + secret +
+	// downstream Slack channel without waiting for a real SBOM ingest
+	// to clear the threshold. Audit-logged like a normal fire.
+	auth.POST("/tenant/settings/diff-webhook/test", func(c echo.Context) error {
+		tenantID, ok := c.Get(appmw.ContextKeyTenantID).(uuid.UUID)
+		if !ok {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+		}
+		// Build a synthetic diff with non-zero critical / high / license
+		// counts so the threshold check definitely passes regardless of
+		// the operator's configured thresholds.
+		syntheticProject := uuid.New()
+		synthetic := &diff.Response{
+			ProjectID: syntheticProject,
+			Components: diff.ComponentsDiff{
+				Added: []diff.ComponentChange{{Name: "synthetic-test", Version: "1.0.0", License: "GPL-3.0"}},
+				Removed: []diff.ComponentChange{},
+				VersionChanged: []diff.ComponentVersionChange{},
+			},
+			Vulnerabilities: diff.VulnerabilitiesDiff{
+				Added: []diff.VulnerabilityAdded{
+					{CVEID: "CVE-2024-TEST", Severity: "CRITICAL", ComponentName: "synthetic-test", ComponentVersion: "1.0.0"},
+				},
+				Resolved:        []diff.VulnerabilityResolved{},
+				SeverityChanged: []diff.VulnerabilitySeverityChange{},
+			},
+			Licenses: diff.LicensesDiff{
+				AddedPolicyViolations: []diff.LicensePolicyViolation{
+					{ComponentName: "synthetic-test", License: "GPL-3.0", PolicyName: "test policy"},
+				},
+				RemovedPolicyViolations: []diff.LicensePolicyViolation{},
+			},
+		}
+		dec, ferr := projectDiffWebhookService.FireIfThreshold(c.Request().Context(), tenantID, syntheticProject, synthetic)
+		if ferr != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": ferr.Error()})
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"triggered":     dec.Triggered,
+			"reason":        dec.Reason,
+			"http_status":   dec.Status,
+			"error_message": dec.ErrorMessage,
+		})
+	})
 
 	// KEV (Known Exploited Vulnerabilities) integration endpoints
 	auth.POST("/kev/sync", kevHandler.SyncCatalog)
