@@ -219,6 +219,12 @@ prepare_checksum_verification() {
 verify_download_checksum() {
     target_path=$1
     checksum_name=$2
+    # Optional third arg: fallback name to try if the primary lookup misses.
+    # M10-4 #72: lets us migrate the .env.example SHA256SUMS entry to
+    # `default.env.example` (matches the uploaded asset name) while still
+    # accepting v1.6.0-or-older SHA256SUMS files where the entry is
+    # `.env.example`.
+    checksum_alt_name=${3:-}
 
     if [ -z "$CHECKSUMS_FILE" ]; then
         return 0
@@ -229,8 +235,8 @@ verify_download_checksum() {
         exit 1
     fi
 
-    expected_sha256=$(
-        awk -v name="$checksum_name" '
+    lookup_checksum() {
+        awk -v name="$1" '
             {
                 filename = $0
                 sub(/^[[:xdigit:]]+[[:space:]]+\*?/, "", filename)
@@ -246,10 +252,22 @@ verify_download_checksum() {
                 }
             }
         ' "$CHECKSUMS_FILE"
-    ) || {
-        printf '[FAIL] SHA256SUMS に %s の entry がありません。\n' "$checksum_name" >&2
-        exit 1
     }
+
+    if expected_sha256=$(lookup_checksum "$checksum_name"); then
+        :
+    elif [ -n "$checksum_alt_name" ] && expected_sha256=$(lookup_checksum "$checksum_alt_name"); then
+        printf '[INFO] SHA256SUMS entry %s が無いため legacy entry %s で検証します。\n' \
+            "$checksum_name" "$checksum_alt_name"
+    else
+        if [ -n "$checksum_alt_name" ]; then
+            printf '[FAIL] SHA256SUMS に %s / %s の entry がありません。\n' \
+                "$checksum_name" "$checksum_alt_name" >&2
+        else
+            printf '[FAIL] SHA256SUMS に %s の entry がありません。\n' "$checksum_name" >&2
+        fi
+        exit 1
+    fi
 
     checksum_dir=$(dirname "$target_path")
     checksum_base=$(basename "$target_path")
@@ -676,7 +694,11 @@ if [ "$MODE" = "start" ]; then
             printf '[FAIL] .env.example の download に失敗しました。\n' >&2
             exit 1
         fi
-        verify_download_checksum .env.example .env.example
+        # M10-4 #72: v1.7.0+ SHA256SUMS uses `default.env.example` (matches the
+        # uploaded asset). Older SHA256SUMS files still ship `.env.example` —
+        # pass it as the legacy fallback so install.sh stays compatible with
+        # SBOMHUB_RELEASE_SHA256SUMS_URL pointed at v1.6.0 or earlier.
+        verify_download_checksum .env.example default.env.example .env.example
     fi
 
     # operational scripts download (M6 #56 F120):

@@ -35,6 +35,10 @@ bin/
 .env
 .env.local
 .env.*.local
+# M10-4 #72: goreleaser before.hooks copies .env.example -> default.env.example
+# at release time so the GitHub asset name and SHA256SUMS entry stay aligned
+# (GitHub release assets cannot start with a dot). The copy is build-only.
+default.env.example
 
 # IDE
 .idea/

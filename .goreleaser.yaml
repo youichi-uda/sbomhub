@@ -30,6 +30,17 @@ version: 2
 # config away from the repo root and complicate the CI workflow.
 project_name: sbomhub
 
+# M10-4 #72: GitHub release assets cannot have filenames starting with a dot
+# — goreleaser silently renames `.env.example` → `default.env.example` when
+# uploading, but the SHA256SUMS entry still uses the source basename
+# (`.env.example`), causing a name drift between the published asset and
+# the checksum file. Pre-stage a non-dot copy (`default.env.example`) and
+# reference THAT in checksum.extra_files / release.extra_files so both the
+# uploaded asset name and the SHA256SUMS entry stay aligned.
+before:
+  hooks:
+    - sh -c 'cp .env.example default.env.example'
+
 builds:
   - id: llm-bench
     dir: apps/api
@@ -87,13 +98,19 @@ archives:
 # M7 #57: publish SHA256SUMS for both llm-bench archives and the operational
 # curl-only install artifacts. GoReleaser uploads checksum.extra_files entries
 # by basename, matching install.sh verification.
+#
+# M10-4 #72: `default.env.example` here (instead of `.env.example`) keeps
+# the SHA256SUMS entry aligned with the actual uploaded asset name (see
+# `before.hooks` above). install.sh's verify_download_checksum() tries the
+# new entry name first and falls back to the legacy `.env.example` entry
+# so v1.6.0-or-older SHA256SUMS files keep working.
 checksum:
   name_template: "SHA256SUMS"
   algorithm: sha256
   extra_files:
     - glob: install.sh
     - glob: docker-compose.yml
-    - glob: .env.example
+    - glob: default.env.example
     - glob: docker/scripts/backup.sh
     - glob: docker/scripts/restore.sh
     - glob: docker/scripts/_env_helpers.sh
@@ -121,10 +138,14 @@ release:
   draft: false
   prerelease: auto
   name_template: "{{.Tag}}"
+  # M10-4 #72: `default.env.example` (see `before.hooks` rationale at the
+  # top of this file). Uploading this name directly avoids goreleaser's
+  # silent dot-prefix rename and keeps the SHA256SUMS entry vs. asset name
+  # in sync.
   extra_files:
     - glob: install.sh
     - glob: docker-compose.yml
-    - glob: .env.example
+    - glob: default.env.example
     - glob: docker/scripts/backup.sh
     - glob: docker/scripts/restore.sh
     - glob: docker/scripts/_env_helpers.sh
