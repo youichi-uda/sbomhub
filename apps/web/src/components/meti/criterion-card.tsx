@@ -51,6 +51,44 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+/**
+ * M11-3 (#78): title_ja was rewritten to be verbatim from primary METI
+ * ver 2.0 PDF for 17/32 criteria, which makes titles up to ~75 chars
+ * (the longest is sbom_operation.01). The list-view variant of the
+ * card truncates titles past TITLE_TRUNCATE_CHARS with an ellipsis and
+ * surfaces the full title via a hover tooltip. The detail variant
+ * always renders full text. The component callsite (e.g. METI
+ * dashboard accordion) does not pass a variant today; the default is
+ * "list" so the accordion stays scannable. Future detail-drawer
+ * callers can opt-in to "detail" to render full text inline.
+ */
+const TITLE_TRUNCATE_CHARS = 80;
+
+/**
+ * Pure helper: returns the truncated label (display) and whether the
+ * full text was actually trimmed. Splitting it out keeps the JSX
+ * branch readable and the assertion ("truncated only when needed")
+ * testable in isolation.
+ */
+export function truncateTitle(full: string, max: number = TITLE_TRUNCATE_CHARS): {
+  display: string;
+  truncated: boolean;
+} {
+  if (!full) return { display: "", truncated: false };
+  // Array.from handles surrogate pairs / non-BMP chars correctly so
+  // an emoji or 𩸽-class CJK extension B char counts as 1, not 2.
+  const codepoints = Array.from(full);
+  if (codepoints.length <= max) {
+    return { display: full, truncated: false };
+  }
+  return { display: codepoints.slice(0, max).join("") + "…", truncated: true };
+}
 
 /**
  * Optional catalog entry — fetched at page level. Mirrors a tiny subset
@@ -103,6 +141,22 @@ export interface CriterionCardProps {
   catalog?: MetiCatalogEntry;
   /** Disable controls while a sibling action is in-flight. */
   busy?: boolean;
+  /**
+   * Display variant. M11-3 (#78) introduced two render modes:
+   *
+   *   - "list" (default): list-view variant. Truncates title_ja past
+   *     ~80 chars with an ellipsis and surfaces the full text via
+   *     hover tooltip; description renders full. Used by the METI
+   *     dashboard accordion where many cards stack vertically.
+   *   - "detail": detail-drawer variant. Renders full title + full
+   *     description without truncation. Reserved for a future
+   *     per-criterion drawer / report view.
+   *
+   * Description is always rendered in full because the auditor needs
+   * the full PDF-verbatim sentence to verify provenance; only the
+   * title is truncated.
+   */
+  variant?: "list" | "detail";
   /**
    * Async handler invoked when the operator confirms an override. The
    * page is responsible for wiring this to api.meti.overrideCriterion
@@ -210,6 +264,7 @@ export function CriterionCard({
   assessment,
   catalog,
   busy = false,
+  variant = "list",
   onOverride,
   onClearOverride,
 }: CriterionCardProps) {
@@ -242,6 +297,14 @@ export function CriterionCard({
     catalog?.description_ja ||
     "";
 
+  // M11-3 (#78): in list-view variant, primary-PDF-verbatim titles
+  // (up to ~75 chars) get truncated with a hover tooltip so the
+  // accordion stays scannable. In detail-view variant the full title
+  // is rendered inline. The truncation is purely a display concern;
+  // the backend serves the full string.
+  const titleTrunc = truncateTitle(title);
+  const showTitleTooltip = variant === "list" && titleTrunc.truncated;
+
   return (
     <Card
       data-testid="meti-criterion-card"
@@ -250,18 +313,43 @@ export function CriterionCard({
       data-status={assessment.status}
       data-effective-status={eff}
       data-overridden={isOverridden ? "true" : "false"}
+      data-variant={variant}
     >
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <CardTitle className="text-base">{title}</CardTitle>
+              {showTitleTooltip ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <CardTitle
+                      className="text-base cursor-help"
+                      data-testid="meti-criterion-title-truncated"
+                      data-full-title={title}
+                    >
+                      {titleTrunc.display}
+                    </CardTitle>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xl whitespace-normal break-words text-left">
+                    {title}
+                  </TooltipContent>
+                </Tooltip>
+              ) : (
+                <CardTitle
+                  className="text-base"
+                  data-testid="meti-criterion-title"
+                >
+                  {variant === "detail" ? title : titleTrunc.display}
+                </CardTitle>
+              )}
               <code className="font-mono text-xs text-muted-foreground">
                 {assessment.criterion_id}
               </code>
             </div>
             {description && (
-              <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+              <p className="mt-1 text-sm text-muted-foreground whitespace-pre-line">
+                {description}
+              </p>
             )}
           </div>
           <div className="flex flex-col items-end gap-1">
