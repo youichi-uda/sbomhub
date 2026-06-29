@@ -104,14 +104,35 @@ The application runtime role (`sbomhub_app`, `NOSUPERUSER`,
 `NOBYPASSRLS`) does **not** have DDL privileges and will fail at the
 first `ALTER TABLE`.
 
-Override the `psql` binary used by setting `PSQL`, e.g. to invoke a
-containerised psql:
+Override the `psql` binary used by setting `PSQL` to the path of a
+single executable. Multi-word commands (e.g. `docker run ...`) are NOT
+accepted because the script checks the binary with `command -v "$PSQL"`,
+which only resolves a single token. If you need a containerised psql,
+write a tiny wrapper script:
 
 ```bash
-PSQL="docker run --rm -i --network host postgres:15-alpine psql" \
+# Write a wrapper that invokes psql inside a postgres container,
+# forwarding the libpq env vars the script sets.
+cat > /usr/local/bin/psql-docker <<'EOF'
+#!/bin/sh
+exec docker run --rm --network host -i \
+    -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE \
+    -e PGSSLMODE -e PGSSLROOTCERT -e PGOPTIONS \
+    postgres:15-alpine psql "$@"
+EOF
+chmod +x /usr/local/bin/psql-docker
+
+# Then point PSQL at the wrapper:
+PSQL=/usr/local/bin/psql-docker \
     MIGRATE_DATABASE_URL="postgres://..." \
     ./docker/scripts/validate-deferred-constraints.sh
 ```
+
+The `-e PG*` flags forward the libpq env vars the script parses out
+of `MIGRATE_DATABASE_URL`. Without them the dockerized psql cannot
+see the credentials (the script intentionally does not pass the DSN
+on argv, to keep the password out of `ps` — see §10 in the script
+header comment).
 
 ## 5. Exit codes
 
