@@ -273,81 +273,123 @@ func TestLoadMetadata_PresentAndSane(t *testing.T) {
 		"metadata.verification_notes must be set so the dashboard can render the honest provenance note")
 }
 
-// TestCatalog_OfficialWording_Regression locks down the Japanese title
-// wording for ALL 32 catalog criteria. Originally (M5-6, issue #52)
-// only a 10-item representative slice was pinned; M8-2 (issue #63,
-// 2026-06-28) expanded it to full 32-criteria coverage so that any
-// title drift — including for items that don't appear in dashboard
-// shortlists — is caught at test time.
+// TestCatalog_VerbatimMatch_Strict (M11-3, issue #78) is the strict
+// byte-exact regression for all 32 catalog title_ja strings. It
+// replaces the M5-6 / M8-2 TestCatalog_OfficialWording_Regression which
+// pinned the 1-line distillation wording; M11-3 rewrote title_ja for
+// 17/32 criteria to be byte-for-byte verbatim copies of the primary
+// METI ver 2.0 PDF (□ checklist rows or section headings), and kept
+// the remaining 15/32 as honest curated distillations with notes:
+// rationale. The pin below is therefore the authoritative wording
+// table after M11-3.
 //
-// A future edit that changes any of these titles will fail this test
-// and the author must update the test deliberately, which is the
-// M5-6 / M8-2 contract: wording becomes catalog data, not a comment.
-//
-// Provenance note: M10-2 (issue #75, 2026-06-29) confirmed the
-// title_ja wording remains as the M8-1 (issue #62) 1-line
-// distillation. Direct char-by-char comparison against the primary
-// METI ver 2.0 PDF was completed in M10-2: title_ja values are
-// curated 1-line summaries (UI labels) rather than verbatim copies
-// of the primary PDF's paragraph-form checklist items, by intentional
-// design. See metadata.verification_notes + each criterion's notes:
-// field in catalog.yaml for the M10-2 distillation rationale.
+// Tally:
+//   - 17 VERBATIM: env_setup.02-09; sbom_creation.02-05/07;
+//     sbom_operation.01/02/05/07.
+//   - 15 DISTILLED: env_setup.01/10/11; sbom_creation.01/06/08/09/10;
+//     sbom_operation.03/04/06/08/09/10/11.
 //
 // Why title_ja and not description_ja: titles surface in the UI as
-// short labels (dashboard rows, CRA report headings), so silent drift
-// there is highest-visibility. Descriptions are intentionally not
-// pinned char-by-char so prose polish does not require a test edit
-// per round, but their leading-token shape is asserted in
-// TestCatalog_DescriptionJA_LeadingTokens.
-func TestCatalog_OfficialWording_Regression(t *testing.T) {
-	// 32 criteria full coverage (M8-2, issue #63). Keep in id order so
-	// review diffs read top-to-bottom against the catalog file.
+// short labels (dashboard rows, CRA report headings). Description
+// wording for VERBATIM criteria is verbatim from PDF body too, but
+// description prose is allowed to be 1-2 sentences from the PDF
+// section body rather than the single checklist row, so the
+// byte-exact pin lives on title_ja. Description verbatim is asserted
+// by sentinel-token containment instead (see
+// TestCatalog_VerbatimDescription_TokenContainment below).
+//
+// A failure of this test indicates UNINTENTIONAL DRIFT — either the
+// catalog wording or this test must be updated deliberately, and
+// NEVER by loosening the assertion. If the official PDF is updated
+// (ver 2.0 → ver 3.0), bump source_version + re-extract title_ja
+// + update this pin in one reviewed change.
+func TestCatalog_VerbatimMatch_Strict(t *testing.T) {
+	// 32 criteria full coverage. Keep in id order so review diffs read
+	// top-to-bottom against the catalog file.
+	//
+	// VERBATIM entries below correspond to primary METI ver 2.0 PDF
+	// (SBOMv2.pdf, SHA256
+	// cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a)
+	// □ checklist rows or section headings, with trailing 。 stripped
+	// for label-style rendering. DISTILLED entries are curated 1-line
+	// UI labels documented in each criterion's notes: field.
 	wantTitles := map[string]string{
-		// env_setup phase — 11 items (M3-3 で 8 + M8-1 で +3).
+		// ── env_setup phase — 11 items ───────────────────────────
+		// DISTILLED: no primary PDF anchor (IPA secondary derived).
 		"meti.env_setup.01": "SBOM 担当部署および責任者を明確化",
-		"meti.env_setup.02": "対象ソフトウェアの開発言語・ビルド環境を整理",
-		"meti.env_setup.03": "サプライヤー / OSS 配布元との契約形態・取引慣行を明確化",
-		"meti.env_setup.04": "適用される規制・要求事項を確認",
-		"meti.env_setup.05": "組織内制約 (機密情報の取り扱い / 公開範囲) を明確化",
-		"meti.env_setup.06": "SBOM 適用範囲 (5W1H) を明確化",
-		"meti.env_setup.07": "SBOM 生成ツールを選定・導入",
-		"meti.env_setup.08": "担当者教育・トレーニングを実施",
-		"meti.env_setup.09": "対象ソフトウェアの構成図を可視化",
+		// VERBATIM 4.1 No.1 (L.2493-2494).
+		"meti.env_setup.02": "対象ソフトウェアの開発言語、コンポーネント形態、開発ツール等、対象ソフトウェアに関する情報を明確化する",
+		// VERBATIM 4.1 No.3 (L.2496).
+		"meti.env_setup.03": "対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を明確化する",
+		// VERBATIM 4.1 No.4 (L.2497).
+		"meti.env_setup.04": "対象ソフトウェアの SBOM に関する規制・要求事項を確認する",
+		// VERBATIM 4.1 No.5 (L.2498).
+		"meti.env_setup.05": "SBOM 導入に関する組織内の制約（体制の制約、コストの制約等）を明確化する",
+		// VERBATIM 4.1 No.6 (L.2499).
+		"meti.env_setup.06": "整理した情報に基づき、SBOM 適用範囲（5W1H）を明確化する",
+		// VERBATIM 4.2 section heading (L.2869).
+		"meti.env_setup.07": "SBOM ツールの選定",
+		// VERBATIM 4.4 section heading (L.3202).
+		"meti.env_setup.08": "SBOM ツールに関する学習",
+		// VERBATIM 4.1 No.2 (L.2495).
+		"meti.env_setup.09": "対象ソフトウェアの正確な構成図を作成し、SBOM 適用の対象を可視化する",
+		// DISTILLED: 4.3 split with env_setup.07; IPA secondary.
 		"meti.env_setup.10": "SBOM ツールを導入・設定 (個別運用)",
+		// DISTILLED: 4.4 split with env_setup.08; IPA secondary.
 		"meti.env_setup.11": "SBOM ツールの学習 (運用習熟度確認)",
 
-		// sbom_creation phase — 10 items (M3-3 で 9 + M8-1 で +1).
+		// ── sbom_creation phase — 10 items ───────────────────────
+		// DISTILLED: no PDF □ row for cadence/trigger/granularity.
 		"meti.sbom_creation.01": "SBOM 作成方針 (頻度 / トリガー / 粒度) を決定",
-		"meti.sbom_creation.02": "SBOM 形式 (CycloneDX / SPDX) を選定",
-		"meti.sbom_creation.03": "コンポーネントを解析し SBOM を生成",
-		"meti.sbom_creation.04": "解析エラー (パース失敗 / バージョン不明) を確認",
-		"meti.sbom_creation.05": "誤検出・検出漏れを確認",
+		// VERBATIM 5.2 No.1 (L.3513).
+		"meti.sbom_creation.02": "作成する SBOM の項目、フォーマット、出力ファイル形式等の SBOM に関する要件を決定する",
+		// VERBATIM 5.1 No.1 (L.3243).
+		"meti.sbom_creation.03": "SBOM ツールを用いて対象ソフトウェアのスキャンを行い、コンポーネントの情報を解析する",
+		// VERBATIM 5.1 No.2 (L.3244-3245).
+		"meti.sbom_creation.04": "SBOM ツールの解析ログ等を調査し、エラー発生や情報不足による解析の中断や省略がなく、解析が正しく実行されたかを確認する",
+		// VERBATIM 5.1 No.3 (L.3246).
+		"meti.sbom_creation.05": "コンポーネントの解析結果について、コンポーネントの誤検出や検出漏れがないかを確認する",
+		// DISTILLED: NTIA 7-elements is table, not 1-line.
 		"meti.sbom_creation.06": "METI / NTIA 最小要素を満たす SBOM を作成",
-		"meti.sbom_creation.07": "SBOM 共有方法・配布契約を整備",
+		// VERBATIM 5.3 No.1 (L.3564-3565).
+		"meti.sbom_creation.07": "対象ソフトウェアの利用者及び納入先に対する SBOM の共有方法を検討した上で、必要に応じて、SBOM を共有する",
+		// DISTILLED: diff tracking is SBOMHub extension of 6.2 No.1.
 		"meti.sbom_creation.08": "SBOM のバージョン管理と差分追跡を実施",
+		// DISTILLED: supplier merge in 5.2 body only, no □ row.
 		"meti.sbom_creation.09": "サプライヤー受領 SBOM のマージ / 検証",
+		// DISTILLED: IPA secondary; per-recipient operation.
 		"meti.sbom_creation.10": "SBOM 共有プロセスを個別運用 (受領者管理 / 通知)",
 
-		// sbom_operation phase — 11 items (M3-3 で 10 + M8-1 で +1).
-		"meti.sbom_operation.01": "脆弱性監視プロセスを確立",
-		"meti.sbom_operation.02": "脆弱性情報源 (NVD / JVN / KEV / GHSA / JPCERT) を特定",
+		// ── sbom_operation phase — 11 items ──────────────────────
+		// VERBATIM 6.1 No.1 (L.3615-3616).
+		"meti.sbom_operation.01": "脆弱性に関する SBOM ツールの出力結果を踏まえ、深刻度の評価、影響度の評価、脆弱性の修正、残存リスクの確認、関係機関への情報提供等の脆弱性対応を行う",
+		// VERBATIM 7.4.1 (3) (L.4041-4042).
+		"meti.sbom_operation.02": "脆弱性特定や脆弱性対応優先付けにおいて利用する脆弱性 DB を選択する",
+		// DISTILLED: 7.4.2 multi-step; SBOMHub 4-axis selection.
 		"meti.sbom_operation.03": "脆弱性を優先付け (EPSS / SSVC / CVSS / KEV)",
+		// DISTILLED: VEX scattered across 2.5 / 7.4.3 / 7.4.4.
 		"meti.sbom_operation.04": "脆弱性対応 (VEX 作成・承認・配布) を実施",
-		"meti.sbom_operation.05": "ライセンス違反 / コンプライアンス逸脱を確認",
+		// VERBATIM 6.1 No.2 (L.3617-3618).
+		"meti.sbom_operation.05": "ライセンスに関する SBOM ツールの出力結果を踏まえ、OSS のライセンス違反が発生していないかを確認する",
+		// DISTILLED: EOL in 6.1 body only, no □ row.
 		"meti.sbom_operation.06": "EOL / End-of-Support コンポーネントを特定",
-		"meti.sbom_operation.07": "SBOM を適切な期間 保管 (監査対応)",
+		// VERBATIM 6.2 No.1 (L.3727-3728).
+		"meti.sbom_operation.07": "作成した SBOM は、社外からの問合せがあった場合等に参照できるよう、変更履歴も含めて一定期間保管する",
+		// DISTILLED: 24h/72h EU CRA timeline is SBOMHub extension.
 		"meti.sbom_operation.08": "インシデント対応プロセス (悪用検知時) を整備",
+		// DISTILLED: 30-day cadence is SBOMHub rule.
 		"meti.sbom_operation.09": "SBOM 更新頻度を遵守",
+		// DISTILLED: audit_log action names are SBOMHub schema.
 		"meti.sbom_operation.10": "監査ログ (作成 / 共有 / 承認 / 配布) を記録",
+		// DISTILLED: IPA secondary; per-customer provision window.
 		"meti.sbom_operation.11": "SBOM 提供期間を個別運用 (顧客 / 製品ライン別)",
 	}
 
-	// Full-coverage guard: the map must hold exactly 32 entries (one
-	// per IPA full-coverage criterion). If the catalog grows or shrinks
-	// the author must update this map deliberately — silent drift is
-	// not allowed.
+	// Full-coverage guard: the map must hold exactly 32 entries. If
+	// the catalog grows or shrinks the author must update this map
+	// deliberately — silent drift is not allowed.
 	require.Len(t, wantTitles, 32,
-		"M8-2 (#63): wantTitles must hold exactly 32 entries to match the IPA full-coverage catalog; got %d",
+		"M11-3 (#78): wantTitles must hold exactly 32 entries to match the IPA full-coverage catalog; got %d",
 		len(wantTitles))
 
 	for id, want := range wantTitles {
@@ -355,7 +397,7 @@ func TestCatalog_OfficialWording_Regression(t *testing.T) {
 		require.True(t, ok, "criterion %s must exist", id)
 		require.NotNil(t, got)
 		assert.Equal(t, want, got.TitleJA,
-			"title_ja for %s drifted from the pinned wording; update this test only if the change is intentional",
+			"criterion %s drift: title_ja byte-exact mismatch against M11-3 PDF-verbatim pin (or M11-3 distillation pin); fix the catalog or update this test deliberately, NEVER loosen the assertion",
 			id)
 	}
 
@@ -367,8 +409,63 @@ func TestCatalog_OfficialWording_Regression(t *testing.T) {
 	for _, c := range items {
 		_, pinned := wantTitles[c.ID]
 		assert.True(t, pinned,
-			"catalog criterion %s has no pinned title in TestCatalog_OfficialWording_Regression; add it to wantTitles",
+			"catalog criterion %s has no pinned title in TestCatalog_VerbatimMatch_Strict; add it to wantTitles",
 			c.ID)
+	}
+}
+
+// TestCatalog_VerbatimDescription_TokenContainment (M11-3, issue #78)
+// asserts that the 17 VERBATIM criteria carry description_ja that
+// contains the load-bearing PDF body sentence stem. We do not byte-
+// exact pin descriptions because they're paragraph-form and may be
+// wrapped at different column widths by future yaml lint passes;
+// instead, we lock down 1-2 sentinel substrings per criterion that
+// must remain present — those substrings come from the primary PDF
+// body at the line ranges named in each criterion's notes: field.
+//
+// Drift here means description_ja diverged from the PDF body the
+// notes: field claims is its source — either the description was
+// edited away from verbatim, or the notes: field is now lying. Either
+// way the author must fix the catalog deliberately.
+//
+// The 15 DISTILLED criteria are not checked here: their description
+// wording is curated and may legitimately evolve without PDF anchor.
+func TestCatalog_VerbatimDescription_TokenContainment(t *testing.T) {
+	// (criterion_id, sentinel substring that must appear in
+	// description_ja). One sentinel per criterion is enough; we pick a
+	// distinctive primary-PDF phrase (>=15 chars, not present in any
+	// distilled criterion) so a careless prose tweak that drops the
+	// verbatim anchor fails this test loudly.
+	wantSentinels := map[string]string{
+		"meti.env_setup.02":      "SBOM 導入により解決したい自社の課題と SBOM 導入の目的を踏まえ",
+		"meti.env_setup.03":      "対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を整理すること",
+		"meti.env_setup.04":      "SBOM のフォーマット・項目や SBOM の活用範囲を決定するために",
+		"meti.env_setup.05":      "組織内の体制に関する制約やコストに関する制約",
+		"meti.env_setup.06":      "5W1H の観点に分類することができ",
+		"meti.env_setup.07":      "整理した観点に基づき、複数の SBOM ツールを評価し、選定する",
+		"meti.env_setup.08":      "ツールの使い方に関するノウハウや各機能の概要は記録し、組織内で共有する",
+		"meti.env_setup.09":      "リスク管理の範囲を明確化することができる",
+		"meti.sbom_creation.02":  "SBOM に含める項目、フォーマット、出力ファイル形式等の SBOM に関する要件を事前に決定する必要がある",
+		"meti.sbom_creation.03":  "手動の場合と比較し、効率的にコンポーネントの解析及び SBOM の作成を行うことができる",
+		"meti.sbom_creation.04":  "「既知の未知」として把握することが望まれる",
+		"meti.sbom_creation.05":  "シンボリックリンクやランタイムライブラリ等のコンポーネント",
+		"meti.sbom_creation.07":  "ソフトウェアサプライチェーンの透明性を高める観点で",
+		"meti.sbom_operation.01": "脆弱性の箇所を特定し、影響範囲を分析するとともに、リスクの推定及び評価を行い",
+		"meti.sbom_operation.02": "NVD、JVN のような公的な脆弱性情報データベース以外に、独自に脆弱性情報データベースを強化",
+		"meti.sbom_operation.05": "ライセンスコンプライアンスの状況を確認するとともに",
+		"meti.sbom_operation.07": "保管期間は、一般的に対象製品が市場に流通している間",
+	}
+	require.Len(t, wantSentinels, 17,
+		"M11-3 (#78): wantSentinels must hold exactly 17 entries (one per VERBATIM criterion); got %d",
+		len(wantSentinels))
+
+	for id, sentinel := range wantSentinels {
+		got, ok := GetCriterion(id)
+		require.True(t, ok, "criterion %s must exist", id)
+		require.NotNil(t, got)
+		assert.Contains(t, got.DescriptionJA, sentinel,
+			"criterion %s drift: description_ja no longer contains the load-bearing PDF body fragment %q; either the verbatim quote was edited or notes: now misrepresents the source",
+			id, sentinel)
 	}
 }
 
@@ -556,37 +653,124 @@ func TestCatalog_SourceSection_RejectsIPASecondaryTableNumbering(t *testing.T) {
 	}
 }
 
-// TestCatalog_Notes_PresentForDistilledCriteria (M10-2, issue #75) pins
-// the criteria where the catalog text is a deliberate distillation of
-// the primary METI ver 2.0 PDF (rather than a verbatim quote of a
-// checklist item) — for these, the notes: field must be populated so
-// the dashboard can surface "why does this label not match the PDF
-// verbatim" provenance, and a future edit that strips the notes must
-// fail loudly.
+// TestCatalog_Notes_PresentForDistilledCriteria (M10-2, issue #75;
+// extended by M11-3, issue #78) requires every criterion to carry a
+// non-empty notes: field. M10-2 introduced the field to document the
+// distillation rationale; M11-3 either replaced the notes (for the 17
+// VERBATIM criteria) with "M11-3 VERBATIM: ..." provenance or
+// reaffirmed them (for the 15 DISTILLED criteria) with "M11-3
+// DISTILLED: ..." rationale.
 //
-// All 32 criteria are listed: every M10-2 criterion gained a notes
-// field documenting the primary PDF passage(s) and the distillation
-// rationale. If a future criterion lands without one, this test
-// catches it.
+// The contract: every criterion's notes: must mention either M10-2
+// (legacy provenance preserved) OR M11-3 (current wave provenance) —
+// because if neither marker is present, the notes are too old to
+// reflect the current catalog wording. M11-3 dropped M10-2 mentions
+// from many criteria because the new notes are M11-3-authored; the
+// test treats either marker as valid evidence of provenance.
 func TestCatalog_Notes_PresentForDistilledCriteria(t *testing.T) {
 	items, err := LoadCatalog()
 	require.NoError(t, err)
 
 	for _, c := range items {
 		assert.NotEmpty(t, c.Notes,
-			"criterion %s.notes must be set (M10-2 distillation rationale); empty notes implies the catalog claims verbatim PDF match which is not the case",
+			"criterion %s.notes must be set (provenance / distillation rationale); empty notes leaves the dashboard with no way to surface why the label diverges from a literal PDF quote",
 			c.ID)
-		assert.Contains(t, c.Notes, "M10-2",
-			"criterion %s.notes %q should mention M10-2 provenance so a grep over the codebase finds the verification wave",
+		// Either marker is acceptable; M11-3 is the most current wave
+		// but M10-2 markers may persist for criteria whose notes were
+		// not rewritten.
+		hasMarker := strings.Contains(c.Notes, "M10-2") || strings.Contains(c.Notes, "M11-3")
+		assert.True(t, hasMarker,
+			"criterion %s.notes %q should mention M10-2 or M11-3 provenance so a grep over the codebase finds the verification wave",
 			c.ID, c.Notes)
 	}
 }
 
+// TestCatalog_Notes_M11_3_VerbatimDistilledTagging (M11-3, issue #78)
+// locks in the explicit "M11-3 VERBATIM" vs "M11-3 DISTILLED" tag in
+// each criterion's notes: field. This is the M11-3 contract: every
+// criterion must either claim VERBATIM (and the catalog wording must
+// match the PDF) or DISTILLED (and the notes must document why).
+//
+// A future edit that flips a criterion from DISTILLED to VERBATIM (or
+// vice versa) without updating both the catalog wording and this test
+// will fail loudly. Silent toggling is not allowed.
+func TestCatalog_Notes_M11_3_VerbatimDistilledTagging(t *testing.T) {
+	// Per-criterion expected M11-3 tag. Exactly one of "VERBATIM" /
+	// "DISTILLED" must appear in notes: for each id.
+	wantTag := map[string]string{
+		// 17 VERBATIM
+		"meti.env_setup.02":      "VERBATIM",
+		"meti.env_setup.03":      "VERBATIM",
+		"meti.env_setup.04":      "VERBATIM",
+		"meti.env_setup.05":      "VERBATIM",
+		"meti.env_setup.06":      "VERBATIM",
+		"meti.env_setup.07":      "VERBATIM",
+		"meti.env_setup.08":      "VERBATIM",
+		"meti.env_setup.09":      "VERBATIM",
+		"meti.sbom_creation.02":  "VERBATIM",
+		"meti.sbom_creation.03":  "VERBATIM",
+		"meti.sbom_creation.04":  "VERBATIM",
+		"meti.sbom_creation.05":  "VERBATIM",
+		"meti.sbom_creation.07":  "VERBATIM",
+		"meti.sbom_operation.01": "VERBATIM",
+		"meti.sbom_operation.02": "VERBATIM",
+		"meti.sbom_operation.05": "VERBATIM",
+		"meti.sbom_operation.07": "VERBATIM",
+		// 15 DISTILLED
+		"meti.env_setup.01":      "DISTILLED",
+		"meti.env_setup.10":      "DISTILLED",
+		"meti.env_setup.11":      "DISTILLED",
+		"meti.sbom_creation.01":  "DISTILLED",
+		"meti.sbom_creation.06":  "DISTILLED",
+		"meti.sbom_creation.08":  "DISTILLED",
+		"meti.sbom_creation.09":  "DISTILLED",
+		"meti.sbom_creation.10":  "DISTILLED",
+		"meti.sbom_operation.03": "DISTILLED",
+		"meti.sbom_operation.04": "DISTILLED",
+		"meti.sbom_operation.06": "DISTILLED",
+		"meti.sbom_operation.08": "DISTILLED",
+		"meti.sbom_operation.09": "DISTILLED",
+		"meti.sbom_operation.10": "DISTILLED",
+		"meti.sbom_operation.11": "DISTILLED",
+	}
+	require.Len(t, wantTag, 32,
+		"M11-3 (#78): wantTag must hold exactly 32 entries; got %d", len(wantTag))
+
+	verbatimCount, distilledCount := 0, 0
+	for id, tag := range wantTag {
+		got, ok := GetCriterion(id)
+		require.True(t, ok, "criterion %s must exist", id)
+		require.NotNil(t, got)
+		assert.Contains(t, got.Notes, "M11-3 "+tag,
+			"criterion %s.notes should carry the M11-3 %s tag; current notes: %q",
+			id, tag, got.Notes)
+		// Mutual exclusion guard.
+		otherTag := "VERBATIM"
+		if tag == "VERBATIM" {
+			otherTag = "DISTILLED"
+		}
+		assert.NotContains(t, got.Notes, "M11-3 "+otherTag,
+			"criterion %s.notes carries BOTH M11-3 %s and M11-3 %s tags — exactly one is allowed",
+			id, tag, otherTag)
+		if tag == "VERBATIM" {
+			verbatimCount++
+		} else {
+			distilledCount++
+		}
+	}
+	assert.Equal(t, 17, verbatimCount,
+		"M11-3 (#78): exactly 17 criteria should be tagged VERBATIM; got %d", verbatimCount)
+	assert.Equal(t, 15, distilledCount,
+		"M11-3 (#78): exactly 15 criteria should be tagged DISTILLED; got %d", distilledCount)
+}
+
 // TestLoadMetadata_M10_2_VerificationNotesShape (issue #75) asserts the
-// verification_notes contain the load-bearing claims that M10-2 makes:
-// the primary PDF SHA256, the methodology summary, and the honest
-// "partial" rationale. A future round that rewrites the notes must
-// preserve these load-bearing tokens or update this test deliberately.
+// verification_notes still cite the M10-2 source_section anchor
+// verification load-bearing claims: the primary PDF SHA256, the
+// methodology summary, and the honest "partial" rationale. M11-3
+// (issue #78) extended the notes block; this test preserves the
+// historical M10-2 tokens while the M11-3-specific tokens are checked
+// by TestLoadMetadata_M11_3_VerificationNotesShape below.
 func TestLoadMetadata_M10_2_VerificationNotesShape(t *testing.T) {
 	meta, err := LoadMetadata()
 	require.NoError(t, err)
@@ -610,9 +794,44 @@ func TestLoadMetadata_M10_2_VerificationNotesShape(t *testing.T) {
 			"metadata.verification_notes must contain %q (M10-2 load-bearing token)", want)
 	}
 
-	// last_synced bump — M10-2 ran on 2026-06-29.
+	// last_synced bump — both M10-2 and M11-3 ran on 2026-06-29.
 	assert.Equal(t, "2026-06-29", meta.LastSynced,
-		"metadata.last_synced should be 2026-06-29 after the M10-2 wave")
-	assert.Contains(t, meta.SyncedBy, "M10-2",
-		"metadata.synced_by should mention M10-2; got %q", meta.SyncedBy)
+		"metadata.last_synced should be 2026-06-29 after the M11-3 wave")
+}
+
+// TestLoadMetadata_M11_3_VerificationNotesShape (issue #78) asserts the
+// load-bearing claims of the M11-3 verbatim-rewrite wave: the
+// synced_by attribution, the 17/15 VERBATIM/DISTILLED split, and the
+// honest "partial" rationale. A future round that rewrites the notes
+// must preserve these tokens or update this test deliberately.
+func TestLoadMetadata_M11_3_VerificationNotesShape(t *testing.T) {
+	meta, err := LoadMetadata()
+	require.NoError(t, err)
+
+	// M11-3 provenance + tally markers — these must remain so the
+	// dashboard provenance pane can render "M11-3: 17 verbatim / 15
+	// distilled" honestly.
+	wantSubstrings := []string{
+		"M11-3",
+		"issue #78",
+		// 17/15 tally.
+		"17 件 VERBATIM",
+		"15 件 DISTILLED",
+		// Methodology + honest partial rationale.
+		"VERBATIM",
+		"DISTILLED",
+		"partial",
+		// Both PDF SHA256s cited.
+		"cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a",
+		"9d46a2f16e4f075b18671b646c8ce0006e057211b041e5a26efa2942c83d0567",
+	}
+	for _, want := range wantSubstrings {
+		assert.Contains(t, meta.VerificationNotes, want,
+			"metadata.verification_notes must contain %q (M11-3 load-bearing token)", want)
+	}
+
+	assert.Contains(t, meta.SyncedBy, "M11-3",
+		"metadata.synced_by should mention M11-3; got %q", meta.SyncedBy)
+	assert.Equal(t, "partial", meta.VerificationStatus,
+		"M11-3 keeps verification_status: partial (17/32 verbatim, 15/32 honest distilled); 'full' would be a stretched claim")
 }
