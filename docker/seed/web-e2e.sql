@@ -151,6 +151,103 @@ VALUES (
 ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------
+-- 2b. Second SBOM (newer version) + 3 components for diff / licenses
+-- ---------------------------------------------------------------------
+-- A second SBOM on the same project so:
+--   * the sbom-diff page has two SBOMs to diff against (already covered
+--     by M11-1's per-test self-seeding, but a seeded pair lets cross-
+--     tenant flows render against a non-empty diff history),
+--   * the licenses spec finds at least one MIT-allow / GPL-3-deny
+--     policy violation (matched by license_id below),
+--   * Hosted vuln search returns updated component versions when the
+--     `log4j-core` row appears at both 2.14.0 (vulnerable) and 2.17.0
+--     (fixed) — M11-2 #77 follow-up to M10-3's minimum seed.
+INSERT INTO sboms (id, tenant_id, project_id, format, version, raw_data, created_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000021'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    '00000000-0000-0000-0000-000000000010'::uuid,
+    'cyclonedx',
+    '1.4',
+    jsonb_build_object(
+        'bomFormat', 'CycloneDX',
+        'specVersion', '1.4',
+        'version', 2,
+        'components', jsonb_build_array(
+            jsonb_build_object(
+                'type', 'library',
+                'name', 'log4j-core',
+                'version', '2.17.0',
+                'purl', 'pkg:maven/org.apache.logging.log4j/log4j-core@2.17.0',
+                'licenses', jsonb_build_array(jsonb_build_object('license', jsonb_build_object('id', 'Apache-2.0')))
+            ),
+            jsonb_build_object(
+                'type', 'library',
+                'name', 'lodash',
+                'version', '4.17.21',
+                'purl', 'pkg:npm/lodash@4.17.21',
+                'licenses', jsonb_build_array(jsonb_build_object('license', jsonb_build_object('id', 'MIT')))
+            ),
+            jsonb_build_object(
+                'type', 'library',
+                'name', 'gpl-test-component',
+                'version', '1.0.0',
+                'purl', 'pkg:generic/gpl-test-component@1.0.0',
+                'licenses', jsonb_build_array(jsonb_build_object('license', jsonb_build_object('id', 'GPL-3.0-only')))
+            )
+        )
+    ),
+    NOW()
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- log4j-core 2.17.0 — patched version, no CVE link.
+INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000031'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    '00000000-0000-0000-0000-000000000021'::uuid,
+    'log4j-core',
+    '2.17.0',
+    'library',
+    'pkg:maven/org.apache.logging.log4j/log4j-core@2.17.0',
+    'Apache-2.0',
+    NOW()
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- MIT-licensed component (lodash) — allowed by license_policies.
+INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000032'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    '00000000-0000-0000-0000-000000000021'::uuid,
+    'lodash',
+    '4.17.21',
+    'library',
+    'pkg:npm/lodash@4.17.21',
+    'MIT',
+    NOW()
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- GPL-3-licensed component — denied by license_policies (drives the
+-- license-violations rendering path below).
+INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license, created_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000033'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    '00000000-0000-0000-0000-000000000021'::uuid,
+    'gpl-test-component',
+    '1.0.0',
+    'library',
+    'pkg:generic/gpl-test-component@1.0.0',
+    'GPL-3.0-only',
+    NOW()
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------
 -- 3. Vulnerability + component-vulnerability link
 -- ---------------------------------------------------------------------
 -- The vulnerabilities table is tenant-soft (tenant_id ON DELETE SET
@@ -179,6 +276,153 @@ VALUES (
     NOW()
 )
 ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
+
+-- Additional CVEs so cross-tenant CVE search (e2e/search.spec.ts) and
+-- the vulnerabilities list (e2e/vulnerabilities.spec.ts) return more
+-- than a single Log4Shell row.
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000041'::uuid,
+    'CVE-2021-45046',
+    'Apache Log4j2 Thread Context Map lookup pattern allows attackers with control over Thread Context Map (MDC) input data to craft malicious input data using a JNDI lookup pattern.',
+    'CRITICAL',
+    9.0,
+    'NVD',
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    TRUE,
+    '2021-12-14T00:00:00Z',
+    NOW()
+)
+ON CONFLICT (cve_id) DO NOTHING;
+
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000042'::uuid,
+    'CVE-2021-23337',
+    'Lodash versions prior to 4.17.21 are vulnerable to Command Injection via the template function.',
+    'HIGH',
+    7.2,
+    'NVD',
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    FALSE,
+    '2021-02-15T00:00:00Z',
+    NOW()
+)
+ON CONFLICT (cve_id) DO NOTHING;
+
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000043'::uuid,
+    'CVE-2020-8203',
+    'Prototype pollution in lodash before 4.17.20 via _.zipObjectDeep allows a malicious user to modify object prototype properties.',
+    'HIGH',
+    7.4,
+    'NVD',
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    FALSE,
+    '2020-07-15T00:00:00Z',
+    NOW()
+)
+ON CONFLICT (cve_id) DO NOTHING;
+
+-- Match the additional CVEs to the components already present:
+--   * log4j-core 2.14.0 (component …030) ← CVE-2021-45046
+--   * lodash 4.17.21 (component …032) ← CVE-2021-23337 + CVE-2020-8203
+--     (kept here as fixed-version components so the vulnerabilities
+--     list still has rows to render; the API surfaces all component-
+--     linked CVEs irrespective of "fixed-by" comparisons today).
+INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000030'::uuid,
+    '00000000-0000-0000-0000-000000000041'::uuid,
+    NOW()
+)
+ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
+
+INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000032'::uuid,
+    '00000000-0000-0000-0000-000000000042'::uuid,
+    NOW()
+)
+ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
+
+INSERT INTO component_vulnerabilities (component_id, vulnerability_id, detected_at)
+VALUES (
+    '00000000-0000-0000-0000-000000000032'::uuid,
+    '00000000-0000-0000-0000-000000000043'::uuid,
+    NOW()
+)
+ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------
+-- 3b. License policies (M11-2 #77)
+-- ---------------------------------------------------------------------
+-- One allow rule (MIT) + one deny rule (GPL-3-only) so the licenses
+-- spec can render the policies list and exercise the violations API
+-- against the seeded components above. Per project_id + tenant_id, RLS
+-- and the (project_id, license_id) UNIQUE constraint both apply.
+INSERT INTO license_policies (
+    id, project_id, tenant_id, license_id, license_name, policy_type, reason, created_at, updated_at
+)
+VALUES (
+    '00000000-0000-0000-0000-0000000000a0'::uuid,
+    '00000000-0000-0000-0000-000000000010'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    'MIT',
+    'MIT License',
+    'allowed',
+    'Seed allow-rule: MIT is approved for commercial use (M11-2 #77).',
+    NOW(),
+    NOW()
+)
+ON CONFLICT (project_id, license_id) DO NOTHING;
+
+INSERT INTO license_policies (
+    id, project_id, tenant_id, license_id, license_name, policy_type, reason, created_at, updated_at
+)
+VALUES (
+    '00000000-0000-0000-0000-0000000000a1'::uuid,
+    '00000000-0000-0000-0000-000000000010'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    'GPL-3.0-only',
+    'GNU GPL v3.0',
+    'denied',
+    'Seed deny-rule: GPL-3.0 copyleft incompatible with proprietary release (M11-2 #77).',
+    NOW(),
+    NOW()
+)
+ON CONFLICT (project_id, license_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------
+-- 3c. API key fixture (M11-2 #77)
+-- ---------------------------------------------------------------------
+-- A single tenant-scoped key so /settings/apikeys (and any per-project
+-- /apikeys list) renders at least one row. The hash is a SYNTHETIC
+-- sha256 placeholder — `sha256('m11-2-seed-key-do-not-use-in-prod')` —
+-- which DOES NOT correspond to any real key value. The plaintext key
+-- is intentionally not stored anywhere; the row exists only so the UI
+-- list path renders without depending on a successful POST in the
+-- spec's beforeAll.
+--
+-- DO NOT replace this with a hash of a real key in any production
+-- deployment — this file is ephemeral CI seed only and must never be
+-- loaded against a production database (see header §2 / CLAUDE.md M0
+-- "Trust Rescue" §Constraints).
+INSERT INTO api_keys (
+    id, project_id, tenant_id, name, key_hash, key_prefix, permissions, created_at
+)
+VALUES (
+    '00000000-0000-0000-0000-0000000000b0'::uuid,
+    '00000000-0000-0000-0000-000000000010'::uuid,
+    '00000000-0000-0000-0000-000000000001'::uuid,
+    'M11-2 Seed Key (do not use in production)',
+    'm11-2-seed-synthetic-not-a-real-hash-00000000000000000000000000',
+    'sbh_seed',
+    'write',
+    NOW()
+)
+ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------
 -- 4. AI VEX draft (M1) — 1 pending row so /triage renders the list
@@ -258,20 +502,31 @@ ON CONFLICT (id) DO NOTHING;
 -- are legal — see migration 039 comment). The seed pins one row in the
 -- "sbom_creation" phase so meti-assessment.spec.ts has at least one
 -- assessment to render before its own POST /refresh kicks in.
+-- M11-2 #77: criterion_id pinned to the catalog-correct
+-- "meti.env_setup.01" form so the criterion-card.tsx title resolves
+-- to the seeded en/ja string instead of falling back to the raw id.
+-- override_status stays NULL so the override-form spec finds a
+-- non-overridden row to interact with.
+--
+-- The row's id moved from ...070 → ...071 in M11-2 to avoid PK
+-- conflicts when re-loading on top of an M10-3-shaped DB (the
+-- legacy seed used id=...070 / criterion_id='sbom-1'). The UNIQUE
+-- (tenant_id, project_id, criterion_id) ON CONFLICT clause still
+-- protects against accidental duplicates within a single load.
 INSERT INTO meti_assessments (
     id, tenant_id, project_id,
     criterion_id, criterion_phase, status, evidence,
     evaluator_version, evaluated_at, created_at, updated_at
 )
 VALUES (
-    '00000000-0000-0000-0000-000000000070'::uuid,
+    '00000000-0000-0000-0000-000000000071'::uuid,
     '00000000-0000-0000-0000-000000000001'::uuid,
     '00000000-0000-0000-0000-000000000010'::uuid,
-    'sbom-1',
-    'sbom_creation',
+    'meti.env_setup.01',
+    'env_setup',
     'needs_review',
     jsonb_build_array(
-        jsonb_build_object('kind', 'seed_fixture', 'ref', 'M10-3 #71 docker/seed/web-e2e.sql')
+        jsonb_build_object('kind', 'seed_fixture', 'ref', 'M11-2 #77 docker/seed/web-e2e.sql')
     ),
     'seed-1',
     NOW(),

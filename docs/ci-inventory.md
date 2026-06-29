@@ -36,7 +36,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | `migration-roundtrip.yml` | push main / PR (`apps/api/migrations/**`, `apps/api/cmd/migrate/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + `migrate up` → `migrate down 999` → `migrate up` (regression check)。 schema diff は warn-only で初回 landing | Trust Rescue P1 #17-followup |
 | `frontend-ci.yml` | push main / PR (`apps/web/**`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `package.json` paths) | pnpm install → `pnpm --filter web lint` (**hard gate, ESLint v9 flat config**, M11-5 #80) / `typecheck` (`tsc --noEmit`, warn-only) / `build` (`next build`, warn-only)。 Node 22 LTS / pnpm 10.34.3 | Trust Rescue P1 #17-followup / M10-4 / M11-5 |
 | `web-e2e.yml` (job: `web-e2e`) | push main / PR (`apps/web/**`, `apps/api/**`, compose / `docker/seed/**` / install.sh / env / pnpm paths) | docker compose (postgres + redis + locally built api + web) を起動 → Playwright (chromium) で `apps/web/e2e/smoke/` を実行。 home (`/` redirect + SBOMHub brand) / dashboard (auth surface に到達) / api-health (`/api/v1/health` `status=ok`) の 3 scenario | M8 #67 |
-| `web-e2e.yml` (job: `web-e2e-full`) | 同上 trigger | docker compose 一式 + `docker/seed/web-e2e.sql` (deterministic tenant + project + sbom + component + CVE-2021-44228 + vex_draft + cra_report + meti_assessment + audit_log) を pre-load → Playwright (chromium, `retries: 2`, `timeout: 60_000`) で `apps/web/e2e/*.spec.ts` 26 件を実行。 seed は web 起動より前に load することで API の `GetOrCreateDefault` が deterministic UUID (`00000000-0000-0000-0000-000000000001`) を採用する経路を強制 | M10-3 #71 |
+| `web-e2e.yml` (job: `web-e2e-full`) | 同上 trigger | docker compose 一式 + `docker/seed/web-e2e.sql` (deterministic tenant + project + **2 SBOMs** (log4j-core 2.14.0 / 2.17.0) + 4 components + **4 CVEs (44228 / 45046 / 23337 / 8203)** + vex_draft + cra_report + **meti.env_setup.01** + audit_log + **license_policies (MIT allow + GPL-3 deny)** + **api_keys 1 件 (synthetic hash)**) を pre-load → Playwright (chromium, `retries: 2`, `timeout: 60_000`) で `apps/web/e2e/*.spec.ts` 26 件を実行。 seed は web 起動より前に load することで API の `GetOrCreateDefault` が deterministic UUID (`00000000-0000-0000-0000-000000000001`) を採用する経路を強制 | M10-3 #71 / M11-2 #77 |
 
 ### 2.2 Required quality gates
 
@@ -162,10 +162,35 @@ P3 = それ以降):
 | artifact | 失敗時 `playwright-report-full` (apps/web/playwright-report + test-results) を upload、 retention 7 日 |
 | auth mode | 本番 web image を `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=` build arg で焼き込み → `isAuthEnabled()` が false → mock auth shim (`apps/web/src/lib/auth.ts`) が active。 dev:test launcher と同等の経路だが production image を使うため build path も同時に validate される |
 
-honest limitations (M11 で対処):
-- Clerk hosted UI (sign-in / sign-up / org switcher) の経路は本 job でも未カバー (`apps/web/e2e/auth.spec.ts` は public page と language switcher のみ assert)。
-- LLM provider (OpenAI / Anthropic / Gemini) を要する flow (triage runner / cra runner の actual draft generation) は seed 済み draft で UI shell のみ exercise、 LLM 呼び出しの mock layer は M11。
+honest limitations (M12 で対処):
+- Clerk hosted UI (sign-in / sign-up / org switcher) の経路は本 job でも未カバー。 anonymous-request shim (`error-handling.spec.ts::should display error for unauthorized access`) も同じ理由で M12 に積み残し。
+- LLM provider (OpenAI / Anthropic / Gemini) を要する flow (triage runner / cra runner の actual draft generation) は seed 済み draft で UI shell のみ exercise、 LLM 呼び出しの mock layer は M12。
 - 3rd-party integration spec (`integrations.spec.ts` の GitHub / Jira 連携、 `sso-settings.spec.ts` の SAML / OIDC) は無認証で API が 404 / 401 を返す経路を許容する設計のため、 spec 自体は green になるが「integration 動作確認」までは到達しない。
+- Duplicate-project-name prevention (`error-handling.spec.ts::should prevent duplicate project creation`) は product decision (UNIQUE (tenant_id, name) を加えるか UI dedup hint で済ますか) が未確定のため M12 に積み残し。
+
+### M11-2 #77 で un-skip 済み (was-skipped → enabled)
+
+M10-3 で 22 spec、 M11-1 (`sbom-diff.spec.ts`) で 21 spec まで減らした skipped を、 M11-2 で **15+ 件 un-skip** した:
+
+| spec | tests | M11-2 で扱った内容 |
+|---|---|---|
+| `licenses.spec.ts` | 6 | seed enrichment (MIT + GPL-3 components + 2 license_policies rows) |
+| `api-keys.spec.ts` | 6 | seed enrichment (synthetic-hash api_keys row) |
+| `meti-assessment.spec.ts` | 3 | seed criterion_id を catalog-correct `meti.env_setup.01` に揃え、 spec body の soft-gate を信頼して un-skip |
+| `search.spec.ts` | 3 | seed enrichment (4 CVE rows) |
+| `vulnerabilities.spec.ts` | 1 | seed component_vulnerabilities row |
+| `integrations.spec.ts` / `ipa-settings.spec.ts` / `sso-settings.spec.ts` | 3 | sidebar h1 ("SBOMHub") との strict-mode 衝突を `getByRole('heading', { name: regex, level: 1 })` で disambiguate |
+| `auth.spec.ts::EN→JA` | 1 | empty-Clerk-key mock auth で router.push 経路が確定したため re-enable |
+| `security.spec.ts::HTML/SQL in search` | 2 | EN page で button label 'Search' に揃える (旧: Japanese '검索') |
+| `security.spec.ts::null bytes` | 1 | parameterised INSERT で安全な outcome envelope (200/201/400/422/500) に揃える |
+| `security.spec.ts::SQL in project` | 1 | dialog button locator + main 内 heading で disambiguate |
+
+残 skipped (M12 対象):
+
+| spec | reason |
+|---|---|
+| `error-handling.spec.ts::should display error for unauthorized access` | dev:test に anonymous-request shim が無い (multi-file refactor 必須) |
+| `error-handling.spec.ts::should prevent duplicate project creation` | product decision (UNIQUE constraint or UI dedup hint) 未確定 |
 
 ## 5. Out of scope (M0 では決めない)
 

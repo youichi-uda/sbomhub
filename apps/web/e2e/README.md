@@ -81,11 +81,13 @@ rows:
 | `users` | `00000000-0000-0000-0000-000000000002` (`clerk_user_id='self-hosted'`) | The self-hosted bootstrap user. |
 | `tenant_users` | (tenant, user, role='owner') | Self-hosted admin membership. |
 | `projects` | `00000000-0000-0000-0000-000000000010` ("M10-3 Seed Project") | Seed project so `/projects` is not empty. |
-| `sboms` + `components` | log4j-core 2.14.0 | Seed SBOM with one component — enough for the components / vulnerabilities / vex specs. The `sbom-diff` spec (M10-6) uploads its own two SBOMs to a per-test project in `beforeAll`, so it does NOT depend on the seed having multiple SBOMs (F163 fix). |
-| `vulnerabilities` + `component_vulnerabilities` | CVE-2021-44228 (Critical, in_kev=true) | Seed vuln so vulnerabilities / kev / ssvc specs are non-empty. |
+| `sboms` + `components` | **2 SBOMs**: log4j-core 2.14.0 (vulnerable) + log4j-core 2.17.0 + lodash 4.17.21 (MIT) + gpl-test-component 1.0.0 (GPL-3.0-only) | M11-2 #77 extension — the 2nd SBOM unlocks the licenses spec (needs MIT-allow + GPL-3-deny components) and the search spec (needs a non-empty CVE database). The `sbom-diff` spec (M10-6 / M11-1) still uploads its own two SBOMs to a per-test project in `beforeAll`, so it does NOT depend on the seed having multiple SBOMs. |
+| `vulnerabilities` + `component_vulnerabilities` | **4 CVEs**: CVE-2021-44228 (Critical, in_kev=true), CVE-2021-45046 (Critical, in_kev=true) — both linked to log4j-core 2.14.0; CVE-2021-23337 (High) + CVE-2020-8203 (High) — linked to lodash 4.17.21 | M11-2 #77 extension. The extra CVEs let `search.spec.ts` un-skip 3 CVE-search tests and `vulnerabilities.spec.ts` un-skip 1 detail-rendering test. |
+| `license_policies` | MIT allow + GPL-3.0-only deny | M11-2 #77 extension. Drives the licenses spec's policy CRUD + violations API. |
+| `api_keys` | 1 tenant-level row, name='M11-2 Seed Key', synthetic hash | M11-2 #77 extension. The hash is a SYNTHETIC placeholder — it does NOT correspond to any real key value. The api-keys spec creates its own keys via POST in `beforeAll`; the seed exists only so the list path renders non-empty before the spec's first POST. **DO NOT** load this seed against a production database — see header §2 / CLAUDE.md M0 Constraints. |
 | `vex_drafts` | 1 pending `not_affected` row | Seed AI VEX draft so `/triage` renders the list (decision filter row count > 0). |
 | `cra_reports` | 1 pending `early_warning ja` row | Seed AI CRA report so `/cra-reports` renders the list. |
-| `meti_assessments` | 1 `needs_review` (`sbom_creation` phase) | Seed METI row so `/meti-assessment` renders the list. |
+| `meti_assessments` | 1 `needs_review` row (criterion_id=`meti.env_setup.01`, phase=`env_setup`, override_status=NULL) | M11-2 #77 extension — pinned to a catalog-correct criterion id so the card title resolves to a translated string rather than the raw id, and override_status stays NULL so the override-form spec can interact with it. |
 | `audit_logs` | 1 `seed.bootstrap` action | Seed audit row so `/audit` renders the list. |
 
 All UUIDs are hardcoded constants (see CLAUDE.md M10-3 brief
