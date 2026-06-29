@@ -22,7 +22,7 @@
  * No AI is involved here — the diff is a mechanical comparison.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
@@ -53,7 +53,24 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { buildDiffQuery, normaliseSeverity } from "./diff-helpers";
 
+// M10-6 #74 + Phase D F164: wrap the page body in <Suspense> because
+// useSearchParams() in a Next.js 15 client component triggers the
+// client-side bailout error when the parent layout has no Suspense
+// boundary. The CI playwright run on commit d6f759c surfaced this as
+// "Application error: a client-side exception has occurred while
+// loading localhost" (heading at level=2), making every assertion in
+// sbom-diff.spec.ts fail to find the level=1 page title. The fallback
+// renders nothing visible so the Suspense boundary doesn't interfere
+// with the unconditional h1 below it.
 export default function ProjectDiffPage() {
+  return (
+    <Suspense fallback={null}>
+      <ProjectDiffPageInner />
+    </Suspense>
+  );
+}
+
+function ProjectDiffPageInner() {
   const params = useParams();
   const searchParams = useSearchParams();
   const locale = useLocale();
