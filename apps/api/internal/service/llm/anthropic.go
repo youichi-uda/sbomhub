@@ -213,24 +213,32 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req CompleteRequest) (
 // Embed implements Provider. Anthropic does NOT expose a first-party
 // embeddings endpoint, so this method returns ErrNotImplemented.
 //
-// Status verification (M10 Wave M10-5 / issue #73, re-confirmed 2026-06-29;
-// originally landed M8 Wave M8-3 / issue #68 on 2026-06-28):
+// Status verification (M11 Wave M11-6 / issue #81, re-confirmed 2026-06-29;
+// previously M10 Wave M10-5 / issue #73 on 2026-06-29; originally landed
+// M8 Wave M8-3 / issue #68 on 2026-06-28):
 //   - WebSearch ("Anthropic first-party embedding API endpoint 2026")
-//     and the Anthropic API release notes through 2026-06-26 surface
-//     no embeddings endpoint; the most recent API release notes cover
-//     rate-limit consolidation (2026-06-26), Claude Opus 4.7 fast-mode
-//     deprecation (2026-06-25), and code_execution_20260120 SDK support
-//     (2026-06-18) — none touch embeddings.
+//     and the Anthropic API release notes at
+//     https://platform.claude.com/docs/en/release-notes/api still surface
+//     no embeddings endpoint through 2026-06-26. The most recent API
+//     release notes cover rate-limit consolidation into Start/Build/Scale
+//     tiers (2026-06-26), Claude Opus 4.7 fast-mode deprecation with
+//     removal on 2026-07-24 (2026-06-25), and code_execution_20260120 SDK
+//     support (2026-06-18) — none touch embeddings. No release notes have
+//     landed between M10-5 and M11-6.
 //   - Official Anthropic guidance (the "Embeddings" page at
 //     https://docs.anthropic.com/en/docs/build-with-claude/embeddings
 //     which 301-redirects to
 //     https://platform.claude.com/docs/en/docs/build-with-claude/embeddings
 //     as of 2026-06-29) still explicitly states:
-//       "Anthropic does not offer its own embedding model."
+//     "Anthropic does not offer its own embedding model. One embeddings
+//     provider that has a wide variety of options and capabilities
+//     encompassing all of the above considerations is Voyage AI."
 //     and directs callers to Voyage AI (api.voyageai.com/v1/embeddings)
 //     as the preferred third-party provider. Anthropic's own cookbook
 //     repo (anthropics/claude-cookbooks) keeps the embedding examples
-//     under third_party/VoyageAI/, reinforcing this position.
+//     under third_party/VoyageAI/ (see
+//     https://github.com/anthropics/claude-cookbooks/blob/main/third_party/VoyageAI/how_to_create_embeddings.md),
+//     reinforcing this position.
 //   - Voyage AI is therefore the recommended embedding path for callers
 //     that need embeddings alongside Anthropic chat; sbomhub's M5-7
 //     embedding work standardised on OpenAI / Gemini / Ollama / Azure
@@ -250,8 +258,8 @@ func (p *AnthropicProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResp
 // Capabilities implements Provider.
 // SupportsEmbedding is hard-wired to false across every model family:
 // Anthropic still does not ship a first-party embeddings endpoint as of
-// 2026-06-29 (M10 #73 re-verification, originally M8 #68 on 2026-06-28;
-// see Embed() docstring for sources).
+// 2026-06-29 (M11 #81 re-verification; previously M10 #73 on 2026-06-29
+// and M8 #68 on 2026-06-28; see Embed() docstring for sources).
 // ※要確認: keep in sync with Anthropic's docs (context windows, JSON-mode
 // support change across model generations).
 func (p *AnthropicProvider) Capabilities() Capabilities {
