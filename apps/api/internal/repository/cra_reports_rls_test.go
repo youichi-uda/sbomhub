@@ -228,8 +228,11 @@ func TestCRAReports_EvidenceRequired(t *testing.T) {
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
 
+	// M9 F158: cra_reports is under FORCE RLS, so the negative-path
+	// INSERTs below must run inside a tx with the tenant GUC set.
+
 	// Empty array.
-	_, err := migDB.Exec(`
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, draft_text, evidence
@@ -246,7 +249,7 @@ func TestCRAReports_EvidenceRequired(t *testing.T) {
 	// NULL evidence: NOT NULL violation, not a CHECK violation, but
 	// equally load-bearing. We accept either error class but require
 	// the insert to fail.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, draft_text, evidence
@@ -259,7 +262,7 @@ func TestCRAReports_EvidenceRequired(t *testing.T) {
 
 	// Non-array JSON: jsonb_array_length raises an error on non-
 	// arrays; the CHECK constraint is therefore tripped.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, draft_text, evidence
@@ -290,13 +293,19 @@ func TestCRAReports_ReportTypeLangStateAndDecisionChecks(t *testing.T) {
 
 	good := `'[{"kind":"vex_draft","ref":"00000000-0000-0000-0000-000000000001"}]'::jsonb`
 
-	// Bad report_type.
-	_, err := migDB.Exec(`
+	// M9 F158: cra_reports is under FORCE RLS. Wrap each negative-path
+	// INSERT in a tenant-GUC tx. Also keep all bogus VARCHAR(20) values
+	// within 20 chars so the CHECK constraint fires before PG's column
+	// type length check ("value too long for type character varying(20)")
+	// pre-empts the allow-list error we are asserting against.
+
+	// Bad report_type (17 chars, fits VARCHAR(20)).
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, draft_text, evidence
 		) VALUES ($1, $2, $3, $4,
-			'CVE-2025-CK', 'not-a-real-report-type', 'ja', 'x', `+good+`)
+			'CVE-2025-CK', 'bogus_report_type', 'ja', 'x', `+good+`)
 	`, uuid.New(), tenant, uuid.New(), uuid.New())
 	if err == nil {
 		t.Fatalf("CHECK constraint allowed unknown report_type; the allow-list is meant to be enforced")
@@ -306,7 +315,7 @@ func TestCRAReports_ReportTypeLangStateAndDecisionChecks(t *testing.T) {
 	}
 
 	// Bad lang.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, draft_text, evidence
@@ -320,8 +329,8 @@ func TestCRAReports_ReportTypeLangStateAndDecisionChecks(t *testing.T) {
 		t.Fatalf("expected a CHECK constraint violation on lang, got: %v", err)
 	}
 
-	// Bad state.
-	_, err = migDB.Exec(`
+	// Bad state (11 chars, fits VARCHAR(20)).
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, state, draft_text, evidence
@@ -335,8 +344,8 @@ func TestCRAReports_ReportTypeLangStateAndDecisionChecks(t *testing.T) {
 		t.Fatalf("expected a CHECK constraint violation on state, got: %v", err)
 	}
 
-	// Bad decision.
-	_, err = migDB.Exec(`
+	// Bad decision (11 chars, fits VARCHAR(20)).
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO cra_reports (
 			id, tenant_id, project_id, vulnerability_id,
 			cve_id, report_type, lang, draft_text, evidence, decision

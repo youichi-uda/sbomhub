@@ -111,12 +111,15 @@ func seedTenantForVisualization(t *testing.T, migDB *sql.DB, label string) uuid.
 func seedProjectForVisualization(t *testing.T, migDB *sql.DB, tenant uuid.UUID, label string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
-		id, tenant, "VizRLS Project "+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed project %s: %v", label, err)
-	}
+	// M9 F158: see rls_test_helpers_integration_test.go.
+	withTenantGUC(t, migDB, tenant, func(tx *sql.Tx) {
+		if _, err := tx.Exec(
+			`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
+			id, tenant, "VizRLS Project "+label+"-"+id.String()[:8],
+		); err != nil {
+			t.Fatalf("seed project %s: %v", label, err)
+		}
+	})
 	return id
 }
 

@@ -214,12 +214,17 @@ func TestReachabilityResults_StatusAndConfidenceChecks(t *testing.T) {
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
 
-	// Bad status.
-	_, err := migDB.Exec(`
+	// M9 F158: reachability_results is under FORCE RLS. Each negative-
+	// path INSERT runs inside a tenant-GUC tx, and bogus status values
+	// stay within VARCHAR(20) so the CHECK constraint fires before the
+	// column type length check pre-empts it.
+
+	// Bad status (15 chars, fits VARCHAR(20)).
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO reachability_results (
 			id, tenant_id, project_id, component_id,
 			cve_id, status
-		) VALUES ($1, $2, $3, $4, 'CVE-2025-CK', 'definitely-not-a-status')
+		) VALUES ($1, $2, $3, $4, 'CVE-2025-CK', 'bogus_reachable')
 	`, uuid.New(), tenant, uuid.New(), uuid.New())
 	if err == nil {
 		t.Fatalf("CHECK constraint allowed unknown status; the allow-list is meant to be enforced")
@@ -229,7 +234,7 @@ func TestReachabilityResults_StatusAndConfidenceChecks(t *testing.T) {
 	}
 
 	// Bad confidence.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO reachability_results (
 			id, tenant_id, project_id, component_id,
 			cve_id, status, confidence

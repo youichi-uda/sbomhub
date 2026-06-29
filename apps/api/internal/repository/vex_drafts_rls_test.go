@@ -223,8 +223,11 @@ func TestVEXDrafts_EvidenceRequired(t *testing.T) {
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
 
+	// M9 F158: vex_drafts is under FORCE RLS, so each negative-path
+	// INSERT must run inside a tx with the tenant GUC set.
+
 	// Empty array.
-	_, err := migDB.Exec(`
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO vex_drafts (
 			id, tenant_id, project_id, component_id, vulnerability_id,
 			cve_id, state, evidence
@@ -241,7 +244,7 @@ func TestVEXDrafts_EvidenceRequired(t *testing.T) {
 	// NULL evidence: NOT NULL violation, not a CHECK violation, but
 	// equally load-bearing. We accept either error class but require
 	// the insert to fail.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO vex_drafts (
 			id, tenant_id, project_id, component_id, vulnerability_id,
 			cve_id, state, evidence
@@ -254,7 +257,7 @@ func TestVEXDrafts_EvidenceRequired(t *testing.T) {
 
 	// Non-array JSON: jsonb_array_length raises an error on non-arrays;
 	// the CHECK constraint is therefore tripped.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO vex_drafts (
 			id, tenant_id, project_id, component_id, vulnerability_id,
 			cve_id, state, evidence
@@ -285,13 +288,18 @@ func TestVEXDrafts_StateAndDecisionAndConfidenceChecks(t *testing.T) {
 
 	good := `'[{"kind":"advisory_excerpt","ref":"00000000-0000-0000-0000-000000000001"}]'::jsonb`
 
-	// Bad state.
-	_, err := migDB.Exec(`
+	// M9 F158: vex_drafts is under FORCE RLS. Each negative-path INSERT
+	// runs inside a tenant-GUC tx, and bogus state values stay within
+	// VARCHAR(20) so the CHECK constraint fires before the column type
+	// length check pre-empts it.
+
+	// Bad state (15 chars, fits VARCHAR(20)).
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO vex_drafts (
 			id, tenant_id, project_id, component_id, vulnerability_id,
 			cve_id, state, evidence
 		) VALUES ($1, $2, $3, $4, $5,
-			'CVE-2025-CK', 'definitely-not-a-state', `+good+`)
+			'CVE-2025-CK', 'not_a_vex_state', `+good+`)
 	`, uuid.New(), tenant, uuid.New(), uuid.New(), uuid.New())
 	if err == nil {
 		t.Fatalf("CHECK constraint allowed unknown state; the allow-list is meant to be enforced")
@@ -301,7 +309,7 @@ func TestVEXDrafts_StateAndDecisionAndConfidenceChecks(t *testing.T) {
 	}
 
 	// Bad decision.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO vex_drafts (
 			id, tenant_id, project_id, component_id, vulnerability_id,
 			cve_id, state, evidence, decision
@@ -316,7 +324,7 @@ func TestVEXDrafts_StateAndDecisionAndConfidenceChecks(t *testing.T) {
 	}
 
 	// Bad confidence.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO vex_drafts (
 			id, tenant_id, project_id, component_id, vulnerability_id,
 			cve_id, state, evidence, confidence

@@ -159,12 +159,15 @@ func seedTenantForM5_1(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 func seedProjectForM5_1(t *testing.T, migDB *sql.DB, tenant uuid.UUID, label string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
-		id, tenant, "M5-1 RLS Project "+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed project %s: %v", label, err)
-	}
+	// M9 F158: see rls_test_helpers_integration_test.go.
+	withTenantGUC(t, migDB, tenant, func(tx *sql.Tx) {
+		if _, err := tx.Exec(
+			`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
+			id, tenant, "M5-1 RLS Project "+label+"-"+id.String()[:8],
+		); err != nil {
+			t.Fatalf("seed project %s: %v", label, err)
+		}
+	})
 	return id
 }
 
@@ -216,8 +219,8 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 	// role for the seed.
 	vulnID := uuid.New()
 	if _, err := migDB.Exec(`
-		INSERT INTO vulnerabilities (id, cve_id, severity, source, created_at, updated_at)
-		VALUES ($1, $2, 'HIGH', 'NVD', NOW(), NOW())
+		INSERT INTO vulnerabilities (id, cve_id, severity, source, updated_at)
+		VALUES ($1, $2, 'HIGH', 'NVD', NOW())
 	`, vulnID, "CVE-M5-1-VRE-"+vulnID.String()[:8]); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
@@ -636,8 +639,8 @@ func TestM5_1_TenantIsolation_SSVCAssessmentHistory(t *testing.T) {
 	// LOCAL).
 	vulnID := uuid.New()
 	if _, err := migDB.Exec(`
-		INSERT INTO vulnerabilities (id, cve_id, severity, source, created_at, updated_at)
-		VALUES ($1, $2, 'HIGH', 'NVD', NOW(), NOW())
+		INSERT INTO vulnerabilities (id, cve_id, severity, source, updated_at)
+		VALUES ($1, $2, 'HIGH', 'NVD', NOW())
 	`, vulnID, "CVE-M5-1-SAH-"+vulnID.String()[:8]); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
@@ -764,8 +767,8 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 
 	vulnID := uuid.New()
 	if _, err := migDB.Exec(`
-		INSERT INTO vulnerabilities (id, cve_id, severity, source, created_at, updated_at)
-		VALUES ($1, $2, 'HIGH', 'NVD', NOW(), NOW())
+		INSERT INTO vulnerabilities (id, cve_id, severity, source, updated_at)
+		VALUES ($1, $2, 'HIGH', 'NVD', NOW())
 	`, vulnID, "CVE-M5-1-SSACFK-"+vulnID.String()[:8]); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
@@ -781,6 +784,12 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 	defer txA.Rollback()
 	setTenantGUC(t, txA, tenantA)
 
+	// M9 F158: wrap the negative-path INSERT in a SAVEPOINT so the FK
+	// rejection doesn't poison the surrounding tx for the same-tenant
+	// sanity INSERT below.
+	if _, err := txA.Exec(`SAVEPOINT cross_tenant_probe`); err != nil {
+		t.Fatalf("savepoint: %v", err)
+	}
 	_, polluteErr := txA.Exec(`
 		INSERT INTO ssvc_assessments (
 			id, project_id, tenant_id, vulnerability_id, cve_id,
@@ -796,6 +805,9 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 		t.Fatalf("F75 regression (M5-1 composite FK): tenantA attached a ssvc_assessment "+
 			"to tenantB's project (id=%s). Migration 044 composite FK is supposed to reject.",
 			projectB)
+	}
+	if _, err := txA.Exec(`ROLLBACK TO SAVEPOINT cross_tenant_probe`); err != nil {
+		t.Fatalf("rollback to savepoint: %v", err)
 	}
 
 	// Sanity: the same INSERT with tenant A's own project_id must

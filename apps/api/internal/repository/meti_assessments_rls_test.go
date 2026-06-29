@@ -230,8 +230,11 @@ func TestMetiAssessments_EvidenceShape(t *testing.T) {
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
 
+	// M9 F158: meti_assessments is under FORCE RLS, so each negative-
+	// path INSERT must run inside a tx with the tenant GUC set.
+
 	// Empty array: MUST be accepted (relaxation from vex/cra).
-	_, err := migDB.Exec(`
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -243,7 +246,7 @@ func TestMetiAssessments_EvidenceShape(t *testing.T) {
 	}
 
 	// NULL evidence: NOT NULL violation, MUST be rejected.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -256,7 +259,7 @@ func TestMetiAssessments_EvidenceShape(t *testing.T) {
 
 	// Non-array JSON: jsonb_array_length raises on non-arrays; the
 	// CHECK constraint is therefore tripped.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -284,8 +287,10 @@ func TestMetiAssessments_PhaseStatusAndOverrideChecks(t *testing.T) {
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
 
+	// M9 F158: meti_assessments is under FORCE RLS.
+
 	// Bad criterion_phase.
-	_, err := migDB.Exec(`
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -300,7 +305,7 @@ func TestMetiAssessments_PhaseStatusAndOverrideChecks(t *testing.T) {
 	}
 
 	// Bad status.
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -315,7 +320,7 @@ func TestMetiAssessments_PhaseStatusAndOverrideChecks(t *testing.T) {
 	}
 
 	// Bad override_status (a non-NULL non-allowed value).
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence,
@@ -332,7 +337,7 @@ func TestMetiAssessments_PhaseStatusAndOverrideChecks(t *testing.T) {
 	}
 
 	// NULL override_status MUST be accepted (it's the "no override" state).
-	_, err = migDB.Exec(`
+	err = execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -364,8 +369,9 @@ func TestMetiAssessments_UniqueCriterionPerProject(t *testing.T) {
 
 	project := uuid.New()
 
+	// M9 F158: meti_assessments is under FORCE RLS.
 	// First insert OK.
-	if _, err := migDB.Exec(`
+	if err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence
@@ -376,7 +382,7 @@ func TestMetiAssessments_UniqueCriterionPerProject(t *testing.T) {
 	}
 
 	// Second insert with same (tenant, project, criterion) MUST fail.
-	_, err := migDB.Exec(`
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO meti_assessments (
 			id, tenant_id, project_id,
 			criterion_id, criterion_phase, status, evidence

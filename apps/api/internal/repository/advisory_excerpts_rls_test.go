@@ -225,7 +225,11 @@ func TestAdvisoryExcerpts_SourceCheckConstraint(t *testing.T) {
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	})
 
-	_, err := migDB.Exec(`
+	// M9 F158: migration 023+ puts advisory_excerpts under FORCE RLS, so
+	// the negative-path INSERT must run inside a tx with the tenant GUC
+	// set; otherwise the row is rejected by the RLS policy before the
+	// CHECK constraint fires.
+	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO advisory_excerpts (
 			id, tenant_id, cve_id, source
 		) VALUES ($1, $2, 'CVE-2025-CK', 'osv')

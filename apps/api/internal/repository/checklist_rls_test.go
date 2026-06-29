@@ -124,12 +124,18 @@ func seedTenantForComplianceChecklist(t *testing.T, migDB *sql.DB, label string)
 func seedProjectForComplianceChecklist(t *testing.T, migDB *sql.DB, tenant uuid.UUID, label string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
-		id, tenant, "ChecklistRLS Project "+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed project %s: %v", label, err)
-	}
+	// M9 F158: migration 023 puts projects under FORCE RLS with WITH CHECK
+	// (tenant_id = current_setting('app.current_tenant_id', true)::UUID).
+	// Migrator role is NOBYPASSRLS, so the seed must run inside a tx with
+	// SET LOCAL app.current_tenant_id. Use the shared helper.
+	withTenantGUC(t, migDB, tenant, func(tx *sql.Tx) {
+		if _, err := tx.Exec(
+			`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
+			id, tenant, "ChecklistRLS Project "+label+"-"+id.String()[:8],
+		); err != nil {
+			t.Fatalf("seed project %s: %v", label, err)
+		}
+	})
 	return id
 }
 

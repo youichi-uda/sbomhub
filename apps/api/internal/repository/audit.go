@@ -43,10 +43,21 @@ func (r *AuditRepository) q(ctx context.Context) database.Queryable {
 // GUC set (webhook handlers, background jobs, etc.). a.TenantID MAY be nil
 // for system-level events; such rows are invisible to tenant-scoped reads
 // by construction (every List/Get below filters with `tenant_id = $1`).
+//
+// M9 F158: the audit_logs.ip_address column is inet NULL. net.IP(nil).String()
+// returns the literal "<nil>", which PG inet rejects. Pass NULL when the
+// IP is unset; webhook handlers (webhook_clerk.go, webhook_lemonsqueezy.go)
+// construct AuditLog values with IPAddress=nil and would otherwise fail
+// the INSERT.
 func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
 	detailsJSON, err := json.Marshal(a.Details)
 	if err != nil {
 		detailsJSON = []byte("{}")
+	}
+
+	var ipArg interface{}
+	if len(a.IPAddress) > 0 && !a.IPAddress.IsUnspecified() {
+		ipArg = a.IPAddress.String()
 	}
 
 	query := `
@@ -57,7 +68,7 @@ func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
 	`
 	_, err = r.q(ctx).ExecContext(ctx, query,
 		a.ID, a.TenantID, a.UserID, a.Action, a.ResourceType, a.ResourceID,
-		detailsJSON, a.IPAddress.String(), a.UserAgent, a.CreatedAt)
+		detailsJSON, ipArg, a.UserAgent, a.CreatedAt)
 	return err
 }
 
