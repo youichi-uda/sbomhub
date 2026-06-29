@@ -82,6 +82,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # M10-4 #72: proxy.ts middleware matcher regression fixture.
+      # Asserts the matcher does not let arbitrary `.json` / `.txt`
+      # files at root bypass the auth path (the pre-M10-4 `.*\..*`
+      # rule used to). Hard gate (no continue-on-error): the matcher
+      # is a security invariant, regressing it is a release blocker.
+      - name: Proxy matcher invariant (M10-4)
+        run: node apps/web/src/proxy.matcher.test.mjs
+
       # First-landing enforcement policy: warn-only. See header comment.
       - name: Lint (next lint)
         continue-on-error: true

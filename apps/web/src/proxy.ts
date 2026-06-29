@@ -80,6 +80,17 @@ export default async function proxy(request: NextRequest) {
   return clerkHandler(request, {} as NextFetchEvent);
 }
 
+// M10-4 #72: matcher invariant — every request goes through the proxy
+// EXCEPT the explicit allowlist below. The previous `.*\\..*` exclusion
+// allowed any path containing a dot (e.g. `/secret.json`, `/leak.txt`,
+// `/anything.csv`) to bypass middleware entirely, which is defensively
+// risky if someone accidentally drops a sensitive file under apps/web/public/.
+// Tightened to an explicit allowlist of Next.js / Vercel internals and
+// the conventional static endpoints (favicon, robots.txt, sitemap.xml).
+// New static-extension files at the root WILL now invoke the proxy and
+// go through the public-route check. proxy.matcher.test.mjs holds the
+// regression fixtures asserting `/secret.json` / `/leak.txt` do not
+// bypass the matcher.
 export const config = {
-  matcher: ["/((?!api|_next|_vercel|.*\\..*).*)"],
+  matcher: ["/((?!api/|api$|_next/|_next$|_vercel/|_vercel$|favicon\\.ico$|robots\\.txt$|sitemap\\.xml$).*)"],
 };
