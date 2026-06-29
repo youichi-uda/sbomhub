@@ -25,8 +25,10 @@ import (
 )
 
 // withTenantGUC opens a transaction on db, sets the tenant GUC to
-// tenantID, runs fn against the tx, then COMMITs. On any failure the tx
-// is rolled back and t.Fatalf is called with context.
+// tenantID, runs fn against the tx, then COMMITs. On any failure (incl.
+// fn calling t.Fatalf via runtime.Goexit or panicking) the deferred
+// rollback closes the tx so the underlying connection is released
+// promptly instead of waiting for the test process to exit.
 //
 // Use this from seed helpers and from CHECK-constraint tests that need
 // to INSERT into a tenant-scoped table via the migrator role.
@@ -36,14 +38,22 @@ func withTenantGUC(t *testing.T, db *sql.DB, tenantID uuid.UUID, fn func(*sql.Tx
 	if err != nil {
 		t.Fatalf("withTenantGUC begin tx (tenant=%s): %v", tenantID, err)
 	}
+	// M9 F158: defer rollback guard; t.Fatalf inside fn() unwinds via
+	// runtime.Goexit and would otherwise skip the Commit + leak the tx.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenantID.String() + `'`); err != nil {
-		_ = tx.Rollback()
 		t.Fatalf("withTenantGUC SET LOCAL app.current_tenant_id=%s: %v", tenantID, err)
 	}
 	fn(tx)
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("withTenantGUC commit (tenant=%s): %v", tenantID, err)
 	}
+	committed = true
 }
 
 // execAsTenant runs a single INSERT/UPDATE/DELETE inside a
@@ -53,25 +63,32 @@ func withTenantGUC(t *testing.T, db *sql.DB, tenantID uuid.UUID, fn func(*sql.Tx
 // Unlike withTenantGUC, execAsTenant does NOT t.Fatalf on the exec
 // itself — many CHECK-constraint tests deliberately exercise inserts
 // that are expected to fail, and need the error value to assert against.
-// It still t.Fatalf's on Begin / SET LOCAL / Rollback failure.
+// It still t.Fatalf's on Begin / SET LOCAL / Commit failure, and uses a
+// deferred rollback so a t.Fatalf along those paths still closes the tx.
 func execAsTenant(t *testing.T, db *sql.DB, tenantID uuid.UUID, query string, args ...any) error {
 	t.Helper()
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatalf("execAsTenant begin tx (tenant=%s): %v", tenantID, err)
 	}
+	// M9 F158: defer rollback guard; same rationale as withTenantGUC.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenantID.String() + `'`); err != nil {
-		_ = tx.Rollback()
 		t.Fatalf("execAsTenant SET LOCAL app.current_tenant_id=%s: %v", tenantID, err)
 	}
 	_, execErr := tx.Exec(query, args...)
 	if execErr != nil {
-		// Always roll back on exec error; CHECK violation aborts the tx.
-		_ = tx.Rollback()
+		// CHECK / FK violation aborts the tx; deferred rollback closes it.
 		return execErr
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("execAsTenant commit (tenant=%s): %v", tenantID, err)
 	}
+	committed = true
 	return nil
 }
