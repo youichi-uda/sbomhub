@@ -1,6 +1,7 @@
 {
   "name": "sbomhub",
   "private": true,
+  "//pnpm-skip-monitor": "M10-4 #72: pnpm 10.34.3 auto-skips lifecycle (build) scripts for @clerk/shared, @parcel/watcher, @swc/core, sharp, unrs-resolver. The skip is intentional (M8 F154 first-run OK); the warning is informational. .github/workflows/frontend-ci.yml runs a require()-probe after pnpm install to fail-fast if any of the 5 native bindings ever go missing. If you add/remove from the skipped list (e.g. a transitive dep churns), update the probe in that workflow in lockstep. See docs/ci-inventory.md §4.3.",
   "packageManager": "pnpm@10.34.3",
   "scripts": {
     "dev:web": "pnpm --filter web dev",
