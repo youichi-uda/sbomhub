@@ -195,6 +195,16 @@ var ErrNoSboms = fmt.Errorf("project has no SBOM ingests")
 // owned by the requested project (or has been deleted). Maps to 404.
 var ErrSbomNotInProject = fmt.Errorf("sbom does not belong to project")
 
+// ErrNoNewerSbom is returned when the caller passes only `from` and that
+// SBOM is already the newest revision in the project — there is nothing
+// strictly after it to use as the default `to`. The handler maps this to
+// 400 (the request itself is structurally fine; the project state just
+// has no successor) so the UI can render a clean "already the most
+// recent revision" empty state without hitting the 500-class branch.
+// F166: previously this returned a generic fmt.Errorf that fell through
+// to the handler's 500 path.
+var ErrNoNewerSbom = fmt.Errorf("from sbom is already the newest in the project")
+
 // Compute runs the full diff. See Request godoc for the semantics of
 // optional From / To.
 func (s *Service) Compute(ctx context.Context, req Request) (*Response, error) {
@@ -284,9 +294,10 @@ func (s *Service) resolveSboms(ctx context.Context, req Request, sboms []model.S
 		to := pickSuccessor(sboms, from)
 		if to == nil {
 			// From is already the newest; nothing newer to diff against.
-			// Surface as an explicit error so the UI can show a clean
-			// "this is already the most recent revision" empty state.
-			return nil, nil, fmt.Errorf("no sbom newer than from: %s", req.FromSbomID)
+			// Surface ErrNoNewerSbom (F166) so the handler maps to 400
+			// and the UI can show a clean "already the most recent
+			// revision" empty state instead of a 500.
+			return nil, nil, ErrNoNewerSbom
 		}
 		return from, to, nil
 	default:

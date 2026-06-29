@@ -174,6 +174,40 @@ func TestDiffHandler_CrossTenant_Returns404(t *testing.T) {
 	}
 }
 
+// F166: when only `from` is set AND it's already the newest SBOM, the
+// handler must return 400 (ErrNoNewerSbom) — NOT 500 — so the UI can
+// render an "already most recent" empty state.
+func TestDiffHandler_FromIsNewest_Returns400(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	fromID := uuid.New()
+	toID := uuid.New()
+	now := time.Now()
+	fromSbom := model.Sbom{ID: fromID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", CreatedAt: now.Add(-time.Hour)}
+	toSbom := model.Sbom{ID: toID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", CreatedAt: now}
+
+	h := newDiffTestHandler(t, tenantID, projectID,
+		[]model.Sbom{toSbom, fromSbom}, // newest first
+		map[uuid.UUID][]model.Component{},
+		map[uuid.UUID][]model.ComponentVulnerability{},
+	)
+
+	e := echo.New()
+	// Pass `from` = the NEWEST sbom (toID). Default resolution should
+	// fail to find a successor and surface ErrNoNewerSbom.
+	req := httptest.NewRequest(http.MethodGet, "/?from="+toID.String(), nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+
+	_ = h.ProjectDiff(c)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("from-is-newest: got status %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDiffHandler_HappyPath_TwoSboms_DefaultsToNewest(t *testing.T) {
 	tenantID := uuid.New()
 	projectID := uuid.New()

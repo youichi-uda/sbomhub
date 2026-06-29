@@ -12,6 +12,7 @@ package diff
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -387,6 +388,25 @@ func TestCompute_NoSboms_ReturnsErrNoSboms(t *testing.T) {
 	_, err := svc.Compute(context.Background(), Request{TenantID: tenantID, ProjectID: projectID})
 	if err != ErrNoSboms {
 		t.Errorf("expected ErrNoSboms, got %v", err)
+	}
+}
+
+// F166: when only `from` is set AND from is already the newest SBOM,
+// the service must return ErrNoNewerSbom (not a generic fmt.Errorf).
+// The handler maps this to 400, not 500.
+func TestCompute_FromIsNewest_ReturnsErrNoNewerSbom(t *testing.T) {
+	f := twoSbomFixture(t)
+
+	// twoSbomFixture has from at -2h and to at -1h. Pass `to` (the
+	// newest) as `from` with no explicit `to`. Default resolution
+	// should not find a successor.
+	_, err := f.service.Compute(context.Background(), Request{
+		TenantID:   f.tenantID,
+		ProjectID:  f.projectID,
+		FromSbomID: f.toSbom.ID,
+	})
+	if !errors.Is(err, ErrNoNewerSbom) {
+		t.Errorf("expected ErrNoNewerSbom, got %v", err)
 	}
 }
 

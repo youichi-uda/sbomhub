@@ -82,6 +82,13 @@ func (h *DiffHandler) ProjectDiff(c echo.Context) error {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "project has no SBOMs to diff"})
 		case errors.Is(err, diff.ErrSbomNotInProject):
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom does not belong to project"})
+		case errors.Is(err, diff.ErrNoNewerSbom):
+			// F166: from is already the newest SBOM — no successor to
+			// default `to` to. Return 400 (request is structurally
+			// fine; project state has no newer revision) so the UI
+			// renders an "already most recent" empty state instead of
+			// the generic 500.
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "from sbom is already the newest in the project"})
 		default:
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
