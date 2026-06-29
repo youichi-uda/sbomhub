@@ -1688,7 +1688,7 @@ export const api = {
      * Single-SBOM projects: the server returns `from: null` and treats every
      * component in `to` as added — the "initial baseline" representation.
      */
-    getDiff: (
+    getDiff: async (
       id: string,
       opts?: { from?: string; to?: string },
     ): Promise<ProjectDiffResponse> => {
@@ -1696,9 +1696,40 @@ export const api = {
       if (opts?.from) params.set("from", opts.from);
       if (opts?.to) params.set("to", opts.to);
       const qs = params.toString();
-      return request<ProjectDiffResponse>(
+      const raw = await request<ProjectDiffResponse>(
         `/api/v1/projects/${id}/diff${qs ? `?${qs}` : ""}`,
       );
+      // M11-1 #76 / F164: the Go backend marshals a nil bucket slice as
+      // JSON `null`, not `[]` (uninitialised `[]LicensePolicyViolation`
+      // in service/diff/diff.go::LicensesDiff hits this in the common
+      // baseline path where no licence policy is configured). The
+      // TypeScript ProjectDiffResponse declares each bucket as a
+      // non-nullable array; the page (e.g. useMemo badges, ComponentBucket
+      // rows.length) calls `.length` / `.map` on them unconditionally,
+      // which throws "Cannot read properties of null (reading 'length')"
+      // at hydration and trips the Next.js "Application error: a
+      // client-side exception has occurred" boundary. Normalise here so
+      // every consumer of the typed shape gets the invariant the type
+      // promises. Cheaper than scattering `?? []` across the page and
+      // closer to the source of the polymorphism.
+      return {
+        ...raw,
+        components: {
+          added: raw.components?.added ?? [],
+          removed: raw.components?.removed ?? [],
+          version_changed: raw.components?.version_changed ?? [],
+        },
+        vulnerabilities: {
+          added: raw.vulnerabilities?.added ?? [],
+          resolved: raw.vulnerabilities?.resolved ?? [],
+          severity_changed: raw.vulnerabilities?.severity_changed ?? [],
+        },
+        licenses: {
+          added_policy_violations: raw.licenses?.added_policy_violations ?? [],
+          removed_policy_violations:
+            raw.licenses?.removed_policy_violations ?? [],
+        },
+      };
     },
     // VEX methods
     getVEXStatements: (id: string) =>

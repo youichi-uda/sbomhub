@@ -53,18 +53,23 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { buildDiffQuery, normaliseSeverity } from "./diff-helpers";
 
-// M10-6 #74 + Phase D F164 known-issue: when CI playwright loads
-// /<locale>/projects/<id>/diff in the production build, the page
-// renders Next.js's "Application error: a client-side exception
-// has occurred" boundary at heading level 2 instead of the timeline
-// h1 at level 1. The error reproduces 100% in CI but the local
-// `pnpm build` does not surface a compile-time issue, the page
-// works in manual smoke against `pnpm dev`, and tsc + go tests
-// pass. The root cause is not yet isolated (Suspense wrap around
-// useSearchParams was tried in commit e701737 and reverted because
-// it did not address the crash). The sbom-diff e2e spec is
-// re-marked test.skip and the investigation is deferred to M11
-// (see apps/web/e2e/sbom-diff.spec.ts F164 comment).
+// M10-6 #74 + Phase D F164 + M11-1 #76: the CI playwright run on
+// commit d6f759c surfaced "Application error: a client-side exception
+// has occurred while loading localhost" (heading level=2) in place of
+// the timeline h1 (level=1). Root cause isolated in M11-1: the Go
+// backend marshals a nil `[]LicensePolicyViolation` slice as JSON
+// `null`, but the TypeScript ProjectDiffResponse declares each bucket
+// as a non-nullable array. The `useMemo` below calls
+// `diff.licenses.added_policy_violations.length` unconditionally,
+// which throws TypeError on `null` at hydration and trips the
+// generic Next.js error boundary. Fix lives in
+// apps/web/src/lib/api.ts::api.projects.getDiff — it normalises every
+// bucket to `[]` before returning, so this page can keep the
+// invariant the type promises. The speculative Suspense wrap from
+// commit e701737 (reverted in 957e6d2) was a red herring: useSearchParams
+// in Next.js 15+ does not need an extra boundary when the parent route
+// is already dynamic (`/<locale>/projects/<id>/diff` is server-rendered
+// on demand per `next build` output).
 export default function ProjectDiffPage() {
   const params = useParams();
   const searchParams = useSearchParams();
