@@ -24,6 +24,8 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service"
 	"github.com/sbomhub/sbomhub/internal/service/cra"
 	"github.com/sbomhub/sbomhub/internal/service/diff"
+	"github.com/sbomhub/sbomhub/internal/service/diff_export"
+	"github.com/sbomhub/sbomhub/internal/service/diff_summary"
 	"github.com/sbomhub/sbomhub/internal/service/evidence_pack"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 	"github.com/sbomhub/sbomhub/internal/service/meti"
@@ -340,6 +342,21 @@ func main() {
 	// returns the richer envelope (components/vulnerabilities/licenses)
 	// and supports query-string driven from/to with auto-newest default.
 	projectDiffService := diff.NewService(projectRepo, sbomRepo, componentRepo, licensePolicyRepo)
+	// M11-4 (#79) — AI summary of the diff. Reuses the shared per-tenant
+	// LLM provider resolver (built below alongside the triage / CRA
+	// runners) and the same llm_calls + audit repositories. BYOK only —
+	// when no provider is configured the service writes a
+	// diff_summary_ai_disabled audit row and returns a deterministic
+	// placeholder envelope so the UI can still render the audit
+	// controls. See internal/service/diff_summary/diff_summary.go godoc
+	// for the request flow.
+	//
+	// M11-4 (#79) — CSV + PDF export. Pure formatting layer over the
+	// diff service — no LLM, no extra persistence. The handler's CSV
+	// and PDF routes share the same (from, to) query string contract
+	// as GET /diff so a UI download button can pass through whatever
+	// the user has selected on the diff detail page.
+	projectDiffExportService := diff_export.NewService(projectDiffService)
 	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache)
 	jvnService := service.NewJVNService(vulnRepo, componentRepo)
 	statsService := service.NewStatsService(statsRepo)
@@ -458,6 +475,28 @@ func main() {
 		"llm_timeout", triageLLMTimeout,
 		"tx_manager", "DBTxManager (F19, shared with triage)")
 
+	// M11-4 (#79) — diff AI summary service. Shares the per-tenant
+	// provider resolver + LLMCalls + audit repositories with VEX triage
+	// and CRA drafting so all four (M1, M2, M11) honour the same BYOK
+	// / audit-or-nothing discipline. The summary lifecycle is a single
+	// in-flight LLM call (no domain table) — every persistence event
+	// (llm_calls + audit_logs) is written inside the request's ambient
+	// TenantTx so RLS GUC is honoured and audit failure rolls the
+	// llm_calls write back. See internal/service/diff_summary/diff_summary.go
+	// godoc for the request flow.
+	projectDiffSummaryService := diff_summary.NewService(diff_summary.Config{
+		Diff:             projectDiffService,
+		Provider:         triageDefaultProvider,
+		ProviderResolver: triageProviderResolver,
+		LLMCalls:         llmCallsRepo,
+		Audit:            auditRepo,
+		LLMTimeout:       triageLLMTimeout,
+	})
+	slog.Info("Diff AI summary service initialised",
+		"default_provider", triageDefaultProvider.Name(),
+		"per_tenant_resolver", "tenant_llm_config",
+		"llm_timeout", triageLLMTimeout)
+
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
 	// NewSbomHandler needs `db` so the post-upload background scan goroutine
@@ -466,8 +505,12 @@ func main() {
 	// goroutine starts. Codex R1 fix.
 	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
-	// M10-6 (#74) — see projectDiffService comment above.
-	projectDiffHandler := handler.NewDiffHandler(projectDiffService)
+	// M10-6 (#74) — see projectDiffService comment above. M11-4 (#79)
+	// extends with AI summary + CSV/PDF export wired through the same
+	// handler so the (from, to) query string contract is shared.
+	projectDiffHandler := handler.NewDiffHandler(projectDiffService).
+		WithSummary(projectDiffSummaryService).
+		WithExport(projectDiffExportService)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	vexHandler := handler.NewVEXHandler(vexService)
@@ -839,6 +882,16 @@ func main() {
 	// service fans out. See internal/service/diff/diff.go godoc for the
 	// from/to resolution semantics.
 	auth.GET("/projects/:id/diff", projectDiffHandler.ProjectDiff)
+	// M11-4 (#79) — AI summary, CSV export, PDF export. Sit on the
+	// same auth+TenantTx chain as the M10-6 GET /diff endpoint so
+	// tenant_id scoping is enforced for all three. POST for /diff/summary
+	// because the LLM call is non-idempotent and has cost. CSV + PDF
+	// are GET because they're deterministic projections of the diff
+	// envelope (no LLM, no extra persistence) — the audit row written
+	// by the auditMiddleware path+method+latency record is sufficient.
+	auth.POST("/projects/:id/diff/summary", projectDiffHandler.ProjectDiffSummary)
+	auth.GET("/projects/:id/diff.csv", projectDiffHandler.ProjectDiffCSV)
+	auth.GET("/projects/:id/diff.pdf", projectDiffHandler.ProjectDiffPDF)
 
 	// VEX endpoints
 	auth.GET("/projects/:id/vex", vexHandler.List)
