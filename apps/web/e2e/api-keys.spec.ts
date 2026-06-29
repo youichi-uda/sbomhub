@@ -3,13 +3,21 @@ import { test, expect } from '@playwright/test';
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
-// M11-2 #77: re-enabled after docker/seed/web-e2e.sql gained a
-// synthetic-hash api_keys row for the tenant. The per-test specs
-// still create their own keys via POST /api/v1/projects/:id/apikeys
-// in their bodies; the seed exists so the list path renders
-// non-empty before the first POST completes, eliminating the empty-
-// state race that previously hung the full-suite job.
-test.describe('API Keys Management', () => {
+// M11-2 #77 (deferred to M12 — UI flow gap, not a seed gap): the seed
+// gained a synthetic-hash api_keys row, but the UI flow these tests
+// target is still broken. The first test (line 33) expects a
+// per-project "API Keys" tab on /projects/:id and times out at 15 s
+// waiting for it — current build only surfaces API keys at the
+// tenant level (/settings/apikeys), not as a per-project tab. The
+// subsequent tests (Create API Key button, name input, Copy button)
+// likewise target a per-project dialog that does not exist. The first
+// M11-2 attempt to un-skip burnt ~18 min of the 35-min CI budget on
+// these tests retrying ×3 and timing out at 1 min each (see run
+// 28378387603 cancellation). M12 owner needs to (a) decide whether
+// project-detail surfaces an API Keys tab or whether the spec moves
+// to /settings/apikeys, (b) align the dialog locators with the
+// chosen UI.
+test.describe.skip('API Keys Management', () => {
     let projectId: string;
 
     test.beforeAll(async ({ request }) => {

@@ -3,13 +3,22 @@ import { test, expect } from '@playwright/test';
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
-// M11-2 #77: re-enabled after docker/seed/web-e2e.sql gained MIT +
-// GPL-3.0-only seeded components plus the matching allow/deny
-// license_policies rows. The describe block creates its own project
-// in beforeAll, so the seed only provides the *catalog* of known
-// licenses + a working policy CRUD surface for the tab to render
-// against — the per-test rows still come from the spec.
-test.describe('License Policy Management', () => {
+// M11-2 #77 (deferred to M12 — UI flow gap, not a seed gap): the seed
+// gained MIT + GPL-3.0-only components plus matching allow/deny
+// license_policies rows in M11-2, but the UI flow these tests target
+// is still broken. The first test (line 67) expects a per-project
+// "Licenses" tab on /projects/:id and times out at 15 s waiting for
+// it — the project-detail page does not currently surface a Licenses
+// tab. The subsequent tests (Add Policy button, select dropdowns,
+// reason textarea, Check Violations) target a dialog shape that does
+// not exist in the current build. The first M11-2 attempt to un-skip
+// burnt ~18 min of the 35-min CI budget on these tests retrying ×3 and
+// timing out at 1 min each (see run 28378387603 cancellation). M12
+// owner needs to (a) decide whether project-detail surfaces a
+// Licenses tab or whether the spec moves to /settings/* alongside
+// the existing settings sub-routes, (b) align the dialog locators
+// with the chosen UI.
+test.describe.skip('License Policy Management', () => {
     let projectId: string;
 
     test.beforeAll(async ({ request }) => {

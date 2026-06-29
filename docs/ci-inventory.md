@@ -170,14 +170,12 @@ honest limitations (M12 で対処):
 
 ### M11-2 #77 で un-skip 済み (was-skipped → enabled)
 
-M10-3 で 22 spec、 M11-1 (`sbom-diff.spec.ts`) で 21 spec まで減らした skipped を、 M11-2 で **15+ 件 un-skip** した:
+M10-3 で 22 spec、 M11-1 (`sbom-diff.spec.ts`) で 21 spec まで減らした skipped を、 M11-2 で **13 件 un-skip** した。 licenses + api-keys describe は最初 un-skip したが、 UI flow gap (project-detail に Licenses / API Keys タブが無い、 spec が想定する dialog shape も乖離) で **35-min CI cap を burnt したため re-skip して M12 product decision 待ち** (run 28378387603 cancellation 参照):
 
 | spec | tests | M11-2 で扱った内容 |
 |---|---|---|
-| `licenses.spec.ts` | 6 | seed enrichment (MIT + GPL-3 components + 2 license_policies rows) |
-| `api-keys.spec.ts` | 6 | seed enrichment (synthetic-hash api_keys row) |
 | `meti-assessment.spec.ts` | 3 | seed criterion_id を catalog-correct `meti.env_setup.01` に揃え、 spec body の soft-gate を信頼して un-skip |
-| `search.spec.ts` | 3 | seed enrichment (4 CVE rows) |
+| `search.spec.ts` | 3 | seed enrichment (4 CVE rows: 44228 / 45046 / 23337 / 8203) |
 | `vulnerabilities.spec.ts` | 1 | seed component_vulnerabilities row |
 | `integrations.spec.ts` / `ipa-settings.spec.ts` / `sso-settings.spec.ts` | 3 | sidebar h1 ("SBOMHub") との strict-mode 衝突を `getByRole('heading', { name: regex, level: 1 })` で disambiguate |
 | `auth.spec.ts::EN→JA` | 1 | empty-Clerk-key mock auth で router.push 経路が確定したため re-enable |
@@ -185,12 +183,14 @@ M10-3 で 22 spec、 M11-1 (`sbom-diff.spec.ts`) で 21 spec まで減らした 
 | `security.spec.ts::null bytes` | 1 | parameterised INSERT で安全な outcome envelope (200/201/400/422/500) に揃える |
 | `security.spec.ts::SQL in project` | 1 | dialog button locator + main 内 heading で disambiguate |
 
-残 skipped (M12 対象):
+残 skipped (M12 対象、 計 14 spec):
 
-| spec | reason |
-|---|---|
-| `error-handling.spec.ts::should display error for unauthorized access` | dev:test に anonymous-request shim が無い (multi-file refactor 必須) |
-| `error-handling.spec.ts::should prevent duplicate project creation` | product decision (UNIQUE constraint or UI dedup hint) 未確定 |
+| spec | tests | reason |
+|---|---|---|
+| `licenses.spec.ts::License Policy Management` | 6 | **UI flow gap (not seed gap)**. project-detail page に Licenses tab が無く、 Add Policy dialog の shape も乖離。 M11-2 初回 attempt で 35-min CI cap を burnt (run 28378387603 cancellation) ため re-skip。 product decision: project-detail に Licenses tab を生やすか、 spec を /settings/* へ移すか |
+| `api-keys.spec.ts::API Keys Management` | 6 | **UI flow gap (not seed gap)**. project-detail page に API Keys tab が無く (現状は tenant-level `/settings/apikeys` のみ)、 spec が想定する dialog shape も乖離。 M11-2 初回 attempt で ~18 min CI を burnt。 product decision: project-detail に API Keys tab を追加するか、 spec を /settings/apikeys に揃えるか |
+| `error-handling.spec.ts::should display error for unauthorized access` | 1 | dev:test に anonymous-request shim が無い (multi-file refactor 必須) |
+| `error-handling.spec.ts::should prevent duplicate project creation` | 1 | product decision (UNIQUE constraint or UI dedup hint) 未確定 |
 
 ## 5. Out of scope (M0 では決めない)
 
