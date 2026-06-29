@@ -7,18 +7,19 @@
 # Next.js frontend (apps/web): ESLint, TypeScript noEmit, and a production
 # `next build`.
 #
-# Enforcement policy (initial landing):
-#   Each of the lint / typecheck / build steps runs with
-#   `continue-on-error: true`. This mirrors the golangci-lint.yml policy:
-#   this is the first time these gates are wired against apps/web, and
-#   the current main branch is not guaranteed to be clean. Blocking
-#   unrelated PRs on pre-existing violations would be hostile to small
-#   bug-fix / docs PRs.
+# Enforcement policy:
+#   - Lint:      HARD GATE (M11-5 #80). ESLint v9 flat config; new
+#                error-level regressions fail CI. Warnings remain visible
+#                but non-blocking. See apps/web/eslint.config.mjs for the
+#                rule-disable rationales.
+#   - Typecheck: warn-only (continue-on-error). Pre-M11-5 baseline; will
+#                be promoted in a follow-up once the type errors enumerated
+#                in M10-6 are addressed.
+#   - Build:     warn-only (continue-on-error). Same rationale as
+#                typecheck.
 #
-#   Once existing violations are cleaned up in a follow-up wave, these
-#   flags will be removed and the workflow becomes a hard gate (and gets
-#   added to the Required status checks list in docs/ci-inventory.md
-#   §2.3).
+# When typecheck / build are promoted to hard gates they should be added
+# to the Required status checks list in docs/ci-inventory.md §2.3.
 #
 # Versions:
 #   - Node 22 LTS — engines.node in root package.json is `>=18.0.0` and
@@ -129,9 +130,12 @@ jobs:
       - name: Proxy matcher invariant (M10-4)
         run: node apps/web/src/proxy.matcher.test.mjs
 
-      # First-landing enforcement policy: warn-only. See header comment.
-      - name: Lint (next lint)
-        continue-on-error: true
+      # M11-5 #80: hard gate after the ESLint v9 flat-config migration.
+      # Next 16 removed `next lint`; we now invoke eslint directly against
+      # apps/web/eslint.config.mjs. The migration brought the project to
+      # zero errors (warnings remain visible). New error-level regressions
+      # block CI.
+      - name: Lint (eslint v9 flat config)
         run: pnpm --filter web lint
 
       - name: Typecheck (tsc --noEmit)
