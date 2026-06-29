@@ -1,15 +1,19 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('SSO Settings', () => {
-    // M10-3 #71 follow-up: same h1-level mismatch as integrations /
-    // ipa-settings. Skip pending M11 heading refresh.
-    test.skip('should navigate to SSO settings page', async ({ page }) => {
+    // M11-2 #77: same fix shape as integrations / ipa-settings. The
+    // SSO page renders h1 ("シングルサインオン (SSO)") but the sidebar h1
+    // ("SBOMHub") triggers a strict-mode ambiguity. Filter by name to
+    // disambiguate.
+    test('should navigate to SSO settings page', async ({ page }) => {
         await page.goto('/en/settings/sso');
         await page.waitForLoadState('networkidle');
 
-        // Should show SSO settings page
-        const heading = page.getByRole('heading', { level: 1 });
-        await expect(heading).toContainText(/SSO|認証|Authentication/i, { timeout: 15000 });
+        const heading = page.getByRole('heading', {
+            name: /SSO|シングルサインオン|認証|Authentication/i,
+            level: 1,
+        });
+        await expect(heading).toBeVisible({ timeout: 15000 });
     });
 
     test('should display SSO provider options', async ({ page }) => {

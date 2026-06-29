@@ -4,18 +4,22 @@ const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
 test.describe('Issue Tracker Integrations', () => {
-    // M10-3 #71 follow-up: page renders heading at a level other than h1.
-    // Sibling tests (add button, dialog, form fields) pass — the H1
-    // expectation is the only broken assertion. Skip pending a M11
-    // pass that uses getByRole('heading') without level constraint or
-    // updates the page to emit h1.
-    test.skip('should navigate to integrations settings page', async ({ page }) => {
+    // M11-2 #77: the page already renders the title as h1, but the
+    // dashboard layout's sidebar also mounts an h1 ("SBOMHub") which
+    // makes the bare `getByRole('heading', { level: 1 })` lookup
+    // ambiguous in strict mode. Filtering by name resolves the
+    // ambiguity without touching the sidebar (a11y best practice
+    // would be to demote it; deferred to M12 since it would touch a
+    // shared layout).
+    test('should navigate to integrations settings page', async ({ page }) => {
         await page.goto('/en/settings/integrations');
         await page.waitForLoadState('networkidle');
 
-        // Should show integrations page
-        const heading = page.getByRole('heading', { level: 1 });
-        await expect(heading).toContainText(/Integration|連携|課題管理/i, { timeout: 15000 });
+        const heading = page.getByRole('heading', {
+            name: /Integration|連携|課題管理/i,
+            level: 1,
+        });
+        await expect(heading).toBeVisible({ timeout: 15000 });
     });
 
     test('should display add connection button', async ({ page }) => {

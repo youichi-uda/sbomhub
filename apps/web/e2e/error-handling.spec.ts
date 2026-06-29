@@ -170,10 +170,14 @@ test.describe('Error Handling', () => {
         await request.delete(`${API_BASE_URL}/api/v1/projects/${project.id}`);
     });
 
-    // M10-3 #71 follow-up: in dev:test mode the seed tenant is always
-    // authorized, so this assertion ("login prompt OR settings page")
-    // falls through both branches. Re-evaluate in M11 once the dev:test
-    // shim has a way to simulate an anonymous request.
+    // M11-2 #77 (deferred to M12): in dev:test / self-hosted-auth
+    // mode the seed tenant is always authorized, so this assertion
+    // ("login prompt OR settings page") falls through both branches.
+    // Implementing an anonymous-request shim under the empty Clerk
+    // publishable-key flow needs a Next.js middleware or route-
+    // group split (anonymous → /sign-in mount, authed → dashboard).
+    // That's a multi-file refactor and crosses the M11-2 file scope —
+    // re-skipped with the clearer M12 hand-off.
     test.skip('should display error for unauthorized access', async ({ page }) => {
         // Try to access settings without proper authorization
         await page.goto('/en/settings');
@@ -214,12 +218,14 @@ test.describe('Error Handling', () => {
         expect(hasError || hasContent).toBeTruthy();
     });
 
-    // M10-3 #71 follow-up: the "duplicate prevention" assertion depends
-    // on the API rejecting the second POST with a 4xx — current
-    // implementation creates two projects with the same name. Fixing
-    // this requires either a UNIQUE constraint on (tenant_id, name)
-    // (data model decision) or UI-side dedup. Defer to M11 product
-    // decision.
+    // M11-2 #77 (deferred to M12 — product decision): the API
+    // currently allows duplicate project names within a tenant. The
+    // product question is whether two projects called "My App" in
+    // the same tenant should be (a) merged client-side via dedup
+    // hint, (b) rejected with a 409, or (c) silently coexist with
+    // distinct UUIDs (current behaviour). Each option has a
+    // different migration / UX cost. Re-skipped here so M11 doesn't
+    // ship a half-thought constraint that would force a rollback.
     test.skip('should prevent duplicate project creation', async ({ page, request }) => {
         // Create a project
         const projectName = `Duplicate Test ${Date.now()}`;

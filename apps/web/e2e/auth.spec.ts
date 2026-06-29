@@ -94,24 +94,23 @@ test.describe('Authentication Flow', () => {
         expect(hasEnButton || hasJaButton || hasLangSelect).toBeTruthy();
     });
 
-    // M10-3 #71 follow-up: assertion `/\/ja/` fails because the lang
-    // switcher in dev:test mode lands at a different path. The
-    // surrounding language-detection / preference tests pass. Skip
-    // pending M11 review of the lang-switch flow under the Clerk-
-    // disabled launcher.
-    test.skip('should switch language from EN to JA', async ({ page }) => {
-        await page.goto('/en');
+    // M11-2 #77: re-enabled. The lang switcher (Header.toggleLocale)
+    // uses router.push("/ja...") which is synchronous in dev:test
+    // mode; the previous failure mode was tied to a stale Clerk
+    // OrganizationSwitcher mount that has since been resolved by
+    // empty-publishable-key short-circuiting in M10-3. The assertion
+    // tolerates any URL containing `/ja` to stay robust against home
+    // redirects.
+    test('should switch language from EN to JA', async ({ page }) => {
+        await page.goto('/en/dashboard');
         await page.waitForLoadState('networkidle');
 
-        // Find and click language switcher
-        const langButton = page.locator('button:has-text("EN")').first();
-        if (await langButton.isVisible()) {
-            await langButton.click();
-            await page.waitForTimeout(500);
+        // The header button shows "EN" on /en/* and "JA" on /ja/*.
+        const langButton = page.getByRole('button', { name: /^EN$/ }).first();
+        await expect(langButton).toBeVisible({ timeout: 10000 });
+        await langButton.click();
 
-            // URL should change to /ja
-            await expect(page).toHaveURL(/\/ja/);
-        }
+        await expect(page).toHaveURL(/\/ja(\/|$)/, { timeout: 5000 });
     });
 
     test('should maintain language preference across pages', async ({ page }) => {

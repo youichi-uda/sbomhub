@@ -3,14 +3,13 @@ import { test, expect } from '@playwright/test';
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
-// M10-3 #71 follow-up: the 6 UI tests under "License Policy Management"
-// each hang 60 s waiting for a Licenses tab + policy list that the M10-3
-// seed (docker/seed/web-e2e.sql) does not populate. With 60 s timeout ×
-// 3 retries × 6 tests = ~18 min, the full-suite job overruns the 35 min
-// runner cap. Skipping the describe block until M11 ships a richer seed
-// (licensed components + populated license_policies table) keeps the
-// CI gate green. The API-only tests below this describe remain active.
-test.describe.skip('License Policy Management', () => {
+// M11-2 #77: re-enabled after docker/seed/web-e2e.sql gained MIT +
+// GPL-3.0-only seeded components plus the matching allow/deny
+// license_policies rows. The describe block creates its own project
+// in beforeAll, so the seed only provides the *catalog* of known
+// licenses + a working policy CRUD surface for the tab to render
+// against — the per-test rows still come from the spec.
+test.describe('License Policy Management', () => {
     let projectId: string;
 
     test.beforeAll(async ({ request }) => {
