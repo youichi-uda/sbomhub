@@ -523,6 +523,33 @@ export interface ProjectDiffResponse {
   };
 }
 
+// M11-4 (#79) — AI summary envelope returned by
+// POST /api/v1/projects/:id/diff/summary.
+//
+// `ai_disabled = true` indicates the backend wrote a deterministic
+// placeholder (no BYOK configured). The UI should still render
+// Confidence / Evidence / Approve controls so the audit shape is
+// uniform across configured / unconfigured deployments.
+export interface ProjectDiffSummaryEvidence {
+  kind: string;
+  ref: string;
+}
+
+export interface ProjectDiffSummaryResponse {
+  project_id: string;
+  from: ProjectDiffSbomRef | null;
+  to: ProjectDiffSbomRef | null;
+  summary: string;
+  highlights: string[];
+  confidence: number;
+  evidence: ProjectDiffSummaryEvidence[];
+  provider: string;
+  model: string;
+  lang: string;
+  generated_at: string;
+  ai_disabled: boolean;
+}
+
 // Search types
 export interface AffectedComponent {
   id: string;
@@ -1730,6 +1757,113 @@ export const api = {
             raw.licenses?.removed_policy_violations ?? [],
         },
       };
+    },
+    /**
+     * M11-4 (#79) — POST /api/v1/projects/:id/diff/summary?from=&to=&lang=.
+     *
+     * Generates an AI natural-language summary of the diff. Non-idempotent
+     * (LLM call has cost), hence POST. The backend persists an llm_calls
+     * row + an audit_logs row (diff_summary_ai_generated | ai_disabled |
+     * ai_failed) per request — see internal/service/diff_summary godoc.
+     *
+     * `ai_disabled = true` means BYOK is not configured server-side; the
+     * caller should still render the placeholder envelope (the backend
+     * supplies a deterministic mechanical summary so the audit UI shape
+     * stays uniform).
+     */
+    getDiffSummary: async (
+      id: string,
+      opts?: { from?: string; to?: string; lang?: string },
+    ): Promise<ProjectDiffSummaryResponse> => {
+      const params = new URLSearchParams();
+      if (opts?.from) params.set("from", opts.from);
+      if (opts?.to) params.set("to", opts.to);
+      if (opts?.lang) params.set("lang", opts.lang);
+      const qs = params.toString();
+      const raw = await request<ProjectDiffSummaryResponse>(
+        `/api/v1/projects/${id}/diff/summary${qs ? `?${qs}` : ""}`,
+        { method: "POST" },
+      );
+      // Defensive normalisation in the spirit of the M11-1 fix for
+      // getDiff: the Go backend marshals nil slices as JSON `null`,
+      // and consumers call `.map` on highlights / evidence
+      // unconditionally.
+      return {
+        ...raw,
+        highlights: raw.highlights ?? [],
+        evidence: raw.evidence ?? [],
+      };
+    },
+    /**
+     * M11-4 (#79) — build a CSV download URL for the diff.
+     *
+     * Returns a string the UI can hand to a hidden <a download> anchor
+     * or open in a new tab. We do NOT call the endpoint through the
+     * shared request() helper because that path assumes JSON; download
+     * endpoints need the browser's native blob handling.
+     */
+    getDiffCsvUrl: (
+      id: string,
+      opts?: { from?: string; to?: string },
+    ): string => {
+      const params = new URLSearchParams();
+      if (opts?.from) params.set("from", opts.from);
+      if (opts?.to) params.set("to", opts.to);
+      const qs = params.toString();
+      return `${API_URL}/api/v1/projects/${id}/diff.csv${qs ? `?${qs}` : ""}`;
+    },
+    /**
+     * M11-4 (#79) — PDF download URL companion to getDiffCsvUrl.
+     */
+    getDiffPdfUrl: (
+      id: string,
+      opts?: { from?: string; to?: string; lang?: string },
+    ): string => {
+      const params = new URLSearchParams();
+      if (opts?.from) params.set("from", opts.from);
+      if (opts?.to) params.set("to", opts.to);
+      if (opts?.lang) params.set("lang", opts.lang);
+      const qs = params.toString();
+      return `${API_URL}/api/v1/projects/${id}/diff.pdf${qs ? `?${qs}` : ""}`;
+    },
+    /**
+     * M11-4 (#79) — fetch the CSV / PDF as a blob through the
+     * authenticated request chain. Use this variant when the call needs
+     * to go through the same auth/org headers the rest of the API
+     * receives (the URL builders above produce raw URLs which assume
+     * the browser is logged in via a cookie + Clerk session).
+     */
+    fetchDiffExport: async (
+      id: string,
+      format: "csv" | "pdf",
+      opts?: { from?: string; to?: string; lang?: string },
+    ): Promise<{ blob: Blob; filename: string }> => {
+      const params = new URLSearchParams();
+      if (opts?.from) params.set("from", opts.from);
+      if (opts?.to) params.set("to", opts.to);
+      if (format === "pdf" && opts?.lang) params.set("lang", opts.lang);
+      const qs = params.toString();
+      const path = `/api/v1/projects/${id}/diff.${format}${qs ? `?${qs}` : ""}`;
+
+      const headers: Record<string, string> = {};
+      if (getAuthToken) {
+        const token = await getAuthToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+      }
+      if (getOrgId) {
+        const orgId = getOrgId();
+        if (orgId) headers["X-Clerk-Org-ID"] = orgId;
+      }
+      const res = await fetch(`${API_URL}${path}`, { headers });
+      if (!res.ok) {
+        throw new APIError(res.status, undefined);
+      }
+      const blob = await res.blob();
+      // Parse the Content-Disposition `filename=...` for a friendly download.
+      const cd = res.headers.get("Content-Disposition") ?? "";
+      const m = cd.match(/filename=\"?([^\";]+)\"?/);
+      const filename = m?.[1] ?? `sbomhub-diff.${format}`;
+      return { blob, filename };
     },
     // VEX methods
     getVEXStatements: (id: string) =>

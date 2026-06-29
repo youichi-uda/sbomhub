@@ -1082,7 +1082,35 @@
       "severity": "重大度",
       "fromSeverity": "変更前",
       "toSeverity": "変更後",
-      "policyName": "ポリシー"
+      "policyName": "ポリシー",
+      "aiSummaryPanel": "AI 要約"
+    },
+    "AiSummary": {
+      "title": "AI 要約",
+      "description": "AI が差分から CRA 報告関連要点 / ライセンス違反 / 重大な変更を抽出します。生成後は人間が確認・承認してください。",
+      "idleHint": "「生成」をクリックすると LLM が差分を要約します。BYOK 未設定時は決定論的なプレースホルダを表示します。",
+      "generate": "生成",
+      "generating": "生成中...",
+      "regenerate": "再生成",
+      "generateFailed": "AI 要約の生成に失敗しました",
+      "highlights": "ハイライト",
+      "confidence": "信頼度",
+      "provider": "プロバイダ",
+      "generatedAt": "生成日時",
+      "evidenceToggle": "根拠 ({count})",
+      "decisionPrompt": "レビュー:",
+      "approve": "承認",
+      "edit": "編集",
+      "reject": "却下",
+      "decisionLocal": "ローカル判定: {decision} (M12 で永続化)",
+      "disabledBanner": "AI 要約は無効化されています。/settings/llm で BYOK を設定すると有効化できます。"
+    },
+    "Export": {
+      "label": "差分をエクスポート",
+      "csv": "CSV",
+      "pdf": "PDF",
+      "exportFailed": "エクスポートに失敗しました",
+      "exportFailedStatus": "エクスポートに失敗しました (HTTP {status})"
     }
   },
   "Triage": {

@@ -1081,7 +1081,35 @@
       "severity": "Severity",
       "fromSeverity": "From",
       "toSeverity": "To",
-      "policyName": "Policy"
+      "policyName": "Policy",
+      "aiSummaryPanel": "AI summary"
+    },
+    "AiSummary": {
+      "title": "AI Summary",
+      "description": "AI extracts CRA-relevant findings, licence violations, and high-impact changes from the diff. Drafts only — humans approve.",
+      "idleHint": "Click Generate to ask the LLM for a 3-5 sentence summary. When BYOK is not configured, a deterministic placeholder is shown instead.",
+      "generate": "Generate",
+      "generating": "Generating...",
+      "regenerate": "Regenerate",
+      "generateFailed": "Failed to generate AI summary",
+      "highlights": "Highlights",
+      "confidence": "Confidence",
+      "provider": "Provider",
+      "generatedAt": "Generated at",
+      "evidenceToggle": "Evidence ({count})",
+      "decisionPrompt": "Review:",
+      "approve": "Approve",
+      "edit": "Edit",
+      "reject": "Reject",
+      "decisionLocal": "Local decision: {decision} (persistence in M12)",
+      "disabledBanner": "AI summary is disabled. Configure BYOK at /settings/llm to enable."
+    },
+    "Export": {
+      "label": "Export diff",
+      "csv": "CSV",
+      "pdf": "PDF",
+      "exportFailed": "Export failed",
+      "exportFailedStatus": "Export failed (HTTP {status})"
     }
   },
   "Triage": {

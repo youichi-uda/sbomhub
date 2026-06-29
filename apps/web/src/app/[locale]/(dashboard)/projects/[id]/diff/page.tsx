@@ -51,6 +51,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { AiSummaryPanel } from "@/components/diff/ai-summary";
+import { ExportButtons } from "@/components/diff/export-buttons";
 import { buildDiffQuery, normaliseSeverity } from "./diff-helpers";
 
 // M10-6 #74 + Phase D F164 + M11-1 #76: the CI playwright run on
@@ -241,6 +243,17 @@ export default function ProjectDiffPage() {
               }}
               formatDate={formatDate}
             />
+            {/* M11-4 (#79): CSV + PDF export action row sits between the
+                from/to header and the data tabs so it's visible regardless
+                of which tab the user lands on. */}
+            <div className="mt-4">
+              <ExportButtons
+                projectId={projectId}
+                from={from}
+                to={to}
+                lang={locale}
+              />
+            </div>
             <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-6">
               <TabsList>
                 <TabsTrigger value="components">
@@ -251,6 +264,13 @@ export default function ProjectDiffPage() {
                 </TabsTrigger>
                 <TabsTrigger value="licenses">
                   {tDetail("licensesPanel")}
+                </TabsTrigger>
+                {/* M11-4 (#79): AI summary lives in its own tab so the
+                    deterministic diff buckets remain the default landing
+                    surface (the AI artefact is opt-in per the CLAUDE.md
+                    "AI drafts only. Humans approve." discipline). */}
+                <TabsTrigger value="ai-summary">
+                  {tDetail("aiSummaryPanel")}
                 </TabsTrigger>
               </TabsList>
 
@@ -333,6 +353,15 @@ export default function ProjectDiffPage() {
                     license: tDetail("componentLicense"),
                     policyName: tDetail("policyName"),
                   }}
+                />
+              </TabsContent>
+
+              <TabsContent value="ai-summary" className="mt-4">
+                <AiSummaryPanel
+                  projectId={projectId}
+                  from={from}
+                  to={to}
+                  lang={locale}
                 />
               </TabsContent>
             </Tabs>
