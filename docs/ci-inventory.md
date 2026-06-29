@@ -121,12 +121,26 @@ P3 = それ以降):
 - [x] (P1) sbomhub: migration roundtrip workflow 追加 — `migration-roundtrip.yml` (#17-followup) で docker compose postgres + role bootstrap + `cmd/migrate up && down 999 && up` を実行。 up/down/up が完走することを block、 schema diff (pg_dump --schema-only) は 027 backfill 等 known non-roundtrippable migration を抱えるため warn-only で初回 landing。 strict 化 (diff → exit 1) は P2 で別 wave
 - [x] (P1) sbomhub: RLS integration test workflow 追加 — `rls-integration.yml` で docker compose postgres + role bootstrap + migrate → `go test -tags=integration ./internal/repository/... ./internal/middleware/...` を実行 (#17-followup)
 - [x] (P1) sbomhub: frontend lint/typecheck/build workflow 追加 — `frontend-ci.yml` (#17-followup) で Node 22 LTS + pnpm 9 で `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`) を実行。 各 step `continue-on-error: true` の warn-only で初回 landing (apps/web に既存 lint / type 違反が残存している可能性があり、 無関係 PR を block しないため)。 strict 化 (continue-on-error 削除 + Required status checks 追加) は既存違反 fix 後 P2 で別 wave。 `apps/web/package.json` に `typecheck` script (`tsc --noEmit`) を追加
+- [x] (M10-4 #72) sbomhub: `frontend-ci.yml` に proxy.ts matcher 不変条件 fixture (`apps/web/src/proxy.matcher.test.mjs`) + pnpm-workspace.yaml placeholder 検知 + pnpm 10 lifecycle-script skipped 5 package の native binding probe を追加。 §4.3 参照
 - [ ] (USER) GitHub UI で `main` ブランチに上記 Required status checks 設定 (§2.3 / §3.3)
 - [x] (P2) sbomhub: Golden Path E2E skeleton (Playwright を CI で実行) — `web-e2e.yml` (M8 #67) で docker compose 一式 (postgres + redis + locally built api + web) を立て、 chromium で `apps/web/e2e/smoke/` (home / dashboard / api-health) を実行。 docker-publish.yml (M7-5) の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)。 認証込みの深堀り spec (`apps/web/e2e/*.spec.ts` 26 件、 `dev:test` 前提) の CI 化は M1 で別 wave
 - [ ] (P2) sbomhub-cli: golangci-lint の `continue-on-error: true` 解除 (Go 1.25 対応待ち)
 - [ ] (P2) sbomhub-cli: PR 時の goreleaser snapshot dry-run 追加
 - [ ] (P2) sbomhub / sbomhub-cli: security scanning (Snyk / GitGuardian / gosec / trivy fs scan) workflow 追加
 - [ ] (P3) sbomhub-cli: homebrew tap / scoop bucket の install smoke 追加
+
+## 4.3 frontend-ci.yml: M10-4 guard rails
+
+`frontend-ci.yml` (M10-4 #72) に以下の hard gate を追加した。 いずれも
+`continue-on-error: true` ではなく即時 fail。
+
+| Guard | 何を守るか |
+|---|---|
+| `Guard pnpm-workspace.yaml against placeholder` | `pnpm-workspace.yaml` に `'@clerk/shared': set this to true or false` 等の `pnpm approve-builds` scaffold が紛れ込んだ際に PR を block。 M5-M9 で 数回 stale commit が発生し `git checkout --` revert が必要だった (詳細: pnpm-workspace.yaml header comment) |
+| `Proxy matcher invariant (M10-4)` | `apps/web/src/proxy.matcher.test.mjs` を `node` で実行し、 proxy.ts の middleware matcher が `/secret.json` / `/leak.txt` 等 static-extension path を auth から bypass させない不変条件を pin |
+| `pnpm 10 lifecycle script skip probe (M10-4)` | pnpm 10.34.3 が自動 skip する `@clerk/shared` / `@parcel/watcher` / `@swc/core` / `sharp` / `unrs-resolver` の native binding が **install 後に require できる**ことを確認。 binding が壊れていれば runtime まで露見せず CI で先に fail (詳細: package.json `// pnpm-skip-monitor` 参照) |
+
+これら 3 つは全て M10-4 #72 で追加。 過去 M5-M9 で manual revert / stale catch を要した polish item を CI gate 化した。
 
 ## 5. Out of scope (M0 では決めない)
 

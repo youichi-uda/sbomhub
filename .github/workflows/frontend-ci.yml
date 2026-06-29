@@ -79,6 +79,21 @@ jobs:
           node --version
           pnpm --version
 
+      # M10-4 #72: pnpm-workspace.yaml placeholder guard.
+      # `pnpm approve-builds` (or a casual edit) can drop a stale
+      # onlyBuiltDependencies scaffold (a per-package "set true or false"
+      # comment) into pnpm-workspace.yaml. M5-M9 saw this recur several
+      # times and required manual `git checkout --` reverts. Fail fast on
+      # PR. grep `-v '^[[:space:]]*#'` strips comment lines so the header
+      # comment in pnpm-workspace.yaml documenting this guard doesn't
+      # self-trigger.
+      - name: Guard pnpm-workspace.yaml against placeholder
+        run: |
+          if grep -vE '^[[:space:]]*#' pnpm-workspace.yaml | grep -F 'set this to true or false'; then
+            echo "::error file=pnpm-workspace.yaml::pnpm-workspace.yaml contains the pnpm approve-builds scaffold placeholder. Revert with: git checkout -- pnpm-workspace.yaml (see header comment in the file for context, M10-4 #72)."
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

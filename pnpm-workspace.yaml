@@ -1,3 +1,28 @@
+# M10-4 #72: keep this file EXACTLY as-is — just the `packages` array.
+#
+# Recurrence history: M5-M9 saw pnpm-workspace.yaml get a stale
+# onlyBuiltDependencies scaffold (a per-package "set true or false"
+# placeholder) committed accidentally several times, requiring
+# `git checkout --` revert.
+#
+# Working hypothesis (2026-06-29):
+#   `pnpm approve-builds` (pnpm >= 10 lifecycle-script consent flow) writes
+#   an interactive scaffold into pnpm-workspace.yaml when an operator runs
+#   it casually after `pnpm install` complains about ignored build scripts
+#   (@clerk/shared / @parcel/watcher / @swc/core / sharp / unrs-resolver —
+#   tracked separately by .github/workflows/frontend-ci.yml's "pnpm 10
+#   lifecycle skip probe", M10-4 #72 Item 4).
+#
+#   This project deliberately leaves those build scripts skipped — the
+#   warning is informational, not actionable. DO NOT run `pnpm approve-builds`
+#   in this workspace. If pnpm starts requiring an explicit
+#   `onlyBuiltDependencies` declaration in a future major, revisit Item 4
+#   first to decide whether to actually allow the scripts or to keep them
+#   skipped via a project-policy comment.
+#
+# Guard: frontend-ci.yml fails the build if any non-comment line in this
+# file contains the pnpm approve-builds scaffold placeholder, so an
+# accidental commit will be caught at PR time.
 packages:
   - 'apps/*'
   - 'packages/*'
