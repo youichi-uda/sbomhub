@@ -18,6 +18,12 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
+  // Per-spec timeout. The M10-3 #71 brief pins this at 60 s so the full
+  // e2e suite (CI job .github/workflows/web-e2e.yml::full-e2e) does not
+  // silently time out on the slower self-seeding specs (sbom-diff /
+  // meti-assessment / vex / cra-reports each poll the API for async
+  // pipeline state). Local runs reuse the same value for consistency.
+  timeout: 60_000,
   reporter: process.env.CI
     ? [['html', { open: 'never' }], ['list']]
     : 'html',

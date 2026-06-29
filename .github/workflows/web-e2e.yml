@@ -1,18 +1,27 @@
 ---
-# SBOMHub - Web E2E (Playwright) — M8 #67
+# SBOMHub - Web E2E (Playwright) — M8 #67 / M10-3 #71
 #
 # Complements .github/workflows/docker-publish.yml's web smoke (M7-5).
 # That smoke confirms the published web image boots and serves a non-
 # empty response at build time; this workflow drives a real browser
 # against a full docker compose stack (postgres + redis + api + web,
-# locally built from the PR source) and verifies the runtime flow:
+# locally built from the PR source) and verifies the runtime flow.
 #
-#   1. /  → next-intl middleware routes to /ja or /en (home.spec.ts).
-#   2. /ja/dashboard → either the dashboard renders or the Clerk
-#      sign-in surface is reachable; the route does not 5xx
-#      (dashboard.spec.ts).
-#   3. /api/v1/health → returns {"status":"ok","mode":...} from the
-#      api the web image is configured to talk to (api-health.spec.ts).
+# Two jobs:
+#
+#   - `web-e2e` (M8 #67) — Playwright smoke (3 specs under e2e/smoke/).
+#     Hits production-shaped images with empty Clerk key. Confirms the
+#     home → locale redirect, /dashboard reachability, and api /health
+#     contract.
+#
+#   - `web-e2e-full` (M10-3 #71) — Playwright full suite (26 specs
+#     under e2e/*.spec.ts). Hits the same production-shaped images but
+#     pre-loads docker/seed/web-e2e.sql so the dashboard / projects /
+#     vex / cra / meti / audit specs render with at least one row each.
+#     The seed is loaded BEFORE the web container starts so the
+#     auto-create-on-first-request path in apps/api/internal/repository
+#     /tenant.go::GetOrCreateDefault picks up the deterministic seed
+#     UUID instead of minting a random one.
 #
 # Stack pattern is lifted from golden-path-e2e.yml — same per-run
 # ENCRYPTION_KEY / role bootstrap discipline, same local image build to
@@ -30,6 +39,7 @@ name: Web E2E
       - 'apps/api/**'
       - 'docker-compose.yml'
       - 'docker-compose.override.yml'
+      - 'docker/seed/**'
       - '.env.example'
       - 'install.sh'
       - 'pnpm-lock.yaml'
@@ -44,6 +54,7 @@ name: Web E2E
       - 'apps/api/**'
       - 'docker-compose.yml'
       - 'docker-compose.override.yml'
+      - 'docker/seed/**'
       - '.env.example'
       - 'install.sh'
       - 'pnpm-lock.yaml'
@@ -212,6 +223,248 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Dump stack logs on failure
+        if: failure()
+        run: |
+          echo "--- api ---"
+          docker compose logs --tail=500 api || true
+          echo "--- web ---"
+          docker compose logs --tail=500 web || true
+          echo "--- postgres ---"
+          docker compose logs --tail=200 postgres || true
+          echo "--- redis ---"
+          docker compose logs --tail=100 redis || true
+
+      - name: Tear down docker compose stack
+        if: always()
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------
+  # Full Playwright suite (M10-3 #71)
+  # ---------------------------------------------------------------------
+  # Promotes the 26 specs under apps/web/e2e/*.spec.ts (top-level, NOT
+  # the e2e/smoke/ subdir) into CI. These were historically dev:test-
+  # only because they self-seed via the API and target the auth-bypass
+  # mock path; in CI we still hit the production web image — its
+  # `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` build arg is empty, which makes
+  # apps/web/src/lib/auth.ts::isAuthEnabled() return false, so the mock
+  # auth shim activates identically to `pnpm dev:test` (verified in
+  # apps/web/e2e/README.md repro recipe).
+  #
+  # Critical ordering: postgres + api must come up BEFORE the seed is
+  # loaded (otherwise migrations have not applied), but the api must
+  # NOT receive an authenticated request BEFORE the seed (otherwise
+  # GetOrCreateDefault mints a random-UUID tenant that the seed then
+  # clashes with). The job loads the seed in between `api /health` (a
+  # public endpoint, no Auth middleware) and the web container start.
+  web-e2e-full:
+    name: Playwright full suite (26 specs against seeded stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    # The full suite runs in parallel with the smoke job rather than
+    # waiting for it: both jobs build the same images from scratch, so
+    # serialising them would just double wall-clock time without any
+    # benefit. If the smoke gate has to fail, this job's failure is
+    # independent and equally informative.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pinned to match root package.json `packageManager` — same
+          # reasoning as the smoke job above (M8 #67 F154).
+          version: 10.34.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Show tool versions
+        run: |
+          node --version
+          pnpm --version
+          docker version
+          docker compose version
+          curl --version | head -n1
+          openssl version
+
+      - name: Install pnpm dependencies (root workspace)
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate per-run .env (ENCRYPTION_KEY + role passwords)
+        # Same shape as the smoke job. APP_ENV=development keeps the
+        # M0 startup guards in warn-mode so a CI-issued ENCRYPTION_KEY
+        # rotation does not refuse to boot.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@postgres:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Build api image locally (tag matches docker-compose.yml)
+        run: |
+          docker build \
+            -t y1uda/sbomhub-api:latest \
+            -f apps/api/Dockerfile \
+            apps/api
+
+      - name: Build web image locally (tag matches docker-compose.yml)
+        # NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is intentionally empty —
+        # apps/web/src/lib/auth.ts::isAuthEnabled() returns false, so
+        # all client-side useAuth/useUser/useOrganization calls fall
+        # back to the self-hosted mock identity (orgId='self-hosted',
+        # orgSlug='default', orgRole='admin'). This matches the API's
+        # self-hosted mode (apps/api/internal/middleware/auth.go
+        # ::handleSelfHostedAuth) and the docker/seed/web-e2e.sql
+        # tenant fixture.
+        run: |
+          docker build \
+            -t y1uda/sbomhub-web:latest \
+            -f apps/web/Dockerfile \
+            --build-arg NEXT_PUBLIC_API_URL=http://localhost:8080 \
+            --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY= \
+            .
+
+      - name: Start postgres + redis
+        run: |
+          docker compose up -d --wait postgres redis
+          docker compose ps
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Start api (locally built, no web yet)
+        # web is held back until AFTER the seed loads — see the job
+        # header comment.
+        run: |
+          docker compose up -d --pull never api
+          docker compose ps
+
+      - name: Wait for api /health (migrations applied)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/api/v1/health >/dev/null 2>&1; then
+              echo "api healthy after $((i*2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::api did not become healthy within ~120s"
+          docker compose logs --tail=200 api || true
+          docker compose logs --tail=100 postgres || true
+          exit 1
+
+      - name: Load web e2e seed fixture
+        # docker compose exec -T disables TTY allocation so the heredoc
+        # / stdin redirect is delivered verbatim. The `sbomhub`
+        # superuser-equivalent role (POSTGRES_USER in
+        # docker-compose.yml) carries `rolbypassrls=t` — required for
+        # the FORCE RLS tables (vex_drafts / cra_reports /
+        # meti_assessments / audit_logs) where the seed inserts
+        # without a `SET LOCAL app.current_tenant_id` preface.
+        run: |
+          docker compose exec -T postgres psql -U sbomhub -d sbomhub \
+            < docker/seed/web-e2e.sql
+
+      - name: Verify seed (deterministic tenant_id)
+        # Confirms the seed loaded AND that the API's GetOrCreateDefault
+        # picked up the seeded tenant on first auth (rather than minting
+        # a fresh random one). The expected UUID is the hardcoded
+        # constant in docker/seed/web-e2e.sql; if the seed is reshuffled
+        # this guard must be updated to match.
+        shell: bash
+        run: |
+          set -euo pipefail
+          got="$(curl -fsS http://localhost:8080/api/v1/me \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tenant"]["id"])')"
+          want="00000000-0000-0000-0000-000000000001"
+          if [ "$got" != "$want" ]; then
+            echo "::error::seed verification failed — expected tenant_id=$want, got $got"
+            exit 1
+          fi
+          echo "seed verified — tenant_id=$got"
+
+      - name: Start web (now that seed is loaded)
+        run: |
+          docker compose up -d --pull never web
+          docker compose ps
+
+      - name: Wait for web reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+              echo "web reachable after $((i*2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::web did not become reachable within ~120s"
+          docker compose logs --tail=200 web || true
+          exit 1
+
+      - name: Install Playwright browser (chromium)
+        run: |
+          cd apps/web
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Run Playwright full suite (e2e/*.spec.ts, excluding smoke/)
+        # The positional `e2e/*.spec.ts` glob matches the 26 top-level
+        # specs but NOT the smoke subdir — Playwright treats a path
+        # argument as a literal file pattern, not a directory walk.
+        # PLAYWRIGHT_SKIP_WEB_SERVER=1 disables the bundled
+        # `npm run dev:test` launcher (see playwright.config.ts) so we
+        # target the docker compose web container directly.
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
+          PLAYWRIGHT_API_URL: http://localhost:8080
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+        run: |
+          cd apps/web
+          pnpm exec playwright test --project=chromium e2e/*.spec.ts
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-full
           path: |
             apps/web/playwright-report/
             apps/web/test-results/

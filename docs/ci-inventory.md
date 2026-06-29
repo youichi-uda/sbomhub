@@ -35,7 +35,8 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | `rls-integration.yml` | push main / PR (`apps/api/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + migrate → `go test -tags=integration ./internal/repository/... ./internal/middleware/...` | Trust Rescue P1 #17-followup |
 | `migration-roundtrip.yml` | push main / PR (`apps/api/migrations/**`, `apps/api/cmd/migrate/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + `migrate up` → `migrate down 999` → `migrate up` (regression check)。 schema diff は warn-only で初回 landing | Trust Rescue P1 #17-followup |
 | `frontend-ci.yml` | push main / PR (`apps/web/**`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `package.json` paths) | pnpm install → `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`)。 Node 22 LTS / pnpm 9、 warn-only initial landing | Trust Rescue P1 #17-followup |
-| `web-e2e.yml` | push main / PR (`apps/web/**`, `apps/api/**`, compose / install.sh / env / pnpm paths) | docker compose (postgres + redis + locally built api + web) を起動 → Playwright (chromium) で `apps/web/e2e/smoke/` を実行。 home (`/` redirect + SBOMHub brand) / dashboard (auth surface に到達) / api-health (`/api/v1/health` `status=ok`) の 3 scenario | M8 #67 |
+| `web-e2e.yml` (job: `web-e2e`) | push main / PR (`apps/web/**`, `apps/api/**`, compose / `docker/seed/**` / install.sh / env / pnpm paths) | docker compose (postgres + redis + locally built api + web) を起動 → Playwright (chromium) で `apps/web/e2e/smoke/` を実行。 home (`/` redirect + SBOMHub brand) / dashboard (auth surface に到達) / api-health (`/api/v1/health` `status=ok`) の 3 scenario | M8 #67 |
+| `web-e2e.yml` (job: `web-e2e-full`) | 同上 trigger | docker compose 一式 + `docker/seed/web-e2e.sql` (deterministic tenant + project + sbom + component + CVE-2021-44228 + vex_draft + cra_report + meti_assessment + audit_log) を pre-load → Playwright (chromium, `retries: 2`, `timeout: 60_000`) で `apps/web/e2e/*.spec.ts` 26 件を実行。 seed は web 起動より前に load することで API の `GetOrCreateDefault` が deterministic UUID (`00000000-0000-0000-0000-000000000001`) を採用する経路を強制 | M10-3 #71 |
 
 ### 2.2 Required quality gates
 
@@ -53,7 +54,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | docs curl smoke | `docs-curl-smoke.yml` | OK |
 | install.sh smoke | `install-smoke.yml` (Ubuntu + macOS) | OK |
 | CLI release / install smoke | sbomhub-cli `ci.yml` (release) + sbomhub `install-smoke.yml` (install.sh) | OK |
-| Golden Path E2E (Playwright) | `apps/web/e2e/smoke/` の 3 scenario (home / dashboard / api-health) を `web-e2e.yml` (M8 #67) で実行。 docker compose 一式を立てて 本番 web image (Clerk key 空) に対し chromium で叩く、 M7-5 docker-publish.yml の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)。 旧 `apps/web/e2e/*.spec.ts` (26 spec) は `dev:test` 前提のため引き続き local-only | OK (本 wave、 認証込み深堀りは M1 で本格化) |
+| Golden Path E2E (Playwright) | `apps/web/e2e/smoke/` の 3 scenario (home / dashboard / api-health) を `web-e2e.yml::web-e2e` (M8 #67) で実行 + `apps/web/e2e/*.spec.ts` の 26 spec を `web-e2e.yml::web-e2e-full` (M10-3 #71) で `docker/seed/web-e2e.sql` populated stack に対し実行。 docker compose 一式を立てて 本番 web image (Clerk key 空 → mock auth shim) に対し chromium で叩く、 M7-5 docker-publish.yml の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow) | OK (M10-3 #71、 認証込み深堀りは M11 で外部 API mock 化) |
 | security scanning (Snyk / GitGuardian / gosec / trivy) | **未設定** | (P2) 別 wave |
 
 ### 2.3 Branch protection settings
@@ -123,7 +124,8 @@ P3 = それ以降):
 - [x] (P1) sbomhub: frontend lint/typecheck/build workflow 追加 — `frontend-ci.yml` (#17-followup) で Node 22 LTS + pnpm 9 で `pnpm --filter web lint` / `typecheck` (`tsc --noEmit`) / `build` (`next build`) を実行。 各 step `continue-on-error: true` の warn-only で初回 landing (apps/web に既存 lint / type 違反が残存している可能性があり、 無関係 PR を block しないため)。 strict 化 (continue-on-error 削除 + Required status checks 追加) は既存違反 fix 後 P2 で別 wave。 `apps/web/package.json` に `typecheck` script (`tsc --noEmit`) を追加
 - [x] (M10-4 #72) sbomhub: `frontend-ci.yml` に proxy.ts matcher 不変条件 fixture (`apps/web/src/proxy.matcher.test.mjs`) + pnpm-workspace.yaml placeholder 検知 + pnpm 10 lifecycle-script skipped 5 package の native binding probe を追加。 §4.3 参照
 - [ ] (USER) GitHub UI で `main` ブランチに上記 Required status checks 設定 (§2.3 / §3.3)
-- [x] (P2) sbomhub: Golden Path E2E skeleton (Playwright を CI で実行) — `web-e2e.yml` (M8 #67) で docker compose 一式 (postgres + redis + locally built api + web) を立て、 chromium で `apps/web/e2e/smoke/` (home / dashboard / api-health) を実行。 docker-publish.yml (M7-5) の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)。 認証込みの深堀り spec (`apps/web/e2e/*.spec.ts` 26 件、 `dev:test` 前提) の CI 化は M1 で別 wave
+- [x] (P2) sbomhub: Golden Path E2E skeleton (Playwright を CI で実行) — `web-e2e.yml::web-e2e` (M8 #67) で docker compose 一式 (postgres + redis + locally built api + web) を立て、 chromium で `apps/web/e2e/smoke/` (home / dashboard / api-health) を実行。 docker-publish.yml (M7-5) の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)
+- [x] (M10-3 #71) sbomhub: 認証込みの深堀り spec (`apps/web/e2e/*.spec.ts` 26 件) を `web-e2e.yml::web-e2e-full` に promote。 `docker/seed/web-e2e.sql` で deterministic UUID の test tenant + project + sbom + component + CVE-2021-44228 + vex_draft + cra_report + meti_assessment + audit_log を pre-load し、 web 起動より前に seed を load することで API の `GetOrCreateDefault` が seeded tenant を採用する経路を強制。 spec ごとの timeout は `playwright.config.ts` で `60_000`、 retries は CI で `2`、 失敗時は `playwright-report-full` artifact を upload。 local repro recipe は `apps/web/e2e/README.md`。 §4.4 参照
 - [ ] (P2) sbomhub-cli: golangci-lint の `continue-on-error: true` 解除 (Go 1.25 対応待ち)
 - [ ] (P2) sbomhub-cli: PR 時の goreleaser snapshot dry-run 追加
 - [ ] (P2) sbomhub / sbomhub-cli: security scanning (Snyk / GitGuardian / gosec / trivy fs scan) workflow 追加
@@ -141,6 +143,28 @@ P3 = それ以降):
 | `pnpm 10 lifecycle script skip probe (M10-4)` | pnpm 10.34.3 が自動 skip する `@clerk/shared` / `@parcel/watcher` / `@swc/core` / `sharp` / `unrs-resolver` の native binding が **install 後に require できる**ことを確認。 binding が壊れていれば runtime まで露見せず CI で先に fail (詳細: package.json `// pnpm-skip-monitor` 参照) |
 
 これら 3 つは全て M10-4 #72 で追加。 過去 M5-M9 で manual revert / stale catch を要した polish item を CI gate 化した。
+
+## 4.4 web-e2e.yml::web-e2e-full: M10-3 promote
+
+`web-e2e.yml` (M10-3 #71) に full Playwright suite job を追加した。 既存
+の smoke job (`web-e2e`, 3 spec) と並行 (matrix ではなく独立 job) で実行する。
+
+| 観点 | 値 / 説明 |
+|---|---|
+| trigger | `web-e2e` と同じ paths (apps/web, apps/api, compose, install.sh, env, pnpm 系) に `docker/seed/**` を追加 |
+| seed | `docker/seed/web-e2e.sql` — deterministic UUID (`00000000-0000-0000-0000-000000000001` 以下) で tenant + user + project + sbom + component + CVE-2021-44228 + vex_draft + cra_report + meti_assessment + audit_log を 1 件ずつ insert。 `ON CONFLICT DO NOTHING` で idempotent |
+| seed load 経路 | `docker compose exec -T postgres psql -U sbomhub -d sbomhub < docker/seed/web-e2e.sql`。 sbomhub superuser は `rolbypassrls=t` なので FORCE RLS table も `SET LOCAL app.current_tenant_id` 不要 |
+| ordering | postgres + redis → install.sh --bootstrap-roles → **api 単体起動 (web まだ)** → /health 待ち → seed load → /me で deterministic tenant_id を verify → web 起動 → playwright |
+| spec selector | `pnpm exec playwright test --project=chromium e2e/*.spec.ts` (top-level glob で `e2e/smoke/` subdir を除外、 26 件) |
+| timeout | `playwright.config.ts::timeout: 60_000`、 job-level `timeout-minutes: 35` |
+| retries | CI 時 `retries: 2` (既存設定を踏襲) |
+| artifact | 失敗時 `playwright-report-full` (apps/web/playwright-report + test-results) を upload、 retention 7 日 |
+| auth mode | 本番 web image を `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=` build arg で焼き込み → `isAuthEnabled()` が false → mock auth shim (`apps/web/src/lib/auth.ts`) が active。 dev:test launcher と同等の経路だが production image を使うため build path も同時に validate される |
+
+honest limitations (M11 で対処):
+- Clerk hosted UI (sign-in / sign-up / org switcher) の経路は本 job でも未カバー (`apps/web/e2e/auth.spec.ts` は public page と language switcher のみ assert)。
+- LLM provider (OpenAI / Anthropic / Gemini) を要する flow (triage runner / cra runner の actual draft generation) は seed 済み draft で UI shell のみ exercise、 LLM 呼び出しの mock layer は M11。
+- 3rd-party integration spec (`integrations.spec.ts` の GitHub / Jira 連携、 `sso-settings.spec.ts` の SAML / OIDC) は無認証で API が 404 / 401 を返す経路を許容する設計のため、 spec 自体は green になるが「integration 動作確認」までは到達しない。
 
 ## 5. Out of scope (M0 では決めない)
 
