@@ -703,7 +703,7 @@ if [ "$MODE" = "start" ]; then
 
     # operational scripts download (M6 #56 F120):
     mkdir -p "$SCRIPTS_TARGET_DIR"
-    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh _env_helpers.sh dr-rehearsal.sh; do
+    for script in backup.sh restore.sh verify-encryption.sh verify-encryption-cron.sh _env_helpers.sh dr-rehearsal.sh validate-deferred-constraints.sh; do
         target="$SCRIPTS_TARGET_DIR/$script"
         if [ ! -f "$target" ]; then
             if ! command -v curl >/dev/null 2>&1; then
