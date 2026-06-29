@@ -27,11 +27,15 @@ const proxySrc = readFileSync(join(__dirname, "proxy.ts"), "utf8");
 // Pull the matcher string literal out of proxy.ts so the test sees the
 // same pattern Next.js compiles at build time. Format guarded:
 //   matcher: ["<pattern>"]
+// OR multi-line:
+//   matcher: [
+//     "<pattern>",
+//   ]
 //
 // The captured group is the *raw* source-level string (e.g.
 // `favicon\\.ico$`); JSON.parse turns the JS-source string literal into
 // the runtime string (`favicon\.ico$`) that Next.js / RegExp actually see.
-const matcherMatch = proxySrc.match(/matcher:\s*\[\s*("[^"]+")\s*\]/);
+const matcherMatch = proxySrc.match(/matcher:\s*\[\s*("[^"]+")\s*,?\s*\]/);
 assert.ok(
   matcherMatch,
   "could not extract `matcher: [\"...\"]` from proxy.ts; refactor of the export literal broke this fixture",
@@ -65,6 +69,18 @@ const cases = [
   { path: "/favicon.ico", expectInvokes: false, why: "favicon convention" },
   { path: "/robots.txt", expectInvokes: false, why: "robots convention" },
   { path: "/sitemap.xml", expectInvokes: false, why: "sitemap convention" },
+
+  // Public root assets shipped by apps/web/public/ (F160). These MUST
+  // stay matcher-excluded so crawlers / OpenGraph unfurls / web app
+  // manifest can fetch them without Clerk auth in SaaS mode.
+  { path: "/llms.txt", expectInvokes: false, why: "LLM crawler contract (F160)" },
+  { path: "/llms-full.txt", expectInvokes: false, why: "LLM crawler contract (F160)" },
+  { path: "/og-image.png", expectInvokes: false, why: "OpenGraph / Twitter card unfurl (F160)" },
+  { path: "/apple-touch-icon.png", expectInvokes: false, why: "iOS web app icon (F160)" },
+  { path: "/android-chrome-192x192.png", expectInvokes: false, why: "Android web app icon (F160)" },
+  { path: "/android-chrome-512x512.png", expectInvokes: false, why: "Android web app icon (F160)" },
+  { path: "/favicon-16x16.png", expectInvokes: false, why: "favicon variant (F160)" },
+  { path: "/favicon-32x32.png", expectInvokes: false, why: "favicon variant (F160)" },
 ];
 
 let failures = 0;

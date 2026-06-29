@@ -111,17 +111,137 @@ vulnerability_tickets:vulnerability_tickets_tenant_project_fk
 # parent (the FK probe against projects is otherwise RLS-filtered to nothing).
 TABLES_TO_TOGGLE="projects sboms vex_statements license_policies notification_settings notification_logs public_links vulnerability_tickets"
 
+# --- DSN → PG* env split (M10-1 #70 Codex F159) -----------------------------
+# Passing the full libpq URI as a positional psql argument exposes the
+# password in `ps` for the duration of the psql call. The standing
+# secret-in-env-not-argv invariant (F84/F107/F134/F136/F137/F140/F145)
+# applies. Parse the URI once into PGUSER / PGPASSWORD / PGHOST / PGPORT /
+# PGDATABASE + libpq query options, then invoke psql without any DSN argv.
+#
+# Accepted shapes (libpq URI form, the only form install.sh / docker-compose
+# emit):
+#   postgres://user:password@host:port/dbname[?key=value&...]
+#   postgresql://...
+#
+# The scheme prefix is stripped; the remainder is split on the first `@`
+# (everything left = userinfo, everything right = host/db/opts). Userinfo
+# is split on the first `:` (left = user, right = password). The host/db
+# portion is split on the first `/` (left = hostport, right = dbname+opts).
+#
+# Anything outside that shape (e.g. a Unix-socket DSN with %2F-escaped path,
+# or libpq key=value pair DSN) is rejected, since the migrator role's URL
+# here is always emitted by install.sh / docker-compose.yml.
+case "$DB_URL" in
+    postgres://*) DSN_REMAINDER=${DB_URL#postgres://} ;;
+    postgresql://*) DSN_REMAINDER=${DB_URL#postgresql://} ;;
+    *)
+        echo "[validate-deferred] FATAL: MIGRATE_DATABASE_URL must be a libpq URI (postgres:// or postgresql://)" >&2
+        exit 2
+        ;;
+esac
+
+case "$DSN_REMAINDER" in
+    *@*)
+        DSN_USERINFO=${DSN_REMAINDER%%@*}
+        DSN_HOSTDB=${DSN_REMAINDER#*@}
+        ;;
+    *)
+        echo "[validate-deferred] FATAL: MIGRATE_DATABASE_URL must include user[:password]@host" >&2
+        exit 2
+        ;;
+esac
+
+case "$DSN_USERINFO" in
+    *:*)
+        PGUSER_PARSED=${DSN_USERINFO%%:*}
+        PGPASSWORD_PARSED=${DSN_USERINFO#*:}
+        ;;
+    *)
+        PGUSER_PARSED=$DSN_USERINFO
+        PGPASSWORD_PARSED=
+        ;;
+esac
+
+case "$DSN_HOSTDB" in
+    */*)
+        DSN_HOSTPORT=${DSN_HOSTDB%%/*}
+        DSN_DBOPTS=${DSN_HOSTDB#*/}
+        ;;
+    *)
+        DSN_HOSTPORT=$DSN_HOSTDB
+        DSN_DBOPTS=
+        ;;
+esac
+
+case "$DSN_HOSTPORT" in
+    *:*)
+        PGHOST_PARSED=${DSN_HOSTPORT%:*}
+        PGPORT_PARSED=${DSN_HOSTPORT##*:}
+        ;;
+    *)
+        PGHOST_PARSED=$DSN_HOSTPORT
+        PGPORT_PARSED=5432
+        ;;
+esac
+
+case "$DSN_DBOPTS" in
+    *\?*)
+        PGDATABASE_PARSED=${DSN_DBOPTS%%\?*}
+        DSN_QUERY=${DSN_DBOPTS#*\?}
+        ;;
+    *)
+        PGDATABASE_PARSED=$DSN_DBOPTS
+        DSN_QUERY=
+        ;;
+esac
+
+# libpq honours PGSSLMODE / PGSSLROOTCERT / PGOPTIONS from env. We forward
+# the only query parameter our install.sh / docker-compose emits today,
+# `sslmode`, plus anything else we recognise. Unknown query params are
+# ignored with a stderr warning so an operator with a custom DSN sees them.
+PGSSLMODE_PARSED=
+PGSSLROOTCERT_PARSED=
+PGOPTIONS_PARSED=
+if [ -n "$DSN_QUERY" ]; then
+    OLD_IFS=$IFS
+    IFS='&'
+    # shellcheck disable=SC2086 # word-splitting on & is intentional
+    set -- $DSN_QUERY
+    IFS=$OLD_IFS
+    for kv in "$@"; do
+        case "$kv" in
+            sslmode=*) PGSSLMODE_PARSED=${kv#sslmode=} ;;
+            sslrootcert=*) PGSSLROOTCERT_PARSED=${kv#sslrootcert=} ;;
+            options=*) PGOPTIONS_PARSED=${kv#options=} ;;
+            *) echo "[validate-deferred] WARN: ignoring unrecognised DSN query param ${kv%%=*}" >&2 ;;
+        esac
+    done
+fi
+
+# Export everything libpq reads. PGPASSWORD only takes effect for the
+# psql subprocess; the calling shell never sees it in argv.
+export PGUSER=$PGUSER_PARSED
+[ -n "$PGPASSWORD_PARSED" ] && export PGPASSWORD=$PGPASSWORD_PARSED
+export PGHOST=$PGHOST_PARSED
+export PGPORT=$PGPORT_PARSED
+[ -n "$PGDATABASE_PARSED" ] && export PGDATABASE=$PGDATABASE_PARSED
+[ -n "$PGSSLMODE_PARSED" ] && export PGSSLMODE=$PGSSLMODE_PARSED
+[ -n "$PGSSLROOTCERT_PARSED" ] && export PGSSLROOTCERT=$PGSSLROOTCERT_PARSED
+[ -n "$PGOPTIONS_PARSED" ] && export PGOPTIONS=$PGOPTIONS_PARSED
+
+# DB_URL itself is now redundant for psql but kept in scope for logging
+# (without the password — strip it from any future echo).
+
 # --- psql wrappers ----------------------------------------------------------
-# DSN is the first positional arg to psql (a libpq connection URI). psql does
-# not echo the URI and the host process can keep the secret out of `ps` by
-# placing the URI in argv only at this single command site. Keep --no-psqlrc
+# DSN is intentionally NOT passed as a positional argument so the password
+# stays in env (PGPASSWORD) and never reaches `ps` argv. Keep --no-psqlrc
 # so an operator's local ~/.psqlrc cannot mutate behaviour.
 #
 # psql_query: capture-stdout shape. Stdin redirected from /dev/null so that
 # a wrapper such as `docker run -i postgres:15-alpine psql ...` does not
 # inherit and consume the calling shell's stdin pipe.
 psql_query() {
-    "$PSQL" "$DB_URL" \
+    "$PSQL" \
         --quiet --no-align --tuples-only --no-psqlrc \
         -v ON_ERROR_STOP=1 "$@" </dev/null
 }
@@ -131,7 +251,7 @@ psql_query() {
 # original RLS posture, not commit a partially-lifted state).
 # shellcheck disable=SC2120  # called without args in this script
 psql_pipe() {
-    "$PSQL" "$DB_URL" \
+    "$PSQL" \
         --quiet --no-align --no-psqlrc \
         -v ON_ERROR_STOP=1 "$@"
 }

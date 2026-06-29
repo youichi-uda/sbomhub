@@ -97,42 +97,29 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # M10-4 #72: pnpm 10 lifecycle-script skip probe.
-      # pnpm 10.34.3 auto-skips lifecycle (build) scripts for these
-      # 5 native-binding packages and only logs an informational
-      # warning. M8 F154 verified the first-run was OK, but a future
-      # major bump (pnpm 11, the package itself, Node 22→24, etc.)
-      # could land a regression where the native binding is missing
-      # at runtime — which would only surface in production logs
-      # (e.g. `Cannot find module './build/Release/sharp.node'`).
-      # Probe up-front by require()-ing each package after install.
+      # M10-4 #72 + M10-Phase-D F161: pnpm 10 lifecycle-script skip probe.
+      # pnpm 10.34.3 auto-skips lifecycle (build) scripts for several
+      # native-binding packages and only logs an informational warning.
+      # M8 F154 verified the first-run was OK, but a future major bump
+      # (pnpm 11, the package itself, Node 22→24, etc.) could land a
+      # regression where the native binding is missing at runtime —
+      # only surfacing in production logs (e.g. `Cannot find module
+      # './build/Release/sharp.node'`).
+      #
+      # F161 fix: require()-alone does NOT prove the native binding
+      # actually loaded — `sharp` ships a wasm fallback, `@swc/core`
+      # can transpile without the .node addon for some operations, and
+      # `@clerk/shared` is a pure-JS package without any native binding.
+      # Replace the generic require loop with package-specific native
+      # execution probes that fail if the native binding is missing or
+      # silently downgraded to a JS/WASM shim. `@clerk/shared` is no
+      # longer in the list (no native artifact to assert against).
       # Hard gate (no continue-on-error): a missing binding is a
       # release blocker. If a package needs to be removed from this
-      # list (e.g. it's no longer a transitive dep), update the list
+      # list (e.g. it's no longer a transitive dep), update the probe
       # AND the root package.json `//pnpm-skip-monitor` note in lockstep.
-      - name: pnpm 10 lifecycle script skip probe (M10-4)
-        run: |
-          set -eu
-          node -e "
-            const pkgs = ['@clerk/shared', '@parcel/watcher', '@swc/core', 'sharp', 'unrs-resolver'];
-            const fail = [];
-            for (const p of pkgs) {
-              try {
-                const mod = require(p);
-                const keys = Object.keys(mod).slice(0, 3).join(',');
-                console.log('[ok] ' + p + ' (sample keys: ' + keys + ')');
-              } catch (e) {
-                console.error('[FAIL] ' + p + ': ' + (e && e.message ? e.message : e));
-                fail.push(p);
-              }
-            }
-            if (fail.length) {
-              console.error('---');
-              console.error('Missing native bindings: ' + fail.join(', '));
-              console.error('See package.json `//pnpm-skip-monitor` comment + docs/ci-inventory.md §4.3');
-              process.exit(1);
-            }
-          "
+      - name: pnpm 10 lifecycle script skip probe (M10-4 / F161)
+        run: node .github/scripts/pnpm-native-probe.mjs
 
       # M10-4 #72: proxy.ts middleware matcher regression fixture.
       # Asserts the matcher does not let arbitrary `.json` / `.txt`

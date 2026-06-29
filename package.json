@@ -1,7 +1,7 @@
 {
   "name": "sbomhub",
   "private": true,
-  "//pnpm-skip-monitor": "M10-4 #72: pnpm 10.34.3 auto-skips lifecycle (build) scripts for @clerk/shared, @parcel/watcher, @swc/core, sharp, unrs-resolver. The skip is intentional (M8 F154 first-run OK); the warning is informational. .github/workflows/frontend-ci.yml runs a require()-probe after pnpm install to fail-fast if any of the 5 native bindings ever go missing. If you add/remove from the skipped list (e.g. a transitive dep churns), update the probe in that workflow in lockstep. See docs/ci-inventory.md §4.3.",
+  "//pnpm-skip-monitor": "M10-4 #72 + F161: pnpm 10.34.3 auto-skips lifecycle (build) scripts for @parcel/watcher, @swc/core, sharp, unrs-resolver (4 native-binding packages). The skip is intentional (M8 F154 first-run OK); the warning is informational. .github/scripts/pnpm-native-probe.mjs exercises each package's native code path (sharp libvips PNG encode / @swc/core transformSync / @parcel/watcher subscribe / unrs-resolver napi resolve) after pnpm install and fails if any binding is missing or downgraded to a JS/WASM fallback. .github/workflows/frontend-ci.yml runs it as a hard gate. @clerk/shared was dropped from the probe (F161): it has no native artifact and only emitted the pnpm warning because it was bundled with the others. If you add/remove from the skipped list, update the probe in lockstep. See docs/ci-inventory.md §4.3.",
   "packageManager": "pnpm@10.34.3",
   "scripts": {
     "dev:web": "pnpm --filter web dev",
