@@ -23,6 +23,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/scheduler"
 	"github.com/sbomhub/sbomhub/internal/service"
 	"github.com/sbomhub/sbomhub/internal/service/cra"
+	"github.com/sbomhub/sbomhub/internal/service/diff"
 	"github.com/sbomhub/sbomhub/internal/service/evidence_pack"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 	"github.com/sbomhub/sbomhub/internal/service/meti"
@@ -334,6 +335,11 @@ func main() {
 	projectService := service.NewProjectService(projectRepo)
 	sbomService := service.NewSbomService(sbomRepo, componentRepo)
 	sbomDiffService := service.NewSbomDiffService(sbomRepo, componentRepo)
+	// M10-6 (#74) — supply-chain churn observability. Wires the per-project
+	// diff service over the same repos as the legacy sbomDiffService but
+	// returns the richer envelope (components/vulnerabilities/licenses)
+	// and supports query-string driven from/to with auto-newest default.
+	projectDiffService := diff.NewService(projectRepo, sbomRepo, componentRepo, licensePolicyRepo)
 	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache)
 	jvnService := service.NewJVNService(vulnRepo, componentRepo)
 	statsService := service.NewStatsService(statsRepo)
@@ -460,6 +466,8 @@ func main() {
 	// goroutine starts. Codex R1 fix.
 	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
+	// M10-6 (#74) — see projectDiffService comment above.
+	projectDiffHandler := handler.NewDiffHandler(projectDiffService)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	vexHandler := handler.NewVEXHandler(vexService)
@@ -824,6 +832,13 @@ func main() {
 
 	// SBOM Diff endpoints
 	auth.POST("/sbom/diff", sbomDiffHandler.Diff)
+	// M10-6 (#74) — GET /api/v1/projects/:id/diff?from=...&to= — the
+	// supply-chain churn observability route. Sits inside the same
+	// auth (Clerk-or-self-hosted) + TenantTx chain as the rest of the
+	// project routes so tenant_id scoping is enforced before the diff
+	// service fans out. See internal/service/diff/diff.go godoc for the
+	// from/to resolution semantics.
+	auth.GET("/projects/:id/diff", projectDiffHandler.ProjectDiff)
 
 	// VEX endpoints
 	auth.GET("/projects/:id/vex", vexHandler.List)
