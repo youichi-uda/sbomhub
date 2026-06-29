@@ -111,7 +111,7 @@ vulnerability_tickets:vulnerability_tickets_tenant_project_fk
 # parent (the FK probe against projects is otherwise RLS-filtered to nothing).
 TABLES_TO_TOGGLE="projects sboms vex_statements license_policies notification_settings notification_logs public_links vulnerability_tickets"
 
-# --- DSN → PG* env split (M10-1 #70 Codex F159) -----------------------------
+# --- DSN → PG* env split (M10-1 #70 Codex F159 + F162) ----------------------
 # Passing the full libpq URI as a positional psql argument exposes the
 # password in `ps` for the duration of the psql call. The standing
 # secret-in-env-not-argv invariant (F84/F107/F134/F136/F137/F140/F145)
@@ -131,6 +131,40 @@ TABLES_TO_TOGGLE="projects sboms vex_statements license_policies notification_se
 # Anything outside that shape (e.g. a Unix-socket DSN with %2F-escaped path,
 # or libpq key=value pair DSN) is rejected, since the migrator role's URL
 # here is always emitted by install.sh / docker-compose.yml.
+#
+# F162: URI-encoded password / user / database / query values (e.g. the
+# .env.example documented `m%40ss%23word`) must be percent-decoded before
+# being placed in PG* env vars. libpq would decode them from a URI but
+# expects raw bytes from PG* env. urldecode() below handles %XX hex
+# decoding via printf %b after sed-converting % → \x.
+
+# urldecode: portable POSIX-sh percent-decoder. `%XX` → byte 0xXX. Other
+# characters pass through (a bare `%` not followed by two hex digits
+# stays literal). POSIX `printf` accepts octal escapes (`\OOO`) but not
+# hex (`\xXX`), so we hex→octal-convert one byte at a time. Walking
+# byte-by-byte avoids edge cases with sed's locale-dependent regex
+# classes. NB: command substitution strips trailing newlines, but
+# DSN tokens never end in `\n`, so that's fine.
+urldecode() {
+    s=$1
+    out=
+    while [ -n "$s" ]; do
+        case "$s" in
+            %[0-9A-Fa-f][0-9A-Fa-f]*)
+                hex=$(printf '%s' "$s" | cut -c2-3)
+                rest=$(printf '%s' "$s" | cut -c4-)
+                out=$out$(printf "\\$(printf '%o' "0x$hex")")
+                s=$rest
+                ;;
+            *)
+                first=$(printf '%s' "$s" | cut -c1)
+                out=$out$first
+                s=$(printf '%s' "$s" | cut -c2-)
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
 case "$DB_URL" in
     postgres://*) DSN_REMAINDER=${DB_URL#postgres://} ;;
     postgresql://*) DSN_REMAINDER=${DB_URL#postgresql://} ;;
@@ -218,16 +252,31 @@ if [ -n "$DSN_QUERY" ]; then
     done
 fi
 
+# F162: percent-decode every URI component before placing it in PG* env
+# vars. libpq decodes URI components when given a full DSN, but reads
+# PG* env vars as raw bytes, so passwords like the `.env.example`-
+# documented `m%40ss%23word` must be decoded here. Host/port are
+# excluded because IPv6 addresses can include literal `:` and `%`
+# (zone-id) that libpq parses differently in PGHOST; .env.example only
+# ships `localhost` / DNS names so that's a non-issue today, but err
+# on the side of pass-through there.
+PGUSER_DECODED=$(urldecode "$PGUSER_PARSED")
+PGPASSWORD_DECODED=$(urldecode "$PGPASSWORD_PARSED")
+PGDATABASE_DECODED=$(urldecode "$PGDATABASE_PARSED")
+PGSSLMODE_DECODED=$(urldecode "$PGSSLMODE_PARSED")
+PGSSLROOTCERT_DECODED=$(urldecode "$PGSSLROOTCERT_PARSED")
+PGOPTIONS_DECODED=$(urldecode "$PGOPTIONS_PARSED")
+
 # Export everything libpq reads. PGPASSWORD only takes effect for the
 # psql subprocess; the calling shell never sees it in argv.
-export PGUSER=$PGUSER_PARSED
-[ -n "$PGPASSWORD_PARSED" ] && export PGPASSWORD=$PGPASSWORD_PARSED
+export PGUSER=$PGUSER_DECODED
+[ -n "$PGPASSWORD_DECODED" ] && export PGPASSWORD=$PGPASSWORD_DECODED
 export PGHOST=$PGHOST_PARSED
 export PGPORT=$PGPORT_PARSED
-[ -n "$PGDATABASE_PARSED" ] && export PGDATABASE=$PGDATABASE_PARSED
-[ -n "$PGSSLMODE_PARSED" ] && export PGSSLMODE=$PGSSLMODE_PARSED
-[ -n "$PGSSLROOTCERT_PARSED" ] && export PGSSLROOTCERT=$PGSSLROOTCERT_PARSED
-[ -n "$PGOPTIONS_PARSED" ] && export PGOPTIONS=$PGOPTIONS_PARSED
+[ -n "$PGDATABASE_DECODED" ] && export PGDATABASE=$PGDATABASE_DECODED
+[ -n "$PGSSLMODE_DECODED" ] && export PGSSLMODE=$PGSSLMODE_DECODED
+[ -n "$PGSSLROOTCERT_DECODED" ] && export PGSSLROOTCERT=$PGSSLROOTCERT_DECODED
+[ -n "$PGOPTIONS_DECODED" ] && export PGOPTIONS=$PGOPTIONS_DECODED
 
 # DB_URL itself is now redundant for psql but kept in scope for logging
 # (without the password — strip it from any future echo).
