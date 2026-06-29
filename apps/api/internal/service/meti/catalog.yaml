@@ -1,51 +1,75 @@
-# METI SBOM Catalog (M3-3, issue #39 / M5-6, issue #52 / M8-1, issue #62)
+# METI SBOM Catalog
+# (M3-3 #39 / M5-6 #52 / M8-1 #62 / M8-2 #63 / M10-2 #75)
 #
 # Self-assessment criteria derived from "ソフトウェア管理に向けた SBOM
-# (Software Bill of Materials) の導入に関する手引 ver 2.0" (経済産業省, 2024-08).
+# (Software Bill of Materials) の導入に関する手引 ver 2.0" (経済産業省, 2024-08-29).
 #
-# M8-1 (issue #62, 2026-06-28): 27 → 32 criteria。 IPA 中核人材育成プログラム
-# 「SBOM 導入・運用の手引き」 (2024-12 版) の 32-item 全項目との 1:1 対応を
-# 達成。 追加項目は env_setup +3 (4.1.4 構成図可視化 / 4.4 ツール導入設定 /
-# 4.5 ツール学習)、 sbom_creation +1 (5.3 SBOM 共有)、 sbom_operation +1
-# (6.3 SBOM 提供期間 個別運用)。 phase 配分: env_setup 11 / sbom_creation 10
-# / sbom_operation 11 = 32 items。 追加 5 件はいずれも auto-signal 未実装の
-# stub evaluator (StatusNeedsReview) として登録、 wording exact-match と
-# auto-signal 実装は M8-2 wave で対応。
+# M10-2 (issue #75, 2026-06-29): primary PDF を local fixture
+# (/home/y1/Downloads/meti-sbom-v2/SBOMv2.pdf, SHA256
+# cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a) として
+# 取得し、 全 32 criteria の source_section / title_ja / description_ja を
+# character-by-character で照合。 結果:
+#   * source_section は primary PDF の実構造 (4.1 / 4.2 / 4.3 / 4.4 / 5.1 /
+#     5.2 / 5.3 / 6.1 / 6.2 / 7.x) に整合させて全件修正。 M8-1 までの
+#     "表：4.1.1 / 4.5.1 / 6.3.1" 等の表番号は IPA 二次資料 (2024-12 版) の
+#     numbering であり primary PDF には存在しないため除去、 IPA 由来の
+#     criterion (env_setup.01 / 09 / 10 / 11 / sbom_creation.10 /
+#     sbom_operation.11) は notes: で出自を明示。
+#   * title_ja / description_ja は意図的に "1-line distillation" として
+#     維持。 primary PDF は段落形式のため verbatim 引用は UI 表示に
+#     向かない。 各 criterion の notes: フィールドに distillation 鏡映と
+#     primary PDF 該当節を記録。
+#   * verification_status は "partial" を維持。 source_section の primary-
+#     PDF anchor は M10-2 で完了したが、 title_ja / description_ja は
+#     依然 distillation であり verbatim ではない。 「partial: anchors verified,
+#     wording is curated distillation」 の意味として読み替える。
+#
+# M8-1 (issue #62, 2026-06-28): 27 → 32 criteria に拡張。 IPA 中核人材育成
+# プログラム「SBOM 導入・運用の手引き」 (2024-12 版、 経産省 ver 2.0 を
+# [1] として明示参照) の 32-item チェックリストと 1:1 対応を達成。 追加 5 件:
+# env_setup.09 (構成図可視化, primary 4.1 No.2 由来) / env_setup.10 (ツール
+# 導入・設定 個別運用, primary 4.3) / env_setup.11 (ツール学習 運用習熟度,
+# primary 4.4) / sbom_creation.10 (5.3 共有 個別運用 IPA 由来) /
+# sbom_operation.11 (6.2 提供期間 個別運用 IPA 由来)。
 #
 # Source:
-#   https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2.pdf
-#   https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf (概要 PDF)
-#   https://www.meti.go.jp/english/policy/safety_security/cybersecurity/downloadfiles/sbom_tebiki02_en.pdf (English)
-#   https://www.meti.go.jp/press/2024/08/20240829001/20240829001.html (press release)
+#   primary 本書:
+#     https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2.pdf
+#     (SHA256 cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a,
+#      local fixture: /home/y1/Downloads/meti-sbom-v2/SBOMv2.pdf, 4.8 MB)
+#   概要 PDF:
+#     https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf
+#     (SHA256 9d46a2f16e4f075b18671b646c8ce0006e057211b041e5a26efa2942c83d0567,
+#      local fixture: /home/y1/Downloads/meti-sbom-v2/SBOMv2gaiyou.pdf, 1.2 MB)
+#   English version:
+#     https://www.meti.go.jp/english/policy/safety_security/cybersecurity/downloadfiles/sbom_tebiki02_en.pdf
+#     (M10-2 時点で取得未確認、 title_en / description_en は best-effort
+#      translation、 M10-2 の verification 対象外)
+#   press release:
+#     https://www.meti.go.jp/press/2024/08/20240829001/20240829001.html
+#   IPA 二次資料 (cited where catalog draws from this rather than primary PDF):
+#     https://www.ipa.go.jp/jinzai/ics/core_human_resource/final_project/2024/sbn8o10000001y6j-att/sbn8o10000001zcl.pdf
 #
-# M5-6 reconciliation note (issue #52, 2026-06-27):
-#   The primary PDF (3 MB) timed out on every WebFetch / curl probe against
-#   meti.go.jp from the build environment, and the appendix xlsx URL is not
-#   linked from the press page in a stable form. The wording below was
-#   reconciled against the following secondary sources whose chapter
-#   structure (env_setup / sbom_creation / sbom_operation) explicitly cites
-#   METI ver 2.0:
-#     1. IPA 産業サイバーセキュリティセンター中核人材育成プログラム
-#        「SBOM 導入・運用の手引き」 (2024年12月、 経産省 ver 2.0 を参考に構成、
-#        cited as [1] throughout):
-#        https://www.ipa.go.jp/jinzai/ics/core_human_resource/final_project/2024/sbn8o10000001y6j-att/sbn8o10000001zcl.pdf
-#        Chapter 4-6 implementation checklist tables (表：4.1.1 / 4.2.1 / 4.3.1 /
-#        4.4.1 / 4.5.1 / 5.1.1 / 5.2.1 / 5.3.1 / 6.1.1 / 6.2.1 / 6.3.1) were
-#        cross-checked against the wording fields below.
-#     2. yamory / nikkei xtech / Newton Consulting commentary on the
-#        ver 1.0 → 2.0 diff (第7章 脆弱性管理プロセスの具体化, 付録 SBOM 対応
-#        モデル, 付録 SBOM 取引モデル).
-#     3. The already-shipped 18-item baseline in
-#        apps/api/internal/model/checklist.go (PhaseSetup / PhaseCreation /
-#        PhaseOperation), which itself was derived from ver 1.0.
-#     4. IPA SBOM minimum-element list already validated by
-#        apps/api/internal/service/compliance.go checkMinimumElements.
-#
-#   Outstanding: the primary PDF should be re-fetched (e.g. from a
-#   network position that reaches meti.go.jp without timeout) so that the
-#   wording can be quoted verbatim from the original. metadata.verification_status
-#   stays at "partial" until that lift is complete. See STATUS.md M5-6
-#   entry for the residual checklist.
+# Primary PDF の実章節構造 (M10-2 で確認済):
+#   4. 環境構築・体制整備フェーズ
+#     4.1 SBOM 適用範囲の明確化   — 6 checklist items (No.1 開発言語等 /
+#         No.2 構成図 / No.3 契約形態 / No.4 規制 / No.5 組織内制約 / No.6 5W1H)
+#     4.2 SBOM ツールの選定
+#     4.3 SBOM ツールの導入・設定
+#     4.4 SBOM ツールに関する学習
+#   5. SBOM 作成・共有フェーズ
+#     5.1 コンポーネントの解析
+#     5.2 SBOM の作成
+#     5.3 SBOM の共有
+#   6. SBOM 運用・管理フェーズ
+#     6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施
+#     6.2 SBOM 情報の管理
+#   7. 脆弱性管理プロセスの具体化 (ver 2.0 新規)
+#     7.1 目的 / 7.2 課題・問題認識 / 7.3 プロセス全体像
+#     7.4 各フェーズの手順と方法
+#       7.4.1 脆弱性特定フェーズ / 7.4.2 脆弱性対応優先付けフェーズ
+#       7.4.3 情報共有フェーズ / 7.4.4 脆弱性対応フェーズ
+#   付録 8 SBOM 対応モデル / 付録 9 SBOM 取引モデル
 #
 # Schema (one entry):
 #   - id:               stable, dotted, lowercase. "meti.<phase>.<seq>".
@@ -64,7 +88,14 @@
 #                       METI guidance (Japanese, format "第N章 N.N 小見出し").
 #                       Required from M5-6 — the loader rejects criteria
 #                       without it so a future authoring round cannot
-#                       silently lose provenance.
+#                       silently lose provenance. M10-2 で primary PDF
+#                       integer-numbered sections (4.1 等) に整合済。
+#   - notes:            (optional, M10-2 introduced) Japanese annotation
+#                       explaining where the catalog wording is a
+#                       deliberate distillation of a multi-paragraph
+#                       primary PDF section, or where the criterion is
+#                       sourced from the IPA secondary catalogue rather
+#                       than the primary METI ver 2.0 PDF.
 
 metadata:
   source: "経済産業省 ソフトウェア管理に向けた SBOM (Software Bill of Materials) の導入に関する手引 ver 2.0"
@@ -72,31 +103,75 @@ metadata:
   source_summary_url: "https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf"
   source_version: "ver 2.0"
   source_published: "2024-08-29"
-  last_synced: "2026-06-28"
-  synced_by: "M8-2 issue #63 (M5-6 issue #52 / M8-1 issue #62 を継承)"
+  last_synced: "2026-06-29"
+  synced_by: "M10-2 issue #75 (M5-6 #52 / M8-1 #62 / M8-2 #63 を継承)"
   verification_status: "partial"
   verification_notes: |
-    M5-6 (issue #52) で METI ver 2.0 公式 PDF の WebFetch / curl 取得が全試行
-    タイムアウト。 IPA 産業サイバーセキュリティセンター中核人材育成プログラム
-    「SBOM 導入・運用の手引き」 (2024年12月、 METI ver 2.0 を [1] として明示参照)
-    の表：4.1.1 〜 表：6.3.1 (実施事項チェックリスト) と章構成 (第4-6章) を
-    二次資料として照合済。 ver 2.0 で新規追加された第7章 (脆弱性管理プロセスの
-    具体化) は meti.sbom_operation.01 / 02 / 03 / 04 / 08 に分解反映。 付録
-    「SBOM 対応モデル」 「SBOM 取引モデル」 は契約条項として
-    meti.env_setup.03 / meti.sbom_creation.07 / meti.sbom_creation.09 に
-    関連付け済。 一次 PDF の原文ママ照合は再 fetch 成功後の wave 持ち越し。
+    M10-2 (issue #75, 2026-06-29) で primary PDF (SBOMv2.pdf, SHA256
+    cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a) 及び
+    概要 PDF (SBOMv2gaiyou.pdf, SHA256
+    9d46a2f16e4f075b18671b646c8ce0006e057211b041e5a26efa2942c83d0567) を
+    user 環境で取得し、 全 32 criteria を character-by-character 照合。
 
-    M8-2 (issue #63, 2026-06-28) で再 fetch を試行: 一次 (SBOMv2.pdf) / 概要
-    (SBOMv2gaiyou.pdf) / 英語版 (sbom_tebiki02_en.pdf) の 3 URL いずれも
-    WebFetch (60s) / curl (60s) で完全タイムアウト。 build 環境からの
-    `https://www.meti.go.jp/` 自体が 15s 内に応答せず (google.com は 0.19s で
-    200 応答)、 M5-6 で観測した meti.go.jp 全面遮断パターンが継続している
-    ことを確認。 一次 PDF の原文ママ照合は user 環境での offline PDF
-    取得 + repo fixture 配置 (例: testdata/meti/SBOMv2.pdf) 後の follow-up
-    wave に持ち越し。 verification_status は引き続き "partial"。 一方、
-    catalog_test.go の title_ja exact-match regression は M8-1 で確定した
-    32 件全件に拡張 (公式照合と独立した、 既存 wording の意図せぬ drift を
-    防ぐ regression gate)。
+    Methodology:
+      1. pdftotext で primary PDF をテキスト抽出 (13,582 行)。
+      2. 各 criterion の source_section に書かれた章節を primary PDF で grep
+         し、 該当節の checklist 項目・本文と照合。
+      3. wording deviation (whitespace / 旧字新字 / punctuation / 表現差) を
+         記録。
+      4. 結果に応じて source_section / notes / description_ja を更新。
+
+    Findings:
+      * source_section の primary-PDF anchor を全 32 件で完了。 M8-1 までは
+        IPA 二次資料 (2024-12 版) の表番号 (表：4.1.1 / 表：4.5.1 / 表：6.3.1
+        等) を引いていたが、 primary PDF にはこれらの表番号は存在しない。
+        全件で primary PDF の section 番号 (4.1 / 4.2 / ... / 6.2 / 7.4.1 等)
+        に書き換え。 旧表番号を引いていた notes は IPA 由来であることを
+        明示。
+      * primary PDF Chapter 4 の実構造は 4.1 / 4.2 / 4.3 / 4.4 の 4 節
+        (M8-1 が想定していた 4.5 SBOM ツール学習 は実体は 4.4 SBOM ツールに
+        関する学習)。 catalog の 4.5 / 4.4 / 4.3 参照は -1 シフトで修正。
+      * primary PDF Chapter 6 は 6.1 (脆弱性管理・ライセンス管理 等) / 6.2
+        (SBOM 情報の管理) の 2 節構成。 M8-1 が想定していた 6.3 SBOM 情報の
+        管理 は実体は 6.2。 全 criterion の "6.3" 参照は "6.2" にシフト。
+      * title_ja / description_ja は意図的な 1-line distillation として
+        維持。 primary PDF の checklist 項目は段落形式 + 文末 "〜する"
+        命令形のため UI dashboard / report heading への直接転載に不向き。
+        各 criterion の notes: で primary PDF 該当節の原文と distillation
+        鏡映を記録。
+      * IPA 二次資料 由来の criterion (env_setup.01 担当部署・責任者 / 09
+        構成図可視化 / 10 ツール導入・設定 個別運用 / 11 ツール学習
+        運用習熟度 / sbom_creation.10 共有 個別運用 / sbom_operation.11
+        提供期間 個別運用) は primary PDF に独立 checklist 項目を持たない
+        ため、 notes: で IPA 由来であることを明示し、 primary PDF の関連
+        節を補助参照として記録。
+      * 0 件: wording を強制 verbatim 化したものなし。 distillation が
+        UI 表示用として適切と判断。
+
+    verification_status は引き続き "partial"。 source_section anchor 整合
+    (= primary PDF の章節構造への正確な紐付け) は M10-2 で完了したが、
+    title_ja / description_ja は curated distillation のため verbatim
+    照合の意味では "full" を主張できない。 「partial: anchors verified,
+    wording is curated distillation」 という意味として dashboard 側で
+    読み替える。
+
+    English version (sbom_tebiki02_en.pdf) は M10-2 時点で取得未確認。
+    title_en / description_en は best-effort translation のまま、 M10-2
+    の verification 対象外 (将来 wave に持ち越し)。
+
+    過去 wave の経緯 (アーカイブ):
+      M5-6 (issue #52, 2026-06-27): primary PDF への WebFetch / curl 全
+      timeout。 IPA 二次資料を反映した初期 27 criteria を整備。
+      M8-1 (issue #62, 2026-06-28): IPA 32-item 全項目との 1:1 対応を
+      達成 (+5 criteria)。 wording exact-match は M8-2 持ち越し。
+      M8-2 (issue #63, 2026-06-28): WebFetch 再試行、 meti.go.jp 全面
+      遮断が継続することを確認。 catalog_test.go の title_ja exact-match
+      regression を 32 件全件に拡張。 primary PDF 照合は user 環境
+      offline 取得を待つ持ち越し。
+      M10-2 (issue #75, 2026-06-29): user が offline で取得した primary
+      / 概要 PDF を fixture とし、 全 source_section を primary 整合に
+      書き換え。 wording distillation を notes: フィールド (今回新設)
+      で正式に明文化。
 
 criteria:
   # --------------------------------------------------------------------------
@@ -119,7 +194,18 @@ criteria:
       (e.g. PSIRT lead) and a contact point must be designated even when
       the role is shared with another function.
     evaluator_hint: "Manual-only. No auto-signal in DB. Map to checklist_responses table check_id='setup_01' for human attestation."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.2 SBOM 導入体制の整備 (表：4.2.1 No.1-2)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 章導入文 (体制整備の必要性) + 4.1 SBOM 適用範囲の明確化 (組織内の制約 — 体制の制約) + 6.2 SBOM 情報の管理 (PSIRT / 品質管理部門による管理体制)"
+    notes: |
+      M10-2: primary PDF に「SBOM 担当部署および責任者を明確化」 と直接対応
+      する独立 checklist 項目は存在しない。 出自は IPA 二次資料
+      「SBOM 導入・運用の手引き」 (2024-12 版) 表：4.2.1 No.1-2。 primary PDF
+      では (1) 第4章 章導入文 (「SBOM に関する体制を整備することが必要」、
+      L.2486-2489) (2) 4.1 No.5 「組織内の制約 (体制の制約、 コストの制約等)」
+      (L.2498) (3) 6.2 SBOM 情報の管理 「SBOM の管理体制について、 脆弱性
+      管理という観点を踏まえると、 組織内の PSIRT 又はそれに類する部門が
+      主導して SBOM の管理を行うのが望ましい」 (L.3758-3766) — として
+      分散的に言及されている。 catalog では IPA 二次資料に従って独立
+      checklist 化。
 
   - id: meti.env_setup.02
     phase: env_setup
@@ -135,7 +221,15 @@ criteria:
       software, and decide which scanner (Syft / Trivy / cdxgen) covers each
       stack so that no ecosystem is silently omitted from SBOM generation.
     evaluator_hint: "Auto-signal: sboms.bom_format and components.purl prefixes — distinct PURL types observed across all sboms for the project indicate ecosystems covered. Map to projects.metadata for declared stack vs. coverage gap."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (表：4.1.1 No.3 開発言語・コンポーネント形態)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.1 開発言語・コンポーネント形態・開発ツール等)"
+    notes: |
+      M10-2: primary PDF 4.1 checklist No.1 「対象ソフトウェアの開発言語、
+      コンポーネント形態、 開発ツール等、 対象ソフトウェアに関する情報を
+      明確化する」 (L.2493-2494) に対応。 catalog title_ja 「開発言語・
+      ビルド環境を整理」 は primary PDF の例示 (L.2653-2687 開発言語・
+      コンポーネント形態・開発環境ツール・ビルドツール・構成管理ツール・
+      データ形式・動作環境) を 1 行に集約した distillation。 IPA 二次
+      資料での No.3 (表：4.1.1) ではなく primary PDF では No.1。
 
   - id: meti.env_setup.03
     phase: env_setup
@@ -151,7 +245,16 @@ criteria:
       channel and cadence by which SBOMs are received from suppliers, plus
       the handling policy (re-distribution rights, retention period).
     evaluator_hint: "Manual-only. No DB signal. Map to checklist_responses check_id='setup_03'. Future hook: supplier_contracts table when added."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (契約形態・取引慣行) / 付録 SBOM 取引モデル (ver 2.0 新規)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.3 利用者及びサプライヤーとの契約形態・取引慣行) / 付録 9 SBOM 取引モデル (ver 2.0 新規)"
+    notes: |
+      M10-2: primary PDF 4.1 checklist No.3 「対象ソフトウェアの利用者
+      及びサプライヤーとの契約形態・取引慣行を明確化する」 (L.2496)
+      及び本文 (契約形態 / コンポーネント情報の提供 / 第三者コンポーネントの
+      申告 / 脆弱性の通知 / 脆弱性の修正 / 納品形態 / 損害賠償責任 /
+      知的財産権 / 改変の有無、 L.2798-2838) に対応。 catalog の
+      「サプライヤー / OSS 配布元」 は primary の「利用者及びサプライヤー」
+      の片側 (供給側) に焦点を絞った distillation。 付録 9 SBOM 取引
+      モデル (L.10700+) は ver 2.0 新規追加。
 
   - id: meti.env_setup.04
     phase: env_setup
@@ -167,7 +270,13 @@ criteria:
       IPA procurement guidelines, etc.) and reflect SBOM-format, minimum-
       element and submission-deadline requirements in the design.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_04'. Future hook: cra_reports presence indicates EU CRA scope is in play."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (規制や要求)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.4 SBOM に関する規制・要求事項)"
+    notes: |
+      M10-2: primary PDF 4.1 checklist No.4 「対象ソフトウェアの SBOM に
+      関する規制・要求事項を確認する」 (L.2497) 及び本文 (米国大統領令
+      M-22-18 / EU CRA / IMDRF / 薬機法、 L.2840-2854) に対応。 catalog の
+      EU CRA, 米国 EO 14028, NIST SP 800-218, IPA 政府調達基準 は primary
+      PDF の例示 (M-22-18 含む) を distillation 拡張したもの。
 
   - id: meti.env_setup.05
     phase: env_setup
@@ -183,7 +292,16 @@ criteria:
       scope toward customers and third parties, and establish a policy for
       separating public from internal SBOM variants.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_05'. Future hook: public_links.is_public flag history per project."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (表：4.1.1 No.5 組織内の制約)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.5 SBOM 導入に関する組織内の制約)"
+    notes: |
+      M10-2: primary PDF 4.1 checklist No.5 「SBOM 導入に関する組織内の
+      制約 (体制の制約、 コストの制約等) を明確化する」 (L.2498) と
+      本文 (L.2855-2858 組織内の体制・コスト制約) に対応。 catalog 表現
+      「機密情報の取り扱い / 公開範囲」 は primary PDF の (体制の制約、
+      コストの制約等) を、 SBOM の公開可否 / 機密情報含有判断という
+      実運用観点に拡張した distillation。 primary の文面とは厳密には
+      乖離しているが、 SBOM 適用範囲決定時の組織内制約という上位
+      範囲は包含されている。
 
   - id: meti.env_setup.06
     phase: env_setup
@@ -201,7 +319,16 @@ criteria:
       (regulation / customer / internal audit) and how it is handled
       (automated vs. manual).
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_06'. Auto-augment: count of distinct project ids vs. scan_settings rows indicates whether scope is consistently configured."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (表：4.1.1 No.6 / 表：4.1.2 5W1H による SBOM 適用範囲)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.6 SBOM 適用範囲 (5W1H) / 表 4-1 SBOM 適用範囲 (5W1H))"
+    notes: |
+      M10-2: primary PDF 4.1 checklist No.6 「整理した情報に基づき、 SBOM
+      適用範囲 (5W1H) を明確化する」 (L.2499) と 表 4-1 SBOM 適用範囲
+      (5W1H) (L.2518-2644: 作成主体 / 作成タイミング / 活用主体 / 対象範囲 /
+      作成手段 / 活用範囲 / フォーマット・項目) に対応。 catalog の
+      「いつ / どこで / 誰が / 何を / なぜ / どう」 は表 4-1 の Who / When /
+      What / Where / Why / How を日本語に展開した distillation。 旧 catalog
+      では「表：4.1.2」 と記述していたが primary PDF では「表 4-1」 (4 章
+      1 番目の表) が正しい。
 
   - id: meti.env_setup.07
     phase: env_setup
@@ -217,7 +344,19 @@ criteria:
       tool both locally and in CI. Confirm the tool can emit both
       CycloneDX and SPDX in their major output variants.
     evaluator_hint: "Auto-signal: scan_settings.enabled_scanners is non-empty for the project (sbomhub-cli writes this) OR sboms.tool_name is non-null on the latest upload."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.3 SBOM ツールの選定 (表：4.3.1) + 4.4 SBOM ツールの導入・設定 (表：4.4.1)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.2 SBOM ツールの選定 + 4.3 SBOM ツールの導入・設定"
+    notes: |
+      M10-2: primary PDF 4.2 「SBOM ツールの選定」 (L.2869、 選定の観点
+      整理 + 複数ツール評価・選定) + 4.3 「SBOM ツールの導入・設定」
+      (L.3145、 環境要件確認 + 取扱説明書に基づく導入) を 1 criterion に
+      集約した distillation。 旧 catalog では「4.3 SBOM ツールの選定 +
+      4.4 SBOM ツールの導入・設定」 と参照していたが primary PDF の
+      章番号と -1 ずれていた。 表 4-2 SBOM ツールの選定の観点 (機能 /
+      性能 / 解析可能な情報 / 解析可能なデータ形式 / コスト / 対応
+      フォーマット / コンポーネント解析方法 / サポート体制 / 他ツール
+      との連携 / 提供形態 / ユーザーインターフェース / 運用方法 /
+      対応するソフトウェア開発言語 / 日本語対応、 L.2957-3129) も
+      関連参照。 個別運用 (4.3 のみ) は env_setup.10 を参照。
 
   - id: meti.env_setup.08
     phase: env_setup
@@ -233,7 +372,18 @@ criteria:
       databases (NVD / JVN / KEV); retain training records as audit
       evidence.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='setup_08'. Future hook: tenant training_records table."
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.5 SBOM ツールの学習 (表：4.5.1 開発・セキュリティ部門への教育)"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.4 SBOM ツールに関する学習"
+    notes: |
+      M10-2: primary PDF 4.4 「SBOM ツールに関する学習」 (L.3202、
+      checklist 2 項目: 「ツールの取扱説明書や README ファイルを確認して、
+      SBOM ツールの使い方を習得する」 / 「ツールの使い方に関するノウハウ
+      や各機能の概要は記録し、 組織内で共有する」) に対応。 catalog title_ja
+      「担当者教育・トレーニングを実施」 は primary PDF の「ツールの
+      使い方を習得 + ノウハウを記録・共有」 に CycloneDX / SPDX / PURL /
+      CPE / VEX / VDR / NVD / JVN / KEV といった SBOM 周辺知識を含む
+      包括的トレーニングへと拡張した distillation。 旧 catalog では「4.5
+      SBOM ツールの学習」 と参照していたが primary PDF では 4.4 が正しい
+      (-1 ずれ修正)。
 
   # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
   - id: meti.env_setup.09
@@ -251,8 +401,19 @@ criteria:
       supplier-supplied component layers and their boundaries — and identify
       which components are in / out of SBOM scope. Refresh the diagram on
       every release.
-    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 構成図 (architecture diagram) は現状 DB 表現を持たないため manual attestation 必須。 M8-2 以降の hook 候補: projects.architecture_diagram_url / sboms.RawData の metadata.component 階層解析。"
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (4.1.4 対象ソフトウェアの構成図 / 表：4.1.4 構成図可視化)"
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 構成図 (architecture diagram) は現状 DB 表現を持たないため manual attestation 必須。 M10-2 以降の hook 候補: projects.architecture_diagram_url / sboms.RawData の metadata.component 階層解析。"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.2 対象ソフトウェアの正確な構成図 / 図 4-1 システム構成図の例 — 歯科用 CT)"
+    notes: |
+      M10-2: primary PDF 4.1 checklist No.2 「対象ソフトウェアの正確な
+      構成図を作成し、 SBOM 適用の対象を可視化する」 (L.2495) 及び
+      本文 (L.2689-2796: 自組織開発範囲 / 取引契約のあるサプライヤー /
+      契約のないサプライヤーを可視化、 図 4-1 歯科用 CT システム構成図
+      の実例) に対応。 旧 catalog の「4.1.4 対象ソフトウェアの構成図」
+      「表：4.1.4」 は IPA 二次資料の sub-section 番号で primary PDF
+      には存在しない (primary では 4.1 直下の checklist No.2 として
+      列挙)。 catalog title_ja 「対象ソフトウェアの構成図を可視化」 は
+      primary PDF の checklist 表現「構成図を作成し、 SBOM 適用の対象を
+      可視化する」 を簡潔化した distillation。
 
   - id: meti.env_setup.10
     phase: env_setup
@@ -271,8 +432,19 @@ criteria:
       format, lockfile-resolution policy, etc.). Validate installation /
       configuration adequacy as an operational step distinct from tool
       selection (4.3).
-    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 ツール選定 (env_setup.07) との重複を避けるため、 ここでは個別設定値 (scan_settings.enabled_scanners 詳細 / exclusion patterns / output spec_version 固定) の妥当性を判定したい。 M8-2 以降の hook 候補: scan_settings.config_json 拡張、 sbomhub-cli の `doctor` 出力との突合。"
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.4 SBOM ツールの導入・設定 (表：4.4.1 ツール導入手順・設定項目)"
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 ツール選定 (env_setup.07) との重複を避けるため、 ここでは個別設定値 (scan_settings.enabled_scanners 詳細 / exclusion patterns / output spec_version 固定) の妥当性を判定したい。 M10-2 以降の hook 候補: scan_settings.config_json 拡張、 sbomhub-cli の `doctor` 出力との突合。"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.3 SBOM ツールの導入・設定"
+    notes: |
+      M10-2: primary PDF 4.3 「SBOM ツールの導入・設定」 (L.3145、 checklist
+      2 項目: 「SBOM ツールが導入可能な環境の要件を確認し、 整備する」 /
+      「ツールの取扱説明書や README ファイルを確認して、 SBOM ツールの
+      導入・設定を行う」 + 本文 L.3183-3200 環境要件 / 取扱説明書 / 稼働
+      監視) に対応。 旧 catalog では「4.4 SBOM ツールの導入・設定」 と
+      参照していたが primary PDF では 4.3 が正しい (-1 ずれ修正)。
+      env_setup.07 (ツール選定・導入) との分担: 07 は 4.2 + 4.3 を集約、
+      10 は 4.3 のみを「個別運用 — スキャン対象ディレクトリ / 除外
+      パターン / lockfile 解決ポリシー等」 の運用詳細にフォーカスした
+      IPA 二次資料由来の独立 criterion。 出自は IPA 二次資料 表：4.4.1。
 
   - id: meti.env_setup.11
     phase: env_setup
@@ -289,8 +461,17 @@ criteria:
       handling, output validation — and measure proficiency (generation time,
       error-recovery time, interpretation accuracy). Record proficiency
       baselines and reuse them for rotation / onboarding handovers.
-    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 担当者教育 (env_setup.08) との重複を避けるため、 ここでは「教育受講後に実機で動かしたか」 のハンズオン実績 (sboms.created_by ユーザ多様性 / 直近 90 日の operator 数) を判定したい。 M8-2 以降の hook 候補: audit_logs の sbom.created actor 集計、 training_completion テーブル。"
-    source_section: "第4章 環境構築・体制整備フェーズ — 4.5 SBOM ツールの学習 (表：4.5.1 ハンズオン演習・運用習熟度評価)"
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 担当者教育 (env_setup.08) との重複を避けるため、 ここでは「教育受講後に実機で動かしたか」 のハンズオン実績 (sboms.created_by ユーザ多様性 / 直近 90 日の operator 数) を判定したい。 M10-2 以降の hook 候補: audit_logs の sbom.created actor 集計、 training_completion テーブル。"
+    source_section: "第4章 環境構築・体制整備フェーズ — 4.4 SBOM ツールに関する学習"
+    notes: |
+      M10-2: primary PDF 4.4 「SBOM ツールに関する学習」 (L.3202) 本文
+      「サンプル SBOM の作成等を通じて、 試行錯誤的にツールの使い方を
+      習得することも効果的である」 (L.3228-3230) に対応。 env_setup.08
+      (担当者教育) との分担: 08 は SBOM 形式 / PURL / VEX 等の知識教育、
+      11 は実機ハンズオン演習・運用習熟度評価にフォーカスした IPA
+      二次資料由来の独立 criterion。 旧 catalog では「4.5 SBOM ツールの
+      学習」 と参照していたが primary PDF では 4.4 が正しい (-1 ずれ修正)。
+      出自は IPA 二次資料 表：4.5.1。
 
   # --------------------------------------------------------------------------
   # Phase 2 — SBOM 作成・共有フェーズ (sbom_creation) : 10 items
@@ -310,7 +491,19 @@ criteria:
       into CI. For supplier-delivered artefacts, regenerate the SBOM at
       each delivery.
     evaluator_hint: "Auto-signal: COUNT(sboms WHERE project_id=...) per 30 days indicates cadence. scan_settings.schedule field indicates declared trigger."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.2 精査範囲) / 5.2 SBOM の作成 (頻度・粒度)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (checklist No.1 SBOM の項目・フォーマット・出力ファイル形式等の要件決定)"
+    notes: |
+      M10-2: primary PDF 5.2 「SBOM の作成」 (L.3511) checklist No.1
+      「作成する SBOM の項目、 フォーマット、 出力ファイル形式等の SBOM
+      に関する要件を決定する」 (L.3513) 及び 5.1 コンポーネントの解析の
+      実証エビデンス (L.3306-3314 手動 30 人時 vs ツール 0.15 人時) を
+      引用して、 「リリース毎 / マージ毎 / 夜次」 「アプリ / コンテナ /
+      モジュール」 という CI 統合粒度に拡張した distillation。 primary
+      PDF には頻度 / トリガー / 粒度 を直接の checklist 項目として
+      列挙する箇所はなく、 これらは 5.1-5.2 全体の本文・実証示唆と
+      6.2 「SBOM に含まれる情報は定期的に更新し、 管理する必要がある」
+      (L.3750-3751) を運用ルール化した補助設計。 旧 catalog の「表：5.1.1
+      No.2」 は IPA 二次資料の番号。
 
   - id: meti.sbom_creation.02
     phase: sbom_creation
@@ -326,7 +519,16 @@ criteria:
       format version (e.g. CycloneDX 1.5+, SPDX 2.3). If VEX must be
       bundled, prefer CycloneDX.
     evaluator_hint: "Auto-signal: sboms.bom_format ('CycloneDX' or 'SPDX') and sboms.spec_version on latest upload."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (表：5.2.1 No.1 フォーマット・出力ファイル形式の決定)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (checklist No.1 SBOM の項目・フォーマット・出力ファイル形式等の要件決定) + 第2章 2.4 SBOM フォーマットの例 (SPDX / CycloneDX / SWID タグ)"
+    notes: |
+      M10-2: primary PDF 5.2 checklist No.1 「作成する SBOM の項目、
+      フォーマット、 出力ファイル形式等の SBOM に関する要件を決定する」
+      (L.3513) と 第2章 2.4 SBOM フォーマットの例 (L.1355+: SPDX /
+      CycloneDX の説明) に対応。 catalog 表現「CycloneDX 1.5+ / SPDX 2.3 /
+      VEX 同梱要件があれば CycloneDX を優先」 は primary PDF が形式
+      バージョンや VEX 同梱の優先方針を明示していない部分を補った
+      運用 distillation。 旧 catalog の「表：5.2.1 No.1」 は IPA 二次資料
+      番号。
 
   - id: meti.sbom_creation.03
     phase: sbom_creation
@@ -340,7 +542,17 @@ criteria:
       the selected tool and produce an SBOM that captures direct and
       transitive dependencies without omissions.
     evaluator_hint: "Auto-signal: sboms exists for the project AND latest sbom has components count > 0."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.1) + 5.2 SBOM の作成 (表：5.2.1 No.2)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (checklist No.1 対象ソフトウェアのスキャン) + 5.2 SBOM の作成 (checklist No.2 SBOM ツールを用いた SBOM 作成)"
+    notes: |
+      M10-2: primary PDF 5.1 checklist No.1 「SBOM ツールを用いて対象
+      ソフトウェアのスキャンを行い、 コンポーネントの情報を解析する」
+      (L.3243) と 5.2 checklist No.2 「SBOM ツールを用いて、 当該要件を
+      満足する SBOM を作成する」 (L.3514) に対応。 catalog 表現「直接依存と
+      推移依存を漏れなく抽出」 は primary 本文「コンポーネントの名称、
+      サプライヤー名、 バージョン、 コンポーネント間の依存関係等を洗い
+      出す」 (L.3319-3320) と「再帰的に利用されるコンポーネントも含めて
+      対象とする」 (L.2589-2590) の集約 distillation。 旧 catalog の
+      「表：5.1.1 No.1 / 表：5.2.1 No.2」 は IPA 二次資料番号。
 
   - id: meti.sbom_creation.04
     phase: sbom_creation
@@ -354,7 +566,18 @@ criteria:
       dropped as "version: unknown" or due to parse failures. Where they
       cannot be resolved, record the reason for the exception.
     evaluator_hint: "Auto-signal: COUNT(components WHERE version IS NULL OR version='unknown') for latest sbom should be 0 for a passing item."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.3 解析エラー / version 不明検出)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (checklist No.2 SBOM ツールの解析ログ調査・解析中断・省略の確認)"
+    notes: |
+      M10-2: primary PDF 5.1 checklist No.2 「SBOM ツールの解析ログ等を
+      調査し、 エラー発生や情報不足による解析の中断や省略がなく、 解析
+      が正しく実行されたかを確認する」 (L.3244-3245) に対応。 本文
+      「バージョン情報が誤って検出されたコンポーネントが複数存在した」
+      (L.3359) / 「ツールの実行ログを確認し、 そのようなエラーが発生
+      していないかを確認する」 (L.3500-3502) / 「『既知の未知』 として
+      把握することが望まれる」 (L.3504-3506) を「version: unknown や
+      パース失敗による除外を残さず、 残存する場合は理由を記録する」 と
+      distillation。 旧 catalog の「表：5.1.1 No.3」 は IPA 二次資料番号
+      (primary では No.2)。
 
   - id: meti.sbom_creation.05
     phase: sbom_creation
@@ -370,7 +593,18 @@ criteria:
       actually shipped) and false negatives (shipped but missing from the
       SBOM).
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_03'. Future hook: diff sboms generated by Syft vs. Trivy and surface unique entries."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (表：5.1.1 No.3 抜け漏れ・過検知の精査)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (checklist No.3 誤検出・検出漏れの確認) + 図 5-1 コンポーネント解析結果の確認の観点及び確認方法"
+    notes: |
+      M10-2: primary PDF 5.1 checklist No.3 「コンポーネントの解析結果に
+      ついて、 コンポーネントの誤検出や検出漏れがないかを確認する」
+      (L.3246) と 図 5-1 (L.3398-3486 ①ツール実行ログ確認 / ②対象
+      ソフトウェアへの含有確認 / ③外部ソースとの比較 / ④含まれる
+      コンポーネントの出力含有確認 / ⑤スニペット解析でのソースコード
+      比較 / ⑥ Copyright 抽出突合) に対応。 catalog 表現「package-lock /
+      go.sum 等と突き合わせ」 は primary の「パッケージマネージャーで
+      抽出したコンポーネントが一致しないケース」 (L.3385-3386) を
+      具体的 manifest 名で書き下した distillation。 旧 catalog の
+      「表：5.1.1 No.3」 は IPA 二次資料番号。
 
   - id: meti.sbom_creation.06
     phase: sbom_creation
@@ -386,7 +620,18 @@ criteria:
       unique identifier (PURL or CPE), dependency relationship, SBOM
       author and timestamp.
     evaluator_hint: "Auto-signal: reuse ComplianceService.checkMinimumElements (apps/api/internal/service/compliance.go) — all 7 sub-checks pass."
-    source_section: "第2章 SBOM の概要 — 2.3 SBOM の最小要素 (NTIA Minimum Elements) + 第5章 5.2 SBOM の作成"
+    source_section: "第2章 SBOM の概要 — 2.3 SBOM の「最小要素」 (表 2-3 / 表 2-4 NTIA Minimum Elements) + 第5章 5.2 SBOM の作成"
+    notes: |
+      M10-2: primary PDF 2.3 「SBOM の『最小要素』」 (L.1171-1354) と 表 2-3
+      米国 NTIA による SBOM の「最小要素」 の定義 (L.1186-1292) / 表 2-4
+      「最小要素」 として SBOM に含めるべきデータフィールド (L.1318+) と
+      5.2 「正確な情報を不足なく SBOM に記載することが望まれる」 (L.3536-
+      3537) に対応。 catalog 列挙 (Supplier Name / Component Name /
+      Component Version / Unique Identifier / Dependency Relationship /
+      SBOM Author / Timestamp の 7 項目) は NTIA 原典の data fields
+      categorisation そのもの。 旧 catalog の「2.3 SBOM の最小要素」 は
+      primary では「2.3 SBOM の『最小要素』」 (鉤括弧付き) が正確な
+      見出し。
 
   - id: meti.sbom_creation.07
     phase: sbom_creation
@@ -402,7 +647,19 @@ criteria:
       put in place contractual handling terms for recipients (no
       redistribution, retention period, permitted disclosure scope).
     evaluator_hint: "Auto-signal: public_links rows exist for the project (indicates shareable URL provisioned). Manual override via checklist_responses check_id='create_07'."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (表：5.3.1 No.1-3 公開範囲・共有方法) / 付録 SBOM 取引モデル (ver 2.0 新規、 受発注者間の SBOM 規定)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (checklist No.1 SBOM 共有方法の検討 / No.2 電子署名等の改ざん防止) / 付録 9 SBOM 取引モデル (ver 2.0 新規)"
+    notes: |
+      M10-2: primary PDF 5.3 「SBOM の共有」 (L.3562) checklist 2 項目:
+      「対象ソフトウェアの利用者及び納入先に対する SBOM の共有方法を
+      検討した上で、 必要に応じて、 SBOM を共有する」 / 「SBOM の共有に
+      当たって、 SBOM データの改ざん防止のための電子署名技術等の活用を
+      検討する」 (L.3564-3567) と本文 (L.3579-3604: 共有方法の例 / 電子署名・
+      分散型台帳技術) に対応。 catalog 表現「顧客ポータル, 暗号化メール,
+      公開リンク」 「再配布禁止 / 保管期間 / 開示範囲」 は primary の
+      「製品に組み込む / アクセス可能なリポジトリで公開 / Web ページで
+      公開 / SBOM ツールで共有」 (L.3598-3600) を一般化 + 契約条項
+      (付録 9) を取り込んだ distillation。 旧 catalog の「表：5.3.1 No.1-3」
+      は IPA 二次資料番号。
 
   - id: meti.sbom_creation.08
     phase: sbom_creation
@@ -417,7 +674,20 @@ criteria:
       against the previous version (added, removed, updated components).
       If diffs should trigger customer notification, automate the alert.
     evaluator_hint: "Auto-signal: sbom_diff service exists and ≥2 sbom revisions exist for the project (so diffs are computable)."
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.3 SBOM の更新条件・時期) — リリース毎の差分追跡"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (checklist No.1 変更履歴も含めた SBOM 保管 / 本文 SBOM の改変履歴 — 資産管理システム保管)"
+    notes: |
+      M10-2: primary PDF 6.2 「SBOM 情報の管理」 (L.3725) checklist No.1
+      「作成した SBOM は、 社外からの問合せがあった場合等に参照できる
+      よう、 変更履歴も含めて一定期間保管する」 (L.3727-3728) と本文
+      「出荷済み製品と SBOM 情報とを対応づけられるよう、 SBOM の改変
+      履歴も含めて資産管理システム等で保管することも想定される」
+      (L.3748-3749) / 「SBOM に含まれる情報は定期的に更新し、 管理する
+      必要がある」 (L.3750-3751) に対応。 catalog 表現「リリースごとに
+      SBOM を版管理、 前版との差分 (追加 / 削除 / バージョン更新) を
+      可視化、 顧客通知トリガーとなる場合は自動通知」 は primary の
+      「変更履歴」 を CI 連動の自動 diff + 通知に拡張した distillation。
+      旧 catalog の「6.3 SBOM 情報の管理 / 表：6.3.1 No.3」 は IPA 二次
+      資料番号 (primary では 6.2)。
 
   - id: meti.sbom_creation.09
     phase: sbom_creation
@@ -433,7 +703,19 @@ criteria:
       and validate the supplier SBOM (signature, timestamp, format
       conformance) before accepting it.
     evaluator_hint: "Manual-only. Map to checklist_responses check_id='create_09'. Future hook: sboms.source ('uploaded' vs. 'merged') column."
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (第三者提供 SBOM のインポート) / 付録 SBOM 取引モデル (受領 SBOM の品質・責任、 ver 2.0 新規)"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (本文 サードパーティ提供 SBOM のインポート・突合) / 付録 9 SBOM 取引モデル (受領 SBOM の品質・責任、 ver 2.0 新規)"
+    notes: |
+      M10-2: primary PDF 5.2 本文「サードパーティや OSS コミュニティ等
+      の第三者から提供されたコンポーネントを使用している場合は、 当該
+      コンポーネントの SBOM の提供を受けることができる場合もある」
+      (L.3522-3526) / 「サプライチェーン上でのコンポーネントの書換えや
+      不正改ざんを把握するためには、 第三者から提供された SBOM と自組織
+      で作成した SBOM を突合し、 整合性を確認することが効果的である」
+      (L.3542-3544) に対応。 catalog 表現「マージするか リンクするかを
+      定め、 受領 SBOM の妥当性 (署名・タイムスタンプ・形式準拠) を
+      検証する」 は primary の「整合性を確認」 を merge/link 運用 +
+      validation 観点に拡張した distillation。 5.2 自体は checklist 形式の
+      明示項目ではなく本文段落に対応する点に注意。
 
   # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
   - id: meti.sbom_creation.10
@@ -453,8 +735,20 @@ criteria:
       recipients on new revisions; and replace previously delivered SBOMs
       as needed. Maintain a ledger of recipients, contacts and shared-SBOM
       history that can be presented on audit (5.3).
-    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 配布契約整備 (sbom_creation.07) との重複を避けるため、 ここでは「個別運用が回っているか」 (公開リンクのアクセスログ / public_links.created_at 系列 / 通知配信履歴) を判定したい。 M8-2 以降の hook 候補: public_link_access_logs テーブル、 notification_deliveries テーブル。"
-    source_section: "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (表：5.3.1 No.4 受領者管理・通知・更新版差替え)"
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 配布契約整備 (sbom_creation.07) との重複を避けるため、 ここでは「個別運用が回っているか」 (公開リンクのアクセスログ / public_links.created_at 系列 / 通知配信履歴) を判定したい。 M10-2 以降の hook 候補: public_link_access_logs テーブル、 notification_deliveries テーブル。"
+    source_section: "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (本文 動的更新・利用者ごとの共有方法選定)"
+    notes: |
+      M10-2: primary PDF 5.3 本文「多くの SBOM は、 コンポーネントの
+      バージョンアップ等により作成後も動的に内容が変わることに留意する
+      必要がある」 (L.3582-3583) / 「SBOM 対象ソフトウェアの特性や更新の
+      頻度、 利用者における SBOM 利用状況等を踏まえ、 どの方法で共有する
+      かを検討することが望まれる」 (L.3601-3602) に対応。 catalog 表現
+      「受領者リスト / 連絡先 / 共有 SBOM 履歴を台帳化、 監査時に提示
+      できる状態を維持」 は primary PDF に独立 checklist 項目がなく、
+      IPA 二次資料 表：5.3.1 No.4「受領者管理・通知・更新版差替え」 由来。
+      sbom_creation.07 (5.3 全体の配布契約整備) との分担: 07 が「枠組み
+      整備」、 10 が「個別受領者運用 (誰に / いつ / どの版を / どの
+      チャネルで)」 にフォーカス。 出自は IPA 二次資料。
 
   # --------------------------------------------------------------------------
   # Phase 3 — SBOM 運用・管理フェーズ (sbom_operation) : 11 items
@@ -473,7 +767,20 @@ criteria:
       operations (cadence, owner, SLA) that match each SBOM component
       against vulnerability databases.
     evaluator_hint: "Auto-signal: scan_settings.vuln_scan_enabled is true AND last scan_tracker entry is within configured cadence."
-    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ1 脆弱性特定 / 第6章 6.1 SBOM に基づく脆弱性管理 (表：6.1.1 No.1)"
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.1 脆弱性特定フェーズ / 第6章 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施 (checklist No.1 脆弱性対応)"
+    notes: |
+      M10-2: primary PDF 第7章 「脆弱性管理プロセスの具体化」 (ver 2.0
+      新規、 L.3772+) と 6.1 「SBOM に基づく脆弱性管理、 ライセンス管理
+      等の実施」 (L.3613) checklist No.1 「脆弱性に関する SBOM ツールの
+      出力結果を踏まえ、 深刻度の評価、 影響度の評価、 脆弱性の修正、
+      残存リスクの確認、 関係機関への情報提供等の脆弱性対応を行う」
+      (L.3615-3616) に対応。 catalog 表現「実行頻度・担当・SLA」 は primary
+      の 7.3 プロセス全体像 (L.3925+) や 6.2「自動で脆弱性情報が更新・
+      通知される SBOM ツールを用いることで、 新たな脆弱性に関する情報を
+      即座に把握することができる」 (L.3733-3736) を SLA 化した distillation。
+      旧 catalog の「表：6.1.1 No.1」 は IPA 二次資料番号。 primary 6.1 の
+      正確な見出しは「SBOM に基づく脆弱性管理、 ライセンス管理等の実施」
+      (脆弱性 + ライセンス + 等 を 1 節に統合)。
 
   - id: meti.sbom_operation.02
     phase: sbom_operation
@@ -487,7 +794,17 @@ criteria:
       synchronisation cadence (e.g. NVD 24h, KEV 24h, JVN 24h) and the
       severity-notification threshold (e.g. CVSS ≥ 7.0).
     evaluator_hint: "Auto-signal: nvd, jvn, kev service tables have recent updated_at (<48h). Service files: apps/api/internal/service/{nvd,jvn,kev}.go."
-    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ1 脆弱性特定 / 第6章 6.1 SBOM に基づく脆弱性管理 (表：6.1.1 No.2 脆弱性 DB の選定)"
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.1 脆弱性特定フェーズ ((1.3) 対象とする脆弱性 DB の選択) / 第6章 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施"
+    notes: |
+      M10-2: primary PDF 7.3 プロセス全体像の (1.3) 「対象とする脆弱性
+      DB の選択」 (L.3951) と 7.4.1 脆弱性特定フェーズ (L.4031+) / 6.1
+      本文「NVD、 JVN のような公的な脆弱性情報データベース以外に、 独自に
+      脆弱性情報データベースを強化し、 脆弱性マッチングの範囲を拡大した
+      ものがある」 (L.3653-3655) に対応。 catalog 列挙「NVD / JVN / KEV /
+      GHSA / JPCERT」 は primary 例示 (NVD, JVN, OSV, ZDI, GitHub、 L.3835-
+      3843) を SBOMHub の実装に合わせて選定した distillation。 同期頻度
+      24h や CVSS 7.0 閾値は primary が直接示していない運用補助設計。
+      旧 catalog の「表：6.1.1 No.2」 は IPA 二次資料番号。
 
   - id: meti.sbom_operation.03
     phase: sbom_operation
@@ -501,7 +818,14 @@ criteria:
       KEV (known exploited) and SSVC (decision framework) alongside CVSS
       to set the remediation order.
     evaluator_hint: "Auto-signal: vulnerabilities table has epss_score, ssvc_decision and kev_listed columns populated for ≥1 finding."
-    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ2 脆弱性対応の優先付け / 第6章 6.1 (表：6.1.1 No.4 対応基準方針)"
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.2 脆弱性対応優先付けフェーズ ((2.1) 優先付け情報の選択・取得 / (2.2) 優先付け判断ツリー / (2.3) 優先度スコア評価)"
+    notes: |
+      M10-2: primary PDF 7.4.2 「脆弱性対応優先付けフェーズ」 (L.5317+) と
+      7.3 全体像 (2.1) - (2.3) (L.3942-3965) に対応。 catalog 列挙「EPSS /
+      SSVC / CVSS / KEV」 は primary が示す優先付け基準のうち SBOMHub
+      実装済の 4 軸を選択した distillation。 旧 catalog の「表：6.1.1 No.4」
+      は IPA 二次資料番号 (primary では 7.4.2 が主、 6.1 は脆弱性対応全般
+      の上位節)。
 
   - id: meti.sbom_operation.04
     phase: sbom_operation
@@ -516,7 +840,18 @@ criteria:
       (CycloneDX VEX or CSAF) and distribute to customers only after human
       approval. AI-drafted statements remain unapproved until reviewed.
     evaluator_hint: "Auto-signal: vex_statements rows exist for the project with status IN ('approved','distributed'). Service: apps/api/internal/service/vex.go."
-    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ3 情報共有 / フェーズ4 脆弱性対応 (VEX 活用) — 第6章 6.1 コラム「VEX を用いた脆弱性管理」"
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.3 情報共有フェーズ / 7.4.4 脆弱性対応フェーズ ((4.2) SBOM・VEX 等の更新・共有)"
+    notes: |
+      M10-2: primary PDF 7.4.3 「情報共有フェーズ」 (L.6771+) と 7.4.4
+      「脆弱性対応フェーズ (暫定対応・根本対応)」 (L.6900+) / 7.3 全体像
+      (4.2)「SBOM・VEX 等の更新・共有」 (L.3995) / 2.5「ある製品が既知の
+      脆弱性の影響を受けるかどうかを示す機械判読可能なセキュリティ勧告の
+      一つとして、 VEX」 (L.2377-) に対応。 catalog 表現「対応中 / 影響
+      なし / 修正済の判断を VEX (CycloneDX VEX or CSAF) で表現し、 人に
+      よる承認後に顧客へ配布」 は primary の VEX 概念に SBOMHub の
+      AI ドラフト + 人間承認ワークフローを重ねた distillation。 旧
+      catalog の「6.1 コラム『VEX を用いた脆弱性管理』」 は primary PDF
+      では独立コラムとして見出し化されておらず、 2.5 と第7章で分散言及。
 
   - id: meti.sbom_operation.05
     phase: sbom_operation
@@ -530,7 +865,20 @@ criteria:
       licence policy (prohibited / approved-with-review) and remediate
       violations.
     evaluator_hint: "Auto-signal: license_policies exist for the tenant AND license violation count = 0. Service: apps/api/internal/service/license.go."
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM に基づくライセンス管理 (表：6.2.1 No.1-2 利用 OSS の洗い出し・ライセンス利用条件)"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施 (checklist No.2 OSS ライセンス違反確認)"
+    notes: |
+      M10-2: primary PDF 6.1 「SBOM に基づく脆弱性管理、 ライセンス管理
+      等の実施」 (L.3613) checklist No.2 「ライセンスに関する SBOM ツール
+      の出力結果を踏まえ、 OSS のライセンス違反が発生していないかを
+      確認する」 (L.3617-3618) と本文 (L.3712-3719: 「ライセンスコンプライ
+      アンスの状況を確認」 / 「遵守不可能又は遵守困難なライセンス条件が
+      確認された場合には、 利用コンポーネント自体の変更や利用方法の
+      変更等、 対応を実施する」) に対応。 primary では脆弱性 + ライセンス
+      + EOL が 6.1 という 1 節に統合されており、 旧 catalog の「6.2 SBOM
+      に基づくライセンス管理 / 表：6.2.1 No.1-2」 という独立 sub-section
+      は存在しない (これは IPA 二次資料の構成)。 catalog 表現「禁止
+      ライセンス / 要承認ライセンス」 「license_policies」 は SBOMHub
+      実装の policy table 名と整合させた distillation。
 
   - id: meti.sbom_operation.06
     phase: sbom_operation
@@ -543,7 +891,22 @@ criteria:
       Identify runtimes and frameworks that have reached end-of-life
       (e.g. via endoflife.date) and record a replacement roadmap.
     evaluator_hint: "Auto-signal: eol service has produced findings for the project. Service: apps/api/internal/service/eol.go."
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.1 SBOM に基づく脆弱性管理 (EOL コンポーネントの脆弱性リスク) / 6.3 SBOM 情報の管理 (表：6.3.1 No.2 SBOM 提供期間)"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施 (本文 EOL コンポーネントの特定は手作業)"
+    notes: |
+      M10-2: primary PDF 6.1 本文「SBOM ツールを用いることで、 対象
+      ソフトウェアに含まれるコンポーネントにおける脆弱性やライセンスの
+      情報を効率的に特定できる一方で、 ツールを用いてコンポーネントの
+      EOL を特定することは一般に難しく、 手作業で特定することが必要と
+      なる。 EOL に関する情報がないコンポーネントも存在するところ、
+      可能な限りこのようなコンポーネントを使用しない等を設計時に考慮
+      することが望まれる」 (L.3720-3723) に対応。 認識ポイント「SBOM
+      ツールでコンポーネントの EOL を特定できない場合、 別途個別に調査
+      する必要がある」 (L.3628) も同節。 catalog 表現「endoflife.date を
+      参照、 置換ロードマップを記録」 は primary が示さない具体ツール
+      (endoflife.date) と運用 (置換ロードマップ) を SBOMHub 実装側で補った
+      distillation。 旧 catalog の「6.3 SBOM 情報の管理 / 表：6.3.1 No.2」
+      は IPA 二次資料番号 (primary では 6.1 が主、 提供期間は 6.2 に
+      別途記載)。
 
   - id: meti.sbom_operation.07
     phase: sbom_operation
@@ -559,7 +922,22 @@ criteria:
       regulations as applicable) in a tamper-evident form retrievable on
       demand, with hash / timestamp integrity checks available.
     evaluator_hint: "Auto-signal: sboms table retention policy enforced — no rows hard-deleted within retention window (check audit_log for delete events)."
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.2 SBOM 提供期間 / 図：6.3.2 SBOM 保管期間の検討例)"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (checklist No.1 変更履歴も含めた一定期間保管 / 本文 保管期間 — 製品流通中・販売終了後の保証期間・サポート提供期間・交換部品提供期間・ライセンス指定期間)"
+    notes: |
+      M10-2: primary PDF 6.2 「SBOM 情報の管理」 (L.3725) checklist No.1
+      「作成した SBOM は、 社外からの問合せがあった場合等に参照できる
+      よう、 変更履歴も含めて一定期間保管する」 (L.3727-3728) と本文
+      「保管期間は、 一般的に対象製品が市場に流通している間や対象
+      サービスが提供されている期間は最低限としつつ、 販売終了後も、
+      保証期間、 サポート提供期間、 交換部品の提供期間等に必要に応じて
+      SBOM を参照する可能性があるため、 予め参照できるように準備して
+      おく必要がある。 さらに、 使用しているコンポーネントのライセンス
+      の条件で製品提供終了後 3 年等の個別の指定がある場合にはその期間も
+      考慮する必要がある」 (L.3743-3748) に対応。 catalog 表現「ハッシュや
+      タイムスタンプによる完全性確認」 は primary が直接示さず、 CRA や
+      tamper-evident 要件として SBOMHub 実装側で補った distillation。
+      旧 catalog の「6.3 SBOM 情報の管理 / 表：6.3.1 No.2 / 図：6.3.2」
+      は IPA 二次資料番号 (primary では 6.2、 図 6.3.2 は存在しない)。
 
   - id: meti.sbom_operation.08
     phase: sbom_operation
@@ -576,7 +954,16 @@ criteria:
       72h detailed notification / final report) consistent with EU CRA
       Article 14.
     evaluator_hint: "Auto-signal: cra_reports rows exist for the project with report_type IN ('early_warning','detailed_notification','final_report'). Service: apps/api/internal/service/cra/."
-    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — フェーズ3 情報共有 / フェーズ4 脆弱性対応 (悪用検知時のインシデント対応タイムライン)"
+    source_section: "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.3 情報共有フェーズ / 7.4.4 脆弱性対応フェーズ (暫定対応の周知 / 根本対応)"
+    notes: |
+      M10-2: primary PDF 第7章「脆弱性管理プロセスの具体化」 (L.3772+) /
+      7.4.3 情報共有フェーズ (L.6771+) / 7.4.4 脆弱性対応フェーズ (暫定
+      対応・根本対応) (L.6900+) / 表 7-1 課題全体像「暫定対応の周知・
+      実施」 (L.3845-3848) に対応。 catalog 表現「24h 早期警告 / 72h
+      詳細通知 / 最終報告」 「EU CRA Article 14」 は primary PDF が示さない
+      EU CRA 由来の SLA タイムラインを SBOMHub 実装側で補った distillation。
+      primary は SLA 時刻を規定せず「悪用検知時の対応手順を整備」 までの
+      抽象度。
 
   - id: meti.sbom_operation.09
     phase: sbom_operation
@@ -590,7 +977,15 @@ criteria:
       dependency removal. Pin a minimum cadence of regeneration every 30
       days as an operational rule (per ver 2.0 recommendation).
     evaluator_hint: "Auto-signal: latest sboms.created_at for the project is within 30 days."
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.3 SBOM の更新条件・時期)"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (本文 SBOM に含まれる情報の定期更新)"
+    notes: |
+      M10-2: primary PDF 6.2 本文「SBOM の対象としたソフトウェアの内容が
+      動的に変わるほか、 脆弱性の情報も日々更新されることを踏まえ、
+      SBOM に含まれる情報は定期的に更新し、 管理する必要がある」 (L.3750-
+      3751) に対応。 catalog 表現「30 日に 1 回」 は primary PDF が直接示
+      さない数値で、 SBOMHub 運用ルールとして固定した distillation。
+      旧 catalog の「6.3 SBOM 情報の管理 / 表：6.3.1 No.3」 は IPA 二次
+      資料番号 (primary では 6.2)。
 
   - id: meti.sbom_operation.10
     phase: sbom_operation
@@ -604,7 +999,18 @@ criteria:
       with the operator identity so an auditor can trace the lifecycle
       chronologically.
     evaluator_hint: "Auto-signal: audit_log table has rows for action IN ('sbom.created','sbom.shared','vex.approved','cra.distributed') for the project."
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.1 SBOM 管理体制の整備 / SBOM 変更履歴の信頼性担保)"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (本文 SBOM の改変履歴を資産管理システム等で保管 / 管理体制 — PSIRT・品質管理部門)"
+    notes: |
+      M10-2: primary PDF 6.2 本文「出荷済み製品と SBOM 情報とを対応
+      づけられるよう、 SBOM の改変履歴も含めて資産管理システム等で保管
+      することも想定される」 (L.3748-3749) / 「SBOM の管理体制について、
+      脆弱性管理という観点を踏まえると、 組織内の PSIRT 又はそれに類
+      する部門が主導して SBOM の管理を行うのが望ましい」 (L.3758-3766)
+      に対応。 catalog 表現「sbom.created / sbom.shared / vex.approved /
+      cra.distributed の action 列挙」 は SBOMHub の audit_log スキーマと
+      整合させた distillation。 primary PDF は具体的 action 名を示さず、
+      「変更履歴も含めて保管」 までの抽象度。 旧 catalog の「6.3 SBOM
+      情報の管理 / 表：6.3.1 No.1」 は IPA 二次資料番号 (primary では 6.2)。
 
   # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
   - id: meti.sbom_operation.11
@@ -623,5 +1029,16 @@ criteria:
       (start, end, renewal conditions, re-provision SLA). Define
       notification, renewal-decision and termination procedures as an
       SLA and capture them in the audit log (6.3).
-    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 保管 (sbom_operation.07) との重複を避けるため、 ここでは「顧客 / 製品ライン毎の提供期間が個別運用されているか」 (project metadata の retention_window / customer_id 紐付け / provision_end_at 配列) を判定したい。 M8-2 以降の hook 候補: project_customer_provision_windows テーブル、 sboms.retention_end_at 個別列。"
-    source_section: "第6章 SBOM 運用・管理フェーズ — 6.3 SBOM 情報の管理 (表：6.3.1 No.2 SBOM 提供期間 — 顧客 / 製品ライン別個別運用)"
+    evaluator_hint: "pending evaluator: M8-1 で追加、 auto-signal 未実装。 保管 (sbom_operation.07) との重複を避けるため、 ここでは「顧客 / 製品ライン毎の提供期間が個別運用されているか」 (project metadata の retention_window / customer_id 紐付け / provision_end_at 配列) を判定したい。 M10-2 以降の hook 候補: project_customer_provision_windows テーブル、 sboms.retention_end_at 個別列。"
+    source_section: "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (本文 保管期間の検討要素 — 保証期間・サポート期間・ライセンス条件別の個別指定)"
+    notes: |
+      M10-2: primary PDF 6.2 本文「使用しているコンポーネントのライセンス
+      の条件で製品提供終了後 3 年等の個別の指定がある場合にはその期間も
+      考慮する必要がある」 (L.3747-3748) を、 顧客 / 製品ライン / 出荷地域 /
+      契約タイプ別の個別運用にまで拡張した distillation。 primary PDF は
+      製品ライン別運用を直接 checklist 化しておらず、 出自は IPA 二次
+      資料 表：6.3.1 No.2「SBOM 提供期間 — 顧客 / 製品ライン別個別運用」。
+      sbom_operation.07 (6.2 保管期間の全体方針) との分担: 07 が「ライフ
+      タイム + 規制要求期間の枠組み」、 11 が「個別顧客 / 製品ライン毎の
+      開始日・終了日・延長条件・再提供 SLA」 にフォーカス。 旧 catalog の
+      「6.3 / 表：6.3.1」 は IPA 二次資料番号 (primary では 6.2)。

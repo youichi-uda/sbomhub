@@ -284,20 +284,21 @@ func TestLoadMetadata_PresentAndSane(t *testing.T) {
 // and the author must update the test deliberately, which is the
 // M5-6 / M8-2 contract: wording becomes catalog data, not a comment.
 //
-// Provenance note: these strings are the M8-1 (issue #62) wording,
-// which was reconciled against the IPA 2024-12 secondary source
-// (METI ver 2.0 を [1] として明示参照). A direct char-by-char
-// comparison against the primary METI ver 2.0 PDF is still pending
-// because the build environment cannot reach meti.go.jp (M5-6 timeout
-// pattern re-confirmed in M8-2: WebFetch / curl 60s timeout on all
-// three PDF URLs; meti.go.jp index itself does not respond within
-// 15s while google.com responds in 0.19s). See metadata.verification_notes
-// in catalog.yaml for the residual checklist.
+// Provenance note: M10-2 (issue #75, 2026-06-29) confirmed the
+// title_ja wording remains as the M8-1 (issue #62) 1-line
+// distillation. Direct char-by-char comparison against the primary
+// METI ver 2.0 PDF was completed in M10-2: title_ja values are
+// curated 1-line summaries (UI labels) rather than verbatim copies
+// of the primary PDF's paragraph-form checklist items, by intentional
+// design. See metadata.verification_notes + each criterion's notes:
+// field in catalog.yaml for the M10-2 distillation rationale.
 //
 // Why title_ja and not description_ja: titles surface in the UI as
 // short labels (dashboard rows, CRA report headings), so silent drift
 // there is highest-visibility. Descriptions are intentionally not
-// pinned so prose polish does not require a test edit per round.
+// pinned char-by-char so prose polish does not require a test edit
+// per round, but their leading-token shape is asserted in
+// TestCatalog_DescriptionJA_LeadingTokens.
 func TestCatalog_OfficialWording_Regression(t *testing.T) {
 	// 32 criteria full coverage (M8-2, issue #63). Keep in id order so
 	// review diffs read top-to-bottom against the catalog file.
@@ -405,4 +406,213 @@ func TestCatalog_SourceSection_AnchorsVer2Chapters(t *testing.T) {
 			"env_setup criterion %s.source_section %q should reference 第4章 (環境構築・体制整備フェーズ)",
 			c.ID, c.SourceSection)
 	}
+}
+
+// TestCatalog_SourceSection_M10_2_StrictPin (issue #75, 2026-06-29) locks
+// down the exact source_section string for every catalog criterion against
+// the primary METI ver 2.0 PDF structure as confirmed by character-by-
+// character audit. M5-6 / M8-1 / M8-2 used the IPA secondary catalogue's
+// table numbering (表：4.1.1 / 表：4.5.1 / 表：6.3.1, etc.) because the
+// primary PDF was network-unreachable; M10-2 reset every source_section
+// to anchor on the primary PDF's actual section numbers (4.1 / 4.2 /
+// 4.3 / 4.4 / 5.1 / 5.2 / 5.3 / 6.1 / 6.2 / 7.x).
+//
+// A future edit that drifts the source_section will fail this test, and
+// the author must update both the catalog and this pin deliberately —
+// that is the M10-2 contract: source_section is provenance data, not
+// free-form commentary.
+func TestCatalog_SourceSection_M10_2_StrictPin(t *testing.T) {
+	// Exact source_section strings, keyed by criterion ID. The full
+	// pin is intentional: section drift is high-stakes (it determines
+	// which PDF passage an auditor opens to verify the catalog claim)
+	// and the strings double as the provenance shown by the dashboard.
+	wantSections := map[string]string{
+		// env_setup phase — 11 items, anchored to primary 4.1 / 4.2 /
+		// 4.3 / 4.4 (M10-2 reset from IPA secondary 4.1.x / 4.2 / 4.3 /
+		// 4.4 / 4.5 numbering).
+		"meti.env_setup.01": "第4章 環境構築・体制整備フェーズ — 章導入文 (体制整備の必要性) + 4.1 SBOM 適用範囲の明確化 (組織内の制約 — 体制の制約) + 6.2 SBOM 情報の管理 (PSIRT / 品質管理部門による管理体制)",
+		"meti.env_setup.02": "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.1 開発言語・コンポーネント形態・開発ツール等)",
+		"meti.env_setup.03": "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.3 利用者及びサプライヤーとの契約形態・取引慣行) / 付録 9 SBOM 取引モデル (ver 2.0 新規)",
+		"meti.env_setup.04": "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.4 SBOM に関する規制・要求事項)",
+		"meti.env_setup.05": "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.5 SBOM 導入に関する組織内の制約)",
+		"meti.env_setup.06": "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.6 SBOM 適用範囲 (5W1H) / 表 4-1 SBOM 適用範囲 (5W1H))",
+		"meti.env_setup.07": "第4章 環境構築・体制整備フェーズ — 4.2 SBOM ツールの選定 + 4.3 SBOM ツールの導入・設定",
+		"meti.env_setup.08": "第4章 環境構築・体制整備フェーズ — 4.4 SBOM ツールに関する学習",
+		"meti.env_setup.09": "第4章 環境構築・体制整備フェーズ — 4.1 SBOM 適用範囲の明確化 (checklist No.2 対象ソフトウェアの正確な構成図 / 図 4-1 システム構成図の例 — 歯科用 CT)",
+		"meti.env_setup.10": "第4章 環境構築・体制整備フェーズ — 4.3 SBOM ツールの導入・設定",
+		"meti.env_setup.11": "第4章 環境構築・体制整備フェーズ — 4.4 SBOM ツールに関する学習",
+
+		// sbom_creation phase — 10 items, anchored to primary 5.1 / 5.2 /
+		// 5.3 plus 2.3 / 2.4 / 6.2 cross-refs (M10-2 reset).
+		"meti.sbom_creation.01": "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (checklist No.1 SBOM の項目・フォーマット・出力ファイル形式等の要件決定)",
+		"meti.sbom_creation.02": "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (checklist No.1 SBOM の項目・フォーマット・出力ファイル形式等の要件決定) + 第2章 2.4 SBOM フォーマットの例 (SPDX / CycloneDX / SWID タグ)",
+		"meti.sbom_creation.03": "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (checklist No.1 対象ソフトウェアのスキャン) + 5.2 SBOM の作成 (checklist No.2 SBOM ツールを用いた SBOM 作成)",
+		"meti.sbom_creation.04": "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (checklist No.2 SBOM ツールの解析ログ調査・解析中断・省略の確認)",
+		"meti.sbom_creation.05": "第5章 SBOM 作成・共有フェーズ — 5.1 コンポーネントの解析 (checklist No.3 誤検出・検出漏れの確認) + 図 5-1 コンポーネント解析結果の確認の観点及び確認方法",
+		"meti.sbom_creation.06": "第2章 SBOM の概要 — 2.3 SBOM の「最小要素」 (表 2-3 / 表 2-4 NTIA Minimum Elements) + 第5章 5.2 SBOM の作成",
+		"meti.sbom_creation.07": "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (checklist No.1 SBOM 共有方法の検討 / No.2 電子署名等の改ざん防止) / 付録 9 SBOM 取引モデル (ver 2.0 新規)",
+		"meti.sbom_creation.08": "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (checklist No.1 変更履歴も含めた SBOM 保管 / 本文 SBOM の改変履歴 — 資産管理システム保管)",
+		"meti.sbom_creation.09": "第5章 SBOM 作成・共有フェーズ — 5.2 SBOM の作成 (本文 サードパーティ提供 SBOM のインポート・突合) / 付録 9 SBOM 取引モデル (受領 SBOM の品質・責任、 ver 2.0 新規)",
+		"meti.sbom_creation.10": "第5章 SBOM 作成・共有フェーズ — 5.3 SBOM の共有 (本文 動的更新・利用者ごとの共有方法選定)",
+
+		// sbom_operation phase — 11 items, anchored to primary 6.1 / 6.2 /
+		// 7.4.x (M10-2 reset from IPA secondary 6.1 / 6.2 / 6.3 numbering).
+		"meti.sbom_operation.01": "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.1 脆弱性特定フェーズ / 第6章 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施 (checklist No.1 脆弱性対応)",
+		"meti.sbom_operation.02": "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.1 脆弱性特定フェーズ ((1.3) 対象とする脆弱性 DB の選択) / 第6章 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施",
+		"meti.sbom_operation.03": "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.2 脆弱性対応優先付けフェーズ ((2.1) 優先付け情報の選択・取得 / (2.2) 優先付け判断ツリー / (2.3) 優先度スコア評価)",
+		"meti.sbom_operation.04": "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.3 情報共有フェーズ / 7.4.4 脆弱性対応フェーズ ((4.2) SBOM・VEX 等の更新・共有)",
+		"meti.sbom_operation.05": "第6章 SBOM 運用・管理フェーズ — 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施 (checklist No.2 OSS ライセンス違反確認)",
+		"meti.sbom_operation.06": "第6章 SBOM 運用・管理フェーズ — 6.1 SBOM に基づく脆弱性管理、ライセンス管理等の実施 (本文 EOL コンポーネントの特定は手作業)",
+		"meti.sbom_operation.07": "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (checklist No.1 変更履歴も含めた一定期間保管 / 本文 保管期間 — 製品流通中・販売終了後の保証期間・サポート提供期間・交換部品提供期間・ライセンス指定期間)",
+		"meti.sbom_operation.08": "第7章 脆弱性管理プロセスの具体化 (ver 2.0 新規) — 7.4.3 情報共有フェーズ / 7.4.4 脆弱性対応フェーズ (暫定対応の周知 / 根本対応)",
+		"meti.sbom_operation.09": "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (本文 SBOM に含まれる情報の定期更新)",
+		"meti.sbom_operation.10": "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (本文 SBOM の改変履歴を資産管理システム等で保管 / 管理体制 — PSIRT・品質管理部門)",
+		"meti.sbom_operation.11": "第6章 SBOM 運用・管理フェーズ — 6.2 SBOM 情報の管理 (本文 保管期間の検討要素 — 保証期間・サポート期間・ライセンス条件別の個別指定)",
+	}
+
+	require.Len(t, wantSections, 32,
+		"M10-2 (#75): wantSections must hold exactly 32 entries; got %d", len(wantSections))
+
+	for id, want := range wantSections {
+		got, ok := GetCriterion(id)
+		require.True(t, ok, "criterion %s must exist", id)
+		require.NotNil(t, got)
+		assert.Equal(t, want, got.SourceSection,
+			"source_section for %s drifted from the M10-2 primary-PDF pin; update both catalog.yaml and this test only if the change is intentional",
+			id)
+	}
+
+	// Inverse coverage: every catalog criterion must have a pinned
+	// source_section. Catches the case where a new criterion is added
+	// without an M10-2 regression entry.
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+	for _, c := range items {
+		_, pinned := wantSections[c.ID]
+		assert.True(t, pinned,
+			"catalog criterion %s has no pinned source_section in TestCatalog_SourceSection_M10_2_StrictPin; add it to wantSections",
+			c.ID)
+	}
+}
+
+// TestCatalog_SourceSection_RejectsIPASecondaryTableNumbering is the
+// M10-2 (issue #75) drift guard: the M5-6 / M8-1 wave referenced IPA
+// secondary catalogue table numbering (表：4.1.1 / 表：4.5.1 /
+// 表：6.3.1, …) because the primary METI ver 2.0 PDF was network-
+// unreachable. M10-2 confirmed via local PDF fixture that the primary
+// PDF does NOT use such numbering — sections are flat 4.1 / 4.2 / 4.3 /
+// 4.4 / 5.1 / 5.2 / 5.3 / 6.1 / 6.2 / 7.x and the only tables in those
+// sections are 表 2-3, 表 2-4, 表 4-1, 表 4-2, 図 4-1, 図 5-1, etc.
+//
+// A future authoring round that copy-pastes from the IPA secondary
+// would re-introduce 表：N.N.N references and silently regress the
+// M10-2 anchoring. This test catches that.
+//
+// Banned forms locked in:
+//   - 表：4.X.X / 表：5.X.X / 表：6.X.X — IPA dotted-table numbering
+//   - "4.5 SBOM ツール" — primary uses 4.4 for tool learning
+//   - "6.3 SBOM 情報の管理" — primary uses 6.2
+//   - "4.4 SBOM ツールの導入・設定" — primary uses 4.3
+//   - "4.3 SBOM ツールの選定" — primary uses 4.2
+//   - "4.1.4 対象ソフトウェアの構成図" — primary has no 4.1.x sub-sections,
+//     the diagram is checklist No.2 under 4.1
+//   - "6.2 SBOM に基づくライセンス管理" — primary 6.1 covers both vuln + licence
+func TestCatalog_SourceSection_RejectsIPASecondaryTableNumbering(t *testing.T) {
+	bannedPatterns := []struct {
+		needle string
+		reason string
+	}{
+		{"表：4.1.1", "IPA secondary table numbering; primary METI ver 2.0 PDF has no 表：4.1.1"},
+		{"表：4.2.1", "IPA secondary table numbering"},
+		{"表：4.3.1", "IPA secondary table numbering"},
+		{"表：4.4.1", "IPA secondary table numbering"},
+		{"表：4.5.1", "IPA secondary table numbering"},
+		{"表：4.1.2", "IPA secondary table numbering"},
+		{"表：4.1.4", "IPA secondary table numbering"},
+		{"表：5.1.1", "IPA secondary table numbering"},
+		{"表：5.2.1", "IPA secondary table numbering"},
+		{"表：5.3.1", "IPA secondary table numbering"},
+		{"表：6.1.1", "IPA secondary table numbering"},
+		{"表：6.2.1", "IPA secondary table numbering"},
+		{"表：6.3.1", "IPA secondary table numbering"},
+		{"4.5 SBOM ツールの学習", "primary METI ver 2.0 PDF uses 4.4 for tool learning"},
+		{"6.3 SBOM 情報の管理", "primary METI ver 2.0 PDF uses 6.2 for SBOM 情報の管理"},
+		{"4.4 SBOM ツールの導入・設定", "primary METI ver 2.0 PDF uses 4.3 for tool install"},
+		{"4.3 SBOM ツールの選定", "primary METI ver 2.0 PDF uses 4.2 for tool selection"},
+		{"4.1.4 対象ソフトウェアの構成図", "primary METI ver 2.0 PDF has no 4.1.x; diagram is 4.1 checklist No.2"},
+		{"6.2 SBOM に基づくライセンス管理", "primary METI ver 2.0 PDF combines vuln + licence into 6.1"},
+		{"4.2 SBOM 導入体制の整備", "primary METI ver 2.0 PDF has no separate 4.2 体制 section"},
+	}
+
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+
+	for _, c := range items {
+		for _, banned := range bannedPatterns {
+			assert.NotContains(t, c.SourceSection, banned.needle,
+				"criterion %s.source_section %q contains banned IPA-secondary form %q (%s) — M10-2 reset every source_section to anchor on the primary PDF; do not re-introduce",
+				c.ID, c.SourceSection, banned.needle, banned.reason)
+		}
+	}
+}
+
+// TestCatalog_Notes_PresentForDistilledCriteria (M10-2, issue #75) pins
+// the criteria where the catalog text is a deliberate distillation of
+// the primary METI ver 2.0 PDF (rather than a verbatim quote of a
+// checklist item) — for these, the notes: field must be populated so
+// the dashboard can surface "why does this label not match the PDF
+// verbatim" provenance, and a future edit that strips the notes must
+// fail loudly.
+//
+// All 32 criteria are listed: every M10-2 criterion gained a notes
+// field documenting the primary PDF passage(s) and the distillation
+// rationale. If a future criterion lands without one, this test
+// catches it.
+func TestCatalog_Notes_PresentForDistilledCriteria(t *testing.T) {
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+
+	for _, c := range items {
+		assert.NotEmpty(t, c.Notes,
+			"criterion %s.notes must be set (M10-2 distillation rationale); empty notes implies the catalog claims verbatim PDF match which is not the case",
+			c.ID)
+		assert.Contains(t, c.Notes, "M10-2",
+			"criterion %s.notes %q should mention M10-2 provenance so a grep over the codebase finds the verification wave",
+			c.ID, c.Notes)
+	}
+}
+
+// TestLoadMetadata_M10_2_VerificationNotesShape (issue #75) asserts the
+// verification_notes contain the load-bearing claims that M10-2 makes:
+// the primary PDF SHA256, the methodology summary, and the honest
+// "partial" rationale. A future round that rewrites the notes must
+// preserve these load-bearing tokens or update this test deliberately.
+func TestLoadMetadata_M10_2_VerificationNotesShape(t *testing.T) {
+	meta, err := LoadMetadata()
+	require.NoError(t, err)
+
+	// M10-2 provenance markers — these must remain so the dashboard
+	// provenance pane can render the verification chain back to the
+	// PDF fixture.
+	wantSubstrings := []string{
+		"M10-2",
+		"issue #75",
+		"2026-06-29",
+		// Primary PDF SHA256.
+		"cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a",
+		// Summary PDF SHA256.
+		"9d46a2f16e4f075b18671b646c8ce0006e057211b041e5a26efa2942c83d0567",
+		// Honest distillation note.
+		"distillation",
+	}
+	for _, want := range wantSubstrings {
+		assert.Contains(t, meta.VerificationNotes, want,
+			"metadata.verification_notes must contain %q (M10-2 load-bearing token)", want)
+	}
+
+	// last_synced bump — M10-2 ran on 2026-06-29.
+	assert.Equal(t, "2026-06-29", meta.LastSynced,
+		"metadata.last_synced should be 2026-06-29 after the M10-2 wave")
+	assert.Contains(t, meta.SyncedBy, "M10-2",
+		"metadata.synced_by should mention M10-2; got %q", meta.SyncedBy)
 }

@@ -110,6 +110,17 @@ type Criterion struct {
 	// string beginning with "第N章" (e.g. "第4章 4.1 / 4.6 SBOM ツール
 	// 選定 (ver 2.0)").
 	SourceSection string `yaml:"source_section"`
+
+	// Notes is an optional Japanese free-form annotation introduced by
+	// M10-2 (issue #75) to document where the catalog wording is a
+	// deliberate distillation of a multi-paragraph PDF section, or
+	// where the criterion is sourced from an IPA secondary catalogue
+	// rather than the primary METI ver 2.0 PDF. Empty for criteria
+	// where TitleJA / DescriptionJA already track the primary PDF
+	// reasonably closely. Surfaced verbatim by the dashboard provenance
+	// pane so operators see why the catalog text diverges from a literal
+	// quote.
+	Notes string `yaml:"notes,omitempty"`
 }
 
 // Metadata captures provenance for the catalog as a whole.
