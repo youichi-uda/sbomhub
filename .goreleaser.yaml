@@ -117,6 +117,7 @@ checksum:
     - glob: docker/scripts/dr-rehearsal.sh
     - glob: docker/scripts/verify-encryption.sh
     - glob: docker/scripts/verify-encryption-cron.sh
+    - glob: docker/scripts/validate-deferred-constraints.sh
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
@@ -152,6 +153,7 @@ release:
     - glob: docker/scripts/dr-rehearsal.sh
     - glob: docker/scripts/verify-encryption.sh
     - glob: docker/scripts/verify-encryption-cron.sh
+    - glob: docker/scripts/validate-deferred-constraints.sh
   header: |
     ## sbomhub {{ .Tag }}
 

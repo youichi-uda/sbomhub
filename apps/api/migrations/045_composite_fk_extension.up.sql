@@ -211,6 +211,20 @@ ALTER TABLE vulnerability_tickets FORCE  ROW LEVEL SECURITY;
 -- mismatches, so the data is effectively pre-validated. Operators may run
 -- ALTER TABLE ... VALIDATE CONSTRAINT ... later under a session that sets
 -- app.current_tenant_id appropriately (M9 follow-up: F157).
+--
+-- M10-1 (issue #70): post-deploy validation is shipped as
+--   docker/scripts/validate-deferred-constraints.sh
+-- with the operator runbook at
+--   docs/operations/validate-deferred-constraints.md (English)
+--   docs/operations/validate-deferred-constraints.ja.md (Japanese)
+-- The script wraps the seven VALIDATE statements in a single atomic
+-- transaction that mirrors Steps 1 and 5 of this migration: lift FORCE+RLS
+-- on the 7 child tables plus projects, VALIDATE under a full-table scan
+-- (no app.current_tenant_id required), then restore the snapshotted RLS
+-- posture. The per-tenant SET LOCAL approach was rejected because
+-- public_links has had RLS removed by migration 030 and its FK probe
+-- against projects remains RLS-filtered, producing false-positive FK
+-- violations.
 ALTER TABLE sboms
     ADD CONSTRAINT sboms_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
