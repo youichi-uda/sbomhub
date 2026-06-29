@@ -81,7 +81,7 @@ rows:
 | `users` | `00000000-0000-0000-0000-000000000002` (`clerk_user_id='self-hosted'`) | The self-hosted bootstrap user. |
 | `tenant_users` | (tenant, user, role='owner') | Self-hosted admin membership. |
 | `projects` | `00000000-0000-0000-0000-000000000010` ("M10-3 Seed Project") | Seed project so `/projects` is not empty. |
-| `sboms` + `components` | log4j-core 2.14.0 | Seed SBOM with one component — enough for the components / vulnerabilities / vex / sbom-diff specs. |
+| `sboms` + `components` | log4j-core 2.14.0 | Seed SBOM with one component — enough for the components / vulnerabilities / vex specs. The `sbom-diff` spec (M10-6) uploads its own two SBOMs to a per-test project in `beforeAll`, so it does NOT depend on the seed having multiple SBOMs (F163 fix). |
 | `vulnerabilities` + `component_vulnerabilities` | CVE-2021-44228 (Critical, in_kev=true) | Seed vuln so vulnerabilities / kev / ssvc specs are non-empty. |
 | `vex_drafts` | 1 pending `not_affected` row | Seed AI VEX draft so `/triage` renders the list (decision filter row count > 0). |
 | `cra_reports` | 1 pending `early_warning ja` row | Seed AI CRA report so `/cra-reports` renders the list. |

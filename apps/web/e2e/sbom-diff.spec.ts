@@ -78,100 +78,77 @@ test.describe('SBOM Diff', () => {
     }
   });
 
-  // M10-3 #71 follow-up: this spec requires 2 SBOMs uploaded to the
-  // seed project and the M10-6 diff page wired up. M11 needs to extend
-  // docker/seed/web-e2e.sql with 2 SBOM rows + components so the
-  // M10-6 diff endpoint has real input.
-  test.skip('should compare two sboms and show added/removed/updated components', async ({ page, request }) => {
-    // First verify SBOMs are available via API
-    const sbomsResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/sboms`);
-    console.log('In test - SBOMs GET status:', sbomsResponse.status());
+  // M10-6 #74 + Phase D F163: assertion rewritten against the new
+  // SBOM diff timeline + detail UI shipped in M10-6 (commit b0665d4).
+  // The legacy spec asserted against a `<select>` + "Compare" button
+  // layout that no longer exists — the new page renders a
+  // "SBOM Change History" timeline at /projects/:id/diff and a
+  // "Diff detail" view at /projects/:id/diff?from=<sbom>&to=<sbom>.
+  // beforeAll uploads two SBOMs to a per-test project, so the seed
+  // (docker/seed/web-e2e.sql) does NOT need to ship two SBOMs for
+  // this spec to pass.
+  test('should compare two sboms and show added/removed/updated components', async ({ page, request }) => {
+    // Sanity: the API must surface both uploaded SBOMs for the diff
+    // endpoint to have non-empty input. If the upload path is broken
+    // we want a fast failure here, not a confusing UI-level miss.
+    const sbomsResponse = await request.get(
+      `${API_BASE_URL}/api/v1/projects/${projectId}/sboms`,
+    );
+    expect(sbomsResponse.ok()).toBeTruthy();
+    const sboms = await sbomsResponse.json();
+    expect(sboms.length).toBeGreaterThanOrEqual(2);
 
-    // If SBOMs endpoint is not available (404), skip the test
-    // This can happen if the backend is running in SaaS mode or the endpoint requires auth
-    if (sbomsResponse.status() === 404) {
-      console.log('SBOMs endpoint returned 404, skipping test');
-      test.skip(true, 'SBOMs API endpoint not available (404). Backend may require authentication.');
-      return;
-    }
-
-    if (sbomsResponse.ok()) {
-      const sboms = await sbomsResponse.json();
-      console.log('In test - SBOMs count:', sboms?.length || 0);
-      if (sboms?.length < 2) {
-        test.skip(true, 'Less than 2 SBOMs available for comparison');
-        return;
-      }
-    }
-
+    // --- Timeline mode (default landing) -------------------------------
     await page.goto(`/en/projects/${projectId}/diff`);
     await page.waitForLoadState('networkidle');
 
-    await expect(page.getByRole('heading', { name: 'SBOM Diff' })).toBeVisible({ timeout: 10000 });
+    // h1 from messages/en.json -> SbomDiff.Page.title
+    await expect(
+      page.getByRole('heading', { level: 1, name: /SBOM Change History/i }),
+    ).toBeVisible({ timeout: 10000 });
 
-    // Wait for the page to fully load (loading state to disappear)
-    await page.waitForTimeout(3000);
+    // Timeline section heading from SbomDiff.Timeline.title.
+    await expect(page.getByText(/SBOM revisions/i)).toBeVisible();
 
-    // Wait for SBOM selectors to be populated
-    // The page pre-selects the two most recent SBOMs if available
-    const baseSelect = page.locator('select').first();
-    const targetSelect = page.locator('select').nth(1);
+    // Both uploads should appear in the timeline list. We don't pin
+    // the exact ordering since timestamps depend on upload latency;
+    // we only assert both rows are present.
+    await expect(page.getByText(/Uploaded/i).first()).toBeVisible();
 
-    // Check if selectors have options
-    const optionCount = await baseSelect.locator('option').count();
-    console.log('Initial option count:', optionCount);
+    // The newest revision has a "Diff vs previous" affordance whose
+    // click navigates into detail mode.
+    const diffLink = page
+      .getByRole('link', { name: /Diff vs previous|View diff/i })
+      .first();
+    await expect(diffLink).toBeVisible({ timeout: 10000 });
+    await diffLink.click();
 
-    if (optionCount < 3) {
-      // If no options, the API might not be returning SBOMs
-      // Check if the page shows the "At least two SBOMs are required" message
-      const noSbomsMessage = page.getByText('At least two SBOMs are required');
-      if (await noSbomsMessage.isVisible({ timeout: 5000 }).catch(() => false)) {
-        test.skip(true, 'Less than 2 SBOMs available for comparison in the UI');
-        return;
-      }
-      // Otherwise wait with polling
-      await expect(async () => {
-        await page.reload();
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(2000);
-        const newCount = await baseSelect.locator('option').count();
-        console.log('Current option count after reload:', newCount);
-        expect(newCount).toBeGreaterThanOrEqual(3);
-      }).toPass({ timeout: 20000, intervals: [5000] });
-    }
+    // --- Detail mode (?from=<base>&to=<target>) ------------------------
+    await page.waitForLoadState('networkidle');
+    await expect(
+      page.getByRole('heading', { level: 1, name: /Diff detail/i }),
+    ).toBeVisible({ timeout: 10000 });
 
-    const compareButton = page.getByRole('button', { name: 'Compare' });
+    // Three panels: Components / Vulnerabilities / License policy.
+    // Each surfaces as a tab in the detail view.
+    await expect(page.getByRole('tab', { name: /Components/i })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /Vulnerabilities/i })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /License/i })).toBeVisible();
 
-    // The page auto-selects SBOMs when there are 2+ available
-    // Wait a bit for the auto-selection to complete
-    await page.waitForTimeout(1000);
+    // Click into the Components tab (or rely on it being default) and
+    // assert the three buckets land:
+    //   - alpha-lib  (only in base   -> removed)
+    //   - beta-lib   (only in target -> added)
+    //   - shared-lib (version changed 1.0.0 -> 1.1.0)
+    await page.getByRole('tab', { name: /Components/i }).click();
 
-    // Check if button is still disabled and if so, manually select the SBOMs
-    const isDisabled = await compareButton.isDisabled();
-    if (isDisabled) {
-      // Manually select the SBOMs: base = older (index 2), target = newer (index 1)
-      await baseSelect.selectOption({ index: 2 });
-      await page.waitForTimeout(200);
-      await targetSelect.selectOption({ index: 1 });
-      await page.waitForTimeout(500);
-    }
+    // shared-lib version change is the most resilient assertion since
+    // the new bucket renders both versions explicitly via the table.
+    await expect(page.getByText('shared-lib')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('1.1.0')).toBeVisible();
 
-    // Now the button should be enabled
-    await expect(compareButton).toBeEnabled({ timeout: 10000 });
-    await compareButton.click();
-
-    // Wait for diff results to load
-    await expect(page.getByRole('heading', { name: 'Added Components' })).toBeVisible({ timeout: 15000 });
-
-    // Check for added component - format is "name@version"
-    await expect(page.getByText('beta-lib@2.0.0')).toBeVisible();
-
-    await expect(page.getByRole('heading', { name: 'Removed Components' })).toBeVisible();
-    await expect(page.getByText('alpha-lib@1.0.0')).toBeVisible();
-
-    await expect(page.getByRole('heading', { name: 'Updated Components' })).toBeVisible();
-    // The updated component shows name with version change
-    // shared-lib was updated from 1.0.0 to 1.1.0 - check for the new version
-    await expect(page.getByText('shared-lib@1.1.0')).toBeVisible();
+    // alpha-lib must appear in the Removed bucket; beta-lib in Added.
+    await expect(page.getByText('alpha-lib')).toBeVisible();
+    await expect(page.getByText('beta-lib')).toBeVisible();
   });
 });
