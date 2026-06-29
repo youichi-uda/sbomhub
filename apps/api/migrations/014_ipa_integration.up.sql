@@ -51,4 +51,4 @@ ALTER TABLE ipa_sync_settings ENABLE ROW LEVEL SECURITY;
 
 -- RLS policy
 CREATE POLICY "ipa_sync_settings_tenant_isolation" ON ipa_sync_settings
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);

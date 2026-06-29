@@ -201,47 +201,64 @@ ALTER TABLE vulnerability_tickets FORCE  ROW LEVEL SECURITY;
 
 -- Step 6: Add composite FKs. Existing single-column project_id FKs stay in
 -- place; this migration is additive hardening.
+--
+-- NOT VALID: deferred validation (FK validation under FORCE RLS triggers the
+-- 012/013/014/015/021 RLS policies which call current_setting('app.current_tenant_id')
+-- without missing_ok=true, raising "unrecognized configuration parameter" during
+-- migrate apply when no app.current_tenant_id GUC is set. NOT VALID skips the
+-- initial whole-table validation while still enforcing the constraint on new
+-- writes. Step 3's pre-flight DO block above already raises on existing tenant
+-- mismatches, so the data is effectively pre-validated. Operators may run
+-- ALTER TABLE ... VALIDATE CONSTRAINT ... later under a session that sets
+-- app.current_tenant_id appropriately (M9 follow-up: F157).
 ALTER TABLE sboms
     ADD CONSTRAINT sboms_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 ALTER TABLE vex_statements
     ADD CONSTRAINT vex_statements_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 ALTER TABLE license_policies
     ADD CONSTRAINT license_policies_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 ALTER TABLE notification_settings
     ADD CONSTRAINT notification_settings_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 ALTER TABLE notification_logs
     ADD CONSTRAINT notification_logs_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 ALTER TABLE public_links
     ADD CONSTRAINT public_links_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 ALTER TABLE vulnerability_tickets
     ADD CONSTRAINT vulnerability_tickets_tenant_project_fk
     FOREIGN KEY (tenant_id, project_id)
     REFERENCES projects (tenant_id, id)
-    ON DELETE CASCADE;
+    ON DELETE CASCADE
+    NOT VALID;
 
 COMMENT ON CONSTRAINT sboms_tenant_project_fk ON sboms IS
     'M5 Phase D review Round 1 / F81: rejects tenant_id/project_id pairs whose parent project belongs to a different tenant.';

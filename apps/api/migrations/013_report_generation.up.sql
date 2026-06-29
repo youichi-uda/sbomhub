@@ -51,7 +51,7 @@ ALTER TABLE generated_reports ENABLE ROW LEVEL SECURITY;
 
 -- RLS policies
 CREATE POLICY "report_settings_tenant_isolation" ON report_settings
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
 CREATE POLICY "generated_reports_tenant_isolation" ON generated_reports
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);

@@ -35,7 +35,7 @@ CREATE INDEX idx_ssvc_project_defaults_tenant ON ssvc_project_defaults(tenant_id
 ALTER TABLE ssvc_project_defaults ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "ssvc_project_defaults_tenant_isolation" ON ssvc_project_defaults
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
 -- SSVC assessments (per project per vulnerability)
 CREATE TABLE ssvc_assessments (
@@ -77,7 +77,7 @@ CREATE INDEX idx_ssvc_assessments_immediate ON ssvc_assessments(project_id) WHER
 ALTER TABLE ssvc_assessments ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "ssvc_assessments_tenant_isolation" ON ssvc_assessments
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
 -- SSVC assessment history (audit trail)
 CREATE TABLE ssvc_assessment_history (

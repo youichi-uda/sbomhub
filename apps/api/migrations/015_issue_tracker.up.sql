@@ -56,7 +56,7 @@ ALTER TABLE vulnerability_tickets ENABLE ROW LEVEL SECURITY;
 
 -- RLS policies
 CREATE POLICY "issue_tracker_connections_tenant_isolation" ON issue_tracker_connections
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
 CREATE POLICY "vulnerability_tickets_tenant_isolation" ON vulnerability_tickets
-    FOR ALL USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
