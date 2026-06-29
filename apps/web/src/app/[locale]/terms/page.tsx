@@ -117,7 +117,7 @@ export default async function TermsPage({ params }: Props) {
               <p className="text-muted-foreground mb-6">Last updated: January 26, 2025</p>
 
               <h2 className="text-xl font-semibold mt-8 mb-4">1. Service Overview</h2>
-              <p>SBOMHub ("the Service") is a cloud service that provides Software Bill of Materials (SBOM) management, vulnerability visualization, and compliance checking.</p>
+              <p>SBOMHub (&quot;the Service&quot;) is a cloud service that provides Software Bill of Materials (SBOM) management, vulnerability visualization, and compliance checking.</p>
 
               <h2 className="text-xl font-semibold mt-8 mb-4">2. Eligibility</h2>
               <p>To use the Service, you must:</p>
@@ -152,7 +152,7 @@ export default async function TermsPage({ params }: Props) {
               </ul>
 
               <h2 className="text-xl font-semibold mt-8 mb-4">6. Disclaimer</h2>
-              <p>The Service is provided "as is" without warranties of merchantability or fitness for a particular purpose. Vulnerability information is for reference only and is not guaranteed to be complete.</p>
+              <p>The Service is provided &quot;as is&quot; without warranties of merchantability or fitness for a particular purpose. Vulnerability information is for reference only and is not guaranteed to be complete.</p>
 
               <h2 className="text-xl font-semibold mt-8 mb-4">7. Limitation of Liability</h2>
               <p>Our liability for damages arising from use of the Service is limited to the fees you paid in the preceding 12 months.</p>

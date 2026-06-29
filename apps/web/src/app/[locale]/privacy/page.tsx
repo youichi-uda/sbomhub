@@ -106,7 +106,7 @@ export default async function PrivacyPage({ params }: Props) {
               <p className="text-muted-foreground mb-6">Last updated: January 26, 2025</p>
 
               <h2 className="text-xl font-semibold mt-8 mb-4">1. Introduction</h2>
-              <p>SBOMHub ("the Service") respects your privacy and is committed to protecting your personal information. This Privacy Policy explains what information we collect and how we use it.</p>
+              <p>SBOMHub (&quot;the Service&quot;) respects your privacy and is committed to protecting your personal information. This Privacy Policy explains what information we collect and how we use it.</p>
 
               <h2 className="text-xl font-semibold mt-8 mb-4">2. Information We Collect</h2>
               <p>We may collect the following information:</p>

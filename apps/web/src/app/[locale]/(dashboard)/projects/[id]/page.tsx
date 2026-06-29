@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, NotificationSettings, NotificationLog } from "@/lib/api";
 import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Bell } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
@@ -432,7 +432,7 @@ export default function ProjectDetailPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-mono font-bold">{vuln.cve_id}</span>
                         <Badge
-                          variant={getSeverityVariant(vuln.severity) as any}
+                          variant={getSeverityVariant(vuln.severity) as BadgeProps["variant"]}
                         >
                           {vuln.severity}
                         </Badge>

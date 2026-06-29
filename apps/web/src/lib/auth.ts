@@ -1,3 +1,11 @@
+// Note on rules-of-hooks (M11-5 #80):
+// The mode switch below (`isAuthEnabled()`) is driven by
+// `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, which Next.js inlines at BUILD time.
+// For any given build artifact the branch is a compile-time constant, so the
+// hook call order is stable across renders. The `react-hooks/rules-of-hooks`
+// inline disables in this file mark the deliberate self-hosted-vs-SaaS fork
+// and must NOT be removed without restructuring useAuth / useUser /
+// useOrganization into separate hooks per mode.
 import { useAuth as useClerkAuth, useUser as useClerkUser, useOrganization as useClerkOrg } from "@clerk/nextjs";
 
 // Check if Clerk is configured (SaaS mode)
@@ -32,7 +40,8 @@ export function useAuth() {
     };
   }
 
-  // In SaaS mode, use Clerk
+  // In SaaS mode, use Clerk.
+  // eslint-disable-next-line react-hooks/rules-of-hooks -- build-time branch via NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY; see header comment.
   const auth = useClerkAuth();
   return {
     isLoaded: auth.isLoaded,
@@ -64,6 +73,7 @@ export function useUser() {
     };
   }
 
+  // eslint-disable-next-line react-hooks/rules-of-hooks -- build-time branch via NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY; see header comment.
   const { isLoaded, isSignedIn, user } = useClerkUser();
   return { isLoaded, isSignedIn, user };
 }
@@ -85,6 +95,7 @@ export function useOrganization() {
     };
   }
 
+  // eslint-disable-next-line react-hooks/rules-of-hooks -- build-time branch via NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY; see header comment.
   const { isLoaded, organization, membership } = useClerkOrg();
   return { isLoaded, organization, membership };
 }

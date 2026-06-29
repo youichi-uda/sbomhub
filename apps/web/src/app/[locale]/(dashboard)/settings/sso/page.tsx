@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -86,9 +87,9 @@ export default function SSOSettingsPage() {
           <AlertDescription>
             SSO 機能は Enterprise プランでご利用いただけます。
             プランのアップグレードについては、
-            <a href="/settings/billing" className="text-primary hover:underline ml-1">
+            <Link href="/settings/billing" className="text-primary hover:underline ml-1">
               料金プラン
-            </a>
+            </Link>
             をご確認ください。
           </AlertDescription>
         </Alert>

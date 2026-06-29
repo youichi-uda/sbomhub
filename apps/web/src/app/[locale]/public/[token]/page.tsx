@@ -22,7 +22,7 @@ export default function PublicSbomPage() {
     try {
       const data = await api.publicLinks.publicView(token, pwd);
       setView(data);
-    } catch (err: any) {
+    } catch {
       setError("Access denied. Password may be required.");
     } finally {
       setLoading(false);
