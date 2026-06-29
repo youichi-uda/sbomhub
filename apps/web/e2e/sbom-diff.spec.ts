@@ -78,17 +78,14 @@ test.describe('SBOM Diff', () => {
     }
   });
 
-  // M10-6 #74 + Phase D F163 + F164: F163 rewrote the assertions
-  // against the new M10-6 timeline + detail UI, but CI exposed a
-  // separate production-only crash on /<locale>/projects/<id>/diff:
-  // the page renders the Next.js "Application error: a client-side
-  // exception has occurred" boundary at level=2 instead of the
-  // timeline h1 at level=1. `pnpm build` succeeds, tsc passes, and
-  // the page works in `pnpm dev` manual smoke, so the root cause is
-  // not isolated (a speculative Suspense wrap around useSearchParams
-  // — commit e701737 — was reverted because it did not help).
-  // Skipping until M11 isolates the prod-build hydration regression.
-  test.skip('should compare two sboms and show added/removed/updated components', async ({ page, request }) => {
+  // M10-6 #74 + Phase D F163 + M11-1 #76 (F164 resolved): F163 rewrote
+  // the assertions against the M10-6 timeline + detail UI. M11-1
+  // isolated the production-only crash: the Go backend marshals nil
+  // diff-bucket slices as JSON `null`, and the timeline `useMemo` then
+  // called `.length` on them, throwing TypeError at hydration. The fix
+  // normalises every bucket to `[]` in apps/web/src/lib/api.ts::getDiff
+  // so the typed shape's invariant holds at runtime.
+  test('should compare two sboms and show added/removed/updated components', async ({ page, request }) => {
     // Sanity: the API must surface both uploaded SBOMs for the diff
     // endpoint to have non-empty input. If the upload path is broken
     // we want a fast failure here, not a confusing UI-level miss.
@@ -131,17 +128,20 @@ test.describe('SBOM Diff', () => {
     ).toBeVisible({ timeout: 10000 });
 
     // Three panels: Components / Vulnerabilities / License policy.
-    // Each surfaces as a tab in the detail view.
-    await expect(page.getByRole('tab', { name: /Components/i })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /Vulnerabilities/i })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /License/i })).toBeVisible();
+    // Each surfaces as a tab trigger in the detail view. The project's
+    // shadcn-derived Tabs primitive renders the triggers as plain
+    // <button> nodes (no ARIA role="tab"), so the role query is
+    // 'button' not 'tab' — see apps/web/src/components/ui/tabs.tsx.
+    await expect(page.getByRole('button', { name: /^Components$/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Vulnerabilities$/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /License policy/i })).toBeVisible();
 
     // Click into the Components tab (or rely on it being default) and
     // assert the three buckets land:
     //   - alpha-lib  (only in base   -> removed)
     //   - beta-lib   (only in target -> added)
     //   - shared-lib (version changed 1.0.0 -> 1.1.0)
-    await page.getByRole('tab', { name: /Components/i }).click();
+    await page.getByRole('button', { name: /^Components$/ }).click();
 
     // shared-lib version change is the most resilient assertion since
     // the new bucket renders both versions explicitly via the table.
