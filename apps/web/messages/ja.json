@@ -1028,6 +1028,63 @@
       "usageCI": "CI/CD (GitHub Actions など)"
     }
   },
+  "SbomDiff": {
+    "Page": {
+      "title": "SBOM 変更履歴",
+      "description": "プロジェクトの SBOM 取り込み間でサプライチェーンの変化を追跡します。差分は機械的な比較で算出するため、AI は介在しません（監査証跡を決定的に保つため）。",
+      "backToProject": "プロジェクトに戻る",
+      "loadFailed": "SBOM 履歴の読み込みに失敗しました",
+      "diffLoadFailed": "差分の読み込みに失敗しました",
+      "noSboms": "このプロジェクトにはまだ SBOM がありません。SBOM をアップロードすると変更履歴の追跡を開始できます。",
+      "singleSbomBanner": "取り込み済み SBOM が 1 件のみです。詳細ビューでは全コンポーネントを「追加」として表示します（初回ベースライン）。比較するには別の SBOM をアップロードしてください。",
+      "viewDiff": "差分を表示",
+      "compareSelected": "選択した SBOM を比較"
+    },
+    "Timeline": {
+      "title": "SBOM リビジョン",
+      "description": "新しい順に表示。各行は直前のリビジョンとの差分にリンクします。",
+      "uploadedAt": "アップロード",
+      "format": "フォーマット",
+      "diffWithPrevious": "前回との差分",
+      "initialBaseline": "初回ベースライン",
+      "componentsAdded": "追加 {count} 件",
+      "componentsRemoved": "削除 {count} 件",
+      "componentsChanged": "バージョン変更 {count} 件",
+      "vulnsAdded": "新規脆弱性 {count} 件",
+      "vulnsResolved": "解消 {count} 件",
+      "vulnsSeverityChanged": "重大度変更 {count} 件",
+      "licensesAddedViolations": "新規ライセンス違反 {count} 件"
+    },
+    "Detail": {
+      "title": "差分詳細",
+      "from": "From",
+      "to": "To",
+      "fromBaseline": "初回ベースライン（前回 SBOM なし）",
+      "componentsPanel": "コンポーネント",
+      "vulnerabilitiesPanel": "脆弱性",
+      "licensesPanel": "ライセンスポリシー",
+      "added": "追加",
+      "removed": "削除",
+      "versionChanged": "バージョン変更",
+      "vulnsAddedSection": "新規検出",
+      "vulnsResolvedSection": "解消",
+      "severityChanged": "重大度変更",
+      "violationsAdded": "新規ポリシー違反",
+      "violationsRemoved": "解消したポリシー違反",
+      "noChanges": "このセクションに変更はありません。",
+      "componentName": "名前",
+      "componentVersion": "バージョン",
+      "componentLicense": "ライセンス",
+      "componentPurl": "purl",
+      "fromVersion": "変更前",
+      "toVersion": "変更後",
+      "cveId": "CVE",
+      "severity": "重大度",
+      "fromSeverity": "変更前",
+      "toSeverity": "変更後",
+      "policyName": "ポリシー"
+    }
+  },
   "Triage": {
     "AIDisabledBanner": {
       "title": "AI 機能が無効です",

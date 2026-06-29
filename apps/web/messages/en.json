@@ -1027,6 +1027,63 @@
       "usageCI": "CI/CD (GitHub Actions, etc.)"
     }
   },
+  "SbomDiff": {
+    "Page": {
+      "title": "SBOM Change History",
+      "description": "Track supply-chain churn between SBOM ingests for this project. AI is intentionally not involved here — the diff is a mechanical comparison so the audit trail is deterministic.",
+      "backToProject": "Back to project",
+      "loadFailed": "Failed to load the SBOM history",
+      "diffLoadFailed": "Failed to load the diff",
+      "noSboms": "This project has no SBOMs yet. Upload an SBOM to start tracking changes.",
+      "singleSbomBanner": "Only one SBOM has been ingested. The detail view below treats every component as added (initial baseline). Upload another SBOM to compare revisions.",
+      "viewDiff": "View diff",
+      "compareSelected": "Compare selected"
+    },
+    "Timeline": {
+      "title": "SBOM revisions",
+      "description": "Newest first. Each row links to the diff against the previous revision.",
+      "uploadedAt": "Uploaded",
+      "format": "Format",
+      "diffWithPrevious": "Diff vs previous",
+      "initialBaseline": "Initial baseline",
+      "componentsAdded": "{count} added",
+      "componentsRemoved": "{count} removed",
+      "componentsChanged": "{count} version changes",
+      "vulnsAdded": "{count} new vulns",
+      "vulnsResolved": "{count} resolved",
+      "vulnsSeverityChanged": "{count} severity changes",
+      "licensesAddedViolations": "{count} new license violations"
+    },
+    "Detail": {
+      "title": "Diff detail",
+      "from": "From",
+      "to": "To",
+      "fromBaseline": "Initial baseline (no previous SBOM)",
+      "componentsPanel": "Components",
+      "vulnerabilitiesPanel": "Vulnerabilities",
+      "licensesPanel": "License policy",
+      "added": "Added",
+      "removed": "Removed",
+      "versionChanged": "Version changed",
+      "vulnsAddedSection": "Newly introduced",
+      "vulnsResolvedSection": "Resolved",
+      "severityChanged": "Severity changed",
+      "violationsAdded": "New policy violations",
+      "violationsRemoved": "Resolved policy violations",
+      "noChanges": "No changes in this section.",
+      "componentName": "Name",
+      "componentVersion": "Version",
+      "componentLicense": "License",
+      "componentPurl": "purl",
+      "fromVersion": "From",
+      "toVersion": "To",
+      "cveId": "CVE",
+      "severity": "Severity",
+      "fromSeverity": "From",
+      "toSeverity": "To",
+      "policyName": "Policy"
+    }
+  },
   "Triage": {
     "AIDisabledBanner": {
       "title": "AI features are disabled",

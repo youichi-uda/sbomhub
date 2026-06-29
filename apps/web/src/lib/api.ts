@@ -449,6 +449,80 @@ export interface SbomDiffResponse {
   new_vulnerabilities: SbomDiffVulnerability[];
 }
 
+// ----------------------------------------------------------------------------
+// M10-6 (#74) — project-scoped diff (supply-chain churn observability).
+// GET /api/v1/projects/:id/diff?from=<sbom_id>&to=<sbom_id>
+//
+// The legacy POST /api/v1/sbom/diff types above are kept for back-compat;
+// the new richer envelope below is what /[locale]/projects/[id]/diff
+// renders.
+// ----------------------------------------------------------------------------
+
+export interface ProjectDiffSbomRef {
+  sbom_id: string;
+  format: string;
+  version?: string;
+  created_at: string;
+}
+
+export interface ProjectDiffComponentChange {
+  name: string;
+  version: string;
+  purl?: string;
+  license?: string;
+}
+
+export interface ProjectDiffComponentVersionChange {
+  name: string;
+  from_version: string;
+  to_version: string;
+  purl?: string;
+}
+
+export interface ProjectDiffVulnerabilityAdded {
+  cve_id: string;
+  severity: string;
+  component_name: string;
+  component_version: string;
+}
+
+export interface ProjectDiffVulnerabilityResolved {
+  cve_id: string;
+  severity: string;
+}
+
+export interface ProjectDiffVulnerabilitySeverityChange {
+  cve_id: string;
+  from_severity: string;
+  to_severity: string;
+}
+
+export interface ProjectDiffLicenseViolation {
+  component_name: string;
+  license: string;
+  policy_name: string;
+}
+
+export interface ProjectDiffResponse {
+  project_id: string;
+  from: ProjectDiffSbomRef | null;
+  to: ProjectDiffSbomRef | null;
+  components: {
+    added: ProjectDiffComponentChange[];
+    removed: ProjectDiffComponentChange[];
+    version_changed: ProjectDiffComponentVersionChange[];
+  };
+  vulnerabilities: {
+    added: ProjectDiffVulnerabilityAdded[];
+    resolved: ProjectDiffVulnerabilityResolved[];
+    severity_changed: ProjectDiffVulnerabilitySeverityChange[];
+  };
+  licenses: {
+    added_policy_violations: ProjectDiffLicenseViolation[];
+    removed_policy_violations: ProjectDiffLicenseViolation[];
+  };
+}
+
 // Search types
 export interface AffectedComponent {
   id: string;
@@ -1600,6 +1674,32 @@ export const api = {
     },
     getSboms: (id: string) =>
       request<Sbom[]>(`/api/v1/projects/${id}/sboms`),
+    /**
+     * M10-6 (#74) — GET /api/v1/projects/:id/diff?from=<sbom_id>&to=<sbom_id>.
+     *
+     * Both from and to are optional. Resolution rules (see backend
+     * service/diff/diff.go godoc):
+     *   - neither set: defaults to the 2 most-recent SBOMs (newest = to,
+     *     previous = from)
+     *   - only to set: from defaults to the SBOM immediately preceding to
+     *   - only from set: to defaults to the SBOM immediately following from
+     *   - both set: passes through, validates both belong to the project
+     *
+     * Single-SBOM projects: the server returns `from: null` and treats every
+     * component in `to` as added — the "initial baseline" representation.
+     */
+    getDiff: (
+      id: string,
+      opts?: { from?: string; to?: string },
+    ): Promise<ProjectDiffResponse> => {
+      const params = new URLSearchParams();
+      if (opts?.from) params.set("from", opts.from);
+      if (opts?.to) params.set("to", opts.to);
+      const qs = params.toString();
+      return request<ProjectDiffResponse>(
+        `/api/v1/projects/${id}/diff${qs ? `?${qs}` : ""}`,
+      );
+    },
     // VEX methods
     getVEXStatements: (id: string) =>
       request<VEXStatementWithDetails[]>(`/api/v1/projects/${id}/vex`),
