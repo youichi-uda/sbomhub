@@ -72,6 +72,16 @@ func (h *PublicLinkHandler) Create(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
+	// F208 / M14-1: publish the newly-minted public-link UUID so the
+	// audit middleware records audit_logs.resource_id = link.ID instead
+	// of the parent project UUID. POST /projects/:id/public-links has
+	// :id in the path, so without this override the resource_id would
+	// point at the project and forensic joins to public_links would
+	// silently drop.
+	if link != nil {
+		middleware.SetAuditResourceID(c, link.ID)
+	}
+
 	return c.JSON(http.StatusCreated, link)
 }
 

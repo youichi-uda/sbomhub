@@ -86,6 +86,16 @@ func (h *VEXHandler) Create(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
+	// F208 / M14-1: publish the newly-minted VEX UUID so the audit
+	// middleware records audit_logs.resource_id = statement.ID instead
+	// of the parent project UUID. POST /projects/:id/vex has :id in
+	// the path, so without this override the resourceIDParamPriority
+	// list would record the project UUID and forensic joins to
+	// vex_statements would silently drop.
+	if statement != nil {
+		middleware.SetAuditResourceID(c, statement.ID)
+	}
+
 	return c.JSON(http.StatusCreated, statement)
 }
 

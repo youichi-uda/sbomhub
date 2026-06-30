@@ -138,6 +138,15 @@ func (h *ReportHandler) Generate(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
+	// F208 / M14-1: publish the newly-minted report UUID so the audit
+	// middleware records audit_logs.resource_id = report.ID. POST
+	// /reports/generate has no UUID path param so without this Set the
+	// audit row would drop to NULL and break the forensic join
+	// audit_logs ⨝ reports for every report.generated row.
+	if report != nil {
+		middleware.SetAuditResourceID(c, report.ID)
+	}
+
 	// Defer the async PDF/XLSX build until the request's tenant tx commits.
 	// generateReportAsync opens its own tenant tx to issue the terminal
 	// UpdateReport, but it raced the parent CreateReport INSERT on fast

@@ -95,6 +95,15 @@ func (h *APIKeyHandler) CreateTenant(c echo.Context) error {
 		return mapCreateKeyError(c, err)
 	}
 
+	// F208 / M14-1: publish the newly-minted apikey UUID so the audit
+	// middleware records audit_logs.resource_id = key.ID. POST /apikeys
+	// is a tenant-scoped create with no UUID path param, so without this
+	// Set the audit row would drop to NULL and break the forensic join
+	// audit_logs ⨝ api_keys for every apikey.created row.
+	if key != nil {
+		middleware.SetAuditResourceID(c, key.ID)
+	}
+
 	return c.JSON(http.StatusCreated, key)
 }
 
@@ -181,6 +190,16 @@ func (h *APIKeyHandler) Create(c echo.Context) error {
 	key, err := h.keyService.CreateProjectKey(c.Request().Context(), input)
 	if err != nil {
 		return mapCreateKeyError(c, err)
+	}
+
+	// F208 / M14-1: publish the newly-minted apikey UUID so the audit
+	// middleware records audit_logs.resource_id = key.ID instead of the
+	// parent project UUID. POST /projects/:id/apikeys has :id bound, so
+	// without this override the priority-list (which prefers :id last
+	// but ParamNames-fallback still picks it up) would record the
+	// project UUID and forensic joins to api_keys would silently drop.
+	if key != nil {
+		middleware.SetAuditResourceID(c, key.ID)
 	}
 
 	return c.JSON(http.StatusCreated, key)

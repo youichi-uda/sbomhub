@@ -80,6 +80,16 @@ func (h *IssueTrackerHandler) CreateConnection(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
+	// F208 / M14-1: publish the newly-minted integration UUID so the
+	// audit middleware records audit_logs.resource_id = conn.ID. POST
+	// /integrations is a tenant-scoped create with no UUID path param,
+	// so without this Set the row would drop to NULL and break the
+	// forensic join audit_logs ⨝ issue_tracker_connections for every
+	// integration.created row.
+	if conn != nil {
+		middleware.SetAuditResourceID(c, conn.ID)
+	}
+
 	return c.JSON(http.StatusCreated, conn)
 }
 
@@ -195,6 +205,17 @@ func (h *IssueTrackerHandler) CreateTicket(c echo.Context) error {
 	ticket, err := h.issueTrackerService.CreateTicket(ctx, tenantID, input)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	// F208 / M14-1: publish the newly-minted ticket UUID so the audit
+	// middleware records audit_logs.resource_id = ticket.ID instead of
+	// the parent :vuln_id (which would point at the vulnerability, not
+	// the just-created ticket). POST /vulnerabilities/:vuln_id/ticket
+	// has :vuln_id bound, so without this override the priority-list
+	// would pick up :vuln_id and forensic joins to tickets would
+	// silently drop.
+	if ticket != nil {
+		middleware.SetAuditResourceID(c, ticket.ID)
 	}
 
 	return c.JSON(http.StatusCreated, ticket)

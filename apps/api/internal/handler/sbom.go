@@ -188,6 +188,17 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
+	// F208 / M14-1: publish the newly-minted sbom UUID so the audit
+	// middleware records audit_logs.resource_id = sbom.ID instead of
+	// the parent project UUID. POST /api/v1/projects/:id/sbom has :id
+	// in the path, so without this override the resource_id would
+	// point at the project and forensic joins to sboms would silently
+	// drop. The sbom UUID is also what the CLI polls scan-status with,
+	// so audit ⨝ sboms ⨝ scan-status traces line up across all three.
+	if sbom != nil {
+		appmw.SetAuditResourceID(c, sbom.ID)
+	}
+
 	// The background scan goroutine outlives this request and cannot rely
 	// on the request's TenantTx (which commits as soon as Upload returns).
 	// Capture the tenant ID here so the goroutine can open its own tx and

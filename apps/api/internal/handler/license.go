@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -51,6 +52,16 @@ func (h *LicensePolicyHandler) Create(c echo.Context) error {
 	policy, err := h.licenseService.CreatePolicy(c.Request().Context(), input)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	// F208 / M14-1: publish the newly-minted license-policy UUID so the
+	// audit middleware records audit_logs.resource_id = policy.ID
+	// instead of the parent project UUID. POST /projects/:id/licenses
+	// has :id in the path, so without this override the resource_id
+	// would point at the project and forensic joins to license_policies
+	// would silently drop.
+	if policy != nil {
+		middleware.SetAuditResourceID(c, policy.ID)
 	}
 
 	return c.JSON(http.StatusCreated, policy)

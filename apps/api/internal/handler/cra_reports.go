@@ -192,6 +192,17 @@ func (h *CRAReportsHandler) RunReport(c echo.Context) error {
 	if status, body, ok := mapCRARunnerError(err); ok {
 		return c.JSON(status, body)
 	}
+	// F208 / M14-1: publish the newly-minted cra_report UUID so the
+	// audit middleware records audit_logs.resource_id = report.ID
+	// instead of the parent project UUID (priority list would
+	// otherwise pick up :id and the row would be unjoinable to
+	// cra_reports). The runner's own internal audit rows (action
+	// cra_report_ai_generated / cra_report_ai_disabled) already carry
+	// the new report id correctly; the middleware row that records
+	// the resource.created bucket needs this Set to agree.
+	if res != nil && res.Report != nil && res.Report.ID != uuid.Nil {
+		middleware.SetAuditResourceID(c, res.Report.ID)
+	}
 	return c.JSON(http.StatusCreated, buildRunReportResponse(res))
 }
 
@@ -592,6 +603,15 @@ func (h *CRAReportsHandler) Reanalyse(c echo.Context) error {
 	res, err := h.runner.Run(c.Request().Context(), in)
 	if status, body, ok := mapCRARunnerError(err); ok {
 		return c.JSON(status, body)
+	}
+	// F208 / M14-1: Reanalyse mints a FRESH cra_reports row (history
+	// preservation — the source report is never mutated). The audit
+	// row's resource_id must point at the new row, NOT the source
+	// :report_id from the URL, so a forensic walk of audit_logs ⨝
+	// cra_reports lines up "this AI re-judgement produced THIS new
+	// report row" rather than misattributing it to the source.
+	if res != nil && res.Report != nil && res.Report.ID != uuid.Nil {
+		middleware.SetAuditResourceID(c, res.Report.ID)
 	}
 	return c.JSON(http.StatusCreated, buildRunReportResponse(res))
 }

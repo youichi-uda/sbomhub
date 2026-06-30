@@ -169,6 +169,19 @@ func (h *VexDraftsHandler) RunTriage(c echo.Context) error {
 	if status, body, ok := mapRunnerError(err); ok {
 		return c.JSON(status, body)
 	}
+	// F208 / M14-1: publish the newly-minted draft UUID so the audit
+	// middleware records audit_logs.resource_id = draft.ID. POST
+	// /projects/:id/triage/run has only :id (parent project) in the
+	// path, so without this override the resourceIDParamPriority list
+	// would pick up :id and forensic joins to vex_drafts would
+	// silently drop. When the triage run fans out across multiple
+	// components (#F3), the FIRST draft's UUID is recorded — the
+	// runner's own audit rows (vex_draft_ai_drafted) carry the
+	// per-draft id correctly; this Set covers the middleware row
+	// which can only carry one resource_id.
+	if res != nil && res.Draft != nil && res.Draft.ID != uuid.Nil {
+		middleware.SetAuditResourceID(c, res.Draft.ID)
+	}
 	return c.JSON(http.StatusCreated, buildRunTriageResponse(res))
 }
 
@@ -479,6 +492,15 @@ func (h *VexDraftsHandler) Reanalyse(c echo.Context) error {
 	})
 	if status, body, ok := mapRunnerError(err); ok {
 		return c.JSON(status, body)
+	}
+	// F208 / M14-1: Reanalyse mints a FRESH vex_drafts row (history
+	// preservation — the source draft is never mutated). The audit
+	// row's resource_id must point at the new draft, NOT the source
+	// :draft_id from the URL, so a forensic walk of audit_logs ⨝
+	// vex_drafts lines up "this AI re-judgement produced THIS new
+	// draft row" rather than misattributing it to the source.
+	if res != nil && res.Draft != nil && res.Draft.ID != uuid.Nil {
+		middleware.SetAuditResourceID(c, res.Draft.ID)
 	}
 	return c.JSON(http.StatusCreated, buildRunTriageResponse(res))
 }

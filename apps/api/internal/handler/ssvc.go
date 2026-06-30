@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -136,6 +137,18 @@ func (h *SSVCHandler) AssessVulnerability(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
+	// F208 / M14-1: publish the newly-minted (or upserted) SSVC
+	// assessment UUID so the audit middleware records
+	// audit_logs.resource_id = assessment.ID instead of the parent
+	// :vuln_id (which would point at the vulnerability, not the
+	// assessment row). POST /projects/:id/vulnerabilities/:vuln_id/ssvc
+	// has both :id and :vuln_id bound, so without this override the
+	// resourceIDParamPriority list would pick up :vuln_id first and
+	// forensic joins to ssvc_assessments would silently drop.
+	if assessment != nil {
+		middleware.SetAuditResourceID(c, assessment.ID)
+	}
+
 	return c.JSON(http.StatusOK, assessment)
 }
 
@@ -167,6 +180,13 @@ func (h *SSVCHandler) AutoAssessVulnerability(c echo.Context) error {
 	assessment, err := h.ssvcService.AutoAssessVulnerability(c.Request().Context(), projectID, tenantID, vulnID, cveID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	// F208 / M14-1: same rationale as AssessVulnerability above —
+	// publish the assessment UUID so audit_logs.resource_id reflects
+	// the auto-assess row, not the parent :vuln_id.
+	if assessment != nil {
+		middleware.SetAuditResourceID(c, assessment.ID)
 	}
 
 	return c.JSON(http.StatusOK, assessment)
