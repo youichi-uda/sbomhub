@@ -32,6 +32,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -39,6 +40,31 @@ import (
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
+
+// maxGraphComponentDepth caps the recursion depth of indexComponent so
+// an adversarial SBOM with deeply nested Component.Components cannot
+// exhaust Go's goroutine stack on the /diff/graph endpoint (F203, M13
+// Phase D round 3).
+//
+// CycloneDX 1.6 permits arbitrary nesting under
+// `components[].components` / `metadata.component.components`, and
+// `dependencies` declares the graph as a DAG (no true cycles). The
+// indexComponent closure recurses unconditionally to support the
+// M13-2 (#88) nested-component contract, so a hand-crafted SBOM with
+// O(10^4-10^5) nested levels would expand the Go goroutine stack toward
+// its ~1 GB hard cap and spike CPU + memory on a single authenticated
+// request.
+//
+// 64 levels is a deliberately generous safety margin. Real-world
+// CycloneDX outputs from syft / trivy / cdxgen reach 3-5 nested levels
+// (container -> layer -> os-package -> sub-package) in the worst
+// observed cases; manually-authored "deep stack" SBOMs rarely cross 10
+// levels. Capping at 64 keeps every legitimate ingestion path
+// untouched while bounding the worst-case memory blast to ~64 stack
+// frames per closure invocation. When the cap is hit we slog.Warn and
+// stop recursing; siblings continue to be indexed so a single deep
+// branch does not erase the rest of the graph.
+const maxGraphComponentDepth = 64
 
 // GraphNode is the projection of a component for the dependency-graph view.
 // ID is the deterministic match key (purl-normalised, falling back to
@@ -332,8 +358,18 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 	// tooling such as syft/trivy does this consistently). This stays
 	// consistent with the existing M12-3 contract and avoids inventing
 	// edges that are not in the SBOM bytes.
-	var indexComponent func(c cdx.Component)
-	indexComponent = func(c cdx.Component) {
+	//
+	// F203 (M13 Phase D round 3): depth-bounded recursion. A `depth`
+	// counter is threaded through every recursive call and capped at
+	// maxGraphComponentDepth so an adversarial SBOM cannot blow the
+	// Go goroutine stack (see the const docstring for the rationale
+	// behind 64). On overflow we slog.Warn once per call site and
+	// return without recursing further; siblings at shallower depths
+	// continue to be indexed normally so the rest of the graph
+	// survives. This is best-effort defence in depth — the diff
+	// endpoint already returns a partial graph on malformed SBOMs.
+	var indexComponent func(c cdx.Component, depth int)
+	indexComponent = func(c cdx.Component, depth int) {
 		comp := model.Component{
 			Name:    c.Name,
 			Version: c.Version,
@@ -360,13 +396,30 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 				}
 			}
 		}
+		// F203: stop recursing once depth reaches the cap. We bail at
+		// the recursion site (not at function entry) so the current
+		// component still lands in the index — only its children are
+		// dropped. This matches the "partial graph on malformed input"
+		// contract used elsewhere in this package.
+		if depth >= maxGraphComponentDepth {
+			if c.Components != nil && len(*c.Components) > 0 {
+				slog.Warn("graph nested component depth limit reached; dropping subtree",
+					"depth", depth,
+					"max_depth", maxGraphComponentDepth,
+					"bom_ref", c.BOMRef,
+					"name", c.Name,
+					"dropped_children", len(*c.Components),
+				)
+			}
+			return
+		}
 		// M13-2 (#88): walk nested sub-components even when the parent
 		// itself has no usable identity (a bom-ref-only wrapper with no
 		// name/purl is legal but rare). The children may still carry
 		// match keys and need to be indexed so edge resolution works.
 		if c.Components != nil {
 			for _, sub := range *c.Components {
-				indexComponent(sub)
+				indexComponent(sub, depth+1)
 			}
 		}
 	}
@@ -376,12 +429,12 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 	// bom.Components so the root node lands at orderedIDs[0] and any
 	// dependencies[].ref pointing at the root bom-ref resolves.
 	if bom.Metadata != nil && bom.Metadata.Component != nil {
-		indexComponent(*bom.Metadata.Component)
+		indexComponent(*bom.Metadata.Component, 0)
 	}
 
 	if bom.Components != nil {
 		for _, c := range *bom.Components {
-			indexComponent(c)
+			indexComponent(c, 0)
 		}
 	}
 

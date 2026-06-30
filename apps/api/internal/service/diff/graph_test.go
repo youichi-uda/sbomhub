@@ -637,6 +637,154 @@ func TestComputeGraph_NestedSubComponents_VersionDiff_M13_2(t *testing.T) {
 	}
 }
 
+// TestComputeGraph_DeepNestedComponents_DepthLimit_F203 pins the F203
+// depth cap on indexComponent recursion. An adversarial CycloneDX
+// document with components nested 100 levels deep (well past the
+// configured cap of 64) is parsed end-to-end through ComputeGraph; the
+// fixture asserts:
+//
+//   - parsing completes without panicking and within a bounded latency
+//     budget (10s — well below any realistic stack-blow regression);
+//   - every component AT OR ABOVE the depth cap lands in the graph
+//     (the closure bails at the recursion site, so the node at
+//     depth == maxGraphComponentDepth is still indexed);
+//   - components STRICTLY DEEPER than the cap are absent from the
+//     graph (the closure stops recursing into them).
+//
+// Pre-F203 the recursion was unbounded; a hand-crafted SBOM with
+// O(10^4-10^5) nested levels could expand the Go goroutine stack
+// toward its ~1 GB hard cap and spike CPU + memory on a single
+// authenticated /diff/graph request. Tenant auth gates the endpoint,
+// but any authenticated user can upload an SBOM, so the DoS surface
+// is real even with auth in place.
+func TestComputeGraph_DeepNestedComponents_DepthLimit_F203(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	toID := uuid.New()
+
+	// Build a 100-deep nested chain anchored at metadata.component.
+	// The chain is intentionally deeper than the configured cap (64)
+	// so we exercise both the "indexed under the cap" and "dropped
+	// past the cap" code paths in a single fixture.
+	const totalDepth = 100
+	buildDeepNested := func() cdxComponent {
+		// Construct innermost component first, then wrap outward so
+		// the depth-0 root contains a depth-1 child contains a depth-2
+		// child, etc, ending with the depth-(totalDepth-1) leaf.
+		var current cdxComponent
+		// Leaf at the deepest level.
+		current = cdxComponent{
+			BOMRef:  fmt.Sprintf("nested-%d", totalDepth-1),
+			Type:    "library",
+			Name:    fmt.Sprintf("nested-%d", totalDepth-1),
+			Version: "1.0.0",
+			Purl:    fmt.Sprintf("pkg:npm/nested-%d@1.0.0", totalDepth-1),
+		}
+		for i := totalDepth - 2; i >= 0; i-- {
+			current = cdxComponent{
+				BOMRef:     fmt.Sprintf("nested-%d", i),
+				Type:       "library",
+				Name:       fmt.Sprintf("nested-%d", i),
+				Version:    "1.0.0",
+				Purl:       fmt.Sprintf("pkg:npm/nested-%d@1.0.0", i),
+				Components: []cdxComponent{current},
+			}
+		}
+		// Wrap once more with an "app" root so metadata.component
+		// itself is at depth 0 and `nested-0` starts at depth 1.
+		// This matches the structure of a real container SBOM.
+		return cdxComponent{
+			BOMRef:     "app",
+			Type:       "application",
+			Name:       "app",
+			Version:    "1.0.0",
+			Purl:       "pkg:my/app@1.0.0",
+			Components: []cdxComponent{current},
+		}
+	}
+
+	rawData := makeCycloneDXBytesWithMetadata(t,
+		buildDeepNested(),
+		[]cdxComponent{},
+		// No `dependencies` array: the test is about whether nodes
+		// are indexed safely, not about edge resolution.
+		[]cdxDependency{},
+	)
+
+	toSbom := model.Sbom{
+		ID: toID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.6", RawData: rawData,
+		CreatedAt: time.Now(),
+	}
+	pr := &fakeProjectRepo{projects: map[uuid.UUID]uuid.UUID{projectID: tenantID}}
+	sr := &fakeSbomRepo{
+		byID:      map[uuid.UUID]model.Sbom{toID: toSbom},
+		byProject: map[uuid.UUID][]model.Sbom{projectID: {toSbom}},
+	}
+	cr := &fakeComponentRepo{components: map[uuid.UUID][]model.Component{}, vulns: map[uuid.UUID][]model.ComponentVulnerability{}}
+	lr := &fakeLicenseRepo{policies: map[uuid.UUID][]model.LicensePolicy{}}
+	svc := NewService(pr, sr, cr, lr)
+
+	start := time.Now()
+	resp, err := svc.ComputeGraph(context.Background(), Request{TenantID: tenantID, ProjectID: projectID})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ComputeGraph error: %v", err)
+	}
+	// Loose latency ceiling — defence against a future regression
+	// reintroducing unbounded recursion + accidental quadratic
+	// behaviour. Real measurement of a 100-deep chain post-F203
+	// completes in single-digit milliseconds.
+	if elapsed > 10*time.Second {
+		t.Errorf("ComputeGraph deep-nested latency too slow: %v "+
+			"(loose ceiling 10s; suggests F203 cap regressed)", elapsed)
+	}
+
+	nodeByID := map[string]GraphNode{}
+	for _, n := range resp.Nodes {
+		nodeByID[n.ID] = n
+	}
+
+	// Root + every level UP TO AND INCLUDING the cap must be present.
+	// The cap depth refers to indexComponent's `depth` parameter
+	// (depth 0 = metadata.component itself). When called with depth=0
+	// for `app`, depth=1 for `nested-0`, ..., depth=N for
+	// `nested-(N-1)`. The depth check bails BEFORE recursing into
+	// children, so the deepest indexed nested-X has depth ==
+	// maxGraphComponentDepth, i.e. X == maxGraphComponentDepth - 1.
+	maxIndexedNested := maxGraphComponentDepth - 1
+	if _, ok := nodeByID["pkg:my/app"]; !ok {
+		t.Errorf("F203: root app missing from graph; nodes=%+v", nodeByID)
+	}
+	for i := 0; i <= maxIndexedNested; i++ {
+		id := fmt.Sprintf("pkg:npm/nested-%d", i)
+		if _, ok := nodeByID[id]; !ok {
+			t.Errorf("F203: nested-%d (within depth cap) missing from graph", i)
+		}
+	}
+
+	// Everything strictly deeper than the cap must be ABSENT.
+	for i := maxIndexedNested + 1; i < totalDepth; i++ {
+		id := fmt.Sprintf("pkg:npm/nested-%d", i)
+		if _, ok := nodeByID[id]; ok {
+			t.Errorf("F203: nested-%d (beyond depth cap) leaked into graph; "+
+				"cap is supposed to bail at depth=%d",
+				i, maxGraphComponentDepth)
+		}
+	}
+
+	// Sanity: the indexed count matches the cap. 1 root (app) + the
+	// nested-0..nested-(maxIndexedNested) chain.
+	wantNodeCount := 1 + (maxIndexedNested + 1)
+	if len(resp.Nodes) != wantNodeCount {
+		t.Errorf("F203: node count %d != expected %d (root + cap-1 deep chain)",
+			len(resp.Nodes), wantNodeCount)
+	}
+
+	t.Logf("F203 depth-cap pin: indexed %d nodes from %d-deep fixture in %v (cap=%d)",
+		len(resp.Nodes), totalDepth, elapsed, maxGraphComponentDepth)
+}
+
 // ---------- scale / latency ----------
 
 // TestComputeGraph_1000NodesLatency builds a CycloneDX with 1000
