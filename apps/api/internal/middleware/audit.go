@@ -793,15 +793,21 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			}
 			return model.ActionTicketViewed, model.ResourceTicket
 		case "PUT", "PATCH":
-			return "ticket.updated", model.ResourceTicket
+			// F225 (M14 Phase D round 2 fix): the inline "ticket.updated"
+			// literal is replaced by the named constant so a typo cannot
+			// silently drift between the middleware emit site and the
+			// service-layer dropdown that filters on the same string.
+			return model.ActionTicketUpdated, model.ResourceTicket
 		case "DELETE":
-			return "ticket.deleted", model.ResourceTicket
+			// F225 (M14 Phase D round 2 fix): see PUT/PATCH note above.
+			return model.ActionTicketDeleted, model.ResourceTicket
 		default:
 			// F206 (anti-pattern 48 symmetric to F201): pin the resource
 			// here so a future OPTIONS / HEAD route on the ticket family
 			// does not fall through to the /vulnerabilities tenant
 			// branch below and re-introduce the F217 mass-misclassification.
-			return "ticket.updated", model.ResourceTicket
+			// F225 promotes the literal to the named constant.
+			return model.ActionTicketUpdated, model.ResourceTicket
 		}
 	}
 

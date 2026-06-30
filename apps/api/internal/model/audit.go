@@ -203,6 +203,22 @@ const (
 	ActionTicketSynced  = "ticket.synced"
 	ActionTicketListed  = "ticket.listed"
 	ActionTicketViewed  = "ticket.viewed"
+
+	// F225 (M14 Phase D round 2 fix, anti-pattern 48 symmetric closure):
+	// the F217 middleware ticket branch emits PUT/PATCH and DELETE+default
+	// arms returning "ticket.updated" and "ticket.deleted" as inline
+	// string literals, with no named constant counterpart and no entry in
+	// the service-layer dropdown registry. No PUT/PATCH or DELETE ticket
+	// route exists today, so the gap was latent — but a future ticket
+	// route landing on either arm would produce audit_logs rows that the
+	// UI filter dropdown could not select. Adding the constants here +
+	// dropdown entries in service/audit.go closes the symmetric gap so the
+	// four ticket.created/synced/listed/viewed entries (F217) and the
+	// future ticket.updated/deleted entries share the same registration
+	// discipline. The middleware now references these constants instead
+	// of the raw literals so a typo at the literal site fails to compile.
+	ActionTicketUpdated = "ticket.updated"
+	ActionTicketDeleted = "ticket.deleted"
 )
 
 // Resource type constants

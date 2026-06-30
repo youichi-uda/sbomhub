@@ -419,6 +419,16 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.ActionTicketSynced, Label: "Ticket Synced", Category: "ticket"},
 		{Action: model.ActionTicketListed, Label: "Ticket Listed", Category: "ticket"},
 		{Action: model.ActionTicketViewed, Label: "Ticket Viewed", Category: "ticket"},
+		// F225 (M14 Phase D round 2 fix, anti-pattern 48 symmetric
+		// closure): the middleware emits ticket.updated on PUT/PATCH +
+		// OPTIONS/HEAD default arm and ticket.deleted on DELETE. No
+		// PUT/PATCH or DELETE ticket route exists at the router today,
+		// so today these emit only on hypothetical future routes — but
+		// registering the dropdown entries now keeps the F217 ticket
+		// family symmetric with every other audit family (each verb the
+		// middleware can emit has a matching UI filter entry).
+		{Action: model.ActionTicketUpdated, Label: "Ticket Updated", Category: "ticket"},
+		{Action: model.ActionTicketDeleted, Label: "Ticket Deleted", Category: "ticket"},
 	}
 }
 
