@@ -35,6 +35,15 @@ func (h *ProjectHandler) Create(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
+	// F208 / M14-1: publish the newly-minted project UUID so the audit
+	// middleware records audit_logs.resource_id = project.ID instead of
+	// NULL. POST /api/v1/projects has no path param carrying the new
+	// UUID, so without this Set the row would be unjoinable to
+	// projects.id (forensic gap the F190 docstring used to pin).
+	if project != nil {
+		middleware.SetAuditResourceID(c, project.ID)
+	}
+
 	return c.JSON(http.StatusCreated, project)
 }
 
