@@ -314,6 +314,7 @@
     "apiKeyClose": "Close",
     "apiKeyDelete": "Delete",
     "apiKeyCreateFailed": "Failed to create API key",
+    "apiKeyDeleteFailed": "Failed to delete API key",
     "apiKeyDescription": "Project-scoped API keys for CLI, MCP Server, and CI/CD integrations.",
     "apiKeyExpired": "Expired",
     "apiKeyPrefix": "Prefix"

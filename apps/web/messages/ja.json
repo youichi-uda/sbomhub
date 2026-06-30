@@ -314,6 +314,7 @@
     "apiKeyClose": "閉じる",
     "apiKeyDelete": "削除",
     "apiKeyCreateFailed": "APIキーの作成に失敗しました",
+    "apiKeyDeleteFailed": "APIキーの削除に失敗しました",
     "apiKeyDescription": "CLI / MCP Server / CI/CD 連携用のプロジェクトスコープAPIキー",
     "apiKeyExpired": "期限切れ",
     "apiKeyPrefix": "プレフィックス"

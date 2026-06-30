@@ -280,11 +280,24 @@ export default function ProjectDetailPage() {
     // (it attaches `page.on('dialog', ...)` and treats Delete as a
     // browser-level confirm dialog rather than a custom AlertDialog).
     if (!confirm(tp("deleteApiKeyConfirm"))) return;
+    // F204 (M13 Phase D round 3): mirror the create handler's
+    // setApiKeyError pattern so a backend failure (RBAC 403, referenced-
+    // by-CI 409, network drop) is surfaced inline on the page rather
+    // than swallowed into console.error. The previous handler logged
+    // and silently re-fetched, which made the failure look like the
+    // delete just had no effect — operators reflex-retried, and any
+    // 403 / 409 conflict story was invisible. We reset the error before
+    // the call so a successful delete clears any stale message left
+    // over from a previous attempt.
+    setApiKeyError(null);
     try {
       await api.projects.deleteAPIKey(projectId, keyId);
       await loadApiKeys();
     } catch (err) {
       console.error("Failed to delete API key:", err);
+      setApiKeyError(
+        err instanceof Error ? err.message : tp("apiKeyDeleteFailed"),
+      );
     }
   }
 
@@ -891,6 +904,25 @@ export default function ProjectDetailPage() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* F204 (M13 Phase D round 3): top-level error banner that
+                surfaces failures from delete (and any future non-form
+                action) on this tab. The create form has its own inline
+                error block (see below) which renders when
+                `showCreateApiKey` is true; this banner covers the
+                "no form open" case, primarily the delete handler's
+                403 RBAC / 409 referenced-by-CI / network error stories.
+                Rendered only when no create form is open so the inline
+                error is not duplicated. role="alert" + aria-live="polite"
+                so screen readers announce the failure on update. */}
+            {apiKeyError && !showCreateApiKey && (
+              <div
+                role="alert"
+                aria-live="polite"
+                className="mb-4 text-sm text-destructive bg-destructive/10 p-3 rounded-md"
+              >
+                {apiKeyError}
+              </div>
+            )}
             {/* Success card — bg-green-50 selector is matched in
                 api-keys.spec.ts L92/L96 (`.bg-green-50 code` for the
                 secret, `.bg-green-50` getByRole('button').first() for
