@@ -9,8 +9,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service/diff"
+	"github.com/sbomhub/sbomhub/internal/service/diff_summary"
 )
 
 // ---------- fakes for the four repos consumed by diff.NewService ----------
@@ -380,5 +383,278 @@ func TestDiffHandler_PDF_NotWired_Returns503(t *testing.T) {
 	_ = h.ProjectDiffPDF(c)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("nil exportSvc PDF: got status %d, want 503", rec.Code)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M13-2 (#88) — handler-level regression for the M12-3 ProjectDiffGraph
+// endpoint, mirroring the M12-4 sbom_test.go audit-or-nothing coverage.
+//
+// Four properties pinned here, all of them load-bearing for F168
+// (audit-or-nothing) on the graph endpoint:
+//
+//  1. audit writer not wired => 503 (deployment fail-closed).
+//  2. audit.Log returning an error => 500 with "audit write failed"
+//     so the absence of the audit row is itself the signal.
+//  3. successful render => exactly one audit row with the pinned
+//     shape (action / resource_type / details fields).
+//  4. tenant mismatch => 404 (projectRepo.GetByTenant returns
+//     sql.ErrNoRows for the wrong tenant, the handler maps it to 404,
+//     and the audit row is NOT written — there was no view to audit).
+//
+// All four tests reuse stubAuditLogger declared in sbom_test.go
+// (same package) so the audit shape coverage stays in sync with the
+// auto-trigger M12-4 path.
+// ----------------------------------------------------------------------------
+
+// graphCdxBytes constructs a minimal CycloneDX 1.5 SBOM with the
+// supplied root + 1 library + 1 dependency edge. We marshal raw JSON
+// rather than depending on the cyclonedx-go encoder so the handler
+// tests stay isolated from library upgrades.
+func graphCdxBytes(t *testing.T, leafName, leafVersion string) []byte {
+	t.Helper()
+	type comp struct {
+		BOMRef  string `json:"bom-ref"`
+		Type    string `json:"type"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Purl    string `json:"purl,omitempty"`
+	}
+	type dep struct {
+		Ref          string   `json:"ref"`
+		Dependencies []string `json:"dependsOn,omitempty"`
+	}
+	doc := struct {
+		BOMFormat    string `json:"bomFormat"`
+		SpecVersion  string `json:"specVersion"`
+		Components   []comp `json:"components"`
+		Dependencies []dep  `json:"dependencies"`
+	}{
+		BOMFormat:   "CycloneDX",
+		SpecVersion: "1.5",
+		Components: []comp{
+			{BOMRef: "root@1.0", Type: "application", Name: "root", Version: "1.0", Purl: "pkg:my/root@1.0"},
+			{BOMRef: "leaf-ref", Type: "library", Name: leafName, Version: leafVersion, Purl: "pkg:npm/" + leafName + "@" + leafVersion},
+		},
+		Dependencies: []dep{{Ref: "root@1.0", Dependencies: []string{"leaf-ref"}}},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal cdx fixture: %v", err)
+	}
+	return b
+}
+
+// newGraphTestHandler wires a DiffHandler with two ingested CycloneDX
+// SBOMs whose RawData allows ComputeGraph to actually parse a non-
+// trivial graph. Caller decides whether to attach an audit writer.
+func newGraphTestHandler(t *testing.T, tenantID, projectID uuid.UUID) (*DiffHandler, model.Sbom, model.Sbom) {
+	t.Helper()
+	fromID := uuid.New()
+	toID := uuid.New()
+	now := time.Now()
+	fromSbom := model.Sbom{
+		ID: fromID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.5", RawData: graphCdxBytes(t, "lodash", "4.17.20"),
+		CreatedAt: now.Add(-time.Hour),
+	}
+	toSbom := model.Sbom{
+		ID: toID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.5", RawData: graphCdxBytes(t, "lodash", "4.17.21"),
+		CreatedAt: now,
+	}
+	h := newDiffTestHandler(t, tenantID, projectID,
+		[]model.Sbom{toSbom, fromSbom}, // newest-first per repo contract
+		map[uuid.UUID][]model.Component{},
+		map[uuid.UUID][]model.ComponentVulnerability{},
+	)
+	return h, fromSbom, toSbom
+}
+
+// TestProjectDiffGraph_AuditMissing503 pins the deployment-misconfig
+// fail-closed path: NewDiffHandler.WithAudit was never called, so the
+// handler must 503 rather than render a graph view with no audit trail.
+func TestProjectDiffGraph_AuditMissing503(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	h, _, _ := newGraphTestHandler(t, tenantID, projectID)
+	// Deliberately no WithAudit wiring.
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String()+"/diff/graph", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+
+	_ = h.ProjectDiffGraph(c)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("nil audit writer: got status %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "audit writer missing") {
+		t.Errorf("503 body should explain audit writer missing; got %s", rec.Body.String())
+	}
+}
+
+// TestProjectDiffGraph_AuditFailurePropagates pins F168 audit-or-
+// nothing on the graph endpoint: if audit.Log returns an error the
+// handler MUST return 500 with an explanatory body so the absence of
+// the audit row is the durable signal (no JSON graph body is sent).
+func TestProjectDiffGraph_AuditFailurePropagates(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	h, _, _ := newGraphTestHandler(t, tenantID, projectID)
+	auditStub := &stubAuditLogger{err: errors.New("audit_logs INSERT failed")}
+	h.WithAudit(auditStub)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String()+"/diff/graph", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+
+	_ = h.ProjectDiffGraph(c)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("audit failure: got status %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "audit write failed") {
+		t.Errorf("500 body must surface audit-write failure; got %s", rec.Body.String())
+	}
+	// The audit attempt itself must have been issued exactly once.
+	if len(auditStub.calls) != 1 {
+		t.Errorf("audit.Log attempt count = %d, want 1", len(auditStub.calls))
+	}
+}
+
+// TestProjectDiffGraph_AuditRowShape pins the audit row shape emitted
+// on a successful render. The frontend / dashboard treat this row as
+// the canonical "operator viewed the dependency-graph diff" event.
+//
+// Pinned fields:
+//   - Action       = "diff.graph.view"           (ActionDiffGraphView)
+//   - ResourceType = "sbom_diff"                 (diff_summary.ResourceTypeSbomDiff)
+//   - ResourceID   = projectID
+//   - TenantID     = tenantID
+//   - Details      = { node_count, edge_count, added, removed,
+//                       changed, from_sbom_id, to_sbom_id }
+func TestProjectDiffGraph_AuditRowShape(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	userID := uuid.New()
+	h, fromSbom, toSbom := newGraphTestHandler(t, tenantID, projectID)
+	auditStub := &stubAuditLogger{}
+	h.WithAudit(auditStub)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String()+"/diff/graph", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, userID)
+
+	if err := h.ProjectDiffGraph(c); err != nil {
+		t.Fatalf("ProjectDiffGraph error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Body sanity: must be a parseable GraphResponse with the expected
+	// from/to refs.
+	var resp diff.GraphResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal graph response: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.From == nil || resp.From.SbomID != fromSbom.ID {
+		t.Errorf("From mismatch: %+v, want sbom_id=%s", resp.From, fromSbom.ID)
+	}
+	if resp.To == nil || resp.To.SbomID != toSbom.ID {
+		t.Errorf("To mismatch: %+v, want sbom_id=%s", resp.To, toSbom.ID)
+	}
+
+	if len(auditStub.calls) != 1 {
+		t.Fatalf("audit.Log call count = %d, want 1", len(auditStub.calls))
+	}
+	row := auditStub.calls[0]
+	if row.Action != ActionDiffGraphView {
+		t.Errorf("audit Action = %q, want %q", row.Action, ActionDiffGraphView)
+	}
+	if row.ResourceType != diff_summary.ResourceTypeSbomDiff {
+		t.Errorf("audit ResourceType = %q, want %q", row.ResourceType, diff_summary.ResourceTypeSbomDiff)
+	}
+	if row.ResourceID == nil || *row.ResourceID != projectID {
+		t.Errorf("audit ResourceID = %v, want project %s", row.ResourceID, projectID)
+	}
+	if row.TenantID == nil || *row.TenantID != tenantID {
+		t.Errorf("audit TenantID = %v, want %s", row.TenantID, tenantID)
+	}
+	if row.UserID == nil || *row.UserID != userID {
+		t.Errorf("audit UserID = %v, want %s", row.UserID, userID)
+	}
+
+	// Details shape: every key listed in the handler comment must be
+	// present. The counts must match the rendered response so the audit
+	// row is genuinely a snapshot of what the operator saw.
+	for _, key := range []string{"node_count", "edge_count", "added", "removed", "changed", "from_sbom_id", "to_sbom_id"} {
+		if _, ok := row.Details[key]; !ok {
+			t.Errorf("audit details missing key %q; got %+v", key, row.Details)
+		}
+	}
+	if nc, _ := row.Details["node_count"].(int); nc != len(resp.Nodes) {
+		t.Errorf("audit details.node_count = %d, want %d", nc, len(resp.Nodes))
+	}
+	if ec, _ := row.Details["edge_count"].(int); ec != len(resp.Edges) {
+		t.Errorf("audit details.edge_count = %d, want %d", ec, len(resp.Edges))
+	}
+	if added, _ := row.Details["added"].(int); added != len(resp.DiffStatus.Added) {
+		t.Errorf("audit details.added = %d, want %d", added, len(resp.DiffStatus.Added))
+	}
+	if removed, _ := row.Details["removed"].(int); removed != len(resp.DiffStatus.Removed) {
+		t.Errorf("audit details.removed = %d, want %d", removed, len(resp.DiffStatus.Removed))
+	}
+	if changed, _ := row.Details["changed"].(int); changed != len(resp.DiffStatus.VersionChanged) {
+		t.Errorf("audit details.changed = %d, want %d", changed, len(resp.DiffStatus.VersionChanged))
+	}
+	if fs, _ := row.Details["from_sbom_id"].(string); fs != fromSbom.ID.String() {
+		t.Errorf("audit details.from_sbom_id = %q, want %q", fs, fromSbom.ID.String())
+	}
+	if ts, _ := row.Details["to_sbom_id"].(string); ts != toSbom.ID.String() {
+		t.Errorf("audit details.to_sbom_id = %q, want %q", ts, toSbom.ID.String())
+	}
+}
+
+// TestProjectDiffGraph_TenantMismatch pins the cross-tenant fence:
+// stubProjectRepo.GetByTenant returns sql.ErrNoRows when the request
+// tenant does not own the project, and the handler must map that to
+// 404 (do not leak the distinction between "no such project" and
+// "not your tenant"). The audit row MUST NOT be written because
+// there was no view to audit.
+func TestProjectDiffGraph_TenantMismatch(t *testing.T) {
+	tenantID := uuid.New()
+	wrongTenant := uuid.New()
+	projectID := uuid.New()
+	h, _, _ := newGraphTestHandler(t, tenantID, projectID)
+	auditStub := &stubAuditLogger{}
+	h.WithAudit(auditStub)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String()+"/diff/graph", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, wrongTenant)
+
+	_ = h.ProjectDiffGraph(c)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant: got status %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(auditStub.calls) != 0 {
+		t.Errorf("cross-tenant: audit.Log calls = %d, want 0 (no view => no audit)", len(auditStub.calls))
 	}
 }
