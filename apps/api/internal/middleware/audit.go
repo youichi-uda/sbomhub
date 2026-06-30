@@ -76,15 +76,46 @@ func Audit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 
 // determineActionAndResource determines the audit action and resource type from HTTP method and path.
 func determineActionAndResource(method, path string) (action, resourceType string) {
-	// Normalize path
-	path = strings.TrimPrefix(path, "/api/v1")
-	path = strings.TrimPrefix(path, "/api")
+	// Normalize path: strip the API group prefix. We have to gate the
+	// two TrimPrefix calls on a leading "/" after the prefix, otherwise
+	// the second call eats the "/api" head of a real resource name —
+	// e.g. "/api/v1/apikeys" trims to "/apikeys" then to "pikeys",
+	// which broke api-key classification (F176 root cause).
+	switch {
+	case strings.HasPrefix(path, "/api/v1/"):
+		path = strings.TrimPrefix(path, "/api/v1")
+	case path == "/api/v1":
+		path = ""
+	case strings.HasPrefix(path, "/api/"):
+		path = strings.TrimPrefix(path, "/api")
+	case path == "/api":
+		path = ""
+	}
 
 	// Skip certain paths
 	if strings.HasPrefix(path, "/health") ||
 		strings.HasPrefix(path, "/metrics") ||
 		strings.HasPrefix(path, "/audit-logs") { // Avoid recursive logging
 		return "", ""
+	}
+
+	// API key endpoints (must run BEFORE the /projects branch so that
+	// project-scoped routes such as /projects/:id/apikeys are classified
+	// as apikey, not as a generic project resource. F176: previously the
+	// branch used "/api-keys" (with a hyphen) which never matched the
+	// real routes "/apikeys" / "/projects/:id/apikeys", so apikey audit
+	// actions were dead code and project-scoped key ops were mislogged
+	// as project.created / project.deleted.
+	if strings.Contains(path, "/apikeys") {
+		resourceType = model.ResourceAPIKey
+		switch method {
+		case "POST":
+			return model.ActionAPIKeyCreated, model.ResourceAPIKey
+		case "DELETE":
+			return model.ActionAPIKeyDeleted, model.ResourceAPIKey
+		case "GET":
+			return "apikey.viewed", model.ResourceAPIKey
+		}
 	}
 
 	// Project endpoints
@@ -133,19 +164,6 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			return model.ActionVEXDeleted, model.ResourceVEX
 		case "GET":
 			return "vex.viewed", model.ResourceVEX
-		}
-	}
-
-	// API key endpoints
-	if strings.HasPrefix(path, "/api-keys") {
-		resourceType = model.ResourceAPIKey
-		switch method {
-		case "POST":
-			return model.ActionAPIKeyCreated, model.ResourceAPIKey
-		case "DELETE":
-			return model.ActionAPIKeyDeleted, model.ResourceAPIKey
-		case "GET":
-			return "apikey.viewed", model.ResourceAPIKey
 		}
 	}
 
