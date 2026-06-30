@@ -111,9 +111,15 @@ test.describe('Vulnerabilities', () => {
 
       // Severity + CVSS rendering — these may legitimately appear more
       // than once across the vuln list (e.g. multiple HIGH vulns), so
-      // anchor through the same entry's testid and assert on `.first()`
-      // to keep the spec robust against future seed expansions.
-      const entryLocator = page.locator('[data-testid="vuln-entry"]', { hasText: firstVuln.cve_id });
+      // anchor through the entry's `data-vuln-cve-id` attribute (exact
+      // match) and assert on `.first()` to keep the spec robust against
+      // future seed expansions. The attribute is exposed on the entry
+      // wrapper specifically for spec scoping — using it instead of
+      // `hasText: firstVuln.cve_id` removes the risk that a future
+      // CVE-ID which is a substring of another (e.g. CVE-2024-1 vs
+      // CVE-2024-12) silently double-matches and trips strict-mode
+      // (F181, M13-3 #89).
+      const entryLocator = page.locator(`[data-vuln-cve-id="${firstVuln.cve_id}"]`);
       await expect(entryLocator.getByText(firstVuln.severity).first()).toBeVisible();
       await expect(entryLocator.getByText(`CVSS: ${firstVuln.cvss_score}`).first()).toBeVisible();
     }

@@ -276,7 +276,11 @@ export default function SearchPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleCVESearch} className="flex gap-2">
+              <form
+                onSubmit={handleCVESearch}
+                className="flex gap-2"
+                aria-busy={loading}
+              >
                 <Input
                   placeholder={t("cvePlaceholder")}
                   value={cveQuery}
@@ -294,13 +298,17 @@ export default function SearchPage() {
               search completion without racing the 2s hard sleep that the
               M12-1 audit hit when the NVD-fallback path was slow. Hidden
               from screen readers because the in-button spinner already
-              conveys the loading state visually + via aria-busy on the
-              form. */}
-            {loading && (
-              <div data-testid="search-loading" className="sr-only" aria-hidden="true">
-                {t("searching")}
-              </div>
-            )}
+              conveys the loading state visually + via `aria-busy={loading}`
+              on the surrounding <form>, which is the actual AT signal —
+              this sr-only node is Playwright-only. (F180, M13-1 #87)
+              aria-busy was wired to the form in the same commit; without
+              it the comment was promising an a11y story that did not
+              exist in the DOM. */}
+          {loading && (
+            <div data-testid="search-loading" className="sr-only" aria-hidden="true">
+              {t("searching")}
+            </div>
+          )}
 
           {error && (
             <Card className="border-red-200" data-testid="empty-state">
@@ -340,7 +348,11 @@ export default function SearchPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleComponentSearch} className="flex gap-2">
+              <form
+                onSubmit={handleComponentSearch}
+                className="flex gap-2"
+                aria-busy={loading}
+              >
                 <Input
                   placeholder={t("componentNamePlaceholder")}
                   value={componentQuery}

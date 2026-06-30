@@ -570,7 +570,19 @@ export default function ProjectDetailPage() {
                             The unique selector also lets the dashboard
                             audit JS confirm the dedupe invariant
                             (1 entry per backend-deduplicated vuln_id)
-                            without having to count by text. */}
+                            without having to count by text.
+
+                            M13-3 F181 #89 follow-up: the `data-vuln-cve-id`
+                            attribute on the wrapper above exists for the
+                            same scoping reason at the entry level. The
+                            spec at e2e/vulnerabilities.spec.ts L116 now
+                            keys on `[data-vuln-cve-id="${cveId}"]` (exact
+                            attribute match) instead of `hasText: cveId`
+                            (substring match) — this is what shifts the
+                            risk from text-based matching (where a future
+                            CVE-ID could silently substring-match a longer
+                            one and trip strict-mode) to attribute-based
+                            matching (exact, one entry per CVE-ID). */}
                         <span
                           data-testid="vuln-cve-id"
                           className="font-mono font-bold"
