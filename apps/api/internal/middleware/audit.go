@@ -49,6 +49,28 @@ func Audit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 				details["query"] = c.QueryParams()
 			}
 
+			// F214 / M14-4 (closes F196 NULL-by-design pin): record every
+			// non-UUID path param value under its param name so forensic
+			// queries can join on identifiers like :cve_id ("CVE-2021-44228")
+			// or :checkId (slug-style checklist response key) without the
+			// audit middleware needing to grow a "non-UUID resource_id"
+			// slot. UUID-shaped params already flow through resource_id
+			// (extractResourceID) and are not duplicated here.
+			//
+			// Pre-F214 only "path"/"method"/"status"/"latency_ms"/"query"
+			// lived in details — a row for GET /projects/:id/ssvc/cve/:cve_id
+			// could rescue resource_id from the project :id but the CVE
+			// identifier itself was unrecoverable from the audit row, so
+			// "show me every audit row touching CVE-2021-44228" required
+			// re-parsing path strings.
+			//
+			// (anti-pattern 48 anchor: F196 had only a doc-only NULL-by-
+			// design pin for :cve_id specifically; this fix covers every
+			// current and future non-UUID path param in one place.)
+			for name, val := range collectNonUUIDPathParams(c) {
+				details[name] = val
+			}
+
 			var tenantIDPtr *uuid.UUID
 			var userIDPtr *uuid.UUID
 			if hasTenant {
@@ -72,6 +94,76 @@ func Audit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 			return err
 		}
 	}
+}
+
+// sensitiveAuditParamNames lists path-param names whose VALUE we must
+// never copy into audit_logs.details, even if the value parses as a
+// non-UUID string. The current sbomhub route table does NOT use any of
+// these names in an authenticated route (the only one in use today is
+// :token on the unauthenticated /public/:token route, which bypasses
+// the audit middleware via the `if !hasTenant { return err }` guard),
+// but the filter is defensive: a future authenticated route that
+// inadvertently binds e.g. :api_key in the path would otherwise leak
+// the secret into audit forensics with no warning.
+//
+// Names are matched lower-case; collectNonUUIDPathParams lower-cases
+// the candidate before consulting this set so casing variants
+// (:apiKey vs :api_key vs :APIKey) cannot bypass it.
+var sensitiveAuditParamNames = map[string]struct{}{
+	"token":       {},
+	"secret":      {},
+	"password":    {},
+	"passwd":      {},
+	"api_key":     {},
+	"apikey":      {},
+	"access_key":  {},
+	"private_key": {},
+	"session":     {},
+}
+
+// collectNonUUIDPathParams walks c.ParamNames() and returns name=value
+// pairs for every path param whose value is non-empty, does NOT parse as
+// a UUID (UUID-shaped params already flow through resource_id), and is
+// not on the sensitive-name deny-list. The result is merged into the
+// audit_logs.details map (F214 / M14-4) so forensic queries can join on
+// identifiers like :cve_id ("CVE-2021-44228") and :checkId (slug-style
+// checklist response keys).
+//
+// Returns nil when the route binds no path params or every bound param
+// is empty / UUID / sensitive, so callers can iterate with `for k, v :=
+// range collectNonUUIDPathParams(c)` without a length guard. The map
+// keys are the raw Echo param names (e.g. "cve_id", "checkId") so the
+// audit row matches the route declaration — a reader can grep the
+// route table to find the originating endpoint.
+//
+// (anti-pattern 48: this captures the WHOLE class of non-UUID path
+// params, not just the visible :cve_id case that motivated F196. A new
+// route binding e.g. :purl is picked up automatically without an audit
+// middleware edit.)
+func collectNonUUIDPathParams(c echo.Context) map[string]string {
+	names := c.ParamNames()
+	if len(names) == 0 {
+		return nil
+	}
+	var out map[string]string
+	for _, name := range names {
+		val := c.Param(name)
+		if val == "" {
+			continue
+		}
+		if _, err := uuid.Parse(val); err == nil {
+			// UUID — already captured via resource_id.
+			continue
+		}
+		if _, sensitive := sensitiveAuditParamNames[strings.ToLower(name)]; sensitive {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(names))
+		}
+		out[name] = val
+	}
+	return out
 }
 
 // pathHasChildResource reports whether path contains "/<name>" as a
@@ -847,6 +939,15 @@ func SetAuditResourceID(c echo.Context, id uuid.UUID) {
 // UUID; the ssvc handlers that mint a new assessment row on POST also
 // publish that UUID via path 1 so the audit row reflects the
 // assessment, not the parent project.
+//
+// F214 / M14-4 (closes F196): non-UUID path param VALUES (cve_id,
+// checkId, ...) are now recorded under their param name inside
+// audit_logs.details by the Audit() middleware itself (see
+// collectNonUUIDPathParams). resource_id remains nil for those values
+// by design — UUIDs only — but forensic queries can now reach the CVE
+// identifier via details->>'cve_id' instead of re-parsing path strings.
+// The NULL-by-design pin documented above is still true for resource_id,
+// but the forensic gap it described is closed at the details layer.
 //
 // Why explicit handler override is path 1 (anti-pattern 48 anchor,
 // M14-1 closure of F190): the F190 docstring catalogued a class of

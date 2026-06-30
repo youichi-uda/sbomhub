@@ -1,13 +1,17 @@
 package middleware
 
 import (
+	"database/sql/driver"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
 // newCtxWithParams builds a minimal echo.Context with the given path param
@@ -1447,6 +1451,264 @@ func TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough(t *t
 				}
 			})
 		}
+	}
+}
+
+// TestCollectNonUUIDPathParams_F214 pins the M14-4 helper that feeds
+// the audit details map. The helper must:
+//
+//  1. Return nil when no path params are bound (no allocation overhead
+//     for routes that take no params at all — the common audit hot path).
+//  2. Skip empty values (Echo binds unset path params to "" — we must
+//     not write "cve_id": "" into details).
+//  3. Skip UUID-parseable values (UUIDs already flow through
+//     resource_id via extractResourceID; duplicating them in details is
+//     redundant + would imply that resource_id was somehow not picked
+//     up, which is a misleading signal during incident response).
+//  4. Skip sensitive-name params (see sensitiveAuditParamNames doc —
+//     defensive against a future route accidentally binding e.g.
+//     :api_key in the path). The match is case-insensitive so neither
+//     :api_key nor :APIKey nor :ApiKey can sneak through.
+//  5. Preserve the raw param name as the map key (so the audit row
+//     matches the route declaration and a reader can grep main.go for
+//     the originating endpoint).
+//  6. Capture multiple non-UUID params on the same route (e.g. a
+//     hypothetical future /widgets/:slug/parts/:part_id).
+func TestCollectNonUUIDPathParams_F214(t *testing.T) {
+	projectUUID := uuid.New()
+	cases := []struct {
+		name   string
+		params [][2]string // name, value
+		want   map[string]string
+	}{
+		{
+			name:   "no params bound",
+			params: nil,
+			want:   nil,
+		},
+		{
+			name: "single CVE path param (the F196 motivating case)",
+			params: [][2]string{
+				{"cve_id", "CVE-2021-44228"},
+			},
+			want: map[string]string{"cve_id": "CVE-2021-44228"},
+		},
+		{
+			name: "nested CVE under project: project :id is UUID → not duplicated, only cve_id captured",
+			params: [][2]string{
+				{"id", projectUUID.String()},
+				{"cve_id", "CVE-2021-44228"},
+			},
+			want: map[string]string{"cve_id": "CVE-2021-44228"},
+		},
+		{
+			name: "slug-style :checkId is captured (anti-pattern 48 universal closure)",
+			params: [][2]string{
+				{"id", projectUUID.String()},
+				{"checkId", "supply-chain-management.05"},
+			},
+			want: map[string]string{"checkId": "supply-chain-management.05"},
+		},
+		{
+			name: "all-UUID route returns nil (nothing to record)",
+			params: [][2]string{
+				{"id", projectUUID.String()},
+				{"vuln_id", uuid.New().String()},
+			},
+			want: nil,
+		},
+		{
+			name: "empty values are skipped",
+			params: [][2]string{
+				{"cve_id", ""},
+				{"checkId", "abc"},
+			},
+			want: map[string]string{"checkId": "abc"},
+		},
+		{
+			name: "sensitive :token is filtered even when non-UUID (defensive)",
+			params: [][2]string{
+				{"token", "secret-bearer-value"},
+			},
+			want: nil,
+		},
+		{
+			name: "sensitive name match is case-insensitive — :APIKey filtered",
+			params: [][2]string{
+				{"APIKey", "sk-live-deadbeef"},
+			},
+			want: nil,
+		},
+		{
+			name: "multi non-UUID params all captured (forward compat for future routes)",
+			params: [][2]string{
+				{"slug", "react"},
+				{"version", "18.2.0"},
+			},
+			want: map[string]string{"slug": "react", "version": "18.2.0"},
+		},
+		{
+			name: "product :name (eol/products/:name route shape) captured",
+			params: [][2]string{
+				{"name", "django"},
+			},
+			want: map[string]string{"name": "django"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			names := make([]string, len(tc.params))
+			vals := make([]string, len(tc.params))
+			for i, p := range tc.params {
+				names[i] = p[0]
+				vals[i] = p[1]
+			}
+			c := newCtxWithParams(t, names, vals)
+			got := collectNonUUIDPathParams(c)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d entries (%v), want %d (%v)", len(got), got, len(tc.want), tc.want)
+			}
+			for k, wantV := range tc.want {
+				if gotV, ok := got[k]; !ok {
+					t.Errorf("missing key %q in result %v", k, got)
+				} else if gotV != wantV {
+					t.Errorf("key %q = %q, want %q", k, gotV, wantV)
+				}
+			}
+		})
+	}
+}
+
+// detailsCaptureMatcher is a sqlmock argument matcher that records the
+// raw bytes of the matched driver.Value into target — used by the
+// F214 end-to-end pin below to inspect the JSON-encoded details column
+// the middleware persisted, without paying a Postgres round-trip.
+type detailsCaptureMatcher struct {
+	target *[]byte
+}
+
+func (d detailsCaptureMatcher) Match(v driver.Value) bool {
+	switch b := v.(type) {
+	case []byte:
+		*d.target = append([]byte(nil), b...)
+		return true
+	case string:
+		*d.target = []byte(b)
+		return true
+	}
+	return false
+}
+
+// TestAudit_DetailsMap_NonUUIDParamCaptured_F214 is the end-to-end pin
+// for M14-4 (closes F196). It drives the Audit() middleware against a
+// sqlmock-backed AuditRepository on a route shaped like
+// /projects/:id/ssvc/cve/:cve_id and asserts the INSERT's details
+// JSON contains both cve_id and the request metadata.
+//
+// Coverage rationale (anti-pattern 48 + F206 meta-test family):
+//   - the helper-level unit test (TestCollectNonUUIDPathParams_F214)
+//     proves the param-walk filter is correct in isolation
+//   - this integration test proves the helper output actually reaches
+//     audit_logs.details via the live middleware → repository code
+//     path, so a future refactor that accidentally drops the merge
+//     loop in Audit() is caught here even if the helper still works
+//   - asserting both keys present (cve_id) AND legacy keys still
+//     present (path/method/status/latency_ms) pins additive semantics —
+//     M14-4 must not regress the original details contract
+func TestAudit_DetailsMap_NonUUIDParamCaptured_F214(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	var capturedDetails []byte
+	// Audit middleware ultimately calls AuditRepository.Create via the
+	// auditRepo.Log wrapper. The INSERT shape lives in repository/audit.go
+	// (`INSERT INTO audit_logs (...)`). We match the details column with
+	// the capture matcher and accept anything for the rest.
+	mock.ExpectExec(`INSERT INTO audit_logs`).
+		WithArgs(
+			sqlmock.AnyArg(),                                // id
+			sqlmock.AnyArg(),                                // tenant_id
+			sqlmock.AnyArg(),                                // user_id
+			sqlmock.AnyArg(),                                // action
+			sqlmock.AnyArg(),                                // resource_type
+			sqlmock.AnyArg(),                                // resource_id
+			detailsCaptureMatcher{target: &capturedDetails}, // details (JSON)
+			sqlmock.AnyArg(),                                // ip_address
+			sqlmock.AnyArg(),                                // user_agent
+			sqlmock.AnyArg(),                                // created_at
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	auditRepo := repository.NewAuditRepository(db)
+	mw := Audit(auditRepo)
+
+	tenantID := uuid.New()
+	userID := uuid.New()
+	projectUUID := uuid.New()
+
+	e := echo.New()
+	// Register the route so c.Path() returns the route pattern (not the
+	// concrete URL); determineActionAndResource lives off the pattern.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+projectUUID.String()+"/ssvc/cve/CVE-2021-44228", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/api/v1/projects/:id/ssvc/cve/:cve_id")
+	c.SetParamNames("id", "cve_id")
+	c.SetParamValues(projectUUID.String(), "CVE-2021-44228")
+	c.Set(ContextKeyTenantID, tenantID)
+	c.Set(ContextKeyUserID, userID)
+
+	handler := func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	}
+	if err := mw(handler)(c); err != nil {
+		t.Fatalf("middleware returned error: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+
+	if len(capturedDetails) == 0 {
+		t.Fatal("details JSON was not captured by sqlmock matcher")
+	}
+	var details map[string]interface{}
+	if err := json.Unmarshal(capturedDetails, &details); err != nil {
+		t.Fatalf("details JSON unmarshal: %v\nraw: %s", err, capturedDetails)
+	}
+
+	// Primary F214 assertion — :cve_id (non-UUID) must be present.
+	if got, ok := details["cve_id"]; !ok {
+		t.Errorf("details missing key cve_id; raw=%s", capturedDetails)
+	} else if got != "CVE-2021-44228" {
+		t.Errorf("details[cve_id] = %v, want %q", got, "CVE-2021-44228")
+	}
+
+	// :id is a UUID — must NOT be duplicated into details (already
+	// captured as resource_id; copying it into details would be a
+	// misleading signal during incident response).
+	if _, ok := details["id"]; ok {
+		t.Errorf("details unexpectedly contains UUID-shaped :id key (=%v); "+
+			"UUID params must NOT be duplicated into details, they flow through resource_id",
+			details["id"])
+	}
+
+	// Additive semantics: every pre-F214 details key must still be present.
+	for _, k := range []string{"path", "method", "status", "latency_ms"} {
+		if _, ok := details[k]; !ok {
+			t.Errorf("F214 must be ADDITIVE — pre-existing details key %q missing; raw=%s",
+				k, capturedDetails)
+		}
+	}
+	if details["path"] != "/api/v1/projects/:id/ssvc/cve/:cve_id" {
+		t.Errorf("details[path] = %v, want %q", details["path"],
+			"/api/v1/projects/:id/ssvc/cve/:cve_id")
+	}
+	if details["method"] != "GET" {
+		t.Errorf("details[method] = %v, want GET", details["method"])
 	}
 }
 
