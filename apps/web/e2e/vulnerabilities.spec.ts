@@ -85,15 +85,37 @@ test.describe('Vulnerabilities', () => {
     await page.getByRole('button', { name: /Vulnerabilities/i }).click();
 
     if (vulnerabilities && vulnerabilities.length > 0) {
-      // Verify vulnerability information is displayed
+      // Verify vulnerability information is displayed.
+      //
+      // M13-3 F175 #89: scope the CVE-ID assertion through the canonical
+      // `data-testid="vuln-cve-id"` selector on the vuln entry header
+      // span. A single vuln entry's DOM contains two text nodes that
+      // both match the CVE-ID — the header span AND the
+      // RemediationPanel collapsible button label (intentional UX, see
+      // apps/web/src/components/vulnerability/remediation-panel.tsx:114
+      // and the comment block at the page.tsx span). Without the
+      // data-testid scope, `page.getByText(firstVuln.cve_id)` resolves
+      // to two elements per entry and Playwright's strict mode
+      // (`toBeVisible()`) trips with "resolved to 2 elements". This is
+      // the root cause of the pre-existing flaky that re-surfaced after
+      // M11 close (M12 push) and is logged in STATUS.md as hypothesis A
+      // (CVE × component cartesian) — investigation in M13-3 showed
+      // hypothesis A is false (backend dedupes per F29 via WHERE EXISTS
+      // and the seed maps CVE-2020-8203 to a single component anyway),
+      // so the actual fix is page-side selector scope, not vuln-list
+      // dedupe.
       const firstVuln = vulnerabilities[0];
-      await expect(page.getByText(firstVuln.cve_id)).toBeVisible({ timeout: 5000 });
+      const cveLocator = page.getByTestId('vuln-cve-id').filter({ hasText: firstVuln.cve_id });
+      await expect(cveLocator).toHaveCount(1);
+      await expect(cveLocator).toBeVisible({ timeout: 5000 });
 
-      // Check severity badge
-      await expect(page.getByText(firstVuln.severity)).toBeVisible();
-
-      // Check CVSS score
-      await expect(page.getByText(`CVSS: ${firstVuln.cvss_score}`)).toBeVisible();
+      // Severity + CVSS rendering — these may legitimately appear more
+      // than once across the vuln list (e.g. multiple HIGH vulns), so
+      // anchor through the same entry's testid and assert on `.first()`
+      // to keep the spec robust against future seed expansions.
+      const entryLocator = page.locator('[data-testid="vuln-entry"]', { hasText: firstVuln.cve_id });
+      await expect(entryLocator.getByText(firstVuln.severity).first()).toBeVisible();
+      await expect(entryLocator.getByText(`CVSS: ${firstVuln.cvss_score}`).first()).toBeVisible();
     }
   });
 

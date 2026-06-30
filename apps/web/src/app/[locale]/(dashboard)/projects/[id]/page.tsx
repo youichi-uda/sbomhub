@@ -545,10 +545,38 @@ export default function ProjectDetailPage() {
             ) : (
               <div className="space-y-4">
                 {vulnerabilities.map((vuln) => (
-                  <div key={vuln.id} className="border rounded-lg p-4">
+                  <div
+                    key={vuln.id}
+                    data-testid="vuln-entry"
+                    data-vuln-cve-id={vuln.cve_id}
+                    className="border rounded-lg p-4"
+                  >
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold">{vuln.cve_id}</span>
+                        {/* M13-3 F175 #89: the canonical CVE-ID display for
+                            a vulnerability entry. The RemediationPanel
+                            collapsible button below ALSO renders {cveId}
+                            inside its own header label (intentional UX —
+                            the panel header doubles as a labelled accordion
+                            trigger), so a single vuln entry's DOM contains
+                            two text nodes matching the CVE-ID. e2e specs
+                            that need to assert "this vuln is rendered"
+                            must scope through `data-testid="vuln-cve-id"`
+                            to land on this header span only — otherwise
+                            `page.getByText('CVE-X')` resolves to two
+                            elements per entry and trips Playwright's
+                            strict mode (see e2e/vulnerabilities.spec.ts L90,
+                            pre-existing flaky surfaced after M11 close).
+                            The unique selector also lets the dashboard
+                            audit JS confirm the dedupe invariant
+                            (1 entry per backend-deduplicated vuln_id)
+                            without having to count by text. */}
+                        <span
+                          data-testid="vuln-cve-id"
+                          className="font-mono font-bold"
+                        >
+                          {vuln.cve_id}
+                        </span>
                         <Badge
                           variant={getSeverityVariant(vuln.severity) as BadgeProps["variant"]}
                         >
