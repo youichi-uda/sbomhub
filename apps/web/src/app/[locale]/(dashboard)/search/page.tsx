@@ -290,6 +290,18 @@ export default function SearchPage() {
             </CardContent>
           </Card>
 
+          {/* M13-1 #87 (F174): loading marker so search.spec can poll for
+              search completion without racing the 2s hard sleep that the
+              M12-1 audit hit when the NVD-fallback path was slow. Hidden
+              from screen readers because the in-button spinner already
+              conveys the loading state visually + via aria-busy on the
+              form. */}
+            {loading && (
+              <div data-testid="search-loading" className="sr-only" aria-hidden="true">
+                {t("searching")}
+              </div>
+            )}
+
           {error && (
             <Card className="border-red-200" data-testid="empty-state">
               <CardContent className="pt-6">
@@ -300,6 +312,21 @@ export default function SearchPage() {
               </CardContent>
             </Card>
           )}
+
+          {/* M13-1 #87 (F174): when the backend returns 200 with an empty
+              affected_projects + unaffected_projects set, the CVE exists
+              in the DB but no local SBOM matches. Surface the same
+              empty-state testid so the spec's `[data-testid="empty-state"]`
+              probe lights up regardless of which branch ran. We render
+              this *and* the CVE info card (no result hiding) so the
+              operator still sees the CVE metadata they searched for. */}
+          {cveResult &&
+            cveResult.affected_projects.length === 0 &&
+            cveResult.unaffected_projects.length === 0 && (
+              <div data-testid="empty-state" className="sr-only" aria-hidden="true">
+                {t("noAffectedProjects")}
+              </div>
+            )}
 
           {cveResult && <CVESearchResults result={cveResult} locale={locale} />}
         </TabsContent>
@@ -332,6 +359,12 @@ export default function SearchPage() {
             </CardContent>
           </Card>
 
+          {loading && (
+            <div data-testid="search-loading" className="sr-only" aria-hidden="true">
+              {t("searching")}
+            </div>
+          )}
+
           {error && (
             <Card className="border-red-200" data-testid="empty-state">
               <CardContent className="pt-6">
@@ -341,6 +374,12 @@ export default function SearchPage() {
                 </div>
               </CardContent>
             </Card>
+          )}
+
+          {componentResult && componentResult.matches.length === 0 && (
+            <div data-testid="empty-state" className="sr-only" aria-hidden="true">
+              {t("noComponentsFound")}
+            </div>
           )}
 
           {componentResult && <ComponentSearchResults result={componentResult} locale={locale} />}
