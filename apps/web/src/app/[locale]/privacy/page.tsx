@@ -1,6 +1,4 @@
-import { getTranslations } from "next-intl/server";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import type { Metadata } from "next";
 

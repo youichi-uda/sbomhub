@@ -56,7 +56,7 @@ export default function ScanSettingsPage() {
         try {
             const data = await api.get<ScanSettings>('/api/v1/settings/scan');
             setSettings(data);
-        } catch (err) {
+        } catch {
             setError(t('loadError'));
         } finally {
             setLoading(false);
@@ -67,7 +67,7 @@ export default function ScanSettingsPage() {
         try {
             const data = await api.get<ScanLog[]>('/api/v1/settings/scan/logs?limit=10');
             setLogs(data || []);
-        } catch (err) {
+        } catch {
             // Ignore log loading errors
         }
     };
@@ -84,7 +84,7 @@ export default function ScanSettingsPage() {
             setSettings(updated);
             setSuccess(true);
             setTimeout(() => setSuccess(false), 3000);
-        } catch (err) {
+        } catch {
             setError(t('saveError'));
         } finally {
             setSaving(false);

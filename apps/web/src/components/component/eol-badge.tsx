@@ -52,7 +52,10 @@ export function EOLBadge({
   productLabel,
   cycleVersion,
   lts,
-  showDetails = false,
+  // `showDetails` is part of the shadcn-style public surface (callers may
+  // still pass it for forward compatibility), but the inline Tooltip below
+  // already renders everything we'd otherwise gate on it.
+  showDetails: _showDetails = false,
   size = "md",
 }: EOLBadgeProps) {
   const t = useTranslations("EOL");
@@ -183,7 +186,10 @@ export function EOLSummaryCard({
   eol,
   eos,
   unknown,
-  total,
+  // `total` is kept on the public prop type for callers that pass it
+  // alongside the per-status counts; the card renders the breakdown only,
+  // not the aggregate, so the local value is unused.
+  total: _total,
 }: {
   active: number;
   eol: number;

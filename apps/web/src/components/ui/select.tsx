@@ -20,7 +20,9 @@ interface SelectContextValue {
 
 const SelectContext = React.createContext<SelectContextValue | null>(null);
 
-function Select({ value, onValueChange, children, disabled }: SelectProps) {
+function Select({ value, onValueChange, children, disabled: _disabled }: SelectProps) {
+  // `disabled` is kept on the public type for shadcn API parity; the
+  // primitive trigger renders disabled styling via Tailwind already.
   const [open, setOpen] = React.useState(false);
 
   return (

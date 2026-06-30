@@ -65,7 +65,10 @@ export function DialogDescription({ children }: { children: React.ReactNode }) {
 
 export function DialogTrigger({
   children,
-  asChild,
+  // `asChild` is kept on the public type to match the shadcn/Radix
+  // surface (callers commonly pass `<DialogTrigger asChild>`), even
+  // though this minimal shim does not apply Slot-style merging.
+  asChild: _asChild,
 }: {
   children: React.ReactNode;
   asChild?: boolean;

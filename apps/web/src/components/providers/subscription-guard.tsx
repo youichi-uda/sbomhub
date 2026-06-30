@@ -6,7 +6,6 @@ import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { Loader2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Building2 } from "lucide-react";
 import { OrganizationSwitcher } from "@clerk/nextjs";
 

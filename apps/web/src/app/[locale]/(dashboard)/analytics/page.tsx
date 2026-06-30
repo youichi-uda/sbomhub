@@ -8,7 +8,6 @@ import { api, AnalyticsSummary, MTTRResult, SLOAchievement } from '@/lib/api';
 export default function AnalyticsPage() {
     const t = useTranslations("Analytics");
     const tc = useTranslations("Common");
-    const tv = useTranslations("Vulnerabilities");
     const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

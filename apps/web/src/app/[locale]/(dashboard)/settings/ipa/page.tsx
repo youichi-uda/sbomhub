@@ -21,7 +21,6 @@ const SEVERITY_OPTIONS = [
 
 export default function IPASettingsPage() {
   const t = useTranslations("Settings.IPA");
-  const tCommon = useTranslations("Common");
   const locale = useLocale();
   const [settings, setSettings] = useState<IPASyncSettings | null>(null);
   const [loading, setLoading] = useState(true);

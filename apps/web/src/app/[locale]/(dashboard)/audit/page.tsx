@@ -20,7 +20,6 @@ export default function AuditLogPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [hasFeature, setHasFeature] = useState<boolean | null>(null);
-    const [isSelfHosted, setIsSelfHosted] = useState(false);
 
     // Filter states
     const [showFilters, setShowFilters] = useState(false);
@@ -35,7 +34,6 @@ export default function AuditLogPage() {
     const checkFeatureAccess = useCallback(async () => {
         try {
             const subscription = await api.billing.getSubscription();
-            setIsSelfHosted(subscription.is_self_hosted);
             if (subscription.is_self_hosted) {
                 setHasFeature(true);
                 return;

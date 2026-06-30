@@ -136,7 +136,7 @@ export default function LLMSettingsPage() {
           azure_deployment: data.azure_deployment || "",
           ollama_url: data.ollama_url || "",
         });
-      } catch (err) {
+      } catch {
         setError(t("loadError"));
       } finally {
         setLoading(false);

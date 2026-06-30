@@ -21,8 +21,6 @@ export default function ProjectDetailPage() {
   const t = useTranslations();
   const tp = useTranslations("ProjectDetail");
   const tc = useTranslations("Common");
-  const tv = useTranslations("VexForm");
-  const tl = useTranslations("LicenseForm");
 
   const [project, setProject] = useState<Project | null>(null);
   const [components, setComponents] = useState<Component[]>([]);

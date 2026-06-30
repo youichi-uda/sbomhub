@@ -58,7 +58,10 @@ function TooltipContent({
   children,
   className,
   side = "top",
-  sideOffset = 4,
+  // `sideOffset` is preserved on the public type for shadcn/Radix API
+  // parity; this lightweight tooltip uses Tailwind margins for spacing
+  // instead of a numeric offset prop.
+  sideOffset: _sideOffset = 4,
 }: {
   children: React.ReactNode;
   className?: string;

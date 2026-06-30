@@ -52,6 +52,23 @@ const config = [
       // cleanup wave. Promotion back to `error` is tracked separately.
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/immutability": "warn",
+      // -- unused vars: allow `_`-prefixed names (M12-5 #86) --
+      // We deliberately keep some props/args around to preserve a public
+      // API shape (e.g. shadcn-style component params such as `asChild`,
+      // `sideOffset`, `disabled`, or `onClose` callbacks reserved for a
+      // future hookup) and some `catch (err)` bindings. Renaming them to
+      // `_foo` (via destructure-alias when the public prop name must be
+      // kept) flags intent without losing the type-level surface.
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          destructuredArrayIgnorePattern: "^_",
+          ignoreRestSiblings: true,
+        },
+      ],
     },
   },
 ];

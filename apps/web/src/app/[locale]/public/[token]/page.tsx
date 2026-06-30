@@ -5,7 +5,6 @@ import { useParams } from "next/navigation";
 import { api, PublicSbomView } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { FormatBadge } from "@/components/sbom/format-badge";
 
 export default function PublicSbomPage() {
