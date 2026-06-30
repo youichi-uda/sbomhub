@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -1899,6 +1900,139 @@ func TestAudit_DetailsMap_NonUUIDParamCaptured_F214(t *testing.T) {
 	}
 	if details["method"] != "GET" {
 		t.Errorf("details[method] = %v, want GET", details["method"])
+	}
+}
+
+// TestDetermineActionAndResource_TicketFamily_AllMethods_F224 is the
+// anti-pattern 48 universal-defense meta-test for the F217 ticket
+// classifier branch. It mirrors the F206 / F208 family discipline at
+// the tenant-level (vs. project-nested) ticket route surface.
+//
+// Coverage gap pre-F224:
+//
+//   - F206 (TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough)
+//     enumerates every PROJECT-NESTED /projects/:id/<child> family ×
+//     every HTTP method and asserts the default arm does NOT fall
+//     through to ResourceProject. The ticket branch lives ABOVE the
+//     tenant /vulnerabilities branch (see F217 head comment in
+//     audit.go), is tenant-scoped, and is NOT enumerated by F206.
+//
+//   - F208 (TestExtractResourceID_PostSuccessContextKey_F208) pins
+//     ONE ticket route (POST /vulnerabilities/:vuln_id/ticket) for the
+//     SetAuditResourceID handler/middleware symmetry contract. The
+//     other three ticket-family routes
+//     (POST /tickets/:id/sync, GET /tickets, GET /vulnerabilities/:vuln_id/tickets)
+//     are untested at the (method × path) cell level.
+//
+// Without F224, a future refactor that drops the
+// `pathHasChildResource(path, "tickets")` arm or shuffles the case
+// order inside the ticket switch would silently regress GET /tickets
+// (the tenant-wide list) to the default "unknown" bucket without any
+// test catching the symptom until the audit dropdown filter went
+// blank in production.
+//
+// The table below enumerates the 4 ticket routes × 7 standard HTTP
+// methods (28 cells) and asserts:
+//
+//  1. resource_type == ResourceTicket (never falls through to
+//     ResourceVulnerability via the /vulnerabilities tenant branch
+//     that immediately follows the ticket arm — the F217 pre-fix
+//     bug — and never to "unknown" via the default fallback at the
+//     bottom of determineActionAndResource).
+//  2. action matches the expected verb for the cell, including the
+//     F225 ticket.updated / ticket.deleted promoted constants on
+//     PUT/PATCH/DELETE/OPTIONS/HEAD.
+//
+// Adding a new ticket route to the router REQUIRES adding a row to
+// the paths table here; otherwise that route's default-arm coverage is
+// not enforced and a future fall-through bug ships unobserved.
+func TestDetermineActionAndResource_TicketFamily_AllMethods_F224(t *testing.T) {
+	// Echo route patterns (the shape c.Path() returns) for every
+	// currently-routed ticket endpoint. /tickets and /tickets/:id/sync
+	// are tenant-scoped; /vulnerabilities/:vuln_id/ticket{,s} are
+	// tenant-scoped too (the /vulnerabilities branch above is
+	// pre-empted by the ticket arm — see F217 head comment in
+	// audit.go).
+	paths := []string{
+		"/api/v1/tickets",
+		"/api/v1/tickets/:id/sync",
+		"/api/v1/vulnerabilities/:vuln_id/ticket",
+		"/api/v1/vulnerabilities/:vuln_id/tickets",
+	}
+	// All standard HTTP methods. OPTIONS / HEAD model the CORS
+	// preflight + head-only-meta future routes — both must land on the
+	// default arm and resolve to (ticket.updated, ticket) so neither
+	// the /vulnerabilities tenant branch nor the "unknown" default at
+	// the bottom of determineActionAndResource can swallow them.
+	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+
+	// expectedAction returns the verb the middleware emits for a given
+	// (method, path) cell. Mirrors the ticket switch in audit.go::
+	// determineActionAndResource so a divergence between this table
+	// and the classifier is the precise failure mode the test is
+	// designed to catch.
+	expectedAction := func(method, path string) string {
+		switch method {
+		case "POST":
+			if strings.HasSuffix(path, "/sync") {
+				return model.ActionTicketSynced
+			}
+			return model.ActionTicketCreated
+		case "GET":
+			if strings.HasSuffix(path, "/tickets") {
+				return model.ActionTicketListed
+			}
+			return model.ActionTicketViewed
+		case "PUT", "PATCH":
+			// F225: promoted from inline "ticket.updated" literal.
+			return model.ActionTicketUpdated
+		case "DELETE":
+			// F225: promoted from inline "ticket.deleted" literal.
+			return model.ActionTicketDeleted
+		default:
+			// OPTIONS / HEAD land on the default arm, which the F206
+			// symmetric closure pins to ticket.updated so a future
+			// CORS preflight cannot fall through to /vulnerabilities.
+			return model.ActionTicketUpdated
+		}
+	}
+
+	for _, path := range paths {
+		for _, method := range methods {
+			t.Run(method+" "+path, func(t *testing.T) {
+				action, resource := determineActionAndResource(method, path)
+
+				// Guard 1: resource_type must be ResourceTicket. Falling
+				// through to ResourceVulnerability is the F217 pre-fix
+				// regression we are guarding against on the tenant-level
+				// ticket routes; falling through to "unknown" would mean
+				// the default arm at the bottom of the classifier
+				// swallowed the path (silent forensic-join gap).
+				if resource != model.ResourceTicket {
+					t.Fatalf("F224 regression: %s %s resolved to resource %q, "+
+						"want %q (action=%q); the ticket arm above the "+
+						"/vulnerabilities tenant branch must catch every "+
+						"ticket-family path × method cell — anti-pattern 48 "+
+						"universal defense for tenant-level ticket family",
+						method, path, resource, model.ResourceTicket, action)
+				}
+				// Guard 2: action must match the expected verb. A drift
+				// here means the switch arm and the dropdown registry
+				// (service/audit.go GetAvailableActions) are out of sync.
+				want := expectedAction(method, path)
+				if action != want {
+					t.Errorf("action = %q, want %q (method=%s path=%s)",
+						action, want, method, path)
+				}
+				// Guard 3: both must be non-empty — a silently-skipped
+				// path drops the audit row entirely.
+				if action == "" || resource == "" {
+					t.Errorf("%s %s emitted empty (action=%q, resource=%q); "+
+						"ticket paths must always classify",
+						method, path, action, resource)
+				}
+			})
+		}
 	}
 }
 
