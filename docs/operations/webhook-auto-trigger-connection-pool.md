@@ -78,16 +78,27 @@ the workload, not from defaults.
 
 ### Formula
 
+This is a direct application of **Little's law** to the long-tx ingest
+path: the steady-state number of concurrently-open auto-trigger
+transactions is approximately `arrival_rate × tx_duration`. Plug in the
+**throughput** (uploads/sec), not an already-multiplied concurrent count
+— that is what the `_per_s` suffix on the variable name is there to
+enforce.
+
 ```
-max_connections  =  ceil( (ingest_concurrency × avg_tx_duration_s) / target_tx_pool_utilization )
+max_connections  =  ceil( (ingest_rate_per_s × avg_tx_duration_s) / target_tx_pool_utilization )
                   + baseline_connections
 ```
 
 Where:
 
-- `ingest_concurrency` = peak concurrent SBOM uploads/sec the deployment
-  must absorb without queueing (90th percentile of historical
-  `POST /api/v1/projects/:id/sbom` rate is a reasonable proxy).
+- `ingest_rate_per_s` = peak SBOM upload **throughput** in uploads/second
+  the deployment must absorb without queueing — i.e. `λ` in Little's law,
+  NOT a concurrency count. 90th percentile of historical
+  `POST /api/v1/projects/:id/sbom` rate is a reasonable proxy. If you
+  already measured "concurrent open tx" directly, skip this formula and
+  size `max_connections` from that observation; the formula exists to
+  derive that quantity from arrival rate and tx duration.
 - `avg_tx_duration_s` = expected tx lifetime per ingest. Use **5 s** when
   most webhooks succeed on attempt 1 with a fast receiver, **15 s** when
   the receiver is on a different network / slow path, **32.5 s** for the
@@ -136,7 +147,55 @@ healthy operation does not over-allocate idle connections.
 The shipped `docker/docker-compose.yml` does not override
 `max_connections` — PostgreSQL 15 defaults to 100. That is fine for the
 Small profile and adequate for Medium with a healthy receiver, but the
-Large profile needs explicit tuning.
+Large profile needs explicit tuning. The shipped compose stack runs a
+**single `api` replica**, which is the baseline assumption behind the
+`App pool max-open` column above. The moment an operator scales
+`apps/api` horizontally (compose `deploy.replicas`, Kubernetes
+`replicas`, autoscaling group desired count, etc.), the next
+sub-section's per-replica constraint must hold.
+
+### Per-replica pool constraint (multi-replica deployments)
+
+`App pool max-open` is the Go `database/sql.SetMaxOpenConns` ceiling and
+is **per-replica**, not cluster-wide. PostgreSQL `max_connections` is
+cluster-wide. The table above implicitly assumes a single `api` replica;
+once you scale horizontally, the sum of every replica's open-conn
+ceiling — plus baseline — must fit under `max_connections` with
+headroom:
+
+```
+pool_max_open_per_replica × api_replica_count
+  + baseline_connections
+  ≤ max_connections × target_utilization
+```
+
+Solve for `pool_max_open_per_replica` when sizing a new deployment:
+
+```
+pool_max_open_per_replica  =  floor(
+    ( max_connections × target_utilization - baseline_connections )
+      / api_replica_count
+)
+```
+
+Worked examples — Medium profile (`max_connections = 200`, `target_utilization = 0.8`, `baseline = 15`):
+
+| Replicas | Budget for app pools | Per-replica max-open | Notes |
+|---|---|---|---|
+| **1** (docker-compose default) | 200 × 0.8 − 15 = 145 | 145 → use table default **80** (under-allocation is fine; the table figure leaves room for connection bursts) | Single-replica matches the §2 table verbatim. |
+| **2** (compose `deploy.replicas: 2`) | 145 | **72** per replica (2 × 72 + 15 = 159 ≤ 160) | Drop `DATABASE_MAX_OPEN_CONNS` from 80 → 72 on each replica. |
+| **3** (small Kubernetes deployment) | 145 | **48** per replica (3 × 48 + 15 = 159 ≤ 160) | Without this drop, 3 × 80 + 15 = 255 > 200 — replicas would race for connections and trip `FATAL: sorry, too many clients already`. |
+
+When operators forget this constraint and leave `DATABASE_MAX_OPEN_CONNS`
+at the single-replica default while scaling horizontally, the symptom
+is exactly the §6.2 "Connection exhaustion" failure mode firing under
+otherwise-healthy ingest load. **Always re-derive `pool_max_open_per_replica`
+from the formula above when changing replica count, not from the table
+defaults alone.** The pgbouncer path (§3) does not relax this constraint
+— a session-pool pgbouncer still pins one backend per checked-out client
+connection, so the same arithmetic applies, with pgbouncer
+`max_client_conn` replacing PostgreSQL `max_connections` as the binding
+ceiling.
 
 ---
 
@@ -152,7 +211,7 @@ incompatible with the auto-trigger path:
 | Pool mode | Compatible? | Why |
 |---|---|---|
 | **session** | YES (required) | Each client holds one backend connection for the lifetime of the application's connection. The 32.5 s tx survives because nothing tries to multiplex the backend mid-tx. |
-| **transaction** | NO | Returns the backend to the pool **at COMMIT**. The auto-trigger tx is still open during the HTTP delivery, but transaction-pool semantics around `SET LOCAL` (and around the entire auto-trigger flow's reuse of the same Go `*sql.Tx`) become brittle: `set_config(..., true)` is GUC-scoped to the tx, and the HTTP delivery path performs no SQL between `set_config` and `Commit`, so the tx-pool's "borrow backend per statement" model can drop the tenant GUC binding on the next acquire. Even where it does not corrupt RLS, it negates the point of pooling — every ingest pins a backend for tens of seconds. |
+| **transaction** | NO | A tx-pool backend is pinned for the full BEGIN..COMMIT span, **so `set_config(..., true)` does survive within a single auto-trigger tx** — the tenant GUC binding is not silently dropped, and RLS stays enforced. The reasons to still reject tx-pool for this path are operational, not correctness-based: **(1)** the ~32.5 s tx ceiling means every ingest pins a backend for tens of seconds, which negates the whole point of tx-pool's multiplexing (you pay the pooler's latency overhead while getting session-pool's connection-pinning characteristics); **(2)** Go `database/sql` keeps a per-connection cache of server-side prepared statements (`PREPARE`d on the backend), which interact poorly with pgbouncer's tx-pool because the backend a `*sql.Conn` lands on for tx N+1 may not have the prepared statements that were issued on tx N's backend, surfacing as `prepared statement "..." does not exist` errors; **(3)** failure-mode debugging becomes harder because the application-side connection identity no longer maps 1:1 to a backend `pid`, so `pg_stat_activity` traces and the §4 monitoring queries lose their pid-stable view of long-running auto-trigger transactions. Use session-pool. |
 | **statement** | NO | Forbids any multi-statement tx outright. The auto-trigger tx contains `set_config` + several reads + audit insert + commit; statement pooling rejects it. |
 
 The pooler's max client connections sets a ceiling unrelated to (and
