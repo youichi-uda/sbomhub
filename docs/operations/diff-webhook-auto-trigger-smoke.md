@@ -272,3 +272,14 @@ This is the canonical "did my ingests trigger webhooks?" replay.
 Pair with the matching `diff_webhook_fired` row (same `tenant_id`,
 `resource_id`=project_id, `created_at` within a few seconds) to
 reconstruct the full chain.
+
+## See also
+
+- [`webhook-auto-trigger-connection-pool.md`](./webhook-auto-trigger-connection-pool.md)
+  — M13-4 operator guidance for sizing PostgreSQL `max_connections`
+  and pgbouncer pool mode against the auto-trigger's long-tx posture
+  (the tx held during the up-to-~32.5 s HTTP delivery + retry chain),
+  monitoring metrics, alert thresholds, latency mitigation knobs
+  (threshold tuning, receiver SLA, retry backoff), and failure-mode
+  handling (statement_timeout, connection exhaustion, receiver 5xx
+  dead-letter behaviour via the audit log).
