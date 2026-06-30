@@ -32,6 +32,14 @@ export function ApiAuthProvider({ children }: ApiAuthProviderProps) {
       setAuthTokenGetter(getOrgScopedToken);
       // Keep org ID getter for backwards compatibility (read-only info)
       setOrgIdGetter(() => orgId || null);
+      // M12-5 #86: setIsReady mirrors Clerk's `isLoaded` (external auth
+      // state) into a local readiness flag so children only mount after
+      // the token getter is wired. This is exactly the "subscribe to an
+      // external system, update local state on signal" pattern that
+      // react-hooks/set-state-in-effect explicitly allows; there is no
+      // pre-render derivable substitute because `isLoaded` flips
+      // asynchronously after Clerk's session bootstrap.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Clerk isLoaded is external state; readiness must be reflected to children.
       setIsReady(true);
     }
   }, [getOrgScopedToken, isLoaded, orgId]);

@@ -74,6 +74,12 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
     // Skip check for exempt paths
     const isExempt = EXEMPT_PATHS.some((path) => pathname.includes(path));
     if (isExempt) {
+      // M12-5 #86: the exempt branch mirrors the pathname-driven (external
+      // route state) decision into local `loading`/`checked` flags. The
+      // value depends on the live pathname, so a useMemo-derived initial
+      // state would not catch route changes after mount. This is the
+      // "subscribe to external system" pattern set-state-in-effect allows.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- pathname is external nav state; exempt branch must publish completion to consumers.
       setLoading(false);
       setChecked(true);
       return;

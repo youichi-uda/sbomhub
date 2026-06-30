@@ -774,6 +774,13 @@ function ClearOverrideForm({
   // trimmed value is >= 1 char. Mirrors the server-side trim contract
   // (validateMetiOverrideNote) so the operator doesn't see a 400 from
   // a whitespace-only submission.
+  //
+  // M12-5 #86: react-hook-form's `watch()` returns an unmemoizable
+  // function (the React Compiler `incompatible-library` warning flags
+  // this). We acknowledge the compiler skip here — the alternative is
+  // migrating this submit-button gating to `useFormContext`/`useWatch`,
+  // which is tracked for M13. Suppress the inline warning only.
+  // eslint-disable-next-line react-hooks/incompatible-library -- react-hook-form watch() returns an unstable fn; compiler skip is acknowledged. Migration to useWatch tracked in M13.
   const noteRaw = watch("note") ?? "";
   const noteValid = noteRaw.trim().length >= 1;
 
