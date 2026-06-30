@@ -794,9 +794,11 @@ func TestLoadMetadata_M10_2_VerificationNotesShape(t *testing.T) {
 			"metadata.verification_notes must contain %q (M10-2 load-bearing token)", want)
 	}
 
-	// last_synced bump — both M10-2 and M11-3 ran on 2026-06-29.
-	assert.Equal(t, "2026-06-29", meta.LastSynced,
-		"metadata.last_synced should be 2026-06-29 after the M11-3 wave")
+	// last_synced bump — M10-2 / M11-3 ran on 2026-06-29; M12-2 (#83)
+	// bumped it to 2026-06-30 when the schema split landed and
+	// verification_status moved partial → full.
+	assert.Equal(t, "2026-06-30", meta.LastSynced,
+		"metadata.last_synced should be 2026-06-30 after the M12-2 wave")
 }
 
 // TestLoadMetadata_M11_3_VerificationNotesShape (issue #78) asserts the
@@ -831,7 +833,304 @@ func TestLoadMetadata_M11_3_VerificationNotesShape(t *testing.T) {
 	}
 
 	assert.Contains(t, meta.SyncedBy, "M11-3",
-		"metadata.synced_by should mention M11-3; got %q", meta.SyncedBy)
-	assert.Equal(t, "partial", meta.VerificationStatus,
-		"M11-3 keeps verification_status: partial (17/32 verbatim, 15/32 honest distilled); 'full' would be a stretched claim")
+		"metadata.synced_by should still cite M11-3 in the chain (M12-2 extends, not replaces); got %q", meta.SyncedBy)
+	// M12-2 (#83) bumped verification_status partial → full when the
+	// schema split (verbatim_title_ja + evaluator_text_ja) landed and
+	// all 32 criteria gained byte-exact verbatim_title_ja from primary
+	// METI ver 2.0 PDF (27 criteria) or IPA secondary (5 criteria).
+	// This pin protects against a silent downgrade.
+	assert.Equal(t, "full", meta.VerificationStatus,
+		"M12-2 (#83) verification_status: full (32/32 verbatim_title_ja populated from primary METI ver 2.0 PDF or IPA secondary); silent downgrade to partial means a regression")
+}
+
+// TestLoadMetadata_M12_2_VerificationNotesShape (issue #83) asserts the
+// load-bearing claims of the M12-2 schema-split wave: the synced_by
+// attribution, the option-A schema (verbatim_title_ja +
+// evaluator_text_ja), the IPA-derived 5-criterion provenance, and the
+// honest "full" rationale. A future round that rewrites the notes must
+// preserve these tokens or update this test deliberately.
+func TestLoadMetadata_M12_2_VerificationNotesShape(t *testing.T) {
+	meta, err := LoadMetadata()
+	require.NoError(t, err)
+
+	// M12-2 provenance + schema markers — these must remain so the
+	// dashboard provenance pane can render the M12-2 promotion honestly.
+	wantSubstrings := []string{
+		"M12-2",
+		"issue #83",
+		"2026-06-30",
+		// option A schema split.
+		"verbatim_title_ja",
+		"evaluator_text_ja",
+		// IPA-derived 5-criterion bucket.
+		"ipa-derived",
+		// "full" verification claim.
+		"full",
+		// IPA secondary PDF filename — proves IPA URL was actually
+		// fetched as part of M12-2.
+		"sbn8o10000001zcl",
+		// Primary PDF SHA256 still cited.
+		"cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a",
+	}
+	for _, want := range wantSubstrings {
+		assert.Contains(t, meta.VerificationNotes, want,
+			"metadata.verification_notes must contain %q (M12-2 load-bearing token)", want)
+	}
+
+	assert.Contains(t, meta.SyncedBy, "M12-2",
+		"metadata.synced_by should mention M12-2; got %q", meta.SyncedBy)
+}
+
+// TestCatalog_M12_2_SchemaSplit_AllPopulated (issue #83) asserts that
+// every catalog criterion carries non-empty verbatim_title_ja and
+// evaluator_text_ja. The M12-2 schema-split contract requires that:
+//
+//   - VerbatimTitleJA holds the byte-exact official wording (primary
+//     METI ver 2.0 PDF, or IPA secondary 2024-12 for the 5 IPA-derived
+//     criteria).
+//   - EvaluatorTextJA holds the SBOMHub-tuned evaluator-correspondent
+//     label (= the M11-3 title_ja that the criteria/*.go signal logic
+//     and dashboard render against).
+//
+// Empty either field would silently regress the audit posture, so the
+// loader (catalog.go) rejects it at parse time and this test pins it
+// at the test layer too — defence in depth.
+func TestCatalog_M12_2_SchemaSplit_AllPopulated(t *testing.T) {
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+	require.Len(t, items, 32, "M12-2 (#83) requires the 32-criterion catalog")
+
+	for _, c := range items {
+		assert.NotEmpty(t, c.VerbatimTitleJA,
+			"criterion %s.verbatim_title_ja must be set (M12-2 #83 schema requires byte-exact official wording for every criterion)",
+			c.ID)
+		assert.NotEmpty(t, c.EvaluatorTextJA,
+			"criterion %s.evaluator_text_ja must be set (M12-2 #83 schema requires evaluator-correspondent wording for every criterion)",
+			c.ID)
+	}
+}
+
+// TestCatalog_M12_2_VerbatimEvaluatorSplit_MutuallyExclusiveForDistilled
+// (issue #83) is the M12-2 mutually-exclusive contract: for the 15
+// DISTILLED criteria, verbatim_title_ja (official PDF wording) and
+// evaluator_text_ja (SBOMHub-tuned wording) must NOT be byte-exact
+// equal. This is the structural reason the schema split exists — if
+// the two strings overlap exactly there was no reason to distill.
+//
+// For the 17 VERBATIM criteria, the two fields ARE allowed to be
+// equal (the official wording already matches the evaluator semantics
+// and no distillation was needed). The test asserts that direction
+// too — equality is required on the 17 — so a careless edit that
+// drifts the verbatim field from the evaluator field on a VERBATIM
+// criterion is caught here.
+//
+// The VERBATIM / DISTILLED partition is read from the existing M11-3
+// notes-tag map (TestCatalog_Notes_M11_3_VerbatimDistilledTagging) so
+// the two tests cannot disagree about the canonical split.
+func TestCatalog_M12_2_VerbatimEvaluatorSplit_MutuallyExclusiveForDistilled(t *testing.T) {
+	// Mirror of the M11-3 tag map. Keep in sync with
+	// TestCatalog_Notes_M11_3_VerbatimDistilledTagging — both tests pin
+	// the same partition deliberately.
+	verbatimIDs := map[string]struct{}{
+		"meti.env_setup.02":      {},
+		"meti.env_setup.03":      {},
+		"meti.env_setup.04":      {},
+		"meti.env_setup.05":      {},
+		"meti.env_setup.06":      {},
+		"meti.env_setup.07":      {},
+		"meti.env_setup.08":      {},
+		"meti.env_setup.09":      {},
+		"meti.sbom_creation.02":  {},
+		"meti.sbom_creation.03":  {},
+		"meti.sbom_creation.04":  {},
+		"meti.sbom_creation.05":  {},
+		"meti.sbom_creation.07":  {},
+		"meti.sbom_operation.01": {},
+		"meti.sbom_operation.02": {},
+		"meti.sbom_operation.05": {},
+		"meti.sbom_operation.07": {},
+	}
+	require.Len(t, verbatimIDs, 17,
+		"M11-3 partition: exactly 17 criteria are VERBATIM")
+
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+
+	verbatimMatchCount, distilledDifferCount := 0, 0
+	for _, c := range items {
+		_, isVerbatim := verbatimIDs[c.ID]
+		if isVerbatim {
+			// VERBATIM criteria: verbatim_title_ja and evaluator_text_ja
+			// must match — the official wording IS the evaluator label.
+			assert.Equal(t, c.VerbatimTitleJA, c.EvaluatorTextJA,
+				"VERBATIM criterion %s: verbatim_title_ja and evaluator_text_ja must be equal (official wording is the evaluator label); silent divergence is a M12-2 schema violation",
+				c.ID)
+			if c.VerbatimTitleJA == c.EvaluatorTextJA {
+				verbatimMatchCount++
+			}
+		} else {
+			// DISTILLED criteria: verbatim_title_ja (PDF) and
+			// evaluator_text_ja (SBOMHub-tuned) MUST differ. If they
+			// happened to be equal, the schema split would be a no-op
+			// for this criterion — which violates the M11-3 distillation
+			// rationale that the field separation is meant to preserve.
+			assert.NotEqual(t, c.VerbatimTitleJA, c.EvaluatorTextJA,
+				"DISTILLED criterion %s: verbatim_title_ja and evaluator_text_ja must differ — the whole point of the M12-2 schema split is that the official wording (verbatim) and the SBOMHub-tuned evaluator label (evaluator_text) carry different semantics for distilled criteria",
+				c.ID)
+			if c.VerbatimTitleJA != c.EvaluatorTextJA {
+				distilledDifferCount++
+			}
+		}
+	}
+	assert.Equal(t, 17, verbatimMatchCount,
+		"M12-2 (#83): exactly 17 VERBATIM criteria should have verbatim_title_ja == evaluator_text_ja; got %d", verbatimMatchCount)
+	assert.Equal(t, 15, distilledDifferCount,
+		"M12-2 (#83): exactly 15 DISTILLED criteria should have verbatim_title_ja != evaluator_text_ja; got %d", distilledDifferCount)
+}
+
+// TestCatalog_M12_2_EvaluatorText_MatchesTitleJA_ForBackwardCompat
+// (issue #83) pins the backward-compatibility contract: for every
+// criterion, evaluator_text_ja MUST equal title_ja so the existing
+// handler (apps/api/internal/handler/meti.go) / evidence_pack
+// (apps/api/internal/service/evidence_pack/builder.go) / web frontend
+// consumers that read title_ja continue to see the same wording the
+// evaluator is matching against.
+//
+// If a future wave wants to diverge title_ja from evaluator_text_ja
+// (e.g. shorten the UI label) the consumer migration must be done in
+// the same change so the test does not silently pass with stale UI.
+func TestCatalog_M12_2_EvaluatorText_MatchesTitleJA_ForBackwardCompat(t *testing.T) {
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+
+	for _, c := range items {
+		assert.Equal(t, c.TitleJA, c.EvaluatorTextJA,
+			"criterion %s: evaluator_text_ja must equal title_ja for backward compat with handler/evidence_pack/web consumers that read title_ja; divergence requires a coordinated consumer migration",
+			c.ID)
+	}
+}
+
+// TestCatalog_M12_2_IPADerivedSource (issue #83) pins the exact set of
+// 5 IPA-derived criteria. M12-2 confirmed that these 5 criteria have
+// no anchoring sentence in the primary METI ver 2.0 PDF and that
+// their verbatim_title_ja was extracted from the IPA secondary
+// catalogue (sbn8o10000001zcl.pdf, 2024-12). The Source field
+// therefore must be "ipa-derived" so the dashboard provenance pane
+// renders the correct badge.
+//
+// All other 27 criteria must have Source == "" (default =
+// meti-primary-ver2.0) — explicit setting is allowed but the loader
+// defaults are the maintenance-friendly choice.
+func TestCatalog_M12_2_IPADerivedSource(t *testing.T) {
+	wantIPADerived := map[string]struct{}{
+		"meti.env_setup.01":      {},
+		"meti.env_setup.11":      {},
+		"meti.sbom_creation.01":  {},
+		"meti.sbom_creation.10":  {},
+		"meti.sbom_operation.11": {},
+	}
+	require.Len(t, wantIPADerived, 5,
+		"M12-2 (#83): exactly 5 criteria are IPA-derived")
+
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+
+	gotIPADerived := 0
+	for _, c := range items {
+		_, want := wantIPADerived[c.ID]
+		if want {
+			assert.Equal(t, "ipa-derived", c.Source,
+				"criterion %s should have source: ipa-derived (M12-2 IPA secondary provenance); got %q",
+				c.ID, c.Source)
+			if c.Source == "ipa-derived" {
+				gotIPADerived++
+			}
+		} else {
+			// Non-IPA: empty or meti-primary-ver2.0 both acceptable.
+			assert.Contains(t, []string{"", "meti-primary-ver2.0"}, c.Source,
+				"criterion %s source %q must be empty or 'meti-primary-ver2.0' (primary METI ver 2.0 PDF); only the 5 explicitly IPA-derived criteria carry 'ipa-derived'",
+				c.ID, c.Source)
+		}
+	}
+	assert.Equal(t, 5, gotIPADerived,
+		"M12-2 (#83): expected exactly 5 IPA-derived criteria; got %d", gotIPADerived)
+}
+
+// TestCatalog_M12_2_VerbatimTitleJA_StrictPin (issue #83) is the M12-2
+// byte-exact regression for all 32 catalog verbatim_title_ja strings.
+// Drift here means the official PDF wording was edited (intentionally
+// or not). The author must update both the catalog and this pin
+// deliberately — silent drift is not allowed.
+//
+// Wording sources (per M12-2 verification_notes block):
+//
+//   - 17 entries: existing M11-3 VERBATIM titles (primary PDF □ rows
+//     or section headings). Mirror of TestCatalog_VerbatimMatch_Strict
+//     wantTitles[verbatim 17].
+//   - 10 entries: M12-2 new primary-PDF anchors (4.3 No.1, 2.3
+//     heading, 6.2 No.2, 5.2 body, 7.4.2 / 7.4.3 / 7.4.4 headings,
+//     6.1 body, 6.2 body x2).
+//   - 5 entries: IPA secondary catalogue (表：4.2.1 No.1 / 表：4.5.1
+//     No.1 / 表：6.3.1 No.3 / 表：5.3.1 No.2 / 表：6.3.1 No.2).
+func TestCatalog_M12_2_VerbatimTitleJA_StrictPin(t *testing.T) {
+	wantVerbatim := map[string]string{
+		// ── 17 entries inherited from M11-3 VERBATIM ────────────────
+		"meti.env_setup.02":      "対象ソフトウェアの開発言語、コンポーネント形態、開発ツール等、対象ソフトウェアに関する情報を明確化する",
+		"meti.env_setup.03":      "対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を明確化する",
+		"meti.env_setup.04":      "対象ソフトウェアの SBOM に関する規制・要求事項を確認する",
+		"meti.env_setup.05":      "SBOM 導入に関する組織内の制約（体制の制約、コストの制約等）を明確化する",
+		"meti.env_setup.06":      "整理した情報に基づき、SBOM 適用範囲（5W1H）を明確化する",
+		"meti.env_setup.07":      "SBOM ツールの選定",
+		"meti.env_setup.08":      "SBOM ツールに関する学習",
+		"meti.env_setup.09":      "対象ソフトウェアの正確な構成図を作成し、SBOM 適用の対象を可視化する",
+		"meti.sbom_creation.02":  "作成する SBOM の項目、フォーマット、出力ファイル形式等の SBOM に関する要件を決定する",
+		"meti.sbom_creation.03":  "SBOM ツールを用いて対象ソフトウェアのスキャンを行い、コンポーネントの情報を解析する",
+		"meti.sbom_creation.04":  "SBOM ツールの解析ログ等を調査し、エラー発生や情報不足による解析の中断や省略がなく、解析が正しく実行されたかを確認する",
+		"meti.sbom_creation.05":  "コンポーネントの解析結果について、コンポーネントの誤検出や検出漏れがないかを確認する",
+		"meti.sbom_creation.07":  "対象ソフトウェアの利用者及び納入先に対する SBOM の共有方法を検討した上で、必要に応じて、SBOM を共有する",
+		"meti.sbom_operation.01": "脆弱性に関する SBOM ツールの出力結果を踏まえ、深刻度の評価、影響度の評価、脆弱性の修正、残存リスクの確認、関係機関への情報提供等の脆弱性対応を行う",
+		"meti.sbom_operation.02": "脆弱性特定や脆弱性対応優先付けにおいて利用する脆弱性 DB を選択する",
+		"meti.sbom_operation.05": "ライセンスに関する SBOM ツールの出力結果を踏まえ、OSS のライセンス違反が発生していないかを確認する",
+		"meti.sbom_operation.07": "作成した SBOM は、社外からの問合せがあった場合等に参照できるよう、変更履歴も含めて一定期間保管する",
+		// ── 10 entries new in M12-2 from primary PDF anchors ────────
+		"meti.env_setup.10":      "SBOM ツールが導入可能な環境の要件を確認し、整備する",
+		"meti.sbom_creation.06":  "SBOM の「最小要素」",
+		"meti.sbom_creation.08":  "SBOM に含まれる情報や SBOM 自体を適切に管理する",
+		"meti.sbom_creation.09":  "サードパーティや OSS コミュニティ等の第三者から提供されたコンポーネントを使用している場合は、当該コンポーネントの SBOM の提供を受けることができる場合もある",
+		"meti.sbom_operation.03": "脆弱性対応優先付けフェーズ",
+		"meti.sbom_operation.04": "脆弱性対応フェーズ（暫定対応・根本対応）",
+		"meti.sbom_operation.06": "SBOM ツールでコンポーネントの EOL を特定できない場合、別途個別に調査する必要がある",
+		"meti.sbom_operation.08": "情報共有フェーズ",
+		"meti.sbom_operation.09": "SBOM に含まれる情報は定期的に更新し、管理する必要がある",
+		"meti.sbom_operation.10": "出荷済み製品と SBOM 情報とを対応づけられるよう、SBOM の改変履歴も含めて資産管理システム等で保管することも想定される",
+		// ── 5 entries from IPA secondary catalogue ─────────────────
+		"meti.env_setup.01":      "自組織における SBOM 導入・運用に係る役割と部門を精査する",
+		"meti.env_setup.11":      "導入した SBOM ツールの手順書を作成する",
+		"meti.sbom_creation.01":  "SBOM の更新条件や時期を決める",
+		"meti.sbom_creation.10":  "SBOM の公開範囲、自社の特性を考慮し共有方法を検討する",
+		"meti.sbom_operation.11": "SBOM の提供期間を定める",
+	}
+	require.Len(t, wantVerbatim, 32,
+		"M12-2 (#83): wantVerbatim must hold exactly 32 entries (one per criterion); got %d", len(wantVerbatim))
+
+	for id, want := range wantVerbatim {
+		got, ok := GetCriterion(id)
+		require.True(t, ok, "criterion %s must exist", id)
+		require.NotNil(t, got)
+		assert.Equal(t, want, got.VerbatimTitleJA,
+			"criterion %s drift: verbatim_title_ja byte-exact mismatch against M12-2 PDF / IPA pin; fix the catalog or update this test deliberately, NEVER loosen the assertion",
+			id)
+	}
+
+	// Inverse coverage: every catalog criterion must have a pinned
+	// verbatim_title_ja. Catches the case where a new criterion is
+	// added without an M12-2 regression entry.
+	items, err := LoadCatalog()
+	require.NoError(t, err)
+	for _, c := range items {
+		_, pinned := wantVerbatim[c.ID]
+		assert.True(t, pinned,
+			"catalog criterion %s has no pinned verbatim_title_ja in TestCatalog_M12_2_VerbatimTitleJA_StrictPin; add it to wantVerbatim",
+			c.ID)
+	}
 }
