@@ -33,6 +33,7 @@ const TabsList = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
+    role="tablist"
     className={cn(
       "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
       className
@@ -46,6 +47,16 @@ interface TabsTriggerProps extends React.ButtonHTMLAttributes<HTMLButtonElement>
   value: string
 }
 
+// F174 (M13-1): the previous shim rendered TabsTrigger as a bare
+// <button>, which leaked it into `getByRole('button', { name: 'Search' })`
+// queries — the search-page CVE/Component tab triggers ("CVE Search" /
+// "Component Search") then sat ahead of the actual form submit button
+// in DOM order and `.first()` clicked a no-op tab onChange instead of
+// the form, hence the M12-1 CVE search specs never fired the search/cve
+// API call. Tagging the trigger with role="tab" + the matching aria-*
+// state pulls it out of the button role tree (a11y trees collapse
+// `role=tab` under tablist, not button) and matches the Radix/shadcn
+// shape callers expect. Same posture for TabsContent → role="tabpanel".
 const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
   ({ className, value, ...props }, ref) => {
     const context = React.useContext(TabsContext)
@@ -56,6 +67,10 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
     return (
       <button
         ref={ref}
+        type="button"
+        role="tab"
+        aria-selected={isSelected}
+        data-state={isSelected ? "active" : "inactive"}
         className={cn(
           "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
           isSelected
@@ -85,6 +100,8 @@ const TabsContent = React.forwardRef<HTMLDivElement, TabsContentProps>(
     return (
       <div
         ref={ref}
+        role="tabpanel"
+        data-state="active"
         className={cn(
           "mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
           className

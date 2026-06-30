@@ -128,20 +128,23 @@ test.describe('SBOM Diff', () => {
     ).toBeVisible({ timeout: 10000 });
 
     // Three panels: Components / Vulnerabilities / License policy.
-    // Each surfaces as a tab trigger in the detail view. The project's
-    // shadcn-derived Tabs primitive renders the triggers as plain
-    // <button> nodes (no ARIA role="tab"), so the role query is
-    // 'button' not 'tab' — see apps/web/src/components/ui/tabs.tsx.
-    await expect(page.getByRole('button', { name: /^Components$/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^Vulnerabilities$/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /License policy/i })).toBeVisible();
+    // Each surfaces as a tab trigger in the detail view. The Tabs
+    // primitive in apps/web/src/components/ui/tabs.tsx now tags
+    // TabsTrigger with role="tab" + aria-selected (F174, M13-1 #87),
+    // so we query as role='tab' to match the Radix/shadcn shape. The
+    // earlier `role: 'button'` workaround predated the ARIA fix; that
+    // workaround also dragged the search-page form Search button under
+    // the same selector and caused the M12-1 CVE search regressions.
+    await expect(page.getByRole('tab', { name: /^Components$/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /^Vulnerabilities$/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /License policy/i })).toBeVisible();
 
     // Click into the Components tab (or rely on it being default) and
     // assert the three buckets land:
     //   - alpha-lib  (only in base   -> removed)
     //   - beta-lib   (only in target -> added)
     //   - shared-lib (version changed 1.0.0 -> 1.1.0)
-    await page.getByRole('button', { name: /^Components$/ }).click();
+    await page.getByRole('tab', { name: /^Components$/ }).click();
 
     // shared-lib version change is the most resilient assertion since
     // the new bucket renders both versions explicitly via the table.

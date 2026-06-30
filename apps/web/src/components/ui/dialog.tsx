@@ -32,8 +32,21 @@ export function DialogContent({
   children: React.ReactNode;
   onClose?: () => void;
 }) {
+  // F174 (M13-1): expose the WAI-ARIA modal role on the panel itself.
+  // The original shim rendered raw <div>s with no role, so anything
+  // scoping by `[role="dialog"]` (assistive-tech focus traps, Playwright
+  // selectors in security.spec.ts and integrations.spec.ts) could not
+  // locate the panel — security.spec.ts:363 hit a 60 s timeout chasing
+  // the in-dialog Create button. Adding role + aria-modal also lets
+  // screen readers announce the panel as a modal rather than an
+  // unlabeled region. The class set is unchanged so positioning, sizing,
+  // and the dark-mode shadow remain identical.
   return (
-    <div className={cn("bg-white rounded-lg shadow-lg p-6 w-full max-w-md", className)}>
+    <div
+      role="dialog"
+      aria-modal="true"
+      className={cn("bg-white rounded-lg shadow-lg p-6 w-full max-w-md", className)}
+    >
       {onClose && (
         <button
           onClick={onClose}
