@@ -37,9 +37,24 @@ const AlertTitle = React.forwardRef<
 ));
 AlertTitle.displayName = "AlertTitle";
 
+// F210 (M14-2): the forwardRef previously declared
+// `HTMLParagraphElement` on both the ref and prop generics while the
+// JSX rendered a `<div>` — a type-vs-DOM mismatch that meant `ref`
+// typed at the callsite was `RefObject<HTMLParagraphElement>` but
+// actually pointed at an `HTMLDivElement`, and `<p>`-only attributes
+// would have type-checked but silently no-op'd at runtime. The render
+// must stay as `<div>` because production callers nest block-level
+// children (icon + flex layout in triage/ai-disabled-banner; multi-`<p>`
+// content elsewhere) which would be invalid HTML nesting inside a `<p>`
+// — `<p>` cannot contain `<div>` per the HTML spec and the React
+// hydration warning surfaces it loudly. The `[&_p]:leading-relaxed`
+// utility class targeting *nested* `<p>` children is preserved.
+// Resolution: align both ref and prop generics to `HTMLDivElement` so
+// the type surface matches the rendered element. Caller-supplied
+// `ref={...}` now narrows correctly and div-only attrs become available.
 const AlertDescription = React.forwardRef<
-  HTMLParagraphElement,
-  React.HTMLAttributes<HTMLParagraphElement>
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
