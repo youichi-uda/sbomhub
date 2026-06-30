@@ -94,6 +94,19 @@ type fakeAuditWriter struct{}
 
 func (a *fakeAuditWriter) Log(_ context.Context, _ *model.CreateAuditLogInput) error { return nil }
 
+// fakeVulnCVELookup satisfies triage.VulnerabilityCVELookup. M1 #F12
+// closure requires the runner to cross-check the caller-supplied
+// CVEID against the authoritative vulnerabilities row; returning the
+// caller's CVEID verbatim is the simplest stub that passes the
+// equality check for tests that don't care about the mismatch path.
+type fakeVulnCVELookup struct {
+	cveID string
+}
+
+func (l *fakeVulnCVELookup) GetCVEIDByID(_ context.Context, _ uuid.UUID) (string, error) {
+	return l.cveID, nil
+}
+
 // disabledProvider returns the concrete llm.DisabledProvider so
 // triage.NewRunner's "Provider is required" guard is satisfied. The F7
 // path never executes Complete because the handler short-circuits on
@@ -1152,5 +1165,107 @@ func TestVEXDraftsHandler_ListDrafts_OffsetAtCap_F27(t *testing.T) {
 	if store.lastFilter.Offset != MaxListOffset {
 		t.Errorf("F27: boundary offset must pass through to the repo verbatim, got %d (want %d)",
 			store.lastFilter.Offset, MaxListOffset)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F208 / M14-1 — audit_resource_id context-key contract on Reanalyse
+// ----------------------------------------------------------------------------
+
+// TestVEXDraftsHandler_Reanalyse_SetsAuditResourceID_F208 pins that
+// Reanalyse — which mints a FRESH vex_drafts row preserving history —
+// records the NEW row's UUID on the audit_resource_id context key,
+// NOT the source :draft_id from the URL. A walk of audit_logs ⨝
+// vex_drafts must line up "this AI re-judgement produced THIS new
+// draft row" rather than misattributing it to the source.
+//
+// This is the handler-side complement to
+// TestExtractResourceID_PostSuccessContextKey_F208's coverage row
+// for "POST /projects/:id/vex-drafts/:draft_id/reanalyse" — the
+// middleware test pins the contract, this test pins the handler
+// actually publishes its mint.
+func TestVEXDraftsHandler_Reanalyse_SetsAuditResourceID_F208(t *testing.T) {
+	tenantID := uuid.New()
+	projectA := uuid.New()
+	componentID := uuid.New()
+	vulnID := uuid.New()
+	srcDraftID := uuid.New()
+
+	store := &fakeVexDraftStore{
+		inserted: []repository.VEXDraft{{
+			ID:              srcDraftID,
+			TenantID:        tenantID,
+			ProjectID:       projectA,
+			ComponentID:     componentID,
+			VulnerabilityID: vulnID,
+			CVEID:           "CVE-2026-0301",
+			State:           "under_investigation",
+			Evidence:        json.RawMessage(`[{"kind":"llm_rationale","source":"llm"}]`),
+			Decision:        triage.DecisionPending,
+		}},
+	}
+
+	runner := triage.NewRunner(triage.RunnerConfig{
+		Drafts:                   store,
+		Advisories:               &fakeAdvisoryReader{},
+		Reachability:             &fakeReachabilityReader{},
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 disabledProvider(),
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         &fakeVulnCVELookup{cveID: "CVE-2026-0301"},
+	})
+	h := NewVexDraftsHandler(runner)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectA.String()+"/vex-drafts/"+srcDraftID.String()+"/reanalyse",
+		strings.NewReader(""))
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "draft_id")
+	c.SetParamValues(projectA.String(), srcDraftID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyUserID, uuid.New())
+	c.Set(middleware.ContextKeyRole, model.RoleAdmin)
+
+	if err := h.Reanalyse(c); err != nil {
+		t.Fatalf("Reanalyse returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Reanalyse status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, ok := c.Get(middleware.ContextKeyAuditResourceID).(uuid.UUID)
+	if !ok {
+		t.Fatalf("F208: context key %q must hold uuid.UUID after Reanalyse, got %T",
+			middleware.ContextKeyAuditResourceID, c.Get(middleware.ContextKeyAuditResourceID))
+	}
+	if got == uuid.Nil {
+		t.Fatalf("F208: context key must hold the newly-minted draft UUID, got uuid.Nil")
+	}
+	if got == srcDraftID {
+		t.Fatalf("F208 regression: Reanalyse audit_resource_id = source :draft_id "+
+			"(history-preservation contract violated; new row would be unjoinable)")
+	}
+	if got == projectA {
+		t.Fatalf("F208 regression: Reanalyse audit_resource_id = parent project UUID "+
+			"(F190 limitation back)")
+	}
+
+	// The new draft id should be in the runner's insert stream — pin
+	// the join so a future refactor that publishes a stale id is
+	// caught loudly.
+	found := false
+	for _, d := range store.inserted {
+		if d.ID == got {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("F208: audit_resource_id (%s) does not match any inserted draft — "+
+			"handler published a stale or fabricated id", got)
 	}
 }

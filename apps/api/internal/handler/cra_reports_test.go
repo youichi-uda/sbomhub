@@ -982,3 +982,112 @@ func TestCRAReportsHandler_NoAuth_Returns401(t *testing.T) {
 		t.Fatalf("no-auth RunReport status = %d, want 401", rec.Code)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// F208 / M14-1 — audit_resource_id context-key contract
+// ----------------------------------------------------------------------------
+
+// TestCRAReportsHandler_RunReport_SetsAuditResourceID_F208 pins that
+// after a successful RunReport, the handler publishes the newly-minted
+// cra_report UUID via middleware.SetAuditResourceID so the audit
+// middleware records audit_logs.resource_id = report.ID instead of the
+// parent project UUID. Without this Set the priority-list path would
+// pick up :id (project) and forensic joins to cra_reports would
+// silently drop (the original F190 limitation closed by F208).
+func TestCRAReportsHandler_RunReport_SetsAuditResourceID_F208(t *testing.T) {
+	h := newCRAHarness()
+	wantReportID := uuid.New()
+	h.runner.result = &cra.RunResult{
+		Report: &repository.CRAReport{
+			ID:       wantReportID,
+			Decision: "pending",
+			State:    "draft",
+			Evidence: json.RawMessage(`[{"kind":"vex_draft"}]`),
+		},
+	}
+
+	body := runReportRequestBody(t)
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/run",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.RunReport(c); err != nil {
+		t.Fatalf("RunReport returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("RunReport status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, ok := c.Get(middleware.ContextKeyAuditResourceID).(uuid.UUID)
+	if !ok {
+		t.Fatalf("F208: context key %q must hold uuid.UUID after RunReport, got %T",
+			middleware.ContextKeyAuditResourceID, c.Get(middleware.ContextKeyAuditResourceID))
+	}
+	if got != wantReportID {
+		t.Errorf("F208: audit_resource_id = %s, want %s (new cra_report UUID, NOT parent project)",
+			got, wantReportID)
+	}
+	if got == h.projectID {
+		t.Fatalf("F208 regression: audit_resource_id = parent project UUID — F190 limitation back")
+	}
+}
+
+// TestCRAReportsHandler_Reanalyse_SetsAuditResourceID_F208 pins that
+// Reanalyse — which mints a FRESH cra_reports row preserving history —
+// records the NEW row's UUID on the audit_resource_id context key,
+// NOT the source :report_id from the URL. A walk of audit_logs ⨝
+// cra_reports must line up "this AI re-judgement produced THIS new
+// report row" rather than misattributing it to the source.
+func TestCRAReportsHandler_Reanalyse_SetsAuditResourceID_F208(t *testing.T) {
+	h := newCRAHarness()
+	srcID := uuid.New()
+	h.seedReport(srcID, h.projectID)
+
+	newReportID := uuid.New()
+	h.runner.result = &cra.RunResult{
+		Report: &repository.CRAReport{
+			ID:       newReportID,
+			Decision: "pending",
+			State:    "draft",
+			Evidence: json.RawMessage(`[{"kind":"vex_draft"}]`),
+		},
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+srcID.String()+"/reanalyse",
+		strings.NewReader(""))
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), srcID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.Reanalyse(c); err != nil {
+		t.Fatalf("Reanalyse returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Reanalyse status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, ok := c.Get(middleware.ContextKeyAuditResourceID).(uuid.UUID)
+	if !ok {
+		t.Fatalf("F208: context key %q must hold uuid.UUID after Reanalyse, got %T",
+			middleware.ContextKeyAuditResourceID, c.Get(middleware.ContextKeyAuditResourceID))
+	}
+	if got != newReportID {
+		t.Errorf("F208: audit_resource_id = %s, want %s (NEW cra_report UUID, NOT source)",
+			got, newReportID)
+	}
+	if got == srcID {
+		t.Fatalf("F208 regression: Reanalyse audit_resource_id = source :report_id "+
+			"(history-preservation contract violated; new row %s would be unjoinable)", newReportID)
+	}
+}
