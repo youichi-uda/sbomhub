@@ -42,16 +42,32 @@ const config = [
   },
   {
     rules: {
-      // -- react-hooks plugin v7 new rules (M11-5 #80) --
-      // These rules ship with eslint-plugin-react-hooks@7 as errors. The
-      // patterns they flag are legitimate concerns, but they fire on
-      // pre-existing M0-M9 code that would need behaviour-preserving
-      // refactors (state-machine restructuring, useEvent migrations) to
-      // satisfy. Downgrading to `warn` keeps them visible in IDE output
-      // and CI logs without blocking unrelated PRs on a cross-cutting
-      // cleanup wave. Promotion back to `error` is tracked separately.
-      "react-hooks/set-state-in-effect": "warn",
-      "react-hooks/immutability": "warn",
+      // -- react-hooks plugin v7 new rules (M11-5 #80 → promoted M12-5 #86) --
+      // M11-5 (#80) downgraded these from the plugin default (error) to
+      // `warn` because pre-existing M0-M9 code triggered them and a
+      // cross-cutting cleanup wave was needed before they could be a
+      // hard gate.
+      //
+      // M12-5 (#86) audited every active site:
+      //   - `set-state-in-effect`: 3 hits remaining, each is legitimate
+      //     external-state sync (Clerk readiness in api-auth-provider,
+      //     pathname-driven exempt branch in subscription-guard,
+      //     fetch-lifecycle publication in kev-badge). Each is suppressed
+      //     locally with an inline `eslint-disable-next-line` + rationale.
+      //   - `immutability`: 0 hits in the codebase as of M12-5 close.
+      //
+      // With every existing violation either fixed or explicitly disabled
+      // with rationale, promoting these to `error` means any NEW violation
+      // either earns its own justified inline disable or gets fixed before
+      // merge — which is exactly the policy we want.
+      "react-hooks/set-state-in-effect": "error",
+      "react-hooks/immutability": "error",
+      // `react-hooks/incompatible-library` is intentionally left at the
+      // plugin default (warn). The only current hit is react-hook-form's
+      // `watch()` in criterion-card.tsx, which is structurally
+      // unmemoizable; promoting this rule to error would require
+      // codebase-wide migration to `useWatch` (tracked for M13). The
+      // single existing site is locally suppressed with rationale.
       // -- unused vars: allow `_`-prefixed names (M12-5 #86) --
       // We deliberately keep some props/args around to preserve a public
       // API shape (e.g. shadcn-style component params such as `asChild`,
