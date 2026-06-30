@@ -9,6 +9,17 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
+// MCPAudit emits one audit row per authenticated MCP request. Like its
+// sibling Audit() in audit.go, this is a middleware-level best-effort
+// path — see the Audit() head comment for the full dual-path rationale
+// (middleware-level swallow vs F168 handler-level audit_pair). Same
+// 500-storm blast-radius reasoning applies: failing the MCP request on
+// an audit-log INSERT failure would mean every MCP read 500s during any
+// audit_logs table outage, which is worse than dropping the audit row.
+// F229 (M14 Phase D round 3) adds this symmetric docstring so a future
+// reviewer inspecting mcp_audit.go in isolation has the same signal
+// audit.go now carries — the swallow at L<N> is intentional, not an
+// F168 audit-or-nothing violation.
 func MCPAudit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -25,6 +36,12 @@ func MCPAudit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 				"latency_ms": time.Since(start).Milliseconds(),
 			}
 
+			// F229 (M14 Phase D round 3) — intentional swallow, same
+			// rationale as Audit() in audit.go. See that head comment
+			// for the middleware-level vs F168 handler-level audit_pair
+			// (audit-or-nothing) distinction. Handler-level audit_pair
+			// example: handler/sbom.go::writeAutoFiredAudit /
+			// runDiffWebhookAutoTrigger.
 			_ = auditRepo.Log(c.Request().Context(), &model.CreateAuditLogInput{
 				TenantID:     &tenantID,
 				UserID:       nil,
