@@ -298,12 +298,13 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.ActionSBOMUploaded, Label: "SBOM Uploaded", Category: "sbom"},
 		{Action: model.ActionSBOMDeleted, Label: "SBOM Deleted", Category: "sbom"},
 		{Action: model.ActionSBOMScanned, Label: "SBOM Scanned", Category: "sbom"},
-		{Action: "sbom.viewed", Label: "SBOM Viewed", Category: "sbom"},
+		{Action: model.ActionSBOMViewed, Label: "SBOM Viewed", Category: "sbom"},
 
 		// VEX actions
 		{Action: model.ActionVEXCreated, Label: "VEX Created", Category: "vex"},
 		{Action: model.ActionVEXUpdated, Label: "VEX Updated", Category: "vex"},
 		{Action: model.ActionVEXDeleted, Label: "VEX Deleted", Category: "vex"},
+		{Action: model.ActionVEXListed, Label: "VEX Listed", Category: "vex"},
 
 		// API Key actions
 		{Action: model.ActionAPIKeyCreated, Label: "API Key Created", Category: "apikey"},
@@ -312,6 +313,91 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 
 		// Settings actions
 		{Action: model.ActionSettingsUpdated, Label: "Settings Updated", Category: "settings"},
+
+		// F188 (M13 Phase D round 3): project-nested child-resource actions
+		// surfaced by the audit middleware hoist. Each family ships at
+		// minimum the verbs the middleware emits today; the UI filter
+		// dropdown follows the registry.
+
+		// CRA report actions (Wave M2-4 / issue #36).
+		{Action: model.ActionCRAReportRun, Label: "CRA Report Run", Category: "cra_report"},
+		{Action: model.ActionCRAReportListed, Label: "CRA Report Listed", Category: "cra_report"},
+		{Action: model.ActionCRAReportViewed, Label: "CRA Report Viewed", Category: "cra_report"},
+		{Action: model.ActionCRAReportDecisionUpdated, Label: "CRA Report Decision Updated", Category: "cra_report"},
+		{Action: model.ActionCRAReportReanalysed, Label: "CRA Report Reanalysed", Category: "cra_report"},
+
+		// VEX draft actions (Wave M1-5).
+		{Action: model.ActionVEXDraftListed, Label: "VEX Draft Listed", Category: "vex_draft"},
+		{Action: model.ActionVEXDraftViewed, Label: "VEX Draft Viewed", Category: "vex_draft"},
+		{Action: model.ActionVEXDraftDecisionUpdated, Label: "VEX Draft Decision Updated", Category: "vex_draft"},
+		{Action: model.ActionVEXDraftReanalysed, Label: "VEX Draft Reanalysed", Category: "vex_draft"},
+
+		// Triage actions.
+		{Action: model.ActionTriageRun, Label: "Triage Run", Category: "triage"},
+
+		// Scan actions.
+		{Action: model.ActionScanStarted, Label: "Scan Started", Category: "scan"},
+		{Action: model.ActionScanViewed, Label: "Scan Status Viewed", Category: "scan"},
+
+		// Compliance.
+		{Action: model.ActionComplianceChecked, Label: "Compliance Checked", Category: "compliance"},
+
+		// Notifications.
+		{Action: model.ActionNotificationListed, Label: "Notification Listed", Category: "notification"},
+		{Action: model.ActionNotificationCreated, Label: "Notification Created", Category: "notification"},
+		{Action: model.ActionNotificationUpdated, Label: "Notification Updated", Category: "notification"},
+		{Action: model.ActionNotificationDeleted, Label: "Notification Deleted", Category: "notification"},
+		{Action: model.ActionNotificationViewed, Label: "Notification Viewed", Category: "notification"},
+
+		// Diff observability.
+		{Action: model.ActionDiffViewed, Label: "Diff Viewed", Category: "diff"},
+		{Action: model.ActionDiffSummary, Label: "Diff Summary", Category: "diff"},
+		{Action: model.ActionDiffGraphViewed, Label: "Diff Graph Viewed", Category: "diff"},
+
+		// SSVC.
+		{Action: model.ActionSSVCViewed, Label: "SSVC Viewed", Category: "ssvc"},
+		{Action: model.ActionSSVCAssessed, Label: "SSVC Assessed", Category: "ssvc"},
+		{Action: model.ActionSSVCDeleted, Label: "SSVC Deleted", Category: "ssvc"},
+
+		// METI self-assessment.
+		{Action: model.ActionMETIViewed, Label: "METI Viewed", Category: "meti"},
+		{Action: model.ActionMETIRefreshed, Label: "METI Refreshed", Category: "meti"},
+		{Action: model.ActionMETIOverridden, Label: "METI Overridden", Category: "meti"},
+
+		// License policy.
+		{Action: model.ActionLicensePolicyListed, Label: "License Policy Listed", Category: "license_policy"},
+		{Action: model.ActionLicensePolicyViewed, Label: "License Policy Viewed", Category: "license_policy"},
+		{Action: model.ActionLicensePolicyCreated, Label: "License Policy Created", Category: "license_policy"},
+		{Action: model.ActionLicensePolicyUpdated, Label: "License Policy Updated", Category: "license_policy"},
+		{Action: model.ActionLicensePolicyDeleted, Label: "License Policy Deleted", Category: "license_policy"},
+
+		// Evidence pack.
+		{Action: model.ActionEvidencePackBuilt, Label: "Evidence Pack Built", Category: "evidence_pack"},
+
+		// METI checklist.
+		{Action: model.ActionChecklistViewed, Label: "Checklist Viewed", Category: "checklist"},
+		{Action: model.ActionChecklistUpdated, Label: "Checklist Updated", Category: "checklist"},
+		{Action: model.ActionChecklistDeleted, Label: "Checklist Deleted", Category: "checklist"},
+
+		// Visualization framework.
+		{Action: model.ActionVisualizationViewed, Label: "Visualization Viewed", Category: "visualization"},
+		{Action: model.ActionVisualizationUpdated, Label: "Visualization Updated", Category: "visualization"},
+		{Action: model.ActionVisualizationDeleted, Label: "Visualization Deleted", Category: "visualization"},
+
+		// Public links.
+		{Action: model.ActionPublicLinkCreated, Label: "Public Link Created", Category: "public_link"},
+		{Action: model.ActionPublicLinkViewed, Label: "Public Link Viewed", Category: "public_link"},
+		{Action: model.ActionPublicLinkUpdated, Label: "Public Link Updated", Category: "public_link"},
+		{Action: model.ActionPublicLinkDeleted, Label: "Public Link Deleted", Category: "public_link"},
+
+		// KEV / EOL.
+		{Action: model.ActionKEVViewed, Label: "KEV Viewed", Category: "kev"},
+		{Action: model.ActionEOLViewed, Label: "EOL Viewed", Category: "eol"},
+		{Action: model.ActionEOLChecked, Label: "EOL Checked", Category: "eol"},
+
+		// Vulnerability listing.
+		{Action: model.ActionVulnerabilityListed, Label: "Vulnerability Listed", Category: "vulnerability"},
+		{Action: model.ActionVulnerabilityViewed, Label: "Vulnerability Viewed", Category: "vulnerability"},
 	}
 }
 
@@ -334,9 +420,31 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		{Type: model.ResourceSubscription, Label: "Subscription"},
 		{Type: model.ResourceSettings, Label: "Settings"},
 		{Type: "report", Label: "Report"},
-		{Type: "compliance", Label: "Compliance"},
 		{Type: "analytics", Label: "Analytics"},
 		{Type: "integration", Label: "Integration"},
+
+		// F188 (M13 Phase D round 3): per-family resource types the
+		// hoisted audit middleware now distinguishes for
+		// /projects/:id/<child> routes. Previously every nested route
+		// was logged as the bare "project" type, collapsing the
+		// (resource_type, resource_id) join key for the evidence layer.
+		{Type: model.ResourceCRAReport, Label: "CRA Report"},
+		{Type: model.ResourceVEXDraft, Label: "VEX Draft"},
+		{Type: model.ResourceTriage, Label: "Triage"},
+		{Type: model.ResourceScan, Label: "Scan"},
+		{Type: model.ResourceCompliance, Label: "Compliance"},
+		{Type: model.ResourceNotification, Label: "Notification"},
+		{Type: model.ResourceDiff, Label: "Diff"},
+		{Type: model.ResourceSSVC, Label: "SSVC"},
+		{Type: model.ResourceMETI, Label: "METI"},
+		{Type: model.ResourceLicensePolicy, Label: "License Policy"},
+		{Type: model.ResourceEvidencePack, Label: "Evidence Pack"},
+		{Type: model.ResourceChecklist, Label: "Checklist"},
+		{Type: model.ResourceVisualization, Label: "Visualization"},
+		{Type: model.ResourcePublicLink, Label: "Public Link"},
+		{Type: model.ResourceKEV, Label: "KEV"},
+		{Type: model.ResourceEOL, Label: "EOL"},
+		{Type: model.ResourceVulnerability, Label: "Vulnerability"},
 	}
 }
 

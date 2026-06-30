@@ -323,6 +323,18 @@ func TestExtractResourceID_NoParams(t *testing.T) {
 // as a UUID so the audit row is joinable. Without the fallback we would
 // silently regress to NULL until someone notices and edits the priority
 // list.
+//
+// F199 follow-up: the ParamNames reverse-walk relies on Echo binding the
+// path params in the SAME ORDER they appear in the route pattern, which
+// is the contract the v4 router currently honours (Echo's Router.add()
+// builds param names by appending while walking the trie, see
+// echo/router.go::insert). A future Echo upgrade that broke that
+// invariant — or a custom router with a different convention — would
+// silently weaken the "child wins over parent" guarantee for ANY route
+// that did not get an explicit entry in resourceIDParamPriority. If
+// you upgrade Echo, run this test against the new binary BEFORE
+// shipping; the test passes today only because the v4 binding order
+// happens to match path order.
 func TestExtractResourceID_FallbackTailParam(t *testing.T) {
 	novelUUID := uuid.New()
 	c := newCtxWithParams(t,
@@ -446,4 +458,615 @@ func TestExtractResourceID_CVEParam_NilResourceID_F196(t *testing.T) {
 		)
 		assertResourceID(t, extractResourceID(c), projectUUID)
 	})
+}
+
+// TestDetermineActionAndResource_ProjectChildResources is the F189
+// regression net for the F188 fix. F176 hoisted /apikeys above the
+// /projects branch; F188 generalised the same pattern to every
+// /projects/:id/<child> family — 18+ resource families at the time of
+// this fix. Pre-F188 every nested family was logged as project.<verb>,
+// breaking the audit_logs.(resource_type, resource_id) join key for
+// the entire CRA / VEX / METI evidence layer.
+//
+// The table below pins one or more representative request shapes for
+// each family. Adding a new /projects/:id/<thing> route should add a
+// matching row here so the audit middleware regression catches it
+// before the F188 swallow returns.
+func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
+	cases := []struct {
+		name         string
+		method       string
+		path         string // Echo route pattern as returned by c.Path()
+		wantAction   string
+		wantResource string
+	}{
+		// ---- /vex (manual VEX statements) ---------------------------------
+		{
+			name:         "GET /projects/:id/vex (list)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/vex",
+			wantAction:   model.ActionVEXListed,
+			wantResource: model.ResourceVEX,
+		},
+		{
+			name:         "POST /projects/:id/vex (create)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vex",
+			wantAction:   model.ActionVEXCreated,
+			wantResource: model.ResourceVEX,
+		},
+		{
+			name:         "GET /projects/:id/vex/:vex_id (item)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/vex/:vex_id",
+			wantAction:   "vex.viewed",
+			wantResource: model.ResourceVEX,
+		},
+		{
+			name:         "DELETE /projects/:id/vex/:vex_id",
+			method:       "DELETE",
+			path:         "/api/v1/projects/:id/vex/:vex_id",
+			wantAction:   model.ActionVEXDeleted,
+			wantResource: model.ResourceVEX,
+		},
+		{
+			name:         "GET /projects/:id/vex/export",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/vex/export",
+			wantAction:   "vex.viewed",
+			wantResource: model.ResourceVEX,
+		},
+
+		// ---- /vex-drafts (AI VEX triage outputs) --------------------------
+		// Segment-distinct from /vex so the /vex branch must NOT shadow
+		// /vex-drafts even though both contain the substring "vex".
+		{
+			name:         "GET /projects/:id/vex-drafts (list)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/vex-drafts",
+			wantAction:   model.ActionVEXDraftListed,
+			wantResource: model.ResourceVEXDraft,
+		},
+		{
+			name:         "GET /projects/:id/vex-drafts/:draft_id (item)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/vex-drafts/:draft_id",
+			wantAction:   model.ActionVEXDraftViewed,
+			wantResource: model.ResourceVEXDraft,
+		},
+		{
+			name:         "PUT /projects/:id/vex-drafts/:draft_id/decision",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/vex-drafts/:draft_id/decision",
+			wantAction:   model.ActionVEXDraftDecisionUpdated,
+			wantResource: model.ResourceVEXDraft,
+		},
+		{
+			name:         "POST /projects/:id/vex-drafts/:draft_id/reanalyse",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vex-drafts/:draft_id/reanalyse",
+			wantAction:   model.ActionVEXDraftReanalysed,
+			wantResource: model.ResourceVEXDraft,
+		},
+
+		// ---- /triage (AI triage runner) -----------------------------------
+		{
+			name:         "POST /projects/:id/triage/run",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/triage/run",
+			wantAction:   model.ActionTriageRun,
+			wantResource: model.ResourceTriage,
+		},
+
+		// ---- /cra-reports (CRA report drafting, Wave M2-4) ----------------
+		{
+			name:         "POST /projects/:id/cra-reports/run",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/cra-reports/run",
+			wantAction:   model.ActionCRAReportRun,
+			wantResource: model.ResourceCRAReport,
+		},
+		{
+			name:         "GET /projects/:id/cra-reports (list)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/cra-reports",
+			wantAction:   model.ActionCRAReportListed,
+			wantResource: model.ResourceCRAReport,
+		},
+		{
+			name:         "GET /projects/:id/cra-reports/:report_id (item)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id",
+			wantAction:   model.ActionCRAReportViewed,
+			wantResource: model.ResourceCRAReport,
+		},
+		{
+			name:         "PUT /projects/:id/cra-reports/:report_id/decision",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/decision",
+			wantAction:   model.ActionCRAReportDecisionUpdated,
+			wantResource: model.ResourceCRAReport,
+		},
+		{
+			name:         "POST /projects/:id/cra-reports/:report_id/reanalyse",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/reanalyse",
+			wantAction:   model.ActionCRAReportReanalysed,
+			wantResource: model.ResourceCRAReport,
+		},
+
+		// ---- /scan (vulnerability scan trigger) ---------------------------
+		{
+			name:         "POST /projects/:id/scan",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/scan",
+			wantAction:   model.ActionScanStarted,
+			wantResource: model.ResourceScan,
+		},
+
+		// ---- /compliance --------------------------------------------------
+		{
+			name:         "GET /projects/:id/compliance",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/compliance",
+			wantAction:   model.ActionComplianceChecked,
+			wantResource: model.ResourceCompliance,
+		},
+		{
+			name:         "GET /projects/:id/compliance/report",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/compliance/report",
+			wantAction:   model.ActionComplianceChecked,
+			wantResource: model.ResourceCompliance,
+		},
+
+		// ---- /notifications -----------------------------------------------
+		{
+			name:         "GET /projects/:id/notifications (list)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/notifications",
+			wantAction:   model.ActionNotificationListed,
+			wantResource: model.ResourceNotification,
+		},
+		{
+			name:         "PUT /projects/:id/notifications",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/notifications",
+			wantAction:   model.ActionNotificationUpdated,
+			wantResource: model.ResourceNotification,
+		},
+		{
+			name:         "POST /projects/:id/notifications/test",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/notifications/test",
+			wantAction:   model.ActionNotificationCreated,
+			wantResource: model.ResourceNotification,
+		},
+
+		// ---- /diff (M10-6 / M11-4 / M12-3) --------------------------------
+		{
+			name:         "GET /projects/:id/diff",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/diff",
+			wantAction:   model.ActionDiffViewed,
+			wantResource: model.ResourceDiff,
+		},
+		{
+			name:         "POST /projects/:id/diff/summary",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/diff/summary",
+			wantAction:   model.ActionDiffSummary,
+			wantResource: model.ResourceDiff,
+		},
+		{
+			name:         "GET /projects/:id/diff.csv",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/diff.csv",
+			wantAction:   model.ActionDiffViewed,
+			wantResource: model.ResourceDiff,
+		},
+		{
+			name:         "GET /projects/:id/diff.pdf",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/diff.pdf",
+			wantAction:   model.ActionDiffViewed,
+			wantResource: model.ResourceDiff,
+		},
+		{
+			name:         "GET /projects/:id/diff/graph (M12-3 graph view)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/diff/graph",
+			wantAction:   model.ActionDiffGraphViewed,
+			wantResource: model.ResourceDiff,
+		},
+
+		// ---- /ssvc --------------------------------------------------------
+		// SSVC must beat /vulnerabilities on the nested
+		// /projects/:id/vulnerabilities/:vuln_id/ssvc route — assert
+		// the order in this same suite to catch a reorder.
+		{
+			name:         "GET /projects/:id/ssvc/defaults",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/ssvc/defaults",
+			wantAction:   model.ActionSSVCViewed,
+			wantResource: model.ResourceSSVC,
+		},
+		{
+			name:         "PUT /projects/:id/ssvc/defaults",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/ssvc/defaults",
+			wantAction:   model.ActionSSVCAssessed,
+			wantResource: model.ResourceSSVC,
+		},
+		{
+			name:         "POST /projects/:id/vulnerabilities/:vuln_id/ssvc",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc",
+			wantAction:   model.ActionSSVCAssessed,
+			wantResource: model.ResourceSSVC,
+		},
+		{
+			name:         "POST /projects/:id/vulnerabilities/:vuln_id/ssvc/auto",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc/auto",
+			wantAction:   model.ActionSSVCAssessed,
+			wantResource: model.ResourceSSVC,
+		},
+		{
+			name:         "DELETE /projects/:id/ssvc/assessments/:assessment_id",
+			method:       "DELETE",
+			path:         "/api/v1/projects/:id/ssvc/assessments/:assessment_id",
+			wantAction:   model.ActionSSVCDeleted,
+			wantResource: model.ResourceSSVC,
+		},
+
+		// ---- /meti (Wave M3-4) --------------------------------------------
+		{
+			name:         "GET /projects/:id/meti/assessment",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/meti/assessment",
+			wantAction:   model.ActionMETIViewed,
+			wantResource: model.ResourceMETI,
+		},
+		{
+			name:         "POST /projects/:id/meti/assessment/refresh",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/meti/assessment/refresh",
+			wantAction:   model.ActionMETIRefreshed,
+			wantResource: model.ResourceMETI,
+		},
+		{
+			name:         "PUT /projects/:id/meti/assessment/:criterion_id/override",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/meti/assessment/:criterion_id/override",
+			wantAction:   model.ActionMETIOverridden,
+			wantResource: model.ResourceMETI,
+		},
+		{
+			name:         "DELETE /projects/:id/meti/assessment/:criterion_id/override",
+			method:       "DELETE",
+			path:         "/api/v1/projects/:id/meti/assessment/:criterion_id/override",
+			wantAction:   model.ActionMETIOverridden,
+			wantResource: model.ResourceMETI,
+		},
+
+		// ---- /licenses (license policies) ---------------------------------
+		{
+			name:         "GET /projects/:id/licenses",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/licenses",
+			wantAction:   model.ActionLicensePolicyListed,
+			wantResource: model.ResourceLicensePolicy,
+		},
+		{
+			name:         "POST /projects/:id/licenses",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/licenses",
+			wantAction:   model.ActionLicensePolicyCreated,
+			wantResource: model.ResourceLicensePolicy,
+		},
+		{
+			name:         "PUT /projects/:id/licenses/:policy_id",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/licenses/:policy_id",
+			wantAction:   model.ActionLicensePolicyUpdated,
+			wantResource: model.ResourceLicensePolicy,
+		},
+		{
+			name:         "DELETE /projects/:id/licenses/:policy_id",
+			method:       "DELETE",
+			path:         "/api/v1/projects/:id/licenses/:policy_id",
+			wantAction:   model.ActionLicensePolicyDeleted,
+			wantResource: model.ResourceLicensePolicy,
+		},
+
+		// ---- /evidence-pack -----------------------------------------------
+		{
+			name:         "POST /projects/:id/evidence-pack/build",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/evidence-pack/build",
+			wantAction:   model.ActionEvidencePackBuilt,
+			wantResource: model.ResourceEvidencePack,
+		},
+
+		// ---- /checklist (METI checklist) ----------------------------------
+		{
+			name:         "GET /projects/:id/checklist",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/checklist",
+			wantAction:   model.ActionChecklistViewed,
+			wantResource: model.ResourceChecklist,
+		},
+		{
+			name:         "PUT /projects/:id/checklist/:checkId",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/checklist/:checkId",
+			wantAction:   model.ActionChecklistUpdated,
+			wantResource: model.ResourceChecklist,
+		},
+		{
+			name:         "DELETE /projects/:id/checklist/:checkId",
+			method:       "DELETE",
+			path:         "/api/v1/projects/:id/checklist/:checkId",
+			wantAction:   model.ActionChecklistDeleted,
+			wantResource: model.ResourceChecklist,
+		},
+
+		// ---- /visualization -----------------------------------------------
+		{
+			name:         "GET /projects/:id/visualization",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/visualization",
+			wantAction:   model.ActionVisualizationViewed,
+			wantResource: model.ResourceVisualization,
+		},
+		{
+			name:         "PUT /projects/:id/visualization",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/visualization",
+			wantAction:   model.ActionVisualizationUpdated,
+			wantResource: model.ResourceVisualization,
+		},
+
+		// ---- /public-links ------------------------------------------------
+		{
+			name:         "POST /projects/:id/public-links",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/public-links",
+			wantAction:   model.ActionPublicLinkCreated,
+			wantResource: model.ResourcePublicLink,
+		},
+		{
+			name:         "GET /projects/:id/public-links",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/public-links",
+			wantAction:   model.ActionPublicLinkViewed,
+			wantResource: model.ResourcePublicLink,
+		},
+
+		// ---- /kev (project-scoped) ----------------------------------------
+		{
+			name:         "GET /projects/:id/kev",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/kev",
+			wantAction:   model.ActionKEVViewed,
+			wantResource: model.ResourceKEV,
+		},
+
+		// ---- /eol-* (project-scoped) --------------------------------------
+		{
+			name:         "GET /projects/:id/eol-summary",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/eol-summary",
+			wantAction:   model.ActionEOLViewed,
+			wantResource: model.ResourceEOL,
+		},
+		{
+			name:         "POST /projects/:id/eol-check",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/eol-check",
+			wantAction:   model.ActionEOLChecked,
+			wantResource: model.ResourceEOL,
+		},
+
+		// ---- /sbom (nested - F188 sub-case) -------------------------------
+		// Pre-F188 GET /projects/:id/sbom was classified as project.viewed
+		// because the /projects branch only differentiated /sbom on
+		// POST/DELETE. Now the hoist captures every method.
+		{
+			name:         "GET /projects/:id/sbom (nested read-back)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/sbom",
+			wantAction:   model.ActionSBOMViewed,
+			wantResource: model.ResourceSBOM,
+		},
+		{
+			name:         "GET /projects/:id/sboms (list)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/sboms",
+			wantAction:   model.ActionSBOMViewed,
+			wantResource: model.ResourceSBOM,
+		},
+		{
+			name:         "GET /projects/:id/sboms/:sbom_id/scan-status",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/sboms/:sbom_id/scan-status",
+			wantAction:   model.ActionSBOMViewed,
+			wantResource: model.ResourceSBOM,
+		},
+		{
+			name:         "GET /projects/:id/components",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/components",
+			wantAction:   "project.viewed",
+			wantResource: model.ResourceProject,
+		},
+
+		// ---- /vulnerabilities (nested) ------------------------------------
+		{
+			name:         "GET /projects/:id/vulnerabilities (nested list)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/vulnerabilities",
+			wantAction:   model.ActionVulnerabilityListed,
+			wantResource: model.ResourceVulnerability,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			action, resourceType := determineActionAndResource(tc.method, tc.path)
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q (method=%s path=%s)",
+					action, tc.wantAction, tc.method, tc.path)
+			}
+			if resourceType != tc.wantResource {
+				t.Errorf("resourceType = %q, want %q (method=%s path=%s)",
+					resourceType, tc.wantResource, tc.method, tc.path)
+			}
+		})
+	}
+}
+
+// TestDetermineActionAndResource_APIKeyPathFalsePositive pins F202. The
+// pre-F188 audit middleware used `strings.Contains(path, "/apikeys")`
+// which would have false-matched a hypothetical /integrations/apikeys-sync
+// route — pulling an integration-management request into the apikey
+// audit bucket. The F188 segment-exact pathHasChildResource rules it
+// out. The route doesn't exist today, but the test guards against
+// reintroducing a substring-only check.
+func TestDetermineActionAndResource_APIKeyPathFalsePositive(t *testing.T) {
+	cases := []struct {
+		name         string
+		method       string
+		path         string
+		wantResource string
+		notResource  string // negative assertion — must NOT be this
+	}{
+		{
+			name:         "/integrations/apikeys-sync is integration, not apikey",
+			method:       "POST",
+			path:         "/api/v1/integrations/apikeys-sync",
+			wantResource: "integration",
+			notResource:  model.ResourceAPIKey,
+		},
+		{
+			name:         "/integrations/apikeys-sync GET is integration, not apikey",
+			method:       "GET",
+			path:         "/api/v1/integrations/apikeys-sync",
+			wantResource: "integration",
+			notResource:  model.ResourceAPIKey,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, resourceType := determineActionAndResource(tc.method, tc.path)
+			if resourceType == tc.notResource {
+				t.Fatalf("F202 regression: resource_type = %q for path %q; "+
+					"the segment-exact pathHasChildResource must not match "+
+					"/apikeys-sync as /apikeys", resourceType, tc.path)
+			}
+			if resourceType != tc.wantResource {
+				t.Errorf("resourceType = %q, want %q (method=%s path=%s)",
+					resourceType, tc.wantResource, tc.method, tc.path)
+			}
+		})
+	}
+}
+
+// TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist
+// pins the HasPrefix("/projects/") guard on the F188 hoist. Tenant-level
+// paths that re-use a segment name from the hoist list (e.g.
+// /settings/scan, /vulnerabilities/sync-epss) must still hit the
+// tenant-level branches below the hoist — NOT the project-nested
+// classification. Without the guard, /settings/scan would be
+// misclassified as scan.started instead of settings.updated.
+func TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist(t *testing.T) {
+	cases := []struct {
+		name         string
+		method       string
+		path         string
+		wantAction   string
+		wantResource string
+	}{
+		{
+			name:         "GET /settings/scan (tenant settings, not project scan)",
+			method:       "GET",
+			path:         "/api/v1/settings/scan",
+			wantAction:   "settings.viewed",
+			wantResource: model.ResourceSettings,
+		},
+		{
+			name:         "PUT /settings/scan (tenant settings update)",
+			method:       "PUT",
+			path:         "/api/v1/settings/scan",
+			wantAction:   model.ActionSettingsUpdated,
+			wantResource: model.ResourceSettings,
+		},
+		{
+			name:         "GET /settings/scan/logs (tenant settings, not project scan)",
+			method:       "GET",
+			path:         "/api/v1/settings/scan/logs",
+			wantAction:   "settings.viewed",
+			wantResource: model.ResourceSettings,
+		},
+		{
+			name:         "GET /vulnerabilities/sync-epss (tenant vuln, not project)",
+			method:       "GET",
+			path:         "/api/v1/vulnerabilities/sync-epss",
+			wantAction:   model.ActionVulnerabilityViewed,
+			wantResource: model.ResourceVulnerability,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			action, resourceType := determineActionAndResource(tc.method, tc.path)
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q (method=%s path=%s)",
+					action, tc.wantAction, tc.method, tc.path)
+			}
+			if resourceType != tc.wantResource {
+				t.Errorf("resourceType = %q, want %q (method=%s path=%s)",
+					resourceType, tc.wantResource, tc.method, tc.path)
+			}
+		})
+	}
+}
+
+// TestPathHasChildResource_SegmentExact unit-tests the F202 helper in
+// isolation: the segment-exact match must accept "/<name>" suffixes and
+// "/<name>/" infixes but reject prefix-only collisions like
+// "/<name>-something". A future contributor tempted to "simplify" the
+// helper into a strings.Contains call would break this test and
+// re-introduce F202.
+func TestPathHasChildResource_SegmentExact(t *testing.T) {
+	cases := []struct {
+		path string
+		name string
+		want bool
+	}{
+		// Suffix match — the most common project-nested shape.
+		{"/api/v1/projects/:id/apikeys", "apikeys", true},
+		{"/api/v1/apikeys", "apikeys", true},
+		// Infix match — sub-resource under the segment.
+		{"/api/v1/projects/:id/apikeys/:key_id", "apikeys", true},
+		{"/api/v1/projects/:id/vex/:vex_id", "vex", true},
+		// Prefix-only collision must NOT match — F202.
+		{"/api/v1/integrations/apikeys-sync", "apikeys", false},
+		{"/api/v1/projects/:id/vex-drafts", "vex", false},
+		{"/api/v1/projects/:id/vex-drafts/:draft_id", "vex", false},
+		// Empty / unrelated path — must NOT match.
+		{"", "vex", false},
+		{"/", "vex", false},
+		{"/api/v1/projects", "vex", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path+"::"+tc.name, func(t *testing.T) {
+			if got := pathHasChildResource(tc.path, tc.name); got != tc.want {
+				t.Errorf("pathHasChildResource(%q, %q) = %v, want %v",
+					tc.path, tc.name, got, tc.want)
+			}
+		})
+	}
 }

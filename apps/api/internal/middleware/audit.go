@@ -74,6 +74,24 @@ func Audit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 	}
 }
 
+// pathHasChildResource reports whether path contains "/<name>" as a
+// COMPLETE path segment — i.e. it ends with "/<name>" or contains
+// "/<name>/". Substring-only matching (the old
+// `strings.Contains(path, "/<name>")` pattern) over-trips on routes
+// that share <name> as a prefix of a longer segment:
+//
+//   - F202 latent: /integrations/apikeys-sync would have false-matched
+//     strings.Contains(path, "/apikeys") and been classified as apikey.
+//     The COMPLETE-segment match rules it out.
+//
+// The helper is the building block of the F188 (M13 Phase D round 3)
+// project-nested resource hoist below. See its head comment in
+// determineActionAndResource for the full rationale.
+func pathHasChildResource(path, name string) bool {
+	seg := "/" + name
+	return strings.HasSuffix(path, seg) || strings.Contains(path, seg+"/")
+}
+
 // determineActionAndResource determines the audit action and resource type from HTTP method and path.
 func determineActionAndResource(method, path string) (action, resourceType string) {
 	// Normalize path: strip the API group prefix. We have to gate the
@@ -99,15 +117,39 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		return "", ""
 	}
 
-	// API key endpoints (must run BEFORE the /projects branch so that
-	// project-scoped routes such as /projects/:id/apikeys are classified
-	// as apikey, not as a generic project resource. F176: previously the
-	// branch used "/api-keys" (with a hyphen) which never matched the
-	// real routes "/apikeys" / "/projects/:id/apikeys", so apikey audit
-	// actions were dead code and project-scoped key ops were mislogged
-	// as project.created / project.deleted.
-	if strings.Contains(path, "/apikeys") {
-		resourceType = model.ResourceAPIKey
+	// ========================================================================
+	// F188 (M13 Phase D round 3) project-nested child-resource hoist.
+	//
+	// Routes shaped like /projects/:id/<child>(/:sub_id(/<verb>)) must be
+	// classified by <child> BEFORE the /projects branch swallows them all
+	// into project.<verb>. F176 originally hoisted /apikeys only; this
+	// block generalises the same pattern to every /projects/:id/<child>
+	// family — there are 18+ at the time of this fix (vex, vex-drafts,
+	// cra-reports, triage, scan, compliance, notifications, diff, ssvc,
+	// meti, licenses, evidence-pack, checklist, visualization,
+	// public-links, kev, eol-*, sboms, vulnerabilities). Pre-F188, every
+	// one of them was logged as project.viewed / project.created /
+	// project.deleted, which broke the audit_logs.(resource_type,
+	// resource_id) join key for the CRA / VEX / METI evidence layer.
+	//
+	// Each branch uses pathHasChildResource so the match is segment-exact:
+	//   * `/projects/:id/vex` matches "vex" but NOT "vex-drafts"
+	//   * `/projects/:id/apikeys` matches "apikeys" but NOT a hypothetical
+	//     /integrations/apikeys-sync (F202: the older
+	//     strings.Contains(path, "/apikeys") was a latent false-positive)
+	//
+	// /apikeys is the only segment that has a tenant-level counterpart we
+	// still want to catch (tenant POST /apikeys is the SBOM-CLI auth
+	// bootstrap path from F176), so it sits outside the
+	// HasPrefix("/projects/") guard. Every other family in this block is
+	// gated by that prefix so tenant-level paths re-using the same
+	// segment name (e.g. /settings/scan, /sbom/diff) still fall through
+	// to the tenant-level branches below.
+	// ========================================================================
+
+	// /apikeys: tenant-level (POST/GET /apikeys, DELETE /apikeys/:key_id)
+	// AND project-level (/projects/:id/apikeys[/:key_id]).
+	if pathHasChildResource(path, "apikeys") {
 		switch method {
 		case "POST":
 			return model.ActionAPIKeyCreated, model.ResourceAPIKey
@@ -115,24 +157,257 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			return model.ActionAPIKeyDeleted, model.ResourceAPIKey
 		case "GET":
 			return "apikey.viewed", model.ResourceAPIKey
+		default:
+			// F201: PUT/PATCH on apikey routes is not used today, but
+			// the bare switch above would otherwise fall through to the
+			// /projects branch on a future PUT route. Pin the resource
+			// here so any new PUT lands as apikey, not as project.
+			return "apikey.updated", model.ResourceAPIKey
 		}
 	}
 
-	// Project endpoints
+	// Project-nested child resource families. Guarded by
+	// HasPrefix("/projects/") so the segment match never collides with
+	// tenant-level paths that happen to contain the same word
+	// (e.g. /settings/scan, /sbom/diff).
+	if strings.HasPrefix(path, "/projects/") {
+		// CRA reports (Wave M2-4 / issue #36).
+		if pathHasChildResource(path, "cra-reports") {
+			switch method {
+			case "POST":
+				if strings.HasSuffix(path, "/reanalyse") {
+					return model.ActionCRAReportReanalysed, model.ResourceCRAReport
+				}
+				return model.ActionCRAReportRun, model.ResourceCRAReport
+			case "PUT", "PATCH":
+				return model.ActionCRAReportDecisionUpdated, model.ResourceCRAReport
+			case "GET":
+				if strings.HasSuffix(path, "/cra-reports") {
+					return model.ActionCRAReportListed, model.ResourceCRAReport
+				}
+				return model.ActionCRAReportViewed, model.ResourceCRAReport
+			}
+		}
+		// VEX drafts (Wave M1-5). Segment-distinct from /vex so order
+		// against the /vex branch does not matter.
+		if pathHasChildResource(path, "vex-drafts") {
+			switch method {
+			case "POST":
+				return model.ActionVEXDraftReanalysed, model.ResourceVEXDraft
+			case "PUT", "PATCH":
+				return model.ActionVEXDraftDecisionUpdated, model.ResourceVEXDraft
+			case "GET":
+				if strings.HasSuffix(path, "/vex-drafts") {
+					return model.ActionVEXDraftListed, model.ResourceVEXDraft
+				}
+				return model.ActionVEXDraftViewed, model.ResourceVEXDraft
+			}
+		}
+		// Triage runs (Wave M1-4).
+		if pathHasChildResource(path, "triage") {
+			return model.ActionTriageRun, model.ResourceTriage
+		}
+		// VEX statements.
+		if pathHasChildResource(path, "vex") {
+			switch method {
+			case "POST":
+				return model.ActionVEXCreated, model.ResourceVEX
+			case "PUT", "PATCH":
+				return model.ActionVEXUpdated, model.ResourceVEX
+			case "DELETE":
+				return model.ActionVEXDeleted, model.ResourceVEX
+			case "GET":
+				if strings.HasSuffix(path, "/vex") {
+					return model.ActionVEXListed, model.ResourceVEX
+				}
+				return "vex.viewed", model.ResourceVEX
+			}
+		}
+		// Vulnerability scan trigger (POST /projects/:id/scan).
+		if pathHasChildResource(path, "scan") {
+			if method == "POST" {
+				return model.ActionScanStarted, model.ResourceScan
+			}
+			return model.ActionScanViewed, model.ResourceScan
+		}
+		// Compliance.
+		if pathHasChildResource(path, "compliance") {
+			return model.ActionComplianceChecked, model.ResourceCompliance
+		}
+		// Notification settings.
+		if pathHasChildResource(path, "notifications") {
+			switch method {
+			case "POST":
+				return model.ActionNotificationCreated, model.ResourceNotification
+			case "PUT", "PATCH":
+				return model.ActionNotificationUpdated, model.ResourceNotification
+			case "DELETE":
+				return model.ActionNotificationDeleted, model.ResourceNotification
+			case "GET":
+				if strings.HasSuffix(path, "/notifications") {
+					return model.ActionNotificationListed, model.ResourceNotification
+				}
+				return model.ActionNotificationViewed, model.ResourceNotification
+			}
+		}
+		// Diff (M10-6 / M11-4 / M12-3). /diff.csv and /diff.pdf are not
+		// segment-shaped, so we accept them explicitly.
+		if pathHasChildResource(path, "diff") ||
+			strings.HasSuffix(path, "/diff.csv") ||
+			strings.HasSuffix(path, "/diff.pdf") {
+			if method == "POST" {
+				return model.ActionDiffSummary, model.ResourceDiff
+			}
+			if strings.HasSuffix(path, "/graph") {
+				return model.ActionDiffGraphViewed, model.ResourceDiff
+			}
+			return model.ActionDiffViewed, model.ResourceDiff
+		}
+		// SSVC. Must come before the /vulnerabilities check below so
+		// /projects/:id/vulnerabilities/:vuln_id/ssvc lands as SSVC,
+		// not as a vulnerability list.
+		if pathHasChildResource(path, "ssvc") {
+			switch method {
+			case "POST", "PUT", "PATCH":
+				return model.ActionSSVCAssessed, model.ResourceSSVC
+			case "DELETE":
+				return model.ActionSSVCDeleted, model.ResourceSSVC
+			case "GET":
+				return model.ActionSSVCViewed, model.ResourceSSVC
+			}
+		}
+		// METI self-assessment (Wave M3-4).
+		if pathHasChildResource(path, "meti") {
+			switch method {
+			case "POST":
+				return model.ActionMETIRefreshed, model.ResourceMETI
+			case "PUT", "PATCH":
+				return model.ActionMETIOverridden, model.ResourceMETI
+			case "DELETE":
+				return model.ActionMETIOverridden, model.ResourceMETI
+			case "GET":
+				return model.ActionMETIViewed, model.ResourceMETI
+			}
+		}
+		// License policies.
+		if pathHasChildResource(path, "licenses") {
+			switch method {
+			case "POST":
+				return model.ActionLicensePolicyCreated, model.ResourceLicensePolicy
+			case "PUT", "PATCH":
+				return model.ActionLicensePolicyUpdated, model.ResourceLicensePolicy
+			case "DELETE":
+				return model.ActionLicensePolicyDeleted, model.ResourceLicensePolicy
+			case "GET":
+				if strings.HasSuffix(path, "/licenses") {
+					return model.ActionLicensePolicyListed, model.ResourceLicensePolicy
+				}
+				return model.ActionLicensePolicyViewed, model.ResourceLicensePolicy
+			}
+		}
+		// Evidence pack (Wave M2-6).
+		if pathHasChildResource(path, "evidence-pack") {
+			return model.ActionEvidencePackBuilt, model.ResourceEvidencePack
+		}
+		// METI checklist.
+		if pathHasChildResource(path, "checklist") {
+			switch method {
+			case "PUT", "PATCH":
+				return model.ActionChecklistUpdated, model.ResourceChecklist
+			case "DELETE":
+				return model.ActionChecklistDeleted, model.ResourceChecklist
+			case "GET":
+				return model.ActionChecklistViewed, model.ResourceChecklist
+			}
+		}
+		// Visualization framework.
+		if pathHasChildResource(path, "visualization") {
+			switch method {
+			case "PUT", "PATCH":
+				return model.ActionVisualizationUpdated, model.ResourceVisualization
+			case "DELETE":
+				return model.ActionVisualizationDeleted, model.ResourceVisualization
+			case "GET":
+				return model.ActionVisualizationViewed, model.ResourceVisualization
+			}
+		}
+		// Public links.
+		if pathHasChildResource(path, "public-links") {
+			switch method {
+			case "POST":
+				return model.ActionPublicLinkCreated, model.ResourcePublicLink
+			case "PUT", "PATCH":
+				return model.ActionPublicLinkUpdated, model.ResourcePublicLink
+			case "DELETE":
+				return model.ActionPublicLinkDeleted, model.ResourcePublicLink
+			case "GET":
+				return model.ActionPublicLinkViewed, model.ResourcePublicLink
+			}
+		}
+		// KEV (project-scoped /projects/:id/kev). Tenant-level /kev/* and
+		// /vulnerabilities/:cve_id/kev fall through to the tenant branches
+		// below because of the HasPrefix("/projects/") guard.
+		if pathHasChildResource(path, "kev") {
+			return model.ActionKEVViewed, model.ResourceKEV
+		}
+		// EOL (project-scoped /eol-summary, /eol-check). These are not
+		// /-separated segments — they're suffix tokens hanging off the
+		// project root — so we match them explicitly.
+		if pathHasChildResource(path, "eol-summary") || pathHasChildResource(path, "eol-check") {
+			if method == "POST" {
+				return model.ActionEOLChecked, model.ResourceEOL
+			}
+			return model.ActionEOLViewed, model.ResourceEOL
+		}
+		// SBOM (nested /sbom — upload + read-back — and /sboms — list +
+		// /sboms/:sbom_id/scan-status). POST /projects/:id/sbom keeps the
+		// existing sbom.uploaded verb (matches the legacy branch the
+		// /projects swallow used to redirect to via Contains("/sbom")).
+		if pathHasChildResource(path, "sbom") || pathHasChildResource(path, "sboms") {
+			switch method {
+			case "POST":
+				return model.ActionSBOMUploaded, model.ResourceSBOM
+			case "DELETE":
+				return model.ActionSBOMDeleted, model.ResourceSBOM
+			case "GET":
+				return model.ActionSBOMViewed, model.ResourceSBOM
+			}
+		}
+		// Vulnerabilities (project-nested). Must come AFTER the /ssvc
+		// branch above so /projects/:id/vulnerabilities/:vuln_id/ssvc
+		// is classified by /ssvc, not by /vulnerabilities.
+		if pathHasChildResource(path, "vulnerabilities") {
+			switch method {
+			case "POST":
+				if strings.Contains(path, "/scan") {
+					return "vulnerability.scanned", model.ResourceVulnerability
+				}
+				return "vulnerability.created", model.ResourceVulnerability
+			case "PUT", "PATCH":
+				return "vulnerability.updated", model.ResourceVulnerability
+			case "GET":
+				if strings.HasSuffix(path, "/vulnerabilities") {
+					return model.ActionVulnerabilityListed, model.ResourceVulnerability
+				}
+				return model.ActionVulnerabilityViewed, model.ResourceVulnerability
+			}
+		}
+	}
+
+	// Project endpoints — bare /projects (list, create) and
+	// /projects/:id (get, update, delete) with no child resource
+	// segment. The F188 hoist above already handled every nested case,
+	// so the legacy /sbom branches inside this switch are intentionally
+	// absent; keeping them would shadow the hoisted classification for
+	// any /sbom subpath that slipped through and re-introduce the F188
+	// bug.
 	if strings.HasPrefix(path, "/projects") {
-		resourceType = model.ResourceProject
 		switch method {
 		case "POST":
-			if strings.Contains(path, "/sbom") {
-				return model.ActionSBOMUploaded, model.ResourceSBOM
-			}
 			return model.ActionProjectCreated, model.ResourceProject
 		case "PUT", "PATCH":
 			return model.ActionProjectUpdated, model.ResourceProject
 		case "DELETE":
-			if strings.Contains(path, "/sbom") {
-				return model.ActionSBOMDeleted, model.ResourceSBOM
-			}
 			return model.ActionProjectDeleted, model.ResourceProject
 		case "GET":
 			return "project.viewed", model.ResourceProject
@@ -152,9 +427,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// VEX endpoints
-	if strings.HasPrefix(path, "/vex") || strings.Contains(path, "/vex") {
-		resourceType = model.ResourceVEX
+	// VEX endpoints — tenant-level only. The Contains(/vex) arm that
+	// used to live on this branch caught /projects/:id/vex etc., but
+	// only after the /projects branch had already returned project.*
+	// for the same path, so it was dead code. F188 hoist now classifies
+	// nested /vex above; F198 removes the dead arm here.
+	if strings.HasPrefix(path, "/vex") {
 		switch method {
 		case "POST":
 			return model.ActionVEXCreated, model.ResourceVEX
@@ -225,12 +503,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// Compliance endpoints
-	if strings.HasPrefix(path, "/compliance") || strings.Contains(path, "/compliance") {
-		resourceType = "compliance"
+	// Compliance endpoints — tenant-level only (project-nested classified
+	// by the F188 hoist above). F198 removes the dead Contains arm.
+	if strings.HasPrefix(path, "/compliance") {
 		switch method {
 		case "GET":
-			return "compliance.checked", "compliance"
+			return model.ActionComplianceChecked, model.ResourceCompliance
 		}
 	}
 
@@ -280,19 +558,23 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// Vulnerability endpoints
-	if strings.HasPrefix(path, "/vulnerabilities") || strings.Contains(path, "/vulnerabilities") {
-		resourceType = "vulnerability"
+	// Vulnerability endpoints — tenant-level only (project-nested
+	// classified by the F188 hoist above). F198 removes the dead Contains
+	// arm. /vulnerabilities/sync-epss, /vulnerabilities/epss/:cve_id,
+	// /vulnerabilities/:cve_id/ipa, /vulnerabilities/:vuln_id/ticket(s)
+	// and /vulnerabilities/:id/remediation all start with /vulnerabilities
+	// so HasPrefix is sufficient.
+	if strings.HasPrefix(path, "/vulnerabilities") {
 		switch method {
 		case "POST":
 			if strings.Contains(path, "/scan") {
-				return "vulnerability.scanned", "vulnerability"
+				return "vulnerability.scanned", model.ResourceVulnerability
 			}
-			return "vulnerability.created", "vulnerability"
+			return "vulnerability.created", model.ResourceVulnerability
 		case "PUT", "PATCH":
-			return "vulnerability.updated", "vulnerability"
+			return "vulnerability.updated", model.ResourceVulnerability
 		case "GET":
-			return "vulnerability.viewed", "vulnerability"
+			return model.ActionVulnerabilityViewed, model.ResourceVulnerability
 		}
 	}
 
@@ -335,18 +617,19 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// Notifications endpoints
-	if strings.HasPrefix(path, "/notifications") || strings.Contains(path, "/notifications") {
-		resourceType = "notification"
+	// Notifications endpoints — tenant-level only (project-nested
+	// classified by the F188 hoist above). F198 removes the dead Contains
+	// arm.
+	if strings.HasPrefix(path, "/notifications") {
 		switch method {
 		case "POST":
-			return "notification.created", "notification"
+			return model.ActionNotificationCreated, model.ResourceNotification
 		case "PUT", "PATCH":
-			return "notification.updated", "notification"
+			return model.ActionNotificationUpdated, model.ResourceNotification
 		case "DELETE":
-			return "notification.deleted", "notification"
+			return model.ActionNotificationDeleted, model.ResourceNotification
 		case "GET":
-			return "notification.viewed", "notification"
+			return model.ActionNotificationViewed, model.ResourceNotification
 		}
 	}
 

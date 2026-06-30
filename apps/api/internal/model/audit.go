@@ -72,6 +72,107 @@ const (
 	ActionLLMKeySet     = "llm_key_set"
 	ActionLLMKeyRotated = "llm_key_rotated"
 	ActionLLMKeyCleared = "llm_key_cleared"
+
+	// F188 (M13 Phase D round 3): action verbs for the project-nested
+	// child resource families that the audit middleware now classifies
+	// before the /projects branch swallows them. Before F188, every
+	// /projects/:id/<child> request was logged as project.<verb>; this
+	// list, paired with the matching Resource* constants below, gives
+	// each family its own (action, resource_type) pair so audit_logs
+	// joins onto the family's own table actually work.
+
+	// VEX statement listing — GET /projects/:id/vex is a list operation;
+	// keep "vex.viewed" for the per-statement GET so existing audit rows
+	// stay readable.
+	ActionVEXListed = "vex.listed"
+
+	// VEX draft (AI triage) actions. The runner emits its own domain-
+	// level vex_draft_ai_generated / vex_draft_ai_disabled etc. rows
+	// inside the Stage 3 write tx; the middleware records the request-
+	// level path/method/latency view with these verbs.
+	ActionVEXDraftListed           = "vex_draft.listed"
+	ActionVEXDraftViewed           = "vex_draft.viewed"
+	ActionVEXDraftDecisionUpdated  = "vex_draft.decision_updated"
+	ActionVEXDraftReanalysed       = "vex_draft.reanalysed"
+
+	// Triage runs (Wave M1-5).
+	ActionTriageRun = "triage.run"
+
+	// CRA report drafting (Wave M2-4 / issue #36).
+	ActionCRAReportRun             = "cra_report.run"
+	ActionCRAReportListed          = "cra_report.listed"
+	ActionCRAReportViewed          = "cra_report.viewed"
+	ActionCRAReportDecisionUpdated = "cra_report.decision_updated"
+	ActionCRAReportReanalysed      = "cra_report.reanalysed"
+
+	// Scheduled / on-demand vulnerability scans.
+	ActionScanStarted = "scan.started"
+	ActionScanViewed  = "scan.viewed"
+
+	// Compliance checks (METI dashboard, /compliance).
+	ActionComplianceChecked = "compliance.checked"
+
+	// Notification settings.
+	ActionNotificationListed  = "notification.listed"
+	ActionNotificationCreated = "notification.created"
+	ActionNotificationUpdated = "notification.updated"
+	ActionNotificationDeleted = "notification.deleted"
+	ActionNotificationViewed  = "notification.viewed"
+
+	// SBOM-diff observability (M10-6 / M11-4 / M12-3).
+	ActionDiffViewed       = "diff.viewed"
+	ActionDiffSummary      = "diff.summary"
+	ActionDiffGraphViewed  = "diff.graph.view"
+
+	// SSVC.
+	ActionSSVCViewed   = "ssvc.viewed"
+	ActionSSVCAssessed = "ssvc.assessed"
+	ActionSSVCDeleted  = "ssvc.deleted"
+
+	// METI self-assessment (Wave M3-4).
+	ActionMETIViewed     = "meti.viewed"
+	ActionMETIRefreshed  = "meti.refreshed"
+	ActionMETIOverridden = "meti.overridden"
+
+	// License policy.
+	ActionLicensePolicyListed  = "license_policy.listed"
+	ActionLicensePolicyViewed  = "license_policy.viewed"
+	ActionLicensePolicyCreated = "license_policy.created"
+	ActionLicensePolicyUpdated = "license_policy.updated"
+	ActionLicensePolicyDeleted = "license_policy.deleted"
+
+	// Evidence pack (Wave M2-6).
+	ActionEvidencePackBuilt = "evidence_pack.built"
+
+	// METI checklist.
+	ActionChecklistViewed  = "checklist.viewed"
+	ActionChecklistUpdated = "checklist.updated"
+	ActionChecklistDeleted = "checklist.deleted"
+
+	// Visualization framework.
+	ActionVisualizationViewed  = "visualization.viewed"
+	ActionVisualizationUpdated = "visualization.updated"
+	ActionVisualizationDeleted = "visualization.deleted"
+
+	// Public links.
+	ActionPublicLinkCreated = "public_link.created"
+	ActionPublicLinkViewed  = "public_link.viewed"
+	ActionPublicLinkUpdated = "public_link.updated"
+	ActionPublicLinkDeleted = "public_link.deleted"
+
+	// KEV (project-scoped lookup).
+	ActionKEVViewed = "kev.viewed"
+
+	// EOL (project-scoped /eol-summary, /eol-check).
+	ActionEOLViewed  = "eol.viewed"
+	ActionEOLChecked = "eol.checked"
+
+	// SBOM viewed (per-project GET /sbom, GET /sboms, scan-status).
+	ActionSBOMViewed = "sbom.viewed"
+
+	// Vulnerability listing.
+	ActionVulnerabilityListed = "vulnerability.listed"
+	ActionVulnerabilityViewed = "vulnerability.viewed"
 )
 
 // Resource type constants
@@ -85,6 +186,30 @@ const (
 	ResourceSubscription = "subscription"
 	ResourceSettings     = "settings"
 	ResourceLLMConfig    = "llm_config"
+
+	// F188 (M13 Phase D round 3): resource_type constants for the
+	// project-nested child resource families that the audit middleware
+	// now distinguishes. audit_logs (resource_type, resource_id) joins
+	// onto the per-family domain table — keeping these as named constants
+	// catches typos at compile time. See internal/middleware/audit.go
+	// determineActionAndResource for the path-classification map.
+	ResourceCRAReport     = "cra_report"
+	ResourceVEXDraft      = "vex_draft"
+	ResourceTriage        = "triage"
+	ResourceScan          = "scan"
+	ResourceCompliance    = "compliance"
+	ResourceNotification  = "notification"
+	ResourceDiff          = "diff"
+	ResourceSSVC          = "ssvc"
+	ResourceMETI          = "meti"
+	ResourceLicensePolicy = "license_policy"
+	ResourceEvidencePack  = "evidence_pack"
+	ResourceChecklist     = "checklist"
+	ResourceVisualization = "visualization"
+	ResourcePublicLink    = "public_link"
+	ResourceKEV           = "kev"
+	ResourceEOL           = "eol"
+	ResourceVulnerability = "vulnerability"
 )
 
 // CreateAuditLogInput is the input for creating an audit log
