@@ -760,34 +760,115 @@ var resourceIDParamPriority = []string{
 	"id",
 }
 
-// extractResourceID extracts the resource ID from path parameters.
+// ContextKeyAuditResourceID is the echo.Context key handlers use to
+// publish a newly-minted resource UUID for the audit middleware to
+// consume as resource_id when no UUID path param resolves (F208).
 //
-// Strategy (F186 hybrid):
-//  1. Iterate resourceIDParamPriority in declaration order. The first
+// Handlers MUST call SetAuditResourceID(c, id) AFTER a successful
+// create-style operation so the (post-`next(c)`) middleware sees the
+// value during extractResourceID's third fallback path. See
+// extractResourceID head doc for the full strategy.
+//
+// The key is exported so handler/_test files can assert on it without
+// re-typing the literal; the literal value ("audit_resource_id") is
+// the contract documented in the F190 limitation paragraph the M14-1
+// fix closes.
+const ContextKeyAuditResourceID = "audit_resource_id"
+
+// SetAuditResourceID publishes id on the echo.Context so the audit
+// middleware records audit_logs.resource_id = id when no UUID path
+// param resolves on the route (F208, M14-1).
+//
+// Convenience wrapper around c.Set(ContextKeyAuditResourceID, id) —
+// kept in middleware/ so the contract (key name, accepted types)
+// lives next to the consumer (extractResourceID). Handlers may call
+// this with either uuid.UUID or *uuid.UUID; the consumer accepts both.
+//
+// Call site convention (F208):
+//   - POST/create handlers: invoke immediately BEFORE the success
+//     return (`return c.JSON(http.StatusCreated, obj)`), passing the
+//     newly-minted object's primary key UUID.
+//   - For POST routes that act on an existing resource and mint a
+//     NEW row (e.g. /cra-reports/run, /reports/generate, /ssvc/cve
+//     /:cve_id), call with the NEW row's UUID — not the parent :id.
+//     The middleware's priority list would otherwise pick up the
+//     parent path param and the audit row would point at the wrong
+//     subject for forensic joins (the original F190 failure mode).
+//
+// Pass a typed-nil pointer (no-op-safe) when the handler decides
+// post-flight that no resource was actually created; the middleware
+// then falls back to the path-param strategy as if Set had not been
+// called.
+func SetAuditResourceID(c echo.Context, id uuid.UUID) {
+	if id == uuid.Nil {
+		return
+	}
+	c.Set(ContextKeyAuditResourceID, id)
+}
+
+// extractResourceID extracts the resource ID from path parameters
+// and the post-success handler context-key override.
+//
+// Strategy (F186 hybrid + F208 explicit-handler-override):
+//  1. Explicit handler override (F208 / M14-1): handlers that mint a
+//     new UUID inside the request body — typical of every create-style
+//     POST — call SetAuditResourceID(c, id) (or c.Set(
+//     ContextKeyAuditResourceID, id) directly) right before the
+//     success return. Because the audit middleware runs AFTER `next(c)`
+//     returns, that value is available here AND it takes precedence
+//     over path-param inference. This is what makes the F208 fix work
+//     for project-nested create routes such as POST /projects/:id/vex
+//     and POST /projects/:id/cra-reports/run — without override-first
+//     semantics, the priority list below would still pick up the
+//     parent `:id` and the audit row would point at the project UUID
+//     (the original F190 failure mode). We accept both uuid.UUID and
+//     *uuid.UUID type assertions so handler call sites that already
+//     hold a pointer to a service-returned *Model do not need to
+//     dereference at the call boundary.
+//  2. Iterate resourceIDParamPriority in declaration order. The first
 //     param bound on the request whose value parses as a UUID wins. The
 //     list is explicit so a reader can grep audit.go to answer "which
 //     path param becomes resource_id on route X?". Specific names (e.g.
 //     :key_id) come before generic ":id" so child resources are not
 //     shadowed by their parent.
-//  2. Fallback: if nothing in the priority list matches, walk
+//  3. Fallback: if nothing in the priority list matches, walk
 //     c.ParamNames() from tail to head and accept the first UUID-
 //     parseable value. This is the future-proof path — when a new route
 //     introduces a novel `:<thing>_id` we still record the most specific
 //     UUID instead of silently dropping resource_id to NULL until
 //     someone notices and edits the priority list.
-//  3. Non-UUID values (slugs such as :checkId for checklist response
-//     keys) are intentionally skipped so they never pollute resource_id.
-//     This includes :cve_id (CVE identifiers such as "CVE-2021-44228"
-//     are not UUIDs by spec — see F196). The only currently-known route
-//     binding :cve_id is /projects/:id/ssvc/cve/:cve_id, where the
-//     parent :id rescues the audit row with the project UUID; standalone
-//     CVE-keyed routes will record resource_id = NULL by design.
 //
-// Known limitation — create-route resource_id is NULL (F190, M13 Phase D):
+// Non-UUID values (slugs such as :checkId for checklist response keys)
+// are intentionally skipped on paths 2 + 3 so they never pollute
+// resource_id. This includes :cve_id (CVE identifiers such as
+// "CVE-2021-44228" are not UUIDs by spec — see F196). The only
+// currently-known route binding :cve_id is /projects/:id/ssvc/cve/
+// :cve_id, where the parent :id rescues the audit row with the project
+// UUID; the ssvc handlers that mint a new assessment row on POST also
+// publish that UUID via path 1 so the audit row reflects the
+// assessment, not the parent project.
 //
-//	extractResourceID is invoked AFTER `next(c)` returns, but it only
-//	reads path params bound on the route pattern. POST/create routes
-//	such as:
+// Why explicit handler override is path 1 (anti-pattern 48 anchor,
+// M14-1 closure of F190): the F190 docstring catalogued a class of
+// create routes where the newly-minted UUID lives in the response body
+// and the path carries only the PARENT resource's UUID. Examples
+// include POST /projects/:id/cra-reports (new cra_report UUID, parent
+// :id in path) and POST /projects/:id/vex (new VEX UUID, parent :id in
+// path). If the handler override were merely a last-resort fallback
+// (i.e. only consulted when paths 2+3 returned nil), those routes
+// would still record the parent's project UUID — the exact failure
+// the F190 docstring warned about. Putting the handler override
+// FIRST closes the limitation universally: every create handler can
+// authoritatively declare "the audit row points at THIS row".
+//
+// Handlers that opted into the F208 contract are pinned by the
+// TestExtractResourceID_PostSuccessContextKey_F208 meta-test in
+// audit_test.go; additions to that coverage table flag every future
+// create handler that forgets to call SetAuditResourceID.
+//
+// Historical limitation (F190, M13 Phase D — RESOLVED by F208 / M14-1):
+//
+//	Before path 1 existed, POST/create routes such as
 //
 //	  POST /projects            (newly-minted project UUID in body)
 //	  POST /apikeys             (newly-minted apikey UUID in body)
@@ -797,29 +878,40 @@ var resourceIDParamPriority = []string{
 //	  POST /projects/:id/vex    (same — new VEX UUID is in body, only
 //	                             the parent project :id is in the path)
 //
-//	have no path param carrying the newly-minted UUID, so the audit row
-//	for every project.created / apikey.created / cra_report.created /
-//	vex.created records resource_id = NULL (or the parent project's
+//	had no path param carrying the newly-minted UUID, so the audit
+//	row for every project.created / apikey.created / cra_report.created
+//	/ vex.created recorded resource_id = NULL (or the parent project's
 //	UUID, which is misleading — joining audit_logs.resource_id onto
-//	the newly-created table's primary key on those rows will silently
-//	drop them or join onto the wrong subject).
-//
-//	The F186 commit message implied "create paths covered"; that was
-//	for the action+resource_type classification (which IS correct for
-//	POST routes), not for resource_id (which is not). We are choosing
-//	to document the limitation here rather than reshape the handler
-//	contract — the eventual fix (M14 candidate) requires every create
-//	handler to call c.Set("audit_resource_id", newID) after a
-//	successful create, with extractResourceID falling back to that
-//	context value when no UUID path param resolves. That touches every
-//	create handler and is out of scope for M13 Phase D.
-//
-//	Operational consequence today: forensic queries that join
-//	audit_logs on (resource_type='project' AND action='project.created')
-//	must use details->>'path' + (tenant_id, created_at) heuristics to
-//	correlate to projects.id; resource_id is unreliable for the row.
+//	the newly-created table's primary key on those rows would silently
+//	drop them or join onto the wrong subject). M14-1 (F208) closes the
+//	limitation by adding path 1 here (and inserting SetAuditResourceID
+//	calls in every create handler — apikey/cra_reports/issue_tracker/
+//	license/project/public_link/report/sbom/ssvc/vex). Forensic
+//	queries that join audit_logs.resource_id onto the created table's
+//	primary key are now reliable for those rows.
 func extractResourceID(c echo.Context) *uuid.UUID {
-	// 1) Explicit priority list.
+	// 1) Explicit handler override (F208 / M14-1). Accept both
+	//    uuid.UUID and *uuid.UUID so handler call sites that already
+	//    hold a pointer to a service-returned *Model do not need to
+	//    dereference at the call boundary. uuid.Nil is treated as
+	//    "no value" so a default-initialised zero UUID does not
+	//    silently poison forensic joins.
+	if v := c.Get(ContextKeyAuditResourceID); v != nil {
+		switch id := v.(type) {
+		case uuid.UUID:
+			if id != uuid.Nil {
+				out := id
+				return &out
+			}
+		case *uuid.UUID:
+			if id != nil && *id != uuid.Nil {
+				out := *id
+				return &out
+			}
+		}
+	}
+
+	// 2) Explicit priority list.
 	for _, name := range resourceIDParamPriority {
 		if idStr := c.Param(name); idStr != "" {
 			if id, err := uuid.Parse(idStr); err == nil {
@@ -828,7 +920,7 @@ func extractResourceID(c echo.Context) *uuid.UUID {
 		}
 	}
 
-	// 2) Fallback: path-tail UUID. We walk ParamNames in reverse so the
+	// 3) Fallback: path-tail UUID. We walk ParamNames in reverse so the
 	//    most specific param on the route wins, mirroring the priority
 	//    list's "child before parent" rule.
 	names := c.ParamNames()
