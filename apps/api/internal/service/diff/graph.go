@@ -315,7 +315,25 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 	// (libraries / files / etc). F171: previously only bom.Components
 	// was indexed, which silently dropped the root node + any edges
 	// whose `ref` pointed at the metadata.component bom-ref.
-	indexComponent := func(c cdx.Component) {
+	//
+	// M13-2 (#88): the closure recurses into Component.Components so
+	// nested sub-components (CycloneDX 1.6 supports nesting
+	// components — e.g. a container component declaring its constituent
+	// libraries inline) are also indexed. Without recursion the
+	// dependencies[].ref pointing at a nested bom-ref silently dropped
+	// the edge AND the node, leaving the auditor with a partial graph
+	// that did not match the on-disk SBOM.
+	//
+	// Edge inference for nested components follows the CycloneDX
+	// 1.6 spec contract: the `dependencies` array is the canonical
+	// source of edges. Nesting alone does NOT synthesize an implicit
+	// parent → child edge; auditors who want the parent → nested-child
+	// edge visualised should declare it in `dependencies` (cyclonedx
+	// tooling such as syft/trivy does this consistently). This stays
+	// consistent with the existing M12-3 contract and avoids inventing
+	// edges that are not in the SBOM bytes.
+	var indexComponent func(c cdx.Component)
+	indexComponent = func(c cdx.Component) {
 		comp := model.Component{
 			Name:    c.Name,
 			Version: c.Version,
@@ -323,26 +341,32 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 			Purl:    c.PackageURL,
 		}
 		key := componentMatchKey(comp)
-		if key == "" {
-			// No usable identity (no purl, no name). Skip — we
-			// cannot match this across SBOMs.
-			return
-		}
-		if _, dup := out.nodes[key]; !dup {
-			out.nodes[key] = GraphNode{
-				ID:      key,
-				Name:    c.Name,
-				Version: c.Version,
-				Type:    string(c.Type),
+		if key != "" {
+			if _, dup := out.nodes[key]; !dup {
+				out.nodes[key] = GraphNode{
+					ID:      key,
+					Name:    c.Name,
+					Version: c.Version,
+					Type:    string(c.Type),
+				}
+				out.orderedIDs = append(out.orderedIDs, key)
 			}
-			out.orderedIDs = append(out.orderedIDs, key)
+			if c.BOMRef != "" {
+				// First-write-wins: keep the metadata.component mapping
+				// when a duplicate bom-ref shows up under components, so
+				// the root edge still resolves.
+				if _, exists := refToKey[c.BOMRef]; !exists {
+					refToKey[c.BOMRef] = key
+				}
+			}
 		}
-		if c.BOMRef != "" {
-			// First-write-wins: keep the metadata.component mapping
-			// when a duplicate bom-ref shows up under components, so
-			// the root edge still resolves.
-			if _, exists := refToKey[c.BOMRef]; !exists {
-				refToKey[c.BOMRef] = key
+		// M13-2 (#88): walk nested sub-components even when the parent
+		// itself has no usable identity (a bom-ref-only wrapper with no
+		// name/purl is legal but rare). The children may still carry
+		// match keys and need to be indexed so edge resolution works.
+		if c.Components != nil {
+			for _, sub := range *c.Components {
+				indexComponent(sub)
 			}
 		}
 	}

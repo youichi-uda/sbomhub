@@ -33,11 +33,12 @@ import (
 // through the cyclonedx-go library so the test stays a black-box
 // regression on the parser path.
 type cdxComponent struct {
-	BOMRef  string `json:"bom-ref"`
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Purl    string `json:"purl,omitempty"`
+	BOMRef     string         `json:"bom-ref"`
+	Type       string         `json:"type"`
+	Name       string         `json:"name"`
+	Version    string         `json:"version"`
+	Purl       string         `json:"purl,omitempty"`
+	Components []cdxComponent `json:"components,omitempty"`
 }
 
 type cdxDependency struct {
@@ -444,6 +445,195 @@ func TestComputeGraph_MetadataComponentRoot_F171(t *testing.T) {
 	// Single-SBOM baseline path: both nodes land in Added.
 	if len(resp.DiffStatus.Added) != 2 {
 		t.Errorf("Added: got %d, want 2 (app + lib); %+v", len(resp.DiffStatus.Added), resp.DiffStatus.Added)
+	}
+}
+
+// TestComputeGraph_NestedSubComponents_M13_2 (#88) pins the nested
+// Component.Components walk: a CycloneDX 1.6 SBOM declares a container
+// component (`app`) whose sub-components (`mid` and the deeply-nested
+// `leaf`) only exist under `metadata.component.components` /
+// `components[].components` — they are NOT top-level entries in
+// `bom.Components`. Pre-M13-2 the parser stopped at the first level,
+// so dependencies[].ref pointing at `mid` / `leaf` silently dropped
+// the node + every edge through it. The fixture asserts:
+//
+//   - all three nodes (app, mid, leaf) land in the graph
+//   - the explicit dependency chain app -> mid -> leaf survives the
+//     bom-ref -> match-key translation
+//   - the baseline single-SBOM path reports all three under Added
+//
+// We assert the dependencies-array remains the canonical edge source:
+// nesting alone does NOT synthesise implicit parent -> child edges
+// (the test fixture wires the chain through `dependencies`).
+func TestComputeGraph_NestedSubComponents_M13_2(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	toID := uuid.New()
+
+	// metadata.component (root=app) holds an inline child component
+	// (mid), which itself holds an inline child component (leaf).
+	// The dependencies array describes the full chain.
+	rootWithNested := cdxComponent{
+		BOMRef: "app", Type: "application", Name: "app", Version: "1.0.0",
+		Purl: "pkg:my/app@1.0.0",
+		Components: []cdxComponent{
+			{
+				BOMRef: "mid", Type: "library", Name: "mid", Version: "2.0.0",
+				Purl: "pkg:npm/mid@2.0.0",
+				Components: []cdxComponent{
+					{BOMRef: "leaf", Type: "library", Name: "leaf", Version: "3.0.0", Purl: "pkg:npm/leaf@3.0.0"},
+				},
+			},
+		},
+	}
+	rawData := makeCycloneDXBytesWithMetadata(t,
+		rootWithNested,
+		// bom.Components is empty: every node is nested under metadata.component.
+		// This makes the recursion the only path that can index `mid` and `leaf`.
+		[]cdxComponent{},
+		[]cdxDependency{
+			{Ref: "app", Dependencies: []string{"mid"}},
+			{Ref: "mid", Dependencies: []string{"leaf"}},
+		},
+	)
+	toSbom := model.Sbom{
+		ID: toID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.6", RawData: rawData,
+		CreatedAt: time.Now(),
+	}
+	pr := &fakeProjectRepo{projects: map[uuid.UUID]uuid.UUID{projectID: tenantID}}
+	sr := &fakeSbomRepo{
+		byID:      map[uuid.UUID]model.Sbom{toID: toSbom},
+		byProject: map[uuid.UUID][]model.Sbom{projectID: {toSbom}},
+	}
+	cr := &fakeComponentRepo{components: map[uuid.UUID][]model.Component{}, vulns: map[uuid.UUID][]model.ComponentVulnerability{}}
+	lr := &fakeLicenseRepo{policies: map[uuid.UUID][]model.LicensePolicy{}}
+	svc := NewService(pr, sr, cr, lr)
+
+	resp, err := svc.ComputeGraph(context.Background(), Request{TenantID: tenantID, ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("ComputeGraph error: %v", err)
+	}
+
+	wantApp := "pkg:my/app"
+	wantMid := "pkg:npm/mid"
+	wantLeaf := "pkg:npm/leaf"
+
+	if len(resp.Nodes) != 3 {
+		t.Errorf("Nodes count: got %d, want 3 (app + mid + leaf); %+v", len(resp.Nodes), resp.Nodes)
+	}
+	nodeByID := map[string]GraphNode{}
+	for _, n := range resp.Nodes {
+		nodeByID[n.ID] = n
+	}
+	for _, id := range []string{wantApp, wantMid, wantLeaf} {
+		if _, ok := nodeByID[id]; !ok {
+			t.Errorf("M13-2: nested node %q missing; got nodes %+v", id, nodeByID)
+		}
+	}
+	if got := nodeByID[wantMid]; got.Name != "mid" || got.Version != "2.0.0" || got.Type != "library" {
+		t.Errorf("nested mid projection mismatch: %+v", got)
+	}
+	if got := nodeByID[wantLeaf]; got.Name != "leaf" || got.Version != "3.0.0" || got.Type != "library" {
+		t.Errorf("nested leaf projection mismatch: %+v", got)
+	}
+
+	// Edges: app -> mid + mid -> leaf. Nesting alone does NOT
+	// synthesise implicit edges — both must come from `dependencies`.
+	if len(resp.Edges) != 2 {
+		t.Fatalf("Edges count: got %d, want 2 (app->mid, mid->leaf); %+v", len(resp.Edges), resp.Edges)
+	}
+	edgeSet := map[string]struct{}{}
+	for _, e := range resp.Edges {
+		edgeSet[e.From+" -> "+e.To] = struct{}{}
+	}
+	for _, want := range []string{
+		wantApp + " -> " + wantMid,
+		wantMid + " -> " + wantLeaf,
+	} {
+		if _, ok := edgeSet[want]; !ok {
+			t.Errorf("M13-2: chain edge %q missing; got %v", want, edgeSet)
+		}
+	}
+
+	// Single-SBOM baseline: all three nodes land in Added.
+	if len(resp.DiffStatus.Added) != 3 {
+		t.Errorf("Added: got %d, want 3; %+v", len(resp.DiffStatus.Added), resp.DiffStatus.Added)
+	}
+	if len(resp.DiffStatus.Removed) != 0 {
+		t.Errorf("Removed should be empty in baseline: %+v", resp.DiffStatus.Removed)
+	}
+	if len(resp.DiffStatus.VersionChanged) != 0 {
+		t.Errorf("VersionChanged should be empty in baseline: %+v", resp.DiffStatus.VersionChanged)
+	}
+}
+
+// TestComputeGraph_NestedSubComponents_VersionDiff_M13_2 covers the
+// two-SBOM path with nested components: a nested `mid` library bumps
+// version between `from` and `to`. The version_changed marker MUST
+// be emitted on the merged node so the frontend renders the colour
+// even though the component only exists under nesting.
+func TestComputeGraph_NestedSubComponents_VersionDiff_M13_2(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	fromID := uuid.New()
+	toID := uuid.New()
+
+	makeNested := func(midVersion string) []byte {
+		root := cdxComponent{
+			BOMRef: "app", Type: "application", Name: "app", Version: "1.0.0",
+			Purl: "pkg:my/app@1.0.0",
+			Components: []cdxComponent{
+				{BOMRef: "mid", Type: "library", Name: "mid", Version: midVersion, Purl: "pkg:npm/mid@" + midVersion},
+			},
+		}
+		return makeCycloneDXBytesWithMetadata(t,
+			root,
+			[]cdxComponent{},
+			[]cdxDependency{{Ref: "app", Dependencies: []string{"mid"}}},
+		)
+	}
+
+	fromSbom := model.Sbom{
+		ID: fromID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.6", RawData: makeNested("2.0.0"),
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	toSbom := model.Sbom{
+		ID: toID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.6", RawData: makeNested("2.0.1"),
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+	}
+	pr := &fakeProjectRepo{projects: map[uuid.UUID]uuid.UUID{projectID: tenantID}}
+	sr := &fakeSbomRepo{
+		byID:      map[uuid.UUID]model.Sbom{fromID: fromSbom, toID: toSbom},
+		byProject: map[uuid.UUID][]model.Sbom{projectID: {toSbom, fromSbom}}, // DESC
+	}
+	cr := &fakeComponentRepo{components: map[uuid.UUID][]model.Component{}, vulns: map[uuid.UUID][]model.ComponentVulnerability{}}
+	lr := &fakeLicenseRepo{policies: map[uuid.UUID][]model.LicensePolicy{}}
+	svc := NewService(pr, sr, cr, lr)
+
+	resp, err := svc.ComputeGraph(context.Background(), Request{
+		TenantID: tenantID, ProjectID: projectID,
+		FromSbomID: fromID, ToSbomID: toID,
+	})
+	if err != nil {
+		t.Fatalf("ComputeGraph error: %v", err)
+	}
+
+	wantMid := "pkg:npm/mid"
+
+	if len(resp.DiffStatus.VersionChanged) != 1 {
+		t.Fatalf("VersionChanged: got %d, want 1; %+v", len(resp.DiffStatus.VersionChanged), resp.DiffStatus.VersionChanged)
+	}
+	vc := resp.DiffStatus.VersionChanged[0]
+	if vc.ID != wantMid || vc.OldVersion != "2.0.0" || vc.NewVersion != "2.0.1" {
+		t.Errorf("nested VersionChanged mismatch: %+v", vc)
+	}
+	// app node should be unchanged (no marker).
+	if len(resp.DiffStatus.Added) != 0 || len(resp.DiffStatus.Removed) != 0 {
+		t.Errorf("Added/Removed should be empty for version-only nested change: added=%v removed=%v",
+			resp.DiffStatus.Added, resp.DiffStatus.Removed)
 	}
 }
 
