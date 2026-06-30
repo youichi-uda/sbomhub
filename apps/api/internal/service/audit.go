@@ -406,6 +406,14 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// Vulnerability listing.
 		{Action: model.ActionVulnerabilityListed, Label: "Vulnerability Listed", Category: "vulnerability"},
 		{Action: model.ActionVulnerabilityViewed, Label: "Vulnerability Viewed", Category: "vulnerability"},
+
+		// F217 (M14 Phase D round 1 fix): issue-tracker ticket actions.
+		// audit_logs.(resource_type="ticket", resource_id=<ticket UUID>)
+		// joins onto integration_tickets.id.
+		{Action: model.ActionTicketCreated, Label: "Ticket Created", Category: "ticket"},
+		{Action: model.ActionTicketSynced, Label: "Ticket Synced", Category: "ticket"},
+		{Action: model.ActionTicketListed, Label: "Ticket Listed", Category: "ticket"},
+		{Action: model.ActionTicketViewed, Label: "Ticket Viewed", Category: "ticket"},
 	}
 }
 
@@ -453,6 +461,12 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		{Type: model.ResourceKEV, Label: "KEV"},
 		{Type: model.ResourceEOL, Label: "EOL"},
 		{Type: model.ResourceVulnerability, Label: "Vulnerability"},
+
+		// F217 (M14 Phase D round 1 fix): issue-tracker ticket
+		// resource_type. Pre-F217 ticket rows were misfiled under
+		// resource_type="vulnerability" with resource_id pointing at
+		// a ticket UUID, breaking forensic joins onto either table.
+		{Type: model.ResourceTicket, Label: "Ticket"},
 	}
 }
 

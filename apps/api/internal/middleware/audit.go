@@ -731,12 +731,66 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
+	// F217 (M14 Phase D round 1 fix): issue-tracker ticket routes.
+	//
+	// Pre-F217, the four ticket endpoints
+	//
+	//   POST   /vulnerabilities/:vuln_id/ticket  (mint new ticket row)
+	//   GET    /vulnerabilities/:vuln_id/tickets (list per-vuln)
+	//   GET    /tickets                          (list tenant-wide)
+	//   POST   /tickets/:id/sync                 (sync existing ticket)
+	//
+	// were classified by the tenant /vulnerabilities branch (for the
+	// /vulnerabilities-prefixed two) as vulnerability.* and by the
+	// default "unknown" bucket (for the /tickets-prefixed two). The
+	// CreateTicket handler additionally publishes ticket.ID via
+	// SetAuditResourceID (F208 path), so the resulting audit row carried
+	// (resource_type="vulnerability", resource_id=<ticket UUID>) — a
+	// JOIN onto vulnerabilities.id silently dropped (ticket UUID is not
+	// a vulnerabilities PK) and a JOIN onto integration_tickets.id
+	// matched only by coincidence (resource_type filter excluded it).
+	//
+	// This branch must come BEFORE the /vulnerabilities tenant branch
+	// below so the /vulnerabilities-prefixed ticket routes are caught
+	// here first. The two pathHasChildResource calls match the segment-
+	// exact suffix "/ticket" (singular create) and "/tickets" (plural
+	// list / nested sync), respecting F202 discipline so a hypothetical
+	// "/tickets-archive" route would not false-match.
+	if pathHasChildResource(path, "ticket") || pathHasChildResource(path, "tickets") {
+		switch method {
+		case "POST":
+			if strings.HasSuffix(path, "/sync") {
+				return model.ActionTicketSynced, model.ResourceTicket
+			}
+			return model.ActionTicketCreated, model.ResourceTicket
+		case "GET":
+			// Plural /tickets suffix is a list operation; everything
+			// else (no current GET route, but future :id GET) is a
+			// per-item view.
+			if strings.HasSuffix(path, "/tickets") {
+				return model.ActionTicketListed, model.ResourceTicket
+			}
+			return model.ActionTicketViewed, model.ResourceTicket
+		case "PUT", "PATCH":
+			return "ticket.updated", model.ResourceTicket
+		case "DELETE":
+			return "ticket.deleted", model.ResourceTicket
+		default:
+			// F206 (anti-pattern 48 symmetric to F201): pin the resource
+			// here so a future OPTIONS / HEAD route on the ticket family
+			// does not fall through to the /vulnerabilities tenant
+			// branch below and re-introduce the F217 mass-misclassification.
+			return "ticket.updated", model.ResourceTicket
+		}
+	}
+
 	// Vulnerability endpoints — tenant-level only (project-nested
 	// classified by the F188 hoist above). F198 removes the dead Contains
 	// arm. /vulnerabilities/sync-epss, /vulnerabilities/epss/:cve_id,
 	// /vulnerabilities/:cve_id/ipa, /vulnerabilities/:vuln_id/ticket(s)
 	// and /vulnerabilities/:id/remediation all start with /vulnerabilities
-	// so HasPrefix is sufficient.
+	// so HasPrefix is sufficient. (F217 hoists the ticket sub-paths
+	// above; this branch now only sees non-ticket vulnerability routes.)
 	if strings.HasPrefix(path, "/vulnerabilities") {
 		switch method {
 		case "POST":

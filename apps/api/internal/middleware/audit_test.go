@@ -512,11 +512,30 @@ func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
 	// row regardless of which (parent) UUIDs the path carries — i.e.
 	// the explicit override beats the priority list AND the
 	// ParamNames fallback.
+	//
+	// F217 / F218 / F219 (M14 Phase D round 1 fix, anti-pattern 48
+	// universal defense): the coverage table now also pins the
+	// (action, resource_type) pair determineActionAndResource emits for
+	// the same route pattern. This catches a class of bug where the
+	// handler's SetAuditResourceID(c, newID) publishes a child-table
+	// UUID but the middleware classifier still routes the path to a
+	// DIFFERENT resource_type — producing audit_logs rows whose
+	// (resource_type, resource_id) JOIN onto a table the resource_id
+	// does not live in (the F217 ticket / F218 triage root cause). The
+	// per-row "path" + "method" columns drive determineActionAndResource;
+	// the per-row "wantAction" + "wantResource" columns pin the
+	// resulting classification so a future asymmetric drift between a
+	// SetAuditResourceID call and the corresponding classify branch is
+	// caught at CI rather than at forensic-join time.
 	type row struct {
-		name       string
-		paramNames []string
-		paramVals  []string
-		setID      uuid.UUID
+		name         string
+		method       string
+		path         string // Echo route pattern (matches c.Path())
+		paramNames   []string
+		paramVals    []string
+		setID        uuid.UUID
+		wantAction   string
+		wantResource string
 	}
 
 	mkUUID := func() uuid.UUID { return uuid.New() }
@@ -529,110 +548,187 @@ func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
 		// Tenant-level creates (no path UUID at all — pre-F208 this
 		// recorded NULL).
 		{
-			name:       "POST /projects (project.created)",
-			paramNames: nil,
-			paramVals:  nil,
-			setID:      mkUUID(),
+			name:         "POST /projects (project.created)",
+			method:       "POST",
+			path:         "/api/v1/projects",
+			paramNames:   nil,
+			paramVals:    nil,
+			setID:        mkUUID(),
+			wantAction:   model.ActionProjectCreated,
+			wantResource: model.ResourceProject,
 		},
 		{
-			name:       "POST /apikeys (apikey.created tenant-level)",
-			paramNames: nil,
-			paramVals:  nil,
-			setID:      mkUUID(),
+			name:         "POST /apikeys (apikey.created tenant-level)",
+			method:       "POST",
+			path:         "/api/v1/apikeys",
+			paramNames:   nil,
+			paramVals:    nil,
+			setID:        mkUUID(),
+			wantAction:   model.ActionAPIKeyCreated,
+			wantResource: model.ResourceAPIKey,
 		},
 		{
-			name:       "POST /integrations (integration.created)",
-			paramNames: nil,
-			paramVals:  nil,
-			setID:      mkUUID(),
+			name:         "POST /integrations (integration.created)",
+			method:       "POST",
+			path:         "/api/v1/integrations",
+			paramNames:   nil,
+			paramVals:    nil,
+			setID:        mkUUID(),
+			wantAction:   "integration.created",
+			wantResource: "integration",
 		},
 		{
-			name:       "POST /reports/generate (report.generated)",
-			paramNames: nil,
-			paramVals:  nil,
-			setID:      mkUUID(),
+			name:         "POST /reports/generate (report.generated)",
+			method:       "POST",
+			path:         "/api/v1/reports/generate",
+			paramNames:   nil,
+			paramVals:    nil,
+			setID:        mkUUID(),
+			wantAction:   "report.generated",
+			wantResource: "report",
 		},
 
 		// Project-nested creates (pre-F208 recorded :id = project UUID
 		// instead of new row UUID — joins to the new table dropped).
 		{
-			name:       "POST /projects/:id/vex (vex.created)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/vex (vex.created)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vex",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionVEXCreated,
+			wantResource: model.ResourceVEX,
 		},
 		{
-			name:       "POST /projects/:id/apikeys (apikey.created project-level)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/apikeys (apikey.created project-level)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/apikeys",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionAPIKeyCreated,
+			wantResource: model.ResourceAPIKey,
 		},
 		{
-			name:       "POST /projects/:id/licenses (license_policy.created)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/licenses (license_policy.created)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/licenses",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionLicensePolicyCreated,
+			wantResource: model.ResourceLicensePolicy,
 		},
 		{
-			name:       "POST /projects/:id/public-links (public_link.created)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/public-links (public_link.created)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/public-links",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionPublicLinkCreated,
+			wantResource: model.ResourcePublicLink,
 		},
 		{
-			name:       "POST /projects/:id/sbom (sbom.uploaded)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/sbom (sbom.uploaded)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/sbom",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionSBOMUploaded,
+			wantResource: model.ResourceSBOM,
 		},
 		{
-			name:       "POST /projects/:id/triage/run (vex_draft.created)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			// F218 (M14 Phase D round 1 fix): triage/run now classifies
+			// as vex_draft.created so the audit row joins on
+			// vex_drafts.id (the handler's published draft UUID).
+			name:         "POST /projects/:id/triage/run (vex_draft.created)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/triage/run",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionVEXDraftCreated,
+			wantResource: model.ResourceVEXDraft,
 		},
 		{
-			name:       "POST /projects/:id/cra-reports/run (cra_report.created)",
-			paramNames: []string{"id"},
-			paramVals:  []string{projectUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/cra-reports/run (cra_report.created)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/cra-reports/run",
+			paramNames:   []string{"id"},
+			paramVals:    []string{projectUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionCRAReportRun,
+			wantResource: model.ResourceCRAReport,
 		},
 
 		// Routes with TWO bound UUIDs in the priority list (pre-F208
 		// recorded :vuln_id or :draft_id, both wrong subjects).
 		{
-			name:       "POST /projects/:id/vulnerabilities/:vuln_id/ssvc (ssvc_assessment.created)",
-			paramNames: []string{"id", "vuln_id"},
-			paramVals:  []string{projectUUID.String(), vulnUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/vulnerabilities/:vuln_id/ssvc (ssvc_assessment.created)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc",
+			paramNames:   []string{"id", "vuln_id"},
+			paramVals:    []string{projectUUID.String(), vulnUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionSSVCAssessed,
+			wantResource: model.ResourceSSVC,
 		},
 		{
-			name:       "POST /projects/:id/vulnerabilities/:vuln_id/ssvc/auto (ssvc_assessment.auto)",
-			paramNames: []string{"id", "vuln_id"},
-			paramVals:  []string{projectUUID.String(), vulnUUID.String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/vulnerabilities/:vuln_id/ssvc/auto (ssvc_assessment.auto)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vulnerabilities/:vuln_id/ssvc/auto",
+			paramNames:   []string{"id", "vuln_id"},
+			paramVals:    []string{projectUUID.String(), vulnUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionSSVCAssessed,
+			wantResource: model.ResourceSSVC,
 		},
 		{
-			name:       "POST /vulnerabilities/:vuln_id/ticket (integration_ticket.created)",
-			paramNames: []string{"vuln_id"},
-			paramVals:  []string{vulnUUID.String()},
-			setID:      mkUUID(),
+			// F217 / F219 (M14 Phase D round 1 fix): pre-F217 the case
+			// label was "(integration_ticket.created)" (aspirational —
+			// the middleware actually classified this as
+			// vulnerability.created so the audit row carried
+			// resource_type="vulnerability" but resource_id=<ticket
+			// UUID>, joining onto neither table). Post-F217 the
+			// middleware emits ticket.created / ticket so the
+			// SetAuditResourceID(c, ticket.ID) override in
+			// IssueTrackerHandler.CreateTicket lands on a JOINable
+			// (resource_type, resource_id) pair.
+			name:         "POST /vulnerabilities/:vuln_id/ticket (ticket.created)",
+			method:       "POST",
+			path:         "/api/v1/vulnerabilities/:vuln_id/ticket",
+			paramNames:   []string{"vuln_id"},
+			paramVals:    []string{vulnUUID.String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionTicketCreated,
+			wantResource: model.ResourceTicket,
 		},
 
 		// Reanalyse routes mint a FRESH row whose audit_logs.resource_id
 		// must point at the new row, NOT the source :draft_id /
 		// :report_id from the URL (history-preservation contract).
 		{
-			name:       "POST /projects/:id/vex-drafts/:draft_id/reanalyse (vex_draft.reanalysed → NEW draft)",
-			paramNames: []string{"id", "draft_id"},
-			paramVals:  []string{projectUUID.String(), mkUUID().String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/vex-drafts/:draft_id/reanalyse (vex_draft.reanalysed → NEW draft)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/vex-drafts/:draft_id/reanalyse",
+			paramNames:   []string{"id", "draft_id"},
+			paramVals:    []string{projectUUID.String(), mkUUID().String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionVEXDraftReanalysed,
+			wantResource: model.ResourceVEXDraft,
 		},
 		{
-			name:       "POST /projects/:id/cra-reports/:report_id/reanalyse (cra_report.reanalysed → NEW report)",
-			paramNames: []string{"id", "report_id"},
-			paramVals:  []string{projectUUID.String(), mkUUID().String()},
-			setID:      mkUUID(),
+			name:         "POST /projects/:id/cra-reports/:report_id/reanalyse (cra_report.reanalysed → NEW report)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/reanalyse",
+			paramNames:   []string{"id", "report_id"},
+			paramVals:    []string{projectUUID.String(), mkUUID().String()},
+			setID:        mkUUID(),
+			wantAction:   model.ActionCRAReportReanalysed,
+			wantResource: model.ResourceCRAReport,
 		},
 	}
 
@@ -642,6 +738,28 @@ func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
 			SetAuditResourceID(c, tc.setID)
 			got := extractResourceID(c)
 			assertResourceID(t, got, tc.setID)
+
+			// F217 / F218 / F219 (anti-pattern 48 universal defense):
+			// pin the middleware's classify output for the same route
+			// so a future SetAuditResourceID call and the matching
+			// classify branch cannot drift apart silently. If this
+			// fails with "want=ticket actualResource=vulnerability"
+			// the symmetric handler/middleware mismatch is back
+			// (F217 root cause) and the audit row's (resource_type,
+			// resource_id) pair is no longer JOINable.
+			action, resourceType := determineActionAndResource(tc.method, tc.path)
+			if action != tc.wantAction {
+				t.Errorf("classify action = %q, want %q (method=%s path=%s) — "+
+					"anti-pattern 48 symmetric drift between SetAuditResourceID "+
+					"and determineActionAndResource",
+					action, tc.wantAction, tc.method, tc.path)
+			}
+			if resourceType != tc.wantResource {
+				t.Errorf("classify resource_type = %q, want %q (method=%s path=%s) — "+
+					"audit_logs.(resource_type, resource_id) no longer joins on the "+
+					"table the handler-published resource_id lives in",
+					resourceType, tc.wantResource, tc.method, tc.path)
+			}
 		})
 	}
 }

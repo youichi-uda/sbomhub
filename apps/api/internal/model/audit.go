@@ -188,6 +188,21 @@ const (
 	// Vulnerability listing.
 	ActionVulnerabilityListed = "vulnerability.listed"
 	ActionVulnerabilityViewed = "vulnerability.viewed"
+
+	// F217 (M14 Phase D round 1 fix): Issue-tracker ticket actions for
+	// POST /vulnerabilities/:vuln_id/ticket (mints new ticket row),
+	// POST /tickets/:id/sync (re-syncs an existing ticket), and the
+	// GET /vulnerabilities/:vuln_id/tickets list / GET /tickets list
+	// endpoints. Pre-F217 these requests were classified as
+	// vulnerability.* (the /vulnerabilities branch swallowed the suffix
+	// segment) and the SetAuditResourceID(c, ticket.ID) override in the
+	// CreateTicket handler poisoned audit_logs with
+	// (resource_type="vulnerability", resource_id=<ticket UUID>) — a
+	// row that joined onto NEITHER table.
+	ActionTicketCreated = "ticket.created"
+	ActionTicketSynced  = "ticket.synced"
+	ActionTicketListed  = "ticket.listed"
+	ActionTicketViewed  = "ticket.viewed"
 )
 
 // Resource type constants
@@ -225,6 +240,14 @@ const (
 	ResourceKEV           = "kev"
 	ResourceEOL           = "eol"
 	ResourceVulnerability = "vulnerability"
+
+	// F217 (M14 Phase D round 1 fix): issue-tracker ticket resource_type
+	// for /vulnerabilities/:vuln_id/ticket(s) and /tickets[/...]. Pinned
+	// here so audit_logs.(resource_type, resource_id) joins onto the
+	// integration_tickets table cleanly — pre-F217 the row carried
+	// resource_type="vulnerability" but resource_id=<ticket UUID>
+	// (handler SetAuditResourceID) which joined onto NEITHER table.
+	ResourceTicket = "ticket"
 )
 
 // CreateAuditLogInput is the input for creating an audit log
