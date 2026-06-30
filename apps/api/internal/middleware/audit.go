@@ -119,6 +119,24 @@ var sensitiveAuditParamNames = map[string]struct{}{
 	"access_key":  {},
 	"private_key": {},
 	"session":     {},
+	// F222 (M14 Phase D round 1 fix, anti-pattern 48 universal closure
+	// supplement): forward-defensive additions covering auth header
+	// shapes, CSRF / replay protection tokens, message-integrity
+	// signatures, and raw HTTP cookies. None of these names are bound
+	// by any current authenticated sbomhub route, so the additions are
+	// strict-superset and cannot change today's behaviour; they exist
+	// so a future route that inadvertently surfaces e.g. :bearer or
+	// :jwt as a path param does not silently leak the value into
+	// audit_logs.details under that name. Match is case-insensitive
+	// via collectNonUUIDPathParams's strings.ToLower call.
+	"bearer":     {},
+	"jwt":        {},
+	"csrf":       {},
+	"csrf_token": {},
+	"nonce":      {},
+	"signature":  {},
+	"hmac":       {},
+	"cookie":     {},
 }
 
 // collectNonUUIDPathParams walks c.ParamNames() and returns name=value

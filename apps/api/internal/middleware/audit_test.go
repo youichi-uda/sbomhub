@@ -1666,6 +1666,69 @@ func TestCollectNonUUIDPathParams_F214(t *testing.T) {
 			},
 			want: nil,
 		},
+		// F222 (M14 Phase D round 1 fix, anti-pattern 48 universal
+		// closure supplement): forward-defensive deny-list additions.
+		// None of these names appear in a current authenticated route,
+		// so the assertions are strict-superset; they exist so a future
+		// route binding e.g. :bearer / :jwt / :csrf as a path param
+		// cannot leak the value into audit_logs.details without an
+		// explicit removal from sensitiveAuditParamNames.
+		{
+			name: "F222 :Bearer is filtered (case-insensitive)",
+			params: [][2]string{
+				{"Bearer", "eyJhbGciOiJIUzI1NiJ9.payload.sig"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :JWT is filtered (case-insensitive)",
+			params: [][2]string{
+				{"JWT", "eyJhbGciOiJIUzI1NiJ9.payload.sig"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :csrf is filtered",
+			params: [][2]string{
+				{"csrf", "csrf-token-value"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :csrf_token is filtered (compound form)",
+			params: [][2]string{
+				{"csrf_token", "csrf-compound-form"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :nonce is filtered (replay-protection)",
+			params: [][2]string{
+				{"nonce", "abc123nonce"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :Signature is filtered (case-insensitive)",
+			params: [][2]string{
+				{"Signature", "hex-sha256-signature"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :hmac is filtered",
+			params: [][2]string{
+				{"hmac", "hmac-message-auth-code"},
+			},
+			want: nil,
+		},
+		{
+			name: "F222 :Cookie is filtered (case-insensitive)",
+			params: [][2]string{
+				{"Cookie", "session_id=opaque"},
+			},
+			want: nil,
+		},
 		{
 			name: "multi non-UUID params all captured (forward compat for future routes)",
 			params: [][2]string{
