@@ -19,7 +19,21 @@ const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDiv
 );
 CardHeader.displayName = "CardHeader";
 
-const CardTitle = React.forwardRef<HTMLParagraphElement, React.HTMLAttributes<HTMLHeadingElement>>(
+// F211 (M14-2): the forwardRef previously typed its ref as
+// `HTMLParagraphElement` while the props generic and the rendered
+// element were `HTMLHeadingElement` (<h3>). That asymmetry meant a
+// caller's `ref={ref}` was typed `RefObject<HTMLParagraphElement>` but
+// actually pointed at an `HTMLHeadingElement`, defeating ref-narrowing
+// and breaking IntelliSense on any heading-only DOM method
+// (e.g. `node.scrollIntoView({ block: "center" })` type-checks on both
+// so is fine, but heading-specific role probing was lost).
+// Resolution: unify both generics to `HTMLHeadingElement`. The render
+// stays as `<h3>` — callers (page hero, draft-card, report-card,
+// criterion-card, etc.) all rely on the h3 default and none pass an
+// `as`-prop override (grep-verified during M14-2 audit). CardDescription
+// below already has symmetric `HTMLParagraphElement` generics and is
+// unchanged.
+const CardTitle = React.forwardRef<HTMLHeadingElement, React.HTMLAttributes<HTMLHeadingElement>>(
   ({ className, ...props }, ref) => (
     <h3 ref={ref} className={cn("text-2xl font-semibold leading-none tracking-tight", className)} {...props} />
   )
