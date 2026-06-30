@@ -51,6 +51,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AiSummaryPanel } from "@/components/diff/ai-summary";
+import { DependencyGraphPanel } from "@/components/diff/dependency-graph";
 import { ExportButtons } from "@/components/diff/export-buttons";
 import { buildDiffQuery, normaliseSeverity } from "./diff-helpers";
 
@@ -271,6 +272,14 @@ export default function ProjectDiffPage() {
                 <TabsTrigger value="ai-summary">
                   {tDetail("aiSummaryPanel")}
                 </TabsTrigger>
+                {/* M12-3 (#84): dependency-graph view — react-flow
+                    canvas with diff colours (green added / red removed /
+                    amber version_changed / grey unchanged). Backend
+                    GET /diff/graph emits a `diff.graph.view` audit row
+                    per render. */}
+                <TabsTrigger value="graph">
+                  {tDetail("graphPanel")}
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="components" className="mt-4 space-y-4">
@@ -361,6 +370,14 @@ export default function ProjectDiffPage() {
                   from={from}
                   to={to}
                   lang={locale}
+                />
+              </TabsContent>
+
+              <TabsContent value="graph" className="mt-4">
+                <DependencyGraphPanel
+                  projectId={projectId}
+                  from={from}
+                  to={to}
                 />
               </TabsContent>
             </Tabs>

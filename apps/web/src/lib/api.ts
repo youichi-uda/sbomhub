@@ -2677,6 +2677,94 @@ export const api = {
 };
 
 // useApi hook for components that need direct API access with auth
+// -----------------------------------------------------------------------------
+// M12-3 (#84) — SBOM dependency-graph view types + helper.
+//
+// Lives at the very end of api.ts (not folded into the `api.projects` block
+// above) so the patch is a pure append — M12-1's parallel edits to the
+// existing diff helpers cannot conflict with this one. The handler at
+// apps/api/internal/handler/diff.go::ProjectDiffGraph emits a
+// `diff.graph.view` audit row per call; the typed envelope below mirrors
+// the Go-side `internal/service/diff/graph.go::GraphResponse` shape.
+//
+// F164 (Go nil slice → JSON null) defence: even though the Go side now
+// initialises every []T with `make([]T, 0)`, we still `?? []` on every
+// slice field here so a future regression on either side cannot crash the
+// page at render time. Same pattern as the existing getDiff helper.
+// -----------------------------------------------------------------------------
+
+export interface ProjectDiffGraphNode {
+  id: string;
+  name: string;
+  version: string;
+  type: string;
+}
+
+export interface ProjectDiffGraphEdge {
+  from: string;
+  to: string;
+}
+
+export interface ProjectDiffGraphVersionChange {
+  id: string;
+  old_version: string;
+  new_version: string;
+}
+
+export interface ProjectDiffGraphDiffStatus {
+  added: string[];
+  removed: string[];
+  version_changed: ProjectDiffGraphVersionChange[];
+}
+
+export interface ProjectDiffGraphResponse {
+  project_id: string;
+  from: ProjectDiffSbomRef | null;
+  to: ProjectDiffSbomRef | null;
+  nodes: ProjectDiffGraphNode[];
+  edges: ProjectDiffGraphEdge[];
+  diff_status: ProjectDiffGraphDiffStatus;
+}
+
+/**
+ * M12-3 (#84) — GET /api/v1/projects/:id/diff/graph?from=<sbom_id>&to=<sbom_id>.
+ *
+ * Loads the merged dependency graph for the (from, to) SBOM pair.
+ * Same query string contract as getDiff: omit both for the auto-newest
+ * default, pass either for one-sided defaulting. Single-SBOM projects
+ * return `from: null` and every node lands in `diff_status.added`.
+ *
+ * The backend records a `diff.graph.view` audit row per successful call
+ * (F168 audit-or-nothing); a 500 here therefore means either the diff
+ * failed or the audit insert failed.
+ */
+export async function getDiffGraph(
+  projectId: string,
+  from?: string,
+  to?: string,
+): Promise<ProjectDiffGraphResponse> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const qs = params.toString();
+  const raw = await request<ProjectDiffGraphResponse>(
+    `/api/v1/projects/${projectId}/diff/graph${qs ? `?${qs}` : ""}`,
+  );
+  // F164: defence-in-depth `?? []` on every slice field. The Go side
+  // already initialises with make([]T, 0); this guards against a future
+  // regression on either end (e.g. someone re-introducing omitempty).
+  return {
+    ...raw,
+    nodes: raw.nodes ?? [],
+    edges: raw.edges ?? [],
+    diff_status: {
+      added: raw.diff_status?.added ?? [],
+      removed: raw.diff_status?.removed ?? [],
+      version_changed: raw.diff_status?.version_changed ?? [],
+    },
+  };
+}
+
 export function useApi() {
   return {
     async get<T>(path: string): Promise<T> {

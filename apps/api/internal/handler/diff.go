@@ -20,6 +20,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -28,18 +29,29 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/middleware"
+	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service/diff"
 	"github.com/sbomhub/sbomhub/internal/service/diff_export"
 	"github.com/sbomhub/sbomhub/internal/service/diff_summary"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
 
-// DiffHandler exposes the M10-6 project diff endpoint and the M11-4
-// summary / export endpoints.
+// DiffAuditWriter is the slice of *repository.AuditRepository used by
+// the M12-3 graph handler to record a `diff.graph.view` audit event
+// per successful render. We narrow the interface here so the handler
+// is unit-testable with a small fake (and so the handler does not
+// reach for a repository field that may move package).
+type DiffAuditWriter interface {
+	Log(ctx context.Context, input *model.CreateAuditLogInput) error
+}
+
+// DiffHandler exposes the M10-6 project diff endpoint, the M11-4
+// summary / export endpoints, and the M12-3 graph endpoint.
 type DiffHandler struct {
 	svc        *diff.Service
 	summarySvc *diff_summary.Service // optional (nil disables /diff/summary)
 	exportSvc  *diff_export.Service  // optional (nil disables /diff.csv|pdf)
+	audit      DiffAuditWriter       // optional (nil disables /diff/graph)
 }
 
 // NewDiffHandler wires the handler. The svc dependency is constructed
@@ -61,6 +73,15 @@ func (h *DiffHandler) WithSummary(s *diff_summary.Service) *DiffHandler {
 // WithExport attaches the diff export (CSV + PDF) service.
 func (h *DiffHandler) WithExport(s *diff_export.Service) *DiffHandler {
 	h.exportSvc = s
+	return h
+}
+
+// WithAudit attaches the audit log writer used by the M12-3
+// /diff/graph endpoint to record a `diff.graph.view` event per
+// successful render. Passing nil yields 503 from the graph route so
+// the audit pair (F168 audit-or-nothing) is never silently skipped.
+func (h *DiffHandler) WithAudit(a DiffAuditWriter) *DiffHandler {
+	h.audit = a
 	return h
 }
 
@@ -308,6 +329,116 @@ func (h *DiffHandler) ProjectDiffPDF(c echo.Context) error {
 	c.Response().Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	return c.Blob(http.StatusOK, "application/pdf", data)
 }
+
+// ProjectDiffGraph handles GET /api/v1/projects/:id/diff/graph.
+//
+// M12-3 (#84) — renders the dependency-graph view that complements
+// the M10-6 flat-list diff. Re-parses the (from, to) SBOM raw bytes
+// (CycloneDX `dependencies` block), merges them into a single graph
+// keyed by the same componentMatchKey identity used by the flat
+// diff, and annotates each node with added / removed / version_changed.
+//
+// Auth + tenant scoping go through the same middleware chain as
+// ProjectDiff above. Every successful render writes an audit_logs
+// row (action=`diff.graph.view`, resource_type=`sbom_diff`) inside
+// the ambient TenantTx so the F168 audit-or-nothing contract holds
+// — if the audit insert fails we fail the whole request rather than
+// returning a render with no audit trail.
+//
+//   - 400 invalid project id / invalid from / invalid to
+//   - 401 missing tenant context (auth middleware should already 401 first)
+//   - 404 project not owned by tenant / no SBOMs / sbom not in project
+//   - 503 audit writer not wired (deployment misconfiguration)
+//   - 500 audit write failed / unexpected error
+//   - 200 success
+func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
+	if h.audit == nil {
+		// Misconfiguration: graph endpoint requires audit so we fail
+		// closed rather than serving a render without an audit row.
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "diff graph endpoint is not wired (audit writer missing)",
+		})
+	}
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+	from, to, err := parseFromTo(c)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	req := diff.Request{
+		TenantID:   tenantID,
+		ProjectID:  projectID,
+		FromSbomID: from,
+		ToSbomID:   to,
+	}
+	resp, err := h.svc.ComputeGraph(c.Request().Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		case errors.Is(err, diff.ErrNoSboms):
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project has no SBOMs to diff"})
+		case errors.Is(err, diff.ErrSbomNotInProject):
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom does not belong to project"})
+		case errors.Is(err, diff.ErrNoNewerSbom):
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "from sbom is already the newest in the project"})
+		default:
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	}
+
+	// Audit-or-nothing (F168): record `diff.graph.view` BEFORE flushing
+	// the response so a failed audit fails the whole request rather
+	// than leaking a render with no audit trail. UserID is optional
+	// (the middleware may not have set it on API-key paths).
+	details := map[string]interface{}{
+		"node_count": len(resp.Nodes),
+		"edge_count": len(resp.Edges),
+		"added":      len(resp.DiffStatus.Added),
+		"removed":    len(resp.DiffStatus.Removed),
+		"changed":    len(resp.DiffStatus.VersionChanged),
+	}
+	if resp.From != nil {
+		details["from_sbom_id"] = resp.From.SbomID.String()
+	}
+	if resp.To != nil {
+		details["to_sbom_id"] = resp.To.SbomID.String()
+	}
+	tID := tenantID
+	pid := projectID
+	auditInput := &model.CreateAuditLogInput{
+		TenantID:     &tID,
+		Action:       ActionDiffGraphView,
+		ResourceType: diff_summary.ResourceTypeSbomDiff,
+		ResourceID:   &pid,
+		Details:      details,
+	}
+	if uid, ok := c.Get(middleware.ContextKeyUserID).(uuid.UUID); ok && uid != uuid.Nil {
+		auditInput.UserID = &uid
+	}
+	if err := h.audit.Log(c.Request().Context(), auditInput); err != nil {
+		// F168: do NOT swallow this. The audit log is the only durable
+		// proof that the operator viewed the graph; a missing row would
+		// silently break the audit chain.
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": fmt.Sprintf("audit write failed: %v", err),
+		})
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ActionDiffGraphView is the audit_logs.action emitted by
+// ProjectDiffGraph on each successful render. Kept here next to the
+// handler so the constant lives with its only emitter.
+const ActionDiffGraphView = "diff.graph.view"
 
 // mapDiffExportError centralises the error → HTTP mapping shared by the
 // CSV + PDF handlers. Mirrors the ProjectDiff mapping.

@@ -1083,7 +1083,8 @@
       "fromSeverity": "変更前",
       "toSeverity": "変更後",
       "policyName": "ポリシー",
-      "aiSummaryPanel": "AI 要約"
+      "aiSummaryPanel": "AI 要約",
+      "graphPanel": "依存関係グラフ"
     },
     "AiSummary": {
       "title": "AI 要約",
@@ -1111,6 +1112,21 @@
       "pdf": "PDF",
       "exportFailed": "エクスポートに失敗しました",
       "exportFailedStatus": "エクスポートに失敗しました (HTTP {status})"
+    },
+    "Graph": {
+      "title": "依存関係グラフ",
+      "description": "2 SBOM 間の依存関係を色付きで可視化します (緑: 追加 / 赤: 削除 / 橙: バージョン変更 / 灰: 変更なし)。 親子関係は CycloneDX の dependencies フィールドから抽出します。",
+      "loading": "グラフを読み込み中...",
+      "loadFailed": "依存関係グラフの読み込みに失敗しました",
+      "empty": "表示できる依存関係がありません。 CycloneDX 形式の SBOM がアップロードされているか確認してください。",
+      "totalNodes": "ノード {count}",
+      "totalEdges": "エッジ {count}",
+      "Status": {
+        "added": "追加",
+        "removed": "削除",
+        "version_changed": "バージョン変更",
+        "unchanged": "変更なし"
+      }
     }
   },
   "Triage": {

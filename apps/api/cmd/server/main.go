@@ -541,9 +541,16 @@ func main() {
 	// M10-6 (#74) — see projectDiffService comment above. M11-4 (#79)
 	// extends with AI summary + CSV/PDF export wired through the same
 	// handler so the (from, to) query string contract is shared.
+	// M12-3 (#84) — graph endpoint added via .WithAudit. The audit
+	// writer is required because every successful render emits a
+	// `diff.graph.view` audit row (F168 audit-or-nothing), unlike the
+	// flat-list endpoint where the audit is implicit via the request
+	// log middleware. If the audit writer is nil the graph route
+	// returns 503 so misconfiguration fails closed.
 	projectDiffHandler := handler.NewDiffHandler(projectDiffService).
 		WithSummary(projectDiffSummaryService).
-		WithExport(projectDiffExportService)
+		WithExport(projectDiffExportService).
+		WithAudit(auditRepo)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	vexHandler := handler.NewVEXHandler(vexService)
@@ -925,6 +932,11 @@ func main() {
 	auth.POST("/projects/:id/diff/summary", projectDiffHandler.ProjectDiffSummary)
 	auth.GET("/projects/:id/diff.csv", projectDiffHandler.ProjectDiffCSV)
 	auth.GET("/projects/:id/diff.pdf", projectDiffHandler.ProjectDiffPDF)
+	// M12-3 (#84) — dependency-graph view that complements the M10-6
+	// flat-list diff. Same (from, to) query string contract; emits a
+	// `diff.graph.view` audit row per successful render. See
+	// internal/service/diff/graph.go + handler.ProjectDiffGraph godoc.
+	auth.GET("/projects/:id/diff/graph", projectDiffHandler.ProjectDiffGraph)
 
 	// VEX endpoints
 	auth.GET("/projects/:id/vex", vexHandler.List)

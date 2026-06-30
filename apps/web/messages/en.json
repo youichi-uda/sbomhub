@@ -1082,7 +1082,8 @@
       "fromSeverity": "From",
       "toSeverity": "To",
       "policyName": "Policy",
-      "aiSummaryPanel": "AI summary"
+      "aiSummaryPanel": "AI summary",
+      "graphPanel": "Dependency graph"
     },
     "AiSummary": {
       "title": "AI Summary",
@@ -1110,6 +1111,21 @@
       "pdf": "PDF",
       "exportFailed": "Export failed",
       "exportFailedStatus": "Export failed (HTTP {status})"
+    },
+    "Graph": {
+      "title": "Dependency graph",
+      "description": "Visualises the dependency relationships between the two SBOMs with diff colours (green: added / red: removed / amber: version changed / grey: unchanged). Parent → child edges are parsed from the CycloneDX dependencies field.",
+      "loading": "Loading graph...",
+      "loadFailed": "Failed to load the dependency graph",
+      "empty": "No dependency relationships to render. Make sure a CycloneDX SBOM has been uploaded.",
+      "totalNodes": "{count} nodes",
+      "totalEdges": "{count} edges",
+      "Status": {
+        "added": "Added",
+        "removed": "Removed",
+        "version_changed": "Version changed",
+        "unchanged": "Unchanged"
+      }
     }
   },
   "Triage": {
