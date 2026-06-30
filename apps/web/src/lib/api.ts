@@ -1576,6 +1576,32 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 /**
+ * F184 (M13-5 #91) — null-body envelope defence.
+ *
+ * `request<T>()` resolves to `undefined` on HTTP 204 / empty body and may
+ * additionally yield JSON `null` if the Go handler marshals a
+ * pointer-typed envelope as null (the F164 / F174 nil-slice pattern's
+ * envelope-level cousin). Both shapes hit the same downstream crash
+ * class: every helper below treats the result as a typed envelope and
+ * destructures required fields (`total`, `page`, `summary`, `period`, …)
+ * immediately — when the envelope is `undefined`, the destructure throws
+ * "Cannot read properties of undefined". Round 1 of the M13-5 audit
+ * catalogued analytics.getSummary, reports.list, auditLogs.list and
+ * sbom.diff as concrete sites; this helper collapses raw ==
+ * undefined | null to a caller-supplied default so the destructure is
+ * always safe.
+ *
+ * Slice-shaped fields (`logs`, `reports`, `entries`, …) STILL get a
+ * per-field `?? []` AFTER this call — that is the F164 / F174 layer,
+ * defending against a partially-populated envelope whose nested slice
+ * is null. The two layers compose: envelope-level (this helper) +
+ * field-level (existing `?? []` pattern).
+ */
+function safeEnvelope<T>(raw: T | undefined | null, fallback: T): T {
+  return raw ?? fallback;
+}
+
+/**
  * Build URLSearchParams for CRAReportListFilter. Centralised so list()
  * and listWithMeta() emit identical query strings — drift between the
  * two would surface as "the count says N but the page shows M" which
@@ -1753,26 +1779,39 @@ export const api = {
       // rows.length) calls `.length` / `.map` on them unconditionally,
       // which throws "Cannot read properties of null (reading 'length')"
       // at hydration and trips the Next.js "Application error: a
-      // client-side exception has occurred" boundary. Normalise here so
-      // every consumer of the typed shape gets the invariant the type
-      // promises. Cheaper than scattering `?? []` across the page and
-      // closer to the source of the polymorphism.
+      // client-side exception has occurred" boundary.
+      //
+      // F184 (M13-5 #91): the original M11-1 fix below assumed `raw` was
+      // non-nullable and reached into `raw.components?.added` directly,
+      // which still crashes when `raw` itself is `undefined` (HTTP 204 /
+      // empty body / `request<T>()` returning T = undefined). safeEnvelope
+      // collapses raw == undefined | null to the empty-diff default first;
+      // the per-bucket `?? []` then defends against the nested-null
+      // partial-envelope case (F164's original scope).
+      const safe = safeEnvelope<ProjectDiffResponse>(raw, {
+        project_id: id,
+        from: null,
+        to: null,
+        components: { added: [], removed: [], version_changed: [] },
+        vulnerabilities: { added: [], resolved: [], severity_changed: [] },
+        licenses: { added_policy_violations: [], removed_policy_violations: [] },
+      });
       return {
-        ...raw,
+        ...safe,
         components: {
-          added: raw.components?.added ?? [],
-          removed: raw.components?.removed ?? [],
-          version_changed: raw.components?.version_changed ?? [],
+          added: safe.components?.added ?? [],
+          removed: safe.components?.removed ?? [],
+          version_changed: safe.components?.version_changed ?? [],
         },
         vulnerabilities: {
-          added: raw.vulnerabilities?.added ?? [],
-          resolved: raw.vulnerabilities?.resolved ?? [],
-          severity_changed: raw.vulnerabilities?.severity_changed ?? [],
+          added: safe.vulnerabilities?.added ?? [],
+          resolved: safe.vulnerabilities?.resolved ?? [],
+          severity_changed: safe.vulnerabilities?.severity_changed ?? [],
         },
         licenses: {
-          added_policy_violations: raw.licenses?.added_policy_violations ?? [],
+          added_policy_violations: safe.licenses?.added_policy_violations ?? [],
           removed_policy_violations:
-            raw.licenses?.removed_policy_violations ?? [],
+            safe.licenses?.removed_policy_violations ?? [],
         },
       };
     },
@@ -1806,10 +1845,31 @@ export const api = {
       // getDiff: the Go backend marshals nil slices as JSON `null`,
       // and consumers call `.map` on highlights / evidence
       // unconditionally.
+      //
+      // F184 (M13-5 #91): the original normalisation reached `raw.highlights`
+      // directly and crashed when `raw` itself was undefined (HTTP 204 /
+      // empty body / null envelope). safeEnvelope provides the
+      // ai-disabled-equivalent placeholder so the destructure is safe even
+      // when the backend yields no body — the UI then renders the empty
+      // summary card instead of the null-crash boundary.
+      const safe = safeEnvelope<ProjectDiffSummaryResponse>(raw, {
+        project_id: id,
+        from: null,
+        to: null,
+        summary: "",
+        highlights: [],
+        confidence: 0,
+        evidence: [],
+        provider: "",
+        model: "",
+        lang: opts?.lang ?? "",
+        generated_at: "",
+        ai_disabled: true,
+      });
       return {
-        ...raw,
-        highlights: raw.highlights ?? [],
-        evidence: raw.evidence ?? [],
+        ...safe,
+        highlights: safe.highlights ?? [],
+        evidence: safe.evidence ?? [],
       };
     },
     /**
@@ -2155,7 +2215,12 @@ export const api = {
       // the F164 / getDiffGraph philosophy: handler-side guards have
       // regressed twice before (F167, F164), so the client refuses to
       // trust them.
-      return { ...raw, drafts: raw?.drafts ?? [] };
+      //
+      // F184 (M13-5 #91): safeEnvelope makes the spread safe when raw is
+      // undefined / null (HTTP 204 / null body). The slice schema is just
+      // `{ drafts: VexDraft[] }`, so the empty fallback is `{ drafts: [] }`.
+      const safe = safeEnvelope<VexDraftListResponse>(raw, { drafts: [] });
+      return { ...safe, drafts: safe.drafts ?? [] };
     },
     getDraft: (projectId: string, draftId: string) =>
       request<VexDraft>(
@@ -2213,7 +2278,12 @@ export const api = {
       // F174 (M13-5): listWithMeta (below) already normalises via
       // Array.isArray; keep the bare-envelope path symmetric so callers
       // can switch between the two without changing their `.map` calls.
-      return { ...raw, reports: raw?.reports ?? [] };
+      //
+      // F184 (M13-5 #91): safeEnvelope defends against raw == undefined |
+      // null (HTTP 204 / null-body case). CRAReportListResponse is just
+      // `{ reports: CRAReport[] }` today, so the fallback is one field.
+      const safe = safeEnvelope<CRAReportListResponse>(raw, { reports: [] });
+      return { ...safe, reports: safe.reports ?? [] };
     },
     /**
      * GET list + total count from X-Total-Count (M1 #F28 pattern, see
@@ -2338,7 +2408,11 @@ export const api = {
       // F174 (M13-5): handler/meti.go:372 currently guards but the
       // matrix page mounts unconditionally. Belt-and-braces per the F164
       // pattern.
-      return { ...raw, assessments: raw?.assessments ?? [] };
+      //
+      // F184 (M13-5 #91): also defend against the whole envelope being
+      // undefined / null. MetiAssessmentListResponse is one slice field.
+      const safe = safeEnvelope<MetiAssessmentListResponse>(raw, { assessments: [] });
+      return { ...safe, assessments: safe.assessments ?? [] };
     },
     /**
      * POST /refresh — re-runs the evaluator fan-out (27 criteria) and
@@ -2356,7 +2430,19 @@ export const api = {
       );
       // F174 (M13-5): post-refresh `assessments` field comes from the
       // same repo path as getAssessment. Keep the response shape stable.
-      return { ...raw, assessments: raw?.assessments ?? [] };
+      //
+      // F184 (M13-5 #91): the refresh handler can land on 503 AI-disabled
+      // — surfaced as a thrown APIError above — or on a successful 204 if
+      // a future fast-path early-returns when no criterion changed.
+      // safeEnvelope provides defaults for the evaluator_version /
+      // refreshed counters so the UI can show "0 criteria refreshed"
+      // instead of crashing.
+      const safe = safeEnvelope<MetiRefreshResponse>(raw, {
+        assessments: [],
+        evaluator_version: "",
+        refreshed: 0,
+      });
+      return { ...safe, assessments: safe.assessments ?? [] };
     },
     /**
      * PUT /override — applies one operator override to a single criterion
@@ -2423,7 +2509,12 @@ export const api = {
       // F174 (M13-5): the improvement-actions list is the M3 dashboard's
       // primary call-to-action; "what should we fix next" must show an
       // empty state, not crash.
-      return { ...raw, actions: raw?.actions ?? [] };
+      //
+      // F184 (M13-5 #91): safeEnvelope handles raw == undefined | null so
+      // the "all achieved" empty case renders the dashboard's
+      // congratulations state instead of crashing.
+      const safe = safeEnvelope<MetiImprovementActionsResponse>(raw, { actions: [] });
+      return { ...safe, actions: safe.actions ?? [] };
     },
   },
   sbom: {
@@ -2441,12 +2532,33 @@ export const api = {
       // []…; never appended). The page-level dashboard renders all four
       // unconditionally so a single `null` crashed it. Spread + per-key
       // ?? keeps the summary object intact.
+      //
+      // F184 (M13-5 #91): the original spread of `...raw` (with raw =
+      // undefined) returned `{ added: [], removed: [], updated: [],
+      // new_vulnerabilities: [] }` — missing the required `summary`
+      // counter field that `SbomDiffResponse` declares. Downstream
+      // dashboard widgets read `response.summary.added_count` and
+      // crashed with "Cannot read properties of undefined (reading
+      // 'added_count')". safeEnvelope supplies the zeroed summary so the
+      // dashboard renders "0 added / 0 removed / 0 updated".
+      const safe = safeEnvelope<SbomDiffResponse>(raw, {
+        summary: {
+          added_count: 0,
+          removed_count: 0,
+          updated_count: 0,
+          new_vulnerabilities_count: 0,
+        },
+        added: [],
+        removed: [],
+        updated: [],
+        new_vulnerabilities: [],
+      });
       return {
-        ...raw,
-        added: raw?.added ?? [],
-        removed: raw?.removed ?? [],
-        updated: raw?.updated ?? [],
-        new_vulnerabilities: raw?.new_vulnerabilities ?? [],
+        ...safe,
+        added: safe.added ?? [],
+        removed: safe.removed ?? [],
+        updated: safe.updated ?? [],
+        new_vulnerabilities: safe.new_vulnerabilities ?? [],
       };
     },
   },
@@ -2481,11 +2593,25 @@ export const api = {
       // interface marks email_recipients as optional, so we widen it to
       // an always-present `[]` to let the email-status column render
       // unconditionally.
-      const reports = (raw?.reports ?? []).map((r) => ({
+      //
+      // F184 (M13-5 #91): the original `{ ...raw, reports }` dropped the
+      // pagination fields (`total`, `page`, `limit`, `total_pages`) when
+      // raw was undefined — the report-list page reads them
+      // unconditionally for the pager footer. safeEnvelope fills them
+      // in with the empty-list defaults (page = 1, limit = requested,
+      // total = 0).
+      const safe = safeEnvelope<ReportListResponse>(raw, {
+        reports: [],
+        total: 0,
+        page: page ?? 1,
+        limit: limit ?? 0,
+        total_pages: 0,
+      });
+      const reports = (safe.reports ?? []).map((r) => ({
         ...r,
         email_recipients: r.email_recipients ?? [],
       }));
-      return { ...raw, reports };
+      return { ...safe, reports };
     },
     get: (id: string) => request<GeneratedReport>(`/api/v1/reports/${id}`),
     downloadUrl: (id: string) => `${API_URL}/api/v1/reports/${id}/download`,
@@ -2502,12 +2628,34 @@ export const api = {
       const raw = await request<AnalyticsSummary>(
         `/api/v1/analytics/summary${days ? `?days=${days}` : ""}`,
       );
+      // F184 (M13-5 #91): the original normalisation only filled the
+      // four slice fields and dropped `period` + the AnalyticsQuickStats
+      // `summary` block when raw was undefined. The dashboard reads
+      // `response.summary.total_open_vulnerabilities` etc.
+      // unconditionally for the headline KPI cards, so a null body
+      // crashed the analytics page. safeEnvelope supplies the zero
+      // KPIs so the cards render "0 / 0 / 0%" instead.
+      const safe = safeEnvelope<AnalyticsSummary>(raw, {
+        period: days ?? 0,
+        mttr: [],
+        vulnerability_trend: [],
+        slo_achievement: [],
+        compliance_trend: [],
+        summary: {
+          total_open_vulnerabilities: 0,
+          resolved_last_30_days: 0,
+          average_mttr_hours: 0,
+          overall_slo_achievement_pct: 0,
+          current_compliance_score: 0,
+          compliance_max_score: 0,
+        },
+      });
       return {
-        ...raw,
-        mttr: raw?.mttr ?? [],
-        vulnerability_trend: raw?.vulnerability_trend ?? [],
-        slo_achievement: raw?.slo_achievement ?? [],
-        compliance_trend: raw?.compliance_trend ?? [],
+        ...safe,
+        mttr: safe.mttr ?? [],
+        vulnerability_trend: safe.vulnerability_trend ?? [],
+        slo_achievement: safe.slo_achievement ?? [],
+        compliance_trend: safe.compliance_trend ?? [],
       };
     },
     getMTTR: async (days?: number): Promise<MTTRResult[]> =>
@@ -2554,7 +2702,21 @@ export const api = {
       // this is belt-and-braces — but the table renders `.map` on every
       // request so a future refactor that returns nil from a fast path
       // (e.g. early-return for empty windows) cannot crash the page.
-      return { ...raw, logs: raw?.logs ?? [] };
+      //
+      // F184 (M13-5 #91): the original `{ ...raw, logs }` dropped the
+      // pager metadata (`total`, `page`, `limit`, `total_pages`) when
+      // raw was undefined. The audit log page footer reads them
+      // unconditionally for the "page N of M" widget; safeEnvelope
+      // supplies the empty-list defaults so the footer renders
+      // "page 1 of 0" instead of crashing.
+      const safe = safeEnvelope<AuditListResponse>(raw, {
+        logs: [],
+        total: 0,
+        page: filter?.page ?? 1,
+        limit: filter?.limit ?? 0,
+        total_pages: 0,
+      });
+      return { ...safe, logs: safe.logs ?? [] };
     },
     exportUrl: (filter?: AuditFilter) => {
       const params = new URLSearchParams();
@@ -2575,10 +2737,19 @@ export const api = {
       // both follow the `var rows []…` / `rows = append(...)` pattern,
       // so empty-window summaries marshal as null. The audit dashboard
       // renders both arrays into bar charts unconditionally.
+      //
+      // F184 (M13-5 #91): also defend the `period` scalar — the chart
+      // title renders `"Last {period} days"` and crashed when raw was
+      // undefined and period dropped out of the spread.
+      const safe = safeEnvelope<AuditStatistics>(raw, {
+        period: days ?? 0,
+        action_counts: [],
+        daily_counts: [],
+      });
       return {
-        ...raw,
-        action_counts: raw?.action_counts ?? [],
-        daily_counts: raw?.daily_counts ?? [],
+        ...safe,
+        action_counts: safe.action_counts ?? [],
+        daily_counts: safe.daily_counts ?? [],
       };
     },
     getActions: async (): Promise<ActionInfo[]> =>
@@ -2604,7 +2775,15 @@ export const api = {
       // F174 (M13-5): repository.EOLRepository.ListProducts (repo/eol.go:118)
       // declares `var products …` → nil → JSON null when no products
       // are synced yet (first boot before the EOL background sync runs).
-      return { ...raw, products: raw?.products ?? [] };
+      //
+      // F184 (M13-5 #91): the original `{ ...raw, products }` dropped
+      // `total` when raw was undefined — the EOL list page renders
+      // `total` in its header summary. safeEnvelope supplies `total: 0`.
+      const safe = safeEnvelope<{ products: EOLProduct[]; total: number }>(
+        raw,
+        { products: [], total: 0 },
+      );
+      return { ...safe, products: safe.products ?? [] };
     },
     getProduct: async (
       name: string,
@@ -2616,7 +2795,30 @@ export const api = {
       // repository.EOLRepository.GetCyclesByProduct (repo/eol.go:169) via
       // the same nil-slice pattern. The product detail page builds a
       // timeline widget unconditionally over `cycles`.
-      return { ...raw, cycles: raw?.cycles ?? [] };
+      //
+      // F184 (M13-5 #91): if the EOL product is absent the handler returns
+      // 404 (thrown by APIError above), but a 204 / empty body on a
+      // legitimate hit would crash the consumer that destructures
+      // `product.name`. The product detail page is not built to render a
+      // truly empty product, so we surface a sentinel zero product with
+      // the requested name and an empty cycles list — the consumer will
+      // observe the empty timeline and the operator will see the
+      // "no cycles synced" empty state rather than a hard crash.
+      const safe = safeEnvelope<{ product: EOLProduct; cycles: EOLProductCycle[] }>(
+        raw,
+        {
+          product: {
+            id: "",
+            name,
+            title: name,
+            total_cycles: 0,
+            created_at: "",
+            updated_at: "",
+          },
+          cycles: [],
+        },
+      );
+      return { ...safe, cycles: safe.cycles ?? [] };
     },
     getStats: () => request<EOLStats>("/api/v1/eol/stats"),
     checkComponent: (name: string, version?: string, purl?: string) => {
@@ -2650,7 +2852,15 @@ export const api = {
       // → `var entries …`. The KEV catalog page is the M0 trust-rescue
       // "is the KEV sync alive" smoke; an empty post-sync state must
       // render the empty-state card, not crash.
-      return { ...raw, entries: raw?.entries ?? [] };
+      //
+      // F184 (M13-5 #91): safeEnvelope also fills `total: 0` so the
+      // catalog page's header count renders zero instead of crashing
+      // on the null-body path.
+      const safe = safeEnvelope<{ entries: KEVEntry[]; total: number }>(
+        raw,
+        { entries: [], total: 0 },
+      );
+      return { ...safe, entries: safe.entries ?? [] };
     },
     getStats: () => request<KEVStats>("/api/v1/kev/stats"),
     getByCVE: (cveId: string) =>
@@ -2666,7 +2876,14 @@ export const api = {
       // F174 (M13-5): per-project KEV intersection from
       // repository/kev.go:358 GetKEVVulnerabilities; nil when the project
       // SBOM has no KEV-listed CVEs (the common case for clean projects).
-      return { ...raw, vulnerabilities: raw?.vulnerabilities ?? [] };
+      //
+      // F184 (M13-5 #91): also defend `count`, which the project KEV
+      // badge reads unconditionally.
+      const safe = safeEnvelope<{ vulnerabilities: Vulnerability[]; count: number }>(
+        raw,
+        { vulnerabilities: [], count: 0 },
+      );
+      return { ...safe, vulnerabilities: safe.vulnerabilities ?? [] };
     },
   },
   // SSVC methods
@@ -2707,7 +2924,22 @@ export const api = {
       // path operators use to triage vulnerabilities; an empty filtered
       // view (e.g. decision=Immediate but no immediate items) hit JSON
       // null before this normalisation.
-      return { ...raw, assessments: raw?.assessments ?? [] };
+      //
+      // F184 (M13-5 #91): also defend the offset-based pager
+      // (`total` / `limit` / `offset`) so the queue's "showing N of M"
+      // footer renders zeros on the null-body path.
+      const safe = safeEnvelope<{
+        assessments: SSVCAssessmentWithVuln[];
+        total: number;
+        limit: number;
+        offset: number;
+      }>(raw, {
+        assessments: [],
+        total: 0,
+        limit: limit ?? 0,
+        offset: offset ?? 0,
+      });
+      return { ...safe, assessments: safe.assessments ?? [] };
     },
     getAssessment: (projectId: string, vulnId: string) =>
       request<SSVCAssessment>(`/api/v1/projects/${projectId}/vulnerabilities/${vulnId}/ssvc`),
@@ -2759,7 +2991,16 @@ export const api = {
       // F174 (M13-5): repository.IPARepository.ListAnnouncements
       // (repo/ipa.go:114) → `var rows …`. Empty when an operator opens
       // the IPA pane before the first sync completes.
-      return { ...raw, announcements: raw?.announcements ?? [] };
+      //
+      // F184 (M13-5 #91): also defend the IPA pager metadata —
+      // `total` / `limit` / `offset` are rendered in the page footer.
+      const safe = safeEnvelope<IPAAnnouncementListResponse>(raw, {
+        announcements: [],
+        total: 0,
+        limit: limit ?? 0,
+        offset: offset ?? 0,
+      });
+      return { ...safe, announcements: safe.announcements ?? [] };
     },
     getAnnouncementsByCVE: async (
       cveId: string,
@@ -2769,7 +3010,16 @@ export const api = {
       );
       // F174 (M13-5): GetAnnouncementsByCVE (repo/ipa.go:145) same
       // pattern; nil when no IPA announcement is correlated.
-      return { ...raw, announcements: raw?.announcements ?? [] };
+      //
+      // F184 (M13-5 #91): also defend `cve_id` — consumers display
+      // "IPA correlation for {cve_id}" verbatim and crashed when raw
+      // was undefined and the field dropped out of the spread. Use the
+      // requested CVE id as the natural default.
+      const safe = safeEnvelope<{ announcements: IPAAnnouncement[]; cve_id: string }>(
+        raw,
+        { announcements: [], cve_id: cveId },
+      );
+      return { ...safe, announcements: safe.announcements ?? [] };
     },
     getSettings: () => request<IPASyncSettings>("/api/v1/settings/ipa"),
     updateSettings: (settings: { enabled: boolean; notify_on_new: boolean; notify_severity: string[] }) =>
@@ -2789,7 +3039,15 @@ export const api = {
       // (repo/issue_tracker.go:91) → `var rows …`. The integrations
       // settings page renders the empty-state "Configure your first
       // integration" card when this is `[]` but crashed on `null`.
-      return { ...raw, connections: raw?.connections ?? [] };
+      //
+      // F184 (M13-5 #91): envelope shape is one slice field so the
+      // safeEnvelope call is trivial; we still adopt the pattern for
+      // consistency with the other helpers.
+      const safe = safeEnvelope<{ connections: IssueTrackerConnection[] }>(
+        raw,
+        { connections: [] },
+      );
+      return { ...safe, connections: safe.connections ?? [] };
     },
     get: (id: string) => request<IssueTrackerConnection>(`/api/v1/integrations/${id}`),
     create: (input: CreateConnectionInput) =>
@@ -2818,7 +3076,16 @@ export const api = {
       // (repo/issue_tracker.go:339) → `var rows …`. The tickets queue
       // is empty whenever no operator has created any ticket from a
       // vulnerability yet — common on fresh installs.
-      return { ...raw, tickets: raw?.tickets ?? [] };
+      //
+      // F184 (M13-5 #91): also defend `total` / `limit` / `offset` for
+      // the queue pager.
+      const safe = safeEnvelope<TicketListResponse>(raw, {
+        tickets: [],
+        total: 0,
+        limit: limit ?? 0,
+        offset: offset ?? 0,
+      });
+      return { ...safe, tickets: safe.tickets ?? [] };
     },
     getByVulnerability: async (
       vulnId: string,
@@ -2830,7 +3097,14 @@ export const api = {
       // Per-vulnerability ticket list is null when no tickets were
       // filed against that CVE — the vulnerability detail dialog uses
       // this to decide whether to show the "Open in Jira" shortcut.
-      return { ...raw, tickets: raw?.tickets ?? [] };
+      //
+      // F184 (M13-5 #91): envelope shape is one slice field; safeEnvelope
+      // makes the spread safe when raw is undefined / null.
+      const safe = safeEnvelope<{ tickets: VulnerabilityTicketWithDetails[] }>(
+        raw,
+        { tickets: [] },
+      );
+      return { ...safe, tickets: safe.tickets ?? [] };
     },
     create: (vulnId: string, input: Omit<CreateTicketInput, "vulnerability_id">) =>
       request<VulnerabilityTicket>(`/api/v1/vulnerabilities/${vulnId}/ticket`, {
@@ -2919,7 +3193,29 @@ export const api = {
       // hardening it against null lets us treat the page as
       // safe-by-default. Component table on the public view maps
       // unconditionally.
-      return { ...raw, components: raw?.components ?? [] };
+      //
+      // F184 (M13-5 #91): also defend the `project_name` / `sbom` /
+      // `link` scalars. A null body on the public route would otherwise
+      // surface the Next.js application-error boundary instead of a
+      // friendly "this link is invalid or expired" empty state.
+      const safe = safeEnvelope<PublicSbomView>(raw, {
+        project_name: "",
+        sbom: {
+          id: "",
+          project_id: "",
+          format: "",
+          version: null,
+          created_at: "",
+        },
+        components: [],
+        link: {
+          name: "",
+          expires_at: "",
+          view_count: 0,
+          download_count: 0,
+        },
+      });
+      return { ...safe, components: safe.components ?? [] };
     },
   },
 };
@@ -3001,14 +3297,27 @@ export async function getDiffGraph(
   // F164: defence-in-depth `?? []` on every slice field. The Go side
   // already initialises with make([]T, 0); this guards against a future
   // regression on either end (e.g. someone re-introducing omitempty).
+  //
+  // F184 (M13-5 #91): safeEnvelope handles the raw == undefined | null
+  // case (HTTP 204 / null body); the per-slice `?? []` below handles
+  // the partial-envelope case where raw exists but a nested slice is
+  // null — same composition pattern as getDiff above.
+  const safe = safeEnvelope<ProjectDiffGraphResponse>(raw, {
+    project_id: projectId,
+    from: null,
+    to: null,
+    nodes: [],
+    edges: [],
+    diff_status: { added: [], removed: [], version_changed: [] },
+  });
   return {
-    ...raw,
-    nodes: raw.nodes ?? [],
-    edges: raw.edges ?? [],
+    ...safe,
+    nodes: safe.nodes ?? [],
+    edges: safe.edges ?? [],
     diff_status: {
-      added: raw.diff_status?.added ?? [],
-      removed: raw.diff_status?.removed ?? [],
-      version_changed: raw.diff_status?.version_changed ?? [],
+      added: safe.diff_status?.added ?? [],
+      removed: safe.diff_status?.removed ?? [],
+      version_changed: safe.diff_status?.version_changed ?? [],
     },
   };
 }
