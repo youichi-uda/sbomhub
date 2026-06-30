@@ -86,9 +86,59 @@ type Criterion struct {
 	Phase Phase `yaml:"phase"`
 
 	// TitleJA / TitleEN are short headlines for the criterion in each
-	// supported UI language.
+	// supported UI language. The dashboard and evidence_pack builder
+	// render TitleJA as the canonical short label; M12-2 (#83) preserves
+	// this field unchanged so handler / web / CLI consumers do not need
+	// to migrate at the same time as the schema split.
 	TitleJA string `yaml:"title_ja"`
 	TitleEN string `yaml:"title_en"`
+
+	// VerbatimTitleJA (M12-2, #83) is the byte-exact wording from the
+	// primary METI ver 2.0 PDF (SBOMv2.pdf, SHA256
+	// cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a)
+	// or — when the primary PDF has no anchoring sentence — from the
+	// IPA secondary catalogue (sbn8o10000001zcl.pdf, 2024-12). Required
+	// for all 32 criteria from M12-2 onward; criteria sourced from the
+	// IPA secondary set Source = "ipa-derived" so auditors can tell at
+	// a glance which 1-line came from which document.
+	//
+	// Schema rationale (M12-2 option A): the M11-3 wave overloaded
+	// TitleJA to carry BOTH the official wording (for the 17 VERBATIM
+	// criteria) and the SBOMHub-tuned evaluator label (for the 15
+	// DISTILLED criteria). VerbatimTitleJA pulls the official wording
+	// out into its own field so the dashboard provenance pane can
+	// render an audit-grade "this is what METI / IPA wrote" string
+	// without losing the SBOMHub evaluator-correspondent label that
+	// EvaluatorTextJA carries.
+	VerbatimTitleJA string `yaml:"verbatim_title_ja"`
+
+	// EvaluatorTextJA (M12-2, #83) is the SBOMHub evaluator-matching
+	// wording — i.e. the label whose semantics line up with the
+	// criteria/*.go auto-signal logic and the manual-attestation
+	// checklist_responses keys. Required for all 32 criteria from M12-2
+	// onward. For the 17 VERBATIM criteria EvaluatorTextJA equals
+	// VerbatimTitleJA (the official wording already matches the
+	// evaluator semantics). For the 15 DISTILLED criteria
+	// EvaluatorTextJA is the M11-3 distillation wording (preserves the
+	// signal correspondence) while VerbatimTitleJA quotes the official
+	// PDF.
+	EvaluatorTextJA string `yaml:"evaluator_text_ja"`
+
+	// Source (M12-2, #83) tags the upstream document that
+	// VerbatimTitleJA was extracted from. Allowed values:
+	//
+	//   - "" (default) / "meti-primary-ver2.0" — primary METI ver 2.0
+	//     PDF (SBOMv2.pdf). Empty default keeps the YAML noise low for
+	//     the majority of criteria.
+	//   - "ipa-derived" — IPA secondary catalogue (sbn8o10000001zcl
+	//     .pdf, 2024-12), used when the primary PDF has no anchoring
+	//     sentence for the criterion. M12-2 confirmed 5 such criteria:
+	//     env_setup.01 / env_setup.11 / sbom_creation.01 /
+	//     sbom_creation.10 / sbom_operation.11.
+	//
+	// The dashboard provenance pane uses Source to render "IPA二次資料"
+	// vs "経産省ver2.0" badges next to the VerbatimTitleJA label.
+	Source string `yaml:"source,omitempty"`
 
 	// DescriptionJA / DescriptionEN spell out what the criterion requires
 	// and why, in each supported language. May contain newlines (preserved
@@ -330,6 +380,17 @@ var validMetadataVerificationStatuses = map[string]struct{}{
 	"deferred": {},
 }
 
+// validCriterionSources is the closed set of values for Criterion
+// .Source (M12-2 #83). Empty / "meti-primary-ver2.0" both denote the
+// primary METI PDF; "ipa-derived" denotes the IPA secondary catalogue
+// (2024-12 PDF). The loader rejects typos at parse time so a future
+// authoring round cannot silently downgrade provenance.
+var validCriterionSources = map[string]struct{}{
+	"":                     {}, // legacy / primary METI ver 2.0 (default)
+	"meti-primary-ver2.0":  {},
+	"ipa-derived":          {},
+}
+
 // validateMetadata enforces the per-field invariants for the catalog
 // metadata block.
 //
@@ -404,6 +465,21 @@ func validateCriterion(c *Criterion) error {
 	}
 	if c.SourceSection == "" {
 		return fmt.Errorf("missing source_section")
+	}
+	// M12-2 (#83): schema split requires both fields populated for
+	// every criterion. The verbatim wording is the official METI ver
+	// 2.0 PDF (or IPA secondary) byte-exact text; the evaluator text
+	// is what the criteria/*.go signal logic and UI render against.
+	// Empty is rejected at load time so a future authoring round
+	// cannot silently regress the audit posture.
+	if c.VerbatimTitleJA == "" {
+		return fmt.Errorf("missing verbatim_title_ja (M12-2 #83 schema requires every criterion to carry the byte-exact METI ver 2.0 / IPA wording)")
+	}
+	if c.EvaluatorTextJA == "" {
+		return fmt.Errorf("missing evaluator_text_ja (M12-2 #83 schema requires every criterion to carry the SBOMHub evaluator-correspondent wording)")
+	}
+	if _, ok := validCriterionSources[c.Source]; !ok {
+		return fmt.Errorf("unknown source %q (want empty / meti-primary-ver2.0 / ipa-derived)", c.Source)
 	}
 	// ID-prefix check: a criterion's id must encode its phase so authors
 	// cannot silently mis-classify a duplicated entry.
