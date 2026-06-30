@@ -18,8 +18,11 @@ import (
 // audit_logs table outage, which is worse than dropping the audit row.
 // F229 (M14 Phase D round 3) adds this symmetric docstring so a future
 // reviewer inspecting mcp_audit.go in isolation has the same signal
-// audit.go now carries — the swallow at L<N> is intentional, not an
-// F168 audit-or-nothing violation.
+// audit.go now carries — the inline swallow below is intentional, not
+// an F168 audit-or-nothing violation. F230 (M14 Phase D round 4)
+// rewrote the line-number reference to a position-relative phrase so
+// the docstring does not bit-rot under future line drift, matching
+// the F227 docstring's line-number-free style on audit.go.
 func MCPAudit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
