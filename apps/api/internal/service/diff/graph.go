@@ -309,32 +309,55 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 	// orphan nodes that would confuse the diff colours).
 	refToKey := map[string]string{}
 
-	if bom.Components != nil {
-		for _, c := range *bom.Components {
-			comp := model.Component{
+	// indexComponent is the shared add-node-to-graph logic used for
+	// both bom.Metadata.Component (the application/root node, per the
+	// CycloneDX 1.6 metadata.component contract) and bom.Components
+	// (libraries / files / etc). F171: previously only bom.Components
+	// was indexed, which silently dropped the root node + any edges
+	// whose `ref` pointed at the metadata.component bom-ref.
+	indexComponent := func(c cdx.Component) {
+		comp := model.Component{
+			Name:    c.Name,
+			Version: c.Version,
+			Type:    string(c.Type),
+			Purl:    c.PackageURL,
+		}
+		key := componentMatchKey(comp)
+		if key == "" {
+			// No usable identity (no purl, no name). Skip — we
+			// cannot match this across SBOMs.
+			return
+		}
+		if _, dup := out.nodes[key]; !dup {
+			out.nodes[key] = GraphNode{
+				ID:      key,
 				Name:    c.Name,
 				Version: c.Version,
 				Type:    string(c.Type),
-				Purl:    c.PackageURL,
 			}
-			key := componentMatchKey(comp)
-			if key == "" {
-				// No usable identity (no purl, no name). Skip — we
-				// cannot match this across SBOMs.
-				continue
-			}
-			if _, dup := out.nodes[key]; !dup {
-				out.nodes[key] = GraphNode{
-					ID:      key,
-					Name:    c.Name,
-					Version: c.Version,
-					Type:    string(c.Type),
-				}
-				out.orderedIDs = append(out.orderedIDs, key)
-			}
-			if c.BOMRef != "" {
+			out.orderedIDs = append(out.orderedIDs, key)
+		}
+		if c.BOMRef != "" {
+			// First-write-wins: keep the metadata.component mapping
+			// when a duplicate bom-ref shows up under components, so
+			// the root edge still resolves.
+			if _, exists := refToKey[c.BOMRef]; !exists {
 				refToKey[c.BOMRef] = key
 			}
+		}
+	}
+
+	// F171: metadata.component is the canonical root in CycloneDX 1.6
+	// (application, framework, container, etc). Index it BEFORE
+	// bom.Components so the root node lands at orderedIDs[0] and any
+	// dependencies[].ref pointing at the root bom-ref resolves.
+	if bom.Metadata != nil && bom.Metadata.Component != nil {
+		indexComponent(*bom.Metadata.Component)
+	}
+
+	if bom.Components != nil {
+		for _, c := range *bom.Components {
+			indexComponent(c)
 		}
 	}
 

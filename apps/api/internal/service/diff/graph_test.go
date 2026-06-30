@@ -45,9 +45,14 @@ type cdxDependency struct {
 	Dependencies []string `json:"dependsOn,omitempty"`
 }
 
+type cdxMetadata struct {
+	Component *cdxComponent `json:"component,omitempty"`
+}
+
 type cdxDoc struct {
 	BOMFormat    string          `json:"bomFormat"`
 	SpecVersion  string          `json:"specVersion"`
+	Metadata     *cdxMetadata    `json:"metadata,omitempty"`
 	Components   []cdxComponent  `json:"components"`
 	Dependencies []cdxDependency `json:"dependencies"`
 }
@@ -63,6 +68,25 @@ func makeCycloneDXBytes(t *testing.T, comps []cdxComponent, deps []cdxDependency
 	b, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatalf("marshal cdx fixture: %v", err)
+	}
+	return b
+}
+
+// makeCycloneDXBytesWithMetadata mirrors makeCycloneDXBytes but also
+// emits a `metadata.component` block — the CycloneDX 1.6 canonical
+// home of the application/root node. F171 regression coverage.
+func makeCycloneDXBytesWithMetadata(t *testing.T, root cdxComponent, comps []cdxComponent, deps []cdxDependency) []byte {
+	t.Helper()
+	doc := cdxDoc{
+		BOMFormat:    "CycloneDX",
+		SpecVersion:  "1.6",
+		Metadata:     &cdxMetadata{Component: &root},
+		Components:   comps,
+		Dependencies: deps,
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal cdx fixture with metadata: %v", err)
 	}
 	return b
 }
@@ -344,6 +368,82 @@ func TestComputeGraph_TenantMismatch_ReturnsErrNoRows(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected ErrNoRows-class error for wrong tenant, got nil")
+	}
+}
+
+// TestComputeGraph_MetadataComponentRoot_F171 covers the Codex round-1
+// finding F171: parseCycloneDXGraph used to only walk bom.Components
+// for the bom-ref → match-key index, which silently dropped the
+// application/root node + every edge whose `ref` pointed at it. The
+// fixture below puts the root in metadata.component (per the
+// CycloneDX 1.6 spec) and asserts the root node, the root → library
+// edge, and the library node all survive.
+func TestComputeGraph_MetadataComponentRoot_F171(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	toID := uuid.New()
+	rawData := makeCycloneDXBytesWithMetadata(t,
+		cdxComponent{BOMRef: "app", Type: "application", Name: "app", Version: "1.0.0", Purl: "pkg:my/app@1.0.0"},
+		[]cdxComponent{
+			{BOMRef: "lib", Type: "library", Name: "lib", Version: "2.0.0", Purl: "pkg:npm/lib@2.0.0"},
+		},
+		[]cdxDependency{
+			{Ref: "app", Dependencies: []string{"lib"}},
+		},
+	)
+	toSbom := model.Sbom{
+		ID: toID, TenantID: tenantID, ProjectID: projectID,
+		Format: "cyclonedx", Version: "1.6", RawData: rawData,
+		CreatedAt: time.Now(),
+	}
+	pr := &fakeProjectRepo{projects: map[uuid.UUID]uuid.UUID{projectID: tenantID}}
+	sr := &fakeSbomRepo{
+		byID:      map[uuid.UUID]model.Sbom{toID: toSbom},
+		byProject: map[uuid.UUID][]model.Sbom{projectID: {toSbom}},
+	}
+	cr := &fakeComponentRepo{components: map[uuid.UUID][]model.Component{}, vulns: map[uuid.UUID][]model.ComponentVulnerability{}}
+	lr := &fakeLicenseRepo{policies: map[uuid.UUID][]model.LicensePolicy{}}
+	svc := NewService(pr, sr, cr, lr)
+
+	resp, err := svc.ComputeGraph(context.Background(), Request{TenantID: tenantID, ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("ComputeGraph error: %v", err)
+	}
+
+	wantApp := "pkg:my/app"
+	wantLib := "pkg:npm/lib"
+
+	// Both nodes must be present — pre-fix the app node was dropped.
+	if len(resp.Nodes) != 2 {
+		t.Errorf("Nodes count: got %d, want 2 (app + lib); %+v", len(resp.Nodes), resp.Nodes)
+	}
+	nodeByID := map[string]GraphNode{}
+	for _, n := range resp.Nodes {
+		nodeByID[n.ID] = n
+	}
+	if _, ok := nodeByID[wantApp]; !ok {
+		t.Errorf("F171: metadata.component root node %q missing from graph; got nodes %+v", wantApp, nodeByID)
+	}
+	if _, ok := nodeByID[wantLib]; !ok {
+		t.Errorf("library node %q missing from graph; got nodes %+v", wantLib, nodeByID)
+	}
+	if got := nodeByID[wantApp]; got.Name != "app" || got.Version != "1.0.0" || got.Type != "application" {
+		t.Errorf("root node projection mismatch: %+v", got)
+	}
+
+	// Root → library edge must survive the bom-ref translation —
+	// pre-fix `app` was unindexed so the edge was dropped.
+	if len(resp.Edges) != 1 {
+		t.Fatalf("Edges count: got %d, want 1; %+v", len(resp.Edges), resp.Edges)
+	}
+	e := resp.Edges[0]
+	if e.From != wantApp || e.To != wantLib {
+		t.Errorf("F171: edge mismatch: got %s -> %s, want %s -> %s", e.From, e.To, wantApp, wantLib)
+	}
+
+	// Single-SBOM baseline path: both nodes land in Added.
+	if len(resp.DiffStatus.Added) != 2 {
+		t.Errorf("Added: got %d, want 2 (app + lib); %+v", len(resp.DiffStatus.Added), resp.DiffStatus.Added)
 	}
 }
 
