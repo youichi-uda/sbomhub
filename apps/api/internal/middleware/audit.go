@@ -1003,12 +1003,19 @@ var resourceIDParamPriority = []string{
 
 // ContextKeyAuditResourceID is the echo.Context key handlers use to
 // publish a newly-minted resource UUID for the audit middleware to
-// consume as resource_id when no UUID path param resolves (F208).
+// consume as resource_id (F208).
 //
 // Handlers MUST call SetAuditResourceID(c, id) AFTER a successful
 // create-style operation so the (post-`next(c)`) middleware sees the
-// value during extractResourceID's third fallback path. See
-// extractResourceID head doc for the full strategy.
+// value during extractResourceID's first (override) strategy path —
+// this OVERRIDES the priority-list / ParamNames fallback paths even
+// when a parent :id UUID is present, which is required to close the
+// F190 join-key corruption (parent :id would otherwise win and the
+// audit row would point at the wrong subject). F231 (M14 Phase D
+// round 6) corrected this docstring from the older 'fallback-only'
+// wording to match the override-first implementation pinned by
+// TestExtractResourceID_PostSuccessContextKey_F208 project-nested
+// cases. See extractResourceID head doc for the full strategy.
 //
 // The key is exported so handler/_test files can assert on it without
 // re-typing the literal; the literal value ("audit_resource_id") is
@@ -1017,8 +1024,10 @@ var resourceIDParamPriority = []string{
 const ContextKeyAuditResourceID = "audit_resource_id"
 
 // SetAuditResourceID publishes id on the echo.Context so the audit
-// middleware records audit_logs.resource_id = id when no UUID path
-// param resolves on the route (F208, M14-1).
+// middleware records audit_logs.resource_id = id with override-first
+// semantics — the published id wins over the priority-list /
+// ParamNames-fallback paths even when a parent :id UUID is bound on
+// the route (F208, M14-1; F231 docstring correction).
 //
 // Convenience wrapper around c.Set(ContextKeyAuditResourceID, id) —
 // kept in middleware/ so the contract (key name, accepted types)
