@@ -425,6 +425,47 @@ var resourceIDParamPriority = []string{
 //     someone notices and edits the priority list.
 //  3. Non-UUID values (slugs such as :checkId for checklist response
 //     keys) are intentionally skipped so they never pollute resource_id.
+//     This includes :cve_id (CVE identifiers such as "CVE-2021-44228"
+//     are not UUIDs by spec — see F196). The only currently-known route
+//     binding :cve_id is /projects/:id/ssvc/cve/:cve_id, where the
+//     parent :id rescues the audit row with the project UUID; standalone
+//     CVE-keyed routes will record resource_id = NULL by design.
+//
+// Known limitation — create-route resource_id is NULL (F190, M13 Phase D):
+//
+//	extractResourceID is invoked AFTER `next(c)` returns, but it only
+//	reads path params bound on the route pattern. POST/create routes
+//	such as:
+//
+//	  POST /projects            (newly-minted project UUID in body)
+//	  POST /apikeys             (newly-minted apikey UUID in body)
+//	  POST /projects/:id/cra-reports   (parent :id present, but the
+//	                                    NEW cra_report UUID lives in
+//	                                    the response body)
+//	  POST /projects/:id/vex    (same — new VEX UUID is in body, only
+//	                             the parent project :id is in the path)
+//
+//	have no path param carrying the newly-minted UUID, so the audit row
+//	for every project.created / apikey.created / cra_report.created /
+//	vex.created records resource_id = NULL (or the parent project's
+//	UUID, which is misleading — joining audit_logs.resource_id onto
+//	the newly-created table's primary key on those rows will silently
+//	drop them or join onto the wrong subject).
+//
+//	The F186 commit message implied "create paths covered"; that was
+//	for the action+resource_type classification (which IS correct for
+//	POST routes), not for resource_id (which is not). We are choosing
+//	to document the limitation here rather than reshape the handler
+//	contract — the eventual fix (M14 candidate) requires every create
+//	handler to call c.Set("audit_resource_id", newID) after a
+//	successful create, with extractResourceID falling back to that
+//	context value when no UUID path param resolves. That touches every
+//	create handler and is out of scope for M13 Phase D.
+//
+//	Operational consequence today: forensic queries that join
+//	audit_logs on (resource_type='project' AND action='project.created')
+//	must use details->>'path' + (tenant_id, created_at) heuristics to
+//	correlate to projects.id; resource_id is unreliable for the row.
 func extractResourceID(c echo.Context) *uuid.UUID {
 	// 1) Explicit priority list.
 	for _, name := range resourceIDParamPriority {
