@@ -1034,6 +1034,127 @@ func TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist(t *tes
 	}
 }
 
+// TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough
+// pins F206 (anti-pattern 48 symmetric to F201). F201 added a default arm
+// to the apikeys switch so a future PUT/PATCH route on /projects/:id/apikeys
+// would not silently fall through to the /projects branch and re-introduce
+// F188 mass-misclassification. The same anti-pattern existed on every other
+// hoisted family switch — cra-reports / vex-drafts / vex / notifications /
+// ssvc / meti / licenses / checklist / visualization / public-links /
+// sbom / vulnerabilities all had at least one HTTP verb that was either
+// missing today (e.g. checklist had no POST case, sbom had no PUT/PATCH
+// case) or would land on OPTIONS / HEAD without a default.
+//
+// The F189 ProjectChildResources regression net above exercises only
+// CURRENTLY-ROUTED (method, path) pairs, so method gaps are invisible to
+// it by design. This meta-test enumerates every hoisted family x every
+// standard HTTP method including OPTIONS, and asserts:
+//
+//  1. The resource_type is NEVER ResourceProject. Falling through to the
+//     /projects branch is the F188 / F206 regression and is the primary
+//     thing we are guarding against.
+//
+//  2. The resource_type matches the family's expected resource. A wrong
+//     family (e.g. apikeys path resolving to ResourceVEX) would also
+//     break the audit_logs.(resource_type, resource_id) join key on the
+//     row, but in a less catastrophic way than falling through to
+//     project.
+//
+//  3. The (action, resource) pair is non-empty — i.e. the path is not
+//     silently skipped. A skipped path would drop the audit row entirely
+//     and disappear from forensic queries with no warning.
+//
+// Adding a NEW /projects/:id/<thing> family to determineActionAndResource
+// REQUIRES adding the family to the table below; otherwise the new
+// family's OPTIONS / HEAD route can silently fall through and we lose
+// the F206 invariant. The F189 ProjectChildResources test is also
+// updated alongside (per-method positive assertions), but this meta-test
+// is what catches the absence of a default arm — F189 only catches the
+// absence of a wired-up method case.
+func TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough(t *testing.T) {
+	// Families hoisted ABOVE the /projects branch in
+	// determineActionAndResource. Each entry pins the canonical path for
+	// the family and the expected resource_type. Paths use the Echo
+	// route-pattern shape (`:id`) because that is what c.Path() returns
+	// at request time.
+	//
+	// /apikeys is the only entry whose path is also valid at the tenant
+	// level — the others are gated by the HasPrefix("/projects/") guard
+	// so a tenant-level path with the same segment name falls through to
+	// its own tenant branch (covered by
+	// TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist).
+	families := []struct {
+		name     string
+		path     string
+		resource string
+	}{
+		{"apikeys", "/api/v1/projects/:id/apikeys", model.ResourceAPIKey},
+		{"cra-reports", "/api/v1/projects/:id/cra-reports", model.ResourceCRAReport},
+		{"vex-drafts", "/api/v1/projects/:id/vex-drafts", model.ResourceVEXDraft},
+		{"triage", "/api/v1/projects/:id/triage", model.ResourceTriage},
+		{"vex", "/api/v1/projects/:id/vex", model.ResourceVEX},
+		{"scan", "/api/v1/projects/:id/scan", model.ResourceScan},
+		{"compliance", "/api/v1/projects/:id/compliance", model.ResourceCompliance},
+		{"notifications", "/api/v1/projects/:id/notifications", model.ResourceNotification},
+		{"diff", "/api/v1/projects/:id/diff", model.ResourceDiff},
+		{"ssvc", "/api/v1/projects/:id/ssvc", model.ResourceSSVC},
+		{"meti", "/api/v1/projects/:id/meti", model.ResourceMETI},
+		{"licenses", "/api/v1/projects/:id/licenses", model.ResourceLicensePolicy},
+		{"evidence-pack", "/api/v1/projects/:id/evidence-pack", model.ResourceEvidencePack},
+		{"checklist", "/api/v1/projects/:id/checklist", model.ResourceChecklist},
+		{"visualization", "/api/v1/projects/:id/visualization", model.ResourceVisualization},
+		{"public-links", "/api/v1/projects/:id/public-links", model.ResourcePublicLink},
+		{"kev", "/api/v1/projects/:id/kev", model.ResourceKEV},
+		{"eol-summary", "/api/v1/projects/:id/eol-summary", model.ResourceEOL},
+		{"eol-check", "/api/v1/projects/:id/eol-check", model.ResourceEOL},
+		{"sbom", "/api/v1/projects/:id/sbom", model.ResourceSBOM},
+		{"sboms", "/api/v1/projects/:id/sboms", model.ResourceSBOM},
+		{"vulnerabilities", "/api/v1/projects/:id/vulnerabilities", model.ResourceVulnerability},
+	}
+	// All standard HTTP methods plus OPTIONS, which is the most likely
+	// future addition (CORS preflight). HEAD is intentionally omitted
+	// because Echo treats HEAD as GET for routing, so the switch never
+	// observes HEAD directly — but the default arms still cover it if a
+	// future routing change exposes it.
+	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+
+	for _, fam := range families {
+		for _, method := range methods {
+			t.Run(fam.name+"_"+method, func(t *testing.T) {
+				action, resource := determineActionAndResource(method, fam.path)
+
+				// Guard 1: the family must NEVER fall through to the
+				// /projects branch. This is the F188 / F206 regression
+				// we are pinning.
+				if resource == model.ResourceProject {
+					t.Fatalf("F206 regression: family %s method %s "+
+						"fell through to ResourceProject (action=%q, path=%s); "+
+						"add a default arm to the family switch in audit.go",
+						fam.name, method, action, fam.path)
+				}
+
+				// Guard 2: the family must resolve to its own resource
+				// type. A wrong family would also break the
+				// audit_logs.(resource_type, resource_id) join key.
+				if resource != fam.resource {
+					t.Errorf("family %s method %s resolved to resource %q, want %q "+
+						"(action=%q, path=%s)",
+						fam.name, method, resource, fam.resource, action, fam.path)
+				}
+
+				// Guard 3: (action, resource) must both be non-empty.
+				// A silently-skipped path drops the audit row.
+				if action == "" || resource == "" {
+					t.Errorf("family %s method %s returned empty (action=%q, "+
+						"resource=%q, path=%s); paths in the hoist block must "+
+						"always emit an audit row",
+						fam.name, method, action, resource, fam.path)
+				}
+			})
+		}
+	}
+}
+
 // TestPathHasChildResource_SegmentExact unit-tests the F202 helper in
 // isolation: the segment-exact match must accept "/<name>" suffixes and
 // "/<name>/" infixes but reject prefix-only collisions like

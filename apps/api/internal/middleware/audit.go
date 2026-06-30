@@ -186,6 +186,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 					return model.ActionCRAReportListed, model.ResourceCRAReport
 				}
 				return model.ActionCRAReportViewed, model.ResourceCRAReport
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin the
+				// resource here so a future DELETE / OPTIONS / etc.
+				// route on /projects/:id/cra-reports lands as
+				// cra_report.* and not as project.<verb>.
+				return "cra_report.updated", model.ResourceCRAReport
 			}
 		}
 		// VEX drafts (Wave M1-5). Segment-distinct from /vex so order
@@ -201,6 +207,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 					return model.ActionVEXDraftListed, model.ResourceVEXDraft
 				}
 				return model.ActionVEXDraftViewed, model.ResourceVEXDraft
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin the
+				// resource here so a future DELETE / OPTIONS / etc.
+				// route on /projects/:id/vex-drafts lands as
+				// vex_draft.* and not as project.<verb>.
+				return "vex_draft.updated", model.ResourceVEXDraft
 			}
 		}
 		// Triage runs (Wave M1-4).
@@ -221,6 +233,13 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 					return model.ActionVEXListed, model.ResourceVEX
 				}
 				return "vex.viewed", model.ResourceVEX
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): the four
+				// arms above cover the current CRUD surface, but a
+				// future OPTIONS / HEAD route would otherwise fall
+				// through to the /projects branch and re-introduce
+				// F188 mass-misclassification for /projects/:id/vex.
+				return model.ActionVEXUpdated, model.ResourceVEX
 			}
 		}
 		// Vulnerability scan trigger (POST /projects/:id/scan).
@@ -248,6 +267,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 					return model.ActionNotificationListed, model.ResourceNotification
 				}
 				return model.ActionNotificationViewed, model.ResourceNotification
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): future
+				// non-CRUD method (OPTIONS / HEAD) must stay on the
+				// notification family rather than falling through to
+				// the /projects branch as project.<verb>.
+				return model.ActionNotificationUpdated, model.ResourceNotification
 			}
 		}
 		// Diff (M10-6 / M11-4 / M12-3). /diff.csv and /diff.pdf are not
@@ -274,6 +299,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return model.ActionSSVCDeleted, model.ResourceSSVC
 			case "GET":
 				return model.ActionSSVCViewed, model.ResourceSSVC
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin SSVC
+				// resource on any future method so it does not fall
+				// through to project.<verb>.
+				return model.ActionSSVCAssessed, model.ResourceSSVC
 			}
 		}
 		// METI self-assessment (Wave M3-4).
@@ -287,6 +317,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return model.ActionMETIOverridden, model.ResourceMETI
 			case "GET":
 				return model.ActionMETIViewed, model.ResourceMETI
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin METI
+				// resource on any future method so it does not fall
+				// through to project.<verb>.
+				return model.ActionMETIOverridden, model.ResourceMETI
 			}
 		}
 		// License policies.
@@ -303,6 +338,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 					return model.ActionLicensePolicyListed, model.ResourceLicensePolicy
 				}
 				return model.ActionLicensePolicyViewed, model.ResourceLicensePolicy
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin
+				// license_policy resource on any future method so it
+				// does not fall through to project.<verb>.
+				return model.ActionLicensePolicyUpdated, model.ResourceLicensePolicy
 			}
 		}
 		// Evidence pack (Wave M2-6).
@@ -318,6 +358,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return model.ActionChecklistDeleted, model.ResourceChecklist
 			case "GET":
 				return model.ActionChecklistViewed, model.ResourceChecklist
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin
+				// checklist resource on any future method (e.g. POST,
+				// OPTIONS) so it does not fall through to
+				// project.<verb>.
+				return model.ActionChecklistUpdated, model.ResourceChecklist
 			}
 		}
 		// Visualization framework.
@@ -329,6 +375,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return model.ActionVisualizationDeleted, model.ResourceVisualization
 			case "GET":
 				return model.ActionVisualizationViewed, model.ResourceVisualization
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin
+				// visualization resource on any future method (e.g.
+				// POST, OPTIONS) so it does not fall through to
+				// project.<verb>.
+				return model.ActionVisualizationUpdated, model.ResourceVisualization
 			}
 		}
 		// Public links.
@@ -342,6 +394,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return model.ActionPublicLinkDeleted, model.ResourcePublicLink
 			case "GET":
 				return model.ActionPublicLinkViewed, model.ResourcePublicLink
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin
+				// public_link resource on any future method so it does
+				// not fall through to project.<verb>.
+				return model.ActionPublicLinkUpdated, model.ResourcePublicLink
 			}
 		}
 		// KEV (project-scoped /projects/:id/kev). Tenant-level /kev/* and
@@ -371,6 +428,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return model.ActionSBOMDeleted, model.ResourceSBOM
 			case "GET":
 				return model.ActionSBOMViewed, model.ResourceSBOM
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin SBOM
+				// resource on any future method (PUT/PATCH replace,
+				// OPTIONS preflight) so it does not fall through to
+				// project.<verb>.
+				return "sbom.updated", model.ResourceSBOM
 			}
 		}
 		// Vulnerabilities (project-nested). Must come AFTER the /ssvc
@@ -390,6 +453,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 					return model.ActionVulnerabilityListed, model.ResourceVulnerability
 				}
 				return model.ActionVulnerabilityViewed, model.ResourceVulnerability
+			default:
+				// F206 (anti-pattern 48 symmetric to F201): pin
+				// vulnerability resource on any future method (DELETE,
+				// OPTIONS) so it does not fall through to
+				// project.<verb>.
+				return "vulnerability.updated", model.ResourceVulnerability
 			}
 		}
 	}
