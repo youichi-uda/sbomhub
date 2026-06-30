@@ -331,8 +331,16 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.ActionVEXDraftViewed, Label: "VEX Draft Viewed", Category: "vex_draft"},
 		{Action: model.ActionVEXDraftDecisionUpdated, Label: "VEX Draft Decision Updated", Category: "vex_draft"},
 		{Action: model.ActionVEXDraftReanalysed, Label: "VEX Draft Reanalysed", Category: "vex_draft"},
+		// F218 (M14 Phase D round 1 fix): triage/run now classifies as
+		// vex_draft.created (see middleware/audit.go::determineActionAndResource).
+		{Action: model.ActionVEXDraftCreated, Label: "VEX Draft Created", Category: "vex_draft"},
 
 		// Triage actions.
+		//
+		// F218 (M14 Phase D round 1 fix): no longer emitted by the
+		// audit middleware (reclassified to vex_draft.created). Kept
+		// in the dropdown so historical audit_logs rows produced
+		// before the reclassification remain filterable.
 		{Action: model.ActionTriageRun, Label: "Triage Run", Category: "triage"},
 
 		// Scan actions.

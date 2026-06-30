@@ -849,12 +849,18 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 		},
 
 		// ---- /triage (AI triage runner) -----------------------------------
+		// F218 (M14 Phase D round 1 fix): triage/run now classifies as
+		// vex_draft.created (the RunTriage handler mints a vex_draft
+		// row and publishes its UUID via SetAuditResourceID). Pre-F218
+		// the audit row carried (resource_type="triage",
+		// resource_id=<vex_draft UUID>) which joined onto neither table
+		// (no `triage` table exists).
 		{
 			name:         "POST /projects/:id/triage/run",
 			method:       "POST",
 			path:         "/api/v1/projects/:id/triage/run",
-			wantAction:   model.ActionTriageRun,
-			wantResource: model.ResourceTriage,
+			wantAction:   model.ActionVEXDraftCreated,
+			wantResource: model.ResourceVEXDraft,
 		},
 
 		// ---- /cra-reports (CRA report drafting, Wave M2-4) ----------------
@@ -1390,7 +1396,10 @@ func TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough(t *t
 		{"apikeys", "/api/v1/projects/:id/apikeys", model.ResourceAPIKey},
 		{"cra-reports", "/api/v1/projects/:id/cra-reports", model.ResourceCRAReport},
 		{"vex-drafts", "/api/v1/projects/:id/vex-drafts", model.ResourceVEXDraft},
-		{"triage", "/api/v1/projects/:id/triage", model.ResourceTriage},
+		// F218 (M14 Phase D round 1 fix): triage paths now classify as
+		// vex_draft (the triage runner mints vex_draft rows; there is
+		// no `triage` table to join onto).
+		{"triage", "/api/v1/projects/:id/triage", model.ResourceVEXDraft},
 		{"vex", "/api/v1/projects/:id/vex", model.ResourceVEX},
 		{"scan", "/api/v1/projects/:id/scan", model.ResourceScan},
 		{"compliance", "/api/v1/projects/:id/compliance", model.ResourceCompliance},

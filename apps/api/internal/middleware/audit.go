@@ -307,9 +307,21 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				return "vex_draft.updated", model.ResourceVEXDraft
 			}
 		}
-		// Triage runs (Wave M1-4).
+		// Triage runs (Wave M1-4). POST /projects/:id/triage/run mints a
+		// fresh vex_draft row (the RunTriage handler publishes the new
+		// draft UUID via SetAuditResourceID(c, res.Draft.ID) F208 path).
+		//
+		// F218 (M14 Phase D round 1 fix): pre-F218 this branch returned
+		// model.ActionTriageRun / model.ResourceTriage, but no `triage`
+		// table exists — audit_logs.(resource_type, resource_id) had no
+		// joinable target. Combined with the F208 handler override that
+		// sets resource_id to the new draft UUID, the audit row carried
+		// (resource_type="triage", resource_id=<vex_draft UUID>), which
+		// joined onto NEITHER vex_drafts (wrong resource_type) NOR a
+		// triage table (does not exist). Reclassifying to
+		// vex_draft.created closes the join contract.
 		if pathHasChildResource(path, "triage") {
-			return model.ActionTriageRun, model.ResourceTriage
+			return model.ActionVEXDraftCreated, model.ResourceVEXDraft
 		}
 		// VEX statements.
 		if pathHasChildResource(path, "vex") {

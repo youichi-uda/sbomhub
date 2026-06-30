@@ -94,8 +94,23 @@ const (
 	ActionVEXDraftViewed           = "vex_draft.viewed"
 	ActionVEXDraftDecisionUpdated  = "vex_draft.decision_updated"
 	ActionVEXDraftReanalysed       = "vex_draft.reanalysed"
+	// F218 (M14 Phase D round 1 fix): POST /projects/:id/triage/run mints
+	// a fresh vex_draft row. Pre-F218 the middleware classified it as
+	// "triage.run" / "triage" but no `triage` table exists, so
+	// audit_logs.(resource_type, resource_id) had no joinable target —
+	// the handler-published resource_id (the new draft UUID) collided
+	// with resource_type="triage". The branch is reclassified to
+	// vex_draft.created so the audit row joins on vex_drafts.id.
+	ActionVEXDraftCreated = "vex_draft.created"
 
 	// Triage runs (Wave M1-5).
+	//
+	// F218 (M14 Phase D round 1 fix): No longer emitted by the audit
+	// middleware (the /triage branch is reclassified to vex_draft.created
+	// because triage runs mint vex_draft rows and there is no `triage`
+	// table to join onto). The constant is retained so existing dropdown
+	// filters can still match legacy audit_logs rows produced before the
+	// reclassification.
 	ActionTriageRun = "triage.run"
 
 	// CRA report drafting (Wave M2-4 / issue #36).
