@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
 import { Clock, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { useApi } from '@/lib/api';
@@ -35,7 +35,13 @@ export default function ScanSettingsPage() {
     const t = useTranslations("Settings.Scan");
     const tCommon = useTranslations("Common");
     const locale = useLocale();
+    // `useApi()` returns a fresh object each render, so we route through a
+    // ref to keep the load* callbacks stable. Without this, including `api`
+    // in the useCallback deps would re-create the callbacks every render
+    // and re-fire the load* effect into a loop.
     const api = useApi();
+    const apiRef = useRef(api);
+    apiRef.current = api;
 
     const WEEKDAYS = locale === 'ja'
         ? ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日']
@@ -47,30 +53,30 @@ export default function ScanSettingsPage() {
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
 
-    useEffect(() => {
-        loadSettings();
-        loadLogs();
-    }, []);
-
-    const loadSettings = async () => {
+    const loadSettings = useCallback(async () => {
         try {
-            const data = await api.get<ScanSettings>('/api/v1/settings/scan');
+            const data = await apiRef.current.get<ScanSettings>('/api/v1/settings/scan');
             setSettings(data);
         } catch {
             setError(t('loadError'));
         } finally {
             setLoading(false);
         }
-    };
+    }, [t]);
 
-    const loadLogs = async () => {
+    const loadLogs = useCallback(async () => {
         try {
-            const data = await api.get<ScanLog[]>('/api/v1/settings/scan/logs?limit=10');
+            const data = await apiRef.current.get<ScanLog[]>('/api/v1/settings/scan/logs?limit=10');
             setLogs(data || []);
         } catch {
             // Ignore log loading errors
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        loadSettings();
+        loadLogs();
+    }, [loadSettings, loadLogs]);
 
     const handleSave = async () => {
         if (!settings) return;

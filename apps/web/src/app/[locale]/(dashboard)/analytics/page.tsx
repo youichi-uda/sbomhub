@@ -25,7 +25,7 @@ export default function AnalyticsPage() {
         } finally {
             setLoading(false);
         }
-    }, [days]);
+    }, [days, tc]);
 
     useEffect(() => {
         loadData();

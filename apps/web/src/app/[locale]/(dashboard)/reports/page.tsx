@@ -42,7 +42,7 @@ export default function ReportsPage() {
         } finally {
             setLoading(false);
         }
-    }, [page]);
+    }, [page, t]);
 
     useEffect(() => {
         loadReports();

@@ -77,7 +77,7 @@ export default function AuditLogPage() {
         } finally {
             setLoading(false);
         }
-    }, [filter, page]);
+    }, [filter, page, t]);
 
     useEffect(() => {
         checkFeatureAccess();

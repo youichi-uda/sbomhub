@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -72,11 +72,7 @@ export default function BillingPage() {
   // the SaaS is sunset. Existing subscriptions continue to display and
   // can be managed through the Lemon Squeezy portal. See sunset/page.tsx.
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
       const [subData, usageData] = await Promise.all([
@@ -91,7 +87,11 @@ export default function BillingPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleManageSubscription = async () => {
     try {

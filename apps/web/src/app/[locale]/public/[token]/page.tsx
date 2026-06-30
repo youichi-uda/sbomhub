@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { api, PublicSbomView } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,7 @@ export default function PublicSbomPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const load = async (pwd?: string) => {
+  const load = useCallback(async (pwd?: string) => {
     setLoading(true);
     setError(null);
     try {
@@ -26,11 +26,11 @@ export default function PublicSbomPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
 
   useEffect(() => {
     load();
-  }, [token]);
+  }, [load]);
 
   if (loading) {
     return <div className="flex items-center justify-center h-64">Loading...</div>;

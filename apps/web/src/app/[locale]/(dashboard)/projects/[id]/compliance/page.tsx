@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -550,11 +550,7 @@ export default function CompliancePage() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
 
-  useEffect(() => {
-    loadAllData();
-  }, [projectId]);
-
-  const loadAllData = async () => {
+  const loadAllData = useCallback(async () => {
     try {
       setLoading(true);
       const [complianceData, checklistData, visualizationData] =
@@ -572,7 +568,11 @@ export default function CompliancePage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId]);
+
+  useEffect(() => {
+    loadAllData();
+  }, [loadAllData]);
 
   const reloadChecklist = async () => {
     try {

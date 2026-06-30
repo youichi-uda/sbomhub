@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { api, PublicLink, Sbom } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,7 @@ export default function ProjectSharePage() {
   const [password, setPassword] = useState("");
   const [isActive, setIsActive] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const [linkList, sbomList] = await Promise.all([
@@ -40,11 +40,11 @@ export default function ProjectSharePage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId]);
 
   useEffect(() => {
     load();
-  }, [projectId]);
+  }, [load]);
 
   const handleCreate = async () => {
     if (!name || !expiresAt) return;

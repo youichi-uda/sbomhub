@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useTranslations, useLocale } from 'next-intl';
 import { Loader2, Save, ArrowLeft } from 'lucide-react';
 import { api, ReportSettings } from '@/lib/api';
@@ -22,11 +22,7 @@ export default function ReportSettingsPage() {
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
 
-    useEffect(() => {
-        loadSettings();
-    }, []);
-
-    const loadSettings = async () => {
+    const loadSettings = useCallback(async () => {
         setLoading(true);
         try {
             const data = await api.reports.getSettings() as ReportSettings[];
@@ -37,7 +33,11 @@ export default function ReportSettingsPage() {
         } finally {
             setLoading(false);
         }
-    };
+    }, [t]);
+
+    useEffect(() => {
+        loadSettings();
+    }, [loadSettings]);
 
     const handleSave = async (setting: ReportSettings) => {
         setSaving(setting.report_type);
