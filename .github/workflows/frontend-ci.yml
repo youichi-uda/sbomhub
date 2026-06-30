@@ -9,17 +9,21 @@
 #
 # Enforcement policy:
 #   - Lint:      HARD GATE (M11-5 #80). ESLint v9 flat config; new
-#                error-level regressions fail CI. Warnings remain visible
-#                but non-blocking. See apps/web/eslint.config.mjs for the
-#                rule-disable rationales.
-#   - Typecheck: warn-only (continue-on-error). Pre-M11-5 baseline; will
-#                be promoted in a follow-up once the type errors enumerated
-#                in M10-6 are addressed.
-#   - Build:     warn-only (continue-on-error). Same rationale as
-#                typecheck.
+#                error-level regressions fail CI. M12-5 #86 closed the
+#                44 pre-existing warnings to zero and promoted the
+#                react-hooks `set-state-in-effect` + `immutability` rules
+#                to `error`. See apps/web/eslint.config.mjs for the
+#                rule-promotion + inline-disable rationale.
+#   - Typecheck: HARD GATE (M12-5 #86). Promoted from warn-only after the
+#                M11-5 lint cleanup left tsc --noEmit at zero errors.
+#   - Build:     HARD GATE (M12-5 #86). `next build` must succeed end-to-end.
+#                Promoted at the same time as typecheck for the same
+#                reason — the M11-1 F164 production-build hydration-crash
+#                isolation taught us that `next dev` is not a sufficient
+#                guard against RSC full-SSR-hydration regressions.
 #
-# When typecheck / build are promoted to hard gates they should be added
-# to the Required status checks list in docs/ci-inventory.md §2.3.
+# Hard gates should appear in the Required status checks list — see
+# docs/ci-inventory.md §2.3.
 #
 # Versions:
 #   - Node 22 LTS — engines.node in root package.json is `>=18.0.0` and
@@ -138,12 +142,18 @@ jobs:
       - name: Lint (eslint v9 flat config)
         run: pnpm --filter web lint
 
+      # M12-5 #86: promoted to hard gate after the lint cleanup closed
+      # the type-error inventory enumerated in M10-6. `tsc --noEmit`
+      # ran clean as of the M12-5 close.
       - name: Typecheck (tsc --noEmit)
-        continue-on-error: true
         run: pnpm --filter web typecheck
 
+      # M12-5 #86: promoted to hard gate alongside typecheck. The
+      # M11-1 F164 production-build hydration crash demonstrated that
+      # `next dev` skips RSC code paths that only execute under the
+      # full SSR-hydration path of `next build`, so the build step is
+      # the only reliable guard against that class of regression.
       - name: Build (next build)
-        continue-on-error: true
         env:
           # next build requires these env vars to be present (referenced
           # in next.config.mjs and the build script). They are dummy
