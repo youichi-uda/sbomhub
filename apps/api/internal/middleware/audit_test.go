@@ -460,6 +460,301 @@ func TestExtractResourceID_CVEParam_NilResourceID_F196(t *testing.T) {
 	})
 }
 
+// TestExtractResourceID_PostSuccessContextKey_F208 is the F208 / M14-1
+// meta-test that pins the explicit-handler-override path
+// (ContextKeyAuditResourceID) at the FRONT of extractResourceID's
+// strategy chain.
+//
+// Pre-F208 limitation (F190, M13 Phase D doc-only): create-style POST
+// routes whose newly-minted UUID lives in the response body — but
+// whose path carries only a PARENT UUID — recorded audit_logs.resource_id
+// pointing at the parent rather than the new row. Examples:
+//
+//	POST /projects/:id/vex          → recorded :id (project), not vex.id
+//	POST /projects/:id/cra-reports  → recorded :id (project), not report.id
+//	POST /projects/:id/apikeys      → recorded :id (project), not key.id
+//	POST /vulnerabilities/:vuln_id/ticket → recorded :vuln_id, not ticket.id
+//
+// Joining audit_logs.resource_id onto the created table's primary key
+// silently dropped (NULL case) or joined onto the wrong subject (parent
+// id case) for every <resource>.created row — the CRA/VEX/METI evidence
+// layer compliance gap the F190 docstring warned about.
+//
+// F208 closes the limitation by:
+//
+//  1. Adding ContextKeyAuditResourceID + SetAuditResourceID helper in
+//     middleware/audit.go.
+//  2. Adding path 1 to extractResourceID that consults the context key
+//     BEFORE the priority list — explicit handler override wins so
+//     parent-only paths cannot shadow the new row.
+//  3. Inserting SetAuditResourceID(c, newID) calls in every create
+//     handler (apikey/cra_reports/issue_tracker/license/project/
+//     public_link/report/sbom/ssvc/vex/vex_drafts).
+//
+// This meta-test pins the middleware contract: every create-route
+// resource family is represented in the coverage table below. Adding
+// a future create handler that mints a new UUID requires adding a
+// matching row here so the F208 contract stays universally closed.
+// (anti-pattern 48 anchor — pattern-level coverage instead of per-bug
+// fix-and-forget.)
+func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
+	// Coverage table: one row per create-route resource family fixed
+	// in M14-1. The "paramNames" / "paramValues" columns model what
+	// Echo would bind on the route; "setID" is what the handler is
+	// expected to publish via SetAuditResourceID right before its
+	// success return.
+	//
+	// The test asserts that extractResourceID returns setID for every
+	// row regardless of which (parent) UUIDs the path carries — i.e.
+	// the explicit override beats the priority list AND the
+	// ParamNames fallback.
+	type row struct {
+		name       string
+		paramNames []string
+		paramVals  []string
+		setID      uuid.UUID
+	}
+
+	mkUUID := func() uuid.UUID { return uuid.New() }
+
+	// Generate fresh UUIDs per case so a stray cross-case leak fails
+	// loudly rather than masquerading as a pass.
+	projectUUID := mkUUID()
+	vulnUUID := mkUUID()
+	cases := []row{
+		// Tenant-level creates (no path UUID at all — pre-F208 this
+		// recorded NULL).
+		{
+			name:       "POST /projects (project.created)",
+			paramNames: nil,
+			paramVals:  nil,
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /apikeys (apikey.created tenant-level)",
+			paramNames: nil,
+			paramVals:  nil,
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /integrations (integration.created)",
+			paramNames: nil,
+			paramVals:  nil,
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /reports/generate (report.generated)",
+			paramNames: nil,
+			paramVals:  nil,
+			setID:      mkUUID(),
+		},
+
+		// Project-nested creates (pre-F208 recorded :id = project UUID
+		// instead of new row UUID — joins to the new table dropped).
+		{
+			name:       "POST /projects/:id/vex (vex.created)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/apikeys (apikey.created project-level)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/licenses (license_policy.created)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/public-links (public_link.created)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/sbom (sbom.uploaded)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/triage/run (vex_draft.created)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/cra-reports/run (cra_report.created)",
+			paramNames: []string{"id"},
+			paramVals:  []string{projectUUID.String()},
+			setID:      mkUUID(),
+		},
+
+		// Routes with TWO bound UUIDs in the priority list (pre-F208
+		// recorded :vuln_id or :draft_id, both wrong subjects).
+		{
+			name:       "POST /projects/:id/vulnerabilities/:vuln_id/ssvc (ssvc_assessment.created)",
+			paramNames: []string{"id", "vuln_id"},
+			paramVals:  []string{projectUUID.String(), vulnUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/vulnerabilities/:vuln_id/ssvc/auto (ssvc_assessment.auto)",
+			paramNames: []string{"id", "vuln_id"},
+			paramVals:  []string{projectUUID.String(), vulnUUID.String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /vulnerabilities/:vuln_id/ticket (integration_ticket.created)",
+			paramNames: []string{"vuln_id"},
+			paramVals:  []string{vulnUUID.String()},
+			setID:      mkUUID(),
+		},
+
+		// Reanalyse routes mint a FRESH row whose audit_logs.resource_id
+		// must point at the new row, NOT the source :draft_id /
+		// :report_id from the URL (history-preservation contract).
+		{
+			name:       "POST /projects/:id/vex-drafts/:draft_id/reanalyse (vex_draft.reanalysed → NEW draft)",
+			paramNames: []string{"id", "draft_id"},
+			paramVals:  []string{projectUUID.String(), mkUUID().String()},
+			setID:      mkUUID(),
+		},
+		{
+			name:       "POST /projects/:id/cra-reports/:report_id/reanalyse (cra_report.reanalysed → NEW report)",
+			paramNames: []string{"id", "report_id"},
+			paramVals:  []string{projectUUID.String(), mkUUID().String()},
+			setID:      mkUUID(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCtxWithParams(t, tc.paramNames, tc.paramVals)
+			SetAuditResourceID(c, tc.setID)
+			got := extractResourceID(c)
+			assertResourceID(t, got, tc.setID)
+		})
+	}
+}
+
+// TestExtractResourceID_PostSuccessContextKey_F208_TypeAssertions pins
+// the two accepted type assertions (uuid.UUID and *uuid.UUID) so a
+// future handler that publishes via service-returned pointer
+// (*model.Project) keeps working without the call site needing a
+// dereference at the boundary. This makes the F208 contract caller-
+// friendly across the existing handler conventions (some return
+// pointers, some return values).
+func TestExtractResourceID_PostSuccessContextKey_F208_TypeAssertions(t *testing.T) {
+	t.Run("value uuid.UUID", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		want := uuid.New()
+		c.Set(ContextKeyAuditResourceID, want)
+		assertResourceID(t, extractResourceID(c), want)
+	})
+
+	t.Run("pointer *uuid.UUID", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		want := uuid.New()
+		c.Set(ContextKeyAuditResourceID, &want)
+		assertResourceID(t, extractResourceID(c), want)
+	})
+
+	t.Run("nil pointer is treated as no value", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		var nilPtr *uuid.UUID
+		c.Set(ContextKeyAuditResourceID, nilPtr)
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for typed-nil pointer override", got)
+		}
+	})
+
+	t.Run("uuid.Nil value is treated as no value", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		c.Set(ContextKeyAuditResourceID, uuid.Nil)
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for uuid.Nil override "+
+				"(prevents a default-initialised zero from poisoning forensic joins)", got)
+		}
+	})
+
+	t.Run("uuid.Nil pointer is treated as no value", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		zero := uuid.Nil
+		c.Set(ContextKeyAuditResourceID, &zero)
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for *uuid.Nil override", got)
+		}
+	})
+
+	t.Run("unrelated type is ignored (defensive — wrong c.Set call must not panic)", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		c.Set(ContextKeyAuditResourceID, "not-a-uuid-string")
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for non-UUID type at context key", got)
+		}
+	})
+}
+
+// TestExtractResourceID_PostSuccessContextKey_F208_PriorityListStillWorks
+// pins the regression coverage for the F186 priority-list / ParamNames-
+// fallback paths AFTER the F208 override was added. Without explicit
+// pin, a future refactor that accidentally short-circuited the path
+// when the context key was unset would silently regress every
+// /projects/:id/<child>/:child_id delete route's audit row back to
+// the F186-era project-UUID bug.
+//
+// Each subtest covers one strategy path without a context-key override:
+//   - priorityList: routes where a named param in resourceIDParamPriority
+//     wins (e.g. /apikeys/:key_id, /projects/:id/vex-drafts/:draft_id).
+//   - paramNamesFallback: routes where the param name is not in the
+//     priority list and the reverse-walk picks it up (e.g. a future
+//     route binding :future_widget_id).
+//   - nilForNoParams: confirms the function still returns nil when no
+//     path params AND no context-key override are bound.
+func TestExtractResourceID_PostSuccessContextKey_F208_PriorityListStillWorks(t *testing.T) {
+	t.Run("priorityList: :key_id wins on DELETE /apikeys/:key_id (F186 regression net)", func(t *testing.T) {
+		keyUUID := uuid.New()
+		c := newCtxWithParams(t, []string{"key_id"}, []string{keyUUID.String()})
+		assertResourceID(t, extractResourceID(c), keyUUID)
+	})
+
+	t.Run("priorityList: :draft_id wins over parent :id (F186 child-before-parent rule)", func(t *testing.T) {
+		projectUUID := uuid.New()
+		draftUUID := uuid.New()
+		c := newCtxWithParams(t,
+			[]string{"id", "draft_id"},
+			[]string{projectUUID.String(), draftUUID.String()},
+		)
+		got := extractResourceID(c)
+		assertResourceID(t, got, draftUUID)
+		if got != nil && *got == projectUUID {
+			t.Fatalf("F186 regression: parent :id shadowed child :draft_id "+
+				"(got %s, want %s)", got, draftUUID)
+		}
+	})
+
+	t.Run("paramNamesFallback: future :widget_id picked up by reverse walk", func(t *testing.T) {
+		novelUUID := uuid.New()
+		c := newCtxWithParams(t,
+			[]string{"future_widget_id"},
+			[]string{novelUUID.String()},
+		)
+		assertResourceID(t, extractResourceID(c), novelUUID)
+	})
+
+	t.Run("nilForNoParams: no path params + no override → nil", func(t *testing.T) {
+		c := newCtxWithParams(t, nil, nil)
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for empty context", got)
+		}
+	})
+}
+
 // TestDetermineActionAndResource_ProjectChildResources is the F189
 // regression net for the F188 fix. F176 hoisted /apikeys above the
 // /projects branch; F188 generalised the same pattern to every
