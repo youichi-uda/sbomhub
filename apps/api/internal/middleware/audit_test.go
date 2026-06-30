@@ -345,3 +345,105 @@ func TestExtractResourceID_NonUUIDParamSkipped(t *testing.T) {
 		t.Errorf("extractResourceID = %v, want nil for non-UUID slug param", got)
 	}
 }
+
+// TestExtractResourceID_SBOMID_F197 pins the :sbom_id slot of the
+// priority list. The mid-tier slot exists because routes like
+// /api/v1/projects/:id/sboms/:sbom_id/scan-status bind both :id
+// (project UUID) and :sbom_id (SBOM UUID); the audit row should join
+// onto sboms.id, not projects.id, since the request operates on the
+// SBOM. F186 added :sbom_id to the list but no test asserted the
+// nested-route ordering, so a future reorder that put :id before
+// :sbom_id would silently regress.
+func TestExtractResourceID_SBOMID_F197(t *testing.T) {
+	projectUUID := uuid.New()
+	sbomUUID := uuid.New()
+	c := newCtxWithParams(t,
+		[]string{"id", "sbom_id"},
+		[]string{projectUUID.String(), sbomUUID.String()},
+	)
+	got := extractResourceID(c)
+	assertResourceID(t, got, sbomUUID)
+	if got != nil && *got == projectUUID {
+		t.Fatalf("extractResourceID returned project UUID %s; F197 regression "+
+			"(sbom_id must beat id on /projects/:id/sboms/:sbom_id/* routes)",
+			projectUUID)
+	}
+}
+
+// TestExtractResourceID_ProjectID_F197 pins the :project_id slot of the
+// priority list. The slot exists for tenant-scoped routes that take a
+// project UUID under the name :project_id rather than :id — currently
+// hypothetical at the route layer but pinned defensively so a future
+// route that adds :project_id (e.g. a cross-resource lookup like
+// /api/v1/triage/:project_id/...) lands on the right column and is not
+// shadowed by an unrelated :id later in the path.
+func TestExtractResourceID_ProjectID_F197(t *testing.T) {
+	projectUUID := uuid.New()
+	c := newCtxWithParams(t,
+		[]string{"project_id"},
+		[]string{projectUUID.String()},
+	)
+	assertResourceID(t, extractResourceID(c), projectUUID)
+}
+
+// TestExtractResourceID_CVEParam_NilResourceID_F196 pins NULL-by-design
+// behaviour for :cve_id path params. CVE identifiers ("CVE-2021-44228")
+// are not UUIDs by spec — the MITRE CVE record format is
+// "CVE-YYYY-NNNNNN+" with a 4-digit year and 4+ digit sequence — so
+// uuid.Parse rejects them in both the priority list walk and the
+// tail-walk fallback. Routes whose only path param is :cve_id therefore
+// record resource_id = NULL.
+//
+// The only currently-known route binding :cve_id is
+//
+//	/projects/:id/ssvc/cve/:cve_id
+//
+// where the parent :id rescues the audit row by recording the project
+// UUID instead. Standalone CVE-keyed routes (e.g. /kev/:cve_id,
+// /vulnerabilities/:cve_id/details) would record resource_id = NULL.
+//
+// Future-fix path (M14 candidate): record the CVE id as a string field
+// inside the audit details map (`details->>'cve_id'`) so forensic
+// queries can join on it without needing the audit middleware to grow
+// a "non-UUID resource id" slot. That requires extending CreateAuditLogInput
+// to carry an optional `Details["cve_id"]` write path; out of scope for
+// M13 Phase D.
+func TestExtractResourceID_CVEParam_NilResourceID_F196(t *testing.T) {
+	// Standalone CVE-keyed route: only :cve_id is bound. Must return
+	// nil because "CVE-2021-44228" is not a UUID.
+	t.Run("standalone cve route", func(t *testing.T) {
+		c := newCtxWithParams(t,
+			[]string{"cve_id"},
+			[]string{"CVE-2021-44228"},
+		)
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for CVE-keyed route "+
+				"(CVE IDs are not UUIDs by spec)", got)
+		}
+	})
+
+	// /kev/CVE-2021-44228 — KEV-keyed route, no parent UUID to rescue.
+	// Resource_id MUST be nil; F196 NULL-by-design pin.
+	t.Run("kev catalog route", func(t *testing.T) {
+		c := newCtxWithParams(t,
+			[]string{"cve_id"},
+			[]string{"CVE-2014-6271"},
+		)
+		if got := extractResourceID(c); got != nil {
+			t.Errorf("extractResourceID = %v, want nil for /kev/:cve_id", got)
+		}
+	})
+
+	// /projects/:id/ssvc/cve/:cve_id — :id rescues the row. Asserts
+	// the rescue path still works so the doc note in audit.go remains
+	// accurate: nested CVE routes record the project UUID, standalone
+	// CVE routes record NULL.
+	t.Run("nested route rescued by project id", func(t *testing.T) {
+		projectUUID := uuid.New()
+		c := newCtxWithParams(t,
+			[]string{"id", "cve_id"},
+			[]string{projectUUID.String(), "CVE-2021-44228"},
+		)
+		assertResourceID(t, extractResourceID(c), projectUUID)
+	})
+}
