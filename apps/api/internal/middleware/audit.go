@@ -12,6 +12,49 @@ import (
 
 // Audit returns a middleware that logs all authenticated requests to the audit log.
 // It determines the action and resource type from the HTTP method and path.
+//
+// Dual-path audit design (F227, M14 Phase D round 2 fix — explicit
+// closure of a recurring review false-positive):
+//
+// sbomhub has TWO audit write paths with intentionally different error
+// contracts. Confusing them is a recurring review failure mode (Codex
+// Round 2 flagged the `_ = auditRepo.Log(...)` below as an F168
+// audit-or-nothing violation; it is not, because F168 governs a
+// different path entirely). The two paths and the rationale for the
+// asymmetry are pinned here:
+//
+//  1. MIDDLEWARE-LEVEL AUDIT (this function). Cross-cutting concern
+//     that records one row per authenticated HTTP request as a generic
+//     forensic trail: path, method, status, latency, IP, UA, plus the
+//     classifier's (action, resource_type, resource_id) join key.
+//     This path is BY-DESIGN BEST-EFFORT — the Log() return value is
+//     intentionally swallowed (`_ = auditRepo.Log(...)`). The reason is
+//     blast-radius: an audit-log INSERT failure during a DB outage,
+//     RLS bug, or schema drift would otherwise translate to a 500 on
+//     EVERY authenticated request, taking the whole product down to
+//     preserve forensic completeness on requests that already failed.
+//     We accept the trade-off — a small fraction of requests may be
+//     missing from audit_logs during a DB incident — because middleware
+//     audit is the trail, not the source of truth, for any specific
+//     business event.
+//
+//  2. HANDLER-LEVEL AUDIT_PAIR (F168 audit-or-nothing). Specific
+//     handlers that MUST emit an audit row as part of a multi-row
+//     business contract — the canonical example is sbom.go::
+//     runDiffWebhookAutoTrigger / writeAutoFiredAudit (the M12-4
+//     diff-webhook auto-trigger), where a webhook firing without a
+//     matching diff_webhook_auto_fired audit row would orphan the
+//     webhook in the dashboard's audit timeline. Those call sites
+//     PROPAGATE the audit Log error (do NOT use `_ = audit.Log(...)`)
+//     so a failed audit write fails the whole pair atomically: either
+//     both the webhook and the audit row land, or neither does.
+//     "Audit-or-nothing" is the name for that contract.
+//
+// A future contributor reviewing this file MUST keep the two paths
+// separate. Promoting the middleware-level swallow to F168 audit-or-
+// nothing would re-introduce the 500-storm failure mode above; demoting
+// a handler-level audit_pair to best-effort would silently corrupt the
+// business invariant the audit_pair was added to guarantee.
 func Audit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -80,6 +123,19 @@ func Audit(auditRepo *repository.AuditRepository) echo.MiddlewareFunc {
 				userIDPtr = &userID
 			}
 
+			// F227 (M14 Phase D round 2 fix, dual-path audit design
+			// pin): the Log error is INTENTIONALLY discarded here.
+			// This is the middleware-level best-effort path; failing
+			// the request on an audit-log INSERT failure would convert
+			// a DB-side audit_logs outage into a 500 on every
+			// authenticated request and take the whole product down.
+			// F168 audit-or-nothing applies to HANDLER-level audit_pair
+			// call sites (e.g. handler/sbom.go::writeAutoFiredAudit /
+			// runDiffWebhookAutoTrigger) where the audit row is part of
+			// a multi-row business contract; those handlers PROPAGATE
+			// the Log error and do NOT use this swallow pattern. See
+			// the Audit() head comment above for the full two-path
+			// rationale.
 			_ = auditRepo.Log(c.Request().Context(), &model.CreateAuditLogInput{
 				TenantID:     tenantIDPtr,
 				UserID:       userIDPtr,
