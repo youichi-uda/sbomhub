@@ -108,30 +108,66 @@ table owner (the migrator role) silently bypasses the policy.
 
 If a `tenant_*`-prefixed table or a tenant_id-bearing table genuinely
 cannot carry RLS, add a one-line marker comment INSIDE the migration
-file that defines it:
+file that defines it. Two forms are accepted (F195 / M13 Phase D
+round 3):
 
 ```sql
--- lint:no-rls-required: shared global cache mirroring upstream advisory data
+-- lint:no-rls-required: <reason>                  -- unscoped
+-- lint:no-rls-required(<table>): <reason>          -- table-scoped
 ```
 
-The reason is mandatory and is echoed by the lint in `--verbose` mode
-for the audit trail. Suppression should be rare — prefer the
-`structuralExemptions` map in the lint source for tables that
-genuinely cannot ever carry RLS by construction.
+The reason is mandatory in both forms and is echoed by the lint in
+`--verbose` mode for the audit trail.
+
+The unscoped form is the common case for migrations that define a
+single tenant-scoped table. In a migration that defines MORE THAN ONE
+tenant-scoped table the unscoped form is rejected as ambiguous (the
+marker cannot disambiguate which table is being exempted, and silently
+widening to file-wide would defeat the gate — the original 036 / 046
+misses were exactly the "one table in a multi-table migration" shape).
+Use the table-scoped form to exempt one specific table while keeping
+its siblings under the full RLS contract:
+
+```sql
+-- lint:no-rls-required(tenant_global_mirror): shared upstream cache mirror
+CREATE TABLE tenant_global_mirror (
+    advisory_id TEXT PRIMARY KEY,
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE tenant_per_org_settings (
+    tenant_id   UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    payload     JSONB NOT NULL
+);
+
+ALTER TABLE tenant_per_org_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_per_org_settings FORCE  ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_tenant_per_org_settings ON tenant_per_org_settings
+    FOR ALL USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+```
+
+Suppression should be rare — prefer the `structuralExemptions` map in
+the lint source for tables that genuinely cannot ever carry RLS by
+construction.
 
 ## What the lint actually checks
 
 `tools/lint-migration-rls` runs as a hard CI gate on every PR that
-touches `apps/api/migrations/**`. Its detection rule, after F183:
+touches `apps/api/migrations/**`. Its detection rule, after F183 /
+F191 / F194 / F195:
 
   1. Detect a table as tenant-scoped if EITHER its name matches
      `tenant_*`, OR its `CREATE TABLE` body declares a `tenant_id`
-     column, OR a later `ALTER TABLE … ADD COLUMN tenant_id` promotes
-     it.
+     column, OR a later `ALTER TABLE … ADD [COLUMN] tenant_id`
+     promotes it. Schema-qualified (`public.<table>`) and
+     double-quoted (`"<table>"`) identifiers are recognised the same
+     way (F194). The `COLUMN` keyword is optional per the SQL standard
+     (F191).
   2. Require the `ENABLE` + `FORCE` + `CREATE POLICY tenant_isolation_*`
      triple to appear somewhere in the directory (any file).
   3. Skip tables listed in `structuralExemptions` or with a
-     `-- lint:no-rls-required: <reason>` inline marker.
+     `-- lint:no-rls-required[(<table>)]: <reason>` inline marker
+     (F195: unscoped form is rejected in multi-table migrations).
 
 If you add a new `*.up.sql` and the lint fails, the error message names
 the offending table + file:line and lists which of the three statements
@@ -144,7 +180,8 @@ is missing. Add the missing statement(s), or add a partner
     full structural-exemption catalogue.
   - `tools/lint-migration-rls/main_test.go` — fixture-driven tests
     covering positive / negative / suppression / partner-file /
-    ALTER-promote / phantom-comment cases.
+    ALTER-promote / phantom-comment / schema-qualified / quoted-name /
+    multi-table-marker cases.
   - Migration 023 (`023_rls_security_hardening.up.sql`) — the M0 Trust
     Rescue sweep that established the `ENABLE + FORCE + POLICY` triple
     as the standard.

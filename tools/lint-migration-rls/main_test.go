@@ -441,6 +441,158 @@ ALTER TABLE vulnerabilities ADD COLUMN tenant_id UUID REFERENCES tenants(id) ON 
 	}
 }
 
+// TestLegacyAlterPromoteNoColumn_Detected asserts F191 (M13 Phase D
+// round 3): `ALTER TABLE … ADD tenant_id` — the SQL-standard shorter
+// form without the `COLUMN` keyword — is now treated as a tenant-scope
+// promotion identical to the `ADD COLUMN tenant_id` form. The fixture
+// has no RLS evidence, so the lint must FAIL with the canonical
+// missing-triple. Before F191 the omitted-COLUMN form silently
+// bypassed the detector, undermining the F183 widening.
+func TestLegacyAlterPromoteNoColumn_Detected(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "legacy_alter_promote_no_column.up.sql", dir)
+
+	exit, stdout, stderr := runLint(t, "--dir", dir)
+	if exit != 1 {
+		t.Fatalf("expected exit 1 (ALTER ADD tenant_id without COLUMN missing RLS), got %d; stdout=%q stderr=%q",
+			exit, stdout, stderr)
+	}
+	wantSubstrings := []string{
+		"FAIL",
+		"billing_records_promoted",
+		"ALTER TABLE ... ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE ... FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY tenant_isolation_... ON ...",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q; got: %s", want, stderr)
+		}
+	}
+}
+
+// TestSchemaQualifiedName_Detected asserts F194 (M13 Phase D round 3):
+// a tenant-scoped table whose CREATE TABLE uses an explicit schema
+// prefix (`public.<table>`) is detected by the widened table-name
+// pattern. The fixture has no RLS, so the lint must FAIL. Before
+// F194 the table-name char-class was `[a-z][a-z0-9_]*` and the
+// schema-prefixed form slipped past entirely.
+func TestSchemaQualifiedName_Detected(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "schema_qualified.up.sql", dir)
+
+	exit, _, stderr := runLint(t, "--dir", dir)
+	if exit != 1 {
+		t.Fatalf("expected exit 1 (schema-qualified table missing RLS), got %d; stderr=%q", exit, stderr)
+	}
+	// The schema prefix must NOT appear in the table-name capture —
+	// audit reports the bare table name (regex's schema prefix is
+	// consumed non-capturing; normalizeTableName lowercases / strips
+	// any surviving quotes).
+	if !strings.Contains(stderr, "billing_records_schema") {
+		t.Errorf("expected stderr to name schema-qualified table by bare name, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "ALTER TABLE ... ENABLE ROW LEVEL SECURITY") {
+		t.Errorf("expected canonical missing-triple line, got: %s", stderr)
+	}
+}
+
+// TestQuotedTableName_Detected asserts F194 (M13 Phase D round 3): a
+// `CREATE TABLE "tenant_foo_quoted" (…)` form with no RLS partner is
+// detected and flagged. normalizeTableName strips the surrounding
+// quotes before downstream lookups so the table-name in error output
+// matches the operator's intuition.
+func TestQuotedTableName_Detected(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "quoted_name.up.sql", dir)
+
+	exit, _, stderr := runLint(t, "--dir", dir)
+	if exit != 1 {
+		t.Fatalf("expected exit 1 (quoted-name table missing RLS), got %d; stderr=%q", exit, stderr)
+	}
+	if !strings.Contains(stderr, "tenant_foo_quoted") {
+		t.Errorf("expected stderr to name the unquoted table identifier, got: %s", stderr)
+	}
+	// Quote characters must NOT survive into the error output — that
+	// would surface a normalisation regression.
+	if strings.Contains(stderr, `"tenant_foo_quoted"`) {
+		t.Errorf("expected quotes stripped from error output, got: %s", stderr)
+	}
+}
+
+// TestMultiTableSingleExempt asserts F195 (M13 Phase D round 3): the
+// table-scoped `-- lint:no-rls-required(<table>): <reason>` form
+// exempts exactly the named table in a multi-tenant-scoped-table
+// migration, while a sibling table in the same file is still held to
+// the full RLS contract and passes on its own merits. The fixture
+// has tenant_foo_a (full RLS triple) and tenant_foo_b (table-scoped
+// marker) — exit 0, `1 suppressed`, both tables present in the
+// verbose summary.
+func TestMultiTableSingleExempt(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "multi_table_single_exempt.up.sql", dir)
+
+	exit, stdout, stderr := runLint(t, "--dir", dir, "--verbose")
+	if exit != 0 {
+		t.Fatalf("expected exit 0 (table-scoped marker exempts one of two tables), got %d; stderr=%q",
+			exit, stderr)
+	}
+	if !strings.Contains(stdout, "2 tenant_* table(s) checked") {
+		t.Errorf("expected count of 2 in summary, stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "1 suppressed") {
+		t.Errorf("expected '1 suppressed' in summary, got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "clean:      tenant_foo_a") {
+		t.Errorf("expected verbose 'clean: tenant_foo_a' line, got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "suppressed: tenant_foo_b") {
+		t.Errorf("expected verbose 'suppressed: tenant_foo_b' line, got: %s", stdout)
+	}
+	// The marker reason must be echoed for the table-scoped entry, not
+	// silently broadened to its sibling.
+	if !strings.Contains(stdout, "shared global cache mirror") {
+		t.Errorf("expected verbose echo of suppression reason, got: %s", stdout)
+	}
+}
+
+// TestMultiTableAmbiguousMarker asserts F195 (M13 Phase D round 3):
+// an unscoped `-- lint:no-rls-required: <reason>` marker in a file
+// that defines more than one tenant-scoped table is rejected as
+// structurally ambiguous. The lint hard-fails with a dedicated
+// error pointing the operator at the table-scoped form. This is the
+// regression test for the silent file-wide widening that pre-F195
+// code allowed.
+func TestMultiTableAmbiguousMarker(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "multi_table_ambiguous_marker.up.sql", dir)
+
+	exit, stdout, stderr := runLint(t, "--dir", dir)
+	if exit != 1 {
+		t.Fatalf("expected exit 1 (ambiguous unscoped marker in multi-table migration), got %d; stdout=%q stderr=%q",
+			exit, stdout, stderr)
+	}
+	wantSubstrings := []string{
+		"FAIL",
+		// Error message must mention both the trigger (unscoped marker
+		// + multi-table) and the recommended fix (table-scoped form).
+		"unscoped",
+		"more than one tenant-scoped table",
+		"lint:no-rls-required(<table>)",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q; got: %s", want, stderr)
+		}
+	}
+	// The ambiguity finding must NOT degrade into the generic
+	// missing-RLS triple — that would lose the structural-error
+	// signal in CI logs.
+	if strings.Contains(stderr, "missing: ALTER TABLE") {
+		t.Errorf("expected ambiguous-marker error, not generic missing-RLS triple, got: %s", stderr)
+	}
+}
+
 // TestRealMigrations is the "smoke test against production" — it runs
 // the lint against the actual `apps/api/migrations` directory. This
 // guards against the failure mode where a refactor of the lint
