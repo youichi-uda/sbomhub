@@ -1623,7 +1623,17 @@ export const api = {
   },
 
   projects: {
-    list: () => request<Project[]>("/api/v1/projects"),
+    // F174 (M13-5 #91): defence-in-depth `?? []` on every top-level slice
+    // response. The Go backend's repository layer declares many slice
+    // returns as `var xs []T` and then appends, so an empty-result
+    // SELECT marshals as JSON `null` (not `[]`). Without normalisation
+    // the page-level `.map` / `.length` calls throw at render time. The
+    // pattern mirrors the in-place `?? []` defence on `getDiff` and
+    // `getDiffGraph` already present in this file. See the M13-5 audit
+    // header for the full helper inventory and Go-side nil-return
+    // catalog.
+    list: async (): Promise<Project[]> =>
+      (await request<Project[]>("/api/v1/projects")) ?? [],
     get: (id: string) => request<Project>(`/api/v1/projects/${id}`),
     create: (data: { name: string; description: string }) =>
       request<Project>("/api/v1/projects", {
@@ -1637,10 +1647,10 @@ export const api = {
         method: "POST",
         body: sbom,
       }),
-    getComponents: (id: string) =>
-      request<Component[]>(`/api/v1/projects/${id}/components`),
-    getVulnerabilities: (id: string) =>
-      request<Vulnerability[]>(`/api/v1/projects/${id}/vulnerabilities`),
+    getComponents: async (id: string): Promise<Component[]> =>
+      (await request<Component[]>(`/api/v1/projects/${id}/components`)) ?? [],
+    getVulnerabilities: async (id: string): Promise<Vulnerability[]> =>
+      (await request<Vulnerability[]>(`/api/v1/projects/${id}/vulnerabilities`)) ?? [],
     // getVulnerabilitiesWithMeta returns the visible page plus the
     // authoritative server-side total (X-Total-Count). M1 Codex review
     // #F28: the bare getVulnerabilities path silently treats the
@@ -1691,7 +1701,15 @@ export const api = {
         }
         throw new APIError(res.status, body);
       }
-      const data: Vulnerability[] = res.status === 204 ? [] : await res.json();
+      // F174 (M13-5): the Go handler emits an empty page as JSON `null`
+      // when the underlying `var rows []Vulnerability` slice is never
+      // appended to (e.g. an offset past the last row). `await res.json()`
+      // then resolves to `null`, not `[]`, and `data.length` blew up the
+      // truncation banner in M11 QA. Belt-and-braces normalisation here
+      // mirrors the `?? []` defence on the other helpers.
+      const parsed: Vulnerability[] | null =
+        res.status === 204 ? [] : await res.json();
+      const data: Vulnerability[] = Array.isArray(parsed) ? parsed : [];
       const headerVal = res.headers.get("X-Total-Count");
       const totalCount =
         headerVal !== null && !Number.isNaN(parseInt(headerVal, 10))
@@ -1699,8 +1717,8 @@ export const api = {
           : data.length;
       return { data, totalCount };
     },
-    getSboms: (id: string) =>
-      request<Sbom[]>(`/api/v1/projects/${id}/sboms`),
+    getSboms: async (id: string): Promise<Sbom[]> =>
+      (await request<Sbom[]>(`/api/v1/projects/${id}/sboms`)) ?? [],
     /**
      * M10-6 (#74) — GET /api/v1/projects/:id/diff?from=<sbom_id>&to=<sbom_id>.
      *
@@ -1866,8 +1884,8 @@ export const api = {
       return { blob, filename };
     },
     // VEX methods
-    getVEXStatements: (id: string) =>
-      request<VEXStatementWithDetails[]>(`/api/v1/projects/${id}/vex`),
+    getVEXStatements: async (id: string): Promise<VEXStatementWithDetails[]> =>
+      (await request<VEXStatementWithDetails[]>(`/api/v1/projects/${id}/vex`)) ?? [],
     createVEXStatement: (
       projectId: string,
       data: {
@@ -1989,8 +2007,8 @@ export const api = {
       return { filename, sizeBytes: blob.size, vexCount, craCount };
     },
     // License policy methods
-    getLicensePolicies: (id: string) =>
-      request<LicensePolicy[]>(`/api/v1/projects/${id}/licenses`),
+    getLicensePolicies: async (id: string): Promise<LicensePolicy[]> =>
+      (await request<LicensePolicy[]>(`/api/v1/projects/${id}/licenses`)) ?? [],
     createLicensePolicy: (
       projectId: string,
       data: {
@@ -2020,11 +2038,16 @@ export const api = {
       request<void>(`/api/v1/projects/${projectId}/licenses/${policyId}`, {
         method: "DELETE",
       }),
-    checkLicenseViolations: (projectId: string, sbomId: string) =>
-      request<LicenseViolation[]>(`/api/v1/projects/${projectId}/licenses/violations?sbom_id=${sbomId}`),
+    checkLicenseViolations: async (
+      projectId: string,
+      sbomId: string,
+    ): Promise<LicenseViolation[]> =>
+      (await request<LicenseViolation[]>(
+        `/api/v1/projects/${projectId}/licenses/violations?sbom_id=${sbomId}`,
+      )) ?? [],
     // API key methods
-    getAPIKeys: (id: string) =>
-      request<APIKey[]>(`/api/v1/projects/${id}/apikeys`),
+    getAPIKeys: async (id: string): Promise<APIKey[]> =>
+      (await request<APIKey[]>(`/api/v1/projects/${id}/apikeys`)) ?? [],
     createAPIKey: (
       projectId: string,
       data: {
@@ -2064,8 +2087,8 @@ export const api = {
       request<{ status: string }>(`/api/v1/projects/${projectId}/notifications/test`, {
         method: "POST",
       }),
-    getNotificationLogs: (projectId: string) =>
-      request<NotificationLog[]>(`/api/v1/projects/${projectId}/notifications/logs`),
+    getNotificationLogs: async (projectId: string): Promise<NotificationLog[]> =>
+      (await request<NotificationLog[]>(`/api/v1/projects/${projectId}/notifications/logs`)) ?? [],
     // Compliance methods
     getCompliance: (id: string) =>
       request<ComplianceResult>(`/api/v1/projects/${id}/compliance`),
@@ -2114,16 +2137,25 @@ export const api = {
   //   PUT    /api/v1/projects/:id/vex-drafts/:draft_id/decision
   //   POST   /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse
   triage: {
-    listDrafts: (projectId: string, filter?: VexDraftListFilter) => {
+    listDrafts: async (
+      projectId: string,
+      filter?: VexDraftListFilter,
+    ): Promise<VexDraftListResponse> => {
       const params = new URLSearchParams();
       if (filter?.cve_id) params.set("cve_id", filter.cve_id);
       if (filter?.decision) params.set("decision", filter.decision);
       if (typeof filter?.limit === "number") params.set("limit", String(filter.limit));
       if (typeof filter?.offset === "number") params.set("offset", String(filter.offset));
       const query = params.toString();
-      return request<VexDraftListResponse>(
-        `/api/v1/projects/${projectId}/vex-drafts${query ? `?${query}` : ""}`
+      const raw = await request<VexDraftListResponse>(
+        `/api/v1/projects/${projectId}/vex-drafts${query ? `?${query}` : ""}`,
       );
+      // F174 (M13-5): handler-level guard at handler/vex_drafts.go:269
+      // already coerces nil → []; this `?? []` is defence-in-depth per
+      // the F164 / getDiffGraph philosophy: handler-side guards have
+      // regressed twice before (F167, F164), so the client refuses to
+      // trust them.
+      return { ...raw, drafts: raw?.drafts ?? [] };
     },
     getDraft: (projectId: string, draftId: string) =>
       request<VexDraft>(
@@ -2169,12 +2201,19 @@ export const api = {
      * header is dropped here, so paginated UIs MUST use listWithMeta
      * instead (M1 #F28 lesson re-applied for the CRA queue UI).
      */
-    list: (projectId: string, filter?: CRAReportListFilter) => {
+    list: async (
+      projectId: string,
+      filter?: CRAReportListFilter,
+    ): Promise<CRAReportListResponse> => {
       const params = cleanCRAReportFilter(filter);
       const query = params.toString();
-      return request<CRAReportListResponse>(
+      const raw = await request<CRAReportListResponse>(
         `/api/v1/projects/${projectId}/cra-reports${query ? `?${query}` : ""}`,
       );
+      // F174 (M13-5): listWithMeta (below) already normalises via
+      // Array.isArray; keep the bare-envelope path symmetric so callers
+      // can switch between the two without changing their `.map` calls.
+      return { ...raw, reports: raw?.reports ?? [] };
     },
     /**
      * GET list + total count from X-Total-Count (M1 #F28 pattern, see
@@ -2280,10 +2319,10 @@ export const api = {
      * we expose only the envelope here. If a paginated view lands
      * later, mirror the cra-reports.listWithMeta shape.
      */
-    getAssessment: (
+    getAssessment: async (
       projectId: string,
       filter?: MetiAssessmentListFilter,
-    ) => {
+    ): Promise<MetiAssessmentListResponse> => {
       const params = new URLSearchParams();
       if (filter?.phase) params.set("phase", filter.phase);
       if (filter?.status) params.set("status", filter.status);
@@ -2293,9 +2332,13 @@ export const api = {
       if (typeof filter?.limit === "number") params.set("limit", String(filter.limit));
       if (typeof filter?.offset === "number") params.set("offset", String(filter.offset));
       const query = params.toString();
-      return request<MetiAssessmentListResponse>(
+      const raw = await request<MetiAssessmentListResponse>(
         `/api/v1/projects/${projectId}/meti/assessment${query ? `?${query}` : ""}`,
       );
+      // F174 (M13-5): handler/meti.go:372 currently guards but the
+      // matrix page mounts unconditionally. Belt-and-braces per the F164
+      // pattern.
+      return { ...raw, assessments: raw?.assessments ?? [] };
     },
     /**
      * POST /refresh — re-runs the evaluator fan-out (27 criteria) and
@@ -2306,11 +2349,15 @@ export const api = {
      * outages — APIError.isAIDisabled() is harmless here, it just falls
      * through to the generic flash error path).
      */
-    refreshAssessment: (projectId: string) =>
-      request<MetiRefreshResponse>(
+    refreshAssessment: async (projectId: string): Promise<MetiRefreshResponse> => {
+      const raw = await request<MetiRefreshResponse>(
         `/api/v1/projects/${projectId}/meti/assessment/refresh`,
         { method: "POST" },
-      ),
+      );
+      // F174 (M13-5): post-refresh `assessments` field comes from the
+      // same repo path as getAssessment. Keep the response shape stable.
+      return { ...raw, assessments: raw?.assessments ?? [] };
+    },
     /**
      * PUT /override — applies one operator override to a single criterion
      * row. Server enforces F31 state-machine guard: re-overriding an
@@ -2363,24 +2410,45 @@ export const api = {
      * achieved"). The page uses this as the "改善 actions のみ" toggle
      * data source.
      */
-    getImprovementActions: (
+    getImprovementActions: async (
       projectId: string,
       filter?: { phase?: METIPhase | string },
-    ) => {
+    ): Promise<MetiImprovementActionsResponse> => {
       const params = new URLSearchParams();
       if (filter?.phase) params.set("phase", filter.phase);
       const query = params.toString();
-      return request<MetiImprovementActionsResponse>(
+      const raw = await request<MetiImprovementActionsResponse>(
         `/api/v1/projects/${projectId}/meti/improvement-actions${query ? `?${query}` : ""}`,
       );
+      // F174 (M13-5): the improvement-actions list is the M3 dashboard's
+      // primary call-to-action; "what should we fix next" must show an
+      // empty state, not crash.
+      return { ...raw, actions: raw?.actions ?? [] };
     },
   },
   sbom: {
-    diff: (data: { base_sbom_id: string; target_sbom_id: string }) =>
-      request<SbomDiffResponse>("/api/v1/sbom/diff", {
+    diff: async (data: {
+      base_sbom_id: string;
+      target_sbom_id: string;
+    }): Promise<SbomDiffResponse> => {
+      const raw = await request<SbomDiffResponse>("/api/v1/sbom/diff", {
         method: "POST",
         body: JSON.stringify(data),
-      }),
+      });
+      // F174 (M13-5): same defence as `projects.getDiff` — each of the
+      // four slice fields can land as JSON `null` when the backend's
+      // diff has no entries in that bucket (var added []…; var removed
+      // []…; never appended). The page-level dashboard renders all four
+      // unconditionally so a single `null` crashed it. Spread + per-key
+      // ?? keeps the summary object intact.
+      return {
+        ...raw,
+        added: raw?.added ?? [],
+        removed: raw?.removed ?? [],
+        updated: raw?.updated ?? [],
+        new_vulnerabilities: raw?.new_vulnerabilities ?? [],
+      };
+    },
   },
   // Report methods
   reports: {
@@ -2398,29 +2466,68 @@ export const api = {
         method: "POST",
         body: JSON.stringify(input),
       }),
-    list: (page?: number, limit?: number) => {
+    list: async (page?: number, limit?: number): Promise<ReportListResponse> => {
       const params = new URLSearchParams();
       if (page) params.set("page", page.toString());
       if (limit) params.set("limit", limit.toString());
       const query = params.toString();
-      return request<ReportListResponse>(`/api/v1/reports${query ? `?${query}` : ""}`);
+      const raw = await request<ReportListResponse>(
+        `/api/v1/reports${query ? `?${query}` : ""}`,
+      );
+      // F174 (M13-5): repository.ReportRepository.ListReports declares
+      // `var reports []…` (repo/report.go:256) and the per-report
+      // `email_recipients` field is scanned via the same nil-slice
+      // pattern (repo/report.go:188,215,259). The GeneratedReport
+      // interface marks email_recipients as optional, so we widen it to
+      // an always-present `[]` to let the email-status column render
+      // unconditionally.
+      const reports = (raw?.reports ?? []).map((r) => ({
+        ...r,
+        email_recipients: r.email_recipients ?? [],
+      }));
+      return { ...raw, reports };
     },
     get: (id: string) => request<GeneratedReport>(`/api/v1/reports/${id}`),
     downloadUrl: (id: string) => `${API_URL}/api/v1/reports/${id}/download`,
   },
   // Analytics methods
   analytics: {
-    getSummary: (days?: number) =>
-      request<AnalyticsSummary>(`/api/v1/analytics/summary${days ? `?days=${days}` : ""}`),
-    getMTTR: (days?: number) =>
-      request<MTTRResult[]>(`/api/v1/analytics/mttr${days ? `?days=${days}` : ""}`),
-    getVulnerabilityTrend: (days?: number) =>
-      request<VulnerabilityTrendPoint[]>(`/api/v1/analytics/vulnerability-trend${days ? `?days=${days}` : ""}`),
-    getSLOAchievement: (days?: number) =>
-      request<SLOAchievement[]>(`/api/v1/analytics/slo-achievement${days ? `?days=${days}` : ""}`),
-    getComplianceTrend: (days?: number) =>
-      request<ComplianceTrendPoint[]>(`/api/v1/analytics/compliance-trend${days ? `?days=${days}` : ""}`),
-    getSLOTargets: () => request<SLOTarget[]>("/api/v1/analytics/slo-targets"),
+    // F174 (M13-5): every analytics endpoint feeds a dashboard chart
+    // that maps over its slice. `service/analytics.go:72-101,213-225`
+    // returns `var trend []…` style slices from
+    // `repository/analytics.go:284,365`, so an empty period produces a
+    // JSON `null` envelope. The `?? []` normalisation here keeps the
+    // charts rendering an empty axis instead of crashing the page.
+    getSummary: async (days?: number): Promise<AnalyticsSummary> => {
+      const raw = await request<AnalyticsSummary>(
+        `/api/v1/analytics/summary${days ? `?days=${days}` : ""}`,
+      );
+      return {
+        ...raw,
+        mttr: raw?.mttr ?? [],
+        vulnerability_trend: raw?.vulnerability_trend ?? [],
+        slo_achievement: raw?.slo_achievement ?? [],
+        compliance_trend: raw?.compliance_trend ?? [],
+      };
+    },
+    getMTTR: async (days?: number): Promise<MTTRResult[]> =>
+      (await request<MTTRResult[]>(
+        `/api/v1/analytics/mttr${days ? `?days=${days}` : ""}`,
+      )) ?? [],
+    getVulnerabilityTrend: async (days?: number): Promise<VulnerabilityTrendPoint[]> =>
+      (await request<VulnerabilityTrendPoint[]>(
+        `/api/v1/analytics/vulnerability-trend${days ? `?days=${days}` : ""}`,
+      )) ?? [],
+    getSLOAchievement: async (days?: number): Promise<SLOAchievement[]> =>
+      (await request<SLOAchievement[]>(
+        `/api/v1/analytics/slo-achievement${days ? `?days=${days}` : ""}`,
+      )) ?? [],
+    getComplianceTrend: async (days?: number): Promise<ComplianceTrendPoint[]> =>
+      (await request<ComplianceTrendPoint[]>(
+        `/api/v1/analytics/compliance-trend${days ? `?days=${days}` : ""}`,
+      )) ?? [],
+    getSLOTargets: async (): Promise<SLOTarget[]> =>
+      (await request<SLOTarget[]>("/api/v1/analytics/slo-targets")) ?? [],
     updateSLOTarget: (severity: string, targetHours: number) =>
       request<{ status: string }>("/api/v1/analytics/slo-targets", {
         method: "PUT",
@@ -2429,7 +2536,7 @@ export const api = {
   },
   // Audit log methods
   auditLogs: {
-    list: (filter?: AuditFilter) => {
+    list: async (filter?: AuditFilter): Promise<AuditListResponse> => {
       const params = new URLSearchParams();
       if (filter?.action) params.set("action", filter.action);
       if (filter?.resource_type) params.set("resource_type", filter.resource_type);
@@ -2439,7 +2546,15 @@ export const api = {
       if (filter?.page) params.set("page", filter.page.toString());
       if (filter?.limit) params.set("limit", filter.limit.toString());
       const query = params.toString();
-      return request<AuditListResponse>(`/api/v1/audit-logs${query ? `?${query}` : ""}`);
+      const raw = await request<AuditListResponse>(
+        `/api/v1/audit-logs${query ? `?${query}` : ""}`,
+      );
+      // F174 (M13-5): audit log envelope normalisation. The service
+      // initialises `logs := make(...)` today (service/audit.go:105) so
+      // this is belt-and-braces — but the table renders `.map` on every
+      // request so a future refactor that returns nil from a fast path
+      // (e.g. early-return for empty windows) cannot crash the page.
+      return { ...raw, logs: raw?.logs ?? [] };
     },
     exportUrl: (filter?: AuditFilter) => {
       const params = new URLSearchParams();
@@ -2451,24 +2566,58 @@ export const api = {
       const query = params.toString();
       return `${API_URL}/api/v1/audit-logs/export${query ? `?${query}` : ""}`;
     },
-    getStatistics: (days?: number) =>
-      request<AuditStatistics>(`/api/v1/audit-logs/statistics${days ? `?days=${days}` : ""}`),
-    getActions: () => request<ActionInfo[]>("/api/v1/audit-logs/actions"),
-    getResourceTypes: () => request<ResourceTypeInfo[]>("/api/v1/audit-logs/resource-types"),
+    getStatistics: async (days?: number): Promise<AuditStatistics> => {
+      const raw = await request<AuditStatistics>(
+        `/api/v1/audit-logs/statistics${days ? `?days=${days}` : ""}`,
+      );
+      // F174 (M13-5): repository.AuditRepository.GetActionCounts
+      // (repo/audit.go:360) and GetDailyActionCounts (repo/audit.go:386)
+      // both follow the `var rows []…` / `rows = append(...)` pattern,
+      // so empty-window summaries marshal as null. The audit dashboard
+      // renders both arrays into bar charts unconditionally.
+      return {
+        ...raw,
+        action_counts: raw?.action_counts ?? [],
+        daily_counts: raw?.daily_counts ?? [],
+      };
+    },
+    getActions: async (): Promise<ActionInfo[]> =>
+      (await request<ActionInfo[]>("/api/v1/audit-logs/actions")) ?? [],
+    getResourceTypes: async (): Promise<ResourceTypeInfo[]> =>
+      (await request<ResourceTypeInfo[]>("/api/v1/audit-logs/resource-types")) ?? [],
   },
   // EOL methods
   eol: {
     sync: () =>
       request<EOLSyncResult>("/api/v1/eol/sync", { method: "POST" }),
-    getProducts: (limit?: number, offset?: number) => {
+    getProducts: async (
+      limit?: number,
+      offset?: number,
+    ): Promise<{ products: EOLProduct[]; total: number }> => {
       const params = new URLSearchParams();
       if (limit) params.set("limit", limit.toString());
       if (offset) params.set("offset", offset.toString());
       const query = params.toString();
-      return request<{ products: EOLProduct[]; total: number }>(`/api/v1/eol/products${query ? `?${query}` : ""}`);
+      const raw = await request<{ products: EOLProduct[]; total: number }>(
+        `/api/v1/eol/products${query ? `?${query}` : ""}`,
+      );
+      // F174 (M13-5): repository.EOLRepository.ListProducts (repo/eol.go:118)
+      // declares `var products …` → nil → JSON null when no products
+      // are synced yet (first boot before the EOL background sync runs).
+      return { ...raw, products: raw?.products ?? [] };
     },
-    getProduct: (name: string) =>
-      request<{ product: EOLProduct; cycles: EOLProductCycle[] }>(`/api/v1/eol/products/${name}`),
+    getProduct: async (
+      name: string,
+    ): Promise<{ product: EOLProduct; cycles: EOLProductCycle[] }> => {
+      const raw = await request<{ product: EOLProduct; cycles: EOLProductCycle[] }>(
+        `/api/v1/eol/products/${name}`,
+      );
+      // F174 (M13-5): per-product cycles list comes from
+      // repository.EOLRepository.GetCyclesByProduct (repo/eol.go:169) via
+      // the same nil-slice pattern. The product detail page builds a
+      // timeline widget unconditionally over `cycles`.
+      return { ...raw, cycles: raw?.cycles ?? [] };
+    },
     getStats: () => request<EOLStats>("/api/v1/eol/stats"),
     checkComponent: (name: string, version?: string, purl?: string) => {
       const params = new URLSearchParams();
@@ -2486,20 +2635,39 @@ export const api = {
   kev: {
     sync: () =>
       request<KEVSyncResult>("/api/v1/kev/sync", { method: "POST" }),
-    getCatalog: (limit?: number, offset?: number) => {
+    getCatalog: async (
+      limit?: number,
+      offset?: number,
+    ): Promise<{ entries: KEVEntry[]; total: number }> => {
       const params = new URLSearchParams();
       if (limit) params.set("limit", limit.toString());
       if (offset) params.set("offset", offset.toString());
       const query = params.toString();
-      return request<{ entries: KEVEntry[]; total: number }>(`/api/v1/kev/catalog${query ? `?${query}` : ""}`);
+      const raw = await request<{ entries: KEVEntry[]; total: number }>(
+        `/api/v1/kev/catalog${query ? `?${query}` : ""}`,
+      );
+      // F174 (M13-5): repository.KEVRepository.List (repo/kev.go:107)
+      // → `var entries …`. The KEV catalog page is the M0 trust-rescue
+      // "is the KEV sync alive" smoke; an empty post-sync state must
+      // render the empty-state card, not crash.
+      return { ...raw, entries: raw?.entries ?? [] };
     },
     getStats: () => request<KEVStats>("/api/v1/kev/stats"),
     getByCVE: (cveId: string) =>
       request<{ in_kev: boolean; cve_id: string; entry?: KEVEntry }>(`/api/v1/kev/${cveId}`),
     checkCVE: (cveId: string) =>
       request<KEVCheckResult>(`/api/v1/vulnerabilities/${cveId}/kev`),
-    getProjectKEV: (projectId: string) =>
-      request<{ vulnerabilities: Vulnerability[]; count: number }>(`/api/v1/projects/${projectId}/kev`),
+    getProjectKEV: async (
+      projectId: string,
+    ): Promise<{ vulnerabilities: Vulnerability[]; count: number }> => {
+      const raw = await request<{ vulnerabilities: Vulnerability[]; count: number }>(
+        `/api/v1/projects/${projectId}/kev`,
+      );
+      // F174 (M13-5): per-project KEV intersection from
+      // repository/kev.go:358 GetKEVVulnerabilities; nil when the project
+      // SBOM has no KEV-listed CVEs (the common case for clean projects).
+      return { ...raw, vulnerabilities: raw?.vulnerabilities ?? [] };
+    },
   },
   // SSVC methods
   ssvc: {
@@ -2512,15 +2680,34 @@ export const api = {
       }),
     getSummary: (projectId: string) =>
       request<SSVCSummary>(`/api/v1/projects/${projectId}/ssvc/summary`),
-    listAssessments: (projectId: string, decision?: SSVCDecision, limit?: number, offset?: number) => {
+    listAssessments: async (
+      projectId: string,
+      decision?: SSVCDecision,
+      limit?: number,
+      offset?: number,
+    ): Promise<{
+      assessments: SSVCAssessmentWithVuln[];
+      total: number;
+      limit: number;
+      offset: number;
+    }> => {
       const params = new URLSearchParams();
       if (decision) params.set("decision", decision);
       if (limit) params.set("limit", limit.toString());
       if (offset) params.set("offset", offset.toString());
       const query = params.toString();
-      return request<{ assessments: SSVCAssessmentWithVuln[]; total: number; limit: number; offset: number }>(
-        `/api/v1/projects/${projectId}/ssvc/assessments${query ? `?${query}` : ""}`
-      );
+      const raw = await request<{
+        assessments: SSVCAssessmentWithVuln[];
+        total: number;
+        limit: number;
+        offset: number;
+      }>(`/api/v1/projects/${projectId}/ssvc/assessments${query ? `?${query}` : ""}`);
+      // F174 (M13-5): repository.SSVCRepository.ListAssessments
+      // (repo/ssvc.go:250) → `var rows …`. The SSVC queue is the main
+      // path operators use to triage vulnerabilities; an empty filtered
+      // view (e.g. decision=Immediate but no immediate items) hit JSON
+      // null before this normalisation.
+      return { ...raw, assessments: raw?.assessments ?? [] };
     },
     getAssessment: (projectId: string, vulnId: string) =>
       request<SSVCAssessment>(`/api/v1/projects/${projectId}/vulnerabilities/${vulnId}/ssvc`),
@@ -2539,10 +2726,15 @@ export const api = {
       request<void>(`/api/v1/projects/${projectId}/ssvc/assessments/${assessmentId}`, {
         method: "DELETE",
       }),
-    getHistory: (projectId: string, assessmentId: string) =>
-      request<SSVCAssessmentHistory[]>(`/api/v1/projects/${projectId}/ssvc/assessments/${assessmentId}/history`),
-    getImmediateAssessments: () =>
-      request<SSVCAssessmentWithVuln[]>("/api/v1/ssvc/immediate"),
+    getHistory: async (
+      projectId: string,
+      assessmentId: string,
+    ): Promise<SSVCAssessmentHistory[]> =>
+      (await request<SSVCAssessmentHistory[]>(
+        `/api/v1/projects/${projectId}/ssvc/assessments/${assessmentId}/history`,
+      )) ?? [],
+    getImmediateAssessments: async (): Promise<SSVCAssessmentWithVuln[]> =>
+      (await request<SSVCAssessmentWithVuln[]>("/api/v1/ssvc/immediate")) ?? [],
     calculate: (input: SSVCAssessmentInput) =>
       request<SSVCCalculateResult>("/api/v1/ssvc/calculate", {
         method: "POST",
@@ -2551,16 +2743,34 @@ export const api = {
   },
   // IPA methods
   ipa: {
-    listAnnouncements: (category?: string, limit?: number, offset?: number) => {
+    listAnnouncements: async (
+      category?: string,
+      limit?: number,
+      offset?: number,
+    ): Promise<IPAAnnouncementListResponse> => {
       const params = new URLSearchParams();
       if (category) params.set("category", category);
       if (limit) params.set("limit", limit.toString());
       if (offset) params.set("offset", offset.toString());
       const query = params.toString();
-      return request<IPAAnnouncementListResponse>(`/api/v1/ipa/announcements${query ? `?${query}` : ""}`);
+      const raw = await request<IPAAnnouncementListResponse>(
+        `/api/v1/ipa/announcements${query ? `?${query}` : ""}`,
+      );
+      // F174 (M13-5): repository.IPARepository.ListAnnouncements
+      // (repo/ipa.go:114) → `var rows …`. Empty when an operator opens
+      // the IPA pane before the first sync completes.
+      return { ...raw, announcements: raw?.announcements ?? [] };
     },
-    getAnnouncementsByCVE: (cveId: string) =>
-      request<{ announcements: IPAAnnouncement[]; cve_id: string }>(`/api/v1/vulnerabilities/${cveId}/ipa`),
+    getAnnouncementsByCVE: async (
+      cveId: string,
+    ): Promise<{ announcements: IPAAnnouncement[]; cve_id: string }> => {
+      const raw = await request<{ announcements: IPAAnnouncement[]; cve_id: string }>(
+        `/api/v1/vulnerabilities/${cveId}/ipa`,
+      );
+      // F174 (M13-5): GetAnnouncementsByCVE (repo/ipa.go:145) same
+      // pattern; nil when no IPA announcement is correlated.
+      return { ...raw, announcements: raw?.announcements ?? [] };
+    },
     getSettings: () => request<IPASyncSettings>("/api/v1/settings/ipa"),
     updateSettings: (settings: { enabled: boolean; notify_on_new: boolean; notify_severity: string[] }) =>
       request<IPASyncSettings>("/api/v1/settings/ipa", {
@@ -2571,8 +2781,16 @@ export const api = {
   },
   // Issue Tracker methods
   integrations: {
-    list: () =>
-      request<{ connections: IssueTrackerConnection[] }>("/api/v1/integrations"),
+    list: async (): Promise<{ connections: IssueTrackerConnection[] }> => {
+      const raw = await request<{ connections: IssueTrackerConnection[] }>(
+        "/api/v1/integrations",
+      );
+      // F174 (M13-5): repository.IssueTrackerRepository.ListConnections
+      // (repo/issue_tracker.go:91) → `var rows …`. The integrations
+      // settings page renders the empty-state "Configure your first
+      // integration" card when this is `[]` but crashed on `null`.
+      return { ...raw, connections: raw?.connections ?? [] };
+    },
     get: (id: string) => request<IssueTrackerConnection>(`/api/v1/integrations/${id}`),
     create: (input: CreateConnectionInput) =>
       request<IssueTrackerConnection>("/api/v1/integrations", {
@@ -2583,16 +2801,37 @@ export const api = {
       request<void>(`/api/v1/integrations/${id}`, { method: "DELETE" }),
   },
   tickets: {
-    list: (status?: string, limit?: number, offset?: number) => {
+    list: async (
+      status?: string,
+      limit?: number,
+      offset?: number,
+    ): Promise<TicketListResponse> => {
       const params = new URLSearchParams();
       if (status) params.set("status", status);
       if (limit) params.set("limit", limit.toString());
       if (offset) params.set("offset", offset.toString());
       const query = params.toString();
-      return request<TicketListResponse>(`/api/v1/tickets${query ? `?${query}` : ""}`);
+      const raw = await request<TicketListResponse>(
+        `/api/v1/tickets${query ? `?${query}` : ""}`,
+      );
+      // F174 (M13-5): repository.IssueTrackerRepository.ListTickets
+      // (repo/issue_tracker.go:339) → `var rows …`. The tickets queue
+      // is empty whenever no operator has created any ticket from a
+      // vulnerability yet — common on fresh installs.
+      return { ...raw, tickets: raw?.tickets ?? [] };
     },
-    getByVulnerability: (vulnId: string) =>
-      request<{ tickets: VulnerabilityTicketWithDetails[] }>(`/api/v1/vulnerabilities/${vulnId}/tickets`),
+    getByVulnerability: async (
+      vulnId: string,
+    ): Promise<{ tickets: VulnerabilityTicketWithDetails[] }> => {
+      const raw = await request<{ tickets: VulnerabilityTicketWithDetails[] }>(
+        `/api/v1/vulnerabilities/${vulnId}/tickets`,
+      );
+      // F174 (M13-5): ListTicketsByVulnerability (repo/issue_tracker.go:272).
+      // Per-vulnerability ticket list is null when no tickets were
+      // filed against that CVE — the vulnerability detail dialog uses
+      // this to decide whether to show the "Open in Jira" shortcut.
+      return { ...raw, tickets: raw?.tickets ?? [] };
+    },
     create: (vulnId: string, input: Omit<CreateTicketInput, "vulnerability_id">) =>
       request<VulnerabilityTicket>(`/api/v1/vulnerabilities/${vulnId}/ticket`, {
         method: "POST",
@@ -2623,7 +2862,8 @@ export const api = {
   },
   // Tenant-level API key methods (recommended)
   apiKeys: {
-    list: () => request<APIKey[]>("/api/v1/apikeys"),
+    list: async (): Promise<APIKey[]> =>
+      (await request<APIKey[]>("/api/v1/apikeys")) ?? [],
     create: (data: CreateAPIKeyInput) =>
       request<APIKeyWithSecret>("/api/v1/apikeys", {
         method: "POST",
@@ -2633,8 +2873,10 @@ export const api = {
       request<void>(`/api/v1/apikeys/${keyId}`, { method: "DELETE" }),
   },
   publicLinks: {
-    list: (projectId: string) =>
-      request<PublicLink[]>(`/api/v1/projects/${projectId}/public-links`),
+    list: async (projectId: string): Promise<PublicLink[]> =>
+      (await request<PublicLink[]>(
+        `/api/v1/projects/${projectId}/public-links`,
+      )) ?? [],
     create: (
       projectId: string,
       data: {
@@ -2667,11 +2909,17 @@ export const api = {
       }),
     delete: (linkId: string) =>
       request<void>(`/api/v1/public-links/${linkId}`, { method: "DELETE" }),
-    publicView: (token: string, password?: string) => {
+    publicView: async (token: string, password?: string): Promise<PublicSbomView> => {
       const url = password
         ? `/api/v1/public/${token}?password=${encodeURIComponent(password)}`
         : `/api/v1/public/${token}`;
-      return request<PublicSbomView>(url);
+      const raw = await request<PublicSbomView>(url);
+      // F174 (M13-5): public-link SBOM view normalises components to []
+      // — the view is rendered into a public (unauthenticated) page and
+      // hardening it against null lets us treat the page as
+      // safe-by-default. Component table on the public view maps
+      // unconditionally.
+      return { ...raw, components: raw?.components ?? [] };
     },
   },
 };
