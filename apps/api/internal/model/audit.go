@@ -244,9 +244,13 @@ const (
 	// F217 (M14 Phase D round 1 fix): issue-tracker ticket resource_type
 	// for /vulnerabilities/:vuln_id/ticket(s) and /tickets[/...]. Pinned
 	// here so audit_logs.(resource_type, resource_id) joins onto the
-	// integration_tickets table cleanly — pre-F217 the row carried
-	// resource_type="vulnerability" but resource_id=<ticket UUID>
-	// (handler SetAuditResourceID) which joined onto NEITHER table.
+	// vulnerability_tickets table cleanly (the physical table — see
+	// migrations/015_issue_tracker.up.sql and repository/issue_tracker.go).
+	// Pre-F217 the row carried resource_type="vulnerability" but
+	// resource_id=<ticket UUID> (handler SetAuditResourceID) which
+	// joined onto NEITHER table. F223 (M14 Phase D round 2 fix)
+	// corrected this docstring's prior integration-prefixed ticket
+	// table reference, which never existed in any migration.
 	ResourceTicket = "ticket"
 )
 

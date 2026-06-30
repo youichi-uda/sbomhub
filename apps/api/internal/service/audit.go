@@ -409,7 +409,12 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 
 		// F217 (M14 Phase D round 1 fix): issue-tracker ticket actions.
 		// audit_logs.(resource_type="ticket", resource_id=<ticket UUID>)
-		// joins onto integration_tickets.id.
+		// joins onto vulnerability_tickets.id (the physical table name —
+		// see apps/api/migrations/015_issue_tracker.up.sql and
+		// repository/issue_tracker.go). F223 (M14 Phase D round 2 fix):
+		// renamed from a prior integration-prefixed docstring reference,
+		// which never existed in any migration and would have sent
+		// forensic-join readers grepping for a phantom table.
 		{Action: model.ActionTicketCreated, Label: "Ticket Created", Category: "ticket"},
 		{Action: model.ActionTicketSynced, Label: "Ticket Synced", Category: "ticket"},
 		{Action: model.ActionTicketListed, Label: "Ticket Listed", Category: "ticket"},

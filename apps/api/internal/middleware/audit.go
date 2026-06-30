@@ -765,8 +765,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	// SetAuditResourceID (F208 path), so the resulting audit row carried
 	// (resource_type="vulnerability", resource_id=<ticket UUID>) — a
 	// JOIN onto vulnerabilities.id silently dropped (ticket UUID is not
-	// a vulnerabilities PK) and a JOIN onto integration_tickets.id
+	// a vulnerabilities PK) and a JOIN onto vulnerability_tickets.id
+	// (the physical table — see migrations/015_issue_tracker.up.sql)
 	// matched only by coincidence (resource_type filter excluded it).
+	// F223 (M14 Phase D round 2 fix) corrected this docstring's prior
+	// reference to a non-existent integration-prefixed ticket table.
 	//
 	// This branch must come BEFORE the /vulnerabilities tenant branch
 	// below so the /vulnerabilities-prefixed ticket routes are caught
