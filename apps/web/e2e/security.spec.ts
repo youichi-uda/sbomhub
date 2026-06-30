@@ -358,10 +358,13 @@ test.describe('Security Tests', () => {
         // page heading remains mounted — both of which prove "no
         // table dropped" without requiring a specific error-message
         // i18n match.
-        // M11-2 #77 follow-up: 1m × 3 retries timeout in CI 28381027058,
-        // project creation UI flow doesn't match the assertion shape.
-        // Re-skip pending M12 page-side review.
-        test.skip('should handle SQL injection in project creation', async ({ page, request }) => {
+        // M12-1 #82: root-cause audited. The dialog locators line up
+        // with `projects/page.tsx` L129-161: namePlaceholder = "My Project",
+        // descriptionPlaceholder = "Project description", Create button
+        // sits inside the radix `[role="dialog"]` with `tc("create")` =
+        // "Create" (exact match for `/^Create$/`). Main-scoped Projects
+        // heading still mounts after the payload submission. Un-skip.
+        test('should handle SQL injection in project creation', async ({ page, request }) => {
             const sqlPayload = "Test'; DROP TABLE projects; --";
 
             // Create project with SQL injection payload

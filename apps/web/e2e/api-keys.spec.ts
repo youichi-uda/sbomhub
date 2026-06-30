@@ -3,21 +3,20 @@ import { test, expect } from '@playwright/test';
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
-// M11-2 #77 (deferred to M12 — UI flow gap, not a seed gap): the seed
-// gained a synthetic-hash api_keys row, but the UI flow these tests
-// target is still broken. The first test (line 33) expects a
-// per-project "API Keys" tab on /projects/:id and times out at 15 s
-// waiting for it — current build only surfaces API keys at the
-// tenant level (/settings/apikeys), not as a per-project tab. The
-// subsequent tests (Create API Key button, name input, Copy button)
-// likewise target a per-project dialog that does not exist. The first
-// M11-2 attempt to un-skip burnt ~18 min of the 35-min CI budget on
-// these tests retrying ×3 and timing out at 1 min each (see run
-// 28378387603 cancellation). M12 owner needs to (a) decide whether
-// project-detail surfaces an API Keys tab or whether the spec moves
-// to /settings/apikeys, (b) align the dialog locators with the
-// chosen UI.
-test.describe.skip('API Keys Management', () => {
+// M12-1 #82 → M13 deferment: confirmed page-route gap (NOT a hydration
+// bug). The project detail page tab union in
+// `apps/web/src/app/[locale]/(dashboard)/projects/[id]/page.tsx` L16
+// is `"upload" | "components" | "vulnerabilities" | "vex" | "licenses"
+// | "notifications"` — there is no "apikeys" tab. The current build
+// only surfaces API keys at the tenant level via
+// `/settings/apikeys/page.tsx` (`APIKeysPage`). Backend endpoints
+// `/projects/:id/apikeys` exist (see apps/api/cmd/server/main.go
+// L1236-1238) so the spec's API plumbing is sound, but the per-project
+// UI tab + Create dialog the spec drives are not implemented. Two M13
+// options: (a) add a per-project API Keys tab + dialog to the project
+// detail page, OR (b) rewrite this spec to target /settings/apikeys
+// (tenant-level). Option (a) is the spec author's original intent.
+test.describe.skip('API Keys Management (M13: per-project API Keys tab missing on /projects/:id)', () => {
     let projectId: string;
 
     test.beforeAll(async ({ request }) => {

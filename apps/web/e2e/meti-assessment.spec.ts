@@ -128,17 +128,16 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await expect(page.getByTestId("meti-improvement-toggle")).toBeVisible();
     });
 
-    // M11-2 #77: re-enabled. The test creates its own project in
-    // beforeAll and runs /refresh to populate rows; the inline
-    // status-200 / has_override guard auto-skips when /refresh 401's
-    // (no API-key session in CI) so this stays soft-gated.
-    // M11-2 #77 follow-up: M11-2 un-skipped this spec assuming the
-    // M11-2 seed (criterion=meti.env_setup.01, override_status=NULL)
-    // would let the override-trigger button land. CI 28381027058
-    // shows it still hangs 11s × 3 retries — the page-side override
-    // form discovery is gated on additional state the seed doesn't
-    // surface. Re-skip pending M12 page-side investigation.
-    test.skip("should open the override form on a criterion card", async ({ page, request }) => {
+    // M12-1 #82: root-cause audited. The M11-2 11s hang was the
+    // selector — `.filter({ has: page.locator('[data-criterion-id=…]') })`
+    // requires the matching element to be a DESCENDANT of the card,
+    // but `data-criterion-id` lives on the Card itself (see
+    // apps/web/src/components/meti/criterion-card.tsx L310-311). Use
+    // a compound attribute selector instead so the card matches itself.
+    // The `/refresh` POST is gated by RequireWrite (Owner/Admin/Member)
+    // and self-hosted mock auth sets Role=Owner, so it should 200 in
+    // CI; the inline status-200 guard stays as belt-and-suspenders.
+    test("should open the override form on a criterion card", async ({ page, request }) => {
         // Requires at least one meti_assessment row that has NOT been
         // overridden yet. The override-trigger button is disabled when
         // override_status is already set, so we filter on
@@ -172,9 +171,11 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await page.goto(`/en/projects/${projectId}/meti`);
         await page.waitForLoadState("networkidle");
 
+        // M12-1 #82: compound attribute selector — `data-criterion-id`
+        // is on the Card root, not a descendant, so `.filter({ has })`
+        // would never match. Combine both attributes in one locator.
         const card = page
-            .getByTestId("meti-criterion-card")
-            .filter({ has: page.locator(`[data-criterion-id="${target.criterion_id}"]`) })
+            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"]`)
             .first();
         await expect(card).toBeVisible({ timeout: 10000 });
 
@@ -189,10 +190,8 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await expect(card.getByTestId("meti-override-form")).toHaveCount(0);
     });
 
-    // M11-2 #77: re-enabled. Same soft-gate as the override-form test —
-    // auto-skips when /refresh 401's or no non-overridden row exists.
-    // M11-2 #77 follow-up: same root cause as override-form spec.
-    test.skip("should apply a manual override and surface override badge", async ({ page, request }) => {
+    // M12-1 #82: same selector fix as override-form spec.
+    test("should apply a manual override and surface override badge", async ({ page, request }) => {
         // Acceptance criterion: override → effective status flips and
         // the override badge is visible. Requires a non-overridden row
         // AND a write-capable session — same gating as the prior test.
@@ -224,9 +223,9 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await page.goto(`/en/projects/${projectId}/meti`);
         await page.waitForLoadState("networkidle");
 
+        // M12-1 #82: compound attribute selector (see override-form spec).
         const card = page
-            .getByTestId("meti-criterion-card")
-            .filter({ has: page.locator(`[data-criterion-id="${target.criterion_id}"]`) })
+            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"]`)
             .first();
         await expect(card).toBeVisible({ timeout: 10000 });
 
@@ -241,10 +240,9 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         // when the override has been persisted. If the page-level
         // session lacks write auth the PUT lands as 403 and the badge
         // does not appear; skip in that case since we cannot assert
-        // the success outcome.
+        // the success outcome. M12-1 #82: compound attribute selector.
         const overriddenCard = page
-            .getByTestId("meti-criterion-card")
-            .filter({ has: page.locator(`[data-criterion-id="${target.criterion_id}"][data-overridden="true"]`) });
+            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"][data-overridden="true"]`);
 
         const overriddenCount = await overriddenCard.count();
         if (overriddenCount === 0) {
@@ -299,12 +297,8 @@ test.describe("METI Self-Assessment (M3-5)", () => {
     // clear-override form, submits a 1-char-min note, polls the GET
     // until override_status is null, and confirms a
     // meti_assessment_override_cleared audit row.
-    // M11-2 #77: re-enabled. Same soft-gate as the prior override
-    // tests — the body auto-skips when /refresh 401's or the inline
-    // PUT/DELETE 403's, so this test cannot fail-loud in CI without
-    // an API key.
-    // M11-2 #77 follow-up: same root cause as override-form spec.
-    test.skip("should expose the clear-override flow on an overridden row", async ({ page, request }) => {
+    // M12-1 #82: same selector fix as override-form spec.
+    test("should expose the clear-override flow on an overridden row", async ({ page, request }) => {
         const refreshRes = await request.post(
             `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`,
         );
@@ -346,9 +340,9 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await page.goto(`/en/projects/${projectId}/meti`);
         await page.waitForLoadState("networkidle");
 
+        // M12-1 #82: compound attribute selector (see override-form spec).
         const card = page
-            .getByTestId("meti-criterion-card")
-            .filter({ has: page.locator(`[data-criterion-id="${target.criterion_id}"]`) })
+            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"]`)
             .first();
         await expect(card).toBeVisible({ timeout: 10000 });
 
@@ -376,13 +370,9 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         // After the clear, the same criterion id should carry
         // data-overridden="false". If the session lacks write auth
         // the DELETE 403's and the badge stays — skip in that case.
+        // M12-1 #82: compound attribute selector.
         const clearedCard = page
-            .getByTestId("meti-criterion-card")
-            .filter({
-                has: page.locator(
-                    `[data-criterion-id="${target.criterion_id}"][data-overridden="false"]`,
-                ),
-            });
+            .locator(`[data-testid="meti-criterion-card"][data-criterion-id="${target.criterion_id}"][data-overridden="false"]`);
         if ((await clearedCard.count()) === 0) {
             test.skip();
             return;

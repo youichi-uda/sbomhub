@@ -1,19 +1,25 @@
 import { test, expect } from '@playwright/test';
 
-// M11-2 #77 follow-up (CI run 28381027058): all 9 SSO settings specs
-// across the 3 describes hang 60s each waiting for page content, ~21 min
-// budget × 3 retries → 35-min runner cap exceeded. The SSO page likely
-// requires Clerk Enterprise context or upstream data the dev:test stack
-// does not surface. Re-skip the whole file pending M12 isolation —
-// same shape as licenses + api-keys re-skip (commit 2414342).
-test.describe.skip('SSO Settings', () => {
-    // M11-2 #77: same fix shape as integrations / ipa-settings. The
-    // SSO page renders h1 ("シングルサインオン (SSO)") but the sidebar h1
-    // ("SBOMHub") triggers a strict-mode ambiguity. Filter by name to
-    // disambiguate.
+// M12-1 #82: root-cause audited. The SSO page (settings/sso/page.tsx)
+// is a fully static client component — `useState(false)` for the
+// enterprise flag, no API calls, no Clerk SDK initialisation in
+// self-hosted mode (NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY empty →
+// AuthProvider short-circuits per apps/web/src/components/providers/
+// auth-provider.tsx L18). The h1 "シングルサインオン (SSO)" matches
+// the `level: 1 + name: /SSO|シングルサインオン|認証|Authentication/i`
+// filter; the sidebar h1 "SBOMHub" is excluded by the name regex.
+// Static provider list contains SAML so the OR-disjunction smoke
+// assertions pass. We switch the load-state guard from `networkidle`
+// to `domcontentloaded` as a defensive measure — the M11-2 60s hang
+// was attributed to `networkidle` blocking on the dashboard layout's
+// SubscriptionGuard billing fetch, and `domcontentloaded` fires
+// reliably before React hydration so the explicit toBeVisible timeout
+// remains the meaningful gate.
+test.describe('SSO Settings', () => {
+    // M12-1 #82: same defensive `domcontentloaded` swap below.
     test('should navigate to SSO settings page', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
 
         const heading = page.getByRole('heading', {
             name: /SSO|シングルサインオン|認証|Authentication/i,
@@ -24,7 +30,7 @@ test.describe.skip('SSO Settings', () => {
 
     test('should display SSO provider options', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Should show LDAP and/or OIDC options
@@ -42,7 +48,7 @@ test.describe.skip('SSO Settings', () => {
 
     test('should show enterprise plan requirement if not on enterprise', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // May show enterprise plan requirement
@@ -58,7 +64,7 @@ test.describe.skip('SSO Settings', () => {
 
     test('should display LDAP configuration fields', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Look for LDAP tab or section
@@ -81,7 +87,7 @@ test.describe.skip('SSO Settings', () => {
 
     test('should display OIDC configuration fields', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Look for OIDC tab or section
@@ -104,7 +110,7 @@ test.describe.skip('SSO Settings', () => {
 
     test('should handle Clerk Enterprise SSO info', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Should show Clerk-related SSO information
@@ -119,10 +125,10 @@ test.describe.skip('SSO Settings', () => {
     });
 });
 
-test.describe.skip('SSO Settings in Japanese', () => {
+test.describe('SSO Settings in Japanese', () => {
     test('should display SSO settings in Japanese', async ({ page }) => {
         await page.goto('/ja/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
 
         // Should show Japanese content
         const japaneseLabels = ['SSO', '認証', 'シングルサインオン', 'LDAP', 'OIDC'];
@@ -141,10 +147,10 @@ test.describe.skip('SSO Settings in Japanese', () => {
     });
 });
 
-test.describe.skip('SSO Navigation', () => {
+test.describe('SSO Navigation', () => {
     test('should have SSO link in settings navigation', async ({ page }) => {
         await page.goto('/en/settings');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Look for SSO link in navigation
@@ -152,7 +158,7 @@ test.describe.skip('SSO Navigation', () => {
 
         if (await ssoLink.isVisible()) {
             await ssoLink.click();
-            await page.waitForLoadState('networkidle');
+            await page.waitForLoadState('domcontentloaded');
 
             // Should navigate to SSO settings
             expect(page.url()).toContain('sso');
@@ -161,7 +167,7 @@ test.describe.skip('SSO Navigation', () => {
 
     test('should return to settings from SSO page', async ({ page }) => {
         await page.goto('/en/settings/sso');
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('domcontentloaded');
         await page.waitForTimeout(2000);
 
         // Look for back button or settings link

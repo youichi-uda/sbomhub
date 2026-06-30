@@ -3,22 +3,20 @@ import { test, expect } from '@playwright/test';
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
-// M11-2 #77 (deferred to M12 — UI flow gap, not a seed gap): the seed
-// gained MIT + GPL-3.0-only components plus matching allow/deny
-// license_policies rows in M11-2, but the UI flow these tests target
-// is still broken. The first test (line 67) expects a per-project
-// "Licenses" tab on /projects/:id and times out at 15 s waiting for
-// it — the project-detail page does not currently surface a Licenses
-// tab. The subsequent tests (Add Policy button, select dropdowns,
-// reason textarea, Check Violations) target a dialog shape that does
-// not exist in the current build. The first M11-2 attempt to un-skip
-// burnt ~18 min of the 35-min CI budget on these tests retrying ×3 and
-// timing out at 1 min each (see run 28378387603 cancellation). M12
-// owner needs to (a) decide whether project-detail surfaces a
-// Licenses tab or whether the spec moves to /settings/* alongside
-// the existing settings sub-routes, (b) align the dialog locators
-// with the chosen UI.
-test.describe.skip('License Policy Management', () => {
+// M12-1 #82: root-cause audited (F164-style page-side hydration audit).
+// The per-project Licenses tab DOES exist on /projects/:id — see
+// apps/web/src/app/[locale]/(dashboard)/projects/[id]/page.tsx ~L298
+// which renders the tab as `{t("Components.license")} ({licensePolicies.length})`
+// (i.e. "License (0)" in EN, "ライセンス (0)" in JA). The M11-2 hang
+// at 15s was driven by the regex `/Licenses|ライセンス/i` requiring the
+// trailing "s" — JS regex `Licenses` does NOT match "License" (singular).
+// Fix: allow either form via `/Licenses?|License|ライセンス/i`. The
+// LicensePolicyForm body matches the spec asserts (select first =
+// license dropdown with "MIT License (MIT)" labels, select second =
+// policy type with `allowed` / `denied` / `review` values, textarea
+// for reason, submit button text "Add Policy" identical to the
+// header trigger so `nth(1)` is the form submit).
+test.describe('License Policy Management', () => {
     let projectId: string;
 
     test.beforeAll(async ({ request }) => {
@@ -75,8 +73,11 @@ test.describe.skip('License Policy Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Look for Licenses tab
-        const licensesTab = page.getByRole('button', { name: /Licenses|ライセンス/i });
+        // Look for Licenses tab. M12-1 #82: the tab text is
+        // singular "License (0)" in EN (`t("Components.license")` +
+        // count) — `/Licenses/i` would not match because regex needs
+        // the trailing `s`. Accept either form for forward-compat.
+        const licensesTab = page.getByRole('button', { name: /Licenses?|License|ライセンス/i });
         await expect(licensesTab).toBeVisible({ timeout: 5000 });
     });
 
@@ -84,8 +85,8 @@ test.describe.skip('License Policy Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on Licenses tab
-        await page.getByRole('button', { name: /Licenses|ライセンス/i }).click();
+        // Click on Licenses tab — accept singular/plural EN forms.
+        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
         await page.waitForTimeout(500);
 
         // Should show policies section
@@ -96,8 +97,8 @@ test.describe.skip('License Policy Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on Licenses tab
-        await page.getByRole('button', { name: /Licenses/i }).click();
+        // Click on Licenses tab — accept singular/plural EN forms.
+        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
         await page.waitForTimeout(500);
 
         // Click the Add Policy button
@@ -130,8 +131,8 @@ test.describe.skip('License Policy Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        // Click on Licenses tab
-        await page.getByRole('button', { name: /Licenses/i }).click();
+        // Click on Licenses tab — accept singular/plural EN forms.
+        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
         await page.waitForTimeout(500);
 
         // Click the Add Policy button
@@ -164,7 +165,7 @@ test.describe.skip('License Policy Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        await page.getByRole('button', { name: /Licenses|ライセンス/i }).click();
+        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
         await page.waitForTimeout(500);
 
         // Look for violations section or check button
@@ -192,7 +193,7 @@ test.describe.skip('License Policy Management', () => {
         await page.goto(`/en/projects/${projectId}`);
         await page.waitForLoadState('networkidle');
 
-        await page.getByRole('button', { name: /Licenses|ライセンス/i }).click();
+        await page.getByRole('button', { name: /Licenses?|License|ライセンス/i }).click();
         await page.waitForTimeout(1000);
 
         // Find delete button
