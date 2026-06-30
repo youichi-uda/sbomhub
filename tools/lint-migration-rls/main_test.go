@@ -277,6 +277,170 @@ func TestBadDir(t *testing.T) {
 	}
 }
 
+// TestLegacyNoRLS_NonPrefixDetected asserts F183 (M13-5 #91): a table
+// whose name does NOT start with `tenant_` but whose CREATE TABLE body
+// declares a `tenant_id` column is now detected by the lint. The fixture
+// has no RLS evidence anywhere, so the lint must FAIL with the canonical
+// missing-triple — proving the scope extension actually catches the
+// non-prefixed failure class that the old prefix-only detector missed.
+func TestLegacyNoRLS_NonPrefixDetected(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "legacy_no_rls.up.sql", dir)
+
+	exit, stdout, stderr := runLint(t, "--dir", dir)
+	if exit != 1 {
+		t.Fatalf("expected exit 1 (non-prefix tenant_id table missing RLS), got %d; stdout=%q stderr=%q",
+			exit, stdout, stderr)
+	}
+	wantSubstrings := []string{
+		"FAIL",
+		"billing_records",
+		"ALTER TABLE ... ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE ... FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY tenant_isolation_... ON ...",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q; got: %s", want, stderr)
+		}
+	}
+}
+
+// TestLegacyAlterPromote_RLSInSameFile asserts F183 (M13-5 #91): a table
+// CREATEd without a tenant_id column but promoted to tenant-scoped by a
+// later `ALTER TABLE … ADD COLUMN tenant_id` is detected and accepted
+// when the same file provides the RLS triple. This mirrors how the lint
+// behaves on the production 007 multitenancy migration once F183
+// detection lands.
+func TestLegacyAlterPromote_RLSInSameFile(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, "legacy_alter_promote.up.sql", dir)
+
+	exit, stdout, stderr := runLint(t, "--dir", dir, "--verbose")
+	if exit != 0 {
+		t.Fatalf("expected exit 0 (legacy ALTER promote with RLS in same file), got %d; stderr=%q",
+			exit, stderr)
+	}
+	if !strings.Contains(stdout, "1 tenant_* table(s) checked") {
+		t.Errorf("expected count of 1, stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "clean:      legacy_widget") {
+		t.Errorf("expected verbose 'clean: legacy_widget' line, got: %s", stdout)
+	}
+}
+
+// TestPartnerFile_AlterPromote asserts F183 (M13-5 #91): the production
+// 007-style pattern where one migration ALTERs an existing tenantless
+// table to add tenant_id and a PARTNER migration supplies the RLS triple.
+// The lint's directory-wide evidence aggregation must accept this just
+// like the existing 036→037 / 046→047 partner pattern for CREATE TABLE.
+func TestPartnerFile_AlterPromote(t *testing.T) {
+	dir := t.TempDir()
+
+	const createBody = `
+CREATE TABLE legacy_widget (
+    id   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT NOT NULL
+);
+ALTER TABLE legacy_widget ADD COLUMN tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE;
+`
+	const rlsBody = `
+ALTER TABLE legacy_widget ENABLE ROW LEVEL SECURITY;
+ALTER TABLE legacy_widget FORCE  ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_legacy_widget ON legacy_widget
+    FOR ALL
+    USING      (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
+    WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+`
+	if err := os.WriteFile(filepath.Join(dir, "200_widget.up.sql"), []byte(createBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "201_widget_rls.up.sql"), []byte(rlsBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exit, stdout, stderr := runLint(t, "--dir", dir)
+	if exit != 0 {
+		t.Fatalf("expected exit 0 (partner RLS for ALTER-promoted table), got %d; stderr=%q",
+			exit, stderr)
+	}
+	if !strings.Contains(stdout, "1 tenant_* table(s) checked") {
+		t.Errorf("expected count of 1, stdout=%q", stdout)
+	}
+}
+
+// TestStripBlockComments_LineCommentWithStarSlash regression-tests F183
+// (M13-5 #91): a `--` line comment containing `/*` (e.g. a path like
+// `service/llm/*` or `repository/*` in a header docstring) must NOT open
+// a phantom block comment that swallows the rest of the file's RLS
+// statements. The migrations 032 and 043 trip this exact pattern.
+//
+// Before the F183 stripBlockComments rewrite, the lint silently lost
+// the RLS evidence past line 8 of 032 and line 65 of 043, which had
+// gone undetected only because the legacy detector ignored non-prefix
+// tables. F183 widened detection to cover them and immediately
+// surfaced the lurking phantom-comment bug.
+func TestStripBlockComments_LineCommentWithStarSlash(t *testing.T) {
+	dir := t.TempDir()
+	const body = `-- header note: service/llm/* writes one row here
+
+CREATE TABLE phantom_test (
+    id        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE
+);
+
+ALTER TABLE phantom_test ENABLE ROW LEVEL SECURITY;
+ALTER TABLE phantom_test FORCE  ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_phantom_test ON phantom_test
+    FOR ALL
+    USING      (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
+    WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+`
+	if err := os.WriteFile(filepath.Join(dir, "001_phantom.up.sql"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exit, stdout, stderr := runLint(t, "--dir", dir)
+	if exit != 0 {
+		t.Fatalf("expected exit 0 (line-comment with /* must not swallow RLS), got %d; stdout=%q stderr=%q",
+			exit, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "1 tenant_* table(s) checked") {
+		t.Errorf("expected count of 1, stdout=%q", stdout)
+	}
+}
+
+// TestVulnerabilitiesExemption_NonPrefix asserts F183 (M13-5 #91): the
+// 007-legacy `vulnerabilities` table (non-prefix, ALTER-promoted to
+// carry tenant_id, intentionally NOT RLS-protected because CVE data is
+// global) is recognised as a structural exemption — not flagged as a
+// missing-RLS failure.
+func TestVulnerabilitiesExemption_NonPrefix(t *testing.T) {
+	dir := t.TempDir()
+	const body = `
+CREATE TABLE vulnerabilities (
+    id     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cve_id VARCHAR(50) NOT NULL
+);
+ALTER TABLE vulnerabilities ADD COLUMN tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL;
+`
+	if err := os.WriteFile(filepath.Join(dir, "001_vulns.up.sql"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exit, stdout, _ := runLint(t, "--dir", dir, "--verbose")
+	if exit != 0 {
+		t.Fatalf("expected exit 0 (vulnerabilities structural exemption), got %d; stdout=%q",
+			exit, stdout)
+	}
+	if !strings.Contains(stdout, "exempt:") || !strings.Contains(stdout, "vulnerabilities") {
+		t.Errorf("expected verbose 'exempt: vulnerabilities' line, got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "global CVE") {
+		t.Errorf("expected exemption justification to mention 'global CVE', got: %s", stdout)
+	}
+}
+
 // TestRealMigrations is the "smoke test against production" — it runs
 // the lint against the actual `apps/api/migrations` directory. This
 // guards against the failure mode where a refactor of the lint
