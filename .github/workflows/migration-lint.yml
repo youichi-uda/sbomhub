@@ -1,0 +1,117 @@
+# SBOMHub - Migration RLS lint (M13-5 #91)
+#
+# Hard CI gate that runs `tools/lint-migration-rls` against
+# `apps/api/migrations/` on every PR or push to `main` that touches a
+# migration file or the lint tool itself.
+#
+# Why this exists
+# ===============
+#
+# The product's tenant-isolation guarantee is anchored in PostgreSQL Row
+# Level Security (RLS). The application-layer `WHERE tenant_id = $1`
+# filter is treated as defense-in-depth, not the primary control (see
+# `apps/api/CLAUDE.md` "Database" section and `PRODUCT_REBOOT_PLAN.md`
+# M0 deliverables). Two production migrations historically forgot to
+# `ENABLE ROW LEVEL SECURITY` on a tenant-scoped table:
+#
+#   * 036_tenant_llm_config (encrypted BYOK API keys) → patched by 037.
+#   * 046_diff_webhook_settings (encrypted webhook secrets) → patched by 047.
+#
+# Both were caught only by Codex external review (M11 round 1 finding
+# F167). This workflow is the M13-5 follow-up that turns that pattern
+# into an automated CI gate so a future tenant_* migration with no RLS
+# is blocked at PR time, not at security-review time.
+#
+# What it does NOT replace
+# ========================
+#
+#   * `rls-integration.yml` — exercises RLS at runtime against a real
+#     PostgreSQL instance with the non-superuser app role. That workflow
+#     catches policy mis-writes (USING clause references the wrong
+#     column, etc.) — things this static lint cannot see.
+#   * `migration-roundtrip.yml` — checks that up→down→up sequences
+#     terminate cleanly.
+#
+# This lint sits in front of both: it is fast (no DB needed, finishes in
+# seconds), runs on every PR that touches migrations, and is the first
+# thing a reviewer sees go red if RLS is missing.
+#
+# Hard gate posture
+# =================
+#
+# `continue-on-error` is intentionally absent. A red migration-lint job
+# blocks the PR. This is the same posture as `golangci-lint.yml` — both
+# are static, deterministic checks that should never have a reason to be
+# yellow.
+
+name: Migration RLS lint
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/migrations/**"
+      - "tools/lint-migration-rls/**"
+      - ".github/workflows/migration-lint.yml"
+  pull_request:
+    paths:
+      - "apps/api/migrations/**"
+      - "tools/lint-migration-rls/**"
+      - ".github/workflows/migration-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint-migration-rls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        # Pin via the standalone tools module's go.mod so the lint runs
+        # on exactly the toolchain version it was developed against. We
+        # do NOT use apps/api/go.mod here — the tool intentionally lives
+        # in its own module to avoid pulling tooling deps into the
+        # production backend's dependency graph.
+        #
+        # Caching is disabled: the lint depends only on the Go stdlib so
+        # there is no `go.sum`, and a build cache for a single-file
+        # stdlib-only program adds no measurable savings to the CI run
+        # while introducing a "file not found" failure mode when
+        # `cache-dependency-path` is wired up without a real lockfile.
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/lint-migration-rls/go.mod
+          cache: false
+
+      - name: Show tool version
+        run: go version
+
+      # The lint must succeed against the real migrations directory. If
+      # this step fails, a tenant_* CREATE TABLE was added without a
+      # matching RLS triple (ENABLE + FORCE + POLICY) — the merged stderr
+      # output names the file, line, and which statement is missing.
+      #
+      # We use `cd` rather than `go run ./tools/lint-migration-rls`
+      # because the lint lives in its own module (see go.mod header
+      # comment); `go run` resolved from the repo root needs a wrapping
+      # workspace, which we deliberately omit to keep the standalone
+      # module isolated.
+      - name: Run lint against apps/api/migrations
+        working-directory: tools/lint-migration-rls
+        run: go run . --dir ../../apps/api/migrations --verbose
+
+      # Run the lint's own unit tests too. This guards against the
+      # accidental "fix the lint to make my migration pass" antipattern
+      # — the negative / positive / suppress / partner-file fixtures all
+      # have to keep working alongside any change to the detection rule.
+      - name: Run lint tool unit tests
+        working-directory: tools/lint-migration-rls
+        run: go test ./...
