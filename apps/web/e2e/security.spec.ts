@@ -358,14 +358,26 @@ test.describe('Security Tests', () => {
         // page heading remains mounted — both of which prove "no
         // table dropped" without requiring a specific error-message
         // i18n match.
-        // M12-1 #82 で un-skip したが CI Web E2E で dialog Create button が 60s timeout、
-        // page-side button render path or dialog flow の root cause 調査が必要。 M13 持ち越し。
-        test.skip('should handle SQL injection in project creation', async ({ page, request }) => {
+        // M13-1 #87 (F174): un-skipped. Two-part root cause:
+        //   (a) The custom Dialog shim under apps/web/src/components/ui/dialog.tsx
+        //       rendered no `role="dialog"` attribute, so the original
+        //       `[role="dialog"]` scope matched nothing and the Create
+        //       button click timed out at the 60s per-test budget. The
+        //       shim now sets role + aria-modal (also a genuine a11y
+        //       win); the spec scope works against it.
+        //   (b) `getByRole('button', { name: /New Project/i })` without
+        //       `.first()` is strict-mode-violating whenever the empty
+        //       state Card also surfaces a New Project CTA. Pin
+        //       `.first()` to match projects.spec.ts L21.
+        //   We also wait on the create-project POST response so the
+        //   subsequent projects-list health check sees the post-write
+        //   state rather than racing it.
+        test('should handle SQL injection in project creation', async ({ page, request }) => {
             const sqlPayload = "Test'; DROP TABLE projects; --";
 
             // Create project with SQL injection payload
             await page.goto('/en/projects');
-            await page.getByRole('button', { name: /New Project/i }).click();
+            await page.getByRole('button', { name: /New Project/i }).first().click();
             await expect(page.getByPlaceholder('My Project')).toBeVisible({ timeout: 5000 });
 
             await page.getByPlaceholder('My Project').fill(sqlPayload);
@@ -373,9 +385,14 @@ test.describe('Security Tests', () => {
             // Dialog "Create" button sits inside [role="dialog"], so
             // scope by role to avoid matching the outer "New Project"
             // CTA on the page.
+            const createResponse = page.waitForResponse(
+                (resp) =>
+                    resp.url().includes('/api/v1/projects') &&
+                    resp.request().method() === 'POST',
+                { timeout: 15000 },
+            );
             await page.locator('[role="dialog"]').getByRole('button', { name: /^Create$/ }).click();
-
-            await page.waitForTimeout(2000);
+            await createResponse.catch(() => undefined);
 
             // Page should still be functional. Scope to main so the
             // sidebar h1 ("SBOMHub") does not interfere.
