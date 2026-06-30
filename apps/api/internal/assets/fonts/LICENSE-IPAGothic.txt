@@ -1,0 +1,157 @@
+IPA Font License Agreement v1.0
+================================
+
+Source / provenance:
+  - File: IPAGothic.ttf (SHA256 503af4a8b84d1079b8e2e358dc7f7a7fb8cb7a1f212f35eaef6782dbfc75a55e)
+  - Bundled in SBOMHub repo: apps/api/internal/assets/fonts/IPAGothic.ttf
+  - Upstream: https://moji.or.jp/ipafont/license/  (Information-technology
+    Promotion Agency, Japan / 独立行政法人 情報処理推進機構)
+  - Embedded in SBOMHub binaries via internal/assets/assets.go (Go embed) for
+    the M11-4 diff PDF export feature (CRA / METI compliance report rendering
+    requires a CJK-capable font that ships with the binary so air-gapped
+    self-host deployments do not need to install fonts separately).
+
+License: IPA Font License Agreement v1.0 (re-distributable, royalty-free).
+SBOMHub's AGPL-3.0 license does not modify this font; the font is
+sub-licensed under its original IPA Font License which is compatible with
+re-distribution alongside an AGPL-3.0 work as long as the conditions below
+are preserved.
+
+The IPA Font License Agreement v1.0 verbatim text follows
+(English translation reproduced from the IPA Font web site
+https://moji.or.jp/ipafont/license/ — the canonical Japanese text is
+also distributed alongside on the IPA site).
+
+------------------------------------------------------------
+The Licensor provides the Licensed Program (as defined in Article 1
+below) under the terms of this license agreement ("Agreement").  Any use,
+reproduction or distribution of the Licensed Program, or any exercise of
+rights under this Agreement by a Recipient (as defined in Article 1
+below) constitutes the Recipient's acceptance of this Agreement.
+
+Article 1 (Definitions)
+
+  1. "Digital Font Program" shall mean a computer program containing,
+     or used to render or display fonts.
+  2. "Licensed Program" shall mean a Digital Font Program licensed by
+     the Licensor under this Agreement.
+  3. "Derived Program" shall mean a Digital Font Program created as a
+     result of a modification, addition, deletion, replacement or any
+     other adaptation to or of a part or all of the Licensed Program,
+     and includes a case where a Digital Font Program newly created by
+     retrieving font information from a part or all of the Licensed
+     Program or Embedded Fonts from a Digital Document File with or
+     without modification of the retrieved font information.
+  4. "Digital Content" shall mean products provided to end users in the
+     form of digital data, including video content, motion and / or
+     still pictures, TV programs or other broadcasting content and
+     products consisting of character text, pictures, photographic
+     images, graphic symbols and / or the like.
+  5. "Digital Document File" shall mean a PDF file or other Digital
+     Content created by various software programs in which a part or
+     all of the Licensed Program becomes embedded or contained in the
+     file for the display of the font ("Embedded Fonts"). Embedded
+     Fonts are used only in the display of characters in the particular
+     Digital Document File within which they are embedded, and shall be
+     distinguished from those in any Digital Font Program, which may be
+     used for display of characters outside that particular Digital
+     Document File.
+  6. "Computer" shall include a server in this Agreement.
+  7. "Reproduction and Other Exploitation" shall mean reproduction,
+     transfer, distribution, lease, public transmission, presentation,
+     exhibition, adaptation and any other exploitation.
+  8. "Recipient" shall mean anyone who receives the Licensed Program
+     under this Agreement, including one that receives the Licensed
+     Program from a Recipient.
+
+Article 2 (Grant of License)
+
+The Licensor grants to the Recipient a license to use the Licensed
+Program in any and all countries in accordance with each of the
+provisions set forth in this Agreement. However, any and all rights
+relating to the Licensed Program shall be held by the Licensor. In no
+sense is this Agreement intended to transfer any right relating to the
+Licensed Program held by the Licensor except as specifically set forth
+in this Agreement or any right relating to any trademark, trade name,
+or service mark to the Recipient.
+
+  1. The Recipient may install the Licensed Program on any number of
+     Computers and use the same in accordance with the provisions set
+     forth in this Agreement.
+  2. The Recipient may use the Licensed Program, with or without
+     modification in printed materials or in Digital Content as an
+     expression of character texts or the like.
+  3. The Recipient may conduct Reproduction and Other Exploitation of
+     the printed materials and Digital Content created in accordance
+     with the preceding Paragraph, for commercial or non-commercial
+     purposes and in any form of media including but not limited to
+     broadcasting, communication and various recording media.
+  4. If any Recipient extracts Embedded Fonts from a Digital Document
+     File to create a Derived Program, such Derived Program shall be
+     subject to the terms of this Agreement.
+  5. If any Recipient performs Reproduction or Other Exploitation of a
+     Digital Document File in which Embedded Fonts of the Licensed
+     Program are used only for rendering the Digital Content within
+     such Digital Document File then the Recipient shall have no
+     further obligations under this Agreement in relation to such
+     actions.
+  6. The Recipient may reproduce the Licensed Program as is without
+     modification and transfer such copies, publish and distribute the
+     Licensed Program to a third party for commercial or non-commercial
+     purposes ("Redistribute"), in accordance with the provisions set
+     forth in Article 3 Paragraph 2.
+  7. The Recipient may create, use, reproduce and/or Redistribute a
+     Derived Program under the terms stated above for the Licensed
+     Program: provided, that the Recipient shall follow the provisions
+     set forth in Article 3 Paragraph 1 when Redistributing the
+     Derived Program.
+
+Article 3 (Restriction)
+
+The license granted in the preceding Article shall be subject to the
+following restrictions:
+
+  1. If a Derived Program is Redistributed pursuant to Paragraph 4 and
+     7 of the preceding Article, the following conditions must be met:
+       (1) The following must be also Redistributed together with the
+           Derived Program, or be made available online or by means
+           equivalent thereto upon the Redistribution of the Derived
+           Program:
+             (a) a copy of the Derived Program; and
+             (b) a copy of this Agreement.
+       (2) It is required to also Redistribute means to enable
+           recipients of the Derived Program to replace the Derived
+           Program with the Licensed Program first released under this
+           Agreement (the "Original Program"). Such means may be to
+           provide a difference file from the Original Program, or any
+           other method.
+       (3) The Recipient must license the Derived Program under the
+           terms and conditions of this Agreement.
+       (4) No one may use or include the name of the Licensed Program
+           as a program name, font name or file name of the Derived
+           Program.
+       (5) Any material to be made available online or otherwise made
+           available in relation to the Derived Program shall clearly
+           describe how to obtain the Original Program.
+
+  2. When the Recipient Redistributes the Licensed Program pursuant to
+     Paragraph 6 of the preceding Article, the Recipient shall meet
+     all of the following conditions:
+       (1) The Recipient may not change the name of the Licensed
+           Program.
+       (2) The Recipient may not alter or otherwise modify the
+           Licensed Program.
+       (3) The Recipient must attach a copy of this Agreement to the
+           Licensed Program.
+
+------------------------------------------------------------
+
+SBOMHub redistribution compliance summary (Article 3 Paragraph 2):
+  1. We do not rename IPAGothic.ttf (file is shipped with the upstream name).
+  2. We do not modify the font binary; it is byte-identical to the upstream
+     archive (SHA256 above).
+  3. This LICENSE-IPAGothic.txt is shipped alongside the font and is also
+     embedded with it via internal/assets/assets.go (Go //go:embed).
+
+If you redistribute SBOMHub binaries that include this font, you must
+preserve this LICENSE-IPAGothic.txt file alongside the font.

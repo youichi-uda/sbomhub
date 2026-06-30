@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, ReactNode } from "react";
+import { useEffect, useState, useCallback, ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -30,28 +30,11 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
   const router = useRouter();
   const { orgId, isLoaded } = useAuth();
 
-  useEffect(() => {
-    if (!isLoaded) return;
-
-    // Skip check for exempt paths
-    const isExempt = EXEMPT_PATHS.some((path) => pathname.includes(path));
-    if (isExempt) {
-      setLoading(false);
-      setChecked(true);
-      return;
-    }
-
-    // Check if user has an organization selected
-    if (!orgId) {
-      setNeedsOrg(true);
-      setLoading(false);
-      return;
-    }
-
-    checkSubscription();
-  }, [pathname, orgId, isLoaded]);
-
-  const checkSubscription = async () => {
+  // M11 Phase D F170: checkSubscription captures `router` and `locale`,
+  // so it must be in the effect deps to avoid stale-closure bugs as the
+  // guard evolves. Hoist it via useCallback so the identity is stable
+  // across re-renders and pin its own [router, locale] deps.
+  const checkSubscription = useCallback(async () => {
     try {
       const subscription = await api.billing.getSubscription();
 
@@ -84,7 +67,28 @@ export function SubscriptionGuard({ children, locale }: SubscriptionGuardProps) 
       setLoading(false);
       setChecked(true);
     }
-  };
+  }, [router, locale]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    // Skip check for exempt paths
+    const isExempt = EXEMPT_PATHS.some((path) => pathname.includes(path));
+    if (isExempt) {
+      setLoading(false);
+      setChecked(true);
+      return;
+    }
+
+    // Check if user has an organization selected
+    if (!orgId) {
+      setNeedsOrg(true);
+      setLoading(false);
+      return;
+    }
+
+    checkSubscription();
+  }, [pathname, orgId, isLoaded, checkSubscription]);
 
   // Show organization selection if user has no org
   if (needsOrg) {

@@ -214,7 +214,13 @@ func (s *Service) FireIfThreshold(
 	if settings.HasSecret() {
 		plaintext, dErr := llm.Decrypt(settings.EncryptedSecret, s.encryptionKey)
 		if dErr != nil {
-			s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, 0, "decrypt secret: "+dErr.Error(), counts)
+			// M11 Phase D F168: audit-or-nothing. If even the failure
+			// audit row cannot land, surface that to the caller — a
+			// silent failure here is the exact UX regression F168
+			// flagged.
+			if aErr := s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, 0, "decrypt secret: "+dErr.Error(), counts); aErr != nil {
+				return nil, fmt.Errorf("decrypt secret + audit log: %w", aErr)
+			}
 			return &FireDecision{Triggered: true, ErrorMessage: "decrypt secret"}, nil
 		}
 		secret = plaintext
@@ -237,10 +243,17 @@ func (s *Service) FireIfThreshold(
 	_ = s.settings.UpdateFireResult(ctx, tenantID, status, errMsg)
 
 	if status >= 200 && status < 300 && errMsg == "" {
-		s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFired, status, "", counts)
+		// F168: a 2xx webhook delivery that cannot audit MUST report
+		// failure, not success — the audit row IS the durable record
+		// the operator relies on.
+		if aErr := s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFired, status, "", counts); aErr != nil {
+			return nil, fmt.Errorf("webhook delivered (status=%d) but audit log failed: %w", status, aErr)
+		}
 		return &FireDecision{Triggered: true, Status: status}, nil
 	}
-	s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, status, errMsg, counts)
+	if aErr := s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, status, errMsg, counts); aErr != nil {
+		return nil, fmt.Errorf("webhook delivery failed (status=%d, err=%q) + audit log failed: %w", status, errMsg, aErr)
+	}
 	return &FireDecision{Triggered: true, Status: status, ErrorMessage: errMsg}, nil
 }
 
@@ -535,11 +548,18 @@ func computeSignature(body, secret []byte) string {
 
 // ---------- audit ----------
 
+// writeAudit writes a diff_webhook audit row. M11 Phase D F168: returns
+// the error from the underlying audit Log so callers can enforce the
+// package's audit-or-nothing contract. A 2xx webhook delivery that
+// cannot persist its audit row MUST be reported as a failure, not a
+// success — otherwise the operator sees `Triggered=true` with no
+// matching `diff_webhook_fired` row, which contradicts the audit-trail
+// guarantee CLAUDE.md requires.
 func (s *Service) writeAudit(
 	ctx context.Context, tenantID, projectID uuid.UUID,
 	action string, status int, errMsg string,
 	c severityCounts,
-) {
+) error {
 	details := map[string]interface{}{
 		"http_status":       status,
 		"critical_new":      c.Critical,
@@ -565,5 +585,7 @@ func (s *Service) writeAudit(
 			"action", action,
 			"error", err.Error(),
 		)
+		return err
 	}
+	return nil
 }
