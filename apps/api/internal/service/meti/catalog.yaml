@@ -117,10 +117,118 @@ metadata:
   source_summary_url: "https://www.meti.go.jp/policy/netsecurity/wg1/SBOMv2gaiyou.pdf"
   source_version: "ver 2.0"
   source_published: "2024-08-29"
-  last_synced: "2026-06-29"
-  synced_by: "M11-3 issue #78 (M10-2 #75 / M8-2 #63 / M8-1 #62 / M5-6 #52 を継承)"
-  verification_status: "partial"
+  last_synced: "2026-06-30"
+  synced_by: "M12-2 issue #83 (M11-3 #78 / M10-2 #75 / M8-2 #63 / M8-1 #62 / M5-6 #52 を継承)"
+  verification_status: "full"
   verification_notes: |
+    M12-2 (issue #83, 2026-06-30) で catalog schema を option A 設計
+    (verbatim_title_ja + evaluator_text_ja 分離) に拡張し、 32 件全件で
+    verbatim_title_ja を primary METI ver 2.0 PDF (SBOMv2.pdf, SHA256
+    cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a)
+    または IPA 二次資料 (SBOM 導入・運用の手引き 2024-12,
+    sbn8o10000001zcl.pdf) から byte-exact wording で埋めた。 これにより
+    verification_status を partial → full に昇格。
+
+    M12-2 schema 設計 (option A):
+      * verbatim_title_ja (新規 required field): 公式 PDF byte-exact
+        wording。 dashboard provenance pane で「経産省 ver2.0」 または
+        「IPA 二次資料」 のバッジと共に表示する用途。
+      * evaluator_text_ja (新規 required field): SBOMHub の auto-evaluator
+        (criteria/*.go) 及び manual-attestation (checklist_responses) で
+        参照する semantic-correspondent label。 M11-3 distillation の
+        signal correspondence を維持。
+      * title_ja (既存 field、 backward compat): UI / evidence_pack
+        builder / handler の表示ラベル。 M11-3 までの値を変更せず保持し、
+        consumer migration を不要とした。
+      * source (新規 optional field、 default 空 / meti-primary-ver2.0):
+        5 件の IPA-derived criteria のみ「ipa-derived」 を設定し、
+        primary PDF に独立 □ checklist 行を持たない provenance を明示。
+
+    M12-2 Wording sources (32/32 verbatim_title_ja 充足):
+      ◆ 17 件 — 既存 M11-3 VERBATIM (verbatim_title_ja == title_ja ==
+        evaluator_text_ja、 primary PDF □ 行 / section 見出し byte-exact):
+          env_setup.02 (4.1 No.1) / env_setup.03 (4.1 No.3) /
+          env_setup.04 (4.1 No.4) / env_setup.05 (4.1 No.5) /
+          env_setup.06 (4.1 No.6) / env_setup.07 (4.2 heading) /
+          env_setup.08 (4.4 heading) / env_setup.09 (4.1 No.2) /
+          sbom_creation.02 (5.2 No.1) / sbom_creation.03 (5.1 No.1) /
+          sbom_creation.04 (5.1 No.2) / sbom_creation.05 (5.1 No.3) /
+          sbom_creation.07 (5.3 No.1) / sbom_operation.01 (6.1 No.1) /
+          sbom_operation.02 (7.4.1 (3)) / sbom_operation.05 (6.1 No.2) /
+          sbom_operation.07 (6.2 No.1)
+      ◆ 10 件 — M12-2 新規 primary-PDF verbatim (verbatim_title_ja 単独
+        は primary PDF 由来、 evaluator_text_ja は M11-3 distillation
+        を保持):
+          env_setup.10 (Primary 4.3 No.1 □ 行: 「SBOM ツールが導入可能な
+                      環境の要件を確認し、整備する。」 L.2153)
+          sbom_creation.06 (Primary 2.3 section heading: 「SBOM の
+                          「最小要素」」 L.870)
+          sbom_creation.08 (Primary 6.2 No.2 □ 行: 「SBOM に含まれる
+                          情報や SBOM 自体を適切に管理する。」 L.2704)
+          sbom_creation.09 (Primary 5.2 本文: 「サードパーティや OSS
+                          コミュニティ等の第三者から提供されたコンポーネント
+                          を使用している場合は、当該コンポーネントの SBOM の
+                          提供を受けることができる場合もある」 L.3522-3526)
+          sbom_operation.03 (Primary 7.4.2 section heading: 「脆弱性
+                           対応優先付けフェーズ」 L.3244)
+          sbom_operation.04 (Primary 7.4.4 section heading: 「脆弱性
+                           対応フェーズ（暫定対応・根本対応）」 L.3836)
+          sbom_operation.06 (Primary 6.1 認識ポイント: 「SBOM ツールで
+                           コンポーネントの EOL を特定できない場合、別途
+                           個別に調査する必要がある」 L.3628)
+          sbom_operation.08 (Primary 7.4.3 section heading: 「情報共有
+                           フェーズ」 L.3753)
+          sbom_operation.09 (Primary 6.2 本文: 「SBOM に含まれる情報は
+                           定期的に更新し、管理する必要がある」 L.3750-3751)
+          sbom_operation.10 (Primary 6.2 本文: 「出荷済み製品と SBOM
+                           情報とを対応づけられるよう、SBOM の改変履歴も
+                           含めて資産管理システム等で保管することも想定
+                           される」 L.3748-3749)
+      ◆ 5 件 — IPA-derived (source: ipa-derived、 verbatim_title_ja は
+        IPA 二次資料 表：N.N.N の チェック項目 列 byte-exact):
+          env_setup.01 (IPA 表：4.2.1 No.1: 「自組織における SBOM 導入・
+                       運用に係る役割と部門を精査する。」)
+          env_setup.11 (IPA 表：4.5.1 No.1: 「導入した SBOM ツールの
+                       手順書を作成する。」)
+          sbom_creation.01 (IPA 表：6.3.1 No.3: 「SBOM の更新条件や時期を
+                          決める。」)
+          sbom_creation.10 (IPA 表：5.3.1 No.2: 「SBOM の公開範囲、
+                          自社の特性を考慮し共有方法を検討する」)
+          sbom_operation.11 (IPA 表：6.3.1 No.2: 「SBOM の提供期間を
+                           定める」)
+
+    M12-2 Methodology:
+      1. M11-3 で導入した local PDF fixture (SBOMv2.pdf SHA256
+         cd24eff4..., SBOMv2gaiyou.pdf SHA256 9d46a2f1...) を再利用。
+         両 PDF は M10-2 (#75) で SHA256 検証済。
+      2. IPA 二次資料を WebSearch で公式 URL を特定し WebFetch で取得
+         (sbn8o10000001zcl.pdf, 2.9MB)。 pdftotext で 2,565 行抽出。
+      3. M11-3 で distilled として残した 15 件について、 primary PDF
+         に対応する section 見出し / □ 行 / body verbatim wording を
+         再 audit。 10 件は primary PDF に anchoring sentence を発見、
+         残り 5 件は IPA 二次資料の 表：N.N.N チェック項目を採用。
+      4. catalog.go schema に VerbatimTitleJA / EvaluatorTextJA / Source
+         3 field を追加 (yaml: verbatim_title_ja / evaluator_text_ja /
+         source)。 catalog.yaml に 32 件全件で verbatim_title_ja +
+         evaluator_text_ja を populate、 5 件で source: ipa-derived を
+         付与。
+      5. 既存 title_ja / description_ja / evaluator_hint / source_section
+         は不変。 handler (meti.go) / evidence_pack (builder.go) / web
+         frontend の consumer は title_ja を読み続けるため transparent
+         backward compat。
+
+    M12-2 で full 昇格できる根拠 (M11-3 partial 維持判断との差分):
+      M11-3 では「distilled 15 件を強制 verbatim 化すると意味が崩れる
+      (例: SBOMHub 実装の EPSS/SSVC 軸を 7.4.2 の multi-step 表現に
+      押し込むと評価器 signal との対応が失われる)」 と判断し、 verbatim
+      vs evaluator semantics の 1-field doubling 問題により partial を
+      維持した。 M12-2 の schema 拡張により verbatim_title_ja と
+      evaluator_text_ja を分離した結果、 distillation の意味を犠牲に
+      せず公式 wording を audit grade で保持できるようになり、 full
+      verification の前提条件を満たした。
+
+    M11-3 (issue #78, 2026-06-29) — アーカイブ section ↓
+    ----------------------------------------------------------------
     M11-3 (issue #78, 2026-06-29) で primary PDF (SBOMv2.pdf, SHA256
     cd24eff4e082286698f77253492b0eb07a515e3f70e9835ff8d3c1b276b7336a) 及び
     概要 PDF (SBOMv2gaiyou.pdf, SHA256
@@ -232,6 +340,11 @@ metadata:
       M11-3 (issue #78, 2026-06-29): title_ja / description_ja を primary
       PDF verbatim に書き換え (17/32)、 残 15 件は honest distillation
       として保持。 UI 側で truncation + tooltip を追加。
+      M12-2 (issue #83, 2026-06-30): catalog schema を option A 拡張
+      (verbatim_title_ja + evaluator_text_ja 分離 + source: ipa-derived)、
+      32 件全件で verbatim_title_ja を populate (primary METI ver 2.0
+      PDF 27 件 + IPA 二次資料 5 件)、 verification_status を partial →
+      full に昇格。 title_ja の backward compat は維持。
 
 criteria:
   # --------------------------------------------------------------------------
@@ -241,7 +354,10 @@ criteria:
   # --------------------------------------------------------------------------
   - id: meti.env_setup.01
     phase: env_setup
+    source: ipa-derived
     title_ja: SBOM 担当部署および責任者を明確化
+    verbatim_title_ja: 自組織における SBOM 導入・運用に係る役割と部門を精査する
+    evaluator_text_ja: SBOM 担当部署および責任者を明確化
     title_en: Designate the SBOM owner team and accountable role
     description_ja: |
       SBOM 導入・運用の責任者と担当部署を明確化し、 経営層・開発・セキュリティ部門との
@@ -272,6 +388,8 @@ criteria:
   - id: meti.env_setup.02
     phase: env_setup
     title_ja: 対象ソフトウェアの開発言語、コンポーネント形態、開発ツール等、対象ソフトウェアに関する情報を明確化する
+    verbatim_title_ja: 対象ソフトウェアの開発言語、コンポーネント形態、開発ツール等、対象ソフトウェアに関する情報を明確化する
+    evaluator_text_ja: 対象ソフトウェアの開発言語、コンポーネント形態、開発ツール等、対象ソフトウェアに関する情報を明確化する
     title_en: Inventory the target software's languages and build environment
     description_ja: |
       SBOM 導入組織は、SBOM 導入により解決したい自社の課題と SBOM 導入の目的を踏まえ、SBOM の適用範囲を明確化する必要がある。SBOM ツールを用いて SBOM を作成する場合、ツールによって対応している言語やコンポーネント形態が異なるため、開発言語とコンポーネントの形態については最低限把握することが必要である。
@@ -295,6 +413,8 @@ criteria:
   - id: meti.env_setup.03
     phase: env_setup
     title_ja: 対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を明確化する
+    verbatim_title_ja: 対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を明確化する
+    evaluator_text_ja: 対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を明確化する
     title_en: Clarify contract and trading practices with suppliers / OSS distributors
     description_ja: |
       あわせて、SBOM の対象とするコンポーネントの範囲対象を明確化するために、対象ソフトウェアの利用者及びサプライヤーとの契約形態・取引慣行を整理することが望まれる。具体的には、利用者・サプライヤーそれぞれについて、契約形態、コンポーネント情報の提供、第三者コンポーネントの申告、脆弱性の通知、脆弱性の修正、納品形態、損害賠償責任、知的財産権の帰属、改変の有無 等の各項目に関する対象ソフトウェアの情報を整理することが望まれる。
@@ -320,6 +440,8 @@ criteria:
   - id: meti.env_setup.04
     phase: env_setup
     title_ja: 対象ソフトウェアの SBOM に関する規制・要求事項を確認する
+    verbatim_title_ja: 対象ソフトウェアの SBOM に関する規制・要求事項を確認する
+    evaluator_text_ja: 対象ソフトウェアの SBOM に関する規制・要求事項を確認する
     title_en: Confirm applicable regulations and requirements
     description_ja: |
       SBOM 適用項目のうち、SBOM のフォーマット・項目や SBOM の活用範囲を決定するために、対象ソフトウェアの SBOM に関する規制・要求事項を確認し、整理することが望まれる。規制・要求事項において、SBOM のフォーマット・項目や SBOM の活用範囲が規定される可能性もあるため、対象ソフトウェアに関する規制・要求事項について随時情報収集し、求められる場合には具体的な要求事項を整理することが望まれる。
@@ -343,6 +465,8 @@ criteria:
   - id: meti.env_setup.05
     phase: env_setup
     title_ja: SBOM 導入に関する組織内の制約（体制の制約、コストの制約等）を明確化する
+    verbatim_title_ja: SBOM 導入に関する組織内の制約（体制の制約、コストの制約等）を明確化する
+    evaluator_text_ja: SBOM 導入に関する組織内の制約（体制の制約、コストの制約等）を明確化する
     title_en: Clarify organisational constraints (confidentiality, disclosure scope)
     description_ja: |
       SBOM 適用項目の検討に当たっては、当然ながら、SBOM 導入に向けた組織内の制約も加味する必要がある。最も想定される制約としては、組織内の体制に関する制約やコストに関する制約が挙げられる。これらの制約が厳しい場合、限定的な SBOM 適用項目しか選択できない可能性もあるところ、SBOM 適用範囲の整理のために、予め組織内の制約を確認・整理することが望まれる。
@@ -365,6 +489,8 @@ criteria:
   - id: meti.env_setup.06
     phase: env_setup
     title_ja: 整理した情報に基づき、SBOM 適用範囲（5W1H）を明確化する
+    verbatim_title_ja: 整理した情報に基づき、SBOM 適用範囲（5W1H）を明確化する
+    evaluator_text_ja: 整理した情報に基づき、SBOM 適用範囲（5W1H）を明確化する
     title_en: Define the SBOM application scope (5W1H)
     description_ja: |
       SBOM 導入組織は、SBOM 導入により解決したい自社の課題と SBOM 導入の目的を踏まえ、SBOM の適用範囲を明確化する必要がある。SBOM 適用範囲は表 4-1 に示す 5W1H の観点に分類することができ、各観点において複数の適用項目（選択肢）が存在する。
@@ -390,6 +516,8 @@ criteria:
   - id: meti.env_setup.07
     phase: env_setup
     title_ja: SBOM ツールの選定
+    verbatim_title_ja: SBOM ツールの選定
+    evaluator_text_ja: SBOM ツールの選定
     title_en: Select and install the SBOM generation tool
     description_ja: |
       対象ソフトウェアの開発言語や組織内の制約を考慮した SBOM ツールの選定の観点を整理する。整理した観点に基づき、複数の SBOM ツールを評価し、選定する。
@@ -418,6 +546,8 @@ criteria:
   - id: meti.env_setup.08
     phase: env_setup
     title_ja: SBOM ツールに関する学習
+    verbatim_title_ja: SBOM ツールに関する学習
+    evaluator_text_ja: SBOM ツールに関する学習
     title_en: Train the SBOM team
     description_ja: |
       ツールの取扱説明書や README ファイルを確認して、SBOM ツールの使い方を習得する。ツールの使い方に関するノウハウや各機能の概要は記録し、組織内で共有する。
@@ -444,6 +574,8 @@ criteria:
   - id: meti.env_setup.09
     phase: env_setup
     title_ja: 対象ソフトウェアの正確な構成図を作成し、SBOM 適用の対象を可視化する
+    verbatim_title_ja: 対象ソフトウェアの正確な構成図を作成し、SBOM 適用の対象を可視化する
+    evaluator_text_ja: 対象ソフトウェアの正確な構成図を作成し、SBOM 適用の対象を可視化する
     title_en: Visualise the target software's architecture diagram
     description_ja: |
       対象ソフトウェアの正確な構成図を作成し、SBOM 適用の対象を可視化することで、リスク管理の範囲を明確化することができる。具体的には、対象ソフトウェアにおいて自組織で開発した範囲、取引契約のあるサプライヤーが開発した範囲、取引契約のないサプライヤーが開発した範囲（OSS 等）を可視化した図を作成することが望まれる。
@@ -471,6 +603,8 @@ criteria:
   - id: meti.env_setup.10
     phase: env_setup
     title_ja: SBOM ツールを導入・設定 (個別運用)
+    verbatim_title_ja: SBOM ツールが導入可能な環境の要件を確認し、整備する
+    evaluator_text_ja: SBOM ツールを導入・設定 (個別運用)
     title_en: Install and configure the SBOM tool (per-deployment settings)
     description_ja: |
       選定済 SBOM 生成ツール (env_setup.07) を実行環境にインストールし、
@@ -501,7 +635,10 @@ criteria:
 
   - id: meti.env_setup.11
     phase: env_setup
+    source: ipa-derived
     title_ja: SBOM ツールの学習 (運用習熟度確認)
+    verbatim_title_ja: 導入した SBOM ツールの手順書を作成する
+    evaluator_text_ja: SBOM ツールの学習 (運用習熟度確認)
     title_en: Practise with the SBOM tool (operator proficiency check)
     description_ja: |
       担当者教育 (env_setup.08) で習得した知識をもとに、 実際の対象ソフトウェアに
@@ -532,7 +669,10 @@ criteria:
   # --------------------------------------------------------------------------
   - id: meti.sbom_creation.01
     phase: sbom_creation
+    source: ipa-derived
     title_ja: SBOM 作成方針 (頻度 / トリガー / 粒度) を決定
+    verbatim_title_ja: SBOM の更新条件や時期を決める
+    evaluator_text_ja: SBOM 作成方針 (頻度 / トリガー / 粒度) を決定
     title_en: Decide the SBOM creation policy (frequency, trigger, granularity)
     description_ja: |
       SBOM をいつ (リリース毎 / マージ毎 / 夜次) どの粒度 (アプリ単位 /
@@ -559,6 +699,8 @@ criteria:
   - id: meti.sbom_creation.02
     phase: sbom_creation
     title_ja: 作成する SBOM の項目、フォーマット、出力ファイル形式等の SBOM に関する要件を決定する
+    verbatim_title_ja: 作成する SBOM の項目、フォーマット、出力ファイル形式等の SBOM に関する要件を決定する
+    evaluator_text_ja: 作成する SBOM の項目、フォーマット、出力ファイル形式等の SBOM に関する要件を決定する
     title_en: Select the SBOM format (CycloneDX / SPDX)
     description_ja: |
       解析したコンポーネントの情報に基づき、SBOM を作成する。SBOM の作成に当たっては、SBOM に含める項目、フォーマット、出力ファイル形式等の SBOM に関する要件を事前に決定する必要がある。これらの要件について、規制・要求事項において、SBOM のフォーマットや項目が定められている場合がある。
@@ -583,6 +725,8 @@ criteria:
   - id: meti.sbom_creation.03
     phase: sbom_creation
     title_ja: SBOM ツールを用いて対象ソフトウェアのスキャンを行い、コンポーネントの情報を解析する
+    verbatim_title_ja: SBOM ツールを用いて対象ソフトウェアのスキャンを行い、コンポーネントの情報を解析する
+    evaluator_text_ja: SBOM ツールを用いて対象ソフトウェアのスキャンを行い、コンポーネントの情報を解析する
     title_en: Analyse components and generate the SBOM
     description_ja: |
       SBOM ツールのコンポーネント解析機能を用いることで、手動の場合と比較し、効率的にコンポーネントの解析及び SBOM の作成を行うことができる。SBOM ツールを用いることの効果はコンポーネント数が多いほど大きい。
@@ -606,6 +750,8 @@ criteria:
   - id: meti.sbom_creation.04
     phase: sbom_creation
     title_ja: SBOM ツールの解析ログ等を調査し、エラー発生や情報不足による解析の中断や省略がなく、解析が正しく実行されたかを確認する
+    verbatim_title_ja: SBOM ツールの解析ログ等を調査し、エラー発生や情報不足による解析の中断や省略がなく、解析が正しく実行されたかを確認する
+    evaluator_text_ja: SBOM ツールの解析ログ等を調査し、エラー発生や情報不足による解析の中断や省略がなく、解析が正しく実行されたかを確認する
     title_en: Confirm analysis errors (parse failure, unknown version)
     description_ja: |
       面上は正常終了しているように見えても、エラーにより内部的な解析プロセスの一部をスキップして終了している場合もあるため、ツールの実行ログを確認し、そのようなエラーが発生していないかを確認する必要がある。誤検出や検出漏れの確認の結果、未知の情報や不明の情報が含まれていることが分かった場合、その情報を「既知の未知」として把握することが望まれる。
@@ -628,6 +774,8 @@ criteria:
   - id: meti.sbom_creation.05
     phase: sbom_creation
     title_ja: コンポーネントの解析結果について、コンポーネントの誤検出や検出漏れがないかを確認する
+    verbatim_title_ja: コンポーネントの解析結果について、コンポーネントの誤検出や検出漏れがないかを確認する
+    evaluator_text_ja: コンポーネントの解析結果について、コンポーネントの誤検出や検出漏れがないかを確認する
     title_en: Verify false positives and false negatives
     description_ja: |
       コンポーネントの誤検出や検出漏れが生じる場合がある。例えば、シンボリックリンクやランタイムライブラリ等のコンポーネント、深い階層のコンポーネント、特定分野でのみ利用されているコンポーネント等を検出できない場合があるほか、コンポーネントを特定できてもバージョン情報が誤っている場合がある。
@@ -654,6 +802,8 @@ criteria:
   - id: meti.sbom_creation.06
     phase: sbom_creation
     title_ja: METI / NTIA 最小要素を満たす SBOM を作成
+    verbatim_title_ja: SBOM の「最小要素」
+    evaluator_text_ja: METI / NTIA 最小要素を満たす SBOM を作成
     title_en: Produce an SBOM meeting METI / NTIA minimum elements
     description_ja: |
       Supplier Name / Component Name / Component Version / Unique
@@ -681,6 +831,8 @@ criteria:
   - id: meti.sbom_creation.07
     phase: sbom_creation
     title_ja: 対象ソフトウェアの利用者及び納入先に対する SBOM の共有方法を検討した上で、必要に応じて、SBOM を共有する
+    verbatim_title_ja: 対象ソフトウェアの利用者及び納入先に対する SBOM の共有方法を検討した上で、必要に応じて、SBOM を共有する
+    evaluator_text_ja: 対象ソフトウェアの利用者及び納入先に対する SBOM の共有方法を検討した上で、必要に応じて、SBOM を共有する
     title_en: Establish SBOM sharing channels and distribution terms
     description_ja: |
       ソフトウェアサプライチェーンの透明性を高める観点で、必要に応じて、ソフトウェアの利用者や納入先に対して作成した SBOM を共有することが望まれる。規制・要求事項として SBOM の共有が求められている場合には、当該事項で規定された内容に則り、適切な対象者に対して、適切な方法で SBOM を共有することが必要となる。
@@ -706,6 +858,8 @@ criteria:
   - id: meti.sbom_creation.08
     phase: sbom_creation
     title_ja: SBOM のバージョン管理と差分追跡を実施
+    verbatim_title_ja: SBOM に含まれる情報や SBOM 自体を適切に管理する
+    evaluator_text_ja: SBOM のバージョン管理と差分追跡を実施
     title_en: Version-control SBOMs and track diffs
     description_ja: |
       ソフトウェアリリースごとに SBOM を版管理し、 前版との差分 (追加 / 削除 /
@@ -734,6 +888,8 @@ criteria:
   - id: meti.sbom_creation.09
     phase: sbom_creation
     title_ja: サプライヤー受領 SBOM のマージ / 検証
+    verbatim_title_ja: サードパーティや OSS コミュニティ等の第三者から提供されたコンポーネントを使用している場合は、当該コンポーネントの SBOM の提供を受けることができる場合もある
+    evaluator_text_ja: サプライヤー受領 SBOM のマージ / 検証
     title_en: Merge and validate supplier-provided SBOMs
     description_ja: |
       自社が再配布する成果物にサプライヤー製コンポーネントが含まれる場合、
@@ -763,7 +919,10 @@ criteria:
   # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
   - id: meti.sbom_creation.10
     phase: sbom_creation
+    source: ipa-derived
     title_ja: SBOM 共有プロセスを個別運用 (受領者管理 / 通知)
+    verbatim_title_ja: SBOM の公開範囲、自社の特性を考慮し共有方法を検討する
+    evaluator_text_ja: SBOM 共有プロセスを個別運用 (受領者管理 / 通知)
     title_en: Operate SBOM sharing per recipient (audience management, notifications)
     description_ja: |
       SBOM 共有方法・配布契約 (sbom_creation.07) を整備した上で、 個別受領者
@@ -801,6 +960,8 @@ criteria:
   - id: meti.sbom_operation.01
     phase: sbom_operation
     title_ja: 脆弱性に関する SBOM ツールの出力結果を踏まえ、深刻度の評価、影響度の評価、脆弱性の修正、残存リスクの確認、関係機関への情報提供等の脆弱性対応を行う
+    verbatim_title_ja: 脆弱性に関する SBOM ツールの出力結果を踏まえ、深刻度の評価、影響度の評価、脆弱性の修正、残存リスクの確認、関係機関への情報提供等の脆弱性対応を行う
+    evaluator_text_ja: 脆弱性に関する SBOM ツールの出力結果を踏まえ、深刻度の評価、影響度の評価、脆弱性の修正、残存リスクの確認、関係機関への情報提供等の脆弱性対応を行う
     title_en: Establish a vulnerability monitoring process
     description_ja: |
       脆弱性管理に当たっては、SBOM ツールの脆弱性管理機能の出力結果を踏まえ、ソフトウェアに含まれるコンポーネントの脆弱性有無を確認するとともに、脆弱性が確認された場合には、当該脆弱性に対する対応を実施することが必要となる。具体的な脆弱性対応として、脆弱性の箇所を特定し、影響範囲を分析するとともに、リスクの推定及び評価を行い、リスクの受容可能性を確認し、脆弱性対応の優先付けを行うことが望まれる。
@@ -824,6 +985,8 @@ criteria:
   - id: meti.sbom_operation.02
     phase: sbom_operation
     title_ja: 脆弱性特定や脆弱性対応優先付けにおいて利用する脆弱性 DB を選択する
+    verbatim_title_ja: 脆弱性特定や脆弱性対応優先付けにおいて利用する脆弱性 DB を選択する
+    evaluator_text_ja: 脆弱性特定や脆弱性対応優先付けにおいて利用する脆弱性 DB を選択する
     title_en: Identify vulnerability information sources (NVD / JVN / KEV / GHSA / JPCERT)
     description_ja: |
       有償・無償の SBOM ツールにより、脆弱性マッチングの範囲に差が大きいことに留意が必要である。無償ツールには脆弱性マッチングの機能がないものもあり、有償ツールでは、NVD、JVN のような公的な脆弱性情報データベース以外に、独自に脆弱性情報データベースを強化し、脆弱性マッチングの範囲を拡大したものがある。
@@ -846,6 +1009,8 @@ criteria:
   - id: meti.sbom_operation.03
     phase: sbom_operation
     title_ja: 脆弱性を優先付け (EPSS / SSVC / CVSS / KEV)
+    verbatim_title_ja: 脆弱性対応優先付けフェーズ
+    evaluator_text_ja: 脆弱性を優先付け (EPSS / SSVC / CVSS / KEV)
     title_en: Prioritise vulnerabilities (EPSS / SSVC / CVSS / KEV)
     description_ja: |
       検出された脆弱性に対し、 CVSS だけでなく EPSS (悪用予測スコア),
@@ -871,6 +1036,8 @@ criteria:
   - id: meti.sbom_operation.04
     phase: sbom_operation
     title_ja: 脆弱性対応 (VEX 作成・承認・配布) を実施
+    verbatim_title_ja: 脆弱性対応フェーズ（暫定対応・根本対応）
+    evaluator_text_ja: 脆弱性対応 (VEX 作成・承認・配布) を実施
     title_en: Execute vulnerability response (VEX authoring, approval, distribution)
     description_ja: |
       対応中 / 影響なし / 修正済の判断を VEX (CycloneDX VEX or CSAF) で表現
@@ -898,6 +1065,8 @@ criteria:
   - id: meti.sbom_operation.05
     phase: sbom_operation
     title_ja: ライセンスに関する SBOM ツールの出力結果を踏まえ、OSS のライセンス違反が発生していないかを確認する
+    verbatim_title_ja: ライセンスに関する SBOM ツールの出力結果を踏まえ、OSS のライセンス違反が発生していないかを確認する
+    evaluator_text_ja: ライセンスに関する SBOM ツールの出力結果を踏まえ、OSS のライセンス違反が発生していないかを確認する
     title_en: Check for licence violations and compliance deviations
     description_ja: |
       ライセンス管理も同様である。SBOM ツールの出力結果を踏まえ、ソフトウェアに含まれるコンポーネントのライセンスコンプライアンスの状況を確認するとともに、当該コンポーネントの想定利用方法に対して遵守不可能又は遵守困難なライセンス条件が確認された場合には、利用コンポーネント自体の変更や利用方法の変更等、対応を実施することが必要となる。
@@ -923,6 +1092,8 @@ criteria:
   - id: meti.sbom_operation.06
     phase: sbom_operation
     title_ja: EOL / End-of-Support コンポーネントを特定
+    verbatim_title_ja: SBOM ツールでコンポーネントの EOL を特定できない場合、別途個別に調査する必要がある
+    evaluator_text_ja: EOL / End-of-Support コンポーネントを特定
     title_en: Identify EOL / end-of-support components
     description_ja: |
       endoflife.date 等を参照して EOL を迎えたランタイム / フレームワーク
@@ -951,6 +1122,8 @@ criteria:
   - id: meti.sbom_operation.07
     phase: sbom_operation
     title_ja: 作成した SBOM は、社外からの問合せがあった場合等に参照できるよう、変更履歴も含めて一定期間保管する
+    verbatim_title_ja: 作成した SBOM は、社外からの問合せがあった場合等に参照できるよう、変更履歴も含めて一定期間保管する
+    evaluator_text_ja: 作成した SBOM は、社外からの問合せがあった場合等に参照できるよう、変更履歴も含めて一定期間保管する
     title_en: Retain SBOMs for the required period (audit-ready)
     description_ja: |
       保管期間は、一般的に対象製品が市場に流通している間や対象サービスが提供されている期間は最低限としつつ、販売終了後も、保証期間、サポート提供期間、交換部品の提供期間等に必要に応じて SBOM を参照する可能性があるため、予め参照できるように準備しておく必要がある。さらに、使用しているコンポーネントのライセンスの条件で製品提供終了後 3 年等の個別の指定がある場合にはその期間も考慮する必要がある。
@@ -976,6 +1149,8 @@ criteria:
   - id: meti.sbom_operation.08
     phase: sbom_operation
     title_ja: インシデント対応プロセス (悪用検知時) を整備
+    verbatim_title_ja: 情報共有フェーズ
+    evaluator_text_ja: インシデント対応プロセス (悪用検知時) を整備
     title_en: Establish an incident-response process (when exploitation is detected)
     description_ja: |
       KEV 追加 / EPSS 急上昇 / 悪用実例レポートを受領したコンポーネントに
@@ -1004,6 +1179,8 @@ criteria:
   - id: meti.sbom_operation.09
     phase: sbom_operation
     title_ja: SBOM 更新頻度を遵守
+    verbatim_title_ja: SBOM に含まれる情報は定期的に更新し、管理する必要がある
+    evaluator_text_ja: SBOM 更新頻度を遵守
     title_en: Maintain SBOM update frequency
     description_ja: |
       ソフトウェア改変・依存追加・依存削除のたびに SBOM を更新する。 最低
@@ -1026,6 +1203,8 @@ criteria:
   - id: meti.sbom_operation.10
     phase: sbom_operation
     title_ja: 監査ログ (作成 / 共有 / 承認 / 配布) を記録
+    verbatim_title_ja: 出荷済み製品と SBOM 情報とを対応づけられるよう、SBOM の改変履歴も含めて資産管理システム等で保管することも想定される
+    evaluator_text_ja: 監査ログ (作成 / 共有 / 承認 / 配布) を記録
     title_en: Record audit logs (creation, sharing, approval, distribution)
     description_ja: |
       SBOM の生成・アップロード・共有・承認・配布の各イベントを操作者
@@ -1052,7 +1231,10 @@ criteria:
   # ── M8-1 (issue #62) で追加 ──────────────────────────────────────────────
   - id: meti.sbom_operation.11
     phase: sbom_operation
+    source: ipa-derived
     title_ja: SBOM 提供期間を個別運用 (顧客 / 製品ライン別)
+    verbatim_title_ja: SBOM の提供期間を定める
+    evaluator_text_ja: SBOM 提供期間を個別運用 (顧客 / 製品ライン別)
     title_en: Operate per-customer / per-product SBOM provision windows
     description_ja: |
       製品ライフタイム + 規制要求期間 (sbom_operation.07) の枠組みを前提として、
