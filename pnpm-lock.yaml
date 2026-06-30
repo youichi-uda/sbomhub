@@ -23,7 +23,7 @@ importers:
         specifier: ^5.90.20
         version: 5.90.20(react@19.2.4)
       '@xyflow/react':
-        specifier: 12.11.1
+        specifier: ^12.11.1
         version: 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       class-variance-authority:
         specifier: ^0.7.1
