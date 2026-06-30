@@ -26,7 +26,14 @@ func NewTenantRepository(db *sql.DB) *TenantRepository {
 // Note: Create() below opens its own BeginTx because it must seed both
 // `tenants` and `scan_settings` atomically; it is only invoked from
 // pre-request paths (Auth middleware bootstrap, Clerk webhook handler)
-// where no request-scoped tx is open yet.
+// where no request-scoped tx is open yet. Migration 048 (F185) brought
+// `scan_settings` under FORCE ROW LEVEL SECURITY with WITH CHECK bound to
+// `current_setting('app.current_tenant_id', true)::UUID`, so the same
+// transaction must bind that GUC before the scan_settings INSERT —
+// otherwise the WITH CHECK predicate evaluates against NULL, the INSERT
+// is rejected, the tx rolls back, and the `tenants` INSERT is lost too.
+// See F187 (M13 Phase D round 3) for the full failure trail; the integration
+// test in `tenant_rls_test.go` pins the fix.
 func (r *TenantRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
 }
@@ -47,6 +54,23 @@ func (r *TenantRepository) Create(ctx context.Context, t *model.Tenant) error {
 	_, err = tx.ExecContext(ctx, query,
 		t.ID, t.ClerkOrgID, t.Name, t.Slug, t.Plan, t.CreatedAt, t.UpdatedAt)
 	if err != nil {
+		return err
+	}
+
+	// F187 (M13 Phase D round 3): bind `app.current_tenant_id` for the rest
+	// of this transaction so the scan_settings INSERT below passes the FORCE
+	// RLS WITH CHECK predicate introduced by migration 048 (F185). The `true`
+	// second argument makes set_config tx-scoped (SET LOCAL semantics) so the
+	// GUC does NOT leak across pooled connection re-use after Commit. Without
+	// this, GetOrCreateDefault / GetOrCreateByClerkOrgID — every entry path
+	// into tenant bootstrap (Auth middleware, Clerk webhook) — fails with
+	// `pq: new row violates row-level security policy for table "scan_settings"`
+	// and the tenant row never lands. The TenantRepository.SetCurrentTenant
+	// helper does the same thing for request-scoped txns; we re-issue it
+	// directly here because that helper routes through r.q(ctx) and would
+	// not see our local tx.
+	if _, err = tx.ExecContext(ctx,
+		`SELECT set_config('app.current_tenant_id', $1, true)`, t.ID.String()); err != nil {
 		return err
 	}
 
