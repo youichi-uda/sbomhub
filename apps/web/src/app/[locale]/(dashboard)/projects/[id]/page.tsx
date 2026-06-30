@@ -6,14 +6,26 @@ import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
-import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, NotificationSettings, NotificationLog } from "@/lib/api";
-import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Bell } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { api, Project, Component, Vulnerability, VEXStatementWithDetails, VEXStatus, VEXJustification, LicensePolicy, LicensePolicyType, LicenseViolation, NotificationSettings, NotificationLog, APIKey, APIKeyWithSecret } from "@/lib/api";
+import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck, Bell, Key, Plus, Copy, Check } from "lucide-react";
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { EOLBadge } from "@/components/component/eol-badge";
 import Link from "next/link";
 
-type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications";
+// M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
+// detail page surfaces project-scoped API key CRUD again. The wider
+// product direction is tenant-scoped keys (see
+// /settings/apikeys/page.tsx and apps/api/cmd/server/main.go L1256 —
+// the project-level route is flagged "deprecated, for backwards
+// compatibility"). We keep the project-level tab live for now because:
+//   1. api-keys.spec.ts (M12-1 #82 carryover) was written for in-tab
+//      CRUD and expects a project-scoped flow.
+//   2. The backend route still validates + audit-logs identically, so
+//      no behavioural drift vs the tenant route.
+//   3. Removing the deprecated route + UI is its own dedicated wave.
+type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications" | "apikeys";
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -43,6 +55,23 @@ export default function ProjectDetailPage() {
   const [sbomId, setSbomId] = useState<string | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
+  // M13-1 #87 (F174): project-scoped API keys state. The full lifecycle
+  // is inline (no Dialog) so it mirrors the existing VEX / License form
+  // pattern in this file and avoids depending on the custom Dialog shim
+  // that previously lacked role="dialog" (root cause of security.spec
+  // L376 60s timeout, fixed separately on the shim itself). `apiKeyJustCreated`
+  // holds the one-time secret returned from the create endpoint; the
+  // server never echoes the secret again, hence the bg-green-50 banner
+  // patterned after the equivalent affordance on /settings/apikeys.
+  const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
+  const [showCreateApiKey, setShowCreateApiKey] = useState(false);
+  const [apiKeyJustCreated, setApiKeyJustCreated] = useState<APIKeyWithSecret | null>(null);
+  const [apiKeyName, setApiKeyName] = useState("");
+  const [apiKeyPermissions, setApiKeyPermissions] = useState<"read" | "write">("write");
+  const [apiKeyExpiresInDays, setApiKeyExpiresInDays] = useState("");
+  const [apiKeyCreating, setApiKeyCreating] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  const [apiKeyCopied, setApiKeyCopied] = useState(false);
   // Evidence Pack (Wave M2-6 / issue #34): synchronous build → browser
   // download. Tracking a separate state flag rather than re-using
   // `uploading` so the button label stays accurate during long
@@ -139,6 +168,20 @@ export default function ProjectDetailPage() {
     }
   }, [projectId]);
 
+  // M13-1 #87 (F174): load project-scoped API keys via the deprecated
+  // (but still validated + audit-logged) `/projects/:id/apikeys` route.
+  // F164 normalisation (`data || []`) keeps the array shape stable when
+  // the backend emits a JSON null for the empty case.
+  const loadApiKeys = useCallback(async () => {
+    try {
+      const data = await api.projects.getAPIKeys(projectId);
+      setApiKeys(data || []);
+    } catch (error) {
+      console.error("Failed to load API keys:", error);
+      setApiKeys([]);
+    }
+  }, [projectId]);
+
   useEffect(() => {
     loadProject();
     loadComponents();
@@ -147,7 +190,12 @@ export default function ProjectDetailPage() {
     loadLicensePolicies();
     loadSbomId();
     loadNotificationSettings();
-  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadNotificationSettings]);
+    // Preload API keys so the tab counter renders an accurate badge
+    // before the operator switches tabs. The page-level fetch failures
+    // are swallowed inside loadApiKeys (logged + reset to []) so they
+    // do not block project-level rendering.
+    loadApiKeys();
+  }, [loadProject, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadSbomId, loadNotificationSettings, loadApiKeys]);
 
   useEffect(() => {
     if (activeTab === "components") loadComponents();
@@ -161,7 +209,8 @@ export default function ProjectDetailPage() {
       loadNotificationSettings();
       loadNotificationLogs();
     }
-  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadNotificationSettings, loadNotificationLogs]);
+    if (activeTab === "apikeys") loadApiKeys();
+  }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadNotificationSettings, loadNotificationLogs, loadApiKeys]);
 
   // handleBuildEvidencePack drives the M2-6 (issue #34) Markdown
   // bundle download. The server emits the file body with
@@ -183,6 +232,70 @@ export default function ProjectDetailPage() {
     } finally {
       setEvidencePackBuilding(false);
     }
+  }
+
+  // M13-1 #87 (F174): inline create form handler. We reset the form-only
+  // fields once the secret is captured into state so the success card
+  // (`apiKeyJustCreated` set) is what re-renders, not a stale form. The
+  // create error is surfaced inline rather than via alert() to avoid the
+  // window-dialog overlap test harnesses see when chaining create→list.
+  async function handleCreateApiKey(e: React.FormEvent) {
+    e.preventDefault();
+    if (!apiKeyName.trim()) return;
+    setApiKeyCreating(true);
+    setApiKeyError(null);
+    try {
+      const created = await api.projects.createAPIKey(projectId, {
+        name: apiKeyName.trim(),
+        permissions: apiKeyPermissions,
+        expires_in_days: apiKeyExpiresInDays
+          ? parseInt(apiKeyExpiresInDays, 10)
+          : undefined,
+      });
+      setApiKeyJustCreated(created);
+      setApiKeyName("");
+      setApiKeyExpiresInDays("");
+      setApiKeyPermissions("write");
+      await loadApiKeys();
+    } catch (err) {
+      console.error("Failed to create API key:", err);
+      setApiKeyError(err instanceof Error ? err.message : tp("apiKeyCreateFailed"));
+    } finally {
+      setApiKeyCreating(false);
+    }
+  }
+
+  async function handleCopyApiKey(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setApiKeyCopied(true);
+      setTimeout(() => setApiKeyCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+    }
+  }
+
+  async function handleDeleteApiKey(keyId: string) {
+    // Native confirm() per api-keys.spec.ts expectation
+    // (it attaches `page.on('dialog', ...)` and treats Delete as a
+    // browser-level confirm dialog rather than a custom AlertDialog).
+    if (!confirm(tp("deleteApiKeyConfirm"))) return;
+    try {
+      await api.projects.deleteAPIKey(projectId, keyId);
+      await loadApiKeys();
+    } catch (err) {
+      console.error("Failed to delete API key:", err);
+    }
+  }
+
+  function resetApiKeyCreateForm() {
+    setShowCreateApiKey(false);
+    setApiKeyJustCreated(null);
+    setApiKeyName("");
+    setApiKeyExpiresInDays("");
+    setApiKeyPermissions("write");
+    setApiKeyError(null);
+    setApiKeyCopied(false);
   }
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -306,6 +419,13 @@ export default function ProjectDetailPage() {
         >
           <Bell className="h-4 w-4 mr-2" />
           {tp("notifications")}
+        </Button>
+        <Button
+          variant={activeTab === "apikeys" ? "default" : "outline"}
+          onClick={() => setActiveTab("apikeys")}
+        >
+          <Key className="h-4 w-4 mr-2" />
+          {tp("apiKeys")} ({apiKeys.length})
         </Button>
       </div>
 
@@ -705,6 +825,180 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {activeTab === "apikeys" && (
+        <Card>
+          <CardHeader>
+            <div className="flex justify-between items-center">
+              <div>
+                <CardTitle>{tp("apiKeys")}</CardTitle>
+                <p className="text-sm text-muted-foreground mt-1">{tp("apiKeyDescription")}</p>
+              </div>
+              {!showCreateApiKey && !apiKeyJustCreated && (
+                <Button
+                  onClick={() => {
+                    setShowCreateApiKey(true);
+                    setApiKeyError(null);
+                  }}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  {tp("createApiKey")}
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {/* Success card — bg-green-50 selector is matched in
+                api-keys.spec.ts L92/L96 (`.bg-green-50 code` for the
+                secret, `.bg-green-50` getByRole('button').first() for
+                the copy affordance). */}
+            {apiKeyJustCreated && (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+                <h3 className="font-bold text-green-900 mb-2 flex items-center gap-2">
+                  <Check className="h-5 w-5" />
+                  {tp("apiKeyCreated")}
+                </h3>
+                <p className="text-sm text-green-700 mb-3">
+                  {tp("apiKeyCopyWarning")}
+                </p>
+                <div className="flex items-center gap-2 mb-3">
+                  <code className="flex-1 bg-white px-3 py-2 rounded border font-mono text-sm break-all">
+                    {apiKeyJustCreated.key}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleCopyApiKey(apiKeyJustCreated.key)}
+                  >
+                    {apiKeyCopied ? (
+                      <Check className="h-4 w-4" />
+                    ) : (
+                      <Copy className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={resetApiKeyCreateForm}>
+                    {tp("done")}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Inline create form — modelled on VEXForm / LicensePolicyForm
+                in this file. The submit-button regex
+                `/^Create Key$|^作成$/i` is pinned in api-keys.spec.ts
+                L84, hence `apiKeyCreate` is explicitly "Create Key"
+                (en) / "作成" (ja). */}
+            {showCreateApiKey && !apiKeyJustCreated && (
+              <form
+                onSubmit={handleCreateApiKey}
+                className="border rounded-lg p-4 mb-4 bg-muted/50"
+              >
+                <h3 className="font-bold mb-4">{tp("createApiKey")}</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">
+                      {tp("apiKeyNameLabel")}
+                    </label>
+                    <Input
+                      value={apiKeyName}
+                      onChange={(e) => setApiKeyName(e.target.value)}
+                      placeholder={tp("apiKeyNamePlaceholder")}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">
+                      {tp("apiKeyPermissionsLabel")}
+                    </label>
+                    <select
+                      value={apiKeyPermissions}
+                      onChange={(e) => setApiKeyPermissions(e.target.value as "read" | "write")}
+                      className="w-full border rounded px-3 py-2"
+                    >
+                      <option value="read">{tp("apiKeyPermissionRead")}</option>
+                      <option value="write">{tp("apiKeyPermissionWrite")}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">
+                      {tp("apiKeyExpiresLabel")}
+                    </label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={apiKeyExpiresInDays}
+                      onChange={(e) => setApiKeyExpiresInDays(e.target.value)}
+                      placeholder="30"
+                    />
+                  </div>
+                  {apiKeyError && (
+                    <div className="text-sm text-destructive bg-destructive/10 p-3 rounded-md">
+                      {apiKeyError}
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <Button type="submit" disabled={apiKeyCreating || !apiKeyName.trim()}>
+                      {apiKeyCreating ? tp("apiKeyCreating") : tp("apiKeyCreate")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={resetApiKeyCreateForm}
+                    >
+                      {tc("cancel")}
+                    </Button>
+                  </div>
+                </div>
+              </form>
+            )}
+
+            {/* Key list — `.border.rounded-lg.p-3` per-row class and
+                an inline `Delete` button with `text-red-500` are pinned
+                in api-keys.spec.ts L139/L176. */}
+            {apiKeys.length === 0 && !showCreateApiKey && !apiKeyJustCreated ? (
+              <p className="text-center text-muted-foreground py-8">
+                {tp("noApiKeys")}
+              </p>
+            ) : apiKeys.length > 0 ? (
+              <div className="space-y-2">
+                {apiKeys.map((key) => (
+                  <div key={key.id} className="border rounded-lg p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Key className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                        <span className="font-medium truncate">{key.name}</span>
+                        <span className="text-muted-foreground text-sm font-mono">
+                          ({key.key_prefix}...)
+                        </span>
+                        <Badge variant="secondary" className="text-xs">
+                          {key.permissions === "read"
+                            ? tp("apiKeyPermissionRead")
+                            : tp("apiKeyPermissionWrite")}
+                        </Badge>
+                        {key.expires_at && new Date(key.expires_at) < new Date() && (
+                          <Badge variant="destructive" className="text-xs">
+                            {tp("apiKeyExpired")}
+                          </Badge>
+                        )}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-500 hover:text-red-700"
+                        onClick={() => handleDeleteApiKey(key.id)}
+                      >
+                        {tp("apiKeyDelete")}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       )}

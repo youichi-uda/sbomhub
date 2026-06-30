@@ -3,20 +3,15 @@ import { test, expect } from '@playwright/test';
 const API_BASE_URL =
     process.env.PLAYWRIGHT_API_URL || process.env.API_BASE_URL || 'http://localhost:8080';
 
-// M12-1 #82 → M13 deferment: confirmed page-route gap (NOT a hydration
-// bug). The project detail page tab union in
-// `apps/web/src/app/[locale]/(dashboard)/projects/[id]/page.tsx` L16
-// is `"upload" | "components" | "vulnerabilities" | "vex" | "licenses"
-// | "notifications"` — there is no "apikeys" tab. The current build
-// only surfaces API keys at the tenant level via
-// `/settings/apikeys/page.tsx` (`APIKeysPage`). Backend endpoints
-// `/projects/:id/apikeys` exist (see apps/api/cmd/server/main.go
-// L1236-1238) so the spec's API plumbing is sound, but the per-project
-// UI tab + Create dialog the spec drives are not implemented. Two M13
-// options: (a) add a per-project API Keys tab + dialog to the project
-// detail page, OR (b) rewrite this spec to target /settings/apikeys
-// (tenant-level). Option (a) is the spec author's original intent.
-test.describe.skip('API Keys Management (M13: per-project API Keys tab missing on /projects/:id)', () => {
+// M13-1 #87 (F174): un-skipped. Option (A) was chosen — the project
+// detail page now carries an "API Keys" tab driving the
+// `/projects/:id/apikeys` (deprecated but still validated) backend
+// route, preserving the original spec intent. The tenant-level
+// /settings/apikeys page is the canonical long-term home and is
+// covered separately; collapsing the project-scoped surface is a
+// separate cleanup wave so the deprecation note in
+// apps/api/cmd/server/main.go::projects/:id/apikeys can stand.
+test.describe('API Keys Management', () => {
     let projectId: string;
 
     test.beforeAll(async ({ request }) => {
