@@ -367,15 +367,85 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	return "", ""
 }
 
+// resourceIDParamPriority lists path param names ordered from path-tail
+// (most specific resource) to path-head (least specific). The audit row's
+// resource_id should always point at the most specific resource the request
+// operates on, so when both ":id" (parent) and ":key_id" (child) are bound
+// — e.g. DELETE /projects/:id/apikeys/:key_id — the child wins.
+//
+// F186 root cause: the original list iterated only
+// {"id","project_id","sbom_id","vulnerability_id"} in arbitrary order. For
+// DELETE /projects/:id/apikeys/:key_id, "id" matched first and the audit
+// row recorded the project UUID instead of the apikey UUID. For tenant-
+// scoped DELETE /apikeys/:key_id, none of the four names matched at all
+// and resource_id silently dropped to NULL. F176 fix corrected action
+// classification (apikey.deleted vs project.deleted) but the companion
+// extractResourceID was never adjusted, so the join key between
+// audit_logs.resource_id and api_keys.id was broken for every apikey
+// delete logged after the F176 deploy.
+//
+// Same gap also affected :vex_id, :draft_id, :report_id, :criterion_id,
+// :policy_id, :assessment_id and :vuln_id — every route-specific resource
+// param that lives under a /projects/:id parent.
+var resourceIDParamPriority = []string{
+	// Path-tail params first. Order within this block is grouped by
+	// feature area but the actual ordering only matters when more than
+	// one of these is bound on a single route, which Echo route tree
+	// does not currently do.
+	"vuln_id",
+	"assessment_id",
+	"policy_id",
+	"criterion_id",
+	"report_id",
+	"draft_id",
+	"vex_id",
+	"key_id",
+	// Mid-tier params used for nested-but-not-leaf resources.
+	"sbom_id",
+	"vulnerability_id",
+	"project_id",
+	// Generic :id last — only matched if no specific param above is bound.
+	"id",
+}
+
 // extractResourceID extracts the resource ID from path parameters.
+//
+// Strategy (F186 hybrid):
+//  1. Iterate resourceIDParamPriority in declaration order. The first
+//     param bound on the request whose value parses as a UUID wins. The
+//     list is explicit so a reader can grep audit.go to answer "which
+//     path param becomes resource_id on route X?". Specific names (e.g.
+//     :key_id) come before generic ":id" so child resources are not
+//     shadowed by their parent.
+//  2. Fallback: if nothing in the priority list matches, walk
+//     c.ParamNames() from tail to head and accept the first UUID-
+//     parseable value. This is the future-proof path — when a new route
+//     introduces a novel `:<thing>_id` we still record the most specific
+//     UUID instead of silently dropping resource_id to NULL until
+//     someone notices and edits the priority list.
+//  3. Non-UUID values (slugs such as :checkId for checklist response
+//     keys) are intentionally skipped so they never pollute resource_id.
 func extractResourceID(c echo.Context) *uuid.UUID {
-	// Try common parameter names
-	for _, param := range []string{"id", "project_id", "sbom_id", "vulnerability_id"} {
-		if idStr := c.Param(param); idStr != "" {
+	// 1) Explicit priority list.
+	for _, name := range resourceIDParamPriority {
+		if idStr := c.Param(name); idStr != "" {
 			if id, err := uuid.Parse(idStr); err == nil {
 				return &id
 			}
 		}
 	}
+
+	// 2) Fallback: path-tail UUID. We walk ParamNames in reverse so the
+	//    most specific param on the route wins, mirroring the priority
+	//    list's "child before parent" rule.
+	names := c.ParamNames()
+	for i := len(names) - 1; i >= 0; i-- {
+		if idStr := c.Param(names[i]); idStr != "" {
+			if id, err := uuid.Parse(idStr); err == nil {
+				return &id
+			}
+		}
+	}
+
 	return nil
 }
