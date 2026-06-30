@@ -26,7 +26,7 @@
  */
 
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useLocale, useTranslations } from "next-intl";
@@ -763,7 +763,7 @@ function ClearOverrideForm({
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<CriterionClearOverrideFormValues>({
     resolver: zodResolver(clearOverrideSchema),
@@ -775,13 +775,14 @@ function ClearOverrideForm({
   // (validateMetiOverrideNote) so the operator doesn't see a 400 from
   // a whitespace-only submission.
   //
-  // M12-5 #86: react-hook-form's `watch()` returns an unmemoizable
-  // function (the React Compiler `incompatible-library` warning flags
-  // this). We acknowledge the compiler skip here — the alternative is
-  // migrating this submit-button gating to `useFormContext`/`useWatch`,
-  // which is tracked for M13. Suppress the inline warning only.
-  // eslint-disable-next-line react-hooks/incompatible-library -- react-hook-form watch() returns an unstable fn; compiler skip is acknowledged. Migration to useWatch tracked in M13.
-  const noteRaw = watch("note") ?? "";
+  // M14-4 (#96, F215): migrated from `watch("note")` to useWatch so
+  // the React Compiler `react-hooks/incompatible-library` rule passes
+  // without an inline suppression — the previous M12-5 workaround
+  // (`eslint-disable react-hooks/incompatible-library`) is no longer
+  // needed. useWatch subscribes to ONLY the note field so the rest of
+  // the form does not re-render on keystroke; this also makes the
+  // gate lint-clean once the rule is promoted to error in M14-4.
+  const noteRaw = (useWatch({ control, name: "note" }) as string | undefined) ?? "";
   const noteValid = noteRaw.trim().length >= 1;
 
   return (

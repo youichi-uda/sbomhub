@@ -22,7 +22,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useTranslations } from "next-intl";
@@ -134,7 +134,7 @@ export default function DiffWebhookSettingsPage() {
     register,
     handleSubmit,
     reset,
-    watch,
+    control,
     setValue,
     formState: { errors },
   } = useForm<FormValues>({
@@ -150,8 +150,13 @@ export default function DiffWebhookSettingsPage() {
     },
   });
 
-  const enabled = watch("enabled");
-  const format = watch("format");
+  // M14-4 (#96, F215): migrated from `watch("enabled") / watch("format")`
+  // to useWatch so the React Compiler `react-hooks/incompatible-library`
+  // rule passes without an inline suppression. useWatch subscribes to
+  // ONLY the named field, so re-renders are scoped to that field's
+  // changes (a small perf win on top of the lint cleanup).
+  const enabled = useWatch({ control, name: "enabled" });
+  const format = useWatch({ control, name: "format" });
 
   useEffect(() => {
     (async () => {

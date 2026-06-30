@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useTranslations } from "next-intl";
@@ -104,7 +104,7 @@ export default function LLMSettingsPage() {
     register,
     handleSubmit,
     reset,
-    watch,
+    control,
     setValue,
     formState: { errors },
   } = useForm<FormValues>({
@@ -119,7 +119,13 @@ export default function LLMSettingsPage() {
     },
   });
 
-  const provider = watch("provider");
+  // M14-4 (#96, F215): migrated from `watch("provider")` to useWatch
+  // so the React Compiler `react-hooks/incompatible-library` rule
+  // passes without an inline suppression. Provider drives the
+  // conditional fields (api_key visibility, azure / ollama extras)
+  // so this subscription is the form's primary re-render driver —
+  // scoping it to just `provider` is also a small perf win.
+  const provider = useWatch({ control, name: "provider" });
 
   useEffect(() => {
     (async () => {
