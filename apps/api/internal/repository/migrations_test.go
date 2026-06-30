@@ -699,3 +699,100 @@ func Test045_CompositeFKExtension_DownReversibility(t *testing.T) {
 		}
 	}
 }
+
+// Test048_LegacyScanSettingsLogsRLS_ContainsHardening guards the M13
+// Phase D round 2 F185 fix. scan_settings + scan_logs shipped in
+// migration 010 (legacy schema, pre-023 hardening sweep) carrying
+// tenant_id but no RLS partner — the lint
+// (tools/lint-migration-rls/main.go) exempted them with a F185 follow-up
+// tracking note. Migration 048 added ENABLE + FORCE RLS + a FOR ALL
+// USING+WITH CHECK policy on both tables, matching the 037/047 partner-
+// migration pattern. If anyone edits 048 to remove a load-bearing
+// statement (or merges it into 010 forward), this test fires before
+// review.
+func Test048_LegacyScanSettingsLogsRLS_ContainsHardening(t *testing.T) {
+	up := readMigration(t, "048_legacy_scan_settings_logs_rls.up.sql")
+	upUpper := strings.ToUpper(up)
+
+	mustContain := []struct {
+		needle string
+		why    string
+	}{
+		// scan_settings half.
+		{
+			needle: "ALTER TABLE SCAN_SETTINGS ENABLE ROW LEVEL SECURITY",
+			why:    "RLS must be ENABLED on scan_settings (F185 fix)",
+		},
+		{
+			needle: "ALTER TABLE SCAN_SETTINGS FORCE",
+			why:    "RLS must be FORCED on scan_settings so the migrator/owner does not bypass policy",
+		},
+		{
+			needle: "CREATE POLICY TENANT_ISOLATION_SCAN_SETTINGS ON SCAN_SETTINGS",
+			why:    "policy name must match the tenant_isolation_<table> convention used by 037/047",
+		},
+		// scan_logs half.
+		{
+			needle: "ALTER TABLE SCAN_LOGS ENABLE ROW LEVEL SECURITY",
+			why:    "RLS must be ENABLED on scan_logs (F185 fix)",
+		},
+		{
+			needle: "ALTER TABLE SCAN_LOGS FORCE",
+			why:    "RLS must be FORCED on scan_logs so the migrator/owner does not bypass policy",
+		},
+		{
+			needle: "CREATE POLICY TENANT_ISOLATION_SCAN_LOGS ON SCAN_LOGS",
+			why:    "policy name must match the tenant_isolation_<table> convention used by 037/047",
+		},
+		// Shared shape (both policies use these).
+		{needle: "FOR ALL", why: "policies must cover all command types (SELECT/INSERT/UPDATE/DELETE)"},
+		{needle: "USING", why: "policies must have USING (read predicate)"},
+		{needle: "WITH CHECK",
+			why: "policies must have WITH CHECK (write predicate) -- blocks cross-tenant INSERT/UPDATE"},
+		{
+			needle: "CURRENT_SETTING('APP.CURRENT_TENANT_ID', TRUE)::UUID",
+			why:    "predicate must read app.current_tenant_id GUC with missing_ok=true and cast to UUID",
+		},
+	}
+	for _, m := range mustContain {
+		if !strings.Contains(upUpper, m.needle) {
+			t.Errorf("048_legacy_scan_settings_logs_rls.up.sql missing %q: %s",
+				m.needle, m.why)
+		}
+	}
+
+	// Down migration must clean up in the right order.
+	down := readMigration(t, "048_legacy_scan_settings_logs_rls.down.sql")
+	downUpper := strings.ToUpper(down)
+	for _, m := range []struct {
+		needle string
+		why    string
+	}{
+		{"DROP POLICY IF EXISTS TENANT_ISOLATION_SCAN_LOGS ON SCAN_LOGS",
+			"down must drop the scan_logs policy"},
+		{"DROP POLICY IF EXISTS TENANT_ISOLATION_SCAN_SETTINGS ON SCAN_SETTINGS",
+			"down must drop the scan_settings policy"},
+		{"NO FORCE ROW LEVEL SECURITY", "down must unforce RLS on both tables"},
+		{"DISABLE", "down must disable RLS"},
+	} {
+		if !strings.Contains(downUpper, m.needle) {
+			t.Errorf("048_legacy_scan_settings_logs_rls.down.sql missing %q: %s",
+				m.needle, m.why)
+		}
+	}
+}
+
+// Test010_ScanSettingsLogs_TablesStillExist ensures migration 010 still
+// creates the two tables migration 048 depends on. If 010 is later
+// renamed/removed without merging 048 forward, this test surfaces the
+// dependency immediately (matches the Test018/Test036 pattern).
+func Test010_ScanSettingsLogs_TablesStillExist(t *testing.T) {
+	up := readMigration(t, "010_scan_settings.up.sql")
+	for _, table := range []string{"scan_settings", "scan_logs"} {
+		pattern := regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?` + table)
+		if !pattern.MatchString(up) {
+			t.Fatalf("010_scan_settings.up.sql no longer creates %s; "+
+				"048 RLS hardening will fail to apply", table)
+		}
+	}
+}

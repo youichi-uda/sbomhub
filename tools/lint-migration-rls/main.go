@@ -614,22 +614,6 @@ var structuralExemptions = map[string]string{
 		"tenant_id is a soft-join hint (ON DELETE SET NULL), not an isolation boundary. " +
 		"Legacy 007 schema; intentionally not RLS-protected.",
 
-	// F183 — legacy 010 schema, **potential RLS gap** (see F185).
-	//
-	// `scan_settings` / `scan_logs` were added in migration 010 BEFORE
-	// the 023 RLS hardening sweep and never received an RLS partner.
-	// Tenant scope is enforced application-side in ScanSettingsRepository.
-	// Exempt here so the lint surfaces a clean run on the current tree;
-	// the missing RLS posture is tracked as F185 (M13 Phase D round 2)
-	// for a follow-up partner migration.
-	"scan_settings": "legacy 010 schema; predates the 023 RLS hardening sweep. " +
-		"Tenant scope enforced app-side in ScanSettingsRepository. " +
-		"Tracked as F185 — partner RLS migration outstanding.",
-	"scan_logs": "legacy 010 schema; predates the 023 RLS hardening sweep. " +
-		"Tenant scope enforced app-side in ScanSettingsRepository (scan_logs is " +
-		"written by the scheduler under the same tenant context). " +
-		"Tracked as F185 — partner RLS migration outstanding.",
-
 	// F183 — RLS deliberately removed in 030 (Trust Rescue codex-r5 P1 #19).
 	//
 	// `public_links` and `public_link_access_logs` need tenant-unscoped

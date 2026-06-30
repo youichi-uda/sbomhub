@@ -49,6 +49,12 @@ without the prefix:
     migration, FORCE harmonised by partner migration 042.
   - `issue_tracker_connections`, `vulnerability_tickets` — full RLS
     triple across 015 / 023.
+  - `scan_settings`, `scan_logs` — RLS added in partner migration 048
+    (F185 follow-up to the legacy 010 schema; companion changes to
+    `internal/scheduler/vulnerability_scan.go` +
+    `internal/service/scan_settings.go` switch the scheduler and the
+    API handlers to per-tenant transactions so the new FORCE policy
+    fires correctly).
   - Post-031 tables (`llm_calls`, `advisory_excerpts`,
     `reachability_results`, `vex_drafts`, `cra_reports`,
     `meti_assessments`) — already follow the `ENABLE + FORCE + POLICY`
@@ -72,9 +78,11 @@ records each with a one-line justification (see
   - `subscriptions`, `subscription_events`, `usage_records` — RLS
     removed in 031 to allow Lemon Squeezy webhook lookups; tenant scope
     enforced application-side.
-  - `scan_settings`, `scan_logs` — legacy 010 schema with no RLS
-    partner. Application-side scope only; tracked as F185 (M13 Phase D
-    round 2) for a follow-up partner migration.
+
+`scan_settings` / `scan_logs` (legacy 010 schema) previously appeared in
+this list as a pending follow-up; their RLS partner migration was added
+in 048 (F185 fix, M13 Phase D round 2) together with the matching
+scheduler + service refactor.
 
 Adding a new entry requires the same care as removing an RLS policy —
 PR review + an explicit narrative in the migration's header.

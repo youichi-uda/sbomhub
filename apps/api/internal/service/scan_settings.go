@@ -7,9 +7,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/database"
 )
 
-// ScanSettingsService manages scan settings
+// ScanSettingsService manages scan settings.
+//
+// All Get / Update / GetLogs paths route through `database.Querier(ctx, s.db)`
+// so that handler-invoked calls run inside the TenantTx middleware's
+// transaction (and therefore inherit `SET LOCAL app.current_tenant_id`).
+// This is load-bearing for the F185 fix: scan_settings + scan_logs are now
+// RLS-protected (migration 048) and a bare `s.db.QueryContext` would silently
+// see zero rows under the NOBYPASSRLS app role. The scheduler accesses these
+// tables via runWithTenantTx from internal/scheduler/vulnerability_scan.go
+// instead.
 type ScanSettingsService struct {
 	db *sql.DB
 }
@@ -56,7 +66,7 @@ func (s *ScanSettingsService) Get(ctx context.Context, tenantID uuid.UUID) (*Sca
 	var scheduleDay sql.NullInt64
 	var lastScanAt, nextScanAt sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, `
+	err := database.Querier(ctx, s.db).QueryRowContext(ctx, `
 		SELECT id, tenant_id, enabled, schedule_type, schedule_hour, schedule_day,
 		       notify_critical, notify_high, notify_medium, notify_low,
 		       last_scan_at, next_scan_at, created_at, updated_at
@@ -158,10 +168,12 @@ func (s *ScanSettingsService) Update(ctx context.Context, tenantID uuid.UUID, in
 	// Calculate next scan time
 	nextScan := calculateNextScan(existing.ScheduleType, existing.ScheduleHour, existing.ScheduleDay)
 
-	// Upsert
+	// Upsert (routed through database.Querier so the handler's TenantTx
+	// transaction is used — scan_settings is RLS-protected post-048).
+	q := database.Querier(ctx, s.db)
 	if existing.ID == uuid.Nil {
 		existing.ID = uuid.New()
-		_, err = s.db.ExecContext(ctx, `
+		_, err = q.ExecContext(ctx, `
 			INSERT INTO scan_settings (id, tenant_id, enabled, schedule_type, schedule_hour, schedule_day,
 			                           notify_critical, notify_high, notify_medium, notify_low, next_scan_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -169,8 +181,8 @@ func (s *ScanSettingsService) Update(ctx context.Context, tenantID uuid.UUID, in
 			existing.ScheduleDay, existing.NotifyCritical, existing.NotifyHigh, existing.NotifyMedium,
 			existing.NotifyLow, nextScan)
 	} else {
-		_, err = s.db.ExecContext(ctx, `
-			UPDATE scan_settings 
+		_, err = q.ExecContext(ctx, `
+			UPDATE scan_settings
 			SET enabled = $1, schedule_type = $2, schedule_hour = $3, schedule_day = $4,
 			    notify_critical = $5, notify_high = $6, notify_medium = $7, notify_low = $8,
 			    next_scan_at = $9, updated_at = NOW()
@@ -194,8 +206,8 @@ func (s *ScanSettingsService) GetLogs(ctx context.Context, tenantID uuid.UUID, l
 		limit = 20
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, tenant_id, started_at, completed_at, status, 
+	rows, err := database.Querier(ctx, s.db).QueryContext(ctx, `
+		SELECT id, tenant_id, started_at, completed_at, status,
 		       projects_scanned, new_vulnerabilities, error_message, created_at
 		FROM scan_logs
 		WHERE tenant_id = $1
