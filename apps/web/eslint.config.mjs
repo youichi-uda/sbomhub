@@ -62,12 +62,17 @@ const config = [
       // merge — which is exactly the policy we want.
       "react-hooks/set-state-in-effect": "error",
       "react-hooks/immutability": "error",
-      // `react-hooks/incompatible-library` is intentionally left at the
-      // plugin default (warn). The only current hit is react-hook-form's
-      // `watch()` in criterion-card.tsx, which is structurally
-      // unmemoizable; promoting this rule to error would require
-      // codebase-wide migration to `useWatch` (tracked for M13). The
-      // single existing site is locally suppressed with rationale.
+      // M14-4 (#96, F216): promoted from `warn` to `error`. The previous
+      // hits all came from react-hook-form `watch()` callsites
+      // (criterion-card.tsx / settings/diff-webhook / settings/llm),
+      // which were migrated to `useWatch` in F215. With every site
+      // migrated, any NEW `watch()` callsite — or any future library
+      // hook that the React Compiler flags as incompatible — fails CI
+      // immediately instead of accumulating as drift. Inline
+      // `eslint-disable-next-line react-hooks/incompatible-library`
+      // remains the escape hatch when a justified case appears (the
+      // M12-5 escape-hatch policy is preserved for the rule family).
+      "react-hooks/incompatible-library": "error",
       // -- unused vars: allow `_`-prefixed names (M12-5 #86) --
       // We deliberately keep some props/args around to preserve a public
       // API shape (e.g. shadcn-style component params such as `asChild`,
