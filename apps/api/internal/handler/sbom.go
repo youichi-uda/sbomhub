@@ -17,6 +17,8 @@ import (
 	appmw "github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/service/diff"
+	"github.com/sbomhub/sbomhub/internal/service/diff_webhook"
 )
 
 // Pagination bounds for GetVulnerabilities (M1 Codex review #F26).
@@ -70,6 +72,38 @@ type componentScanner interface {
 	ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 }
 
+// diffComputer is the narrow surface the M12-4 auto-trigger consumes
+// from internal/service/diff.Service. Keeping the dependency as an
+// interface lets sbom_test.go drive the auto-trigger flow without
+// standing up the full repository graph the diff service requires.
+//
+// Production wiring binds *diff.Service via WithDiffWebhook in
+// cmd/server/main.go.
+type diffComputer interface {
+	Compute(ctx context.Context, req diff.Request) (*diff.Response, error)
+}
+
+// webhookFirer is the narrow surface the M12-4 auto-trigger consumes
+// from internal/service/diff_webhook.Service. Tests substitute a
+// recording stub.
+//
+// Production wiring binds *diff_webhook.Service via WithDiffWebhook in
+// cmd/server/main.go. FireIfThreshold owns the existing delivery-side
+// audit pair (diff_webhook_fired / diff_webhook_failed); the auto-
+// trigger ONLY layers the additional diff_webhook_auto_fired row
+// describing the auto-trigger decision.
+type webhookFirer interface {
+	FireIfThreshold(ctx context.Context, tenantID, projectID uuid.UUID, d *diff.Response) (*diff_webhook.FireDecision, error)
+}
+
+// auditLogger is the audit-writer surface the M12-4 auto-trigger
+// depends on. *repository.AuditRepository.Log satisfies it. F168
+// audit-or-nothing: callers MUST propagate errors from Log, never
+// swallow them — see runDiffWebhookAutoTrigger.
+type auditLogger interface {
+	Log(ctx context.Context, input *model.CreateAuditLogInput) error
+}
+
 type SbomHandler struct {
 	sbomService *service.SbomService
 	nvdService  componentScanner
@@ -81,6 +115,17 @@ type SbomHandler struct {
 	// so the goroutine must NOT reuse it — it would be closed by then.
 	// See startBackgroundScan godoc.
 	db *sql.DB
+
+	// M12-4 (#85) optional auto-trigger dependencies. nil → the
+	// post-ingest goroutine runs the existing vuln scan only (M11-4
+	// behaviour). All three must be non-nil for the auto-trigger to
+	// fire (set together via WithDiffWebhook). The "all-or-none" gate
+	// is intentional — wiring two of the three but not the audit
+	// writer would violate F168 audit-or-nothing the moment the
+	// threshold is exceeded.
+	diffSvc     diffComputer
+	webhookSvc  webhookFirer
+	auditWriter auditLogger
 }
 
 // NewSbomHandler wires the handler with the services it needs.
@@ -104,6 +149,27 @@ func NewSbomHandler(db *sql.DB, ss *service.SbomService, nvd *service.NVDService
 		scanTracker: tracker,
 		db:          db,
 	}
+}
+
+// WithDiffWebhook enables the M12-4 (#85) auto-trigger that fires the
+// per-tenant diff webhook on every SBOM ingest whose diff against the
+// immediate predecessor exceeds the configured thresholds.
+//
+// All three arguments are required for the auto-trigger to engage —
+// pass nil for any of them and the handler reverts to the M11-4
+// behaviour (NVD/JVN scan only, no webhook auto-fire). main.go wires
+// `projectDiffService`, `projectDiffWebhookService`, `auditRepo`.
+//
+// The audit writer is gated together with the diff+webhook services
+// because dropping the diff_webhook_auto_fired row would silently
+// violate F168 audit-or-nothing the moment a threshold trips.
+// Surfacing the dependency at construction time (rather than as an
+// optional later setter) makes the misconfiguration loud at startup.
+func (h *SbomHandler) WithDiffWebhook(d diffComputer, w webhookFirer, a auditLogger) *SbomHandler {
+	h.diffSvc = d
+	h.webhookSvc = w
+	h.auditWriter = a
+	return h
 }
 
 func (h *SbomHandler) Upload(c echo.Context) error {
@@ -166,8 +232,9 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 		h.scanTracker.MarkRunning(sbom.ID)
 	}
 	scanSbomID := sbom.ID
+	scanProjectID := projectID
 	appmw.RegisterPostCommit(c, func() {
-		h.startBackgroundScan(scanSbomID, tenantID)
+		h.startBackgroundScan(scanSbomID, tenantID, scanProjectID)
 	})
 
 	return c.JSON(http.StatusCreated, sbom)
@@ -199,8 +266,252 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 // flow through the tx. The tx therefore stays effectively idle for most
 // of the scan but pins one pooled connection for the scan's duration;
 // that is an acknowledged trade-off (see ※要確認 in completion report).
-func (h *SbomHandler) startBackgroundScan(sbomID, tenantID uuid.UUID) {
-	go h.runScan(context.Background(), sbomID, tenantID)
+func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID) {
+	go func() {
+		ctx := context.Background()
+		// Vuln scan first — the diff webhook auto-trigger downstream
+		// reads component_vulnerabilities so it can compute the
+		// (new critical / new high) counts that drive threshold
+		// evaluation. Running the scan first means a webhook that
+		// fires on "new critical vulns >= 1" sees the just-scanned
+		// rows rather than a stale snapshot.
+		h.runScan(ctx, sbomID, tenantID)
+
+		// M12-4 (#85): auto-fire diff webhook on ingest. nil guard
+		// preserves the M11-4 behaviour for deployments that have
+		// not opted into the auto-trigger via WithDiffWebhook.
+		// Scan-level failures do NOT block the auto-trigger — the
+		// diff is computed off whatever components/vulnerabilities
+		// were persisted (which may be partial). Operators see the
+		// partial scan via scan-status and the partial diff via the
+		// webhook, both of which is preferable to silently dropping
+		// the webhook altogether.
+		if h.diffSvc != nil && h.webhookSvc != nil && h.auditWriter != nil {
+			h.runDiffWebhookAutoTrigger(ctx, sbomID, tenantID, projectID)
+		}
+	}()
+}
+
+// runDiffWebhookAutoTrigger is the M12-4 (#85) auto-trigger body. It
+// runs in the same background goroutine as the vuln scan, after the
+// scan completes, and:
+//
+//  1. Opens a fresh transaction with `app.current_tenant_id` bound so
+//     every downstream repository read (project scope, sbom list,
+//     component diff, webhook settings) hits RLS as the correct
+//     tenant. Without the GUC the diff service's
+//     projectRepo.GetByTenant would short-circuit on a NULL → UUID
+//     cast and ALL ingest webhooks would silently drop — the exact
+//     class of regression F167 catalogued.
+//
+//  2. Resolves the diff against the IMMEDIATE PREDECESSOR by passing
+//     only ToSbomID to diff.Compute — the service's resolveSboms
+//     handles the "first ever ingest" case (From is nil) by returning
+//     a baseline diff. The auto-trigger treats baseline ingests as
+//     no_predecessor (no webhook fires) so an initial onboarding
+//     ingest does not flood operators with a "first SBOM" alert that
+//     resembles every component being newly added.
+//
+//  3. Delegates threshold evaluation + HTTP delivery to
+//     webhookSvc.FireIfThreshold (M11-4 service). That call ALREADY
+//     writes the delivery-side audit pair
+//     (diff_webhook_fired / diff_webhook_failed). The auto-trigger
+//     then layers an ADDITIONAL diff_webhook_auto_fired audit row
+//     keyed to the ingest sbom_id with the auto-trigger decision
+//     status. The two audit rows are the canonical "did this ingest
+//     trigger a webhook?" + "did the webhook actually deliver?"
+//     records, respectively.
+//
+//  4. Honours F168 audit-or-nothing: a failed Log returns an error
+//     from writeAutoFiredAudit; the background goroutine logs it at
+//     slog.Error level (no upstream HTTP frame to abort). Audit gaps
+//     would render the auto-trigger's compliance value moot — the
+//     whole point of the row is to give operators a durable record
+//     mapping ingests → fires they can replay during an incident.
+//
+//  5. 1 ingest = at most 1 webhook fire. The race-condition guard is
+//     structural: each Upload spawns its own goroutine bound to its
+//     own sbom_id, and FireIfThreshold's settings read +
+//     UpdateFireResult write happen serially inside this goroutine's
+//     tx. Two concurrent Uploads for the same tenant produce two
+//     INDEPENDENT diffs (each against their own predecessor) — that
+//     is the intended behaviour, not a race. A single sbom_id never
+//     fires twice because the goroutine runs once per Upload call.
+func (h *SbomHandler) runDiffWebhookAutoTrigger(ctx context.Context, sbomID, tenantID, projectID uuid.UUID) {
+	txErr := database.WithTxFunc(ctx, h.db, func(txCtx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(txCtx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			tenantID.String(),
+		); err != nil {
+			return fmt.Errorf("set tenant context: %w", err)
+		}
+
+		// Compute diff (To = ingested SBOM, From = predecessor).
+		resp, err := h.diffSvc.Compute(txCtx, diff.Request{
+			TenantID:  tenantID,
+			ProjectID: projectID,
+			ToSbomID:  sbomID,
+		})
+		if err != nil {
+			// ErrNoSboms is impossible because we just ingested
+			// `sbomID` above; surfacing it would indicate the
+			// ingest never persisted. ErrSbomNotInProject means
+			// the project/tenant pairing failed which is a real
+			// misconfig. Either way — audit + bail.
+			return h.writeAutoFiredAudit(txCtx, sbomID, tenantID, projectID, autoFireAuditDetails{
+				Status:    model.DiffWebhookAutoFireStatusError,
+				ErrorText: "diff compute: " + err.Error(),
+			})
+		}
+
+		// Baseline ingest (single SBOM): no predecessor → skip fire,
+		// emit audit row so the trail records the decision.
+		if resp.From == nil {
+			return h.writeAutoFiredAudit(txCtx, sbomID, tenantID, projectID, autoFireAuditDetails{
+				Status:     model.DiffWebhookAutoFireStatusNoPredecessor,
+				FromSbomID: "",
+				ToSbomID:   sbomID.String(),
+			})
+		}
+
+		// Delegate threshold + delivery to the M11-4 webhook service.
+		// FireIfThreshold writes its own diff_webhook_fired /
+		// diff_webhook_failed audit row; we then layer the
+		// auto_fired audit on top.
+		decision, fireErr := h.webhookSvc.FireIfThreshold(txCtx, tenantID, projectID, resp)
+		if fireErr != nil {
+			// Settings read failed OR FireIfThreshold's own audit
+			// write failed (F168 propagation from the webhook
+			// service). Audit + bail — the inner audit failure
+			// already logged via slog inside the webhook service.
+			return h.writeAutoFiredAudit(txCtx, sbomID, tenantID, projectID, autoFireAuditDetails{
+				Status:     model.DiffWebhookAutoFireStatusError,
+				ErrorText:  "fire if threshold: " + fireErr.Error(),
+				FromSbomID: resp.From.SbomID.String(),
+				ToSbomID:   resp.To.SbomID.String(),
+			})
+		}
+
+		status := mapDecisionToStatus(decision)
+		details := autoFireAuditDetails{
+			Status:     status,
+			Reason:     decision.Reason,
+			HTTPStatus: decision.Status,
+			ErrorText:  decision.ErrorMessage,
+			FromSbomID: resp.From.SbomID.String(),
+			ToSbomID:   resp.To.SbomID.String(),
+		}
+		return h.writeAutoFiredAudit(txCtx, sbomID, tenantID, projectID, details)
+	})
+	if txErr != nil {
+		slog.Error("diff_webhook auto-trigger failed",
+			"sbom_id", sbomID,
+			"tenant_id", tenantID,
+			"project_id", projectID,
+			"error", txErr,
+		)
+	}
+}
+
+// autoFireAuditDetails is the structured detail payload persisted on
+// each diff_webhook_auto_fired audit row. Field naming mirrors the
+// snake_case convention the delivery-side audit (diff_webhook_fired /
+// diff_webhook_failed) uses so downstream operator dashboards can
+// pivot on the same keys.
+type autoFireAuditDetails struct {
+	Status     string // model.DiffWebhookAutoFireStatus*
+	Reason     string // FireDecision.Reason verbatim ("no_config", "disabled", ...) when not Triggered
+	HTTPStatus int    // FireDecision.Status (0 when not delivered)
+	ErrorText  string // FireDecision.ErrorMessage or upstream error
+	FromSbomID string // resp.From.SbomID, empty when baseline
+	ToSbomID   string // ingested sbom_id
+}
+
+// writeAutoFiredAudit persists one diff_webhook_auto_fired row. F168
+// audit-or-nothing: the underlying audit.Log error is RETURNED so the
+// background tx rolls back — the absence of the audit row is itself
+// the durable signal that something went wrong. Without this return
+// an audit-write outage would manifest as "webhooks deliver but
+// nothing in the trail", which is the exact compliance regression
+// F168 was opened to close.
+func (h *SbomHandler) writeAutoFiredAudit(
+	ctx context.Context, sbomID, tenantID, projectID uuid.UUID,
+	d autoFireAuditDetails,
+) error {
+	details := map[string]interface{}{
+		"status":     d.Status,
+		"sbom_id":    sbomID.String(),
+		"project_id": projectID.String(),
+	}
+	if d.Reason != "" {
+		details["reason"] = d.Reason
+	}
+	if d.HTTPStatus != 0 {
+		details["http_status"] = d.HTTPStatus
+	}
+	if d.ErrorText != "" {
+		details["error"] = d.ErrorText
+	}
+	if d.FromSbomID != "" {
+		details["from_sbom_id"] = d.FromSbomID
+	}
+	if d.ToSbomID != "" {
+		details["to_sbom_id"] = d.ToSbomID
+	}
+	tenant := tenantID
+	input := &model.CreateAuditLogInput{
+		TenantID:     &tenant,
+		Action:       model.AuditActionDiffWebhookAutoFired,
+		ResourceType: model.ResourceTypeDiffWebhook,
+		ResourceID:   &projectID,
+		Details:      details,
+	}
+	if err := h.auditWriter.Log(ctx, input); err != nil {
+		slog.Error("diff_webhook auto-trigger audit write failed",
+			"sbom_id", sbomID,
+			"tenant_id", tenantID,
+			"project_id", projectID,
+			"status", d.Status,
+			"error", err,
+		)
+		return fmt.Errorf("write auto_fired audit (status=%s): %w", d.Status, err)
+	}
+	return nil
+}
+
+// mapDecisionToStatus translates a *diff_webhook.FireDecision into the
+// stable model.DiffWebhookAutoFireStatus* string persisted in the
+// audit row. Reason → status mapping mirrors the FireDecision.Reason
+// vocabulary documented on the webhook service so an operator can
+// pivot on either column without a translation table.
+func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
+	if d == nil {
+		return model.DiffWebhookAutoFireStatusError
+	}
+	if d.Triggered {
+		// Webhook was attempted. Status >= 0 with ErrorMessage == ""
+		// is the success path; anything else is failure (including
+		// the post-decrypt audit-only branch where Status stays 0).
+		if d.Status >= 200 && d.Status < 300 && d.ErrorMessage == "" {
+			return model.DiffWebhookAutoFireStatusSuccess
+		}
+		return model.DiffWebhookAutoFireStatusFailure
+	}
+	switch d.Reason {
+	case "no_config":
+		return model.DiffWebhookAutoFireStatusNoConfig
+	case "disabled":
+		return model.DiffWebhookAutoFireStatusDisabled
+	case "no_url":
+		return model.DiffWebhookAutoFireStatusNoURL
+	case "below_thresholds":
+		return model.DiffWebhookAutoFireStatusThresholdNotExceeded
+	default:
+		// Defensive: any future FireDecision.Reason added in
+		// diff_webhook without a matching case here surfaces as
+		// error so the audit trail still records the ingest.
+		return model.DiffWebhookAutoFireStatusError
+	}
 }
 
 // runScan executes the post-upload NVD + JVN sweep synchronously and

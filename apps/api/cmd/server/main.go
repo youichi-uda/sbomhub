@@ -56,7 +56,6 @@ func (metiCatalogAdapter) Phases() []meti.Phase {
 	return meti.Phases()
 }
 
-
 // knownDefaultEncryptionKeys enumerates placeholder values that must never be
 // used outside development. The list includes:
 //   - generic placeholders found in tutorials / sample configs (changeme,
@@ -510,11 +509,17 @@ func main() {
 	// M11-4 (#79) — diff webhook firing service. Posts the diff summary
 	// to an operator-configured URL with an HMAC-SHA256 signature when
 	// the (critical / high / license_violation) thresholds are
-	// exceeded. The auto-trigger from SBOM ingest is deferred to M12
-	// (would require touching internal/handler/sbom.go which is
-	// outside the M11-4 file scope); operators can still verify the
-	// configuration via POST /api/v1/tenant/settings/diff-webhook/test
-	// which fires a synthetic-diff event.
+	// exceeded.
+	//
+	// M12-4 (#85) — auto-trigger on SBOM ingest is now wired below via
+	// sbomHandler.WithDiffWebhook. The post-commit goroutine that
+	// runs the NVD/JVN scan also drives a second tx that computes the
+	// diff against the immediate predecessor and invokes
+	// FireIfThreshold; an additional diff_webhook_auto_fired audit
+	// row records the auto-trigger decision (success / failure /
+	// threshold_not_exceeded / no_predecessor / no_config / disabled
+	// / no_url / error). Operators can still hand-fire the test event
+	// via POST /api/v1/tenant/settings/diff-webhook/test.
 	encryptionKeyForWebhook, kerr := cfg.GetEncryptionKey()
 	if kerr != nil {
 		slog.Error("Failed to get encryption key for diff webhook", "error", kerr)
@@ -527,8 +532,8 @@ func main() {
 	})
 	slog.Info("Diff webhook firing service initialised",
 		"timeout", diff_webhook.DefaultHTTPTimeout,
-		"auto_trigger_on_ingest", false,
-		"note", "M11-4: auto-trigger deferred to M12 (sbom.go scope guard)")
+		"auto_trigger_on_ingest", true,
+		"note", "M12-4 (#85): auto-trigger active, audit pair diff_webhook_fired+diff_webhook_auto_fired")
 
 	// Handlers
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -536,7 +541,14 @@ func main() {
 	// can open its own tx with `SET LOCAL app.current_tenant_id` bound —
 	// the request's TenantTx has already committed by the time the
 	// goroutine starts. Codex R1 fix.
-	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker)
+	// M12-4 (#85) — wire the diff + webhook + audit dependencies for
+	// the auto-trigger. All three must be non-nil to engage; passing
+	// nil for any of them reverts the goroutine to the M11-4 (scan-
+	// only) behaviour. The "all-or-none" gate is intentional —
+	// dropping the audit writer would silently violate F168 audit-
+	// or-nothing the moment a threshold trips.
+	sbomHandler := handler.NewSbomHandler(db, sbomService, nvdService, jvnService, scanTracker).
+		WithDiffWebhook(projectDiffService, projectDiffWebhookService, auditRepo)
 	sbomDiffHandler := handler.NewSbomDiffHandler(sbomDiffService)
 	// M10-6 (#74) — see projectDiffService comment above. M11-4 (#79)
 	// extends with AI summary + CSV/PDF export wired through the same
@@ -776,9 +788,9 @@ func main() {
 	auth.GET("/me", func(c echo.Context) error {
 		tc := appmw.NewTenantContext(c)
 		return c.JSON(200, map[string]interface{}{
-			"user":     tc.User(),
-			"tenant":   tc.Tenant(),
-			"role":     tc.Role(),
+			"user":       tc.User(),
+			"tenant":     tc.Tenant(),
+			"role":       tc.Role(),
 			"selfHosted": tc.IsSelfHosted(),
 		})
 	})
@@ -1348,8 +1360,8 @@ func main() {
 		synthetic := &diff.Response{
 			ProjectID: syntheticProject,
 			Components: diff.ComponentsDiff{
-				Added: []diff.ComponentChange{{Name: "synthetic-test", Version: "1.0.0", License: "GPL-3.0"}},
-				Removed: []diff.ComponentChange{},
+				Added:          []diff.ComponentChange{{Name: "synthetic-test", Version: "1.0.0", License: "GPL-3.0"}},
+				Removed:        []diff.ComponentChange{},
 				VersionChanged: []diff.ComponentVersionChange{},
 			},
 			Vulnerabilities: diff.VulnerabilitiesDiff{

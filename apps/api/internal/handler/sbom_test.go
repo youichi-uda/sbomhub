@@ -15,6 +15,8 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/service/diff"
+	"github.com/sbomhub/sbomhub/internal/service/diff_webhook"
 )
 
 func TestSummariseVulnerabilities(t *testing.T) {
@@ -808,6 +810,492 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M12-4 (#85) — diff webhook auto-trigger on SBOM ingest
+// ----------------------------------------------------------------------------
+//
+// The three tests below pin the auto-trigger's threshold-decision matrix
+// at the handler boundary. Production wires this to the post-commit
+// goroutine in startBackgroundScan; the tests skip the goroutine and
+// drive runDiffWebhookAutoTrigger directly so the assertions are stable
+// (no goroutine timing).
+//
+// Test doubles substitute the three injected interfaces (diffComputer,
+// webhookFirer, auditLogger) so the test harness records what would
+// have been called without standing up the full repository graph or
+// HTTP layer. sqlmock covers ONLY the tx envelope
+// (Begin / SET LOCAL app.current_tenant_id / Commit) since the auto-
+// trigger opens its own tx for GUC binding. Inner repository reads do
+// not flow through sqlmock — the test doubles intercept them at the
+// service interface layer.
+//
+// Three paths:
+//
+//   M12-4.1 (TestSBOMHandler_AutoTriggerWebhook_ThresholdExceeded):
+//     FireDecision.Triggered=true + Status=200 →
+//     diff_webhook_auto_fired audit row with status=success.
+//
+//   M12-4.2 (TestSBOMHandler_AutoTriggerWebhook_ThresholdNotExceeded):
+//     FireDecision.Reason="below_thresholds" →
+//     diff_webhook_auto_fired audit row with status=
+//     threshold_not_exceeded, NO delivery attempted.
+//
+//   M12-4.3 (TestSBOMHandler_AutoTriggerWebhook_WebhookDisabled):
+//     FireDecision.Reason="disabled" →
+//     diff_webhook_auto_fired audit row with status=disabled,
+//     NO delivery attempted.
+
+// stubDiffComputer is a recording fake for the diffComputer interface.
+type stubDiffComputer struct {
+	resp   *diff.Response
+	err    error
+	called int
+	gotReq diff.Request
+}
+
+func (s *stubDiffComputer) Compute(_ context.Context, req diff.Request) (*diff.Response, error) {
+	s.called++
+	s.gotReq = req
+	return s.resp, s.err
+}
+
+// stubWebhookFirer is a recording fake for the webhookFirer interface.
+type stubWebhookFirer struct {
+	decision   *diff_webhook.FireDecision
+	err        error
+	called     int
+	gotTenant  uuid.UUID
+	gotProject uuid.UUID
+	gotDiff    *diff.Response
+}
+
+func (s *stubWebhookFirer) FireIfThreshold(_ context.Context, tenantID, projectID uuid.UUID, d *diff.Response) (*diff_webhook.FireDecision, error) {
+	s.called++
+	s.gotTenant = tenantID
+	s.gotProject = projectID
+	s.gotDiff = d
+	return s.decision, s.err
+}
+
+// stubAuditLogger is a recording fake for the auditLogger interface.
+type stubAuditLogger struct {
+	calls []*model.CreateAuditLogInput
+	err   error
+}
+
+func (s *stubAuditLogger) Log(_ context.Context, input *model.CreateAuditLogInput) error {
+	cp := *input
+	s.calls = append(s.calls, &cp)
+	return s.err
+}
+
+// fakeDiffResponse builds a deterministic diff.Response for the auto-
+// trigger tests. From + To non-nil so the auto-trigger does NOT short-
+// circuit on the baseline branch.
+func fakeDiffResponse(projectID uuid.UUID) *diff.Response {
+	return &diff.Response{
+		ProjectID: projectID,
+		From: &diff.SbomRef{
+			SbomID:    uuid.New(),
+			Format:    "cyclonedx",
+			Version:   "1.5",
+			CreatedAt: time.Now().Add(-time.Hour),
+		},
+		To: &diff.SbomRef{
+			SbomID:    uuid.New(),
+			Format:    "cyclonedx",
+			Version:   "1.5",
+			CreatedAt: time.Now(),
+		},
+		Components:      diff.ComponentsDiff{},
+		Vulnerabilities: diff.VulnerabilitiesDiff{},
+		Licenses:        diff.LicensesDiff{},
+	}
+}
+
+// expectAutoFireTx primes sqlmock with the tx envelope every auto-
+// trigger run issues (Begin → SET LOCAL → Commit). Repository reads
+// do not flow through sqlmock — the stubs intercept them.
+func expectAutoFireTx(mock sqlmock.Sqlmock) {
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id'`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+}
+
+// TestSBOMHandler_AutoTriggerWebhook_ThresholdExceeded pins the
+// success path: FireIfThreshold reports Triggered + 200, and the
+// auto-trigger writes a diff_webhook_auto_fired audit row with
+// status=success referencing the ingest sbom_id.
+func TestSBOMHandler_AutoTriggerWebhook_ThresholdExceeded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	expectAutoFireTx(mock)
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	tenantID := uuid.New()
+
+	diffResp := fakeDiffResponse(projectID)
+	diffStub := &stubDiffComputer{resp: diffResp}
+	firerStub := &stubWebhookFirer{
+		decision: &diff_webhook.FireDecision{
+			Triggered: true,
+			Status:    200,
+		},
+	}
+	auditStub := &stubAuditLogger{}
+
+	h := &SbomHandler{
+		db:          db,
+		diffSvc:     diffStub,
+		webhookSvc:  firerStub,
+		auditWriter: auditStub,
+	}
+
+	h.runDiffWebhookAutoTrigger(context.Background(), sbomID, tenantID, projectID)
+
+	if diffStub.called != 1 {
+		t.Fatalf("diffSvc.Compute called %d times, want 1", diffStub.called)
+	}
+	if diffStub.gotReq.ToSbomID != sbomID {
+		t.Errorf("diff Request.ToSbomID = %s, want %s", diffStub.gotReq.ToSbomID, sbomID)
+	}
+	if diffStub.gotReq.FromSbomID != uuid.Nil {
+		t.Errorf("diff Request.FromSbomID = %s, want zero (auto-predecessor)", diffStub.gotReq.FromSbomID)
+	}
+	if firerStub.called != 1 {
+		t.Fatalf("webhookSvc.FireIfThreshold called %d times, want 1", firerStub.called)
+	}
+	if firerStub.gotTenant != tenantID {
+		t.Errorf("FireIfThreshold tenantID = %s, want %s", firerStub.gotTenant, tenantID)
+	}
+	if firerStub.gotProject != projectID {
+		t.Errorf("FireIfThreshold projectID = %s, want %s", firerStub.gotProject, projectID)
+	}
+
+	if len(auditStub.calls) != 1 {
+		t.Fatalf("auditWriter.Log called %d times, want 1 (auto_fired only)", len(auditStub.calls))
+	}
+	got := auditStub.calls[0]
+	if got.Action != model.AuditActionDiffWebhookAutoFired {
+		t.Errorf("audit Action = %q, want %q", got.Action, model.AuditActionDiffWebhookAutoFired)
+	}
+	if got.ResourceType != model.ResourceTypeDiffWebhook {
+		t.Errorf("audit ResourceType = %q, want %q", got.ResourceType, model.ResourceTypeDiffWebhook)
+	}
+	if got.ResourceID == nil || *got.ResourceID != projectID {
+		t.Errorf("audit ResourceID = %v, want project %s", got.ResourceID, projectID)
+	}
+	if got.TenantID == nil || *got.TenantID != tenantID {
+		t.Errorf("audit TenantID = %v, want %s", got.TenantID, tenantID)
+	}
+	if status, _ := got.Details["status"].(string); status != model.DiffWebhookAutoFireStatusSuccess {
+		t.Errorf("audit details.status = %q, want %q", status, model.DiffWebhookAutoFireStatusSuccess)
+	}
+	if sb, _ := got.Details["sbom_id"].(string); sb != sbomID.String() {
+		t.Errorf("audit details.sbom_id = %q, want %q", sb, sbomID.String())
+	}
+	if hs, _ := got.Details["http_status"].(int); hs != 200 {
+		t.Errorf("audit details.http_status = %d, want 200", hs)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_AutoTriggerWebhook_ThresholdNotExceeded pins the
+// below-threshold path: FireIfThreshold returns Triggered=false +
+// Reason="below_thresholds". The audit row records the decision
+// (status=threshold_not_exceeded) so an auditor can see the auto-
+// trigger ran but did not fire — distinguishing it from "no_config"
+// (forgot to enable webhooks) is the load-bearing property.
+func TestSBOMHandler_AutoTriggerWebhook_ThresholdNotExceeded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	expectAutoFireTx(mock)
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	tenantID := uuid.New()
+
+	diffResp := fakeDiffResponse(projectID)
+	diffStub := &stubDiffComputer{resp: diffResp}
+	firerStub := &stubWebhookFirer{
+		decision: &diff_webhook.FireDecision{
+			Triggered: false,
+			Reason:    "below_thresholds",
+		},
+	}
+	auditStub := &stubAuditLogger{}
+
+	h := &SbomHandler{
+		db:          db,
+		diffSvc:     diffStub,
+		webhookSvc:  firerStub,
+		auditWriter: auditStub,
+	}
+
+	h.runDiffWebhookAutoTrigger(context.Background(), sbomID, tenantID, projectID)
+
+	if firerStub.called != 1 {
+		t.Fatalf("FireIfThreshold called %d times, want 1", firerStub.called)
+	}
+	if len(auditStub.calls) != 1 {
+		t.Fatalf("auditWriter.Log called %d times, want 1", len(auditStub.calls))
+	}
+	got := auditStub.calls[0]
+	if got.Action != model.AuditActionDiffWebhookAutoFired {
+		t.Errorf("audit Action = %q, want %q", got.Action, model.AuditActionDiffWebhookAutoFired)
+	}
+	if status, _ := got.Details["status"].(string); status != model.DiffWebhookAutoFireStatusThresholdNotExceeded {
+		t.Errorf("audit details.status = %q, want %q", status, model.DiffWebhookAutoFireStatusThresholdNotExceeded)
+	}
+	if reason, _ := got.Details["reason"].(string); reason != "below_thresholds" {
+		t.Errorf("audit details.reason = %q, want %q", reason, "below_thresholds")
+	}
+	if _, present := got.Details["http_status"]; present {
+		t.Errorf("audit details.http_status should be omitted when not delivered, got %v", got.Details["http_status"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_AutoTriggerWebhook_WebhookDisabled pins the disabled
+// path: tenant has a row but Enabled=false (operator paused). The
+// FireDecision.Reason maps to status=disabled so dashboards can
+// distinguish "intentionally paused" from "below threshold".
+func TestSBOMHandler_AutoTriggerWebhook_WebhookDisabled(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	expectAutoFireTx(mock)
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	tenantID := uuid.New()
+
+	diffResp := fakeDiffResponse(projectID)
+	diffStub := &stubDiffComputer{resp: diffResp}
+	firerStub := &stubWebhookFirer{
+		decision: &diff_webhook.FireDecision{
+			Triggered: false,
+			Reason:    "disabled",
+		},
+	}
+	auditStub := &stubAuditLogger{}
+
+	h := &SbomHandler{
+		db:          db,
+		diffSvc:     diffStub,
+		webhookSvc:  firerStub,
+		auditWriter: auditStub,
+	}
+
+	h.runDiffWebhookAutoTrigger(context.Background(), sbomID, tenantID, projectID)
+
+	if len(auditStub.calls) != 1 {
+		t.Fatalf("auditWriter.Log called %d times, want 1", len(auditStub.calls))
+	}
+	got := auditStub.calls[0]
+	if status, _ := got.Details["status"].(string); status != model.DiffWebhookAutoFireStatusDisabled {
+		t.Errorf("audit details.status = %q, want %q", status, model.DiffWebhookAutoFireStatusDisabled)
+	}
+	if reason, _ := got.Details["reason"].(string); reason != "disabled" {
+		t.Errorf("audit details.reason = %q, want %q", reason, "disabled")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_AutoTriggerWebhook_BaselineSkipsFire pins the
+// "first ever SBOM ingest" path: diff.Compute returns a baseline
+// response (From=nil) because the project has only one SBOM. The
+// auto-trigger MUST NOT call FireIfThreshold (every component would
+// show as added and operators would see a "new project" alert
+// indistinguishable from a real high-volume diff) but MUST still
+// audit so the trail records the decision.
+func TestSBOMHandler_AutoTriggerWebhook_BaselineSkipsFire(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	expectAutoFireTx(mock)
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	tenantID := uuid.New()
+
+	baseline := &diff.Response{
+		ProjectID: projectID,
+		From:      nil,
+		To:        &diff.SbomRef{SbomID: sbomID, Format: "cyclonedx"},
+	}
+	diffStub := &stubDiffComputer{resp: baseline}
+	firerStub := &stubWebhookFirer{}
+	auditStub := &stubAuditLogger{}
+
+	h := &SbomHandler{
+		db:          db,
+		diffSvc:     diffStub,
+		webhookSvc:  firerStub,
+		auditWriter: auditStub,
+	}
+
+	h.runDiffWebhookAutoTrigger(context.Background(), sbomID, tenantID, projectID)
+
+	if firerStub.called != 0 {
+		t.Fatalf("FireIfThreshold MUST NOT be called on baseline ingest, called %d", firerStub.called)
+	}
+	if len(auditStub.calls) != 1 {
+		t.Fatalf("auditWriter.Log called %d times, want 1", len(auditStub.calls))
+	}
+	got := auditStub.calls[0]
+	if status, _ := got.Details["status"].(string); status != model.DiffWebhookAutoFireStatusNoPredecessor {
+		t.Errorf("audit details.status = %q, want %q", status, model.DiffWebhookAutoFireStatusNoPredecessor)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_AutoTriggerWebhook_AuditFailurePropagates pins the
+// F168 audit-or-nothing contract for the auto-trigger: if the audit
+// writer returns an error, the tx MUST roll back so the absence of
+// the audit row is itself the durable signal. Without this property
+// an audit-write outage would silently produce "webhook delivered
+// but no auto_fired row in the trail" — the exact regression F168
+// catalogued for the M11-4 webhook service.
+func TestSBOMHandler_AutoTriggerWebhook_AuditFailurePropagates(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id'`).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	// audit.Log returns an error → fn returns error → WithTxFunc rolls back.
+	mock.ExpectRollback()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	tenantID := uuid.New()
+
+	diffStub := &stubDiffComputer{resp: fakeDiffResponse(projectID)}
+	firerStub := &stubWebhookFirer{
+		decision: &diff_webhook.FireDecision{Triggered: true, Status: 200},
+	}
+	auditStub := &stubAuditLogger{err: errors.New("audit_logs INSERT failed")}
+
+	h := &SbomHandler{
+		db:          db,
+		diffSvc:     diffStub,
+		webhookSvc:  firerStub,
+		auditWriter: auditStub,
+	}
+
+	// Must not panic, must not block — the goroutine path swallows
+	// the tx error after logging via slog.Error.
+	h.runDiffWebhookAutoTrigger(context.Background(), sbomID, tenantID, projectID)
+
+	if len(auditStub.calls) != 1 {
+		t.Fatalf("audit.Log attempt count = %d, want 1 (single attempt before rollback)", len(auditStub.calls))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestMapDecisionToStatus exhaustively covers the FireDecision → audit
+// status mapping table. The mapping is tiny but load-bearing — every
+// new FireDecision.Reason added to diff_webhook needs a matching arm
+// here, and the default-error fallback guards against silent drops.
+func TestMapDecisionToStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *diff_webhook.FireDecision
+		want string
+	}{
+		{
+			name: "nil decision falls to error",
+			in:   nil,
+			want: model.DiffWebhookAutoFireStatusError,
+		},
+		{
+			name: "triggered + 2xx + no error → success",
+			in:   &diff_webhook.FireDecision{Triggered: true, Status: 200},
+			want: model.DiffWebhookAutoFireStatusSuccess,
+		},
+		{
+			name: "triggered + 2xx + ErrorMessage → failure (post-decrypt audit branch)",
+			in:   &diff_webhook.FireDecision{Triggered: true, Status: 200, ErrorMessage: "weird"},
+			want: model.DiffWebhookAutoFireStatusFailure,
+		},
+		{
+			name: "triggered + 5xx → failure",
+			in:   &diff_webhook.FireDecision{Triggered: true, Status: 503, ErrorMessage: "HTTP 503"},
+			want: model.DiffWebhookAutoFireStatusFailure,
+		},
+		{
+			name: "triggered + 0 + decrypt error → failure",
+			in:   &diff_webhook.FireDecision{Triggered: true, Status: 0, ErrorMessage: "decrypt secret"},
+			want: model.DiffWebhookAutoFireStatusFailure,
+		},
+		{
+			name: "not triggered no_config → no_config",
+			in:   &diff_webhook.FireDecision{Reason: "no_config"},
+			want: model.DiffWebhookAutoFireStatusNoConfig,
+		},
+		{
+			name: "not triggered disabled → disabled",
+			in:   &diff_webhook.FireDecision{Reason: "disabled"},
+			want: model.DiffWebhookAutoFireStatusDisabled,
+		},
+		{
+			name: "not triggered no_url → no_url",
+			in:   &diff_webhook.FireDecision{Reason: "no_url"},
+			want: model.DiffWebhookAutoFireStatusNoURL,
+		},
+		{
+			name: "not triggered below_thresholds → threshold_not_exceeded",
+			in:   &diff_webhook.FireDecision{Reason: "below_thresholds"},
+			want: model.DiffWebhookAutoFireStatusThresholdNotExceeded,
+		},
+		{
+			name: "not triggered unknown reason → error (defensive default)",
+			in:   &diff_webhook.FireDecision{Reason: "future_reason_added_in_webhook"},
+			want: model.DiffWebhookAutoFireStatusError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mapDecisionToStatus(tt.in)
+			if got != tt.want {
+				t.Errorf("mapDecisionToStatus = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
