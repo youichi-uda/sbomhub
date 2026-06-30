@@ -178,9 +178,21 @@ function AlertDialogTitle({
   // preserved, and the wrapper only contributes visual layout. We
   // deliberately do not render a second h2 to avoid landing two
   // headings at the same level inside the dialog.
+  //
+  // F212 (M14-2): the wrapper <div> previously had no ARIA role, so
+  // screen-reader tree walkers saw it as an anonymous structural node
+  // sandwiched between the role="dialog" panel and the inner h2. Adding
+  // `role="presentation"` tells assistive tech that the wrapper carries
+  // no semantic value — it exists only to host the caller-supplied
+  // className for visual layout — and that the announcement should jump
+  // directly to the inner DialogTitle h2 (which still owns the
+  // DialogContext titleId surfaced via aria-labelledby on the dialog
+  // panel). This closes the M13 round 5/6 cosmetic flag about the
+  // wrapper's silent semantic identity and finishes the AlertDialog
+  // a11y wiring started by F205.
   if (className) {
     return (
-      <div className={className}>
+      <div className={className} role="presentation">
         <DialogTitle>{children}</DialogTitle>
       </div>
     );

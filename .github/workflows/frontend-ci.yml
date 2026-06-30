@@ -134,6 +134,25 @@ jobs:
       - name: Proxy matcher invariant (M10-4)
         run: node apps/web/src/proxy.matcher.test.mjs
 
+      # M14-2 #94: UI primitive ARIA + type/render invariants
+      # (F209 Tooltip role + aria-describedby, F210 AlertDescription
+      # type/render alignment, F211 CardTitle ref/props symmetry,
+      # F212 AlertDialogTitle wrapper role=presentation). The 4
+      # primitives close the cosmetic class of anti-pattern 48
+      # (fix-one-instance-leave-pattern) — a regression here means
+      # SR contracts at every callsite (eol-badge, kev-badge,
+      # ssvc-badge, ticket-status, settings/apikeys delete confirm,
+      # settings/integrations delete confirm, etc.) silently
+      # degrade at once. node --test runs all four files in one
+      # process, ~50ms total.
+      - name: UI primitive invariants (M14-2 F209-F212)
+        run: |
+          node --test \
+            apps/web/src/components/ui/__tests__/tooltip.test.mjs \
+            apps/web/src/components/ui/__tests__/alert.test.mjs \
+            apps/web/src/components/ui/__tests__/card.test.mjs \
+            apps/web/src/components/ui/__tests__/alert-dialog.test.mjs
+
       # M11-5 #80: hard gate after the ESLint v9 flat-config migration.
       # Next 16 removed `next lint`; we now invoke eslint directly against
       # apps/web/eslint.config.mjs. The migration brought the project to
