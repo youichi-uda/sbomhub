@@ -758,7 +758,6 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 
 	// SBOM endpoints
 	if strings.HasPrefix(path, "/sbom") {
-		resourceType = model.ResourceSBOM
 		switch method {
 		case "POST":
 			return model.ActionSBOMUploaded, model.ResourceSBOM
@@ -789,7 +788,6 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 
 	// Settings endpoints
 	if strings.HasPrefix(path, "/settings") {
-		resourceType = model.ResourceSettings
 		switch method {
 		case "PUT", "PATCH", "POST":
 			return model.ActionSettingsUpdated, model.ResourceSettings
@@ -800,7 +798,6 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 
 	// User endpoints
 	if strings.HasPrefix(path, "/users") || strings.HasPrefix(path, "/members") {
-		resourceType = model.ResourceUser
 		switch method {
 		case "POST":
 			if strings.Contains(path, "/invite") {
@@ -821,7 +818,6 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 
 	// Subscription endpoints
 	if strings.HasPrefix(path, "/subscription") || strings.HasPrefix(path, "/billing") {
-		resourceType = model.ResourceSubscription
 		switch method {
 		case "POST":
 			return model.ActionSubscriptionCreated, model.ResourceSubscription
