@@ -2550,12 +2550,30 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 	// Direction 1: emit → registry. Hand-maintained set of every
 	// model.Action* constant the audit middleware's
 	// determineActionAndResource can return. Sourced by grepping
-	// `return model.Action` in apps/api/internal/middleware/audit.go
-	// and normalizing to the string values. Kept as string values (not
-	// symbol refs) so a future rename of a constant that breaks the
-	// emit ↔ registry contract still trips this test — the string is
-	// the audit_logs.action wire value the UI dropdown filter selects
-	// against, not the Go symbol.
+	// `return model.Action` in apps/api/internal/middleware/audit.go.
+	//
+	// F276 (M18-1 Phase D R3 Codex adjunct v2 fix): the map keys are
+	// runtime string values, BUT the source references on the RHS
+	// (`model.ActionAPIKeyCreated: true`) are Go symbol references —
+	// this is intentional and the correct trade-off for the emit ↔
+	// registry parity contract, but it is NOT a wire-value stability
+	// pin. Specifically:
+	//   - What THIS test catches: an author swaps middleware/audit.go
+	//     to emit a symbol (or literal) that GetAvailableActions does
+	//     not register — direction 1 fails. And a typo in the registry
+	//     side that is not a real model.Action* constant — direction
+	//     2 fails.
+	//   - What THIS test does NOT catch: someone renaming the string
+	//     value of a constant (e.g. changing
+	//     `ActionAPIKeyCreated = "apikey.created"` to
+	//     `ActionAPIKeyCreated = "apikey.created_v2"`). Both the emit
+	//     side and the registry side resolve through the same symbol
+	//     so both propagate together and this test still passes — but
+	//     external consumers (UI filters selecting against
+	//     audit_logs.action wire strings, forensic queries) would
+	//     silently break. Wire-value stability is a separate contract
+	//     that would require literal-string pins (see F276 fix_path
+	//     alternative (b) if that discipline is ever required).
 	expectedEmit := map[string]bool{
 		// F176 + F242 project / apikey.
 		model.ActionAPIKeyCreated:  true,
@@ -2764,9 +2782,18 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 // string constant. Hand-maintained companion of the model/audit.go
 // action-constants block; a new model.Action* constant added there
 // should be listed here so the F271 direction-2 typo check can
-// recognize it as a valid registry value. Kept as string values (not
-// symbol refs) so a future rename of a constant that skips this list
-// still trips F271 loudly.
+// recognize it as a valid registry value.
+//
+// F276 (M18-1 Phase D R3 Codex adjunct v2 fix): as with expectedEmit,
+// the RHS values are Go symbol references. Direction-2 catches
+// GetAvailableActions() entries whose action value is NOT one of
+// model.Action* — i.e. a typo like `model.ActionAPIKeyeUpdate` (extra
+// `e`) that resolves to an empty string via `.String() ??? ""`, or a
+// hand-typed inline string literal in the registry that no model
+// constant emits. What Direction-2 does NOT catch: a rename of the
+// STRING value of a model constant (both this list and the registry
+// resolve through the same symbol, so both change together). See the
+// F276 note on expectedEmit above for the shared trade-off.
 func allModelActionValues() map[string]bool {
 	return map[string]bool{
 		// User.
