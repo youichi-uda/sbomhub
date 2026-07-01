@@ -125,6 +125,19 @@ func NewReportGenerationJob(
 	if reportService == nil {
 		panic("scheduler: NewReportGenerationJob requires non-nil reportService (F257, M17-2 #108)")
 	}
+	// F260 (M17-2 Phase D R2 #108): symmetric db-nil guard. Parallel to the
+	// F257 reportService panic above — same "fail-fast at construction,
+	// loud" discipline. Without this guard, a nil db would silently no-op
+	// inside reportService.SetDB (see service.ReportService.SetDB, which
+	// intentionally short-circuits on nil to avoid tearing down a
+	// previously-attached handle) and then confusingly surface later as a
+	// "nil db" error inside generateReport. Panicking here moves the
+	// failure point back to the construction site so the caller (main.go
+	// wiring or a test factory) can see immediately which factory call
+	// forgot to pass db.
+	if db == nil {
+		panic("scheduler: NewReportGenerationJob requires non-nil db (F260, M17-2 Phase D R2 #108)")
+	}
 	reportService.SetDB(db)
 	return &ReportGenerationJob{
 		reportService: reportService,
@@ -153,6 +166,15 @@ func NewReportGenerationJobFull(
 ) *ReportGenerationJob {
 	if reportService == nil {
 		panic("scheduler: NewReportGenerationJobFull requires non-nil reportService (F257, M17-2 #108)")
+	}
+	// F260 (M17-2 Phase D R2 #108): symmetric db-nil guard. See
+	// NewReportGenerationJob's F260 comment for the full rationale —
+	// db-nil silently no-ops inside reportService.SetDB and surfaces later
+	// as a confusing "nil db" error deep in generateReport. Panicking here
+	// keeps the two factories symmetric and moves the failure point to the
+	// construction site.
+	if db == nil {
+		panic("scheduler: NewReportGenerationJobFull requires non-nil db (F260, M17-2 Phase D R2 #108)")
 	}
 	reportService.SetDB(db)
 	return &ReportGenerationJob{
