@@ -246,15 +246,28 @@ func (c *JiraClient) doRequest(ctx context.Context, method, path string, body in
 			return fmt.Errorf("failed to execute request: %w", err)
 		}
 
-		// F300 (M20-3): bound the response body read at maxErrorBodyBytes so a
-		// hostile or misconfigured upstream that streams a multi-GB body under
-		// the 30s client-side timeout cannot exhaust process memory. Every
-		// successful Jira response fits comfortably under 64 KiB — the same
-		// bound also caps 4xx/5xx error bodies used in the "Jira API error"
-		// diagnostic and the 429 body carried into ErrRateLimitExhausted.
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		// F300 (M20-3) + F309 (M20-3 Phase D R2): bound the response body read
+		// at maxResponseBodyBytes (8 MiB) so a hostile or misconfigured upstream
+		// that streams a multi-GB body under the 30s client-side timeout cannot
+		// exhaust process memory. This cap applies universally (2xx / 4xx / 5xx
+		// / 429) because the same doRequest funnel carries every status class;
+		// the F300 original wording that scoped the cap to "error / 429 only"
+		// misrepresented the wrap site — see rate_limit.go maxResponseBodyBytes
+		// docstring for the F309 correction. The truncate(..., 200) formatting
+		// on error surfaces continues to work unchanged on the bounded slice.
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 		retryAfter := resp.Header.Get("Retry-After")
 		status := resp.StatusCode
+		// F312 (M20-3 Phase D R2): drain any unread remainder before Close so
+		// http.Transport can return the underlying TCP+TLS connection to the
+		// idle pool. Without this drain, an upstream that streamed slightly
+		// more than maxResponseBodyBytes (or that lingered after the LimitReader
+		// hit the cap) would leave bytes buffered on the socket, and Close would
+		// then abort the connection instead of pooling it — forcing a fresh
+		// handshake on the next request, in direct contradiction to the
+		// rate-limit hardening posture. io.Discard is bounded by the same
+		// upstream body length so no unbounded read is introduced here.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("failed to read response: %w", readErr)

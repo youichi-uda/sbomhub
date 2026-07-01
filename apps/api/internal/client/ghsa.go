@@ -212,19 +212,35 @@ func (c *GHSAClient) doGET(ctx context.Context, endpoint string) ([]byte, int, e
 	if err != nil {
 		return nil, 0, fmt.Errorf("ghsa: do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// F312 (M20-3 Phase D R2): drain any unread remainder before Close so
+		// http.Transport can return the underlying TCP+TLS connection to the
+		// idle pool. Without this drain, an upstream that streamed slightly
+		// more than maxResponseBodyBytes would leave bytes buffered on the
+		// socket, and Close would abort the connection instead of pooling it
+		// — forcing a fresh handshake on the next request, in direct
+		// contradiction to the rate-limit hardening posture. io.Discard is
+		// bounded by the same upstream body length so no unbounded read is
+		// introduced here.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
-	// F300 (M20-3): bound the response body read at maxErrorBodyBytes so a
-	// hostile or misconfigured upstream that streams a multi-GB body under
-	// the 30s client-side timeout cannot exhaust process memory. Every GHSA
-	// advisory response fits comfortably under 64 KiB — the same bound also
-	// caps 403 rate-limit bodies inspected via strings.Contains below and 4xx
-	// / 5xx error bodies used in the "ghsa: get ... returned status" and
-	// "ghsa: list advisories returned status" diagnostics. This mirrors the
-	// jira.go / backlog.go hygiene apply and completes anti-pattern 48
-	// universal closure across the three external HTTP clients that share
-	// the rate_limit.go helper.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	// F300 (M20-3) + F309 (M20-3 Phase D R2): bound the response body read
+	// at maxResponseBodyBytes (8 MiB) so a hostile or misconfigured upstream
+	// that streams a multi-GB body under the 30s client-side timeout cannot
+	// exhaust process memory. This cap applies universally (2xx / 4xx / 5xx
+	// / 403 rate-limit bodies inspected via strings.Contains below) because
+	// the same doRequest funnel carries every status class; the F300 original
+	// wording that scoped the cap to "error / 429 only" misrepresented the
+	// wrap site — see rate_limit.go maxResponseBodyBytes docstring for the
+	// F309 correction. Large 2xx payloads (GHSA `listAdvisories` returns up
+	// to 30 advisories per page, each with multi-KB markdown descriptions)
+	// no longer risk silent 64 KiB truncation into an opaque json.Unmarshal
+	// EOF. This mirrors the jira.go / backlog.go hygiene apply and completes
+	// anti-pattern 48 universal closure across the three external HTTP
+	// clients that share the rate_limit.go helper.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("ghsa: read response: %w", err)
 	}
@@ -236,9 +252,21 @@ func (c *GHSAClient) doGET(ctx context.Context, endpoint string) ([]byte, int, e
 	return body, resp.StatusCode, nil
 }
 
+// truncate caps s to at most max bytes and appends an ellipsis when the
+// string was longer. F311 (M20-3 Phase D R2): the raw `s[:max]` slice
+// could cut a multi-byte UTF-8 codepoint at any of its trailing bytes,
+// producing an invalid-UTF-8 string. In Japanese-heavy error surfaces
+// (M0 Trust Rescue ICP: Japanese SMB manufacturers, so provider errors
+// like "プロジェクトが見つかりません" are common at 3 bytes per rune),
+// downstream JSON log pipelines — Datadog, Loki, Elastic ingest — reject
+// invalid UTF-8, so a mid-rune split at byte 200 would drop the entire
+// error record. `strings.ToValidUTF8("", "")` replaces any invalid
+// trailing bytes with the empty string, guaranteeing the returned value
+// is valid UTF-8. The Datadog / Loki pipelines then log a slightly
+// shorter but well-formed error rather than silently dropping the record.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	return strings.ToValidUTF8(s[:max], "") + "..."
 }

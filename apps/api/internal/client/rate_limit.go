@@ -38,18 +38,29 @@ import (
 // The cap is ~292 years, well above any legitimate provider Retry-After.
 const maxRetryAfterSeconds = int64(math.MaxInt64) / int64(time.Second)
 
-// maxErrorBodyBytes caps the number of bytes read from a rate-limited or
-// error HTTP response body. 64 KiB is far larger than any legitimate
-// provider error JSON (typical Jira / Backlog / GitHub error bodies are
-// < 2 KiB) yet small enough to bound OOM risk from a hostile or
-// misconfigured upstream that streams a multi-GB body under the 30s
-// client-side timeout (F300 M20-3, F290 fix path). Consumers wrap the
-// response body with io.LimitReader(resp.Body, maxErrorBodyBytes) before
-// io.ReadAll so a pathological upstream cannot exhaust process memory even
-// within the client timeout window. The truncate(..., 200) formatting on
-// error surfaces continues to work unchanged because it operates on the
-// already-bounded byte slice.
-const maxErrorBodyBytes = 64 * 1024
+// maxResponseBodyBytes is a universal defensive cap on the number of bytes
+// read from ANY HTTP response body (rate-limited, error, and success paths
+// alike). The 8 MiB ceiling is far above legitimate provider payloads —
+// GHSA `listAdvisories` returns 30 advisories per page each with multi-KB
+// markdown descriptions, Jira `GetIssue` with an ADF-formatted description
+// can approach a couple hundred KB, Backlog list responses are typically
+// well under 1 MiB — while still bounding OOM risk from a hostile or
+// misconfigured upstream that streams a multi-GB body under the 30 s
+// client-side timeout window (F290 / F300 M20-3 fix lineage).
+//
+// F309 (M20-3 Phase D R2) raised the cap from 64 KiB and repurposed it
+// from the narrow "error / 429 response only" scope claimed in the
+// original F300 land: at that time the LimitReader wrap applied to
+// SUCCESS-path bodies too (the doRequest funnel is shared across all
+// status classes in each client), so a 64 KiB cap would have silently
+// truncated large-but-legitimate 2xx JSON payloads and produced an
+// opaque json.Unmarshal EOF error rather than the intended OOM
+// defence. 8 MiB is a defensive ceiling — the primary bound on
+// well-behaved upstreams is the client-side HTTP timeout, not this
+// cap. The truncate(..., 200) formatting on error surfaces continues
+// to work unchanged because it operates on the already-bounded byte
+// slice.
+const maxResponseBodyBytes = 8 * 1024 * 1024
 
 // ErrRateLimitExhausted is the sentinel returned when a rate-limited request
 // exceeds MaxRetries. Callers can use errors.Is to detect it — the individual
