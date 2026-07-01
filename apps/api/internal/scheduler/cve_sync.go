@@ -823,14 +823,38 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 	if err != nil {
 		return 0, fmt.Errorf("query components: %w", err)
 	}
-	defer rows.Close()
-
-	linkedCount := 0
+	// F258 (M17-3 orchestrator recovery post-Phase A CI failure):
+	// collect componentIDs into an in-memory slice BEFORE closing the
+	// rows and issuing the INSERTs. lib/pq (`github.com/lib/pq`)
+	// disallows an ExecContext on the same connection while a Rows is
+	// still open — it emits `pq: unexpected Parse response 'C'` (the
+	// Parse frame arrives while the driver is still expecting the
+	// tail of a bind/execute cycle from the outer query) and then
+	// invalidates the connection with `driver: bad connection`.
+	// Pre-F258 the per-tenant runWithTenantTx pattern hid the bug: each
+	// tenant grabbed a fresh conn, so the first (tenant, CVE) hit
+	// failed silently and the loop moved on. Post-F258 the chunk pool
+	// pins ONE conn across all N/K tenants, so the first bad-conn
+	// cascades through every subsequent BEGIN in the chunk with
+	// `sql: connection is already closed`. Collecting rows first
+	// resolves it while preserving the original semantics (per-match
+	// INSERT, ON CONFLICT DO NOTHING, warn-on-error, continue).
+	componentIDs := make([]uuid.UUID, 0)
 	for rows.Next() {
 		var componentID uuid.UUID
 		if err := rows.Scan(&componentID); err != nil {
 			continue
 		}
+		componentIDs = append(componentIDs, componentID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("iterate components: %w", err)
+	}
+	rows.Close()
+
+	linkedCount := 0
+	for _, componentID := range componentIDs {
 		// component_vulnerabilities is not RLS-bound; this write still
 		// goes through the tx (q is the tx) which is fine.
 		if _, err := q.ExecContext(ctx, `
