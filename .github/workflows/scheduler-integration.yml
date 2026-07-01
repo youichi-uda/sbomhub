@@ -1,0 +1,180 @@
+# SBOMHub - scheduler real-PG integration tests
+#
+# F234 / M15-2 (#99) follow-up: sqlmock literally cannot model the
+# "current transaction is aborted, commands ignored until end of
+# transaction block" ACID semantics that F234's chunk-based tx split
+# relies on. The `//go:build integration` files in
+# apps/api/internal/scheduler/*_integration_test.go must therefore run
+# against a real PostgreSQL to gate a regression that breaks chunk-local
+# blast-radius containment.
+#
+# Companion of .github/workflows/rls-integration.yml — same shape
+# (docker compose postgres + install.sh --bootstrap-roles + migrate up),
+# scoped to the scheduler subtree. Kept in a separate workflow file so
+# scheduler-only PRs don't wait on the whole RLS matrix and vice versa.
+#
+# Anti-pattern 21 (sqlmock semantics limitation) — universal defence:
+# the pattern here (build tag + real PG smoke) is available for any
+# future scheduler that grows chunked-tx or other ACID-load-bearing
+# semantics that sqlmock can't reproduce. cve_sync.go /
+# report_generation.go / ticket_sync.go still walk tenants via
+# per-tenant runWithTenantTx and are M16+ candidates to migrate to
+# F234's chunked pattern — when they do, add their integration tests
+# to this workflow's `-run` filter.
+#
+# Port note (mirrors rls-integration.yml):
+#   docker-compose.yml is frozen and does NOT publish postgres:5432 to
+#   the host. This workflow drops a transient docker-compose.override.yml
+#   to expose the port so the Go test process on the runner host can
+#   dial localhost:5432. Override is workflow-local, never committed,
+#   torn down with the stack.
+
+name: Scheduler integration tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/internal/scheduler/**"
+      - "apps/api/migrations/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/scheduler-integration.yml"
+  pull_request:
+    paths:
+      - "apps/api/internal/scheduler/**"
+      - "apps/api/migrations/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/scheduler-integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scheduler-integration:
+    name: F234 chunk-abort blast-radius smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Show tool versions
+        run: |
+          go version
+          docker version
+          docker compose version
+
+      - name: Generate .env with per-run secrets
+        # Mirror of rls-integration.yml — per-run passwords so nothing
+        # leaks between workflow runs.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@localhost:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@localhost:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Write docker-compose.override.yml (expose postgres:5432)
+        # docker-compose.yml is frozen and does not publish 5432. The
+        # override is a transient workflow-local file that adds the
+        # port publish so the Go test process on the runner host can
+        # dial localhost:5432.
+        shell: bash
+        run: |
+          cat > docker-compose.override.yml <<'YML'
+          services:
+            postgres:
+              ports:
+                - "5432:5432"
+          YML
+          docker compose config | grep -A2 '^  postgres:' | head -n 20 || true
+
+      - name: Start postgres
+        run: docker compose up -d --wait postgres
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Apply migrations
+        # Runs as sbomhub_migrator (DDL-capable, NOT BYPASSRLS).
+        # Must include migration 048 which enables RLS on scan_settings
+        # — F234's integration tests depend on the migration-048 policy
+        # being present so they can drop-and-restore it around the
+        # poison branch.
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go run ./cmd/migrate up
+
+      - name: Run scheduler integration tests
+        # `-tags=integration` enables the //go:build integration file:
+        #   - internal/scheduler/vulnerability_scan_integration_test.go
+        # -run filter is scoped to the F234 tests explicitly so future
+        # additions to this file are opt-in (name your test starting
+        # with TestF234_, or bump the pattern).
+        # -count=1 disables the Go test cache so a passing cached run
+        # doesn't hide a regression that only manifests against a
+        # freshly-migrated DB.
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go test -count=1 -tags=integration -timeout 5m -v \
+            -run 'TestF234_' \
+            ./internal/scheduler/...
+
+      - name: Dump postgres logs on failure
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs --tail=200 postgres || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true
