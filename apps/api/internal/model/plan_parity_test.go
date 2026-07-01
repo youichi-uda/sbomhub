@@ -235,6 +235,27 @@ func TestPlanFeatureRegistryParity_F299(t *testing.T) {
 	// because the runtime answer is the same false, but the DECLARED
 	// key SET differs — Direction 2 catches that).
 
+	// F320 (M21-2 Phase D, F307 close): the Direction 2 error messages
+	// below name knownGoOnlyPerPlanMissingFromSQL and
+	// knownSQLOnlyPerPlanMissingFromGo as the shrink-pattern
+	// escape-hatch maps a wave would populate to defer a per-plan
+	// key/value gap. Pre-F320 those maps were only NAMED in the error
+	// strings and had no declaration — so an author following the
+	// error message to add a deferral entry would find no map to
+	// touch, and the meta-test's "add {plan}:{key} to
+	// knownGoOnlyPerPlanMissingFromSQL" instruction was factually
+	// non-executable. F320 declares both maps as intentionally-empty
+	// skeletons mirroring the F271 knownEmitNotRegistered /
+	// F281 knownResourceEmitNotRegistered / F299 Direction 1
+	// knownGoOnlyMissingFromSQL + knownSQLOnlyMissingFromGo
+	// discipline: keyed by `plan + "/" + key` (colon-free so JSON
+	// path notation works), value is the F# reason for deferral.
+	// Kept empty at F320 so future silent per-plan divergence trips
+	// CI loud; a future wave populating an entry MUST come with an
+	// F# reason and a shrink-target wave.
+	knownGoOnlyPerPlanMissingFromSQL := map[string]string{}
+	knownSQLOnlyPerPlanMissingFromGo := map[string]string{}
+
 	for _, plan := range plans {
 		goPlan := goSide[plan]
 		sqlPlan := sqlSide[plan]
@@ -247,14 +268,20 @@ func TestPlanFeatureRegistryParity_F299(t *testing.T) {
 		for k, goVal := range goPlan {
 			sqlVal, ok := sqlPlan[k]
 			if !ok {
+				// F320 (M21-2): consult the skeleton allowlist before
+				// erroring so a wave can defer a per-plan gap with an
+				// F# reason instead of silencing the assertion.
+				if _, deferred := knownGoOnlyPerPlanMissingFromSQL[plan+"/"+k]; deferred {
+					continue
+				}
 				t.Errorf("F299 direction 2 failure (Go → SQL per plan): "+
 					"plan=%q key=%q present in Go DefaultPlanLimits "+
 					"(=%v) but absent from plan_limits.features JSONB "+
 					"for this specific plan. Either add the key to the "+
 					"SQL seed / backfill migration for %q, or (if the "+
-					"deferral is intentional) add {plan}:{key} to "+
+					"deferral is intentional) add %q to "+
 					"knownGoOnlyPerPlanMissingFromSQL with an F# reason.",
-					plan, k, goVal, plan)
+					plan, k, goVal, plan, plan+"/"+k)
 				continue
 			}
 			if goVal != sqlVal {
@@ -267,14 +294,20 @@ func TestPlanFeatureRegistryParity_F299(t *testing.T) {
 		// SQL → Go per plan.
 		for k, sqlVal := range sqlPlan {
 			if _, ok := goPlan[k]; !ok {
+				// F320 (M21-2): consult the skeleton allowlist before
+				// erroring so a wave can defer a per-plan gap with an
+				// F# reason instead of silencing the assertion.
+				if _, deferred := knownSQLOnlyPerPlanMissingFromGo[plan+"/"+k]; deferred {
+					continue
+				}
 				t.Errorf("F299 direction 2 failure (SQL → Go per plan): "+
 					"plan=%q key=%q present in plan_limits.features JSONB "+
 					"(=%v) but absent from Go DefaultPlanLimits for this "+
 					"specific plan. Either add the key to model/plan.go "+
 					"DefaultPlanLimits for %q, or (if the deferral is "+
-					"intentional) add {plan}:{key} to "+
+					"intentional) add %q to "+
 					"knownSQLOnlyPerPlanMissingFromGo with an F# reason.",
-					plan, k, sqlVal, plan)
+					plan, k, sqlVal, plan, plan+"/"+k)
 			}
 		}
 	}
@@ -454,9 +487,35 @@ var backfillUpdateEqRe = regexp.MustCompile(`(?s)UPDATE\s+plan_limits\s+SET\s+fe
 var planNameRe = regexp.MustCompile(`'([a-z_]+)'`)
 
 // applyBackfillUpdates parses UPDATE ... plan_limits statements in a
-// migration file and folds them into `seed` in file order (later
-// wins on key collision, matching PostgreSQL `||` right-hand-side
-// wins semantics).
+// migration file and folds them into `seed` in SOURCE-POSITION order
+// (later wins on key collision, matching PostgreSQL `||` right-hand-
+// side wins semantics — which itself follows statement execution
+// order in the migration).
+//
+// F320 (M21-2 Phase D, F308 close): pre-F320 this function ran the
+// IN (...) regex over the entire file body first, then the = 'x'
+// regex second — so an interleaved sequence like [IN@line10,
+// =@line20, IN@line30] would be folded as [IN10, IN30, =20],
+// silently permuting the source order. The 8 / 024 / 049 shape at
+// M20 close did not induce the reordering (024 uses only the = 'x'
+// shape; 049 uses only the IN (...) shape) so the bug was latent,
+// but a future migration mixing both shapes would have hit it. F320
+// scans matches from both regexes and folds them by their byte
+// offset in the source (earlier offset applied first), so PostgreSQL
+// `||` last-write-wins semantics hold regardless of which
+// regex-flavor the author picks per statement.
+//
+// F320 (M21-2 Phase D, F308 sibling): the pre-F320 `IN (...) form
+// (049 primary + 024 enterprise)` and `= 'x' form (024 per-plan
+// style)` inline comments were factually incorrect on the 024
+// enterprise attribution — 024's per-plan enterprise UPDATE uses
+// the `= 'enterprise'` shape, not the IN (...) shape, and the
+// enterprise-only IN clauses in migrations use single-plan lists
+// like IN ('enterprise') which are semantically identical to
+// = 'enterprise' but not what the pre-F320 comment described. The
+// updated comments below reference the shape of the SQL rather
+// than pinning specific migrations, which is both more accurate
+// and future-migration-proof.
 func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -464,12 +523,24 @@ func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 	}
 	src := string(raw)
 
-	total := 0
+	// backfillMatch carries a single UPDATE statement's parse result
+	// plus the byte offset in the source at which the UPDATE keyword
+	// appeared, so all matches from both regex flavors can be sorted
+	// into execution order regardless of which regex captured them.
+	type backfillMatch struct {
+		offset      int             // byte offset of the leading UPDATE keyword in src
+		delta       map[string]bool // decoded JSON delta
+		targetPlans []string        // one or more plan names the delta applies to
+	}
+	var matches []backfillMatch
 
-	// IN (...) form (049 primary + 024 enterprise).
-	for _, m := range backfillUpdateInRe.FindAllStringSubmatch(src, -1) {
-		jsonDelta := m[1]
-		inList := m[2]
+	// IN (...) form — a single UPDATE targeting one or more plans via
+	// WHERE plan IN ('a', 'b', ...). Common shape for multi-plan
+	// backfills (e.g. 049 free/starter audit_logs=false) but also
+	// used for single-plan IN clauses like IN ('enterprise').
+	for _, loc := range backfillUpdateInRe.FindAllStringSubmatchIndex(src, -1) {
+		jsonDelta := src[loc[2]:loc[3]]
+		inList := src[loc[4]:loc[5]]
 
 		delta := make(map[string]bool)
 		if err := json.Unmarshal([]byte(jsonDelta), &delta); err != nil {
@@ -482,27 +553,48 @@ func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 		if len(targetPlans) == 0 {
 			return &parseErr{path: path, msg: "no plan names found in IN (...) clause"}
 		}
-		for _, plan := range targetPlans {
-			mergeDelta(seed, plan, delta)
-		}
-		total++
+		matches = append(matches, backfillMatch{
+			offset:      loc[0],
+			delta:       delta,
+			targetPlans: targetPlans,
+		})
 	}
 
-	// = 'x' form (024 per-plan style).
-	for _, m := range backfillUpdateEqRe.FindAllStringSubmatch(src, -1) {
-		jsonDelta := m[1]
-		plan := m[2]
+	// = 'x' form — a single UPDATE targeting exactly one plan via
+	// WHERE plan = 'x'. Common shape for per-plan backfills where a
+	// migration writes a different JSON delta per plan (e.g. 024's
+	// per-plan audit_logs=true UPDATE for pro/team/enterprise, each
+	// as its own = 'x' UPDATE statement).
+	for _, loc := range backfillUpdateEqRe.FindAllStringSubmatchIndex(src, -1) {
+		jsonDelta := src[loc[2]:loc[3]]
+		plan := src[loc[4]:loc[5]]
 
 		delta := make(map[string]bool)
 		if err := json.Unmarshal([]byte(jsonDelta), &delta); err != nil {
 			return &parseErr{path: path, msg: "JSONB delta decode failed: " + err.Error()}
 		}
-		mergeDelta(seed, plan, delta)
-		total++
+		matches = append(matches, backfillMatch{
+			offset:      loc[0],
+			delta:       delta,
+			targetPlans: []string{plan},
+		})
 	}
 
-	if total == 0 {
+	if len(matches) == 0 {
 		return &parseErr{path: path, msg: "no UPDATE plan_limits ... jsonb ... WHERE ... matched"}
+	}
+
+	// Fold in source-position order so PostgreSQL `||` last-write-
+	// wins semantics track statement execution order in the
+	// migration (F320 F308 close — pre-F320 grouped by regex flavor
+	// which could permute interleaved statements).
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].offset < matches[j].offset
+	})
+	for _, m := range matches {
+		for _, plan := range m.targetPlans {
+			mergeDelta(seed, plan, m.delta)
+		}
 	}
 	return nil
 }
@@ -526,16 +618,14 @@ func unionKeys(byPlan map[string]map[string]bool) map[string]struct{} {
 	return out
 }
 
-// sortedKeys is unused by the assertions but kept here so a future
-// wave writing a diff-view helper can render deterministically.
-func sortedKeys(m map[string]struct{}) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
-}
+// F320 (M21-2 Phase D, F314 close): the pre-F320 `sortedKeys`
+// helper was unused by any assertion and kept as speculative
+// scaffold for "a future wave writing a diff-view helper" — YAGNI.
+// A future wave that actually needs deterministic key iteration for
+// a diff-view helper can add the helper back at that point with the
+// concrete call site rather than as speculation. Removing keeps
+// `.golangci.yml` unused-linter strict-mode from tripping and
+// reduces test-file surface area.
 
 type parseErr struct {
 	path string
