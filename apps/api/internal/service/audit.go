@@ -485,6 +485,51 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// F271's emit ↔ registry parity direction 1 to close (F272's
 		// four default-arm emit sites cover all four resource verbs).
 		{Action: model.ActionResourceViewed, Label: "Resource Viewed", Category: "resource"},
+
+		// F280 (M19-2 Phase D R1, anti-pattern 58 formalize + horizontal
+		// completion): register the 12 remaining emit symbols that F271
+		// (M18-1 Phase D R2) had documented as F275+ candidates in the
+		// knownEmitNotRegistered allowlist. F270 closed the 23 F267
+		// symbols but deferred two clusters — the F256-era .viewed
+		// residuals across nine tenant-branch resources and the three
+		// subscription verbs — to a future M19+ wave. F280 completes
+		// that wave: every emit site the audit middleware can produce
+		// now has a matching UI filter entry, and the F271 allowlist
+		// shrinks 12 → 0 (Action dimension parity completeness). F281
+		// (M19-3 sibling) replicates the same discipline to the
+		// Resource dimension so the dual-list system's parity contract
+		// is enforced in both directions.
+		{Action: model.ActionAPIKeyViewed, Label: "API Key Viewed", Category: "apikey"},
+		{Action: model.ActionVEXViewed, Label: "VEX Viewed", Category: "vex"},
+		{Action: model.ActionSettingsViewed, Label: "Settings Viewed", Category: "settings"},
+		{Action: model.ActionUserViewed, Label: "User Viewed", Category: "user"},
+
+		// Subscription family. The tenant-branch middleware arm at
+		// audit.go /subscription emits four verbs (created/updated/
+		// cancelled/viewed); F280 registers all four so the UI filter
+		// can surface any audit_logs row the middleware produces.
+		// ActionSubscriptionRenewed is intentionally omitted — no
+		// middleware emit site exists for it today (SubscriptionRenewed
+		// is currently only exposed as a model constant, not a classifier
+		// return value), so registering it here without an emit
+		// counterpart would violate the F271 direction-1 parity by
+		// injecting a UI-selectable action that no middleware branch
+		// can produce.
+		{Action: model.ActionSubscriptionCreated, Label: "Subscription Created", Category: "subscription"},
+		{Action: model.ActionSubscriptionUpdated, Label: "Subscription Updated", Category: "subscription"},
+		{Action: model.ActionSubscriptionCancelled, Label: "Subscription Cancelled", Category: "subscription"},
+		{Action: model.ActionSubscriptionViewed, Label: "Subscription Viewed", Category: "subscription"},
+
+		// Report / analytics / integration / dashboard tenant-branch
+		// .viewed residuals. F270 registered the F267 non-.viewed
+		// counterparts (ReportGenerated, IntegrationCreated/Updated/
+		// Deleted) but the .viewed sibling in each family was deferred
+		// to F275+; F280 closes the deferral so the tenant-branch
+		// families are symmetric with the F267 completion.
+		{Action: model.ActionReportViewed, Label: "Report Viewed", Category: "report"},
+		{Action: model.ActionAnalyticsViewed, Label: "Analytics Viewed", Category: "analytics"},
+		{Action: model.ActionIntegrationViewed, Label: "Integration Viewed", Category: "integration"},
+		{Action: model.ActionDashboardViewed, Label: "Dashboard Viewed", Category: "dashboard"},
 	}
 }
 
