@@ -120,6 +120,23 @@ func (h *CLIHandler) Upload(c echo.Context) error {
 		})
 	}
 
+	// F233 (M15-1 fix, anti-pattern 51 override-first audit context-key):
+	// publish the newly-minted sbom UUID so the audit middleware records
+	// audit_logs.resource_id = sbom.ID under the sbom.uploaded /
+	// ResourceSBOM classification that the F233 middleware branch now
+	// emits for POST /cli/upload. This mirrors the tenant-side POST
+	// /api/v1/projects/:id/sbom SetAuditResourceID call in sbom.go.
+	//
+	// We publish the SBOM UUID (not the project UUID) because the
+	// business subject of POST /cli/upload is the SBOM itself — the
+	// project either already existed or was mint-on-first-upload — and
+	// forensic queries want to join audit_logs onto sboms.id. If
+	// created=true, the project.created event is not lost: the
+	// GetOrCreateProject writer path already emits its own audit row
+	// through the tenant repository layer (M14-1 F208 project handler
+	// pattern), so publishing sbom.ID here does not shadow it.
+	middleware.SetAuditResourceID(c, sbom.ID)
+
 	return c.JSON(http.StatusOK, UploadResponse{
 		Success:        true,
 		ProjectID:      project.ID,
@@ -255,6 +272,21 @@ func (h *CLIHandler) CreateProject(c echo.Context) error {
 	if created {
 		status = http.StatusCreated
 	}
+
+	// F233 (M15-1 fix, anti-pattern 51 override-first audit context-key):
+	// publish the project UUID so the audit middleware records
+	// audit_logs.resource_id = project.ID under the project.created /
+	// ResourceProject classification that the F233 middleware branch
+	// now emits for POST /cli/projects. This mirrors the tenant-side
+	// POST /api/v1/projects SetAuditResourceID call in project.go.
+	//
+	// We publish the project UUID on BOTH created==true and
+	// created==false. For created==false (the idempotent get-existing
+	// path) the audit row is still a legitimate "asked to create /
+	// touch this project" event from the CLI and the resource_id must
+	// point at the returned project so forensic timelines are
+	// contiguous.
+	middleware.SetAuditResourceID(c, project.ID)
 
 	return c.JSON(status, map[string]interface{}{
 		"project": project,
