@@ -49,6 +49,7 @@ func DefaultPlanLimits(plan string) PlanLimits {
 				"discord_integration":  false,
 				"api_access":           false,
 				"audit_logs":           false,
+				"priority_support":     false,
 			},
 		}
 	case PlanStarter:
@@ -67,6 +68,7 @@ func DefaultPlanLimits(plan string) PlanLimits {
 				"discord_integration":  true,
 				"api_access":           true,
 				"audit_logs":           false,
+				"priority_support":     false,
 			},
 		}
 	case PlanPro:
@@ -85,6 +87,7 @@ func DefaultPlanLimits(plan string) PlanLimits {
 				"discord_integration":  true,
 				"api_access":           true,
 				"audit_logs":           true,
+				"priority_support":     true,
 			},
 		}
 	case PlanTeam:
@@ -104,6 +107,7 @@ func DefaultPlanLimits(plan string) PlanLimits {
 				"api_access":           true,
 				"audit_logs":           true,
 				"sso":                  false,
+				"priority_support":     true,
 			},
 		}
 	case PlanEnterprise:
@@ -124,6 +128,7 @@ func DefaultPlanLimits(plan string) PlanLimits {
 				"audit_logs":           true,
 				"sso":                  true,
 				"custom_integrations":  true,
+				"priority_support":     true,
 			},
 		}
 	default:
