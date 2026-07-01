@@ -56,12 +56,19 @@
 --
 -- Idempotency:
 --
---   The `features || '{"audit_logs": false}'::jsonb` concatenation
---   only inserts the key when it is not already present at the top
---   level (PostgreSQL JSONB `||` right-hand-side wins on collision,
---   so re-running would overwrite pro/team/enterprise back to false
---   if they were in the WHERE clause — they are not). The WHERE
---   scopes the write to free / starter only.
+--   PostgreSQL JSONB `||` OVERWRITES on top-level key collision
+--   (right-hand-side wins): `'{"a":1}'::jsonb || '{"a":2}'::jsonb`
+--   yields `'{"a":2}'`, NOT `'{"a":1}'`. This migration is safe only
+--   because the `WHERE plan IN ('free', 'starter')` clause excludes
+--   the pro / team / enterprise rows that migration 024 (BUG-06)
+--   already backfilled to `true`; re-running is a no-op for the
+--   scoped rows because free / starter already resolve to `false`
+--   under `||` and stay `false`, and the other tiers are never
+--   touched. A future maintainer copy-pasting this pattern WITHOUT
+--   the WHERE scope would silently regress pro / team / enterprise
+--   state (their `audit_logs: true` from 024 would be overwritten
+--   to `false`); do NOT drop the WHERE clause when adding new
+--   feature-key backfills.
 --
 -- Related:
 --   * Meta-test: TestPlanFeatureRegistryParity_F299 in
