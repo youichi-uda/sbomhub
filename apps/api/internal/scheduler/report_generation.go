@@ -22,14 +22,15 @@ var base64StdEncoding = base64.StdEncoding
 // ReportGenerationJob handles periodic report generation.
 //
 // codex-r4 P1 fix:
-//   `report_settings` and `generated_reports` are RLS-enabled (migration
-//   013). The previous job called `reportRepo.GetEnabledSettings(ctx)` and
-//   `reportRepo.GetReport*` on a bare scheduler context with no
-//   `app.current_tenant_id` GUC, so under sbomhub_app it received zero
-//   rows and never generated anything. The job now enumerates tenants via
-//   TenantRepository and runs all read/write paths inside per-tenant
-//   transactions. A direct *sql.DB handle is required for that — the
-//   `db` field is the source for `runWithTenantTx`.
+//
+//	`report_settings` and `generated_reports` are RLS-enabled (migration
+//	013). The previous job called `reportRepo.GetEnabledSettings(ctx)` and
+//	`reportRepo.GetReport*` on a bare scheduler context with no
+//	`app.current_tenant_id` GUC, so under sbomhub_app it received zero
+//	rows and never generated anything. The job now enumerates tenants via
+//	TenantRepository and runs all read/write paths inside per-tenant
+//	transactions. A direct *sql.DB handle is required for that — the
+//	`db` field is the source for `runWithTenantTx`.
 type ReportGenerationJob struct {
 	reportService *service.ReportService
 	reportRepo    *repository.ReportRepository

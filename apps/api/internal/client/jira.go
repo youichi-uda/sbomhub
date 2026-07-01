@@ -40,14 +40,14 @@ type JiraIssue struct {
 
 // JiraIssueFields represents Jira issue fields
 type JiraIssueFields struct {
-	Summary     string          `json:"summary"`
-	Description interface{}     `json:"description,omitempty"` // Can be string or ADF format
-	Status      *JiraStatus     `json:"status,omitempty"`
-	Priority    *JiraPriority   `json:"priority,omitempty"`
-	Assignee    *JiraUser       `json:"assignee,omitempty"`
-	IssueType   *JiraIssueType  `json:"issuetype,omitempty"`
-	Project     *JiraProject    `json:"project,omitempty"`
-	Labels      []string        `json:"labels,omitempty"`
+	Summary     string         `json:"summary"`
+	Description interface{}    `json:"description,omitempty"` // Can be string or ADF format
+	Status      *JiraStatus    `json:"status,omitempty"`
+	Priority    *JiraPriority  `json:"priority,omitempty"`
+	Assignee    *JiraUser      `json:"assignee,omitempty"`
+	IssueType   *JiraIssueType `json:"issuetype,omitempty"`
+	Project     *JiraProject   `json:"project,omitempty"`
+	Labels      []string       `json:"labels,omitempty"`
 }
 
 // JiraStatus represents a Jira status

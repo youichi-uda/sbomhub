@@ -32,20 +32,20 @@ func NewRemediationService(
 
 // RemediationResponse contains full remediation information
 type RemediationResponse struct {
-	CVEID             string                `json:"cve_id"`
-	Summary           string                `json:"summary"`
-	Severity          string                `json:"severity"`
-	AffectedComponent AffectedComponent     `json:"affected_component"`
-	Remediation       RemediationDetails    `json:"remediation"`
-	Workarounds       []Workaround          `json:"workarounds"`
+	CVEID             string             `json:"cve_id"`
+	Summary           string             `json:"summary"`
+	Severity          string             `json:"severity"`
+	AffectedComponent AffectedComponent  `json:"affected_component"`
+	Remediation       RemediationDetails `json:"remediation"`
+	Workarounds       []Workaround       `json:"workarounds"`
 }
 
 // AffectedComponent describes the affected component
 type AffectedComponent struct {
-	Name             string   `json:"name"`
-	Ecosystem        string   `json:"ecosystem"`
-	CurrentVersion   string   `json:"current_version"`
-	AffectedVersions string   `json:"affected_versions"`
+	Name             string `json:"name"`
+	Ecosystem        string `json:"ecosystem"`
+	CurrentVersion   string `json:"current_version"`
+	AffectedVersions string `json:"affected_versions"`
 }
 
 // RemediationDetails contains upgrade information
@@ -118,7 +118,6 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 
 	return response, nil
 }
-
 
 // GetRemediationByCVE fetches remediation by CVE ID
 func (s *RemediationService) GetRemediationByCVE(ctx context.Context, cveID string, componentName, componentVersion string) (*RemediationResponse, error) {

@@ -23,18 +23,18 @@ import (
 // the rendered prompt (BuildPrompt includes the CVE id, which we use
 // as the routing key) to pick which canned response to emit.
 type fakeProvider struct {
-	name        string
-	model       string
-	responses   map[string]string // CVEID → JSON body to return
-	err         error
-	inputTokens int
+	name         string
+	model        string
+	responses    map[string]string // CVEID → JSON body to return
+	err          error
+	inputTokens  int
 	outputTokens int
 }
 
 var _ llm.Provider = (*fakeProvider)(nil)
 
-func (f *fakeProvider) Name() string                  { return f.name }
-func (f *fakeProvider) Model() string                 { return f.model }
+func (f *fakeProvider) Name() string                   { return f.name }
+func (f *fakeProvider) Model() string                  { return f.model }
 func (f *fakeProvider) Capabilities() llm.Capabilities { return llm.Capabilities{} }
 func (f *fakeProvider) Embed(_ context.Context, _ llm.EmbedRequest) (*llm.EmbedResponse, error) {
 	return nil, llm.ErrNotImplemented
@@ -539,8 +539,8 @@ type ctxAwareBlockingProvider struct {
 
 var _ llm.Provider = (*ctxAwareBlockingProvider)(nil)
 
-func (p *ctxAwareBlockingProvider) Name() string                  { return p.name }
-func (p *ctxAwareBlockingProvider) Model() string                 { return p.model }
+func (p *ctxAwareBlockingProvider) Name() string                   { return p.name }
+func (p *ctxAwareBlockingProvider) Model() string                  { return p.model }
 func (p *ctxAwareBlockingProvider) Capabilities() llm.Capabilities { return llm.Capabilities{} }
 func (p *ctxAwareBlockingProvider) Embed(_ context.Context, _ llm.EmbedRequest) (*llm.EmbedResponse, error) {
 	return nil, llm.ErrNotImplemented
@@ -579,8 +579,8 @@ type barrierGatedProvider struct {
 
 var _ llm.Provider = (*barrierGatedProvider)(nil)
 
-func (b *barrierGatedProvider) Name() string                  { return b.inner.Name() }
-func (b *barrierGatedProvider) Model() string                 { return b.inner.Model() }
+func (b *barrierGatedProvider) Name() string                   { return b.inner.Name() }
+func (b *barrierGatedProvider) Model() string                  { return b.inner.Model() }
 func (b *barrierGatedProvider) Capabilities() llm.Capabilities { return b.inner.Capabilities() }
 func (b *barrierGatedProvider) Embed(ctx context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {
 	return b.inner.Embed(ctx, req)
@@ -618,18 +618,18 @@ func (b *barrierGatedProvider) Complete(ctx context.Context, req llm.CompleteReq
 // green.
 //
 // This test asserts:
-//   1. Every blocking provider call that started observes ctx
-//      cancellation (cancelObserved == started). If runOne stopped
-//      threading runCtx into the per-call ctx, the blocking goroutines
-//      would only unblock when their own per-call Timeout elapsed —
-//      i.e. they would not observe runCtx cancellation, only the
-//      per-call timeout. The Timeout is set to 30s here so any goroutine
-//      that observed Done within the test budget came from runCtx, not
-//      its own per-call timer.
-//   2. runBench returns within 1s after the write failure. With per-call
-//      Timeout = 30s and an outer 5s test ceiling, a regression in the
-//      cancel-propagation path would hang until the outer ceiling and
-//      blow the test budget, not the assertion.
+//  1. Every blocking provider call that started observes ctx
+//     cancellation (cancelObserved == started). If runOne stopped
+//     threading runCtx into the per-call ctx, the blocking goroutines
+//     would only unblock when their own per-call Timeout elapsed —
+//     i.e. they would not observe runCtx cancellation, only the
+//     per-call timeout. The Timeout is set to 30s here so any goroutine
+//     that observed Done within the test budget came from runCtx, not
+//     its own per-call timer.
+//  2. runBench returns within 1s after the write failure. With per-call
+//     Timeout = 30s and an outer 5s test ceiling, a regression in the
+//     cancel-propagation path would hang until the outer ceiling and
+//     blow the test budget, not the assertion.
 //
 // The race detector additionally checks for goroutine-level data races
 // and (indirectly, via wg.Wait inside runBench) verifies the bench

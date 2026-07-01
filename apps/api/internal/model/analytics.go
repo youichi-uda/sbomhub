@@ -104,28 +104,28 @@ type ComplianceTrendPoint struct {
 
 // AnalyticsSummary is the main analytics dashboard response
 type AnalyticsSummary struct {
-	Period           int                       `json:"period"` // days
-	MTTR             []MTTRResult              `json:"mttr"`
+	Period             int                       `json:"period"` // days
+	MTTR               []MTTRResult              `json:"mttr"`
 	VulnerabilityTrend []VulnerabilityTrendPoint `json:"vulnerability_trend"`
-	SLOAchievement   []SLOAchievement          `json:"slo_achievement"`
-	ComplianceTrend  []ComplianceTrendPoint    `json:"compliance_trend"`
-	Summary          AnalyticsQuickStats       `json:"summary"`
+	SLOAchievement     []SLOAchievement          `json:"slo_achievement"`
+	ComplianceTrend    []ComplianceTrendPoint    `json:"compliance_trend"`
+	Summary            AnalyticsQuickStats       `json:"summary"`
 }
 
 // AnalyticsQuickStats provides quick summary statistics
 type AnalyticsQuickStats struct {
-	TotalOpenVulnerabilities   int     `json:"total_open_vulnerabilities"`
-	ResolvedLast30Days         int     `json:"resolved_last_30_days"`
-	AverageMTTRHours           float64 `json:"average_mttr_hours"`
-	OverallSLOAchievementPct   float64 `json:"overall_slo_achievement_pct"`
-	CurrentComplianceScore     int     `json:"current_compliance_score"`
-	ComplianceMaxScore         int     `json:"compliance_max_score"`
+	TotalOpenVulnerabilities int     `json:"total_open_vulnerabilities"`
+	ResolvedLast30Days       int     `json:"resolved_last_30_days"`
+	AverageMTTRHours         float64 `json:"average_mttr_hours"`
+	OverallSLOAchievementPct float64 `json:"overall_slo_achievement_pct"`
+	CurrentComplianceScore   int     `json:"current_compliance_score"`
+	ComplianceMaxScore       int     `json:"compliance_max_score"`
 }
 
 // Resolution type constants
 const (
-	ResolutionTypeFixed       = "fixed"
-	ResolutionTypeMitigated   = "mitigated"
-	ResolutionTypeAccepted    = "accepted"
+	ResolutionTypeFixed         = "fixed"
+	ResolutionTypeMitigated     = "mitigated"
+	ResolutionTypeAccepted      = "accepted"
 	ResolutionTypeFalsePositive = "false_positive"
 )

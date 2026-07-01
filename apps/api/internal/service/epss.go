@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	epssAPIURL   = "https://api.first.org/data/v1/epss"
+	epssAPIURL    = "https://api.first.org/data/v1/epss"
 	epssBatchSize = 100
 )
 

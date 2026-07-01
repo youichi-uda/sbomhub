@@ -25,15 +25,15 @@ import (
 )
 
 type ComplianceService struct {
-	sbomRepo            *repository.SbomRepository
-	componentRepo       *repository.ComponentRepository
-	vulnRepo            *repository.VulnerabilityRepository
-	vexRepo             *repository.VEXRepository
-	licensePolicyRepo   *repository.LicensePolicyRepository
-	dashboardRepo       *repository.DashboardRepository
-	checklistRepo       *repository.ChecklistRepository
-	visualizationRepo   *repository.VisualizationRepository
-	publicLinkRepo      *repository.PublicLinkRepository
+	sbomRepo          *repository.SbomRepository
+	componentRepo     *repository.ComponentRepository
+	vulnRepo          *repository.VulnerabilityRepository
+	vexRepo           *repository.VEXRepository
+	licensePolicyRepo *repository.LicensePolicyRepository
+	dashboardRepo     *repository.DashboardRepository
+	checklistRepo     *repository.ChecklistRepository
+	visualizationRepo *repository.VisualizationRepository
+	publicLinkRepo    *repository.PublicLinkRepository
 }
 
 func NewComplianceService(
@@ -67,15 +67,15 @@ func NewComplianceServiceFull(
 	publicLinkRepo *repository.PublicLinkRepository,
 ) *ComplianceService {
 	return &ComplianceService{
-		sbomRepo:            sbomRepo,
-		componentRepo:       componentRepo,
-		vulnRepo:            vulnRepo,
-		vexRepo:             vexRepo,
-		licensePolicyRepo:   licensePolicyRepo,
-		dashboardRepo:       dashboardRepo,
-		checklistRepo:       checklistRepo,
-		visualizationRepo:   visualizationRepo,
-		publicLinkRepo:      publicLinkRepo,
+		sbomRepo:          sbomRepo,
+		componentRepo:     componentRepo,
+		vulnRepo:          vulnRepo,
+		vexRepo:           vexRepo,
+		licensePolicyRepo: licensePolicyRepo,
+		dashboardRepo:     dashboardRepo,
+		checklistRepo:     checklistRepo,
+		visualizationRepo: visualizationRepo,
+		publicLinkRepo:    publicLinkRepo,
 	}
 }
 

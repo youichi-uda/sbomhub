@@ -203,16 +203,16 @@ func (r *LLMCallsRepository) List(ctx context.Context, tenantID uuid.UUID, filte
 	var out []LLMCall
 	for rows.Next() {
 		var (
-			c              LLMCall
-			userID         sql.NullString
-			promptPreview  sql.NullString
-			respPreview    sql.NullString
-			respBody       sql.NullString
-			finishReason   sql.NullString
-			errMessage     sql.NullString
-			triageCVE      sql.NullString
-			triageCompID   sql.NullString
-			craReportID    sql.NullString
+			c             LLMCall
+			userID        sql.NullString
+			promptPreview sql.NullString
+			respPreview   sql.NullString
+			respBody      sql.NullString
+			finishReason  sql.NullString
+			errMessage    sql.NullString
+			triageCVE     sql.NullString
+			triageCompID  sql.NullString
+			craReportID   sql.NullString
 		)
 		if err := rows.Scan(
 			&c.ID, &c.TenantID, &userID,
@@ -267,7 +267,7 @@ func nullableUUID(u *uuid.UUID) interface{} {
 }
 
 // nullableString returns nil for empty strings so optional TEXT columns
-// land as NULL instead of '' (matches LLM_PROVIDER_DESIGN.md §6.1 intent
+// land as NULL instead of ” (matches LLM_PROVIDER_DESIGN.md §6.1 intent
 // where prompt_preview / response_preview / response_body / error_message
 // are described as optional rather than empty-string-required).
 func nullableString(s string) interface{} {

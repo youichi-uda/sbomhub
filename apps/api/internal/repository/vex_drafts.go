@@ -109,10 +109,10 @@ const (
 // handler should only ever be able to flip the decision lifecycle
 // fields, not the AI evidence trail.
 type VEXDraftDecisionUpdate struct {
-	Decision     string     // required: 'approved' | 'edited' | 'rejected'
-	DecisionBy   uuid.UUID  // required: the user making the decision
-	DecisionAt   time.Time  // optional: defaults to NOW() if zero
-	DecisionNote string     // optional human note
+	Decision     string    // required: 'approved' | 'edited' | 'rejected'
+	DecisionBy   uuid.UUID // required: the user making the decision
+	DecisionAt   time.Time // optional: defaults to NOW() if zero
+	DecisionNote string    // optional human note
 	// EditedState / EditedJustification / EditedDetail apply only
 	// when Decision == 'edited'. They overwrite the AI draft fields.
 	// For 'approved' / 'rejected' decisions they are ignored. Pointers
@@ -577,7 +577,7 @@ func hasNonEmptyJSONArray(raw json.RawMessage) bool {
 // nullableStringPtr converts a *string to a sql-driver value: nil
 // pointer -> NULL (interpreted as "do not change" by COALESCE), set
 // pointer -> the string value (including empty string, which the
-// COALESCE then treats as a real overwrite to ''). Mirrors
+// COALESCE then treats as a real overwrite to ”). Mirrors
 // nullableUUID / nullableTime.
 func nullableStringPtr(s *string) interface{} {
 	if s == nil {

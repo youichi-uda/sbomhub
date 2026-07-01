@@ -375,7 +375,7 @@ func TestVisualizationRepository_TenantTxFlow_RLSAllows(t *testing.T) {
 		t.Fatalf("repo.GetByProject via TenantTx ctx: %v -- F74 regression", err)
 	}
 	if got == nil {
-		t.Fatalf("repo.GetByProject returned nil; want row (F74 regression: RLS predicate "+
+		t.Fatalf("repo.GetByProject returned nil; want row (F74 regression: RLS predicate " +
 			"stripped the row because the repo connection has no app.current_tenant_id GUC)")
 	}
 	if got.TenantID != tenantA || got.ProjectID != projectA {

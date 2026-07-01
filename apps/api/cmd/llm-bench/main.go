@@ -272,14 +272,14 @@ func resolveProviderNames(raw string) ([]string, error) {
 // (each provider has its own sensible default; we pass through the env
 // override when present).
 type providerSpec struct {
-	name             string
-	model            string
-	apiKey           string
-	azureEndpoint    string
-	azureDeployment  string
-	azureAPIVersion  string
-	ollamaURL        string
-	skipReason       string // non-empty → provider was requested but cannot run; bench logs warning + skips
+	name            string
+	model           string
+	apiKey          string
+	azureEndpoint   string
+	azureDeployment string
+	azureAPIVersion string
+	ollamaURL       string
+	skipReason      string // non-empty → provider was requested but cannot run; bench logs warning + skips
 }
 
 // resolveProviderSpec reads env for one provider. The env names follow

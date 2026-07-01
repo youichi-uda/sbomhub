@@ -9,7 +9,8 @@
 //   - PRODUCT_REBOOT_PLAN.md §6 defines the Evidence Pack as the
 //     primary export surface a Japanese SMB manufacturer hands to an
 //     EU CRA auditor: "approved VEX statements + approved CRA reports
-//     + METI self-assessment, with audit trail". M2-6 shipped the
+//
+//   - METI self-assessment, with audit trail". M2-6 shipped the
 //     Markdown bundle with VEX + CRA + a METI placeholder; M3-6
 //     replaces the placeholder with the live meti_assessments rows
 //     produced by the M3-2 evaluator and indexed by the M3-3 catalog.
@@ -319,9 +320,9 @@ func (b *Builder) Build(ctx context.Context, in BuildInput) (*BuildResult, error
 	// single ListByProject with the zero filter (all phases, all
 	// statuses, all override states).
 	var (
-		metiRows         []repository.MetiAssessment
-		metiFetchAll     bool
-		metiAchievedCnt  int
+		metiRows        []repository.MetiAssessment
+		metiFetchAll    bool
+		metiAchievedCnt int
 	)
 	if in.IncludeMETIAssessment {
 		if b.meti == nil || b.catalog == nil {

@@ -62,24 +62,24 @@ func NewKEVServiceWithRepo(kevRepo KEVRepositoryInterface) *KEVService {
 
 // KEVCatalogResponse represents the CISA KEV catalog JSON response
 type KEVCatalogResponse struct {
-	CatalogVersion string                `json:"catalogVersion"`
-	DateReleased   string                `json:"dateReleased"`
-	Count          int                   `json:"count"`
-	Vulnerabilities []KEVVulnerability   `json:"vulnerabilities"`
+	CatalogVersion  string             `json:"catalogVersion"`
+	DateReleased    string             `json:"dateReleased"`
+	Count           int                `json:"count"`
+	Vulnerabilities []KEVVulnerability `json:"vulnerabilities"`
 }
 
 // KEVVulnerability represents a single vulnerability in the KEV catalog
 type KEVVulnerability struct {
-	CVEID                     string `json:"cveID"`
-	VendorProject             string `json:"vendorProject"`
-	Product                   string `json:"product"`
-	VulnerabilityName         string `json:"vulnerabilityName"`
-	DateAdded                 string `json:"dateAdded"`
-	ShortDescription          string `json:"shortDescription"`
-	RequiredAction            string `json:"requiredAction"`
-	DueDate                   string `json:"dueDate"`
+	CVEID                      string `json:"cveID"`
+	VendorProject              string `json:"vendorProject"`
+	Product                    string `json:"product"`
+	VulnerabilityName          string `json:"vulnerabilityName"`
+	DateAdded                  string `json:"dateAdded"`
+	ShortDescription           string `json:"shortDescription"`
+	RequiredAction             string `json:"requiredAction"`
+	DueDate                    string `json:"dueDate"`
 	KnownRansomwareCampaignUse string `json:"knownRansomwareCampaignUse"`
-	Notes                     string `json:"notes"`
+	Notes                      string `json:"notes"`
 }
 
 // SyncCatalog fetches and synchronizes the KEV catalog
@@ -292,10 +292,10 @@ func (s *KEVService) GetStats(ctx context.Context) (*KEVStats, error) {
 	}
 
 	return &KEVStats{
-		TotalEntries:      count,
-		LastSyncAt:        settings.LastSyncAt,
-		CatalogVersion:    settings.LastCatalogVersion,
-		LatestSyncStatus:  latestLog,
+		TotalEntries:     count,
+		LastSyncAt:       settings.LastSyncAt,
+		CatalogVersion:   settings.LastCatalogVersion,
+		LatestSyncStatus: latestLog,
 	}, nil
 }
 

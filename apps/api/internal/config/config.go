@@ -27,9 +27,9 @@ type Config struct {
 	ClerkWebhookSecret string
 
 	// Lemon Squeezy billing (SaaS mode)
-	LemonSqueezyAPIKey        string
-	LemonSqueezyWebhookSecret string
-	LemonSqueezyStoreID       string
+	LemonSqueezyAPIKey         string
+	LemonSqueezyWebhookSecret  string
+	LemonSqueezyStoreID        string
 	LemonSqueezyStarterVariant string
 	LemonSqueezyProVariant     string
 	LemonSqueezyTeamVariant    string

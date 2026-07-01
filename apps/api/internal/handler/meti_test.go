@@ -265,12 +265,12 @@ func (f *fakeMetiStore) ClearOverride(_ context.Context, tenantID, projectID uui
 }
 
 type fakeMetiEvaluator struct {
-	mu       sync.Mutex
-	results  []metisvc.CriterionResult
-	err      error
-	calls    int
-	lastT    uuid.UUID
-	lastP    uuid.UUID
+	mu      sync.Mutex
+	results []metisvc.CriterionResult
+	err     error
+	calls   int
+	lastT   uuid.UUID
+	lastP   uuid.UUID
 }
 
 func (f *fakeMetiEvaluator) Evaluate(_ context.Context, tenantID, projectID uuid.UUID) ([]metisvc.CriterionResult, error) {

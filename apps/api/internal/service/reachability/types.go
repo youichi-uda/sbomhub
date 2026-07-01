@@ -82,10 +82,10 @@ type EvidencePointer struct {
 	FilePath    string       `json:"file_path,omitempty"`
 	Line        int          `json:"line,omitempty"`
 	Column      int          `json:"column,omitempty"`
-	Symbol      string       `json:"symbol,omitempty"`       // e.g. "yaml.Unmarshal"
-	ImportPath  string       `json:"import_path,omitempty"`  // e.g. "gopkg.in/yaml.v2"
-	Description string       `json:"description,omitempty"`  // human-readable context
-	RawSnippet  string       `json:"raw_snippet,omitempty"`  // optional source excerpt
+	Symbol      string       `json:"symbol,omitempty"`      // e.g. "yaml.Unmarshal"
+	ImportPath  string       `json:"import_path,omitempty"` // e.g. "gopkg.in/yaml.v2"
+	Description string       `json:"description,omitempty"` // human-readable context
+	RawSnippet  string       `json:"raw_snippet,omitempty"` // optional source excerpt
 }
 
 // ReachabilityResult is the analyzer output consumed by the M1-4 LLM stage
@@ -106,7 +106,7 @@ type ReachabilityResult struct {
 	Status       Status            `json:"status"`
 	Confidence   float64           `json:"confidence"`
 	Evidence     []EvidencePointer `json:"evidence"`
-	Ecosystem    string            `json:"ecosystem"`    // "go" for M1; "npm" deferred to M2
+	Ecosystem    string            `json:"ecosystem"` // "go" for M1; "npm" deferred to M2
 	AnalyzedAt   time.Time         `json:"analyzed_at"`
 	AnalyzerName string            `json:"analyzer_name"` // e.g. "go_analyzer/v1"
 	DurationMS   int64             `json:"duration_ms"`

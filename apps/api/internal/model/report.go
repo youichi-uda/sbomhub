@@ -8,19 +8,19 @@ import (
 
 // ReportSettings defines settings for scheduled report generation
 type ReportSettings struct {
-	ID              uuid.UUID  `json:"id" db:"id"`
-	TenantID        uuid.UUID  `json:"tenant_id" db:"tenant_id"`
-	Enabled         bool       `json:"enabled" db:"enabled"`
-	ReportType      string     `json:"report_type" db:"report_type"`
-	ScheduleType    string     `json:"schedule_type" db:"schedule_type"`
-	ScheduleDay     int        `json:"schedule_day" db:"schedule_day"`
-	ScheduleHour    int        `json:"schedule_hour" db:"schedule_hour"`
-	Format          string     `json:"format" db:"format"`
-	EmailEnabled    bool       `json:"email_enabled" db:"email_enabled"`
-	EmailRecipients []string   `json:"email_recipients" db:"email_recipients"`
-	IncludeSections []string   `json:"include_sections" db:"include_sections"`
-	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+	ID              uuid.UUID `json:"id" db:"id"`
+	TenantID        uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	Enabled         bool      `json:"enabled" db:"enabled"`
+	ReportType      string    `json:"report_type" db:"report_type"`
+	ScheduleType    string    `json:"schedule_type" db:"schedule_type"`
+	ScheduleDay     int       `json:"schedule_day" db:"schedule_day"`
+	ScheduleHour    int       `json:"schedule_hour" db:"schedule_hour"`
+	Format          string    `json:"format" db:"format"`
+	EmailEnabled    bool      `json:"email_enabled" db:"email_enabled"`
+	EmailRecipients []string  `json:"email_recipients" db:"email_recipients"`
+	IncludeSections []string  `json:"include_sections" db:"include_sections"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // GeneratedReport represents a generated report
@@ -103,28 +103,28 @@ type ReportSummary struct {
 
 // VulnReportData contains vulnerability statistics
 type VulnReportData struct {
-	BySeverity   map[string]int `json:"by_severity"`
-	ByStatus     map[string]int `json:"by_status"`
-	TopCVEs      []CVESummary   `json:"top_cves"`
-	TrendData    []TrendPoint   `json:"trend_data"`
+	BySeverity map[string]int `json:"by_severity"`
+	ByStatus   map[string]int `json:"by_status"`
+	TopCVEs    []CVESummary   `json:"top_cves"`
+	TrendData  []TrendPoint   `json:"trend_data"`
 }
 
 // CVESummary contains summary info for a CVE
 type CVESummary struct {
-	CVEID       string  `json:"cve_id"`
-	Severity    string  `json:"severity"`
-	CVSSScore   float64 `json:"cvss_score"`
-	EPSSScore   float64 `json:"epss_score"`
-	ProjectName string  `json:"project_name"`
-	ComponentName string `json:"component_name"`
+	CVEID         string  `json:"cve_id"`
+	Severity      string  `json:"severity"`
+	CVSSScore     float64 `json:"cvss_score"`
+	EPSSScore     float64 `json:"epss_score"`
+	ProjectName   string  `json:"project_name"`
+	ComponentName string  `json:"component_name"`
 }
 
 // ComplianceReportData contains compliance statistics
 type ComplianceReportData struct {
-	OverallScore   int                    `json:"overall_score"`
-	MaxScore       int                    `json:"max_score"`
-	Categories     []ComplianceCategory   `json:"categories"`
-	TrendData      []ComplianceTrendPoint `json:"trend_data"`
+	OverallScore int                    `json:"overall_score"`
+	MaxScore     int                    `json:"max_score"`
+	Categories   []ComplianceCategory   `json:"categories"`
+	TrendData    []ComplianceTrendPoint `json:"trend_data"`
 }
 
 // ChecklistReportData contains METI checklist progress for reports

@@ -27,15 +27,16 @@ const (
 // CVESyncJob fetches new/updated CVEs from NVD and matches against components.
 //
 // codex-r4 P1 fix:
-//   The `components` table is FORCE ROW LEVEL SECURITY (migration 023 /
-//   027). The previous matching loop ran a single system-wide LIKE query
-//   on `j.db` and silently matched zero rows under sbomhub_app. The fix
-//   keeps vulnerability upsert on the non-RLS `vulnerabilities` table at
-//   the system level (one row per CVE, shared across tenants) but moves
-//   the component-match phase into a per-tenant tx so RLS policies see
-//   the right tenant. `component_vulnerabilities` is not RLS-enabled, so
-//   the link writes happen on the same tenant tx without further policy
-//   plumbing.
+//
+//	The `components` table is FORCE ROW LEVEL SECURITY (migration 023 /
+//	027). The previous matching loop ran a single system-wide LIKE query
+//	on `j.db` and silently matched zero rows under sbomhub_app. The fix
+//	keeps vulnerability upsert on the non-RLS `vulnerabilities` table at
+//	the system level (one row per CVE, shared across tenants) but moves
+//	the component-match phase into a per-tenant tx so RLS policies see
+//	the right tenant. `component_vulnerabilities` is not RLS-enabled, so
+//	the link writes happen on the same tenant tx without further policy
+//	plumbing.
 type CVESyncJob struct {
 	db         *sql.DB
 	tenantRepo *repository.TenantRepository

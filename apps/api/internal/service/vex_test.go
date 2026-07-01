@@ -63,8 +63,8 @@ func TestMapJustificationToCycloneDX(t *testing.T) {
 		{model.VEXJustificationVulnerableCodeNotInExecutePath, "vulnerable_code_not_in_execute_path"},
 		{model.VEXJustificationVulnerableCodeCannotBeControlled, "vulnerable_code_cannot_be_controlled_by_adversary"},
 		{model.VEXJustificationInlineMitigationsAlreadyExist, "inline_mitigations_already_exist"},
-		{model.VEXJustification("unknown"), ""},   // default empty
-		{model.VEXJustification(""), ""},          // empty
+		{model.VEXJustification("unknown"), ""}, // default empty
+		{model.VEXJustification(""), ""},        // empty
 	}
 
 	for _, tt := range tests {

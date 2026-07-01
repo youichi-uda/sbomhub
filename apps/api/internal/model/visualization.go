@@ -33,8 +33,8 @@ type VisualizationSettingsInput struct {
 
 // VisualizationFramework represents the complete visualization framework with options
 type VisualizationFramework struct {
-	Settings *VisualizationSettings  `json:"settings,omitempty"`
-	Options  VisualizationOptions    `json:"options"`
+	Settings *VisualizationSettings `json:"settings,omitempty"`
+	Options  VisualizationOptions   `json:"options"`
 }
 
 // VisualizationOptions represents available options for visualization settings

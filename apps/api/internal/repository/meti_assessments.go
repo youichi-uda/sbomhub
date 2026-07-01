@@ -433,6 +433,7 @@ func (r *MetiAssessmentsRepository) CountByProject(ctx context.Context, tenantID
 //  2. The row exists but its current override_status IS NOT NULL
 //     (already overridden -- re-override rejected; clear-first via a
 //     separate handler path).
+//
 // Handlers that load the row first can disambiguate by inspecting the
 // prior override; bare callers should treat ErrNoRows as "could not
 // apply override" and surface a 409 to the operator.

@@ -97,7 +97,7 @@ func TestVEXStatement_NilComponentID(t *testing.T) {
 func TestVEXStatementWithDetails(t *testing.T) {
 	compName := "lodash"
 	compVersion := "4.17.20"
-	
+
 	stmt := VEXStatementWithDetails{
 		VEXStatement: VEXStatement{
 			ID:        uuid.New(),

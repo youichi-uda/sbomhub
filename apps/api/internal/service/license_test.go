@@ -39,33 +39,33 @@ func TestNormalizeLicenseID(t *testing.T) {
 		{"Apache-2.0", "Apache-2.0"},
 		{"GPL-3.0-only", "GPL-3.0-only"},
 		{"BSD-3-Clause", "BSD-3-Clause"},
-		
+
 		// Common variations should be normalized
 		{"MIT License", "MIT"},
 		{"Apache 2.0", "Apache-2.0"},
 		{"Apache 2", "Apache-2.0"},
 		{"Apache-2", "Apache-2.0"},
-		
+
 		// GPL variations
 		{"GPL-2.0", "GPL-2.0-only"},
 		{"GPL-3.0", "GPL-3.0-only"},
 		{"LGPL-2.1", "LGPL-2.1-only"},
 		{"LGPL-3.0", "LGPL-3.0-only"},
-		
+
 		// BSD variations
 		{"BSD 2-Clause", "BSD-2-Clause"},
 		{"BSD 3-Clause", "BSD-3-Clause"},
 		{"BSD-2", "BSD-2-Clause"},
 		{"BSD-3", "BSD-3-Clause"},
-		
+
 		// CC0 variations
 		{"CC0", "CC0-1.0"},
 		{"Creative Commons Zero", "CC0-1.0"},
-		
+
 		// Whitespace handling
 		{"  MIT  ", "MIT"},
 		{" Apache-2.0 ", "Apache-2.0"},
-		
+
 		// Unknown licenses pass through
 		{"Custom-License", "Custom-License"},
 		{"Proprietary", "Proprietary"},

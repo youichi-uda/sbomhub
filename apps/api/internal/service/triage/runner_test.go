@@ -1726,10 +1726,10 @@ func TestRunner_Run_MissingVulnerabilityCVELookup_Rejected(t *testing.T) {
 // separation. The inner manager is invoked for actual behaviour so the
 // fakes still see their normal call sequence.
 type countingTxManager struct {
-	mu        sync.Mutex
-	inner     TxManager
-	readCnt   int
-	writeCnt  int
+	mu       sync.Mutex
+	inner    TxManager
+	readCnt  int
+	writeCnt int
 	// inReadDuringFn captures whether ctx had a tx bound while fn ran.
 	// Set on every RunRead call so test assertions can stay simple.
 	lastReadHadTx  bool
@@ -1766,8 +1766,8 @@ func (m *countingTxManager) RunWrite(ctx context.Context, tenantID uuid.UUID, fn
 // carried an active *sql.Tx. The F19 contract is "no tx is held during
 // the LLM upstream call"; this lets us assert it directly.
 type ctxAwareStubProvider struct {
-	resp           *llm.CompleteResponse
-	err            error
+	resp          *llm.CompleteResponse
+	err           error
 	sawTxInCtx    bool
 	receivedCtx   context.Context
 	blockUntilCtx bool // if true, Complete blocks until ctx.Done()

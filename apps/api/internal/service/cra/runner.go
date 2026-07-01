@@ -1217,26 +1217,26 @@ func vexJustificationToCRAImmediateMitigations(d *repository.VEXDraft, lang Lang
 	}
 	// Lookup tables keyed by justification.
 	jaJust := map[string]string{
-		"code_not_present":                   "脆弱なコードは本製品に含まれていない (VEX 判定: code_not_present)",
-		"code_not_reachable":                 "脆弱なコードは含まれるが到達不可能な経路にあり、悪用は確認されていない (VEX 判定: code_not_reachable)",
-		"requires_configuration":             "特定の構成設定下でのみ顕在化する (VEX 判定: requires_configuration)",
-		"requires_dependency":                "特定の依存ライブラリ構成下でのみ顕在化する (VEX 判定: requires_dependency)",
-		"requires_environment":               "特定の実行環境下でのみ顕在化する (VEX 判定: requires_environment)",
-		"protected_by_compiler":              "コンパイラ層の保護により悪用を抑止 (VEX 判定: protected_by_compiler)",
-		"protected_at_perimeter":             "境界防御により悪用を抑止 (VEX 判定: protected_at_perimeter)",
-		"protected_at_runtime":               "実行時保護により悪用を抑止 (VEX 判定: protected_at_runtime)",
-		"inline_mitigations_already_exist":   "本製品内に組み込みの緩和策が既に存在する (VEX 判定: inline_mitigations_already_exist)",
+		"code_not_present":                 "脆弱なコードは本製品に含まれていない (VEX 判定: code_not_present)",
+		"code_not_reachable":               "脆弱なコードは含まれるが到達不可能な経路にあり、悪用は確認されていない (VEX 判定: code_not_reachable)",
+		"requires_configuration":           "特定の構成設定下でのみ顕在化する (VEX 判定: requires_configuration)",
+		"requires_dependency":              "特定の依存ライブラリ構成下でのみ顕在化する (VEX 判定: requires_dependency)",
+		"requires_environment":             "特定の実行環境下でのみ顕在化する (VEX 判定: requires_environment)",
+		"protected_by_compiler":            "コンパイラ層の保護により悪用を抑止 (VEX 判定: protected_by_compiler)",
+		"protected_at_perimeter":           "境界防御により悪用を抑止 (VEX 判定: protected_at_perimeter)",
+		"protected_at_runtime":             "実行時保護により悪用を抑止 (VEX 判定: protected_at_runtime)",
+		"inline_mitigations_already_exist": "本製品内に組み込みの緩和策が既に存在する (VEX 判定: inline_mitigations_already_exist)",
 	}
 	enJust := map[string]string{
-		"code_not_present":                   "Vulnerable code is not present in this product (VEX: code_not_present)",
-		"code_not_reachable":                 "Vulnerable code is present but not reachable (VEX: code_not_reachable)",
-		"requires_configuration":             "Only exploitable under specific configurations (VEX: requires_configuration)",
-		"requires_dependency":                "Only exploitable under specific dependency profiles (VEX: requires_dependency)",
-		"requires_environment":               "Only exploitable under specific runtime environments (VEX: requires_environment)",
-		"protected_by_compiler":              "Compiler-level protections mitigate exploitation (VEX: protected_by_compiler)",
-		"protected_at_perimeter":             "Perimeter defences mitigate exploitation (VEX: protected_at_perimeter)",
-		"protected_at_runtime":               "Runtime protections mitigate exploitation (VEX: protected_at_runtime)",
-		"inline_mitigations_already_exist":   "Inline mitigations already exist within the product (VEX: inline_mitigations_already_exist)",
+		"code_not_present":                 "Vulnerable code is not present in this product (VEX: code_not_present)",
+		"code_not_reachable":               "Vulnerable code is present but not reachable (VEX: code_not_reachable)",
+		"requires_configuration":           "Only exploitable under specific configurations (VEX: requires_configuration)",
+		"requires_dependency":              "Only exploitable under specific dependency profiles (VEX: requires_dependency)",
+		"requires_environment":             "Only exploitable under specific runtime environments (VEX: requires_environment)",
+		"protected_by_compiler":            "Compiler-level protections mitigate exploitation (VEX: protected_by_compiler)",
+		"protected_at_perimeter":           "Perimeter defences mitigate exploitation (VEX: protected_at_perimeter)",
+		"protected_at_runtime":             "Runtime protections mitigate exploitation (VEX: protected_at_runtime)",
+		"inline_mitigations_already_exist": "Inline mitigations already exist within the product (VEX: inline_mitigations_already_exist)",
 	}
 	table := enJust
 	if lang == LangJA {
@@ -1270,6 +1270,7 @@ type evidenceEntry struct {
 // The array always carries at least:
 //   - one "vex_draft" pointer (source)
 //   - one "template" pointer (which template was used)
+//
 // plus optional "advisory_excerpt" and "reachability_result" entries.
 // On LLM JSON parse failure an "llm_rationale" entry with note
 // "parse_error" is appended so the audit trail records the degradation.

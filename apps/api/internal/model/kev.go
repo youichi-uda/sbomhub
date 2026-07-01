@@ -8,19 +8,19 @@ import (
 
 // KEVEntry represents an entry in the CISA Known Exploited Vulnerabilities catalog
 type KEVEntry struct {
-	ID                uuid.UUID `json:"id" db:"id"`
-	CVEID             string    `json:"cve_id" db:"cve_id"`
-	VendorProject     string    `json:"vendor_project" db:"vendor_project"`
-	Product           string    `json:"product" db:"product"`
-	VulnerabilityName string    `json:"vulnerability_name" db:"vulnerability_name"`
-	ShortDescription  string    `json:"short_description,omitempty" db:"short_description"`
-	RequiredAction    string    `json:"required_action,omitempty" db:"required_action"`
-	DateAdded         time.Time `json:"date_added" db:"date_added"`
-	DueDate           time.Time `json:"due_date" db:"due_date"`
-	KnownRansomwareUse bool     `json:"known_ransomware_use" db:"known_ransomware_use"`
-	Notes             string    `json:"notes,omitempty" db:"notes"`
-	CreatedAt         time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
+	ID                 uuid.UUID `json:"id" db:"id"`
+	CVEID              string    `json:"cve_id" db:"cve_id"`
+	VendorProject      string    `json:"vendor_project" db:"vendor_project"`
+	Product            string    `json:"product" db:"product"`
+	VulnerabilityName  string    `json:"vulnerability_name" db:"vulnerability_name"`
+	ShortDescription   string    `json:"short_description,omitempty" db:"short_description"`
+	RequiredAction     string    `json:"required_action,omitempty" db:"required_action"`
+	DateAdded          time.Time `json:"date_added" db:"date_added"`
+	DueDate            time.Time `json:"due_date" db:"due_date"`
+	KnownRansomwareUse bool      `json:"known_ransomware_use" db:"known_ransomware_use"`
+	Notes              string    `json:"notes,omitempty" db:"notes"`
+	CreatedAt          time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // KEVSyncSettings represents global KEV sync configuration

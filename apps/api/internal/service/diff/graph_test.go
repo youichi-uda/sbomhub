@@ -4,15 +4,15 @@
 // interfaces, with RawData baked into the model.Sbom fixtures so the
 // CycloneDX parser has something to chew on. Three groups:
 //
-//   1. small-fixture functional tests: add / remove / version_change
-//      markers are correctly populated, edges survive the bom-ref →
-//      match-key translation, single-SBOM baseline path.
-//   2. F164 nil-slice protection: every slice field is `[]` not nil
-//      so JSON marshalling never produces `null` (the api.ts helper
-//      additionally `?? []`s, but defence in depth).
-//   3. 1000-component latency sanity: the parse + merge fits well
-//      inside the 1 s p99 the diff page expects (looser bound than
-//      a benchmark — we just want to catch quadratic regressions).
+//  1. small-fixture functional tests: add / remove / version_change
+//     markers are correctly populated, edges survive the bom-ref →
+//     match-key translation, single-SBOM baseline path.
+//  2. F164 nil-slice protection: every slice field is `[]` not nil
+//     so JSON marshalling never produces `null` (the api.ts helper
+//     additionally `?? []`s, but defence in depth).
+//  3. 1000-component latency sanity: the parse + merge fits well
+//     inside the 1 s p99 the diff page expects (looser bound than
+//     a benchmark — we just want to catch quadratic regressions).
 package diff
 
 import (
@@ -95,9 +95,9 @@ func makeCycloneDXBytesWithMetadata(t *testing.T, root cdxComponent, comps []cdx
 // graphFixture builds a two-SBOM project with a parent -> {child-a,
 // child-b} dependency tree where:
 //
-//   from:                                to:
-//     root@1.0 -> lodash@4.17.20            root@1.0 -> lodash@4.17.21  (version_change)
-//     root@1.0 -> axios@1.4.0               root@1.0 -> cool-pkg@2.0.0  (axios removed, cool-pkg added)
+//	from:                                to:
+//	  root@1.0 -> lodash@4.17.20            root@1.0 -> lodash@4.17.21  (version_change)
+//	  root@1.0 -> axios@1.4.0               root@1.0 -> cool-pkg@2.0.0  (axios removed, cool-pkg added)
 //
 // Match keys for these components come from the purl normalisation
 // (`pkg:npm/<name>` with the version stripped). That means lodash on

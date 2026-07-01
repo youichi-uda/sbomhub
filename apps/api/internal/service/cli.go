@@ -121,15 +121,15 @@ type CLIVulnerabilityResult struct {
 
 // CLIVulnerabilityEntry represents a single vulnerability entry for CLI output.
 type CLIVulnerabilityEntry struct {
-	Package     string   `json:"package"`
-	Version     string   `json:"version"`
-	Purl        string   `json:"purl,omitempty"`
-	ID          string   `json:"id"`
-	Severity    string   `json:"severity"`
-	Summary     string   `json:"summary,omitempty"`
-	FixedIn     string   `json:"fixed_in,omitempty"`
-	Aliases     []string `json:"aliases,omitempty"`
-	References  []string `json:"references,omitempty"`
+	Package    string   `json:"package"`
+	Version    string   `json:"version"`
+	Purl       string   `json:"purl,omitempty"`
+	ID         string   `json:"id"`
+	Severity   string   `json:"severity"`
+	Summary    string   `json:"summary,omitempty"`
+	FixedIn    string   `json:"fixed_in,omitempty"`
+	Aliases    []string `json:"aliases,omitempty"`
+	References []string `json:"references,omitempty"`
 }
 
 // OSV API types
@@ -171,8 +171,8 @@ type osvSeverity struct {
 }
 
 type osvAffected struct {
-	Package osvPackage  `json:"package"`
-	Ranges  []osvRange  `json:"ranges,omitempty"`
+	Package osvPackage `json:"package"`
+	Ranges  []osvRange `json:"ranges,omitempty"`
 }
 
 type osvRange struct {

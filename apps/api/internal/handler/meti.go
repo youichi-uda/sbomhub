@@ -166,33 +166,33 @@ type MetiAuditLogger interface {
 // meti_test.go):
 //   - F1/F4   structured input validation; 400 on malformed UUID / phase / status
 //   - F5/F32  audit-or-nothing: override audit failure returns 500 so the
-//             ambient TenantTx rolls back the OverrideStatus UPDATE
+//     ambient TenantTx rolls back the OverrideStatus UPDATE
 //   - F8/F9   project boundary enforced by the (tenant, project, criterion)
-//             composite key in MetiAssessmentsRepository.Get; cross-project
-//             lookups naturally miss (vs CRA's UUID-only lookup which needed
-//             a separate loadReportScoped helper)
+//     composite key in MetiAssessmentsRepository.Get; cross-project
+//     lookups naturally miss (vs CRA's UUID-only lookup which needed
+//     a separate loadReportScoped helper)
 //   - F10     generic 404 / 400 body; precise reason in slog only
 //   - F14/F15 MultiAuth + RequireWrite at the route layer; CanWrite
-//             defence-in-depth in the handler
+//     defence-in-depth in the handler
 //   - F18     write routes (POST /refresh, PUT /override) require write role
 //   - F24/F27 limit / offset clamp with explicit reject (no silent clamp)
 //   - F26     query-param validation (phase / status / has_override) rejects
-//             out-of-allowlist values with 400 BEFORE the repository runs
+//     out-of-allowlist values with 400 BEFORE the repository runs
 //   - F28     X-Total-Count via CountByProject for the list endpoints
 //   - F29     same WHERE shape shared between ListByProject and CountByProject
-//             (repository invariant; the handler just hands the same filter
-//             through to both calls so the X-Total-Count and the page length
-//             adjudicate on identical units)
+//     (repository invariant; the handler just hands the same filter
+//     through to both calls so the X-Total-Count and the page length
+//     adjudicate on identical units)
 //   - F31     state-machine guard at handler layer (already-overridden → 409
-//             BEFORE the UPDATE) PLUS the repo's `override_status IS NULL`
-//             WHERE clause for the load-then-update TOCTOU race. Clear-then-
-//             re-override is an explicit M4 handler path (DELETE override)
-//             so each transition emits its own audit_logs row.
+//     BEFORE the UPDATE) PLUS the repo's `override_status IS NULL`
+//     WHERE clause for the load-then-update TOCTOU race. Clear-then-
+//     re-override is an explicit M4 handler path (DELETE override)
+//     so each transition emits its own audit_logs row.
 //
 // F19 / F25 are intentionally NOT in scope:
 //   - F19: the evaluator is fully local (no LLM upstream), so /refresh runs
-//          synchronously inside the ambient TenantTx. Connection-pool
-//          exhaustion DoS does not apply.
+//     synchronously inside the ambient TenantTx. Connection-pool
+//     exhaustion DoS does not apply.
 //   - F25: the catalog is a fixed 27-item set; fan-out cap does not apply.
 type MetiHandler struct {
 	store     MetiAssessmentStore

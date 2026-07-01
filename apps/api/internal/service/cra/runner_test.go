@@ -186,12 +186,12 @@ func (f *fakeAuditWriter) Log(_ context.Context, input *model.CreateAuditLogInpu
 // return an error (vulnerability gone). When seq is non-nil it overrides
 // the constant cveID and err.
 type fakeVulnCVE struct {
-	mu       sync.Mutex
-	cveID    string
-	err      error
-	called   int
-	gotVuln  uuid.UUID
-	seq      []vulnCVEResult
+	mu      sync.Mutex
+	cveID   string
+	err     error
+	called  int
+	gotVuln uuid.UUID
+	seq     []vulnCVEResult
 }
 
 type vulnCVEResult struct {
@@ -318,22 +318,22 @@ func makeApprovedVEXDraft(tenantID, projectID, vulnID, componentID uuid.UUID, cv
 // Callers can override any of the fakes by mutating the returned
 // pointers before calling Run.
 type testHarness struct {
-	runner       *Runner
-	tenantID     uuid.UUID
-	projectID    uuid.UUID
-	vulnID       uuid.UUID
-	componentID  uuid.UUID
-	cveID        string
-	sourceDraft  repository.VEXDraft
-	drafts       *fakeVEXDraftReader
-	advisories   *fakeAdvisoryReader
-	reach        *fakeReachabilityReader
-	craReports   *fakeCRAReportWriter
-	llmCalls     *fakeLLMCallWriter
-	audit        *fakeAuditWriter
-	provider     *stubProvider
-	vulnCVE      *fakeVulnCVE
-	clockTime    time.Time
+	runner      *Runner
+	tenantID    uuid.UUID
+	projectID   uuid.UUID
+	vulnID      uuid.UUID
+	componentID uuid.UUID
+	cveID       string
+	sourceDraft repository.VEXDraft
+	drafts      *fakeVEXDraftReader
+	advisories  *fakeAdvisoryReader
+	reach       *fakeReachabilityReader
+	craReports  *fakeCRAReportWriter
+	llmCalls    *fakeLLMCallWriter
+	audit       *fakeAuditWriter
+	provider    *stubProvider
+	vulnCVE     *fakeVulnCVE
+	clockTime   time.Time
 }
 
 func newTestHarness(t *testing.T) *testHarness {

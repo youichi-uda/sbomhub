@@ -29,13 +29,13 @@ type Subscription struct {
 
 // SubscriptionStatus constants
 const (
-	StatusOnTrial  = "on_trial"
-	StatusActive   = "active"
-	StatusPaused   = "paused"
-	StatusPastDue  = "past_due"
-	StatusUnpaid   = "unpaid"
+	StatusOnTrial   = "on_trial"
+	StatusActive    = "active"
+	StatusPaused    = "paused"
+	StatusPastDue   = "past_due"
+	StatusUnpaid    = "unpaid"
 	StatusCancelled = "cancelled"
-	StatusExpired  = "expired"
+	StatusExpired   = "expired"
 )
 
 // IsActive returns true if the subscription is currently active

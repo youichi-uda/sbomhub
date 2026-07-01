@@ -9,31 +9,31 @@ type ReportTranslations struct {
 	TitleDefault    string
 
 	// Section headers
-	Summary               string
+	Summary                string
 	VulnerabilityBreakdown string
-	VulnerabilityDetailed string
-	Compliance            string
-	TopRisks              string
-	TopRisksDetailed      string
-	SecurityMetrics       string
-	VulnerabilityTrend    string
-	ComplianceScore       string
-	METIChecklist         string
+	VulnerabilityDetailed  string
+	Compliance             string
+	TopRisks               string
+	TopRisksDetailed       string
+	SecurityMetrics        string
+	VulnerabilityTrend     string
+	ComplianceScore        string
+	METIChecklist          string
 	VisualizationFramework string
-	VulnerabilitySummary  string
+	VulnerabilitySummary   string
 
 	// Labels
-	Projects           string
-	Components         string
+	Projects             string
+	Components           string
 	TotalVulnerabilities string
-	ResolvedInPeriod   string
-	AverageMTTR        string
-	SLOAchievement     string
-	Score              string
-	AchievementRate    string
-	TotalProgress      string
-	Period             string
-	GeneratedAt        string
+	ResolvedInPeriod     string
+	AverageMTTR          string
+	SLOAchievement       string
+	Score                string
+	AchievementRate      string
+	TotalProgress        string
+	Period               string
+	GeneratedAt          string
 
 	// Severity labels
 	Critical      string
@@ -46,29 +46,29 @@ type ReportTranslations struct {
 	LowCount      string
 
 	// Status
-	Completed   string
+	Completed    string
 	NotCompleted string
-	Auto        string
+	Auto         string
 
 	// Visualization framework
-	VizSBOMAuthor      string
-	VizDependency      string
-	VizGeneration      string
-	VizDataFormat      string
-	VizUtilizationScope string
-	VizUtilization     string
-	VizSBOMAuthorDesc  string
-	VizDependencyDesc  string
-	VizGenerationDesc  string
-	VizDataFormatDesc  string
+	VizSBOMAuthor           string
+	VizDependency           string
+	VizGeneration           string
+	VizDataFormat           string
+	VizUtilizationScope     string
+	VizUtilization          string
+	VizSBOMAuthorDesc       string
+	VizDependencyDesc       string
+	VizGenerationDesc       string
+	VizDataFormatDesc       string
 	VizUtilizationScopeDesc string
-	VizUtilizationDesc string
+	VizUtilizationDesc      string
 
 	// Excel specific
-	SheetSummary      string
-	SheetTopRisks     string
-	SheetTrend        string
-	SheetChecklist    string
+	SheetSummary       string
+	SheetTopRisks      string
+	SheetTrend         string
+	SheetChecklist     string
 	SheetVisualization string
 
 	// Table headers
@@ -89,7 +89,7 @@ type ReportTranslations struct {
 	Description string
 
 	// Misc
-	Hours       string
+	Hours        string
 	CriticalHigh string
 }
 
@@ -100,30 +100,30 @@ var translationsJa = ReportTranslations{
 	TitleCompliance: "SBOMHub コンプライアンスレポート",
 	TitleDefault:    "SBOMHub セキュリティレポート",
 
-	Summary:               "サマリー",
+	Summary:                "サマリー",
 	VulnerabilityBreakdown: "脆弱性内訳",
-	VulnerabilityDetailed: "脆弱性 詳細内訳",
-	Compliance:            "コンプライアンス",
-	TopRisks:              "TOP リスク",
-	TopRisksDetailed:      "TOP リスク 詳細",
-	SecurityMetrics:       "セキュリティメトリクス",
-	VulnerabilityTrend:    "脆弱性トレンド (直近7日)",
-	ComplianceScore:       "コンプライアンススコア",
-	METIChecklist:         "経産省ガイドライン チェックリスト",
+	VulnerabilityDetailed:  "脆弱性 詳細内訳",
+	Compliance:             "コンプライアンス",
+	TopRisks:               "TOP リスク",
+	TopRisksDetailed:       "TOP リスク 詳細",
+	SecurityMetrics:        "セキュリティメトリクス",
+	VulnerabilityTrend:     "脆弱性トレンド (直近7日)",
+	ComplianceScore:        "コンプライアンススコア",
+	METIChecklist:          "経産省ガイドライン チェックリスト",
 	VisualizationFramework: "SBOM可視化フレームワーク",
-	VulnerabilitySummary:  "脆弱性サマリー (参考)",
+	VulnerabilitySummary:   "脆弱性サマリー (参考)",
 
-	Projects:           "プロジェクト数",
-	Components:         "コンポーネント数",
+	Projects:             "プロジェクト数",
+	Components:           "コンポーネント数",
 	TotalVulnerabilities: "脆弱性総数",
-	ResolvedInPeriod:   "期間内解決数",
-	AverageMTTR:        "平均MTTR",
-	SLOAchievement:     "SLO達成率",
-	Score:              "スコア",
-	AchievementRate:    "達成率",
-	TotalProgress:      "総合進捗",
-	Period:             "期間",
-	GeneratedAt:        "生成日時",
+	ResolvedInPeriod:     "期間内解決数",
+	AverageMTTR:          "平均MTTR",
+	SLOAchievement:       "SLO達成率",
+	Score:                "スコア",
+	AchievementRate:      "達成率",
+	TotalProgress:        "総合進捗",
+	Period:               "期間",
+	GeneratedAt:          "生成日時",
 
 	Critical:      "Critical",
 	High:          "High",
@@ -138,23 +138,23 @@ var translationsJa = ReportTranslations{
 	NotCompleted: "未完了",
 	Auto:         "自動",
 
-	VizSBOMAuthor:      "(a) SBOM作成主体 (Who)",
-	VizDependency:      "(b) 依存関係 (What/Where)",
-	VizGeneration:      "(c) 生成手段 (How)",
-	VizDataFormat:      "(d) データ様式 (What)",
-	VizUtilizationScope: "(e) 活用目的 (Why)",
-	VizUtilization:     "(f) 活用主体 (Who)",
-	VizSBOMAuthorDesc:  "SBOMを作成する主体",
-	VizDependencyDesc:  "SBOMに含める依存関係の範囲",
-	VizGenerationDesc:  "SBOMの生成方法",
-	VizDataFormatDesc:  "SBOMのデータ形式",
+	VizSBOMAuthor:           "(a) SBOM作成主体 (Who)",
+	VizDependency:           "(b) 依存関係 (What/Where)",
+	VizGeneration:           "(c) 生成手段 (How)",
+	VizDataFormat:           "(d) データ様式 (What)",
+	VizUtilizationScope:     "(e) 活用目的 (Why)",
+	VizUtilization:          "(f) 活用主体 (Who)",
+	VizSBOMAuthorDesc:       "SBOMを作成する主体",
+	VizDependencyDesc:       "SBOMに含める依存関係の範囲",
+	VizGenerationDesc:       "SBOMの生成方法",
+	VizDataFormatDesc:       "SBOMのデータ形式",
 	VizUtilizationScopeDesc: "SBOMの活用目的・範囲",
-	VizUtilizationDesc: "SBOMを活用する主体",
+	VizUtilizationDesc:      "SBOMを活用する主体",
 
-	SheetSummary:      "サマリー",
-	SheetTopRisks:     "TOPリスク",
-	SheetTrend:        "トレンド",
-	SheetChecklist:    "チェックリスト",
+	SheetSummary:       "サマリー",
+	SheetTopRisks:      "TOPリスク",
+	SheetTrend:         "トレンド",
+	SheetChecklist:     "チェックリスト",
 	SheetVisualization: "可視化フレームワーク",
 
 	CVEID:       "CVE ID",
@@ -173,7 +173,7 @@ var translationsJa = ReportTranslations{
 	Setting:     "設定値",
 	Description: "説明",
 
-	Hours:       "時間",
+	Hours:        "時間",
 	CriticalHigh: "Critical/High",
 }
 
@@ -184,30 +184,30 @@ var translationsEn = ReportTranslations{
 	TitleCompliance: "SBOMHub Compliance Report",
 	TitleDefault:    "SBOMHub Security Report",
 
-	Summary:               "Summary",
+	Summary:                "Summary",
 	VulnerabilityBreakdown: "Vulnerability Breakdown",
-	VulnerabilityDetailed: "Vulnerability Details",
-	Compliance:            "Compliance",
-	TopRisks:              "Top Risks",
-	TopRisksDetailed:      "Top Risks (Detailed)",
-	SecurityMetrics:       "Security Metrics",
-	VulnerabilityTrend:    "Vulnerability Trend (Last 7 Days)",
-	ComplianceScore:       "Compliance Score",
-	METIChecklist:         "METI Guidelines Checklist",
+	VulnerabilityDetailed:  "Vulnerability Details",
+	Compliance:             "Compliance",
+	TopRisks:               "Top Risks",
+	TopRisksDetailed:       "Top Risks (Detailed)",
+	SecurityMetrics:        "Security Metrics",
+	VulnerabilityTrend:     "Vulnerability Trend (Last 7 Days)",
+	ComplianceScore:        "Compliance Score",
+	METIChecklist:          "METI Guidelines Checklist",
 	VisualizationFramework: "SBOM Visualization Framework",
-	VulnerabilitySummary:  "Vulnerability Summary (Reference)",
+	VulnerabilitySummary:   "Vulnerability Summary (Reference)",
 
-	Projects:           "Projects",
-	Components:         "Components",
+	Projects:             "Projects",
+	Components:           "Components",
 	TotalVulnerabilities: "Total Vulnerabilities",
-	ResolvedInPeriod:   "Resolved in Period",
-	AverageMTTR:        "Average MTTR",
-	SLOAchievement:     "SLO Achievement",
-	Score:              "Score",
-	AchievementRate:    "Achievement Rate",
-	TotalProgress:      "Total Progress",
-	Period:             "Period",
-	GeneratedAt:        "Generated At",
+	ResolvedInPeriod:     "Resolved in Period",
+	AverageMTTR:          "Average MTTR",
+	SLOAchievement:       "SLO Achievement",
+	Score:                "Score",
+	AchievementRate:      "Achievement Rate",
+	TotalProgress:        "Total Progress",
+	Period:               "Period",
+	GeneratedAt:          "Generated At",
 
 	Critical:      "Critical",
 	High:          "High",
@@ -222,23 +222,23 @@ var translationsEn = ReportTranslations{
 	NotCompleted: "Not Completed",
 	Auto:         "Auto",
 
-	VizSBOMAuthor:      "(a) SBOM Author (Who)",
-	VizDependency:      "(b) Dependencies (What/Where)",
-	VizGeneration:      "(c) Generation Method (How)",
-	VizDataFormat:      "(d) Data Format (What)",
-	VizUtilizationScope: "(e) Utilization Scope (Why)",
-	VizUtilization:     "(f) Utilization Actor (Who)",
-	VizSBOMAuthorDesc:  "Entity that creates the SBOM",
-	VizDependencyDesc:  "Scope of dependencies included in SBOM",
-	VizGenerationDesc:  "Method of SBOM generation",
-	VizDataFormatDesc:  "Data format of SBOM",
+	VizSBOMAuthor:           "(a) SBOM Author (Who)",
+	VizDependency:           "(b) Dependencies (What/Where)",
+	VizGeneration:           "(c) Generation Method (How)",
+	VizDataFormat:           "(d) Data Format (What)",
+	VizUtilizationScope:     "(e) Utilization Scope (Why)",
+	VizUtilization:          "(f) Utilization Actor (Who)",
+	VizSBOMAuthorDesc:       "Entity that creates the SBOM",
+	VizDependencyDesc:       "Scope of dependencies included in SBOM",
+	VizGenerationDesc:       "Method of SBOM generation",
+	VizDataFormatDesc:       "Data format of SBOM",
 	VizUtilizationScopeDesc: "Purpose and scope of SBOM utilization",
-	VizUtilizationDesc: "Entity that utilizes the SBOM",
+	VizUtilizationDesc:      "Entity that utilizes the SBOM",
 
-	SheetSummary:      "Summary",
-	SheetTopRisks:     "Top Risks",
-	SheetTrend:        "Trend",
-	SheetChecklist:    "Checklist",
+	SheetSummary:       "Summary",
+	SheetTopRisks:      "Top Risks",
+	SheetTrend:         "Trend",
+	SheetChecklist:     "Checklist",
 	SheetVisualization: "Visualization Framework",
 
 	CVEID:       "CVE ID",
@@ -257,7 +257,7 @@ var translationsEn = ReportTranslations{
 	Setting:     "Setting",
 	Description: "Description",
 
-	Hours:       "hours",
+	Hours:        "hours",
 	CriticalHigh: "Critical/High",
 }
 

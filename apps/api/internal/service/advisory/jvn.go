@@ -41,8 +41,8 @@ func (p *JVNParser) Source() Source { return SourceJVN }
 // JVNAdvisory is the canonical in-memory representation. Both the XML and JSON
 // decoders normalize into this shape before extraction.
 type JVNAdvisory struct {
-	JVNDBID     string   // e.g. "JVNDB-2024-000001"
-	CVEID       string   // optional CVE alias
+	JVNDBID     string // e.g. "JVNDB-2024-000001"
+	CVEID       string // optional CVE alias
 	Title       string
 	Description string   // free-text body, locale-mixed
 	References  []string // affected URLs
@@ -52,8 +52,8 @@ type JVNAdvisory struct {
 // service.JVNRSSFeed lives in a different package and using it here would
 // create a coupling we don't want.
 type jvnRDF struct {
-	XMLName xml.Name      `xml:"RDF"`
-	Items   []jvnRSSItem  `xml:"item"`
+	XMLName xml.Name     `xml:"RDF"`
+	Items   []jvnRSSItem `xml:"item"`
 }
 
 type jvnRSSItem struct {

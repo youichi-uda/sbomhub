@@ -15,12 +15,13 @@ import (
 // trackers.
 //
 // codex-r4 P1 fix:
-//   `vulnerability_tickets` and `issue_tracker_connections` are FORCE
-//   ROW LEVEL SECURITY (migration 023). The job used to call
-//   `issueTrackerRepo.GetTicketsToSync(ctx, …)` on a bare scheduler context
-//   and silently received zero rows on every tick. We now enumerate tenants
-//   via TenantRepository and run the fetch + per-ticket sync inside a
-//   per-tenant tx that pins `app.current_tenant_id` so RLS policies pass.
+//
+//	`vulnerability_tickets` and `issue_tracker_connections` are FORCE
+//	ROW LEVEL SECURITY (migration 023). The job used to call
+//	`issueTrackerRepo.GetTicketsToSync(ctx, …)` on a bare scheduler context
+//	and silently received zero rows on every tick. We now enumerate tenants
+//	via TenantRepository and run the fetch + per-ticket sync inside a
+//	per-tenant tx that pins `app.current_tenant_id` so RLS policies pass.
 type TicketSyncJob struct {
 	issueTrackerService *service.IssueTrackerService
 	issueTrackerRepo    *repository.IssueTrackerRepository

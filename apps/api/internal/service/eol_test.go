@@ -16,64 +16,64 @@ func TestEOLService_ParseDateOrBool(t *testing.T) {
 	svc := &EOLService{}
 
 	tests := []struct {
-		name         string
-		input        interface{}
-		wantDate     bool
-		wantIsEOL    bool
+		name      string
+		input     interface{}
+		wantDate  bool
+		wantIsEOL bool
 	}{
 		{
-			name:         "nil value",
-			input:        nil,
-			wantDate:     false,
-			wantIsEOL:    false,
+			name:      "nil value",
+			input:     nil,
+			wantDate:  false,
+			wantIsEOL: false,
 		},
 		{
-			name:         "bool true",
-			input:        true,
-			wantDate:     false,
-			wantIsEOL:    true,
+			name:      "bool true",
+			input:     true,
+			wantDate:  false,
+			wantIsEOL: true,
 		},
 		{
-			name:         "bool false",
-			input:        false,
-			wantDate:     false,
-			wantIsEOL:    false,
+			name:      "bool false",
+			input:     false,
+			wantDate:  false,
+			wantIsEOL: false,
 		},
 		{
-			name:         "empty string",
-			input:        "",
-			wantDate:     false,
-			wantIsEOL:    false,
+			name:      "empty string",
+			input:     "",
+			wantDate:  false,
+			wantIsEOL: false,
 		},
 		{
-			name:         "string false",
-			input:        "false",
-			wantDate:     false,
-			wantIsEOL:    false,
+			name:      "string false",
+			input:     "false",
+			wantDate:  false,
+			wantIsEOL: false,
 		},
 		{
-			name:         "string true",
-			input:        "true",
-			wantDate:     false,
-			wantIsEOL:    true,
+			name:      "string true",
+			input:     "true",
+			wantDate:  false,
+			wantIsEOL: true,
 		},
 		{
-			name:         "past date string",
-			input:        "2020-01-01",
-			wantDate:     true,
-			wantIsEOL:    true,
+			name:      "past date string",
+			input:     "2020-01-01",
+			wantDate:  true,
+			wantIsEOL: true,
 		},
 		{
-			name:         "future date string",
-			input:        "2099-12-31",
-			wantDate:     true,
-			wantIsEOL:    false,
+			name:      "future date string",
+			input:     "2099-12-31",
+			wantDate:  true,
+			wantIsEOL: false,
 		},
 		{
-			name:         "invalid date string",
-			input:        "not-a-date",
-			wantDate:     false,
-			wantIsEOL:    false,
+			name:      "invalid date string",
+			input:     "not-a-date",
+			wantDate:  false,
+			wantIsEOL: false,
 		},
 	}
 
@@ -235,11 +235,11 @@ func TestEOLService_ParseCycle(t *testing.T) {
 
 func TestEOLService_FetchProductCycles_MockServer(t *testing.T) {
 	tests := []struct {
-		name       string
-		product    string
-		handler    http.HandlerFunc
-		wantErr    bool
-		wantCount  int
+		name      string
+		product   string
+		handler   http.HandlerFunc
+		wantErr   bool
+		wantCount int
 	}{
 		{
 			name:    "successful fetch",
@@ -351,8 +351,8 @@ func TestEOLService_FetchProductCycles_MockServer(t *testing.T) {
 
 func TestEOLCycleResponse_JSON(t *testing.T) {
 	tests := []struct {
-		name     string
-		jsonStr  string
+		name      string
+		jsonStr   string
 		checkFunc func(t *testing.T, resp EOLCycleResponse)
 	}{
 		{
@@ -486,8 +486,8 @@ func TestEOLStatus_DetermineStatus(t *testing.T) {
 			wantStatus: model.EOLStatusActive,
 		},
 		{
-			name: "no dates set, not discontinued",
-			cycle: model.EOLProductCycle{},
+			name:       "no dates set, not discontinued",
+			cycle:      model.EOLProductCycle{},
 			wantStatus: model.EOLStatusActive,
 		},
 	}
@@ -561,8 +561,8 @@ func TestEOLService_VersionMatchingLogic(t *testing.T) {
 				}
 				// Prefix match (e.g., "3.11.4" starts with "3.11.")
 				if len(tt.componentVersion) > len(cycle) &&
-				   tt.componentVersion[:len(cycle)] == cycle &&
-				   tt.componentVersion[len(cycle)] == '.' {
+					tt.componentVersion[:len(cycle)] == cycle &&
+					tt.componentVersion[len(cycle)] == '.' {
 					matched = cycle
 					break
 				}

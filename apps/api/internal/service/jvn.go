@@ -52,15 +52,15 @@ type JVNChannel struct {
 }
 
 type JVNItem struct {
-	Title       string       `xml:"title"`
-	Link        string       `xml:"link"`
-	Description string       `xml:"description"`
-	Identifier  string       `xml:"identifier"`
-	References  []JVNRef     `xml:"references"`
-	CPE         []JVNCPE     `xml:"cpe"`
-	CVSS        []JVNCVSS    `xml:"cvss"`
-	Published   string       `xml:"issued"`
-	Modified    string       `xml:"modified"`
+	Title       string    `xml:"title"`
+	Link        string    `xml:"link"`
+	Description string    `xml:"description"`
+	Identifier  string    `xml:"identifier"`
+	References  []JVNRef  `xml:"references"`
+	CPE         []JVNCPE  `xml:"cpe"`
+	CVSS        []JVNCVSS `xml:"cvss"`
+	Published   string    `xml:"issued"`
+	Modified    string    `xml:"modified"`
 }
 
 type JVNRef struct {

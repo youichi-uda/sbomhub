@@ -176,17 +176,17 @@ type Request struct {
 // The frontend renders Summary + Highlights + Confidence + Evidence and
 // shows Approve / Edit / Reject controls per the CLAUDE.md AI policy.
 type Response struct {
-	ProjectID    uuid.UUID `json:"project_id"`
-	From         *diff.SbomRef `json:"from"`
-	To           *diff.SbomRef `json:"to"`
-	Summary      string    `json:"summary"`
-	Highlights   []string  `json:"highlights"`
-	Confidence   float64   `json:"confidence"`
-	Evidence     []Evidence `json:"evidence"`
-	Provider     string    `json:"provider"`
-	Model        string    `json:"model"`
-	Lang         string    `json:"lang"`
-	GeneratedAt  time.Time `json:"generated_at"`
+	ProjectID   uuid.UUID     `json:"project_id"`
+	From        *diff.SbomRef `json:"from"`
+	To          *diff.SbomRef `json:"to"`
+	Summary     string        `json:"summary"`
+	Highlights  []string      `json:"highlights"`
+	Confidence  float64       `json:"confidence"`
+	Evidence    []Evidence    `json:"evidence"`
+	Provider    string        `json:"provider"`
+	Model       string        `json:"model"`
+	Lang        string        `json:"lang"`
+	GeneratedAt time.Time     `json:"generated_at"`
 	// AIDisabled is true when no provider was available and the
 	// summary is the deterministic placeholder. The UI uses this to
 	// render a "Configure BYOK to enable AI summary" banner instead
@@ -418,17 +418,17 @@ func buildPrompt(d *diff.Response, lang string) (string, string) {
 	}
 
 	user := struct {
-		ProjectID                 string                                `json:"project_id"`
-		From                      *diff.SbomRef                         `json:"from"`
-		To                        *diff.SbomRef                         `json:"to"`
-		ComponentsAdded           []diff.ComponentChange                `json:"components_added"`
-		ComponentsRemoved         []diff.ComponentChange                `json:"components_removed"`
-		ComponentsVersionChanged  []diff.ComponentVersionChange         `json:"components_version_changed"`
-		VulnsAdded                []diff.VulnerabilityAdded             `json:"vulnerabilities_added"`
-		VulnsResolved             []diff.VulnerabilityResolved          `json:"vulnerabilities_resolved"`
-		VulnsSeverityChanged      []diff.VulnerabilitySeverityChange    `json:"vulnerabilities_severity_changed"`
-		LicensesAddedViolations   []diff.LicensePolicyViolation         `json:"licenses_added_violations"`
-		LicensesRemovedViolations []diff.LicensePolicyViolation         `json:"licenses_removed_violations"`
+		ProjectID                 string                             `json:"project_id"`
+		From                      *diff.SbomRef                      `json:"from"`
+		To                        *diff.SbomRef                      `json:"to"`
+		ComponentsAdded           []diff.ComponentChange             `json:"components_added"`
+		ComponentsRemoved         []diff.ComponentChange             `json:"components_removed"`
+		ComponentsVersionChanged  []diff.ComponentVersionChange      `json:"components_version_changed"`
+		VulnsAdded                []diff.VulnerabilityAdded          `json:"vulnerabilities_added"`
+		VulnsResolved             []diff.VulnerabilityResolved       `json:"vulnerabilities_resolved"`
+		VulnsSeverityChanged      []diff.VulnerabilitySeverityChange `json:"vulnerabilities_severity_changed"`
+		LicensesAddedViolations   []diff.LicensePolicyViolation      `json:"licenses_added_violations"`
+		LicensesRemovedViolations []diff.LicensePolicyViolation      `json:"licenses_removed_violations"`
 	}{
 		ProjectID:                 d.ProjectID.String(),
 		From:                      d.From,
@@ -710,17 +710,17 @@ func (s *Service) writeAudit(
 	parsed *llmFields, confidence float64,
 ) error {
 	details := map[string]interface{}{
-		"llm_call_id":         llmCallID.String(),
-		"confidence":          confidence,
-		"components_added":    len(d.Components.Added),
-		"components_removed":  len(d.Components.Removed),
-		"components_changed":  len(d.Components.VersionChanged),
-		"vulns_added":         len(d.Vulnerabilities.Added),
-		"vulns_resolved":      len(d.Vulnerabilities.Resolved),
-		"vulns_sev_changed":   len(d.Vulnerabilities.SeverityChanged),
+		"llm_call_id":                llmCallID.String(),
+		"confidence":                 confidence,
+		"components_added":           len(d.Components.Added),
+		"components_removed":         len(d.Components.Removed),
+		"components_changed":         len(d.Components.VersionChanged),
+		"vulns_added":                len(d.Vulnerabilities.Added),
+		"vulns_resolved":             len(d.Vulnerabilities.Resolved),
+		"vulns_sev_changed":          len(d.Vulnerabilities.SeverityChanged),
 		"license_violations_added":   len(d.Licenses.AddedPolicyViolations),
 		"license_violations_removed": len(d.Licenses.RemovedPolicyViolations),
-		"summary_preview":     truncate(parsed.Summary, 200),
+		"summary_preview":            truncate(parsed.Summary, 200),
 	}
 	if d.From != nil {
 		details["from_sbom_id"] = d.From.SbomID.String()
@@ -748,12 +748,12 @@ func (s *Service) writeFailedAudit(
 	d *diff.Response, errMsg string,
 ) error {
 	details := map[string]interface{}{
-		"llm_call_id":         llmCallID.String(),
-		"error":               errMsg,
-		"components_added":    len(d.Components.Added),
-		"components_removed":  len(d.Components.Removed),
-		"vulns_added":         len(d.Vulnerabilities.Added),
-		"vulns_resolved":      len(d.Vulnerabilities.Resolved),
+		"llm_call_id":        llmCallID.String(),
+		"error":              errMsg,
+		"components_added":   len(d.Components.Added),
+		"components_removed": len(d.Components.Removed),
+		"vulns_added":        len(d.Vulnerabilities.Added),
+		"vulns_resolved":     len(d.Vulnerabilities.Resolved),
 	}
 	if d.From != nil {
 		details["from_sbom_id"] = d.From.SbomID.String()

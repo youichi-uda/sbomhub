@@ -500,10 +500,11 @@ func (r *CRAReportsRepository) CountByProject(ctx context.Context, tenantID, pro
 // Returns sql.ErrNoRows wrapped as a typed error when the UPDATE
 // matches zero rows. After the F31 guard, that happens in either of
 // two cases:
-//   1. (tenant, id) does not match any existing row (wrong id /
-//      foreign tenant).
-//   2. The row exists but its current decision is not 'pending'
-//      (already decided — re-decision rejected).
+//  1. (tenant, id) does not match any existing row (wrong id /
+//     foreign tenant).
+//  2. The row exists but its current decision is not 'pending'
+//     (already decided — re-decision rejected).
+//
 // Handlers that load the report first (loadReportScoped) can
 // disambiguate by inspecting the report's prior decision; bare
 // callers should treat ErrNoRows as "could not apply decision" and

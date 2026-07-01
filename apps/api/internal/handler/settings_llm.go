@@ -36,16 +36,18 @@ var supportedLLMProviders = map[string]struct{}{
 // SettingsLLMHandler serves /api/v1/settings/llm.
 //
 // Reads:
-//   GET  /api/v1/settings/llm
-//     Returns the persisted config with the api_key field replaced by a
-//     placeholder ("***") when one is configured, or empty when not.
+//
+//	GET  /api/v1/settings/llm
+//	  Returns the persisted config with the api_key field replaced by a
+//	  placeholder ("***") when one is configured, or empty when not.
 //
 // Writes:
-//   PUT  /api/v1/settings/llm
-//     Encrypts the supplied API key with internal/service/llm.Encrypt
-//     (AES-256-GCM, ENCRYPTION_KEY) and upserts the row. Records a
-//     llm_key_set / llm_key_rotated audit log (the key itself is NEVER
-//     written to logs / audit details).
+//
+//	PUT  /api/v1/settings/llm
+//	  Encrypts the supplied API key with internal/service/llm.Encrypt
+//	  (AES-256-GCM, ENCRYPTION_KEY) and upserts the row. Records a
+//	  llm_key_set / llm_key_rotated audit log (the key itself is NEVER
+//	  written to logs / audit details).
 type SettingsLLMHandler struct {
 	repo      *repository.TenantLLMConfigRepository
 	auditRepo *repository.AuditRepository
@@ -68,15 +70,15 @@ func NewSettingsLLMHandler(
 // settingsLLMResponse is the shape returned to the browser. The api_key
 // field intentionally surfaces only a placeholder, never the plaintext.
 type settingsLLMResponse struct {
-	Mode            string `json:"mode"`
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	APIKeyConfigured bool  `json:"api_key_configured"`
-	APIKey          string `json:"api_key"` // always "" or "***"
-	AzureEndpoint   string `json:"azure_endpoint,omitempty"`
-	AzureDeployment string `json:"azure_deployment,omitempty"`
-	OllamaURL       string `json:"ollama_url,omitempty"`
-	UpdatedAt       string `json:"updated_at,omitempty"`
+	Mode             string `json:"mode"`
+	Provider         string `json:"provider"`
+	Model            string `json:"model"`
+	APIKeyConfigured bool   `json:"api_key_configured"`
+	APIKey           string `json:"api_key"` // always "" or "***"
+	AzureEndpoint    string `json:"azure_endpoint,omitempty"`
+	AzureDeployment  string `json:"azure_deployment,omitempty"`
+	OllamaURL        string `json:"ollama_url,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
 }
 
 // settingsLLMRequest is the PUT body.

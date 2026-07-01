@@ -4,13 +4,13 @@ import "github.com/google/uuid"
 
 // CVESearchResult represents the result of a CVE search
 type CVESearchResult struct {
-	CVEID              string               `json:"cve_id"`
-	Description        string               `json:"description"`
-	CVSSScore          float64              `json:"cvss_score"`
-	EPSSScore          float64              `json:"epss_score"`
-	Severity           string               `json:"severity"`
-	AffectedProjects   []AffectedProject    `json:"affected_projects"`
-	UnaffectedProjects []UnaffectedProject  `json:"unaffected_projects"`
+	CVEID              string              `json:"cve_id"`
+	Description        string              `json:"description"`
+	CVSSScore          float64             `json:"cvss_score"`
+	EPSSScore          float64             `json:"epss_score"`
+	Severity           string              `json:"severity"`
+	AffectedProjects   []AffectedProject   `json:"affected_projects"`
+	UnaffectedProjects []UnaffectedProject `json:"unaffected_projects"`
 }
 
 // AffectedProject represents a project affected by a CVE
@@ -42,8 +42,8 @@ type ComponentSearchQuery struct {
 
 // ComponentSearchResult represents the result of a component search
 type ComponentSearchResult struct {
-	Query   ComponentSearchQuery      `json:"query"`
-	Matches []ComponentSearchMatch    `json:"matches"`
+	Query   ComponentSearchQuery   `json:"query"`
+	Matches []ComponentSearchMatch `json:"matches"`
 }
 
 // ComponentSearchMatch represents a matching component

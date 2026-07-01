@@ -14,14 +14,14 @@
 //     its backing buffer. Plaintext never leaves the request frame.
 //
 //   - Two payload formats are supported:
-//       json  — SBOMHub canonical envelope ({type, tenant_id,
-//               project_id, from_sbom_id, to_sbom_id, counts:{...},
-//               thresholds:{...}, generated_at}). This is what most
-//               operators with their own ingest pipeline will want.
-//       slack — text + attachments JSON shaped for Slack incoming
-//               webhooks. Operators can paste a Slack webhook URL +
-//               format=slack and get human-readable Slack messages
-//               without an intermediate service.
+//     json  — SBOMHub canonical envelope ({type, tenant_id,
+//     project_id, from_sbom_id, to_sbom_id, counts:{...},
+//     thresholds:{...}, generated_at}). This is what most
+//     operators with their own ingest pipeline will want.
+//     slack — text + attachments JSON shaped for Slack incoming
+//     webhooks. Operators can paste a Slack webhook URL +
+//     format=slack and get human-readable Slack messages
+//     without an intermediate service.
 //
 //   - The HTTP delivery is bounded (10 s default) and uses simple
 //     exponential backoff (3 attempts at 0 / 500 ms / 2 s). 5xx
@@ -387,27 +387,27 @@ func toLower(s string) string {
 // Payload is the canonical "json" format envelope. Slack format
 // wraps a subset of these fields in a Slack-shaped object instead.
 type Payload struct {
-	Event       string         `json:"event"`
-	TenantID    string         `json:"tenant_id"`
-	ProjectID   string         `json:"project_id"`
-	FromSbomID  string         `json:"from_sbom_id,omitempty"`
-	ToSbomID    string         `json:"to_sbom_id,omitempty"`
-	GeneratedAt string         `json:"generated_at"`
-	Counts      payloadCounts  `json:"counts"`
+	Event       string            `json:"event"`
+	TenantID    string            `json:"tenant_id"`
+	ProjectID   string            `json:"project_id"`
+	FromSbomID  string            `json:"from_sbom_id,omitempty"`
+	ToSbomID    string            `json:"to_sbom_id,omitempty"`
+	GeneratedAt string            `json:"generated_at"`
+	Counts      payloadCounts     `json:"counts"`
 	Thresholds  payloadThresholds `json:"thresholds"`
-	URL         string         `json:"sbomhub_url,omitempty"`
+	URL         string            `json:"sbomhub_url,omitempty"`
 }
 
 type payloadCounts struct {
-	ComponentsAdded       int `json:"components_added"`
-	ComponentsRemoved     int `json:"components_removed"`
-	ComponentsChanged     int `json:"components_version_changed"`
-	VulnsAdded            int `json:"vulnerabilities_added"`
-	VulnsResolved         int `json:"vulnerabilities_resolved"`
-	VulnsSeverityChanged  int `json:"vulnerabilities_severity_changed"`
-	NewCriticalVulns      int `json:"new_critical_vulns"`
-	NewHighVulns          int `json:"new_high_vulns"`
-	NewLicenseViolations  int `json:"new_license_violations"`
+	ComponentsAdded      int `json:"components_added"`
+	ComponentsRemoved    int `json:"components_removed"`
+	ComponentsChanged    int `json:"components_version_changed"`
+	VulnsAdded           int `json:"vulnerabilities_added"`
+	VulnsResolved        int `json:"vulnerabilities_resolved"`
+	VulnsSeverityChanged int `json:"vulnerabilities_severity_changed"`
+	NewCriticalVulns     int `json:"new_critical_vulns"`
+	NewHighVulns         int `json:"new_high_vulns"`
+	NewLicenseViolations int `json:"new_license_violations"`
 }
 
 type payloadThresholds struct {

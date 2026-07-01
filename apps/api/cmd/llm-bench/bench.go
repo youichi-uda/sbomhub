@@ -29,17 +29,17 @@ import (
 // vendor advisories that the operator's BYOK provider would otherwise
 // not see.
 type EvalCase struct {
-	CaseID                   string             `json:"case_id"`
-	CVEID                    string             `json:"cve_id"`
-	AdvisoryTitle            string             `json:"advisory_title,omitempty"`
-	AdvisoryExcerpt          string             `json:"advisory_excerpt"`
-	ComponentName            string             `json:"component_name"`
-	ComponentVersion         string             `json:"component_version,omitempty"`
-	Ecosystem                string             `json:"ecosystem"`
-	CodeReachability         CodeReachability   `json:"code_reachability"`
-	ExpectedState            string             `json:"expected_state"`
-	ExpectedReasoningKeywords []string          `json:"expected_reasoning_keywords,omitempty"`
-	Comment                  string             `json:"comment,omitempty"`
+	CaseID                    string           `json:"case_id"`
+	CVEID                     string           `json:"cve_id"`
+	AdvisoryTitle             string           `json:"advisory_title,omitempty"`
+	AdvisoryExcerpt           string           `json:"advisory_excerpt"`
+	ComponentName             string           `json:"component_name"`
+	ComponentVersion          string           `json:"component_version,omitempty"`
+	Ecosystem                 string           `json:"ecosystem"`
+	CodeReachability          CodeReachability `json:"code_reachability"`
+	ExpectedState             string           `json:"expected_state"`
+	ExpectedReasoningKeywords []string         `json:"expected_reasoning_keywords,omitempty"`
+	Comment                   string           `json:"comment,omitempty"`
 }
 
 // CodeReachability is the per-case reachability evidence the bench
@@ -524,9 +524,9 @@ func computeCost(provider, model string, inputTok, outputTok int) float64 {
 			"claude-opus-4-7":            {inputPer1K: 0.015000, outputPer1K: 0.075000},
 		},
 		"gemini": {
-			"gemini-2.0-flash":     {inputPer1K: 0.000075, outputPer1K: 0.000300},
-			"gemini-1.5-flash":     {inputPer1K: 0.000075, outputPer1K: 0.000300},
-			"gemini-1.5-pro":       {inputPer1K: 0.001250, outputPer1K: 0.005000},
+			"gemini-2.0-flash": {inputPer1K: 0.000075, outputPer1K: 0.000300},
+			"gemini-1.5-flash": {inputPer1K: 0.000075, outputPer1K: 0.000300},
+			"gemini-1.5-pro":   {inputPer1K: 0.001250, outputPer1K: 0.005000},
 		},
 		"azure_openai": {
 			// Mirrors openai pricing; Azure tier add-on varies per

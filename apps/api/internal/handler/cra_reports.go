@@ -93,14 +93,14 @@ type CRAAuditLogger interface {
 //   - F8/F9   loadReportScoped helper enforces (tenant, project) → 404
 //   - F10     generic 404 / 400 body; sentinels logged via slog only
 //   - F14/F15 MultiAuth + RequireWrite at the route layer; CanWrite
-//             defence-in-depth in the handler
+//     defence-in-depth in the handler
 //   - F19     no TenantTx for RunReport / Reanalyse (runner manages tx)
 //   - F24/F27 limit / offset clamp with explicit reject (no silent clamp)
 //   - F28     X-Total-Count via CountByProject for the list endpoint
 type CRAReportsHandler struct {
-	runner   CRAReportRunner
-	reports  CRAReportStore
-	audit    CRAAuditLogger
+	runner  CRAReportRunner
+	reports CRAReportStore
+	audit   CRAAuditLogger
 }
 
 // NewCRAReportsHandler wires the handler.
@@ -445,14 +445,14 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 	// records only path/method/latency — the domain audit captures the
 	// before/after decision values for the compliance trail.
 	auditDetails := map[string]interface{}{
-		"cve_id":               report.CVEID,
-		"vulnerability_id":     report.VulnerabilityID.String(),
-		"project_id":           projectID.String(),
-		"report_type":          report.ReportType,
-		"lang":                 report.Lang,
-		"prior_decision":       report.Decision,
-		"new_decision":         req.Decision,
-		"edited":               req.EditedDraftText != nil,
+		"cve_id":           report.CVEID,
+		"vulnerability_id": report.VulnerabilityID.String(),
+		"project_id":       projectID.String(),
+		"report_type":      report.ReportType,
+		"lang":             report.Lang,
+		"prior_decision":   report.Decision,
+		"new_decision":     req.Decision,
+		"edited":           req.EditedDraftText != nil,
 	}
 	if note := req.DecisionNote; note != "" {
 		auditDetails["decision_note_len"] = len(note)
@@ -748,8 +748,8 @@ func (h *CRAReportsHandler) loadReportScoped(
 //   - cra.ErrSourceVEXDraftNotFound                  → 404 (generic body)
 //   - cra.ErrSourceVEXDraftCrossProject              → 404 (#F7/F8/F9, generic body)
 //   - cra.ErrSourceVEXDraftCVEMismatch               → 409 (#F30, operator must
-//                                                     attach a VEX draft for the
-//                                                     correct CVE)
+//     attach a VEX draft for the
+//     correct CVE)
 //   - cra.ErrNoApprovedVEXDraft                      → 409 (operator must triage first)
 //   - cra.ErrUnknownTemplate                         → 400
 //   - input-validation errors (missing fields)       → 400

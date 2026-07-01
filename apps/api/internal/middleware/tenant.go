@@ -123,7 +123,9 @@ func EnsureTenantAccess(c echo.Context, resourceTenantID uuid.UUID) error {
 }
 
 // CheckProjectLimit verifies project count limit for the tenant
-func CheckProjectLimit(tenantRepo *repository.TenantRepository, subRepo *repository.SubscriptionRepository, projectRepo interface{ CountByTenant(c echo.Context, id uuid.UUID) (int, error) }) echo.MiddlewareFunc {
+func CheckProjectLimit(tenantRepo *repository.TenantRepository, subRepo *repository.SubscriptionRepository, projectRepo interface {
+	CountByTenant(c echo.Context, id uuid.UUID) (int, error)
+}) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			// Only check on POST (create) requests

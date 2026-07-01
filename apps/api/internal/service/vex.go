@@ -162,8 +162,8 @@ func (s *VEXService) ExportCycloneDXVEX(ctx context.Context, projectID uuid.UUID
 
 	for _, stmt := range statements {
 		vuln := VEXVulnerability{
-			ID:          stmt.VulnerabilityCVEID,
-			Source:      VEXSource{Name: "NVD"},
+			ID:     stmt.VulnerabilityCVEID,
+			Source: VEXSource{Name: "NVD"},
 			Analysis: VEXAnalysis{
 				State:         mapStatusToCycloneDX(stmt.Status),
 				Justification: mapJustificationToCycloneDX(stmt.Justification),

@@ -41,16 +41,16 @@ func TestAdvisoryExcerptsRepository_Upsert_PassesTenantID(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO advisory_excerpts")).
 		WithArgs(
-			excerptID,             // $1  id
-			tenantID,              // $2  tenant_id
-			"CVE-2025-12345",      // $3  cve_id
-			"ghsa",                // $4  source
-			[]byte(vulnFuncs),     // $5  vuln_funcs
-			[]byte(affectedPaths), // $6  affected_paths
-			[]byte(requiredConfig),// $7  required_config
-			[]byte(requiredEnv),   // $8  required_env
-			"raw advisory text",   // $9  raw_excerpt
-			fetched,               // $10 fetched_at
+			excerptID,              // $1  id
+			tenantID,               // $2  tenant_id
+			"CVE-2025-12345",       // $3  cve_id
+			"ghsa",                 // $4  source
+			[]byte(vulnFuncs),      // $5  vuln_funcs
+			[]byte(affectedPaths),  // $6  affected_paths
+			[]byte(requiredConfig), // $7  required_config
+			[]byte(requiredEnv),    // $8  required_env
+			"raw advisory text",    // $9  raw_excerpt
+			fetched,                // $10 fetched_at
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(excerptID, now, now))
@@ -161,16 +161,16 @@ func TestAdvisoryExcerptsRepository_Upsert_AssignsIDIfZero(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO advisory_excerpts")).
 		WithArgs(
-			sqlmock.AnyArg(),  // $1  id (generated)
-			tenantID,          // $2  tenant_id
-			"CVE-2025-1",      // $3  cve_id
-			"nvd",             // $4  source
-			[]byte("[]"),      // $5  vuln_funcs default
-			[]byte("[]"),      // $6  affected_paths default
-			[]byte("[]"),      // $7  required_config default
-			[]byte("[]"),      // $8  required_env default
-			nil,               // $9  raw_excerpt (empty -> NULL)
-			nil,               // $10 fetched_at (nil)
+			sqlmock.AnyArg(), // $1  id (generated)
+			tenantID,         // $2  tenant_id
+			"CVE-2025-1",     // $3  cve_id
+			"nvd",            // $4  source
+			[]byte("[]"),     // $5  vuln_funcs default
+			[]byte("[]"),     // $6  affected_paths default
+			[]byte("[]"),     // $7  required_config default
+			[]byte("[]"),     // $8  required_env default
+			nil,              // $9  raw_excerpt (empty -> NULL)
+			nil,              // $10 fetched_at (nil)
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(uuid.New(), now, now))

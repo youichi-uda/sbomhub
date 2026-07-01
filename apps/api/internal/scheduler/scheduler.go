@@ -180,7 +180,7 @@ func sscanf(s string, format string, args ...interface{}) (int, error) {
 	// Simplified scanf implementation
 	var count int
 	parts := splitWhitespace(s)
-	
+
 	for i, arg := range args {
 		if i >= len(parts) {
 			break

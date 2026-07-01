@@ -67,21 +67,21 @@ func (c *GHSAClient) WithHTTPClient(hc *http.Client) *GHSAClient {
 // only the fields the advisory parser needs. The full schema includes many more
 // fields (credits, withdrawn_at, etc.) which we intentionally ignore for now.
 type GHSAAdvisory struct {
-	GHSAID            string             `json:"ghsa_id"`
-	CVEID             string             `json:"cve_id"`
-	URL               string             `json:"url"`
-	HTMLURL           string             `json:"html_url"`
-	Summary           string             `json:"summary"`
-	Description       string             `json:"description"`
-	Severity          string             `json:"severity"`
-	Identifiers       []GHSAIdentifier   `json:"identifiers"`
-	References        []string           `json:"references"`
-	PublishedAt       string             `json:"published_at"`
-	UpdatedAt         string             `json:"updated_at"`
-	WithdrawnAt       string             `json:"withdrawn_at"`
-	Vulnerabilities   []GHSAVulnerability `json:"vulnerabilities"`
-	CWEs              []GHSACWE          `json:"cwes"`
-	CVSS              *GHSACVSS          `json:"cvss"`
+	GHSAID          string              `json:"ghsa_id"`
+	CVEID           string              `json:"cve_id"`
+	URL             string              `json:"url"`
+	HTMLURL         string              `json:"html_url"`
+	Summary         string              `json:"summary"`
+	Description     string              `json:"description"`
+	Severity        string              `json:"severity"`
+	Identifiers     []GHSAIdentifier    `json:"identifiers"`
+	References      []string            `json:"references"`
+	PublishedAt     string              `json:"published_at"`
+	UpdatedAt       string              `json:"updated_at"`
+	WithdrawnAt     string              `json:"withdrawn_at"`
+	Vulnerabilities []GHSAVulnerability `json:"vulnerabilities"`
+	CWEs            []GHSACWE           `json:"cwes"`
+	CVSS            *GHSACVSS           `json:"cvss"`
 	// VulnerableFunctions is a flat array of fully-qualified symbol names known
 	// to be vulnerable. Present on a subset of advisories (Go ecosystem in
 	// particular populates this from the GO-* CVE feed). ※要確認:
@@ -92,7 +92,7 @@ type GHSAAdvisory struct {
 
 // GHSAIdentifier is one of the alternate identifiers attached to an advisory.
 type GHSAIdentifier struct {
-	Type  string `json:"type"`  // "CVE" or "GHSA"
+	Type  string `json:"type"` // "CVE" or "GHSA"
 	Value string `json:"value"`
 }
 

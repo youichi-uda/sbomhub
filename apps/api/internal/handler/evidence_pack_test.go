@@ -319,16 +319,16 @@ func TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236(t *testing
 	// details map contents are exercised by other suites.
 	mock.ExpectExec(`INSERT INTO audit_logs`).
 		WithArgs(
-			sqlmock.AnyArg(),                                 // id
-			sqlmock.AnyArg(),                                 // tenant_id
-			sqlmock.AnyArg(),                                 // user_id
+			sqlmock.AnyArg(), // id
+			sqlmock.AnyArg(), // tenant_id
+			sqlmock.AnyArg(), // user_id
 			captureStringArgMatcher{target: &capturedAction}, // action
-			sqlmock.AnyArg(),                                 // resource_type
-			sqlmock.AnyArg(),                                 // resource_id
-			sqlmock.AnyArg(),                                 // details (JSON)
-			sqlmock.AnyArg(),                                 // ip_address
-			sqlmock.AnyArg(),                                 // user_agent
-			sqlmock.AnyArg(),                                 // created_at
+			sqlmock.AnyArg(), // resource_type
+			sqlmock.AnyArg(), // resource_id
+			sqlmock.AnyArg(), // details (JSON)
+			sqlmock.AnyArg(), // ip_address
+			sqlmock.AnyArg(), // user_agent
+			sqlmock.AnyArg(), // created_at
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

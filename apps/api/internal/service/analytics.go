@@ -92,12 +92,12 @@ func (s *AnalyticsService) GetSummary(ctx context.Context, tenantID uuid.UUID, d
 	}
 
 	return &model.AnalyticsSummary{
-		Period:           days,
-		MTTR:             mttr,
+		Period:             days,
+		MTTR:               mttr,
 		VulnerabilityTrend: vulnTrend,
-		SLOAchievement:   sloAchievement,
-		ComplianceTrend:  complianceTrend,
-		Summary:          *stats,
+		SLOAchievement:     sloAchievement,
+		ComplianceTrend:    complianceTrend,
+		Summary:            *stats,
 	}, nil
 }
 

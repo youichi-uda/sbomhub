@@ -24,12 +24,12 @@ type AuditLog struct {
 // Audit action constants
 const (
 	// User actions
-	ActionUserSignIn     = "user.sign_in"
-	ActionUserSignOut    = "user.sign_out"
-	ActionUserCreated    = "user.created"
-	ActionUserUpdated    = "user.updated"
-	ActionUserDeleted    = "user.deleted"
-	ActionUserInvited    = "user.invited"
+	ActionUserSignIn      = "user.sign_in"
+	ActionUserSignOut     = "user.sign_out"
+	ActionUserCreated     = "user.created"
+	ActionUserUpdated     = "user.updated"
+	ActionUserDeleted     = "user.deleted"
+	ActionUserInvited     = "user.invited"
 	ActionUserRoleChanged = "user.role_changed"
 
 	// Tenant actions
@@ -90,10 +90,10 @@ const (
 	// level vex_draft_ai_generated / vex_draft_ai_disabled etc. rows
 	// inside the Stage 3 write tx; the middleware records the request-
 	// level path/method/latency view with these verbs.
-	ActionVEXDraftListed           = "vex_draft.listed"
-	ActionVEXDraftViewed           = "vex_draft.viewed"
-	ActionVEXDraftDecisionUpdated  = "vex_draft.decision_updated"
-	ActionVEXDraftReanalysed       = "vex_draft.reanalysed"
+	ActionVEXDraftListed          = "vex_draft.listed"
+	ActionVEXDraftViewed          = "vex_draft.viewed"
+	ActionVEXDraftDecisionUpdated = "vex_draft.decision_updated"
+	ActionVEXDraftReanalysed      = "vex_draft.reanalysed"
 	// F218 (M14 Phase D round 1 fix): POST /projects/:id/triage/run mints
 	// a fresh vex_draft row. Pre-F218 the middleware classified it as
 	// "triage.run" / "triage" but no `triage` table exists, so
@@ -135,9 +135,9 @@ const (
 	ActionNotificationViewed  = "notification.viewed"
 
 	// SBOM-diff observability (M10-6 / M11-4 / M12-3).
-	ActionDiffViewed       = "diff.viewed"
-	ActionDiffSummary      = "diff.summary"
-	ActionDiffGraphViewed  = "diff.graph.view"
+	ActionDiffViewed      = "diff.viewed"
+	ActionDiffSummary     = "diff.summary"
+	ActionDiffGraphViewed = "diff.graph.view"
 
 	// SSVC.
 	ActionSSVCViewed   = "ssvc.viewed"

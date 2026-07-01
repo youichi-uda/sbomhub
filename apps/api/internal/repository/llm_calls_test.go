@@ -35,48 +35,48 @@ func TestLLMCallsRepository_Insert_PassesTenantID(t *testing.T) {
 
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO llm_calls")).
 		WithArgs(
-			callID,                                                       // $1  id
-			tenantID,                                                     // $2  tenant_id
-			userID,                                                       // $3  user_id
-			"vex_triage",                                                 // $4  purpose
-			"openai",                                                     // $5  provider
-			"gpt-4o",                                                     // $6  model
-			"deadbeef",                                                   // $7  prompt_hash
-			"prompt preview",                                             // $8  prompt_preview
-			"cafebabe",                                                   // $9  response_hash
-			"response preview",                                           // $10 response_preview
-			nil,                                                          // $11 response_body (empty -> NULL)
-			120,                                                          // $12 input_tokens
-			45,                                                           // $13 output_tokens
-			0.0123,                                                       // $14 cost_usd
-			800,                                                          // $15 duration_ms
-			"stop",                                                       // $16 finish_reason
-			nil,                                                          // $17 error_message (empty -> NULL)
-			"CVE-2025-12345",                                             // $18 triage_target_cve
-			nil,                                                          // $19 triage_target_component_id
-			nil,                                                          // $20 cra_report_id
-			now,                                                          // $21 created_at
+			callID,             // $1  id
+			tenantID,           // $2  tenant_id
+			userID,             // $3  user_id
+			"vex_triage",       // $4  purpose
+			"openai",           // $5  provider
+			"gpt-4o",           // $6  model
+			"deadbeef",         // $7  prompt_hash
+			"prompt preview",   // $8  prompt_preview
+			"cafebabe",         // $9  response_hash
+			"response preview", // $10 response_preview
+			nil,                // $11 response_body (empty -> NULL)
+			120,                // $12 input_tokens
+			45,                 // $13 output_tokens
+			0.0123,             // $14 cost_usd
+			800,                // $15 duration_ms
+			"stop",             // $16 finish_reason
+			nil,                // $17 error_message (empty -> NULL)
+			"CVE-2025-12345",   // $18 triage_target_cve
+			nil,                // $19 triage_target_component_id
+			nil,                // $20 cra_report_id
+			now,                // $21 created_at
 		).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	err = repo.Insert(context.Background(), &LLMCall{
-		ID:               callID,
-		TenantID:         tenantID,
-		UserID:           &userID,
-		Purpose:          "vex_triage",
-		Provider:         "openai",
-		Model:            "gpt-4o",
-		PromptHash:       "deadbeef",
-		PromptPreview:    "prompt preview",
-		ResponseHash:     "cafebabe",
-		ResponsePreview:  "response preview",
-		InputTokens:      120,
-		OutputTokens:     45,
-		CostUSD:          0.0123,
-		DurationMs:       800,
-		FinishReason:     "stop",
-		TriageTargetCVE:  "CVE-2025-12345",
-		CreatedAt:        now,
+		ID:              callID,
+		TenantID:        tenantID,
+		UserID:          &userID,
+		Purpose:         "vex_triage",
+		Provider:        "openai",
+		Model:           "gpt-4o",
+		PromptHash:      "deadbeef",
+		PromptPreview:   "prompt preview",
+		ResponseHash:    "cafebabe",
+		ResponsePreview: "response preview",
+		InputTokens:     120,
+		OutputTokens:    45,
+		CostUSD:         0.0123,
+		DurationMs:      800,
+		FinishReason:    "stop",
+		TriageTargetCVE: "CVE-2025-12345",
+		CreatedAt:       now,
 	})
 	if err != nil {
 		t.Fatalf("Insert returned unexpected error: %v", err)

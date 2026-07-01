@@ -40,12 +40,12 @@ func NewBillingHandler(
 
 // SubscriptionResponse represents the subscription info returned to clients
 type SubscriptionResponse struct {
-	HasSubscription bool               `json:"has_subscription"`
+	HasSubscription bool                `json:"has_subscription"`
 	Subscription    *model.Subscription `json:"subscription,omitempty"`
-	Plan            string             `json:"plan"`
-	Limits          *model.PlanLimits  `json:"limits"`
-	BillingEnabled  bool               `json:"billing_enabled"`
-	IsSelfHosted    bool               `json:"is_self_hosted"`
+	Plan            string              `json:"plan"`
+	Limits          *model.PlanLimits   `json:"limits"`
+	BillingEnabled  bool                `json:"billing_enabled"`
+	IsSelfHosted    bool                `json:"is_self_hosted"`
 }
 
 // GetSubscription returns the current subscription info
@@ -215,7 +215,7 @@ func (h *BillingHandler) GetUsage(c echo.Context) error {
 			"current": stats.ProjectCount,
 			"limit":   limits.MaxProjects,
 		},
-		"plan":        tenant.Plan,
+		"plan":         tenant.Plan,
 		"isSelfHosted": tc.IsSelfHosted(),
 	})
 }

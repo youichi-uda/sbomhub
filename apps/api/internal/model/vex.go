@@ -10,9 +10,9 @@ import (
 type VEXStatus string
 
 const (
-	VEXStatusNotAffected       VEXStatus = "not_affected"
-	VEXStatusAffected          VEXStatus = "affected"
-	VEXStatusFixed             VEXStatus = "fixed"
+	VEXStatusNotAffected        VEXStatus = "not_affected"
+	VEXStatusAffected           VEXStatus = "affected"
+	VEXStatusFixed              VEXStatus = "fixed"
 	VEXStatusUnderInvestigation VEXStatus = "under_investigation"
 )
 
@@ -46,8 +46,8 @@ type VEXStatement struct {
 // VEXStatementWithDetails includes vulnerability and component info for display
 type VEXStatementWithDetails struct {
 	VEXStatement
-	VulnerabilityCVEID   string  `json:"vulnerability_cve_id"`
-	VulnerabilitySeverity string `json:"vulnerability_severity"`
-	ComponentName        *string `json:"component_name,omitempty"`
-	ComponentVersion     *string `json:"component_version,omitempty"`
+	VulnerabilityCVEID    string  `json:"vulnerability_cve_id"`
+	VulnerabilitySeverity string  `json:"vulnerability_severity"`
+	ComponentName         *string `json:"component_name,omitempty"`
+	ComponentVersion      *string `json:"component_version,omitempty"`
 }

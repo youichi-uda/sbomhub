@@ -1876,16 +1876,16 @@ func TestAudit_DetailsMap_NonUUIDParamCaptured_F214(t *testing.T) {
 	// the capture matcher and accept anything for the rest.
 	mock.ExpectExec(`INSERT INTO audit_logs`).
 		WithArgs(
-			sqlmock.AnyArg(),                                // id
-			sqlmock.AnyArg(),                                // tenant_id
-			sqlmock.AnyArg(),                                // user_id
-			sqlmock.AnyArg(),                                // action
-			sqlmock.AnyArg(),                                // resource_type
-			sqlmock.AnyArg(),                                // resource_id
+			sqlmock.AnyArg(), // id
+			sqlmock.AnyArg(), // tenant_id
+			sqlmock.AnyArg(), // user_id
+			sqlmock.AnyArg(), // action
+			sqlmock.AnyArg(), // resource_type
+			sqlmock.AnyArg(), // resource_id
 			detailsCaptureMatcher{target: &capturedDetails}, // details (JSON)
-			sqlmock.AnyArg(),                                // ip_address
-			sqlmock.AnyArg(),                                // user_agent
-			sqlmock.AnyArg(),                                // created_at
+			sqlmock.AnyArg(), // ip_address
+			sqlmock.AnyArg(), // user_agent
+			sqlmock.AnyArg(), // created_at
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

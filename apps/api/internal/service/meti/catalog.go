@@ -6,14 +6,14 @@
 // issue #39) and is layered as follows:
 //
 //   - catalog.yaml       — the criterion definitions, embedded into the
-//                          binary so the deployed image cannot drift away
-//                          from the version vetted at build time.
+//     binary so the deployed image cannot drift away
+//     from the version vetted at build time.
 //   - catalog.go         — load / lookup API consumed by the evaluator
-//                          (M3-2, separate agent) and by the handler /
-//                          report layer.
+//     (M3-2, separate agent) and by the handler /
+//     report layer.
 //   - catalog_test.go    — schema validation: every criterion must carry
-//                          id, phase, ja+en title, ja+en description and
-//                          evaluator_hint, and ids must be globally unique.
+//     id, phase, ja+en title, ja+en description and
+//     evaluator_hint, and ids must be globally unique.
 //
 // Scope discipline (per the M3-3 task contract): this package owns the
 // catalog only. It does NOT touch the DB (M3-1 owns migration 039 +
@@ -386,9 +386,9 @@ var validMetadataVerificationStatuses = map[string]struct{}{
 // (2024-12 PDF). The loader rejects typos at parse time so a future
 // authoring round cannot silently downgrade provenance.
 var validCriterionSources = map[string]struct{}{
-	"":                     {}, // legacy / primary METI ver 2.0 (default)
-	"meti-primary-ver2.0":  {},
-	"ipa-derived":          {},
+	"":                    {}, // legacy / primary METI ver 2.0 (default)
+	"meti-primary-ver2.0": {},
+	"ipa-derived":         {},
 }
 
 // validateMetadata enforces the per-field invariants for the catalog

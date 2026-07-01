@@ -56,28 +56,28 @@ type LSWebhookMeta struct {
 
 // LSWebhookData contains the subscription data
 type LSWebhookData struct {
-	ID         string                 `json:"id"`
-	Type       string                 `json:"type"`
-	Attributes LSSubscriptionAttrs    `json:"attributes"`
+	ID         string              `json:"id"`
+	Type       string              `json:"type"`
+	Attributes LSSubscriptionAttrs `json:"attributes"`
 }
 
 // LSSubscriptionAttrs contains subscription attributes
 type LSSubscriptionAttrs struct {
-	StoreID                int    `json:"store_id"`
-	CustomerID             int    `json:"customer_id"`
-	OrderID                int    `json:"order_id"`
-	ProductID              int    `json:"product_id"`
-	VariantID              int    `json:"variant_id"`
-	ProductName            string `json:"product_name"`
-	VariantName            string `json:"variant_name"`
-	Status                 string `json:"status"`
-	StatusFormatted        string `json:"status_formatted"`
-	BillingAnchor          int    `json:"billing_anchor"`
-	RenewsAt               string `json:"renews_at"`
-	EndsAt                 string `json:"ends_at"`
-	TrialEndsAt            string `json:"trial_ends_at"`
-	CreatedAt              string `json:"created_at"`
-	UpdatedAt              string `json:"updated_at"`
+	StoreID         int    `json:"store_id"`
+	CustomerID      int    `json:"customer_id"`
+	OrderID         int    `json:"order_id"`
+	ProductID       int    `json:"product_id"`
+	VariantID       int    `json:"variant_id"`
+	ProductName     string `json:"product_name"`
+	VariantName     string `json:"variant_name"`
+	Status          string `json:"status"`
+	StatusFormatted string `json:"status_formatted"`
+	BillingAnchor   int    `json:"billing_anchor"`
+	RenewsAt        string `json:"renews_at"`
+	EndsAt          string `json:"ends_at"`
+	TrialEndsAt     string `json:"trial_ends_at"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 // Handle processes Lemon Squeezy webhook events

@@ -527,9 +527,9 @@ func TestComponentRepository_Create_VariousTypes(t *testing.T) {
 	repo := NewComponentRepository(db)
 
 	componentTypes := []struct {
-		name    string
+		name     string
 		compType string
-		purl    string
+		purl     string
 	}{
 		{"npm library", "library", "pkg:npm/express@4.18.2"},
 		{"go module", "library", "pkg:golang/github.com/gin-gonic/gin@1.9.1"},

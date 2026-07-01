@@ -270,13 +270,13 @@ func TestEOLRepository_ListProducts(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name       string
-		limit      int
-		offset     int
-		setupMock  func()
-		wantErr    bool
-		wantCount  int
-		wantTotal  int
+		name      string
+		limit     int
+		offset    int
+		setupMock func()
+		wantErr   bool
+		wantCount int
+		wantTotal int
 	}{
 		{
 			name:   "successful list with multiple products",

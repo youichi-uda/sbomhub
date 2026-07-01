@@ -31,13 +31,13 @@ func (p *NVDParser) Source() Source { return SourceNVD }
 //
 // Reference: https://nvd.nist.gov/developers/vulnerabilities
 type NVDCVEPayload struct {
-	ID           string                 `json:"id"`
-	Published    string                 `json:"published"`
-	LastModified string                 `json:"lastModified"`
-	Descriptions []NVDDescription       `json:"descriptions"`
-	References   []NVDReference         `json:"references"`
-	Configurations []NVDConfiguration   `json:"configurations"`
-	Weaknesses   []NVDWeakness          `json:"weaknesses"`
+	ID             string             `json:"id"`
+	Published      string             `json:"published"`
+	LastModified   string             `json:"lastModified"`
+	Descriptions   []NVDDescription   `json:"descriptions"`
+	References     []NVDReference     `json:"references"`
+	Configurations []NVDConfiguration `json:"configurations"`
+	Weaknesses     []NVDWeakness      `json:"weaknesses"`
 }
 
 // NVDDescription is one localised description block.
@@ -56,15 +56,15 @@ type NVDReference struct {
 // NVDConfiguration captures CPE configurations. Used opportunistically to spot
 // "must be configured with X" style constraints.
 type NVDConfiguration struct {
-	Operator string     `json:"operator"`
-	Nodes    []NVDNode  `json:"nodes"`
+	Operator string    `json:"operator"`
+	Nodes    []NVDNode `json:"nodes"`
 }
 
 // NVDNode is one node in the CPE applicability tree.
 type NVDNode struct {
-	Operator string           `json:"operator"`
-	Negate   bool             `json:"negate"`
-	CPEMatch []NVDCPEMatch    `json:"cpeMatch"`
+	Operator string        `json:"operator"`
+	Negate   bool          `json:"negate"`
+	CPEMatch []NVDCPEMatch `json:"cpeMatch"`
 }
 
 // NVDCPEMatch is one CPE applicability match.
@@ -75,9 +75,9 @@ type NVDCPEMatch struct {
 
 // NVDWeakness wraps a CWE classification.
 type NVDWeakness struct {
-	Source      string            `json:"source"`
-	Type        string            `json:"type"`
-	Description []NVDDescription  `json:"description"`
+	Source      string           `json:"source"`
+	Type        string           `json:"type"`
+	Description []NVDDescription `json:"description"`
 }
 
 // nvdEnvelope and nvdEntry mirror the upstream list response shape so we can

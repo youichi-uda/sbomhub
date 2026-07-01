@@ -50,15 +50,15 @@ func TestMetiAssessmentsRepository_Upsert_PassesTenantID(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO meti_assessments")).
 		WithArgs(
-			rowID,             // $1 id
-			tenantID,          // $2 tenant_id
-			projectID,         // $3 project_id
-			"ENV-SBOM-001",    // $4 criterion_id
-			"env_setup",       // $5 criterion_phase
-			"achieved",        // $6 status
-			[]byte(ev),        // $7 evidence
-			"1.0.0",           // $8 evaluator_version
-			sqlmock.AnyArg(),  // $9 evaluated_at (caller-supplied)
+			rowID,            // $1 id
+			tenantID,         // $2 tenant_id
+			projectID,        // $3 project_id
+			"ENV-SBOM-001",   // $4 criterion_id
+			"env_setup",      // $5 criterion_phase
+			"achieved",       // $6 status
+			[]byte(ev),       // $7 evidence
+			"1.0.0",          // $8 evaluator_version
+			sqlmock.AnyArg(), // $9 evaluated_at (caller-supplied)
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "evaluated_at", "created_at", "updated_at"}).
 			AddRow(rowID, now, now, now))

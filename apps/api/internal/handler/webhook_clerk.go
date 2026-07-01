@@ -49,7 +49,7 @@ type ClerkWebhookPayload struct {
 
 // ClerkUserData represents user data from Clerk
 type ClerkUserData struct {
-	ID            string `json:"id"`
+	ID             string `json:"id"`
 	EmailAddresses []struct {
 		EmailAddress string `json:"email_address"`
 	} `json:"email_addresses"`
@@ -70,7 +70,7 @@ type ClerkOrgData struct {
 
 // ClerkOrgMembershipData represents organization membership data from Clerk
 type ClerkOrgMembershipData struct {
-	ID             string `json:"id"`
+	ID             string       `json:"id"`
 	Organization   ClerkOrgData `json:"organization"`
 	PublicUserData struct {
 		UserID string `json:"user_id"`

@@ -140,7 +140,7 @@ func TestLoadModuleGraph_MissingFile(t *testing.T) {
 func TestMatchModules(t *testing.T) {
 	t.Parallel()
 	graph := map[string]struct{}{
-		"github.com/foo/bar": {},
+		"github.com/foo/bar":   {},
 		"example.test/vulnpkg": {},
 	}
 	hits := matchModules(graph, []string{"example.test/vulnpkg", "missing/mod"})
@@ -150,11 +150,11 @@ func TestMatchModules(t *testing.T) {
 func TestParseSymbolSelectors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name    string
-		in      []string
-		wantPkg []string
+		name     string
+		in       []string
+		wantPkg  []string
 		wantLeaf []string
-		wantErr bool
+		wantErr  bool
 	}{
 		{
 			name:     "two-part",
@@ -169,14 +169,14 @@ func TestParseSymbolSelectors(t *testing.T) {
 			wantLeaf: []string{"Exec"},
 		},
 		{
-			name:     "bare function rejected",
-			in:       []string{"Unmarshal"},
-			wantErr:  true,
+			name:    "bare function rejected",
+			in:      []string{"Unmarshal"},
+			wantErr: true,
 		},
 		{
-			name:    "trimming + skip empty",
-			in:      []string{"  ", "yaml.Unmarshal"},
-			wantPkg: []string{"yaml"},
+			name:     "trimming + skip empty",
+			in:       []string{"  ", "yaml.Unmarshal"},
+			wantPkg:  []string{"yaml"},
 			wantLeaf: []string{"Unmarshal"},
 		},
 	}

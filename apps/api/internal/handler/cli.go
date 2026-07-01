@@ -29,13 +29,13 @@ type UploadRequest struct {
 
 // UploadResponse represents the response for SBOM upload.
 type UploadResponse struct {
-	Success         bool        `json:"success"`
-	ProjectID       uuid.UUID   `json:"project_id"`
-	ProjectName     string      `json:"project_name"`
-	ProjectCreated  bool        `json:"project_created"`
-	SbomID          uuid.UUID   `json:"sbom_id"`
-	Format          string      `json:"format"`
-	ComponentCount  int         `json:"component_count"`
+	Success        bool      `json:"success"`
+	ProjectID      uuid.UUID `json:"project_id"`
+	ProjectName    string    `json:"project_name"`
+	ProjectCreated bool      `json:"project_created"`
+	SbomID         uuid.UUID `json:"sbom_id"`
+	Format         string    `json:"format"`
+	ComponentCount int       `json:"component_count"`
 }
 
 // Upload handles SBOM upload from CLI.

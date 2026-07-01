@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	nvdAPIBase            = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-	rateLimitWithoutKey   = 6 * time.Second  // ~5 requests per 30 seconds
-	rateLimitWithKey      = 700 * time.Millisecond // ~50 requests per 30 seconds
-	maxConcurrentWithKey  = 5  // Max concurrent workers with API key
-	maxConcurrentNoKey    = 1  // Single worker without API key
+	nvdAPIBase           = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+	rateLimitWithoutKey  = 6 * time.Second        // ~5 requests per 30 seconds
+	rateLimitWithKey     = 700 * time.Millisecond // ~50 requests per 30 seconds
+	maxConcurrentWithKey = 5                      // Max concurrent workers with API key
+	maxConcurrentNoKey   = 1                      // Single worker without API key
 )
 
 type NVDService struct {
@@ -56,10 +56,10 @@ func NewNVDServiceWithCache(vr *repository.VulnerabilityRepository, cr *reposito
 }
 
 type NVDResponse struct {
-	ResultsPerPage  int             `json:"resultsPerPage"`
-	StartIndex      int             `json:"startIndex"`
-	TotalResults    int             `json:"totalResults"`
-	Vulnerabilities []NVDVulnEntry  `json:"vulnerabilities"`
+	ResultsPerPage  int            `json:"resultsPerPage"`
+	StartIndex      int            `json:"startIndex"`
+	TotalResults    int            `json:"totalResults"`
+	Vulnerabilities []NVDVulnEntry `json:"vulnerabilities"`
 }
 
 type NVDVulnEntry struct {
@@ -67,11 +67,11 @@ type NVDVulnEntry struct {
 }
 
 type NVDCVE struct {
-	ID          string        `json:"id"`
-	Published   string        `json:"published"`
-	LastModified string       `json:"lastModified"`
-	Descriptions []NVDDesc    `json:"descriptions"`
-	Metrics     NVDMetrics    `json:"metrics"`
+	ID           string     `json:"id"`
+	Published    string     `json:"published"`
+	LastModified string     `json:"lastModified"`
+	Descriptions []NVDDesc  `json:"descriptions"`
+	Metrics      NVDMetrics `json:"metrics"`
 }
 
 type NVDDesc struct {

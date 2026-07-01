@@ -8,12 +8,12 @@ import (
 
 // DashboardSummary represents the overall dashboard data
 type DashboardSummary struct {
-	TotalProjects    int               `json:"total_projects"`
-	TotalComponents  int               `json:"total_components"`
-	Vulnerabilities  VulnerabilityCounts `json:"vulnerabilities"`
-	TopRisks         []TopRisk         `json:"top_risks"`
-	ProjectScores    []ProjectScore    `json:"project_scores"`
-	Trend            []TrendPoint      `json:"trend"`
+	TotalProjects   int                 `json:"total_projects"`
+	TotalComponents int                 `json:"total_components"`
+	Vulnerabilities VulnerabilityCounts `json:"vulnerabilities"`
+	TopRisks        []TopRisk           `json:"top_risks"`
+	ProjectScores   []ProjectScore      `json:"project_scores"`
+	Trend           []TrendPoint        `json:"trend"`
 }
 
 // VulnerabilityCounts holds vulnerability counts by severity

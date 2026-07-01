@@ -344,8 +344,8 @@ func TestTenantCreate_GetOrCreateDefault_RoundTrips(t *testing.T) {
 	).Scan(&seen); err != nil {
 		// Distinguish RLS error from real failure for clearer diagnosis.
 		if errors.Is(err, sql.ErrNoRows) {
-			t.Fatalf("F187 regression: scan_settings row never landed for "+
-				"the default tenant — Create's tx must roll back when the "+
+			t.Fatalf("F187 regression: scan_settings row never landed for " +
+				"the default tenant — Create's tx must roll back when the " +
 				"GUC is unset.")
 		}
 		t.Fatalf("scan_settings count: %v", err)

@@ -81,9 +81,9 @@ func TestProjectHandler_Create_ValidRequest(t *testing.T) {
 		Name:        "Test Project",
 		Description: "Test Description",
 	}
-	
+
 	jsonBytes, _ := json.Marshal(reqBody)
-	
+
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", strings.NewReader(string(jsonBytes)))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -163,7 +163,7 @@ func TestProjectModel(t *testing.T) {
 
 func TestCreateProjectRequest_JSON(t *testing.T) {
 	jsonStr := `{"name":"My Project","description":"My Description"}`
-	
+
 	var req model.CreateProjectRequest
 	err := json.Unmarshal([]byte(jsonStr), &req)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestCreateProjectRequest_JSON(t *testing.T) {
 
 func TestCreateProjectRequest_MinimalJSON(t *testing.T) {
 	jsonStr := `{"name":"OnlyName"}`
-	
+
 	var req model.CreateProjectRequest
 	err := json.Unmarshal([]byte(jsonStr), &req)
 	if err != nil {

@@ -13,7 +13,7 @@
 //
 //   - templates/*.tmpl    — Markdown templates per report type and language.
 //   - templates.go        — engine: CRATemplateData struct, Render dispatcher,
-//                           embedded template registry.
+//     embedded template registry.
 //   - templates_test.go   — golden-file tests (testdata/golden/*.md).
 //
 // Discipline (PRODUCT_REBOOT_PLAN.md §8.5 "AI は下書きまで"):
@@ -93,13 +93,13 @@ type CRATemplateData struct {
 	VendorName     string // 製造業者名 (optional, defaults to tenant org name)
 
 	// --- Vulnerability identity ---
-	CVEID                string  // CVE ID (required, e.g. "CVE-2025-12345")
-	CVSSScore            string  // free-form (e.g. "9.8") so unknown can be empty without zero-ambiguity
-	CVSSVector           string  // optional (e.g. "CVSS:3.1/AV:N/...")
-	Severity             string  // optional (e.g. "Critical")
-	VulnerabilitySummary string  // short summary (used by early warning + as fallback in detailed/final)
-	VulnerabilityDetail  string  // longer technical description (detailed + final)
-	RootCause            string  // root-cause analysis (detailed + final)
+	CVEID                string // CVE ID (required, e.g. "CVE-2025-12345")
+	CVSSScore            string // free-form (e.g. "9.8") so unknown can be empty without zero-ambiguity
+	CVSSVector           string // optional (e.g. "CVSS:3.1/AV:N/...")
+	Severity             string // optional (e.g. "Critical")
+	VulnerabilitySummary string // short summary (used by early warning + as fallback in detailed/final)
+	VulnerabilityDetail  string // longer technical description (detailed + final)
+	RootCause            string // root-cause analysis (detailed + final)
 
 	// --- Exploitation status (24h trigger) ---
 	ExploitationStatus   string // required (e.g. "actively exploited", "PoC available", "no known exploitation")

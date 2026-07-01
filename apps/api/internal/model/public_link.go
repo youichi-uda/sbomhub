@@ -33,15 +33,15 @@ type PublicLinkAccessLog struct {
 }
 
 type PublicSbomView struct {
-	ProjectName string        `json:"project_name"`
-	Sbom        Sbom          `json:"sbom"`
-	Components  []Component   `json:"components"`
+	ProjectName string         `json:"project_name"`
+	Sbom        Sbom           `json:"sbom"`
+	Components  []Component    `json:"components"`
 	Link        PublicLinkMeta `json:"link"`
 }
 
 type PublicLinkMeta struct {
-	Name      string    `json:"name"`
-	ExpiresAt time.Time `json:"expires_at"`
-	ViewCount int       `json:"view_count"`
-	DownloadCount int   `json:"download_count"`
+	Name          string    `json:"name"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	ViewCount     int       `json:"view_count"`
+	DownloadCount int       `json:"download_count"`
 }

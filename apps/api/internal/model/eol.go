@@ -10,17 +10,17 @@ import (
 type EOLStatus string
 
 const (
-	EOLStatusActive   EOLStatus = "active"   // Component is actively supported
-	EOLStatusEOL      EOLStatus = "eol"      // End of Life reached (no more updates)
-	EOLStatusEOS      EOLStatus = "eos"      // End of Support (security updates ended)
-	EOLStatusUnknown  EOLStatus = "unknown"  // EOL status cannot be determined
+	EOLStatusActive  EOLStatus = "active"  // Component is actively supported
+	EOLStatusEOL     EOLStatus = "eol"     // End of Life reached (no more updates)
+	EOLStatusEOS     EOLStatus = "eos"     // End of Support (security updates ended)
+	EOLStatusUnknown EOLStatus = "unknown" // EOL status cannot be determined
 )
 
 // EOLProduct represents a product tracked in endoflife.date
 type EOLProduct struct {
 	ID          uuid.UUID `json:"id" db:"id"`
-	Name        string    `json:"name" db:"name"`                 // API identifier (e.g., "python", "nodejs")
-	Title       string    `json:"title" db:"title"`               // Human-readable name
+	Name        string    `json:"name" db:"name"`   // API identifier (e.g., "python", "nodejs")
+	Title       string    `json:"title" db:"title"` // Human-readable name
 	Category    string    `json:"category,omitempty" db:"category"`
 	Link        string    `json:"link,omitempty" db:"link"`
 	TotalCycles int       `json:"total_cycles" db:"total_cycles"`
@@ -32,10 +32,10 @@ type EOLProduct struct {
 type EOLProductCycle struct {
 	ID             uuid.UUID  `json:"id" db:"id"`
 	ProductID      uuid.UUID  `json:"product_id" db:"product_id"`
-	Cycle          string     `json:"cycle" db:"cycle"`                       // Version cycle (e.g., "3.11", "18")
+	Cycle          string     `json:"cycle" db:"cycle"` // Version cycle (e.g., "3.11", "18")
 	ReleaseDate    *time.Time `json:"release_date,omitempty" db:"release_date"`
-	EOLDate        *time.Time `json:"eol_date,omitempty" db:"eol_date"`       // End of Life date
-	EOSDate        *time.Time `json:"eos_date,omitempty" db:"eos_date"`       // End of Support date
+	EOLDate        *time.Time `json:"eol_date,omitempty" db:"eol_date"` // End of Life date
+	EOSDate        *time.Time `json:"eos_date,omitempty" db:"eos_date"` // End of Support date
 	LatestVersion  string     `json:"latest_version,omitempty" db:"latest_version"`
 	IsLTS          bool       `json:"is_lts" db:"is_lts"`
 	IsEOL          bool       `json:"is_eol" db:"is_eol"`
@@ -100,17 +100,17 @@ type EOLSyncResult struct {
 
 // ComponentEOLInfo contains EOL information for a component
 type ComponentEOLInfo struct {
-	Status          EOLStatus  `json:"status"`
-	ProductID       *uuid.UUID `json:"product_id,omitempty"`
-	ProductName     string     `json:"product_name,omitempty"`
-	CycleID         *uuid.UUID `json:"cycle_id,omitempty"`
-	CycleVersion    string     `json:"cycle_version,omitempty"`
-	EOLDate         *time.Time `json:"eol_date,omitempty"`
-	EOSDate         *time.Time `json:"eos_date,omitempty"`
-	LatestVersion   string     `json:"latest_version,omitempty"`
-	IsLTS           bool       `json:"is_lts"`
-	ReleaseDate     *time.Time `json:"release_date,omitempty"`
-	SupportEndDate  *time.Time `json:"support_end_date,omitempty"`
+	Status         EOLStatus  `json:"status"`
+	ProductID      *uuid.UUID `json:"product_id,omitempty"`
+	ProductName    string     `json:"product_name,omitempty"`
+	CycleID        *uuid.UUID `json:"cycle_id,omitempty"`
+	CycleVersion   string     `json:"cycle_version,omitempty"`
+	EOLDate        *time.Time `json:"eol_date,omitempty"`
+	EOSDate        *time.Time `json:"eos_date,omitempty"`
+	LatestVersion  string     `json:"latest_version,omitempty"`
+	IsLTS          bool       `json:"is_lts"`
+	ReleaseDate    *time.Time `json:"release_date,omitempty"`
+	SupportEndDate *time.Time `json:"support_end_date,omitempty"`
 }
 
 // EOLSummary represents EOL statistics for a project
@@ -125,8 +125,8 @@ type EOLSummary struct {
 
 // EOLStats represents overall EOL catalog statistics
 type EOLStats struct {
-	TotalProducts    int                `json:"total_products"`
-	TotalCycles      int                `json:"total_cycles"`
-	LastSyncAt       *time.Time         `json:"last_sync_at,omitempty"`
-	LatestSyncStatus *EOLSyncLog        `json:"latest_sync_status,omitempty"`
+	TotalProducts    int         `json:"total_products"`
+	TotalCycles      int         `json:"total_cycles"`
+	LastSyncAt       *time.Time  `json:"last_sync_at,omitempty"`
+	LatestSyncStatus *EOLSyncLog `json:"latest_sync_status,omitempty"`
 }

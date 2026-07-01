@@ -15,9 +15,9 @@ import (
 // ErrTenantLLMConfigNotFound) without touching Postgres. The body of the
 // resolver is what we're exercising; the repo here is purely a test seam.
 type fakeTenantLLMConfigRepo struct {
-	cfg     *repository.TenantLLMConfig
+	cfg      *repository.TenantLLMConfig
 	notFound bool
-	err     error
+	err      error
 }
 
 func (f *fakeTenantLLMConfigRepo) Get(_ context.Context, _ uuid.UUID) (*repository.TenantLLMConfig, error) {

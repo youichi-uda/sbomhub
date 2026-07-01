@@ -41,15 +41,15 @@ type EOLAllProductsResponse []string
 // EOLCycleResponse represents a single cycle from endoflife.date API
 // Note: eol, lts, support can be bool or date string
 type EOLCycleResponse struct {
-	Cycle           interface{} `json:"cycle"`
-	ReleaseDate     string      `json:"releaseDate,omitempty"`
-	EOL             interface{} `json:"eol,omitempty"`       // Can be bool or date string
-	Latest          string      `json:"latest,omitempty"`
-	LatestReleaseDate string    `json:"latestReleaseDate,omitempty"`
-	LTS             interface{} `json:"lts,omitempty"`       // Can be bool or date string
-	Support         interface{} `json:"support,omitempty"`   // Can be bool or date string
-	Discontinued    interface{} `json:"discontinued,omitempty"`
-	Link            string      `json:"link,omitempty"`
+	Cycle             interface{} `json:"cycle"`
+	ReleaseDate       string      `json:"releaseDate,omitempty"`
+	EOL               interface{} `json:"eol,omitempty"` // Can be bool or date string
+	Latest            string      `json:"latest,omitempty"`
+	LatestReleaseDate string      `json:"latestReleaseDate,omitempty"`
+	LTS               interface{} `json:"lts,omitempty"`     // Can be bool or date string
+	Support           interface{} `json:"support,omitempty"` // Can be bool or date string
+	Discontinued      interface{} `json:"discontinued,omitempty"`
+	Link              string      `json:"link,omitempty"`
 }
 
 // SyncCatalog synchronizes the EOL catalog from endoflife.date

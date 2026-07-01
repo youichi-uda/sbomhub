@@ -166,9 +166,9 @@ type ComponentsDiff struct {
 
 // VulnerabilitiesDiff is the vulnerabilities.* envelope.
 type VulnerabilitiesDiff struct {
-	Added            []VulnerabilityAdded          `json:"added"`
-	Resolved         []VulnerabilityResolved       `json:"resolved"`
-	SeverityChanged  []VulnerabilitySeverityChange `json:"severity_changed"`
+	Added           []VulnerabilityAdded          `json:"added"`
+	Resolved        []VulnerabilityResolved       `json:"resolved"`
+	SeverityChanged []VulnerabilitySeverityChange `json:"severity_changed"`
 }
 
 // LicensesDiff is the licenses.* envelope.

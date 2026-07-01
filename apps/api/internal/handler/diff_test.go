@@ -539,7 +539,7 @@ func TestProjectDiffGraph_AuditFailurePropagates(t *testing.T) {
 //   - ResourceID   = projectID
 //   - TenantID     = tenantID
 //   - Details      = { node_count, edge_count, added, removed,
-//                       changed, from_sbom_id, to_sbom_id }
+//     changed, from_sbom_id, to_sbom_id }
 func TestProjectDiffGraph_AuditRowShape(t *testing.T) {
 	tenantID := uuid.New()
 	projectID := uuid.New()

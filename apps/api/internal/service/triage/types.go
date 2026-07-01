@@ -4,10 +4,10 @@
 // The package layers as follows:
 //
 //   - types.go    — value types (State, Justification, EvidencePointer,
-//                   ParsedDecision) consumed by guards and the runner.
+//     ParsedDecision) consumed by guards and the runner.
 //   - guards.go   — pure validation / clamping helpers (this issue, #29).
 //   - runner.go   — orchestrates advisory → reachability → LLM → draft
-//                   (agent B, separate issue).
+//     (agent B, separate issue).
 //
 // The guards layer deliberately stays pure (no DB / HTTP / file I/O) so
 // it can be exhaustively unit-tested in isolation. The runner (Wave M1-5)
@@ -47,14 +47,14 @@ const (
 type Justification string
 
 const (
-	JustificationCodeNotPresent             Justification = "code_not_present"
-	JustificationCodeNotReachable           Justification = "code_not_reachable"
-	JustificationRequiresConfiguration      Justification = "requires_configuration"
-	JustificationRequiresDependency         Justification = "requires_dependency"
-	JustificationRequiresEnvironment        Justification = "requires_environment"
-	JustificationProtectedByCompiler        Justification = "protected_by_compiler"
-	JustificationProtectedAtPerimeter       Justification = "protected_at_perimeter"
-	JustificationProtectedAtRuntime         Justification = "protected_at_runtime"
+	JustificationCodeNotPresent                Justification = "code_not_present"
+	JustificationCodeNotReachable              Justification = "code_not_reachable"
+	JustificationRequiresConfiguration         Justification = "requires_configuration"
+	JustificationRequiresDependency            Justification = "requires_dependency"
+	JustificationRequiresEnvironment           Justification = "requires_environment"
+	JustificationProtectedByCompiler           Justification = "protected_by_compiler"
+	JustificationProtectedAtPerimeter          Justification = "protected_at_perimeter"
+	JustificationProtectedAtRuntime            Justification = "protected_at_runtime"
 	JustificationInlineMitigationsAlreadyExist Justification = "inline_mitigations_already_exist"
 )
 

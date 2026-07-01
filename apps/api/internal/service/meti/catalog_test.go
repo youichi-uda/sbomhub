@@ -209,10 +209,10 @@ func TestCatalog_PhaseCounts(t *testing.T) {
 // we only assert presence + phase classification.
 func TestCatalog_M8_1_NewCriteriaPresent(t *testing.T) {
 	wantPhase := map[string]Phase{
-		"meti.env_setup.09":     PhaseEnvSetup,     // 4.1.4 構成図可視化
-		"meti.env_setup.10":     PhaseEnvSetup,     // 4.4 ツール導入・設定
-		"meti.env_setup.11":     PhaseEnvSetup,     // 4.5 ツール学習
-		"meti.sbom_creation.10": PhaseSBOMCreation, // 5.3 共有 個別運用
+		"meti.env_setup.09":      PhaseEnvSetup,      // 4.1.4 構成図可視化
+		"meti.env_setup.10":      PhaseEnvSetup,      // 4.4 ツール導入・設定
+		"meti.env_setup.11":      PhaseEnvSetup,      // 4.5 ツール学習
+		"meti.sbom_creation.10":  PhaseSBOMCreation,  // 5.3 共有 個別運用
 		"meti.sbom_operation.11": PhaseSBOMOperation, // 6.3 提供期間 個別運用
 	}
 	for id, phase := range wantPhase {

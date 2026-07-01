@@ -122,14 +122,14 @@ func TestExtractRequiredConfig(t *testing.T) {
 
 func TestIsLikelyEnvVar(t *testing.T) {
 	cases := map[string]bool{
-		"DEBUG":      true,
-		"GO_DEBUG":   true,
-		"NODE_ENV":   true,
+		"DEBUG":                true,
+		"GO_DEBUG":             true,
+		"NODE_ENV":             true,
 		"NODE_ENV=development": true,
-		"camelCase":  false,
-		"lower":      false,
-		"AB":         false, // too short
-		"":           false,
+		"camelCase":            false,
+		"lower":                false,
+		"AB":                   false, // too short
+		"":                     false,
 	}
 	for in, want := range cases {
 		if got := isLikelyEnvVar(in); got != want {

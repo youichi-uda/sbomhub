@@ -3,16 +3,17 @@
 // Shared helper for background jobs that touch RLS-enabled tables.
 //
 // Why this exists (codex-r4 Finding P1):
-//   The runtime app role `sbomhub_app` is NOBYPASSRLS + FORCE ROW LEVEL
-//   SECURITY (see migrations 023 / 027 / 028 / 029). Every RLS policy on the
-//   per-tenant tables (projects, sboms, components, report_settings,
-//   vulnerability_tickets, notification_settings, …) requires
-//   `current_setting('app.current_tenant_id')` to match the row's
-//   `tenant_id`. Request handlers get this GUC for free through the
-//   `TenantTx` middleware. Background jobs do NOT pass through middleware —
-//   they run on a bare `context.Background()` against `j.db` — so without
-//   help they silently see zero rows and every scheduled scan / report /
-//   ticket sync becomes a no-op.
+//
+//	The runtime app role `sbomhub_app` is NOBYPASSRLS + FORCE ROW LEVEL
+//	SECURITY (see migrations 023 / 027 / 028 / 029). Every RLS policy on the
+//	per-tenant tables (projects, sboms, components, report_settings,
+//	vulnerability_tickets, notification_settings, …) requires
+//	`current_setting('app.current_tenant_id')` to match the row's
+//	`tenant_id`. Request handlers get this GUC for free through the
+//	`TenantTx` middleware. Background jobs do NOT pass through middleware —
+//	they run on a bare `context.Background()` against `j.db` — so without
+//	help they silently see zero rows and every scheduled scan / report /
+//	ticket sync becomes a no-op.
 //
 // The fix is intentionally simple: for each tenant the job needs to touch,
 // open a fresh transaction, `SET LOCAL app.current_tenant_id` to that

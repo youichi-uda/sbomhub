@@ -52,30 +52,30 @@ func TestVEXDraftsRepository_Insert_PassesTenantID(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO vex_drafts")).
 		WithArgs(
-			rowID,             // $1  id
-			tenantID,          // $2  tenant_id
-			projectID,         // $3  project_id
-			sbomID,            // $4  sbom_id
-			componentID,       // $5  component_id
-			vulnID,            // $6  vulnerability_id
-			"CVE-2025-99999",  // $7  cve_id
-			"not_affected",    // $8  state
+			rowID,                // $1  id
+			tenantID,             // $2  tenant_id
+			projectID,            // $3  project_id
+			sbomID,               // $4  sbom_id
+			componentID,          // $5  component_id
+			vulnID,               // $6  vulnerability_id
+			"CVE-2025-99999",     // $7  cve_id
+			"not_affected",       // $8  state
 			"code_not_reachable", // $9  justification
-			"detail body",     // $10 detail
-			conf,              // $11 confidence
-			"openai",          // $12 provider
-			"gpt-4o",          // $13 model
-			"p" + repeatHex(63), // $14 prompt_hash (64 hex chars)
-			"r" + repeatHex(63), // $15 response_hash
-			[]byte(ev),        // $16 evidence
-			excerptID,         // $17 advisory_excerpt_id
-			reachID,           // $18 reachability_result_id
-			llmID,             // $19 llm_call_id
-			"pending",         // $20 decision (default)
-			nil,               // $21 decision_by
-			nil,               // $22 decision_at
-			nil,               // $23 decision_note
-			createdBy,         // $24 created_by
+			"detail body",        // $10 detail
+			conf,                 // $11 confidence
+			"openai",             // $12 provider
+			"gpt-4o",             // $13 model
+			"p"+repeatHex(63),    // $14 prompt_hash (64 hex chars)
+			"r"+repeatHex(63),    // $15 response_hash
+			[]byte(ev),           // $16 evidence
+			excerptID,            // $17 advisory_excerpt_id
+			reachID,              // $18 reachability_result_id
+			llmID,                // $19 llm_call_id
+			"pending",            // $20 decision (default)
+			nil,                  // $21 decision_by
+			nil,                  // $22 decision_at
+			nil,                  // $23 decision_note
+			createdBy,            // $24 created_by
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(rowID, now, now))
@@ -307,30 +307,30 @@ func TestVEXDraftsRepository_Insert_AssignsIDAndDecision(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO vex_drafts")).
 		WithArgs(
-			sqlmock.AnyArg(), // $1  id (generated)
-			tenantID,         // $2
-			projectID,        // $3
-			nil,              // $4  sbom_id (nil)
-			componentID,      // $5
-			vulnID,           // $6
-			"CVE-2025-1",     // $7
+			sqlmock.AnyArg(),      // $1  id (generated)
+			tenantID,              // $2
+			projectID,             // $3
+			nil,                   // $4  sbom_id (nil)
+			componentID,           // $5
+			vulnID,                // $6
+			"CVE-2025-1",          // $7
 			"under_investigation", // $8
-			nil,              // $9  justification (empty -> NULL)
-			nil,              // $10 detail (empty -> NULL)
-			nil,              // $11 confidence (nil)
-			nil,              // $12 provider (empty -> NULL)
-			nil,              // $13 model
-			nil,              // $14 prompt_hash
-			nil,              // $15 response_hash
-			[]byte(ev),       // $16 evidence
-			nil,              // $17 advisory_excerpt_id
-			nil,              // $18 reachability_result_id
-			nil,              // $19 llm_call_id
-			"pending",        // $20 decision default
-			nil,              // $21 decision_by
-			nil,              // $22 decision_at
-			nil,              // $23 decision_note
-			nil,              // $24 created_by
+			nil,                   // $9  justification (empty -> NULL)
+			nil,                   // $10 detail (empty -> NULL)
+			nil,                   // $11 confidence (nil)
+			nil,                   // $12 provider (empty -> NULL)
+			nil,                   // $13 model
+			nil,                   // $14 prompt_hash
+			nil,                   // $15 response_hash
+			[]byte(ev),            // $16 evidence
+			nil,                   // $17 advisory_excerpt_id
+			nil,                   // $18 reachability_result_id
+			nil,                   // $19 llm_call_id
+			"pending",             // $20 decision default
+			nil,                   // $21 decision_by
+			nil,                   // $22 decision_at
+			nil,                   // $23 decision_note
+			nil,                   // $24 created_by
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(uuid.New(), now, now))
@@ -647,15 +647,15 @@ func TestVEXDraftsRepository_UpdateDecision_PassesArgs(t *testing.T) {
 
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE vex_drafts SET")).
 		WithArgs(
-			tenantID,        // $1
-			id,              // $2
-			"edited",        // $3
-			by,              // $4
-			when,            // $5
-			"reviewed",      // $6 decision_note
-			editedState,     // $7 state COALESCE
-			editedJust,      // $8 justification COALESCE
-			editedDetail,    // $9 detail COALESCE
+			tenantID,     // $1
+			id,           // $2
+			"edited",     // $3
+			by,           // $4
+			when,         // $5
+			"reviewed",   // $6 decision_note
+			editedState,  // $7 state COALESCE
+			editedJust,   // $8 justification COALESCE
+			editedDetail, // $9 detail COALESCE
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

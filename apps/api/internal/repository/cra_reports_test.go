@@ -48,27 +48,27 @@ func TestCRAReportsRepository_Insert_PassesTenantID(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO cra_reports")).
 		WithArgs(
-			rowID,                     // $1  id
-			tenantID,                  // $2  tenant_id
-			projectID,                 // $3  project_id
-			vulnID,                    // $4  vulnerability_id
-			"CVE-2025-99999",          // $5  cve_id
-			"early_warning",           // $6  report_type
-			"ja",                      // $7  lang
-			"draft",                   // $8  state (default)
-			"draft body here",         // $9  draft_text
-			"openai",                  // $10 provider
-			"gpt-4o",                  // $11 model
-			"p" + repeatHex(63),       // $12 prompt_hash
-			"r" + repeatHex(63),       // $13 response_hash
-			[]byte(ev),                // $14 evidence
-			sourceVEX,                 // $15 source_vex_draft_id
-			llmID,                     // $16 llm_call_id
-			"pending",                 // $17 decision (default)
-			nil,                       // $18 decision_by
-			nil,                       // $19 decision_at
-			nil,                       // $20 decision_note
-			createdBy,                 // $21 created_by
+			rowID,             // $1  id
+			tenantID,          // $2  tenant_id
+			projectID,         // $3  project_id
+			vulnID,            // $4  vulnerability_id
+			"CVE-2025-99999",  // $5  cve_id
+			"early_warning",   // $6  report_type
+			"ja",              // $7  lang
+			"draft",           // $8  state (default)
+			"draft body here", // $9  draft_text
+			"openai",          // $10 provider
+			"gpt-4o",          // $11 model
+			"p"+repeatHex(63), // $12 prompt_hash
+			"r"+repeatHex(63), // $13 response_hash
+			[]byte(ev),        // $14 evidence
+			sourceVEX,         // $15 source_vex_draft_id
+			llmID,             // $16 llm_call_id
+			"pending",         // $17 decision (default)
+			nil,               // $18 decision_by
+			nil,               // $19 decision_at
+			nil,               // $20 decision_note
+			createdBy,         // $21 created_by
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(rowID, now, now))
@@ -254,27 +254,27 @@ func TestCRAReportsRepository_Insert_AssignsIDAndDefaults(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO cra_reports")).
 		WithArgs(
-			sqlmock.AnyArg(),    // $1  id (generated)
-			tenantID,            // $2
-			projectID,           // $3
-			vulnID,              // $4
-			"CVE-2025-1",        // $5
+			sqlmock.AnyArg(),        // $1  id (generated)
+			tenantID,                // $2
+			projectID,               // $3
+			vulnID,                  // $4
+			"CVE-2025-1",            // $5
 			"detailed_notification", // $6
-			"en",                // $7
-			"draft",             // $8  state default
-			"hand-authored",     // $9
-			nil,                 // $10 provider (empty -> NULL)
-			nil,                 // $11 model
-			nil,                 // $12 prompt_hash
-			nil,                 // $13 response_hash
-			[]byte(ev),          // $14 evidence
-			nil,                 // $15 source_vex_draft_id
-			nil,                 // $16 llm_call_id
-			"pending",           // $17 decision default
-			nil,                 // $18 decision_by
-			nil,                 // $19 decision_at
-			nil,                 // $20 decision_note
-			nil,                 // $21 created_by
+			"en",                    // $7
+			"draft",                 // $8  state default
+			"hand-authored",         // $9
+			nil,                     // $10 provider (empty -> NULL)
+			nil,                     // $11 model
+			nil,                     // $12 prompt_hash
+			nil,                     // $13 response_hash
+			[]byte(ev),              // $14 evidence
+			nil,                     // $15 source_vex_draft_id
+			nil,                     // $16 llm_call_id
+			"pending",               // $17 decision default
+			nil,                     // $18 decision_by
+			nil,                     // $19 decision_at
+			nil,                     // $20 decision_note
+			nil,                     // $21 created_by
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(uuid.New(), now, now))
@@ -656,13 +656,13 @@ func TestCRAReportsRepository_UpdateDecision_PassesArgs(t *testing.T) {
 
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
 		WithArgs(
-			tenantID,       // $1
-			id,             // $2
-			"edited",       // $3
-			by,             // $4
-			when,           // $5
-			"reviewed",     // $6 decision_note
-			editedDraft,    // $7 draft_text COALESCE
+			tenantID,    // $1
+			id,          // $2
+			"edited",    // $3
+			by,          // $4
+			when,        // $5
+			"reviewed",  // $6 decision_note
+			editedDraft, // $7 draft_text COALESCE
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 

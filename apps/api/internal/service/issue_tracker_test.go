@@ -261,11 +261,11 @@ func TestIssueTrackerService_ValidateBaseURL(t *testing.T) {
 	svcNoAllowlist := NewIssueTrackerService(nil, nil, testEncryptionKey, nil)
 
 	tests := []struct {
-		name           string
-		url            string
-		svc            *IssueTrackerService
-		shouldFail     bool
-		errorContains  string
+		name          string
+		url           string
+		svc           *IssueTrackerService
+		shouldFail    bool
+		errorContains string
 	}{
 		// Valid URLs
 		{"valid jira cloud", "https://example.atlassian.net", svcWithAllowlist, false, ""},
@@ -358,7 +358,7 @@ func TestIsDomainAllowed(t *testing.T) {
 		{"sub.example.org", true},
 		{"notallowed.com", false},
 		{"atlassian.net.evil.com", false}, // Should not match
-		{"fakeatlassian.net", false},       // Should not match
+		{"fakeatlassian.net", false},      // Should not match
 	}
 
 	for _, tt := range tests {

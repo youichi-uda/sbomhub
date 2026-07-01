@@ -215,19 +215,19 @@ func newCRAHarness() *craHarness {
 
 func (h *craHarness) seedReport(reportID, projectID uuid.UUID) repository.CRAReport {
 	r := repository.CRAReport{
-		ID:               reportID,
-		TenantID:         h.tenantID,
-		ProjectID:        projectID,
-		VulnerabilityID:  uuid.New(),
-		CVEID:            "CVE-2026-3100",
-		ReportType:       "early_warning",
-		Lang:             "ja",
-		State:            "draft",
-		DraftText:        "draft body",
-		Decision:         "pending",
-		Evidence:         json.RawMessage(`[{"kind":"vex_draft"}]`),
-		CreatedAt:        time.Now().UTC(),
-		UpdatedAt:        time.Now().UTC(),
+		ID:              reportID,
+		TenantID:        h.tenantID,
+		ProjectID:       projectID,
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2026-3100",
+		ReportType:      "early_warning",
+		Lang:            "ja",
+		State:           "draft",
+		DraftText:       "draft body",
+		Decision:        "pending",
+		Evidence:        json.RawMessage(`[{"kind":"vex_draft"}]`),
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
 	}
 	h.store.byID[reportID] = r
 	h.store.byProject[projectID] = append(h.store.byProject[projectID], r)

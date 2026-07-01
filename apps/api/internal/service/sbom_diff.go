@@ -114,9 +114,9 @@ func (s *SbomDiffService) Diff(ctx context.Context, req SbomDiffRequest) (*model
 			UpdatedCount:            len(updated),
 			NewVulnerabilitiesCount: len(newVulns),
 		},
-		Added:             added,
-		Removed:           removed,
-		Updated:           updated,
+		Added:              added,
+		Removed:            removed,
+		Updated:            updated,
 		NewVulnerabilities: newVulns,
 	}
 

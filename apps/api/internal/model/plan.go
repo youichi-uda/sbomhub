@@ -115,15 +115,15 @@ func DefaultPlanLimits(plan string) PlanLimits {
 			MaxAPIKeys:         -1, // unlimited
 			APIRateLimit:       -1, // unlimited
 			Features: map[string]interface{}{
-				"vulnerability_alerts":  true,
-				"vex_support":           true,
-				"license_policies":      true,
-				"slack_integration":     true,
-				"discord_integration":   true,
-				"api_access":            true,
-				"audit_logs":            true,
-				"sso":                   true,
-				"custom_integrations":   true,
+				"vulnerability_alerts": true,
+				"vex_support":          true,
+				"license_policies":     true,
+				"slack_integration":    true,
+				"discord_integration":  true,
+				"api_access":           true,
+				"audit_logs":           true,
+				"sso":                  true,
+				"custom_integrations":  true,
 			},
 		}
 	default:

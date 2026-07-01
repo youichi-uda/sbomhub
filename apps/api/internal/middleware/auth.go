@@ -18,22 +18,22 @@ import (
 )
 
 const (
-	ContextKeyUserID   = "user_id"
-	ContextKeyUser     = "user"
-	ContextKeyTenantID = "tenant_id"
-	ContextKeyTenant   = "tenant"
-	ContextKeyRole     = "role"
-	ContextKeyClerkOrgID = "clerk_org_id"
+	ContextKeyUserID      = "user_id"
+	ContextKeyUser        = "user"
+	ContextKeyTenantID    = "tenant_id"
+	ContextKeyTenant      = "tenant"
+	ContextKeyRole        = "role"
+	ContextKeyClerkOrgID  = "clerk_org_id"
 	ContextKeyClerkUserID = "clerk_user_id"
 )
 
 // AuthContext holds authentication context for a request
 type AuthContext struct {
-	UserID      uuid.UUID
-	TenantID    uuid.UUID
-	ClerkUserID string
-	ClerkOrgID  string
-	Role        string
+	UserID       uuid.UUID
+	TenantID     uuid.UUID
+	ClerkUserID  string
+	ClerkOrgID   string
+	Role         string
 	IsSelfHosted bool
 }
 
@@ -251,8 +251,8 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 
 // ClerkClaims represents the relevant claims from a Clerk JWT
 type ClerkClaims struct {
-	UserID string
-	OrgID  string
+	UserID  string
+	OrgID   string
 	OrgRole string
 }
 

@@ -1246,11 +1246,11 @@ func TestVEXDraftsHandler_Reanalyse_SetsAuditResourceID_F208(t *testing.T) {
 		t.Fatalf("F208: context key must hold the newly-minted draft UUID, got uuid.Nil")
 	}
 	if got == srcDraftID {
-		t.Fatalf("F208 regression: Reanalyse audit_resource_id = source :draft_id "+
+		t.Fatalf("F208 regression: Reanalyse audit_resource_id = source :draft_id " +
 			"(history-preservation contract violated; new row would be unjoinable)")
 	}
 	if got == projectA {
-		t.Fatalf("F208 regression: Reanalyse audit_resource_id = parent project UUID "+
+		t.Fatalf("F208 regression: Reanalyse audit_resource_id = parent project UUID " +
 			"(F190 limitation back)")
 	}
 

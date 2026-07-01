@@ -6,13 +6,13 @@
 // Layering (M3-2, issue #40 / M8-1, issue #62):
 //
 //   - criteria.go        — Deps interface, Result type, Func signature,
-//                          shared evidence / status helpers.
+//     shared evidence / status helpers.
 //   - env_setup.go       — 11 per-criterion functions (phase 1; +3 in M8-1).
 //   - sbom_creation.go   — 10 per-criterion functions (phase 2; +1 in M8-1).
 //   - sbom_operation.go  — 11 per-criterion functions (phase 3; +1 in M8-1).
 //   - registry.go        — Registry map criterion_id -> Func, the single
-//                          dispatch surface consumed by service/meti
-//                          .Evaluator.
+//     dispatch surface consumed by service/meti
+//     .Evaluator.
 //
 // Why a separate package: the parent service/meti package owns the
 // catalog (LoadCatalog / GetCriterion / ListByPhase) and the Evaluator
@@ -28,16 +28,16 @@
 //     M3-4 handler's responsibility, not this package's.
 //   - No LLM. M3 is explicitly AI-free (PRODUCT_REBOOT_PLAN.md §13).
 //   - Status mapping is a small closed set:
-//        achieved        — auto-signal confirms.
-//        not_achieved    — auto-signal confirms the requirement is
-//                          NOT met (e.g. SBOM tool selected but zero
-//                          sboms uploaded).
-//        needs_review    — auto-signal cannot resolve; operator must
-//                          attest manually via the M3-4 override path.
-//        not_applicable  — the criterion legitimately does not apply
-//                          to this project (used sparingly; M3-4
-//                          handler / operator override is the dominant
-//                          source).
+//     achieved        — auto-signal confirms.
+//     not_achieved    — auto-signal confirms the requirement is
+//     NOT met (e.g. SBOM tool selected but zero
+//     sboms uploaded).
+//     needs_review    — auto-signal cannot resolve; operator must
+//     attest manually via the M3-4 override path.
+//     not_applicable  — the criterion legitimately does not apply
+//     to this project (used sparingly; M3-4
+//     handler / operator override is the dominant
+//     source).
 //   - Evidence is always a JSON array (json.RawMessage). Empty `[]` is
 //     legitimate for needs_review / not_applicable rows; the
 //     meti_assessments DB CHECK accepts that.

@@ -562,8 +562,8 @@ func TestEOLComponentMapping_JSON(t *testing.T) {
 
 func TestEOLStatus_Values(t *testing.T) {
 	tests := []struct {
-		status      model.EOLStatus
-		expected    string
+		status   model.EOLStatus
+		expected string
 	}{
 		{model.EOLStatusActive, "active"},
 		{model.EOLStatusEOL, "eol"},

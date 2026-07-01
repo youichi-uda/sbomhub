@@ -37,17 +37,17 @@ func TestReachabilityResultsRepository_Upsert_PassesTenantID(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO reachability_results")).
 		WithArgs(
-			rowID,             // $1  id
-			tenantID,          // $2  tenant_id
-			projectID,         // $3  project_id
-			componentID,       // $4  component_id
-			"CVE-2025-99999",  // $5  cve_id
-			"go",              // $6  ecosystem
-			"reachable",       // $7  status
-			[]byte(evidence),  // $8  evidence
-			conf,              // $9  confidence
-			"v0.1.0",          // $10 analyzer_version
-			analyzed,          // $11 analyzed_at
+			rowID,            // $1  id
+			tenantID,         // $2  tenant_id
+			projectID,        // $3  project_id
+			componentID,      // $4  component_id
+			"CVE-2025-99999", // $5  cve_id
+			"go",             // $6  ecosystem
+			"reachable",      // $7  status
+			[]byte(evidence), // $8  evidence
+			conf,             // $9  confidence
+			"v0.1.0",         // $10 analyzer_version
+			analyzed,         // $11 analyzed_at
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(rowID, now, now))

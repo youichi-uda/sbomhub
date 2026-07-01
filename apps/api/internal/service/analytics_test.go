@@ -140,8 +140,8 @@ func TestDefaultDaysPeriod(t *testing.T) {
 		{30, 30},
 		{7, 7},
 		{90, 90},
-		{0, 30},  // Should default
-		{-1, 30}, // Should default
+		{0, 30},    // Should default
+		{-1, 30},   // Should default
 		{-100, 30}, // Should default
 	}
 
@@ -212,27 +212,27 @@ func TestSLOTargetHoursMapping(t *testing.T) {
 func TestOverallSLOAchievementCalculation(t *testing.T) {
 	// Test overall SLO calculation logic
 	tests := []struct {
-		name        string
+		name         string
 		achievements []float64
 		expected     float64
 	}{
 		{
-			name:        "all 100%",
+			name:         "all 100%",
 			achievements: []float64{100, 100, 100, 100},
 			expected:     100.0,
 		},
 		{
-			name:        "mixed achievements",
+			name:         "mixed achievements",
 			achievements: []float64{80, 90, 100, 70},
 			expected:     85.0, // (80+90+100+70)/4
 		},
 		{
-			name:        "all 0%",
+			name:         "all 0%",
 			achievements: []float64{0, 0, 0, 0},
 			expected:     0.0,
 		},
 		{
-			name:        "single value",
+			name:         "single value",
 			achievements: []float64{75},
 			expected:     75.0,
 		},

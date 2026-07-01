@@ -56,7 +56,7 @@ func fixedGoldenInput() CRATemplateData {
 			{Version: "1.5.0", ReleaseDate: "2026-07-15", Channel: "OTA"},
 		},
 
-		PermanentRemediation:    "Firmware 1.4.3 has been released and shipped to 100% of fleet via OTA as of 2026-07-02. libmosquitto upgraded to 2.0.15; defensive length validation added to smartgw-mqtt-bridge 1.4.3.",
+		PermanentRemediation: "Firmware 1.4.3 has been released and shipped to 100% of fleet via OTA as of 2026-07-02. libmosquitto upgraded to 2.0.15; defensive length validation added to smartgw-mqtt-bridge 1.4.3.",
 		PreventionMeasures: []string{
 			"Add libmosquitto to the SBOM watchlist with a 24h SLA on new CVEs.",
 			"Enforce a fuzzing gate on the MQTT bridge in CI.",

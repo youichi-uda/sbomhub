@@ -129,10 +129,10 @@ func TestValidateEncryptionKey(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:      "denylisted placeholder long enough still fails",
-			key:       "your-encryption-key-here" + strings.Repeat("x", 32),
-			appEnv:    "production",
-			wantErr:   false, // not exactly equal to placeholder
+			name:    "denylisted placeholder long enough still fails",
+			key:     "your-encryption-key-here" + strings.Repeat("x", 32),
+			appEnv:  "production",
+			wantErr: false, // not exactly equal to placeholder
 		},
 	}
 

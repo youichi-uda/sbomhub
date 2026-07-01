@@ -27,21 +27,21 @@ func NewOSVClient() *OSVClient {
 
 // OSVVulnerability represents an OSV vulnerability response
 type OSVVulnerability struct {
-	ID        string       `json:"id"`
-	Summary   string       `json:"summary"`
-	Details   string       `json:"details"`
-	Aliases   []string     `json:"aliases"`
-	Modified  string       `json:"modified"`
-	Published string       `json:"published"`
+	ID        string        `json:"id"`
+	Summary   string        `json:"summary"`
+	Details   string        `json:"details"`
+	Aliases   []string      `json:"aliases"`
+	Modified  string        `json:"modified"`
+	Published string        `json:"published"`
 	Affected  []OSVAffected `json:"affected"`
 	Severity  []OSVSeverity `json:"severity"`
 }
 
 // OSVAffected represents affected package information
 type OSVAffected struct {
-	Package         OSVPackage        `json:"package"`
-	Ranges          []OSVRange        `json:"ranges"`
-	Versions        []string          `json:"versions"`
+	Package           OSVPackage             `json:"package"`
+	Ranges            []OSVRange             `json:"ranges"`
+	Versions          []string               `json:"versions"`
 	EcosystemSpecific map[string]interface{} `json:"ecosystem_specific"`
 	DatabaseSpecific  map[string]interface{} `json:"database_specific"`
 }
@@ -123,9 +123,9 @@ func (c *OSVClient) GetRemediation(vuln *OSVVulnerability, packageName, ecosyste
 	}
 
 	remediation := &RemediationInfo{
-		VulnID:       vuln.ID,
-		Summary:      vuln.Summary,
-		Workarounds:  []string{},
+		VulnID:      vuln.ID,
+		Summary:     vuln.Summary,
+		Workarounds: []string{},
 	}
 
 	// Find the affected entry for this package
