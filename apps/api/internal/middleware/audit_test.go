@@ -2532,9 +2532,11 @@ func TestPathHasChildResource_SegmentExact(t *testing.T) {
 //
 //   (1) Emit → Registry: every middleware-classifier action must have a
 //       matching AvailableActions entry (so the UI filter can select
-//       audit_logs rows the middleware produces). A documented
-//       exception allowlist captures F256-era .viewed residuals that
-//       predate F270 and are tracked as an M19+ candidate (F275+).
+//       audit_logs rows the middleware produces). F280 (M19-2 Phase D
+//       R1) shrinks the deferral allowlist from 12 entries (F256-era
+//       .viewed residuals + subscription tenant-branch verbs, F270's
+//       out-of-scope tail) to zero — Action-dimension parity completeness
+//       reached.
 //
 //   (2) Registry → model.*: every AvailableActions entry's Action
 //       string must be non-empty and match at least one known
@@ -2699,35 +2701,25 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
-	// currently emits but that predate F270 and are deferred to a
-	// future M19+ wave (F275+ candidate: "close F256-era .viewed
-	// residuals + subscription/analytics/dashboard/report/integration
-	// tenant-branch registry gap"). Adding an entry here is a
-	// deliberate opt-out — future waves should shrink this list, not
-	// grow it. Each key is the model.Action* string; the value is the
-	// F# reason for deferral.
+	// currently emits but that are deliberately not yet registered in
+	// the UI filter dropdown. Adding an entry here is a deliberate
+	// opt-out — future waves should shrink this list, not grow it.
+	// Each key is the model.Action* string; the value is the F# reason
+	// for deferral.
 	//
-	// F270 registered the 23 F267 verbs, closing the M18-1-specific
-	// gap. The residuals below are the F256-era (.viewed) universe
-	// and the tenant-branch (subscription / dashboard / analytics /
-	// report.viewed / integration.viewed / apikey.viewed / vex.viewed /
-	// settings.viewed / user.viewed) sweep that F270 did not scope. A
-	// separate F275+ wave should register them and delete this
-	// allowlist entry-by-entry.
-	knownEmitNotRegistered := map[string]string{
-		model.ActionAPIKeyViewed:          "F256-era .viewed residual, F275+ candidate",
-		model.ActionVEXViewed:             "F256-era .viewed residual, F275+ candidate",
-		model.ActionSettingsViewed:        "F256-era .viewed residual, F275+ candidate",
-		model.ActionUserViewed:            "F256-era .viewed residual, F275+ candidate",
-		model.ActionSubscriptionViewed:    "F256-era .viewed residual, F275+ candidate",
-		model.ActionReportViewed:          "F256-era .viewed residual, F275+ candidate",
-		model.ActionAnalyticsViewed:       "F256-era .viewed residual, F275+ candidate",
-		model.ActionIntegrationViewed:     "F256-era .viewed residual, F275+ candidate",
-		model.ActionDashboardViewed:       "F256-era .viewed residual, F275+ candidate",
-		model.ActionSubscriptionCreated:   "tenant-branch registry gap, F275+ candidate",
-		model.ActionSubscriptionUpdated:   "tenant-branch registry gap, F275+ candidate",
-		model.ActionSubscriptionCancelled: "tenant-branch registry gap, F275+ candidate",
-	}
+	// F270 (M18-1 Phase D R2) registered the 23 F267 verbs and F280
+	// (M19-2 Phase D R1) registered the remaining 12 F275+ candidate
+	// entries (nine F256-era .viewed residuals: apikey / vex / settings
+	// / user / subscription / report / analytics / integration /
+	// dashboard, and three subscription tenant-branch verbs:
+	// subscription.created / .updated / .cancelled). Action-dimension
+	// parity is now complete — this map is intentionally empty and any
+	// new entry MUST come with an F# reason plus a shrink-target wave.
+	// The empty declaration is retained (rather than deleting the map
+	// and the skip logic below) as a template for the shrink-pattern
+	// discipline: if a future wave introduces a temporary defer, add
+	// it here rather than silencing the parity contract.
+	knownEmitNotRegistered := map[string]string{}
 
 	// Build the actual registry set.
 	registry := (&service.AuditService{}).GetAvailableActions()
