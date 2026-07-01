@@ -2128,16 +2128,34 @@ func TestDetermineActionAndResource_TicketFamily_AllMethods_F224(t *testing.T) {
 // CLI-driven SBOM upload or project create without any test catching
 // the symptom until the audit dropdown filter went blank in production.
 //
-// The table below enumerates the 3 CLI routes × 7 standard HTTP
-// methods (21 cells) and asserts:
+// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET reclassify): the GET
+// arm now reclassifies /cli/projects (list) and /cli/projects/:id
+// (item) to project.viewed / project — GET/POST parity with the tenant
+// /api/v1/projects surface. Pre-F242 every /cli/* GET was cli.accessed
+// / cli, which meant a forensic "who read project X via CLI" query
+// could not join audit_logs onto projects.id. The expected() table
+// below and the anti-fallthrough guard have been extended: GET /cli/
+// projects[/:id] now shares the ResourceProject expected cell with the
+// POST create route, and the guard's fatal predicate is scoped to
+// paths NOT under the /cli/projects prefix (so both list, item, and
+// POST create legitimately land on ResourceProject). GET /cli/upload
+// and GET /cli/check remain cli.accessed / cli — no minted UUID,
+// nothing to join onto.
+//
+// The table below enumerates the 4 CLI route shapes × 7 standard HTTP
+// methods (28 cells) and asserts:
 //
 //  1. resource_type matches the expected resource for the cell:
-//     - POST /cli/upload      → ResourceSBOM
-//     - POST /cli/projects    → ResourceProject
-//     - POST /cli/check       → "cli"
-//     - GET  * / default arm  → "cli"
+//     - POST /cli/upload             → ResourceSBOM
+//     - POST /cli/projects           → ResourceProject
+//     - POST /cli/check              → "cli"
+//     - GET  /cli/projects           → ResourceProject       (F242)
+//     - GET  /cli/projects/:id       → ResourceProject       (F242)
+//     - GET  /cli/{upload,check,...} → "cli"
+//     - default arm                  → "cli"
 //  2. action matches the expected verb (sbom.uploaded /
-//     project.created / cli.check / cli.accessed / cli.action).
+//     project.created / project.viewed / cli.check / cli.accessed /
+//     cli.action).
 //  3. Both are non-empty — a silently-skipped path drops the audit row.
 //
 // The default arm (PUT / PATCH / DELETE / OPTIONS / HEAD) MUST land on
@@ -2153,15 +2171,22 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 	// currently-routed CLI endpoint. main.go registers:
 	//   POST /cli/upload         (mints sbom UUID, F233 sbom.uploaded)
 	//   POST /cli/check          (transient check, cli.check)
-	//   GET  /cli/projects       (list, cli.accessed)
-	//   GET  /cli/projects/:id   (item, cli.accessed)
+	//   GET  /cli/projects       (list, F242 project.viewed)
+	//   GET  /cli/projects/:id   (item, F242 project.viewed)
 	//   POST /cli/projects       (mints project UUID, F233 project.created)
 	// The (:id) getter shares the /cli/projects table row — the classify
 	// switch keys off HasSuffix / Contains rather than exact match so
-	// both flows resolve identically.
+	// both flows resolve identically. F242 (M16-1 fix, anti-pattern
+	// 48/51/52 CLI GET reclassify) explicitly enumerates the item
+	// variant "/api/v1/cli/projects/:id" as its own row so the
+	// GET reclassify (project.viewed / project) is pinned across both
+	// list and item shapes — a future refactor that dropped Contains(
+	// path, "/projects") in favour of exact-suffix or HasSuffix on the
+	// list-only variant would then fail this table on the item row.
 	paths := []string{
 		"/api/v1/cli/upload",
 		"/api/v1/cli/projects",
+		"/api/v1/cli/projects/:id",
 		"/api/v1/cli/check",
 	}
 	// All standard HTTP methods. OPTIONS / HEAD model the CORS
@@ -2176,6 +2201,12 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 	// switch in audit.go::determineActionAndResource so a divergence
 	// between this table and the classifier is the precise failure
 	// mode the test is designed to catch.
+	//
+	// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET reclassify): the
+	// GET arm now branches on Contains(path, "/projects") — GET /cli/
+	// projects[/:id] resolves to (ActionProjectViewed, ResourceProject)
+	// for GET/POST parity with the tenant /api/v1/projects surface,
+	// while GET /cli/{upload,check,...} keeps (cli.accessed, "cli").
 	expected := func(method, path string) (string, string) {
 		switch method {
 		case "POST":
@@ -2190,6 +2221,13 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 			}
 			return "cli.action", "cli"
 		case "GET":
+			// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET
+			// reclassify): GET /cli/projects[/:id] now classifies
+			// as project.viewed / project — GET/POST parity with
+			// tenant.
+			if strings.Contains(path, "/projects") {
+				return model.ActionProjectViewed, model.ResourceProject
+			}
 			return "cli.accessed", "cli"
 		default:
 			// PUT / PATCH / DELETE / OPTIONS / HEAD → F206 default arm.
@@ -2244,9 +2282,18 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 				// the strip step could regress this). Assert we did
 				// NOT land on ResourceProject for /cli/upload or
 				// /cli/check to make the intent explicit.
-				if path != "/api/v1/cli/projects" && resource == model.ResourceProject {
+				//
+				// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET
+				// reclassify): the guard's fatal predicate is scoped
+				// to paths NOT under the /cli/projects prefix, so
+				// GET /cli/projects, GET /cli/projects/:id, and
+				// POST /cli/projects all legitimately land on
+				// ResourceProject. Any other cell (upload, check,
+				// future non-projects route) resolving to
+				// ResourceProject still fails as a fallthrough.
+				if !strings.HasPrefix(path, "/api/v1/cli/projects") && resource == model.ResourceProject {
 					t.Fatalf("F233 anti-fallthrough: %s %s should NOT classify "+
-						"as ResourceProject (only /cli/projects may) — got "+
+						"as ResourceProject (only /cli/projects[/:id] may) — got "+
 						"action=%q, resource=%q", method, path, action, resource)
 				}
 			})
