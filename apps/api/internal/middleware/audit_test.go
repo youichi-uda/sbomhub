@@ -2998,20 +2998,40 @@ func allModelActionValues() map[string]bool {
 // handler-side emit set was under-covered relative to the docstring
 // claim.
 //
-// Scope limitation (M20+ candidate F286): this test does NOT cover
-// handler-emitted audit resource_type STRING values that are not
-// model.Resource* symbols. Concretely, orphan package-local
-// ResourceType* constants that live outside the model.Resource*
-// family and outside service.GetAvailableResourceTypes() — for
-// example the "meti_assessment" literal in handler/meti.go, the
-// "sbom_diff" literal in service/diff_summary/, and the
-// "diff_webhook" literal in model/diff_webhook.go — are a silent
-// forensic UI-filter gap this parity contract cannot catch, because
-// its expectedEmit set is keyed on the model.Resource* symbol
-// universe. Closing that gap is tracked as an M20+ candidate (F286);
-// the fix shape will be either promoting the orphan constants into
-// model.Resource* (and adding registry entries) or extending this
-// meta-test to sweep a second, non-symbol string universe.
+// Scope limitation (F286, closed by F296 in M20-1 — anti-pattern 58
+// 3-axis full coverage): pre-M20 this test did NOT cover handler-
+// emitted audit resource_type STRING values that were not model.Resource*
+// symbols. Concretely, three orphan package-local ResourceType*
+// constants lived outside the model.Resource* family and outside
+// service.GetAvailableResourceTypes():
+//
+//   - "meti_assessment"  ← handler/meti.go ResourceTypeMetiAssessment
+//   - "sbom_diff"        ← service/diff_summary/ ResourceTypeSbomDiff
+//   - "diff_webhook"     ← model/diff_webhook.go ResourceTypeDiffWebhook
+//
+// These three were a silent forensic UI-filter gap this parity contract
+// could not catch, because its expectedEmit set is keyed on the
+// model.Resource* symbol universe. F286 tracked the closure as an M20+
+// candidate; F296 (M20-1 Phase D R1) landed the fix by promoting the
+// three orphan constants into model.Resource{METIAssessment,SBOMDiff,
+// DiffWebhook} (single source of truth), removing the package-locals,
+// swapping all six emit sites to reference the model symbols, adding
+// the three GetAvailableResourceTypes registry rows, and expanding the
+// expectedEmit set below so direction-1 registration is enforced. With
+// F296 landed, anti-pattern 58 dual-list parity now has full coverage
+// across all three audit dimensions:
+//
+//   axis 1 (Action dimension)                    = F271 (M18-1)
+//   axis 2 (Resource dimension, middleware-side) = F281 (M19-3)
+//   axis 3 (Resource dimension, handler-side)    = F296 (M20-1, THIS)
+//
+// Any future orphan `ResourceType*` constant added outside model.Resource*
+// remains a discipline violation of the F296 single-source-of-truth
+// rule, but at CI time the F281 direction-1 registration check will
+// only catch it when the symbol is added to expectedEmit — reviewers
+// should reject new package-local ResourceType* constants at PR review
+// per F296 discipline (same rule as F267 established for the Action
+// dimension universe).
 func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 	// Direction 1: emit → registry. Hand-maintained set of every
 	// model.Resource* constant the audit middleware's
@@ -3078,6 +3098,23 @@ func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 		// (create / update / delete) logs against this resource type.
 		// Present in the registry from earlier waves.
 		model.ResourceTenant: true,
+		// F296 (M20-1 Phase D R1): the three handler-side / service-
+		// side emit symbols promoted from pre-M20 orphan
+		// `ResourceType*` package-local constants — see F296 head
+		// comment above and model/audit.go F296 block for the full
+		// 3-axis full-coverage rationale.
+		//
+		//   * ResourceMETIAssessment — handler/meti.go /refresh,
+		//     /override, /override-cleared audit rows (three sites).
+		//   * ResourceSBOMDiff — service/diff_summary AI-generated /
+		//     AI-failed audit rows (two sites) plus handler/diff.go
+		//     /diff/graph audit_pair (F237 dual-path resolution).
+		//   * ResourceDiffWebhook — handler/settings_diff_webhook.go
+		//     /settings PUT, handler/sbom.go auto-fire path, and
+		//     service/diff_webhook/diff_webhook.go delivery worker.
+		model.ResourceMETIAssessment: true,
+		model.ResourceSBOMDiff:       true,
+		model.ResourceDiffWebhook:    true,
 	}
 
 	// Documented exception allowlist mirroring the F271 pattern for
@@ -3126,6 +3163,18 @@ func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 		if entry.Label == "" {
 			t.Errorf("F281 direction 2 failure: registry entry has "+
 				"empty Label field: %+v", entry)
+		}
+		// F298 (M20-1 Phase D R1, anti-pattern 58 dual-list parity
+		// completeness — Category structural symmetry): Category is
+		// asserted non-empty mirroring the F271 Action-dimension
+		// direction-2 assertion (audit_test.go L2760-2763). Pre-F298
+		// ResourceTypeInfo carried only Type + Label so this check
+		// could not exist; F298 added the Category field to the
+		// struct and populated it on every registry entry so the
+		// two dimensions now enforce the same structural contract.
+		if entry.Category == "" {
+			t.Errorf("F298 direction 2 failure: registry entry has "+
+				"empty Category field: %+v", entry)
 		}
 		if !knownConstants[entry.Type] {
 			t.Errorf("F281 direction 2 failure: registry entry "+
@@ -3191,5 +3240,12 @@ func allModelResourceValues() map[string]bool {
 		model.ResourceDashboard:   true,
 		model.ResourceMCP:         true,
 		model.ResourceCLI:         true,
+		// F296 (M20-1 Phase D R1) handler-side ResourceType* orphan
+		// closure — see F281 head comment for the 3-axis full-coverage
+		// rationale and model/audit.go F296 block for the const
+		// definitions.
+		model.ResourceMETIAssessment: true,
+		model.ResourceSBOMDiff:       true,
+		model.ResourceDiffWebhook:    true,
 	}
 }
