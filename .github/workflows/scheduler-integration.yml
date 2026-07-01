@@ -149,11 +149,16 @@ jobs:
           go run ./cmd/migrate up
 
       - name: Run scheduler integration tests
-        # `-tags=integration` enables the //go:build integration file:
-        #   - internal/scheduler/vulnerability_scan_integration_test.go
-        # -run filter is scoped to the F234 tests explicitly so future
+        # `-tags=integration` enables the //go:build integration files:
+        #   - internal/scheduler/vulnerability_scan_integration_test.go (F234)
+        #   - internal/scheduler/report_generation_integration_test.go (F244)
+        # -run filter is scoped to the F<N>_ tests explicitly so future
         # additions to this file are opt-in (name your test starting
-        # with TestF234_, or bump the pattern).
+        # with TestF234_ / TestF244_ / TestF<future>_, or bump the
+        # alternation). Anti-pattern 48 discipline: any scheduler that
+        # grows chunked-tx or other ACID-load-bearing behaviour must
+        # add its F<num> to the alternation, otherwise its integration
+        # test silently skips in CI.
         # -count=1 disables the Go test cache so a passing cached run
         # doesn't hide a regression that only manifests against a
         # freshly-migrated DB.
@@ -166,7 +171,7 @@ jobs:
           source ../../.env
           set +a
           go test -count=1 -tags=integration -timeout 5m -v \
-            -run 'TestF234_' \
+            -run 'TestF(234|244)_' \
             ./internal/scheduler/...
 
       - name: Dump postgres logs on failure
