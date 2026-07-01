@@ -1146,18 +1146,28 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// Default: log as generic resource access
+	// Default: log as generic resource access.
+	//
+	// F272 (M18-1 Phase D R2, anti-pattern 48 symmetric closure): the four
+	// resource_type positions below reference model.ResourceUnknown instead
+	// of the inline "unknown" literal so a typo (e.g. "unkown") at any of
+	// the four sites fails to compile — matching every other model.Resource*
+	// arm in this function. Pre-F272 these four sites were the only
+	// resource_type positions in determineActionAndResource that used a bare
+	// string literal, leaving a silent-drift gap the F225/F242/F256/F267
+	// action-verb closure discipline had already eliminated on the action
+	// side.
 	if method == "GET" {
-		return model.ActionResourceViewed, "unknown"
+		return model.ActionResourceViewed, model.ResourceUnknown
 	}
 	if method == "POST" {
-		return model.ActionResourceCreated, "unknown"
+		return model.ActionResourceCreated, model.ResourceUnknown
 	}
 	if method == "PUT" || method == "PATCH" {
-		return model.ActionResourceUpdated, "unknown"
+		return model.ActionResourceUpdated, model.ResourceUnknown
 	}
 	if method == "DELETE" {
-		return model.ActionResourceDeleted, "unknown"
+		return model.ActionResourceDeleted, model.ResourceUnknown
 	}
 
 	return "", ""

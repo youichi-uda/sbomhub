@@ -357,6 +357,23 @@ const (
 	// corrected this docstring's prior integration-prefixed ticket
 	// table reference, which never existed in any migration.
 	ResourceTicket = "ticket"
+
+	// F272 (M18-1 Phase D R2, anti-pattern 48 symmetric closure): named
+	// constant for the "unknown" resource_type that the audit middleware's
+	// default arm returns when no branch above matches. Pre-F272 the four
+	// default arms (middleware/audit.go GET/POST/PUT+PATCH/DELETE) returned
+	// the "unknown" string literal alongside model.ActionResource*
+	// constants — an asymmetric pattern where a typo ("unkown") at any
+	// of the four sites would silently ship to audit_logs and the UI
+	// filter dropdown could never surface it. Extracting the constant
+	// here mirrors the F242 (project.viewed) / F256 (.viewed universe) /
+	// F267 (action verb universe) discipline: every audit-emitted
+	// resource_type value must be a compile-time-checked symbol so a
+	// rename cascades and a typo fails to build. See middleware/audit.go
+	// four default arms — the model.ActionResourceViewed +
+	// model.ActionResource{Created,Updated,Deleted} arms — for the emit
+	// sites that reference this constant.
+	ResourceUnknown = "unknown"
 )
 
 // CreateAuditLogInput is the input for creating an audit log
