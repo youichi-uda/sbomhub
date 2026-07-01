@@ -576,9 +576,17 @@ func hasNonEmptyJSONArray(raw json.RawMessage) bool {
 
 // nullableStringPtr converts a *string to a sql-driver value: nil
 // pointer -> NULL (interpreted as "do not change" by COALESCE), set
-// pointer -> the string value (including empty string, which the
-// COALESCE then treats as a real overwrite to ”). Mirrors
-// nullableUUID / nullableTime.
+// pointer -> the string value (including an empty string, which the
+// COALESCE then treats as a real overwrite to the empty SQL string).
+// Mirrors nullableUUID / nullableTime.
+//
+// F238 (M15 Phase D round 1 fix, doc-only): rewritten to avoid the
+// literal two-single-quote SQL empty-string spelling. Go 1.19+
+// go/doc comment rewriter (invoked by gofmt on doc comments) treats
+// two consecutive apostrophes inside a doc comment as a curly-quote
+// hint and silently rewrites them to U+201D (RIGHT DOUBLE QUOTATION
+// MARK), corrupting the surrounding sentence. The prose form used
+// here survives future gofmt passes with no change in meaning.
 func nullableStringPtr(s *string) interface{} {
 	if s == nil {
 		return nil

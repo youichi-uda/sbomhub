@@ -267,9 +267,18 @@ func nullableUUID(u *uuid.UUID) interface{} {
 }
 
 // nullableString returns nil for empty strings so optional TEXT columns
-// land as NULL instead of ” (matches LLM_PROVIDER_DESIGN.md §6.1 intent
-// where prompt_preview / response_preview / response_body / error_message
-// are described as optional rather than empty-string-required).
+// land as NULL instead of an empty SQL string (matches
+// LLM_PROVIDER_DESIGN.md §6.1 intent where prompt_preview /
+// response_preview / response_body / error_message are described as
+// optional rather than empty-string-required).
+//
+// F238 (M15 Phase D round 1 fix, doc-only): rewritten to avoid the
+// literal two-single-quote SQL empty-string spelling. Go 1.19+
+// go/doc comment rewriter (invoked by gofmt on doc comments) treats
+// two consecutive apostrophes inside a doc comment as a curly-quote
+// hint and silently rewrites them to U+201D (RIGHT DOUBLE QUOTATION
+// MARK), corrupting the surrounding sentence. The prose form used
+// here survives future gofmt passes with no change in meaning.
 func nullableString(s string) interface{} {
 	if s == "" {
 		return nil
