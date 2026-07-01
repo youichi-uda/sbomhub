@@ -1,0 +1,10 @@
+# Build artifacts from `go build` in this module.
+#
+# The tool is stdlib-only; `go build ./...` at the module root drops the
+# resulting binary here. It is not needed in the repo — CI invokes the
+# tool via `go run .` — and it varies by host arch, so we exclude both
+# the unqualified name and any `*.bin` / `*.exe` variants a curious
+# operator might produce with `-o`.
+lint-toolchain-alignment
+*.bin
+*.exe
