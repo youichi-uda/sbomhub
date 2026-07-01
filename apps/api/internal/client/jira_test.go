@@ -471,17 +471,32 @@ func TestJiraClient_RateLimit_ContextCancel(t *testing.T) {
 
 // TestJiraClient_RateLimit_POST_BodyReuse_F301 pins the POST body-reuse
 // invariant: when a rate-limited CreateIssue call is retried, the second
-// attempt must send byte-identical request body to the first, i.e. the
-// JSON-marshal step must live above the retry loop (F277 landing shape),
-// not inside it. A future regression that moved json.Marshal(body) inside
-// the retry loop would still pass every existing rate-limit test (all of
-// which exercise TestConnection, a GET path with no body) yet silently
-// corrupt POST retries — e.g. an ADF description block re-encoded twice
-// under different Go map iteration orderings could produce non-equivalent
-// but semantically-different byte streams. This test wires an httptest
-// server that (a) captures the request body on every hit and (b) 429s the
-// first hit + 201s the second, then asserts bytes.Equal on the two
-// captured bodies. F301 (M20-3, F292 fix path).
+// attempt must send a request body that is byte-identical to the first.
+// The invariant this catches is "each retry attempt receives a fresh
+// io.Reader positioned at offset 0". The concrete regression is a future
+// refactor that consumes the encoded body's `bytes.NewReader` outside
+// the retry loop (e.g. hoisting the reader construction above the loop
+// and reusing it directly, or advancing it during attempt 1), causing
+// attempt 2 to send an empty or partial body. The bytes.Equal check
+// below trips that regression cleanly.
+//
+// What this test does NOT catch: a regression that produces different
+// but byte-equal encodings across attempts. Such a regression is
+// unlikely with stdlib guarantees — `encoding/json.Marshal` sorts map
+// keys alphabetically per its documented contract, and
+// `url.Values.Encode()` also sorts. So even a per-attempt re-encode of
+// the same Go value would return the same bytes. The pre-F310 docstring
+// wording that appealed to "different Go map iteration orderings could
+// produce non-equivalent byte streams" mis-described the catch scope;
+// F310 (M20-3 Phase D R2) rewrites the docstring to reflect what F301
+// actually catches (the per-attempt-fresh-reader contract, i.e. the
+// bytes.NewReader hoist regression) rather than a hypothetical encoding
+// nondeterminism.
+//
+// This test wires an httptest server that (a) captures the request
+// body on every hit and (b) 429s the first hit + 201s the second, then
+// asserts bytes.Equal on the two captured bodies. F301 (M20-3, F292 fix
+// path) + F310 (M20-3 Phase D R2 docstring correction).
 func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 	var (
 		mu           sync.Mutex
