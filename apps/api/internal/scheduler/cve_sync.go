@@ -124,14 +124,26 @@ var cveMatchBatchChunkSize = cveMatchBatchChunkSizeDefault
 // INSERT batch) + COMMIT) to 1 + 2c + N*(1+M) (single pooled connection
 // + per-chunk BEGIN/COMMIT + per-tenant SET LOCAL + M*(SELECT + INSERT
 // batch)); more importantly, the pool sees exactly one lease per Run()
-// tick instead of N leases. Tx-abort blast radius trade-off: pre-F258
-// a poison tenant rolled back only that ONE tenant's INSERT batch;
-// post-F258 a poison tenant aborts the enclosing chunk's tx and rolls
-// back up to chunk_size (default 200) tenants' INSERT batches for
-// that tick (they retry on the next daily tick). This is intentional
-// — see matchTenantsChunked's docstring for the full write-heavy
-// blast-radius rationale. Horizontal replication of F234 (M15-2,
-// vulnerability_scan.go, read-only) and F244 (M16-4,
+// tick instead of N leases.
+//
+// F264 (M17-3 Phase D R2 #109): the leading `+1` in both formulas is
+// the listAllIDs SELECT issued by Run() itself (see cve_sync.go Run at
+// the caller site), NOT by matchTenantsChunked. matchTenantsChunked
+// receives the pre-materialised tenant ID slice as a parameter and its
+// own cost is exactly 2c + N*(1+M). The `+1` is attributed to Run()'s
+// tenant enumeration step so that the formula composes at the Run()
+// scope — this makes the "single pool lease per Run() tick" claim
+// audit-able (listAllIDs also runs under the same pool lease as
+// matchTenantsChunked's chunked txs). See the Round-trip accounting
+// block on matchTenantsChunked for the full derivation.
+//
+// Tx-abort blast radius trade-off: pre-F258 a poison tenant rolled back
+// only that ONE tenant's INSERT batch; post-F258 a poison tenant aborts
+// the enclosing chunk's tx and rolls back up to chunk_size (default 200)
+// tenants' INSERT batches for that tick (they retry on the next daily
+// tick). This is intentional — see matchTenantsChunked's docstring for
+// the full write-heavy blast-radius rationale. Horizontal replication of
+// F234 (M15-2, vulnerability_scan.go, read-only) and F244 (M16-4,
 // report_generation.go, read-only); F258 is the first write-heavy
 // application of the pattern.
 type CVESyncJob struct {
@@ -528,13 +540,21 @@ type cveVulnEntry struct {
 // Round-trip accounting (N tenants, M CVEs per tenant, chunk_size K,
 // num_chunks c=ceil(N/K)):
 //
+// F264 (M17-3 Phase D R2 #109) attribution note: the leading `1
+// (listAllIDs)` term in both pre-F258 and F258 formulas is the tenant
+// enumeration SELECT issued by Run() at the caller site — it is NOT
+// part of matchTenantsChunked's own cost. matchTenantsChunked's cost is
+// exactly 2c + N*(1+M); the `+1` is added at the Run() scope so the
+// formula composes end-to-end at the Run() tick level. See the
+// type-level docstring on CVESyncJob for the same attribution.
+//
 //	pre-F258 (per-tenant runWithTenantTx):
-//	    1 (listAllIDs)
+//	    1 (listAllIDs, from Run())
 //	  + N * (BEGIN + SET LOCAL + M*(SELECT + INSERT batch) + COMMIT)
 //	  = 1 + N*(3 + M)
 //
 //	F258 (chunked tx split):
-//	    1 (listAllIDs)
+//	    1 (listAllIDs, from Run())
 //	  + c * (BEGIN + COMMIT)              = 2c
 //	  + N * (SET LOCAL)                   = N
 //	  + N * M * (SELECT + INSERT batch)   = N * M
