@@ -1,12 +1,15 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,6 +433,93 @@ func TestBacklogClient_RateLimit_Exhausted(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 3 {
 		t.Errorf("expected 3 requests (1 initial + 2 retries), got %d", got)
+	}
+}
+
+// TestBacklogClient_RateLimit_POST_BodyReuse_F301 pins the POST body-reuse
+// invariant: when a rate-limited CreateIssue call is retried, the second
+// attempt must send byte-identical form-encoded body to the first, i.e. the
+// url.Values.Encode step must live above the retry loop (F277 landing
+// shape), not inside it. A future regression that moved the params.Encode()
+// call inside the retry loop would still pass every existing rate-limit
+// test (all of which exercise TestConnection, a GET path that appends the
+// encoded params to the URL query string only) yet silently break POST
+// retries — Go's url.Values.Encode sorts keys alphabetically today, but
+// even a stable encoding is not the point: F301 asserts byte-equality
+// across attempts to lock in the "encode once, reuse bytes" contract. F301
+// (M20-3, F292 fix path).
+func TestBacklogClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
+	var (
+		mu           sync.Mutex
+		capturedBody [][]byte
+		hits         int32
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/issues" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
+			t.Errorf("unexpected content-type: %s", ct)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		mu.Lock()
+		capturedBody = append(capturedBody, body)
+		mu.Unlock()
+
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errors":[{"message":"rate limited"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(BacklogIssue{
+			ID:       12345,
+			IssueKey: "TEST-1",
+		})
+	}))
+	defer server.Close()
+
+	client := NewBacklogClient(server.URL, "apikey123").
+		WithBackoffPolicy(testBacklogBackoff(3))
+
+	input := CreateBacklogIssueInput{
+		ProjectID:   1,
+		IssueTypeID: 2,
+		PriorityID:  3,
+		Summary:     "Body reuse invariant",
+		Description: "F301 pins byte-equal retry payload",
+	}
+
+	issue, err := client.CreateIssue(context.Background(), input)
+	if err != nil {
+		t.Fatalf("expected CreateIssue to succeed after 429 retry, got: %v", err)
+	}
+	if issue == nil || issue.IssueKey != "TEST-1" {
+		t.Fatalf("expected returned issue key TEST-1, got: %+v", issue)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected exactly 2 requests (1 x 429 + 1 x 201), got %d", got)
+	}
+	if len(capturedBody) != 2 {
+		t.Fatalf("expected 2 captured bodies, got %d", len(capturedBody))
+	}
+	if !bytes.Equal(capturedBody[0], capturedBody[1]) {
+		t.Errorf("F301 invariant violated: retry request body not byte-equal to initial\n"+
+			"  hit1 (%d bytes): %s\n"+
+			"  hit2 (%d bytes): %s",
+			len(capturedBody[0]), capturedBody[0],
+			len(capturedBody[1]), capturedBody[1])
 	}
 }
 
