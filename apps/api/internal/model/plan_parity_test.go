@@ -86,6 +86,14 @@ import (
 //   - New feature key added to a plan_limits seed / backfill
 //     migration without a matching entry in Go DefaultPlanLimits
 //     (silent Gap B shape — the real production audit_logs bug).
+//     F317 (M20-2 Phase D R2, Codex adjunct v2 5th continue application):
+//     the SQL-side parser scans EVERY `apps/api/migrations/*.up.sql`
+//     for `UPDATE plan_limits SET features = features || ...` in
+//     lexicographic (migration-number) order, not the previously
+//     hardcoded 008 / 024 / 049 triplet, so a future 050+ migration
+//     that adds a new plan_limits feature-key backfill is picked up
+//     automatically. The pre-F317 hardcode made the meta-test's
+//     "future silent divergence trips CI" claim narrower than it read.
 //   - Per-plan value flip on only one side (Direction 2).
 //   - Registry typos on the SQL side that decode as valid JSON
 //     but do not match a Go key.
@@ -184,11 +192,14 @@ func TestPlanFeatureRegistryParity_F299(t *testing.T) {
 		}
 		t.Errorf("F299 direction 1 failure (Go → SQL): feature key %q "+
 			"is present in Go DefaultPlanLimits Features but ABSENT "+
-			"from every plan_limits.features JSONB row in "+
-			"008_subscriptions.up.sql + 049_plan_features_parity_backfill"+
-			".up.sql. Either add the matching key to the SQL seed / "+
-			"backfill migration, or (if the deferral is intentional) "+
-			"add it to knownGoOnlyMissingFromSQL with an F# reason.", k)
+			"from every plan_limits.features JSONB row after applying "+
+			"008_subscriptions.up.sql INSERT seed + every subsequent "+
+			"`UPDATE plan_limits SET features = features || ...` "+
+			"backfill migration in apps/api/migrations in numeric order "+
+			"(F317 dynamic scan). Either add the matching key to the "+
+			"SQL seed / a new backfill migration, or (if the deferral "+
+			"is intentional) add it to knownGoOnlyMissingFromSQL with "+
+			"an F# reason.", k)
 	}
 
 	for k := range sqlKeys {
@@ -199,9 +210,11 @@ func TestPlanFeatureRegistryParity_F299(t *testing.T) {
 			continue
 		}
 		t.Errorf("F299 direction 1 failure (SQL → Go): feature key %q "+
-			"is present in plan_limits.features JSONB (008 seed + 049 "+
-			"backfill) but ABSENT from every Go DefaultPlanLimits plan "+
-			"Features map. Either add the matching key to "+
+			"is present in plan_limits.features JSONB (008 INSERT seed "+
+			"+ all subsequent `UPDATE plan_limits SET features = "+
+			"features || ...` backfill migrations discovered by F317 "+
+			"dynamic scan) but ABSENT from every Go DefaultPlanLimits "+
+			"plan Features map. Either add the matching key to "+
 			"model/plan.go DefaultPlanLimits, or (if the deferral is "+
 			"intentional) add it to knownSQLOnlyMissingFromGo with an "+
 			"F# reason.", k)
@@ -267,41 +280,71 @@ func TestPlanFeatureRegistryParity_F299(t *testing.T) {
 	}
 }
 
-// parsePlanFeaturesFromMigrations reads the SQL files that together
-// define the SQL-side plan_limits.features state:
+// parsePlanFeaturesFromMigrations reconstructs the SQL-side
+// plan_limits.features state by scanning every migration in
+// apps/api/migrations that touches plan_limits.features.
 //
-//	008_subscriptions.up.sql          — INSERT seed rows.
-//	024_fix_plan_limits_audit_logs.up — BUG-06 audit_logs=true on
-//	                                    pro/team/enterprise.
-//	049_plan_features_parity_backfill — F299 audit_logs=false on
-//	                                    free/starter (this wave).
+// Scan protocol (F317, M20-2 Phase D R2 Codex adjunct v2 5th continue
+// application):
 //
-// The chain is applied in migration-number order so later UPDATEs
-// win on key collision, mirroring PostgreSQL's `||` semantics.
-// State machine is deliberately narrow-scoped: match INSERT rows in
-// 008 and UPDATE ... SET features = features || '{...}'::jsonb in
-// the two backfills. Kept in-file (not a shared helper) so a future
-// wave that reshapes the SQL is forced to update this parser and
-// notice the parity implications.
+//   - The 008_subscriptions.up.sql INSERT seed is required and always
+//     applied first. It is the origin of every plan_limits row so the
+//     later UPDATE backfills have something to merge into.
+//   - Every *.up.sql in the directory is then scanned in lexicographic
+//     order (which matches migration-number order for the 001-049
+//     zero-padded convention this repo uses). Any file whose contents
+//     match a `UPDATE plan_limits SET features = features || ... ` shape
+//     — either the IN (...) or the `= 'x'` per-plan form — is treated
+//     as a backfill and its deltas are folded into the seed. 008 itself
+//     is skipped in this pass (it has no matching UPDATE shape).
+//   - PostgreSQL `||` right-hand-side wins on key collision, so later
+//     migrations override earlier ones as they would in a live upgrade.
+//
+// Rationale: prior to F317 this parser was hardcoded to the three
+// known migrations at the time of writing (008 / 024 / 049). A future
+// 050+ migration that added a new plan_limits feature-key backfill
+// would have been silently invisible to the unit meta-test, keeping
+// the parity gap latent until the //go:build integration companion
+// ran against real postgres. The dynamic scan closes that gap so the
+// meta-test's "future silent divergence trips CI" claim in the head
+// docstring is factually broad.
 func parsePlanFeaturesFromMigrations(t *testing.T, plans []string) (map[string]map[string]bool, error) {
 	t.Helper()
 
 	migrationsDir := migrationsDirAbs(t)
 
-	// 1) 008 seed rows.
-	seed, err := parse008Seed(filepath.Join(migrationsDir, "008_subscriptions.up.sql"))
+	// 1) 008 INSERT seed — must exist as the origin of every plan row.
+	const seedFile = "008_subscriptions.up.sql"
+	seedPath := filepath.Join(migrationsDir, seedFile)
+	seed, err := parse008Seed(seedPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2) 024 BUG-06 backfill (audit_logs=true on pro/team/enterprise).
-	if err := applyBackfillUpdates(seed, filepath.Join(migrationsDir, "024_fix_plan_limits_audit_logs.up.sql")); err != nil {
+	// 2) Discover every *.up.sql in numeric (lexicographic) order and
+	// fold in any `UPDATE plan_limits SET features = features || ...`
+	// backfills. hasPlanLimitsFeaturesUpdate does a cheap grep first so
+	// unrelated migrations short-circuit; applyBackfillUpdates then
+	// parses and applies the deltas.
+	upFiles, err := filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
+	if err != nil {
 		return nil, err
 	}
-
-	// 3) 049 F299 backfill (audit_logs=false on free/starter — key-set closure).
-	if err := applyBackfillUpdates(seed, filepath.Join(migrationsDir, "049_plan_features_parity_backfill.up.sql")); err != nil {
-		return nil, err
+	sort.Strings(upFiles)
+	for _, path := range upFiles {
+		if filepath.Base(path) == seedFile {
+			continue
+		}
+		hit, err := hasPlanLimitsFeaturesUpdate(path)
+		if err != nil {
+			return nil, err
+		}
+		if !hit {
+			continue
+		}
+		if err := applyBackfillUpdates(seed, path); err != nil {
+			return nil, err
+		}
 	}
 
 	// Ensure every declared plan is present.
@@ -312,6 +355,22 @@ func parsePlanFeaturesFromMigrations(t *testing.T, plans []string) (map[string]m
 		}
 	}
 	return seed, nil
+}
+
+// planLimitsFeaturesUpdateProbeRe is a cheap grep that identifies any
+// migration whose body carries an `UPDATE plan_limits SET features =
+// features || ...` backfill (either IN (...) or `= 'x'` shape). Used
+// by parsePlanFeaturesFromMigrations to short-circuit unrelated
+// migrations without paying the (?s) multi-line regex cost on every
+// file. F317 (M20-2 Phase D R2).
+var planLimitsFeaturesUpdateProbeRe = regexp.MustCompile(`UPDATE\s+plan_limits\s+SET\s+features\s*=\s*features\s*\|\|`)
+
+func hasPlanLimitsFeaturesUpdate(path string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return planLimitsFeaturesUpdateProbeRe.Match(raw), nil
 }
 
 // migrationsDirAbs returns the absolute path to apps/api/migrations
