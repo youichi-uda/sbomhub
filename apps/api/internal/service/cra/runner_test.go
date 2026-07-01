@@ -534,8 +534,8 @@ func TestRunner_Run_HappyPaths_AllReportTypeLangCombos(t *testing.T) {
 				if a.Action != AuditActionCRAReportAIGenerated {
 					t.Errorf("audit action = %q, want %q", a.Action, AuditActionCRAReportAIGenerated)
 				}
-				if a.ResourceType != ResourceTypeCRAReport {
-					t.Errorf("audit resource_type = %q, want %q", a.ResourceType, ResourceTypeCRAReport)
+				if a.ResourceType != model.ResourceCRAReport {
+					t.Errorf("audit resource_type = %q, want %q", a.ResourceType, model.ResourceCRAReport)
 				}
 				// Provider request shape: JSONMode true, system prompt
 				// references CRA.

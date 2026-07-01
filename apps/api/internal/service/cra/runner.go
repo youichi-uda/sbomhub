@@ -75,10 +75,13 @@ import (
 // ----------------------------------------------------------------------------
 
 const (
-	// ResourceTypeCRAReport is the audit_logs.resource_type emitted for
-	// every cra_reports lifecycle event. Matches the migration 038
-	// "Dual-recording in audit_logs" header convention.
-	ResourceTypeCRAReport = "cra_report"
+	// The audit_logs.resource_type wire value for every cra_reports
+	// lifecycle event lives in package model as model.ResourceCRAReport
+	// (the anti-pattern 58 dual-list system single source of truth). This
+	// package used to declare a sibling `ResourceTypeCRAReport = "cra_report"`
+	// duplicate; M20 R2 F302 promoted the 3 use sites to model.ResourceCRAReport
+	// and removed the orphan constant so a future rename of the wire value
+	// cannot desync silently through a stale package-local copy.
 
 	// AuditActionCRAReportAIGenerated is the audit_logs.action emitted
 	// when the LLM successfully drafted a CRA report.
@@ -965,7 +968,7 @@ func (r *Runner) writeAudit(ctx context.Context, in RunInput, resourceID uuid.UU
 		TenantID:     &tenantID,
 		UserID:       in.UserID,
 		Action:       action,
-		ResourceType: ResourceTypeCRAReport,
+		ResourceType: model.ResourceCRAReport,
 		ResourceID:   &rid,
 		Details:      details,
 		IPAddress:    in.IPAddress,

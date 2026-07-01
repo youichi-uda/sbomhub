@@ -463,7 +463,7 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 		TenantID:     &tenantID,
 		UserID:       uid,
 		Action:       AuditActionCRAReportDecided,
-		ResourceType: cra.ResourceTypeCRAReport,
+		ResourceType: model.ResourceCRAReport,
 		ResourceID:   &rid,
 		Details:      auditDetails,
 		IPAddress:    c.RealIP(),
