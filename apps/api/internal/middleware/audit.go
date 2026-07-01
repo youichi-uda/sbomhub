@@ -834,14 +834,23 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// Reports endpoints
+	// Reports endpoints.
+	//
+	// F283 (M19-3 Phase D R1, anti-pattern 58 horizontal replication —
+	// Resource dimension): the two return arms below reference
+	// model.ResourceReport instead of the inline "report" literal so a
+	// typo ("reoprt") at either site fails to compile — mirroring the
+	// F267/F272 discipline on the Action dimension and the "unknown"
+	// default arm. F281 (sibling meta-test) pins the emit ↔ registry
+	// parity so a future wave that adds a new /reports arm returning a
+	// bare literal fails CI at the parity check.
 	if strings.HasPrefix(path, "/reports") {
 		resourceType = "report"
 		switch method {
 		case "POST":
-			return model.ActionReportGenerated, "report"
+			return model.ActionReportGenerated, model.ResourceReport
 		case "GET":
-			return model.ActionReportViewed, "report"
+			return model.ActionReportViewed, model.ResourceReport
 		}
 	}
 
@@ -854,49 +863,53 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// Analytics endpoints
+	// Analytics endpoints. F283 (M19-3, anti-pattern 58): return
+	// references model.ResourceAnalytics.
 	if strings.HasPrefix(path, "/analytics") {
 		resourceType = "analytics"
 		switch method {
 		case "GET":
-			return model.ActionAnalyticsViewed, "analytics"
+			return model.ActionAnalyticsViewed, model.ResourceAnalytics
 		}
 	}
 
-	// Integrations endpoints
+	// Integrations endpoints. F283 (M19-3, anti-pattern 58): all four
+	// arms reference model.ResourceIntegration.
 	if strings.HasPrefix(path, "/integrations") {
 		resourceType = "integration"
 		switch method {
 		case "POST":
-			return model.ActionIntegrationCreated, "integration"
+			return model.ActionIntegrationCreated, model.ResourceIntegration
 		case "PUT", "PATCH":
-			return model.ActionIntegrationUpdated, "integration"
+			return model.ActionIntegrationUpdated, model.ResourceIntegration
 		case "DELETE":
-			return model.ActionIntegrationDeleted, "integration"
+			return model.ActionIntegrationDeleted, model.ResourceIntegration
 		case "GET":
-			return model.ActionIntegrationViewed, "integration"
+			return model.ActionIntegrationViewed, model.ResourceIntegration
 		}
 	}
 
-	// Search endpoints
+	// Search endpoints. F283 (M19-3, anti-pattern 58): all three
+	// arms reference model.ResourceSearch.
 	if strings.HasPrefix(path, "/search") {
 		resourceType = "search"
 		if method == "GET" {
 			if strings.Contains(path, "/cve") {
-				return model.ActionSearchCVE, "search"
+				return model.ActionSearchCVE, model.ResourceSearch
 			}
 			if strings.Contains(path, "/component") {
-				return model.ActionSearchComponent, "search"
+				return model.ActionSearchComponent, model.ResourceSearch
 			}
-			return model.ActionSearchExecuted, "search"
+			return model.ActionSearchExecuted, model.ResourceSearch
 		}
 	}
 
-	// Dashboard endpoints
+	// Dashboard endpoints. F283 (M19-3, anti-pattern 58): return
+	// references model.ResourceDashboard.
 	if strings.HasPrefix(path, "/dashboard") {
 		resourceType = "dashboard"
 		if method == "GET" {
-			return model.ActionDashboardViewed, "dashboard"
+			return model.ActionDashboardViewed, model.ResourceDashboard
 		}
 	}
 
@@ -983,14 +996,15 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// MCP endpoints
+	// MCP endpoints. F283 (M19-3, anti-pattern 58): both arms
+	// reference model.ResourceMCP.
 	if strings.HasPrefix(path, "/mcp") {
 		resourceType = "mcp"
 		if method == "GET" {
-			return model.ActionMCPAccessed, "mcp"
+			return model.ActionMCPAccessed, model.ResourceMCP
 		}
 		if method == "POST" {
-			return model.ActionMCPAction, "mcp"
+			return model.ActionMCPAction, model.ResourceMCP
 		}
 	}
 
@@ -1064,7 +1078,8 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			}
 			if strings.Contains(path, "/check") {
 				// Transient vulnerability check, no UUID minted.
-				return model.ActionCLICheck, "cli"
+				// F283 (M19-3, anti-pattern 58): model.ResourceCLI.
+				return model.ActionCLICheck, model.ResourceCLI
 			}
 			if strings.Contains(path, "/projects") {
 				// POST /cli/projects — project UUID minted in the
@@ -1075,7 +1090,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				// joins on projects.id.
 				return model.ActionProjectCreated, model.ResourceProject
 			}
-			return model.ActionCLIAction, "cli"
+			return model.ActionCLIAction, model.ResourceCLI
 		case "GET":
 			// F242 (M16-1 fix, anti-pattern 48/51/52): reclassify
 			// GET /cli/projects[/:id] to project.viewed / project so
@@ -1090,17 +1105,21 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			if strings.Contains(path, "/projects") {
 				return model.ActionProjectViewed, model.ResourceProject
 			}
-			return model.ActionCLIAccessed, "cli"
+			// F283 (M19-3, anti-pattern 58): model.ResourceCLI.
+			return model.ActionCLIAccessed, model.ResourceCLI
 		default:
 			// F206 (anti-pattern 48 symmetric to F201): pin the CLI
 			// family on any future method (PUT/PATCH/DELETE/OPTIONS/
 			// HEAD) so it does not fall through to the tenant
 			// branches below (or to the generic "unknown" default).
-			return model.ActionCLIAction, "cli"
+			// F283 (M19-3, anti-pattern 58): model.ResourceCLI.
+			return model.ActionCLIAction, model.ResourceCLI
 		}
 	}
 
-	// Scan endpoints
+	// Scan endpoints. F283 (M19-3, anti-pattern 58): both arms
+	// reference model.ResourceScan (the const already existed pre-F282
+	// as an F188 project-nested resource type).
 	if strings.Contains(path, "/scan") {
 		resourceType = "scan"
 		if method == "POST" {
@@ -1123,10 +1142,10 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			// code emit (F225 promoted-literal explanation comments
 			// remain, per F225 discipline — those are docstrings, not
 			// classifier emit).
-			return model.ActionScanStarted, "scan"
+			return model.ActionScanStarted, model.ResourceScan
 		}
 		if method == "GET" {
-			return model.ActionScanStatus, "scan"
+			return model.ActionScanStatus, model.ResourceScan
 		}
 	}
 

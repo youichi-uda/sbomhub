@@ -374,6 +374,31 @@ const (
 	// model.ActionResource{Created,Updated,Deleted} arms — for the emit
 	// sites that reference this constant.
 	ResourceUnknown = "unknown"
+
+	// F282 (M19-3 Phase D R1, anti-pattern 58 horizontal replication —
+	// Resource dimension): named constants for the tenant-branch resource
+	// types that audit middleware still emitted as inline string literals
+	// across the /reports, /analytics, /integrations, /search, /dashboard,
+	// /mcp, /cli, and /scan branches. Pre-F282 the middleware returned
+	// raw strings like "report", "integration", "cli" alongside
+	// model.Action* constants — an asymmetric pattern where a typo
+	// ("reoprt") would silently ship to audit_logs and the service-layer
+	// GetAvailableResourceTypes registry (which itself carried the same
+	// three literal-only entries "report" / "analytics" / "integration")
+	// could not detect the drift at compile time. F282 mirrors the F272
+	// discipline for the "unknown" default arm to the eight tenant-branch
+	// resource families, closing the anti-pattern 48 residual on the
+	// Resource dimension exactly as F267 closed it on the Action dimension.
+	// F283 (M19-3 sibling) swaps the emit-side literals to reference these
+	// constants; F281 (M19-3 sibling) pins the emit ↔ registry parity so
+	// future drift fails CI here.
+	ResourceReport      = "report"
+	ResourceAnalytics   = "analytics"
+	ResourceIntegration = "integration"
+	ResourceSearch      = "search"
+	ResourceDashboard   = "dashboard"
+	ResourceMCP         = "mcp"
+	ResourceCLI         = "cli"
 )
 
 // CreateAuditLogInput is the input for creating an audit log

@@ -551,9 +551,49 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		{Type: model.ResourceAPIKey, Label: "API Key"},
 		{Type: model.ResourceSubscription, Label: "Subscription"},
 		{Type: model.ResourceSettings, Label: "Settings"},
-		{Type: "report", Label: "Report"},
-		{Type: "analytics", Label: "Analytics"},
-		{Type: "integration", Label: "Integration"},
+
+		// F282 (M19-3 Phase D R1, anti-pattern 58 horizontal replication
+		// — Resource dimension): the three registry rows below previously
+		// carried inline "report" / "analytics" / "integration" string
+		// literals with no model.Resource* const backing. Pre-F282 a
+		// rename on the middleware side (e.g. changing an /integrations
+		// return to a new symbol) would have silently desynced from
+		// these dropdown rows because the compiler could not link them.
+		// F282 adds the missing model.Resource{Report,Analytics,
+		// Integration} constants and swaps the registry entries to
+		// symbol references so a typo at either the emit site or the
+		// registry side fails at build time. F281 (sibling meta-test)
+		// pins the parity so future drift fails CI, not silently.
+		{Type: model.ResourceReport, Label: "Report"},
+		{Type: model.ResourceAnalytics, Label: "Analytics"},
+		{Type: model.ResourceIntegration, Label: "Integration"},
+
+		// F282 (M19-3 Phase D R1) new tenant-branch resource types.
+		// Pre-F282 the middleware's /search, /dashboard, /mcp, /cli
+		// branches emitted resource_type as inline "search" /
+		// "dashboard" / "mcp" / "cli" literals but the service-layer
+		// registry never listed them at all — a silent gap where a
+		// forensic operator filtering audit_logs by resource_type
+		// could not select rows the middleware produced. Registering
+		// them here closes the F281 direction-1 parity gap for these
+		// four families in the same wave that closes the direction-2
+		// literal-only entries above.
+		{Type: model.ResourceSearch, Label: "Search"},
+		{Type: model.ResourceDashboard, Label: "Dashboard"},
+		{Type: model.ResourceMCP, Label: "MCP"},
+		{Type: model.ResourceCLI, Label: "CLI"},
+
+		// F282 (M19-3 Phase D R1) LLM config resource type. The
+		// constant existed pre-F282 (model.ResourceLLMConfig, backing
+		// the handler/settings_llm.go audit emit at h.auditRepo.Log)
+		// but was never registered in the dropdown, so an admin
+		// filtering audit_logs.resource_type by "llm_config" via the
+		// UI could not select the LLM key set / rotated / cleared
+		// audit rows. Adding the entry here closes the silent
+		// registry gap and completes the F281 direction-1 parity for
+		// the handler-emitted (rather than middleware-emitted) LLM
+		// resource family.
+		{Type: model.ResourceLLMConfig, Label: "LLM Config"},
 
 		// F188 (M13 Phase D round 3): per-family resource types the
 		// hoisted audit middleware now distinguishes for
