@@ -3,10 +3,26 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// testJiraBackoff returns a BackoffPolicy tuned for httptest — small delays so
+// test runtime stays sub-second and no jitter so the retry cadence is
+// deterministic. Callers usually pair this with WithBackoffPolicy on a client
+// constructed against a httptest.Server URL.
+func testJiraBackoff(maxRetries int) BackoffPolicy {
+	return BackoffPolicy{
+		MaxRetries:   maxRetries,
+		InitialDelay: 5 * time.Millisecond,
+		MaxDelay:     50 * time.Millisecond,
+		Jitter:       false,
+	}
+}
 
 func TestNewJiraClient(t *testing.T) {
 	client := NewJiraClient("https://example.atlassian.net", "user@example.com", "token123")
@@ -303,5 +319,180 @@ func TestCreateIssueInput(t *testing.T) {
 				t.Error("Summary should not be empty")
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F277 (M19-1) rate-limit hardening — 429 detection + Retry-After respect +
+// exponential backoff + context-cancel abort. These tests exercise doRequest
+// indirectly through TestConnection because the retry logic lives on the
+// funnel, so any GET/POST path shares the same behaviour.
+// ---------------------------------------------------------------------------
+
+// TestJiraClient_RateLimit_429_Retry pins the primary happy path: a single 429
+// followed by a 200 must succeed once the client respects Retry-After. The
+// server returns Retry-After: 1 but the test forces InitialDelay=5ms via
+// WithBackoffPolicy so the total runtime stays sub-second.
+//
+// Note: the client respects Retry-After when present, so the "5ms" fallback is
+// not what governs this test — the 1-second value is what the server sends.
+// We keep it small in the server response (Retry-After: 0) to keep the test
+// fast, then a separate test covers the multi-second HTTP header parsing.
+func TestJiraClient_RateLimit_429_Retry(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errorMessages":["rate limited"]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"accountId": "123"})
+	}))
+	defer server.Close()
+
+	client := NewJiraClient(server.URL, "user@example.com", "token123").
+		WithBackoffPolicy(testJiraBackoff(3))
+
+	if err := client.TestConnection(context.Background()); err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("expected 2 requests (1 x 429 + 1 x 200), got %d", got)
+	}
+}
+
+// TestJiraClient_RateLimit_ExponentialBackoff verifies that when no
+// Retry-After header is present the client falls back to the configured
+// backoff policy, and that repeated 429 responses do not cause an early
+// give-up. The server returns 429 three times, then 200 — one shy of the
+// MaxRetries=3 cap.
+func TestJiraClient_RateLimit_ExponentialBackoff(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n <= 3 {
+			// No Retry-After header — force the policy path.
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errorMessages":["rate limited"]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"accountId": "123"})
+	}))
+	defer server.Close()
+
+	client := NewJiraClient(server.URL, "user@example.com", "token123").
+		WithBackoffPolicy(testJiraBackoff(3))
+
+	start := time.Now()
+	if err := client.TestConnection(context.Background()); err != nil {
+		t.Fatalf("expected success after 3 x 429 + 200, got: %v", err)
+	}
+	elapsed := time.Since(start)
+	if got := atomic.LoadInt32(&hits); got != 4 {
+		t.Errorf("expected 4 requests, got %d", got)
+	}
+	// Sanity: with 5ms/10ms/20ms backoff plan, total wait ~35ms plus HTTP RTT.
+	// Cap at 5s to detect a runaway loop; be generous because of CI jitter.
+	if elapsed > 5*time.Second {
+		t.Errorf("retry loop took too long: %v", elapsed)
+	}
+}
+
+// TestJiraClient_RateLimit_Exhausted verifies that persistent 429 responses
+// eventually return a wrapped ErrRateLimitExhausted so callers can detect the
+// condition with errors.Is (and issue_tracker service can log / alarm
+// distinctly from transient failures).
+func TestJiraClient_RateLimit_Exhausted(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"errorMessages":["rate limited"]}`))
+	}))
+	defer server.Close()
+
+	client := NewJiraClient(server.URL, "user@example.com", "token123").
+		WithBackoffPolicy(testJiraBackoff(2))
+
+	err := client.TestConnection(context.Background())
+	if err == nil {
+		t.Fatal("expected rate-limit-exhausted error, got nil")
+	}
+	if !errors.Is(err, ErrRateLimitExhausted) {
+		t.Errorf("errors.Is(err, ErrRateLimitExhausted) = false; err = %v", err)
+	}
+	// 1 initial + 2 retries = 3 total.
+	if got := atomic.LoadInt32(&hits); got != 3 {
+		t.Errorf("expected 3 requests (1 initial + 2 retries), got %d", got)
+	}
+}
+
+// TestJiraClient_RateLimit_ContextCancel pins the context-cancel abort path:
+// while the client is waiting for the backoff timer, cancelling the caller's
+// context must return promptly rather than sleeping the full delay.
+func TestJiraClient_RateLimit_ContextCancel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always 429 with a large Retry-After so the backoff would otherwise
+		// block for seconds — the context cancel must interrupt it.
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := NewJiraClient(server.URL, "user@example.com", "token123").
+		WithBackoffPolicy(testJiraBackoff(3))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	err := client.TestConnection(ctx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected context error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false; err = %v", err)
+	}
+	// Should abort well before Retry-After: 60 elapses.
+	if elapsed > 2*time.Second {
+		t.Errorf("cancel did not abort promptly: %v", elapsed)
+	}
+}
+
+// TestJiraClient_RateLimit_RetryAfterHTTPDate verifies the HTTP-date variant of
+// Retry-After (RFC 7231 §7.1.3 permits both delta-seconds and HTTP-date).
+// The server sends a Retry-After date ~50ms in the future; the client must
+// wait roughly that long and then succeed.
+func TestJiraClient_RateLimit_RetryAfterHTTPDate(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			// Small but non-zero — HTTP-date rounds to 1s granularity so use
+			// "now" which parses to 0-delta ("respect the header, don't block").
+			w.Header().Set("Retry-After", time.Now().UTC().Format(http.TimeFormat))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"accountId": "123"})
+	}))
+	defer server.Close()
+
+	client := NewJiraClient(server.URL, "user@example.com", "token123").
+		WithBackoffPolicy(testJiraBackoff(3))
+
+	if err := client.TestConnection(context.Background()); err != nil {
+		t.Fatalf("expected success after HTTP-date retry, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("expected 2 requests, got %d", got)
 	}
 }

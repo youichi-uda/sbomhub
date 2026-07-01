@@ -3,10 +3,26 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// testBacklogBackoff returns a BackoffPolicy tuned for httptest — small delays
+// so test runtime stays sub-second and no jitter so the retry cadence is
+// deterministic.
+func testBacklogBackoff(maxRetries int) BackoffPolicy {
+	return BackoffPolicy{
+		MaxRetries:   maxRetries,
+		InitialDelay: 5 * time.Millisecond,
+		MaxDelay:     50 * time.Millisecond,
+		Jitter:       false,
+	}
+}
 
 func TestNewBacklogClient(t *testing.T) {
 	client := NewBacklogClient("https://example.backlog.com", "apikey123")
@@ -323,5 +339,128 @@ func TestCreateBacklogIssueInput(t *testing.T) {
 				t.Error("Summary should not be empty")
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F277 (M19-1) rate-limit hardening — Backlog uses X-RateLimit-Reset (epoch
+// seconds) as its documented retry-hint header rather than the standard
+// Retry-After. The client honours X-RateLimit-Reset first, Retry-After next
+// (defensive fallback), then exponential backoff.
+// ---------------------------------------------------------------------------
+
+// TestBacklogClient_RateLimit_429_Retry pins the primary happy path: a single
+// 429 with X-RateLimit-Reset pointing at "now" (i.e. immediately eligible)
+// followed by a 200 must succeed.
+func TestBacklogClient_RateLimit_429_Retry(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Unix()))
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errors":[{"message":"rate limited"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": 1, "userId": "test"})
+	}))
+	defer server.Close()
+
+	client := NewBacklogClient(server.URL, "apikey123").
+		WithBackoffPolicy(testBacklogBackoff(3))
+
+	if err := client.TestConnection(context.Background()); err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("expected 2 requests, got %d", got)
+	}
+}
+
+// TestBacklogClient_RateLimit_RetryAfterFallback pins the defensive
+// Retry-After path: some proxies fronting Backlog may inject the standard
+// header even though the platform uses X-RateLimit-Reset. The client should
+// honour either.
+func TestBacklogClient_RateLimit_RetryAfterFallback(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": 1})
+	}))
+	defer server.Close()
+
+	client := NewBacklogClient(server.URL, "apikey123").
+		WithBackoffPolicy(testBacklogBackoff(3))
+
+	if err := client.TestConnection(context.Background()); err != nil {
+		t.Fatalf("expected success after Retry-After retry, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("expected 2 requests, got %d", got)
+	}
+}
+
+// TestBacklogClient_RateLimit_Exhausted verifies persistent 429 responses
+// return a wrapped ErrRateLimitExhausted so callers can detect via errors.Is.
+func TestBacklogClient_RateLimit_Exhausted(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"rate limited"}]}`))
+	}))
+	defer server.Close()
+
+	client := NewBacklogClient(server.URL, "apikey123").
+		WithBackoffPolicy(testBacklogBackoff(2))
+
+	err := client.TestConnection(context.Background())
+	if err == nil {
+		t.Fatal("expected rate-limit-exhausted error, got nil")
+	}
+	if !errors.Is(err, ErrRateLimitExhausted) {
+		t.Errorf("errors.Is(err, ErrRateLimitExhausted) = false; err = %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 3 {
+		t.Errorf("expected 3 requests (1 initial + 2 retries), got %d", got)
+	}
+}
+
+// TestBacklogClient_RateLimit_ContextCancel pins prompt abort when the caller
+// cancels ctx during a backoff wait. Server sends a large X-RateLimit-Reset
+// (60s out) so the client would otherwise block for the full window.
+func TestBacklogClient_RateLimit_ContextCancel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(60*time.Second).Unix()))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := NewBacklogClient(server.URL, "apikey123").
+		WithBackoffPolicy(testBacklogBackoff(3))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	err := client.TestConnection(ctx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected context error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false; err = %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("cancel did not abort promptly: %v", elapsed)
 	}
 }
