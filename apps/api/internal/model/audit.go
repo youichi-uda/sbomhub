@@ -41,6 +41,22 @@ const (
 	ActionProjectCreated = "project.created"
 	ActionProjectUpdated = "project.updated"
 	ActionProjectDeleted = "project.deleted"
+	// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET reclassify): named
+	// constant for the "project.viewed" dot verb that the audit middleware
+	// emits for GET /projects[/:id] (tenant) and, post-F242, for
+	// GET /cli/projects[/:id] (CLI family). Pre-F242 the value existed
+	// only as an inline string literal at two sites (middleware /projects
+	// GET arm at audit.go L745; service/audit.go dropdown row at L295) so
+	// a typo at either site was compile-time invisible. Extracting the
+	// constant here lets the /cli GET reclassify reference the same value
+	// via model.ActionProjectViewed and keeps the tenant/CLI parity
+	// enforceable at compile time. The dot form is intentional — matches
+	// every other <resource>.viewed verb in this file (sbom.viewed,
+	// vex_draft.viewed, cra_report.viewed, scan.viewed, meti.viewed,
+	// ssvc.viewed, kev.viewed, eol.viewed, ticket.viewed, notification.viewed,
+	// license_policy.viewed, checklist.viewed, visualization.viewed,
+	// public_link.viewed, vulnerability.viewed, diff.viewed).
+	ActionProjectViewed = "project.viewed"
 
 	// SBOM actions
 	ActionSBOMUploaded = "sbom.uploaded"

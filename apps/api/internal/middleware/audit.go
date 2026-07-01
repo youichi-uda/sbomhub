@@ -1011,7 +1011,28 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	//
 	// /cli/check keeps cli.check / cli because it is a transient
 	// vulnerability check (no UUID minted, nothing to join onto).
-	// GET /cli/* keeps cli.accessed / cli for the same reason.
+	// GET /cli/upload and GET /cli/check keep cli.accessed / cli for
+	// the same reason.
+	//
+	// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET reclassify): the
+	// GET arm now distinguishes /cli/projects (list + item) from other
+	// GET /cli/* routes and returns project.viewed / project for the
+	// project family. Pre-F242 every /cli/* GET was cli.accessed / cli,
+	// which meant an operator investigating "who read project X" via
+	// the CLI could not join audit_logs onto projects.id — the audit
+	// row's resource_type was "cli" (no such table) and resource_id
+	// was NULL (no path UUID picked up because the classifier resolved
+	// the type as "cli" before extractResourceID would try to snap on
+	// a project UUID from the path). Post-F242 GET /cli/projects and
+	// GET /cli/projects/:id classify identically to the tenant
+	// GET /api/v1/projects and GET /api/v1/projects/:id routes at
+	// L744-746 (project.viewed / project). Combined with extractResourceID
+	// pulling the :id UUID out of the path (F186 priority list,
+	// child-before-parent), a unified audit query for a given
+	// project.id joins whether the row was created via /api/v1/... or
+	// /cli/... — GET/POST parity with the tenant surface (POST parity
+	// landed in F233). The list variant (no path UUID) still writes
+	// resource_id NULL, mirroring the tenant list route.
 	//
 	// The default arm at the bottom (F206 discipline: pin the family
 	// on any future method — PUT/PATCH/DELETE/OPTIONS/HEAD — so a
@@ -1041,6 +1062,19 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			}
 			return "cli.action", "cli"
 		case "GET":
+			// F242 (M16-1 fix, anti-pattern 48/51/52): reclassify
+			// GET /cli/projects[/:id] to project.viewed / project so
+			// the audit row's (resource_type, resource_id) matches the
+			// tenant GET /api/v1/projects[/:id] surface (GET/POST parity
+			// with F233). Other /cli GETs (upload, check, future route)
+			// remain cli.accessed / cli — no minted UUID, nothing to
+			// join onto. The Contains(path, "/projects") check mirrors
+			// the /cli POST arm at L1033 so /cli/projects and
+			// /cli/projects/:id resolve identically without an exact
+			// suffix match (which would miss the item variant).
+			if strings.Contains(path, "/projects") {
+				return model.ActionProjectViewed, model.ResourceProject
+			}
 			return "cli.accessed", "cli"
 		default:
 			// F206 (anti-pattern 48 symmetric to F201): pin the CLI

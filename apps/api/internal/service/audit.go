@@ -292,7 +292,15 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.ActionProjectCreated, Label: "Project Created", Category: "project"},
 		{Action: model.ActionProjectUpdated, Label: "Project Updated", Category: "project"},
 		{Action: model.ActionProjectDeleted, Label: "Project Deleted", Category: "project"},
-		{Action: "project.viewed", Label: "Project Viewed", Category: "project"},
+		// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET reclassify): the
+		// dropdown row now references the model.ActionProjectViewed
+		// constant instead of the inline "project.viewed" literal — a
+		// typo at either the middleware /projects GET arm (audit.go
+		// L745) or the /cli GET reclassify (audit.go /cli branch) would
+		// otherwise silently desync from this dropdown. See
+		// model/audit.go ActionProjectViewed head comment for the two
+		// emit sites F242 unifies.
+		{Action: model.ActionProjectViewed, Label: "Project Viewed", Category: "project"},
 
 		// SBOM actions
 		{Action: model.ActionSBOMUploaded, Label: "SBOM Uploaded", Category: "sbom"},
