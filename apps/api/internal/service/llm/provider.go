@@ -24,8 +24,21 @@ import (
 // (under //go:build saas) NewProviderForTenant. Callers must treat Provider
 // as immutable after construction.
 type Provider interface {
-	// Name returns the provider identifier
-	// (openai / anthropic / gemini / managed_gemini / azure_openai / ollama / disabled).
+	// Name returns the provider identifier. The identifier universe
+	// splits by build variant:
+	//   - OSS build (default): openai, anthropic, gemini, azure_openai,
+	//     ollama. All five are listed in
+	//     handler/settings_llm.go supportedLLMProviders and mirrored in
+	//     apps/web/src/app/[locale]/(dashboard)/settings/llm/page.tsx
+	//     PROVIDERS array.
+	//   - SaaS build (//go:build saas): the OSS 5 plus managed_gemini
+	//     (compiled from managed_gemini.go only under this build tag).
+	//   - disabled is the sentinel returned by DisabledProvider.Name()
+	//     for the missing-key / unset-provider path; it is not a real
+	//     provider entry.
+	// See TestLLMProviderRegistryParity_F318 in handler/ for the
+	// enforced parity contract (M21-1, anti-pattern 58 horizontal
+	// replication).
 	Name() string
 
 	// Model returns the model ID currently in use ("" for disabled).
