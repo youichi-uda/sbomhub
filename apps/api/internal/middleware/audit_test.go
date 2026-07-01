@@ -1239,13 +1239,21 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 		},
 
 		// ---- /evidence-pack -----------------------------------------------
-		{
-			name:         "POST /projects/:id/evidence-pack/build",
-			method:       "POST",
-			path:         "/api/v1/projects/:id/evidence-pack/build",
-			wantAction:   model.ActionEvidencePackBuilt,
-			wantResource: model.ResourceEvidencePack,
-		},
+		//
+		// F236 (M15-4 fix, anti-pattern 53 dual-path audit resolution):
+		// evidence-pack was previously enumerated here with (wantAction=
+		// model.ActionEvidencePackBuilt, wantResource=
+		// model.ResourceEvidencePack), pinning that the middleware emits
+		// a per-request audit row for POST /projects/:id/evidence-pack/
+		// build. Post-F236 the middleware INTENTIONALLY skips that path
+		// (returns "", ""); the handler-level audit_pair in
+		// EvidencePackHandler.Build is the sole emit source. The row is
+		// removed from the ProjectChildResources positive-assertion
+		// table because the classifier no longer produces (action,
+		// resource) for the path. The skip behaviour is pinned by
+		// TestDetermineActionAndResource_EvidencePackSkipped_F236 in
+		// this file. See docs/operations/evidence-pack-audit-migration.md
+		// for the operator-facing rationale.
 
 		// ---- /checklist (METI checklist) ----------------------------------
 		{
@@ -1561,7 +1569,21 @@ func TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough(t *t
 		{"ssvc", "/api/v1/projects/:id/ssvc", model.ResourceSSVC},
 		{"meti", "/api/v1/projects/:id/meti", model.ResourceMETI},
 		{"licenses", "/api/v1/projects/:id/licenses", model.ResourceLicensePolicy},
-		{"evidence-pack", "/api/v1/projects/:id/evidence-pack", model.ResourceEvidencePack},
+		// F236 (M15-4 fix, anti-pattern 53 dual-path audit resolution):
+		// evidence-pack is INTENTIONALLY absent from this table. Pre-F236
+		// it lived here alongside every other hoisted family, pinning
+		// that the classifier emits (action, resource) for every HTTP
+		// method on /projects/:id/evidence-pack. Post-F236 the middleware
+		// branch returns ("", "") for the family — the handler-level
+		// audit_pair in EvidencePackHandler.Build is the sole emit source
+		// (Option A: handler wins, middleware skips). Enumerating
+		// evidence-pack here would fail Guard 3 (action / resource non-
+		// empty) because that guard is specifically NOT applicable to
+		// skipped paths. The skip behaviour is pinned by
+		// TestDetermineActionAndResource_EvidencePackSkipped_F236 in
+		// this file, and the handler-level single-audit-row emit is
+		// pinned by TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236
+		// in handler/evidence_pack_test.go.
 		{"checklist", "/api/v1/projects/:id/checklist", model.ResourceChecklist},
 		{"visualization", "/api/v1/projects/:id/visualization", model.ResourceVisualization},
 		{"public-links", "/api/v1/projects/:id/public-links", model.ResourcePublicLink},
@@ -2214,6 +2236,72 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 					t.Fatalf("F233 anti-fallthrough: %s %s should NOT classify "+
 						"as ResourceProject (only /cli/projects may) — got "+
 						"action=%q, resource=%q", method, path, action, resource)
+				}
+			})
+		}
+	}
+}
+
+// TestDetermineActionAndResource_EvidencePackSkipped_F236 is the
+// anti-pattern 53 dual-path audit resolution meta-test for the F236
+// middleware skip. It pins that determineActionAndResource returns
+// ("", "") for every HTTP method on the evidence-pack family, so the
+// outer Audit() middleware's `if action == "" { return err }` guard
+// (audit.go L75-78) skips the per-request audit row.
+//
+// Pre-F236 the middleware /evidence-pack branch returned
+// (model.ActionEvidencePackBuilt, model.ResourceEvidencePack) and
+// EvidencePackHandler.Build ALSO emitted its own handler-level
+// audit_pair row (F168 audit-or-nothing semantics) — the same request
+// wrote TWO audit_logs rows: one from the middleware (dotted action)
+// and one from the handler (underscore action per the local handler
+// constant). The handler side was the source of truth (rich details
+// map + fail-closed on audit write failure); the middleware side added
+// noise and double-counted in forensic GROUP BY queries.
+//
+// Option A resolution (chosen by user, M15-4 kickoff): the middleware
+// skips, the handler-level audit_pair remains the single emit path.
+// This meta-test asserts the skip; the handler-side single-row emit
+// is pinned by TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236
+// in handler/evidence_pack_test.go.
+//
+// Table enumerates the two currently-routed evidence-pack shapes ×
+// every standard HTTP method (14 cells):
+//
+//	POST /projects/:id/evidence-pack/build   (Build handler, M2-6)
+//	*    /projects/:id/evidence-pack         (family root, defensive)
+//
+// Every cell must return ("", ""); a non-empty return would signal
+// that a future refactor accidentally re-enabled the middleware emit
+// path and the double-audit is back. The skip discipline applies
+// uniformly — there is no method (POST/GET/PUT/DELETE/OPTIONS/HEAD/
+// PATCH) that should produce an evidence-pack audit row via the
+// middleware.
+func TestDetermineActionAndResource_EvidencePackSkipped_F236(t *testing.T) {
+	paths := []string{
+		"/api/v1/projects/:id/evidence-pack/build",
+		"/api/v1/projects/:id/evidence-pack",
+	}
+	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+
+	for _, path := range paths {
+		for _, method := range methods {
+			t.Run(method+" "+path, func(t *testing.T) {
+				action, resource := determineActionAndResource(method, path)
+				if action != "" {
+					t.Errorf("F236 regression: %s %s returned action=%q, "+
+						"want \"\" (middleware must skip evidence-pack so the "+
+						"handler-level audit_pair is the sole emit source; "+
+						"pre-F236 this returned model.ActionEvidencePackBuilt "+
+						"and produced a double-audit row alongside the handler)",
+						method, path, action)
+				}
+				if resource != "" {
+					t.Errorf("F236 regression: %s %s returned resource=%q, "+
+						"want \"\" (middleware must skip evidence-pack; a "+
+						"non-empty resource_type here means the classifier "+
+						"branch was re-enabled and Audit() will double-write)",
+						method, path, resource)
 				}
 			})
 		}

@@ -524,8 +524,54 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			}
 		}
 		// Evidence pack (Wave M2-6).
+		//
+		// F236 (M15-4 fix, anti-pattern 53 dual-path audit resolution):
+		// this branch INTENTIONALLY returns ("", "") so the outer
+		// Audit() middleware skips its per-request audit row for every
+		// POST /projects/:id/evidence-pack/build request. Pre-F236 the
+		// branch returned (model.ActionEvidencePackBuilt,
+		// model.ResourceEvidencePack) and EvidencePackHandler.Build ALSO
+		// emitted its own handler-level audit_pair row (F168 audit-or-
+		// nothing semantics) — the same request wrote TWO audit_logs
+		// rows: one from here (action="evidence_pack.built" dotted) and
+		// one from the handler (action="evidence_pack_built" underscore
+		// per the local handler constant). Forensic queries that
+		// GROUP BY action double-counted every evidence pack build.
+		//
+		// Option A resolution (chosen by user, M15-4 kickoff): the
+		// handler-level audit_pair is the source of truth for the
+		// evidence_pack.built business event — it fails the request on
+		// audit write failure (F5 fail-closed) and carries the rich
+		// details map (vex_approved_count / cra_approved_count /
+		// meti_row_count / filename / built_at) that the middleware
+		// path cannot reconstruct. The middleware-level generic row
+		// added nothing the handler row was not already writing, only
+		// noise. Skipping here keeps the F168 audit-or-nothing contract
+		// intact on the handler side while eliminating the duplicate.
+		//
+		// The action string was ALSO unified to the dotted form
+		// (model.ActionEvidencePackBuilt = "evidence_pack.built") in the
+		// same M15-4 wave — pre-F236 the handler emitted the underscore
+		// form via a local const AuditActionEvidencePackBuilt =
+		// "evidence_pack_built"; that constant is removed and the
+		// handler now references model.ActionEvidencePackBuilt so the
+		// dotted form is the ONLY action string emitted for evidence
+		// pack builds. Operators querying legacy audit_logs rows
+		// produced before this deploy should filter
+		// `action IN ('evidence_pack.built', 'evidence_pack_built')`;
+		// new rows will only ever carry the dotted form. See
+		// docs/operations/evidence-pack-audit-migration.md for the full
+		// migration note.
+		//
+		// Regression pins:
+		//   - TestDetermineActionAndResource_EvidencePackSkipped_F236
+		//     (this file's test suite) asserts ("", "") return for the
+		//     evidence-pack path × method matrix.
+		//   - TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236
+		//     (handler/evidence_pack_test.go) asserts the handler emits
+		//     exactly one audit row with action="evidence_pack.built".
 		if pathHasChildResource(path, "evidence-pack") {
-			return model.ActionEvidencePackBuilt, model.ResourceEvidencePack
+			return "", ""
 		}
 		// METI checklist.
 		if pathHasChildResource(path, "checklist") {
