@@ -144,9 +144,14 @@ func RespectRetryAfter(header string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// RespectRateLimitReset parses an epoch-seconds header value (Backlog uses
-// X-RateLimit-Reset, GitHub the same). Returns the delta between now and the
-// reset instant, clamped to zero if the reset has already passed. Malformed /
+// RespectRateLimitReset parses an epoch-seconds header value. Backlog uses
+// X-RateLimit-Reset (documented in the Nulab Backlog API docs) — that is the
+// only consumer today. GitHub's REST API exposes the same header shape
+// (X-RateLimit-Reset as an epoch-seconds integer), so the helper is
+// transport-agnostic on purpose: a future GHSA-client hardening pass (see
+// client/ghsa.go, currently minimal — no 429 retry) can reuse this helper
+// as-is without a rewrite. Returns the delta between now and the reset
+// instant, clamped to zero if the reset has already passed. Malformed /
 // empty values return the fallback.
 func RespectRateLimitReset(header string, fallback time.Duration) time.Duration {
 	header = strings.TrimSpace(header)
