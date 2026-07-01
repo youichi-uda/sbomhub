@@ -262,6 +262,47 @@ const (
 	ActionIntegrationViewed  = "integration.viewed"
 	ActionDashboardViewed    = "dashboard.viewed"
 	ActionResourceViewed     = "resource.viewed"
+
+	// F267 (M18-1, anti-pattern 48 universe universal closure completion):
+	// named constants for the remaining 23 dot-verb inline literals that
+	// audit middleware still emitted across the F201/F206 default-arm
+	// pins, the /vulnerabilities/scan+create/update arms, the tenant-level
+	// /reports, /integrations, /search, /mcp, /cli, /scan, and generic
+	// "unknown" default arms. F256 (M17-1) closed the `.viewed` universe
+	// (10 constants + 12 middleware sites + 6 test sites) and F259
+	// (M17-1 R2) swapped the single `scan.started` inline literal to
+	// model.ActionScanStarted; the 22 verb-family cases below (28
+	// middleware sites, unique 23 verbs, plus 6 audit_test.go sites) were
+	// deferred to M18 because they needed new model.* constants added
+	// first. Extracting them here lets every audit-emitting middleware
+	// site reference a single symbol so a typo fails at compile time and
+	// the UI dropdown filter (service/audit.go GetAvailableActions) can
+	// register on the same symbol — audit universe reaches inline-literal
+	// residual 0 for code emit (comment explanations at F225 promoted
+	// literal notes remain, per F225 discipline).
+	ActionAPIKeyUpdated        = "apikey.updated"
+	ActionCRAReportUpdated     = "cra_report.updated"
+	ActionVEXDraftUpdated      = "vex_draft.updated"
+	ActionSBOMUpdated          = "sbom.updated"
+	ActionVulnerabilityScanned = "vulnerability.scanned"
+	ActionVulnerabilityCreated = "vulnerability.created"
+	ActionVulnerabilityUpdated = "vulnerability.updated"
+	ActionReportGenerated      = "report.generated"
+	ActionIntegrationCreated   = "integration.created"
+	ActionIntegrationUpdated   = "integration.updated"
+	ActionIntegrationDeleted   = "integration.deleted"
+	ActionSearchCVE            = "search.cve"
+	ActionSearchComponent      = "search.component"
+	ActionSearchExecuted       = "search.executed"
+	ActionMCPAccessed          = "mcp.accessed"
+	ActionMCPAction            = "mcp.action"
+	ActionCLICheck             = "cli.check"
+	ActionCLIAction            = "cli.action"
+	ActionCLIAccessed          = "cli.accessed"
+	ActionScanStatus           = "scan.status"
+	ActionResourceCreated      = "resource.created"
+	ActionResourceUpdated      = "resource.updated"
+	ActionResourceDeleted      = "resource.deleted"
 )
 
 // Resource type constants
