@@ -731,6 +731,40 @@ func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
 			wantAction:   model.ActionCRAReportReanalysed,
 			wantResource: model.ResourceCRAReport,
 		},
+
+		// F233 (M15-1 fix): CLI-family create routes. Pre-F233 these
+		// classified as cli.upload / cli.action with resource_type="cli"
+		// and resource_id=NULL — the audit_logs row for a CLI-driven
+		// upload / project-create had no joinable target on sboms.id /
+		// projects.id, breaking forensic parity with the tenant-side
+		// /api/v1/... routes.
+		//
+		// Post-F233 the middleware branch classifies /cli/upload as
+		// sbom.uploaded / sbom and /cli/projects as project.created /
+		// project; the handler publishes the newly-minted UUID via
+		// SetAuditResourceID so the F208 override-first path lands the
+		// created row's UUID in resource_id even though the CLI paths
+		// carry no UUID in the URL.
+		{
+			name:         "POST /cli/upload (sbom.uploaded via CLI)",
+			method:       "POST",
+			path:         "/api/v1/cli/upload",
+			paramNames:   nil,
+			paramVals:    nil,
+			setID:        mkUUID(),
+			wantAction:   model.ActionSBOMUploaded,
+			wantResource: model.ResourceSBOM,
+		},
+		{
+			name:         "POST /cli/projects (project.created via CLI)",
+			method:       "POST",
+			path:         "/api/v1/cli/projects",
+			paramNames:   nil,
+			paramVals:    nil,
+			setID:        mkUUID(),
+			wantAction:   model.ActionProjectCreated,
+			wantResource: model.ResourceProject,
+		},
 	}
 
 	for _, tc := range cases {
@@ -2030,6 +2064,156 @@ func TestDetermineActionAndResource_TicketFamily_AllMethods_F224(t *testing.T) {
 					t.Errorf("%s %s emitted empty (action=%q, resource=%q); "+
 						"ticket paths must always classify",
 						method, path, action, resource)
+				}
+			})
+		}
+	}
+}
+
+// TestDetermineActionAndResource_CLIFamily_AllMethods_F233 is the
+// anti-pattern 48/52 universal-defense meta-test for the F233 CLI
+// classifier branch. It mirrors the F206 (project-nested families) and
+// F224 (ticket family) N x M meta-test discipline at the CLI route
+// surface.
+//
+// Coverage gap pre-F233:
+//
+//   - F206 (TestDetermineActionAndResource_AllHoistedFamilies_NoProjectFallthrough)
+//     enumerates project-nested /projects/:id/<child> families only —
+//     the CLI branch lives at the tenant surface and is NOT enumerated
+//     by F206.
+//   - F224 (TestDetermineActionAndResource_TicketFamily_AllMethods_F224)
+//     pins the tenant-scoped ticket family; CLI is a distinct branch
+//     with its own set of resource types (sbom for /upload, project
+//     for /projects, cli for /check + default).
+//
+// Without F233 meta-test, a future refactor that drops the /upload or
+// /projects sub-check in the CLI switch would silently regress those
+// two routes back to cli.action / cli (the pre-F233 bug), breaking the
+// audit_logs.(resource_type, resource_id) join key on every subsequent
+// CLI-driven SBOM upload or project create without any test catching
+// the symptom until the audit dropdown filter went blank in production.
+//
+// The table below enumerates the 3 CLI routes × 7 standard HTTP
+// methods (21 cells) and asserts:
+//
+//  1. resource_type matches the expected resource for the cell:
+//     - POST /cli/upload      → ResourceSBOM
+//     - POST /cli/projects    → ResourceProject
+//     - POST /cli/check       → "cli"
+//     - GET  * / default arm  → "cli"
+//  2. action matches the expected verb (sbom.uploaded /
+//     project.created / cli.check / cli.accessed / cli.action).
+//  3. Both are non-empty — a silently-skipped path drops the audit row.
+//
+// The default arm (PUT / PATCH / DELETE / OPTIONS / HEAD) MUST land on
+// cli.action / cli, not fall through to the tenant branches below or
+// to the "unknown" default at the bottom of determineActionAndResource.
+// This is the F206 discipline applied to the CLI family.
+//
+// Adding a new /cli/<subroute> to the router REQUIRES adding a row to
+// the paths table here; otherwise that route's default-arm coverage is
+// not enforced and a future fall-through bug ships unobserved.
+func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
+	// Echo route patterns (the shape c.Path() returns) for every
+	// currently-routed CLI endpoint. main.go registers:
+	//   POST /cli/upload         (mints sbom UUID, F233 sbom.uploaded)
+	//   POST /cli/check          (transient check, cli.check)
+	//   GET  /cli/projects       (list, cli.accessed)
+	//   GET  /cli/projects/:id   (item, cli.accessed)
+	//   POST /cli/projects       (mints project UUID, F233 project.created)
+	// The (:id) getter shares the /cli/projects table row — the classify
+	// switch keys off HasSuffix / Contains rather than exact match so
+	// both flows resolve identically.
+	paths := []string{
+		"/api/v1/cli/upload",
+		"/api/v1/cli/projects",
+		"/api/v1/cli/check",
+	}
+	// All standard HTTP methods. OPTIONS / HEAD model the CORS
+	// preflight + head-only-meta future routes — both must land on the
+	// default arm and resolve to (cli.action, "cli") so neither the
+	// tenant branches nor the generic "unknown" default at the bottom
+	// of determineActionAndResource can swallow them.
+	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+
+	// expected returns the (action, resource) pair the middleware
+	// should emit for a given (method, path) cell. Mirrors the /cli
+	// switch in audit.go::determineActionAndResource so a divergence
+	// between this table and the classifier is the precise failure
+	// mode the test is designed to catch.
+	expected := func(method, path string) (string, string) {
+		switch method {
+		case "POST":
+			if strings.Contains(path, "/upload") {
+				return model.ActionSBOMUploaded, model.ResourceSBOM
+			}
+			if strings.Contains(path, "/check") {
+				return "cli.check", "cli"
+			}
+			if strings.Contains(path, "/projects") {
+				return model.ActionProjectCreated, model.ResourceProject
+			}
+			return "cli.action", "cli"
+		case "GET":
+			return "cli.accessed", "cli"
+		default:
+			// PUT / PATCH / DELETE / OPTIONS / HEAD → F206 default arm.
+			return "cli.action", "cli"
+		}
+	}
+
+	for _, path := range paths {
+		for _, method := range methods {
+			t.Run(method+" "+path, func(t *testing.T) {
+				action, resource := determineActionAndResource(method, path)
+				wantAction, wantResource := expected(method, path)
+
+				// Guard 1: resource_type must match the expected class.
+				// For POST /cli/upload this is ResourceSBOM (F233 fix);
+				// pre-F233 it was "cli" which broke the join onto
+				// sboms.id. For POST /cli/projects this is ResourceProject
+				// (F233 fix); pre-F233 it was "cli" via the cli.action
+				// fallthrough. For every other cell it is "cli".
+				if resource != wantResource {
+					t.Fatalf("F233 regression: %s %s resolved to resource %q, "+
+						"want %q (action=%q); anti-pattern 48/52 universal "+
+						"defense for CLI family — the classifier drifted "+
+						"from the /cli branch specification",
+						method, path, resource, wantResource, action)
+				}
+
+				// Guard 2: action must match the expected verb. A drift
+				// here means the switch arm and the dropdown registry
+				// (service/audit.go GetAvailableActions) are out of sync.
+				if action != wantAction {
+					t.Errorf("action = %q, want %q (method=%s path=%s)",
+						action, wantAction, method, path)
+				}
+
+				// Guard 3: both must be non-empty — a silently-skipped
+				// path drops the audit row entirely.
+				if action == "" || resource == "" {
+					t.Errorf("%s %s emitted empty (action=%q, resource=%q); "+
+						"CLI paths must always classify",
+						method, path, action, resource)
+				}
+
+				// Guard 4 (F206 anti-fallthrough): the CLI classifier
+				// sits BEFORE the /projects tenant branch (in file
+				// order). If the CLI switch ever missed a method arm
+				// and fell out of the outer if-block, the tenant
+				// branches below (which do HasPrefix(path, "/projects")
+				// checks — /api/v1/cli/projects unfortunately begins
+				// with "/cli/projects", not "/projects", so it would
+				// NOT actually match, but a future refactor that moved
+				// the strip step could regress this). Assert we did
+				// NOT land on ResourceProject for /cli/upload or
+				// /cli/check to make the intent explicit.
+				if path != "/api/v1/cli/projects" && resource == model.ResourceProject {
+					t.Fatalf("F233 anti-fallthrough: %s %s should NOT classify "+
+						"as ResourceProject (only /cli/projects may) — got "+
+						"action=%q, resource=%q", method, path, action, resource)
 				}
 			})
 		}
