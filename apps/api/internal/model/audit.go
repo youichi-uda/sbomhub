@@ -275,11 +275,16 @@ const (
 	// middleware sites, unique 23 verbs, plus 6 audit_test.go sites) were
 	// deferred to M18 because they needed new model.* constants added
 	// first. Extracting them here lets every audit-emitting middleware
-	// site reference a single symbol so a typo fails at compile time and
-	// the UI dropdown filter (service/audit.go GetAvailableActions) can
-	// register on the same symbol — audit universe reaches inline-literal
-	// residual 0 for code emit (comment explanations at F225 promoted
-	// literal notes remain, per F225 discipline).
+	// site reference a single symbol so a typo fails at compile time —
+	// audit universe reaches inline-literal residual 0 for code emit
+	// (comment explanations at F225 promoted literal notes remain, per
+	// F225 discipline). The UI dropdown filter (service/audit.go
+	// GetAvailableActions) registration is not done here — the 23 symbols
+	// below are registered by companion wave F270 (M18-1 Phase D R2) in
+	// service/audit.go, and F271 (M18-1 Phase D R2, anti-pattern 58
+	// candidate) is the emit ↔ registry parity meta-test that keeps the
+	// two lists synchronized so future drift fails CI, not silently
+	// hides in the audit_logs table.
 	ActionAPIKeyUpdated        = "apikey.updated"
 	ActionCRAReportUpdated     = "cra_report.updated"
 	ActionVEXDraftUpdated      = "vex_draft.updated"

@@ -437,6 +437,54 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// middleware can emit has a matching UI filter entry).
 		{Action: model.ActionTicketUpdated, Label: "Ticket Updated", Category: "ticket"},
 		{Action: model.ActionTicketDeleted, Label: "Ticket Deleted", Category: "ticket"},
+
+		// F270 (M18-1 Phase D R2, anti-pattern 48 registry-side closure):
+		// register the 23 F267 emit symbols in the UI filter dropdown.
+		// F267 (M18-1) extracted 23 new model.Action* constants for the
+		// remaining inline dot-verb literals across audit middleware
+		// (apikey/cra_report/vex_draft/sbom/vulnerability/report/
+		// integration/search/mcp/cli/scan/resource families) and swapped
+		// 28 emit sites to reference them. That closed the classifier-
+		// side typo gap at compile time but left the registry-side
+		// dropdown blind to those 23 verbs — a UI filter that could not
+		// select any audit_logs row produced by the middleware's F267
+		// arms. F270 completes the closure by registering each of the
+		// 23 F267 verbs here so the UI can filter them. F271 (M18-1
+		// Phase D R2, anti-pattern 58 candidate) is the emit ↔ registry
+		// parity meta-test that keeps future dual-list drift from
+		// re-opening the same gap silently.
+		{Action: model.ActionAPIKeyUpdated, Label: "API Key Updated", Category: "apikey"},
+		{Action: model.ActionCRAReportUpdated, Label: "CRA Report Updated", Category: "cra_report"},
+		{Action: model.ActionVEXDraftUpdated, Label: "VEX Draft Updated", Category: "vex_draft"},
+		{Action: model.ActionSBOMUpdated, Label: "SBOM Updated", Category: "sbom"},
+		{Action: model.ActionVulnerabilityScanned, Label: "Vulnerability Scanned", Category: "vulnerability"},
+		{Action: model.ActionVulnerabilityCreated, Label: "Vulnerability Created", Category: "vulnerability"},
+		{Action: model.ActionVulnerabilityUpdated, Label: "Vulnerability Updated", Category: "vulnerability"},
+		{Action: model.ActionReportGenerated, Label: "Report Generated", Category: "report"},
+		{Action: model.ActionIntegrationCreated, Label: "Integration Created", Category: "integration"},
+		{Action: model.ActionIntegrationUpdated, Label: "Integration Updated", Category: "integration"},
+		{Action: model.ActionIntegrationDeleted, Label: "Integration Deleted", Category: "integration"},
+		{Action: model.ActionSearchCVE, Label: "Search CVE", Category: "search"},
+		{Action: model.ActionSearchComponent, Label: "Search Component", Category: "search"},
+		{Action: model.ActionSearchExecuted, Label: "Search Executed", Category: "search"},
+		{Action: model.ActionMCPAccessed, Label: "MCP Accessed", Category: "mcp"},
+		{Action: model.ActionMCPAction, Label: "MCP Action", Category: "mcp"},
+		{Action: model.ActionCLICheck, Label: "CLI Check", Category: "cli"},
+		{Action: model.ActionCLIAction, Label: "CLI Action", Category: "cli"},
+		{Action: model.ActionCLIAccessed, Label: "CLI Accessed", Category: "cli"},
+		{Action: model.ActionScanStatus, Label: "Scan Status", Category: "scan"},
+		{Action: model.ActionResourceCreated, Label: "Resource Created", Category: "resource"},
+		{Action: model.ActionResourceUpdated, Label: "Resource Updated", Category: "resource"},
+		{Action: model.ActionResourceDeleted, Label: "Resource Deleted", Category: "resource"},
+		// F270 (M18-1 Phase D R2): resource.viewed is F256-era rather
+		// than F267, but the middleware's default-arm GET emits it as
+		// a family sibling of the three F267 resource.{created,updated,
+		// deleted} verbs above. Registering it here keeps the resource
+		// default-arm family complete rather than splitting one family
+		// across two waves, and is the minimum extension required for
+		// F271's emit ↔ registry parity direction 1 to close (F272's
+		// four default-arm emit sites cover all four resource verbs).
+		{Action: model.ActionResourceViewed, Label: "Resource Viewed", Category: "resource"},
 	}
 }
 
