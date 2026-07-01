@@ -40,9 +40,22 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
-// ※要確認: must mirror supportedLLMProviders in
-// apps/api/internal/handler/settings_llm.go (and the factory in
-// internal/service/llm/factory.go).
+// The PROVIDERS array below is one of three cross-language mirrors of
+// the LLM provider registry (Go supportedLLMProviders +
+// NewProviderFromEnv / NewProviderFromConfigWithAzure switches in
+// apps/api/internal/handler/settings_llm.go +
+// apps/api/internal/service/llm/factory.go, plus this .tsx dropdown).
+// Parity is enforced at CI time by TestLLMProviderRegistryParity_F318
+// direction 2 (Go registry ↔ web PROVIDERS) — see
+// apps/api/internal/handler/settings_llm_parity_test.go. A rename or
+// addition here must be replicated on both Go sites and the
+// Provider.Name() doc comment in
+// apps/api/internal/service/llm/provider.go simultaneously; F318 CI
+// will otherwise fail loudly on the very next PR. F325 (M21 Phase D
+// R2) replaced the pre-F318 archetype "must mirror ..." comment here
+// — that comment was factually redundant once F318 CI enforcement
+// landed but still nudged reviewers toward a manual mirror they were
+// being told the CI already covered.
 const PROVIDERS = ["openai", "anthropic", "gemini", "azure_openai", "ollama"] as const;
 type Provider = (typeof PROVIDERS)[number];
 
