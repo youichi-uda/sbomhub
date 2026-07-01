@@ -1,11 +1,14 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -463,6 +466,92 @@ func TestJiraClient_RateLimit_ContextCancel(t *testing.T) {
 	// Should abort well before Retry-After: 60 elapses.
 	if elapsed > 2*time.Second {
 		t.Errorf("cancel did not abort promptly: %v", elapsed)
+	}
+}
+
+// TestJiraClient_RateLimit_POST_BodyReuse_F301 pins the POST body-reuse
+// invariant: when a rate-limited CreateIssue call is retried, the second
+// attempt must send byte-identical request body to the first, i.e. the
+// JSON-marshal step must live above the retry loop (F277 landing shape),
+// not inside it. A future regression that moved json.Marshal(body) inside
+// the retry loop would still pass every existing rate-limit test (all of
+// which exercise TestConnection, a GET path with no body) yet silently
+// corrupt POST retries — e.g. an ADF description block re-encoded twice
+// under different Go map iteration orderings could produce non-equivalent
+// but semantically-different byte streams. This test wires an httptest
+// server that (a) captures the request body on every hit and (b) 429s the
+// first hit + 201s the second, then asserts bytes.Equal on the two
+// captured bodies. F301 (M20-3, F292 fix path).
+func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
+	var (
+		mu           sync.Mutex
+		capturedBody [][]byte
+		hits         int32
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/3/issue" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		mu.Lock()
+		capturedBody = append(capturedBody, body)
+		mu.Unlock()
+
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"errorMessages":["rate limited"]}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(JiraIssue{
+			ID:  "12345",
+			Key: "TEST-1",
+		})
+	}))
+	defer server.Close()
+
+	client := NewJiraClient(server.URL, "user@example.com", "token123").
+		WithBackoffPolicy(testJiraBackoff(3))
+
+	input := CreateIssueInput{
+		ProjectKey:  "TEST",
+		IssueType:   "Bug",
+		Summary:     "Body reuse invariant",
+		Description: "F301 pins byte-equal retry payload",
+		Priority:    "High",
+		Labels:      []string{"security", "f301"},
+	}
+
+	issue, err := client.CreateIssue(context.Background(), input)
+	if err != nil {
+		t.Fatalf("expected CreateIssue to succeed after 429 retry, got: %v", err)
+	}
+	if issue == nil || issue.Key != "TEST-1" {
+		t.Fatalf("expected returned issue key TEST-1, got: %+v", issue)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected exactly 2 requests (1 x 429 + 1 x 201), got %d", got)
+	}
+	if len(capturedBody) != 2 {
+		t.Fatalf("expected 2 captured bodies, got %d", len(capturedBody))
+	}
+	if !bytes.Equal(capturedBody[0], capturedBody[1]) {
+		t.Errorf("F301 invariant violated: retry request body not byte-equal to initial\n"+
+			"  hit1 (%d bytes): %s\n"+
+			"  hit2 (%d bytes): %s",
+			len(capturedBody[0]), capturedBody[0],
+			len(capturedBody[1]), capturedBody[1])
 	}
 }
 
