@@ -744,10 +744,14 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "GET":
 			// F245 (M16-1 Phase D R2): use model.ActionProjectViewed —
 			// F242 extracted the constant precisely so the tenant GET arm
-			// and the /cli GET reclassify (audit.go L1076) reference the
-			// same symbol. Pre-F245 this site still carried the inline
-			// literal that F242's head comment (L1017-1035) claimed had
-			// already been unified.
+			// (this switch case) and the /cli GET reclassify (see the /cli
+			// HasPrefix branch further below, where the same constant is
+			// returned for GET /cli/projects[/:id]) reference the same
+			// symbol. Pre-F245 this site still carried the inline literal
+			// that F242's head comment claimed had already been unified.
+			// F255 (M16 Phase D R3): symbolic reference replaces the
+			// pre-R3 absolute "L1076" pointer that already drifted by
+			// 6 lines because of the F245 comment insertion above.
 			return model.ActionProjectViewed, model.ResourceProject
 		}
 	}
@@ -1032,7 +1036,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	// a project UUID from the path). Post-F242 GET /cli/projects and
 	// GET /cli/projects/:id classify identically to the tenant
 	// GET /api/v1/projects and GET /api/v1/projects/:id routes at
-	// L744-746 (project.viewed / project). Combined with extractResourceID
+	// the tenant `/projects` handler's GET arm (project.viewed / project;
+	// see the switch case at the `/projects` HasPrefix branch above).
+	// F255 (M16 Phase D R3): line-drift-resistant symbolic reference
+	// replaces the pre-R3 "L744-746" absolute number that had already
+	// shifted by 3 lines because of F245's own 6-line comment insertion.
+	// Combined with extractResourceID
 	// pulling the :id UUID out of the path (F186 priority list,
 	// child-before-parent), a unified audit query for a given
 	// project.id joins whether the row was created via /api/v1/... or
