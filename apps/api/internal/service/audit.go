@@ -543,14 +543,24 @@ type ActionInfo struct {
 // GetAvailableResourceTypes returns list of available resource types for filtering
 func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 	return []ResourceTypeInfo{
-		{Type: model.ResourceUser, Label: "User"},
-		{Type: model.ResourceTenant, Label: "Tenant"},
-		{Type: model.ResourceProject, Label: "Project"},
-		{Type: model.ResourceSBOM, Label: "SBOM"},
-		{Type: model.ResourceVEX, Label: "VEX"},
-		{Type: model.ResourceAPIKey, Label: "API Key"},
-		{Type: model.ResourceSubscription, Label: "Subscription"},
-		{Type: model.ResourceSettings, Label: "Settings"},
+		// F298 (M20-1 Phase D R1, anti-pattern 58 dual-list parity
+		// completeness — Category structural symmetry): every entry
+		// below carries a non-empty Category string so the F281
+		// direction-2 meta-test can enforce Category presence in
+		// lockstep with the F271 (Action dimension) direction-2
+		// contract. Pre-F298 ResourceTypeInfo carried only Type +
+		// Label — a structural asymmetry with ActionInfo whose
+		// Category field the F271 direction-2 loop asserts non-empty.
+		// Categories mirror the Action-side groupings so the two
+		// dropdowns render with matching taxonomy in the UI.
+		{Type: model.ResourceUser, Label: "User", Category: "user"},
+		{Type: model.ResourceTenant, Label: "Tenant", Category: "tenant"},
+		{Type: model.ResourceProject, Label: "Project", Category: "project"},
+		{Type: model.ResourceSBOM, Label: "SBOM", Category: "sbom"},
+		{Type: model.ResourceVEX, Label: "VEX", Category: "vex"},
+		{Type: model.ResourceAPIKey, Label: "API Key", Category: "apikey"},
+		{Type: model.ResourceSubscription, Label: "Subscription", Category: "subscription"},
+		{Type: model.ResourceSettings, Label: "Settings", Category: "settings"},
 
 		// F282 (M19-3 Phase D R1, anti-pattern 58 horizontal replication
 		// — Resource dimension): the three registry rows below previously
@@ -564,9 +574,9 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		// symbol references so a typo at either the emit site or the
 		// registry side fails at build time. F281 (sibling meta-test)
 		// pins the parity so future drift fails CI, not silently.
-		{Type: model.ResourceReport, Label: "Report"},
-		{Type: model.ResourceAnalytics, Label: "Analytics"},
-		{Type: model.ResourceIntegration, Label: "Integration"},
+		{Type: model.ResourceReport, Label: "Report", Category: "report"},
+		{Type: model.ResourceAnalytics, Label: "Analytics", Category: "analytics"},
+		{Type: model.ResourceIntegration, Label: "Integration", Category: "integration"},
 
 		// F282 (M19-3 Phase D R1) new tenant-branch resource types.
 		// Pre-F282 the middleware's /search, /dashboard, /mcp, /cli
@@ -578,10 +588,10 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		// them here closes the F281 direction-1 parity gap for these
 		// four families in the same wave that closes the direction-2
 		// literal-only entries above.
-		{Type: model.ResourceSearch, Label: "Search"},
-		{Type: model.ResourceDashboard, Label: "Dashboard"},
-		{Type: model.ResourceMCP, Label: "MCP"},
-		{Type: model.ResourceCLI, Label: "CLI"},
+		{Type: model.ResourceSearch, Label: "Search", Category: "search"},
+		{Type: model.ResourceDashboard, Label: "Dashboard", Category: "dashboard"},
+		{Type: model.ResourceMCP, Label: "MCP", Category: "mcp"},
+		{Type: model.ResourceCLI, Label: "CLI", Category: "cli"},
 
 		// F282 (M19-3 Phase D R1) LLM config resource type. The
 		// constant existed pre-F282 (model.ResourceLLMConfig, backing
@@ -593,41 +603,73 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		// registry gap and completes the F281 direction-1 parity for
 		// the handler-emitted (rather than middleware-emitted) LLM
 		// resource family.
-		{Type: model.ResourceLLMConfig, Label: "LLM Config"},
+		{Type: model.ResourceLLMConfig, Label: "LLM Config", Category: "llm"},
 
 		// F188 (M13 Phase D round 3): per-family resource types the
 		// hoisted audit middleware now distinguishes for
 		// /projects/:id/<child> routes. Previously every nested route
 		// was logged as the bare "project" type, collapsing the
 		// (resource_type, resource_id) join key for the evidence layer.
-		{Type: model.ResourceCRAReport, Label: "CRA Report"},
-		{Type: model.ResourceVEXDraft, Label: "VEX Draft"},
-		{Type: model.ResourceTriage, Label: "Triage"},
-		{Type: model.ResourceScan, Label: "Scan"},
-		{Type: model.ResourceCompliance, Label: "Compliance"},
-		{Type: model.ResourceNotification, Label: "Notification"},
-		{Type: model.ResourceDiff, Label: "Diff"},
-		{Type: model.ResourceSSVC, Label: "SSVC"},
-		{Type: model.ResourceMETI, Label: "METI"},
-		{Type: model.ResourceLicensePolicy, Label: "License Policy"},
-		{Type: model.ResourceEvidencePack, Label: "Evidence Pack"},
-		{Type: model.ResourceChecklist, Label: "Checklist"},
-		{Type: model.ResourceVisualization, Label: "Visualization"},
-		{Type: model.ResourcePublicLink, Label: "Public Link"},
-		{Type: model.ResourceKEV, Label: "KEV"},
-		{Type: model.ResourceEOL, Label: "EOL"},
-		{Type: model.ResourceVulnerability, Label: "Vulnerability"},
+		{Type: model.ResourceCRAReport, Label: "CRA Report", Category: "cra_report"},
+		{Type: model.ResourceVEXDraft, Label: "VEX Draft", Category: "vex_draft"},
+		{Type: model.ResourceTriage, Label: "Triage", Category: "triage"},
+		{Type: model.ResourceScan, Label: "Scan", Category: "scan"},
+		{Type: model.ResourceCompliance, Label: "Compliance", Category: "compliance"},
+		{Type: model.ResourceNotification, Label: "Notification", Category: "notification"},
+		{Type: model.ResourceDiff, Label: "Diff", Category: "diff"},
+		{Type: model.ResourceSSVC, Label: "SSVC", Category: "ssvc"},
+		{Type: model.ResourceMETI, Label: "METI", Category: "meti"},
+		{Type: model.ResourceLicensePolicy, Label: "License Policy", Category: "license_policy"},
+		{Type: model.ResourceEvidencePack, Label: "Evidence Pack", Category: "evidence_pack"},
+		{Type: model.ResourceChecklist, Label: "Checklist", Category: "checklist"},
+		{Type: model.ResourceVisualization, Label: "Visualization", Category: "visualization"},
+		{Type: model.ResourcePublicLink, Label: "Public Link", Category: "public_link"},
+		{Type: model.ResourceKEV, Label: "KEV", Category: "kev"},
+		{Type: model.ResourceEOL, Label: "EOL", Category: "eol"},
+		{Type: model.ResourceVulnerability, Label: "Vulnerability", Category: "vulnerability"},
 
 		// F217 (M14 Phase D round 1 fix): issue-tracker ticket
 		// resource_type. Pre-F217 ticket rows were misfiled under
 		// resource_type="vulnerability" with resource_id pointing at
 		// a ticket UUID, breaking forensic joins onto either table.
-		{Type: model.ResourceTicket, Label: "Ticket"},
+		{Type: model.ResourceTicket, Label: "Ticket", Category: "ticket"},
+
+		// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage
+		// — handler-side ResourceType* orphan closure): the three rows
+		// below register the newly-promoted model.Resource{METIAssessment,
+		// SBOMDiff,DiffWebhook} constants (F296 promoted them from
+		// three pre-M20 orphan `ResourceType*` package-locals in
+		// handler/meti.go, service/diff_summary/diff_summary.go, and
+		// model/diff_webhook.go). Registering them here closes the F281
+		// direction-1 parity gap on the third axis — the handler-side
+		// emit dimension the pre-M20 F286 scope-limitation block in
+		// audit_test.go documented as a known gap. Category values
+		// mirror the sibling model.Resource{MET I,Diff} entries above
+		// so the UI dropdown groups them alongside the domain family
+		// they belong to.
+		{Type: model.ResourceMETIAssessment, Label: "METI Assessment", Category: "meti"},
+		{Type: model.ResourceSBOMDiff, Label: "SBOM Diff", Category: "diff"},
+		{Type: model.ResourceDiffWebhook, Label: "Diff Webhook", Category: "integration"},
 	}
 }
 
-// ResourceTypeInfo represents information about a resource type
+// ResourceTypeInfo represents information about a resource type.
+//
+// F298 (M20-1 Phase D R1, anti-pattern 58 dual-list parity completeness
+// — Category structural symmetry): the Category field is added to
+// mirror the ActionInfo structure so the F281 (M19-3) direction-2
+// meta-test can assert Category non-emptiness in lockstep with the
+// F271 (M18-1) Action-dimension contract. Pre-F298 ResourceTypeInfo
+// carried only Type + Label, which was a structural asymmetry with
+// ActionInfo (Action + Label + Category) — the audit dropdown in the
+// UI could render Action rows grouped by Category but Resource rows
+// could not, and the F281 direction-2 loop could not enforce Category
+// presence at CI time. F298 closes that asymmetry: every entry in
+// GetAvailableResourceTypes must now carry a non-empty Category the
+// UI can key its dropdown grouping off, and any future entry that
+// forgets to supply one fails the F281 direction-2 assertion.
 type ResourceTypeInfo struct {
-	Type  string `json:"type"`
-	Label string `json:"label"`
+	Type     string `json:"type"`
+	Label    string `json:"label"`
+	Category string `json:"category"`
 }
