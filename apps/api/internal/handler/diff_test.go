@@ -8,6 +8,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,10 +17,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/diff"
 	"github.com/sbomhub/sbomhub/internal/service/diff_summary"
 )
@@ -534,7 +537,7 @@ func TestProjectDiffGraph_AuditFailurePropagates(t *testing.T) {
 // the canonical "operator viewed the dependency-graph diff" event.
 //
 // Pinned fields:
-//   - Action       = "diff.graph.view"           (ActionDiffGraphView)
+//   - Action       = "diff.graph.view"           (model.ActionDiffGraphViewed)
 //   - ResourceType = "sbom_diff"                 (diff_summary.ResourceTypeSbomDiff)
 //   - ResourceID   = projectID
 //   - TenantID     = tenantID
@@ -581,8 +584,8 @@ func TestProjectDiffGraph_AuditRowShape(t *testing.T) {
 		t.Fatalf("audit.Log call count = %d, want 1", len(auditStub.calls))
 	}
 	row := auditStub.calls[0]
-	if row.Action != ActionDiffGraphView {
-		t.Errorf("audit Action = %q, want %q", row.Action, ActionDiffGraphView)
+	if row.Action != model.ActionDiffGraphViewed {
+		t.Errorf("audit Action = %q, want %q", row.Action, model.ActionDiffGraphViewed)
 	}
 	if row.ResourceType != diff_summary.ResourceTypeSbomDiff {
 		t.Errorf("audit ResourceType = %q, want %q", row.ResourceType, diff_summary.ResourceTypeSbomDiff)
@@ -656,5 +659,192 @@ func TestProjectDiffGraph_TenantMismatch(t *testing.T) {
 	}
 	if len(auditStub.calls) != 0 {
 		t.Errorf("cross-tenant: audit.Log calls = %d, want 0 (no view => no audit)", len(auditStub.calls))
+	}
+}
+
+// ----------------------------------------------------------------------------
+// F237 (M15 Phase D round 1 fix, anti-pattern 53 dual-path audit resolution) pins.
+// ----------------------------------------------------------------------------
+
+// captureF237StringArgMatcher records the matched driver.Value as a
+// string into target — used by the F237 pin below to assert the exact
+// audit_logs.action / resource_type column values the handler wrote
+// without paying a Postgres round-trip. Mirrors captureStringArgMatcher
+// in evidence_pack_test.go (same package; renamed to avoid symbol
+// collision).
+type captureF237StringArgMatcher struct {
+	target *string
+}
+
+func (m captureF237StringArgMatcher) Match(v driver.Value) bool {
+	switch s := v.(type) {
+	case string:
+		*m.target = s
+		return true
+	case []byte:
+		*m.target = string(s)
+		return true
+	}
+	return false
+}
+
+// TestDiffGraphHandler_Build_EmitsSingleAuditRow_F237 pins the M15
+// Phase D round 1 dual-path audit resolution from the HANDLER side,
+// symmetric to TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236
+// (which pins the F236 evidence-pack resolution). It drives
+// DiffHandler.ProjectDiffGraph against a sqlmock-backed
+// AuditRepository on the happy path and asserts:
+//
+//  1. Exactly ONE INSERT into audit_logs is issued by the handler
+//     during the request (pre-F237 the handler + middleware BOTH wrote
+//     a row for the same request with the IDENTICAL action string
+//     "diff.graph.view", producing two rows; F237 skips the middleware
+//     for the /diff/graph sub-path so only the handler writes). This
+//     test does NOT wire the middleware — the middleware-side skip is
+//     pinned separately by TestDetermineActionAndResource_DiffGraphSkipped_F237
+//     in middleware/audit_test.go. The single-row pin here catches the
+//     inverse regression: a future refactor that also removed the
+//     handler audit_pair would leave zero rows behind (silent
+//     forensic-log gap for graph views).
+//
+//  2. The action column is "diff.graph.view" (via model.ActionDiffGraphViewed).
+//     Pre-F237 the handler referenced a local const ActionDiffGraphView
+//     with the same literal — the two constants existed in two places,
+//     which is not itself a bug but sets up the exact-same-string
+//     double-audit above. Post-F237 the local const is removed and the
+//     handler references model.ActionDiffGraphViewed directly so the
+//     action string is defined in exactly one place.
+//
+//  3. The resource_type column is "sbom_diff" (via
+//     diff_summary.ResourceTypeSbomDiff). This is the resource_type the
+//     handler-side audit row has ALWAYS carried — pre-F237 the
+//     middleware side wrote "diff" via model.ResourceDiff for the same
+//     request, so the double-audit rows joined onto different tables.
+//     Post-F237 only the "sbom_diff" row survives.
+//
+// This is the anti-pattern 53 (middleware-vs-handler audit dual-path)
+// closure meta-test on the handler side; the middleware-side closure
+// lives in TestDetermineActionAndResource_DiffGraphSkipped_F237.
+// Together they pin the invariant "graph view produces exactly one
+// audit row, action=diff.graph.view, resource_type=sbom_diff"
+// end-to-end.
+func TestDiffGraphHandler_Build_EmitsSingleAuditRow_F237(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	var capturedAction, capturedResourceType string
+	// The handler ultimately calls AuditRepository.Log which wraps
+	// Create with `INSERT INTO audit_logs (...) VALUES ($1..$10)` (see
+	// repository/audit.go). Column order: id, tenant_id, user_id,
+	// action, resource_type, resource_id, details, ip_address,
+	// user_agent, created_at. We capture arg #4 (action) + arg #5
+	// (resource_type) with the string matcher and accept anything for
+	// the other columns — details map contents are exercised by
+	// TestProjectDiffGraph_AuditRowShape.
+	mock.ExpectExec(`INSERT INTO audit_logs`).
+		WithArgs(
+			sqlmock.AnyArg(), // id
+			sqlmock.AnyArg(), // tenant_id
+			sqlmock.AnyArg(), // user_id
+			captureF237StringArgMatcher{target: &capturedAction},       // action
+			captureF237StringArgMatcher{target: &capturedResourceType}, // resource_type
+			sqlmock.AnyArg(), // resource_id
+			sqlmock.AnyArg(), // details (JSON)
+			sqlmock.AnyArg(), // ip_address
+			sqlmock.AnyArg(), // user_agent
+			sqlmock.AnyArg(), // created_at
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	auditRepo := repository.NewAuditRepository(db)
+
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	h, fromSbom, toSbom := newGraphTestHandler(t, tenantID, projectID)
+	h.WithAudit(auditRepo)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+projectID.String()+"/diff/graph", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+
+	if err := h.ProjectDiffGraph(c); err != nil {
+		t.Fatalf("ProjectDiffGraph returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Sanity: body is still a parseable graph response referencing the
+	// wired fixtures. Guards against a future short-circuit that would
+	// skip the render but still write the audit row (audit-without-render
+	// = an audit trail that lies about what the operator saw).
+	var resp diff.GraphResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal graph response: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.From == nil || resp.From.SbomID != fromSbom.ID {
+		t.Errorf("From mismatch: %+v, want sbom_id=%s", resp.From, fromSbom.ID)
+	}
+	if resp.To == nil || resp.To.SbomID != toSbom.ID {
+		t.Errorf("To mismatch: %+v, want sbom_id=%s", resp.To, toSbom.ID)
+	}
+
+	// Assertion 1: exactly one audit INSERT was issued. sqlmock's
+	// ExpectationsWereMet returns an error if the ExpectExec above was
+	// NOT consumed (handler forgot to write) OR if a SECOND unmatched
+	// INSERT was issued (double-audit regression — the whole point of
+	// F237 is that the middleware no longer double-writes for this
+	// endpoint, but the handler still MUST write exactly one row).
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("F237 regression: unmet or exceeded sqlmock expectations: %v — "+
+			"the handler must write exactly ONE audit_logs INSERT for a "+
+			"successful diff.graph.view render (pre-F237 the middleware + "+
+			"handler each wrote one row with the IDENTICAL action string, "+
+			"producing two)", err)
+	}
+
+	// Assertion 2: the action column is the model-side dotted constant.
+	// Pre-F237 the handler referenced a local const ActionDiffGraphView
+	// with the same literal "diff.graph.view"; F237 removed the local
+	// constant and points the handler at model.ActionDiffGraphViewed so
+	// the string is defined in exactly one place.
+	if capturedAction != model.ActionDiffGraphViewed {
+		t.Errorf("F237 regression: audit_logs.action = %q, want %q "+
+			"(handler must reference model.ActionDiffGraphViewed; the local "+
+			"const ActionDiffGraphView was removed in M15 Phase D round 1)",
+			capturedAction, model.ActionDiffGraphViewed)
+	}
+	if capturedAction != "diff.graph.view" {
+		t.Errorf("F237 regression: audit_logs.action = %q, want literal "+
+			"\"diff.graph.view\" — the dotted form must survive any future "+
+			"rename of model.ActionDiffGraphViewed (operator forensic queries "+
+			"and the docs/operations migration note both reference the literal "+
+			"string)", capturedAction)
+	}
+
+	// Assertion 3: the resource_type column is "sbom_diff" (the handler's
+	// canonical resource for the graph view — the row joins onto
+	// sbom_diff artifacts, NOT the middleware-side "diff" family). Pre-
+	// F237 the middleware wrote resource_type="diff" for the same
+	// request, so operators had to know which of the two rows they were
+	// reading; post-F237 only the "sbom_diff" row survives.
+	if capturedResourceType != diff_summary.ResourceTypeSbomDiff {
+		t.Errorf("F237 regression: audit_logs.resource_type = %q, want %q "+
+			"(handler audit_pair MUST emit diff_summary.ResourceTypeSbomDiff; "+
+			"the middleware side was the emitter of \"diff\" and it is now "+
+			"skipped)", capturedResourceType, diff_summary.ResourceTypeSbomDiff)
+	}
+	if capturedResourceType != "sbom_diff" {
+		t.Errorf("F237 regression: audit_logs.resource_type = %q, want literal "+
+			"\"sbom_diff\" — the value must survive any future rename of "+
+			"diff_summary.ResourceTypeSbomDiff", capturedResourceType)
 	}
 }

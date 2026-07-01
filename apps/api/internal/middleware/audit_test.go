@@ -1130,13 +1130,25 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 			wantAction:   model.ActionDiffViewed,
 			wantResource: model.ResourceDiff,
 		},
-		{
-			name:         "GET /projects/:id/diff/graph (M12-3 graph view)",
-			method:       "GET",
-			path:         "/api/v1/projects/:id/diff/graph",
-			wantAction:   model.ActionDiffGraphViewed,
-			wantResource: model.ResourceDiff,
-		},
+		// F237 (M15 Phase D round 1 fix, anti-pattern 53 dual-path audit
+		// resolution): the GET /projects/:id/diff/graph positive-assertion
+		// row was previously here pinning
+		// (wantAction=model.ActionDiffGraphViewed, wantResource=model.ResourceDiff),
+		// asserting the middleware emits a per-request audit row for the
+		// graph view. Post-F237 the middleware INTENTIONALLY skips that
+		// path (returns "", "" from the /diff branch when the path ends
+		// with /graph); the handler-level audit_pair in
+		// DiffHandler.ProjectDiffGraph is the sole emit source. The row
+		// is removed from the ProjectChildResources positive-assertion
+		// table because the classifier no longer produces (action,
+		// resource) for the path. The skip behaviour is pinned by
+		// TestDetermineActionAndResource_DiffGraphSkipped_F237 in this
+		// file. The other /diff sub-paths (summary / .csv / .pdf) are
+		// unaffected and stay in the table above. See
+		// docs/operations/evidence-pack-audit-migration.md for the
+		// operator-facing rationale (same doc covers F236 evidence-pack
+		// and F237 diff-graph — both are middleware-vs-handler dual-path
+		// resolutions).
 
 		// ---- /ssvc --------------------------------------------------------
 		// SSVC must beat /vulnerabilities on the nested
@@ -2305,6 +2317,111 @@ func TestDetermineActionAndResource_EvidencePackSkipped_F236(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestDetermineActionAndResource_DiffGraphSkipped_F237 is the
+// anti-pattern 53 dual-path audit resolution meta-test for the F237
+// middleware skip on the /diff/graph sub-path, structurally identical
+// to TestDetermineActionAndResource_EvidencePackSkipped_F236 above.
+// It pins that determineActionAndResource returns ("", "") for every
+// HTTP method on the diff/graph family, so the outer Audit() middleware's
+// `if action == "" { return err }` guard (audit.go L75-78) skips the
+// per-request audit row.
+//
+// Pre-F237 the middleware /diff branch returned
+// (model.ActionDiffGraphViewed = "diff.graph.view",
+// model.ResourceDiff = "diff") for the /graph sub-path and
+// DiffHandler.ProjectDiffGraph ALSO emitted its own handler-level
+// audit_pair row (F168 audit-or-nothing semantics) with the IDENTICAL
+// action string "diff.graph.view" (via a local handler constant
+// AuditDiffGraphView) but a DIFFERENT resource_type "sbom_diff" (via
+// diff_summary.ResourceTypeSbomDiff) — the same request wrote TWO
+// audit_logs rows sharing the same action string. Forensic
+// `SELECT COUNT(*) FROM audit_logs WHERE action='diff.graph.view'`
+// double-counted every render, and the two rows joined onto different
+// tables (one to sbom_diffs.id, one to projects.id) making join-based
+// analytics silently wrong.
+//
+// Option A resolution (chosen for symmetry with F236): the middleware
+// skips, the handler-level audit_pair remains the single emit path.
+// This meta-test asserts the skip; the handler-side single-row emit is
+// pinned by TestDiffGraphHandler_Build_EmitsSingleAuditRow_F237 in
+// handler/diff_test.go.
+//
+// The test also implicitly pins that the OTHER /diff sub-paths
+// (/diff, /diff/summary, /diff.csv, /diff.pdf) remain unaffected —
+// those cases stay in TestDetermineActionAndResource_ProjectChildResources
+// above as positive assertions. If a future refactor accidentally
+// broadened the skip to the whole /diff family, those positive
+// assertions would fail loudly.
+//
+// Table enumerates the currently-routed /diff/graph shape × every
+// standard HTTP method (7 cells). Every cell must return ("", "");
+// a non-empty return would signal that a future refactor accidentally
+// re-enabled the middleware emit path and the double-audit is back.
+func TestDetermineActionAndResource_DiffGraphSkipped_F237(t *testing.T) {
+	paths := []string{
+		"/api/v1/projects/:id/diff/graph",
+	}
+	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+
+	for _, path := range paths {
+		for _, method := range methods {
+			t.Run(method+" "+path, func(t *testing.T) {
+				action, resource := determineActionAndResource(method, path)
+				if action != "" {
+					t.Errorf("F237 regression: %s %s returned action=%q, "+
+						"want \"\" (middleware must skip /diff/graph so the "+
+						"handler-level audit_pair is the sole emit source; "+
+						"pre-F237 this returned model.ActionDiffGraphViewed "+
+						"and produced a double-audit row alongside the handler "+
+						"with the IDENTICAL action string \"diff.graph.view\")",
+						method, path, action)
+				}
+				if resource != "" {
+					t.Errorf("F237 regression: %s %s returned resource=%q, "+
+						"want \"\" (middleware must skip /diff/graph; a "+
+						"non-empty resource_type here means the classifier "+
+						"branch was re-enabled and Audit() will double-write "+
+						"alongside the handler audit_pair)",
+						method, path, resource)
+				}
+			})
+		}
+	}
+
+	// Regression net: the sibling /diff sub-paths (base, summary, .csv,
+	// .pdf) must NOT be skipped by an over-broad F237 change. If a
+	// future refactor moved the HasSuffix(path, "/graph") check to a
+	// wider position that caught these paths too, the positive-assertion
+	// cases in TestDetermineActionAndResource_ProjectChildResources
+	// above would already fail, but pin the intent here too so the
+	// asymmetry is explicit next to the skip assertion.
+	unskippedCases := []struct {
+		method       string
+		path         string
+		wantAction   string
+		wantResource string
+	}{
+		{"GET", "/api/v1/projects/:id/diff", model.ActionDiffViewed, model.ResourceDiff},
+		{"POST", "/api/v1/projects/:id/diff/summary", model.ActionDiffSummary, model.ResourceDiff},
+		{"GET", "/api/v1/projects/:id/diff.csv", model.ActionDiffViewed, model.ResourceDiff},
+		{"GET", "/api/v1/projects/:id/diff.pdf", model.ActionDiffViewed, model.ResourceDiff},
+	}
+	for _, tc := range unskippedCases {
+		t.Run("sibling_unskipped_"+tc.method+"_"+tc.path, func(t *testing.T) {
+			action, resource := determineActionAndResource(tc.method, tc.path)
+			if action != tc.wantAction || resource != tc.wantResource {
+				t.Errorf("F237 over-broad skip regression: %s %s returned "+
+					"(action=%q, resource=%q), want (%q, %q) — only the "+
+					"/diff/graph sub-path must be skipped; the base /diff "+
+					"and the /diff/summary / /diff.csv / /diff.pdf siblings "+
+					"MUST continue to emit their existing (action, resource) "+
+					"pairs via the middleware", tc.method, tc.path,
+					action, resource, tc.wantAction, tc.wantResource)
+			}
+		})
 	}
 }
 
