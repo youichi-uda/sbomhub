@@ -1104,7 +1104,18 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	if strings.Contains(path, "/scan") {
 		resourceType = "scan"
 		if method == "POST" {
-			return "scan.started", "scan"
+			// F259 (M17-1 Phase D R2 #107): swap inline "scan.started"
+			// literal to model.ActionScanStarted. F256 (M17-1) closed
+			// the model.ActionAPIKey* / model.ActionCLI* / model.ActionMCP*
+			// family, but the L426 project-nested scan branch already used
+			// the constant while this tenant-scoped fallback still had the
+			// inline literal — F259 closes that asymmetry. The 22 other
+			// verb-family inline-literal cases (apikey.updated,
+			// cra_report.updated, vex_draft.updated, sbom.updated,
+			// vulnerability.*, integration.*, resource.*, search.*, mcp.*,
+			// cli.*, scan.status, report.generated) are deferred to M18
+			// because they need new model.* constants added first.
+			return model.ActionScanStarted, "scan"
 		}
 		if method == "GET" {
 			return "scan.status", "scan"
