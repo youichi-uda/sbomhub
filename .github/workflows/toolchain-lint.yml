@@ -63,14 +63,24 @@ on:
       - main
     paths:
       - "apps/api/go.mod"
-      - "apps/api/Dockerfile"
+      # F247 (M16-2 Phase D R2): widened from `apps/api/Dockerfile` +
+      # `docker/**` to also cover `apps/**/Dockerfile*` and
+      # `packages/**/Dockerfile*` so a future `apps/newsvc/Dockerfile`
+      # or `packages/mcp-server/Dockerfile` addition triggers the
+      # alignment lint at PR time. Non-Go Dockerfiles (e.g. the
+      # `FROM node:` variants under apps/web) are silently skipped by
+      # the lint's FROM-golang: filter, so widening the trigger is
+      # false-positive-safe.
+      - "apps/**/Dockerfile*"
+      - "packages/**/Dockerfile*"
       - "docker/**"
       - ".github/workflows/**"
       - "tools/**"
   pull_request:
     paths:
       - "apps/api/go.mod"
-      - "apps/api/Dockerfile"
+      - "apps/**/Dockerfile*"
+      - "packages/**/Dockerfile*"
       - "docker/**"
       - ".github/workflows/**"
       - "tools/**"

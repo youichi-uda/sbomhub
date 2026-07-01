@@ -9,14 +9,23 @@
 // Fixtures kept in `testdata/` (Go's special path the toolchain ignores
 // for build) and pointed at via `--repo-root testdata/<fixture>`:
 //
-//	good_all_aligned/        — go.mod 1.26.4 + Dockerfile 1.26.4 + workflow 1.26
-//	                           → clean, exit 0
-//	bad_dockerfile_drift/    — go.mod 1.26.4 + Dockerfile 1.25.8
-//	                           → drift, exit 1
-//	bad_workflow_drift/      — go.mod 1.26.4 + workflow 1.24
-//	                           → drift, exit 1
-//	bad_tools_gomod_drift/   — go.mod 1.26.4 + tools/lint-migration-rls
-//	                           toolchain 1.25.0 → drift, exit 1
+//	good_all_aligned/                    — go.mod 1.26.4 + Dockerfile 1.26.4 + workflow 1.26
+//	                                       → clean, exit 0
+//	bad_dockerfile_drift/                — go.mod 1.26.4 + Dockerfile 1.25.8
+//	                                       → drift, exit 1
+//	bad_workflow_drift/                  — go.mod 1.26.4 + workflow 1.24
+//	                                       → drift, exit 1
+//	bad_tools_gomod_drift/               — go.mod 1.26.4 + tools/lint-migration-rls
+//	                                       toolchain 1.25.0 → drift, exit 1
+//	bad_apps_service_dockerfile_drift/   — F247 (M16-2 Phase D R2): go.mod 1.26.4 +
+//	                                       apps/newsvc/Dockerfile 1.25.8 (drift) +
+//	                                       apps/api/Dockerfile 1.26.4 (aligned) +
+//	                                       apps/web/Dockerfile FROM node: (skipped) +
+//	                                       packages/mcp-server/Dockerfile FROM node:
+//	                                       (skipped). Pins the widened glob
+//	                                       (apps/*/Dockerfile* + packages/*/Dockerfile*)
+//	                                       and the FROM-golang: silent-skip.
+//	                                       → drift, exit 1
 //
 // We also exercise the tool against the real repo root
 // (`../../` from this package) as a smoke test — a refactor that
@@ -114,6 +123,37 @@ func TestFixtures(t *testing.T) {
 			},
 			wantStderrContain: []string{
 				"FAIL",
+			},
+		},
+		{
+			// F247 (M16-2 Phase D R2): the pre-F247 tool only globbed
+			// `apps/api/Dockerfile` + `docker/Dockerfile*`, so a future
+			// `apps/newsvc/Dockerfile` or `packages/<pkg>/Dockerfile`
+			// would silently skip. Post-F247 the glob is widened to
+			// `apps/*/Dockerfile*` + `packages/*/Dockerfile*` +
+			// `docker/Dockerfile*`, and this fixture proves both the
+			// widened catch (apps/newsvc/Dockerfile is picked up and
+			// flagged) AND the FROM-golang: silent-skip
+			// (apps/web/Dockerfile + packages/mcp-server/Dockerfile
+			// use `FROM node:` and produce zero findings — a false-
+			// positive here would immediately show up as an unexpected
+			// second drift entry).
+			name:     "bad_apps_service_dockerfile_drift exits 1 with widened glob + FROM-golang filter",
+			fixture:  "bad_apps_service_dockerfile_drift",
+			wantExit: 1,
+			wantStdoutContain: []string{
+				"drift: Dockerfile",
+				"apps/newsvc/Dockerfile",
+				"expected: 1.26.4",
+				"actual:   1.25.8",
+			},
+			wantStderrContain: []string{
+				"FAIL",
+				// Sanity: exactly one drift emitted — the node-based
+				// Dockerfiles under apps/web and packages/mcp-server
+				// must NOT produce findings, so the FAIL header
+				// reports 1 pin drift, not 2 or 3.
+				"1 Go toolchain pin(s) drift",
 			},
 		},
 	}

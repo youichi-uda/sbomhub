@@ -42,16 +42,28 @@
 //     the alignment contract (it may legitimately lag by a patch or a
 //     minor).
 //
-//  2. **Dockerfile FROM tags** — `apps/api/Dockerfile` and
-//     `docker/Dockerfile.bench` are the two current call sites; the
-//     scan also picks up any additional `Dockerfile*` under `docker/`
-//     so a future variant is covered without touching this tool.
+//  2. **Dockerfile FROM tags** — the scan picks up every Dockerfile
+//     under `apps/<service>/Dockerfile*`, `packages/<pkg>/Dockerfile*`,
+//     and `docker/Dockerfile*`. `apps/api/Dockerfile` and
+//     `docker/Dockerfile.bench` are the two current sites that
+//     actually pin a Go base image; `apps/web/Dockerfile` uses `node:`
+//     and is silently filtered out (see below). F247 (M16-2 Phase D R2)
+//     widened the glob from a hard-coded `apps/api/Dockerfile` +
+//     `docker/Dockerfile*` list to the full `apps/*/Dockerfile*` +
+//     `packages/*/Dockerfile*` + `docker/Dockerfile*` set so a future
+//     `apps/api/Dockerfile.dev`, `packages/mcp-server/Dockerfile`,
+//     etc. is covered without touching this tool.
 //     A `FROM golang:<version>[-<flavor>]` tag may pin either patch
 //     or minor precision (`golang:1.26.4-alpine` or `golang:1.26-alpine`).
 //     If patch is used it must match truth exactly; if minor is used,
 //     the M.N must match truth's M.N. Non-alpine flavors (`-bookworm`,
 //     `-bullseye`, etc.) are accepted — only the X.Y[.Z] portion is
-//     compared.
+//     compared. **Only Dockerfiles whose first FROM directive starts
+//     with `FROM golang:` participate in the alignment cross-check**;
+//     a `FROM node:`, `FROM python:`, `FROM alpine:`, or any other
+//     non-Go base is skipped entirely so a polyglot repo does not
+//     produce false positives for images that intentionally do not
+//     ship the Go toolchain.
 //
 //  3. **GitHub Actions workflows** — every `.github/workflows/*.yml`
 //     file. A step that pins an explicit `go-version:` string is
@@ -334,11 +346,23 @@ func checkModulesGoMod(root string, truth versionRef, report *scanReport) error 
 }
 
 // dockerfileTargets returns the Dockerfile paths this tool inspects.
-// Two current call sites are explicit (`apps/api/Dockerfile` +
-// `docker/Dockerfile.bench`); the scan additionally globs
-// `docker/Dockerfile*` so that a future `docker/Dockerfile.dev`,
-// `docker/Dockerfile.tools`, etc. is picked up without touching this
-// tool.
+// The scan covers three glob layers so any new service, package, or
+// build variant is picked up without touching this tool:
+//
+//   - `apps/<service>/Dockerfile*` — every apps/* subtree's Dockerfile
+//     and variants (e.g. `apps/api/Dockerfile`, `apps/api/Dockerfile.dev`,
+//     `apps/web/Dockerfile`).
+//   - `packages/<pkg>/Dockerfile*` — same for packages/* (e.g. a
+//     future `packages/mcp-server/Dockerfile`).
+//   - `docker/Dockerfile*` — the shared/bench Dockerfiles (e.g.
+//     `docker/Dockerfile.bench`).
+//
+// F247 (M16-2 Phase D R2) widened this from the pre-F247 hard-coded
+// `apps/api/Dockerfile` + `docker/Dockerfile*` list. Non-Go Dockerfiles
+// (`apps/web/Dockerfile` currently, which uses `node:`) are collected
+// here and filtered out in `checkDockerfiles` by the `FROM golang:`
+// prefix check — so this function returns "candidates to inspect", not
+// "candidates to enforce alignment on".
 //
 // The returned slice is sorted and deduplicated so downstream output
 // is deterministic regardless of filesystem enumeration order.
@@ -353,22 +377,25 @@ func dockerfileTargets(root string) ([]string, error) {
 		out = append(out, p)
 	}
 
-	explicit := []string{
-		filepath.Join(root, "apps", "api", "Dockerfile"),
-		filepath.Join(root, "docker", "Dockerfile.bench"),
+	globPatterns := []string{
+		filepath.Join(root, "apps", "*", "Dockerfile*"),
+		filepath.Join(root, "packages", "*", "Dockerfile*"),
+		filepath.Join(root, "docker", "Dockerfile*"),
 	}
-	for _, p := range explicit {
-		if _, err := os.Stat(p); err == nil {
+	for _, pat := range globPatterns {
+		globbed, err := filepath.Glob(pat)
+		if err != nil {
+			return nil, fmt.Errorf("glob %s: %w", pat, err)
+		}
+		for _, p := range globbed {
+			// Skip directories accidentally caught by Dockerfile*
+			// (e.g. a Dockerfile.d/ subtree).
+			info, err := os.Stat(p)
+			if err != nil || info.IsDir() {
+				continue
+			}
 			add(p)
 		}
-	}
-
-	globbed, err := filepath.Glob(filepath.Join(root, "docker", "Dockerfile*"))
-	if err != nil {
-		return nil, fmt.Errorf("glob docker/Dockerfile*: %w", err)
-	}
-	for _, p := range globbed {
-		add(p)
 	}
 
 	sort.Strings(out)
