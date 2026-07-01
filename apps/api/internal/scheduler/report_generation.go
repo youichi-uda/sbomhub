@@ -12,12 +12,64 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/config"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
 var base64StdEncoding = base64.StdEncoding
+
+// reportEligibilityBatchChunkSizeDefault is the production default for how
+// many tenants to evaluate inside a single BEGIN / COMMIT envelope when
+// enumerating enabled report_settings for the scheduler tick
+// (F244, M16-4 #106).
+//
+// Horizontal replication of F234 (M15-2, vulnerability_scan.go):
+//
+//	F234 established chunk-based tx split for vulnerability_scan's
+//	eligibility check to bound the tx-abort blast radius from
+//	"the whole tick" to "one chunk of <= K tenants". F244 is the same
+//	pattern applied to report_generation.go's read-only per-tenant
+//	report_settings scan. The report_settings SELECT is even lighter
+//	than scan_settings (typically 0-1 rows per tenant, single filter on
+//	enabled=true), so the same K=500 sweet spot applies.
+//
+// Selection rationale — chosen 500 as the sweet spot between:
+//
+//   - Connection long-hold (upper bound): at ~2ms per SET LOCAL + SELECT
+//     round-trip pair against a local PG (F213 baseline), 500 tenants ≈
+//     1s of connection hold time per chunk. That stays well below the
+//     hourly scheduler tick + leaves headroom for network jitter on
+//     managed PG (e.g. RDS) where per-round-trip latency is ~1–5ms.
+//
+//   - Tx-abort blast radius (lower bound): ANY PG-side error inside a
+//     chunk aborts the whole chunk's tx and skips the remaining tenants
+//     in THAT chunk (they get retried on the next hourly tick). Smaller
+//     chunks = smaller blast radius per failure event. At 500, a
+//     worst-case cascade (statement timeout on a runaway RLS policy,
+//     transient connection blip) skips at most 500 tenants for one tick
+//     instead of all N.
+//
+//   - Round-trip overhead (envelope cost per additional chunk): each
+//     extra chunk adds one BEGIN + one COMMIT = 2 round-trips. For
+//     N=10000 (20 chunks) that's +38 round-trips over the pre-F244
+//     per-tenant runWithTenantTx path — a rounding-error cost for a
+//     linear reduction in blast radius, and a 2x improvement over the
+//     pre-F244 per-tenant 4N+1 shape.
+//
+// Tests use reportEligibilityBatchChunkSize (the var below) to temporarily
+// override with smaller values so multi-chunk semantics can be exercised
+// without needing N=1000+ mock tenants.
+const reportEligibilityBatchChunkSizeDefault = 500
+
+// reportEligibilityBatchChunkSize is the effective chunk size used by
+// listEnabledSettingsBatched / listDueSettingsBatched. In production this
+// always equals reportEligibilityBatchChunkSizeDefault. Tests may
+// temporarily override it (with a defer-restore) to force multi-chunk
+// behaviour with small tenant fixtures. See vulnerability_scan_test.go's
+// withChunkSize helper for the analogous pattern.
+var reportEligibilityBatchChunkSize = reportEligibilityBatchChunkSizeDefault
 
 // ReportGenerationJob handles periodic report generation.
 //
@@ -113,43 +165,29 @@ func (j *ReportGenerationJob) Start(ctx context.Context) {
 	}
 }
 
-// run executes a single check cycle, enumerating every tenant under its
-// own RLS-pinned transaction. Inside each tx we list the tenant's enabled
-// report settings (RLS-bound) and decide which are due. The actual
-// per-setting generation is launched outside the tx so we do not hold a
-// transaction open while reportService.GenerateReport runs (which itself
-// spawns long-lived goroutines).
+// run executes a single check cycle.
+//
+// Post-F244 (M16-4 #106): eligibility enumeration is delegated to
+// listDueSettingsBatched, which walks every tenant on ONE pooled
+// connection and splits the SET LOCAL + SELECT report_settings loop
+// across N/K chunked transactions (chunk_size = 500). This is the
+// horizontal replication of F234's chunk-based tx pattern from
+// vulnerability_scan.go — same 2N + 2c + 1 round-trip formula, same
+// chunk-local tx-abort blast-radius semantics, same real-PG integration
+// smoke story.
+//
+// The actual per-setting generation is launched outside any tx so we do
+// not hold a transaction open while reportService.GenerateReport runs
+// (which itself spawns long-lived goroutines) — this is unchanged from
+// the pre-F244 codex-r5 semantics.
 func (j *ReportGenerationJob) run(ctx context.Context) {
 	now := time.Now()
 	j.logger.Debug("Checking scheduled reports", "time", now.Format("15:04"))
 
-	tenantIDs, err := j.tenantRepo.ListAllIDs(ctx)
+	_, due, err := j.listDueSettingsBatched(ctx, now)
 	if err != nil {
-		j.logger.Error("Failed to list tenants", "error", err)
+		j.logger.Error("Failed to enumerate due report settings", "error", err)
 		return
-	}
-
-	var due []model.ReportSettings
-
-	for _, tid := range tenantIDs {
-		terr := runWithTenantTx(ctx, j.db, tid, func(txCtx context.Context, _ *sql.Tx) error {
-			settings, err := j.reportRepo.GetEnabledSettings(txCtx)
-			if err != nil {
-				return err
-			}
-			for _, s := range settings {
-				if j.shouldGenerate(&s, now) {
-					due = append(due, s)
-				}
-			}
-			return nil
-		})
-		if terr != nil {
-			j.logger.Warn("Failed to enumerate report settings for tenant",
-				"tenant_id", tid,
-				"error", terr,
-			)
-		}
 	}
 
 	if len(due) == 0 {
@@ -544,36 +582,18 @@ type ReportGenerationResult struct {
 
 // RunOnce runs a single check and returns results.
 //
-// Walks every tenant under a tenant-scoped tx so the RLS-bound
-// `report_settings` table is actually visible.
+// Post-F244 (M16-4 #106): shares listDueSettingsBatched with run(). See
+// the doc comment on run() for the round-trip formula (2N + 2c + 1) and
+// chunk-local tx-abort blast-radius contract.
 func (j *ReportGenerationJob) RunOnce(ctx context.Context) (*ReportGenerationResult, error) {
 	now := time.Now()
 	result := &ReportGenerationResult{}
 
-	tenantIDs, err := j.tenantRepo.ListAllIDs(ctx)
+	checked, due, err := j.listDueSettingsBatched(ctx, now)
 	if err != nil {
 		return nil, err
 	}
-
-	var due []model.ReportSettings
-	for _, tid := range tenantIDs {
-		terr := runWithTenantTx(ctx, j.db, tid, func(txCtx context.Context, _ *sql.Tx) error {
-			settings, ferr := j.reportRepo.GetEnabledSettings(txCtx)
-			if ferr != nil {
-				return ferr
-			}
-			result.Checked += len(settings)
-			for _, s := range settings {
-				if j.shouldGenerate(&s, now) {
-					due = append(due, s)
-				}
-			}
-			return nil
-		})
-		if terr != nil {
-			j.logger.Warn("RunOnce: failed to enumerate settings for tenant", "tenant_id", tid, "error", terr)
-		}
-	}
+	result.Checked = checked
 
 	for _, setting := range due {
 		setting := setting // capture
@@ -582,4 +602,228 @@ func (j *ReportGenerationJob) RunOnce(ctx context.Context) (*ReportGenerationRes
 	}
 
 	return result, nil
+}
+
+// listEnabledSettingsBatched returns every enabled ReportSettings row
+// across every tenant, evaluated under each tenant's own RLS context and
+// coalesced onto one pooled connection but split across N/K chunked
+// transactions for tx-abort blast-radius containment
+// (F244, M16-4 #106).
+//
+// Horizontal replication of listDueTenantsBatched (F234, M15-2,
+// vulnerability_scan.go). Same pooled-connection + chunked-tx shape,
+// same tx-abort blast-radius contract, same anti-pattern-21 sqlmock
+// caveat covered by report_generation_integration_test.go under the
+// `integration` build tag.
+//
+// Design rationale (mirrors F234):
+//
+//	The pre-F244 implementation opened one per-tenant runWithTenantTx
+//	for the enabled-settings enumeration alone, costing ~4 round-trips
+//	per tenant (BEGIN + SET LOCAL + SELECT report_settings + COMMIT).
+//	At N>=1000 that approached the hourly scheduler tick boundary at
+//	p99 DB latency, mirroring the F193 ceiling that F213 / F234 addressed
+//	on the vulnerability_scan path.
+//
+//	F244 evolves the report_generation enumeration to the F234 chunk
+//	shape:
+//
+//	   - allTenants is split into chunks of reportEligibilityBatchChunkSize.
+//	   - Each chunk gets its own BEGIN / per-tenant (SET LOCAL +
+//	     GetEnabledSettings) loop / COMMIT.
+//	   - A PG-side error inside chunk C aborts C's tx and skips the
+//	     remaining tenants of C (they retry next tick); the loop then
+//	     opens a fresh tx for chunk C+1 and continues.
+//	   - The pooled connection is held across chunks (no reacquire),
+//	     so PG-side connection state stays consistent and the pool
+//	     sees exactly one lease per invocation.
+//
+// Round-trip accounting (N tenants, chunk_size K, num_chunks c=ceil(N/K)):
+//
+//	pre-F244 (per-tenant runWithTenantTx): 1 + 4N          = 4N + 1
+//	F244     (chunked tx split):           1 + c*2 + 2N    = 2N + 2c + 1
+//
+//	  For c=1 (small N <= K) F244 equals a hypothetical single-tx
+//	  2N + 3 exactly. Each additional chunk costs +2 round-trips
+//	  (extra BEGIN + COMMIT).
+//	  N=100,  K=500, c=1  -> 2*100  + 2*1  + 1 = 203   (2N + 3)
+//	  N=1200, K=500, c=3  -> 2*1200 + 2*3  + 1 = 2407  (vs 4N+1 = 4801)
+//
+// Per-tenant error handling — F244 chunk-local blast radius:
+//
+//   - Repository-level errors from GetEnabledSettings (any non-nil
+//     return other than an empty result set) mean PG has aborted the
+//     enclosing tx. The chunk is rolled back, the remaining tenants of
+//     that chunk are skipped for this tick (retried next hourly tick),
+//     and the loop starts a fresh BEGIN for the next chunk.
+//   - GetEnabledSettings returning an empty slice for a tenant is the
+//     "no enabled report_settings for this tenant" path and continues
+//     the chunk cleanly.
+//   - SET LOCAL failure on one tenant is logged and terminates the
+//     chunk with the same rollback-and-continue semantics.
+//
+// Anti-pattern 21 (sqlmock semantics limitation, F234 heritage):
+// sqlmock does NOT model the "current transaction is aborted, commands
+// ignored until end of transaction block" semantics. The unit tests
+// exercise happy-path plus the code-side error paths, but the ACID
+// contract that a PG-side error inside chunk C aborts C's tx
+// server-side and lets chunk C+1 continue on the same pooled connection
+// with a fresh BEGIN is pinned by report_generation_integration_test.go
+// (build tag `integration`), following the same real-PG smoke pattern
+// as F234's vulnerability_scan_integration_test.go.
+func (j *ReportGenerationJob) listEnabledSettingsBatched(ctx context.Context) ([]model.ReportSettings, error) {
+	tenantIDs, err := j.tenantRepo.ListAllIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(tenantIDs) == 0 {
+		return nil, nil
+	}
+
+	conn, err := j.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: acquire pooled conn for report eligibility batch: %w", err)
+	}
+	defer conn.Close()
+
+	chunkSize := reportEligibilityBatchChunkSize
+	if chunkSize <= 0 {
+		// Defensive: a mis-set test override should not divide by zero
+		// or spin forever. Fall back to the production default.
+		chunkSize = reportEligibilityBatchChunkSizeDefault
+	}
+
+	enabled := make([]model.ReportSettings, 0, len(tenantIDs))
+	numChunks := (len(tenantIDs) + chunkSize - 1) / chunkSize
+
+	for chunkIndex := 0; chunkIndex < numChunks; chunkIndex++ {
+		start := chunkIndex * chunkSize
+		end := start + chunkSize
+		if end > len(tenantIDs) {
+			end = len(tenantIDs)
+		}
+		chunk := tenantIDs[start:end]
+
+		chunkEnabled, chunkErr := j.evaluateEnabledSettingsChunk(ctx, conn, chunkIndex, chunk)
+		// A chunk-level error is NOT fatal to the whole tick under F244 —
+		// we log + move on so subsequent chunks still get evaluated.
+		// evaluateEnabledSettingsChunk has already appended any
+		// successfully collected settings to chunkEnabled before the error.
+		if chunkErr != nil {
+			j.logger.Warn("scheduler: report eligibility chunk aborted, continuing with next chunk (F244)",
+				"chunk_index", chunkIndex,
+				"chunk_size", len(chunk),
+				"num_chunks", numChunks,
+				"error", chunkErr,
+			)
+		}
+		enabled = append(enabled, chunkEnabled...)
+	}
+
+	return enabled, nil
+}
+
+// evaluateEnabledSettingsChunk runs one chunk's BEGIN / per-tenant
+// (SET LOCAL + GetEnabledSettings) loop / COMMIT on the caller's pinned
+// connection (F244, M16-4 #106).
+//
+// Contract mirrors F234's evaluateEligibilityChunk (vulnerability_scan.go):
+//
+//   - Returns the enabled ReportSettings collected from `chunk`,
+//     respecting each tenant's report_settings under its own RLS context.
+//   - Returns (partial, error) if a PG-side error aborts the chunk's tx
+//     mid-loop. Any settings successfully collected BEFORE the error are
+//     still returned in the first slice — Go-side state is independent
+//     of the PG tx that got rolled back. The caller
+//     (listEnabledSettingsBatched) logs the error with chunk_index for
+//     forensic tracing and starts a fresh chunk.
+//   - SET LOCAL failure on one tenant is logged + terminates the chunk
+//     with a partial return so the enclosing loop can start a fresh
+//     BEGIN for the next chunk.
+func (j *ReportGenerationJob) evaluateEnabledSettingsChunk(
+	ctx context.Context,
+	conn *sql.Conn,
+	chunkIndex int,
+	chunk []uuid.UUID,
+) ([]model.ReportSettings, error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: begin chunk %d report eligibility tx: %w", chunkIndex, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Bind the tx onto ctx so j.reportRepo.GetEnabledSettings (which
+	// resolves database.Querier(txCtx, ...) back to the tx) runs its
+	// SELECT inside the chunk's tx — see F185 GUC + tx-local scoping
+	// discipline.
+	txCtx := database.WithTx(ctx, tx)
+
+	chunkEnabled := make([]model.ReportSettings, 0)
+	for _, tenantID := range chunk {
+		if _, sErr := tx.ExecContext(txCtx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			tenantID.String(),
+		); sErr != nil {
+			j.logger.Warn("scheduler: failed to bind tenant GUC in chunked report eligibility check (F244)",
+				"chunk_index", chunkIndex, "tenant_id", tenantID, "error", sErr)
+			// See docstring: return the partial slice + the error so
+			// listEnabledSettingsBatched can log + start a fresh chunk.
+			return chunkEnabled, fmt.Errorf("scheduler: chunk %d SET LOCAL failed for tenant %s: %w",
+				chunkIndex, tenantID, sErr)
+		}
+
+		settings, gerr := j.reportRepo.GetEnabledSettings(txCtx)
+		if gerr != nil {
+			j.logger.Warn("scheduler: failed to read report_settings in chunked eligibility check (F244)",
+				"chunk_index", chunkIndex, "tenant_id", tenantID, "error", gerr)
+			// Any error from GetEnabledSettings means PG has aborted the
+			// enclosing tx. Return the partial slice + the error so
+			// listEnabledSettingsBatched can log + start a fresh chunk.
+			return chunkEnabled, fmt.Errorf("scheduler: chunk %d SELECT report_settings failed for tenant %s: %w",
+				chunkIndex, tenantID, gerr)
+		}
+		j.logger.Debug("report eligibility scanned",
+			"chunk_index", chunkIndex,
+			"tenant_id", tenantID,
+			"enabled_settings", len(settings),
+		)
+		chunkEnabled = append(chunkEnabled, settings...)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return chunkEnabled, fmt.Errorf("scheduler: commit chunk %d report eligibility tx: %w", chunkIndex, err)
+	}
+	committed = true
+	return chunkEnabled, nil
+}
+
+// listDueSettingsBatched combines listEnabledSettingsBatched with the
+// in-memory shouldGenerate schedule filter and returns
+// (checkedEnabledCount, dueSettings, err).
+//
+// Used by both run() and RunOnce() so their enumeration path shares the
+// same F244 chunk-based tx split. The "due" decision is a pure function
+// of the enabled ReportSettings + `now`, so no additional round-trip is
+// needed: the round-trip formula is exactly that of
+// listEnabledSettingsBatched (2N + 2c + 1).
+func (j *ReportGenerationJob) listDueSettingsBatched(
+	ctx context.Context,
+	now time.Time,
+) (int, []model.ReportSettings, error) {
+	enabled, err := j.listEnabledSettingsBatched(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	due := make([]model.ReportSettings, 0, len(enabled))
+	for _, s := range enabled {
+		if j.shouldGenerate(&s, now) {
+			due = append(due, s)
+		}
+	}
+	return len(enabled), due, nil
 }
