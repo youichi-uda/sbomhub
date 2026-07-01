@@ -58,12 +58,19 @@
 //     If patch is used it must match truth exactly; if minor is used,
 //     the M.N must match truth's M.N. Non-alpine flavors (`-bookworm`,
 //     `-bullseye`, etc.) are accepted — only the X.Y[.Z] portion is
-//     compared. **Only Dockerfiles whose first FROM directive starts
-//     with `FROM golang:` participate in the alignment cross-check**;
-//     a `FROM node:`, `FROM python:`, `FROM alpine:`, or any other
-//     non-Go base is skipped entirely so a polyglot repo does not
-//     produce false positives for images that intentionally do not
-//     ship the Go toolchain.
+//     compared. **Every `FROM golang:` line in the Dockerfile
+//     participates in the alignment cross-check** (checkDockerfiles
+//     scans all FROM directives, not just the first, so a multi-stage
+//     Node-first Dockerfile that later declares `FROM golang:<X.Y.Z>`
+//     as a builder stage is enforcement-scoped for the Go stage —
+//     intentional: a polyglot `apps/<service>/Dockerfile` cannot slip
+//     an out-of-band Go pin past the lint via a non-Go first stage).
+//     A Dockerfile with zero `FROM golang:` lines (pure `FROM node:`,
+//     `FROM python:`, `FROM alpine:`, etc.) is skipped entirely — no
+//     false positive for images that intentionally do not ship the Go
+//     toolchain. (F247-DOC, M16-2 Phase D R3: docstring corrected from
+//     the pre-R3 wording that said only the FIRST FROM directive
+//     participated — checkDockerfiles has always scanned every line.)
 //
 //  3. **GitHub Actions workflows** — every `.github/workflows/*.yml`
 //     file. A step that pins an explicit `go-version:` string is
