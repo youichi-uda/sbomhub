@@ -38,6 +38,19 @@ import (
 // The cap is ~292 years, well above any legitimate provider Retry-After.
 const maxRetryAfterSeconds = int64(math.MaxInt64) / int64(time.Second)
 
+// maxErrorBodyBytes caps the number of bytes read from a rate-limited or
+// error HTTP response body. 64 KiB is far larger than any legitimate
+// provider error JSON (typical Jira / Backlog / GitHub error bodies are
+// < 2 KiB) yet small enough to bound OOM risk from a hostile or
+// misconfigured upstream that streams a multi-GB body under the 30s
+// client-side timeout (F300 M20-3, F290 fix path). Consumers wrap the
+// response body with io.LimitReader(resp.Body, maxErrorBodyBytes) before
+// io.ReadAll so a pathological upstream cannot exhaust process memory even
+// within the client timeout window. The truncate(..., 200) formatting on
+// error surfaces continues to work unchanged because it operates on the
+// already-bounded byte slice.
+const maxErrorBodyBytes = 64 * 1024
+
 // ErrRateLimitExhausted is the sentinel returned when a rate-limited request
 // exceeds MaxRetries. Callers can use errors.Is to detect it — the individual
 // client wrappers wrap this with their own prefix (e.g.

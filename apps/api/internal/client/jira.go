@@ -246,7 +246,13 @@ func (c *JiraClient) doRequest(ctx context.Context, method, path string, body in
 			return fmt.Errorf("failed to execute request: %w", err)
 		}
 
-		respBody, readErr := io.ReadAll(resp.Body)
+		// F300 (M20-3): bound the response body read at maxErrorBodyBytes so a
+		// hostile or misconfigured upstream that streams a multi-GB body under
+		// the 30s client-side timeout cannot exhaust process memory. Every
+		// successful Jira response fits comfortably under 64 KiB — the same
+		// bound also caps 4xx/5xx error bodies used in the "Jira API error"
+		// diagnostic and the 429 body carried into ErrRateLimitExhausted.
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		retryAfter := resp.Header.Get("Retry-After")
 		status := resp.StatusCode
 		resp.Body.Close()

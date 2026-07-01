@@ -214,7 +214,17 @@ func (c *GHSAClient) doGET(ctx context.Context, endpoint string) ([]byte, int, e
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// F300 (M20-3): bound the response body read at maxErrorBodyBytes so a
+	// hostile or misconfigured upstream that streams a multi-GB body under
+	// the 30s client-side timeout cannot exhaust process memory. Every GHSA
+	// advisory response fits comfortably under 64 KiB — the same bound also
+	// caps 403 rate-limit bodies inspected via strings.Contains below and 4xx
+	// / 5xx error bodies used in the "ghsa: get ... returned status" and
+	// "ghsa: list advisories returned status" diagnostics. This mirrors the
+	// jira.go / backlog.go hygiene apply and completes anti-pattern 48
+	// universal closure across the three external HTTP clients that share
+	// the rate_limit.go helper.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("ghsa: read response: %w", err)
 	}
