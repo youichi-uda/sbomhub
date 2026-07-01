@@ -2987,10 +2987,31 @@ func allModelActionValues() map[string]bool {
 // this test will fail loudly if either half of the pair is forgotten.
 //
 // Handler-side emit sites (not just middleware) are also covered: the
-// resource types the audit repository logs from handler code —
-// notably model.ResourceLLMConfig from handler/settings_llm.go — are
-// included in expectedEmit so a future handler emit site landing a
-// resource type that is not registered fails here.
+// resource types the audit repository logs from handler code
+// (model.ResourceLLMConfig from handler/settings_llm.go,
+// model.ResourceEvidencePack from handler/evidence_pack.go, and
+// model.ResourceTenant from handler/webhook_clerk.go) are included in
+// expectedEmit so a future handler emit site landing a
+// model.Resource* symbol that is not registered fails here. F285
+// (M19-3 Phase D R2 #114) expanded this coverage from LLMConfig-only
+// to the three symbols above after an adversarial grep found the
+// handler-side emit set was under-covered relative to the docstring
+// claim.
+//
+// Scope limitation (M20+ candidate F286): this test does NOT cover
+// handler-emitted audit resource_type STRING values that are not
+// model.Resource* symbols. Concretely, orphan package-local
+// ResourceType* constants that live outside the model.Resource*
+// family and outside service.GetAvailableResourceTypes() — for
+// example the "meti_assessment" literal in handler/meti.go, the
+// "sbom_diff" literal in service/diff_summary/, and the
+// "diff_webhook" literal in model/diff_webhook.go — are a silent
+// forensic UI-filter gap this parity contract cannot catch, because
+// its expectedEmit set is keyed on the model.Resource* symbol
+// universe. Closing that gap is tracked as an M20+ candidate (F286);
+// the fix shape will be either promoting the orphan constants into
+// model.Resource* (and adding registry entries) or extending this
+// meta-test to sweep a second, non-symbol string universe.
 func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 	// Direction 1: emit → registry. Hand-maintained set of every
 	// model.Resource* constant the audit middleware's
@@ -3047,6 +3068,16 @@ func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 		// resource type when a BYOK key is set / rotated / cleared.
 		// Registered in the dropdown by F282.
 		model.ResourceLLMConfig: true,
+		// F285 (M19-3 Phase D R2): handler-side emit from
+		// handler/evidence_pack.go — audit repository logs
+		// evidence-pack export / regenerate operations against this
+		// resource type. Present in the registry from earlier waves.
+		model.ResourceEvidencePack: true,
+		// F285 (M19-3 Phase D R2): handler-side emit from
+		// handler/webhook_clerk.go — Clerk tenant lifecycle webhook
+		// (create / update / delete) logs against this resource type.
+		// Present in the registry from earlier waves.
+		model.ResourceTenant: true,
 	}
 
 	// Documented exception allowlist mirroring the F271 pattern for
