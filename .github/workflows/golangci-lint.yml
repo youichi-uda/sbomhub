@@ -54,8 +54,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          # Pin to the module's declared toolchain (apps/api/go.mod is
-          # `go 1.24.11`). Mirrors go-test.yml.
+          # Pin to whatever apps/api/go.mod declares as the toolchain
+          # directive. Mirrors go-test.yml — bump go.mod to bump CI.
+          # F241 (M15 Phase D round 3 fix): removed the hard-coded
+          # `go 1.24.11` reference that drifted after F235's 1.26 bump.
           go-version-file: apps/api/go.mod
           cache: true
           cache-dependency-path: apps/api/go.sum
