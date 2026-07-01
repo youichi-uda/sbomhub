@@ -2548,11 +2548,41 @@ func TestPathHasChildResource_SegmentExact(t *testing.T) {
 // constant, add the constant here AND to service/audit.go::
 // GetAvailableActions — both directions of this test will fail loudly
 // if either half of the pair is forgotten.
+//
+// Handler-side emit sites (not just middleware) are also covered:
+// post-F319 (M21-2 Phase D) the four AuditActionDiffWebhook* symbols
+// from service/diff_webhook/ + handler/settings_diff_webhook.go +
+// handler/sbom.go auto-fire path are in expectedEmit, and post-F322
+// (M21 Phase D R2) the three ActionTenant* symbols from
+// handler/webhook_clerk.go plus two ActionLLMKey* symbols from
+// handler/settings_llm.go are also included. These are audit_logs
+// writes that bypass the middleware classifier — the handler code
+// calls into the audit repository directly with a model.Action*
+// symbol — but F271 direction-1 assertion pins them against
+// GetAvailableActions() all the same, so a future silent removal of
+// either side (handler emit deletion, registry pruning) trips CI
+// here. See F285 (M19-3 Phase D R2 #114) for the sister expansion on
+// the Resource dimension (F281 test), which established the pattern
+// this Action-dimension hybrid coverage now mirrors.
+//
+// What THIS test catches (extended by F319 + F322): registry entries
+// missing for handler-side emit symbols the middleware classifier
+// never produces, in addition to the original middleware-classifier
+// direction-1 coverage. See the F276 note below for the wire-value
+// stability trade-off (unchanged by the F319/F322 handler-side
+// expansions).
 func TestAuditEmitRegistryParity_F271(t *testing.T) {
 	// Direction 1: emit → registry. Hand-maintained set of every
-	// model.Action* constant the audit middleware's
-	// determineActionAndResource can return. Sourced by grepping
-	// `return model.Action` in apps/api/internal/middleware/audit.go.
+	// model.Action* constant the middleware classifier's
+	// determineActionAndResource can return, plus the handler / service-
+	// side model.Action* symbols the audit repository is called with
+	// directly outside the middleware. Sourced by grepping
+	// `return model.Action` in apps/api/internal/middleware/audit.go
+	// AND `grep -rhnE "model\.Action[A-Z]"` in
+	// apps/api/internal/handler/ + apps/api/internal/service/ for
+	// post-classifier emit sites (F319 added the four
+	// AuditActionDiffWebhook* handler / service symbols; F322 added
+	// the three ActionTenant* and two ActionLLMKey* handler symbols).
 	//
 	// F276 (M18-1 Phase D R3 Codex adjunct v2 fix): the map keys are
 	// runtime string values, BUT the source references on the RHS
@@ -2718,6 +2748,31 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.AuditActionDiffWebhookFired:     true, // F319 service-side
 		model.AuditActionDiffWebhookFailed:    true, // F319 service-side
 		model.AuditActionDiffWebhookAutoFired: true, // F319 handler-side
+		// F322 (M21 Phase D R2, anti-pattern 48 residual pattern closure —
+		// handler-side Action orphans): five more handler-emitted
+		// model.Action* constants F319 missed. R1 review of F319's
+		// "closes the last M20 defer pool residual" claim ran a universal
+		// `grep -rhnE "model\.Action[A-Z]"` across handler/ + service/
+		// and found three ActionTenant* symbols in webhook_clerk.go
+		// (Clerk lifecycle webhook: created / updated / deleted, three
+		// emit sites at L274 / L250 / L153) plus two ActionLLMKey*
+		// symbols in settings_llm.go (BYOK provisioning: set / rotated,
+		// two emit sites at L257 / L259) that were emitted but never
+		// registered in GetAvailableActions(). None are middleware-
+		// classifier outputs — they're the same handler-side pattern
+		// the four AuditActionDiffWebhook* symbols above track. F322
+		// closes the anti-pattern 48 residual by expanding both this
+		// direction-1 set AND service/audit.go GetAvailableActions() in
+		// lockstep, so a future removal of either side (silent handler
+		// deletion, registry pruning) trips CI here rather than
+		// producing a UI filter dropdown that cannot surface real
+		// audit_logs rows. See M20 F302 lineage for the residual
+		// pattern re-application discipline.
+		model.ActionTenantCreated: true, // F322 handler-side (webhook_clerk.go)
+		model.ActionTenantUpdated: true, // F322 handler-side (webhook_clerk.go)
+		model.ActionTenantDeleted: true, // F322 handler-side (webhook_clerk.go)
+		model.ActionLLMKeySet:     true, // F322 handler-side (settings_llm.go)
+		model.ActionLLMKeyRotated: true, // F322 handler-side (settings_llm.go)
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
