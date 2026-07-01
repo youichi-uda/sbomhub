@@ -644,7 +644,7 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		// direction-1 parity gap on the third axis — the handler-side
 		// emit dimension the pre-M20 F286 scope-limitation block in
 		// audit_test.go documented as a known gap. Category values
-		// mirror the sibling model.Resource{MET I,Diff} entries above
+		// mirror the sibling model.Resource{METI,Diff} entries above
 		// so the UI dropdown groups them alongside the domain family
 		// they belong to.
 		{Type: model.ResourceMETIAssessment, Label: "METI Assessment", Category: "meti"},
