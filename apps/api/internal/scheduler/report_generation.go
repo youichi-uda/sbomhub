@@ -101,6 +101,20 @@ type ReportGenerationJob struct {
 // this, the HTTP-driven path leaves reports stuck at "generating" forever.
 // NewReportService cannot take db directly because the cmd/server wiring
 // file is settled in the review queue and must stay untouched.
+//
+// F257 (M17-2 #108): required-fields validation — reportService MUST be
+// non-nil. Before F257 the pre-F244 enumeration path never called into
+// reportService, so nil silently worked in unit / integration tests while
+// production wired a real ReportService (main.go:1453). That factory
+// brittleness was flagged in the M16 F244 R1 review: any future evolution
+// of listEnabledSettingsBatched / listDueSettingsBatched that adds a
+// reportService method call would nil-panic *silently under
+// -tags=integration* while unit tests kept passing. F257 closes that gap
+// by fail-fast panicking at construction time so both production and test
+// factories are forced to wire a real (or minimal dummy) *service.ReportService.
+// The generate path (see generateReport at L270) unconditionally calls
+// j.reportService.GenerateReport, so a nil here is already a production
+// bug — this check just moves the failure point earlier and louder.
 func NewReportGenerationJob(
 	reportService *service.ReportService,
 	reportRepo *repository.ReportRepository,
@@ -108,9 +122,10 @@ func NewReportGenerationJob(
 	db *sql.DB,
 	interval time.Duration,
 ) *ReportGenerationJob {
-	if reportService != nil {
-		reportService.SetDB(db)
+	if reportService == nil {
+		panic("scheduler: NewReportGenerationJob requires non-nil reportService (F257, M17-2 #108)")
 	}
+	reportService.SetDB(db)
 	return &ReportGenerationJob{
 		reportService: reportService,
 		reportRepo:    reportRepo,
@@ -124,6 +139,10 @@ func NewReportGenerationJob(
 // NewReportGenerationJobFull creates a new report generation job with full
 // configuration. Mirrors NewReportGenerationJob's codex-r5 db injection so
 // the production wiring (which uses ...Full) also gets the fix.
+//
+// F257 (M17-2 #108): required-fields validation — reportService MUST be
+// non-nil. See NewReportGenerationJob for the full rationale on why this
+// fail-fast panic replaces the pre-F257 silent-nil pattern.
 func NewReportGenerationJobFull(
 	reportService *service.ReportService,
 	reportRepo *repository.ReportRepository,
@@ -132,9 +151,10 @@ func NewReportGenerationJobFull(
 	cfg *config.Config,
 	interval time.Duration,
 ) *ReportGenerationJob {
-	if reportService != nil {
-		reportService.SetDB(db)
+	if reportService == nil {
+		panic("scheduler: NewReportGenerationJobFull requires non-nil reportService (F257, M17-2 #108)")
 	}
+	reportService.SetDB(db)
 	return &ReportGenerationJob{
 		reportService: reportService,
 		reportRepo:    reportRepo,
