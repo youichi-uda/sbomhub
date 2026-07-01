@@ -1,0 +1,82 @@
+-- ============================================
+-- F299 (M20-2 #116) plan_limits feature-set parity backfill
+--
+-- Source of truth:
+--   * M20-2 KICKOFF: sbomhub-internal/planning/M20_KICKOFF_PROMPT.md
+--   * anti-pattern 58 catalog: emit / registry parity in dual-list systems.
+--     The dual list here is:
+--       (Go side) model.DefaultPlanLimits() Features map keys, and
+--       (SQL side) plan_limits.features JSONB key set seeded by
+--       migration 008_subscriptions and further UPDATE'd by 024
+--       (audit_logs on pro/team/enterprise; BUG-06 partial fix).
+--     Both sides must expose the same feature-key universe or the
+--     middleware.CheckFeature() gate silently answers differently on
+--     the DB path (SubscriptionRepository.GetPlanLimits + HasFeature)
+--     versus the fallback path (DefaultPlanLimits + HasFeature).
+--
+-- Gaps this migration closes (M20-2 F299):
+--
+--   Gap B partial residual — "audit_logs" on free / starter:
+--     Migration 024 (BUG-06) backfilled audit_logs=true on
+--     pro / team / enterprise but intentionally left free / starter
+--     unset because a missing key already answered false at
+--     runtime. That leaves the SQL-side key SET incomplete relative
+--     to Go DefaultPlanLimits, which explicitly seeds
+--     audit_logs=false on free / starter. The parity meta-test
+--     TestPlanFeatureRegistryParity_F299 pins key-SET equality
+--     (direction 2 per plan) precisely because "same runtime answer"
+--     is not the same invariant as "same declared key set" — a
+--     future wave that flips the semantics of HasFeature() (e.g.
+--     treat missing key as "inherit from a default") would silently
+--     regress. This migration adds audit_logs=false on
+--     free / starter so both sides declare the key on every plan.
+--
+--   Gap A residual — "priority_support" on free / starter:
+--     SQL seed 008 has priority_support=true on
+--     pro / team / enterprise but omits the key on free / starter.
+--     The sibling model/plan.go edit in this wave adds
+--     priority_support to ALL FIVE plans in DefaultPlanLimits
+--     (starter/free=false, pro/team/enterprise=true) so the
+--     fallback path can no longer silently answer false for a paid
+--     feature. Direction 2 per-plan symmetric coverage requires
+--     the SQL side to declare priority_support on free / starter
+--     too (both plans get false, matching the Go side). Caught by
+--     the real-PG smoke TestPlanFeatureParity_RealPG_F299 during
+--     the F299 wave itself — a live evidence of the M17 Recovery
+--     R1 pattern (sqlmock / hand-parse semantics limits vs real-PG
+--     round-trip).
+--
+-- Why UPDATE and not amend 008 / 024:
+--
+--   Operators that already migrated past 008 / 024 must pick up
+--   the state transition through the normal migrate-up sequence;
+--   rewriting an old migration in place would silently skip the
+--   change for them. Same partner-file discipline used for
+--   036→037 / 046→047 / legacy 010→048 (F185).
+--
+-- Idempotency:
+--
+--   The `features || '{"audit_logs": false}'::jsonb` concatenation
+--   only inserts the key when it is not already present at the top
+--   level (PostgreSQL JSONB `||` right-hand-side wins on collision,
+--   so re-running would overwrite pro/team/enterprise back to false
+--   if they were in the WHERE clause — they are not). The WHERE
+--   scopes the write to free / starter only.
+--
+-- Related:
+--   * Meta-test: TestPlanFeatureRegistryParity_F299 in
+--     apps/api/internal/model/plan_parity_test.go pins both
+--     Direction 1 (key-set union equality) and Direction 2
+--     (per-plan value equality) against a hand-parse of the SQL
+--     seed + 024 + this backfill so future divergence trips CI
+--     loud.
+--   * Integration smoke: TestPlanFeatureParity_RealPG_F299 in
+--     apps/api/internal/model/plan_parity_integration_test.go
+--     ( //go:build integration ) re-checks against a live postgres
+--     with the whole migration chain applied — the sqlmock-limit
+--     safety valve documented in M17 Recovery R1.
+-- ============================================
+
+UPDATE plan_limits
+   SET features = features || '{"audit_logs": false, "priority_support": false}'::jsonb
+ WHERE plan IN ('free', 'starter');
