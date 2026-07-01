@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
@@ -242,4 +244,156 @@ func TestEvidencePackHandler_Build_ProjectNotFound_Generic404(t *testing.T) {
 // builder propagates it and the handler can fold to 404.
 func errProjectMissingForTest() error {
 	return fmt.Errorf("evidence_pack.Build: resolve project: %w", sql.ErrNoRows)
+}
+
+// ----------------------------------------------------------------------------
+// F236 (M15-4 fix, anti-pattern 53 dual-path audit resolution) pins.
+// ----------------------------------------------------------------------------
+
+// captureStringArgMatcher is a sqlmock argument matcher that records the
+// matched driver.Value as a string into target — used by the F236 pin
+// below to assert the exact audit_logs.action column value the handler
+// wrote, without paying a Postgres round-trip.
+type captureStringArgMatcher struct {
+	target *string
+}
+
+func (m captureStringArgMatcher) Match(v driver.Value) bool {
+	switch s := v.(type) {
+	case string:
+		*m.target = s
+		return true
+	case []byte:
+		*m.target = string(s)
+		return true
+	}
+	return false
+}
+
+// TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236 pins
+// the M15-4 dual-path audit resolution from the HANDLER side. It drives
+// EvidencePackHandler.Build against a sqlmock-backed AuditRepository on
+// the happy path and asserts:
+//
+//  1. Exactly ONE INSERT into audit_logs is issued by the handler
+//     during the request (pre-F236 the handler + middleware BOTH wrote
+//     a row for the same request, producing two rows; F236 skips the
+//     middleware for the /evidence-pack family so only the handler
+//     writes). This test does NOT wire the middleware — the middleware-
+//     side skip is pinned separately by
+//     TestDetermineActionAndResource_EvidencePackSkipped_F236 in
+//     middleware/audit_test.go. The single-row pin here catches the
+//     inverse regression: a future refactor that also removed the
+//     handler audit_pair would leave zero rows behind (silent
+//     forensic-log gap for evidence pack builds).
+//
+//  2. The action column is "evidence_pack.built" (dotted). Pre-F236 the
+//     handler emitted "evidence_pack_built" (underscore) via a local
+//     handler constant AuditActionEvidencePackBuilt while the
+//     middleware emitted "evidence_pack.built" via
+//     model.ActionEvidencePackBuilt — two rows, two different action
+//     strings, forensic GROUP BY queries had to alias both. F236
+//     removes the local underscore constant and points the handler at
+//     model.ActionEvidencePackBuilt so the dotted form is the ONLY
+//     string emitted for evidence pack builds going forward.
+//
+// This is the anti-pattern 53 (middleware-vs-handler audit dual-path)
+// closure meta-test on the handler side; the middleware-side closure
+// lives in TestDetermineActionAndResource_EvidencePackSkipped_F236.
+// Together they pin the invariant "evidence pack build produces
+// exactly one audit row, action=evidence_pack.built" end-to-end.
+func TestEvidencePackHandler_Build_HappyPath_EmitsSingleAuditRow_F236(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	var capturedAction string
+	// The handler ultimately calls AuditRepository.Log which wraps
+	// Create with `INSERT INTO audit_logs (...) VALUES ($1..$10)` (see
+	// repository/audit.go). Column order: id, tenant_id, user_id,
+	// action, resource_type, resource_id, details, ip_address,
+	// user_agent, created_at. We capture arg #4 (action) with the
+	// string matcher and accept anything for the other columns —
+	// details map contents are exercised by other suites.
+	mock.ExpectExec(`INSERT INTO audit_logs`).
+		WithArgs(
+			sqlmock.AnyArg(),                                 // id
+			sqlmock.AnyArg(),                                 // tenant_id
+			sqlmock.AnyArg(),                                 // user_id
+			captureStringArgMatcher{target: &capturedAction}, // action
+			sqlmock.AnyArg(),                                 // resource_type
+			sqlmock.AnyArg(),                                 // resource_id
+			sqlmock.AnyArg(),                                 // details (JSON)
+			sqlmock.AnyArg(),                                 // ip_address
+			sqlmock.AnyArg(),                                 // user_agent
+			sqlmock.AnyArg(),                                 // created_at
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	auditRepo := repository.NewAuditRepository(db)
+
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	vex := &fakeVEXDraftReader{rows: []repository.VEXDraft{}}
+	cra := &fakeCRAReportReader{rows: []repository.CRAReport{}}
+	proj := &fakeProjectReaderHandler{project: &model.Project{
+		ID:   projectID,
+		Name: "demo",
+	}}
+	builder := evidence_pack.NewBuilder(vex, cra, proj, nil, nil)
+	h := NewEvidencePackHandler(builder, auditRepo)
+
+	e := echo.New()
+	// Opt out of the METI section — the builder wiring here uses a nil
+	// METI reader (mirrors newEvidencePackTestHandler above).
+	body := bytes.NewBufferString(`{"include_meti_assessment": false}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/evidence-pack/build", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	installTenantContext(c, tenantID, uuid.New(), model.RoleAdmin)
+
+	if err := h.Build(c); err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Assertion 1: exactly one audit INSERT was issued. sqlmock's
+	// ExpectationsWereMet returns an error if the ExpectExec above was
+	// NOT consumed (handler forgot to write) OR if a SECOND
+	// unmatched INSERT was issued (double-audit regression — the whole
+	// point of F236 is that the middleware no longer double-writes for
+	// this endpoint, but the handler still MUST write exactly one row).
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("F236 regression: unmet or exceeded sqlmock expectations: %v — "+
+			"the handler must write exactly ONE audit_logs INSERT for a "+
+			"successful evidence_pack build (pre-F236 the middleware + "+
+			"handler each wrote one row, producing two)", err)
+	}
+
+	// Assertion 2: the action column is the dotted form. Pre-F236 the
+	// handler emitted "evidence_pack_built" (underscore, via a local
+	// constant AuditActionEvidencePackBuilt now removed). F236 unifies
+	// on model.ActionEvidencePackBuilt = "evidence_pack.built".
+	if capturedAction != model.ActionEvidencePackBuilt {
+		t.Errorf("F236 regression: audit_logs.action = %q, want %q "+
+			"(unified dotted form; the underscore local constant "+
+			"AuditActionEvidencePackBuilt was removed in M15-4)",
+			capturedAction, model.ActionEvidencePackBuilt)
+	}
+	if capturedAction != "evidence_pack.built" {
+		t.Errorf("F236 regression: audit_logs.action = %q, want literal "+
+			"\"evidence_pack.built\" — the dotted form must survive any "+
+			"future rename of model.ActionEvidencePackBuilt (operator "+
+			"forensic queries and the docs/operations migration note both "+
+			"reference the literal string)", capturedAction)
+	}
 }

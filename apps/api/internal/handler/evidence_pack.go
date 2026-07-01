@@ -189,8 +189,8 @@ func (h *EvidencePackHandler) Build(c echo.Context) error {
 		auditInput := &model.CreateAuditLogInput{
 			TenantID:     &tenantID,
 			UserID:       uid,
-			Action:       AuditActionEvidencePackBuilt,
-			ResourceType: ResourceTypeEvidencePack,
+			Action:       model.ActionEvidencePackBuilt,
+			ResourceType: model.ResourceEvidencePack,
 			ResourceID:   &projectID,
 			Details:      details,
 			IPAddress:    c.RealIP(),
@@ -281,16 +281,31 @@ func userIDOrNilTC(tc *middleware.TenantContext) *uuid.UUID {
 // ----------------------------------------------------------------------------
 // Audit constants
 // ----------------------------------------------------------------------------
-
-const (
-	// AuditActionEvidencePackBuilt is the audit_logs.action emitted by
-	// every successful POST /evidence-pack/build. Aligned with the
-	// convention from triage.AuditActionVexDraft*: <resource>_<verb>.
-	AuditActionEvidencePackBuilt = "evidence_pack_built"
-
-	// ResourceTypeEvidencePack is the audit_logs.resource_type for the
-	// evidence pack bundle event. The ResourceID column carries the
-	// project_id (not a bundle id — bundles are not persisted in M2-6;
-	// see M3 for the bundle table proposed by issue #34).
-	ResourceTypeEvidencePack = "evidence_pack"
-)
+//
+// F236 (M15-4 fix, anti-pattern 53 dual-path audit resolution): the
+// local AuditActionEvidencePackBuilt ("evidence_pack_built" underscore)
+// and ResourceTypeEvidencePack ("evidence_pack") constants that used to
+// live here were REMOVED. The handler now references the shared model
+// constants directly:
+//
+//   - model.ActionEvidencePackBuilt = "evidence_pack.built"  (dotted)
+//   - model.ResourceEvidencePack    = "evidence_pack"
+//
+// The dotted action string aligns evidence pack builds with every other
+// audit action verb in model/audit.go (project.created, vex.updated,
+// cra_report.reanalysed, ...); the underscore form was an M2-6-era
+// inconsistency and is retired.
+//
+// In parallel the middleware /evidence-pack branch was set to skip
+// (audit.go returns ("", "") for the family), so this handler-level
+// audit_pair is now the SOLE emit path for the evidence_pack.built
+// business event. The F168 audit-or-nothing contract (audit write
+// failure surfaces 500 and rolls back the TenantTx, see #F5 fail-
+// closed) is preserved.
+//
+// Legacy note for operators: audit_logs rows produced BEFORE the M15-4
+// deploy may carry action="evidence_pack_built" (underscore) from the
+// handler side AND/OR action="evidence_pack.built" (dotted) from the
+// middleware side. New rows will only ever carry the dotted form. See
+// docs/operations/evidence-pack-audit-migration.md for the full
+// migration note and forensic query examples.
