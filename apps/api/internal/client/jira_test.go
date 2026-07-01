@@ -18,6 +18,22 @@ import (
 // test runtime stays sub-second and no jitter so the retry cadence is
 // deterministic. Callers usually pair this with WithBackoffPolicy on a client
 // constructed against a httptest.Server URL.
+//
+// F321 (M21-2 Phase D, F315 close): docstring pins the concrete override
+// values so review-brief prose that references specific millisecond figures
+// (M20 R1 review brief mentioned 10ms/100ms; the actual code has always been
+// 5ms/50ms) stays factually anchored to the code. Concretely:
+//
+//   - InitialDelay = 5ms (base wait before the first retry attempt).
+//   - MaxDelay     = 50ms (cap the exponential-doubling growth would
+//     otherwise hit; at 5ms/10ms/20ms/40ms/50ms cadence the fourth retry
+//     hits the cap).
+//   - Jitter       = false (deterministic cadence — tests that assert
+//     elapsed-time bounds rely on this).
+//
+// Production values are much larger (InitialDelay ~1s, MaxDelay ~30s per
+// F277 client defaults) — these test overrides only exist to keep the
+// httptest-driven retry tests sub-second.
 func testJiraBackoff(maxRetries int) BackoffPolicy {
 	return BackoffPolicy{
 		MaxRetries:   maxRetries,
@@ -498,76 +514,135 @@ func TestJiraClient_RateLimit_ContextCancel(t *testing.T) {
 // asserts bytes.Equal on the two captured bodies. F301 (M20-3, F292 fix
 // path) + F310 (M20-3 Phase D R2 docstring correction).
 func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
-	var (
-		mu           sync.Mutex
-		capturedBody [][]byte
-		hits         int32
-	)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/rest/api/3/issue" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if r.Method != http.MethodPost {
-			t.Errorf("unexpected method: %s", r.Method)
-		}
-		body, err := io.ReadAll(r.Body)
+	// runBodyReuse encapsulates the httptest server + retry
+	// invariant assertion so the plain-text and ADF nested-map paths
+	// can share the same 429 → 201 mechanics. F321 (M21-2 Phase D,
+	// F316 close): pre-F321 this test only exercised a short
+	// plain-ASCII description that jira.go wraps into a single-
+	// paragraph ADF block. The nested-map JSON serialization worked
+	// but the byte-equal invariant across retries was not asserted
+	// for descriptions carrying multi-paragraph content, non-ASCII
+	// characters, or embedded special / JSON-escaping characters —
+	// all of which live in the JSON-encoded ADF sub-tree that
+	// CreateIssue builds in jira.go:128-145. F316 adds an ADF sub-
+	// test that pushes such a description through the same path so
+	// the per-attempt-fresh-reader contract (F310 head docstring) is
+	// verified against a body whose nested-map serialization is
+	// substantially larger and more variance-prone than a single
+	// short line.
+	runBodyReuse := func(t *testing.T, input CreateIssueInput) {
+		t.Helper()
+		var (
+			mu           sync.Mutex
+			capturedBody [][]byte
+			hits         int32
+		)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/rest/api/3/issue" {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			if r.Method != http.MethodPost {
+				t.Errorf("unexpected method: %s", r.Method)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			mu.Lock()
+			capturedBody = append(capturedBody, body)
+			mu.Unlock()
+
+			n := atomic.AddInt32(&hits, 1)
+			if n == 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"errorMessages":["rate limited"]}`))
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(JiraIssue{
+				ID:  "12345",
+				Key: "TEST-1",
+			})
+		}))
+		defer server.Close()
+
+		client := NewJiraClient(server.URL, "user@example.com", "token123").
+			WithBackoffPolicy(testJiraBackoff(3))
+
+		issue, err := client.CreateIssue(context.Background(), input)
 		if err != nil {
-			t.Fatalf("read request body: %v", err)
+			t.Fatalf("expected CreateIssue to succeed after 429 retry, got: %v", err)
 		}
+		if issue == nil || issue.Key != "TEST-1" {
+			t.Fatalf("expected returned issue key TEST-1, got: %+v", issue)
+		}
+
 		mu.Lock()
-		capturedBody = append(capturedBody, body)
-		mu.Unlock()
-
-		n := atomic.AddInt32(&hits, 1)
-		if n == 1 {
-			w.Header().Set("Retry-After", "0")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"errorMessages":["rate limited"]}`))
-			return
+		defer mu.Unlock()
+		if got := atomic.LoadInt32(&hits); got != 2 {
+			t.Fatalf("expected exactly 2 requests (1 x 429 + 1 x 201), got %d", got)
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(JiraIssue{
-			ID:  "12345",
-			Key: "TEST-1",
+		if len(capturedBody) != 2 {
+			t.Fatalf("expected 2 captured bodies, got %d", len(capturedBody))
+		}
+		if !bytes.Equal(capturedBody[0], capturedBody[1]) {
+			t.Errorf("F301 invariant violated: retry request body not byte-equal to initial\n"+
+				"  hit1 (%d bytes): %s\n"+
+				"  hit2 (%d bytes): %s",
+				len(capturedBody[0]), capturedBody[0],
+				len(capturedBody[1]), capturedBody[1])
+		}
+	}
+
+	t.Run("plain_description", func(t *testing.T) {
+		runBodyReuse(t, CreateIssueInput{
+			ProjectKey:  "TEST",
+			IssueType:   "Bug",
+			Summary:     "Body reuse invariant",
+			Description: "F301 pins byte-equal retry payload",
+			Priority:    "High",
+			Labels:      []string{"security", "f301"},
 		})
-	}))
-	defer server.Close()
+	})
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123").
-		WithBackoffPolicy(testJiraBackoff(3))
-
-	input := CreateIssueInput{
-		ProjectKey:  "TEST",
-		IssueType:   "Bug",
-		Summary:     "Body reuse invariant",
-		Description: "F301 pins byte-equal retry payload",
-		Priority:    "High",
-		Labels:      []string{"security", "f301"},
-	}
-
-	issue, err := client.CreateIssue(context.Background(), input)
-	if err != nil {
-		t.Fatalf("expected CreateIssue to succeed after 429 retry, got: %v", err)
-	}
-	if issue == nil || issue.Key != "TEST-1" {
-		t.Fatalf("expected returned issue key TEST-1, got: %+v", issue)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if got := atomic.LoadInt32(&hits); got != 2 {
-		t.Fatalf("expected exactly 2 requests (1 x 429 + 1 x 201), got %d", got)
-	}
-	if len(capturedBody) != 2 {
-		t.Fatalf("expected 2 captured bodies, got %d", len(capturedBody))
-	}
-	if !bytes.Equal(capturedBody[0], capturedBody[1]) {
-		t.Errorf("F301 invariant violated: retry request body not byte-equal to initial\n"+
-			"  hit1 (%d bytes): %s\n"+
-			"  hit2 (%d bytes): %s",
-			len(capturedBody[0]), capturedBody[0],
-			len(capturedBody[1]), capturedBody[1])
-	}
+	// F321 (M21-2 Phase D, F316 close): ADF nested-map path. jira.go
+	// CreateIssue wraps every non-empty Description into a
+	// { version:1, type:"doc", content:[{ type:"paragraph",
+	// content:[{ type:"text", text:<Description> }] }] } ADF block
+	// before json.Marshal (jira.go:130-145). This sub-test pushes a
+	// description whose text carries multi-line content, non-ASCII
+	// (Japanese + emoji-adjacent characters) and JSON-escape-worthy
+	// runes (", \, /, newline, unicode-escape via U+2028) so the
+	// resulting nested-map JSON exercises encoding/json's key-order
+	// stability (map[string]interface{} inside the paragraph, plus
+	// []map[string]interface{} for content arrays), string-escape
+	// determinism, and byte-length sensitivity. The bytes.Equal
+	// invariant remains: retry attempt 2 must produce a body
+	// byte-identical to attempt 1 even though the encoded nested-map
+	// body is now materially larger and its structure spans two
+	// levels of map nesting inside two levels of array nesting.
+	t.Run("ADF_nested_description", func(t *testing.T) {
+		runBodyReuse(t, CreateIssueInput{
+			ProjectKey: "TEST",
+			IssueType:  "Bug",
+			Summary:    "ADF body reuse invariant",
+			// Description content chosen for ADF-path stressors:
+			//   * Multi-line via \n so \\n escape appears in JSON output.
+			//   * Non-ASCII (脆弱性 = vulnerability in Japanese) so
+			//     the UTF-8 → JSON encoding path is exercised.
+			//   * Embedded quote " so " escaping fires.
+			//   * Embedded backslash \ so \\ escaping fires.
+			//   * Embedded forward slash / (json.Marshal does not
+			//     escape /, but pinning the literal keeps regressions
+			//     that would opt into HTMLEscape=true visible).
+			Description: "F316 pins ADF nested-map retry:\n" +
+				"CVE-2025-0001 脆弱性の詳細 \"details\" \\ path/to/file\n" +
+				"line 3 (with control-char boundary)",
+			Priority: "High",
+			Labels:   []string{"security", "f316", "adf"},
+		})
+	})
 }
 
 // TestJiraClient_RateLimit_RetryAfterHTTPDate verifies the HTTP-date variant of

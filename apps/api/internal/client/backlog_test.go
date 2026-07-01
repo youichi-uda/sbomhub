@@ -18,6 +18,20 @@ import (
 // testBacklogBackoff returns a BackoffPolicy tuned for httptest — small delays
 // so test runtime stays sub-second and no jitter so the retry cadence is
 // deterministic.
+//
+// F321 (M21-2 Phase D, F315 close): docstring pins the concrete override
+// values so review-brief prose that references specific millisecond figures
+// (M20 R1 review brief mentioned 10ms/100ms; the actual code has always been
+// 5ms/50ms) stays factually anchored to the code. Concretely:
+//
+//   - InitialDelay = 5ms (base wait before the first retry attempt).
+//   - MaxDelay     = 50ms (cap on exponential-doubling growth).
+//   - Jitter       = false (deterministic cadence — tests that assert
+//     elapsed-time bounds rely on this).
+//
+// Production values are much larger (InitialDelay ~1s, MaxDelay ~30s per
+// F277 client defaults) — these test overrides only exist to keep the
+// httptest-driven retry tests sub-second.
 func testBacklogBackoff(maxRetries int) BackoffPolicy {
 	return BackoffPolicy{
 		MaxRetries:   maxRetries,
