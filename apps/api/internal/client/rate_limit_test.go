@@ -140,6 +140,60 @@ func TestRespectRetryAfter_Malformed(t *testing.T) {
 	}
 }
 
+// TestRespectRetryAfter_OverflowClamped_F295 pins the F295 defence: a
+// syntactically valid but absurdly large delta-seconds value must not
+// overflow time.Duration into a negative / near-zero wait. Prior to F295
+// the delta-seconds path used strconv.Atoi + direct * time.Second, so
+// e.g. "9999999999999" would wrap. After F295 the value is clamped to
+// maxRetryAfterSeconds (~292 years) before the * time.Second conversion.
+func TestRespectRetryAfter_OverflowClamped_F295(t *testing.T) {
+	// int64-max seconds — the largest thing strconv.ParseInt can accept.
+	// Without the F295 clamp the * time.Second would overflow into a
+	// negative time.Duration and waitOrDone would skip the wait entirely.
+	got := RespectRetryAfter("9223372036854775807", 42*time.Second)
+	if got <= 0 {
+		t.Fatalf("RespectRetryAfter(int64-max) = %v, want positive (clamp, "+
+			"not overflow wrap)", got)
+	}
+	// Sanity: an absurdly large "9999999999999" is well past maxRetryAfterSeconds
+	// and must also come out positive (clamped, not wrapped).
+	got = RespectRetryAfter("9999999999999", 42*time.Second)
+	if got <= 0 {
+		t.Fatalf("RespectRetryAfter(9999999999999) = %v, want positive", got)
+	}
+}
+
+// TestRespectRetryAfter_ParseIntBoundary_F295 pins that the migration from
+// strconv.Atoi to strconv.ParseInt(_, 10, 64) does not regress the small /
+// legitimate delta-seconds values — headers within any realistic provider
+// window still map to exact durations.
+func TestRespectRetryAfter_ParseIntBoundary_F295(t *testing.T) {
+	// Small legitimate values still map cleanly (this is what all real
+	// providers send).
+	if got := RespectRetryAfter("30", 42*time.Second); got != 30*time.Second {
+		t.Errorf("RespectRetryAfter(30) = %v, want 30s", got)
+	}
+	// A value that would overflow a 32-bit Atoi on a 32-bit target but
+	// fits in int64 is now accepted rather than falling through to the
+	// HTTP-date parse branch.
+	if got := RespectRetryAfter("3000000000", 42*time.Second); got <= 0 {
+		t.Errorf("RespectRetryAfter(3000000000) = %v, want positive "+
+			"(int64 parse, not Atoi failure)", got)
+	}
+}
+
+// TestRespectRateLimitReset_FarFutureClamped_F295 pins the sibling clamp
+// on the X-RateLimit-Reset helper: an absurdly large future epoch must
+// not produce a wait beyond time.Duration's representable range.
+func TestRespectRateLimitReset_FarFutureClamped_F295(t *testing.T) {
+	// int64-max epoch — well past any legitimate reset.
+	got := RespectRateLimitReset("9223372036854775807", 42*time.Second)
+	if got <= 0 {
+		t.Fatalf("RespectRateLimitReset(int64-max) = %v, want positive "+
+			"(clamp, not overflow wrap)", got)
+	}
+}
+
 func TestRespectRateLimitReset_Future(t *testing.T) {
 	future := time.Now().Add(4 * time.Second).Unix()
 	got := RespectRateLimitReset(fmt.Sprintf("%d", future), 42*time.Second)

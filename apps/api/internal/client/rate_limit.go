@@ -22,11 +22,21 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// maxRetryAfterSeconds caps a Retry-After delta-seconds value at the largest
+// integer that can multiply by time.Second without overflowing time.Duration
+// (an int64 nanosecond count). Header-supplied values above this — whether
+// from a hostile proxy or a misconfigured provider — are clamped to
+// maxRetryAfterSeconds seconds rather than wrapping into a negative /
+// nonsensical duration that would let waitOrDone skip the backoff wait.
+// The cap is ~292 years, well above any legitimate provider Retry-After.
+const maxRetryAfterSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // ErrRateLimitExhausted is the sentinel returned when a rate-limited request
 // exceeds MaxRetries. Callers can use errors.Is to detect it — the individual
@@ -121,15 +131,28 @@ func cryptoRandFloat64() float64 {
 // (e.g. "Wed, 21 Oct 2015 07:28:00 GMT"). Malformed / empty values fall back
 // to the supplied fallback duration. Values that resolve to a past time are
 // clamped to zero.
+//
+// F295 (M19-1 Phase D R2, Codex adjunct v2 4th continue application):
+// delta-seconds is parsed with strconv.ParseInt(int64) rather than Atoi and
+// clamped to maxRetryAfterSeconds before the * time.Second conversion. A
+// hostile proxy or misconfigured upstream that returned a syntactically
+// valid but absurdly large value (e.g. "9999999999999") would otherwise
+// overflow time.Duration into a negative / near-zero value, and waitOrDone
+// would then skip the intended backoff wait entirely — the opposite of a
+// rate-limit hardening posture. HTTP-date form is naturally bounded by
+// http.ParseTime's calendar range.
 func RespectRetryAfter(header string, fallback time.Duration) time.Duration {
 	header = strings.TrimSpace(header)
 	if header == "" {
 		return fallback
 	}
 	// delta-seconds form.
-	if secs, err := strconv.Atoi(header); err == nil {
+	if secs, err := strconv.ParseInt(header, 10, 64); err == nil {
 		if secs < 0 {
 			return 0
+		}
+		if secs > maxRetryAfterSeconds {
+			secs = maxRetryAfterSeconds
 		}
 		return time.Duration(secs) * time.Second
 	}
@@ -161,6 +184,21 @@ func RespectRateLimitReset(header string, fallback time.Duration) time.Duration 
 	epoch, err := strconv.ParseInt(header, 10, 64)
 	if err != nil {
 		return fallback
+	}
+	// F295 defensive clamp: cap the epoch to now + maxRetryAfterSeconds
+	// BEFORE handing it to time.Unix. time.Until on a far-future
+	// time.Time wraps the internal int64 nanosecond delta into a
+	// NEGATIVE time.Duration (verified: time.Until(time.Unix(MaxInt64,
+	// 0)) returns -2562047h47m16s), which without this clamp would
+	// short-circuit to the delta<0 clamp-to-zero branch below and let
+	// waitOrDone skip the intended backoff wait — the same class of
+	// failure the RespectRetryAfter F295 clamp defends against. Past-
+	// epoch clamp-to-zero from F277 initial land is preserved (F288
+	// defensive gate on tight past-epoch retry loops remains an M20+
+	// candidate).
+	nowSecs := time.Now().Unix()
+	if epoch > nowSecs+maxRetryAfterSeconds {
+		epoch = nowSecs + maxRetryAfterSeconds
 	}
 	delta := time.Until(time.Unix(epoch, 0))
 	if delta < 0 {
