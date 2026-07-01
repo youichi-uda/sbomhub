@@ -240,9 +240,14 @@ const (
 	AuditActionVexDraftRejected    = "vex_draft_rejected"
 	AuditActionVexDraftReanalysed  = "vex_draft_reanalysed"
 
-	// ResourceTypeVexDraft is the audit_logs.resource_type for any
-	// vex_draft-related row.
-	ResourceTypeVexDraft = "vex_draft"
+	// The audit_logs.resource_type wire value for every vex_draft
+	// lifecycle event lives in package model as model.ResourceVEXDraft
+	// (the anti-pattern 58 dual-list system single source of truth).
+	// This package used to declare a sibling `ResourceTypeVexDraft =
+	// "vex_draft"` duplicate; M20 R2 F302 promoted the 2 use sites to
+	// model.ResourceVEXDraft and removed the orphan constant so a
+	// future rename of the wire value cannot desync silently through a
+	// stale package-local copy.
 )
 
 // LLMCallPurposeVexTriage tags llm_calls rows produced by this runner.
@@ -1372,7 +1377,7 @@ func (r *Runner) writeAudit(ctx context.Context, tenantID uuid.UUID, userID *uui
 		TenantID:     uuidPtr(tenantID),
 		UserID:       userID,
 		Action:       action,
-		ResourceType: ResourceTypeVexDraft,
+		ResourceType: model.ResourceVEXDraft,
 		ResourceID:   &rid,
 		Details:      details,
 		IPAddress:    ipAddress,

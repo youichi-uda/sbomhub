@@ -408,7 +408,7 @@ func TestRunner_Run_HappyPath_InsertsDraftLLMCallAndAudit(t *testing.T) {
 	if a.Action != AuditActionVexDraftAIGenerated {
 		t.Errorf("audit action mismatch: got %s", a.Action)
 	}
-	if a.ResourceType != ResourceTypeVexDraft {
+	if a.ResourceType != model.ResourceVEXDraft {
 		t.Errorf("audit resource_type mismatch: got %s", a.ResourceType)
 	}
 	if a.ResourceID == nil || *a.ResourceID != d.ID {
