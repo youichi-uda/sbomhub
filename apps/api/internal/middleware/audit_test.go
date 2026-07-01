@@ -575,7 +575,7 @@ func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
 			paramNames:   nil,
 			paramVals:    nil,
 			setID:        mkUUID(),
-			wantAction:   "integration.created",
+			wantAction:   model.ActionIntegrationCreated,
 			wantResource: "integration",
 		},
 		{
@@ -585,7 +585,7 @@ func TestExtractResourceID_PostSuccessContextKey_F208(t *testing.T) {
 			paramNames:   nil,
 			paramVals:    nil,
 			setID:        mkUUID(),
-			wantAction:   "report.generated",
+			wantAction:   model.ActionReportGenerated,
 			wantResource: "report",
 		},
 
@@ -2214,12 +2214,12 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 				return model.ActionSBOMUploaded, model.ResourceSBOM
 			}
 			if strings.Contains(path, "/check") {
-				return "cli.check", "cli"
+				return model.ActionCLICheck, "cli"
 			}
 			if strings.Contains(path, "/projects") {
 				return model.ActionProjectCreated, model.ResourceProject
 			}
-			return "cli.action", "cli"
+			return model.ActionCLIAction, "cli"
 		case "GET":
 			// F242 (M16-1 fix, anti-pattern 48/51/52 CLI GET
 			// reclassify): GET /cli/projects[/:id] now classifies
@@ -2228,10 +2228,10 @@ func TestDetermineActionAndResource_CLIFamily_AllMethods_F233(t *testing.T) {
 			if strings.Contains(path, "/projects") {
 				return model.ActionProjectViewed, model.ResourceProject
 			}
-			return "cli.accessed", "cli"
+			return model.ActionCLIAccessed, "cli"
 		default:
 			// PUT / PATCH / DELETE / OPTIONS / HEAD → F206 default arm.
-			return "cli.action", "cli"
+			return model.ActionCLIAction, "cli"
 		}
 	}
 
