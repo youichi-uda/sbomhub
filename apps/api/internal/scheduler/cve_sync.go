@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
@@ -23,6 +24,85 @@ const (
 	cveSyncRateLimitKey   = 700 * time.Millisecond // ~50 requests per 30 seconds with API key
 	cveSyncResultsPerPage = 2000
 )
+
+// cveMatchBatchChunkSizeDefault is the production default for how many
+// tenants to evaluate inside a single BEGIN / COMMIT envelope in
+// matchTenantsChunked (F258, M17-3 #109).
+//
+// Horizontal replication of F234 (M15-2, vulnerability_scan.go) and F244
+// (M16-4, report_generation.go) — this is the FIRST write-heavy application
+// of the chunk-based tx split pattern in this package. F234 and F244 were
+// both read-only per-tenant eligibility enumerations; F258 flips the same
+// pooled-connection + chunked-tx shape onto a write-heavy per-(tenant, CVE)
+// matching loop. The pattern maturity is thus verified across three
+// scheduler jobs (read-only vulnerability_scan, read-only report_generation,
+// write-heavy cve_sync) — anti-pattern 55 scheduler-side discipline.
+//
+// Selection rationale — chosen 200 (smaller than F234 / F244's 500):
+//
+//   - Write-heavy per-tenant per-CVE cost: F234 / F244 issue exactly 2
+//     round-trips per tenant (SET LOCAL + one SELECT). F258 issues
+//     1 (SET LOCAL) + M * (1 SELECT + up to K INSERTs) round-trips per
+//     tenant, where M is the number of NVD CVEs fetched this tick and K
+//     is the average number of components each CVE's keywords match.
+//     Even at M=50 that's ~50x the per-tenant cost of the read-only
+//     jobs, so the chunk-hold time budget is spent much faster.
+//
+//   - Connection long-hold (upper bound): at ~2ms per per-CVE
+//     (SELECT + ON CONFLICT INSERT batch) round-trip against a local PG
+//     (F213 baseline), M=50 CVEs per tenant means 200 tenants ≈ 20s of
+//     connection hold time per chunk. That still stays well below the
+//     daily scheduler tick (24h interval, see NewCVESyncJob at
+//     main.go:1470) and leaves headroom for network jitter on managed
+//     PG (e.g. RDS) where per-round-trip latency is ~1–5ms.
+//
+//   - Tx-abort blast radius (lower bound, write-heavy specific): ANY
+//     PG-side error inside a chunk aborts the whole chunk's tx and
+//     rolls back EVERY component_vulnerabilities INSERT for the 200
+//     tenants in that chunk (they get retried on the next daily tick).
+//     Smaller chunks = smaller blast radius per failure event. At 200,
+//     a worst-case cascade (statement timeout on a runaway RLS policy,
+//     transient connection blip) skips at most 200 tenants for one
+//     tick instead of all N.
+//
+//   - Write-heavy blast-radius asymmetry vs read-only F234 / F244:
+//     rolling back N=200 tenants worth of INSERTs is a heavier
+//     operator-visible consequence than rolling back N=500 tenants
+//     worth of SELECT eligibility. That's why F258 picks 200 instead
+//     of matching F234 / F244's 500 — the blast radius is intentionally
+//     smaller for the write path. Still, the pre-F258 per-tenant tx
+//     shape already had a POISON tenant taking out that ONE tenant's
+//     entire INSERT batch, so F258's chunk shape is strictly better
+//     for pool efficiency (fewer connection acquire/release cycles)
+//     while only worsening blast radius by ~200x (chunk_size). At
+//     production N=1000+ tenant scale that trade-off is intentional —
+//     see the load-bearing docstring on matchTenantsChunked below.
+//
+//   - Round-trip overhead (envelope cost per additional chunk): each
+//     extra chunk adds one BEGIN + one COMMIT = 2 round-trips. For
+//     N=10000 (50 chunks at K=200) that's +98 round-trips over a
+//     hypothetical single-tx path — a rounding-error cost for a
+//     linear reduction in blast radius.
+//
+//   - Production tenant scale: matches the SaaS reopen plan targets
+//     (N=1000–10000) and the largest self-host manufacturer
+//     deployments. At K=200 the chunk count is 5–50, small enough
+//     that per-chunk logging / forensic tracing stays legible.
+//
+// Tests use cveMatchBatchChunkSize (the var below) to temporarily
+// override with smaller values so multi-chunk semantics can be
+// exercised without needing N=1000+ mock tenants.
+const cveMatchBatchChunkSizeDefault = 200
+
+// cveMatchBatchChunkSize is the effective chunk size used by
+// matchTenantsChunked. In production this always equals
+// cveMatchBatchChunkSizeDefault. Tests may temporarily override it
+// (with a defer-restore) to force multi-chunk behaviour with small
+// tenant fixtures. See cve_sync_perf_test.go / cve_sync_integration_test.go
+// for the pattern (analogous to eligibilityBatchChunkSize in
+// vulnerability_scan.go and reportEligibilityBatchChunkSize in
+// report_generation.go).
+var cveMatchBatchChunkSize = cveMatchBatchChunkSizeDefault
 
 // CVESyncJob fetches new/updated CVEs from NVD and matches against components.
 //
@@ -37,6 +117,23 @@ const (
 //	the right tenant. `component_vulnerabilities` is not RLS-enabled, so
 //	the link writes happen on the same tenant tx without further policy
 //	plumbing.
+//
+// F258 (M17-3 #109): the per-tenant runWithTenantTx loop was replaced
+// with a chunk-based tx split (matchTenantsChunked). Round-trip cost
+// dropped from 1 + N*(3+M) (per-tenant BEGIN + SET LOCAL + M*(SELECT +
+// INSERT batch) + COMMIT) to 1 + 2c + N*(1+M) (single pooled connection
+// + per-chunk BEGIN/COMMIT + per-tenant SET LOCAL + M*(SELECT + INSERT
+// batch)); more importantly, the pool sees exactly one lease per Run()
+// tick instead of N leases. Tx-abort blast radius trade-off: pre-F258
+// a poison tenant rolled back only that ONE tenant's INSERT batch;
+// post-F258 a poison tenant aborts the enclosing chunk's tx and rolls
+// back up to chunk_size (default 200) tenants' INSERT batches for
+// that tick (they retry on the next daily tick). This is intentional
+// — see matchTenantsChunked's docstring for the full write-heavy
+// blast-radius rationale. Horizontal replication of F234 (M15-2,
+// vulnerability_scan.go, read-only) and F244 (M16-4,
+// report_generation.go, read-only); F258 is the first write-heavy
+// application of the pattern.
 type CVESyncJob struct {
 	db         *sql.DB
 	tenantRepo *repository.TenantRepository
@@ -122,21 +219,22 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	}
 
 	// Phase 2: per-tenant matching against `components` (RLS-bound).
+	// F258 (M17-3 #109): the enumeration is now a chunk-based tx split on
+	// a single pooled connection instead of one runWithTenantTx per
+	// tenant. See matchTenantsChunked for the round-trip formula
+	// (1 + 2c + N*(1+M)) and the write-heavy blast-radius trade-off.
 	tenantIDs, terr := j.tenantRepo.ListAllIDs(ctx)
 	if terr != nil {
 		return fmt.Errorf("failed to list tenants for CVE match: %w", terr)
 	}
 
-	matchedCount := 0
-	newVulnCount := 0
-	for _, tid := range tenantIDs {
-		tMatched, tNewVulns, err := j.matchTenant(ctx, tid, cves, vulnIndex)
-		if err != nil {
-			slog.Warn("failed to match CVEs for tenant", "tenant_id", tid, "error", err)
-			continue
-		}
-		matchedCount += tMatched
-		newVulnCount += tNewVulns
+	matchedCount, newVulnCount, err := j.matchTenantsChunked(ctx, tenantIDs, cves, vulnIndex)
+	if err != nil {
+		// matchTenantsChunked returns nil unless the whole enumeration
+		// cannot proceed (e.g. Conn acquire fails). Per-chunk errors are
+		// logged internally and do NOT surface here — they aborted that
+		// chunk's tx but the loop continued with the next chunk.
+		slog.Warn("CVE match enumeration returned early", "error", err)
 	}
 
 	// Update last sync time
@@ -387,22 +485,270 @@ type cveVulnEntry struct {
 	isNew bool
 }
 
-// matchTenant runs the component-match phase for one tenant inside a single
-// RLS-pinned transaction. It returns:
-//   - matched: number of CVEs that linked to at least one component in this tenant
-//   - newVulns: number of NEW vulnerabilities (isNew && linked) for this tenant
+// matchTenantsChunked runs the component-match phase across every tenant,
+// coalesced onto one pooled connection but split across N/K chunked
+// transactions for tx-abort blast-radius containment
+// (F258, M17-3 #109).
 //
-// Holding one tx per tenant is much cheaper than one tx per (tenant, CVE)
-// — the GUC is set once, then the loop can hammer through hundreds of
-// CVEs against the same tenant's components.
-func (j *CVESyncJob) matchTenant(
+// Horizontal replication of listDueTenantsBatched (F234, M15-2,
+// vulnerability_scan.go) and listEnabledSettingsBatched (F244, M16-4,
+// report_generation.go). Same pooled-connection + chunked-tx shape, same
+// tx-abort blast-radius contract, same anti-pattern-21 sqlmock caveat
+// covered by cve_sync_integration_test.go under the `integration` build
+// tag. F258 is the FIRST write-heavy application of the pattern in this
+// package — F234 / F244 are both read-only per-tenant eligibility
+// enumerations, F258 is a per-(tenant, CVE) INSERT loop.
+//
+// Design rationale:
+//
+//	The pre-F258 implementation opened one per-tenant runWithTenantTx
+//	for the match loop, costing ~ (3 + M) round-trips per tenant where
+//	M is the number of NVD CVEs fetched this tick:
+//	  BEGIN + SET LOCAL + M * (SELECT components + ON-CONFLICT INSERT
+//	  component_vulnerabilities batch) + COMMIT.
+//	At N=1000+ tenant scale that's N round-trips of connection pool
+//	acquire/release, which competes with concurrent request-serving
+//	tenant txs for the same pool budget.
+//
+//	F258 collapses the enumeration onto ONE pool lease per Run() tick,
+//	and splits the SET LOCAL + per-CVE match loop across N/K chunked
+//	transactions:
+//
+//	   - allTenants is split into chunks of cveMatchBatchChunkSize.
+//	   - Each chunk gets its own BEGIN / per-tenant (SET LOCAL +
+//	     per-CVE (SELECT + INSERT)) loop / COMMIT.
+//	   - A PG-side error inside chunk C aborts C's tx and skips the
+//	     remaining tenants of C (they retry on the next daily tick);
+//	     the loop then opens a fresh tx for chunk C+1 and continues.
+//	   - The pooled connection is held across chunks (no reacquire),
+//	     so PG-side connection state (search_path, timezone, etc.)
+//	     stays consistent and the pool sees exactly one lease per
+//	     invocation.
+//
+// Round-trip accounting (N tenants, M CVEs per tenant, chunk_size K,
+// num_chunks c=ceil(N/K)):
+//
+//	pre-F258 (per-tenant runWithTenantTx):
+//	    1 (listAllIDs)
+//	  + N * (BEGIN + SET LOCAL + M*(SELECT + INSERT batch) + COMMIT)
+//	  = 1 + N*(3 + M)
+//
+//	F258 (chunked tx split):
+//	    1 (listAllIDs)
+//	  + c * (BEGIN + COMMIT)              = 2c
+//	  + N * (SET LOCAL)                   = N
+//	  + N * M * (SELECT + INSERT batch)   = N * M
+//	  = 1 + 2c + N*(1 + M)
+//
+//	Reduction per tenant: 2 round-trips (BEGIN + COMMIT moved from
+//	per-tenant to per-chunk). At M=50 that's ~4% of the per-tenant
+//	round-trip budget — the real F258 wins are (a) one pool lease
+//	instead of N, and (b) chunk-local blast-radius vs "per-tenant
+//	poison isolation only" pre-F258.
+//
+//	Worked examples:
+//	  N=100  M=50 K=200 c=1  -> 1 + 2*1  + 100*(1+50)  = 5103
+//	                            pre-F258 = 1 + 100*53  = 5301   (∆ = -198)
+//	  N=500  M=50 K=200 c=3  -> 1 + 2*3  + 500*(1+50)  = 25507
+//	                            pre-F258 = 1 + 500*53  = 26501  (∆ = -994)
+//	  N=1000 M=50 K=200 c=5  -> 1 + 2*5  + 1000*(1+50) = 51011
+//	                            pre-F258 = 1 + 1000*53 = 53001  (∆ = -1990)
+//
+//	The chunk envelope cost (F258 vs a hypothetical single-tx path) is
+//	exactly 2*(c-1) round-trips. Same shape as F234 / F244.
+//
+// Per-tenant error handling — F258 chunk-local blast radius:
+//
+//   - A per-(tenant, CVE) linkCVEToTenantComponents error means PG has
+//     aborted the enclosing chunk's tx (e.g. RLS denial on the
+//     components SELECT, statement timeout, connection blip, ON
+//     CONFLICT constraint violation). The chunk is rolled back — every
+//     component_vulnerabilities INSERT performed so far in this chunk
+//     is thrown away. The remaining tenants of the chunk are skipped
+//     for this tick (retried next daily tick), and the loop starts a
+//     fresh BEGIN for the next chunk.
+//   - A tenant whose components SELECT returns no matches for every CVE
+//     is not an error — matched / newVulns stay 0 for that tenant and
+//     the chunk continues.
+//   - Go-side matched / newVulns totals accumulate ACROSS chunks; per
+//     chunk they are added to the running totals only after the chunk
+//     COMMITs successfully. On rollback, that chunk's contribution is
+//     discarded so the reported totals match the durable INSERTs.
+//
+// Write-heavy blast-radius trade-off (load-bearing for operator docs):
+//
+//   - Pre-F258: a single poison tenant (RLS denial, statement timeout,
+//     etc.) rolled back only that ONE tenant's INSERT batch. Other
+//     tenants' matches were durable.
+//   - Post-F258: a single poison tenant rolls back the entire enclosing
+//     chunk's INSERT batches (up to K=200 tenants × M CVEs of INSERTs
+//     are thrown away). The affected tenants retry on the next daily
+//     tick and re-do the work.
+//   - Rationale for accepting the larger blast radius: at production
+//     N=1000+ scale the pool efficiency win (1 lease vs N leases per
+//     tick) prevents pool-exhaustion cascades that would take out
+//     ALL tenants' matches for MULTIPLE hourly ticks, which is a
+//     worse operator-visible outcome than "one chunk of 200 tenants
+//     retries next tick". K=200 (vs F234 / F244's K=500) intentionally
+//     halves the write-heavy blast radius versus what the read-only
+//     jobs use.
+//   - Operator-facing note: monitor Warn-level "CVE match chunk aborted"
+//     log lines with chunk_index for forensic tracing. A single warn
+//     per Run() = one chunk rolled back; recurring warns for the same
+//     chunk_index = a persistent poison tenant that needs investigation.
+//
+// Anti-pattern 21 (sqlmock semantics limitation, F234 heritage):
+// sqlmock does NOT model the "current transaction is aborted, commands
+// ignored until end of transaction block" semantics. The unit tests
+// exercise happy-path plus the code-side error paths, but the ACID
+// contract that a PG-side error inside chunk C aborts C's tx
+// server-side and lets chunk C+1 continue on the same pooled connection
+// with a fresh BEGIN is pinned by cve_sync_integration_test.go
+// (build tag `integration`), following the same real-PG smoke pattern
+// as F234 / F244's integration tests.
+//
+// Return values:
+//   - matched: sum over all committed chunks of per-tenant CVEs that
+//     linked to at least one component.
+//   - newVulns: sum over all committed chunks of per-tenant CVEs where
+//     the underlying vulnerabilities row was newly created this tick.
+//   - err: non-nil ONLY when the whole enumeration cannot proceed
+//     (e.g. j.db.Conn(ctx) fails). Per-chunk aborts are logged and
+//     absorbed — the return err stays nil so the caller keeps the
+//     partial-progress totals.
+func (j *CVESyncJob) matchTenantsChunked(
 	ctx context.Context,
-	tenantID uuid.UUID,
+	tenantIDs []uuid.UUID,
 	cves []CVEInfo,
 	vulnIndex map[string]cveVulnEntry,
 ) (matched, newVulns int, err error) {
-	err = runWithTenantTx(ctx, j.db, tenantID, func(txCtx context.Context, _ *sql.Tx) error {
-		q := database.Querier(txCtx, j.db)
+	if len(tenantIDs) == 0 {
+		return 0, 0, nil
+	}
+
+	conn, cErr := j.db.Conn(ctx)
+	if cErr != nil {
+		return 0, 0, fmt.Errorf("scheduler: acquire pooled conn for CVE match batch: %w", cErr)
+	}
+	defer conn.Close()
+
+	chunkSize := cveMatchBatchChunkSize
+	if chunkSize <= 0 {
+		// Defensive: a mis-set test override should not divide by zero
+		// or spin forever. Fall back to the production default.
+		chunkSize = cveMatchBatchChunkSizeDefault
+	}
+
+	numChunks := (len(tenantIDs) + chunkSize - 1) / chunkSize
+
+	for chunkIndex := 0; chunkIndex < numChunks; chunkIndex++ {
+		start := chunkIndex * chunkSize
+		end := start + chunkSize
+		if end > len(tenantIDs) {
+			end = len(tenantIDs)
+		}
+		chunk := tenantIDs[start:end]
+
+		chunkMatched, chunkNewVulns, chunkErr := j.matchTenantsChunk(
+			ctx, conn, chunkIndex, chunk, cves, vulnIndex,
+		)
+		// A chunk-level error is NOT fatal to the whole tick under F258 —
+		// we log + move on so subsequent chunks still get evaluated.
+		// matchTenantsChunk has already discarded any per-tenant counters
+		// from the aborted chunk (returns 0, 0 on rollback).
+		if chunkErr != nil {
+			slog.Warn("scheduler: CVE match chunk aborted, continuing with next chunk (F258)",
+				"chunk_index", chunkIndex,
+				"chunk_size", len(chunk),
+				"num_chunks", numChunks,
+				"error", chunkErr,
+			)
+		}
+		matched += chunkMatched
+		newVulns += chunkNewVulns
+	}
+
+	return matched, newVulns, nil
+}
+
+// matchTenantsChunk runs one chunk's BEGIN / per-tenant (SET LOCAL +
+// per-CVE linkCVEToTenantComponents) loop / COMMIT on the caller's pinned
+// connection (F258, M17-3 #109).
+//
+// Contract mirrors F234's evaluateEligibilityChunk (vulnerability_scan.go)
+// and F244's evaluateEnabledSettingsChunk (report_generation.go):
+//
+//   - Returns the (matched, newVulns) totals for `chunk`, respecting each
+//     tenant's components under its own RLS context.
+//
+//   - Returns (0, 0, error) if a PG-side error aborts the chunk's tx
+//     mid-loop. Because a write-heavy chunk rollback means the durable
+//     INSERT count for THIS chunk is zero, we deliberately return
+//     (0, 0) rather than partial counters — otherwise the caller's
+//     aggregate would over-count matches whose backing INSERT rolled
+//     back. This is the KEY difference from F234's read-only contract,
+//     where partial counts survive rollback because no writes happened.
+//
+//   - SET LOCAL failure on one tenant is logged + terminates the chunk
+//     with (0, 0, error) so the enclosing loop can start a fresh BEGIN
+//     for the next chunk.
+//
+//   - Per-CVE linkCVEToTenantComponents errors terminate the chunk on
+//     first error — see docstring note above for why we cannot cleanly
+//     continue after the tx is aborted server-side.
+func (j *CVESyncJob) matchTenantsChunk(
+	ctx context.Context,
+	conn *sql.Conn,
+	chunkIndex int,
+	chunk []uuid.UUID,
+	cves []CVEInfo,
+	vulnIndex map[string]cveVulnEntry,
+) (matched, newVulns int, err error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("scheduler: begin chunk %d CVE match tx: %w", chunkIndex, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Bind the tx onto ctx so linkCVEToTenantComponents (which resolves
+	// database.Querier(txCtx, ...) back to the tx) runs its SELECT +
+	// INSERT inside the chunk's tx — see F185 GUC + tx-local scoping
+	// discipline.
+	txCtx := database.WithTx(ctx, tx)
+	q := database.Querier(txCtx, j.db)
+
+	// Per-chunk counters — only added to the (matched, newVulns) return
+	// values on successful COMMIT. This mirrors the write-heavy contract
+	// above: if the chunk rolls back, its INSERTs are discarded, so its
+	// counters must also be discarded.
+	chunkMatched := 0
+	chunkNewVulns := 0
+
+	for _, tenantID := range chunk {
+		// F249-style fidelity note (F244 → F258 replication): use the
+		// outer `ctx` here to keep the SET LOCAL call literally
+		// identical to F234 vulnerability_scan.go and F244
+		// report_generation.go. `tx.ExecContext` binds to the tx
+		// receiver, not the ctx arg, so passing the outer `ctx` vs
+		// `txCtx` is behaviourally equivalent; the txCtx wrap only
+		// matters for downstream database.Querier(txCtx, ...) resolution
+		// (`q` above). Using `ctx` here preserves line-by-line
+		// replication fidelity with the sibling chunk helpers.
+		if _, sErr := tx.ExecContext(ctx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			tenantID.String(),
+		); sErr != nil {
+			slog.Warn("scheduler: failed to bind tenant GUC in chunked CVE match (F258)",
+				"chunk_index", chunkIndex, "tenant_id", tenantID, "error", sErr)
+			return 0, 0, fmt.Errorf("scheduler: chunk %d SET LOCAL failed for tenant %s: %w",
+				chunkIndex, tenantID, sErr)
+		}
+
 		for _, cve := range cves {
 			entry, ok := vulnIndex[cve.ID]
 			if !ok {
@@ -411,27 +757,36 @@ func (j *CVESyncJob) matchTenant(
 
 			linked, lerr := j.linkCVEToTenantComponents(txCtx, q, cve, entry.id)
 			if lerr != nil {
-				slog.Warn("failed to link CVE for tenant",
+				slog.Warn("scheduler: failed to link CVE for tenant in chunked CVE match (F258)",
+					"chunk_index", chunkIndex,
 					"tenant_id", tenantID,
 					"cve_id", cve.ID,
-					"error", lerr)
-				continue
+					"error", lerr,
+				)
+				return 0, 0, fmt.Errorf("scheduler: chunk %d link CVE %s for tenant %s failed: %w",
+					chunkIndex, cve.ID, tenantID, lerr)
 			}
 			if linked > 0 {
-				matched++
+				chunkMatched++
 				if entry.isNew {
-					newVulns++
+					chunkNewVulns++
 				}
 				slog.Debug("matched CVE to components",
+					"chunk_index", chunkIndex,
 					"tenant_id", tenantID,
 					"cve_id", cve.ID,
 					"components_linked", linked,
-					"is_new", entry.isNew)
+					"is_new", entry.isNew,
+				)
 			}
 		}
-		return nil
-	})
-	return matched, newVulns, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("scheduler: commit chunk %d CVE match tx: %w", chunkIndex, err)
+	}
+	committed = true
+	return chunkMatched, chunkNewVulns, nil
 }
 
 // linkCVEToTenantComponents finds tenant-scoped components matching cve.Keywords
@@ -460,7 +815,11 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 		likePatterns[i] = "%" + kw + "%"
 	}
 
-	rows, err := q.QueryContext(ctx, query, exactMatches, likePatterns)
+	// pq.Array wraps the []string args in the pq array-marshalling driver
+	// value — without this, database/sql rejects `[]string` at runtime
+	// with "unsupported type []string, a slice of string" (both against
+	// real PG via lib/pq and against sqlmock in the F258 perf test).
+	rows, err := q.QueryContext(ctx, query, pq.Array(exactMatches), pq.Array(likePatterns))
 	if err != nil {
 		return 0, fmt.Errorf("query components: %w", err)
 	}
