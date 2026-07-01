@@ -90,13 +90,20 @@ import (
 //	          replaying the external API call on the next tick,
 //	          effectively wasting the successful HTTP round-trips.
 //	      (c) The Jira / Backlog clients in apps/api/internal/client/
-//	          currently implement NO rate-limit hardening (no 429
-//	          handling, no exponential backoff, no per-connection
-//	          throttling — verified: neither client.NewJiraClient nor
-//	          client.NewBacklogClient adds backoff or a Ticker gate).
-//	          Chunking would amplify the rate-limit blast radius by
-//	          rolling back tickets that were only failed by external
-//	          throttling, without addressing the root cause.
+//	          now implement F277 rate-limit hardening (429 detection,
+//	          Retry-After / X-RateLimit-Reset respect, exponential
+//	          backoff with retry cap, and a wrapped
+//	          ErrRateLimitExhausted sentinel — landed in M19-1 via
+//	          client/rate_limit.go plus the Jira/Backlog client
+//	          integrations). Chunking would layer on top of this
+//	          hardening rather than around a client with zero
+//	          hardening. The trade-off remains net negative because
+//	          chunking still requires holding a per-chunk tx open
+//	          across per-ticket HTTP calls — each of which now
+//	          includes potential retry latency from F277 — and the
+//	          tx-timeout / rollback-cascade risks from (a)/(b) above
+//	          persist regardless of how well the client behaves under
+//	          throttling.
 //	  - Verdict: chunking would move the per-tenant blast radius
 //	    upward (from 1 tenant to K tenants) while adding a new
 //	    tx-timeout failure mode, in exchange for a marginal pool
@@ -111,11 +118,16 @@ import (
 //	      UpdateTicket batch. This is the scheduler-side analogue of
 //	      F258's collect-then-insert shape and is the correct fix if
 //	      pool pressure ever becomes measurable.
-//	  (b) Rate-limit hardening on the client side. Add 429 detection,
-//	      exponential backoff, and per-connection throttling to
-//	      client.JiraClient / client.BacklogClient. This is orthogonal
-//	      to the tx shape and is the right lever if the operational
-//	      pain is external-API throttling rather than DB pool.
+//	  (b) Rate-limit hardening on the client side. LANDED in M19-1
+//	      (F277, Phase D R2 #113): 429 detection, Retry-After /
+//	      X-RateLimit-Reset respect, exponential backoff, retry cap,
+//	      and a wrapped ErrRateLimitExhausted sentinel are shipped in
+//	      apps/api/internal/client/{jira,backlog}.go plus the shared
+//	      helper apps/api/internal/client/rate_limit.go. This is
+//	      orthogonal to the tx shape and remains the right lever if
+//	      the operational pain is external-API throttling rather than
+//	      DB pool contention — F277 is the lever, not a chunk-shape
+//	      rewrite of this scheduler.
 //	  (c) Bounded per-tenant concurrency. Introduce a goroutine
 //	      worker pool with a semaphore gate so multiple tenants'
 //	      ticket batches can progress in parallel while respecting
@@ -125,11 +137,13 @@ import (
 //	Decision recap: ticket_sync keeps the per-tenant runWithTenantTx
 //	shape. Pool pressure is negligible against I/O latency at
 //	realistic tenant scale (5-min interval × per-cycle LIMIT 100
-//	tickets × per-tenant tx acquisition/release is sparse). If M19+
-//	surfaces HTTP-latency or external-rate-limit issues, prefer
-//	alternative (a), (b), or (c) as a NEW wave. Horizontal
-//	replication of F244's chunk shape is not the right answer for
-//	this job and is closed out here.
+//	tickets × per-tenant tx acquisition/release is sparse).
+//	Alternative (b) — client-side rate-limit hardening — is LANDED
+//	in M19-1 (F277); alternatives (a) HTTP-out-of-tx and
+//	(c) bounded concurrency remain open as future waves if pool
+//	pressure or external-latency ever becomes measurable.
+//	Horizontal replication of F244's chunk shape is not the right
+//	answer for this job and is closed out here.
 //
 //	Cross-references:
 //	  - F234 vulnerability_scan.go   (read-only, K=500)
