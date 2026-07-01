@@ -126,16 +126,24 @@ var cveMatchBatchChunkSize = cveMatchBatchChunkSizeDefault
 // batch)); more importantly, the pool sees exactly one lease per Run()
 // tick instead of N leases.
 //
-// F264 (M17-3 Phase D R2 #109): the leading `+1` in both formulas is
-// the listAllIDs SELECT issued by Run() itself (see cve_sync.go Run at
-// the caller site), NOT by matchTenantsChunked. matchTenantsChunked
-// receives the pre-materialised tenant ID slice as a parameter and its
-// own cost is exactly 2c + N*(1+M). The `+1` is attributed to Run()'s
-// tenant enumeration step so that the formula composes at the Run()
-// scope — this makes the "single pool lease per Run() tick" claim
-// audit-able (listAllIDs also runs under the same pool lease as
-// matchTenantsChunked's chunked txs). See the Round-trip accounting
-// block on matchTenantsChunked for the full derivation.
+// F264 (M17-3 Phase D R2 #109) + F266 (M17-3 Phase D Codex adjunct v2
+// fix): the leading `+1` in both formulas is the listAllIDs SELECT
+// issued by Run() itself (Run() calls tenantRepo.ListAllIDs before
+// invoking matchTenantsChunked), NOT by matchTenantsChunked.
+// matchTenantsChunked receives the pre-materialised tenant ID slice as
+// a parameter and its own cost is exactly 2c + N*(1+M). Pool-lease
+// scope: ListAllIDs runs via TenantRepository.ListAllIDs → r.db.QueryContext,
+// which acquires an ephemeral pool connection (per-query lease), then
+// matchTenantsChunked acquires its OWN pinned *sql.Conn for the chunked
+// match phase. So the two phases use SEPARATE pool leases at the driver
+// level, not one shared lease. F264's initial R2 wording conflated
+// "composed at the Run() scope" (a formula-accounting convenience) with
+// "single pool lease per Run() tick" (a driver-level claim that does
+// not hold). F266 rewrites this section to keep the +1 attribution
+// while removing the incorrect single-lease claim — the win of F258 is
+// "one pinned lease across ALL chunks" (which stays true), not "one
+// lease for the entire Run() tick". See the Round-trip accounting
+// block on matchTenantsChunked for the per-chunk derivation.
 //
 // Tx-abort blast radius trade-off: pre-F258 a poison tenant rolled back
 // only that ONE tenant's INSERT batch; post-F258 a poison tenant aborts
