@@ -742,7 +742,13 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return model.ActionProjectDeleted, model.ResourceProject
 		case "GET":
-			return "project.viewed", model.ResourceProject
+			// F245 (M16-1 Phase D R2): use model.ActionProjectViewed —
+			// F242 extracted the constant precisely so the tenant GET arm
+			// and the /cli GET reclassify (audit.go L1076) reference the
+			// same symbol. Pre-F245 this site still carried the inline
+			// literal that F242's head comment (L1017-1035) claimed had
+			// already been unified.
+			return model.ActionProjectViewed, model.ResourceProject
 		}
 	}
 

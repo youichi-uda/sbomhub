@@ -1376,7 +1376,7 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 			name:         "GET /projects/:id/components",
 			method:       "GET",
 			path:         "/api/v1/projects/:id/components",
-			wantAction:   "project.viewed",
+			wantAction:   model.ActionProjectViewed,
 			wantResource: model.ResourceProject,
 		},
 
