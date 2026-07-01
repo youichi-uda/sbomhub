@@ -413,9 +413,22 @@ func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
 	}
 	tID := tenantID
 	pid := projectID
+	// F237 (M15 Phase D round 1 fix, anti-pattern 53 dual-path audit
+	// resolution): action string is sourced from model.ActionDiffGraphViewed
+	// (the middleware-side dotted constant, "diff.graph.view") so it is
+	// defined in exactly one place. Pre-F237 a local handler constant
+	// AuditActionDiffGraphView existed with the IDENTICAL literal
+	// "diff.graph.view" — both the middleware /diff branch and this
+	// handler-side audit_pair emitted that same action string on every
+	// /diff/graph render, producing a double-audit row (different
+	// resource_type — middleware wrote "diff" via model.ResourceDiff,
+	// handler wrote "sbom_diff" via diff_summary.ResourceTypeSbomDiff).
+	// F237 skips the middleware branch for the /diff/graph sub-path and
+	// deletes the local constant so this handler audit_pair is the sole
+	// emit path and the action string cannot drift between the two sites.
 	auditInput := &model.CreateAuditLogInput{
 		TenantID:     &tID,
-		Action:       ActionDiffGraphView,
+		Action:       model.ActionDiffGraphViewed,
 		ResourceType: diff_summary.ResourceTypeSbomDiff,
 		ResourceID:   &pid,
 		Details:      details,
@@ -434,11 +447,6 @@ func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, resp)
 }
-
-// ActionDiffGraphView is the audit_logs.action emitted by
-// ProjectDiffGraph on each successful render. Kept here next to the
-// handler so the constant lives with its only emitter.
-const ActionDiffGraphView = "diff.graph.view"
 
 // mapDiffExportError centralises the error → HTTP mapping shared by the
 // CSV + PDF handlers. Mirrors the ProjectDiff mapping.
