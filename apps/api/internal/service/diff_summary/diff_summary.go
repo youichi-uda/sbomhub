@@ -60,9 +60,20 @@ const (
 	// diff_summary).
 	LLMCallPurposeDiffSummary = "diff_summary"
 
-	// ResourceTypeSbomDiff is the audit_logs.resource_type for any
-	// sbom-diff-related row.
-	ResourceTypeSbomDiff = "sbom_diff"
+	// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage —
+	// handler-side ResourceType* orphan closure): the pre-F296 package-
+	// local `ResourceTypeSbomDiff = "sbom_diff"` constant lived outside
+	// the model.Resource* universe the F281 (M19-3) direction-1/
+	// direction-2 parity meta-test scans, so a rename / typo at any of
+	// the three emit sites (this file's writeSuccessAudit +
+	// writeFailedAudit and handler/diff.go /diff/graph audit_pair for
+	// F237 dual-path resolution) was compile-time invisible to the
+	// parity contract. F296 promotes the constant into model/audit.go
+	// as model.ResourceSBOMDiff (single source of truth), removes this
+	// package-local definition, and swaps the three emit sites to
+	// reference the model symbol so F281 direction-1 registration
+	// enforces parity at CI time. See model/audit.go F296 head comment
+	// for the full 3-axis full-coverage rationale.
 
 	// AuditActionAIGenerated is emitted on a successful LLM run.
 	AuditActionAIGenerated = "diff_summary_ai_generated"
@@ -733,7 +744,7 @@ func (s *Service) writeAudit(
 		TenantID:     &tenantID,
 		UserID:       req.UserID,
 		Action:       action,
-		ResourceType: ResourceTypeSbomDiff,
+		ResourceType: model.ResourceSBOMDiff,
 		ResourceID:   &req.ProjectID,
 		Details:      details,
 	}
@@ -766,7 +777,7 @@ func (s *Service) writeFailedAudit(
 		TenantID:     &tenantID,
 		UserID:       req.UserID,
 		Action:       AuditActionAIFailed,
-		ResourceType: ResourceTypeSbomDiff,
+		ResourceType: model.ResourceSBOMDiff,
 		ResourceID:   &req.ProjectID,
 		Details:      details,
 	}

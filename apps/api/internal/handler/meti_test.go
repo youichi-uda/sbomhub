@@ -453,8 +453,8 @@ func TestMetiHandler_RefreshAssessment_HappyPath_UpsertsAndAudits(t *testing.T) 
 	if h.audit.entries[0].Action != AuditActionMetiAssessmentRefreshed {
 		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, AuditActionMetiAssessmentRefreshed)
 	}
-	if h.audit.entries[0].ResourceType != ResourceTypeMetiAssessment {
-		t.Errorf("audit resource_type = %q, want %q", h.audit.entries[0].ResourceType, ResourceTypeMetiAssessment)
+	if h.audit.entries[0].ResourceType != model.ResourceMETIAssessment {
+		t.Errorf("audit resource_type = %q, want %q", h.audit.entries[0].ResourceType, model.ResourceMETIAssessment)
 	}
 }
 
@@ -1300,8 +1300,8 @@ func TestMetiHandler_ClearOverride_Success_F33(t *testing.T) {
 	if entry.Action != AuditActionMetiAssessmentOverrideCleared {
 		t.Errorf("F33: audit action = %q, want %q", entry.Action, AuditActionMetiAssessmentOverrideCleared)
 	}
-	if entry.ResourceType != ResourceTypeMetiAssessment {
-		t.Errorf("F33: audit resource_type = %q, want %q", entry.ResourceType, ResourceTypeMetiAssessment)
+	if entry.ResourceType != model.ResourceMETIAssessment {
+		t.Errorf("F33: audit resource_type = %q, want %q", entry.ResourceType, model.ResourceMETIAssessment)
 	}
 	if entry.Details["prior_override_status"] != criteria.StatusAchieved {
 		t.Errorf("F33: prior_override_status in audit details = %v, want %q", entry.Details["prior_override_status"], criteria.StatusAchieved)

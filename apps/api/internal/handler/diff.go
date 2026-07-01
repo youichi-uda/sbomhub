@@ -422,14 +422,20 @@ func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
 	// handler-side audit_pair emitted that same action string on every
 	// /diff/graph render, producing a double-audit row (different
 	// resource_type — middleware wrote "diff" via model.ResourceDiff,
-	// handler wrote "sbom_diff" via diff_summary.ResourceTypeSbomDiff).
+	// handler wrote "sbom_diff" via the pre-F296 orphan constant
+	// diff_summary.ResourceTypeSbomDiff, now model.ResourceSBOMDiff).
 	// F237 skips the middleware branch for the /diff/graph sub-path and
 	// deletes the local constant so this handler audit_pair is the sole
 	// emit path and the action string cannot drift between the two sites.
+	//
+	// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage):
+	// swapped from diff_summary.ResourceTypeSbomDiff to
+	// model.ResourceSBOMDiff so the F281 direction-1 parity meta-test
+	// enforces registry coverage on this handler-side emit at CI time.
 	auditInput := &model.CreateAuditLogInput{
 		TenantID:     &tID,
 		Action:       model.ActionDiffGraphViewed,
-		ResourceType: diff_summary.ResourceTypeSbomDiff,
+		ResourceType: model.ResourceSBOMDiff,
 		ResourceID:   &pid,
 		Details:      details,
 	}

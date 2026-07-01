@@ -248,7 +248,7 @@ func (h *SettingsDiffWebhookHandler) Update(c echo.Context) error {
 		TenantID:     &tenant,
 		UserID:       &user,
 		Action:       model.AuditActionDiffWebhookUpdated,
-		ResourceType: model.ResourceTypeDiffWebhook,
+		ResourceType: model.ResourceDiffWebhook,
 		ResourceID:   &tenant,
 		Details:      details,
 	}

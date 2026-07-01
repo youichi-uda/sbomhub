@@ -24,7 +24,6 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/diff"
-	"github.com/sbomhub/sbomhub/internal/service/diff_summary"
 )
 
 // ---------- fakes for the four repos consumed by diff.NewService ----------
@@ -538,7 +537,7 @@ func TestProjectDiffGraph_AuditFailurePropagates(t *testing.T) {
 //
 // Pinned fields:
 //   - Action       = "diff.graph.view"           (model.ActionDiffGraphViewed)
-//   - ResourceType = "sbom_diff"                 (diff_summary.ResourceTypeSbomDiff)
+//   - ResourceType = "sbom_diff"                 (model.ResourceSBOMDiff; pre-F296 was diff_summary.ResourceTypeSbomDiff)
 //   - ResourceID   = projectID
 //   - TenantID     = tenantID
 //   - Details      = { node_count, edge_count, added, removed,
@@ -587,8 +586,8 @@ func TestProjectDiffGraph_AuditRowShape(t *testing.T) {
 	if row.Action != model.ActionDiffGraphViewed {
 		t.Errorf("audit Action = %q, want %q", row.Action, model.ActionDiffGraphViewed)
 	}
-	if row.ResourceType != diff_summary.ResourceTypeSbomDiff {
-		t.Errorf("audit ResourceType = %q, want %q", row.ResourceType, diff_summary.ResourceTypeSbomDiff)
+	if row.ResourceType != model.ResourceSBOMDiff {
+		t.Errorf("audit ResourceType = %q, want %q", row.ResourceType, model.ResourceSBOMDiff)
 	}
 	if row.ResourceID == nil || *row.ResourceID != projectID {
 		t.Errorf("audit ResourceID = %v, want project %s", row.ResourceID, projectID)
@@ -716,7 +715,7 @@ func (m captureF237StringArgMatcher) Match(v driver.Value) bool {
 //     action string is defined in exactly one place.
 //
 //  3. The resource_type column is "sbom_diff" (via
-//     diff_summary.ResourceTypeSbomDiff). This is the resource_type the
+//     model.ResourceSBOMDiff, pre-F296 was diff_summary.ResourceTypeSbomDiff). This is the resource_type the
 //     handler-side audit row has ALWAYS carried — pre-F237 the
 //     middleware side wrote "diff" via model.ResourceDiff for the same
 //     request, so the double-audit rows joined onto different tables.
@@ -836,15 +835,15 @@ func TestDiffGraphHandler_Build_EmitsSingleAuditRow_F237(t *testing.T) {
 	// F237 the middleware wrote resource_type="diff" for the same
 	// request, so operators had to know which of the two rows they were
 	// reading; post-F237 only the "sbom_diff" row survives.
-	if capturedResourceType != diff_summary.ResourceTypeSbomDiff {
+	if capturedResourceType != model.ResourceSBOMDiff {
 		t.Errorf("F237 regression: audit_logs.resource_type = %q, want %q "+
-			"(handler audit_pair MUST emit diff_summary.ResourceTypeSbomDiff; "+
+			"(handler audit_pair MUST emit model.ResourceSBOMDiff; "+
 			"the middleware side was the emitter of \"diff\" and it is now "+
-			"skipped)", capturedResourceType, diff_summary.ResourceTypeSbomDiff)
+			"skipped)", capturedResourceType, model.ResourceSBOMDiff)
 	}
 	if capturedResourceType != "sbom_diff" {
 		t.Errorf("F237 regression: audit_logs.resource_type = %q, want literal "+
 			"\"sbom_diff\" — the value must survive any future rename of "+
-			"diff_summary.ResourceTypeSbomDiff", capturedResourceType)
+			"model.ResourceSBOMDiff (F296 promoted from diff_summary.ResourceTypeSbomDiff)", capturedResourceType)
 	}
 }

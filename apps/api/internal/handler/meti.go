@@ -112,13 +112,20 @@ const (
 	// details so an auditor can reconstruct who corrected what.
 	AuditActionMetiAssessmentOverrideCleared = "meti_assessment_override_cleared"
 
-	// ResourceTypeMetiAssessment is the audit_logs.resource_type for the
-	// refresh / override / override-cleared audit rows. The resource_id
-	// is the meti_assessments.id (refresh emits one row covering the
-	// whole project fan-out; override / clear emit one row per criterion
-	// the operator touched).
-	// ※要確認: lift into internal/model/audit.go alongside the action verbs.
-	ResourceTypeMetiAssessment = "meti_assessment"
+	// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage —
+	// handler-side ResourceType* orphan closure): the pre-F296 package-
+	// local `ResourceTypeMetiAssessment = "meti_assessment"` constant
+	// lived outside the model.Resource* universe the F281 (M19-3)
+	// direction-1/direction-2 parity meta-test scans, so a rename /
+	// typo at any of the three /refresh, /override, /override-cleared
+	// emit sites in this file was compile-time invisible to the parity
+	// contract. F296 promotes the constant into model/audit.go as
+	// model.ResourceMETIAssessment (single source of truth), removes
+	// this package-local definition, and swaps the three emit sites
+	// below to reference the model symbol so the F281 direction-1
+	// registration check (expectedEmit expansion) enforces parity at
+	// CI time. See model/audit.go F296 head comment for the full
+	// 3-axis full-coverage rationale.
 )
 
 // MetiAssessmentStore is the subset of *repository.MetiAssessmentsRepository
@@ -484,7 +491,7 @@ func (h *MetiHandler) RefreshAssessment(c echo.Context) error {
 		TenantID:     &tenantID,
 		UserID:       uid,
 		Action:       AuditActionMetiAssessmentRefreshed,
-		ResourceType: ResourceTypeMetiAssessment,
+		ResourceType: model.ResourceMETIAssessment,
 		ResourceID:   &pid,
 		Details:      details,
 		IPAddress:    c.RealIP(),
@@ -689,7 +696,7 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 		TenantID:     &tenantID,
 		UserID:       uid,
 		Action:       AuditActionMetiAssessmentOverridden,
-		ResourceType: ResourceTypeMetiAssessment,
+		ResourceType: model.ResourceMETIAssessment,
 		ResourceID:   &resourceID,
 		Details:      auditDetails,
 		IPAddress:    c.RealIP(),
@@ -893,7 +900,7 @@ func (h *MetiHandler) ClearOverride(c echo.Context) error {
 		TenantID:     &tenantID,
 		UserID:       uid,
 		Action:       AuditActionMetiAssessmentOverrideCleared,
-		ResourceType: ResourceTypeMetiAssessment,
+		ResourceType: model.ResourceMETIAssessment,
 		ResourceID:   &resourceID,
 		Details:      auditDetails,
 		IPAddress:    c.RealIP(),

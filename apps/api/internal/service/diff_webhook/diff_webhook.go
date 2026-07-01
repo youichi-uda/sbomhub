@@ -575,7 +575,7 @@ func (s *Service) writeAudit(
 	input := &model.CreateAuditLogInput{
 		TenantID:     &tenant,
 		Action:       action,
-		ResourceType: model.ResourceTypeDiffWebhook,
+		ResourceType: model.ResourceDiffWebhook,
 		ResourceID:   &projectID,
 		Details:      details,
 	}

@@ -989,8 +989,8 @@ func TestSBOMHandler_AutoTriggerWebhook_ThresholdExceeded(t *testing.T) {
 	if got.Action != model.AuditActionDiffWebhookAutoFired {
 		t.Errorf("audit Action = %q, want %q", got.Action, model.AuditActionDiffWebhookAutoFired)
 	}
-	if got.ResourceType != model.ResourceTypeDiffWebhook {
-		t.Errorf("audit ResourceType = %q, want %q", got.ResourceType, model.ResourceTypeDiffWebhook)
+	if got.ResourceType != model.ResourceDiffWebhook {
+		t.Errorf("audit ResourceType = %q, want %q", got.ResourceType, model.ResourceDiffWebhook)
 	}
 	if got.ResourceID == nil || *got.ResourceID != projectID {
 		t.Errorf("audit ResourceID = %v, want project %s", got.ResourceID, projectID)

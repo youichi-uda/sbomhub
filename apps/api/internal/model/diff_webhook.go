@@ -82,7 +82,21 @@ const (
 	AuditActionDiffWebhookFailed    = "diff_webhook_failed"
 	AuditActionDiffWebhookAutoFired = "diff_webhook_auto_fired"
 
-	ResourceTypeDiffWebhook = "diff_webhook"
+	// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage —
+	// handler-side ResourceType* orphan closure): the pre-F296 package-
+	// local `ResourceTypeDiffWebhook = "diff_webhook"` constant lived
+	// in the model package but OUTSIDE the model.Resource* universe
+	// the F281 (M19-3) direction-1/direction-2 parity meta-test scans,
+	// so a rename / typo at any of the three emit sites (handler/
+	// settings_diff_webhook.go, handler/sbom.go auto-fire path, and
+	// service/diff_webhook/diff_webhook.go delivery worker) was
+	// compile-time invisible to the parity contract. F296 promotes the
+	// value into audit.go as model.ResourceDiffWebhook (single source
+	// of truth in the same model.Resource* block that F281 scans),
+	// removes this definition, and swaps the three emit sites to
+	// reference the new symbol so F281 direction-1 registration
+	// enforces parity at CI time. See model/audit.go F296 head comment
+	// for the full 3-axis full-coverage rationale.
 )
 
 // DiffWebhookAutoFireStatus enumerates the auto-trigger decision

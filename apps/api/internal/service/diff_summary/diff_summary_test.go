@@ -222,8 +222,8 @@ func TestGenerate_DisabledProvider_WritesPlaceholderAndAudit(t *testing.T) {
 	if f.audit.rows[0].Action != AuditActionAIDisabled {
 		t.Errorf("audit.Action = %q, want %q", f.audit.rows[0].Action, AuditActionAIDisabled)
 	}
-	if f.audit.rows[0].ResourceType != ResourceTypeSbomDiff {
-		t.Errorf("audit.ResourceType = %q, want %q", f.audit.rows[0].ResourceType, ResourceTypeSbomDiff)
+	if f.audit.rows[0].ResourceType != model.ResourceSBOMDiff {
+		t.Errorf("audit.ResourceType = %q, want %q", f.audit.rows[0].ResourceType, model.ResourceSBOMDiff)
 	}
 }
 

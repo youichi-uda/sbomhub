@@ -473,7 +473,7 @@ func (h *SbomHandler) writeAutoFiredAudit(
 	input := &model.CreateAuditLogInput{
 		TenantID:     &tenant,
 		Action:       model.AuditActionDiffWebhookAutoFired,
-		ResourceType: model.ResourceTypeDiffWebhook,
+		ResourceType: model.ResourceDiffWebhook,
 		ResourceID:   &projectID,
 		Details:      details,
 	}
