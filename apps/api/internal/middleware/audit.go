@@ -899,20 +899,70 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		}
 	}
 
-	// CLI endpoints
+	// CLI endpoints.
+	//
+	// F233 (M15-1 fix, anti-pattern 48/51/52 universal closure for CLI
+	// family): the pre-F233 branch classified every /cli/* POST as
+	// cli.upload / cli.action / cli.check with resource_type="cli",
+	// which meant the audit row for POST /cli/upload (mints a new sbom
+	// UUID via CLIService.UploadSBOM) and POST /cli/projects (mints a
+	// new project UUID via CLIService.GetOrCreateProject) had:
+	//
+	//   * resource_type = "cli"  (no `cli` table exists to join onto)
+	//   * resource_id   = NULL   (extractResourceID had no path UUID
+	//                             to pick up, and F208 handler override
+	//                             was not published from cli.go)
+	//
+	// Post-F233 the CLI upload + project-create routes classify by the
+	// UNDERLYING resource (sbom.uploaded / sbom, project.created /
+	// project) so audit_logs.(resource_type, resource_id) matches the
+	// tenant /api/v1/projects and /api/v1/projects/:id/sbom routes.
+	// Combined with the handler-side SetAuditResourceID calls (cli.go
+	// Upload publishes the new sbom UUID; CreateProject publishes the
+	// new project UUID), the F208 override-first strategy lands the
+	// created row's UUID in resource_id — forensic joins onto
+	// sboms.id / projects.id now work whether the row was created via
+	// /api/v1/... or /cli/... .
+	//
+	// /cli/check keeps cli.check / cli because it is a transient
+	// vulnerability check (no UUID minted, nothing to join onto).
+	// GET /cli/* keeps cli.accessed / cli for the same reason.
+	//
+	// The default arm at the bottom (F206 discipline: pin the family
+	// on any future method — PUT/PATCH/DELETE/OPTIONS/HEAD — so a
+	// future CLI route addition does not fall through to the tenant
+	// branches or to the "unknown" default at the very bottom of the
+	// classifier).
 	if strings.HasPrefix(path, "/cli") {
-		resourceType = "cli"
 		switch method {
 		case "POST":
 			if strings.Contains(path, "/upload") {
-				return "cli.upload", "cli"
+				// POST /cli/upload — sbom UUID minted in the handler
+				// and published via SetAuditResourceID(c, sbom.ID).
+				return model.ActionSBOMUploaded, model.ResourceSBOM
 			}
 			if strings.Contains(path, "/check") {
+				// Transient vulnerability check, no UUID minted.
 				return "cli.check", "cli"
+			}
+			if strings.Contains(path, "/projects") {
+				// POST /cli/projects — project UUID minted in the
+				// handler and published via SetAuditResourceID(c,
+				// project.ID). Even when GetOrCreateProject returns
+				// an EXISTING project (created=false), the handler
+				// still publishes the project UUID so the audit row
+				// joins on projects.id.
+				return model.ActionProjectCreated, model.ResourceProject
 			}
 			return "cli.action", "cli"
 		case "GET":
 			return "cli.accessed", "cli"
+		default:
+			// F206 (anti-pattern 48 symmetric to F201): pin the CLI
+			// family on any future method (PUT/PATCH/DELETE/OPTIONS/
+			// HEAD) so it does not fall through to the tenant
+			// branches below (or to the generic "unknown" default).
+			return "cli.action", "cli"
 		}
 	}
 
