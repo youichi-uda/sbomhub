@@ -614,6 +614,19 @@ func TestF258_CVESyncChunkAbort_RealPG_F258(t *testing.T) {
 
 	// (e) Poison-chunk siblings have ZERO durable INSERTs (write-heavy
 	// blast radius is chunk-wide, not just poison-row).
+	//
+	// F263 (M17-3 Phase D R2 #109): loud-log the boundary case where the
+	// poison tenant lands with no chunk siblings (e.g. poison is the only
+	// tenant in its chunk under an unlucky fixture layout, or the fixture
+	// leaks state from a previous test). Pre-F263 this branch silently
+	// no-op'd, making assertion (e) invisibly vacuous — the test still
+	// "passed" while the blast-radius contract was never actually
+	// exercised. The current fixture (poisonID = seededIDs[N/2], N=1200,
+	// K=500) puts the poison in chunk 1 with ~499 siblings, but a leaky DB
+	// state or future fixture change could hit the boundary. Fixture
+	// hardening (deterministic same-chunk-sibling guarantee) is deferred
+	// to M18 because it requires reworking the poison-position selection
+	// to be chunk-boundary-aware.
 	if len(sameChunkIDs) > 0 {
 		sameComponentIDs := make([]uuid.UUID, 0, len(sameChunkIDs))
 		for _, id := range sameChunkIDs {
@@ -624,6 +637,12 @@ func TestF258_CVESyncChunkAbort_RealPG_F258(t *testing.T) {
 			t.Errorf("F258 (e) write-heavy blast radius broken: poison-chunk siblings should have 0 durable INSERTs "+
 				"(they share the aborted tx), got %d rows for %d siblings", sameRows, len(sameChunkIDs))
 		}
+	} else {
+		t.Logf("F258 (e) skipped: poison landed at chunk boundary with no siblings — " +
+			"fixture may need adjustment (poison-position vs chunk_size). " +
+			"F263 (M17-3 Phase D R2 #109): loud-logged so the vacuous-assertion " +
+			"case is not silent; deterministic same-chunk-sibling guarantee is " +
+			"deferred to M18 (see this comment block).")
 	}
 
 	// (f) matched / newVulns totals equal (before + after) * M
