@@ -399,6 +399,46 @@ const (
 	ResourceDashboard   = "dashboard"
 	ResourceMCP         = "mcp"
 	ResourceCLI         = "cli"
+
+	// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage —
+	// handler-side ResourceType* orphan closure): named constants for
+	// the three handler / service-layer emit sites that pre-F296 lived
+	// as package-local `ResourceType*` string constants outside the
+	// model.Resource* universe. Pre-F296:
+	//
+	//   * handler/meti.go carried `ResourceTypeMetiAssessment = "meti_assessment"`
+	//     used by /refresh, /override, and /override-cleared audit rows
+	//     (three handler emit sites: L487, L692, L896).
+	//   * service/diff_summary/diff_summary.go carried
+	//     `ResourceTypeSbomDiff = "sbom_diff"` used by the AI-generated /
+	//     AI-failed audit rows (two service emit sites) plus one handler
+	//     reference in handler/diff.go (the /diff/graph audit_pair, F237
+	//     dual-path resolution).
+	//   * model/diff_webhook.go carried `ResourceTypeDiffWebhook = "diff_webhook"`
+	//     used by settings_diff_webhook.go (/settings PUT), handler/sbom.go
+	//     (auto-fire path), and service/diff_webhook/diff_webhook.go
+	//     (delivery worker).
+	//
+	// F281 (M19-3) direction-2 parity contract keys on the model.Resource*
+	// symbol universe, so these three orphan constants were a documented
+	// scope-limitation gap tracked as F286 M20+ candidate — the F281
+	// meta-test could not catch a rename / typo at any of the six emit
+	// sites because the strings lived outside the symbol universe it
+	// scans. F296 closes the third axis of anti-pattern 58 coverage:
+	//
+	//   axis 1 (Action dimension, Action*)           = F271 (M18)
+	//   axis 2 (Resource dimension, middleware-side) = F281 (M19)
+	//   axis 3 (Resource dimension, handler-side)    = F296 (M20-1, THIS)
+	//
+	// The handler-side emit sites are swapped to reference these
+	// constants; the orphan `ResourceType*` package-locals are removed
+	// (single source of truth = model.Resource*), the corresponding
+	// GetAvailableResourceTypes() rows are added, and the F281
+	// expectedEmit set expands to include the three symbols so
+	// direction-1 parity is enforced at CI time.
+	ResourceMETIAssessment = "meti_assessment"
+	ResourceSBOMDiff       = "sbom_diff"
+	ResourceDiffWebhook    = "diff_webhook"
 )
 
 // CreateAuditLogInput is the input for creating an audit log
