@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service"
 )
 
 // newCtxWithParams builds a minimal echo.Context with the given path param
@@ -2506,5 +2507,416 @@ func TestPathHasChildResource_SegmentExact(t *testing.T) {
 					tc.path, tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAuditEmitRegistryParity_F271 is the emit ↔ registry parity meta-test
+// for the audit middleware classifier and the service-layer UI filter
+// dropdown registry (F271, M18-1 Phase D R2 #110, anti-pattern 58
+// candidate — dual-list drift in cross-package registries).
+//
+// F208 / F224 / F233 pinned the emit-side classifier's correctness
+// (determineActionAndResource returns the expected (action, resource)
+// pair for a fixed grid of routes). None of them pinned the parity
+// between the emit side and the UI filter dropdown registry in
+// service/audit.go::GetAvailableActions. F270 (the sibling fix in this
+// wave) discovered the failure mode: F267 extracted 23 new
+// model.Action* constants and swapped 28 emit sites to reference them,
+// but the registry-side dropdown had never been updated, so 23 verbs
+// the middleware could emit had no UI filter entry — a silent forensic
+// gap. This test locks the parity so a future wave that adds a new
+// Action* constant + emit site without registering it in the dropdown
+// fails CI here instead of silently shipping.
+//
+// Two directions:
+//
+//   (1) Emit → Registry: every middleware-classifier action must have a
+//       matching AvailableActions entry (so the UI filter can select
+//       audit_logs rows the middleware produces). A documented
+//       exception allowlist captures F256-era .viewed residuals that
+//       predate F270 and are tracked as an M19+ candidate (F275+).
+//
+//   (2) Registry → model.*: every AvailableActions entry's Action
+//       string must be non-empty and match at least one known
+//       model.Action* constant. A typo like {Action: "aipkey.updated"}
+//       inserted into the registry fails at this check.
+//
+// The "expected classifier emit set" below is hand-maintained. When a
+// future wave adds a new emit site returning a new model.Action*
+// constant, add the constant here AND to service/audit.go::
+// GetAvailableActions — both directions of this test will fail loudly
+// if either half of the pair is forgotten.
+func TestAuditEmitRegistryParity_F271(t *testing.T) {
+	// Direction 1: emit → registry. Hand-maintained set of every
+	// model.Action* constant the audit middleware's
+	// determineActionAndResource can return. Sourced by grepping
+	// `return model.Action` in apps/api/internal/middleware/audit.go
+	// and normalizing to the string values. Kept as string values (not
+	// symbol refs) so a future rename of a constant that breaks the
+	// emit ↔ registry contract still trips this test — the string is
+	// the audit_logs.action wire value the UI dropdown filter selects
+	// against, not the Go symbol.
+	expectedEmit := map[string]bool{
+		// F176 + F242 project / apikey.
+		model.ActionAPIKeyCreated:  true,
+		model.ActionAPIKeyDeleted:  true,
+		model.ActionAPIKeyViewed:   true, // F256 residual
+		model.ActionAPIKeyUpdated:  true, // F267
+		model.ActionProjectCreated: true,
+		model.ActionProjectUpdated: true,
+		model.ActionProjectDeleted: true,
+		model.ActionProjectViewed:  true,
+		// SBOM.
+		model.ActionSBOMUploaded: true,
+		model.ActionSBOMDeleted:  true,
+		model.ActionSBOMViewed:   true,
+		model.ActionSBOMUpdated:  true, // F267
+		// VEX + VEX draft.
+		model.ActionVEXCreated:                true,
+		model.ActionVEXUpdated:                true,
+		model.ActionVEXDeleted:                true,
+		model.ActionVEXListed:                 true,
+		model.ActionVEXViewed:                 true, // F256 residual
+		model.ActionVEXDraftListed:            true,
+		model.ActionVEXDraftViewed:            true,
+		model.ActionVEXDraftDecisionUpdated:   true,
+		model.ActionVEXDraftReanalysed:        true,
+		model.ActionVEXDraftCreated:           true,
+		model.ActionVEXDraftUpdated:           true, // F267
+		// CRA report.
+		model.ActionCRAReportRun:             true,
+		model.ActionCRAReportListed:          true,
+		model.ActionCRAReportViewed:          true,
+		model.ActionCRAReportDecisionUpdated: true,
+		model.ActionCRAReportReanalysed:      true,
+		model.ActionCRAReportUpdated:         true, // F267
+		// Scan.
+		model.ActionScanStarted: true,
+		model.ActionScanViewed:  true,
+		model.ActionScanStatus:  true, // F267
+		// Compliance / notifications / diff / SSVC / METI / license / evidence / checklist / visualization / public_link.
+		model.ActionComplianceChecked:      true,
+		model.ActionNotificationListed:     true,
+		model.ActionNotificationCreated:    true,
+		model.ActionNotificationUpdated:    true,
+		model.ActionNotificationDeleted:    true,
+		model.ActionNotificationViewed:     true,
+		model.ActionDiffViewed:             true,
+		model.ActionDiffSummary:            true,
+		model.ActionSSVCViewed:             true,
+		model.ActionSSVCAssessed:           true,
+		model.ActionSSVCDeleted:            true,
+		model.ActionMETIViewed:             true,
+		model.ActionMETIRefreshed:          true,
+		model.ActionMETIOverridden:         true,
+		model.ActionLicensePolicyListed:    true,
+		model.ActionLicensePolicyViewed:    true,
+		model.ActionLicensePolicyCreated:   true,
+		model.ActionLicensePolicyUpdated:   true,
+		model.ActionLicensePolicyDeleted:   true,
+		model.ActionChecklistViewed:        true,
+		model.ActionChecklistUpdated:       true,
+		model.ActionChecklistDeleted:       true,
+		model.ActionVisualizationViewed:    true,
+		model.ActionVisualizationUpdated:   true,
+		model.ActionVisualizationDeleted:   true,
+		model.ActionPublicLinkCreated:      true,
+		model.ActionPublicLinkViewed:       true,
+		model.ActionPublicLinkUpdated:      true,
+		model.ActionPublicLinkDeleted:      true,
+		// KEV / EOL.
+		model.ActionKEVViewed:  true,
+		model.ActionEOLViewed:  true,
+		model.ActionEOLChecked: true,
+		// Vulnerability.
+		model.ActionVulnerabilityListed:    true,
+		model.ActionVulnerabilityViewed:    true,
+		model.ActionVulnerabilityScanned:   true, // F267
+		model.ActionVulnerabilityCreated:   true, // F267
+		model.ActionVulnerabilityUpdated:   true, // F267
+		// Ticket.
+		model.ActionTicketCreated: true,
+		model.ActionTicketSynced:  true,
+		model.ActionTicketListed:  true,
+		model.ActionTicketViewed:  true,
+		model.ActionTicketUpdated: true,
+		model.ActionTicketDeleted: true,
+		// User.
+		model.ActionUserCreated:     true,
+		model.ActionUserUpdated:     true,
+		model.ActionUserDeleted:     true,
+		model.ActionUserInvited:     true,
+		model.ActionUserRoleChanged: true,
+		model.ActionUserViewed:      true, // F256 residual
+		// Settings / subscription / dashboard / analytics / report /
+		// integration.
+		model.ActionSettingsUpdated:         true,
+		model.ActionSettingsViewed:          true, // F256 residual
+		model.ActionSubscriptionCreated:     true, // F256 residual
+		model.ActionSubscriptionUpdated:     true, // F256 residual
+		model.ActionSubscriptionCancelled:   true, // F256 residual
+		model.ActionSubscriptionViewed:      true, // F256 residual
+		model.ActionDashboardViewed:         true, // F256 residual
+		model.ActionAnalyticsViewed:         true, // F256 residual
+		model.ActionReportViewed:            true, // F256 residual
+		model.ActionReportGenerated:         true, // F267
+		model.ActionIntegrationViewed:       true, // F256 residual
+		model.ActionIntegrationCreated:      true, // F267
+		model.ActionIntegrationUpdated:      true, // F267
+		model.ActionIntegrationDeleted:      true, // F267
+		// Search / MCP / CLI.
+		model.ActionSearchCVE:       true, // F267
+		model.ActionSearchComponent: true, // F267
+		model.ActionSearchExecuted:  true, // F267
+		model.ActionMCPAccessed:     true, // F267
+		model.ActionMCPAction:       true, // F267
+		model.ActionCLICheck:        true, // F267
+		model.ActionCLIAction:       true, // F267
+		model.ActionCLIAccessed:     true, // F267
+		// Generic-resource default-arm fallback.
+		model.ActionResourceViewed:  true, // F256-era, registered by F270 companion sweep
+		model.ActionResourceCreated: true, // F267
+		model.ActionResourceUpdated: true, // F267
+		model.ActionResourceDeleted: true, // F267
+	}
+
+	// Documented exception allowlist: verbs the middleware classifier
+	// currently emits but that predate F270 and are deferred to a
+	// future M19+ wave (F275+ candidate: "close F256-era .viewed
+	// residuals + subscription/analytics/dashboard/report/integration
+	// tenant-branch registry gap"). Adding an entry here is a
+	// deliberate opt-out — future waves should shrink this list, not
+	// grow it. Each key is the model.Action* string; the value is the
+	// F# reason for deferral.
+	//
+	// F270 registered the 23 F267 verbs, closing the M18-1-specific
+	// gap. The residuals below are the F256-era (.viewed) universe
+	// and the tenant-branch (subscription / dashboard / analytics /
+	// report.viewed / integration.viewed / apikey.viewed / vex.viewed /
+	// settings.viewed / user.viewed) sweep that F270 did not scope. A
+	// separate F275+ wave should register them and delete this
+	// allowlist entry-by-entry.
+	knownEmitNotRegistered := map[string]string{
+		model.ActionAPIKeyViewed:          "F256-era .viewed residual, F275+ candidate",
+		model.ActionVEXViewed:             "F256-era .viewed residual, F275+ candidate",
+		model.ActionSettingsViewed:        "F256-era .viewed residual, F275+ candidate",
+		model.ActionUserViewed:            "F256-era .viewed residual, F275+ candidate",
+		model.ActionSubscriptionViewed:    "F256-era .viewed residual, F275+ candidate",
+		model.ActionReportViewed:          "F256-era .viewed residual, F275+ candidate",
+		model.ActionAnalyticsViewed:       "F256-era .viewed residual, F275+ candidate",
+		model.ActionIntegrationViewed:     "F256-era .viewed residual, F275+ candidate",
+		model.ActionDashboardViewed:       "F256-era .viewed residual, F275+ candidate",
+		model.ActionSubscriptionCreated:   "tenant-branch registry gap, F275+ candidate",
+		model.ActionSubscriptionUpdated:   "tenant-branch registry gap, F275+ candidate",
+		model.ActionSubscriptionCancelled: "tenant-branch registry gap, F275+ candidate",
+	}
+
+	// Build the actual registry set.
+	registry := (&service.AuditService{}).GetAvailableActions()
+	registrySet := make(map[string]service.ActionInfo, len(registry))
+	for _, entry := range registry {
+		registrySet[entry.Action] = entry
+	}
+
+	// Direction 1: every expected classifier emit must be registered.
+	// Skip documented exceptions.
+	for action := range expectedEmit {
+		if _, ok := knownEmitNotRegistered[action]; ok {
+			continue
+		}
+		if _, ok := registrySet[action]; !ok {
+			t.Errorf("F271 direction 1 failure: middleware classifier "+
+				"emits %q but service.GetAvailableActions() does not "+
+				"register it. Either add the entry to the dropdown "+
+				"or (if the deferral is intentional) add it to "+
+				"knownEmitNotRegistered with an F# reason.", action)
+		}
+	}
+
+	// Direction 2: every registry entry must be non-empty and match
+	// one of the known model.Action* string values. This catches
+	// typos like {Action: "aipkey.updated"} at CI time.
+	knownConstants := allModelActionValues()
+	for _, entry := range registry {
+		if entry.Action == "" {
+			t.Errorf("F271 direction 2 failure: registry entry has "+
+				"empty Action field: %+v", entry)
+			continue
+		}
+		if entry.Label == "" {
+			t.Errorf("F271 direction 2 failure: registry entry has "+
+				"empty Label field: %+v", entry)
+		}
+		if entry.Category == "" {
+			t.Errorf("F271 direction 2 failure: registry entry has "+
+				"empty Category field: %+v", entry)
+		}
+		if !knownConstants[entry.Action] {
+			t.Errorf("F271 direction 2 failure: registry entry "+
+				"Action=%q does not match any known model.Action* "+
+				"constant. This is likely a typo — the emit side "+
+				"cannot produce this string.", entry.Action)
+		}
+	}
+}
+
+// allModelActionValues returns the set of every known model.Action*
+// string constant. Hand-maintained companion of the model/audit.go
+// action-constants block; a new model.Action* constant added there
+// should be listed here so the F271 direction-2 typo check can
+// recognize it as a valid registry value. Kept as string values (not
+// symbol refs) so a future rename of a constant that skips this list
+// still trips F271 loudly.
+func allModelActionValues() map[string]bool {
+	return map[string]bool{
+		// User.
+		model.ActionUserSignIn:      true,
+		model.ActionUserSignOut:     true,
+		model.ActionUserCreated:     true,
+		model.ActionUserUpdated:     true,
+		model.ActionUserDeleted:     true,
+		model.ActionUserInvited:     true,
+		model.ActionUserRoleChanged: true,
+		model.ActionUserViewed:      true,
+		// Tenant.
+		model.ActionTenantCreated: true,
+		model.ActionTenantUpdated: true,
+		model.ActionTenantDeleted: true,
+		// Project.
+		model.ActionProjectCreated: true,
+		model.ActionProjectUpdated: true,
+		model.ActionProjectDeleted: true,
+		model.ActionProjectViewed:  true,
+		// SBOM.
+		model.ActionSBOMUploaded: true,
+		model.ActionSBOMDeleted:  true,
+		model.ActionSBOMScanned:  true,
+		model.ActionSBOMViewed:   true,
+		model.ActionSBOMUpdated:  true,
+		// VEX.
+		model.ActionVEXCreated: true,
+		model.ActionVEXUpdated: true,
+		model.ActionVEXDeleted: true,
+		model.ActionVEXListed:  true,
+		model.ActionVEXViewed:  true,
+		// API key.
+		model.ActionAPIKeyCreated: true,
+		model.ActionAPIKeyDeleted: true,
+		model.ActionAPIKeyUsed:    true,
+		model.ActionAPIKeyUpdated: true,
+		model.ActionAPIKeyViewed:  true,
+		// Subscription.
+		model.ActionSubscriptionCreated:   true,
+		model.ActionSubscriptionUpdated:   true,
+		model.ActionSubscriptionCancelled: true,
+		model.ActionSubscriptionRenewed:   true,
+		model.ActionSubscriptionViewed:    true,
+		// Settings.
+		model.ActionSettingsUpdated: true,
+		model.ActionSettingsViewed:  true,
+		// LLM key.
+		model.ActionLLMKeySet:     true,
+		model.ActionLLMKeyRotated: true,
+		model.ActionLLMKeyCleared: true,
+		// CRA report.
+		model.ActionCRAReportRun:             true,
+		model.ActionCRAReportListed:          true,
+		model.ActionCRAReportViewed:          true,
+		model.ActionCRAReportDecisionUpdated: true,
+		model.ActionCRAReportReanalysed:      true,
+		model.ActionCRAReportUpdated:         true,
+		// VEX draft.
+		model.ActionVEXDraftListed:          true,
+		model.ActionVEXDraftViewed:          true,
+		model.ActionVEXDraftDecisionUpdated: true,
+		model.ActionVEXDraftReanalysed:      true,
+		model.ActionVEXDraftCreated:         true,
+		model.ActionVEXDraftUpdated:         true,
+		// Triage.
+		model.ActionTriageRun: true,
+		// Scan.
+		model.ActionScanStarted: true,
+		model.ActionScanViewed:  true,
+		model.ActionScanStatus:  true,
+		// Compliance.
+		model.ActionComplianceChecked: true,
+		// Notifications.
+		model.ActionNotificationListed:  true,
+		model.ActionNotificationCreated: true,
+		model.ActionNotificationUpdated: true,
+		model.ActionNotificationDeleted: true,
+		model.ActionNotificationViewed:  true,
+		// Diff.
+		model.ActionDiffViewed:      true,
+		model.ActionDiffSummary:     true,
+		model.ActionDiffGraphViewed: true,
+		// SSVC.
+		model.ActionSSVCViewed:   true,
+		model.ActionSSVCAssessed: true,
+		model.ActionSSVCDeleted:  true,
+		// METI.
+		model.ActionMETIViewed:     true,
+		model.ActionMETIRefreshed:  true,
+		model.ActionMETIOverridden: true,
+		// License policy.
+		model.ActionLicensePolicyListed:  true,
+		model.ActionLicensePolicyViewed:  true,
+		model.ActionLicensePolicyCreated: true,
+		model.ActionLicensePolicyUpdated: true,
+		model.ActionLicensePolicyDeleted: true,
+		// Evidence pack.
+		model.ActionEvidencePackBuilt: true,
+		// Checklist.
+		model.ActionChecklistViewed:  true,
+		model.ActionChecklistUpdated: true,
+		model.ActionChecklistDeleted: true,
+		// Visualization.
+		model.ActionVisualizationViewed:  true,
+		model.ActionVisualizationUpdated: true,
+		model.ActionVisualizationDeleted: true,
+		// Public links.
+		model.ActionPublicLinkCreated: true,
+		model.ActionPublicLinkViewed:  true,
+		model.ActionPublicLinkUpdated: true,
+		model.ActionPublicLinkDeleted: true,
+		// KEV / EOL.
+		model.ActionKEVViewed:  true,
+		model.ActionEOLViewed:  true,
+		model.ActionEOLChecked: true,
+		// Vulnerability.
+		model.ActionVulnerabilityListed:  true,
+		model.ActionVulnerabilityViewed:  true,
+		model.ActionVulnerabilityScanned: true,
+		model.ActionVulnerabilityCreated: true,
+		model.ActionVulnerabilityUpdated: true,
+		// Ticket.
+		model.ActionTicketCreated: true,
+		model.ActionTicketSynced:  true,
+		model.ActionTicketListed:  true,
+		model.ActionTicketViewed:  true,
+		model.ActionTicketUpdated: true,
+		model.ActionTicketDeleted: true,
+		// F256 residual .viewed.
+		model.ActionReportViewed:      true,
+		model.ActionAnalyticsViewed:   true,
+		model.ActionIntegrationViewed: true,
+		model.ActionDashboardViewed:   true,
+		model.ActionResourceViewed:    true,
+		// F267 new verbs.
+		model.ActionReportGenerated:    true,
+		model.ActionIntegrationCreated: true,
+		model.ActionIntegrationUpdated: true,
+		model.ActionIntegrationDeleted: true,
+		model.ActionSearchCVE:          true,
+		model.ActionSearchComponent:    true,
+		model.ActionSearchExecuted:     true,
+		model.ActionMCPAccessed:        true,
+		model.ActionMCPAction:          true,
+		model.ActionCLICheck:           true,
+		model.ActionCLIAction:          true,
+		model.ActionCLIAccessed:        true,
+		model.ActionResourceCreated:    true,
+		model.ActionResourceUpdated:    true,
+		model.ActionResourceDeleted:    true,
 	}
 }
