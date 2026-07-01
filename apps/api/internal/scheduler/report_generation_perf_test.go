@@ -51,7 +51,6 @@ package scheduler
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 	"time"
 
@@ -86,15 +85,30 @@ func reportPerfWithChunkSize(t *testing.T, n int) func() {
 // fail-fast panic in NewReportGenerationJob[Full]. The perf test still
 // only exercises listEnabledSettingsBatched (never generateReport), so a
 // minimal dummy service with only reportRepo wired is sufficient.
-func newTestReportGenJob(db *sql.DB) *ReportGenerationJob {
+//
+// F268 (M18-2 #111): pre-F268 the reportDir arg was os.TempDir() so
+// the constructor's internal os.MkdirAll had a valid target on Linux,
+// but that leaked a shared /tmp side effect out of the test. F268
+// replaces os.TempDir() with a per-test t.TempDir() so each test gets
+// its own auto-cleaned scratch dir (Go 1.15+ auto-cleanup via
+// t.Cleanup), eliminating the Docker-in-Docker / K8s pod weird-TMPDIR
+// flake potential. The signature grew a leading `t testing.TB` — the
+// broader TB accepts both *testing.T and *testing.B so a future
+// benchmark that reuses this factory drops in without a separate
+// signature. All perf-test callers already hold `t` from their own
+// TestReportGenerationChunkPerf_F244_* functions, so the rewire is
+// mechanical. Production NewReportService is not touched.
+func newTestReportGenJob(t testing.TB, db *sql.DB) *ReportGenerationJob {
+	t.Helper()
 	reportRepo := repository.NewReportRepository(db)
 	tenantRepo := repository.NewTenantRepository(db)
 	// F257: minimal dummy ReportService — same shape as
 	// newIntegrationReportGenJob so a future refactor that consolidates
-	// both factories has a single dummy-construction pattern. reportDir
-	// is os.TempDir() because NewReportService's internal os.MkdirAll
-	// errors on the empty-string path on Linux.
-	dummyReportSvc := service.NewReportService(reportRepo, nil, nil, nil, nil, nil, os.TempDir())
+	// both factories has a single dummy-construction pattern. F268
+	// (M18-2 #111): reportDir is t.TempDir() so the constructor's
+	// internal os.MkdirAll targets a per-test scratch dir with
+	// auto-cleanup, eliminating the shared /tmp side effect.
+	dummyReportSvc := service.NewReportService(reportRepo, nil, nil, nil, nil, nil, t.TempDir())
 	return NewReportGenerationJob(dummyReportSvc, reportRepo, tenantRepo, db, 1*time.Hour)
 }
 
@@ -148,7 +162,7 @@ func TestReportGenerationChunkPerf_F244_N100_SingleChunk(t *testing.T) {
 	expectReportBatchedFlow(t, newMock, tenantIDs, reportEligibilityBatchChunkSize)
 
 	newStart := time.Now()
-	newJob := newTestReportGenJob(newDB)
+	newJob := newTestReportGenJob(t, newDB)
 	newEnabled, err := newJob.listEnabledSettingsBatched(context.Background())
 	newElapsed := time.Since(newStart)
 	if err != nil {
@@ -269,7 +283,7 @@ func TestReportGenerationChunkPerf_F244_N1200_MultiChunk(t *testing.T) {
 	expectReportBatchedFlow(t, mock, tenantIDs, K)
 
 	start := time.Now()
-	j := newTestReportGenJob(db)
+	j := newTestReportGenJob(t, db)
 	enabled, err := j.listEnabledSettingsBatched(context.Background())
 	elapsed := time.Since(start)
 	if err != nil {

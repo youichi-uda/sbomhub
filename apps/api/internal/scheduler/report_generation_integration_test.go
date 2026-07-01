@@ -55,7 +55,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -290,15 +289,32 @@ func insertReportSettingsRow(t *testing.T, migDB *sql.DB, tenantID uuid.UUID, cl
 // cfg is still nil (only used by the email path in sendReportEmail).
 // If a future integration test exercises the email path, this factory
 // must also wire a real config.Config via NewReportGenerationJobFull.
-func newIntegrationReportGenJob(db *sql.DB) *ReportGenerationJob {
+//
+// F268 (M18-2 #111): pre-F268 the reportDir arg was os.TempDir() so
+// the constructor's internal os.MkdirAll had a valid target on Linux.
+// That leaked a shared /tmp side effect out of the test — a Docker-in-
+// Docker or K8s pod with a weird TMPDIR (missing, unwritable, or
+// symlinked into a per-container overlay that races with sibling
+// tests) could flake the MkdirAll or trip the isolation contract that
+// t.TempDir() guarantees. F268 replaces os.TempDir() with a per-test
+// t.TempDir() so each test gets its own auto-cleaned scratch dir with
+// zero cross-test shared state (Go 1.15+ auto-cleanup via t.Cleanup).
+// The signature grew a leading `t *testing.T` — every caller inside
+// this file already holds `t` from its own TestF244_* function, so the
+// factory rewire is mechanical. Production NewReportService is not
+// touched; that constructor's required-fields validation was already
+// hardened in M17 F257.
+func newIntegrationReportGenJob(t *testing.T, db *sql.DB) *ReportGenerationJob {
+	t.Helper()
 	reportRepo := repository.NewReportRepository(db)
 	tenantRepo := repository.NewTenantRepository(db)
 	// F257: minimal dummy ReportService — only reportRepo is wired
 	// because the enumeration path under test never calls the other
-	// repos. reportDir is os.TempDir() so the internal os.MkdirAll
-	// call in NewReportService succeeds cleanly (the empty-string
-	// path errors on Linux).
-	dummyReportSvc := service.NewReportService(reportRepo, nil, nil, nil, nil, nil, os.TempDir())
+	// repos. F268 (M18-2 #111): reportDir is t.TempDir() so the
+	// constructor's internal os.MkdirAll targets a per-test scratch
+	// dir with auto-cleanup, eliminating the shared /tmp side effect
+	// and the Docker-in-Docker / K8s pod weird-TMPDIR flake potential.
+	dummyReportSvc := service.NewReportService(reportRepo, nil, nil, nil, nil, nil, t.TempDir())
 	return NewReportGenerationJob(dummyReportSvc, reportRepo, tenantRepo, db, 1*time.Hour)
 }
 
@@ -349,7 +365,7 @@ func TestF244_ReportGenerationChunkedBatch_HappyPath_RealPG_F244(t *testing.T) {
 			N, reportEligibilityBatchChunkSize, wantChunks)
 	}
 
-	j := newIntegrationReportGenJob(appDB)
+	j := newIntegrationReportGenJob(t, appDB)
 
 	start := time.Now()
 	enabled, err := j.listEnabledSettingsBatched(context.Background())
@@ -483,7 +499,7 @@ func TestF244_ReportGenerationChunkAbort_RealPG_F244(t *testing.T) {
 	restorePolicy := installPoisonPolicyReport(t, migDB, poisonID)
 	defer restorePolicy()
 
-	j := newIntegrationReportGenJob(appDB)
+	j := newIntegrationReportGenJob(t, appDB)
 
 	start := time.Now()
 	enabled, err := j.listEnabledSettingsBatched(context.Background())
