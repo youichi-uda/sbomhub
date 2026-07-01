@@ -530,6 +530,32 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.ActionAnalyticsViewed, Label: "Analytics Viewed", Category: "analytics"},
 		{Action: model.ActionIntegrationViewed, Label: "Integration Viewed", Category: "integration"},
 		{Action: model.ActionDashboardViewed, Label: "Dashboard Viewed", Category: "dashboard"},
+
+		// F319 (M21-2 Phase D, anti-pattern 58 adjacent gap closure —
+		// handler / service-side Action dimension parity): the four
+		// AuditActionDiffWebhook* constants in model/diff_webhook.go
+		// (settings_updated / fired / failed / auto_fired) are emitted
+		// from handler/settings_diff_webhook.go (Updated), handler/
+		// sbom.go auto-fire path (AutoFired), and service/diff_webhook/
+		// diff_webhook.go delivery worker (Fired / Failed). Pre-F319
+		// none of the four were listed in GetAvailableActions() so the
+		// UI filter dropdown could not surface any audit_logs row
+		// produced by the DiffWebhook delivery pipeline — the same
+		// silent forensic gap F270/F280 closed for the middleware-emit
+		// verbs. F319 registers the four handler / service-side verbs
+		// here so the dropdown is symmetric with the Resource dimension
+		// (model.ResourceDiffWebhook, registered by F296 in
+		// GetAvailableResourceTypes()) and closes the last M20 Action
+		// dimension residual. The middleware-emit parity meta-test
+		// (F271) does not exercise these four because they are not
+		// middleware-classifier outputs; F319 companion test in
+		// middleware/audit_test.go asserts registry presence via the
+		// same GetAvailableActions() surface so a future rename /
+		// removal trips CI.
+		{Action: model.AuditActionDiffWebhookUpdated, Label: "Diff Webhook Updated", Category: "diff_webhook"},
+		{Action: model.AuditActionDiffWebhookFired, Label: "Diff Webhook Fired", Category: "diff_webhook"},
+		{Action: model.AuditActionDiffWebhookFailed, Label: "Diff Webhook Failed", Category: "diff_webhook"},
+		{Action: model.AuditActionDiffWebhookAutoFired, Label: "Diff Webhook Auto-Fired", Category: "diff_webhook"},
 	}
 }
 
