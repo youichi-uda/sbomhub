@@ -346,6 +346,33 @@ func assertSubsetWithExclusions(
 				"is stale and should be pruned.", label, k)
 		}
 	}
+	// F324 (M21 Phase D R2, completeness — bidirectional stale-exclusion
+	// detection): every exclusion entry must also refer to a provider
+	// that is genuinely NOT covered by this switch. If the switch has
+	// since been EXPANDED to cover an excluded provider (e.g. a future
+	// wave adds `case "ollama":` to apiKeyEnvCandidates or a switch arm
+	// to embeddingModelFromEnv), the exclusion entry becomes silently
+	// obsolete: the F# reason no longer applies and the caller's claim
+	// "this switch legitimately does not cover ollama" is factually
+	// wrong. Pre-F324 assertSubsetWithExclusions only caught the
+	// registry-shrink direction (a provider deleted from the registry
+	// leaves a stale exclusion), matching the F318 head docstring's
+	// four silent-drift shape claim only partially. F324 adds the
+	// switch-expansion direction so both drift shapes trip CI. The
+	// F271 shrink-pattern discipline (documented-exception allowlists
+	// should shrink over time) is enforced in both directions: an
+	// exclusion for a case the switch has since covered must be
+	// removed, mirroring the parity contract's "grow deliberately,
+	// shrink silently" rule.
+	for k := range exclusions {
+		if got[k] {
+			t.Errorf("%s: exclusion allowlist entry for provider %q "+
+				"is stale — the switch NOW covers this provider (case "+
+				"arm present in `got`), so the F# reason for excluding "+
+				"it no longer applies. Remove the exclusion entry so "+
+				"the parity contract stays factually accurate.", label, k)
+		}
+	}
 }
 
 // diffKeys returns keys in a that are not in b, sorted for stable output.
