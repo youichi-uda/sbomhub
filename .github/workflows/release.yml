@@ -61,11 +61,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          # Match apps/api/go.mod (`go 1.25.0`). Bumping go.mod must move
+          # Match apps/api/go.mod (`go 1.26.0`). Bumping go.mod must move
           # this value in lockstep — goreleaser fails the build silently
-          # with `go: go.mod requires go >= 1.25.0` if the Go toolchain
+          # with `go: go.mod requires go >= 1.26.0` if the Go toolchain
           # is older.
-          go-version: '1.25'
+          go-version: '1.26'
           cache-dependency-path: apps/api/go.sum
 
       - name: Validate operational release artifacts

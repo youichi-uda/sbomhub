@@ -19,4 +19,6 @@
 // directory the runner happens to start in.
 module github.com/sbomhub/sbomhub/tools/lint-migration-rls
 
-go 1.25
+go 1.26
+
+toolchain go1.26.4
