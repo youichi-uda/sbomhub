@@ -235,6 +235,33 @@ const (
 	// of the raw literals so a typo at the literal site fails to compile.
 	ActionTicketUpdated = "ticket.updated"
 	ActionTicketDeleted = "ticket.deleted"
+
+	// F256 (M17-1, anti-pattern 48 universal closure): named constants
+	// for the remaining <resource>.viewed dot verbs that the audit
+	// middleware still emitted as inline string literals across the
+	// tenant-level and default-arm branches. Pre-F256 twelve
+	// determineActionAndResource sites returned raw strings such as
+	// "apikey.viewed", "user.viewed", "resource.viewed", so a typo at
+	// any single site (e.g. "aipkey.viewed") was compile-time invisible
+	// — the audit_logs row would carry the misspelled verb and the UI
+	// dropdown filter (service/audit.go registry) would never surface
+	// it. F242 (project.viewed) + F245 (dedupe /projects GET arm) had
+	// already established the pattern; F256 extends the same discipline
+	// to every remaining .viewed literal so a rename cascades at compile
+	// time and typos surface as build errors, not silent audit drift.
+	// The middleware audit_test.go cases at the same verbs are also
+	// swapped to reference these constants so a test-side rename tracks
+	// the code-side rename in lockstep.
+	ActionAPIKeyViewed       = "apikey.viewed"
+	ActionVEXViewed          = "vex.viewed"
+	ActionSettingsViewed     = "settings.viewed"
+	ActionUserViewed         = "user.viewed"
+	ActionSubscriptionViewed = "subscription.viewed"
+	ActionReportViewed       = "report.viewed"
+	ActionAnalyticsViewed    = "analytics.viewed"
+	ActionIntegrationViewed  = "integration.viewed"
+	ActionDashboardViewed    = "dashboard.viewed"
+	ActionResourceViewed     = "resource.viewed"
 )
 
 // Resource type constants
