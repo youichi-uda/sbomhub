@@ -43,7 +43,7 @@
 ARG BENCH_MODE=source
 
 # ---------- builder stage (only used when BENCH_MODE=source) ----------
-FROM golang:1.25-alpine AS builder-source
+FROM golang:1.26-alpine AS builder-source
 
 WORKDIR /src
 
