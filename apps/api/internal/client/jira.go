@@ -11,23 +11,43 @@ import (
 )
 
 // JiraClient is a client for the Jira REST API
+//
+// Rate-limit hardening (F277, M19-1): every request routes through doRequest,
+// which handles HTTP 429 Too Many Requests by respecting the Retry-After header
+// (Atlassian Cloud REST API documents this in delta-seconds form) and falling
+// back to exponential backoff with full jitter. The retry loop honours the
+// caller's context.Context so long backoffs abort promptly on shutdown. See
+// developer.atlassian.com/cloud/jira/platform/rate-limiting/ for the upstream
+// contract (verified via WebFetch 2026-07-01).
 type JiraClient struct {
-	httpClient *http.Client
-	baseURL    string
-	email      string
-	apiToken   string
+	httpClient    *http.Client
+	baseURL       string
+	email         string
+	apiToken      string
+	backoffPolicy BackoffPolicy
 }
 
-// NewJiraClient creates a new Jira client
+// NewJiraClient creates a new Jira client with production-safe rate-limit
+// defaults (3 retries, 1s initial delay, 30s cap, full jitter). Use
+// WithBackoffPolicy to override for tests or aggressive callers.
 func NewJiraClient(baseURL, email, apiToken string) *JiraClient {
 	return &JiraClient{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL:  baseURL,
-		email:    email,
-		apiToken: apiToken,
+		baseURL:       baseURL,
+		email:         email,
+		apiToken:      apiToken,
+		backoffPolicy: DefaultBackoffPolicy(),
 	}
+}
+
+// WithBackoffPolicy overrides the retry cadence. Primarily used by tests to
+// shrink InitialDelay so httptest exercises complete in milliseconds. Returns
+// the receiver for chaining.
+func (c *JiraClient) WithBackoffPolicy(p BackoffPolicy) *JiraClient {
+	c.backoffPolicy = p
+	return c
 }
 
 // JiraIssue represents a Jira issue
@@ -185,44 +205,82 @@ func (c *JiraClient) TestConnection(ctx context.Context) error {
 }
 
 func (c *JiraClient) doRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
-	var reqBody io.Reader
+	// Marshal request body once; retries reuse the encoded bytes since Jira
+	// requests are idempotent from the transport's perspective (CreateIssue
+	// on a 429 has not been accepted by Atlassian so a retry is safe).
+	var encoded []byte
 	if body != nil {
-		jsonBody, err := json.Marshal(body)
+		var err error
+		encoded, err = json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("failed to marshal request body: %w", err)
 		}
-		reqBody = bytes.NewReader(jsonBody)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	// F277 (M19-1): retry loop handles HTTP 429 with Retry-After respect + full
+	// exponential backoff. attempt == 0 is the initial request; attempts 1..N
+	// are retries capped by c.backoffPolicy.MaxRetries.
+	maxRetries := c.backoffPolicy.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-
-	req.SetBasicAuth(c.email, c.apiToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("Jira API error: %d - %s", resp.StatusCode, string(respBody))
-	}
-
-	if result != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, result); err != nil {
-			return fmt.Errorf("failed to unmarshal response: %w", err)
+	var lastStatus int
+	var lastBody []byte
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var reqBody io.Reader
+		if encoded != nil {
+			reqBody = bytes.NewReader(encoded)
 		}
+
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.SetBasicAuth(c.email, c.apiToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to execute request: %w", err)
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		retryAfter := resp.Header.Get("Retry-After")
+		status := resp.StatusCode
+		resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("failed to read response: %w", readErr)
+		}
+
+		if status == http.StatusTooManyRequests {
+			lastStatus = status
+			lastBody = respBody
+			if attempt == maxRetries {
+				break
+			}
+			// Respect Retry-After when present, otherwise back off exponentially.
+			delay := RespectRetryAfter(retryAfter, c.backoffPolicy.Delay(attempt))
+			if err := waitOrDone(ctx, delay); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if status >= 400 {
+			return fmt.Errorf("Jira API error: %d - %s", status, string(respBody))
+		}
+
+		if result != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, result); err != nil {
+				return fmt.Errorf("failed to unmarshal response: %w", err)
+			}
+		}
+
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("jira: rate limit exhausted after %d retries (last status %d, body: %s): %w",
+		maxRetries, lastStatus, truncate(string(lastBody), 200), ErrRateLimitExhausted)
 }
