@@ -2939,3 +2939,226 @@ func allModelActionValues() map[string]bool {
 		model.ActionResourceDeleted:    true,
 	}
 }
+
+// TestAuditEmitResourceRegistryParity_F281 is the emit ↔ registry parity
+// meta-test for the RESOURCE dimension of the audit middleware
+// classifier and the service-layer UI filter dropdown registry (F281,
+// M19-3 Phase D R1 #114, anti-pattern 58 horizontal replication).
+//
+// F271 (M18-1 Phase D R2 #110) established this discipline on the
+// Action dimension: every model.Action* value the middleware can emit
+// must have a matching AvailableActions entry, and every entry's
+// Action string must resolve to a real model.Action* constant. F281
+// replicates the same two-direction contract on the Resource
+// dimension so the audit dual-list system — (Action, Resource) pairs
+// on the emit side, (GetAvailableActions, GetAvailableResourceTypes)
+// on the registry side — has parity completeness in both dimensions.
+// F282/F283 (M19-3 sibling) are the fixes that close the direction-1
+// gaps this test would otherwise flag: F282 added the missing
+// model.ResourceLLMConfig registry entry plus new
+// model.Resource{Report,Analytics,Integration,Search,Dashboard,MCP,CLI}
+// constants, and F283 swapped the middleware /reports, /analytics,
+// /integrations, /search, /dashboard, /mcp, /cli, /scan branches to
+// return these constants instead of the inline literals that F267/F272
+// left unclosed on the Resource side.
+//
+// Two directions (F276 factuality trade-off, same as F271):
+//
+//   (1) Emit → Registry: every middleware-classifier resource_type
+//       value must have a matching AvailableResourceTypes entry so
+//       the UI filter can select audit_logs rows the middleware
+//       produces. This test does NOT catch the case where the
+//       string value of a model.Resource* constant is renamed (both
+//       the emit side and the registry side resolve through the
+//       same symbol, so both change together). See the F276 note on
+//       expectedEmit in TestAuditEmitRegistryParity_F271 for the
+//       shared trade-off.
+//
+//   (2) Registry → model.*: every AvailableResourceTypes entry's Type
+//       string must be non-empty and match one of the known
+//       model.Resource* constants. This catches typos like
+//       {Type: "reoprt"} in the registry that no middleware branch
+//       could produce.
+//
+// The "expected classifier emit set" below is hand-maintained. When a
+// future wave adds a new emit site returning a new model.Resource*
+// constant, add the constant here AND to
+// service/audit.go::GetAvailableResourceTypes — both directions of
+// this test will fail loudly if either half of the pair is forgotten.
+//
+// Handler-side emit sites (not just middleware) are also covered: the
+// resource types the audit repository logs from handler code —
+// notably model.ResourceLLMConfig from handler/settings_llm.go — are
+// included in expectedEmit so a future handler emit site landing a
+// resource type that is not registered fails here.
+func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
+	// Direction 1: emit → registry. Hand-maintained set of every
+	// model.Resource* constant the audit middleware's
+	// determineActionAndResource can return (sourced by grepping
+	// `return model.Action*, model.Resource*` in
+	// apps/api/internal/middleware/audit.go) plus resource types
+	// emitted from handler-side audit repository logs (settings_llm.go
+	// LLMConfig). model.ResourceUnknown is intentionally EXCLUDED —
+	// it is the classifier's default-arm fallback signal for "no
+	// branch matched" and registering it in the UI dropdown would
+	// invite operators to filter on it as a legitimate resource
+	// family. Because F272 pinned it as a compile-time-checked
+	// constant, drift on the emit side is caught by symbol
+	// resolution, not by this dropdown parity contract.
+	expectedEmit := map[string]bool{
+		// Core tenant families.
+		model.ResourceUser:    true,
+		model.ResourceProject: true,
+		model.ResourceSBOM:    true,
+		model.ResourceVEX:     true,
+		model.ResourceAPIKey:  true,
+		// Tenant-branch subscription / settings.
+		model.ResourceSubscription: true,
+		model.ResourceSettings:     true,
+		// F188 project-nested child families.
+		model.ResourceCRAReport:     true,
+		model.ResourceVEXDraft:      true,
+		model.ResourceScan:          true,
+		model.ResourceCompliance:    true,
+		model.ResourceNotification:  true,
+		model.ResourceDiff:          true,
+		model.ResourceSSVC:          true,
+		model.ResourceMETI:          true,
+		model.ResourceLicensePolicy: true,
+		model.ResourceChecklist:     true,
+		model.ResourceVisualization: true,
+		model.ResourcePublicLink:    true,
+		model.ResourceKEV:           true,
+		model.ResourceEOL:           true,
+		model.ResourceVulnerability: true,
+		// F217 ticket.
+		model.ResourceTicket: true,
+		// F283 (M19-3) tenant-branch resource types swapped from
+		// inline literals to constants. These are the direction-1
+		// closure targets of this test.
+		model.ResourceReport:      true,
+		model.ResourceAnalytics:   true,
+		model.ResourceIntegration: true,
+		model.ResourceSearch:      true,
+		model.ResourceDashboard:   true,
+		model.ResourceMCP:         true,
+		model.ResourceCLI:         true,
+		// Handler-side emit: settings_llm.go logs against this
+		// resource type when a BYOK key is set / rotated / cleared.
+		// Registered in the dropdown by F282.
+		model.ResourceLLMConfig: true,
+	}
+
+	// Documented exception allowlist mirroring the F271 pattern for
+	// the Action dimension. Kept intentionally empty at F281 initial
+	// so future waves that introduce a new middleware-emitted
+	// resource type without a same-wave registry entry have a
+	// visible deferral slot (with F# reason) rather than silencing
+	// the parity contract. See F271 knownEmitNotRegistered head
+	// comment for the shrink-pattern discipline.
+	knownResourceEmitNotRegistered := map[string]string{}
+
+	// Build the actual registry set.
+	registry := (&service.AuditService{}).GetAvailableResourceTypes()
+	registrySet := make(map[string]service.ResourceTypeInfo, len(registry))
+	for _, entry := range registry {
+		registrySet[entry.Type] = entry
+	}
+
+	// Direction 1: every expected classifier emit must be registered.
+	// Skip documented exceptions.
+	for resource := range expectedEmit {
+		if _, ok := knownResourceEmitNotRegistered[resource]; ok {
+			continue
+		}
+		if _, ok := registrySet[resource]; !ok {
+			t.Errorf("F281 direction 1 failure: middleware classifier "+
+				"(or handler audit emit) produces resource_type=%q but "+
+				"service.GetAvailableResourceTypes() does not register "+
+				"it. Either add the entry to the dropdown or (if the "+
+				"deferral is intentional) add it to "+
+				"knownResourceEmitNotRegistered with an F# reason.",
+				resource)
+		}
+	}
+
+	// Direction 2: every registry entry must be non-empty and match
+	// one of the known model.Resource* string values. This catches
+	// typos like {Type: "reoprt"} at CI time.
+	knownConstants := allModelResourceValues()
+	for _, entry := range registry {
+		if entry.Type == "" {
+			t.Errorf("F281 direction 2 failure: registry entry has "+
+				"empty Type field: %+v", entry)
+			continue
+		}
+		if entry.Label == "" {
+			t.Errorf("F281 direction 2 failure: registry entry has "+
+				"empty Label field: %+v", entry)
+		}
+		if !knownConstants[entry.Type] {
+			t.Errorf("F281 direction 2 failure: registry entry "+
+				"Type=%q does not match any known model.Resource* "+
+				"constant. This is likely a typo — the emit side "+
+				"cannot produce this string.", entry.Type)
+		}
+	}
+}
+
+// allModelResourceValues returns the set of every known model.Resource*
+// string constant. Hand-maintained companion of the model/audit.go
+// resource-type block; a new model.Resource* constant added there
+// should be listed here so the F281 direction-2 typo check can
+// recognize it as a valid registry value.
+//
+// Same F276 factuality trade-off as allModelActionValues: the RHS
+// values are Go symbol references so a rename of the STRING value of
+// a model constant propagates through both this list and the registry
+// together (both change atomically, this test does not catch it).
+// What THIS test catches: a registry entry whose Type string does not
+// resolve to ANY model.Resource* constant — an inline typo or a
+// hand-typed literal that no emit site can produce.
+func allModelResourceValues() map[string]bool {
+	return map[string]bool{
+		// Core.
+		model.ResourceUser:         true,
+		model.ResourceTenant:       true,
+		model.ResourceProject:      true,
+		model.ResourceSBOM:         true,
+		model.ResourceVEX:          true,
+		model.ResourceAPIKey:       true,
+		model.ResourceSubscription: true,
+		model.ResourceSettings:     true,
+		model.ResourceLLMConfig:    true,
+		// F188 project-nested child families.
+		model.ResourceCRAReport:     true,
+		model.ResourceVEXDraft:      true,
+		model.ResourceTriage:        true,
+		model.ResourceScan:          true,
+		model.ResourceCompliance:    true,
+		model.ResourceNotification:  true,
+		model.ResourceDiff:          true,
+		model.ResourceSSVC:          true,
+		model.ResourceMETI:          true,
+		model.ResourceLicensePolicy: true,
+		model.ResourceEvidencePack:  true,
+		model.ResourceChecklist:     true,
+		model.ResourceVisualization: true,
+		model.ResourcePublicLink:    true,
+		model.ResourceKEV:           true,
+		model.ResourceEOL:           true,
+		model.ResourceVulnerability: true,
+		// F217 ticket.
+		model.ResourceTicket: true,
+		// F272 unknown default-arm.
+		model.ResourceUnknown: true,
+		// F282 tenant-branch resource types.
+		model.ResourceReport:      true,
+		model.ResourceAnalytics:   true,
+		model.ResourceIntegration: true,
+		model.ResourceSearch:      true,
+		model.ResourceDashboard:   true,
+		model.ResourceMCP:         true,
+		model.ResourceCLI:         true,
+	}
+}
