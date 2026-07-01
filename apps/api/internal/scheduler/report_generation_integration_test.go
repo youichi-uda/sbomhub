@@ -55,6 +55,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service"
 )
 
 // schedIntEnvReport wraps the shared schedIntEnv helper so the naming is
@@ -264,14 +266,40 @@ func insertReportSettingsRow(t *testing.T, migDB *sql.DB, tenantID uuid.UUID, cl
 	}
 }
 
-// newIntegrationReportGenJob wires a ReportGenerationJob with only the
-// dependencies listEnabledSettingsBatched needs. reportService is nil
-// (never called by the enumeration path) and cfg is nil (only used by
-// the email path). If those change, this factory must too.
+// newIntegrationReportGenJob wires a ReportGenerationJob with the
+// dependencies listEnabledSettingsBatched needs, plus a minimal dummy
+// ReportService so the F257 (M17-2 #108) production factory-level
+// required-fields validation is satisfied.
+//
+// F257 hardening (M17-2 #108): pre-F257 this factory passed a nil
+// reportService because the enumeration path never called
+// reportService methods, so nil silently worked. That was flagged
+// as factory brittleness in the M16 F244 R1 review (finding F251):
+// any future evolution of listEnabledSettingsBatched /
+// listDueSettingsBatched that adds a reportService call would
+// nil-panic *silently under -tags=integration* while unit tests kept
+// passing. F257 replaces the silent-nil with a fail-fast panic in
+// NewReportGenerationJob[Full], so this integration factory now wires
+// a minimal dummy *service.ReportService with the least-viable set of
+// dependencies (only *repository.ReportRepository is needed for
+// GetSettings / UpsertSettings, the rest are nil since the
+// enumeration path does not touch them). If a future integration
+// test drives the generate path, upgrade the dummy service here to a
+// real one wired against the full repository set.
+//
+// cfg is still nil (only used by the email path in sendReportEmail).
+// If a future integration test exercises the email path, this factory
+// must also wire a real config.Config via NewReportGenerationJobFull.
 func newIntegrationReportGenJob(db *sql.DB) *ReportGenerationJob {
 	reportRepo := repository.NewReportRepository(db)
 	tenantRepo := repository.NewTenantRepository(db)
-	return NewReportGenerationJob(nil, reportRepo, tenantRepo, db, 1*time.Hour)
+	// F257: minimal dummy ReportService — only reportRepo is wired
+	// because the enumeration path under test never calls the other
+	// repos. reportDir is os.TempDir() so the internal os.MkdirAll
+	// call in NewReportService succeeds cleanly (the empty-string
+	// path errors on Linux).
+	dummyReportSvc := service.NewReportService(reportRepo, nil, nil, nil, nil, nil, os.TempDir())
+	return NewReportGenerationJob(dummyReportSvc, reportRepo, tenantRepo, db, 1*time.Hour)
 }
 
 // TestF244_ReportGenerationChunkedBatch_HappyPath_RealPG_F244 runs

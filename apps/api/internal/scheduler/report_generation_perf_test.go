@@ -51,6 +51,7 @@ package scheduler
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 
@@ -58,6 +59,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service"
 )
 
 // reportPerfWithChunkSize temporarily overrides the package-level
@@ -72,13 +74,28 @@ func reportPerfWithChunkSize(t *testing.T, n int) func() {
 }
 
 // newTestReportGenJob wires the minimum ReportGenerationJob dependencies
-// needed to exercise listEnabledSettingsBatched. reportService is nil
-// because the perf test never triggers generateReport — only the
-// enumeration path is under test.
+// needed to exercise listEnabledSettingsBatched, plus a minimal dummy
+// ReportService so the F257 (M17-2 #108) production factory-level
+// required-fields validation is satisfied.
+//
+// F257 hardening (M17-2 #108): pre-F257 this factory passed a nil
+// reportService because the enumeration path never called reportService
+// methods. See newIntegrationReportGenJob in
+// report_generation_integration_test.go for the full rationale on why
+// silent-nil was flagged as factory brittleness and replaced with a
+// fail-fast panic in NewReportGenerationJob[Full]. The perf test still
+// only exercises listEnabledSettingsBatched (never generateReport), so a
+// minimal dummy service with only reportRepo wired is sufficient.
 func newTestReportGenJob(db *sql.DB) *ReportGenerationJob {
 	reportRepo := repository.NewReportRepository(db)
 	tenantRepo := repository.NewTenantRepository(db)
-	return NewReportGenerationJob(nil, reportRepo, tenantRepo, db, 1*time.Hour)
+	// F257: minimal dummy ReportService — same shape as
+	// newIntegrationReportGenJob so a future refactor that consolidates
+	// both factories has a single dummy-construction pattern. reportDir
+	// is os.TempDir() because NewReportService's internal os.MkdirAll
+	// errors on the empty-string path on Linux.
+	dummyReportSvc := service.NewReportService(reportRepo, nil, nil, nil, nil, nil, os.TempDir())
+	return NewReportGenerationJob(dummyReportSvc, reportRepo, tenantRepo, db, 1*time.Hour)
 }
 
 // TestReportGenerationChunkPerf_F244_N100_SingleChunk pins the F244
