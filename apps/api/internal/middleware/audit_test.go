@@ -2698,6 +2698,26 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.ActionResourceCreated: true, // F267
 		model.ActionResourceUpdated: true, // F267
 		model.ActionResourceDeleted: true, // F267
+		// F319 (M21-2 Phase D, anti-pattern 58 adjacent gap closure —
+		// handler / service-side Action coverage): the four
+		// AuditActionDiffWebhook* constants are emitted from
+		// handler/settings_diff_webhook.go (Updated), handler/sbom.go
+		// auto-fire path (AutoFired), and service/diff_webhook/
+		// diff_webhook.go delivery worker (Fired / Failed) — none
+		// are middleware-classifier outputs but the F281 (Resource
+		// dimension) sibling expanded its expectedEmit to include
+		// handler-side symbols after F285 discovered under-coverage;
+		// F319 applies the same discipline to the Action dimension.
+		// GetAvailableActions() registers all four (F319 sibling fix
+		// in service/audit.go); this expectedEmit addition makes the
+		// F271 direction-1 loop verify that registration continues
+		// to exist so a future removal from GetAvailableActions()
+		// trips CI here rather than silently disappearing from the
+		// UI filter dropdown.
+		model.AuditActionDiffWebhookUpdated:   true, // F319 handler-side
+		model.AuditActionDiffWebhookFired:     true, // F319 service-side
+		model.AuditActionDiffWebhookFailed:    true, // F319 service-side
+		model.AuditActionDiffWebhookAutoFired: true, // F319 handler-side
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
@@ -2937,6 +2957,17 @@ func allModelActionValues() map[string]bool {
 		model.ActionResourceCreated:    true,
 		model.ActionResourceUpdated:    true,
 		model.ActionResourceDeleted:    true,
+		// F319 (M21-2 Phase D): DiffWebhook handler / service-side
+		// emit constants live in model/diff_webhook.go rather than
+		// model/audit.go, but they are model.* package symbols and
+		// the F271 direction-2 typo check must recognize them as
+		// valid registry values. GetAvailableActions() references
+		// these symbols directly (F319 sibling fix), so this list
+		// must include them for direction-2 to pass.
+		model.AuditActionDiffWebhookUpdated:   true,
+		model.AuditActionDiffWebhookFired:     true,
+		model.AuditActionDiffWebhookFailed:    true,
+		model.AuditActionDiffWebhookAutoFired: true,
 	}
 }
 
