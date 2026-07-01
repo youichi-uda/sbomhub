@@ -328,7 +328,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			// the bare switch above would otherwise fall through to the
 			// /projects branch on a future PUT route. Pin the resource
 			// here so any new PUT lands as apikey, not as project.
-			return "apikey.updated", model.ResourceAPIKey
+			return model.ActionAPIKeyUpdated, model.ResourceAPIKey
 		}
 	}
 
@@ -357,7 +357,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				// resource here so a future DELETE / OPTIONS / etc.
 				// route on /projects/:id/cra-reports lands as
 				// cra_report.* and not as project.<verb>.
-				return "cra_report.updated", model.ResourceCRAReport
+				return model.ActionCRAReportUpdated, model.ResourceCRAReport
 			}
 		}
 		// VEX drafts (Wave M1-5). Segment-distinct from /vex so order
@@ -378,7 +378,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				// resource here so a future DELETE / OPTIONS / etc.
 				// route on /projects/:id/vex-drafts lands as
 				// vex_draft.* and not as project.<verb>.
-				return "vex_draft.updated", model.ResourceVEXDraft
+				return model.ActionVEXDraftUpdated, model.ResourceVEXDraft
 			}
 		}
 		// Triage runs (Wave M1-4). POST /projects/:id/triage/run mints a
@@ -696,7 +696,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				// resource on any future method (PUT/PATCH replace,
 				// OPTIONS preflight) so it does not fall through to
 				// project.<verb>.
-				return "sbom.updated", model.ResourceSBOM
+				return model.ActionSBOMUpdated, model.ResourceSBOM
 			}
 		}
 		// Vulnerabilities (project-nested). Must come AFTER the /ssvc
@@ -706,11 +706,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			switch method {
 			case "POST":
 				if strings.Contains(path, "/scan") {
-					return "vulnerability.scanned", model.ResourceVulnerability
+					return model.ActionVulnerabilityScanned, model.ResourceVulnerability
 				}
-				return "vulnerability.created", model.ResourceVulnerability
+				return model.ActionVulnerabilityCreated, model.ResourceVulnerability
 			case "PUT", "PATCH":
-				return "vulnerability.updated", model.ResourceVulnerability
+				return model.ActionVulnerabilityUpdated, model.ResourceVulnerability
 			case "GET":
 				if strings.HasSuffix(path, "/vulnerabilities") {
 					return model.ActionVulnerabilityListed, model.ResourceVulnerability
@@ -721,7 +721,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				// vulnerability resource on any future method (DELETE,
 				// OPTIONS) so it does not fall through to
 				// project.<verb>.
-				return "vulnerability.updated", model.ResourceVulnerability
+				return model.ActionVulnerabilityUpdated, model.ResourceVulnerability
 			}
 		}
 	}
@@ -839,7 +839,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		resourceType = "report"
 		switch method {
 		case "POST":
-			return "report.generated", "report"
+			return model.ActionReportGenerated, "report"
 		case "GET":
 			return model.ActionReportViewed, "report"
 		}
@@ -868,11 +868,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		resourceType = "integration"
 		switch method {
 		case "POST":
-			return "integration.created", "integration"
+			return model.ActionIntegrationCreated, "integration"
 		case "PUT", "PATCH":
-			return "integration.updated", "integration"
+			return model.ActionIntegrationUpdated, "integration"
 		case "DELETE":
-			return "integration.deleted", "integration"
+			return model.ActionIntegrationDeleted, "integration"
 		case "GET":
 			return model.ActionIntegrationViewed, "integration"
 		}
@@ -883,12 +883,12 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		resourceType = "search"
 		if method == "GET" {
 			if strings.Contains(path, "/cve") {
-				return "search.cve", "search"
+				return model.ActionSearchCVE, "search"
 			}
 			if strings.Contains(path, "/component") {
-				return "search.component", "search"
+				return model.ActionSearchComponent, "search"
 			}
-			return "search.executed", "search"
+			return model.ActionSearchExecuted, "search"
 		}
 	}
 
@@ -973,11 +973,11 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		switch method {
 		case "POST":
 			if strings.Contains(path, "/scan") {
-				return "vulnerability.scanned", model.ResourceVulnerability
+				return model.ActionVulnerabilityScanned, model.ResourceVulnerability
 			}
-			return "vulnerability.created", model.ResourceVulnerability
+			return model.ActionVulnerabilityCreated, model.ResourceVulnerability
 		case "PUT", "PATCH":
-			return "vulnerability.updated", model.ResourceVulnerability
+			return model.ActionVulnerabilityUpdated, model.ResourceVulnerability
 		case "GET":
 			return model.ActionVulnerabilityViewed, model.ResourceVulnerability
 		}
@@ -987,10 +987,10 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	if strings.HasPrefix(path, "/mcp") {
 		resourceType = "mcp"
 		if method == "GET" {
-			return "mcp.accessed", "mcp"
+			return model.ActionMCPAccessed, "mcp"
 		}
 		if method == "POST" {
-			return "mcp.action", "mcp"
+			return model.ActionMCPAction, "mcp"
 		}
 	}
 
@@ -1064,7 +1064,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			}
 			if strings.Contains(path, "/check") {
 				// Transient vulnerability check, no UUID minted.
-				return "cli.check", "cli"
+				return model.ActionCLICheck, "cli"
 			}
 			if strings.Contains(path, "/projects") {
 				// POST /cli/projects — project UUID minted in the
@@ -1075,7 +1075,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				// joins on projects.id.
 				return model.ActionProjectCreated, model.ResourceProject
 			}
-			return "cli.action", "cli"
+			return model.ActionCLIAction, "cli"
 		case "GET":
 			// F242 (M16-1 fix, anti-pattern 48/51/52): reclassify
 			// GET /cli/projects[/:id] to project.viewed / project so
@@ -1090,13 +1090,13 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			if strings.Contains(path, "/projects") {
 				return model.ActionProjectViewed, model.ResourceProject
 			}
-			return "cli.accessed", "cli"
+			return model.ActionCLIAccessed, "cli"
 		default:
 			// F206 (anti-pattern 48 symmetric to F201): pin the CLI
 			// family on any future method (PUT/PATCH/DELETE/OPTIONS/
 			// HEAD) so it does not fall through to the tenant
 			// branches below (or to the generic "unknown" default).
-			return "cli.action", "cli"
+			return model.ActionCLIAction, "cli"
 		}
 	}
 
@@ -1109,16 +1109,24 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 			// the model.ActionAPIKey* / model.ActionCLI* / model.ActionMCP*
 			// family, but the L426 project-nested scan branch already used
 			// the constant while this tenant-scoped fallback still had the
-			// inline literal — F259 closes that asymmetry. The 22 other
-			// verb-family inline-literal cases (apikey.updated,
-			// cra_report.updated, vex_draft.updated, sbom.updated,
-			// vulnerability.*, integration.*, resource.*, search.*, mcp.*,
-			// cli.*, scan.status, report.generated) are deferred to M18
-			// because they need new model.* constants added first.
+			// inline literal — F259 closes that asymmetry.
+			//
+			// F267 (M18-1, anti-pattern 48 universe universal closure
+			// completion): the 22 other verb-family cases that F259
+			// deferred to M18 (apikey.updated, cra_report.updated,
+			// vex_draft.updated, sbom.updated, vulnerability.*,
+			// integration.*, resource.*, search.*, mcp.*, cli.*,
+			// scan.status, report.generated — 28 middleware sites,
+			// unique 23 verbs, plus 6 audit_test.go sites) are now
+			// swapped to model.Action* constants in this same file.
+			// audit universe reaches inline-literal residual 0 for
+			// code emit (F225 promoted-literal explanation comments
+			// remain, per F225 discipline — those are docstrings, not
+			// classifier emit).
 			return model.ActionScanStarted, "scan"
 		}
 		if method == "GET" {
-			return "scan.status", "scan"
+			return model.ActionScanStatus, "scan"
 		}
 	}
 
@@ -1143,13 +1151,13 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		return model.ActionResourceViewed, "unknown"
 	}
 	if method == "POST" {
-		return "resource.created", "unknown"
+		return model.ActionResourceCreated, "unknown"
 	}
 	if method == "PUT" || method == "PATCH" {
-		return "resource.updated", "unknown"
+		return model.ActionResourceUpdated, "unknown"
 	}
 	if method == "DELETE" {
-		return "resource.deleted", "unknown"
+		return model.ActionResourceDeleted, "unknown"
 	}
 
 	return "", ""
