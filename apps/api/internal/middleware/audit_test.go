@@ -76,7 +76,7 @@ func TestDetermineActionAndResource_APIKey(t *testing.T) {
 			name:         "tenant GET /apikeys",
 			method:       "GET",
 			path:         "/api/v1/apikeys",
-			wantAction:   "apikey.viewed",
+			wantAction:   model.ActionAPIKeyViewed,
 			wantResource: model.ResourceAPIKey,
 		},
 		{
@@ -101,7 +101,7 @@ func TestDetermineActionAndResource_APIKey(t *testing.T) {
 			name:         "project GET /projects/:id/apikeys",
 			method:       "GET",
 			path:         "/api/v1/projects/:id/apikeys",
-			wantAction:   "apikey.viewed",
+			wantAction:   model.ActionAPIKeyViewed,
 			wantResource: model.ResourceAPIKey,
 		},
 		{
@@ -951,7 +951,7 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 			name:         "GET /projects/:id/vex/:vex_id (item)",
 			method:       "GET",
 			path:         "/api/v1/projects/:id/vex/:vex_id",
-			wantAction:   "vex.viewed",
+			wantAction:   model.ActionVEXViewed,
 			wantResource: model.ResourceVEX,
 		},
 		{
@@ -965,7 +965,7 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 			name:         "GET /projects/:id/vex/export",
 			method:       "GET",
 			path:         "/api/v1/projects/:id/vex/export",
-			wantAction:   "vex.viewed",
+			wantAction:   model.ActionVEXViewed,
 			wantResource: model.ResourceVEX,
 		},
 
@@ -1471,7 +1471,7 @@ func TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist(t *tes
 			name:         "GET /settings/scan (tenant settings, not project scan)",
 			method:       "GET",
 			path:         "/api/v1/settings/scan",
-			wantAction:   "settings.viewed",
+			wantAction:   model.ActionSettingsViewed,
 			wantResource: model.ResourceSettings,
 		},
 		{
@@ -1485,7 +1485,7 @@ func TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist(t *tes
 			name:         "GET /settings/scan/logs (tenant settings, not project scan)",
 			method:       "GET",
 			path:         "/api/v1/settings/scan/logs",
-			wantAction:   "settings.viewed",
+			wantAction:   model.ActionSettingsViewed,
 			wantResource: model.ResourceSettings,
 		},
 		{
