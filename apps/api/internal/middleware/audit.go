@@ -458,11 +458,50 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		if pathHasChildResource(path, "diff") ||
 			strings.HasSuffix(path, "/diff.csv") ||
 			strings.HasSuffix(path, "/diff.pdf") {
+			// F237 (M15 Phase D round 1 fix, anti-pattern 53 dual-path
+			// audit resolution — symmetric to the F236 evidence-pack
+			// resolution above). The /diff/graph sub-path is
+			// INTENTIONALLY skipped here so the outer Audit() middleware
+			// does not emit a per-request audit row for GET
+			// /projects/:id/diff/graph. Pre-F237 the branch returned
+			// (model.ActionDiffGraphViewed = "diff.graph.view",
+			// model.ResourceDiff = "diff") AND DiffHandler.ProjectDiffGraph
+			// ALSO emitted its own handler-level audit_pair row (F168
+			// audit-or-nothing semantics) with the IDENTICAL action
+			// string ("diff.graph.view", via a local handler constant
+			// AuditActionDiffGraphView) but a DIFFERENT resource_type
+			// ("sbom_diff" via diff_summary.ResourceTypeSbomDiff) —
+			// forensic `SELECT COUNT(*) FROM audit_logs WHERE
+			// action='diff.graph.view'` double-counted every render, and
+			// the two rows joined onto different tables. The handler side
+			// is the source of truth: it fails the request 500 and rolls
+			// back the TenantTx on audit write failure (F168) and carries
+			// the rich details map (node_count / edge_count / added /
+			// removed / changed / from_sbom_id / to_sbom_id) that the
+			// middleware path cannot reconstruct. Option A resolution
+			// (chosen for symmetry with F236): middleware skips, handler
+			// audit_pair remains sole emit path. The local
+			// AuditActionDiffGraphView constant is removed and the handler
+			// now references model.ActionDiffGraphViewed directly so the
+			// action string is defined in exactly one place. See
+			// docs/operations/evidence-pack-audit-migration.md for the
+			// operator-facing rationale (the same doc covers the F236 +
+			// F237 pattern — both are middleware-vs-handler dual-path
+			// resolutions to the single-row invariant).
+			//
+			// Regression pins:
+			//   - TestDetermineActionAndResource_DiffGraphSkipped_F237
+			//     (middleware/audit_test.go) asserts ("", "") return for
+			//     the diff/graph path × method matrix.
+			//   - TestDiffGraphHandler_Build_EmitsSingleAuditRow_F237
+			//     (handler/diff_test.go) asserts the handler emits exactly
+			//     one audit row with action="diff.graph.view" and
+			//     resource_type="sbom_diff".
+			if strings.HasSuffix(path, "/graph") {
+				return "", ""
+			}
 			if method == "POST" {
 				return model.ActionDiffSummary, model.ResourceDiff
-			}
-			if strings.HasSuffix(path, "/graph") {
-				return model.ActionDiffGraphViewed, model.ResourceDiff
 			}
 			return model.ActionDiffViewed, model.ResourceDiff
 		}
