@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // testJiraBackoff returns a BackoffPolicy tuned for httptest — small delays so
@@ -530,7 +531,29 @@ func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 	// verified against a body whose nested-map serialization is
 	// substantially larger and more variance-prone than a single
 	// short line.
-	runBodyReuse := func(t *testing.T, input CreateIssueInput) {
+	// runBodyReuse (F328 M21 R2 Codex 6th continue application): the
+	// optional adfExpectedText parameter carries the deepest ADF text
+	// leaf the caller expects to survive JSON round-trip on hit 1. When
+	// non-empty, the helper adds three layered assertions on top of the
+	// existing byte-equal invariant:
+	//
+	//   (a) hit-1 body decodes as valid JSON (json.Unmarshal succeeds),
+	//   (b) hit-1 body is valid UTF-8 (utf8.Valid true),
+	//   (c) the deepest ADF text leaf navigation
+	//       fields.description.content[0].content[0].text equals
+	//       adfExpectedText.
+	//
+	// This closes an assertion-scope gap the R1 F321 review found: a
+	// regression that consistently drops, normalizes, escapes
+	// incorrectly, or rewrites the ADF description on EVERY attempt
+	// would still make bytes.Equal(hit1, hit2) pass (both remain
+	// byte-identical corrupted output) yet the claimed
+	// "multi-line-Japanese + escape-runes preserved through ADF path"
+	// coverage would be silently violated. The plain-text sub-test
+	// passes "" for adfExpectedText and skips (c) since jira.go wraps
+	// plain text into the same ADF envelope but the text preservation
+	// check is redundant with (a)+bytes.Equal for the ASCII-only path.
+	runBodyReuse := func(t *testing.T, input CreateIssueInput, adfExpectedText string) {
 		t.Helper()
 		var (
 			mu           sync.Mutex
@@ -593,6 +616,70 @@ func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 				len(capturedBody[0]), capturedBody[0],
 				len(capturedBody[1]), capturedBody[1])
 		}
+
+		// F328 (M21 R2 Codex 6th continue application, test infrastructure
+		// completeness): the byte-equal check above only pins the
+		// per-attempt-fresh-reader contract (F310/F316) — it will pass
+		// even if a regression corrupts the ADF payload identically on
+		// every attempt. Layer three additional assertions when the
+		// caller supplies an ADF text expectation so a corruption that
+		// affects both attempts equally still trips CI:
+		//   (a) JSON validity of hit-1 body,
+		//   (b) UTF-8 validity of hit-1 body,
+		//   (c) deepest ADF text leaf preservation.
+		if adfExpectedText != "" {
+			if !utf8.Valid(capturedBody[0]) {
+				t.Fatalf("F328 ADF invariant: hit-1 body is not valid UTF-8 " +
+					"(the multi-line Japanese + escape-rune Description " +
+					"was corrupted through JSON encoding).")
+			}
+			var decoded map[string]interface{}
+			if err := json.Unmarshal(capturedBody[0], &decoded); err != nil {
+				t.Fatalf("F328 ADF invariant: hit-1 body is not valid JSON: %v\n"+
+					"  hit1 (%d bytes): %s",
+					err, len(capturedBody[0]), capturedBody[0])
+			}
+			fields, ok := decoded["fields"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("F328 ADF invariant: hit-1 body has no `fields` map " +
+					"(CreateIssue wire shape regression).")
+			}
+			desc, ok := fields["description"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("F328 ADF invariant: hit-1 body has no `fields.description` " +
+					"map (ADF envelope regression — jira.go:130-145).")
+			}
+			descContent, ok := desc["content"].([]interface{})
+			if !ok || len(descContent) == 0 {
+				t.Fatalf("F328 ADF invariant: hit-1 body `fields.description.content` " +
+					"is not a non-empty array (ADF envelope regression).")
+			}
+			p1, ok := descContent[0].(map[string]interface{})
+			if !ok {
+				t.Fatalf("F328 ADF invariant: hit-1 body `fields.description.content[0]` " +
+					"is not a map (ADF envelope regression).")
+			}
+			p1Content, ok := p1["content"].([]interface{})
+			if !ok || len(p1Content) == 0 {
+				t.Fatalf("F328 ADF invariant: hit-1 body `fields.description.content[0].content` " +
+					"is not a non-empty array (ADF envelope regression).")
+			}
+			text1, ok := p1Content[0].(map[string]interface{})
+			if !ok {
+				t.Fatalf("F328 ADF invariant: hit-1 body `fields.description.content[0].content[0]` " +
+					"is not a map (ADF envelope regression).")
+			}
+			gotText, _ := text1["text"].(string)
+			if gotText != adfExpectedText {
+				t.Errorf("F328 ADF text preservation gap: deepest ADF text leaf "+
+					"differs from input Description — a regression that "+
+					"drops / normalizes / escapes-incorrectly / rewrites the "+
+					"description on every attempt would still pass the "+
+					"byte-equal check above.\n"+
+					"  got:  %q\n"+
+					"  want: %q", gotText, adfExpectedText)
+			}
+		}
 	}
 
 	t.Run("plain_description", func(t *testing.T) {
@@ -603,7 +690,7 @@ func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 			Description: "F301 pins byte-equal retry payload",
 			Priority:    "High",
 			Labels:      []string{"security", "f301"},
-		})
+		}, "")
 	})
 
 	// F321 (M21-2 Phase D, F316 close): ADF nested-map path. jira.go
@@ -622,6 +709,35 @@ func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 	// byte-identical to attempt 1 even though the encoded nested-map
 	// body is now materially larger and its structure spans two
 	// levels of map nesting inside two levels of array nesting.
+	//
+	// F329 (M21 R2 Codex 6th continue application, factuality): the
+	// pre-F329 fixture omitted U+2028 and the emoji-adjacent rune the
+	// docstring above advertised — the shipped stressor set was
+	// Japanese + ", \, /, \n only. F329 broadens the fixture to match
+	// the docstring so both the F328 text-preservation assertion and
+	// the docstring's stressor claims stay factually aligned; a
+	// forensic reader auditing what THIS test actually pins can grep
+	// the fixture and find every advertised rune present.
+	//
+	// F328 (M21 R2 Codex 6th continue application, completeness): the
+	// third argument to runBodyReuse is the deepest ADF text leaf the
+	// helper asserts survived the JSON round-trip on hit 1 (see
+	// runBodyReuse head comment for the layered assertions).
+	adfDescription := "F316 pins ADF nested-map retry:\n" +
+		"CVE-2025-0001 脆弱性の詳細 \"details\" \\ path/to/file\n" +
+		"line 3 (with control-char boundary)\n" +
+		// F329: U+2028 (LINE SEPARATOR) — a JSON-legal but
+		// JavaScript-fatal rune Go's encoding/json escapes as
+		// (see encoding/json §HTMLEscape and Go 1.6+ default). Included
+		// so the "unicode-escape via U+2028" claim in the docstring
+		// above is exercised by a real rune, not just a comment.
+		"line 4 with U+2028 boundary end.\n" +
+		// F329: emoji-adjacent characters — U+1F512 (LOCK) is a real
+		// SMP emoji that json.Marshal serializes as a surrogate pair
+		// (🔒); U+FE0F (VS-16) forces emoji presentation on
+		// the preceding character. Both were advertised by the
+		// docstring but absent from the pre-F329 fixture.
+		"line 5 emoji-adjacent 🔒️ end."
 	t.Run("ADF_nested_description", func(t *testing.T) {
 		runBodyReuse(t, CreateIssueInput{
 			ProjectKey: "TEST",
@@ -636,12 +752,15 @@ func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 			//   * Embedded forward slash / (json.Marshal does not
 			//     escape /, but pinning the literal keeps regressions
 			//     that would opt into HTMLEscape=true visible).
-			Description: "F316 pins ADF nested-map retry:\n" +
-				"CVE-2025-0001 脆弱性の詳細 \"details\" \\ path/to/file\n" +
-				"line 3 (with control-char boundary)",
-			Priority: "High",
-			Labels:   []string{"security", "f316", "adf"},
-		})
+			//   * U+2028 LINE SEPARATOR (F329) so the unicode-escape
+			//     path in encoding/json fires.
+			//   * Emoji-adjacent runes 🔒 + U+FE0F (F329) so the
+			//     surrogate-pair encoding + variation-selector paths
+			//     both fire.
+			Description: adfDescription,
+			Priority:    "High",
+			Labels:      []string{"security", "f316", "adf"},
+		}, adfDescription)
 	})
 }
 
