@@ -556,6 +556,39 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.AuditActionDiffWebhookFired, Label: "Diff Webhook Fired", Category: "diff_webhook"},
 		{Action: model.AuditActionDiffWebhookFailed, Label: "Diff Webhook Failed", Category: "diff_webhook"},
 		{Action: model.AuditActionDiffWebhookAutoFired, Label: "Diff Webhook Auto-Fired", Category: "diff_webhook"},
+
+		// F322 (M21 Phase D R2, anti-pattern 48 residual pattern closure —
+		// handler-side Action orphans): five more model.Action* constants
+		// emitted from handler code (not middleware classifier) but never
+		// registered pre-F322 — a residual of the same M20 F302 pattern
+		// F319 documented itself as closing. The R1 review of F319 caught
+		// the overclaim: "closes the last M20 defer pool residual on the
+		// Action dimension" was factually incomplete because an anti-
+		// pattern 48 universal scan of `model.Action[A-Z]` across
+		// apps/api/internal/handler/ + apps/api/internal/service/ found
+		// five more orphans — three ActionTenant* from
+		// handler/webhook_clerk.go (Clerk lifecycle webhook: Created L274 /
+		// Updated L250 / Deleted L153) and two ActionLLMKey* from
+		// handler/settings_llm.go (BYOK provisioning: Set L257 / Rotated
+		// L259). F322 registers all five here so the UI filter dropdown
+		// can surface any audit_logs row the tenant lifecycle webhook or
+		// LLM key provisioning handler produces, and the F271 direction-1
+		// parity assertion is expanded in the same wave (audit_test.go
+		// F322 expectedEmit additions) so a future removal from either
+		// side trips CI. See F276 factuality lineage on overclaim risk.
+		//
+		// Note (M22+ candidates): model.ActionLLMKeyCleared exists in
+		// model/audit.go but is not emitted by any handler today (dead
+		// symbol) and model.ActionSubscriptionRenewed likewise defined
+		// but not emitted — both intentionally NOT registered here per
+		// the F280 discipline (registering a UI-selectable action with
+		// no emit site would violate the F271 direction-1 parity by
+		// inviting operators to filter on a verb no branch can produce).
+		{Action: model.ActionTenantCreated, Label: "Tenant Created", Category: "tenant"},
+		{Action: model.ActionTenantUpdated, Label: "Tenant Updated", Category: "tenant"},
+		{Action: model.ActionTenantDeleted, Label: "Tenant Deleted", Category: "tenant"},
+		{Action: model.ActionLLMKeySet, Label: "LLM Key Set", Category: "llm"},
+		{Action: model.ActionLLMKeyRotated, Label: "LLM Key Rotated", Category: "llm"},
 	}
 }
 
