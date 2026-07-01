@@ -202,7 +202,13 @@ func seedSchedIntCVETenants(t *testing.T, migDB *sql.DB, n int, tag string) ([]f
 		// sboms row (FORCE RLS, needs SET LOCAL). sboms.tenant_id must
 		// match the current GUC (WITH CHECK).
 		if err := insertRowWithTenantGUC(migDB, f.tenantID,
-			`INSERT INTO sboms (id, project_id, tenant_id, format, spec_version, created_at)
+			// sboms schema (migrations/001_init.up.sql): the version column
+			// is called `version`, not `spec_version` — pre-orchestrator-fix
+			// the test SQL used the wrong column name and failed at
+			// `pq: column "spec_version" of relation "sboms" does not exist`
+			// on the CI real-PG smoke (F258 + orchestrator fix, M17 Phase A
+			// post-push anti-pattern 42 recovery).
+			`INSERT INTO sboms (id, project_id, tenant_id, format, version, created_at)
 			 VALUES ($1, $2, $3, 'cyclonedx', '1.5', NOW())`,
 			f.sbomID, projectID, f.tenantID,
 		); err != nil {
