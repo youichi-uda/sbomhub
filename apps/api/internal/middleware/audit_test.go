@@ -2998,32 +2998,47 @@ func allModelActionValues() map[string]bool {
 // handler-side emit set was under-covered relative to the docstring
 // claim.
 //
-// Scope limitation (F286, closed by F296 in M20-1 — anti-pattern 58
-// 3-axis full coverage): pre-M20 this test did NOT cover handler-
-// emitted audit resource_type STRING values that were not model.Resource*
-// symbols. Concretely, three orphan package-local ResourceType*
-// constants lived outside the model.Resource* family and outside
-// service.GetAvailableResourceTypes():
+// Scope limitation (F286, closed by F296 + F302 in M20 combined —
+// anti-pattern 58 3-axis full coverage): pre-M20 this test did NOT cover
+// handler-emitted / service-emitted audit resource_type STRING values
+// that were not model.Resource* symbols. Concretely, FIVE orphan
+// package-local ResourceType* constants lived outside the
+// model.Resource* family and outside service.GetAvailableResourceTypes():
 //
 //   - "meti_assessment"  ← handler/meti.go ResourceTypeMetiAssessment
 //   - "sbom_diff"        ← service/diff_summary/ ResourceTypeSbomDiff
 //   - "diff_webhook"     ← model/diff_webhook.go ResourceTypeDiffWebhook
+//   - "cra_report"       ← service/cra/runner.go ResourceTypeCRAReport
+//   - "vex_draft"        ← service/triage/runner.go ResourceTypeVexDraft
 //
-// These three were a silent forensic UI-filter gap this parity contract
+// These five were a silent forensic UI-filter gap this parity contract
 // could not catch, because its expectedEmit set is keyed on the
-// model.Resource* symbol universe. F286 tracked the closure as an M20+
-// candidate; F296 (M20-1 Phase D R1) landed the fix by promoting the
-// three orphan constants into model.Resource{METIAssessment,SBOMDiff,
-// DiffWebhook} (single source of truth), removing the package-locals,
-// swapping all six emit sites to reference the model symbols, adding
-// the three GetAvailableResourceTypes registry rows, and expanding the
-// expectedEmit set below so direction-1 registration is enforced. With
-// F296 landed, anti-pattern 58 dual-list parity now has full coverage
-// across all three audit dimensions:
+// model.Resource* symbol universe, and each orphan happened to have a
+// wire-value collision with an existing model.Resource* string
+// (`"meti_assessment"`, `"sbom_diff"`, ..., `"cra_report"`, `"vex_draft"`)
+// so direction-1 parity passed by luck — a typo rename on the orphan
+// side would silently desync in production without any test tripping.
+//
+// F286 tracked the closure as an M20+ candidate. F296 (M20-1 Phase D R1)
+// landed the FIRST three by promoting them into
+// model.Resource{METIAssessment,SBOMDiff,DiffWebhook} (single source of
+// truth), removing the package-locals, swapping all six emit sites to
+// reference the model symbols, adding the three
+// GetAvailableResourceTypes registry rows, and expanding the
+// expectedEmit set below so direction-1 registration is enforced. R1
+// review found the sweep was incomplete — F302 (M20 R2) then closed the
+// remaining TWO orphans (cra/runner.go ResourceTypeCRAReport +
+// triage/runner.go ResourceTypeVexDraft) by swapping their five combined
+// use sites to model.ResourceCRAReport / model.ResourceVEXDraft (both
+// already existed in package model and were already registered by
+// GetAvailableResourceTypes, so no expectedEmit change was needed for
+// this pair) and deleting the two orphan constants. With F296 + F302
+// landed, anti-pattern 58 dual-list parity now has full coverage across
+// all three audit dimensions:
 //
 //   axis 1 (Action dimension)                    = F271 (M18-1)
 //   axis 2 (Resource dimension, middleware-side) = F281 (M19-3)
-//   axis 3 (Resource dimension, handler-side)    = F296 (M20-1, THIS)
+//   axis 3 (Resource dimension, handler-side)    = F296 + F302 (M20 combined)
 //
 // Any future orphan `ResourceType*` constant added outside model.Resource*
 // remains a discipline violation of the F296 single-source-of-truth
