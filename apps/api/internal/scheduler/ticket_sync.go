@@ -51,15 +51,21 @@ import (
 //	    docstring for the load-bearing rationale.
 //	  - ticket_sync is I/O-bound. syncTenant's per-tenant tx wraps
 //	    j.issueTrackerService.SyncTicket(txCtx, ticketID), which
-//	    performs a synchronous external HTTP call (Jira GetIssue /
-//	    Backlog GetIssue at apps/api/internal/service/issue_tracker.go
-//	    around lines 372-398) with a 30-second per-request timeout.
-//	    Every ticket sync is one external round-trip; the DB writes
-//	    that follow are a single UPDATE via UpdateTicket. The tick's
-//	    dominant latency component is external API round-trip time,
-//	    not DB pool contention. Per-tenant tx-abort blast radius is
-//	    already small (1 tenant scope, bounded to 100 tickets per
-//	    cycle by GetTicketsToSync's LIMIT 100).
+//	    performs a synchronous external HTTP call. See
+//	    service.IssueTrackerService.SyncTicket: both the
+//	    model.TrackerTypeJira and model.TrackerTypeBacklog switch arms
+//	    construct a per-request client and call GetIssue synchronously
+//	    with a 30-second per-request timeout (F274b — M18-3 Phase D R2,
+//	    replaced the earlier absolute line-range reference "around
+//	    lines 372-398" which drifted with every unrelated edit to
+//	    issue_tracker.go and would have silently misled a future
+//	    reviewer into looking at the wrong function). Every ticket
+//	    sync is one external round-trip; the DB writes that follow
+//	    are a single UPDATE via UpdateTicket. The tick's dominant
+//	    latency component is external API round-trip time, not DB
+//	    pool contention. Per-tenant tx-abort blast radius is already
+//	    small (1 tenant scope, bounded to 100 tickets per cycle by
+//	    GetTicketsToSync's LIMIT 100).
 //
 //	Trade-off analysis:
 //	  - Chunking benefit for ticket_sync: pool efficiency (small —
@@ -242,6 +248,16 @@ func (j *TicketSyncJob) syncTenant(ctx context.Context, tenantID uuid.UUID) (syn
 		j.logger.Debug("found tickets to sync", "tenant_id", tenantID, "count", total)
 
 		for _, ticket := range tickets {
+			// F269 invariant (M18-3 Phase D R2 #112): this HTTP call
+			// intentionally runs inside runWithTenantTx. Do not move it
+			// out without also updating the F269 ADR docstring on
+			// TicketSyncJob (see the F244-chunk-pattern permanent-defer
+			// block above) — the ADR's chunking trade-off analysis
+			// depends on the per-tenant tx wrapping the external round-
+			// trip. F274b (M18-3 Phase D R2) added this local sign so
+			// a future reviewer editing this loop sees the invariant
+			// here, before having to trace back to the caller-level
+			// ADR on the type declaration.
 			if serr := j.issueTrackerService.SyncTicket(txCtx, ticket.ID); serr != nil {
 				j.logger.Warn("Failed to sync ticket",
 					"tenant_id", tenantID,
