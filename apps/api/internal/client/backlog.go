@@ -13,21 +13,41 @@ import (
 )
 
 // BacklogClient is a client for the Backlog API
+//
+// Rate-limit hardening (F277, M19-1): every request routes through doRequest,
+// which handles HTTP 429 Too Many Requests by respecting the X-RateLimit-Reset
+// header (Backlog / Nulab publish an epoch-seconds reset instant rather than
+// the standard Retry-After — see developer.nulab.com/docs/backlog/rate-limit/,
+// verified via WebFetch 2026-07-01) and falling back to Retry-After, then
+// exponential backoff with full jitter. The retry loop honours the caller's
+// context.Context so long backoffs abort promptly on shutdown.
 type BacklogClient struct {
-	httpClient *http.Client
-	baseURL    string
-	apiKey     string
+	httpClient    *http.Client
+	baseURL       string
+	apiKey        string
+	backoffPolicy BackoffPolicy
 }
 
-// NewBacklogClient creates a new Backlog client
+// NewBacklogClient creates a new Backlog client with production-safe
+// rate-limit defaults (3 retries, 1s initial delay, 30s cap, full jitter).
+// Use WithBackoffPolicy to override for tests or aggressive callers.
 func NewBacklogClient(baseURL, apiKey string) *BacklogClient {
 	return &BacklogClient{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL:       baseURL,
+		apiKey:        apiKey,
+		backoffPolicy: DefaultBackoffPolicy(),
 	}
+}
+
+// WithBackoffPolicy overrides the retry cadence. Primarily used by tests to
+// shrink InitialDelay so httptest exercises complete in milliseconds. Returns
+// the receiver for chaining.
+func (c *BacklogClient) WithBackoffPolicy(p BackoffPolicy) *BacklogClient {
+	c.backoffPolicy = p
+	return c
 }
 
 // BacklogIssue represents a Backlog issue
@@ -165,45 +185,84 @@ func (c *BacklogClient) doRequest(ctx context.Context, method, path string, para
 	}
 	params.Set("apiKey", c.apiKey)
 
-	var reqBody io.Reader
+	// Precompute the encoded form once so retries reuse it. The API key +
+	// projectId are identical across attempts, so re-encoding per attempt
+	// would burn CPU with no upside.
+	encoded := params.Encode()
 	fullURL := c.baseURL + path
-
 	if method == "GET" {
-		fullURL += "?" + params.Encode()
-	} else {
-		reqBody = bytes.NewReader([]byte(params.Encode()))
+		fullURL += "?" + encoded
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	// F277 (M19-1): retry loop handles HTTP 429 by respecting either
+	// X-RateLimit-Reset (Backlog's documented header, epoch seconds) or
+	// Retry-After (defensive fallback for proxies that inject it), then
+	// exponential backoff.
+	maxRetries := c.backoffPolicy.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-
-	if method != "GET" {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("Backlog API error: %d - %s", resp.StatusCode, string(respBody))
-	}
-
-	if result != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, result); err != nil {
-			return fmt.Errorf("failed to unmarshal response: %w", err)
+	var lastStatus int
+	var lastBody []byte
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var reqBody io.Reader
+		if method != "GET" {
+			reqBody = bytes.NewReader([]byte(encoded))
 		}
+
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		if method != "GET" {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to execute request: %w", err)
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		retryAfter := resp.Header.Get("Retry-After")
+		rateLimitReset := resp.Header.Get("X-RateLimit-Reset")
+		status := resp.StatusCode
+		resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("failed to read response: %w", readErr)
+		}
+
+		if status == http.StatusTooManyRequests {
+			lastStatus = status
+			lastBody = respBody
+			if attempt == maxRetries {
+				break
+			}
+			// Precedence: X-RateLimit-Reset (documented) > Retry-After
+			// (defensive) > exponential backoff.
+			fallback := RespectRetryAfter(retryAfter, c.backoffPolicy.Delay(attempt))
+			delay := RespectRateLimitReset(rateLimitReset, fallback)
+			if err := waitOrDone(ctx, delay); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if status >= 400 {
+			return fmt.Errorf("Backlog API error: %d - %s", status, string(respBody))
+		}
+
+		if result != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, result); err != nil {
+				return fmt.Errorf("failed to unmarshal response: %w", err)
+			}
+		}
+
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("backlog: rate limit exhausted after %d retries (last status %d, body: %s): %w",
+		maxRetries, lastStatus, truncate(string(lastBody), 200), ErrRateLimitExhausted)
 }
