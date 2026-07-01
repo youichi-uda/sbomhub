@@ -844,8 +844,16 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	// default arm. F281 (sibling meta-test) pins the emit ↔ registry
 	// parity so a future wave that adds a new /reports arm returning a
 	// bare literal fails CI at the parity check.
+	//
+	// F297 (M20-1 Phase D R1, F287 cleanup): the pre-M20 dead-write
+	// `resourceType = "report"` local assignment above the switch was
+	// a residual left over from F282/F283 (both switch arms return
+	// explicitly with model.ResourceReport, so the named-return
+	// assignment was overwritten before it could be observed). Removed
+	// here as a pure dead-code cleanup — same rationale applies to the
+	// six sibling assignments in /analytics, /integrations, /search,
+	// /dashboard, /mcp, /scan below.
 	if strings.HasPrefix(path, "/reports") {
-		resourceType = "report"
 		switch method {
 		case "POST":
 			return model.ActionReportGenerated, model.ResourceReport
@@ -864,9 +872,9 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	}
 
 	// Analytics endpoints. F283 (M19-3, anti-pattern 58): return
-	// references model.ResourceAnalytics.
+	// references model.ResourceAnalytics. F297 (M20-1) removes the
+	// pre-M20 dead-write `resourceType = "analytics"` assignment.
 	if strings.HasPrefix(path, "/analytics") {
-		resourceType = "analytics"
 		switch method {
 		case "GET":
 			return model.ActionAnalyticsViewed, model.ResourceAnalytics
@@ -874,9 +882,9 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	}
 
 	// Integrations endpoints. F283 (M19-3, anti-pattern 58): all four
-	// arms reference model.ResourceIntegration.
+	// arms reference model.ResourceIntegration. F297 (M20-1) removes
+	// the pre-M20 dead-write `resourceType = "integration"` assignment.
 	if strings.HasPrefix(path, "/integrations") {
-		resourceType = "integration"
 		switch method {
 		case "POST":
 			return model.ActionIntegrationCreated, model.ResourceIntegration
@@ -890,9 +898,9 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	}
 
 	// Search endpoints. F283 (M19-3, anti-pattern 58): all three
-	// arms reference model.ResourceSearch.
+	// arms reference model.ResourceSearch. F297 (M20-1) removes the
+	// pre-M20 dead-write `resourceType = "search"` assignment.
 	if strings.HasPrefix(path, "/search") {
-		resourceType = "search"
 		if method == "GET" {
 			if strings.Contains(path, "/cve") {
 				return model.ActionSearchCVE, model.ResourceSearch
@@ -905,9 +913,9 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	}
 
 	// Dashboard endpoints. F283 (M19-3, anti-pattern 58): return
-	// references model.ResourceDashboard.
+	// references model.ResourceDashboard. F297 (M20-1) removes the
+	// pre-M20 dead-write `resourceType = "dashboard"` assignment.
 	if strings.HasPrefix(path, "/dashboard") {
-		resourceType = "dashboard"
 		if method == "GET" {
 			return model.ActionDashboardViewed, model.ResourceDashboard
 		}
@@ -997,9 +1005,9 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	}
 
 	// MCP endpoints. F283 (M19-3, anti-pattern 58): both arms
-	// reference model.ResourceMCP.
+	// reference model.ResourceMCP. F297 (M20-1) removes the pre-M20
+	// dead-write `resourceType = "mcp"` assignment.
 	if strings.HasPrefix(path, "/mcp") {
-		resourceType = "mcp"
 		if method == "GET" {
 			return model.ActionMCPAccessed, model.ResourceMCP
 		}
@@ -1119,9 +1127,9 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 
 	// Scan endpoints. F283 (M19-3, anti-pattern 58): both arms
 	// reference model.ResourceScan (the const already existed pre-F282
-	// as an F188 project-nested resource type).
+	// as an F188 project-nested resource type). F297 (M20-1) removes
+	// the pre-M20 dead-write `resourceType = "scan"` assignment.
 	if strings.Contains(path, "/scan") {
-		resourceType = "scan"
 		if method == "POST" {
 			// F259 (M17-1 Phase D R2 #107): swap inline "scan.started"
 			// literal to model.ActionScanStarted. F256 (M17-1) closed
