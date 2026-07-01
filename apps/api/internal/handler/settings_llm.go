@@ -24,7 +24,16 @@ const apiKeyPlaceholder = "***"
 // supportedLLMProviders mirrors the set enforced by
 // internal/service/llm/factory.go NewProviderFromEnv. Kept here as a small
 // allowlist so an arbitrary string from the request body cannot land in
-// the DB. ※要確認: if agent B renames any provider id, sync this list.
+// the DB. The three-way parity between this map, the factory switch arms
+// (NewProviderFromEnv + NewProviderFromConfigWithAzure), and the web
+// dropdown (apps/web/src/app/[locale]/(dashboard)/settings/llm/page.tsx
+// PROVIDERS array) is enforced at CI time by
+// TestLLMProviderRegistryParity_F318 — the second horizontal
+// replication of anti-pattern 58 (emit / registry parity in dual-list
+// systems; see M21-1). Adding a new provider requires updating this
+// map + both factory switches + the web PROVIDERS array + the
+// Provider.Name() doc-comment in service/llm/provider.go
+// simultaneously; the meta-test fails loudly otherwise.
 var supportedLLMProviders = map[string]struct{}{
 	"openai":       {},
 	"anthropic":    {},
@@ -199,12 +208,13 @@ func (h *SettingsLLMHandler) Update(c echo.Context) error {
 				"error": "server is missing a valid ENCRYPTION_KEY",
 			})
 		}
-		// ※要確認: agent B's crypto.go currently exposes
-		// llm.Encrypt(plaintext, key []byte) ([]byte, error). The prompt
-		// described the call as `llm.Encrypt(key, masterKey)` — the
-		// argument order in the spec was (secret, master), which matches
-		// (plaintext, key) here. If agent B renames the function or swaps
-		// the parameter order, this call site needs the matching update.
+		// llm.Encrypt(plaintext, key []byte) ([]byte, error) — arg
+		// order (secret, master) matches (plaintext, key) in
+		// service/llm/crypto.go. The signature has been stable since
+		// M1; a change would require updating this call site (compiler
+		// will catch it) plus repository.TenantLLMConfigRepository's
+		// decrypt path, so the coupling is caught at build time rather
+		// than by hand-maintained sync warnings.
 		ct, encErr := llm.Encrypt([]byte(rawKey), masterKey)
 		if encErr != nil {
 			slog.Error("settings_llm: encrypt failed", "error", encErr)
