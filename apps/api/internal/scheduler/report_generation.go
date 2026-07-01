@@ -765,7 +765,16 @@ func (j *ReportGenerationJob) evaluateEnabledSettingsChunk(
 
 	chunkEnabled := make([]model.ReportSettings, 0)
 	for _, tenantID := range chunk {
-		if _, sErr := tx.ExecContext(txCtx,
+		// F249 (M16-4 Phase D R2): use `ctx` here to keep the SET LOCAL
+		// call literally identical to F234 vulnerability_scan.go L485.
+		// `tx.ExecContext` binds to the tx receiver, not the ctx arg,
+		// so passing the outer `ctx` vs `txCtx` is behaviourally
+		// equivalent; the txCtx wrap only matters for downstream
+		// database.Querier(txCtx, ...) resolution below (L780). Using
+		// `ctx` here preserves line-by-line replication fidelity with
+		// vulnerability_scan.go so a diff between the two chunk helpers
+		// is limited to the load-bearing per-scheduler differences.
+		if _, sErr := tx.ExecContext(ctx,
 			`SELECT set_config('app.current_tenant_id', $1, true)`,
 			tenantID.String(),
 		); sErr != nil {
