@@ -322,7 +322,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return model.ActionAPIKeyDeleted, model.ResourceAPIKey
 		case "GET":
-			return "apikey.viewed", model.ResourceAPIKey
+			return model.ActionAPIKeyViewed, model.ResourceAPIKey
 		default:
 			// F201: PUT/PATCH on apikey routes is not used today, but
 			// the bare switch above would otherwise fall through to the
@@ -410,7 +410,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				if strings.HasSuffix(path, "/vex") {
 					return model.ActionVEXListed, model.ResourceVEX
 				}
-				return "vex.viewed", model.ResourceVEX
+				return model.ActionVEXViewed, model.ResourceVEX
 			default:
 				// F206 (anti-pattern 48 symmetric to F201): the four
 				// arms above cover the current CRUD surface, but a
@@ -765,7 +765,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return model.ActionSBOMDeleted, model.ResourceSBOM
 		case "GET":
-			return "sbom.viewed", model.ResourceSBOM
+			return model.ActionSBOMViewed, model.ResourceSBOM
 		}
 	}
 
@@ -783,7 +783,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return model.ActionVEXDeleted, model.ResourceVEX
 		case "GET":
-			return "vex.viewed", model.ResourceVEX
+			return model.ActionVEXViewed, model.ResourceVEX
 		}
 	}
 
@@ -794,7 +794,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "PUT", "PATCH", "POST":
 			return model.ActionSettingsUpdated, model.ResourceSettings
 		case "GET":
-			return "settings.viewed", model.ResourceSettings
+			return model.ActionSettingsViewed, model.ResourceSettings
 		}
 	}
 
@@ -815,7 +815,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return model.ActionUserDeleted, model.ResourceUser
 		case "GET":
-			return "user.viewed", model.ResourceUser
+			return model.ActionUserViewed, model.ResourceUser
 		}
 	}
 
@@ -830,7 +830,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return model.ActionSubscriptionCancelled, model.ResourceSubscription
 		case "GET":
-			return "subscription.viewed", model.ResourceSubscription
+			return model.ActionSubscriptionViewed, model.ResourceSubscription
 		}
 	}
 
@@ -841,7 +841,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "POST":
 			return "report.generated", "report"
 		case "GET":
-			return "report.viewed", "report"
+			return model.ActionReportViewed, "report"
 		}
 	}
 
@@ -859,7 +859,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		resourceType = "analytics"
 		switch method {
 		case "GET":
-			return "analytics.viewed", "analytics"
+			return model.ActionAnalyticsViewed, "analytics"
 		}
 	}
 
@@ -874,7 +874,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 		case "DELETE":
 			return "integration.deleted", "integration"
 		case "GET":
-			return "integration.viewed", "integration"
+			return model.ActionIntegrationViewed, "integration"
 		}
 	}
 
@@ -896,7 +896,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 	if strings.HasPrefix(path, "/dashboard") {
 		resourceType = "dashboard"
 		if method == "GET" {
-			return "dashboard.viewed", "dashboard"
+			return model.ActionDashboardViewed, "dashboard"
 		}
 	}
 
@@ -1129,7 +1129,7 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 
 	// Default: log as generic resource access
 	if method == "GET" {
-		return "resource.viewed", "unknown"
+		return model.ActionResourceViewed, "unknown"
 	}
 	if method == "POST" {
 		return "resource.created", "unknown"
