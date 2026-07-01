@@ -1,0 +1,139 @@
+# SBOMHub - Go toolchain alignment lint (F243, M16-2 #104)
+#
+# Hard CI gate that runs `tools/lint-toolchain-alignment` against the
+# repo root on every PR or push to `main` that touches any of the three
+# alignment layers (apps/api/go.mod, any Dockerfile, any workflow, or
+# any standalone Go tool module).
+#
+# Why this exists
+# ===============
+#
+# The M15-3 fix cycle bumped `apps/api/go.mod`'s toolchain from
+# 1.25.x to 1.26.4 without updating `apps/api/Dockerfile`'s `FROM` tag.
+# The Dockerfile still pinned `golang:1.25.8-alpine`, so docker-smoke
+# silently failed on `go: go.mod requires go >= 1.26.0` and four
+# downstream CI workflows went RED on `main`. The drift was caught only
+# by Claude's Phase D Round 2 broader-sweep review; the M15-3 Codex R1
+# review had scope-limited itself out of the diff and missed it.
+#
+# F241 added a companion cosmetic fix — workflow header docstrings
+# referred to `go 1.24.11` as the pinned toolchain, months stale
+# relative to go.mod. Both findings crystallised anti-pattern 55
+# (see `sbomhub-internal/planning/STATUS.md` M15 close section):
+# **infra pin drift across the go.mod / Dockerfile / workflow triad is
+# a human-error class that MUST be automated**, following the same
+# pattern as M13-5's `lint-migration-rls`.
+#
+# What this replaces
+# ==================
+#
+# Human vigilance: the current process was "reviewer must remember to
+# grep for `golang:` after every go.mod bump". That failed at M15-3.
+# This lint is the M16-2 follow-up that turns the discipline into an
+# automated PR-time check.
+#
+# What this does NOT replace
+# ==========================
+#
+#   * `docker-smoke.yml` — actually builds and runs the container image.
+#     Catches runtime failures (missing dep, misconfigured entrypoint,
+#     etc.) that a static pin check cannot see.
+#   * `go-test.yml` / `golangci-lint.yml` — exercise the code against
+#     the pinned toolchain. Catch semantic drift (e.g. deprecated stdlib
+#     APIs) that a version-string comparison cannot see.
+#
+# This lint sits in front of all of them: it is fast (no build required,
+# finishes in seconds) and runs on every PR that touches an alignment
+# layer, so a version-string drift is blocked before the heavier
+# workflows waste runner minutes on a doomed build.
+#
+# Hard gate posture
+# =================
+#
+# `continue-on-error` is intentionally absent. A red toolchain-lint job
+# blocks the PR. This is the same posture as `migration-lint.yml` and
+# `golangci-lint.yml` — all three are static, deterministic checks that
+# should never have a reason to be yellow.
+
+name: Toolchain alignment lint
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/go.mod"
+      - "apps/api/Dockerfile"
+      - "docker/**"
+      - ".github/workflows/**"
+      - "tools/**"
+  pull_request:
+    paths:
+      - "apps/api/go.mod"
+      - "apps/api/Dockerfile"
+      - "docker/**"
+      - ".github/workflows/**"
+      - "tools/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint-toolchain-alignment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        # Pin via the standalone tools module's go.mod so the lint runs
+        # on exactly the toolchain version it was developed against.
+        # Using tools/lint-toolchain-alignment/go.mod is the deliberate
+        # self-dogfood: layer 1 of the lint itself validates that this
+        # module's toolchain matches apps/api/go.mod, so setup-go and
+        # the lint agree on the Go version by construction.
+        #
+        # Caching is disabled: the lint depends only on the Go stdlib,
+        # there is no `go.sum`, and a build cache for a single-file
+        # stdlib-only program adds no measurable savings while
+        # introducing a "file not found" failure mode when
+        # `cache-dependency-path` is wired up without a real lockfile.
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/lint-toolchain-alignment/go.mod
+          cache: false
+
+      - name: Show tool version
+        run: go version
+
+      # Run the lint's own unit tests first — this guards against the
+      # "fix the lint to make my diff pass" antipattern by ensuring all
+      # four scripted fixtures (good_all_aligned + 3 bad_* drifts) still
+      # produce their expected exit codes and output substrings.
+      #
+      # If the tests are green but the real-repo scan below is red, the
+      # cause is a genuine alignment drift in the diff. If the tests are
+      # red, the cause is a change to the lint itself that broke its
+      # contract, and the diff needs to update the fixture / assertion
+      # in the same PR.
+      - name: Run lint tool unit tests
+        working-directory: tools/lint-toolchain-alignment
+        run: go test ./...
+
+      # The lint must succeed against the real repo. If this step fails,
+      # a Dockerfile / workflow / tools go.mod pin drifted from
+      # apps/api/go.mod's toolchain — the stdout output names each
+      # drifted file, its line number, and expected vs actual version.
+      #
+      # We `cd` into the module dir because the lint lives in its own
+      # module (see go.mod header). `go run ./tools/lint-toolchain-alignment`
+      # from the repo root would need a wrapping workspace, which we
+      # deliberately omit to keep the standalone module isolated
+      # (same posture as `.github/workflows/migration-lint.yml`).
+      - name: Run alignment lint against repository root
+        working-directory: tools/lint-toolchain-alignment
+        run: go run . --repo-root ../.. --verbose
