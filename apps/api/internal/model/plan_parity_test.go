@@ -129,6 +129,22 @@ import (
 //     chain against docker-compose postgres and reads back the
 //     JSONB via database/sql for the smoke-level parity check.
 //
+// go-test-cache note (F344, M23-2 #124): unlike the F318 / F330
+// parity suites (whose web-side reads live outside the apps/api
+// module root and are therefore invisible to go's test cache — see
+// the F344 notes in settings_llm_parity_test.go /
+// tracker_type_parity_test.go), every file this suite reads
+// (apps/api/migrations/*.up.sql) is INSIDE the module root, and
+// go1.26.4's test cache tracks in-root opened files by (mtime,size)
+// stat (cmd/go/internal/test/test.go hashOpen). A normal edit to a
+// migration file therefore DOES invalidate the cache — empirically
+// confirmed 2026-07-02: with a warm cache, flipping audit_logs in
+// 049's UPDATE made a bare `go test ./internal/model/` re-run and
+// fail loudly, no -count=1 needed. Residual caveat: the check is
+// stat-based, not content-hashed, so an edit that preserves both
+// mtime and size (e.g. timestamp-restoring tooling) stays invisible;
+// keep using -count=1 for mutation-verification sessions.
+//
 // Adding a new feature key going forward: add the key to every plan
 // in model/plan.go DefaultPlanLimits AND in a new migration that
 // backfills plan_limits.features with the same key. Add the key to
@@ -426,7 +442,17 @@ func migrationsDirAbs(t *testing.T) string {
 //
 // Captures the plan name and the JSONB body (still SQL-quoted with
 // single quotes).
-var insertRowRe = regexp.MustCompile(`\(\s*'([a-z_]+)'\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*'(\{[^']*\})'\s*\)`)
+//
+// F345 (M23-2 #124, F331 species): the plan-name char class here and
+// in backfillUpdateEqRe / planNameRe is `[a-z0-9_\-]+`, matching the
+// F331 identifier class in settings_llm_parity_test.go — a future
+// plan identifier bearing a digit or hyphen (e.g. "team2",
+// "pro-plus") would be silently invisible to the pre-F345 `[a-z_]+`
+// scan and vacuously pass the parity assertions instead of tripping
+// on the drift. Plan names are a closed set today
+// (free/starter/pro/team/enterprise), so this is future-proofing,
+// not a live-bug fix.
+var insertRowRe = regexp.MustCompile(`\(\s*'([a-z0-9_\-]+)'\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*'(\{[^']*\})'\s*\)`)
 
 func parse008Seed(path string) (map[string]map[string]bool, error) {
 	raw, err := os.ReadFile(path)
@@ -479,12 +505,14 @@ var backfillUpdateInRe = regexp.MustCompile(`(?s)UPDATE\s+plan_limits\s+SET\s+fe
 //	  ... WHERE plan = 'x';
 //
 // (024's per-plan style, `WHERE plan = '<name>'`). Captures the JSON
-// delta and the single plan name.
-var backfillUpdateEqRe = regexp.MustCompile(`(?s)UPDATE\s+plan_limits\s+SET\s+features\s*=\s*features\s*\|\|\s*'(\{[^']*\})'::jsonb\s*(?:,[^;]*?)?WHERE\s+plan\s*=\s*'([a-z_]+)'\s*;`)
+// delta and the single plan name. Plan-name char class per F345 —
+// see insertRowRe.
+var backfillUpdateEqRe = regexp.MustCompile(`(?s)UPDATE\s+plan_limits\s+SET\s+features\s*=\s*features\s*\|\|\s*'(\{[^']*\})'::jsonb\s*(?:,[^;]*?)?WHERE\s+plan\s*=\s*'([a-z0-9_\-]+)'\s*;`)
 
 // planNameRe extracts a bare plan name from a quoted IN (...) list
-// entry (e.g. `'free'`).
-var planNameRe = regexp.MustCompile(`'([a-z_]+)'`)
+// entry (e.g. `'free'`). Plan-name char class per F345 — see
+// insertRowRe.
+var planNameRe = regexp.MustCompile(`'([a-z0-9_\-]+)'`)
 
 // applyBackfillUpdates parses UPDATE ... plan_limits statements in a
 // migration file and folds them into `seed` in SOURCE-POSITION order
