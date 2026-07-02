@@ -203,7 +203,7 @@ func TestCVESyncChunkPerf_F258_N100_M50_SingleChunk(t *testing.T) {
 	if numChunks != 1 {
 		t.Fatalf("F258 N=100 K=200 chunk-layout drift: got %d chunks, want 1", numChunks)
 	}
-	wantOldRT := 1 + N*(3+M)             // 5301 at N=100 M=50
+	wantOldRT := 1 + N*(3+M)               // 5301 at N=100 M=50
 	wantNewRT := 1 + 2*numChunks + N*(1+M) // 5103 at N=100 M=50 c=1
 
 	t.Logf("F258 round-trip accounting (N=%d, M=%d, K=%d, c=%d):",

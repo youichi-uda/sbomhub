@@ -740,4 +740,3 @@ func installPoisonPolicyCVE(t *testing.T, migDB *sql.DB, poisonID uuid.UUID) fun
 		}
 	}
 }
-

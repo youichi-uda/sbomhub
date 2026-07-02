@@ -2530,18 +2530,18 @@ func TestPathHasChildResource_SegmentExact(t *testing.T) {
 //
 // Two directions:
 //
-//   (1) Emit → Registry: every middleware-classifier action must have a
-//       matching AvailableActions entry (so the UI filter can select
-//       audit_logs rows the middleware produces). F280 (M19-2 Phase D
-//       R1) shrinks the deferral allowlist from 12 entries (F256-era
-//       .viewed residuals + subscription tenant-branch verbs, F270's
-//       out-of-scope tail) to zero — Action-dimension parity completeness
-//       reached.
+//	(1) Emit → Registry: every middleware-classifier action must have a
+//	    matching AvailableActions entry (so the UI filter can select
+//	    audit_logs rows the middleware produces). F280 (M19-2 Phase D
+//	    R1) shrinks the deferral allowlist from 12 entries (F256-era
+//	    .viewed residuals + subscription tenant-branch verbs, F270's
+//	    out-of-scope tail) to zero — Action-dimension parity completeness
+//	    reached.
 //
-//   (2) Registry → model.*: every AvailableActions entry's Action
-//       string must be non-empty and match at least one known
-//       model.Action* constant. A typo like {Action: "aipkey.updated"}
-//       inserted into the registry fails at this check.
+//	(2) Registry → model.*: every AvailableActions entry's Action
+//	    string must be non-empty and match at least one known
+//	    model.Action* constant. A typo like {Action: "aipkey.updated"}
+//	    inserted into the registry fails at this check.
 //
 // The "expected classifier emit set" below is hand-maintained. When a
 // future wave adds a new emit site returning a new model.Action*
@@ -2622,17 +2622,17 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.ActionSBOMViewed:   true,
 		model.ActionSBOMUpdated:  true, // F267
 		// VEX + VEX draft.
-		model.ActionVEXCreated:                true,
-		model.ActionVEXUpdated:                true,
-		model.ActionVEXDeleted:                true,
-		model.ActionVEXListed:                 true,
-		model.ActionVEXViewed:                 true, // F256 residual
-		model.ActionVEXDraftListed:            true,
-		model.ActionVEXDraftViewed:            true,
-		model.ActionVEXDraftDecisionUpdated:   true,
-		model.ActionVEXDraftReanalysed:        true,
-		model.ActionVEXDraftCreated:           true,
-		model.ActionVEXDraftUpdated:           true, // F267
+		model.ActionVEXCreated:              true,
+		model.ActionVEXUpdated:              true,
+		model.ActionVEXDeleted:              true,
+		model.ActionVEXListed:               true,
+		model.ActionVEXViewed:               true, // F256 residual
+		model.ActionVEXDraftListed:          true,
+		model.ActionVEXDraftViewed:          true,
+		model.ActionVEXDraftDecisionUpdated: true,
+		model.ActionVEXDraftReanalysed:      true,
+		model.ActionVEXDraftCreated:         true,
+		model.ActionVEXDraftUpdated:         true, // F267
 		// CRA report.
 		model.ActionCRAReportRun:             true,
 		model.ActionCRAReportListed:          true,
@@ -2645,45 +2645,45 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.ActionScanViewed:  true,
 		model.ActionScanStatus:  true, // F267
 		// Compliance / notifications / diff / SSVC / METI / license / evidence / checklist / visualization / public_link.
-		model.ActionComplianceChecked:      true,
-		model.ActionNotificationListed:     true,
-		model.ActionNotificationCreated:    true,
-		model.ActionNotificationUpdated:    true,
-		model.ActionNotificationDeleted:    true,
-		model.ActionNotificationViewed:     true,
-		model.ActionDiffViewed:             true,
-		model.ActionDiffSummary:            true,
-		model.ActionSSVCViewed:             true,
-		model.ActionSSVCAssessed:           true,
-		model.ActionSSVCDeleted:            true,
-		model.ActionMETIViewed:             true,
-		model.ActionMETIRefreshed:          true,
-		model.ActionMETIOverridden:         true,
-		model.ActionLicensePolicyListed:    true,
-		model.ActionLicensePolicyViewed:    true,
-		model.ActionLicensePolicyCreated:   true,
-		model.ActionLicensePolicyUpdated:   true,
-		model.ActionLicensePolicyDeleted:   true,
-		model.ActionChecklistViewed:        true,
-		model.ActionChecklistUpdated:       true,
-		model.ActionChecklistDeleted:       true,
-		model.ActionVisualizationViewed:    true,
-		model.ActionVisualizationUpdated:   true,
-		model.ActionVisualizationDeleted:   true,
-		model.ActionPublicLinkCreated:      true,
-		model.ActionPublicLinkViewed:       true,
-		model.ActionPublicLinkUpdated:      true,
-		model.ActionPublicLinkDeleted:      true,
+		model.ActionComplianceChecked:    true,
+		model.ActionNotificationListed:   true,
+		model.ActionNotificationCreated:  true,
+		model.ActionNotificationUpdated:  true,
+		model.ActionNotificationDeleted:  true,
+		model.ActionNotificationViewed:   true,
+		model.ActionDiffViewed:           true,
+		model.ActionDiffSummary:          true,
+		model.ActionSSVCViewed:           true,
+		model.ActionSSVCAssessed:         true,
+		model.ActionSSVCDeleted:          true,
+		model.ActionMETIViewed:           true,
+		model.ActionMETIRefreshed:        true,
+		model.ActionMETIOverridden:       true,
+		model.ActionLicensePolicyListed:  true,
+		model.ActionLicensePolicyViewed:  true,
+		model.ActionLicensePolicyCreated: true,
+		model.ActionLicensePolicyUpdated: true,
+		model.ActionLicensePolicyDeleted: true,
+		model.ActionChecklistViewed:      true,
+		model.ActionChecklistUpdated:     true,
+		model.ActionChecklistDeleted:     true,
+		model.ActionVisualizationViewed:  true,
+		model.ActionVisualizationUpdated: true,
+		model.ActionVisualizationDeleted: true,
+		model.ActionPublicLinkCreated:    true,
+		model.ActionPublicLinkViewed:     true,
+		model.ActionPublicLinkUpdated:    true,
+		model.ActionPublicLinkDeleted:    true,
 		// KEV / EOL.
 		model.ActionKEVViewed:  true,
 		model.ActionEOLViewed:  true,
 		model.ActionEOLChecked: true,
 		// Vulnerability.
-		model.ActionVulnerabilityListed:    true,
-		model.ActionVulnerabilityViewed:    true,
-		model.ActionVulnerabilityScanned:   true, // F267
-		model.ActionVulnerabilityCreated:   true, // F267
-		model.ActionVulnerabilityUpdated:   true, // F267
+		model.ActionVulnerabilityListed:  true,
+		model.ActionVulnerabilityViewed:  true,
+		model.ActionVulnerabilityScanned: true, // F267
+		model.ActionVulnerabilityCreated: true, // F267
+		model.ActionVulnerabilityUpdated: true, // F267
 		// Ticket.
 		model.ActionTicketCreated: true,
 		model.ActionTicketSynced:  true,
@@ -2700,20 +2700,20 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.ActionUserViewed:      true, // F256 residual
 		// Settings / subscription / dashboard / analytics / report /
 		// integration.
-		model.ActionSettingsUpdated:         true,
-		model.ActionSettingsViewed:          true, // F256 residual
-		model.ActionSubscriptionCreated:     true, // F256 residual
-		model.ActionSubscriptionUpdated:     true, // F256 residual
-		model.ActionSubscriptionCancelled:   true, // F256 residual
-		model.ActionSubscriptionViewed:      true, // F256 residual
-		model.ActionDashboardViewed:         true, // F256 residual
-		model.ActionAnalyticsViewed:         true, // F256 residual
-		model.ActionReportViewed:            true, // F256 residual
-		model.ActionReportGenerated:         true, // F267
-		model.ActionIntegrationViewed:       true, // F256 residual
-		model.ActionIntegrationCreated:      true, // F267
-		model.ActionIntegrationUpdated:      true, // F267
-		model.ActionIntegrationDeleted:      true, // F267
+		model.ActionSettingsUpdated:       true,
+		model.ActionSettingsViewed:        true, // F256 residual
+		model.ActionSubscriptionCreated:   true, // F256 residual
+		model.ActionSubscriptionUpdated:   true, // F256 residual
+		model.ActionSubscriptionCancelled: true, // F256 residual
+		model.ActionSubscriptionViewed:    true, // F256 residual
+		model.ActionDashboardViewed:       true, // F256 residual
+		model.ActionAnalyticsViewed:       true, // F256 residual
+		model.ActionReportViewed:          true, // F256 residual
+		model.ActionReportGenerated:       true, // F267
+		model.ActionIntegrationViewed:     true, // F256 residual
+		model.ActionIntegrationCreated:    true, // F267
+		model.ActionIntegrationUpdated:    true, // F267
+		model.ActionIntegrationDeleted:    true, // F267
 		// Search / MCP / CLI.
 		model.ActionSearchCVE:       true, // F267
 		model.ActionSearchComponent: true, // F267
@@ -3048,21 +3048,21 @@ func allModelActionValues() map[string]bool {
 //
 // Two directions (F276 factuality trade-off, same as F271):
 //
-//   (1) Emit → Registry: every middleware-classifier resource_type
-//       value must have a matching AvailableResourceTypes entry so
-//       the UI filter can select audit_logs rows the middleware
-//       produces. This test does NOT catch the case where the
-//       string value of a model.Resource* constant is renamed (both
-//       the emit side and the registry side resolve through the
-//       same symbol, so both change together). See the F276 note on
-//       expectedEmit in TestAuditEmitRegistryParity_F271 for the
-//       shared trade-off.
+//	(1) Emit → Registry: every middleware-classifier resource_type
+//	    value must have a matching AvailableResourceTypes entry so
+//	    the UI filter can select audit_logs rows the middleware
+//	    produces. This test does NOT catch the case where the
+//	    string value of a model.Resource* constant is renamed (both
+//	    the emit side and the registry side resolve through the
+//	    same symbol, so both change together). See the F276 note on
+//	    expectedEmit in TestAuditEmitRegistryParity_F271 for the
+//	    shared trade-off.
 //
-//   (2) Registry → model.*: every AvailableResourceTypes entry's Type
-//       string must be non-empty and match one of the known
-//       model.Resource* constants. This catches typos like
-//       {Type: "reoprt"} in the registry that no middleware branch
-//       could produce.
+//	(2) Registry → model.*: every AvailableResourceTypes entry's Type
+//	    string must be non-empty and match one of the known
+//	    model.Resource* constants. This catches typos like
+//	    {Type: "reoprt"} in the registry that no middleware branch
+//	    could produce.
 //
 // The "expected classifier emit set" below is hand-maintained. When a
 // future wave adds a new emit site returning a new model.Resource*
@@ -3120,9 +3120,9 @@ func allModelActionValues() map[string]bool {
 // landed, anti-pattern 58 dual-list parity now has full coverage across
 // all three audit dimensions:
 //
-//   axis 1 (Action dimension)                    = F271 (M18-1)
-//   axis 2 (Resource dimension, middleware-side) = F281 (M19-3)
-//   axis 3 (Resource dimension, handler-side)    = F296 + F302 (M20 combined)
+//	axis 1 (Action dimension)                    = F271 (M18-1)
+//	axis 2 (Resource dimension, middleware-side) = F281 (M19-3)
+//	axis 3 (Resource dimension, handler-side)    = F296 + F302 (M20 combined)
 //
 // Any future orphan `ResourceType*` constant added outside model.Resource*
 // remains a discipline violation of the F296 single-source-of-truth

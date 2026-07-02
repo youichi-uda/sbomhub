@@ -206,7 +206,7 @@ func TestReportGenerationChunkPerf_F244_N100_SingleChunk(t *testing.T) {
 	if numChunks != 1 {
 		t.Fatalf("F244 N=100 K=500 chunk-layout drift: got %d chunks, want 1", numChunks)
 	}
-	wantOldRT := 4*N + 1        // 401 at N=100
+	wantOldRT := 4*N + 1               // 401 at N=100
 	wantNewRT := 2*N + 2*numChunks + 1 // 203 at N=100 c=1
 
 	t.Logf("F244 round-trip accounting (N=%d, K=%d, c=%d):", N, reportEligibilityBatchChunkSize, numChunks)
@@ -403,19 +403,19 @@ func reportSettingsMockRows(tenantID uuid.UUID) *sqlmock.Rows {
 		"email_enabled", "email_recipients", "include_sections",
 		"created_at", "updated_at",
 	}).AddRow(
-		uuid.New(),        // id
-		tenantID,          // tenant_id
-		true,              // enabled
-		"executive",       // report_type
-		"weekly",          // schedule_type
-		1,                 // schedule_day (Monday)
-		9,                 // schedule_hour
-		"pdf",             // format
-		false,             // email_enabled
-		"{}",              // email_recipients (pq.Array empty)
-		"{}",              // include_sections (pq.Array empty)
-		time.Now(),        // created_at
-		time.Now(),        // updated_at
+		uuid.New(),  // id
+		tenantID,    // tenant_id
+		true,        // enabled
+		"executive", // report_type
+		"weekly",    // schedule_type
+		1,           // schedule_day (Monday)
+		9,           // schedule_hour
+		"pdf",       // format
+		false,       // email_enabled
+		"{}",        // email_recipients (pq.Array empty)
+		"{}",        // include_sections (pq.Array empty)
+		time.Now(),  // created_at
+		time.Now(),  // updated_at
 	)
 }
 
@@ -478,13 +478,13 @@ func simulateOldPerTenantReportEnabled(ctx context.Context, db *sql.DB) ([]uuid.
 		}
 		for rows.Next() {
 			var (
-				rid, tid                                        uuid.UUID
-				enabledCol                                      bool
-				reportType, scheduleType, format                string
-				scheduleDay, scheduleHour                       int
-				emailEnabled                                    bool
-				emailRecipients, includeSections                string
-				createdAt, updatedAt                            time.Time
+				rid, tid                         uuid.UUID
+				enabledCol                       bool
+				reportType, scheduleType, format string
+				scheduleDay, scheduleHour        int
+				emailEnabled                     bool
+				emailRecipients, includeSections string
+				createdAt, updatedAt             time.Time
 			)
 			if scanErr := rows.Scan(
 				&rid, &tid, &enabledCol, &reportType, &scheduleType, &scheduleDay, &scheduleHour,
