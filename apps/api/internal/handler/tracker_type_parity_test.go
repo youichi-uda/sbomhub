@@ -25,7 +25,11 @@ import (
 //	               `model.TrackerType*` typed const block — the
 //	               authoritative symbol + wire-value universe
 //	               (currently TrackerTypeJira="jira",
-//	               TrackerTypeBacklog="backlog").
+//	               TrackerTypeBacklog="backlog",
+//	               TrackerTypeGitHub="github" — the third member landed
+//	               in F356/M24-1b, the first tracker added under this
+//	               test's watch; see the battle-test note at the end of
+//	               this comment).
 //
 //	(Go switches)  4 dispatch sites, hand-maintained in
 //	               trackerParitySwitchSites below:
@@ -34,8 +38,9 @@ import (
 //	                   model.TrackerType*:` arms with a default arm
 //	                   returning "unsupported tracker type".
 //	                 - handler/issue_tracker.go CreateConnection —
-//	                   `case "jira" / "backlog":` on the RAW request
-//	                   string BEFORE it is mapped to the model const
+//	                   `case "jira" / "backlog" / "github":` on the RAW
+//	                   request string BEFORE it is mapped to the model
+//	                   const
 //	                   (this 4th site was absent from the M22-1
 //	                   kickoff draft and surfaced only in the
 //	                   orchestrator survey; the universal switch-site
@@ -54,8 +59,9 @@ import (
 //	          comment, which names the model.TrackerType* switch arms
 //	          of SyncTicket by symbol.
 //	(Go doc)  handler/issue_tracker.go's 400 error message
-//	          "Invalid tracker_type. Must be 'jira' or 'backlog'",
-//	          which enumerates the wire values operators may send.)
+//	          "Invalid tracker_type. Must be 'jira', 'backlog', or
+//	          'github'", which enumerates the wire values operators may
+//	          send.)
 //
 // If any two of these drift, one of the following silent breakage
 // shapes results:
@@ -164,17 +170,27 @@ import (
 //     used a raw literal in a NEW file — a symbol-based equality
 //     chain in an already-pinned file is invisible to this test and
 //     is a review-required reshape.
-//   - Two-member-universe assumptions in display ternaries:
-//     page.tsx and create-ticket-button.tsx render labels via
-//     `tracker_type === "jira" ? "Jira" : "Backlog"`, so a third
-//     tracker would silently render the "Backlog" label. These are
-//     equality comparisons, not dispatch switches; the web literal
-//     census pins their FILE set but cannot see the binary
-//     assumption inside them.
-//   - The DB layer: migration 015_issue_tracker.up.sql declares
-//     tracker_type VARCHAR(20) with NO CHECK constraint (any string
-//     is storable) and its `-- 'jira', 'backlog'` comment is an
-//     immutable historical record. Neither is parsed here.
+//   - Fixed-universe assumptions inside already-pinned web files.
+//     F356 (M24-1b) replaced the former two-member display ternaries
+//     (`tracker_type === "jira" ? "Jira" : "Backlog"`, which would
+//     have silently rendered the "Backlog" label for a third
+//     tracker) with `Record<TrackerType, ...>` maps in page.tsx and
+//     create-ticket-button.tsx, so an incomplete map is now a
+//     TypeScript compile error rather than a silent mislabel — but
+//     that guarantee lives in tsc, not here: this test's web literal
+//     census pins the FILE set only and cannot see whether the copy
+//     inside those files actually covers every tracker.
+//   - The DB layer: migration 015_issue_tracker.up.sql declared
+//     tracker_type VARCHAR(20) with NO CHECK constraint and its
+//     `-- 'jira', 'backlog'` comment is an immutable historical
+//     record; migration 050_issue_tracker_type_check.up.sql (F357,
+//     M24-2 wave 1) has since added a CHECK constraint pinning
+//     ('jira', 'backlog', 'github') NOT VALID, enforced by the
+//     real-PG reject test in
+//     repository/issue_tracker_check_integration_test.go. Neither
+//     migration file is parsed here, so a FOURTH tracker still
+//     requires a manual companion migration extending that CHECK —
+//     this test cannot remind you.
 //   - Human-readable display names ("Jira", "Backlog" capitalized
 //     JSX labels, i18n catalogs) — only wire identifiers are pinned.
 //
@@ -194,17 +210,30 @@ import (
 // apps/api-side reads (tree walk under apiRoot) are cache-tracked
 // normally via (mtime,size) stat of each opened file.
 //
-// Adding a new tracker (e.g. GitHub Issues) going forward — this test
-// fails until ALL of the following move together, which is exactly the
+// Adding a new tracker (e.g. Linear) going forward — this test fails
+// until ALL of the following move together, which is exactly the
 // 3-way sync this replication exists to force:
 //
-//	model.TrackerTypeGitHub const in model/issue_tracker.go, case
+//	the model.TrackerType* const in model/issue_tracker.go, case
 //	arms in testConnection + CreateTicket + SyncTicket AND the
 //	handler CreateConnection switch (updating its 400 message), the
 //	api.ts TrackerType union, the page.tsx SelectItem list, and the
 //	ticket_sync.go F274b comment. If a NEW dispatch switch site is
 //	introduced, register it in trackerParitySwitchSites. Add nothing
 //	to an allowlist (there is none). Do not silence this test.
+//
+// Battle-tested on exactly that path in F356 (M24-1b #125, GitHub
+// Issues — the procedure above executed for real, one day after this
+// test landed): the const-only first step failed all 8 directions
+// (4 switch sites, TS union, SelectItem list, F274b doc mentions,
+// 400-message tokens), the Go-side wiring narrowed the failures to
+// the two web surfaces, and after the web wiring the direction 2
+// literal census caught a REAL near-miss — the new per-tracker label
+// map in create-ticket-button.tsx initially used unquoted object
+// keys, which would have dropped that file out of the pinned
+// wire-value-literal file set; quoting the keys restored the census
+// contract. No test logic changed to get F356 green (this comment
+// block is the only F356 edit to this file).
 func TestTrackerTypeRegistryParity_F330(t *testing.T) {
 	apiRoot, webSrcRoot := trackerParityRoots(t)
 
