@@ -35,9 +35,13 @@ import (
 //     verbatim once it lands (the methods below match the agreed
 //     surface from the M1-5 prompt).
 //
-// ※要確認: method names / parameter order are the agreed contract with
-// agent A. If A renames Insert→Create or InsertDecision instead of
-// UpdateDecision, the orchestrator should refactor in lock-step.
+// The agent-A coordination note that used to live here is resolved
+// (verified 2026-07-02, M24-3 F350): the vex_drafts repository landed
+// with exactly the agreed surface — repository.VEXDraftsRepository
+// declares Insert / Get / ListByProject / UpdateDecision (see
+// internal/repository/vex_drafts.go) and cmd/server/main.go
+// newVexDraftsStore wires it in as this VexDraftStore verbatim, so no
+// lock-step rename ever became necessary.
 
 // VexDraftStore is the persistence contract for vex_drafts that the
 // runner depends on. *repository.VEXDraftsRepository satisfies this
@@ -83,10 +87,12 @@ type AuditLogWriter interface {
 // CycloneDX export, MCP read access, and the public link surfaces all
 // see the human-approved verdict without a new code path.
 //
-// ※要確認: the prompt allows either calling VEXService.CreateStatement
-// or writing directly to VEXRepository. The interface below is the
-// service-level shape, which keeps validation rules (status allowlist,
-// duplicate-detection) in one place.
+// Of the two shapes the M1-5 prompt allowed (call
+// VEXService.CreateStatement, or write directly to VEXRepository), the
+// service-level shape below is the one that shipped: adapters.go
+// VEXServiceAdapter wraps *service.VEXService, which keeps validation
+// rules (status allowlist, duplicate-detection) in one place (decision
+// verified as implemented 2026-07-02, M24-3 F350).
 type VEXStatementSync interface {
 	CreateStatement(ctx context.Context, input VEXStatementSyncInput) error
 }
@@ -1402,15 +1408,20 @@ func (r *Runner) writeAudit(ctx context.Context, tenantID uuid.UUID, userID *uui
 // the parser expects. We intentionally bake the allowlist into the
 // system prompt so the model has the schema in-context.
 //
-// M4-3 (※要確認): exported so the apps/api/cmd/llm-bench harness can
-// reuse the *exact* runtime prompt rather than maintaining a drifted
-// copy that would invalidate prompt_hash analytics. The original
-// unexported name remains as a const alias below so unit tests inside
-// this package keep compiling without rename churn.
+// M4-3: exported so the apps/api/cmd/llm-bench harness can reuse the
+// *exact* runtime prompt rather than maintaining a drifted copy that
+// would invalidate prompt_hash analytics (verified 2026-07-02, M24-3
+// F350: cmd/llm-bench/bench.go consumes triage.VEXTriageSystemPrompt
+// and triage.BuildPrompt directly). The original unexported name
+// remains as a const alias below so unit tests inside this package
+// keep compiling without rename churn.
 //
-// ※要確認: prompt wording may need iteration once the M1-4 eval set
-// lands. Keep prompt changes Tracked so prompt_hash analytics stay
-// meaningful (any prompt edit invalidates historical equality joins).
+// TODO(triage): prompt wording may still need iteration — the "M1-4
+// eval set" the pre-F350 note waited on landed as the M4-3 llm-bench
+// harness (test/fixtures/llm-bench/cve-20-50.json), so iteration is
+// now unblocked. Keep prompt changes tracked so prompt_hash analytics
+// stay meaningful (any prompt edit invalidates historical equality
+// joins).
 const VEXTriageSystemPrompt = `You are SBOMHub's AI VEX triage assistant.
 
 Your job: given an advisory excerpt and ecosystem reachability evidence,

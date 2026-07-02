@@ -90,8 +90,21 @@ const (
 // product-specific (no existing model.Action* constant covers them)
 // so they live alongside the handler — same rationale as
 // AuditActionCRAReportDecided in cra_reports.go.
-// ※要確認: lift into internal/model/audit.go once the audit action
-// catalogue is consolidated (alongside AuditActionCRAReportDecided).
+//
+// TODO(audit): lift into internal/model/audit.go together with
+// AuditActionCRAReportDecided in a dedicated audit-universe wave, not
+// opportunistically. Verified 2026-07-02 (M24-3 F350): the lift was
+// considered and REJECTED for now because it cannot be done in
+// isolation — allModelActionValues() in middleware/audit_test.go
+// documents itself as the hand-maintained companion of the
+// model/audit.go action-constant block, and the F319/F322 discipline
+// requires handler-emitted model-level action symbols to be registered
+// in service/audit.go GetAvailableActions() plus the F271 expectedEmit
+// set — so a proper lift moves model/audit.go, service/audit.go AND
+// middleware/audit_test.go in one change. Related registration gap,
+// also deferred to that wave: these three wire values land in
+// audit_logs but are not selectable in the GetAvailableActions() UI
+// action filter today.
 const (
 	// AuditActionMetiAssessmentRefreshed is emitted by /refresh after the
 	// evaluator's 32-criterion fan-out is persisted.

@@ -40,8 +40,15 @@ const (
 // the decision flow lives entirely in the handler — the runner only
 // owns AI-generated / AI-disabled audit actions (see
 // cra.AuditActionCRAReportAIGenerated / AuditActionCRAReportAIDisabled).
-// ※要確認: lift into internal/model/audit.go once the audit action
-// catalogue is consolidated.
+//
+// TODO(audit): lift into internal/model/audit.go together with the
+// meti_assessment_* trio in meti.go, in a dedicated audit-universe
+// wave. Verified 2026-07-02 (M24-3 F350): lift REJECTED for now — see
+// the F350 note on the meti.go audit-action block (a proper lift
+// ripples into service/audit.go GetAvailableActions() and
+// middleware/audit_test.go's F271 parity sets). Same registration gap
+// as that trio: cra_report_decided audit rows land but are not
+// selectable in the UI action filter today.
 const AuditActionCRAReportDecided = "cra_report_decided"
 
 // CRAReportRunner is the subset of *cra.Runner the handler uses for

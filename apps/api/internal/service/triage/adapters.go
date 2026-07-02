@@ -141,12 +141,18 @@ type VEXServiceAdapter struct {
 //
 // Idempotency: VEXService.CreateStatement currently rejects a duplicate
 // (project, vulnerability, component) tuple with a "VEX statement
-// already exists" error. The runner's approve / edit transitions can
-// hit this on re-approve (e.g. user clicks Approve twice). We surface
-// the error verbatim so the handler can decide whether to treat it as
-// already-confirmed (200) or surface the duplicate (409).
-// ※要確認: confirm with web (#30 / agent D) whether re-approve should
-// be idempotent on the server side. Until then we let the error propagate.
+// already exists" error (service/vex.go CreateStatement). The runner's
+// approve / edit transitions can hit this on re-approve (e.g. user
+// clicks Approve twice). We surface the error verbatim.
+//
+// TODO(triage): decide the server-side re-approve contract. Verified
+// 2026-07-02 (M24-3 F350): the pre-F350 note said the handler "can
+// decide whether to treat it as already-confirmed (200) or surface the
+// duplicate (409)", but handler/vex_drafts.go mapRunnerError recognises
+// neither — "already exists" matches none of its markers, so a
+// re-approve duplicate surfaces as a 500 today. Make re-approve either
+// idempotent (200) or an explicit conflict (409) by mapping the
+// duplicate sentinel; until then the error propagates unclassified.
 func (a *VEXServiceAdapter) CreateStatement(ctx context.Context, in VEXStatementSyncInput) error {
 	_, err := a.Service.CreateStatement(ctx, service.CreateVEXStatementInput{
 		ProjectID:       in.ProjectID,

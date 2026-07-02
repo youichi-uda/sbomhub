@@ -131,11 +131,19 @@ type Parser interface {
 	Source() Source
 }
 
-// ExcerptStore is the minimal persistence interface advisory_excerpts.
-// Repository owns the concrete implementation in #23 (Agent X), this package
-// only declares the contract so the M1-5 triage runner can wire them together
-// without circular imports. ※要確認: signature may change once Agent X lands
-// the repository; keep this in sync after merge.
+// ExcerptStore is the minimal persistence contract this package sketched
+// for advisory_excerpts before the repository landed.
+//
+// TODO(advisory): adapt or remove this interface. Verified 2026-07-02
+// (M24-3 F350): the pre-F350 note said "signature may change once Agent
+// X lands the repository; keep this in sync after merge" — the
+// repository landed (#23) as repository.AdvisoryExcerptsRepository with
+// a DIFFERENT surface (Upsert / GetByCVE / GetBySource, uuid.UUID
+// tenant ids) and was never synced back here: nothing in the codebase
+// implements or consumes ExcerptStore. The M1-5 triage runner wires
+// against its own AdvisoryExcerptReader (service/triage/runner.go)
+// instead, so this interface is currently dead declaration kept only as
+// documentation of the caller-owns-persistence design note above.
 type ExcerptStore interface {
 	UpsertExcerpt(ctx context.Context, tenantID string, p *ParsedAdvisory) error
 	GetExcerpt(ctx context.Context, tenantID, cveID string, source Source) (*ParsedAdvisory, error)

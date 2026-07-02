@@ -344,8 +344,13 @@ func (s *ReportService) generateReportAsync(tenantID uuid.UUID, report *model.Ge
 // Trade-off (acknowledged in the codex-r5 task): the tx is held for the full
 // duration of file IO + PDF/XLSX rendering, which can be several seconds.
 // This mirrors the existing ScanService background scan pattern (R1-1b) and
-// is acceptable for current report volumes. ※要確認 if parallel report
-// generation ever ramps up to the point of saturating the connection pool.
+// is acceptable for current report volumes.
+//
+// TODO(perf): revisit if parallel report generation ever ramps up to the
+// point of saturating the connection pool. Verified 2026-07-02 (M24-3
+// F350): the tx still spans gatherReportData + PDF/XLSX rendering + the
+// terminal UpdateReport, so each in-flight generation pins one pooled
+// connection for the full render duration.
 func (s *ReportService) runReportGeneration(txCtx context.Context, tenantID uuid.UUID, report *model.GeneratedReport, locale string) error {
 	// Gather report data (RLS-bound reads via repos that pick up the tx
 	// through database.Querier).
