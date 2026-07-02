@@ -115,11 +115,26 @@ import (
 //	    lineage): a registered value missing from the message AND a
 //	    stale token no const declares both fail.
 //
-// CACHE TRAP (M22 R2 lesson): this test reads files OUTSIDE the build
-// graph (templates.go as text, web .ts/.tsx sources, repository and
-// evidence_pack Go sources). `go test`'s result cache does NOT
-// invalidate when those files change, so a cached pass can mask a real
-// failure. Local verification MUST use `go test -count=1`.
+// go-test-cache trap (F344 root cause; F348 rewrite, M23-2 #124):
+// Direction 3 reads apps/web/src/lib/api.ts, the cra-reports page.tsx
+// and (for the 3e census) every .ts/.tsx file under apps/web/src — all
+// OUTSIDE this Go module's root (apps/api). go's test cache folds
+// opened files into the cache key ONLY when they are inside the
+// module / GOPATH / GOROOT root (go1.26.4
+// cmd/go/internal/test/test.go computeTestInputsID: "Do not recheck
+// files outside the module, GOPATH, or GOROOT root"), so a bare
+// `go test` after editing a web surface can return a stale
+// "(cached) ok" false-pass. Empirically confirmed 2026-07-02 on THIS
+// suite: with a warm cache, adding "incidentReport" to the api.ts
+// CRAReportType union left `go test ./internal/service/cra/` reporting
+// "(cached) ok"; the same run with -count=1 failed loudly (direction
+// 3a). Run this suite with -count=1 whenever web-side surfaces changed
+// (and always for mutation verification). CI is unaffected — fresh
+// runners have no warm cache. The in-module reads are cache-tracked
+// normally: templates.go, repository/cra_reports.go,
+// evidence_pack/builder.go and every other .go file the census walks
+// are stat-tracked by (mtime,size) of the opened path; templatesFS and
+// templateCache are compiled build inputs.
 //
 // What THIS test DOES catch:
 //
@@ -523,22 +538,33 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 //	ReportTypeEarlyWarning ReportType = "early_warning"
 //
 // in templates.go. The declaration shape itself is the anchor (no line
-// numbers), so nothing else in the file can match.
+// numbers), so nothing else in the file can match. The value capture
+// class is wider than snake_case (F347 parse-liberal / assert-strict):
+// a camelCase wire value in a declaration still enters the parsed
+// universe and fails direction 1a against SupportedReportTypes()
+// instead of silently dropping out of the authoritative set.
 var craParityReportTypeConstRe = regexp.MustCompile(
-	`(?m)^\s*(ReportType[A-Za-z0-9]+)\s+ReportType\s*=\s*"([a-z0-9_\-]+)"`)
+	`(?m)^\s*(ReportType[A-Za-z0-9]+)\s+ReportType\s*=\s*"([A-Za-z0-9_\-]+)"`)
 
 // craParityLangConstRe matches one typed const declaration line
 //
 //	LangJA Lang = "ja"
 //
-// in templates.go, same technique.
+// in templates.go, same technique (and the same F347-widened value
+// capture class as craParityReportTypeConstRe).
 var craParityLangConstRe = regexp.MustCompile(
-	`(?m)^\s*(Lang[A-Za-z0-9]+)\s+Lang\s*=\s*"([a-z0-9_\-]+)"`)
+	`(?m)^\s*(Lang[A-Za-z0-9]+)\s+Lang\s*=\s*"([A-Za-z0-9_\-]+)"`)
 
-// craParityQuotedRe captures double-quoted wire-value identifiers (F326
-// identifier char class; the + means the "" filter sentinel in the
-// page.tsx option arrays can never be captured).
-var craParityQuotedRe = regexp.MustCompile(`"([a-z0-9_\-]+)"`)
+// craParityQuotedRe captures double-quoted wire-value identifiers. The
+// capture class is deliberately WIDER than the snake_case wire-value
+// shape (F347 parse-liberal / assert-strict): a camelCase member
+// smuggled into a union or option array ("incidentReport") must be
+// captured and fail the set comparison as an unexpected extra entry —
+// the previous [a-z0-9_\-] class could not reach the closing quote of
+// such a member and silently skipped it (latent false negative). The +
+// still means the "" filter sentinel in the page.tsx option arrays can
+// never be captured (F326).
+var craParityQuotedRe = regexp.MustCompile(`"([A-Za-z0-9_\-]+)"`)
 
 // craParityTokenRe captures bare wire-value-shaped tokens inside a
 // prose enumeration window such as
@@ -547,8 +573,13 @@ var craParityQuotedRe = regexp.MustCompile(`"([a-z0-9_\-]+)"`)
 //	early_warning [24h] | detailed_notification [72h] | final_report
 //
 // The leading [a-z] plus \b means bracketed annotations like [24h]
-// cannot produce a token.
-var craParityTokenRe = regexp.MustCompile(`\b[a-z][a-z0-9_]*`)
+// cannot produce a token. The tail class is deliberately wider than
+// snake_case (F347 parse-liberal / assert-strict): a camelCase drift
+// token is captured whole and fails the set comparison loudly — the
+// previous [a-z0-9_] tail truncated at the first uppercase letter, so
+// a drift like "early_warningExtra" collapsed to the registered value
+// "early_warning" and silently passed.
+var craParityTokenRe = regexp.MustCompile(`\b[a-z][A-Za-z0-9_]*`)
 
 // craParityEmbedsDocRe / craParityDimsDocRe / craParityEnumDocRe anchor
 // the three numeric factuality claims in templates.go probed by
