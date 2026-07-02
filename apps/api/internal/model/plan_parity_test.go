@@ -521,8 +521,16 @@ func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 	if err != nil {
 		return err
 	}
-	src := string(raw)
+	return applyBackfillUpdatesFromSource(seed, string(raw), path)
+}
 
+// applyBackfillUpdatesFromSource is the in-memory core of
+// applyBackfillUpdates, split out (F332, M22-2) so the byte-offset
+// source-order fold can be exercised against a synthetic SQL string
+// without touching the real migration files on disk (see
+// TestPlanBackfillSourceOrder_F332). `label` is used in place of a
+// file path in parse-error messages.
+func applyBackfillUpdatesFromSource(seed map[string]map[string]bool, src, label string) error {
 	// backfillMatch carries a single UPDATE statement's parse result
 	// plus the byte offset in the source at which the UPDATE keyword
 	// appeared, so all matches from both regex flavors can be sorted
@@ -544,14 +552,14 @@ func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 
 		delta := make(map[string]bool)
 		if err := json.Unmarshal([]byte(jsonDelta), &delta); err != nil {
-			return &parseErr{path: path, msg: "JSONB delta decode failed: " + err.Error()}
+			return &parseErr{path: label, msg: "JSONB delta decode failed: " + err.Error()}
 		}
 		var targetPlans []string
 		for _, sm := range planNameRe.FindAllStringSubmatch(inList, -1) {
 			targetPlans = append(targetPlans, sm[1])
 		}
 		if len(targetPlans) == 0 {
-			return &parseErr{path: path, msg: "no plan names found in IN (...) clause"}
+			return &parseErr{path: label, msg: "no plan names found in IN (...) clause"}
 		}
 		matches = append(matches, backfillMatch{
 			offset:      loc[0],
@@ -571,7 +579,7 @@ func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 
 		delta := make(map[string]bool)
 		if err := json.Unmarshal([]byte(jsonDelta), &delta); err != nil {
-			return &parseErr{path: path, msg: "JSONB delta decode failed: " + err.Error()}
+			return &parseErr{path: label, msg: "JSONB delta decode failed: " + err.Error()}
 		}
 		matches = append(matches, backfillMatch{
 			offset:      loc[0],
@@ -581,7 +589,7 @@ func applyBackfillUpdates(seed map[string]map[string]bool, path string) error {
 	}
 
 	if len(matches) == 0 {
-		return &parseErr{path: path, msg: "no UPDATE plan_limits ... jsonb ... WHERE ... matched"}
+		return &parseErr{path: label, msg: "no UPDATE plan_limits ... jsonb ... WHERE ... matched"}
 	}
 
 	// Fold in source-position order so PostgreSQL `||` last-write-
@@ -605,6 +613,98 @@ func mergeDelta(seed map[string]map[string]bool, plan string, delta map[string]b
 	}
 	for k, v := range delta {
 		seed[plan][k] = v
+	}
+}
+
+// TestPlanBackfillSourceOrder_F332 (M22-2, F327 INFO_DEFER close) is a
+// companion micro-test that exercises the byte-offset source-order fold
+// in applyBackfillUpdatesFromSource (the
+// regexp.FindAllStringSubmatchIndex + sort.Slice path F320 introduced)
+// against an IN-memory synthetic SQL fixture whose UPDATE statements
+// INTERLEAVE the two regex flavors (IN (...) and = 'x').
+//
+// Why this test exists: the real migration fixtures at M21 close do not
+// exercise the reordering path — 024 uses only the = 'x' shape and 049
+// uses only the IN (...) shape, so within each file the per-flavor
+// match lists are already in source order and the F320 sort is a no-op.
+// A regression that re-grouped folds by regex flavor (the exact pre-F320
+// bug shape) would therefore pass the F299 parity test on today's real
+// fixtures and only surface once a future migration mixed both shapes
+// in one file. This micro-test pins the source-order contract now, as
+// companion protection until a real migration (050+) mixes both shapes
+// and exercises the path on the real fixture; it deliberately uses a
+// synthetic in-memory string and touches no real migration file.
+//
+// The fixture is constructed so that folding grouped-by-flavor (all
+// IN (...) matches first, then all = 'x' matches — the pre-F320 order)
+// yields DIFFERENT final values than folding by byte offset, in both
+// grouping directions:
+//
+//   - "f332_flag" on free: IN(true) → ='free'(false) → IN(true).
+//     Source order ends true; flavor-grouped ([IN,IN] then [=]) ends
+//     false.
+//   - "f332_late" on starter: ='starter'(false) → IN(true).
+//     Source order ends true; flavor-grouped ([IN] then [=]) ends
+//     false.
+func TestPlanBackfillSourceOrder_F332(t *testing.T) {
+	const src = `
+-- F332 synthetic interleaved fixture (in-memory only; NOT a real
+-- migration). Statement order deliberately alternates the IN (...)
+-- and = 'x' UPDATE shapes so byte-offset order != regex-flavor order.
+UPDATE plan_limits SET features = features || '{"f332_flag": true}'::jsonb WHERE plan IN ('free', 'starter');
+
+UPDATE plan_limits SET features = features || '{"f332_flag": false, "f332_eq_only": true}'::jsonb WHERE plan = 'free';
+
+UPDATE plan_limits SET features = features || '{"f332_flag": true}'::jsonb WHERE plan IN ('free');
+
+UPDATE plan_limits SET features = features || '{"f332_late": false}'::jsonb WHERE plan = 'starter';
+
+UPDATE plan_limits SET features = features || '{"f332_late": true}'::jsonb WHERE plan IN ('starter');
+`
+
+	seed := map[string]map[string]bool{
+		"free":    {},
+		"starter": {},
+	}
+	if err := applyBackfillUpdatesFromSource(seed, src, "F332-in-memory-fixture"); err != nil {
+		t.Fatalf("F332 setup: applyBackfillUpdatesFromSource failed: %v", err)
+	}
+
+	want := map[string]map[string]bool{
+		"free": {
+			"f332_flag":    true, // IN(true) → =(false) → IN(true): last write in SOURCE order wins
+			"f332_eq_only": true,
+		},
+		"starter": {
+			"f332_flag": true, // only statement 1 targets starter for this key
+			"f332_late": true, // =(false) → IN(true): last write in SOURCE order wins
+		},
+	}
+
+	for plan, wantFeatures := range want {
+		gotFeatures := seed[plan]
+		for k, wantVal := range wantFeatures {
+			gotVal, ok := gotFeatures[k]
+			if !ok {
+				t.Errorf("F332 failure: plan=%q key=%q missing from folded "+
+					"result — the backfill parser dropped a statement.",
+					plan, k)
+				continue
+			}
+			if gotVal != wantVal {
+				t.Errorf("F332 failure: plan=%q key=%q folded to %v, want %v "+
+					"— the parser is not applying interleaved IN (...) and "+
+					"= 'x' UPDATE statements in byte-offset (source) order; "+
+					"PostgreSQL || last-write-wins semantics would diverge "+
+					"from this fold on a live upgrade.", plan, k, gotVal, wantVal)
+			}
+		}
+		if len(gotFeatures) != len(wantFeatures) {
+			t.Errorf("F332 failure: plan=%q folded key set has %d keys, want "+
+				"%d (got %v) — the parser picked up keys no fixture "+
+				"statement declares for this plan.",
+				plan, len(gotFeatures), len(wantFeatures), gotFeatures)
+		}
 	}
 }
 
