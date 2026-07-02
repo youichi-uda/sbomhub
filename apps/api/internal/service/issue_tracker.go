@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,12 @@ var AllowedIssueTrackerDomains = []string{
 	// Backlog
 	"backlog.com",
 	"backlog.jp",
+	// GitHub Issues (github.com covers api.github.com via the subdomain
+	// match, but both are listed explicitly so the SaaS allowlist reads as
+	// the exact set of endpoints operators may target; GitHub Enterprise
+	// Server self-hosts are OSS-mode only, same as self-hosted Jira)
+	"github.com",
+	"api.github.com",
 	// Additional enterprise domains can be added here
 }
 
@@ -121,6 +128,15 @@ func (s *IssueTrackerService) testConnection(ctx context.Context, conn *model.Is
 	case model.TrackerTypeBacklog:
 		backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken)
 		return backlogClient.TestConnection(ctx)
+	case model.TrackerTypeGitHub:
+		// Unlike Jira/Backlog, GitHub's connection test is repository-scoped
+		// (GET /repos/{owner}/{repo}), so the connection's DefaultProjectKey
+		// ("owner/repo") is required up front rather than optional.
+		if conn.DefaultProjectKey == "" {
+			return fmt.Errorf("github: default project key (\"owner/repo\" repository) is required to test the connection")
+		}
+		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
+		return githubClient.TestConnection(ctx, conn.DefaultProjectKey)
 	default:
 		return fmt.Errorf("unsupported tracker type: %s", conn.TrackerType)
 	}
@@ -200,6 +216,8 @@ func (s *IssueTrackerService) CreateTicket(ctx context.Context, tenantID uuid.UU
 		externalTicket, err = s.createJiraTicket(ctx, conn, apiToken, projectKey, issueType, input)
 	case model.TrackerTypeBacklog:
 		externalTicket, err = s.createBacklogTicket(ctx, conn, apiToken, projectKey, input)
+	case model.TrackerTypeGitHub:
+		externalTicket, err = s.createGitHubTicket(ctx, conn, apiToken, projectKey, input)
 	default:
 		return nil, fmt.Errorf("unsupported tracker type: %s", conn.TrackerType)
 	}
@@ -326,6 +344,42 @@ func (s *IssueTrackerService) createBacklogTicket(ctx context.Context, conn *mod
 	}, nil
 }
 
+func (s *IssueTrackerService) createGitHubTicket(ctx context.Context, conn *model.IssueTrackerConnection, apiToken, projectKey string, input CreateTicketInput) (*model.ExternalTicket, error) {
+	githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
+
+	githubInput := client.CreateGitHubIssueInput{
+		Repo:   projectKey, // "owner/repo"; validated by the client (ErrGitHubInvalidRepo)
+		Title:  input.Summary,
+		Body:   input.Description,
+		Labels: input.Labels,
+	}
+
+	issue, err := githubClient.CreateIssue(ctx, githubInput)
+	if err != nil {
+		return nil, err
+	}
+
+	assignee := ""
+	if issue.Assignee != nil {
+		assignee = issue.Assignee.Login
+	}
+
+	number := strconv.Itoa(issue.Number)
+	return &model.ExternalTicket{
+		ID:  number,
+		Key: number,
+		URL: issue.HTMLURL,
+		// GitHub issue state is "open"/"closed" (lowercase) — mapped by
+		// mapExternalStatus alongside the Jira/Backlog status vocabularies.
+		Status: issue.State,
+		// GitHub Issues has no native priority field; the requested priority
+		// is NOT persisted as external state it does not actually carry.
+		Priority: "",
+		Assignee: assignee,
+		Summary:  issue.Title,
+	}, nil
+}
+
 // GetTicketByVulnerability gets a ticket for a vulnerability
 func (s *IssueTrackerService) GetTicketByVulnerability(ctx context.Context, vulnID uuid.UUID) ([]model.VulnerabilityTicketWithDetails, error) {
 	return s.issueTrackerRepo.ListTicketsByVulnerability(ctx, vulnID)
@@ -396,6 +450,31 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 		if issue.Assignee != nil {
 			assignee = issue.Assignee.Name
 		}
+
+	case model.TrackerTypeGitHub:
+		// GitHub issue numbers are repository-scoped, and the ticket row does
+		// not persist a per-ticket repository, so sync resolves the issue in
+		// the connection's DefaultProjectKey repo. A ticket created with a
+		// per-ticket ProjectKey override pointing at a DIFFERENT repo cannot
+		// be synced against that repo (documented limitation, F356).
+		if conn.DefaultProjectKey == "" {
+			return fmt.Errorf("github: connection %s has no default project key (\"owner/repo\") to sync against", conn.ID)
+		}
+		issueNumber, perr := strconv.Atoi(ticket.ExternalTicketKey)
+		if perr != nil {
+			return fmt.Errorf("github: ticket %s has non-numeric external ticket key %q: %w", ticket.ID, ticket.ExternalTicketKey, perr)
+		}
+		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
+		state, gerr := githubClient.GetIssueStatus(ctx, conn.DefaultProjectKey, issueNumber)
+		if gerr != nil {
+			return gerr
+		}
+		// "open" / "closed" — mapExternalStatus sends "closed" to
+		// TicketStatusClosed (same terminal bucket as Jira/Backlog
+		// Done/Closed/完了) and "open" to the default TicketStatusOpen.
+		// GitHub has no priority field and GetIssueStatus carries no
+		// assignee, so both remain empty for GitHub tickets.
+		externalStatus = state
 	}
 
 	// Update ticket
@@ -411,10 +490,13 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 	return s.issueTrackerRepo.UpdateTicket(ctx, ticket)
 }
 
-// mapExternalStatus maps external status to local status
+// mapExternalStatus maps external status to local status. The vocabulary
+// mixes Jira/Backlog display statuses ("Done", "完了", ...) with GitHub's
+// lowercase machine states ("closed"; "open" falls through to the default
+// TicketStatusOpen arm like every other non-terminal status).
 func (s *IssueTrackerService) mapExternalStatus(externalStatus string) model.TicketStatus {
 	switch externalStatus {
-	case "Done", "Closed", "完了", "クローズ":
+	case "Done", "Closed", "closed", "完了", "クローズ":
 		return model.TicketStatusClosed
 	case "Resolved", "解決済み":
 		return model.TicketStatusResolved

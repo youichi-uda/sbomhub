@@ -12,6 +12,7 @@ type TrackerType string
 const (
 	TrackerTypeJira    TrackerType = "jira"
 	TrackerTypeBacklog TrackerType = "backlog"
+	TrackerTypeGitHub  TrackerType = "github"
 )
 
 // AuthType represents the authentication type

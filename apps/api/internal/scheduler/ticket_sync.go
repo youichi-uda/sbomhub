@@ -52,10 +52,13 @@ import (
 //	  - ticket_sync is I/O-bound. syncTenant's per-tenant tx wraps
 //	    j.issueTrackerService.SyncTicket(txCtx, ticketID), which
 //	    performs a synchronous external HTTP call. See
-//	    service.IssueTrackerService.SyncTicket: both the
-//	    model.TrackerTypeJira and model.TrackerTypeBacklog switch arms
-//	    construct a per-request client and call GetIssue synchronously
-//	    with a 30-second per-request timeout (F274b — M18-3 Phase D R2,
+//	    service.IssueTrackerService.SyncTicket: the
+//	    model.TrackerTypeJira, model.TrackerTypeBacklog, and
+//	    model.TrackerTypeGitHub switch arms each construct a
+//	    per-request client and fetch the external issue synchronously
+//	    (GetIssue for Jira/Backlog; GetIssueStatus — a GetIssue
+//	    wrapper — for GitHub, added in F356/M24-1b) with a 30-second
+//	    per-request timeout (F274b — M18-3 Phase D R2,
 //	    replaced the earlier absolute line-range reference "around
 //	    lines 372-398" which drifted with every unrelated edit to
 //	    issue_tracker.go and would have silently misled a future

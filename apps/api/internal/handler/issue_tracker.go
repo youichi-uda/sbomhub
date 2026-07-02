@@ -61,8 +61,18 @@ func (h *IssueTrackerHandler) CreateConnection(c echo.Context) error {
 		}
 	case "backlog":
 		trackerType = model.TrackerTypeBacklog
+	case "github":
+		trackerType = model.TrackerTypeGitHub
+		// GitHub's connection test is repository-scoped (GET /repos/{owner}/
+		// {repo}), so the "owner/repo" project key is required at creation —
+		// the handler-level check mirrors Jira's email requirement above and
+		// gives operators a field-specific 400 instead of the service's
+		// connection-test failure.
+		if req.DefaultProjectKey == "" {
+			return echo.NewHTTPError(http.StatusBadRequest, "default_project_key (owner/repo) is required for GitHub")
+		}
 	default:
-		return echo.NewHTTPError(http.StatusBadRequest, "Invalid tracker_type. Must be 'jira' or 'backlog'")
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid tracker_type. Must be 'jira', 'backlog', or 'github'")
 	}
 
 	input := service.CreateConnectionInput{

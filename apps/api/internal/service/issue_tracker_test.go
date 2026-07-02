@@ -132,6 +132,7 @@ func TestIssueTrackerService_MapExternalStatus(t *testing.T) {
 		// Closed statuses
 		{"Done", model.TicketStatusClosed},
 		{"Closed", model.TicketStatusClosed},
+		{"closed", model.TicketStatusClosed}, // GitHub machine state (F356)
 		{"完了", model.TicketStatusClosed},
 		{"クローズ", model.TicketStatusClosed},
 
@@ -146,6 +147,7 @@ func TestIssueTrackerService_MapExternalStatus(t *testing.T) {
 
 		// Default to Open
 		{"Open", model.TicketStatusOpen},
+		{"open", model.TicketStatusOpen}, // GitHub machine state (F356)
 		{"New", model.TicketStatusOpen},
 		{"未着手", model.TicketStatusOpen},
 		{"To Do", model.TicketStatusOpen},
@@ -190,6 +192,17 @@ func TestCreateConnectionInput_Validation(t *testing.T) {
 				BaseURL:           "https://example.backlog.com",
 				APIToken:          "token123",
 				DefaultProjectKey: "PROJ",
+			},
+			valid: true,
+		},
+		{
+			name: "valid github connection",
+			input: CreateConnectionInput{
+				TrackerType:       model.TrackerTypeGitHub,
+				Name:              "My GitHub",
+				BaseURL:           "https://api.github.com",
+				APIToken:          "token123",
+				DefaultProjectKey: "octocat/hello-world",
 			},
 			valid: true,
 		},
@@ -271,6 +284,8 @@ func TestIssueTrackerService_ValidateBaseURL(t *testing.T) {
 		{"valid jira cloud", "https://example.atlassian.net", svcWithAllowlist, false, ""},
 		{"valid backlog", "https://example.backlog.com", svcWithAllowlist, false, ""},
 		{"valid backlog jp", "https://example.backlog.jp", svcWithAllowlist, false, ""},
+		{"valid github api", "https://api.github.com", svcWithAllowlist, false, ""},
+		{"valid github root", "https://github.com", svcWithAllowlist, false, ""},
 		{"subdomain allowed", "https://company.team.atlassian.net", svcWithAllowlist, false, ""},
 
 		// Invalid URLs - blocked for all
