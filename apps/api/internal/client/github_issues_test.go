@@ -376,9 +376,11 @@ func TestGitHubIssuesClient_RepoValidation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F277-pattern rate-limit hardening — both documented GitHub shapes:
+// F277-pattern rate-limit hardening — all three documented GitHub shapes:
 //   - secondary: 403/429 + Retry-After (delta-seconds)
 //   - primary:   403/429 + X-RateLimit-Remaining: 0 + X-RateLimit-Reset (epoch)
+//   - secondary, header-less (F364): 403 + "secondary rate limit" body, no
+//     marker headers at all
 // plus exhaustion, context-cancel abort, and POST body reuse across retries.
 // The tests exercise doRequest through the public methods because the retry
 // logic lives on the shared funnel.
@@ -411,6 +413,38 @@ func TestGitHubIssuesClient_RateLimit_SecondaryRetryAfter(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
 		t.Errorf("expected 2 requests (1 x 403+Retry-After + 1 x 200), got %d", got)
+	}
+}
+
+// TestGitHubIssuesClient_RateLimit_SecondaryBodySniff pins the third,
+// header-less secondary rate-limit shape (F364, M24 R2): 403 whose body says
+// "secondary rate limit" with NO Retry-After and NO X-RateLimit-Remaining.
+// Pre-F364 this shape fell through to the terminal ErrGitHubForbidden arm;
+// it must instead be classified retryable, wait the BackoffPolicy fallback
+// (no header to honor), and succeed on the next attempt.
+func TestGitHubIssuesClient_RateLimit_SecondaryBodySniff(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			// Deliberately no rate-limit headers — the body is the only marker.
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"full_name": "acme/widget"})
+	}))
+	defer server.Close()
+
+	client := NewGitHubIssuesClient(server.URL, "token123").
+		WithBackoffPolicy(testGitHubBackoff(3))
+
+	if err := client.TestConnection(context.Background(), "acme/widget"); err != nil {
+		t.Fatalf("expected success after header-less secondary-limit retry, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("expected 2 requests (1 x 403+body-marker + 1 x 200), got %d", got)
 	}
 }
 

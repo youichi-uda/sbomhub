@@ -23,13 +23,18 @@ import (
 // WebFetch 2026-07-02).
 //
 // Rate-limit hardening (F277 pattern, applied at birth rather than retrofitted):
-// every request routes through doRequest, which handles GitHub's two documented
-// rate-limit shapes (docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api,
-// verified via WebFetch 2026-07-02):
+// every request routes through doRequest, which handles GitHub's three
+// documented rate-limit shapes (docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api,
+// verified via WebFetch 2026-07-02; third shape added by F364, M24 R2):
 //
 //   - primary: 403 or 429 with X-RateLimit-Remaining: 0 — wait until the
 //     X-RateLimit-Reset instant (UTC epoch seconds);
-//   - secondary: 403 or 429 with Retry-After (delta-seconds) — wait that long.
+//   - secondary: 403 or 429 with Retry-After (delta-seconds) — wait that long;
+//   - secondary, header-less: 403 whose body says "secondary rate limit" with
+//     neither marker header — GitHub documents that some secondary-limit
+//     responses carry no Retry-After at all. Detected by a body sniff (the
+//     ghsa.go 403 body-sniff precedent) and retried on the BackoffPolicy
+//     fallback.
 //
 // Precedence follows GitHub's own tiered guidance: Retry-After first, then
 // X-RateLimit-Reset (only when X-RateLimit-Remaining is 0 — the reset header
@@ -39,6 +44,20 @@ import (
 // BackoffPolicy.MaxDelay — this mirrors the Jira/Backlog F277 behaviour — but
 // the retry loop honours the caller's context.Context so long waits abort
 // promptly on shutdown.
+//
+// Header-less secondary-limit wait (F364 decision, documented rather than
+// silently chosen): GitHub's guidance for a secondary limit without
+// Retry-After is "wait at least one minute before retrying". The fallback
+// deliberately stays on the BackoffPolicy defaults (1s initial, 30s cap, 3
+// retries) instead of a 60s in-loop floor: doRequest serves interactive
+// create-ticket / test-connection handler requests, where a minutes-long
+// stall is worse than failing fast, and the ticket_sync scheduler runs
+// SyncTicket inside a per-tenant tx (see scheduler/ticket_sync.go's F269
+// ADR) where 3 x 60s of in-tx waiting would trip managed-PG
+// idle-in-transaction timeouts. Exhaustion surfaces ErrRateLimitExhausted
+// and the scheduler's 5-minute cycle retries the sync — comfortably beyond
+// the one-minute guidance — while an operator-facing request fails with an
+// explicit, retryable error instead of hanging.
 //
 // Auth uses "Authorization: Bearer <token>" (same scheme as client/ghsa.go).
 // The token is never placed in a URL query parameter and never included in an
@@ -73,10 +92,13 @@ var (
 	// ErrGitHubUnauthorized is returned on HTTP 401 — the token is missing,
 	// malformed, revoked, or expired.
 	ErrGitHubUnauthorized = errors.New("github: unauthorized")
-	// ErrGitHubForbidden is returned on HTTP 403 that is NOT a rate-limit
-	// response (no Retry-After header and X-RateLimit-Remaining != 0) — the
-	// token is valid but lacks access to the repository (missing scope,
-	// SAML/SSO not authorized, or issues disabled).
+	// ErrGitHubForbidden is returned on HTTP 403 that carries no recognized
+	// rate-limit marker (no Retry-After header, X-RateLimit-Remaining != 0,
+	// and no "secondary rate limit" body text — F364). That is most likely a
+	// permission failure — the token lacks access to the repository (missing
+	// scope, SAML/SSO not authorized, or issues disabled) — but a throttle
+	// response that matches none of GitHub's documented markers would land
+	// here too, so the error text hedges rather than asserting "permission".
 	ErrGitHubForbidden = errors.New("github: forbidden")
 	// ErrGitHubNotFound is returned on HTTP 404 — the repository or issue
 	// does not exist, or the token cannot see it (GitHub deliberately
@@ -272,12 +294,18 @@ func (c *GitHubIssuesClient) GetIssueStatus(ctx context.Context, repoFullName st
 	return state, nil
 }
 
-// isGitHubRateLimited reports whether a response is one of GitHub's two
+// isGitHubRateLimited reports whether a response is one of GitHub's three
 // documented rate-limit shapes. 429 is always a rate limit. 403 is a rate
-// limit only when it carries a rate-limit marker (Retry-After for the
-// secondary limit, X-RateLimit-Remaining: 0 for the primary limit) —
-// otherwise it is a genuine permission failure that retrying cannot fix.
-func isGitHubRateLimited(status int, retryAfter, rateLimitRemaining string) bool {
+// limit only when it carries a rate-limit marker: Retry-After for the
+// secondary limit, X-RateLimit-Remaining: 0 for the primary limit, or —
+// F364, the header-less secondary form — a body that says "secondary rate
+// limit" ("You have exceeded a secondary rate limit. Please wait a few
+// minutes before you try again." with neither marker header; body sniff per
+// the ghsa.go 403 precedent, matched case-insensitively and on the
+// distinctive "secondary rate limit" phrase so a permission body mentioning
+// "rate limit" in passing is not misclassified). A 403 with no marker at all
+// is treated as a permission failure that retrying cannot fix.
+func isGitHubRateLimited(status int, retryAfter, rateLimitRemaining string, body []byte) bool {
 	if status == http.StatusTooManyRequests {
 		return true
 	}
@@ -287,7 +315,10 @@ func isGitHubRateLimited(status int, retryAfter, rateLimitRemaining string) bool
 	if strings.TrimSpace(retryAfter) != "" {
 		return true
 	}
-	return strings.TrimSpace(rateLimitRemaining) == "0"
+	if strings.TrimSpace(rateLimitRemaining) == "0" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(string(body)), "secondary rate limit")
 }
 
 func (c *GitHubIssuesClient) doRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
@@ -361,7 +392,7 @@ func (c *GitHubIssuesClient) doRequest(ctx context.Context, method, path string,
 			return fmt.Errorf("github: failed to read response: %w", readErr)
 		}
 
-		if isGitHubRateLimited(status, retryAfter, rateLimitRemaining) {
+		if isGitHubRateLimited(status, retryAfter, rateLimitRemaining, respBody) {
 			lastStatus = status
 			lastBody = respBody
 			if attempt == maxRetries {
@@ -373,6 +404,10 @@ func (c *GitHubIssuesClient) doRequest(ctx context.Context, method, path string,
 			// header is present on every response, so gating on
 			// remaining == 0 avoids stalling a secondary-limit retry for
 			// the rest of the primary window), then exponential backoff.
+			// The header-less body-sniffed secondary form (F364) carries
+			// neither header, so it lands on the plain BackoffPolicy
+			// fallback — see the type docstring for why that fallback is
+			// NOT floored at GitHub's one-minute guidance.
 			fallback := c.backoffPolicy.Delay(attempt)
 			if strings.TrimSpace(rateLimitRemaining) == "0" {
 				fallback = RespectRateLimitReset(rateLimitReset, fallback)
@@ -389,7 +424,7 @@ func (c *GitHubIssuesClient) doRequest(ctx context.Context, method, path string,
 			return fmt.Errorf("github: API error 401 (token missing, revoked, or expired): %s: %w",
 				truncate(string(respBody), 200), ErrGitHubUnauthorized)
 		case http.StatusForbidden:
-			return fmt.Errorf("github: API error 403 (token lacks repository access, SSO not authorized, or issues disabled): %s: %w",
+			return fmt.Errorf("github: API error 403 with no rate-limit markers — likely a permission failure (token lacks repository access, SSO not authorized, or issues disabled), though an unrecognized throttle response cannot be ruled out: %s: %w",
 				truncate(string(respBody), 200), ErrGitHubForbidden)
 		case http.StatusNotFound:
 			return fmt.Errorf("github: API error 404 (repository or issue not found, or token cannot see it): %s: %w",
