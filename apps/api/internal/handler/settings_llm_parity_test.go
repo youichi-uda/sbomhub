@@ -114,6 +114,23 @@ import (
 //     that changes their coverage tripped is a visible, deliberate
 //     decision rather than a silent test-suite mutation.
 //
+// go-test-cache trap (F344, M23-2 #124): Direction 2 reads
+// apps/web/src/app/[locale]/(dashboard)/settings/llm/page.tsx, which
+// lives OUTSIDE this Go module's root (apps/api). go's test cache
+// folds opened files into the cache key ONLY when they are inside the
+// module / GOPATH / GOROOT root (go1.26.4
+// cmd/go/internal/test/test.go computeTestInputsID: "Do not recheck
+// files outside the module, GOPATH, or GOROOT root"), so a bare
+// `go test` after editing page.tsx can return a stale "(cached) ok"
+// false-pass. Empirically confirmed 2026-07-02: with a warm cache,
+// removing "ollama" from PROVIDERS left `go test ./internal/handler/`
+// reporting "(cached) ok"; the same run with -count=1 failed loudly.
+// Run this suite with -count=1 whenever web-side surfaces changed
+// (and always for mutation verification). CI is unaffected — fresh
+// runners have no warm cache. The in-module reads are cache-tracked
+// normally: factory.go / provider.go by (mtime,size) stat of the
+// os.ReadFile'd path, settings_llm.go as a compiled build input.
+//
 // Adding a new LLM provider going forward: add the identifier to
 // supportedLLMProviders in settings_llm.go AND to both factory switches
 // in factory.go AND to the PROVIDERS array in page.tsx AND to the

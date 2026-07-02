@@ -35,8 +35,17 @@
 //
 // Run with:
 //
-//	cd apps/api && go test -tags=integration \
+//	cd apps/api && go test -tags=integration -count=1 \
 //	    ./internal/model/... -run RealPG_F299
+//
+// -count=1 is load-bearing (F344, M23-2 #124): the live plan_limits
+// rows this test asserts against are NOT inputs to go's test cache —
+// only consulted env vars (DATABASE_URL here) and files opened inside
+// the module root are (go1.26.4 cmd/go/internal/test/test.go
+// computeTestInputsID). Re-running after re-migrating / re-seeding
+// the database with an unchanged binary, flags, and DATABASE_URL
+// would otherwise return the previous cached verdict instead of
+// re-checking the DB.
 //
 // Prerequisites (skipped otherwise):
 //

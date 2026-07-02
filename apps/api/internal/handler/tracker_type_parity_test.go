@@ -178,6 +178,22 @@ import (
 //   - Human-readable display names ("Jira", "Backlog" capitalized
 //     JSX labels, i18n catalogs) — only wire identifiers are pinned.
 //
+// go-test-cache trap (F344, M23-2 #124): Direction 2's web-side scans
+// read apps/web/src/**, which lives OUTSIDE this Go module's root
+// (apps/api). go's test cache folds opened files into the cache key
+// ONLY when they are inside the module / GOPATH / GOROOT root
+// (go1.26.4 cmd/go/internal/test/test.go computeTestInputsID: "Do not
+// recheck files outside the module, GOPATH, or GOROOT root"), so a
+// bare `go test` after editing api.ts / page.tsx can return a stale
+// "(cached) ok" false-pass. Empirically confirmed 2026-07-02 on the
+// sibling F318 suite (identical read shape): a PROVIDERS mutation in
+// the web page.tsx was invisible to a warm-cache `go test` and failed
+// loudly with -count=1. Run this suite with -count=1 whenever
+// web-side surfaces changed (and always for mutation verification).
+// CI is unaffected — fresh runners have no warm cache. The
+// apps/api-side reads (tree walk under apiRoot) are cache-tracked
+// normally via (mtime,size) stat of each opened file.
+//
 // Adding a new tracker (e.g. GitHub Issues) going forward — this test
 // fails until ALL of the following move together, which is exactly the
 // 3-way sync this replication exists to force:
