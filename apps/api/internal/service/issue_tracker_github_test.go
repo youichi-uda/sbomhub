@@ -122,6 +122,9 @@ func TestIssueTrackerService_CreateGitHubTicket(t *testing.T) {
 		conn := &model.IssueTrackerConnection{
 			TrackerType: model.TrackerTypeGitHub,
 			BaseURL:     ts.URL,
+			// Matches the projectKey argument below — the F361 override
+			// guard only admits the connection's default repository.
+			DefaultProjectKey: "octocat/hello-world",
 		}
 		input := CreateTicketInput{
 			Summary:     "[HIGH] CVE-2026-0001",
@@ -165,10 +168,69 @@ func TestIssueTrackerService_CreateGitHubTicket(t *testing.T) {
 		conn := &model.IssueTrackerConnection{
 			TrackerType: model.TrackerTypeGitHub,
 			BaseURL:     "https://api.github.invalid",
+			// Same malformed value as the projectKey argument so the F361
+			// override guard passes and the client-side shape validation is
+			// what rejects.
+			DefaultProjectKey: "not-a-repo",
 		}
 		_, err := svc.createGitHubTicket(context.Background(), conn, "test-token", "not-a-repo", CreateTicketInput{Summary: "s"})
 		if !errors.Is(err, client.ErrGitHubInvalidRepo) {
 			t.Fatalf("err = %v, want errors.Is(err, client.ErrGitHubInvalidRepo)", err)
+		}
+	})
+
+	// F361 guard (creation side): a per-ticket repository override pointing
+	// at a repo other than the connection's default would mint a ticket
+	// SyncTicket can never sync (and, pre-F361, one that silently adopted an
+	// unrelated same-numbered issue's state). It must be rejected before any
+	// HTTP round-trip.
+	t.Run("F361: repository override differing from the default is rejected before HTTP", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("no HTTP request must be made for a rejected repo override; got %s %s", r.Method, r.URL.Path)
+		}))
+		defer ts.Close()
+
+		conn := &model.IssueTrackerConnection{
+			TrackerType:       model.TrackerTypeGitHub,
+			BaseURL:           ts.URL,
+			DefaultProjectKey: "octocat/hello-world",
+		}
+		_, err := svc.createGitHubTicket(context.Background(), conn, "test-token", "octocat/other-repo", CreateTicketInput{Summary: "s"})
+		if err == nil {
+			t.Fatal("expected an error for a repo override differing from the connection default")
+		}
+		if !strContains(err.Error(), "default repository") {
+			t.Errorf("error %q should explain that GitHub tickets sync against the connection's default repository", err)
+		}
+	})
+
+	// GitHub owner/repo names are case-insensitive: a case-variant of the
+	// default repository is the SAME repository, not an override, and must
+	// not be rejected.
+	t.Run("F361: case-variant of the default repository is not an override", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{
+				"number": 7,
+				"title": "s",
+				"state": "open",
+				"html_url": "https://github.com/octocat/hello-world/issues/7"
+			}`))
+		}))
+		defer ts.Close()
+
+		conn := &model.IssueTrackerConnection{
+			TrackerType:       model.TrackerTypeGitHub,
+			BaseURL:           ts.URL,
+			DefaultProjectKey: "octocat/hello-world",
+		}
+		ticket, err := svc.createGitHubTicket(context.Background(), conn, "test-token", "Octocat/Hello-World", CreateTicketInput{Summary: "s"})
+		if err != nil {
+			t.Fatalf("createGitHubTicket rejected a case-variant of the default repository: %v", err)
+		}
+		if ticket.Key != "7" {
+			t.Errorf("Key = %q, want \"7\"", ticket.Key)
 		}
 	})
 }
@@ -292,5 +354,165 @@ func TestIssueTrackerService_SyncTicket_GitHub_NonNumericKey(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("no UPDATE must run for a non-numeric key; got %v", err)
+	}
+}
+
+// githubSyncGuardFixture wires the two GetTicket/GetConnection sqlmock rows
+// shared by the F361 sync-side tests: a GitHub ticket (external key "42")
+// with the given external URL on a connection whose default repository is
+// "octocat/hello-world" and whose base URL is baseURL. The guard tests point
+// baseURL at a server that fails the test on ANY request (the F361 guards
+// must reject before HTTP); the case-variant test points it at a normal mock.
+func githubSyncGuardFixture(t *testing.T, svc *IssueTrackerService, mock sqlmock.Sqlmock, baseURL, ticketURL string) uuid.UUID {
+	t.Helper()
+
+	encToken, err := svc.encrypt("gh-token")
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	ticketID := uuid.New()
+	connID := uuid.New()
+	tenantID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("FROM vulnerability_tickets").WithArgs(ticketID).WillReturnRows(
+		sqlmock.NewRows(githubSyncTicketCols).AddRow(
+			ticketID, tenantID, uuid.New(), uuid.New(), connID,
+			"42", "42", ticketURL,
+			string(model.TicketStatusOpen), "open", "", "", "[HIGH] CVE-2026-0001",
+			nil, now, now))
+
+	mock.ExpectQuery("FROM issue_tracker_connections").WithArgs(connID).WillReturnRows(
+		sqlmock.NewRows(githubSyncConnCols).AddRow(
+			connID, tenantID, string(model.TrackerTypeGitHub), "GitHub prod", baseURL,
+			string(model.AuthTypeAPIToken), "", encToken, "octocat/hello-world", "",
+			true, nil, now, now))
+
+	return ticketID
+}
+
+// TestIssueTrackerService_SyncTicket_GitHub_WrongRepoURL pins the F361
+// sync-side guard: a ticket whose persisted html_url names a repository other
+// than the connection's DefaultProjectKey must error out loudly — with no
+// HTTP round-trip and no UPDATE — instead of polling the same-numbered (and
+// potentially unrelated) issue in the default repo and silently overwriting
+// local_status with its state.
+func TestIssueTrackerService_SyncTicket_GitHub_WrongRepoURL(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no HTTP request must be made for a wrong-repo ticket; got %s %s", r.Method, r.URL.Path)
+	}))
+	defer ts.Close()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+		"https://github.com/other-org/other-repo/issues/42")
+
+	err = svc.SyncTicket(context.Background(), ticketID)
+	if err == nil {
+		t.Fatal("expected an error for a ticket living in a different repository")
+	}
+	if !strContains(err.Error(), "other-org/other-repo") || !strContains(err.Error(), "octocat/hello-world") {
+		t.Errorf("error %q should name both the ticket's repository and the connection's default repository", err)
+	}
+	// No UPDATE expectation was registered: the guard must fire before any
+	// ticket write.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("no UPDATE must run for a wrong-repo ticket; got %v", err)
+	}
+}
+
+// TestIssueTrackerService_SyncTicket_GitHub_UnparseableURL pins the F361
+// defensive-parse arm: a stored URL whose repository cannot be established
+// (legacy rows, hand edits) is an explicit error — never a fall-through to
+// the default repo where the issue number may belong to an unrelated issue.
+func TestIssueTrackerService_SyncTicket_GitHub_UnparseableURL(t *testing.T) {
+	badURLs := []struct {
+		name string
+		url  string
+	}{
+		{"empty", ""},
+		{"relative_no_host", "/octocat/hello-world/issues/42"},
+		{"jira_shaped_path", "https://example.invalid/browse/PROJ-1"},
+		{"pulls_not_issues", "https://github.com/octocat/hello-world/pull/42"},
+		{"non_numeric_issue_segment", "https://github.com/octocat/hello-world/issues/latest"},
+	}
+	for _, tc := range badURLs {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("no HTTP request must be made for an unparseable ticket URL; got %s %s", r.Method, r.URL.Path)
+			}))
+			defer ts.Close()
+
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+			ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL, tc.url)
+
+			err = svc.SyncTicket(context.Background(), ticketID)
+			if err == nil {
+				t.Fatalf("expected an error for unparseable ticket URL %q", tc.url)
+			}
+			if !strContains(err.Error(), "refusing to sync") {
+				t.Errorf("error %q should state the sync refusal", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("no UPDATE must run for an unparseable ticket URL; got %v", err)
+			}
+		})
+	}
+}
+
+// TestIssueTrackerService_SyncTicket_GitHub_CaseVariantRepoURL pins the
+// case-insensitivity of the F361 sync-side comparison: GitHub owner/repo
+// names are case-insensitive and html_url carries GitHub's canonical casing,
+// which may differ from the casing the operator typed into
+// DefaultProjectKey. A case-variant match is the SAME repository and must
+// sync normally.
+func TestIssueTrackerService_SyncTicket_GitHub_CaseVariantRepoURL(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octocat/hello-world/issues/42" {
+			t.Errorf("path = %q, want /repos/octocat/hello-world/issues/42", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 42,
+			"title": "[HIGH] CVE-2026-0001",
+			"state": "closed",
+			"html_url": "https://github.com/Octocat/Hello-World/issues/42"
+		}`))
+	}))
+	defer ts.Close()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+		"https://github.com/Octocat/Hello-World/issues/42")
+
+	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
+		ticketID, string(model.TicketStatusClosed), "closed", "", "",
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+	).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
+		t.Fatalf("SyncTicket rejected a case-variant of the default repository: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}
 }
