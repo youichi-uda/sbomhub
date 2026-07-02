@@ -2903,7 +2903,6 @@ func allModelActionValues() map[string]bool {
 		model.ActionSubscriptionCreated:   true,
 		model.ActionSubscriptionUpdated:   true,
 		model.ActionSubscriptionCancelled: true,
-		model.ActionSubscriptionRenewed:   true,
 		model.ActionSubscriptionViewed:    true,
 		// Settings.
 		model.ActionSettingsUpdated: true,
@@ -2911,7 +2910,6 @@ func allModelActionValues() map[string]bool {
 		// LLM key.
 		model.ActionLLMKeySet:     true,
 		model.ActionLLMKeyRotated: true,
-		model.ActionLLMKeyCleared: true,
 		// CRA report.
 		model.ActionCRAReportRun:             true,
 		model.ActionCRAReportListed:          true,

@@ -73,21 +73,33 @@ const (
 	ActionAPIKeyDeleted = "apikey.deleted"
 	ActionAPIKeyUsed    = "apikey.used"
 
-	// Subscription actions
+	// Subscription actions. F333 (M22-2): a fourth "renewed" verb was
+	// deleted as a dead symbol — the LemonSqueezy webhook handler's
+	// event switch (handler/webhook_lemonsqueezy.go) has no renewal
+	// event (it handles created/updated/cancelled/resumed/expired/
+	// paused/unpaused only), so no emit site existed. A wave that adds
+	// a renewal event must re-introduce the constant together with its
+	// emit site and GetAvailableActions() registry entry in the same
+	// change (F280 discipline).
 	ActionSubscriptionCreated   = "subscription.created"
 	ActionSubscriptionUpdated   = "subscription.updated"
 	ActionSubscriptionCancelled = "subscription.cancelled"
-	ActionSubscriptionRenewed   = "subscription.renewed"
 
 	// Settings actions
 	ActionSettingsUpdated = "settings.updated"
 
 	// LLM / BYOK actions (issue #22). The key itself is NEVER logged —
 	// only the action verb and provider name. See
-	// internal/handler/settings_llm.go for the call sites.
+	// internal/handler/settings_llm.go for the call sites. F333
+	// (M22-2): a third "cleared" verb was deleted as a dead symbol —
+	// the settings_llm.go Update handler treats a nil EncryptedAPIKey
+	// as preserve-existing, so no key-clearance business path (and
+	// therefore no emit site) exists. A wave that adds a clear/DELETE
+	// path must re-introduce the constant together with its emit site
+	// and GetAvailableActions() registry entry in the same change
+	// (F280 discipline).
 	ActionLLMKeySet     = "llm_key_set"
 	ActionLLMKeyRotated = "llm_key_rotated"
-	ActionLLMKeyCleared = "llm_key_cleared"
 
 	// F188 (M13 Phase D round 3): action verbs for the project-nested
 	// child resource families that the audit middleware now classifies

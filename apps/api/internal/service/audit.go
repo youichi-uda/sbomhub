@@ -508,13 +508,14 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// audit.go /subscription emits four verbs (created/updated/
 		// cancelled/viewed); F280 registers all four so the UI filter
 		// can surface any audit_logs row the middleware produces.
-		// ActionSubscriptionRenewed is intentionally omitted — no
-		// middleware emit site exists for it today (SubscriptionRenewed
-		// is currently only exposed as a model constant, not a classifier
-		// return value), so registering it here without an emit
-		// counterpart would violate the F271 direction-1 parity by
-		// injecting a UI-selectable action that no middleware branch
-		// can produce.
+		// A fifth "renewed" verb once existed as a model constant with
+		// no emit site (no middleware classifier branch returned it and
+		// the LemonSqueezy webhook event switch has no renewal event);
+		// F333 (M22-2) deleted that dead constant rather than register
+		// it here, because a registry entry without an emit counterpart
+		// would violate the F271 direction-1 parity by injecting a
+		// UI-selectable action that no branch can produce (F280
+		// discipline).
 		{Action: model.ActionSubscriptionCreated, Label: "Subscription Created", Category: "subscription"},
 		{Action: model.ActionSubscriptionUpdated, Label: "Subscription Updated", Category: "subscription"},
 		{Action: model.ActionSubscriptionCancelled, Label: "Subscription Cancelled", Category: "subscription"},
@@ -577,13 +578,21 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// F322 expectedEmit additions) so a future removal from either
 		// side trips CI. See F276 factuality lineage on overclaim risk.
 		//
-		// Note (M22+ candidates): model.ActionLLMKeyCleared exists in
-		// model/audit.go but is not emitted by any handler today (dead
-		// symbol) and model.ActionSubscriptionRenewed likewise defined
-		// but not emitted — both intentionally NOT registered here per
-		// the F280 discipline (registering a UI-selectable action with
-		// no emit site would violate the F271 direction-1 parity by
-		// inviting operators to filter on a verb no branch can produce).
+		// Note (F333, M22-2 close): the two dead model constants this
+		// note previously tracked as M22+ wire-up-or-delete candidates
+		// (an LLM key "cleared" verb and a subscription "renewed" verb,
+		// both defined in model/audit.go with zero emit sites) were
+		// DELETED in F333 rather than wired up. Survey evidence:
+		// settings_llm.go's Update handler treats a nil EncryptedAPIKey
+		// as preserve-existing (no key-clearance business path exists),
+		// and webhook_lemonsqueezy.go's event switch handles created/
+		// updated/cancelled/resumed/expired/paused/unpaused with no
+		// renewal event. Per the F280 discipline (registering a
+		// UI-selectable action with no emit site would violate the F271
+		// direction-1 parity), delete was the correct close; a wave
+		// that adds either business path must re-introduce the
+		// constant, its emit site, and the registry entry here in the
+		// same change.
 		{Action: model.ActionTenantCreated, Label: "Tenant Created", Category: "tenant"},
 		{Action: model.ActionTenantUpdated, Label: "Tenant Updated", Category: "tenant"},
 		{Action: model.ActionTenantDeleted, Label: "Tenant Deleted", Category: "tenant"},
