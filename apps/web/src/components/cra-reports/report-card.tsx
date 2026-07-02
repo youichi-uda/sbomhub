@@ -116,21 +116,34 @@ function decisionVariant(
   }
 }
 
-/** Build a compact label for an evidence kind (CRA-specific kinds). */
+/**
+ * Build a compact label for an evidence kind (CRA-specific kinds).
+ *
+ * The case list mirrors the six kinds cra.Runner actually emits
+ * (apps/api/internal/service/cra/runner.go — the runAIDisabled
+ * synthetic evidence block plus buildEvidence): ai_disabled /
+ * vex_draft / template / advisory_excerpt / reachability_result /
+ * llm_rationale. F342 (M23-2 #124) removed the never-emitted
+ * source_vex_draft / llm_call / vulnerability cases (F280 discipline:
+ * no register without an emit site) and added the three emitted kinds
+ * the pre-F342 switch missed. The default arm keeps rendering the raw
+ * kind string as defence for a future backend kind this list has not
+ * caught up with yet.
+ */
 function evidenceKindLabel(kind: string): string {
   switch (kind) {
+    case "ai_disabled":
+      return "ai-disabled";
     case "vex_draft":
       return "vex";
-    case "source_vex_draft":
-      return "vex";
+    case "template":
+      return "template";
     case "advisory_excerpt":
       return "advisory";
-    case "llm_call":
-      return "llm";
+    case "reachability_result":
+      return "reachability";
     case "llm_rationale":
       return "rationale";
-    case "vulnerability":
-      return "cve";
     default:
       return kind;
   }
