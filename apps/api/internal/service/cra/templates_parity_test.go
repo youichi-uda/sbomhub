@@ -58,9 +58,15 @@ import (
 //	              into every evidence pack README.
 //
 // If any two drift, the breakage is silent in exactly the anti-pattern
-// 58 way: a const added without a .tmpl file panics the package init at
-// runtime (or, if SupportedReportTypes is also stale, becomes a report
-// type no request can select); a .tmpl file added without a const is a
+// 58 way: a const added together with its templateCache key but without
+// the .tmpl file panics the package init at runtime (the init closure
+// only ReadFiles the hand-maintained keys list); a const added WITHOUT
+// the cache key never panics — Render just returns ErrUnknownTemplate
+// for the new type at runtime (and if SupportedReportTypes() also
+// moved, requests can select a type that can never render) until
+// direction 2b here flags the missing cache key (F351 factual reword —
+// the pre-F351 text overstated init panic as covering the const-only
+// drift); a .tmpl file added without a const is a
 // dead artifact shipped in every binary; web surfaces extended without
 // Go offer a report type the backend rejects; Go extended without the
 // web leaves the new report type invisible to operators; and the prose
@@ -95,10 +101,14 @@ import (
 //
 //	(3) Cross-language: the api.ts CRAReportType / CRAReportLang TS
 //	    unions and the page.tsx REPORT_TYPE_OPTIONS / LANG_OPTIONS
-//	    arrays must each equal the Go wire-value sets. All web parsing
+//	    arrays must each equal the Go wire-value sets, and a duplicated
+//	    entry within any single union / option array fails at parse
+//	    time (F352: set comparison alone would collapse the duplicate
+//	    and hide a doubled dropdown entry). All web parsing
 //	    is read-only and anchor-terminated (F326 discipline: no
 //	    byte-offset windows, no line numbers, identifier char class
-//	    [a-z0-9_-]; every anchor must occur exactly once). A web-side
+//	    [A-Za-z0-9_-], widened by F347 so camelCase drift fails loudly;
+//	    every anchor must occur exactly once). A web-side
 //	    census pins which .ts/.tsx files under apps/web/src may mention
 //	    a report-type wire value at all.
 //
@@ -148,7 +158,10 @@ import (
 //     file under apps/web/src that hardcodes a report-type wire value
 //     outside the pinned census sets, and any stale census pin.
 //   - api.ts union or page.tsx filter-array drift from the Go registry,
-//     in either direction.
+//     in either direction, and a duplicated entry inside any one of
+//     those four web surfaces (F352 parse-stage guard in
+//     craParityQuotedSet — a duplicate would render twice in the UI
+//     dropdown but survive a set-level comparison).
 //   - templates.go's count and stable-order docstring claims going
 //     stale, and the repository / evidence-pack operator-facing
 //     enumerations advertising a set that differs from the registry.
@@ -742,7 +755,10 @@ func craParityWindow(t *testing.T, src, rel, startAnchor, endAnchor string) stri
 
 // craParityQuotedSet extracts the double-quoted identifiers of a window
 // as a set, failing loudly on an empty result (an emptied union or
-// option array needs review, not a vacuous pass).
+// option array needs review, not a vacuous pass) and on a duplicated
+// value (F352: the map collapse would otherwise let a doubled union
+// member or option-array entry — which renders twice in the UI
+// dropdown — pass the downstream set-equality untouched).
 func craParityQuotedSet(t *testing.T, window, label string) map[string]bool {
 	t.Helper()
 	ms := craParityQuotedRe.FindAllStringSubmatch(window, -1)
@@ -752,6 +768,13 @@ func craParityQuotedSet(t *testing.T, window, label string) map[string]bool {
 	}
 	out := make(map[string]bool, len(ms))
 	for _, m := range ms {
+		if out[m[1]] {
+			t.Fatalf("F341 setup (F352 duplicate guard): quoted value %q "+
+				"appears more than once in %s — a duplicated entry renders "+
+				"twice in the UI (or duplicates a TS union member) and "+
+				"would be invisible to the set comparison; remove the "+
+				"duplicate.", m[1], label)
+		}
 		out[m[1]] = true
 	}
 	return out
