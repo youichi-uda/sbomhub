@@ -5,25 +5,38 @@
  * mirror e2e/cra-reports.spec.ts (M2-5) and e2e/triage.spec.ts (M1-6)
  * shape-for-shape: empty-state, filter UX, summary strip, override
  * flow. The M3-4 evaluator fan-out runs synchronously against the
- * project's SBOM / vulnerability / VEX / CRA history, and a fresh test
- * project has none of those, so /refresh returns 32 rows (the full
- * catalog — service/meti/catalog_test.go pins exactly 32 criteria; the
- * pre-F343 "27 rows" here was a stale claim of the F336 species) all
- * in `needs_review` with empty evidence. That is enough to assert the
+ * project's SBOM / vulnerability / VEX / CRA history, and /refresh
+ * always returns 32 rows (the full catalog — service/meti/
+ * catalog_test.go pins exactly 32 criteria; the pre-F343 "27 rows"
+ * here was a stale claim of the F336 species). For a fresh test
+ * project the statuses are MIXED, not uniform — the pre-F353 claim
+ * "all in needs_review with empty evidence" was factually wrong
+ * (verified 2026-07-02 against service/meti/criteria/*): most criteria
+ * fall back to `needs_review`, but the evaluator scores absence as
+ * failure on several (zero SBOMs / zero VEX drafts → `not_achieved`;
+ * e.g. sbom_creation.go guards the no-SBOM case first at 8+ sites),
+ * the EOL check returns `not_applicable` for an empty component set,
+ * and the two tenant-scoped audit-log-presence checks in
+ * sbom_operation.go score `achieved` because creating the project
+ * itself already wrote audit_logs rows. Evidence is `[]` on most rows
+ * but NOT all — several evaluators persist the zero counts that drove
+ * the verdict (sboms_count / vulnerabilities_count /
+ * audit_logs_count). That mix is enough to assert the
  * matrix renders AND — via the public /refresh + PUT/DELETE override
  * endpoints — to apply and clear a real override with a REST readback
  * (see the two override specs below; their conditional skips only
- * guard sessions without write auth). What it is NOT enough for is an
- * evaluator-driven `achieved` → `not_achieved` operator flip, which
- * requires evaluator preconditions the fresh test project lacks.
+ * guard sessions without write auth). What it is NOT enough for is
+ * pinning an evaluator-driven status flip on a KNOWN criterion, which
+ * requires seeded evaluator preconditions the fresh test project
+ * lacks.
  *
  * TODO(e2e): verified 2026-07-02 (M23-2 F343): there is still no
  * "seed a meti_assessment" admin endpoint nor a stubbed evaluator
  * harness. (The pre-F343 note here asked to "replace the conditional
  * skips" once one lands, but the refresh → override-form → submit →
  * REST-readback flow it prescribed has since landed through the
- * public API — only with override_status=not_applicable against an
- * all-needs_review matrix.) When a seed path lands, extend the
+ * public API — only with override_status=not_applicable against the
+ * mixed-status matrix described above.) When a seed path lands, extend the
  * override specs to pin an `achieved` → `not_achieved` flip on a
  * known criterion id.
  */
@@ -107,11 +120,13 @@ test.describe("METI Self-Assessment (M3-5)", () => {
     });
 
     test("should render the per-phase accordion after /refresh", async ({ page, request }) => {
-        // /refresh runs the evaluator fan-out. The fresh project has
-        // no SBOMs, so every criterion lands in needs_review with empty
-        // evidence — that is enough to assert the accordion mounts
-        // with one item per phase and the summary strip mounts with
-        // non-zero needs_review count.
+        // /refresh runs the evaluator fan-out and persists all 32 rows
+        // with MIXED statuses (mostly needs_review, plus not_achieved /
+        // not_applicable / achieved — see the top-of-file F353 note;
+        // the pre-F353 "every criterion lands in needs_review" claim
+        // was wrong). The assertions below only require the accordion
+        // to mount with one item per phase and the summary strip to
+        // render, which any status mix satisfies.
         const refreshRes = await request.post(
             `${API_BASE_URL}/api/v1/projects/${projectId}/meti/assessment/refresh`,
         );
