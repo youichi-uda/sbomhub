@@ -51,8 +51,12 @@ import { Textarea } from "@/components/ui/textarea";
  * under_investigation below `triage.ConfidenceThresholdFromEnv()`; this
  * client-side guard catches drift between server and UI and avoids leaking
  * "approved-looking" draft cards when the threshold env changes.
- * ※要確認: surface the server-side threshold through an API endpoint and
- *  prefer that over this constant.
+ * This constant mirrors triage.DefaultConfidenceThreshold (0.7, see
+ * apps/api/internal/service/triage/guards.go). The effective server-side
+ * value (env SBOMHUB_AI_CONFIDENCE_THRESHOLD) is surfaced only on the
+ * POST run/reanalyse response (RunTriageResponse.threshold), not on the
+ * GET list that renders this queue, so the card falls back to this
+ * default unless a caller passes the `threshold` prop.
  */
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
 

@@ -20,9 +20,11 @@
  * MetiAssessment row (only ImprovementActions carries the title for
  * efficiency). The card receives the catalog entry as an optional
  * prop (page-level lookup) and picks the language by next-intl
- * useLocale. ※要確認: a future M4 task could add a /catalog endpoint
- * the UI fetches once and caches; for now the page renders title
- * fallback as `criterion_id` so a catalog miss stays inspectable.
+ * useLocale. No /meti/catalog endpoint exists today (the server routes
+ * are assessment / refresh / override / improvement-actions, see
+ * apps/api/cmd/server/main.go), and the METI page does not pass the
+ * catalog prop, so the title renders the `criterion_id` fallback and a
+ * catalog miss stays inspectable.
  */
 
 import { useState } from "react";

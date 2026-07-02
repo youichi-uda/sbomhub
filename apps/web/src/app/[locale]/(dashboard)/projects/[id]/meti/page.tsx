@@ -16,7 +16,7 @@
  *     the env may still surface upstream outages; the banner stays
  *     wired for graceful degradation parity with the other AI pages
  *   - PAGE_LIMIT mirrors handler.DefaultMetiAssessmentsListLimit (100)
- *     so the matrix view receives the full 27-criterion catalog in
+ *     so the matrix view receives the full 32-criterion catalog in
  *     one shot; bounds exist purely for handler F24/F27 parity
  *   - truncation banner stays wired for forward compat (catalog could
  *     grow past 100; the banner silently disappears today)
@@ -66,7 +66,7 @@ interface FlashError {
 let flashIdSeq = 0;
 
 // Mirror handler.DefaultMetiAssessmentsListLimit. The catalog ships with
-// 27 criteria today so this never paginates; the bounds exist for
+// 32 criteria today so this never paginates; the bounds exist for
 // forward compatibility with handler.MaxMetiAssessmentsListLimit.
 const PAGE_LIMIT = 100;
 
@@ -171,8 +171,11 @@ export default function METIAssessmentPage() {
       // Truncation banner relies on the X-Total-Count header which the
       // current envelope-only getAssessment helper does not surface
       // (see api.meti.getAssessment comment). totalCount falls back to
-      // the visible count today; the banner is dormant. ※要確認:
-      // promote to listWithMeta if the catalog grows past PAGE_LIMIT.
+      // the visible count, so the banner stays dormant — and it cannot
+      // trigger today anyway: the production catalog is a fixed 32
+      // criteria (criteria.Registry), well under PAGE_LIMIT (100). A
+      // listWithMeta-style helper becomes necessary only if the
+      // catalog ever grows past PAGE_LIMIT.
       setTotalCount(rows.length);
     } catch (err) {
       handleError(err, t("loadAssessmentFailed"));

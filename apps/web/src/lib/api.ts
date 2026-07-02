@@ -1221,12 +1221,15 @@ export type CRAReportState =
 export type CRAReportDecision = "pending" | "approved" | "edited" | "rejected";
 
 /**
- * One evidence pointer attached to a CRA report. The CRA runner emits
- * objects shaped `{kind, ref, ...}` where `ref` typically links back to
- * the source VEX draft id, the LLM call id, or an advisory excerpt id.
- * The exact shape is open-ended (jsonb), so we keep the type permissive.
- * ※要確認: lock the shape once cra.Runner stabilises which keys the UI
- * is meant to surface (`source_vex_draft` deep link in particular).
+ * One evidence pointer attached to a CRA report. The emitting shape is
+ * locked at cra.Runner's evidenceEntry struct
+ * (apps/api/internal/service/cra/runner.go): `{kind, ref?, source?,
+ * description?, note?}` with kinds vex_draft / template /
+ * advisory_excerpt / reachability_result / llm_rationale, plus
+ * ai_disabled on the no-provider path. `ref` carries the FK string
+ * (VEX draft, advisory excerpt or reachability result id). The column
+ * is open-ended jsonb, so the type stays permissive for forward
+ * compatibility.
  */
 export interface CRAReportEvidence {
   kind: string;
@@ -1348,12 +1351,15 @@ export type METIStatus =
 
 /**
  * One evidence pointer attached to a METI assessment. The evaluator emits
- * `{kind, value}` objects (see criteria.evidenceEntry); operator overrides
- * may augment with `{kind, ref}` or note fields. The shape is open-ended
- * (jsonb), so we keep the type permissive — the UI surfaces `kind` as a
- * badge and stringifies `value`/`ref`/`description` for display.
- * ※要確認: lock the exact key set once operator-overridden evidence shape
- * stabilises (M4 follow-up).
+ * `{kind, value}` objects only (see criteria.evidenceEntry in
+ * apps/api/internal/service/meti/criteria/criteria.go). The operator
+ * override endpoints (handler/meti.go metiOverrideRequest /
+ * metiClearOverrideRequest) accept override_status / override_note /
+ * improvement_action and never write evidence rows, so no server path
+ * emits `ref` / `description` / `note` today. The column is open-ended
+ * jsonb, so the extra optional keys and the index signature are
+ * client-side defensiveness — the UI surfaces `kind` as a badge and
+ * stringifies `value`/`ref`/`description` for display.
  */
 export interface METIAssessmentEvidence {
   kind: string;

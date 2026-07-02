@@ -49,10 +49,12 @@ interface FlashError {
 
 let flashIdSeq = 0;
 
-// Mirror the handler-side default (DefaultCRAReportsListLimit=100). The
-// truncation banner triggers when totalCount > pageLimit. ※要確認:
-// surface the server-side default through an API constant once the
-// CRA admin surface stabilises.
+// Mirror the handler-side default (DefaultCRAReportsListLimit=100 in
+// apps/api/internal/handler/cra_reports.go). The truncation banner
+// triggers when totalCount > pageLimit. No API surfaces the server-side
+// constant, so this mirror is pinned by hand; if the two drift the
+// banner threshold desyncs, but the server clamps requests to
+// MaxCRAReportsListLimit (500) regardless.
 const PAGE_LIMIT = 100;
 
 const REPORT_TYPE_OPTIONS = [

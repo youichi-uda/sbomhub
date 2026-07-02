@@ -75,9 +75,11 @@ export interface ReportCardProps {
  * Map state to badge variant. `under_investigation` (forward-compat:
  * not in the DB CHECK list today, but reserved for M3-era policies) is
  * surfaced in yellow per the M1 #F-low-confidence pattern carried over
- * from DraftCard. ※要確認: confirm the backend never emits
- * `under_investigation` for CRA reports today; if it does we should
- * align the DB CHECK list.
+ * from DraftCard. The backend cannot emit `under_investigation` for a
+ * CRA report today: cra.Runner persists state='draft' only, and the
+ * DB CHECK (apps/api/migrations/038_cra_reports.up.sql) rejects any
+ * value outside draft / approved / submitted / archived — the branch
+ * below is purely forward-compat.
  */
 function stateVariant(
   state: CRAReportState,
@@ -136,10 +138,12 @@ function evidenceKindLabel(kind: string): string {
 
 /**
  * Resolve the human-facing pointer string for one evidence row.
- * The CRA runner emits open-ended jsonb; the most common keys we see
- * today are `ref` (the FK string) and `description` (the operator-
- * facing snippet). We preserve everything in raw_snippet for
- * transparency. ※要確認: lock the shape once cra.Runner stabilises.
+ * The emitting shape is locked at cra.Runner's evidenceEntry struct
+ * (apps/api/internal/service/cra/runner.go): {kind, ref?, source?,
+ * description?, note?}, where `ref` carries the FK string (VEX draft /
+ * advisory excerpt / reachability result id) and `description` the
+ * operator-facing snippet. The column stays open-ended jsonb, so
+ * unknown keys are tolerated on the wire but not rendered.
  */
 function evidenceRef(e: CRAReportEvidence): string {
   if (typeof e.ref === "string" && e.ref !== "") return e.ref;
@@ -239,12 +243,13 @@ export function ReportCard({
             {t("draftLabel")}
           </h4>
           {/*
-            ※要確認: render with a proper Markdown renderer (react-markdown
-             not currently a dep — adding it would inflate bundle size
-             without immediate UX value). The whitespace-pre-wrap +
-             monospace fallback preserves headings / lists / code blocks
-             as text, which is acceptable for review-then-submit flows
-             where the operator copies into the regulator's web form.
+            Deliberately rendered as plain text, not Markdown:
+            react-markdown is not a dependency of apps/web (adding it
+            would inflate bundle size without immediate UX value). The
+            whitespace-pre-wrap <pre> preserves headings / lists / code
+            blocks as text, which is acceptable for review-then-submit
+            flows where the operator copies into the regulator's web
+            form.
           */}
           <pre
             data-testid="cra-report-draft"
