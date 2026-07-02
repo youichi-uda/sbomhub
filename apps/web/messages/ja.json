@@ -1291,7 +1291,7 @@
       "evaluatorVersion": "evaluator: {version}",
       "lastEvaluatedAt": "最終評価: {timestamp}",
       "emptyTitle": "評価結果はまだありません",
-      "emptyDescription": "「再評価」 を押すと、 プロジェクトの SBOM/脆弱性/VEX/CRA 履歴から 27 項目の自己評価を一括採点します。 採点後は各項目を手動で上書き可能です。",
+      "emptyDescription": "「再評価」 を押すと、 プロジェクトの SBOM/脆弱性/VEX/CRA 履歴から 32 項目の自己評価を一括採点します。 採点後は各項目を手動で上書き可能です。",
       "summaryAchieved": "達成 {count}",
       "summaryNotAchieved": "未達 {count}",
       "summaryNeedsReview": "要確認 {count}",

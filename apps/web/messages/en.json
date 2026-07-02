@@ -1291,7 +1291,7 @@
       "evaluatorVersion": "evaluator: {version}",
       "lastEvaluatedAt": "Last evaluated: {timestamp}",
       "emptyTitle": "No assessment yet",
-      "emptyDescription": "Press 'Re-evaluate' to score all 27 criteria from the project's SBOM / vulnerability / VEX / CRA history. Each row can then be manually overridden.",
+      "emptyDescription": "Press 'Re-evaluate' to score all 32 criteria from the project's SBOM / vulnerability / VEX / CRA history. Each row can then be manually overridden.",
       "summaryAchieved": "Achieved {count}",
       "summaryNotAchieved": "Not achieved {count}",
       "summaryNeedsReview": "Needs review {count}",
