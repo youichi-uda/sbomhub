@@ -2383,7 +2383,8 @@ export const api = {
   //   PUT    /api/v1/projects/:id/meti/assessment/:criterion_id/override
   //   GET    /api/v1/projects/:id/meti/improvement-actions
   //
-  // The catalog ships with 27 criteria (3 phases × ~9 items) so the
+  // The catalog ships with 32 criteria (11 env_setup + 10
+  // sbom_creation + 11 sbom_operation) so the
   // matrix page never paginates in practice. We still expose limit /
   // offset on the filter shape for parity with the handler's F24/F27
   // bounds — see comment on handler.parseListFilter.
@@ -2421,7 +2422,7 @@ export const api = {
       return { ...safe, assessments: safe.assessments ?? [] };
     },
     /**
-     * POST /refresh — re-runs the evaluator fan-out (27 criteria) and
+     * POST /refresh — re-runs the evaluator fan-out (32 criteria) and
      * returns the persisted rows + evaluator version. Operator-applied
      * overrides are preserved by the repository (Upsert does NOT touch
      * override_*). Failures here include 503 AI-disabled (M3 is

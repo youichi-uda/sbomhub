@@ -10,7 +10,7 @@ package meti
 //
 // Layering (matches the issue's "scope" section):
 //
-//   - meti/catalog.go         (M3-3, owned)        — 27 criteria.
+//   - meti/catalog.go         (M3-3, owned)        — 32 criteria.
 //   - meti/criteria/          (this wave, M3-2)    — per-criterion logic.
 //   - meti/evaluator.go       (this wave, M3-2)    — orchestration.
 //   - repository/meti_assessments.go (M3-1)        — Upsert / Get / list.

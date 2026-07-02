@@ -315,7 +315,7 @@ func (b *Builder) Build(ctx context.Context, in BuildInput) (*BuildResult, error
 	}
 
 	// Step 4: fetch METI self-assessment rows. The evaluator stores at
-	// most one row per (project, criterion) — for a 27-criterion
+	// most one row per (project, criterion) — for a 32-criterion
 	// catalog the fetch is well under the 500-row clamp, so we issue a
 	// single ListByProject with the zero filter (all phases, all
 	// statuses, all override states).
@@ -673,7 +673,7 @@ func writeMETISection(buf *bytes.Buffer, r renderInput) {
 	if r.METITruncated {
 		buf.WriteString("> ⚠️ **Warning**: more than the repository fetch cap (500) METI assessment rows exist for this project. ")
 		buf.WriteString("This bundle includes only the first 500 (ordered by phase, criterion_id). ")
-		buf.WriteString("The catalog currently ships ~27 criteria so truncation should not occur in practice — investigate any project that triggers this banner.\n\n")
+		buf.WriteString("The catalog currently ships ~32 criteria so truncation should not occur in practice — investigate any project that triggers this banner.\n\n")
 	}
 
 	if len(r.METIRows) == 0 {

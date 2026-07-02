@@ -1428,7 +1428,7 @@ func TestMetiHandler_ClearOverride_RequireNote_F33(t *testing.T) {
 // the evaluator / repository call against the (tenant, projectID)
 // pair, so a probe caller could:
 //
-//   - POST /refresh with a random UUID → persist 27 evaluator rows
+//   - POST /refresh with a random UUID → persist 32 evaluator rows
 //     under a project that does not exist in the tenant (or worse,
 //     belongs to another tenant in a shared-cluster deployment).
 //   - GET  /assessment with a sibling tenant's project UUID → read

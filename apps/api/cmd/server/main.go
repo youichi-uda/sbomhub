@@ -334,7 +334,7 @@ func main() {
 	// UpdateDecision.
 	craReportsRepo := repository.NewCRAReportsRepository(db)
 
-	// METI self-assessment store (Wave M3-1 / issue #41). Holds the 27
+	// METI self-assessment store (Wave M3-1 / issue #41). Holds the 32
 	// per-criterion verdicts the evaluator (M3-2) writes and the M3-4
 	// /meti/assessment endpoints read / override.
 	metiAssessmentsRepo := repository.NewMetiAssessmentsRepository(db)
@@ -622,7 +622,7 @@ func main() {
 	// F37 (M3 Codex review round 3): the project repository is injected
 	// so every METI endpoint can confirm the path :id belongs to the
 	// authenticated tenant BEFORE touching meti_assessments. Without
-	// this check, /refresh would persist 27 evaluator rows under an
+	// this check, /refresh would persist 32 evaluator rows under an
 	// arbitrary or non-existent project UUID (project_id is a soft
 	// reference with no FK in the migration).
 	metiHandler := handler.NewMetiHandler(metiAssessmentsRepo, metiEvaluator, auditRepo, projectRepo)
@@ -1126,7 +1126,7 @@ func main() {
 	// /refresh runs synchronously inside the ambient TenantTx — F19
 	// (no-TenantTx-for-LLM-stages) is intentionally NOT applied and a
 	// per-tenant concurrency limiter is not needed (the catalog is a
-	// fixed 27-item fan-out; F25 N/A).
+	// fixed 32-item fan-out; F25 N/A).
 	//
 	// Middleware chain:
 	//   - GET assessment / GET improvement-actions:
@@ -1141,7 +1141,7 @@ func main() {
 	//     /decision and evidence-pack /build — refresh is a deliberate
 	//     auditor-facing action, not a polling surface); 300 req/min on
 	//     reads (matches the CRA /cra-reports list / get budget).
-	//   - TenantTx wraps the rest so the refresh fan-out (27 Upserts +
+	//   - TenantTx wraps the rest so the refresh fan-out (32 Upserts +
 	//     1 audit row) commits atomically with the audit trail, and the
 	//     override (1 UPDATE + 1 audit row) honours the F5/F32 audit-
 	//     or-nothing contract — audit failure inside the handler

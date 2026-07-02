@@ -29,7 +29,7 @@ import (
 //
 // F37 (M3 Codex review round 3): the meti_assessments table treats
 // project_id as a soft reference (no FK) so without this check a probe
-// caller can persist 27 evaluator rows under an arbitrary or
+// caller can persist 32 evaluator rows under an arbitrary or
 // non-existent project UUID and pollute List / Override / Evidence
 // Pack output. GetByTenant returns sql.ErrNoRows for both
 // "row does not exist" and "row belongs to another tenant" — the
@@ -74,8 +74,9 @@ func validateMetiOverrideNote(note string) (string, int, map[string]string) {
 // also clamps as defense-in-depth (meti_assessments.go ListByProject /
 // CountByProject bounds).
 //
-// The METI catalog ships with 27 criterion entries (3 phases × ~9
-// items), so DefaultMetiAssessmentsListLimit = 100 covers the full
+// The METI catalog ships with 32 criterion entries (11 env_setup +
+// 10 sbom_creation + 11 sbom_operation), so
+// DefaultMetiAssessmentsListLimit = 100 covers the full
 // project assessment in one page and the dashboard's tabbed phase
 // matrix never paginates in practice — the bounds exist purely to keep
 // the DoS-probe regression-class out of the repository layer.
@@ -93,7 +94,7 @@ const (
 // catalogue is consolidated (alongside AuditActionCRAReportDecided).
 const (
 	// AuditActionMetiAssessmentRefreshed is emitted by /refresh after the
-	// evaluator's 27-criterion fan-out is persisted.
+	// evaluator's 32-criterion fan-out is persisted.
 	AuditActionMetiAssessmentRefreshed = "meti_assessment_refreshed"
 
 	// AuditActionMetiAssessmentOverridden is emitted by /override when the
@@ -200,7 +201,7 @@ type MetiAuditLogger interface {
 //   - F19: the evaluator is fully local (no LLM upstream), so /refresh runs
 //     synchronously inside the ambient TenantTx. Connection-pool
 //     exhaustion DoS does not apply.
-//   - F25: the catalog is a fixed 27-item set; fan-out cap does not apply.
+//   - F25: the catalog is a fixed 32-item set; fan-out cap does not apply.
 type MetiHandler struct {
 	store     MetiAssessmentStore
 	evaluator MetiEvaluator
@@ -411,7 +412,7 @@ func (h *MetiHandler) ListAssessments(c echo.Context) error {
 //
 // Audit-or-nothing (F5 / F32): if the audit Log fails, we return 500
 // so the ambient TenantTx middleware rolls back the Upsert fan-out.
-// The full 27 rows commit atomically with their audit trail or not at
+// The full 32 rows commit atomically with their audit trail or not at
 // all.
 func (h *MetiHandler) RefreshAssessment(c echo.Context) error {
 	tc := middleware.NewTenantContext(c)
@@ -427,7 +428,7 @@ func (h *MetiHandler) RefreshAssessment(c echo.Context) error {
 	}
 
 	// F37: confirm the project belongs to the authenticated tenant
-	// BEFORE the evaluator + 27-row Upsert fan-out runs. Without this
+	// BEFORE the evaluator + 32-row Upsert fan-out runs. Without this
 	// check the handler would persist meti_assessments rows for an
 	// arbitrary / non-existent project UUID (project_id is a soft
 	// reference with no FK in the migration).
@@ -950,7 +951,7 @@ func (h *MetiHandler) ClearOverride(c echo.Context) error {
 // The repository's status filter is a single-value equality check, so
 // the "not achieved" filtering happens in the handler. This is a
 // server-side filter (vs forcing the Web UI to enumerate every status
-// and post-process) — the row count is bounded by the 27-item catalog
+// and post-process) — the row count is bounded by the 32-item catalog
 // so the post-filter cost is negligible.
 //
 // X-Total-Count carries the count of returned actions (not the raw
