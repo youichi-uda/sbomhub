@@ -139,14 +139,22 @@ import (
 //	    and CRAReports.Lang objects in apps/web/messages/en.json AND
 //	    ja.json must each have a key set equal to the Go wire-value
 //	    sets. The objects are located structurally — an encoding/json
-//	    token walk, not regex or json.Unmarshal — so exactly one object
-//	    named ReportType / Lang may exist per catalog (exactly-once,
-//	    F326 spirit) and a duplicated key INSIDE the object fails at
-//	    parse time (F352 lineage: map-decoding would silently collapse
-//	    the duplicate). A messages census (5c) additionally pins which
-//	    .json files under apps/web/messages may mention a report-type
-//	    wire value at all, so a third locale catalog hardcoding the
-//	    values must be brought under this contract deliberately.
+//	    token walk, not regex or json.Unmarshal — and anchored at
+//	    their FULL key path (F362, M24 R2): the probe matches an
+//	    object only at CRAReports.ReportType / CRAReports.Lang, not a
+//	    same-named object anywhere in the document, so renaming the
+//	    parent CRAReports namespace — which strands the labels
+//	    next-intl resolves under CRAReports.* — fails loudly as a
+//	    zero-match instead of the probe silently re-anchoring (the
+//	    pre-F362 match-anywhere walk was R1-proven GREEN under exactly
+//	    that rename). Exactly one object may exist at the pinned path
+//	    (exactly-once, F326 spirit) and a duplicated key INSIDE the
+//	    object fails at parse time (F352 lineage: map-decoding would
+//	    silently collapse the duplicate). A messages census (5c)
+//	    additionally pins which .json files under apps/web/messages
+//	    may mention a report-type wire value at all, so a third locale
+//	    catalog hardcoding the values must be brought under this
+//	    contract deliberately.
 //
 // go-test-cache trap (F344 root cause; F348 rewrite, M23-2 #124):
 // Direction 3 reads apps/web/src/lib/api.ts, the cra-reports page.tsx
@@ -190,11 +198,14 @@ import (
 //   - templates.go's count and stable-order docstring claims going
 //     stale, and the repository / evidence-pack operator-facing
 //     enumerations advertising a set that differs from the registry.
-//   - A messages catalog (en.json / ja.json) whose ReportType or Lang
-//     label-object key set drifts from the Go registry in either
-//     direction, a duplicated key inside either object, and any OTHER
-//     .json file under apps/web/messages mentioning a report-type wire
-//     value outside the 5c census pin (F358).
+//   - A messages catalog (en.json / ja.json) whose
+//     CRAReports.ReportType or CRAReports.Lang label-object key set
+//     drifts from the Go registry in either direction, a rename or
+//     move of the parent CRAReports namespace that strands both label
+//     objects (F362 full-path anchor), a duplicated key inside either
+//     object, and any OTHER .json file under apps/web/messages
+//     mentioning a report-type wire value outside the 5c census pin
+//     (F358).
 //
 // What THIS test does NOT catch (documented factuality trade-off,
 // mirrors the F276 note on F271 / F281 / F299 / F318 / F330):
@@ -601,11 +612,11 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 		}
 		craParityAssertSetEqual(t,
 			"F358 direction 5a ("+rel+" CRAReports.ReportType label keys ↔ Go report-type wire values)",
-			craParityMessagesObjectKeys(t, src, rel, "ReportType"),
+			craParityMessagesObjectKeys(t, src, rel, "CRAReports.ReportType"),
 			reportTypeValues)
 		craParityAssertSetEqual(t,
 			"F358 direction 5b ("+rel+" CRAReports.Lang label keys ↔ Go lang wire values)",
-			craParityMessagesObjectKeys(t, src, rel, "Lang"),
+			craParityMessagesObjectKeys(t, src, rel, "CRAReports.Lang"),
 			langValues)
 	}
 
@@ -885,33 +896,45 @@ func craParityTokenSet(t *testing.T, window, label string) map[string]bool {
 }
 
 // craParityMessagesObjectKeys returns the key set of the JSON object
-// stored under objKey anywhere in the document src (direction 5, F358).
-// The document is walked with an encoding/json token decoder rather
-// than json.Unmarshal so two failure modes stay loud that map-decoding
-// would silently absorb:
+// stored at the exact dot-joined key path objPath (e.g.
+// "CRAReports.ReportType") in the document src (direction 5, F358;
+// full-path anchor: F362, M24 R2). The document is walked with an
+// encoding/json token decoder — the frame stack carries each
+// container's key path — rather than json.Unmarshal, so three failure
+// modes stay loud that map-decoding (or the pre-F362 match-anywhere
+// walk) would silently absorb:
 //
-//   - exactly-once (F326 spirit): objKey naming an object in two places
-//     (e.g. a second ReportType block under another page namespace)
-//     would make the probe window ambiguous — fatal, re-anchor
-//     deliberately;
+//   - parent-namespace drift (F362): the pre-F362 walk matched a
+//     "ReportType" / "Lang" object ANYWHERE in the document, so
+//     renaming the parent CRAReports namespace — which strands the
+//     labels next-intl resolves under CRAReports.* — kept the probe
+//     GREEN (R1-proven). Matching only at objPath turns that rename
+//     into a loud zero-match failure;
+//   - exactly-once (F326 spirit): objPath resolving to more than one
+//     object (possible only via duplicate parent keys, the same
+//     decoder-collapse family as F352) would make the probe window
+//     ambiguous — fatal, re-anchor deliberately;
 //   - duplicate keys (F352 lineage): a doubled key inside the object is
 //     last-wins-collapsed by every JSON map decoder (including
 //     next-intl's), silently discarding one label — fatal here at parse
 //     time instead.
 //
-// Only the matched object's OWN keys are collected (nested objects, if
-// the catalog shape ever grows them, are not flattened in). An empty
+// Containers reached through an array get a "[]" path segment, so an
+// array-nested object can never satisfy a dot-joined key path. Only the
+// matched object's OWN keys are collected (nested objects, if the
+// catalog shape ever grows them, are not flattened in). An empty
 // matched object is fatal: an emptied label catalog needs review, not a
 // vacuous set comparison.
 func craParityMessagesObjectKeys(
 	t *testing.T,
-	src, rel, objKey string,
+	src, rel, objPath string,
 ) map[string]bool {
 	t.Helper()
 	type frame struct {
 		obj       bool
 		expectKey bool
 		lastKey   string
+		path      string // dot-joined key path of this container ("" = root)
 		capture   bool
 	}
 	dec := json.NewDecoder(strings.NewReader(src))
@@ -934,19 +957,28 @@ func craParityMessagesObjectKeys(
 		if d, ok := tok.(json.Delim); ok {
 			switch d {
 			case '{', '[':
-				capture := d == '{' && top != nil && top.obj &&
-					!top.expectKey && top.lastKey == objKey
+				childPath := ""
+				if top != nil {
+					if top.obj && !top.expectKey {
+						// This delimiter is the value for top.lastKey; the
+						// token after the block closes is the next key.
+						childPath = craParityJoinPath(top.path, top.lastKey)
+						top.expectKey = true
+					} else {
+						// Array element: "[]" can never appear in a
+						// dot-joined key path, so array-nested objects
+						// are unmatched by construction.
+						childPath = craParityJoinPath(top.path, "[]")
+					}
+				}
+				capture := d == '{' && childPath == objPath
 				if capture {
 					matches++
-				}
-				if top != nil && top.obj && !top.expectKey {
-					// This delimiter is the value for top.lastKey; the
-					// token after the block closes is the next key.
-					top.expectKey = true
 				}
 				stack = append(stack, &frame{
 					obj:       d == '{',
 					expectKey: d == '{',
+					path:      childPath,
 					capture:   capture && matches == 1,
 				})
 			case '}', ']':
@@ -969,7 +1001,7 @@ func craParityMessagesObjectKeys(
 						"guard): key %q appears more than once inside the "+
 						"%s object of %s — JSON map decoding (including "+
 						"next-intl's) silently keeps only the last one; "+
-						"remove the duplicate.", k, objKey, rel)
+						"remove the duplicate.", k, objPath, rel)
 				}
 				keys[k] = true
 			}
@@ -983,18 +1015,29 @@ func craParityMessagesObjectKeys(
 		}
 	}
 	if matches != 1 {
-		t.Fatalf("F358 direction 5 setup: expected exactly one %q object "+
-			"in %s, found %d — the catalog structure changed or a second "+
-			"%s block landed; re-anchor this probe deliberately rather "+
-			"than letting it scan the wrong window.",
-			objKey, rel, matches, objKey)
+		t.Fatalf("F358 direction 5 setup (F362 full-path anchor): expected "+
+			"exactly one object at key path %q in %s, found %d — the "+
+			"catalog structure changed, the parent namespace was renamed, "+
+			"or a duplicate parent key landed; move the catalogs and this "+
+			"probe together deliberately rather than letting it scan the "+
+			"wrong (or no) window.",
+			objPath, rel, matches)
 	}
 	if len(keys) == 0 {
 		t.Fatalf("F358 direction 5 setup: the %q object in %s is empty — "+
 			"an emptied label catalog needs review, not a vacuous pass.",
-			objKey, rel)
+			objPath, rel)
 	}
 	return keys
+}
+
+// craParityJoinPath dot-joins a container path with a child key; the
+// root path is the empty string, so root-level keys join to themselves.
+func craParityJoinPath(base, key string) string {
+	if base == "" {
+		return key
+	}
+	return base + "." + key
 }
 
 // craParityExactlyOne runs re over src and requires exactly one match,
