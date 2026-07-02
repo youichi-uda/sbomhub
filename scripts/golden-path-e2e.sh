@@ -295,15 +295,20 @@ assert_eq "${CRA_NEW_DECISION}" "approved" "cra_report decision"
 # ----------------------------------------------------------------------------
 # Step 9: POST /api/v1/projects/:id/meti/assessment/refresh
 # ----------------------------------------------------------------------------
-echo "=== Step 9: refresh METI 27-criterion assessment ==="
+echo "=== Step 9: refresh METI 32-criterion assessment ==="
 METI_RESP=$(auth_curl POST \
   "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/meti/assessment/refresh" \
   -d '{}')
 echo "meti refresh response (truncated): $(printf '%s' "${METI_RESP}" | head -c 400)..."
 REFRESHED=$(printf '%s' "${METI_RESP}" | jq -r '.refreshed // 0')
-# The catalog ships with 27 criteria; we allow any value >= 1 so the
-# assertion survives a future criterion-count bump without churn here.
-# ※要確認: tighten to ==27 if/when the catalog count is frozen for v1.
+# The catalog ships with 32 criteria (11 env_setup + 10 sbom_creation +
+# 11 sbom_operation; exact count pinned by apps/api/internal/service/
+# meti/catalog_test.go); we allow any value >= 1 so the assertion
+# survives a future criterion-count bump without churn here.
+# TODO(e2e): verified 2026-07-02 (M23-2 F349): the catalog count is
+# test-pinned at 32 but not declared frozen for v1; tighten to ==32
+# if/when it is frozen (the pre-F349 note said ==27, which was stale —
+# following it would have produced a wrong assertion).
 assert_ge "${REFRESHED}" 1 "meti refreshed criterion count"
 
 # ----------------------------------------------------------------------------
