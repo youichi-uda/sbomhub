@@ -214,9 +214,13 @@ assert_eq "${AI_DISABLED}" "true" "triage ai_disabled flag (M1 F4 fallback)"
 # Pick the first draft id from the fan-out. With one log4j-core link
 # the fan-out collapses to one draft, but the response shape uses an
 # array regardless.
-# ※要確認 (M1 残課題 #18): vex_drafts wire shape は現状 PascalCase
-# (repository.VEXDraft が json tag 未付与、 cra_reports + meti_assessments で M2/M3 完了済)。
-# .drafts[0].ID / .draft.ID を先に試し、 将来 snake_case 統一時の .id も fallback。
+# TODO(api) (M1 残課題 #18): vex_drafts wire shape は現状も PascalCase。
+# verified 2026-07-02 (M24-3 F360): repository.VEXDraft は json tag 未付与のまま
+# (handler/vex_drafts.go が struct を直接 c.JSON serialise するので .ID /
+# .Decision で出る)、一方 repository.CRAReport / repository.MetiAssessment は
+# snake_case json tag 済 (M2/M3 完了) — claim は正確。vex_drafts が snake_case
+# に統一されたら PascalCase 分岐 (ここの .drafts[0].ID / .draft.ID と Step 6 の
+# .Decision) を削除できる。それまで PascalCase を先に試し、.id を fallback に残す。
 DRAFT_ID=$(printf '%s' "${TRIAGE_RESP}" | jq -r '.drafts[0].ID // .draft.ID // .drafts[0].id // .draft.id // empty')
 if [ -z "${DRAFT_ID}" ] || [ "${DRAFT_ID}" = "null" ]; then
   echo "::error::triage/run did not return a draft id"
