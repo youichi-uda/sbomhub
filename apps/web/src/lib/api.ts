@@ -934,7 +934,7 @@ export interface IPASyncResult {
 }
 
 // Issue Tracker types
-export type TrackerType = "jira" | "backlog";
+export type TrackerType = "jira" | "backlog" | "github";
 
 export interface IssueTrackerConnection {
   id: string;

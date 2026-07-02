@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,57 @@ import {
 } from "@/components/ui/alert-dialog";
 import { api, IssueTrackerConnection, TrackerType } from "@/lib/api";
 import { Plus, Trash2, RefreshCw, ExternalLink, CheckCircle2 } from "lucide-react";
+
+// Per-tracker display copy, keyed by the TrackerType union so that adding a
+// tracker to lib/api.ts without extending these maps is a TypeScript compile
+// error (F356 replaced the former two-member `jira ? ... : ...` ternaries,
+// which would have silently rendered the Backlog branch for a third tracker).
+const TRACKER_LABELS: Record<TrackerType, string> = {
+  "jira": "Jira",
+  "backlog": "Backlog",
+  "github": "GitHub Issues",
+};
+
+const TRACKER_BASE_URL_PLACEHOLDERS: Record<TrackerType, string> = {
+  jira: "https://your-domain.atlassian.net",
+  backlog: "https://your-space.backlog.com",
+  github: "https://api.github.com",
+};
+
+// API-token acquisition link per tracker; the label is an
+// Settings.Integrations i18n key resolved at render time.
+const TRACKER_TOKEN_LINKS: Record<TrackerType, { href: string; labelKey: string }> = {
+  jira: {
+    href: "https://id.atlassian.com/manage-profile/security/api-tokens",
+    labelKey: "getAtlassianToken",
+  },
+  backlog: {
+    href: "https://support-ja.backlog.com/hc/ja/articles/360035641754",
+    labelKey: "getBacklogToken",
+  },
+  github: {
+    href: "https://github.com/settings/personal-access-tokens",
+    labelKey: "getGitHubToken",
+  },
+};
+
+const TRACKER_ICONS: Record<TrackerType, ReactNode> = {
+  jira: (
+    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24 12.483V1.005A1.005 1.005 0 0 0 23.013 0z"/>
+    </svg>
+  ),
+  backlog: (
+    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm0 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm-1-15H9v6h2V7zm4 0h-2v6h2V7zm-2 8H9v2h4v-2z"/>
+    </svg>
+  ),
+  github: (
+    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
+    </svg>
+  ),
+};
 
 export default function IntegrationsPage() {
   const t = useTranslations("Settings.Integrations");
@@ -179,8 +230,9 @@ export default function IntegrationsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="jira">Jira</SelectItem>
-                    <SelectItem value="backlog">Backlog</SelectItem>
+                    <SelectItem value="jira">{TRACKER_LABELS.jira}</SelectItem>
+                    <SelectItem value="backlog">{TRACKER_LABELS.backlog}</SelectItem>
+                    <SelectItem value="github">{TRACKER_LABELS.github}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -201,7 +253,7 @@ export default function IntegrationsPage() {
                   id="base_url"
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder={trackerType === "jira" ? "https://your-domain.atlassian.net" : "https://your-space.backlog.com"}
+                  placeholder={TRACKER_BASE_URL_PLACEHOLDERS[trackerType]}
                 />
               </div>
 
@@ -228,35 +280,29 @@ export default function IntegrationsPage() {
                   placeholder={t("apiTokenPlaceholder")}
                 />
                 <p className="text-xs text-muted-foreground">
-                  {trackerType === "jira" ? (
-                    <a
-                      href="https://id.atlassian.com/manage-profile/security/api-tokens"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-primary hover:underline"
-                    >
-                      {t("getAtlassianToken")}
-                    </a>
-                  ) : (
-                    <a
-                      href="https://support-ja.backlog.com/hc/ja/articles/360035641754"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-primary hover:underline"
-                    >
-                      {t("getBacklogToken")}
-                    </a>
-                  )}
+                  <a
+                    href={TRACKER_TOKEN_LINKS[trackerType].href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                  >
+                    {t(TRACKER_TOKEN_LINKS[trackerType].labelKey)}
+                  </a>
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="default_project">{t("defaultProject")}</Label>
+                {/* GitHub's connection test is repository-scoped, so the
+                    "owner/repo" key is required there while it stays an
+                    optional default for Jira/Backlog. */}
+                <Label htmlFor="default_project">
+                  {trackerType === "github" ? t("repository") : t("defaultProject")}
+                </Label>
                 <Input
                   id="default_project"
                   value={defaultProjectKey}
                   onChange={(e) => setDefaultProjectKey(e.target.value)}
-                  placeholder={t("projectKeyPlaceholder")}
+                  placeholder={trackerType === "github" ? t("repositoryPlaceholder") : t("projectKeyPlaceholder")}
                 />
               </div>
 
@@ -281,7 +327,13 @@ export default function IntegrationsPage() {
               <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
                 {tCommon("cancel")}
               </Button>
-              <Button onClick={handleCreate} disabled={saving || !name || !baseUrl || !apiToken}>
+              <Button
+                onClick={handleCreate}
+                disabled={
+                  saving || !name || !baseUrl || !apiToken ||
+                  (trackerType === "github" && !defaultProjectKey)
+                }
+              >
                 {saving ? t("testingConnection") : t("addConnection")}
               </Button>
             </DialogFooter>
@@ -312,15 +364,7 @@ export default function IntegrationsPage() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="p-2 rounded-lg bg-muted">
-                      {conn.tracker_type === "jira" ? (
-                        <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24 12.483V1.005A1.005 1.005 0 0 0 23.013 0z"/>
-                        </svg>
-                      ) : (
-                        <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm0 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm-1-15H9v6h2V7zm4 0h-2v6h2V7zm-2 8H9v2h4v-2z"/>
-                        </svg>
-                      )}
+                      {TRACKER_ICONS[conn.tracker_type]}
                     </div>
                     <div>
                       <CardTitle className="text-base flex items-center gap-2">
@@ -334,7 +378,7 @@ export default function IntegrationsPage() {
                       </CardTitle>
                       <CardDescription className="flex items-center gap-2">
                         <Badge variant="secondary">
-                          {conn.tracker_type === "jira" ? "Jira" : "Backlog"}
+                          {TRACKER_LABELS[conn.tracker_type]}
                         </Badge>
                         <a
                           href={conn.base_url}
