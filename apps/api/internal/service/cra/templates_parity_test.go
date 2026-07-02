@@ -1,6 +1,8 @@
 package cra
 
 import (
+	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -45,6 +47,14 @@ import (
 //	              page.tsx REPORT_TYPE_OPTIONS / LANG_OPTIONS filter
 //	              arrays (their "" member is the "all" filter sentinel,
 //	              not a wire value, and stays outside the contract).
+//
+//	(i18n)        apps/web/messages/en.json AND ja.json: the
+//	              CRAReports.ReportType and CRAReports.Lang label
+//	              objects are KEYED by these wire values (next-intl
+//	              looks the label up by the raw API value), so each
+//	              catalog's key set is a parity surface — a report type
+//	              added everywhere else renders as a missing-label
+//	              fallback until both catalogs learn it (F358, M24-3).
 //
 //	(Prose)       templates.go's own docstrings ("six Markdown
 //	              templates", "3 report types x 2 languages", "the
@@ -125,10 +135,24 @@ import (
 //	    lineage): a registered value missing from the message AND a
 //	    stale token no const declares both fail.
 //
+//	(5) i18n label catalogs (F358, M24-3): the CRAReports.ReportType
+//	    and CRAReports.Lang objects in apps/web/messages/en.json AND
+//	    ja.json must each have a key set equal to the Go wire-value
+//	    sets. The objects are located structurally — an encoding/json
+//	    token walk, not regex or json.Unmarshal — so exactly one object
+//	    named ReportType / Lang may exist per catalog (exactly-once,
+//	    F326 spirit) and a duplicated key INSIDE the object fails at
+//	    parse time (F352 lineage: map-decoding would silently collapse
+//	    the duplicate). A messages census (5c) additionally pins which
+//	    .json files under apps/web/messages may mention a report-type
+//	    wire value at all, so a third locale catalog hardcoding the
+//	    values must be brought under this contract deliberately.
+//
 // go-test-cache trap (F344 root cause; F348 rewrite, M23-2 #124):
 // Direction 3 reads apps/web/src/lib/api.ts, the cra-reports page.tsx
-// and (for the 3e census) every .ts/.tsx file under apps/web/src — all
-// OUTSIDE this Go module's root (apps/api). go's test cache folds
+// and (for the 3e census) every .ts/.tsx file under apps/web/src, and
+// direction 5 reads every .json file under apps/web/messages (F358) —
+// all OUTSIDE this Go module's root (apps/api). go's test cache folds
 // opened files into the cache key ONLY when they are inside the
 // module / GOPATH / GOROOT root (go1.26.4
 // cmd/go/internal/test/test.go computeTestInputsID: "Do not recheck
@@ -138,7 +162,8 @@ import (
 // suite: with a warm cache, adding "incidentReport" to the api.ts
 // CRAReportType union left `go test ./internal/service/cra/` reporting
 // "(cached) ok"; the same run with -count=1 failed loudly (direction
-// 3a). Run this suite with -count=1 whenever web-side surfaces changed
+// 3a). Run this suite with -count=1 whenever web-side surfaces OR the
+// messages catalogs changed
 // (and always for mutation verification). CI is unaffected — fresh
 // runners have no warm cache. The in-module reads are cache-tracked
 // normally: templates.go, repository/cra_reports.go,
@@ -165,6 +190,11 @@ import (
 //   - templates.go's count and stable-order docstring claims going
 //     stale, and the repository / evidence-pack operator-facing
 //     enumerations advertising a set that differs from the registry.
+//   - A messages catalog (en.json / ja.json) whose ReportType or Lang
+//     label-object key set drifts from the Go registry in either
+//     direction, a duplicated key inside either object, and any OTHER
+//     .json file under apps/web/messages mentioning a report-type wire
+//     value outside the 5c census pin (F358).
 //
 // What THIS test does NOT catch (documented factuality trade-off,
 // mirrors the F276 note on F271 / F281 / F299 / F318 / F330):
@@ -184,25 +214,32 @@ import (
 //   - Template CONTENT. A blank, wrong-language, or legally stale
 //     .tmpl body passes — only filename existence is pinned. Golden
 //     tests (templates_test.go) own content.
-//   - runner.go internals: buildCRASystemPrompt switches on ReportType
-//     with NO default arm, so a new report type silently gets a
-//     truncated prompt sentence until that switch is extended. The
-//     runner's validation path is covered only indirectly (it delegates
-//     to SupportedReportTypes / SupportedLangs).
+//   - runner.go internals: buildCRASystemPrompt's ReportType switch
+//     gained a loud default arm in F359 (M24-3) — an unregistered type
+//     now embeds its raw wire value in the prompt instead of silently
+//     truncating the sentence — but nothing HERE pins that each
+//     registered type keeps its dedicated sentence; that lives in
+//     runner_test.go's F359 unit test. The runner's validation path is
+//     covered only indirectly (it delegates to SupportedReportTypes /
+//     SupportedLangs).
 //   - A Go or web lang-literal census. "ja" / "en" are locale tokens
 //     used all over both trees for i18n (report.go, jvn.go, message
 //     catalogs, next-intl) — pinning their file sets would couple this
 //     test to unrelated churn. Lang parity is enforced only at the
 //     typed surfaces (consts, SupportedLangs, tmpl filenames, TS union,
-//     LANG_OPTIONS, the repository lang error message).
+//     LANG_OPTIONS, the repository lang error message, and — since
+//     F358 — the messages CRAReports.Lang label objects).
+//   - i18n label TEXT. Direction 5 pins the label-object KEYS only —
+//     a wrong, swapped, or stale label string ("24h" wording drift,
+//     Japanese text pasted into the en catalog) passes; only key-set
+//     parity is enforced.
 //   - Comment-only mentions inside already-pinned files (e.g. the
 //     repository struct-field comment, meti/criteria/sbom_operation.go's
 //     doc comment): the census pins the FILE, not the comment content,
 //     so those sentences can go stale without failing here.
-//   - Anything outside apps/api *.go and apps/web/src *.ts/*.tsx:
-//     apps/web/e2e specs, apps/web/messages/{en,ja}.json label catalogs
-//     (which are KEYED by these wire values — a new report type renders
-//     with a missing-label fallback until both catalogs learn it),
+//   - Anything outside apps/api *.go, apps/web/src *.ts/*.tsx and
+//     apps/web/messages *.json (the catalogs graduated INTO the
+//     contract as direction 5, F358): apps/web/e2e specs,
 //     docker/seed/*.sql, and docs.
 //
 // Adding a new report type (or language) going forward — this test
@@ -211,10 +248,12 @@ import (
 // const, SupportedReportTypes(), the templateCache key list, one .tmpl
 // file per supported language, the api.ts union, the page.tsx filter
 // array, templates.go's count/order docstrings, the repository Insert
-// error message, the evidence-pack README line — plus (outside this
-// test, see above) a DB migration extending the CHECK constraint and
-// the two i18n label catalogs. Add nothing to an allowlist (there is
-// none). Do not silence this test. (F341, M23-1 #123)
+// error message, the evidence-pack README line, and the
+// CRAReports.ReportType label objects in BOTH messages catalogs
+// (direction 5) — plus (outside this test, see above) a DB migration
+// extending the CHECK constraint. Add nothing to an allowlist (there
+// is none). Do not silence this test. (F341, M23-1 #123; direction 5:
+// F358, M24-3 #127)
 func TestCRATemplateRegistryParity_F341(t *testing.T) {
 	apiRoot, webSrcRoot, thisFile := craParityRoots(t)
 
@@ -539,6 +578,54 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 			craParityWindow(t, builderTail, builderRel, "(one of ", ")"),
 			builderRel+" report-type enumeration"),
 		reportTypeValues)
+
+	// ------- Direction 5: Go wire values ↔ i18n messages catalogs (F358) -------
+
+	// The messages root sits BESIDE apps/web/src, so the 3e census can
+	// never have seen it (that walk is rooted at webSrcRoot and filtered
+	// to .ts/.tsx); direction 5 walks it explicitly.
+	msgsRoot := filepath.Clean(filepath.Join(webSrcRoot, "..", "messages"))
+	msgFiles := craParityScanTree(t, msgsRoot,
+		map[string]bool{".json": true}, "")
+
+	// (5a/5b) Per-catalog label-object key sets. Both locales are pinned
+	// individually so a key missing from ja.json alone (the en-first
+	// copy-paste failure mode) is named in the diff.
+	msgCatalogs := []string{"en.json", "ja.json"}
+	for _, rel := range msgCatalogs {
+		src, ok := msgFiles[rel]
+		if !ok {
+			t.Fatalf("F358 direction 5 setup: %s not found under %s — the "+
+				"i18n catalog moved or was renamed; update this test.",
+				rel, msgsRoot)
+		}
+		craParityAssertSetEqual(t,
+			"F358 direction 5a ("+rel+" CRAReports.ReportType label keys ↔ Go report-type wire values)",
+			craParityMessagesObjectKeys(t, src, rel, "ReportType"),
+			reportTypeValues)
+		craParityAssertSetEqual(t,
+			"F358 direction 5b ("+rel+" CRAReports.Lang label keys ↔ Go lang wire values)",
+			craParityMessagesObjectKeys(t, src, rel, "Lang"),
+			langValues)
+	}
+
+	// (5c) Messages census: report-type wire values may appear only in
+	// the two pinned catalogs. A third locale file (or any other .json
+	// under apps/web/messages) naming a wire value must be brought under
+	// this parity contract deliberately — same discipline as 1c / 3e.
+	wantMsgLiteralFiles := map[string]bool{
+		"en.json": true,
+		"ja.json": true,
+	}
+	gotMsgLiteralFiles := make(map[string]bool)
+	for rel, src := range msgFiles {
+		if literalRe.MatchString(src) {
+			gotMsgLiteralFiles[rel] = true
+		}
+	}
+	craParityAssertSetEqual(t,
+		"F358 direction 5c (messages catalogs mentioning CRA report-type wire values)",
+		gotMsgLiteralFiles, wantMsgLiteralFiles)
 }
 
 // -----------------------------------------------------------------------------
@@ -795,6 +882,119 @@ func craParityTokenSet(t *testing.T, window, label string) map[string]bool {
 		out[m] = true
 	}
 	return out
+}
+
+// craParityMessagesObjectKeys returns the key set of the JSON object
+// stored under objKey anywhere in the document src (direction 5, F358).
+// The document is walked with an encoding/json token decoder rather
+// than json.Unmarshal so two failure modes stay loud that map-decoding
+// would silently absorb:
+//
+//   - exactly-once (F326 spirit): objKey naming an object in two places
+//     (e.g. a second ReportType block under another page namespace)
+//     would make the probe window ambiguous — fatal, re-anchor
+//     deliberately;
+//   - duplicate keys (F352 lineage): a doubled key inside the object is
+//     last-wins-collapsed by every JSON map decoder (including
+//     next-intl's), silently discarding one label — fatal here at parse
+//     time instead.
+//
+// Only the matched object's OWN keys are collected (nested objects, if
+// the catalog shape ever grows them, are not flattened in). An empty
+// matched object is fatal: an emptied label catalog needs review, not a
+// vacuous set comparison.
+func craParityMessagesObjectKeys(
+	t *testing.T,
+	src, rel, objKey string,
+) map[string]bool {
+	t.Helper()
+	type frame struct {
+		obj       bool
+		expectKey bool
+		lastKey   string
+		capture   bool
+	}
+	dec := json.NewDecoder(strings.NewReader(src))
+	var stack []*frame
+	matches := 0
+	keys := make(map[string]bool)
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("F358 direction 5 setup: %s is not parseable JSON: %v",
+				rel, err)
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				capture := d == '{' && top != nil && top.obj &&
+					!top.expectKey && top.lastKey == objKey
+				if capture {
+					matches++
+				}
+				if top != nil && top.obj && !top.expectKey {
+					// This delimiter is the value for top.lastKey; the
+					// token after the block closes is the next key.
+					top.expectKey = true
+				}
+				stack = append(stack, &frame{
+					obj:       d == '{',
+					expectKey: d == '{',
+					capture:   capture && matches == 1,
+				})
+			case '}', ']':
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		}
+		if top == nil {
+			continue // top-level scalar document — nothing to track
+		}
+		if top.obj && top.expectKey {
+			k, ok := tok.(string)
+			if !ok {
+				t.Fatalf("F358 direction 5 setup: %s: non-string object "+
+					"key token %v — malformed catalog.", rel, tok)
+			}
+			if top.capture {
+				if keys[k] {
+					t.Fatalf("F358 direction 5 setup (F352 duplicate "+
+						"guard): key %q appears more than once inside the "+
+						"%s object of %s — JSON map decoding (including "+
+						"next-intl's) silently keeps only the last one; "+
+						"remove the duplicate.", k, objKey, rel)
+				}
+				keys[k] = true
+			}
+			top.lastKey = k
+			top.expectKey = false
+			continue
+		}
+		// Scalar value inside an object or array.
+		if top.obj {
+			top.expectKey = true
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("F358 direction 5 setup: expected exactly one %q object "+
+			"in %s, found %d — the catalog structure changed or a second "+
+			"%s block landed; re-anchor this probe deliberately rather "+
+			"than letting it scan the wrong window.",
+			objKey, rel, matches, objKey)
+	}
+	if len(keys) == 0 {
+		t.Fatalf("F358 direction 5 setup: the %q object in %s is empty — "+
+			"an emptied label catalog needs review, not a vacuous pass.",
+			objKey, rel)
+	}
+	return keys
 }
 
 // craParityExactlyOne runs re over src and requires exactly one match,
