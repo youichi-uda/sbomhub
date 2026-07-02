@@ -45,7 +45,11 @@ test.describe('Issue Tracker Integrations', () => {
         // Should show dialog with tracker type selection
         const dialog = page.locator('[role="dialog"]');
         if (await dialog.isVisible()) {
-            // Should have Jira and Backlog options
+            // The dialog offers Jira, Backlog, and GitHub Issues; this probe
+            // only asserts the two original options.
+            // TODO(e2e): also assert the GitHub Issues option (deliberately
+            // not added in the F363 comment-only sweep — E2E behaviour is
+            // unchanged there).
             const jiraOption = dialog.getByText(/Jira/i);
             const backlogOption = dialog.getByText(/Backlog/i);
 

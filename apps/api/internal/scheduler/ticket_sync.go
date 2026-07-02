@@ -92,13 +92,14 @@ import (
 //	          semantic loss the caller cannot recover from without
 //	          replaying the external API call on the next tick,
 //	          effectively wasting the successful HTTP round-trips.
-//	      (c) The Jira / Backlog clients in apps/api/internal/client/
-//	          now implement F277 rate-limit hardening (429 detection,
-//	          Retry-After / X-RateLimit-Reset respect, exponential
-//	          backoff with retry cap, and a wrapped
-//	          ErrRateLimitExhausted sentinel — landed in M19-1 via
-//	          client/rate_limit.go plus the Jira/Backlog client
-//	          integrations). Chunking would layer on top of this
+//	      (c) The Jira / Backlog / GitHub Issues clients in
+//	          apps/api/internal/client/ all implement F277-pattern
+//	          rate-limit hardening (429 detection, Retry-After /
+//	          X-RateLimit-Reset respect, exponential backoff with retry
+//	          cap, and a wrapped ErrRateLimitExhausted sentinel — landed
+//	          for Jira/Backlog in M19-1 via client/rate_limit.go, adopted
+//	          at birth by the GitHub Issues client in F355/M24-1b).
+//	          Chunking would layer on top of this
 //	          hardening rather than around a client with zero
 //	          hardening. The trade-off remains net negative because
 //	          chunking still requires holding a per-chunk tx open
@@ -247,7 +248,8 @@ func (j *TicketSyncJob) run(ctx context.Context) {
 
 // syncTenant runs one tenant's ticket fetch + per-ticket sync inside a single
 // tx with `app.current_tenant_id` pinned. SyncTicket itself performs HTTP
-// calls to Jira/Backlog and updates `vulnerability_tickets` (RLS), so it
+// calls to the connected tracker (Jira / Backlog / GitHub Issues) and updates
+// `vulnerability_tickets` (RLS), so it
 // must run inside the tx; the HTTP I/O does keep the tx open for its
 // duration, which is acceptable for a background job that runs every 5
 // minutes and bounds itself to 100 tickets per cycle.

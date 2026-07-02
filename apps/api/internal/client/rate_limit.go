@@ -1,6 +1,7 @@
 // Package client provides HTTP clients for external integrations (Jira, Backlog,
 // GHSA, etc.). This file houses shared rate-limit hardening helpers used by the
-// Jira and Backlog clients.
+// Jira, Backlog, and GitHub Issues clients (the GitHub Issues client adopted
+// them at birth in F355, M24-1b, rather than being retrofitted).
 //
 // F277 (M19-1): promoted from the F269 alternative (b) ADR (ticket_sync HTTP
 // under-tx defer). Prior to F277 the Jira/Backlog clients had zero backoff and

@@ -1442,7 +1442,8 @@ func main() {
 	// Start background jobs
 	ctx := context.Background()
 
-	// Ticket sync job - runs every 5 minutes to sync ticket statuses with Jira/Backlog.
+	// Ticket sync job - runs every 5 minutes to sync ticket statuses with the
+	// connected issue trackers (Jira / Backlog / GitHub Issues).
 	// tenantRepo + db are required for the per-tenant RLS tx wrap (codex-r4 P1).
 	ticketSyncJob := scheduler.NewTicketSyncJob(issueTrackerService, issueTrackerRepo, tenantRepo, db, 5*time.Minute)
 	go ticketSyncJob.Start(ctx)

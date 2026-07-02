@@ -59,7 +59,7 @@ grep -rn 'EncryptionKey\|encryptionKey\|GetEncryptionKey' apps/api/ --include='*
 | Table | Column | Format | What it stores | Encryption path | Re-encrypt needed? |
 | --- | --- | --- | --- | --- | --- |
 | `tenant_llm_config` | `encrypted_api_key` | BYTEA `nonce \|\| sealed` | BYOK LLM API key (per tenant) | `internal/service/llm/crypto.go`; saved by `internal/handler/settings_llm.go`; decrypted by `cmd/server/llm_resolver.go` | **Yes** |
-| `issue_tracker_connections` | `auth_token_encrypted` | TEXT base64 `nonce \|\| sealed` | API token for the connected Jira / Backlog instance (per tenant) | `internal/service/issue_tracker.go` | **Yes** |
+| `issue_tracker_connections` | `auth_token_encrypted` | TEXT base64 `nonce \|\| sealed` | API token for the connected issue tracker — Jira / Backlog API token or GitHub PAT (per tenant) | `internal/service/issue_tracker.go` | **Yes** |
 | `api_keys` | `key_hash` | SHA-256 one-way hash | Issued SBOMHub API key verifier | `internal/service/apikey.go` verification path only | No — hashes are not encrypted with `ENCRYPTION_KEY` and are unaffected by rotation |
 
 > The exhaustive enumeration above is current as of this document's commit. If
@@ -548,7 +548,8 @@ encrypted records are still readable.
    is broken; do not retry rotation.
 
 3. **Issue tracker connections** — open the integrations page for any tenant
-   that previously had a Jira or Backlog connection configured. The connection
+   that previously had a Jira, Backlog, or GitHub Issues connection
+   configured. The connection
    must list as active. Trigger a manual sync (or create a test ticket) to
    confirm the API token re-encrypted under the new key still authenticates
    against the upstream tracker. If the sync fails with `401 Unauthorized`
@@ -668,9 +669,10 @@ existing ciphertext. The pragmatic recovery is:
    `UPDATE tenant_llm_config SET encrypted_api_key = NULL` for affected
    tenants, and `TRUNCATE issue_tracker_connections;` (or `DELETE`
    per-tenant if you can identify which tenants you actually want to wipe).
-3. Notify affected tenants that their BYOK LLM API key and Jira / Backlog
-   connection must be re-entered through the settings and integrations pages.
-   They will paste their secrets again; the new key will encrypt them.
+3. Notify affected tenants that their BYOK LLM API key and issue tracker
+   connection (Jira / Backlog API token, GitHub PAT) must be re-entered
+   through the settings and integrations pages. They will paste their
+   secrets again; the new key will encrypt them.
 
 This costs the BYOK LLM keys and integration tokens but preserves every other
 tenant artefact
@@ -684,7 +686,7 @@ tenant artefact
 | Trigger | Cadence | Notes |
 | --- | --- | --- |
 | Routine rotation | Every 90 days | Calendar reminder is sufficient. Rehearse on a staging environment first if you have one. |
-| Incident (key leak) | Immediately | Treat all BYOK LLM API keys and `issue_tracker_connections` tokens as exposed; rotating the master key does not invalidate already-exfiltrated plaintext. After rotation, advise affected tenants to also rotate their upstream LLM provider and Jira / Backlog tokens. |
+| Incident (key leak) | Immediately | Treat all BYOK LLM API keys and `issue_tracker_connections` tokens as exposed; rotating the master key does not invalidate already-exfiltrated plaintext. After rotation, advise affected tenants to also rotate their upstream issue-tracker credentials (Jira / Backlog API tokens, GitHub PATs) and LLM provider keys. |
 | Personnel change | Within 7 days of offboarding | If the leaver had operator access to `.env`, rotate. |
 | First boot under a known default key | As soon as `apps/api/cmd/server/main.go` `validateEncryptionKey` is updated and you upgrade | The startup check blocks new boots, but already-encrypted rows under the default key are still readable until rotated. |
 

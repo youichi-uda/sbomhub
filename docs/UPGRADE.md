@@ -61,7 +61,8 @@ README quick start.
    ```
    Verify the file size is non-zero before continuing.
 3. **Note your current `ENCRYPTION_KEY`** if any. Stored API tokens for
-   issue-tracker integrations (Jira / GitHub) are encrypted with this key.
+   issue-tracker integrations (Jira / Backlog / GitHub) are encrypted with
+   this key.
    If you regenerate it without rotating ciphertext you will lose those
    tokens (re-entry from the UI required). See
    [`docs/encryption-key-rotation.md`](./encryption-key-rotation.md) for the
@@ -263,7 +264,8 @@ put there are forwarded verbatim via the `${DATABASE_URL:-...}` fallback in
 ### 5.3 `ENCRYPTION_KEY` mismatch — old tokens fail to decrypt
 
 If you regenerated `ENCRYPTION_KEY` without first running the rotation
-runbook, any saved issue-tracker tokens (Jira, GitHub) will surface as
+runbook, any saved issue-tracker tokens (Jira, Backlog, GitHub) will
+surface as
 "decryption failed" in the integration page. Re-enter the tokens through
 the UI to re-encrypt them under the new key, or restore the old key from
 `.env.bak.YYYYMMDD` and follow

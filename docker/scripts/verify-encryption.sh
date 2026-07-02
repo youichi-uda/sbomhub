@@ -248,7 +248,7 @@ case "${RC}" in
         echo "[verify-encryption] WARN: no encrypted row to test (exit 3)." >&2
         echo "[verify-encryption]       Either no BYOK row has been written yet, or another table was targeted." >&2
         echo "[verify-encryption]       Re-run against issue_tracker_connections.auth_token_encrypted if you" >&2
-        echo "[verify-encryption]       have a Jira/Backlog connection configured:" >&2
+        echo "[verify-encryption]       have an issue tracker (Jira/Backlog/GitHub) connection configured:" >&2
         echo "[verify-encryption]         $0 --table issue_tracker_connections --column auth_token_encrypted" >&2
         ;;
     64)

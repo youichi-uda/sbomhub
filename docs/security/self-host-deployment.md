@@ -210,7 +210,7 @@ bare-metal や Kubernetes でも **必ず両方を設定** し、 migration と 
 
 | データ | 用途 | 暗号化スキーム |
 |---|---|---|
-| `issue_tracker_connections.auth_token_encrypted` | Jira / Backlog 連携トークン | AES-256-GCM (12-byte random nonce、 base64 store) |
+| `issue_tracker_connections.auth_token_encrypted` | Issue tracker 連携トークン (Jira / Backlog API トークン、 GitHub PAT) | AES-256-GCM (12-byte random nonce、 base64 store) |
 | (M1 以降) BYOK LLM API key | OpenAI / Anthropic / Gemini / Azure / Ollama 設定 | 同上 (`LLM_PROVIDER_DESIGN.md` §7.1) |
 | (将来) audit_logs の機密フィールド | M0 Trust Rescue 9.2 で議論あり、 段階導入 | 同上 |
 
@@ -1407,7 +1407,7 @@ malware 感染した、 等。
    - Anthropic: <https://console.anthropic.com/settings/keys> で `Delete`
    - Google: GCP Console → API & Services → Credentials → `Disable`
    - Azure: Portal → Cognitive Services → Keys and Endpoint → `Regenerate Key`
-2. **Jira / Backlog 等の issue tracker 連携トークン** も同様に upstream で revoke
+2. **Jira / Backlog / GitHub 等の issue tracker 連携トークン** (GitHub は PAT) も同様に upstream で revoke
    (`issue_tracker_connections.auth_token_encrypted` 経由で漏洩した token 扱い)
 3. 新 `ENCRYPTION_KEY` を生成 ([`../encryption-key-rotation.md`](../encryption-key-rotation.md))
 4. `llm_calls` から流出範囲を特定 (prompt_preview / response_preview から、 どの tenant のどの
