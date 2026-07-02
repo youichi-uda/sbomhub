@@ -142,9 +142,11 @@ var (
 	// handler maps this to 409 (the operator must approve a VEX draft
 	// first) so the UI surfaces a "triage this CVE first" call-to-action
 	// rather than letting an unsourced CRA report land.
-	// ※要確認: 409 vs 422 is a UX preference; the CRA report cannot be
-	// drafted without an approved triage decision per PRODUCT_REBOOT_PLAN
-	// §7.2.
+	// TODO(cra): 409 vs 422 is an open UX preference — verified
+	// 2026-07-02 (M24-3 F359): handler/cra_reports.go mapCRARunnerError
+	// maps this sentinel to 409 today. Either way the CRA report cannot
+	// be drafted without an approved triage decision per
+	// PRODUCT_REBOOT_PLAN §7.2, so only the status code is in question.
 	ErrNoApprovedVEXDraft = errors.New("cra: no approved vex_draft available for this (project, cve)")
 )
 
@@ -921,11 +923,12 @@ func (r *Runner) resolveSourceVEXDraft(ctx context.Context, in RunInput) (*repos
 		// triage for CVE-Y") that does not in fact cover CVE-X. We log
 		// the precise mismatch via slog at the warn level (so probe
 		// alarms still fire) and surface the generic
-		// ErrSourceVEXDraftCVEMismatch sentinel to the handler. M3
-		// may relax this with a validated CVE alias mapping; until then
-		// the rule is strict reject (M2 Codex review #F30, ※要確認: PM
-		// has not signed off on the M3 alias mapping shape, so the
-		// reject side stays unconditional).
+		// ErrSourceVEXDraftCVEMismatch sentinel to the handler.
+		// TODO(cra): a validated CVE alias mapping could relax this —
+		// verified 2026-07-02 (M24-3 F359): no alias resolver exists
+		// anywhere in service/cra or service/triage, and PM has not
+		// signed off on a mapping shape, so the rule stays strict
+		// reject (M2 Codex review #F30) unconditionally.
 		if draft.CVEID != "" && draft.CVEID != in.CVEID {
 			slog.Warn("cra.Run: source vex_draft cve_id does not match input cve_id (rejected)",
 				"tenant_id", in.TenantID, "draft_cve", draft.CVEID, "input_cve", in.CVEID)
@@ -993,6 +996,20 @@ func (r *Runner) writeAudit(ctx context.Context, in RunInput, resourceID uuid.UU
 // write field values in the requested target language so the rendered
 // template body reads naturally for Japanese authorities (ENISA / EU
 // CSIRT prefer the operator's national language for the 24h window).
+//
+// Unknown-ReportType posture (F359, M24-3): in the production Run()
+// path this function only ever sees registered report types — Run()
+// rejects anything outside SupportedReportTypes() via isValidReportType
+// BEFORE Stage 2 reaches this builder, and Render() independently
+// rejects an unknown (reportType, lang) pair with ErrUnknownTemplate.
+// The default arm below therefore exists for the drift case those
+// gates do not cover: a NEW ReportType const registered in
+// SupportedReportTypes() without this switch being extended (or a
+// future direct caller bypassing Run's validation). Pre-F359 the
+// switch had no default arm, so that drift silently dropped the
+// report-type sentence from the prompt; now the raw wire value is
+// embedded loudly in the prompt text instead, where golden/prompt
+// review and the F359 unit test can see it.
 func buildCRASystemPrompt(reportType ReportType, lang Lang) string {
 	var b strings.Builder
 	b.WriteString("You are SBOMHub's CRA (EU Cyber Resilience Act) report drafting assistant. ")
@@ -1004,6 +1021,10 @@ func buildCRASystemPrompt(reportType ReportType, lang Lang) string {
 		b.WriteString("72-hour detailed notification report. ")
 	case ReportTypeFinalReport:
 		b.WriteString("post-remediation final report. ")
+	default:
+		// Loud fallback (F359): name the unregistered type verbatim so
+		// a truncated prompt can never masquerade as a registered one.
+		fmt.Fprintf(&b, "report of the unregistered type %q. ", string(reportType))
 	}
 	if lang == LangJA {
 		b.WriteString("Write all field values in Japanese (日本語). ")
@@ -1155,8 +1176,16 @@ func buildTemplateData(
 	now time.Time,
 	provider llm.Provider,
 ) CRATemplateData {
-	_ = advisories // ※要確認: future expansion may surface advisory pointers in the rendered template (e.g. NVD link table).
-	_ = reach      // ※要確認: future expansion may render per-component reachability table; M2-3 leaves AffectedComponents to operator-supplied / Wave M2-4 enrichment.
+	// TODO(cra): advisories / reach are deliberately unused in
+	// template-data construction — verified 2026-07-02 (M24-3 F359):
+	// both feed only the LLM prompt (buildCRAUserPrompt renders them as
+	// indexed context rows), never the rendered template. Future
+	// expansion may surface advisory pointers (e.g. an NVD link table)
+	// or a per-component reachability table in the template body;
+	// AffectedComponents stays operator-supplied (M2-4 enrichment)
+	// until then.
+	_ = advisories
+	_ = reach
 
 	data := CRATemplateData{
 		ProductName:    in.ProductName,

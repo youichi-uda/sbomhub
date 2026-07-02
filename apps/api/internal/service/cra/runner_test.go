@@ -895,10 +895,12 @@ func TestRunner_Run_SourceVEXDraftCVEMismatch_Rejected_F30(t *testing.T) {
 // one carve-out in the F30 guard: a source draft with an empty cve_id
 // column is still accepted (the guard's `draft.CVEID != ""` clause).
 // Without this carve-out, legacy rows that pre-date the cve_id column
-// would be unreachable. ※要確認: confirm with PM whether empty CVE
+// would be unreachable. TODO(cra): confirm with PM whether empty-CVE
 // drafts should also be hard-rejected once the legacy backfill is
 // complete; for now the conservative behaviour matches the pre-F30
-// allow-on-empty path.
+// allow-on-empty path (carve-out verified still present 2026-07-02,
+// M24-3 F359: runner.go's guard reads `draft.CVEID != "" &&
+// draft.CVEID != in.CVEID`).
 func TestRunner_Run_SourceVEXDraftEmptyCVE_Accepted_F30(t *testing.T) {
 	h := newTestHarness(t)
 	legacy := makeApprovedVEXDraft(h.tenantID, h.projectID, h.vulnID, h.componentID, "")
@@ -944,5 +946,58 @@ func TestRunner_Run_AuditFailure_RollsBackStage3(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "audit") {
 		t.Errorf("error %v should mention audit", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Test 9: buildCRASystemPrompt default arm (F359, M24-3)
+// ----------------------------------------------------------------------------
+
+// TestBuildCRASystemPrompt_UnknownReportType_LoudDefaultArm_F359 pins
+// the F359 default arm directly: an unregistered ReportType must embed
+// its raw wire value verbatim in the prompt text instead of silently
+// dropping the report-type sentence (the pre-F359 switch had no
+// default arm, so the sentence fragment "You produce structured JSON
+// for an EU Article 14 " was left dangling with nothing after it).
+// The production Run() path cannot reach this arm today —
+// isValidReportType rejects unknown types before Stage 2, and Render()
+// rejects unknown (reportType, lang) pairs with ErrUnknownTemplate —
+// so this unit test is the only executable coverage of the arm.
+//
+// The bogus value below is deliberately NOT a registered wire value
+// (and must never become one): the F341 direction-1c census pins which
+// files may mention real report-type wire values, and this file is not
+// in that census set.
+func TestBuildCRASystemPrompt_UnknownReportType_LoudDefaultArm_F359(t *testing.T) {
+	const bogus = ReportType("totally_bogus_report_type")
+
+	got := buildCRASystemPrompt(bogus, LangEN)
+
+	if !strings.Contains(got, `"totally_bogus_report_type"`) {
+		t.Errorf("F359: prompt for an unregistered ReportType must embed "+
+			"the raw wire value %q loudly; prompt head: %.200s",
+			string(bogus), got)
+	}
+	if !strings.Contains(got, "unregistered type") {
+		t.Errorf("F359: prompt must state factually that the type is "+
+			"unregistered; prompt head: %.200s", got)
+	}
+
+	// Registered types must NOT trip the default arm — their dedicated
+	// sentences survive unchanged.
+	for rt, want := range map[ReportType]string{
+		ReportTypeEarlyWarning:         "24-hour early warning report. ",
+		ReportTypeDetailedNotification: "72-hour detailed notification report. ",
+		ReportTypeFinalReport:          "post-remediation final report. ",
+	} {
+		p := buildCRASystemPrompt(rt, LangEN)
+		if !strings.Contains(p, want) {
+			t.Errorf("F359: registered type %q lost its prompt sentence %q",
+				string(rt), want)
+		}
+		if strings.Contains(p, "unregistered type") {
+			t.Errorf("F359: registered type %q must not trip the default arm",
+				string(rt))
+		}
 	}
 }
