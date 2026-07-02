@@ -248,7 +248,14 @@ func readFileString(t *testing.T, path string) string {
 // identifier is captured. Anchored to the beginning of a line (after
 // arbitrary whitespace) so it does not accidentally match strings
 // inside doc comments that happen to include `case "..."`.
-var caseArmRe = regexp.MustCompile(`(?m)^\s*case\s+"([a-z_]+)":`)
+//
+// F331 (M22-2, F326 close): the identifier char class is
+// `[a-z0-9_\-]+`, not the pre-F331 `[a-z_]+` — a future provider
+// identifier containing a digit or a hyphen (e.g. "llama3",
+// "gemini-cli") would have been silently invisible to the pre-F331
+// scan, making the parity assertion vacuously pass on the missed
+// arm instead of tripping on the drift.
+var caseArmRe = regexp.MustCompile(`(?m)^\s*case\s+"([a-z0-9_\-]+)":`)
 
 // extractProviderCaseArms slices factory.go from the start of the
 // named function to the next top-level `func ` (or EOF) and returns
@@ -396,7 +403,14 @@ func diffKeys(a, b map[string]bool) []string {
 var webProvidersRe = regexp.MustCompile(
 	`(?s)const\s+PROVIDERS\s*=\s*\[([^\]]+)\]\s*as\s+const\s*;`)
 
-var webQuotedRe = regexp.MustCompile(`"([a-z_]+)"`)
+// webQuotedRe extracts one quoted provider identifier from the
+// PROVIDERS array literal body. F331 (M22-2, F326 close): the char
+// class matches caseArmRe's `[a-z0-9_\-]+` so a digit- or
+// hyphen-bearing provider identifier is scanned identically on the
+// Go-factory and web-dropdown sides — a class mismatch between the
+// two parsers would make one side silently drop the identifier and
+// surface as a confusing one-sided parity diff.
+var webQuotedRe = regexp.MustCompile(`"([a-z0-9_\-]+)"`)
 
 // extractWebPROVIDERS finds the const PROVIDERS declaration in the
 // supplied .tsx source and returns the set of quoted identifiers it
@@ -416,7 +430,7 @@ func extractWebPROVIDERS(t *testing.T, src, path string) map[string]bool {
 	quoted := webQuotedRe.FindAllStringSubmatch(inner, -1)
 	if len(quoted) == 0 {
 		t.Fatalf("F318 direction 2 setup: PROVIDERS array literal in %s "+
-			"contained no quoted identifiers matching /\"[a-z_]+\"/. "+
+			"contained no quoted identifiers matching /\"[a-z0-9_\\-]+\"/. "+
 			"Either the identifier syntax changed or the array is "+
 			"empty — both need review.", path)
 	}
@@ -440,22 +454,37 @@ func extractWebPROVIDERS(t *testing.T, src, path string) map[string]bool {
 // continued into M21-1).
 func assertProviderDocFactuality(t *testing.T, providerSrc string, registry map[string]bool) {
 	t.Helper()
-	// Locate the Provider interface's Name() method comment block —
-	// the doc-comment listing the identifiers immediately precedes
-	// the Name() method declaration inside the Provider interface.
-	nameIdx := strings.Index(providerSrc, "Name() string")
-	if nameIdx < 0 {
-		t.Fatalf("F318 direction 3 setup: cannot locate `Name() string` " +
-			"in provider.go — the interface may have been reshaped.")
+	// Locate the Provider interface's Name() doc comment via an
+	// anchor-terminated slice (F331, M22-2, F326 close): the window
+	// opens at the doc comment's first line and closes at the
+	// `Name() string` declaration that terminates it. Pre-F331 the
+	// window was a fixed 1200-byte back-slice from `Name() string`,
+	// which would silently truncate the HEAD of the comment once
+	// fixture growth (new providers / build variants added to the
+	// identifier list) pushed the comment past 1200 bytes — a
+	// missing-token false positive shape (the token is present in the
+	// comment but outside the scanned window). Anchor-terminated
+	// slicing tracks the comment's actual extent regardless of its
+	// byte size; if either anchor is rephrased the test fails loudly
+	// here instead of scanning the wrong window (same fail-loud
+	// discipline as extractProviderCaseArms).
+	const docStartAnchor = "// Name returns the provider identifier"
+	docStart := strings.Index(providerSrc, docStartAnchor)
+	if docStart < 0 {
+		t.Fatalf("F318 direction 3 setup: cannot locate the Name() doc "+
+			"comment start anchor %q in provider.go — the doc comment's "+
+			"first line may have been rephrased; update this anchor.",
+			docStartAnchor)
 	}
-	// Slice a window before Name() large enough to catch the full doc
-	// comment (which lists every OSS provider by name and describes
-	// the SaaS delta + disabled sentinel).
-	winStart := nameIdx - 1200
-	if winStart < 0 {
-		winStart = 0
+	const docEndAnchor = "Name() string"
+	relEnd := strings.Index(providerSrc[docStart:], docEndAnchor)
+	if relEnd < 0 {
+		t.Fatalf("F318 direction 3 setup: cannot locate the `Name() " +
+			"string` end anchor after the doc comment start anchor in " +
+			"provider.go — the interface may have been reshaped; update " +
+			"this anchor pair.")
 	}
-	window := providerSrc[winStart:nameIdx]
+	window := providerSrc[docStart : docStart+relEnd]
 
 	// Every registered OSS provider must appear as a bare token in
 	// the doc window.
