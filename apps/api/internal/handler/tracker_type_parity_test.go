@@ -101,13 +101,21 @@ import (
 //	    char class [a-z0-9_-]).
 //
 //	(3) Direction 3 — doc factuality (F276 lineage): every
-//	    model.TrackerType* symbol the ticket_sync.go comment names
+//	    model.TrackerType* symbol the ticket_sync.go doc comment names
 //	    must exist in the const block (referenced → real), and every
 //	    const symbol must be named by that comment (real → referenced,
 //	    so a new tracker's SyncTicket arm cannot leave the F274b
-//	    HTTP-in-tx narrative silently incomplete). The handler's 400
-//	    message must enumerate every registered wire value in
-//	    single-quoted form.
+//	    HTTP-in-tx narrative silently incomplete). F339 (M22 R2): the
+//	    mention scan runs over an anchor-terminated slice of the
+//	    TicketSyncJob doc comment (F331 technique), NOT the whole
+//	    file, so a future CODE-level model.TrackerType* reference in
+//	    ticket_sync.go cannot vacuously satisfy the doc-completeness
+//	    direction while the comment itself stays stale. The handler's
+//	    400 message must enumerate exactly the registered wire-value
+//	    set in single-quoted form — bidirectional (F337, M22 R2): a
+//	    registered value missing from the message AND a stale
+//	    single-quoted token in the message that no const declares both
+//	    fail.
 //
 // What THIS test DOES catch:
 //
@@ -122,9 +130,17 @@ import (
 //   - TS union or SelectItem drift from the Go wire-value set, and a
 //     useState default / setTrackerType reset naming a value the Go
 //     registry does not contain.
-//   - ticket_sync.go's comment naming a model.TrackerType* symbol
-//     that does not exist, or omitting one that does; the handler 400
-//     message not listing every registered wire value.
+//   - ticket_sync.go's doc comment naming a model.TrackerType* symbol
+//     that does not exist, or omitting one that does (even if code in
+//     the same file mentions it — F339 comment-window slice); the
+//     handler 400 message not listing every registered wire value, or
+//     listing a single-quoted token that is not a registered wire
+//     value (F337 bidirectional).
+//   - page.tsx losing (or duplicating) the useState<TrackerType>
+//     default or the setTrackerType reset literal — both probes
+//     require exactly one match, so a form reshape that silently
+//     removes the hardcoded literal fails loudly instead of being
+//     vacuously accepted (F339).
 //
 // What THIS test does NOT catch (documented factuality trade-off,
 // mirrors the F276 note on F271 / F281 / F299 / F318):
@@ -138,6 +154,16 @@ import (
 //     `tt := conn.TrackerType; switch tt {`) — the census matches
 //     field-access headers (`switch ....TrackerType {`) only. No such
 //     site exists today; introducing one is a review-required reshape.
+//   - An if/else equality-chain dispatch (`if conn.TrackerType ==
+//     model.TrackerTypeJira { ... } else { ... }`) — not a switch
+//     header, so the direction 1a census cannot see it (F339). The
+//     only non-test `.TrackerType ==` comparison today is the
+//     handler's empty-string required-field check, which names no
+//     tracker; a dispatch-shaped equality chain on a wire value or
+//     const would land in the direction 1c literal census only if it
+//     used a raw literal in a NEW file — a symbol-based equality
+//     chain in an already-pinned file is invisible to this test and
+//     is a review-required reshape.
 //   - Two-member-universe assumptions in display ternaries:
 //     page.tsx and create-ticket-button.tsx render labels via
 //     `tracker_type === "jira" ? "Jira" : "Backlog"`, so a third
@@ -321,8 +347,20 @@ func TestTrackerTypeRegistryParity_F330(t *testing.T) {
 			"form state shape changed; update this parser.",
 			pageRel, len(defaults))
 	}
-	for _, m := range append(defaults,
-		trackerParitySetterRe.FindAllStringSubmatch(pageTSX, -1)...) {
+	// F339 (M22 R2): the reset literal is held to the same
+	// exactly-one bar as the useState default. Pre-F339 a zero-match
+	// scan was vacuously accepted, so removing (or reshaping) the
+	// setTrackerType("...") reset call silently dropped the membership
+	// probe instead of failing loudly.
+	setters := trackerParitySetterRe.FindAllStringSubmatch(pageTSX, -1)
+	if len(setters) != 1 {
+		t.Fatalf("F330 direction 2 setup: expected exactly one "+
+			"setTrackerType(\"...\") reset literal in %s, found %d — the "+
+			"form reset shape changed; update this parser (and keep the "+
+			"reset value inside the parity contract).",
+			pageRel, len(setters))
+	}
+	for _, m := range append(defaults, setters...) {
 		if !valueSet[m[1]] {
 			t.Errorf("F330 direction 2: %s hardcodes tracker default/reset "+
 				"value %q which is not a registered Go wire value — update "+
@@ -355,28 +393,61 @@ func TestTrackerTypeRegistryParity_F330(t *testing.T) {
 	// model.TrackerType* symbol it names must exist, and every declared
 	// const must be named, so the HTTP-in-tx narrative stays factually
 	// complete when a tracker is added or removed.
+	//
+	// F339 (M22 R2): the scan window is the TicketSyncJob doc comment
+	// only, located via an anchor-terminated slice (F331 technique:
+	// doc-comment first line → the type declaration that terminates
+	// it). Pre-F339 the scan ran over the WHOLE file, so a future
+	// code-level model.TrackerType* reference (e.g. a dispatch added
+	// to this scheduler) would have satisfied the "mentioned" set and
+	// let the doc comment go stale without failing this direction.
+	// Everything between the two anchors is comment text by
+	// construction, so only prose can satisfy the probe.
 	const schedRel = "internal/scheduler/ticket_sync.go"
 	schedSrc, ok := goFiles[schedRel]
 	if !ok {
 		t.Fatalf("F330 direction 3 setup: %s not found under %s.",
 			schedRel, apiRoot)
 	}
+	const schedDocStartAnchor = "// TicketSyncJob handles periodic ticket synchronization"
+	const schedDocEndAnchor = "type TicketSyncJob struct"
+	docStart := strings.Index(schedSrc, schedDocStartAnchor)
+	if docStart < 0 {
+		t.Fatalf("F330 direction 3 setup: cannot locate the TicketSyncJob "+
+			"doc-comment start anchor %q in %s — the comment's first line "+
+			"was rephrased; update this anchor deliberately rather than "+
+			"letting the probe pass vacuously.", schedDocStartAnchor, schedRel)
+	}
+	docEnd := strings.Index(schedSrc[docStart:], schedDocEndAnchor)
+	if docEnd < 0 {
+		t.Fatalf("F330 direction 3 setup: cannot locate the %q end anchor "+
+			"after the doc-comment start anchor in %s — the type was "+
+			"renamed or the comment detached from it; update this anchor "+
+			"pair.", schedDocEndAnchor, schedRel)
+	}
+	schedDocWindow := schedSrc[docStart : docStart+docEnd]
 	mentioned := make(map[string]bool)
-	for _, m := range trackerParityModelSymRe.FindAllStringSubmatch(schedSrc, -1) {
+	for _, m := range trackerParityModelSymRe.FindAllStringSubmatch(schedDocWindow, -1) {
 		mentioned[m[1]] = true
 	}
 	if len(mentioned) == 0 {
 		t.Fatalf("F330 direction 3 setup: no model.TrackerType* symbol "+
-			"mention found in %s — the F274b comment was removed or "+
-			"reworded away from symbol references; update this probe "+
-			"deliberately rather than letting it pass vacuously.", schedRel)
+			"mention found in the TicketSyncJob doc comment of %s — the "+
+			"F274b comment was removed or reworded away from symbol "+
+			"references; update this probe deliberately rather than "+
+			"letting it pass vacuously.", schedRel)
 	}
 	assertSetEqual(t,
-		"F330 direction 3 (ticket_sync.go symbol mentions ↔ model.TrackerType* consts)",
+		"F330 direction 3 (ticket_sync.go doc-comment symbol mentions ↔ model.TrackerType* consts)",
 		mentioned, symbolSet)
 
 	// (3b) handler 400 message: the operator-facing "Must be ..." text
-	// must enumerate every registered wire value in single quotes.
+	// must enumerate exactly the registered wire-value set in single
+	// quotes. F337 (M22 R2): the probe is bidirectional — pre-F337 it
+	// only checked registered ⊆ message, so a tracker REMOVAL (or a
+	// typo'd extra token) could leave the 400 message advertising a
+	// wire value the handler switch no longer accepts. The message's
+	// single-quoted tokens are extracted and compared as a full set.
 	const handlerRel = "internal/handler/issue_tracker.go"
 	handlerSrc := goFiles[handlerRel] // presence already asserted in 1b
 	const msgAnchor = "Invalid tracker_type. Must be"
@@ -390,13 +461,19 @@ func TestTrackerTypeRegistryParity_F330(t *testing.T) {
 	if nl := strings.IndexByte(msgLine, '\n'); nl >= 0 {
 		msgLine = msgLine[:nl]
 	}
-	for val := range valueSet {
-		if !strings.Contains(msgLine, "'"+val+"'") {
-			t.Errorf("F330 direction 3: handler 400 message %q does not "+
-				"list registered wire value '%s' — update the message "+
-				"alongside the switch arms.", msgLine, val)
-		}
+	msgTokens := make(map[string]bool)
+	for _, m := range trackerParityMsgTokenRe.FindAllStringSubmatch(msgLine, -1) {
+		msgTokens[m[1]] = true
 	}
+	if len(msgTokens) == 0 {
+		t.Fatalf("F330 direction 3 setup: no single-quoted wire-value "+
+			"token found in the 400 message %q of %s — the message shape "+
+			"changed; update this probe deliberately rather than letting "+
+			"it pass vacuously.", msgLine, handlerRel)
+	}
+	assertSetEqual(t,
+		"F330 direction 3 (handler 400-message single-quoted tokens ↔ Go wire values)",
+		msgTokens, valueSet)
 }
 
 // -----------------------------------------------------------------------------
@@ -448,6 +525,12 @@ var trackerParityModelSymRe = regexp.MustCompile(`model\.(TrackerType[A-Za-z0-9]
 // trackerParityQuotedRe captures quoted wire-value identifiers (F326
 // identifier char class).
 var trackerParityQuotedRe = regexp.MustCompile(`"([a-z0-9_\-]+)"`)
+
+// trackerParityMsgTokenRe captures the SINGLE-quoted wire-value tokens
+// of the handler's operator-facing 400 message ("Must be 'jira' or
+// 'backlog'"), so direction 3b can compare the message's advertised
+// set against the registry bidirectionally (F337, M22 R2).
+var trackerParityMsgTokenRe = regexp.MustCompile(`'([a-z0-9_\-]+)'`)
 
 // trackerParitySelectItemRe captures the value= attribute of a
 // SelectItem inside the anchor-terminated SelectContent window.
