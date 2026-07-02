@@ -636,16 +636,31 @@ func mergeDelta(seed map[string]map[string]bool, plan string, delta map[string]b
 // synthetic in-memory string and touches no real migration file.
 //
 // The fixture is constructed so that folding grouped-by-flavor (all
-// IN (...) matches first, then all = 'x' matches — the pre-F320 order)
-// yields DIFFERENT final values than folding by byte offset, in both
-// grouping directions:
+// matches of one regex flavor first, then all matches of the other —
+// the pre-F320 bug shape, in EITHER grouping direction) yields
+// DIFFERENT final values than folding by byte offset:
 //
 //   - "f332_flag" on free: IN(true) → ='free'(false) → IN(true).
-//     Source order ends true; flavor-grouped ([IN,IN] then [=]) ends
-//     false.
+//     Source order ends true; IN-first flavor-grouping ([IN,IN] then
+//     [=]) ends false.
 //   - "f332_late" on starter: ='starter'(false) → IN(true).
-//     Source order ends true; flavor-grouped ([IN] then [=]) ends
-//     false.
+//     Source order ends true; IN-first flavor-grouping ([IN] then
+//     [=]) ends false.
+//   - "f332_eq_last" on free: IN(true) → ='free'(false). Source
+//     order ends false; =-first flavor-grouping ([=] then [IN]) ends
+//     true.
+//
+// F335 (M22 R2): the third key exists because the original fixture
+// could NOT discriminate the =-first grouping direction — every
+// mixed-flavor key's FINAL source-order write was IN-flavor, so a
+// fold that grouped all = 'x' matches before all IN (...) matches
+// still converged to the source-order result and escaped both this
+// test and F299 (mutation-verified: flavor-loop swap + sort.Slice
+// deletion passed both against the pre-F335 fixture). "f332_eq_last"
+// puts the final source-order write on the = 'x' flavor, so each
+// grouping direction is now pinned by at least one key (F276
+// factuality lineage: the "in both grouping directions" claim above
+// is now backed by the fixture instead of contradicted by it).
 func TestPlanBackfillSourceOrder_F332(t *testing.T) {
 	const src = `
 -- F332 synthetic interleaved fixture (in-memory only; NOT a real
@@ -660,6 +675,10 @@ UPDATE plan_limits SET features = features || '{"f332_flag": true}'::jsonb WHERE
 UPDATE plan_limits SET features = features || '{"f332_late": false}'::jsonb WHERE plan = 'starter';
 
 UPDATE plan_limits SET features = features || '{"f332_late": true}'::jsonb WHERE plan IN ('starter');
+
+UPDATE plan_limits SET features = features || '{"f332_eq_last": true}'::jsonb WHERE plan IN ('free');
+
+UPDATE plan_limits SET features = features || '{"f332_eq_last": false}'::jsonb WHERE plan = 'free';
 `
 
 	seed := map[string]map[string]bool{
@@ -674,6 +693,10 @@ UPDATE plan_limits SET features = features || '{"f332_late": true}'::jsonb WHERE
 		"free": {
 			"f332_flag":    true, // IN(true) → =(false) → IN(true): last write in SOURCE order wins
 			"f332_eq_only": true,
+			// F335: final source-order write is the = 'x' flavor, so an
+			// =-first flavor-grouped fold ends true instead — the ONLY
+			// key that discriminates that grouping direction.
+			"f332_eq_last": false, // IN(true) → =(false): last write in SOURCE order wins
 		},
 		"starter": {
 			"f332_flag": true, // only statement 1 targets starter for this key
