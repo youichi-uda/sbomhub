@@ -84,11 +84,29 @@ test.describe("AI CRA Reports (M2-5)", () => {
     });
 
     test("should surface AI-disabled banner when BYOK is unset", async ({ page, request }) => {
-        // Try to trigger a CRA report run; in CI BYOK is unset, so the
-        // backend returns 503 + llm.DisabledError on the run endpoint.
-        // The list endpoint does NOT hit the LLM, so the page itself
-        // renders without the banner — this matches the M1-6 triage
-        // page test's behaviour.
+        // Pre-F354 premise ("in CI BYOK is unset, so the backend returns
+        // 503 + llm.DisabledError on the run endpoint") is stale: with
+        // BYOK unset the LLM factory returns *llm.DisabledProvider as a
+        // VALUE, not an error (service/llm/factory.go), and the CRA
+        // runner forks in-band (cra/runner.go runAIDisabled), persisting
+        // an ai_disabled report and returning HTTP 201 — this path never
+        // produces the *llm.DisabledError that mapCRARunnerError's 503
+        // arm needs. Moreover the all-zero vulnerability_id below fails
+        // Stage 1 first (resolveAuthoritativeCVEID cannot resolve a
+        // nonexistent vulnerability -> generic 4xx/5xx via
+        // mapCRARunnerError's default branch), before the provider fork
+        // is even reached. The list endpoint still does not hit the LLM,
+        // so the page renders without the banner either way — matching
+        // the M1-6 triage page test.
+        //
+        // TODO(e2e): verified 2026-07-02 (M23-2 F354): the 503 gate below
+        // is therefore dead — the skip always fires, and the coverage the
+        // pre-F354 comment described does not exist. Gate logic is
+        // deliberately left untouched (this spec runs live in CI via
+        // .github/workflows/web-e2e.yml web-e2e-full; comment-only fix).
+        // Real coverage needs seeded valid prerequisites (vulnerability +
+        // approved VEX draft), then asserting the in-band contract:
+        // POST /cra-reports/run -> 201 ai_disabled report.
         const runRes = await request.post(
             `${API_BASE_URL}/api/v1/projects/${projectId}/cra-reports/run`,
             {

@@ -7,8 +7,9 @@
  *
  *   - the M1-5 runner needs a real LLM provider to populate drafts naturally,
  *     and CI does not have BYOK credentials. So we exercise the page either
- *     by (a) verifying empty-state + 503 AI-disabled behaviour, or (b) by
- *     approving a pre-existing draft when one happens to exist.
+ *     by (a) verifying empty-state + AI-disabled behaviour (the old "503"
+ *     premise is stale — see the F354 note on the banner spec below), or
+ *     (b) by approving a pre-existing draft when one happens to exist.
  *     TODO(e2e): verified 2026-07-02 (M23-2 F343): there is still no
  *     public "seed a draft" endpoint (cmd/server/main.go registers only
  *     list / get / decision / reanalyse under /vex-drafts; draft creation
@@ -76,9 +77,27 @@ test.describe('AI VEX Triage (M1-6)', () => {
     });
 
     test('should surface AI-disabled banner when BYOK is unset', async ({ page, request }) => {
-        // Try to trigger a triage run; in CI BYOK is unset, so the backend
-        // returns 503 + llm.DisabledError. The UI should mount the
-        // AIDisabledBanner. If BYOK is configured (rare in CI), skip.
+        // Pre-F354 premise ("in CI BYOK is unset, so the backend returns
+        // 503 + llm.DisabledError") is stale: with BYOK unset the LLM
+        // factory returns *llm.DisabledProvider as a VALUE, not an error
+        // (service/llm/factory.go: "SBOMHUB_LLM_PROVIDER unset ->
+        // DisabledProvider (NOT an error)"), and the triage runner forks
+        // in-band (triage/runner.go runAIDisabled), persisting
+        // under_investigation drafts with evidence kind "ai_disabled" and
+        // returning HTTP 201 — a 503 requires *llm.DisabledError in the
+        // error chain, which this path no longer produces. Moreover the
+        // all-zero vulnerability_id below fails Stage 1 scope resolution
+        // first (ErrVulnerabilityNotInTenant -> generic 404), before the
+        // provider fork is even reached.
+        //
+        // TODO(e2e): verified 2026-07-02 (M23-2 F354): the 503 gate below
+        // is therefore dead — the skip always fires, and the coverage the
+        // pre-F354 comment described (banner mounted off a 503 run) does
+        // not exist. Gate logic is deliberately left untouched (this spec
+        // runs live in CI via .github/workflows/web-e2e.yml web-e2e-full;
+        // this is a comment-only fix). Real coverage needs a seeded valid
+        // vulnerability, then asserting the in-band contract instead:
+        // POST /triage/run -> 201 with ai_disabled evidence drafts.
         const triageRun = await request.post(
             `${API_BASE_URL}/api/v1/projects/${projectId}/triage/run`,
             {
@@ -97,7 +116,8 @@ test.describe('AI VEX Triage (M1-6)', () => {
         await page.waitForLoadState('networkidle');
 
         // The banner is only mounted if the list call (or a decision call)
-        // also returns 503. listDrafts does NOT hit the LLM, so it will
+        // returns 503 (which, per the F354 note above, the run endpoint
+        // itself no longer does). listDrafts does NOT hit the LLM, so it will
         // return 200 with an empty array in this environment. So this test
         // only asserts the page renders without crashing. TODO(e2e):
         // banner visibility is currently covered by NO test — the
