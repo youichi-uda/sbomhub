@@ -3184,8 +3184,11 @@ func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 		model.ResourceMCP:         true,
 		model.ResourceCLI:         true,
 		// Handler-side emit: settings_llm.go logs against this
-		// resource type when a BYOK key is set / rotated / cleared.
-		// Registered in the dropdown by F282.
+		// resource type when a BYOK key is set or rotated
+		// (ActionLLMKeySet / ActionLLMKeyRotated, the handler's only
+		// two LLM key verbs — the never-emitted "cleared" constant was
+		// deleted in F333; F340 wording fix). Registered in the
+		// dropdown by F282.
 		model.ResourceLLMConfig: true,
 		// F285 (M19-3 Phase D R2): handler-side emit from
 		// handler/evidence_pack.go — audit repository logs

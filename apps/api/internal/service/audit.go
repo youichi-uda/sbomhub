@@ -666,8 +666,11 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		// the handler/settings_llm.go audit emit at h.auditRepo.Log)
 		// but was never registered in the dropdown, so an admin
 		// filtering audit_logs.resource_type by "llm_config" via the
-		// UI could not select the LLM key set / rotated / cleared
-		// audit rows. Adding the entry here closes the silent
+		// UI could not select the LLM key audit rows — today those are
+		// ActionLLMKeySet / ActionLLMKeyRotated, the only two verbs
+		// settings_llm.go emits (F340, M22 R2 wording fix: a "cleared"
+		// verb never had an emit site and its dead constant was
+		// deleted in F333). Adding the entry here closes the silent
 		// registry gap and completes the F281 direction-1 parity for
 		// the handler-emitted (rather than middleware-emitted) LLM
 		// resource family.
