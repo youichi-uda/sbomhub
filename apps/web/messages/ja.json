@@ -587,6 +587,7 @@
     "integrationTarget": "連携先",
     "selectIntegration": "連携先を選択",
     "project": "プロジェクト",
+    "repository": "リポジトリ (owner/repo)",
     "issueType": "課題タイプ",
     "priority": "優先度",
     "selectPriority": "優先度を選択（オプション）",

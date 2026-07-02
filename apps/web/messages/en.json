@@ -587,6 +587,7 @@
     "integrationTarget": "Integration",
     "selectIntegration": "Select integration",
     "project": "Project",
+    "repository": "Repository (owner/repo)",
     "issueType": "Issue Type",
     "priority": "Priority",
     "selectPriority": "Select priority (optional)",
