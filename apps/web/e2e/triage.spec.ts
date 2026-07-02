@@ -8,10 +8,13 @@
  *   - the M1-5 runner needs a real LLM provider to populate drafts naturally,
  *     and CI does not have BYOK credentials. So we exercise the page either
  *     by (a) verifying empty-state + 503 AI-disabled behaviour, or (b) by
- *     POSTing pre-fabricated drafts via the upcoming admin endpoint when
- *     present. ※要確認: there is no public "seed a draft" endpoint yet; the
- *     approve-flow assertion below is conditional on the listDrafts API
- *     returning a row, which we cannot guarantee from a black-box test.
+ *     approving a pre-existing draft when one happens to exist.
+ *     TODO(e2e): verified 2026-07-02 (M23-2 F343): there is still no
+ *     public "seed a draft" endpoint (cmd/server/main.go registers only
+ *     list / get / decision / reanalyse under /vex-drafts; draft creation
+ *     goes through the LLM-backed /triage/run only), so the approve-flow
+ *     assertion below stays conditional on the listDrafts API returning a
+ *     row, which a black-box test cannot guarantee.
  *
  * Hence this file is a *skeleton* per the M1-6 task brief ("ローカルでは
  * playwright install が必要なので軽い skeleton で OK"). The Acceptance
@@ -96,9 +99,13 @@ test.describe('AI VEX Triage (M1-6)', () => {
         // The banner is only mounted if the list call (or a decision call)
         // also returns 503. listDrafts does NOT hit the LLM, so it will
         // return 200 with an empty array in this environment. So this test
-        // only asserts the page renders without crashing — banner visibility
-        // is exercised by a unit test (※要確認: add @testing-library/react
-        // for that, currently this monorepo only has Playwright e2e).
+        // only asserts the page renders without crashing. TODO(e2e):
+        // banner visibility is currently covered by NO test — the
+        // pre-F343 comment claimed a unit test exercised it, which was
+        // factually wrong (verified 2026-07-02: apps/web has only
+        // Playwright; package.json carries no vitest / jest /
+        // @testing-library/react). A component-level unit test needs
+        // @testing-library/react (or an equivalent runner) added first.
         await expect(page.getByTestId('triage-page')).toBeVisible();
     });
 

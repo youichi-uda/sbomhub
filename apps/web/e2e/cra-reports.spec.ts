@@ -14,8 +14,13 @@
  * conditional on listReports returning a row, which we cannot
  * guarantee from a black-box test.
  *
- * ※要確認: when a "seed a cra_report" admin endpoint or a stubbed-LLM
- * harness lands, replace the conditional skips with assertions that
+ * TODO(e2e): verified 2026-07-02 (M23-2 F343): the public API still has
+ * no "seed a cra_report" endpoint (cmd/server/main.go registers only
+ * run / list / get / decision / reanalyse under /cra-reports) and the
+ * LLM factory has no stubbed test provider (factory.go switch arms:
+ * openai / anthropic / gemini / azure_openai / ollama only), so the
+ * skips below remain environment-conditional. When either lands,
+ * replace them with assertions that
  *   1. POST a report (or run the M2-4 runner with a stubbed provider),
  *   2. click [data-testid="cra-approve"],
  *   3. poll GET /api/v1/projects/:id/cra-reports until the approved
@@ -106,8 +111,12 @@ test.describe("AI CRA Reports (M2-5)", () => {
         // listReports returns 200 with an empty array in this
         // environment so the banner is not yet mounted from a list
         // failure. Same skeleton contract as the triage e2e.
-        // ※要確認: add @testing-library/react for a banner-mount unit
-        // test independent of LLM provider state.
+        // TODO(e2e): banner-mount coverage independent of LLM provider
+        // state needs a component-level unit test. Verified 2026-07-02
+        // (M23-2 F343): apps/web still has no unit-test runner —
+        // package.json carries @playwright/test only (no vitest / jest
+        // / @testing-library/react) — so adding @testing-library/react
+        // (or an equivalent runner) is a prerequisite.
         await expect(page.getByTestId("cra-reports-page")).toBeVisible();
     });
 
@@ -118,7 +127,7 @@ test.describe("AI CRA Reports (M2-5)", () => {
         // Changing a filter triggers a fresh list call via useEffect/
         // useCallback. We only assert the select accepts the change
         // and the page does not crash; assertion of filtered rows
-        // requires a seeded report (see top-of-file ※要確認).
+        // requires a seeded report (see the top-of-file TODO(e2e)).
         const select = page.getByTestId("filter-report-type");
         await select.selectOption("early_warning");
         await expect(select).toHaveValue("early_warning");

@@ -4,23 +4,28 @@
  * These tests exercise the /projects/:id/meti page end-to-end. They
  * mirror e2e/cra-reports.spec.ts (M2-5) and e2e/triage.spec.ts (M1-6)
  * shape-for-shape: empty-state, filter UX, summary strip, override
- * flow. The override flow is a skeleton because the M3-4 evaluator
- * fan-out runs synchronously against the project's SBOM / vulnerability
- * / VEX / CRA history, and a fresh test project has none of those, so
- * /refresh returns 27 rows all in `needs_review` with empty evidence.
- * That is enough to assert the matrix renders, the accordion is
- * expanded by default, and the override button exists — but not to
- * assert a real `achieved` → `not_achieved` operator flip end-to-end
- * (that requires evaluator preconditions the test project lacks).
+ * flow. The M3-4 evaluator fan-out runs synchronously against the
+ * project's SBOM / vulnerability / VEX / CRA history, and a fresh test
+ * project has none of those, so /refresh returns 32 rows (the full
+ * catalog — service/meti/catalog_test.go pins exactly 32 criteria; the
+ * pre-F343 "27 rows" here was a stale claim of the F336 species) all
+ * in `needs_review` with empty evidence. That is enough to assert the
+ * matrix renders AND — via the public /refresh + PUT/DELETE override
+ * endpoints — to apply and clear a real override with a REST readback
+ * (see the two override specs below; their conditional skips only
+ * guard sessions without write auth). What it is NOT enough for is an
+ * evaluator-driven `achieved` → `not_achieved` operator flip, which
+ * requires evaluator preconditions the fresh test project lacks.
  *
- * ※要確認: when a "seed a meti_assessment" admin endpoint or a stubbed
- * evaluator harness lands, replace the conditional skips with
- * assertions that:
- *   1. POST a refresh (or seed a row directly),
- *   2. open the override form on a known criterion id,
- *   3. submit override_status=not_achieved + a note,
- *   4. poll GET /api/v1/projects/:id/meti/assessment until the row's
- *      override_status flips to not_achieved.
+ * TODO(e2e): verified 2026-07-02 (M23-2 F343): there is still no
+ * "seed a meti_assessment" admin endpoint nor a stubbed evaluator
+ * harness. (The pre-F343 note here asked to "replace the conditional
+ * skips" once one lands, but the refresh → override-form → submit →
+ * REST-readback flow it prescribed has since landed through the
+ * public API — only with override_status=not_applicable against an
+ * all-needs_review matrix.) When a seed path lands, extend the
+ * override specs to pin an `achieved` → `not_achieved` flip on a
+ * known criterion id.
  */
 
 import { test, expect } from "@playwright/test";
@@ -89,8 +94,11 @@ test.describe("METI Self-Assessment (M3-5)", () => {
 
         // Changing the phase filter triggers a fresh list call via
         // useEffect / useCallback. Assert the select accepts the change
-        // and the page does not crash; assertion of phase-bounded rows
-        // requires /refresh to have been run first (see ※要確認 above).
+        // and the page does not crash. TODO(e2e): tighten by POSTing
+        // /refresh inline first (as the accordion / override specs
+        // below already do) and asserting the listed rows are
+        // phase-bounded; without a refresh a fresh project has zero
+        // meti_assessments rows to filter (verified 2026-07-02, F343).
         const select = page.getByTestId("filter-phase");
         await select.selectOption("env_setup");
         await expect(select).toHaveValue("env_setup");
@@ -284,19 +292,25 @@ test.describe("METI Self-Assessment (M3-5)", () => {
         await expect(toggle).not.toBeChecked();
     });
 
-    // M3 Codex review #F35 — clear-override flow. Skeleton: the test
-    // needs an existing override row to exercise the clear flow. Like
-    // the "apply a manual override" test above, this is gated on
-    // /refresh returning at least one criterion and the PUT /override
-    // surface being writable in the current test session. When either
-    // gate is missing we test.skip() rather than asserting.
+    // M3 Codex review #F35 — clear-override flow. The spec seeds its
+    // own override row inline (public PUT /override) and then walks
+    // the clear flow to a REST readback of the cleared
+    // override_status. Like the "apply a manual override" test above,
+    // it is gated on /refresh returning at least one criterion and the
+    // PUT /override surface being writable in the current test
+    // session. When either gate is missing we test.skip() rather than
+    // asserting.
     //
-    // ※要確認: once a "seed an overridden meti_assessment" admin
-    // endpoint or a stubbed evaluator harness lands, replace this with
-    // an end-to-end assertion that POSTs the override, opens the
-    // clear-override form, submits a 1-char-min note, polls the GET
-    // until override_status is null, and confirms a
-    // meti_assessment_override_cleared audit row.
+    // TODO(e2e): verified 2026-07-02 (M23-2 F343): the pre-F343 note
+    // here waited on a "seed an overridden meti_assessment" admin
+    // endpoint, but the seed-override → clear-form → note → cleared
+    // readback flow it prescribed has since landed below through the
+    // public API. Still missing: confirming the
+    // meti_assessment_override_cleared audit row (handler/meti.go
+    // emits it on DELETE). GET /api/v1/audit-logs exists but is
+    // feature-gated to Pro+ plans (CheckFeature("audit_logs") in
+    // cmd/server/main.go), so the audit assertion needs a plan-aware
+    // guard (or a Pro-seeded tenant) before it can be added here.
     // M12-1 #82: same selector fix as override-form spec.
     test("should expose the clear-override flow on an overridden row", async ({ page, request }) => {
         const refreshRes = await request.post(
