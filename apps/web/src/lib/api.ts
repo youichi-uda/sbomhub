@@ -397,6 +397,53 @@ export interface VEXSuggestionsResponse {
   suggestions: VEXSuggestion[];
 }
 
+// -----------------------------------------------------------------------------
+// VEX apply / 1-click reuse (M27 F382, issue #133) types
+// -----------------------------------------------------------------------------
+//
+// Phase 2 of "VEX cross-project aggregation": a reviewer explicitly reuses a
+// cross-project suggestion (M26 read-only Phase 1) by copying the source
+// statement into THIS project. "AI drafts, humans approve" — there is no
+// auto-apply; the UI always interposes a confirm dialog, and this request is
+// only fired on human confirmation.
+//
+// The wire shape is pinned by the M27 kickoff API contract
+// (sbomhub-internal/planning/M27_KICKOFF_PROMPT.md §"API 契約") and shared
+// verbatim with the Wave A backend
+// (POST /api/v1/projects/:id/vex/suggestions/apply). The backend re-validates
+// that the (source_statement_id, vulnerability_id, component_id) triple is a
+// genuine cross-project match (same tenant, matching vulnerability, and for a
+// component-specific source, matching purl) — the client-supplied fields are
+// never trusted to inject an arbitrary status onto an arbitrary component.
+
+/** POST /api/v1/projects/:id/vex/suggestions/apply request body. */
+export interface VEXApplyRequest {
+  /** The source project's vex_statement being reused (provenance). */
+  source_statement_id: string;
+  /** The vulnerability the reused decision applies to (re-validation). */
+  vulnerability_id: string;
+  /** This project's components.id the decision is copied onto. */
+  component_id: string;
+}
+
+/**
+ * Provenance recorded when a cross-project decision is reused. Points back to
+ * the source vex_statement / project so the audit trail (and a later M28+ UI)
+ * can show "reused from project X".
+ */
+export interface VEXApplyProvenance {
+  source_statement_id: string;
+  source_project_id: string;
+  applied_at: string;
+}
+
+/** POST /api/v1/projects/:id/vex/suggestions/apply 201 response. */
+export interface VEXApplyResponse {
+  /** The new vex_statement created in this project. */
+  statement: VEXStatement;
+  provenance: VEXApplyProvenance;
+}
+
 export type LicensePolicyType = "allowed" | "denied" | "review";
 
 export interface LicensePolicy {
@@ -2271,15 +2318,17 @@ export const api = {
   licenses: {
     getCommon: () => request<Record<string, string>>("/api/v1/licenses/common"),
   },
-  // VEX cross-project aggregation (M26 F376, issue #131) — read-only Phase 1.
-  // Maps to the aggregation endpoint wired by the Wave A backend:
-  //   GET /api/v1/projects/:id/vex/suggestions
-  // Returns human-approved vex_statements from OTHER projects in the same
-  // tenant that match this project's vulnerabilities by (vulnerability_id,
-  // purl) or by vulnerability_id alone. Read-only by design: there is
-  // deliberately no apply/reuse method here — 1-click reuse (copy statement +
-  // audit action) is M27 Phase 2, which touches the F281/F271 audit parity
-  // surface the M26 kickoff explicitly deferred.
+  // VEX cross-project aggregation (M26 F376, issue #131) + apply / 1-click
+  // reuse (M27 F382, issue #133). Maps to the two endpoints wired by the
+  // Wave A backend:
+  //   GET  /api/v1/projects/:id/vex/suggestions        (read-only Phase 1)
+  //   POST /api/v1/projects/:id/vex/suggestions/apply  (Phase 2 reuse)
+  // getSuggestions returns human-approved vex_statements from OTHER projects
+  // in the same tenant that match this project's vulnerabilities by
+  // (vulnerability_id, purl) or by vulnerability_id alone. apply copies one
+  // such source decision into THIS project after the reviewer confirms — never
+  // auto-applied ("humans approve"); the confirm dialog in
+  // cross-project-suggestions.tsx is the human-approval boundary.
   vex: {
     getSuggestions: async (
       projectId: string,
@@ -2297,6 +2346,22 @@ export const api = {
       });
       return { ...safe, suggestions: safe.suggestions ?? [] };
     },
+    // Reuse a cross-project suggestion: copy the source decision into this
+    // project. The backend re-validates the match and records provenance +
+    // an audit action. A 409 means this project has already triaged the
+    // (vulnerability, component) key — the caller surfaces that as a natural
+    // "already triaged here" notice rather than an error.
+    apply: (
+      projectId: string,
+      body: VEXApplyRequest,
+    ): Promise<VEXApplyResponse> =>
+      request<VEXApplyResponse>(
+        `/api/v1/projects/${projectId}/vex/suggestions/apply`,
+        {
+          method: "POST",
+          body: JSON.stringify(body),
+        },
+      ),
   },
   // AI VEX triage (M1-6, issue #28). Maps to the five endpoints wired by
   // apps/api/cmd/server/main.go around line 596:
