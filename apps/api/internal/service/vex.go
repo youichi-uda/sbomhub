@@ -159,10 +159,19 @@ func (s *VEXService) ApplySuggestion(ctx context.Context, in ApplySuggestionInpu
 
 // verifySuggestionMatch re-runs the M26 aggregation match condition for a
 // single (source, target) pair so apply cannot inject an arbitrary status
-// onto an arbitrary component (F381 security requirement). It mirrors
-// assembleSuggestions + repository.ListCrossProjectVEXCandidates:
+// onto an arbitrary component (F381 security requirement). It is a faithful
+// mirror of assembleSuggestions + repository.ListCrossProjectVEXCandidates
+// (the `ta` subquery + the WHERE clause), so a triple apply accepts is one
+// GetSuggestions could have surfaced:
 //
 //   - the source vulnerability must equal the requested vulnerability;
+//   - the target component must be AFFECTED by that vulnerability — linked
+//     to it via component_vulnerabilities within the target project (F383,
+//     issue #132/#133). The `ta` subquery only ever draws (vulnerability,
+//     component) pairs from component_vulnerabilities, so a suggestion never
+//     points at a non-affected component; without this join a crafted apply
+//     could forge a verdict onto a component the vulnerability does not
+//     touch. Enforced for BOTH match branches;
 //   - a component-specific source (component_id non-NULL) matches ONLY when
 //     its own component — bound to the SOURCE statement's project (F379
 //     provenance integrity) — carries a non-empty purl equal to the target
@@ -173,8 +182,9 @@ func (s *VEXService) ApplySuggestion(ctx context.Context, in ApplySuggestionInpu
 //     ComponentBelongsToProject write defence.
 //
 // The source is already tenant-scoped by the caller (GetStatementForTenant),
-// and every purl lookup is project-scoped, so this stays a project-level
-// tightening WITHIN the tenant, never a change to the tenant boundary.
+// and every component lookup is project-scoped (RLS-authoritative on the
+// tenant boundary), so this stays a project-level tightening WITHIN the
+// tenant, never a change to the tenant boundary.
 func (s *VEXService) verifySuggestionMatch(ctx context.Context, in ApplySuggestionInput, source *model.VEXStatement) (string, error) {
 	if source.VulnerabilityID != in.VulnerabilityID {
 		return "", ErrVEXApplyMatchFailed
@@ -190,6 +200,22 @@ func (s *VEXService) verifySuggestionMatch(ctx context.Context, in ApplySuggesti
 		return "", fmt.Errorf("failed to resolve target component purl: %w", err)
 	}
 	if !targetFound {
+		return "", ErrVEXApplyMatchFailed
+	}
+
+	// F383 (issue #132/#133): the target component must ALSO be affected by
+	// the vulnerability — linked via component_vulnerabilities in the target
+	// project — exactly as the M26 aggregation's `ta` subquery requires. This
+	// re-check applies to BOTH branches below (purl and vulnerability_only):
+	// without it, a crafted apply request could pair a real, tenant-visible
+	// source statement with a target component the vulnerability does not
+	// touch (one GetSuggestions would never surface) and forge a verdict onto
+	// it. Rejecting here keeps the injection guard aligned with the read feed.
+	linked, err := s.vexRepo.ComponentLinkedToVulnInProject(ctx, in.TargetComponentID, in.ProjectID, in.VulnerabilityID)
+	if err != nil {
+		return "", fmt.Errorf("failed to verify target component vulnerability linkage: %w", err)
+	}
+	if !linked {
 		return "", ErrVEXApplyMatchFailed
 	}
 

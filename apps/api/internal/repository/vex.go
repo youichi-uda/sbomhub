@@ -144,6 +144,41 @@ func (r *VEXRepository) GetComponentPurlInProject(ctx context.Context, component
 	return purl, true, nil
 }
 
+// ComponentLinkedToVulnInProject reports whether componentID (a component of
+// a SBOM owned by projectID) is linked to vulnerabilityID via
+// component_vulnerabilities — i.e. the vulnerability actually AFFECTS that
+// component (M27-D / F383, issue #132/#133).
+//
+// This mirrors the `ta` subquery of ListCrossProjectVEXCandidates
+// (vex_aggregation.go): that subquery only ever draws (vulnerability,
+// component) pairs FROM component_vulnerabilities, so the cross-project
+// suggestion feed can never surface a verdict for a component the
+// vulnerability does not touch. VEXService.verifySuggestionMatch was missing
+// this join, letting a crafted apply request pair a real source statement
+// with a non-affected target component (an injection variant that
+// GetSuggestions would never surface). This method is the linkage re-check
+// that closes it.
+//
+// Tenant-scoped exactly like ComponentBelongsToProject / GetComponentPurlInProject:
+// components / sboms are FORCE ROW LEVEL SECURITY, so a caller inside a
+// TenantTx only ever sees its own tenant's rows; component_vulnerabilities is
+// a global join table (no tenant_id) but is constrained transitively via the
+// tenant-scoped components / sboms it joins to. Returns false (no error) when
+// the component does not exist, is not visible, belongs to another project,
+// or is simply not linked to the vulnerability.
+func (r *VEXRepository) ComponentLinkedToVulnInProject(ctx context.Context, componentID, projectID, vulnerabilityID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.q(ctx).QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM component_vulnerabilities cv
+			JOIN components c ON c.id = cv.component_id
+			JOIN sboms s ON s.id = c.sbom_id
+			WHERE c.id = $1 AND s.project_id = $2 AND cv.vulnerability_id = $3
+		)`, componentID, projectID, vulnerabilityID).Scan(&exists)
+	return exists, err
+}
+
 // CreateProvenance inserts a vex_statement_provenance row (M27-A / F381,
 // issue #132). The row must carry the same tenant_id as the target
 // statement so the FORCE RLS WITH CHECK on vex_statement_provenance

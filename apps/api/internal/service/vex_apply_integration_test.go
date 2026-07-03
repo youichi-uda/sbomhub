@@ -371,3 +371,114 @@ func TestVEXApply_ExistingTarget_409(t *testing.T) {
 		}
 	})
 }
+
+// TestVEXApply_TargetNotLinkedToVuln_Rejected pins the F383 injection variant
+// (issue #132/#133): the target component must be AFFECTED by the vulnerability
+// — linked via component_vulnerabilities in the target project — exactly as the
+// M26 aggregation's `ta` subquery requires. A crafted apply request that pairs
+// a real, tenant-visible source statement with a target component the
+// vulnerability does NOT touch (one GetSuggestions would never surface) must be
+// rejected with ErrVEXApplyMatchFailed for BOTH match branches:
+//
+//   - (a) vulnerability_only: a component-agnostic source applied onto a target
+//     component that is not linked to the vuln;
+//   - (b) purl: a component-specific source whose purl EQUALS the target's, but
+//     the target component is not linked to the vuln.
+//
+// Without the linkage re-check both would apply (the purl / vuln / ownership
+// predicates all pass), forging a verdict onto a non-affected component. A
+// third sub-case pins that the SAME shapes DO succeed once the target is
+// linked — proving the guard is a linkage gate, not an unconditional reject.
+func TestVEXApply_TargetNotLinkedToVuln_Rejected(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyApply(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "APL")
+	sfx := uuid.New().String()[:8]
+	vAgn := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APL-AGN-%s", sfx))
+	vPurl := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APL-PURL-%s", sfx))
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vAgn, vPurl)
+	})
+
+	// Source project A.
+	projA := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projA, "APL A")
+	sbomA := seedSbomVS(t, migDB, tenantT, projA)
+	// (a) component-agnostic (NULL) approved statement for vAgn.
+	sourceAgn := seedVexStmtVS(t, migDB, tenantT, projA, vAgn, nil, "not_affected")
+	// (b) component-specific approved statement for vPurl on a shared purl.
+	compA := seedComponentVS(t, migDB, tenantT, sbomA, "libshared", "1.0", "pkg:generic/aplshared@1.0")
+	linkCompVulnVS(t, migDB, compA, vPurl)
+	sourcePurl := seedVexStmtVS(t, migDB, tenantT, projA, vPurl, &compA, "not_affected")
+
+	// Target project B. compB shares compA's purl but is NOT linked to either
+	// vuln (no component_vulnerabilities rows) — the vulnerability does not
+	// actually affect it, so no suggestion could ever surface for it.
+	projB := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projB, "APL B")
+	sbomB := seedSbomVS(t, migDB, tenantT, projB)
+	compB := seedComponentVS(t, migDB, tenantT, sbomB, "libshared", "1.0", "pkg:generic/aplshared@1.0")
+
+	// (a) vulnerability_only injection: target not linked to vAgn → reject.
+	applySuggestionVS(t, appDB, tenantT, ApplySuggestionInput{
+		TenantID:          tenantT,
+		ProjectID:         projB,
+		SourceStatementID: sourceAgn,
+		TargetComponentID: compB,
+		VulnerabilityID:   vAgn,
+		CreatedBy:         "tester",
+	}, func(tx *sql.Tx, res *VEXApplyResult, err error) {
+		if !errors.Is(err, ErrVEXApplyMatchFailed) {
+			t.Fatalf("(a) vulnerability_only apply onto non-affected component must reject with ErrVEXApplyMatchFailed, got err=%v res=%+v", err, res)
+		}
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM vex_statements WHERE project_id = $1 AND vulnerability_id = $2`, projB, vAgn).Scan(&n); err != nil {
+			t.Fatalf("count target statements: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("(a) rejected apply still wrote %d target statement rows, want 0", n)
+		}
+	})
+
+	// (b) purl injection: target purl matches source, but target not linked to
+	// vPurl → reject (the linkage gate, not the purl check, is what rejects).
+	applySuggestionVS(t, appDB, tenantT, ApplySuggestionInput{
+		TenantID:          tenantT,
+		ProjectID:         projB,
+		SourceStatementID: sourcePurl,
+		TargetComponentID: compB,
+		VulnerabilityID:   vPurl,
+		CreatedBy:         "tester",
+	}, func(_ *sql.Tx, res *VEXApplyResult, err error) {
+		if !errors.Is(err, ErrVEXApplyMatchFailed) {
+			t.Fatalf("(b) purl apply onto non-affected component must reject with ErrVEXApplyMatchFailed, got err=%v res=%+v", err, res)
+		}
+	})
+
+	// (c) control: link compB to vPurl and the SAME purl apply now succeeds —
+	// proving the guard gates on linkage, not an unconditional reject.
+	linkCompVulnVS(t, migDB, compB, vPurl)
+	applySuggestionVS(t, appDB, tenantT, ApplySuggestionInput{
+		TenantID:          tenantT,
+		ProjectID:         projB,
+		SourceStatementID: sourcePurl,
+		TargetComponentID: compB,
+		VulnerabilityID:   vPurl,
+		CreatedBy:         "tester",
+	}, func(_ *sql.Tx, res *VEXApplyResult, err error) {
+		if err != nil {
+			t.Fatalf("(c) linked purl apply must succeed once component_vulnerabilities links the target, got err=%v", err)
+		}
+		if res == nil || res.MatchType != model.VEXMatchTypePurl {
+			t.Errorf("(c) linked purl apply match_type = %v, want %q", res, model.VEXMatchTypePurl)
+		}
+	})
+}
