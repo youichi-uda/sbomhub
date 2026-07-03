@@ -176,24 +176,34 @@ func (r *IssueTrackerRepository) CreateTicket(ctx context.Context, ticket *model
 		INSERT INTO vulnerability_tickets (
 			id, tenant_id, vulnerability_id, project_id, connection_id,
 			external_ticket_id, external_ticket_key, external_ticket_url,
+			external_project_key,
 			local_status, external_status, priority, assignee, summary,
 			last_synced_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
 	`
 	_, err := r.q(ctx).ExecContext(ctx, query,
 		ticket.ID, ticket.TenantID, ticket.VulnerabilityID, ticket.ProjectID,
 		ticket.ConnectionID, ticket.ExternalTicketID, ticket.ExternalTicketKey,
-		ticket.ExternalTicketURL, ticket.LocalStatus, ticket.ExternalStatus,
-		ticket.Priority, ticket.Assignee, ticket.Summary, ticket.LastSyncedAt,
+		ticket.ExternalTicketURL, ticket.ExternalProjectKey, ticket.LocalStatus,
+		ticket.ExternalStatus, ticket.Priority, ticket.Assignee, ticket.Summary,
+		ticket.LastSyncedAt,
 	)
 	return err
 }
 
-// GetTicket gets a ticket by ID
+// GetTicket gets a ticket by ID.
+//
+// external_project_key is COALESCEd to ” because pre-051 rows carry NULL
+// (deliberately not backfilled — see the 051 migration header) and the model
+// field is a plain string whose empty value is the service-side "legacy row,
+// fall back to the URL-derived repository" sentinel (F366). GetTicket is the
+// only read that needs the column: SyncTicket re-fetches by ID through it,
+// and no API response exposes per-ticket rows any other way.
 func (r *IssueTrackerRepository) GetTicket(ctx context.Context, id uuid.UUID) (*model.VulnerabilityTicket, error) {
 	query := `
 		SELECT id, tenant_id, vulnerability_id, project_id, connection_id,
 			external_ticket_id, external_ticket_key, external_ticket_url,
+			COALESCE(external_project_key, ''),
 			local_status, external_status, priority, assignee, summary,
 			last_synced_at, created_at, updated_at
 		FROM vulnerability_tickets
@@ -204,8 +214,8 @@ func (r *IssueTrackerRepository) GetTicket(ctx context.Context, id uuid.UUID) (*
 	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(
 		&ticket.ID, &ticket.TenantID, &ticket.VulnerabilityID, &ticket.ProjectID,
 		&ticket.ConnectionID, &ticket.ExternalTicketID, &ticket.ExternalTicketKey,
-		&ticket.ExternalTicketURL, &ticket.LocalStatus, &ticket.ExternalStatus,
-		&ticket.Priority, &ticket.Assignee, &ticket.Summary,
+		&ticket.ExternalTicketURL, &ticket.ExternalProjectKey, &ticket.LocalStatus,
+		&ticket.ExternalStatus, &ticket.Priority, &ticket.Assignee, &ticket.Summary,
 		&ticket.LastSyncedAt, &ticket.CreatedAt, &ticket.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {

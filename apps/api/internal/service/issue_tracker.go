@@ -236,12 +236,17 @@ func (s *IssueTrackerService) CreateTicket(ctx context.Context, tenantID uuid.UU
 		ExternalTicketID:  externalTicket.ID,
 		ExternalTicketKey: externalTicket.Key,
 		ExternalTicketURL: externalTicket.URL,
-		LocalStatus:       model.TicketStatusOpen,
-		ExternalStatus:    externalTicket.Status,
-		Priority:          externalTicket.Priority,
-		Assignee:          externalTicket.Assignee,
-		Summary:           externalTicket.Summary,
-		LastSyncedAt:      &now,
+		// Set by the GitHub arm only (F366): issue numbers are
+		// repository-scoped there, so the creation repository is persisted
+		// per ticket. Jira/Backlog leave it empty — their keys are
+		// instance-scoped.
+		ExternalProjectKey: externalTicket.ProjectKey,
+		LocalStatus:        model.TicketStatusOpen,
+		ExternalStatus:     externalTicket.Status,
+		Priority:           externalTicket.Priority,
+		Assignee:           externalTicket.Assignee,
+		Summary:            externalTicket.Summary,
+		LastSyncedAt:       &now,
 	}
 
 	if err := s.issueTrackerRepo.CreateTicket(ctx, ticket); err != nil {
@@ -345,22 +350,16 @@ func (s *IssueTrackerService) createBacklogTicket(ctx context.Context, conn *mod
 }
 
 func (s *IssueTrackerService) createGitHubTicket(ctx context.Context, conn *model.IssueTrackerConnection, apiToken, projectKey string, input CreateTicketInput) (*model.ExternalTicket, error) {
-	// F361 guard (creation side): GitHub tickets sync against the
-	// connection's default repository — SyncTicket resolves the persisted
-	// issue number (a repository-scoped key) in conn.DefaultProjectKey, so a
-	// ticket created in any OTHER repository could never be synced and, worse,
-	// would silently adopt the state of an unrelated same-numbered issue in
-	// the default repo. Reject per-ticket repository overrides at the source
-	// instead of minting such a ticket. EqualFold because GitHub owner/repo
-	// names are case-insensitive — a case-variant of the default repository
-	// is the same repository, not an override. Jira/Backlog keep their
-	// per-ticket project override; project keys are instance-scoped there.
-	if projectKey != "" && !strings.EqualFold(projectKey, conn.DefaultProjectKey) {
-		return nil, fmt.Errorf(
-			"github: per-ticket project key %q differs from the connection's default repository %q: GitHub tickets sync against the connection's default repository, so a ticket created elsewhere could never be synced — create a separate connection for that repository instead",
-			projectKey, conn.DefaultProjectKey)
-	}
-
+	// Per-ticket repository overrides are allowed since F366 (M25-A #128):
+	// the repository the issue is created in is persisted on the ticket row
+	// (external_project_key, migration 051), so SyncTicket polls the ticket's
+	// own repository instead of assuming the connection default. This
+	// replaces the F361 creation-side reject guard, which existed only
+	// because pre-051 rows had nowhere to record a non-default repository —
+	// a ticket minted elsewhere could never be synced back then. projectKey
+	// arrives already defaulted (CreateTicket substitutes
+	// conn.DefaultProjectKey when the request carries no override); its
+	// "owner/repo" shape is validated by the client (ErrGitHubInvalidRepo).
 	githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
 
 	githubInput := client.CreateGitHubIssueInput{
@@ -385,6 +384,10 @@ func (s *IssueTrackerService) createGitHubTicket(ctx context.Context, conn *mode
 		ID:  number,
 		Key: number,
 		URL: issue.HTMLURL,
+		// Persisted to the ticket row (F366) so SyncTicket knows which
+		// repository this issue number is scoped to, independent of later
+		// changes to the connection's default repository.
+		ProjectKey: projectKey,
 		// GitHub issue state is "open"/"closed" (lowercase) — mapped by
 		// mapExternalStatus alongside the Jira/Backlog status vocabularies.
 		Status: issue.State,
@@ -400,11 +403,15 @@ func (s *IssueTrackerService) createGitHubTicket(ctx context.Context, conn *mode
 // html_url — https://HOST/{owner}/{repo}/issues/{number}, the shape
 // createGitHubTicket persists in ExternalTicketURL for github.com and GitHub
 // Enterprise Server alike (GHES serves the web UI at the instance root even
-// though its API root is /api/v3). Parsing is defensive (F128-F132 posture):
-// any deviation from that exact shape — relative URL, missing host, wrong
-// segment count, a path family other than /issues/, or a non-numeric issue
-// segment — returns an error so SyncTicket refuses loudly instead of guessing
-// which repository a legacy or hand-edited ticket row belongs to (F361).
+// though its API root is /api/v3). SyncTicket uses it two ways (F366): as the
+// repository of record for legacy pre-051 tickets that persist no
+// external_project_key, and as a cross-check against the persisted key on
+// newer rows. Parsing is defensive (F128-F132 posture): any deviation from
+// that exact shape — relative URL, missing host, wrong segment count, a path
+// family other than /issues/, or a non-numeric issue segment — returns an
+// error so SyncTicket refuses loudly instead of guessing which repository a
+// legacy or hand-edited ticket row belongs to (F361 posture, retained as
+// defense in depth).
 func githubRepoFromIssueURL(rawURL string) (string, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -495,37 +502,46 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 		}
 
 	case model.TrackerTypeGitHub:
-		// GitHub issue numbers are repository-scoped, and the ticket row does
-		// not persist a per-ticket repository, so sync resolves the issue in
-		// the connection's DefaultProjectKey repo. createGitHubTicket rejects
-		// per-ticket repository overrides (F361), and the URL guard below is
-		// the matching sync-side defense: legacy tickets minted before that
-		// guard, hand-edited rows, and connections whose default repository
-		// was later repointed must all fail loudly here rather than silently
-		// adopt the state of an unrelated same-numbered issue.
-		if conn.DefaultProjectKey == "" {
-			return fmt.Errorf("github: connection %s has no default project key (\"owner/repo\") to sync against", conn.ID)
-		}
+		// GitHub issue numbers are repository-scoped. Since F366 (M25-A
+		// #128) the ticket row persists the repository the issue was created
+		// in (external_project_key, migration 051), so sync polls the
+		// ticket's own repository — per-ticket repository overrides at
+		// creation are allowed, and repointing the connection's default
+		// repository no longer strands previously-minted tickets. Rows
+		// created before 051 carry no persisted repository (empty after the
+		// COALESCE in GetTicket) and fall back to the repository derived
+		// from the persisted issue html_url — the exact pre-F366 source of
+		// truth for where the issue lives.
 		issueNumber, perr := strconv.Atoi(ticket.ExternalTicketKey)
 		if perr != nil {
 			return fmt.Errorf("github: ticket %s has non-numeric external ticket key %q: %w", ticket.ID, ticket.ExternalTicketKey, perr)
 		}
-		// F361 guard (sync side): the ticket's persisted html_url names the
-		// repository the issue actually lives in — verify it matches the repo
-		// we are about to poll. An unparseable URL is an explicit error too:
-		// syncing a ticket whose repository cannot be established risks the
-		// same unrelated-issue overwrite.
+		// URL guard (F361 sync-side defense, kept as defense in depth): the
+		// ticket's persisted html_url names the repository the issue
+		// actually lives in — verify it matches the repository we are about
+		// to poll. An unparseable URL is an explicit error too: syncing a
+		// ticket whose repository cannot be established risks overwriting
+		// local state with an unrelated same-numbered issue's state.
 		urlRepo, uerr := githubRepoFromIssueURL(ticket.ExternalTicketURL)
 		if uerr != nil {
-			return fmt.Errorf("github: ticket %s: cannot establish the ticket's repository from its stored URL, refusing to sync against %q where the same issue number may belong to an unrelated issue: %w",
-				ticket.ID, conn.DefaultProjectKey, uerr)
+			return fmt.Errorf("github: ticket %s: cannot establish the ticket's repository from its stored URL, refusing to sync — the issue number %d is repository-scoped and could belong to an unrelated issue elsewhere: %w",
+				ticket.ID, issueNumber, uerr)
 		}
-		if !strings.EqualFold(urlRepo, conn.DefaultProjectKey) {
-			return fmt.Errorf("github: ticket %s lives in repository %q but connection %s syncs against its default repository %q; refusing to sync — issue #%d there may be an unrelated issue with the same number",
-				ticket.ID, urlRepo, conn.ID, conn.DefaultProjectKey, issueNumber)
+		repo := ticket.ExternalProjectKey
+		if repo == "" {
+			repo = urlRepo
+		} else if !strings.EqualFold(repo, urlRepo) {
+			// A persisted repository that contradicts the persisted URL is
+			// data corruption (hand-edited row, or a bug upstream) — refuse
+			// loudly rather than guess which of the two is right. EqualFold
+			// because GitHub owner/repo names are case-insensitive and
+			// html_url carries GitHub's canonical casing, which may differ
+			// from what the operator typed at creation.
+			return fmt.Errorf("github: ticket %s persists repository %q but its stored URL names %q; refusing to sync — issue #%d may be an unrelated issue with the same number in either repository",
+				ticket.ID, repo, urlRepo, issueNumber)
 		}
 		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
-		state, gerr := githubClient.GetIssueStatus(ctx, conn.DefaultProjectKey, issueNumber)
+		state, gerr := githubClient.GetIssueStatus(ctx, repo, issueNumber)
 		if gerr != nil {
 			return gerr
 		}

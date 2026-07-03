@@ -53,22 +53,29 @@ type IssueTrackerConnection struct {
 
 // VulnerabilityTicket represents a ticket created for a vulnerability
 type VulnerabilityTicket struct {
-	ID                uuid.UUID    `json:"id" db:"id"`
-	TenantID          uuid.UUID    `json:"tenant_id" db:"tenant_id"`
-	VulnerabilityID   uuid.UUID    `json:"vulnerability_id" db:"vulnerability_id"`
-	ProjectID         uuid.UUID    `json:"project_id" db:"project_id"`
-	ConnectionID      uuid.UUID    `json:"connection_id" db:"connection_id"`
-	ExternalTicketID  string       `json:"external_ticket_id" db:"external_ticket_id"`
-	ExternalTicketKey string       `json:"external_ticket_key,omitempty" db:"external_ticket_key"`
-	ExternalTicketURL string       `json:"external_ticket_url" db:"external_ticket_url"`
-	LocalStatus       TicketStatus `json:"local_status" db:"local_status"`
-	ExternalStatus    string       `json:"external_status,omitempty" db:"external_status"`
-	Priority          string       `json:"priority,omitempty" db:"priority"`
-	Assignee          string       `json:"assignee,omitempty" db:"assignee"`
-	Summary           string       `json:"summary,omitempty" db:"summary"`
-	LastSyncedAt      *time.Time   `json:"last_synced_at,omitempty" db:"last_synced_at"`
-	CreatedAt         time.Time    `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time    `json:"updated_at" db:"updated_at"`
+	ID                uuid.UUID `json:"id" db:"id"`
+	TenantID          uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	VulnerabilityID   uuid.UUID `json:"vulnerability_id" db:"vulnerability_id"`
+	ProjectID         uuid.UUID `json:"project_id" db:"project_id"`
+	ConnectionID      uuid.UUID `json:"connection_id" db:"connection_id"`
+	ExternalTicketID  string    `json:"external_ticket_id" db:"external_ticket_id"`
+	ExternalTicketKey string    `json:"external_ticket_key,omitempty" db:"external_ticket_key"`
+	ExternalTicketURL string    `json:"external_ticket_url" db:"external_ticket_url"`
+	// ExternalProjectKey is the project/repository the external ticket was
+	// created in (GitHub "owner/repo" — migration 051, F366). Empty for rows
+	// created before 051 (NULL in the DB, deliberately not backfilled); the
+	// service falls back to the repository derived from ExternalTicketURL
+	// for those legacy rows. Fixed at creation time (UpdateTicket does not
+	// touch it).
+	ExternalProjectKey string       `json:"external_project_key,omitempty" db:"external_project_key"`
+	LocalStatus        TicketStatus `json:"local_status" db:"local_status"`
+	ExternalStatus     string       `json:"external_status,omitempty" db:"external_status"`
+	Priority           string       `json:"priority,omitempty" db:"priority"`
+	Assignee           string       `json:"assignee,omitempty" db:"assignee"`
+	Summary            string       `json:"summary,omitempty" db:"summary"`
+	LastSyncedAt       *time.Time   `json:"last_synced_at,omitempty" db:"last_synced_at"`
+	CreatedAt          time.Time    `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time    `json:"updated_at" db:"updated_at"`
 }
 
 // VulnerabilityTicketWithDetails includes related information
@@ -97,11 +104,16 @@ type CreateTicketInput struct {
 
 // ExternalTicket represents ticket data from the external system
 type ExternalTicket struct {
-	ID       string
-	Key      string
-	URL      string
-	Status   string
-	Priority string
-	Assignee string
-	Summary  string
+	ID  string
+	Key string
+	URL string
+	// ProjectKey is the project/repository the ticket was created in, when
+	// the tracker needs it persisted per ticket (GitHub "owner/repo" —
+	// F366; issue numbers are repository-scoped there). Jira/Backlog leave
+	// it empty: their issue keys (PROJ-123) are instance-scoped.
+	ProjectKey string
+	Status     string
+	Priority   string
+	Assignee   string
+	Summary    string
 }
