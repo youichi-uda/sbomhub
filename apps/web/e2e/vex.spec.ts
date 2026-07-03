@@ -389,6 +389,107 @@ test.describe('VEX Statement Management', () => {
         await expect(card).toContainText('No action required.');
     });
 
+    test('should reuse a cross-project decision via confirm dialog (M27 F382)', async ({ page }) => {
+        // Phase 2 of cross-project VEX (issue #133): the reviewer reuses a
+        // suggestion, copying the source decision into this project. "AI drafts,
+        // humans approve" — the single click only OPENS a confirm dialog; the
+        // POST /vex/suggestions/apply fires only on confirmation. The web-e2e
+        // seed never provisions cross-project data, so intercept both endpoints:
+        // the GET returns the suggestion until it is applied, then empty (the
+        // backend excludes an already-triaged finding), and the POST returns the
+        // 201 apply envelope. The real apply semantics (match re-validation,
+        // tenant isolation, provenance, audit, 409 idempotency) stay in the
+        // Wave A real-PG integration tests; this pins only the web reuse flow:
+        // confirm-gated apply → refetch → suggestion drops out.
+        const suggestion = {
+            vulnerability_id: '11111111-1111-4111-8111-111111111111',
+            cve_id: 'CVE-2026-0999',
+            component: {
+                component_id: '22222222-2222-4222-8222-222222222222',
+                name: 'libmock',
+                version: '1.2.3',
+                purl: 'pkg:npm/libmock@1.2.3',
+            },
+            match_type: 'purl',
+            source: {
+                project_id: '33333333-3333-4333-8333-333333333333',
+                project_name: 'Mock Source Project',
+                statement_id: '44444444-4444-4444-8444-444444444444',
+                status: 'not_affected',
+                justification: 'vulnerable_code_not_present',
+                impact_statement: 'The vulnerable path is not reachable in our build.',
+                action_statement: 'No action required.',
+                created_at: '2026-07-01T00:00:00Z',
+            },
+        };
+
+        let applied = false;
+
+        // POST apply — records applied=true so the subsequent suggestions
+        // refetch returns empty, and returns the 201 contract envelope.
+        await page.route('**/api/v1/projects/*/vex/suggestions/apply', route => {
+            applied = true;
+            route.fulfill({
+                status: 201,
+                contentType: 'application/json',
+                body: JSON.stringify({
+                    statement: {
+                        id: '55555555-5555-4555-8555-555555555555',
+                        project_id: '66666666-6666-4666-8666-666666666666',
+                        vulnerability_id: suggestion.vulnerability_id,
+                        component_id: suggestion.component.component_id,
+                        status: 'not_affected',
+                        created_by: 'tester',
+                        created_at: '2026-07-04T00:00:00Z',
+                        updated_at: '2026-07-04T00:00:00Z',
+                    },
+                    provenance: {
+                        source_statement_id: suggestion.source.statement_id,
+                        source_project_id: suggestion.source.project_id,
+                        applied_at: '2026-07-04T00:00:00Z',
+                    },
+                }),
+            });
+        });
+
+        // GET suggestions — the apply glob above is registered first so this
+        // narrower glob (no trailing /apply) never shadows it; the two paths
+        // are disjoint regardless.
+        await page.route('**/api/v1/projects/*/vex/suggestions', route =>
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ suggestions: applied ? [] : [suggestion] }),
+            })
+        );
+
+        await page.goto(`/en/projects/${projectId}/triage`);
+        await page.waitForLoadState('networkidle');
+
+        await expect(page.getByTestId('triage-page')).toBeVisible({ timeout: 10000 });
+        const section = page.getByTestId('cross-project-suggestions');
+        await expect(section).toBeVisible();
+        const card = page.getByTestId('cross-project-suggestion-card').first();
+        await expect(card).toBeVisible();
+
+        // Single click opens the confirm dialog — it must NOT apply yet
+        // (humans approve). The suggestion is still present behind the dialog.
+        await card.getByTestId('cross-project-apply-button').click();
+        const dialog = page.getByRole('dialog');
+        await expect(dialog).toBeVisible();
+        await expect(dialog).toContainText('Reuse this decision?');
+        // Confirm copy renders the source provenance (interpolated project + status).
+        await expect(dialog).toContainText('Mock Source Project');
+        await expect(dialog).toContainText('Not affected');
+        // Not applied on open — the section is still there.
+        await expect(section).toBeVisible();
+
+        // Confirm → POST apply → onApplied refetch → suggestion drops out.
+        await dialog.getByRole('button', { name: 'Reuse decision' }).click();
+        await expect(page.getByTestId('cross-project-suggestions')).toHaveCount(0);
+        expect(applied).toBe(true);
+    });
+
     test('should display VEX status correctly for each statement', async ({ page, request }) => {
         const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
         const vexStatements = await vexResponse.json();
