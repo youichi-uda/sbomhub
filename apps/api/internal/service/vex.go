@@ -45,6 +45,24 @@ func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStateme
 		return nil, fmt.Errorf("justification is required when status is not_affected")
 	}
 
+	// F379 write defence (issue #131): a component-specific statement must
+	// reference a component that actually belongs to input.ProjectID. Nothing
+	// in the schema enforces this (components have no project_id; migration
+	// 045), so without this guard a statement could be linked to a component
+	// from another project of the same tenant — which the cross-project VEX
+	// suggestion feature would then mis-attribute as "this project decided
+	// it". The normal triage-sync flow always resolves the project's own
+	// components, so this rejects only genuinely mis-linked writes.
+	if input.ComponentID != nil {
+		belongs, err := s.vexRepo.ComponentBelongsToProject(ctx, *input.ComponentID, input.ProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to verify component ownership: %w", err)
+		}
+		if !belongs {
+			return nil, fmt.Errorf("component does not belong to project")
+		}
+	}
+
 	// Check if statement already exists
 	existing, err := s.vexRepo.GetByProjectAndVulnerability(ctx, input.ProjectID, input.VulnerabilityID, input.ComponentID)
 	if err != nil {

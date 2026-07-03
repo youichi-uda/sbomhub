@@ -506,3 +506,170 @@ func TestVEXSuggestions_TenantIsolation_BeltAndBraces(t *testing.T) {
 		}
 	}
 }
+
+// TestVEXSuggestions_SourceComponentProjectAttribution pins F379 (issue #131):
+// the source component of a component-specific suggestion must belong to the
+// SOURCE statement's OWN project so the suggestion's provenance ("project X
+// decided this") is truthful. A vex_statement in project A whose component_id
+// points at a component owned by project C (same tenant) must NOT surface as a
+// suggestion attributed to A — while a correctly-linked statement in A still
+// does (the read hardening must not over-drop legitimate matches).
+func TestVEXSuggestions_SourceComponentProjectAttribution(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "ATTR")
+	sfx := uuid.New().String()[:8]
+	cveMis := fmt.Sprintf("CVE-2026-MIS-%s", sfx)
+	cveOK := fmt.Sprintf("CVE-2026-OKK-%s", sfx)
+	vMis := seedVulnVS(t, migDB, cveMis) // mis-attributed source
+	vOK := seedVulnVS(t, migDB, cveOK)   // legitimate control
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vMis, vOK)
+	})
+
+	// Project C owns the component that project A's statement wrongly points at.
+	projC := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projC, "Project C")
+	sbomC := seedSbomVS(t, migDB, tenantT, projC)
+	compC := seedComponentVS(t, migDB, tenantT, sbomC, "libmis", "1.0", "pkg:generic/misattr@1.0")
+	linkCompVulnVS(t, migDB, compC, vMis)
+
+	// Project A: (1) a MIS-ATTRIBUTED statement — project_id = A but
+	// component_id = compC, which belongs to project C; (2) a LEGITIMATE
+	// statement on A's own component (control that must still surface).
+	projA := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projA, "Project A")
+	sbomA := seedSbomVS(t, migDB, tenantT, projA)
+	stmtMis := seedVexStmtVS(t, migDB, tenantT, projA, vMis, &compC, "not_affected") // A → C's component
+	compAok := seedComponentVS(t, migDB, tenantT, sbomA, "libok", "1.0", "pkg:generic/legit@1.0")
+	linkCompVulnVS(t, migDB, compAok, vOK)
+	stmtOK := seedVexStmtVS(t, migDB, tenantT, projA, vOK, &compAok, "not_affected") // A → A's own component
+
+	// Target project B (same tenant) affected by BOTH vulns with matching purls.
+	projB := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projB, "Project B")
+	sbomB := seedSbomVS(t, migDB, tenantT, projB)
+	compBmis := seedComponentVS(t, migDB, tenantT, sbomB, "libmis", "1.0", "pkg:generic/misattr@1.0")
+	linkCompVulnVS(t, migDB, compBmis, vMis)
+	compBok := seedComponentVS(t, migDB, tenantT, sbomB, "libok", "1.0", "pkg:generic/legit@1.0")
+	linkCompVulnVS(t, migDB, compBok, vOK)
+
+	got := runSuggestions(t, appDB, tenantT, projB)
+
+	// The mis-attributed statement must NOT surface: its source component
+	// belongs to project C, not the attributed project A.
+	for _, s := range got {
+		if s.Source.StatementID == stmtMis {
+			t.Fatalf("F379: mis-attributed statement %s surfaced (source component belongs to project C, not attributed project A)", stmtMis)
+		}
+		if s.CVEID == cveMis {
+			t.Fatalf("F379: suggestion for mis-attributed CVE %s surfaced: %+v", cveMis, s)
+		}
+	}
+
+	// The legitimate statement MUST still surface (no over-drop).
+	var foundOK bool
+	for _, s := range got {
+		if s.Source.StatementID == stmtOK {
+			foundOK = true
+			if s.MatchType != model.VEXMatchTypePurl {
+				t.Errorf("legit control match_type = %q, want %q", s.MatchType, model.VEXMatchTypePurl)
+			}
+			if s.Source.ProjectID != projA {
+				t.Errorf("legit control source.project_id = %s, want project A %s", s.Source.ProjectID, projA)
+			}
+		}
+	}
+	if !foundOK {
+		t.Fatalf("F379 over-drop: the legitimate component-specific statement %s did not surface: %+v", stmtOK, got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 suggestion (legit control only; mis-attributed dropped), got %d: %+v", len(got), got)
+	}
+}
+
+// createStatementVS drives the real VEXService.CreateStatement inside an
+// app-role tx with SET LOCAL app.current_tenant_id (RLS active as on a live
+// request) and rolls the tx back so no rows persist — the test only inspects
+// the returned error.
+func createStatementVS(t *testing.T, appDB *sql.DB, tenantID uuid.UUID, in CreateVEXStatementInput) error {
+	t.Helper()
+	tx, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("createStatementVS begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenantID.String() + `'`); err != nil {
+		t.Fatalf("createStatementVS SET LOCAL: %v", err)
+	}
+	svc := NewVEXService(repository.NewVEXRepository(appDB), repository.NewVulnerabilityRepository(appDB))
+	ctx := database.WithTx(context.Background(), tx)
+	_, createErr := svc.CreateStatement(ctx, in)
+	return createErr
+}
+
+// TestVEXCreateStatement_RejectsForeignProjectComponent pins the F379 write
+// defence (issue #131): CreateStatement rejects a component_id that belongs to
+// another project of the same tenant, and accepts the project's own component.
+func TestVEXCreateStatement_RejectsForeignProjectComponent(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "WD")
+	sfx := uuid.New().String()[:8]
+	v := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-WD-%s", sfx))
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v)
+	})
+
+	// Project A owns compA; project C owns compC.
+	projA := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projA, "WD A")
+	sbomA := seedSbomVS(t, migDB, tenantT, projA)
+	compA := seedComponentVS(t, migDB, tenantT, sbomA, "libwd", "1.0", "pkg:generic/wd@1.0")
+	linkCompVulnVS(t, migDB, compA, v)
+
+	projC := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projC, "WD C")
+	sbomC := seedSbomVS(t, migDB, tenantT, projC)
+	compC := seedComponentVS(t, migDB, tenantT, sbomC, "libwdc", "1.0", "pkg:generic/wdc@1.0")
+
+	// Reject: a statement in project A that references project C's component.
+	if err := createStatementVS(t, appDB, tenantT, CreateVEXStatementInput{
+		ProjectID:       projA,
+		VulnerabilityID: v,
+		ComponentID:     &compC,
+		Status:          model.VEXStatusNotAffected,
+		Justification:   model.VEXJustificationVulnerableCodeNotPresent,
+		CreatedBy:       "tester",
+	}); err == nil {
+		t.Fatalf("F379 write defence: expected CreateStatement to reject a component from another project, got nil error")
+	}
+
+	// Accept: A's own component.
+	if err := createStatementVS(t, appDB, tenantT, CreateVEXStatementInput{
+		ProjectID:       projA,
+		VulnerabilityID: v,
+		ComponentID:     &compA,
+		Status:          model.VEXStatusNotAffected,
+		Justification:   model.VEXJustificationVulnerableCodeNotPresent,
+		CreatedBy:       "tester",
+	}); err != nil {
+		t.Fatalf("F379 write defence over-reached: creating a statement on the project's OWN component failed: %v", err)
+	}
+}

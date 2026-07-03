@@ -57,6 +57,36 @@ func (r *VEXRepository) LookupProjectTenantID(ctx context.Context, projectID uui
 	return tenantID, err
 }
 
+// ComponentBelongsToProject reports whether componentID is a component of a
+// SBOM owned by projectID (M26-D / F379 write defence, issue #131).
+//
+// A vex_statement carries both project_id and (optionally) component_id, but
+// there is no DB constraint tying the two together (migration 045 deliberately
+// leaves components without a project_id — ownership is transitive through
+// sboms). So nothing at the schema level stops a statement in project A from
+// referencing a component that actually lives in project B of the SAME tenant.
+// The cross-project VEX suggestion feature attributes a suggestion's
+// provenance to vs.project_id, so such a mis-linked component_id would make a
+// suggestion claim "project A decided this" while the matched purl really came
+// from project B's component — a provenance integrity break. This guard lets
+// VEXService.CreateStatement reject that at write time.
+//
+// Tenant-scoped: components / sboms are FORCE RLS, so a caller inside a
+// TenantTx only ever sees its own tenant's rows; the join additionally binds
+// the component to the project via its sbom. Returns false (no error) when the
+// component does not exist, is not visible, or belongs to another project.
+func (r *VEXRepository) ComponentBelongsToProject(ctx context.Context, componentID, projectID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.q(ctx).QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM components c
+			JOIN sboms s ON s.id = c.sbom_id
+			WHERE c.id = $1 AND s.project_id = $2
+		)`, componentID, projectID).Scan(&exists)
+	return exists, err
+}
+
 func (r *VEXRepository) Update(ctx context.Context, v *model.VEXStatement) error {
 	query := `
 		UPDATE vex_statements

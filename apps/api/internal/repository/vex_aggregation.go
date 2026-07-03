@@ -82,17 +82,35 @@ func (r *VEXRepository) ListCrossProjectVEXCandidates(ctx context.Context, tenan
 		LEFT JOIN components sc
 			ON sc.id = vs.component_id
 		   AND sc.tenant_id = $1
+		-- F379 provenance integrity (issue #131): bind the source component to
+		-- the SOURCE statement's OWN project via its sbom. A component-specific
+		-- vex_statement whose component_id points at a component in a DIFFERENT
+		-- project of the same tenant (nothing in the schema forbids it — see
+		-- ComponentBelongsToProject / migration 045) would otherwise match on
+		-- that foreign component's purl while being attributed to vs.project_id,
+		-- so a reviewer would trust "project X decided this" when the matched
+		-- coordinate actually came from project Y. Requiring ss.project_id =
+		-- vs.project_id (plus ss.id IS NOT NULL in the purl branch below)
+		-- drops such mis-attributed rows. tenant_id is still pinned on every
+		-- join, so this is a project-level tightening WITHIN the tenant, not a
+		-- change to the tenant boundary.
+		LEFT JOIN sboms ss
+			ON ss.id = sc.sbom_id
+		   AND ss.tenant_id = $1
+		   AND ss.project_id = vs.project_id
 		JOIN projects sp
 			ON sp.id = vs.project_id
 		   AND sp.tenant_id = $1
 		WHERE (
-			-- purl match: source is component-specific and its component's
-			-- purl equals the target component's purl. Empty purls never
+			-- purl match: source is component-specific, its component belongs
+			-- to the source statement's own project (ss.id IS NOT NULL), and
+			-- its purl equals the target component's purl. Empty purls never
 			-- match (a component with no coordinate must not collapse onto
 			-- every other coordinate-less component).
-			(vs.component_id IS NOT NULL AND sc.purl IS NOT NULL AND sc.purl <> '' AND sc.purl = ta.component_purl)
+			(vs.component_id IS NOT NULL AND ss.id IS NOT NULL AND sc.purl IS NOT NULL AND sc.purl <> '' AND sc.purl = ta.component_purl)
 			OR
-			-- vulnerability_only match: source is component-agnostic.
+			-- vulnerability_only match: source is component-agnostic, so there
+			-- is no source component to bind to a project — unaffected by F379.
 			(vs.component_id IS NULL)
 		)
 		ORDER BY v.cve_id, ta.component_name, ta.component_version, vs.created_at DESC, vs.id
