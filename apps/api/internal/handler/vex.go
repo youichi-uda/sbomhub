@@ -152,6 +152,45 @@ func (h *VEXHandler) List(c echo.Context) error {
 	return c.JSON(http.StatusOK, statements)
 }
 
+// GetSuggestions returns cross-project VEX reuse suggestions for a project
+// (M26-A / F375, issue #130): approved vex_statements from OTHER projects
+// of the same tenant that match a vulnerability affecting this project's
+// components. Read-only Phase 1 — no apply action, so this is a plain GET.
+//
+// Auth / tenant scope mirrors the project-scoped VEX List above: the
+// request already passed the auth → TenantTx chain, so ContextKeyTenantID
+// is bound and every downstream query runs under SET LOCAL
+// app.current_tenant_id. The tenant id is also passed explicitly to the
+// service so the aggregation query carries a defence-in-depth
+// `tenant_id = $1` predicate on top of RLS.
+//
+// No new audit action is emitted: this is a read, and the request-level
+// audit middleware already records path + method + latency. Adding a
+// bespoke action here would (needlessly) touch the F281/F271 audit-parity
+// surface, which the M26 scope deliberately avoids.
+func (h *VEXHandler) GetSuggestions(c echo.Context) error {
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+	}
+
+	suggestions, err := h.vexService.GetSuggestions(c.Request().Context(), tenantID, projectID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list VEX suggestions"})
+	}
+
+	if suggestions == nil {
+		suggestions = []model.VEXSuggestion{}
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{"suggestions": suggestions})
+}
+
 // Get returns a specific VEX statement
 func (h *VEXHandler) Get(c echo.Context) error {
 	vexID, err := uuid.Parse(c.Param("vex_id"))

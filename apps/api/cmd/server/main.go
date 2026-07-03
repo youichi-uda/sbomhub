@@ -954,6 +954,11 @@ func main() {
 	auth.GET("/projects/:id/vex", vexHandler.List)
 	auth.POST("/projects/:id/vex", vexHandler.Create)
 	auth.GET("/projects/:id/vex/export", vexHandler.Export)
+	// M26-A (#130 / F375): read-only cross-project VEX reuse suggestions.
+	// Static "/suggestions" segment; Echo prefers it over the :vex_id param
+	// route below regardless of registration order. GET only — no new audit
+	// action (request-level audit middleware covers the read).
+	auth.GET("/projects/:id/vex/suggestions", vexHandler.GetSuggestions)
 	auth.GET("/projects/:id/vex/:vex_id", vexHandler.Get)
 	auth.PUT("/projects/:id/vex/:vex_id", vexHandler.Update)
 	auth.DELETE("/projects/:id/vex/:vex_id", vexHandler.Delete)

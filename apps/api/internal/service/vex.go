@@ -131,6 +131,80 @@ func (s *VEXService) ListByProject(ctx context.Context, projectID uuid.UUID) ([]
 	return s.vexRepo.ListByProject(ctx, projectID)
 }
 
+// GetSuggestions returns cross-project VEX reuse suggestions for the
+// target project (M26-A / F375, issue #130): approved vex_statements from
+// OTHER projects of the same tenant that match a vulnerability affecting
+// this project's components. Read-only Phase 1 — no apply action.
+//
+// The repository owns the tenant boundary + the purl / vulnerability match
+// join (and it deliberately returns self-project candidates + a
+// target_already_triaged flag rather than pre-filtering them). This method
+// applies the two business exclusions — self-project and already-triaged —
+// via assembleSuggestions, which is a pure function so the exclusion logic
+// is unit-testable without a live DB.
+func (s *VEXService) GetSuggestions(ctx context.Context, tenantID, projectID uuid.UUID) ([]model.VEXSuggestion, error) {
+	candidates, err := s.vexRepo.ListCrossProjectVEXCandidates(ctx, tenantID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list cross-project VEX candidates: %w", err)
+	}
+	return assembleSuggestions(candidates, projectID), nil
+}
+
+// assembleSuggestions applies the two cross-project VEX business rules to
+// the raw candidate rows and maps survivors into the response shape:
+//
+//   - self-project exclusion: a candidate whose source project IS the
+//     target project is dropped. The SQL query does not exclude self, so
+//     this Go guard is the load-bearing filter (and its unit test pins it);
+//     it is also defence-in-depth should the query ever be widened.
+//   - already-triaged exclusion: a candidate the target has already ruled
+//     on (target_already_triaged) is dropped so the endpoint only surfaces
+//     NEW reuse opportunities, not decisions already made.
+//
+// match_type is derived from whether the source statement was
+// component-specific (purl) or component-agnostic (vulnerability_only).
+//
+// The returned slice is always non-nil so the handler serialises `[]`
+// rather than `null` for the empty case.
+func assembleSuggestions(candidates []model.VEXSuggestionCandidate, targetProjectID uuid.UUID) []model.VEXSuggestion {
+	out := make([]model.VEXSuggestion, 0, len(candidates))
+	for _, c := range candidates {
+		if c.SourceProjectID == targetProjectID {
+			continue // self-project: not a cross-project suggestion
+		}
+		if c.TargetAlreadyTriaged {
+			continue // target already decided this (vuln, component)
+		}
+
+		matchType := model.VEXMatchTypeVulnerabilityOnly
+		if c.SourceComponentID != nil {
+			matchType = model.VEXMatchTypePurl
+		}
+
+		out = append(out, model.VEXSuggestion{
+			VulnerabilityID: c.VulnerabilityID,
+			CVEID:           c.CVEID,
+			Component: model.VEXSuggestionComponent{
+				Name:    c.ComponentName,
+				Version: c.ComponentVersion,
+				Purl:    c.ComponentPurl,
+			},
+			MatchType: matchType,
+			Source: model.VEXSuggestionSource{
+				ProjectID:       c.SourceProjectID,
+				ProjectName:     c.SourceProjectName,
+				StatementID:     c.StatementID,
+				Status:          c.Status,
+				Justification:   c.Justification,
+				ImpactStatement: c.ImpactStatement,
+				ActionStatement: c.ActionStatement,
+				CreatedAt:       c.CreatedAt,
+			},
+		})
+	}
+	return out
+}
+
 func (s *VEXService) DeleteStatement(ctx context.Context, id uuid.UUID) error {
 	return s.vexRepo.Delete(ctx, id)
 }
