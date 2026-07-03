@@ -565,7 +565,11 @@ func main() {
 		WithAudit(auditRepo)
 	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
-	vexHandler := handler.NewVEXHandler(vexService)
+	// auditRepo is wired for the M27-A (#132 / F381) cross-project VEX
+	// apply endpoint's vex_statement_reused_cross_project domain audit row
+	// (audit-or-nothing, emitted inside the request TenantTx). The other
+	// VEX endpoints do not use it.
+	vexHandler := handler.NewVEXHandler(vexService, auditRepo)
 	licensePolicyHandler := handler.NewLicensePolicyHandler(licensePolicyService)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
@@ -959,6 +963,14 @@ func main() {
 	// route below regardless of registration order. GET only — no new audit
 	// action (request-level audit middleware covers the read).
 	auth.GET("/projects/:id/vex/suggestions", vexHandler.GetSuggestions)
+	// M27-A (#132 / F381): 1-click apply of a cross-project VEX reuse
+	// suggestion. Registered under the `auth` group, which is
+	// authMiddleware + TenantTx + auditMiddleware (main.go ~L775) — the
+	// TenantTx wrap is load-bearing for the handler's audit-or-nothing
+	// atomicity (statement + provenance + audit_logs commit-or-rollback
+	// together). Static "suggestions/apply" segments; Echo prefers them
+	// over the :vex_id param route below.
+	auth.POST("/projects/:id/vex/suggestions/apply", vexHandler.Apply)
 	auth.GET("/projects/:id/vex/:vex_id", vexHandler.Get)
 	auth.PUT("/projects/:id/vex/:vex_id", vexHandler.Update)
 	auth.DELETE("/projects/:id/vex/:vex_id", vexHandler.Delete)

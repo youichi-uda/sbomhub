@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,210 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
+
+// Sentinel errors for the cross-project VEX apply flow (M27-A / F381,
+// issue #132). The handler maps ErrVEXApplyAlreadyTriaged to 409
+// (idempotency — a silent overwrite is forbidden, CRA Decide precedent)
+// and the two rejection sentinels to 400. Any other (wrapped, non-sentinel)
+// error is an internal fault and maps to 500 so the ambient TenantTx rolls
+// back.
+var (
+	// ErrVEXApplySourceNotFound is returned when source_statement_id does
+	// not resolve to a statement visible to the caller's tenant (RLS +
+	// explicit predicate). Distinct from a match failure so the log line
+	// can distinguish "no such source" from "source exists but does not
+	// match the target".
+	ErrVEXApplySourceNotFound = errors.New("source VEX statement not found in tenant")
+
+	// ErrVEXApplyMatchFailed is returned when the source statement is real
+	// and tenant-visible but does NOT satisfy the M26 aggregation match
+	// against the requested (component, vulnerability) — the injection
+	// guard. See verifySuggestionMatch.
+	ErrVEXApplyMatchFailed = errors.New("source statement does not match the target component/vulnerability")
+
+	// ErrVEXApplyAlreadyTriaged is returned when the target project already
+	// holds a statement for (project, vulnerability, component). The apply
+	// endpoint never overwrites an existing decision — 409, not 200.
+	ErrVEXApplyAlreadyTriaged = errors.New("target project already has a VEX statement for this vulnerability and component")
+)
+
+// ApplySuggestionInput is the resolved input to ApplySuggestion. The
+// handler parses the HTTP body ({source_statement_id, vulnerability_id,
+// component_id}) and resolves TenantID / AppliedBy / CreatedBy from the
+// request context before calling.
+type ApplySuggestionInput struct {
+	TenantID          uuid.UUID
+	ProjectID         uuid.UUID
+	SourceStatementID uuid.UUID
+	TargetComponentID uuid.UUID
+	VulnerabilityID   uuid.UUID
+	// AppliedBy is the resolved user UUID for provenance.applied_by (NULL
+	// for self-hosted requests without one). CreatedBy is the human-
+	// readable identity (email / clerk id / "system") for
+	// vex_statements.created_by, matching the manual-authoring flow.
+	AppliedBy *uuid.UUID
+	CreatedBy string
+}
+
+// VEXApplyResult is what ApplySuggestion returns: the freshly-created
+// target statement plus the provenance facts the handler serialises into
+// the 201 response body and the audit Details map.
+type VEXApplyResult struct {
+	Statement       *model.VEXStatement
+	SourceProjectID uuid.UUID
+	MatchType       string
+	ProvenanceID    uuid.UUID
+	AppliedAt       time.Time
+}
+
+// ApplySuggestion materialises a cross-project VEX reuse suggestion into
+// the target project (M27-A / F381, issue #132). A human has 1-click
+// confirmed that another project of the same tenant already judged this
+// (vulnerability, component); this copies that approved judgement into a
+// NEW vex_statements row in the target project and records provenance.
+//
+// Atomicity: this method performs NO explicit BEGIN/COMMIT — every
+// repository call routes through the request-scoped TenantTx attached to
+// ctx (database.Querier), so the source resolve, the CreateStatement
+// INSERT, and the provenance INSERT all run inside the caller's single tx.
+// The handler emits the audit row in the SAME tx and hard-fails (500) on
+// audit error, which rolls the whole tx back (audit-or-nothing, F32
+// precedent). The route MUST therefore be registered under a TenantTx-
+// wrapped group.
+//
+// Security (the load-bearing part): client-supplied ids are NOT trusted.
+// verifySuggestionMatch re-runs the M26 aggregation match so an attacker
+// cannot inject an arbitrary status onto an arbitrary component by pairing
+// a real source_statement_id with a mismatched component_id.
+func (s *VEXService) ApplySuggestion(ctx context.Context, in ApplySuggestionInput) (*VEXApplyResult, error) {
+	// 1. Resolve the source statement, tenant-scoped (RLS authoritative +
+	//    explicit tenant_id predicate as defence in depth).
+	source, err := s.vexRepo.GetStatementForTenant(ctx, in.TenantID, in.SourceStatementID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve source VEX statement: %w", err)
+	}
+	if source == nil {
+		return nil, ErrVEXApplySourceNotFound
+	}
+
+	// 2. Re-verify the M26 match (injection guard).
+	matchType, err := s.verifySuggestionMatch(ctx, in, source)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Idempotency: never overwrite an existing (project, vuln, component)
+	//    decision — surface 409 instead.
+	existing, err := s.vexRepo.GetByProjectAndVulnerability(ctx, in.ProjectID, in.VulnerabilityID, &in.TargetComponentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check existing target statement: %w", err)
+	}
+	if existing != nil {
+		return nil, ErrVEXApplyAlreadyTriaged
+	}
+
+	// 4. Materialise the target statement via the shared CreateStatement
+	//    path (status / justification / impact / action copied from source).
+	//    CreateStatement re-applies status validation + the F379
+	//    ComponentBelongsToProject write defence + its own duplicate check.
+	statement, err := s.CreateStatement(ctx, CreateVEXStatementInput{
+		ProjectID:       in.ProjectID,
+		VulnerabilityID: in.VulnerabilityID,
+		ComponentID:     &in.TargetComponentID,
+		Status:          source.Status,
+		Justification:   source.Justification,
+		ActionStatement: source.ActionStatement,
+		ImpactStatement: source.ImpactStatement,
+		CreatedBy:       in.CreatedBy,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create reused VEX statement: %w", err)
+	}
+
+	// 5. Record provenance in the same tx. TenantID mirrors the freshly-
+	//    created statement (resolved from the target project) so the
+	//    vex_statement_provenance FORCE RLS WITH CHECK is satisfied.
+	appliedAt := time.Now()
+	prov := &model.VEXStatementProvenance{
+		ID:                uuid.New(),
+		TenantID:          statement.TenantID,
+		TargetStatementID: statement.ID,
+		SourceStatementID: source.ID,
+		SourceProjectID:   source.ProjectID,
+		AppliedBy:         in.AppliedBy,
+		AppliedAt:         appliedAt,
+	}
+	if err := s.vexRepo.CreateProvenance(ctx, prov); err != nil {
+		return nil, fmt.Errorf("failed to record VEX reuse provenance: %w", err)
+	}
+
+	return &VEXApplyResult{
+		Statement:       statement,
+		SourceProjectID: source.ProjectID,
+		MatchType:       matchType,
+		ProvenanceID:    prov.ID,
+		AppliedAt:       appliedAt,
+	}, nil
+}
+
+// verifySuggestionMatch re-runs the M26 aggregation match condition for a
+// single (source, target) pair so apply cannot inject an arbitrary status
+// onto an arbitrary component (F381 security requirement). It mirrors
+// assembleSuggestions + repository.ListCrossProjectVEXCandidates:
+//
+//   - the source vulnerability must equal the requested vulnerability;
+//   - a component-specific source (component_id non-NULL) matches ONLY when
+//     its own component — bound to the SOURCE statement's project (F379
+//     provenance integrity) — carries a non-empty purl equal to the target
+//     component's purl (match_type = purl);
+//   - a component-agnostic source (component_id NULL) matches on the
+//     vulnerability alone (match_type = vulnerability_only); target
+//     component ownership is then enforced by CreateStatement's
+//     ComponentBelongsToProject write defence.
+//
+// The source is already tenant-scoped by the caller (GetStatementForTenant),
+// and every purl lookup is project-scoped, so this stays a project-level
+// tightening WITHIN the tenant, never a change to the tenant boundary.
+func (s *VEXService) verifySuggestionMatch(ctx context.Context, in ApplySuggestionInput, source *model.VEXStatement) (string, error) {
+	if source.VulnerabilityID != in.VulnerabilityID {
+		return "", ErrVEXApplyMatchFailed
+	}
+
+	// The target component must belong to the target project regardless of
+	// match type — a client-supplied component_id is never trusted. This
+	// also makes CreateStatement's F379 ComponentBelongsToProject write
+	// defence redundant for the apply path (defence in depth), and keeps
+	// every rejection a typed 400 rather than leaking through as a 500.
+	targetPurl, targetFound, err := s.vexRepo.GetComponentPurlInProject(ctx, in.TargetComponentID, in.ProjectID)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve target component purl: %w", err)
+	}
+	if !targetFound {
+		return "", ErrVEXApplyMatchFailed
+	}
+
+	if source.ComponentID == nil {
+		// component-agnostic source → vulnerability_only match (vuln match
+		// alone suffices, per the M26 aggregation).
+		return model.VEXMatchTypeVulnerabilityOnly, nil
+	}
+
+	// component-specific source → require purl equality, with the source
+	// component bound to the source's OWN project (F379 provenance
+	// integrity). Empty purls never match (a coordinate-less component must
+	// not collapse onto every other coordinate-less component).
+	sourcePurl, sourceFound, err := s.vexRepo.GetComponentPurlInProject(ctx, *source.ComponentID, source.ProjectID)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve source component purl: %w", err)
+	}
+	if !sourceFound || sourcePurl == "" {
+		return "", ErrVEXApplyMatchFailed
+	}
+	if targetPurl == "" || sourcePurl != targetPurl {
+		return "", ErrVEXApplyMatchFailed
+	}
+	return model.VEXMatchTypePurl, nil
+}
 
 type VEXService struct {
 	vexRepo  *repository.VEXRepository
