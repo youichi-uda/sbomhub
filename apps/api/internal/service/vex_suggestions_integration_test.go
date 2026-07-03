@@ -34,7 +34,11 @@
 //     already-triaged exclusion).
 //  4. A (vuln, component) the target already ruled on is not re-surfaced.
 //  5. A component-agnostic (component_id NULL) source statement yields a
-//     `vulnerability_only` suggestion.
+//     `vulnerability_only` suggestion, and when several target components are
+//     affected by the same vulnerability it fans out to one suggestion per
+//     target component — each carrying a DISTINCT target component_id
+//     (M26-D / F377, issue #131), which is what gives the web list a unique
+//     row key.
 package service
 
 import (
@@ -302,6 +306,13 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 	linkCompVulnVS(t, migDB, compB1, v1)
 	compB2 := seedComponentVS(t, migDB, tenantT, sbomB, "libagn", "2.0", "pkg:generic/agn@2.0")
 	linkCompVulnVS(t, migDB, compB2, v2)
+	// F377 fan-out: a SECOND target component also affected by v2. A's
+	// component-agnostic statement (component_id NULL) matches on the
+	// vulnerability alone, so it fans out to BOTH compB2 and compB2b — the
+	// exact shape that made {statement_id, vulnerability_id} a non-unique web
+	// key. Each fan-out suggestion must carry its own target component_id.
+	compB2b := seedComponentVS(t, migDB, tenantT, sbomB, "libagn2", "2.0", "pkg:generic/agn2@2.0")
+	linkCompVulnVS(t, migDB, compB2b, v2)
 	compB3 := seedComponentVS(t, migDB, tenantT, sbomB, "libtriaged", "1.0", "pkg:generic/triaged@1.0")
 	linkCompVulnVS(t, migDB, compB3, v3)
 	seedVexStmtVS(t, migDB, tenantT, projectB, v3, &compB3, "affected") // B already triaged (v3, compB3)
@@ -360,20 +371,27 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 		}
 	}
 
-	// Cases 1 + 5: exactly two suggestions survive — the purl match and the
-	// vulnerability_only match, both sourced from project A.
-	if len(got) != 2 {
-		t.Fatalf("expected exactly 2 suggestions (purl + vulnerability_only), got %d: %+v", len(got), got)
+	// Cases 1 + 5 + F377 fan-out: three suggestions survive — one purl match
+	// plus TWO vulnerability_only matches (A's one agnostic statement fanned
+	// across compB2 and compB2b), all sourced from project A.
+	if len(got) != 3 {
+		t.Fatalf("expected exactly 3 suggestions (purl + 2× vulnerability_only fan-out), got %d: %+v", len(got), got)
 	}
 
-	byCVE := map[string]model.VEXSuggestion{}
-	for _, s := range got {
-		byCVE[s.CVEID] = s
+	// Case 1: purl match. Collect vulnerability_only rows separately since
+	// cve("0002") now has two of them (the fan-out).
+	var s1 *model.VEXSuggestion
+	var vulnOnly []model.VEXSuggestion
+	for i := range got {
+		switch got[i].CVEID {
+		case cve("0001"):
+			s1 = &got[i]
+		case cve("0002"):
+			vulnOnly = append(vulnOnly, got[i])
+		}
 	}
 
-	// Case 1: purl match.
-	s1, ok := byCVE[cve("0001")]
-	if !ok {
+	if s1 == nil {
 		t.Fatalf("expected a suggestion for the shared-purl CVE %s", cve("0001"))
 	}
 	if s1.MatchType != model.VEXMatchTypePurl {
@@ -382,6 +400,11 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 	if s1.Component.Purl != "pkg:generic/shared@1.0" {
 		t.Errorf("case1 component.purl = %q", s1.Component.Purl)
 	}
+	// F377: purl suggestion carries the TARGET component id (compB1), not the
+	// source statement's component (compA1).
+	if s1.Component.ComponentID != compB1 {
+		t.Errorf("case1 component_id = %s, want target compB1 %s", s1.Component.ComponentID, compB1)
+	}
 	if s1.Source.ProjectID != projectA || s1.Source.ProjectName != "Project A" {
 		t.Errorf("case1 source provenance mismatch: %+v", s1.Source)
 	}
@@ -389,20 +412,35 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 		t.Errorf("case1 source.status = %q, want not_affected", s1.Source.Status)
 	}
 
-	// Case 5: vulnerability_only match, sourced from A's component-agnostic
-	// statement.
-	s2, ok := byCVE[cve("0002")]
-	if !ok {
-		t.Fatalf("expected a suggestion for the vulnerability-only CVE %s", cve("0002"))
+	// Case 5 + F377 fan-out: both vulnerability_only suggestions are sourced
+	// from A's single component-agnostic statement, yet each carries a
+	// DISTINCT target component_id (compB2 vs compB2b) — the property that
+	// gives the web list a unique key.
+	if len(vulnOnly) != 2 {
+		t.Fatalf("expected 2 vulnerability_only fan-out suggestions for %s, got %d: %+v", cve("0002"), len(vulnOnly), vulnOnly)
 	}
-	if s2.MatchType != model.VEXMatchTypeVulnerabilityOnly {
-		t.Errorf("case5 match_type = %q, want %q", s2.MatchType, model.VEXMatchTypeVulnerabilityOnly)
+	seenComp := map[uuid.UUID]bool{}
+	for _, s2 := range vulnOnly {
+		if s2.MatchType != model.VEXMatchTypeVulnerabilityOnly {
+			t.Errorf("case5 match_type = %q, want %q", s2.MatchType, model.VEXMatchTypeVulnerabilityOnly)
+		}
+		if s2.Source.StatementID != stmtA2 {
+			t.Errorf("case5 source.statement_id = %s, want %s (A's agnostic statement)", s2.Source.StatementID, stmtA2)
+		}
+		if s2.Source.ProjectID != projectA {
+			t.Errorf("case5 source.project_id = %s, want project A", s2.Source.ProjectID)
+		}
+		if s2.Component.ComponentID != compB2 && s2.Component.ComponentID != compB2b {
+			t.Errorf("case5 component_id = %s, want target compB2 %s or compB2b %s",
+				s2.Component.ComponentID, compB2, compB2b)
+		}
+		if seenComp[s2.Component.ComponentID] {
+			t.Errorf("F377 regression: duplicate target component_id %s across fan-out (web key would collide)", s2.Component.ComponentID)
+		}
+		seenComp[s2.Component.ComponentID] = true
 	}
-	if s2.Source.StatementID != stmtA2 {
-		t.Errorf("case5 source.statement_id = %s, want %s (A's agnostic statement)", s2.Source.StatementID, stmtA2)
-	}
-	if s2.Source.ProjectID != projectA {
-		t.Errorf("case5 source.project_id = %s, want project A", s2.Source.ProjectID)
+	if !seenComp[compB2] || !seenComp[compB2b] {
+		t.Errorf("both fan-out target component ids must appear: compB2=%v compB2b=%v", seenComp[compB2], seenComp[compB2b])
 	}
 }
 

@@ -122,10 +122,23 @@ type VEXSuggestion struct {
 
 // VEXSuggestionComponent is the target project's affected component the
 // suggestion applies to.
+//
+// ComponentID is the target project's components.id (M26-D / F377, issue
+// #131). It is what makes a suggestion uniquely addressable: a single
+// vulnerability_only source statement (source component_id NULL) fans out
+// across every target component the vulnerability touches, and two distinct
+// target component rows can carry the identical (name, version, purl) triple,
+// so the previous {statement_id, vulnerability_id} pair was NOT a unique key
+// for the web list (duplicate React keys). Emitting the concrete target
+// component id lets the client key each row uniquely. NOTE: this only fixes
+// key uniqueness — collapsing / de-duplicating the vulnerability_only fan-out
+// itself (N target components ⇒ N suggestions from one source) is deferred to
+// M27 Phase 2 grouping, per the M26 kickoff N-growth note.
 type VEXSuggestionComponent struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Purl    string `json:"purl"`
+	ComponentID uuid.UUID `json:"component_id"`
+	Name        string    `json:"name"`
+	Version     string    `json:"version"`
+	Purl        string    `json:"purl"`
 }
 
 // VEXSuggestionSource is the provenance of the reused judgement: which

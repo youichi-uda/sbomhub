@@ -25,6 +25,11 @@ func TestAssembleSuggestions_ExclusionAndMatchType(t *testing.T) {
 	vulnSelf := uuid.New()
 	vulnTriaged := uuid.New()
 
+	// Target component ids captured so the test can assert the response
+	// carries the TARGET component's id (F377, issue #131), not the source's.
+	purlTargetComp := uuid.New()
+	agnosticTargetComp := uuid.New()
+
 	now := time.Now().UTC()
 
 	candidates := []model.VEXSuggestionCandidate{
@@ -32,7 +37,7 @@ func TestAssembleSuggestions_ExclusionAndMatchType(t *testing.T) {
 		{
 			VulnerabilityID:   vulnPurl,
 			CVEID:             "CVE-2026-1000",
-			TargetComponentID: uuid.New(),
+			TargetComponentID: purlTargetComp,
 			ComponentName:     "libfoo",
 			ComponentVersion:  "1.2.3",
 			ComponentPurl:     "pkg:golang/libfoo@1.2.3",
@@ -51,7 +56,7 @@ func TestAssembleSuggestions_ExclusionAndMatchType(t *testing.T) {
 		{
 			VulnerabilityID:   vulnAgnostic,
 			CVEID:             "CVE-2026-2000",
-			TargetComponentID: uuid.New(),
+			TargetComponentID: agnosticTargetComp,
 			ComponentName:     "libbar",
 			ComponentVersion:  "0.9.0",
 			ComponentPurl:     "pkg:npm/libbar@0.9.0",
@@ -111,6 +116,12 @@ func TestAssembleSuggestions_ExclusionAndMatchType(t *testing.T) {
 	if got[0].Component.Purl != "pkg:golang/libfoo@1.2.3" {
 		t.Errorf("suggestion[0] component purl = %q", got[0].Component.Purl)
 	}
+	// F377: the suggestion must carry the TARGET component's id, not the
+	// source statement's component id (sourceComp).
+	if got[0].Component.ComponentID != purlTargetComp {
+		t.Errorf("suggestion[0] component_id = %s, want target %s (not source %s)",
+			got[0].Component.ComponentID, purlTargetComp, sourceComp)
+	}
 
 	// Result 2: vulnerability_only match.
 	if got[1].MatchType != model.VEXMatchTypeVulnerabilityOnly {
@@ -118,6 +129,9 @@ func TestAssembleSuggestions_ExclusionAndMatchType(t *testing.T) {
 	}
 	if got[1].CVEID != "CVE-2026-2000" {
 		t.Errorf("suggestion[1] cve = %q, want CVE-2026-2000", got[1].CVEID)
+	}
+	if got[1].Component.ComponentID != agnosticTargetComp {
+		t.Errorf("suggestion[1] component_id = %s, want target %s", got[1].Component.ComponentID, agnosticTargetComp)
 	}
 
 	// Neither dropped CVE may appear in the output.
@@ -128,6 +142,76 @@ func TestAssembleSuggestions_ExclusionAndMatchType(t *testing.T) {
 		if s.CVEID == "CVE-2026-4000" {
 			t.Errorf("already-triaged suggestion (CVE-2026-4000) must be dropped")
 		}
+	}
+}
+
+// TestAssembleSuggestions_VulnerabilityOnlyFanOutDistinctComponentIDs pins
+// the F377 invariant (issue #131): one component-agnostic source statement
+// (SourceComponentID nil) fans out across every target component the
+// vulnerability touches. Those fan-out rows share the SAME source
+// statement_id and vulnerability_id, and — because a target may hold two
+// component rows with the identical (name, version, purl) triple — the
+// component name/version/purl are NOT sufficient to tell them apart. The
+// only field that distinguishes them is the target Component.ComponentID,
+// which the web list keys on to avoid duplicate React keys. This test proves
+// assembleSuggestions surfaces a distinct component_id per fan-out row.
+func TestAssembleSuggestions_VulnerabilityOnlyFanOutDistinctComponentIDs(t *testing.T) {
+	targetProject := uuid.New()
+	sourceProject := uuid.New()
+	vuln := uuid.New()
+	sharedStmt := uuid.New()
+
+	// Two DISTINCT target components with the identical (name, version, purl)
+	// triple — the worst case the old {statement_id, vulnerability_id} key
+	// could not distinguish.
+	compA := uuid.New()
+	compB := uuid.New()
+	now := time.Now().UTC()
+
+	mk := func(targetComp uuid.UUID) model.VEXSuggestionCandidate {
+		return model.VEXSuggestionCandidate{
+			VulnerabilityID:   vuln,
+			CVEID:             "CVE-2026-9000",
+			TargetComponentID: targetComp,
+			ComponentName:     "libdup",
+			ComponentVersion:  "1.0.0",
+			ComponentPurl:     "pkg:npm/libdup@1.0.0",
+			SourceProjectID:   sourceProject,
+			SourceProjectName: "Source",
+			SourceComponentID: nil, // agnostic → vulnerability_only fan-out
+			StatementID:       sharedStmt,
+			Status:            "not_affected",
+			CreatedAt:         now,
+		}
+	}
+
+	got := assembleSuggestions([]model.VEXSuggestionCandidate{mk(compA), mk(compB)}, targetProject)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 fan-out suggestions, got %d", len(got))
+	}
+
+	// Both rows share the source statement + vulnerability (the old key)…
+	if got[0].Source.StatementID != got[1].Source.StatementID || got[0].VulnerabilityID != got[1].VulnerabilityID {
+		t.Fatalf("fan-out rows should share statement_id + vulnerability_id")
+	}
+	// …and the name/version/purl (so those cannot disambiguate)…
+	if got[0].Component.Purl != got[1].Component.Purl {
+		t.Fatalf("fan-out rows should share the component purl in this worst case")
+	}
+	// …but component_id must be distinct, giving the client a unique key.
+	if got[0].Component.ComponentID == got[1].Component.ComponentID {
+		t.Fatalf("F377 regression: fan-out rows share component_id %s — web key would collide",
+			got[0].Component.ComponentID)
+	}
+	seen := map[uuid.UUID]bool{compA: false, compB: false}
+	for _, s := range got {
+		if _, ok := seen[s.Component.ComponentID]; !ok {
+			t.Errorf("unexpected component_id %s (want one of the two target components)", s.Component.ComponentID)
+		}
+		seen[s.Component.ComponentID] = true
+	}
+	if !seen[compA] || !seen[compB] {
+		t.Errorf("both target component ids must appear exactly once: %+v", seen)
 	}
 }
 

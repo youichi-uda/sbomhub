@@ -185,9 +185,15 @@ func assembleSuggestions(candidates []model.VEXSuggestionCandidate, targetProjec
 			VulnerabilityID: c.VulnerabilityID,
 			CVEID:           c.CVEID,
 			Component: model.VEXSuggestionComponent{
-				Name:    c.ComponentName,
-				Version: c.ComponentVersion,
-				Purl:    c.ComponentPurl,
+				// TargetComponentID (the target project's components.id, set from
+				// the ta.component_id column of ListCrossProjectVEXCandidates) —
+				// NOT SourceComponentID. This is what makes each suggestion row
+				// uniquely addressable when a single source fans out across
+				// several target components (F377, issue #131).
+				ComponentID: c.TargetComponentID,
+				Name:        c.ComponentName,
+				Version:     c.ComponentVersion,
+				Purl:        c.ComponentPurl,
 			},
 			MatchType: matchType,
 			Source: model.VEXSuggestionSource{
