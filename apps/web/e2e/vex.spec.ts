@@ -315,6 +315,80 @@ test.describe('VEX Statement Management', () => {
         }
     });
 
+    test('should render a populated cross-project suggestion card (M26 F380)', async ({ page }) => {
+        // Deterministic companion to the empty-state smoke test above. The
+        // web-e2e seed never provisions cross-project VEX data, so the
+        // non-empty render path (endpoint wiring, envelope → card mapping,
+        // i18n keys for every label, no card crash) went unexercised — a
+        // broken endpoint, a mis-mapped field, or a missing i18n key would
+        // pass CI silently. Intercept the aggregation endpoint with a single
+        // fully-populated suggestion and assert the card renders every piece
+        // of provenance a reviewer relies on. The real aggregation semantics
+        // (tenant isolation, exclusions, purl vs vulnerability_only, F377
+        // component_id fan-out, F379 provenance) stay in the Wave A real-PG
+        // integration tests; this pins only the web render contract.
+        const suggestion = {
+            vulnerability_id: '11111111-1111-4111-8111-111111111111',
+            cve_id: 'CVE-2026-0999',
+            component: {
+                component_id: '22222222-2222-4222-8222-222222222222',
+                name: 'libmock',
+                version: '1.2.3',
+                purl: 'pkg:npm/libmock@1.2.3',
+            },
+            match_type: 'purl',
+            source: {
+                project_id: '33333333-3333-4333-8333-333333333333',
+                project_name: 'Mock Source Project',
+                statement_id: '44444444-4444-4444-8444-444444444444',
+                status: 'not_affected',
+                justification: 'vulnerable_code_not_present',
+                impact_statement: 'The vulnerable path is not reachable in our build.',
+                action_statement: 'No action required.',
+                created_at: '2026-07-01T00:00:00Z',
+            },
+        };
+
+        // Host-agnostic glob so the intercept holds regardless of the API base
+        // URL the web build points NEXT_PUBLIC_API_URL at.
+        await page.route('**/api/v1/projects/*/vex/suggestions', route =>
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ suggestions: [suggestion] }),
+            })
+        );
+
+        await page.goto(`/en/projects/${projectId}/triage`);
+        await page.waitForLoadState('networkidle');
+
+        await expect(page.getByTestId('triage-page')).toBeVisible({ timeout: 10000 });
+
+        // Section renders (non-empty branch) with the header count.
+        const section = page.getByTestId('cross-project-suggestions');
+        await expect(section).toBeVisible();
+        await expect(section).toContainText('Decided in other projects');
+        await expect(section).toContainText('(1)');
+
+        // The single card carries every field a reviewer weighs.
+        const card = page.getByTestId('cross-project-suggestion-card').first();
+        await expect(card).toBeVisible();
+        await expect(card).toHaveAttribute('data-cve-id', 'CVE-2026-0999');
+        await expect(card).toHaveAttribute('data-match-type', 'purl');
+        // CVE id
+        await expect(card).toContainText('CVE-2026-0999');
+        // source project provenance
+        await expect(card).toContainText('Mock Source Project');
+        // match-type label (purl → "Component match")
+        await expect(card).toContainText('Component match');
+        // VEX status label (not_affected → "Not affected")
+        await expect(card).toContainText('Not affected');
+        // justification (underscores rendered as spaces) + impact + action
+        await expect(card).toContainText('vulnerable code not present');
+        await expect(card).toContainText('The vulnerable path is not reachable in our build.');
+        await expect(card).toContainText('No action required.');
+    });
+
     test('should display VEX status correctly for each statement', async ({ page, request }) => {
         const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
         const vexStatements = await vexResponse.json();
