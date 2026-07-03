@@ -1215,7 +1215,7 @@
     },
     "CrossProject": {
       "title": "他プロジェクトで判断済み",
-      "description": "同じ脆弱性について、組織内の他プロジェクトで人間が承認済みのVEX判断です。読み取り専用 — 再利用する前に出所を確認してください。",
+      "description": "同じ脆弱性について、組織内の他プロジェクトで人間が承認済みのVEX判断です。出所を確認したうえで、ワンクリックで判断を取り込めます — 取り込みごとに確認が必要で、監査ログに記録されます。",
       "sourceProject": "参照元プロジェクト",
       "matchPurl": "コンポーネント一致",
       "matchVulnerabilityOnly": "CVEのみ一致",
@@ -1224,7 +1224,15 @@
       "justificationLabel": "理由",
       "impactLabel": "影響",
       "actionLabel": "対応",
-      "readOnlyNote": "読み取り専用です。これらの判断のワンクリック再利用は今後のリリースで提供予定です。"
+      "applyButton": "この判断を取り込む",
+      "applying": "取り込み中…",
+      "applyConfirmTitle": "この判断を取り込みますか？",
+      "applyConfirmBody": "{project} の判断（{status}）をこのプロジェクトに取り込みますか？ 取り込み元への出所情報とともに、このプロジェクトにVEX判断が記録されます。取り込み後は他の判断と同様に変更できます。",
+      "applyConfirmAction": "取り込む",
+      "applyConfirmCancel": "キャンセル",
+      "alreadyTriaged": "このプロジェクトでは既に判断済みです。",
+      "applyError": "取り込みに失敗しました。もう一度お試しください。",
+      "reuseNote": "取り込みは確認後にのみ、取り込み元の判断をこのプロジェクトに複製します。すべての取り込みは監査ログに記録されます。"
     },
     "VexStatus": {
       "not_affected": "影響なし",

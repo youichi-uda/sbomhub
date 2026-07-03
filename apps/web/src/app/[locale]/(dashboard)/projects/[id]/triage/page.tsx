@@ -289,12 +289,20 @@ export default function TriagePage() {
       )}
 
       {/*
-        Cross-project VEX suggestions (M26 F376, issue #131). Read-only:
-        "already decided in another project" provenance, no apply control
-        (M27 Phase 2). Renders null when empty, so it never adds noise on the
-        common no-suggestions path.
+        Cross-project VEX suggestions (M26 F376, issue #131; M27 F382 apply,
+        issue #133). "Already decided in another project" provenance plus a
+        human-confirmed 1-click reuse control. onApplied refetches so a reused
+        suggestion drops out (backend excludes it as already-triaged). Renders
+        null when empty, so it never adds noise on the common no-suggestions
+        path.
       */}
-      {!loading && <CrossProjectSuggestions suggestions={suggestions} />}
+      {!loading && (
+        <CrossProjectSuggestions
+          suggestions={suggestions}
+          projectId={projectId}
+          onApplied={loadSuggestions}
+        />
+      )}
 
       {loading ? (
         <div className="flex h-64 items-center justify-center text-muted-foreground">

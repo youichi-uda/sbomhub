@@ -1215,7 +1215,7 @@
     },
     "CrossProject": {
       "title": "Decided in other projects",
-      "description": "Human-approved VEX statements for the same finding from other projects in your organisation. Read-only — review the provenance before you reuse a decision.",
+      "description": "Human-approved VEX statements for the same finding from other projects in your organisation. Review the provenance, then reuse a decision with one click — you confirm each reuse, and it is recorded in the audit log.",
       "sourceProject": "Source project",
       "matchPurl": "Component match",
       "matchVulnerabilityOnly": "CVE-only match",
@@ -1224,7 +1224,15 @@
       "justificationLabel": "Justification",
       "impactLabel": "Impact",
       "actionLabel": "Action",
-      "readOnlyNote": "Read-only. One-click reuse of these decisions ships in a later release."
+      "applyButton": "Reuse decision",
+      "applying": "Applying…",
+      "applyConfirmTitle": "Reuse this decision?",
+      "applyConfirmBody": "Copy {project}'s decision ({status}) into this project? This records a VEX statement here, with provenance back to the source. You can change it afterwards like any other statement.",
+      "applyConfirmAction": "Reuse decision",
+      "applyConfirmCancel": "Cancel",
+      "alreadyTriaged": "Already triaged in this project.",
+      "applyError": "Could not reuse this decision. Please try again.",
+      "reuseNote": "Reuse copies the source decision into this project only after you confirm; every reuse is recorded in the audit log."
     },
     "VexStatus": {
       "not_affected": "Not affected",
