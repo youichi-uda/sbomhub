@@ -45,11 +45,9 @@ test.describe('Issue Tracker Integrations', () => {
         // Should show dialog with tracker type selection
         const dialog = page.locator('[role="dialog"]');
         if (await dialog.isVisible()) {
-            // The dialog offers Jira, Backlog, and GitHub Issues; this probe
-            // only asserts the two original options.
-            // TODO(e2e): also assert the GitHub Issues option (deliberately
-            // not added in the F363 comment-only sweep — E2E behaviour is
-            // unchanged there).
+            // The dialog offers Jira, Backlog, and GitHub Issues. The closed
+            // service Select renders only the selected value ("Jira" by
+            // default), so this first probe can only see Jira/Backlog text.
             const jiraOption = dialog.getByText(/Jira/i);
             const backlogOption = dialog.getByText(/Backlog/i);
 
@@ -57,6 +55,25 @@ test.describe('Issue Tracker Integrations', () => {
             const backlogVisible = await backlogOption.isVisible().catch(() => false);
 
             expect(jiraVisible || backlogVisible).toBeTruthy();
+
+            // GitHub Issues option assert (F369, closes the F363 TODO):
+            // open the service Select and check the option list. Radix
+            // portals the option list to <body>, so the option probe is
+            // page-scoped (audit.spec.ts / vulnerabilities.spec.ts
+            // precedent), and the trigger probe keeps the suite's
+            // soft-guard style — the assert fires whenever the trigger is
+            // actually interactable.
+            const serviceTrigger = dialog.getByRole('combobox').first();
+            if (await serviceTrigger.isVisible().catch(() => false)) {
+                await serviceTrigger.click();
+                await page.waitForTimeout(500);
+
+                const githubOption = page.getByRole('option', { name: /GitHub Issues/i });
+                const githubVisible = await githubOption.isVisible().catch(() => false);
+                expect(githubVisible).toBeTruthy();
+
+                await page.keyboard.press('Escape');
+            }
         }
     });
 
