@@ -150,15 +150,20 @@ jobs:
 
       - name: Run integration tests
         # `-tags=integration` enables the //go:build integration files:
-        #   - internal/repository/rls_test.go              (Wave 1)
-        #   - internal/repository/apikey_rls_test.go       (#18)
-        #   - internal/repository/audit_rls_test.go        (#19)
-        #   - internal/repository/public_link_rls_test.go  (R5-5a)
-        #   - internal/repository/subscription_rls_test.go (R15-15a)
-        #   - internal/middleware/tx_test.go               (Wave 3)
-        # Each one t.Skip()s when DATABASE_URL / MIGRATE_DATABASE_URL
-        # is unset; sourcing .env into the environment here makes them
-        # actually run instead of skipping.
+        #   - internal/repository/rls_test.go                  (Wave 1)
+        #   - internal/repository/apikey_rls_test.go           (#18)
+        #   - internal/repository/audit_rls_test.go            (#19)
+        #   - internal/repository/public_link_rls_test.go      (R5-5a)
+        #   - internal/repository/subscription_rls_test.go     (R15-15a)
+        #   - internal/middleware/tx_test.go                   (Wave 3)
+        #   - internal/service/vex_suggestions_integration_test.go (M26-A #130)
+        #   - internal/service/vex_apply_integration_test.go       (M27-A/D #132)
+        # ./internal/service/... is required so the cross-project VEX apply
+        # security tests — injection guard (F381/F383), tenant-crossed source
+        # rejection, and 409 idempotency — become a CI gate, not a local-only
+        # check (F385). Each file t.Skip()s when DATABASE_URL /
+        # MIGRATE_DATABASE_URL is unset; sourcing .env into the environment
+        # here makes them actually run instead of skipping.
         shell: bash
         working-directory: apps/api
         run: |
@@ -169,7 +174,8 @@ jobs:
           set +a
           go test -count=1 -tags=integration -timeout 5m \
             ./internal/repository/... \
-            ./internal/middleware/...
+            ./internal/middleware/... \
+            ./internal/service/...
 
       - name: Dump postgres logs on failure
         if: failure()
