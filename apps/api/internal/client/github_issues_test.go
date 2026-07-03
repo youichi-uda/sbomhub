@@ -251,7 +251,11 @@ func TestGitHubIssuesClient_CreateIssue_MissingNumber(t *testing.T) {
 	}
 }
 
-func TestGitHubIssuesClient_GetIssueStatus(t *testing.T) {
+// TestGitHubIssuesClient_GetIssue pins SyncTicket's direct consumer surface
+// (F367 — the former GetIssueStatus state-only wrapper is gone per F280):
+// the endpoint/method shape plus the fields the sync arm reads — state and
+// the assignee login (Jira/Backlog assignee parity).
+func TestGitHubIssuesClient_GetIssue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/acme/widget/issues/42" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -272,42 +276,52 @@ func TestGitHubIssuesClient_GetIssueStatus(t *testing.T) {
 
 	client := NewGitHubIssuesClient(server.URL, "token123")
 
-	state, err := client.GetIssueStatus(context.Background(), "acme/widget", 42)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if state != "closed" {
-		t.Errorf("unexpected state: %s", state)
-	}
-
-	// GetIssue exposes the richer record (assignee for SyncTicket parity
-	// with Jira/Backlog).
 	issue, err := client.GetIssue(context.Background(), "acme/widget", 42)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if issue.State != "closed" {
+		t.Errorf("unexpected state: %s", issue.State)
+	}
 	if issue.Assignee == nil || issue.Assignee.Login != "octocat" {
 		t.Errorf("unexpected assignee: %+v", issue.Assignee)
 	}
+
+	// Unassigned issues decode to a nil Assignee (the service's nil-safe
+	// read maps that to an empty assignee).
+	unassigned := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"number":42,"state":"open","html_url":"https://github.com/acme/widget/issues/42"}`))
+	}))
+	defer unassigned.Close()
+
+	issue, err = NewGitHubIssuesClient(unassigned.URL, "token123").GetIssue(context.Background(), "acme/widget", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if issue.Assignee != nil {
+		t.Errorf("Assignee = %+v, want nil for an unassigned issue", issue.Assignee)
+	}
 }
 
-// TestGitHubIssuesClient_GetIssueStatus_Defensive pins the malformed-response
-// arms of the status poll: a missing state and an invalid issue number must
-// both error instead of returning "".
-func TestGitHubIssuesClient_GetIssueStatus_Defensive(t *testing.T) {
+// TestGitHubIssuesClient_GetIssue_Defensive pins the client-side guard of
+// the issue fetch: a non-positive issue number is rejected before any HTTP.
+// (The empty-state defensive error moved with F367 to the service's GitHub
+// sync arm, where it is pinned by
+// service.TestIssueTrackerService_SyncTicket_GitHub_MissingState.)
+func TestGitHubIssuesClient_GetIssue_Defensive(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"number":42}`))
+		t.Errorf("no HTTP request must be made for a non-positive issue number; got %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
 
 	client := NewGitHubIssuesClient(server.URL, "token123")
 
-	if _, err := client.GetIssueStatus(context.Background(), "acme/widget", 42); err == nil {
-		t.Error("expected error for response missing state, got nil")
-	}
-	if _, err := client.GetIssueStatus(context.Background(), "acme/widget", 0); err == nil {
+	if _, err := client.GetIssue(context.Background(), "acme/widget", 0); err == nil {
 		t.Error("expected error for non-positive issue number, got nil")
+	}
+	if _, err := client.GetIssue(context.Background(), "acme/widget", -1); err == nil {
+		t.Error("expected error for negative issue number, got nil")
 	}
 }
 
@@ -353,8 +367,8 @@ func TestGitHubIssuesClient_RepoValidation(t *testing.T) {
 			if _, err := client.CreateIssue(ctx, CreateGitHubIssueInput{Repo: tc.repo, Title: "t"}); !errors.Is(err, ErrGitHubInvalidRepo) {
 				t.Errorf("CreateIssue(%q): expected ErrGitHubInvalidRepo, got: %v", tc.repo, err)
 			}
-			if _, err := client.GetIssueStatus(ctx, tc.repo, 1); !errors.Is(err, ErrGitHubInvalidRepo) {
-				t.Errorf("GetIssueStatus(%q): expected ErrGitHubInvalidRepo, got: %v", tc.repo, err)
+			if _, err := client.GetIssue(ctx, tc.repo, 1); !errors.Is(err, ErrGitHubInvalidRepo) {
+				t.Errorf("GetIssue(%q): expected ErrGitHubInvalidRepo, got: %v", tc.repo, err)
 			}
 		})
 	}
@@ -655,7 +669,7 @@ func TestGitHubIssuesClient_BodyCap_8MiB(t *testing.T) {
 
 	client := NewGitHubIssuesClient(server.URL, "token123")
 
-	_, err := client.GetIssueStatus(context.Background(), "acme/widget", 42)
+	_, err := client.GetIssue(context.Background(), "acme/widget", 42)
 	if err == nil {
 		t.Fatal("expected unmarshal error for over-cap body, got nil")
 	}
@@ -675,7 +689,7 @@ func TestGitHubIssuesClient_MalformedJSON(t *testing.T) {
 
 	client := NewGitHubIssuesClient(server.URL, "token123")
 
-	if _, err := client.GetIssueStatus(context.Background(), "acme/widget", 42); err == nil {
+	if _, err := client.GetIssue(context.Background(), "acme/widget", 42); err == nil {
 		t.Error("expected error for malformed JSON, got nil")
 	}
 	if err := client.TestConnection(context.Background(), "acme/widget"); err == nil {

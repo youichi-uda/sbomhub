@@ -672,3 +672,90 @@ func TestIssueTrackerService_CreateTicket_GitHub_PersistsExternalProjectKey(t *t
 		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}
 }
+
+// TestIssueTrackerService_SyncTicket_GitHub_AssigneeSync pins F367: the
+// GitHub sync arm consumes GetIssue directly, so an assigned issue's
+// assignee login lands in the ticket UPDATE — symmetric with the Jira
+// (DisplayName) and Backlog (Name) arms. The state normalisation the former
+// GetIssueStatus wrapper applied is preserved: an upper-cased "Closed" from
+// a non-canonical proxy still maps to the terminal bucket.
+func TestIssueTrackerService_SyncTicket_GitHub_AssigneeSync(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octocat/hello-world/issues/42" {
+			t.Errorf("path = %q, want /repos/octocat/hello-world/issues/42", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 42,
+			"title": "[HIGH] CVE-2026-0001",
+			"state": "Closed",
+			"html_url": "https://github.com/octocat/hello-world/issues/42",
+			"assignee": {"login": "octocat"}
+		}`))
+	}))
+	defer ts.Close()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+		"https://github.com/octocat/hello-world/issues/42", "octocat/hello-world")
+
+	// UPDATE args: (id, local_status, external_status, priority, assignee,
+	// summary, last_synced_at) — assignee = the issue's assignee login, and
+	// external_status = the ToLower-normalised state.
+	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
+		ticketID, string(model.TicketStatusClosed), "closed", "", "octocat",
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+	).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
+		t.Fatalf("SyncTicket failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestIssueTrackerService_SyncTicket_GitHub_MissingState pins the defensive
+// empty-state error that moved from the removed client GetIssueStatus
+// wrapper into the service's GitHub sync arm (F367): a 2xx issue response
+// with no state must error out — never an empty external status silently
+// overwriting the local ticket state (and no UPDATE).
+func TestIssueTrackerService_SyncTicket_GitHub_MissingState(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 42,
+			"title": "[HIGH] CVE-2026-0001",
+			"html_url": "https://github.com/octocat/hello-world/issues/42"
+		}`))
+	}))
+	defer ts.Close()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+		"https://github.com/octocat/hello-world/issues/42", "octocat/hello-world")
+
+	err = svc.SyncTicket(context.Background(), ticketID)
+	if err == nil {
+		t.Fatal("expected an error for an issue response missing state")
+	}
+	if !strContains(err.Error(), "missing state") {
+		t.Errorf("error %q should name the missing state", err)
+	}
+	// No UPDATE expectation was registered: nothing may be written.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("no UPDATE must run for a missing-state response; got %v", err)
+	}
+}

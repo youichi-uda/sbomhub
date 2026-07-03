@@ -56,9 +56,10 @@ import (
 //	    model.TrackerTypeJira, model.TrackerTypeBacklog, and
 //	    model.TrackerTypeGitHub switch arms each construct a
 //	    per-request client and fetch the external issue synchronously
-//	    (GetIssue for Jira/Backlog; GetIssueStatus — a GetIssue
-//	    wrapper — for GitHub, added in F356/M24-1b) with a 30-second
-//	    per-request timeout (F274b — M18-3 Phase D R2,
+//	    (GetIssue for all three trackers — the GitHub arm's former
+//	    GetIssueStatus state-only wrapper was replaced by a direct
+//	    GetIssue in F367/M25-A to sync assignees, and removed) with a
+//	    30-second per-request timeout (F274b — M18-3 Phase D R2,
 //	    replaced the earlier absolute line-range reference "around
 //	    lines 372-398" which drifted with every unrelated edit to
 //	    issue_tracker.go and would have silently misled a future

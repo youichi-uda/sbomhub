@@ -541,16 +541,29 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 				ticket.ID, repo, urlRepo, issueNumber)
 		}
 		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
-		state, gerr := githubClient.GetIssueStatus(ctx, repo, issueNumber)
+		issue, gerr := githubClient.GetIssue(ctx, repo, issueNumber)
 		if gerr != nil {
 			return gerr
+		}
+		// Same normalisation + defensive empty-state error the former
+		// GetIssueStatus wrapper applied (F367 switched this arm to GetIssue
+		// so the assignee is synced too; the wrapper was then consumer-less
+		// and removed per F280): a 2xx response with no state must error
+		// rather than silently overwrite the local ticket state with "".
+		state := strings.ToLower(strings.TrimSpace(issue.State))
+		if state == "" {
+			return fmt.Errorf("github: issue %d response is missing state", issueNumber)
 		}
 		// "open" / "closed" — mapExternalStatus sends "closed" to
 		// TicketStatusClosed (same terminal bucket as Jira/Backlog
 		// Done/Closed/完了) and "open" to the default TicketStatusOpen.
-		// GitHub has no priority field and GetIssueStatus carries no
-		// assignee, so both remain empty for GitHub tickets.
+		// GitHub has no priority field, so priority stays empty; the
+		// assignee login is synced symmetrically with Jira (DisplayName) /
+		// Backlog (Name), nil-safe for unassigned issues (F367).
 		externalStatus = state
+		if issue.Assignee != nil {
+			assignee = issue.Assignee.Login
+		}
 	}
 
 	// Update ticket

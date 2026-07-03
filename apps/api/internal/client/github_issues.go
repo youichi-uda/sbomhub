@@ -260,6 +260,11 @@ func (c *GitHubIssuesClient) CreateIssue(ctx context.Context, input CreateGitHub
 // Note that the GitHub Issues API also serves pull requests through this
 // endpoint (every PR is an issue), so a ticket that was manually converted /
 // cross-linked still resolves.
+//
+// SyncTicket consumes this directly (F367) — state normalisation and the
+// defensive empty-state error live in the service's GitHub sync arm, next to
+// the identical Jira/Backlog handling. A GetIssueStatus state-only wrapper
+// existed until F367 and was removed once consumer-less (F280 discipline).
 func (c *GitHubIssuesClient) GetIssue(ctx context.Context, repoFullName string, issueNumber int) (*GitHubIssue, error) {
 	owner, repo, err := splitGitHubRepo(repoFullName)
 	if err != nil {
@@ -276,22 +281,6 @@ func (c *GitHubIssuesClient) GetIssue(ctx context.Context, repoFullName string, 
 		return nil, err
 	}
 	return &issue, nil
-}
-
-// GetIssueStatus returns the issue's state ("open" or "closed") for
-// SyncTicket-style status polling. The state is validated defensively — a
-// 2xx response with an empty state field is an error rather than an empty
-// status silently overwriting the local ticket state.
-func (c *GitHubIssuesClient) GetIssueStatus(ctx context.Context, repoFullName string, issueNumber int) (string, error) {
-	issue, err := c.GetIssue(ctx, repoFullName, issueNumber)
-	if err != nil {
-		return "", err
-	}
-	state := strings.ToLower(strings.TrimSpace(issue.State))
-	if state == "" {
-		return "", fmt.Errorf("github: issue %d response is missing state", issueNumber)
-	}
-	return state, nil
 }
 
 // isGitHubRateLimited reports whether a response is one of GitHub's three
