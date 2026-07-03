@@ -405,8 +405,9 @@ SQL_FILE="$WORK_DIR/validate.sql"
     printf '\\timing off\n'
     printf 'BEGIN;\n'
 
-    # Lift RLS on all eight tables (idempotent: NO FORCE + DISABLE on a
-    # table whose RLS is already off is a no-op).
+    # Lift RLS on all nine tables (the eight constrained tables plus the
+    # projects parent; idempotent: NO FORCE + DISABLE on a table whose RLS
+    # is already off is a no-op).
     for tbl in $TABLES_TO_TOGGLE; do
         printf 'ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;\n' "$tbl"
         printf 'ALTER TABLE %s DISABLE ROW LEVEL SECURITY;\n' "$tbl"
