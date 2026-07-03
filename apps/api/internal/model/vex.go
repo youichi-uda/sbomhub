@@ -144,13 +144,25 @@ type VEXSuggestionComponent struct {
 // VEXSuggestionSource is the provenance of the reused judgement: which
 // other project it came from and the approved statement's fields. Enough
 // context for a reviewer to decide whether to trust the reuse.
+//
+// justification / impact_statement / action_statement are omitempty (F378,
+// issue #131). vex_statements.justification (migration 003) is nullable and
+// is only required for status=not_affected, so a source statement with
+// status=affected/fixed/under_investigation legitimately carries none of the
+// three; the aggregation query COALESCEs each to "". The TS contract types
+// these as OPTIONAL — crucially justification is `VEXJustification?`, an enum
+// union of which "" is not a member — so emitting "" would put a non-member
+// value on the wire. omitempty drops the empty value instead, keeping the
+// Go↔TS shape aligned (absent ⇒ TS undefined). status is intentionally NOT
+// omitempty: it is NOT NULL in the schema and always present. The web
+// component already falsy-guards all three fields, so display is unaffected.
 type VEXSuggestionSource struct {
 	ProjectID       uuid.UUID `json:"project_id"`
 	ProjectName     string    `json:"project_name"`
 	StatementID     uuid.UUID `json:"statement_id"`
 	Status          string    `json:"status"`
-	Justification   string    `json:"justification"`
-	ImpactStatement string    `json:"impact_statement"`
-	ActionStatement string    `json:"action_statement"`
+	Justification   string    `json:"justification,omitempty"`
+	ImpactStatement string    `json:"impact_statement,omitempty"`
+	ActionStatement string    `json:"action_statement,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }

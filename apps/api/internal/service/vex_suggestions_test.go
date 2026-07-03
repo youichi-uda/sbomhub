@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -212,6 +213,77 @@ func TestAssembleSuggestions_VulnerabilityOnlyFanOutDistinctComponentIDs(t *test
 	}
 	if !seen[compA] || !seen[compB] {
 		t.Errorf("both target component ids must appear exactly once: %+v", seen)
+	}
+}
+
+// TestVEXSuggestionSource_OmitemptyStringFields pins the F378 wire contract
+// (issue #131): the source's justification / impact_statement /
+// action_statement are omitempty so a source statement that carries none of
+// them (e.g. status=affected) drops the keys from the wire entirely, rather
+// than emitting "". The TS side types these as optional — and justification
+// as the VEXJustification enum union, of which "" is NOT a member — so an
+// empty value must be ABSENT, not a non-member "". status stays present
+// (NOT NULL in the schema).
+func TestVEXSuggestionSource_OmitemptyStringFields(t *testing.T) {
+	// Empty source: only status (+ the non-string provenance fields) survive.
+	empty := model.VEXSuggestion{
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2026-5000",
+		Component: model.VEXSuggestionComponent{
+			ComponentID: uuid.New(),
+			Name:        "libqux",
+			Version:     "3.1.4",
+			Purl:        "pkg:npm/libqux@3.1.4",
+		},
+		MatchType: model.VEXMatchTypePurl,
+		Source: model.VEXSuggestionSource{
+			ProjectID:   uuid.New(),
+			ProjectName: "Source",
+			StatementID: uuid.New(),
+			Status:      "affected", // no justification/impact/action
+		},
+	}
+	b, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty-source suggestion: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	src, ok := wire["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("source object missing from wire: %s", b)
+	}
+	for _, k := range []string{"justification", "impact_statement", "action_statement"} {
+		if _, present := src[k]; present {
+			t.Errorf("F378: empty %q must be omitted from the wire, got: %s", k, b)
+		}
+	}
+	// status must always be present (NOT omitempty).
+	if _, present := src["status"]; !present {
+		t.Errorf("status must always be present on the wire, got: %s", b)
+	}
+
+	// Populated source: the three fields are emitted verbatim when non-empty.
+	populated := empty
+	populated.Source.Justification = "vulnerable_code_not_present"
+	populated.Source.ImpactStatement = "not reachable"
+	populated.Source.ActionStatement = "no action required"
+	b2, err := json.Marshal(populated)
+	if err != nil {
+		t.Fatalf("marshal populated-source suggestion: %v", err)
+	}
+	_ = json.Unmarshal(b2, &wire)
+	src2 := wire["source"].(map[string]any)
+	if src2["justification"] != "vulnerable_code_not_present" {
+		t.Errorf("populated justification not emitted: %s", b2)
+	}
+	if src2["impact_statement"] != "not reachable" {
+		t.Errorf("populated impact_statement not emitted: %s", b2)
+	}
+	if src2["action_statement"] != "no action required" {
+		t.Errorf("populated action_statement not emitted: %s", b2)
 	}
 }
 
