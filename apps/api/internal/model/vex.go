@@ -51,3 +51,93 @@ type VEXStatementWithDetails struct {
 	ComponentName         *string `json:"component_name,omitempty"`
 	ComponentVersion      *string `json:"component_version,omitempty"`
 }
+
+// VEX suggestion match types (M26-A / F375, issue #130).
+//
+// A cross-project VEX suggestion is classified by how strongly the
+// source (an approved vex_statement from another project of the same
+// tenant) matches the target project's affected component:
+//
+//   - VEXMatchTypePurl: the source statement is component-specific
+//     (vex_statements.component_id is non-NULL) and the source
+//     component's purl equals the target component's purl. This is the
+//     precise match — same package coordinate, same vulnerability.
+//   - VEXMatchTypeVulnerabilityOnly: the source statement is
+//     component-agnostic (component_id IS NULL), so it matches on the
+//     vulnerability alone. Surfaced as a coarser match so a reviewer
+//     knows the source judgement was project-wide, not tied to this
+//     exact package coordinate.
+const (
+	VEXMatchTypePurl              = "purl"
+	VEXMatchTypeVulnerabilityOnly = "vulnerability_only"
+)
+
+// VEXSuggestionCandidate is a raw row returned by
+// VEXRepository.ListCrossProjectVEXCandidates. It is the DB-access DTO
+// that VEXService.GetSuggestions filters (self-project + already-triaged
+// exclusion) and maps into VEXSuggestion. Keeping the exclusion logic in
+// Go (rather than a SQL WHERE) keeps it unit-testable without a live DB
+// (see assembleSuggestions + its test), while the SQL owns the tenant
+// boundary + the purl/vulnerability match join.
+type VEXSuggestionCandidate struct {
+	VulnerabilityID   uuid.UUID
+	CVEID             string
+	TargetComponentID uuid.UUID
+	ComponentName     string
+	ComponentVersion  string
+	ComponentPurl     string
+
+	SourceProjectID   uuid.UUID
+	SourceProjectName string
+	// SourceComponentID is nil when the source statement is
+	// component-agnostic → drives match_type = vulnerability_only.
+	SourceComponentID *uuid.UUID
+	StatementID       uuid.UUID
+	Status            string
+	Justification     string
+	ImpactStatement   string
+	ActionStatement   string
+	CreatedAt         time.Time
+
+	// TargetAlreadyTriaged is true when the target project already holds
+	// a vex_statement covering (vulnerability_id, this component) — either
+	// component-specific for this component, or a project-wide (NULL
+	// component) statement for the vulnerability. Such candidates are
+	// dropped to avoid re-surfacing an already-triaged decision.
+	TargetAlreadyTriaged bool
+}
+
+// VEXSuggestion is one cross-project VEX reuse suggestion returned by
+// GET /api/v1/projects/:id/vex/suggestions (read-only Phase 1). It tells
+// a reviewer "another project in your tenant already judged this
+// vulnerability/component — here is that judgement and where it came
+// from". No apply action is offered in Phase 1.
+type VEXSuggestion struct {
+	VulnerabilityID uuid.UUID              `json:"vulnerability_id"`
+	CVEID           string                 `json:"cve_id"`
+	Component       VEXSuggestionComponent `json:"component"`
+	MatchType       string                 `json:"match_type"`
+	Source          VEXSuggestionSource    `json:"source"`
+}
+
+// VEXSuggestionComponent is the target project's affected component the
+// suggestion applies to.
+type VEXSuggestionComponent struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Purl    string `json:"purl"`
+}
+
+// VEXSuggestionSource is the provenance of the reused judgement: which
+// other project it came from and the approved statement's fields. Enough
+// context for a reviewer to decide whether to trust the reuse.
+type VEXSuggestionSource struct {
+	ProjectID       uuid.UUID `json:"project_id"`
+	ProjectName     string    `json:"project_name"`
+	StatementID     uuid.UUID `json:"statement_id"`
+	Status          string    `json:"status"`
+	Justification   string    `json:"justification"`
+	ImpactStatement string    `json:"impact_statement"`
+	ActionStatement string    `json:"action_statement"`
+	CreatedAt       time.Time `json:"created_at"`
+}
