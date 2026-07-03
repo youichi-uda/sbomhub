@@ -103,13 +103,33 @@ func (s *VEXService) ApplySuggestion(ctx context.Context, in ApplySuggestionInpu
 		return nil, err
 	}
 
-	// 3. Idempotency: never overwrite an existing (project, vuln, component)
-	//    decision — surface 409 instead.
+	// 3. Idempotency: never overwrite an existing decision — surface 409
+	//    instead. This MUST mirror the M26 aggregation's already-triaged
+	//    exclusion (vex_aggregation.go: `ex.component_id = ta.component_id OR
+	//    ex.component_id IS NULL`), which is a SUPERSET of an exact-component
+	//    match: a project-wide (component_id IS NULL) statement for this
+	//    vulnerability ALSO suppresses the suggestion. So apply must 409 on
+	//    EITHER an exact-component statement OR a project-wide one (F386,
+	//    issue #132/#133). Checking only the exact component would let apply
+	//    create a component-specific row overlapping an existing project-wide
+	//    decision — conflicting VEX rows plus a 201 the read feed would never
+	//    have offered (GetSuggestions already excludes it as already-triaged).
 	existing, err := s.vexRepo.GetByProjectAndVulnerability(ctx, in.ProjectID, in.VulnerabilityID, &in.TargetComponentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing target statement: %w", err)
 	}
 	if existing != nil {
+		return nil, ErrVEXApplyAlreadyTriaged
+	}
+	// Project-wide (component_id IS NULL) decision for the same vulnerability —
+	// the superset half of the aggregation exclusion (F386). A nil componentID
+	// routes GetByProjectAndVulnerability through its `component_id IS NULL`
+	// branch (repository/vex.go).
+	projectWide, err := s.vexRepo.GetByProjectAndVulnerability(ctx, in.ProjectID, in.VulnerabilityID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check existing project-wide target statement: %w", err)
+	}
+	if projectWide != nil {
 		return nil, ErrVEXApplyAlreadyTriaged
 	}
 

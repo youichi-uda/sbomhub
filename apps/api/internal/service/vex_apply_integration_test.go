@@ -482,3 +482,85 @@ func TestVEXApply_TargetNotLinkedToVuln_Rejected(t *testing.T) {
 		}
 	})
 }
+
+// TestVEXApply_ProjectWideExisting_409 pins F386 (issue #132/#133): apply
+// idempotency must mirror the M26 aggregation's already-triaged exclusion,
+// which is a SUPERSET of an exact-component match — a project-wide
+// (component_id IS NULL) statement for the vulnerability ALSO suppresses the
+// suggestion. So applying a component-specific reuse onto a target that
+// already holds a project-wide decision for the same vulnerability must
+// return ErrVEXApplyAlreadyTriaged (409), NOT create a second, overlapping
+// component-specific row (which GetSuggestions would never have offered).
+//
+// Interaction with the F383 linkage check: the target component IS linked to
+// the vulnerability here (so verifySuggestionMatch passes and we actually
+// reach the idempotency step), and the project-wide vex_statement is
+// orthogonal to component_vulnerabilities linkage — the two guards are
+// independent, so this exercises the 409 path cleanly rather than colliding
+// with the 400 linkage reject.
+func TestVEXApply_ProjectWideExisting_409(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyApply(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "APW")
+	sfx := uuid.New().String()[:8]
+	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APW1-%s", sfx))
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1)
+	})
+
+	// Source project A: component-specific approved statement on a shared purl.
+	projA := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projA, "APW A")
+	sbomA := seedSbomVS(t, migDB, tenantT, projA)
+	compA := seedComponentVS(t, migDB, tenantT, sbomA, "libshared", "1.0", "pkg:generic/apwshared@1.0")
+	linkCompVulnVS(t, migDB, compA, v1)
+	source := seedVexStmtVS(t, migDB, tenantT, projA, v1, &compA, "not_affected")
+
+	// Target project B: compB shares the purl AND is linked to v1 (so the F383
+	// linkage + purl match both pass), but B has already made a PROJECT-WIDE
+	// (component_id NULL) decision on v1 — the exact-component check would miss
+	// it, so this is the F386 regression.
+	projB := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projB, "APW B")
+	sbomB := seedSbomVS(t, migDB, tenantT, projB)
+	compB := seedComponentVS(t, migDB, tenantT, sbomB, "libshared", "1.0", "pkg:generic/apwshared@1.0")
+	linkCompVulnVS(t, migDB, compB, v1)
+	seedVexStmtVS(t, migDB, tenantT, projB, v1, nil, "affected") // project-wide (NULL component)
+
+	applySuggestionVS(t, appDB, tenantT, ApplySuggestionInput{
+		TenantID:          tenantT,
+		ProjectID:         projB,
+		SourceStatementID: source,
+		TargetComponentID: compB,
+		VulnerabilityID:   v1,
+		CreatedBy:         "tester",
+	}, func(tx *sql.Tx, res *VEXApplyResult, err error) {
+		if !errors.Is(err, ErrVEXApplyAlreadyTriaged) {
+			t.Fatalf("apply onto a target with a project-wide (component_id NULL) decision must reject with ErrVEXApplyAlreadyTriaged, got err=%v res=%+v", err, res)
+		}
+		// No new component-specific row for (projB, v1, compB) was created.
+		var nStmt int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM vex_statements WHERE project_id = $1 AND vulnerability_id = $2 AND component_id = $3`, projB, v1, compB).Scan(&nStmt); err != nil {
+			t.Fatalf("count component-specific target statements: %v", err)
+		}
+		if nStmt != 0 {
+			t.Errorf("409-rejected apply created %d overlapping component-specific rows, want 0", nStmt)
+		}
+		// And no provenance row was written.
+		var nProv int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM vex_statement_provenance WHERE source_statement_id = $1`, source).Scan(&nProv); err != nil {
+			t.Fatalf("count provenance: %v", err)
+		}
+		if nProv != 0 {
+			t.Errorf("409-rejected apply wrote %d provenance rows, want 0", nProv)
+		}
+	})
+}
