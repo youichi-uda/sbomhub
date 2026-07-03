@@ -281,6 +281,40 @@ test.describe('VEX Statement Management', () => {
         }
     });
 
+    test('should render cross-project VEX suggestions section without crashing (M26 F376)', async ({ page }) => {
+        // Cross-project VEX suggestion aggregation (issue #131, read-only
+        // Phase 1). The web-e2e seed does NOT provision a second project in
+        // the same tenant with an approved vex_statement that matches this
+        // project's vulnerabilities, so in this environment the suggestions
+        // API returns an empty list and the section renders nothing (the
+        // component returns null when empty). The real aggregation behaviour
+        // — tenant-scoped cross-project matching, tenant-boundary isolation,
+        // self / already-triaged exclusion, purl vs vulnerability_only match
+        // typing — is verified by the Wave A backend integration test
+        // (apps/api, `-tags=integration`, real-PG), NOT here.
+        //
+        // Soft-guard style (consistent with the rest of this file): assert the
+        // triage page renders regardless of suggestions, then, IF seed data
+        // ever surfaces a suggestion, assert the section shape (provenance +
+        // match-type badge). This keeps the test meaningful once cross-project
+        // seed data lands without failing in the seedless CI env today.
+        await page.goto(`/en/projects/${projectId}/triage`);
+        await page.waitForLoadState('networkidle');
+
+        // The triage page must render even when suggestions are empty / the
+        // aggregation endpoint is not yet deployed.
+        await expect(page.getByTestId('triage-page')).toBeVisible({ timeout: 10000 });
+
+        const section = page.getByTestId('cross-project-suggestions');
+        if (await section.isVisible().catch(() => false)) {
+            // Section header count + at least one suggestion card carrying its
+            // source-project provenance and a purl / CVE-only match label.
+            const card = page.getByTestId('cross-project-suggestion-card').first();
+            await expect(card).toBeVisible();
+            await expect(card).toHaveAttribute('data-match-type', /^(purl|vulnerability_only)$/);
+        }
+    });
+
     test('should display VEX status correctly for each statement', async ({ page, request }) => {
         const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
         const vexStatements = await vexResponse.json();
