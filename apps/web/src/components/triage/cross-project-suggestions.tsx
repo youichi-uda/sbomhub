@@ -82,7 +82,14 @@ export function CrossProjectSuggestions({
       <CardContent className="space-y-3">
         {suggestions.map((s) => (
           <div
-            key={`${s.source.statement_id}-${s.vulnerability_id}`}
+            // F377 (issue #131): key on the target component_id too. A single
+            // vulnerability_only source statement fans out across every target
+            // component the vulnerability touches, and two target rows may
+            // share the same (name, version, purl), so {statement_id,
+            // vulnerability_id} alone is not unique and produced duplicate React
+            // keys. component_id disambiguates each fanned-out row. (Collapsing
+            // the fan-out itself is deferred to M27 Phase 2 grouping.)
+            key={`${s.source.statement_id}-${s.vulnerability_id}-${s.component.component_id}`}
             data-testid="cross-project-suggestion-card"
             data-cve-id={s.cve_id}
             data-match-type={s.match_type}

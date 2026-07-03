@@ -347,8 +347,18 @@ export interface VEXStatementWithDetails extends VEXStatement {
 /** Match precision for a cross-project VEX suggestion. */
 export type VEXMatchType = "purl" | "vulnerability_only";
 
-/** The component (in the target project) a suggestion applies to. */
+/**
+ * The component (in the target project) a suggestion applies to.
+ *
+ * component_id is the target project's components.id (F377, issue #131). It is
+ * the only field that uniquely identifies a suggestion row: a single
+ * vulnerability_only source statement fans out across every target component a
+ * vulnerability touches, and two distinct component rows may share the same
+ * (name, version, purl) triple — so {statement_id, vulnerability_id} is not a
+ * unique React key. The list keys on component_id to avoid key collisions.
+ */
 export interface VEXSuggestionComponent {
+  component_id: string;
   name: string;
   version: string;
   purl: string;
