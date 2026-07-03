@@ -321,6 +321,72 @@ export interface VEXStatementWithDetails extends VEXStatement {
   component_version?: string;
 }
 
+// -----------------------------------------------------------------------------
+// VEX cross-project suggestions (M26 F376, issue #131) types
+// -----------------------------------------------------------------------------
+//
+// Read-only Phase 1 of "VEX cross-project aggregation": surface VEX
+// statements that ANOTHER project in the same tenant has already
+// human-approved for the same (vulnerability, component) key, so a reviewer
+// does not re-triage a finding the organisation already decided.
+//
+// The wire shape is pinned by the M26 kickoff API contract
+// (sbomhub-internal/planning/M26_KICKOFF_PROMPT.md §"API 契約") and shared
+// verbatim with the Wave A backend (apps/api,
+// GET /api/v1/projects/:id/vex/suggestions). Keep this in strict sync with
+// that endpoint — if either side drifts the suggestions section silently
+// shows the wrong provenance.
+//
+// match_type encodes match precision (surfaced as a label so the reviewer can
+// weigh how much to trust the suggestion):
+//   - "purl": the source statement is component-specific and its component
+//     purl equals a purl present in this project (precise match).
+//   - "vulnerability_only": the source statement is component-agnostic
+//     (source component_id NULL); matched on vulnerability_id alone (coarser).
+
+/** Match precision for a cross-project VEX suggestion. */
+export type VEXMatchType = "purl" | "vulnerability_only";
+
+/** The component (in the target project) a suggestion applies to. */
+export interface VEXSuggestionComponent {
+  name: string;
+  version: string;
+  purl: string;
+}
+
+/**
+ * Provenance of a cross-project suggestion: the human-approved vex_statement
+ * in another project (same tenant) that produced it. The reviewer trusts a
+ * suggestion partly on this provenance, so project_name + status are always
+ * surfaced. justification / impact_statement / action_statement mirror
+ * VEXStatement's optional fields (a source statement with status=affected may
+ * carry none of them). status reuses the existing VEXStatus union.
+ */
+export interface VEXSuggestionSource {
+  project_id: string;
+  project_name: string;
+  statement_id: string;
+  status: VEXStatus;
+  justification?: VEXJustification;
+  impact_statement?: string;
+  action_statement?: string;
+  created_at: string;
+}
+
+/** One cross-project VEX suggestion (read-only Phase 1 — no apply/reuse). */
+export interface VEXSuggestion {
+  vulnerability_id: string;
+  cve_id: string;
+  component: VEXSuggestionComponent;
+  match_type: VEXMatchType;
+  source: VEXSuggestionSource;
+}
+
+/** GET /api/v1/projects/:id/vex/suggestions envelope. */
+export interface VEXSuggestionsResponse {
+  suggestions: VEXSuggestion[];
+}
+
 export type LicensePolicyType = "allowed" | "denied" | "review";
 
 export interface LicensePolicy {
@@ -2194,6 +2260,33 @@ export const api = {
   },
   licenses: {
     getCommon: () => request<Record<string, string>>("/api/v1/licenses/common"),
+  },
+  // VEX cross-project aggregation (M26 F376, issue #131) — read-only Phase 1.
+  // Maps to the aggregation endpoint wired by the Wave A backend:
+  //   GET /api/v1/projects/:id/vex/suggestions
+  // Returns human-approved vex_statements from OTHER projects in the same
+  // tenant that match this project's vulnerabilities by (vulnerability_id,
+  // purl) or by vulnerability_id alone. Read-only by design: there is
+  // deliberately no apply/reuse method here — 1-click reuse (copy statement +
+  // audit action) is M27 Phase 2, which touches the F281/F271 audit parity
+  // surface the M26 kickoff explicitly deferred.
+  vex: {
+    getSuggestions: async (
+      projectId: string,
+    ): Promise<VEXSuggestionsResponse> => {
+      const raw = await request<VEXSuggestionsResponse>(
+        `/api/v1/projects/${projectId}/vex/suggestions`,
+      );
+      // Defence-in-depth per the F184 / safeEnvelope philosophy: the backend
+      // may return HTTP 204 / a null body, and while the Wave A endpoint is
+      // still rolling out a handler-side nil→[] guard could regress. Normalise
+      // to an empty list so the suggestions section renders empty rather than
+      // throwing.
+      const safe = safeEnvelope<VEXSuggestionsResponse>(raw, {
+        suggestions: [],
+      });
+      return { ...safe, suggestions: safe.suggestions ?? [] };
+    },
   },
   // AI VEX triage (M1-6, issue #28). Maps to the five endpoints wired by
   // apps/api/cmd/server/main.go around line 596:
