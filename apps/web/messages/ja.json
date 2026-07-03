@@ -1212,6 +1212,25 @@
       "protected_at_perimeter": "境界保護",
       "protected_at_runtime": "実行時保護",
       "inline_mitigations_already_exist": "インライン緩和済み"
+    },
+    "CrossProject": {
+      "title": "他プロジェクトで判断済み",
+      "description": "同じ脆弱性について、組織内の他プロジェクトで人間が承認済みのVEX判断です。読み取り専用 — 再利用する前に出所を確認してください。",
+      "sourceProject": "参照元プロジェクト",
+      "matchPurl": "コンポーネント一致",
+      "matchVulnerabilityOnly": "CVEのみ一致",
+      "matchPurlHint": "参照元の判断が同じコンポーネント（purl一致）を対象にしています — 精度の高い一致です。",
+      "matchVulnerabilityOnlyHint": "参照元の判断はコンポーネント非依存で、CVEのみで一致しています — 粗い一致のため慎重に確認してください。",
+      "justificationLabel": "理由",
+      "impactLabel": "影響",
+      "actionLabel": "対応",
+      "readOnlyNote": "読み取り専用です。これらの判断のワンクリック再利用は今後のリリースで提供予定です。"
+    },
+    "VexStatus": {
+      "not_affected": "影響なし",
+      "affected": "影響あり",
+      "fixed": "修正済み",
+      "under_investigation": "調査中"
     }
   },
   "CRAReports": {

@@ -32,8 +32,10 @@ import {
   Project,
   VexDraft,
   VexDraftDecisionInput,
+  VEXSuggestion,
 } from "@/lib/api";
 import { AIDisabledBanner } from "@/components/triage/ai-disabled-banner";
+import { CrossProjectSuggestions } from "@/components/triage/cross-project-suggestions";
 import { DraftCard, EditFormValues } from "@/components/triage/draft-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -53,6 +55,7 @@ export default function TriagePage() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [drafts, setDrafts] = useState<VexDraft[]>([]);
+  const [suggestions, setSuggestions] = useState<VEXSuggestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyDraftId, setBusyDraftId] = useState<string | null>(null);
@@ -109,26 +112,45 @@ export default function TriagePage() {
     }
   }, [projectId, t, handleError]);
 
+  // Cross-project VEX suggestions (M26 F376, issue #131) are auxiliary,
+  // read-only data. The Wave A aggregation endpoint may not be deployed yet
+  // (parallel M26 development), so a failure here must NOT block the pending
+  // drafts queue or funnel through handleError (which could raise the
+  // AI-disabled banner off an unrelated 5xx). Degrade silently to an empty
+  // section instead.
+  const loadSuggestions = useCallback(async () => {
+    try {
+      const res = await api.vex.getSuggestions(projectId);
+      setSuggestions(res.suggestions ?? []);
+    } catch (err) {
+      console.warn(
+        "[triage] failed to load cross-project VEX suggestions",
+        err
+      );
+      setSuggestions([]);
+    }
+  }, [projectId]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      await Promise.all([loadProject(), loadDrafts()]);
+      await Promise.all([loadProject(), loadDrafts(), loadSuggestions()]);
       if (!cancelled) setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadProject, loadDrafts]);
+  }, [loadProject, loadDrafts, loadSuggestions]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await loadDrafts();
+      await Promise.all([loadDrafts(), loadSuggestions()]);
     } finally {
       setRefreshing(false);
     }
-  }, [loadDrafts]);
+  }, [loadDrafts, loadSuggestions]);
 
   /**
    * Optimistic update: drop the draft from the pending list immediately, then
@@ -265,6 +287,14 @@ export default function TriagePage() {
           ))}
         </div>
       )}
+
+      {/*
+        Cross-project VEX suggestions (M26 F376, issue #131). Read-only:
+        "already decided in another project" provenance, no apply control
+        (M27 Phase 2). Renders null when empty, so it never adds noise on the
+        common no-suggestions path.
+      */}
+      {!loading && <CrossProjectSuggestions suggestions={suggestions} />}
 
       {loading ? (
         <div className="flex h-64 items-center justify-center text-muted-foreground">

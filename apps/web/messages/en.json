@@ -1212,6 +1212,25 @@
       "protected_at_perimeter": "Protected at perimeter",
       "protected_at_runtime": "Protected at runtime",
       "inline_mitigations_already_exist": "Inline mitigations exist"
+    },
+    "CrossProject": {
+      "title": "Decided in other projects",
+      "description": "Human-approved VEX statements for the same finding from other projects in your organisation. Read-only — review the provenance before you reuse a decision.",
+      "sourceProject": "Source project",
+      "matchPurl": "Component match",
+      "matchVulnerabilityOnly": "CVE-only match",
+      "matchPurlHint": "The source statement targets the same component (matched by purl) — a precise match.",
+      "matchVulnerabilityOnlyHint": "The source statement is component-agnostic; matched on the CVE alone — a coarser match, review carefully.",
+      "justificationLabel": "Justification",
+      "impactLabel": "Impact",
+      "actionLabel": "Action",
+      "readOnlyNote": "Read-only. One-click reuse of these decisions ships in a later release."
+    },
+    "VexStatus": {
+      "not_affected": "Not affected",
+      "affected": "Affected",
+      "fixed": "Fixed",
+      "under_investigation": "Under investigation"
     }
   },
   "CRAReports": {
