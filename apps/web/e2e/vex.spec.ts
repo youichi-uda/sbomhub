@@ -490,6 +490,113 @@ test.describe('VEX Statement Management', () => {
         expect(applied).toBe(true);
     });
 
+    test('should keep row A disabled while row B apply starts (per-row loading, M27 F387)', async ({ page }) => {
+        // F387 (issue #133): apply loading state must be per-row. With a single
+        // applyingKey, starting an apply on row B overwrote row A's in-flight
+        // key, re-enabling A's button mid-flight so it could be re-triggered —
+        // a duplicate apply POST (the backend 409s, but the UI contract was
+        // wrong). This pins the fixed contract: with two suggestions, once A's
+        // apply is in-flight A stays disabled even after B's apply also starts.
+        //
+        // Both apply POSTs are held behind a gate the test releases at the end,
+        // so both rows are observably in-flight at the same time — the exact
+        // concurrency the single-key bug mishandled.
+        const mk = (n: string) => ({
+            vulnerability_id: `${n}${n}${n}${n}${n}${n}${n}${n}-1111-4111-8111-111111111111`,
+            cve_id: `CVE-2026-0${n.toUpperCase()}01`,
+            component: {
+                component_id: `${n}${n}${n}${n}${n}${n}${n}${n}-2222-4222-8222-222222222222`,
+                name: 'libmock',
+                version: '1.0.0',
+                purl: `pkg:npm/lib${n}@1.0.0`,
+            },
+            match_type: 'purl',
+            source: {
+                project_id: '33333333-3333-4333-8333-333333333333',
+                project_name: 'Mock Source Project',
+                statement_id: `${n}${n}${n}${n}${n}${n}${n}${n}-4444-4444-8444-444444444444`,
+                status: 'not_affected',
+                created_at: '2026-07-01T00:00:00Z',
+            },
+        });
+        const rowA = mk('a');
+        const rowB = mk('b');
+
+        // Hold every apply POST until the test releases the gate, so both rows
+        // are simultaneously in-flight when we assert.
+        let releaseApplies!: () => void;
+        const appliesGate = new Promise<void>((resolve) => {
+            releaseApplies = resolve;
+        });
+        await page.route('**/api/v1/projects/*/vex/suggestions/apply', async (route) => {
+            await appliesGate;
+            await route.fulfill({
+                status: 201,
+                contentType: 'application/json',
+                body: JSON.stringify({
+                    statement: {
+                        id: '55555555-5555-4555-8555-555555555555',
+                        project_id: '66666666-6666-4666-8666-666666666666',
+                        vulnerability_id: rowA.vulnerability_id,
+                        component_id: rowA.component.component_id,
+                        status: 'not_affected',
+                        created_by: 'tester',
+                        created_at: '2026-07-04T00:00:00Z',
+                        updated_at: '2026-07-04T00:00:00Z',
+                    },
+                    provenance: {
+                        source_statement_id: rowA.source.statement_id,
+                        source_project_id: rowA.source.project_id,
+                        applied_at: '2026-07-04T00:00:00Z',
+                    },
+                }),
+            });
+        });
+
+        // GET suggestions stays [A, B] for the whole test (registered after the
+        // /apply glob; the two paths are disjoint regardless).
+        await page.route('**/api/v1/projects/*/vex/suggestions', (route) =>
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ suggestions: [rowA, rowB] }),
+            })
+        );
+
+        await page.goto(`/en/projects/${projectId}/triage`);
+        await page.waitForLoadState('networkidle');
+
+        await expect(page.getByTestId('triage-page')).toBeVisible({ timeout: 10000 });
+        await expect(page.getByTestId('cross-project-suggestions')).toBeVisible();
+
+        const cardA = page.locator('[data-testid="cross-project-suggestion-card"][data-cve-id="CVE-2026-0A01"]');
+        const cardB = page.locator('[data-testid="cross-project-suggestion-card"][data-cve-id="CVE-2026-0B01"]');
+        await expect(cardA).toBeVisible();
+        await expect(cardB).toBeVisible();
+
+        const buttonA = cardA.getByTestId('cross-project-apply-button');
+        const buttonB = cardB.getByTestId('cross-project-apply-button');
+
+        // Start row A's apply (confirm-gated). Its POST is now held in-flight.
+        await buttonA.click();
+        await page.getByRole('dialog').getByRole('button', { name: 'Reuse decision' }).click();
+        await expect(buttonA).toBeDisabled();
+        // Row B is independent — still actionable.
+        await expect(buttonB).toBeEnabled();
+
+        // Start row B's apply while A is still in-flight.
+        await buttonB.click();
+        await page.getByRole('dialog').getByRole('button', { name: 'Reuse decision' }).click();
+
+        // The F387 contract: A must STILL be disabled (a single-key impl would
+        // have re-enabled it when B started), and B is disabled too.
+        await expect(buttonA).toBeDisabled();
+        await expect(buttonB).toBeDisabled();
+
+        // Release both held applies so the page settles cleanly.
+        releaseApplies();
+    });
+
     test('should display VEX status correctly for each statement', async ({ page, request }) => {
         const vexResponse = await request.get(`${API_BASE_URL}/api/v1/projects/${projectId}/vex`);
         const vexStatements = await vexResponse.json();

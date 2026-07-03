@@ -106,16 +106,23 @@ export function CrossProjectSuggestions({
   const t = useTranslations("Triage.CrossProject");
   const tStatus = useTranslations("Triage.VexStatus");
 
-  // Which row is mid-apply (disables its button + shows a spinner) and any
-  // inline notice per row. Both are keyed by suggestionKey so concurrent rows
-  // never bleed each other's state.
-  const [applyingKey, setApplyingKey] = useState<string | null>(null);
+  // Which rows are mid-apply (each disables its own button + shows a spinner)
+  // and any inline notice per row. Both are keyed by suggestionKey so
+  // concurrent rows never bleed each other's state. applyingKeys is a Set
+  // (not a single key) so starting an apply on row B does not clear row A's
+  // in-flight state — a single string would let A's button re-enable and be
+  // re-triggered, firing a duplicate apply POST (F387, issue #133).
+  const [applyingKeys, setApplyingKeys] = useState<Set<string>>(() => new Set());
   const [notices, setNotices] = useState<Record<string, RowNotice>>({});
 
   const handleApply = useCallback(
     async (s: VEXSuggestion) => {
       const key = suggestionKey(s);
-      setApplyingKey(key);
+      setApplyingKeys((prev) => {
+        const next = new Set(prev);
+        next.add(key);
+        return next;
+      });
       // Clear any stale notice from a previous attempt on this row.
       setNotices((prev) => {
         if (!(key in prev)) return prev;
@@ -148,7 +155,14 @@ export function CrossProjectSuggestions({
           }));
         }
       } finally {
-        setApplyingKey(null);
+        // Remove only THIS row's key so other in-flight rows keep their
+        // spinner/disabled state (F387).
+        setApplyingKeys((prev) => {
+          if (!prev.has(key)) return prev;
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
       }
     },
     [projectId, onApplied, t],
@@ -180,7 +194,7 @@ export function CrossProjectSuggestions({
           // keys. component_id disambiguates each fanned-out row. (Collapsing
           // the fan-out itself is deferred to M27 Phase 2 grouping.)
           const key = suggestionKey(s);
-          const applying = applyingKey === key;
+          const applying = applyingKeys.has(key);
           const notice = notices[key];
           return (
           <div
@@ -283,6 +297,12 @@ export function CrossProjectSuggestions({
                     <AlertDialogCancel>
                       {t("applyConfirmCancel")}
                     </AlertDialogCancel>
+                    {/*
+                      No disabled guard needed on the confirm action: the
+                      trigger above is disabled while this row is applying, so
+                      the dialog cannot be re-opened mid-flight — the per-row
+                      trigger disable (F387) is the complete re-trigger guard.
+                    */}
                     <AlertDialogAction onClick={() => handleApply(s)}>
                       {t("applyConfirmAction")}
                     </AlertDialogAction>
