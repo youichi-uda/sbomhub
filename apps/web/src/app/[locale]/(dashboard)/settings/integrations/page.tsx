@@ -235,12 +235,19 @@ export default function IntegrationsPage() {
                     // base URL embeds the customer subdomain — prefill it
                     // so the operator does not have to know/type it. Only
                     // an untouched field is prefilled, and switching away
-                    // clears only the exact prefilled constant, so an
-                    // operator-typed URL (e.g. a GHES root) is never
-                    // clobbered in either direction. The API accepts an
-                    // omitted base_url for github too (handler-side
-                    // default), but prefilling keeps the submitted value
-                    // visible in the form.
+                    // clears only the exact prefilled constant, so a
+                    // distinguishable operator-typed URL (e.g. a GHES
+                    // root) survives in both directions. (F373: a URL
+                    // typed to exactly match the default constant is
+                    // indistinguishable from the prefill by value, so
+                    // switch-away clears it — harmless, since selecting
+                    // github again restores the identical value.) The
+                    // API handler also defaults an empty github base_url
+                    // to this constant (F370), but that path serves
+                    // API-only clients: the form itself always requires
+                    // a non-empty base_url via the submit gating (F374),
+                    // and for github the prefill is what satisfies it,
+                    // keeping the submitted value visible in the form.
                     if (next === "github" && baseUrl === "") {
                       setBaseUrl("https://api.github.com");
                     } else if (next !== "github" && baseUrl === "https://api.github.com") {
@@ -352,6 +359,11 @@ export default function IntegrationsPage() {
               <Button
                 onClick={handleCreate}
                 disabled={
+                  // F374: base_url is deliberately required for github
+                  // too — the F370 prefill supplies it, so the submitted
+                  // value stays visible in the form. The handler-side
+                  // empty-github default is an API-only-client
+                  // affordance, not a form path.
                   saving || !name || !baseUrl || !apiToken ||
                   (trackerType === "github" && !defaultProjectKey)
                 }
