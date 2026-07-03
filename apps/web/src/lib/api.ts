@@ -383,7 +383,7 @@ export interface VEXSuggestionSource {
   created_at: string;
 }
 
-/** One cross-project VEX suggestion (read-only Phase 1 — no apply/reuse). */
+/** One cross-project VEX suggestion. A human reuses it into this project via api.vex.apply (F382, human-confirmed). */
 export interface VEXSuggestion {
   vulnerability_id: string;
   cve_id: string;

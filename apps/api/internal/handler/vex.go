@@ -183,7 +183,8 @@ func (h *VEXHandler) List(c echo.Context) error {
 // GetSuggestions returns cross-project VEX reuse suggestions for a project
 // (M26-A / F375, issue #130): approved vex_statements from OTHER projects
 // of the same tenant that match a vulnerability affecting this project's
-// components. Read-only Phase 1 — no apply action, so this is a plain GET.
+// components. This endpoint only reads, so it is a plain GET; reuse is the
+// separate human-confirmed POST .../vex/suggestions/apply (Apply, F381).
 //
 // Auth / tenant scope mirrors the project-scoped VEX List above: the
 // request already passed the auth → TenantTx chain, so ContextKeyTenantID

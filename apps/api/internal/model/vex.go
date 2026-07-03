@@ -129,10 +129,11 @@ type VEXSuggestionCandidate struct {
 }
 
 // VEXSuggestion is one cross-project VEX reuse suggestion returned by
-// GET /api/v1/projects/:id/vex/suggestions (read-only Phase 1). It tells
-// a reviewer "another project in your tenant already judged this
-// vulnerability/component — here is that judgement and where it came
-// from". No apply action is offered in Phase 1.
+// GET /api/v1/projects/:id/vex/suggestions. It tells a reviewer "another
+// project in your tenant already judged this vulnerability/component — here
+// is that judgement and where it came from". A human can 1-click reuse it
+// into this project via POST .../vex/suggestions/apply (F381); reuse is
+// always human-confirmed — auto-apply is forbidden.
 type VEXSuggestion struct {
 	VulnerabilityID uuid.UUID              `json:"vulnerability_id"`
 	CVEID           string                 `json:"cve_id"`

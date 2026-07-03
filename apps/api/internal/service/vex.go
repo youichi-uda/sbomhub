@@ -383,7 +383,9 @@ func (s *VEXService) ListByProject(ctx context.Context, projectID uuid.UUID) ([]
 // GetSuggestions returns cross-project VEX reuse suggestions for the
 // target project (M26-A / F375, issue #130): approved vex_statements from
 // OTHER projects of the same tenant that match a vulnerability affecting
-// this project's components. Read-only Phase 1 — no apply action.
+// this project's components. This is a read; a human reuses a suggestion
+// into this project via ApplySuggestion (F381), a separate human-confirmed
+// write.
 //
 // The repository owns the tenant boundary + the purl / vulnerability match
 // join (and it deliberately returns self-project candidates + a
