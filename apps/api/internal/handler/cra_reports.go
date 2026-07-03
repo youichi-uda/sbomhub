@@ -34,22 +34,21 @@ const (
 	MaxCRAReportsListOffset    = 10000
 )
 
-// AuditActionCRAReportDecided is the audit_logs.action emitted when a
-// human applies an approve / edit / reject decision to a cra_reports
-// row. Defined alongside the handler (rather than service/cra/) because
-// the decision flow lives entirely in the handler — the runner only
-// owns AI-generated / AI-disabled audit actions (see
+// The cra_report_decided audit action emitted by the Decide endpoint
+// below lives in internal/model/audit.go as
+// model.AuditActionCRAReportDecided. F371 (M25-B) lifted it out of
+// this file's former handler-local const together with the
+// meti_assessment_* trio in meti.go, in the dedicated audit-universe
+// wave the M24-3 F350 note here called for: the four verbs are
+// registered in service/audit.go GetAvailableActions() and pinned in
+// middleware/audit_test.go's F271 expectedEmit + allModelActionValues()
+// sets in the same change (F319/F322 discipline). The wire value is
+// unchanged (F276 stability), so audit_logs rows written before the
+// lift stay compatible, and the verb is now selectable in the UI
+// action filter (the pre-F371 registration gap is closed). The
+// decision flow itself still lives entirely in this handler — the
+// runner only owns AI-generated / AI-disabled audit actions (see
 // cra.AuditActionCRAReportAIGenerated / AuditActionCRAReportAIDisabled).
-//
-// TODO(audit): lift into internal/model/audit.go together with the
-// meti_assessment_* trio in meti.go, in a dedicated audit-universe
-// wave. Verified 2026-07-02 (M24-3 F350): lift REJECTED for now — see
-// the F350 note on the meti.go audit-action block (a proper lift
-// ripples into service/audit.go GetAvailableActions() and
-// middleware/audit_test.go's F271 parity sets). Same registration gap
-// as that trio: cra_report_decided audit rows land but are not
-// selectable in the UI action filter today.
-const AuditActionCRAReportDecided = "cra_report_decided"
 
 // CRAReportRunner is the subset of *cra.Runner the handler uses for
 // RunReport / Reanalyse delegation. Declared as an interface so
@@ -469,7 +468,7 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,
 		UserID:       uid,
-		Action:       AuditActionCRAReportDecided,
+		Action:       model.AuditActionCRAReportDecided,
 		ResourceType: model.ResourceCRAReport,
 		ResourceID:   &rid,
 		Details:      auditDetails,

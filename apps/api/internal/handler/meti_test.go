@@ -450,8 +450,8 @@ func TestMetiHandler_RefreshAssessment_HappyPath_UpsertsAndAudits(t *testing.T) 
 	if got := len(h.audit.entries); got != 1 {
 		t.Fatalf("expected 1 meti_assessment_refreshed audit entry, got %d", got)
 	}
-	if h.audit.entries[0].Action != AuditActionMetiAssessmentRefreshed {
-		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, AuditActionMetiAssessmentRefreshed)
+	if h.audit.entries[0].Action != model.AuditActionMETIAssessmentRefreshed {
+		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, model.AuditActionMETIAssessmentRefreshed)
 	}
 	if h.audit.entries[0].ResourceType != model.ResourceMETIAssessment {
 		t.Errorf("audit resource_type = %q, want %q", h.audit.entries[0].ResourceType, model.ResourceMETIAssessment)
@@ -489,8 +489,8 @@ func TestMetiHandler_OverrideAssessment_HappyPath_EmitsAudit(t *testing.T) {
 	if got := len(h.audit.entries); got != 1 {
 		t.Fatalf("expected 1 meti_assessment_overridden audit entry, got %d", got)
 	}
-	if h.audit.entries[0].Action != AuditActionMetiAssessmentOverridden {
-		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, AuditActionMetiAssessmentOverridden)
+	if h.audit.entries[0].Action != model.AuditActionMETIAssessmentOverridden {
+		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, model.AuditActionMETIAssessmentOverridden)
 	}
 }
 
@@ -1297,8 +1297,8 @@ func TestMetiHandler_ClearOverride_Success_F33(t *testing.T) {
 		t.Fatalf("F33: audit entry count = %d, want 1", got)
 	}
 	entry := h.audit.entries[0]
-	if entry.Action != AuditActionMetiAssessmentOverrideCleared {
-		t.Errorf("F33: audit action = %q, want %q", entry.Action, AuditActionMetiAssessmentOverrideCleared)
+	if entry.Action != model.AuditActionMETIAssessmentOverrideCleared {
+		t.Errorf("F33: audit action = %q, want %q", entry.Action, model.AuditActionMETIAssessmentOverrideCleared)
 	}
 	if entry.ResourceType != model.ResourceMETIAssessment {
 		t.Errorf("F33: audit resource_type = %q, want %q", entry.ResourceType, model.ResourceMETIAssessment)

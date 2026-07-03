@@ -598,6 +598,28 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.ActionTenantDeleted, Label: "Tenant Deleted", Category: "tenant"},
 		{Action: model.ActionLLMKeySet, Label: "LLM Key Set", Category: "llm"},
 		{Action: model.ActionLLMKeyRotated, Label: "LLM Key Rotated", Category: "llm"},
+
+		// F371 (M25-B, audit-universe lift): the three METI assessment
+		// verbs and the CRA report decided verb are handler-emitted
+		// domain audit rows (handler/meti.go /refresh, /override, and
+		// DELETE /override; handler/cra_reports.go Decide) that lived
+		// as handler-local underscore constants until F371 lifted them
+		// into the model/audit.go handler-emit section. Pre-F371 the
+		// four wire values landed in audit_logs but were not selectable
+		// in this UI action filter — the same silent forensic gap
+		// F319/F322 closed for the DiffWebhook / Tenant / LLMKey
+		// handler-side verbs. Categories mirror the F296 resource-
+		// dimension registration (model.ResourceMETIAssessment carries
+		// Category "meti" in GetAvailableResourceTypes) and the
+		// existing cra_report action family so the dropdown groups the
+		// new verbs alongside the domain family they belong to. The
+		// F271 direction-1 parity assertion is expanded in the same
+		// wave (audit_test.go F371 expectedEmit additions) so a future
+		// removal from either side trips CI.
+		{Action: model.AuditActionMETIAssessmentRefreshed, Label: "METI Assessment Refreshed", Category: "meti"},
+		{Action: model.AuditActionMETIAssessmentOverridden, Label: "METI Assessment Overridden", Category: "meti"},
+		{Action: model.AuditActionMETIAssessmentOverrideCleared, Label: "METI Assessment Override Cleared", Category: "meti"},
+		{Action: model.AuditActionCRAReportDecided, Label: "CRA Report Decided", Category: "cra_report"},
 	}
 }
 

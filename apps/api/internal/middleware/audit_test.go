@@ -2555,7 +2555,10 @@ func TestPathHasChildResource_SegmentExact(t *testing.T) {
 // handler/sbom.go auto-fire path are in expectedEmit, and post-F322
 // (M21 Phase D R2) the three ActionTenant* symbols from
 // handler/webhook_clerk.go plus two ActionLLMKey* symbols from
-// handler/settings_llm.go are also included. These are audit_logs
+// handler/settings_llm.go are also included, and post-F371 (M25-B)
+// the three AuditActionMETIAssessment* symbols from handler/meti.go
+// plus AuditActionCRAReportDecided from handler/cra_reports.go join
+// them. These are audit_logs
 // writes that bypass the middleware classifier — the handler code
 // calls into the audit repository directly with a model.Action*
 // symbol — but F271 direction-1 assertion pins them against
@@ -2582,7 +2585,10 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 	// apps/api/internal/handler/ + apps/api/internal/service/ for
 	// post-classifier emit sites (F319 added the four
 	// AuditActionDiffWebhook* handler / service symbols; F322 added
-	// the three ActionTenant* and two ActionLLMKey* handler symbols).
+	// the three ActionTenant* and two ActionLLMKey* handler symbols;
+	// F371 added the three AuditActionMETIAssessment* symbols from
+	// handler/meti.go plus AuditActionCRAReportDecided from
+	// handler/cra_reports.go).
 	//
 	// F276 (M18-1 Phase D R3 Codex adjunct v2 fix): the map keys are
 	// runtime string values, BUT the source references on the RHS
@@ -2773,6 +2779,24 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.ActionTenantDeleted: true, // F322 handler-side (webhook_clerk.go)
 		model.ActionLLMKeySet:     true, // F322 handler-side (settings_llm.go)
 		model.ActionLLMKeyRotated: true, // F322 handler-side (settings_llm.go)
+		// F371 (M25-B, audit-universe lift): the three METI assessment
+		// verbs (handler/meti.go /refresh, /override, and DELETE
+		// /override) and the CRA report decided verb
+		// (handler/cra_reports.go Decide) are direct h.audit.Log
+		// handler emits — the same handler-side pattern as the F319 /
+		// F322 symbols above. They lived as handler-local underscore
+		// constants (outside the model.* symbol universe this test
+		// scans) until F371 lifted them into the model/audit.go
+		// handler-emit section and registered them in
+		// GetAvailableActions() in lockstep, closing the registration
+		// gap the pre-F371 meti.go / cra_reports.go TODO(audit) markers
+		// documented (audit rows landed but were not selectable in the
+		// UI action filter). Wire values are unchanged (F276
+		// stability), so pre-lift audit_logs rows remain filterable.
+		model.AuditActionMETIAssessmentRefreshed:       true, // F371 handler-side (meti.go /refresh)
+		model.AuditActionMETIAssessmentOverridden:      true, // F371 handler-side (meti.go /override)
+		model.AuditActionMETIAssessmentOverrideCleared: true, // F371 handler-side (meti.go DELETE /override)
+		model.AuditActionCRAReportDecided:              true, // F371 handler-side (cra_reports.go Decide)
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
@@ -3021,6 +3045,16 @@ func allModelActionValues() map[string]bool {
 		model.AuditActionDiffWebhookFired:     true,
 		model.AuditActionDiffWebhookFailed:    true,
 		model.AuditActionDiffWebhookAutoFired: true,
+		// F371 (M25-B): handler-emitted METI assessment + CRA report
+		// decided constants, lifted from handler/meti.go and
+		// handler/cra_reports.go into the model/audit.go handler-emit
+		// section. GetAvailableActions() references these symbols
+		// directly (F371 sibling registration in service/audit.go), so
+		// this list must include them for direction-2 to pass.
+		model.AuditActionMETIAssessmentRefreshed:       true,
+		model.AuditActionMETIAssessmentOverridden:      true,
+		model.AuditActionMETIAssessmentOverrideCleared: true,
+		model.AuditActionCRAReportDecided:              true,
 	}
 }
 

@@ -379,8 +379,8 @@ func TestCRAReportsHandler_Decide_HappyPath_EmitsDecidedAudit(t *testing.T) {
 	if got := len(h.audit.entries); got != 1 {
 		t.Fatalf("expected 1 cra_report_decided audit entry, got %d", got)
 	}
-	if h.audit.entries[0].Action != AuditActionCRAReportDecided {
-		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, AuditActionCRAReportDecided)
+	if h.audit.entries[0].Action != model.AuditActionCRAReportDecided {
+		t.Errorf("audit action = %q, want %q", h.audit.entries[0].Action, model.AuditActionCRAReportDecided)
 	}
 }
 

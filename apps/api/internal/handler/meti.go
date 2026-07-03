@@ -86,61 +86,24 @@ const (
 	MaxMetiAssessmentsListOffset    = 10000
 )
 
-// Audit actions emitted by the METI handler. All three verbs are
-// product-specific (no existing model.Action* constant covers them)
-// so they live alongside the handler — same rationale as
-// AuditActionCRAReportDecided in cra_reports.go.
-//
-// TODO(audit): lift into internal/model/audit.go together with
-// AuditActionCRAReportDecided in a dedicated audit-universe wave, not
-// opportunistically. Verified 2026-07-02 (M24-3 F350): the lift was
-// considered and REJECTED for now because it cannot be done in
-// isolation — allModelActionValues() in middleware/audit_test.go
-// documents itself as the hand-maintained companion of the
-// model/audit.go action-constant block, and the F319/F322 discipline
-// requires handler-emitted model-level action symbols to be registered
-// in service/audit.go GetAvailableActions() plus the F271 expectedEmit
-// set — so a proper lift moves model/audit.go, service/audit.go AND
-// middleware/audit_test.go in one change. Related registration gap,
-// also deferred to that wave: these three wire values land in
-// audit_logs but are not selectable in the GetAvailableActions() UI
-// action filter today.
-const (
-	// AuditActionMetiAssessmentRefreshed is emitted by /refresh after the
-	// evaluator's 32-criterion fan-out is persisted.
-	AuditActionMetiAssessmentRefreshed = "meti_assessment_refreshed"
-
-	// AuditActionMetiAssessmentOverridden is emitted by /override when the
-	// operator's manual verdict is applied. Clear-then-re-override goes
-	// through the DELETE override handler path
-	// (AuditActionMetiAssessmentOverrideCleared) so each transition
-	// emits its own audit_logs row.
-	AuditActionMetiAssessmentOverridden = "meti_assessment_overridden"
-
-	// AuditActionMetiAssessmentOverrideCleared is emitted by DELETE
-	// /override when the operator clears a prior manual override (M3
-	// Codex review #F33 — without this verb, an erroneous override is
-	// a one-way trip that continues to win in dashboard + Evidence Pack
-	// output). The audit row carries the prior override_status, the
-	// prior override_by, and the operator-supplied clear note in
-	// details so an auditor can reconstruct who corrected what.
-	AuditActionMetiAssessmentOverrideCleared = "meti_assessment_override_cleared"
-
-	// F296 (M20-1 Phase D R1, anti-pattern 58 3-axis full coverage —
-	// handler-side ResourceType* orphan closure): the pre-F296 package-
-	// local `ResourceTypeMetiAssessment = "meti_assessment"` constant
-	// lived outside the model.Resource* universe the F281 (M19-3)
-	// direction-1/direction-2 parity meta-test scans, so a rename /
-	// typo at any of the three /refresh, /override, /override-cleared
-	// emit sites in this file was compile-time invisible to the parity
-	// contract. F296 promotes the constant into model/audit.go as
-	// model.ResourceMETIAssessment (single source of truth), removes
-	// this package-local definition, and swaps the three emit sites
-	// below to reference the model symbol so the F281 direction-1
-	// registration check (expectedEmit expansion) enforces parity at
-	// CI time. See model/audit.go F296 head comment for the full
-	// 3-axis full-coverage rationale.
-)
+// Audit actions for the three METI-handler domain verbs
+// (meti_assessment_refreshed / meti_assessment_overridden /
+// meti_assessment_override_cleared) live in internal/model/audit.go as
+// model.AuditActionMETIAssessment{Refreshed,Overridden,OverrideCleared}.
+// F371 (M25-B) lifted them out of this file's former handler-local
+// const block in the dedicated audit-universe wave the M24-3 F350 note
+// here called for: per the F319/F322 discipline, handler-emitted
+// model-level action symbols must be registered in service/audit.go
+// GetAvailableActions() plus the F271 expectedEmit and
+// allModelActionValues() sets in middleware/audit_test.go, and F371
+// moved all five surfaces in one change (the same wave lifted
+// AuditActionCRAReportDecided in cra_reports.go). The wire values are
+// unchanged, so audit_logs rows written before the lift stay
+// compatible (F276 wire-value stability), and the three verbs are now
+// selectable in the UI action filter (the pre-F371 registration gap is
+// closed). The sibling resource-dimension constant was lifted earlier
+// by F296 (model.ResourceMETIAssessment — see the F296 head comment in
+// model/audit.go for the 3-axis full-coverage rationale).
 
 // MetiAssessmentStore is the subset of *repository.MetiAssessmentsRepository
 // the handler uses. Declared as an interface so meti_test.go can substitute
@@ -504,7 +467,7 @@ func (h *MetiHandler) RefreshAssessment(c echo.Context) error {
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,
 		UserID:       uid,
-		Action:       AuditActionMetiAssessmentRefreshed,
+		Action:       model.AuditActionMETIAssessmentRefreshed,
 		ResourceType: model.ResourceMETIAssessment,
 		ResourceID:   &pid,
 		Details:      details,
@@ -709,7 +672,7 @@ func (h *MetiHandler) OverrideAssessment(c echo.Context) error {
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,
 		UserID:       uid,
-		Action:       AuditActionMetiAssessmentOverridden,
+		Action:       model.AuditActionMETIAssessmentOverridden,
 		ResourceType: model.ResourceMETIAssessment,
 		ResourceID:   &resourceID,
 		Details:      auditDetails,
@@ -913,7 +876,7 @@ func (h *MetiHandler) ClearOverride(c echo.Context) error {
 	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
 		TenantID:     &tenantID,
 		UserID:       uid,
-		Action:       AuditActionMetiAssessmentOverrideCleared,
+		Action:       model.AuditActionMETIAssessmentOverrideCleared,
 		ResourceType: model.ResourceMETIAssessment,
 		ResourceID:   &resourceID,
 		Details:      auditDetails,

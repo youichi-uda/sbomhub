@@ -322,6 +322,58 @@ const (
 	ActionResourceDeleted      = "resource.deleted"
 )
 
+// Handler-emitted domain audit actions (F371, M25-B). Every verb in
+// the block above is a dotted middleware-classifier output; the four
+// constants below use underscore wire values because they are written
+// by direct handler audit.Log calls (handler/meti.go /refresh,
+// /override, DELETE /override; handler/cra_reports.go Decide) and
+// shipped as handler-local constants before the lift — the strings are
+// already persisted in audit_logs rows, so F371 preserves the wire
+// values verbatim (F276 wire-value stability) and only moves the
+// symbols.
+//
+// Placement: the DiffWebhook precedent keeps its handler-emitted
+// AuditAction* constants in the domain model file
+// (model/diff_webhook.go), but no meti / cra domain model file exists
+// in this package (the MetiAssessment / CRAReport structs live in
+// internal/repository), so this dedicated handler-emit section is the
+// F371 equivalent. Per the F319/F322 discipline the four symbols are
+// registered in service/audit.go GetAvailableActions() and pinned in
+// the F271 expectedEmit + allModelActionValues() sets
+// (middleware/audit_test.go) in the same change. The sibling
+// resource-dimension constant for the METI trio was lifted earlier by
+// F296 (ResourceMETIAssessment, below).
+const (
+	// AuditActionMETIAssessmentRefreshed is emitted by the METI
+	// /refresh handler (handler/meti.go) after the evaluator's
+	// 32-criterion fan-out is persisted.
+	AuditActionMETIAssessmentRefreshed = "meti_assessment_refreshed"
+
+	// AuditActionMETIAssessmentOverridden is emitted by the METI
+	// /override handler when the operator's manual verdict is applied.
+	// Clear-then-re-override goes through the DELETE override handler
+	// path (AuditActionMETIAssessmentOverrideCleared) so each
+	// transition emits its own audit_logs row.
+	AuditActionMETIAssessmentOverridden = "meti_assessment_overridden"
+
+	// AuditActionMETIAssessmentOverrideCleared is emitted by the METI
+	// DELETE /override handler when the operator clears a prior manual
+	// override (M3 Codex review #F33 — without this verb, an erroneous
+	// override is a one-way trip that continues to win in dashboard +
+	// Evidence Pack output). The audit row carries the prior
+	// override_status, the prior override_by, and the operator-supplied
+	// clear note in details so an auditor can reconstruct who corrected
+	// what.
+	AuditActionMETIAssessmentOverrideCleared = "meti_assessment_override_cleared"
+
+	// AuditActionCRAReportDecided is emitted when a human applies an
+	// approve / edit / reject decision to a cra_reports row
+	// (handler/cra_reports.go Decide). The decision flow lives entirely
+	// in the handler — the cra.Runner only owns the AI-generated /
+	// AI-disabled audit actions (see service/cra).
+	AuditActionCRAReportDecided = "cra_report_decided"
+)
+
 // Resource type constants
 const (
 	ResourceUser         = "user"
