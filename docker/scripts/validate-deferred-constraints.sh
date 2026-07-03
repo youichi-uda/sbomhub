@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
-# validate-deferred-constraints.sh — VALIDATE the seven 045 composite-FK
-# constraints that were installed with NOT VALID (M8 F157 #67 → M10-1 #70).
+# validate-deferred-constraints.sh — VALIDATE the eight deferred NOT VALID
+# constraints: the seven 045 composite FKs (M8 F157 #67 → M10-1 #70) plus
+# the 050 issue_tracker_connections tracker_type CHECK (M25-A F368 #128).
 #
 # Background:
 #   apps/api/migrations/045_composite_fk_extension.up.sql installs seven
@@ -10,15 +11,21 @@
 #   FORCE ROW LEVEL SECURITY, and the matching RLS policies (012/013/014/015/
 #   021) call current_setting('app.current_tenant_id') without missing_ok=true.
 #   With no GUC set during migrate, the validation scan crashed the migrator.
+#   apps/api/migrations/050_issue_tracker_type_check.up.sql later added the
+#   issue_tracker_connections tracker_type CHECK registry with the same
+#   NOT VALID deferral for the same reason (the 015 connection policy is
+#   equally missing_ok-less and the table is FORCE RLS since 023).
 #
 #   The constraints already enforce on every new write, and Step 3 of 045 ran
 #   a DO $$ block that RAISEs on any pre-existing tenant_id mismatch, so the
-#   existing data was effectively pre-validated when 045 ran. This script
-#   flips the pg_constraint.convalidated flag from f → t by wrapping the
-#   seven VALIDATE statements in a single atomic transaction that mirrors
-#   migration 045's Steps 1 and 5: temporarily NO FORCE + DISABLE RLS on the
-#   child tables and the projects parent, VALIDATE the constraints under a
-#   full-table scan, then restore each table's original RLS posture.
+#   045 data was effectively pre-validated when 045 ran (050's registry was
+#   never DB-enforced before, but the app layer has only ever written
+#   registry values). This script flips the pg_constraint.convalidated flag
+#   from f → t by wrapping the eight VALIDATE statements in a single atomic
+#   transaction that mirrors migration 045's Steps 1 and 5: temporarily
+#   NO FORCE + DISABLE RLS on the constrained tables and the projects parent,
+#   VALIDATE the constraints under a full-table scan, then restore each
+#   table's original RLS posture.
 #
 #   The per-tenant SET LOCAL app.current_tenant_id approach was considered
 #   and rejected: (a) for `public_links` (RLS removed by 030) the FK probe
@@ -43,13 +50,13 @@
 #
 # Env contract:
 #   MIGRATE_DATABASE_URL   Postgres DSN for the migrator role (DDL-capable,
-#                          NOT BYPASSRLS, owner of the eight tables). Required
+#                          NOT BYPASSRLS, owner of the nine tables). Required
 #                          unless .env at repo root provides it. Passed to
 #                          psql via env / connection URI, never argv-secret.
 #   PSQL                   psql binary to use (default: psql in PATH).
 #
 # Exit code:
-#   0   all seven constraints are convalidated=true after the run
+#   0   all eight constraints are convalidated=true after the run
 #   1   one or more constraints stayed convalidated=false (data integrity
 #       violation detected during VALIDATE; investigate, do NOT auto-DELETE)
 #   2   prerequisite missing (psql not in PATH, MIGRATE_DATABASE_URL unset,
@@ -93,7 +100,8 @@ if [ -z "$DB_URL" ]; then
 fi
 
 # --- constraint + table inventory ------------------------------------------
-# Source: apps/api/migrations/045_composite_fk_extension.up.sql, Step 6.
+# Source: apps/api/migrations/045_composite_fk_extension.up.sql, Step 6, plus
+# the 050 tracker_type CHECK (M25-A F368).
 # Format: whitespace-separated "<table>:<constraint>" pairs. POSIX-sh's
 # `for x in $list` performs unquoted word splitting on IFS, the same idiom
 # 045 itself uses for static table lists.
@@ -105,11 +113,14 @@ notification_settings:notification_settings_tenant_project_fk
 notification_logs:notification_logs_tenant_project_fk
 public_links:public_links_tenant_project_fk
 vulnerability_tickets:vulnerability_tickets_tenant_project_fk
+issue_tracker_connections:issue_tracker_connections_tracker_type_check
 "
 
-# RLS posture must be lifted on both the seven child tables AND the projects
-# parent (the FK probe against projects is otherwise RLS-filtered to nothing).
-TABLES_TO_TOGGLE="projects sboms vex_statements license_policies notification_settings notification_logs public_links vulnerability_tickets"
+# RLS posture must be lifted on the eight constrained tables AND the projects
+# parent (the FK probe against projects is otherwise RLS-filtered to nothing;
+# the 050 CHECK's validation scan of issue_tracker_connections is likewise
+# FORCE-RLS-filtered/crashed without a tenant GUC).
+TABLES_TO_TOGGLE="projects sboms vex_statements license_policies notification_settings notification_logs public_links vulnerability_tickets issue_tracker_connections"
 
 # --- DSN → PG* env split (M10-1 #70 Codex F159 + F162) ----------------------
 # Passing the full libpq URI as a positional psql argument exposes the
@@ -330,7 +341,8 @@ WHERE conname IN (
     'notification_settings_tenant_project_fk',
     'notification_logs_tenant_project_fk',
     'public_links_tenant_project_fk',
-    'vulnerability_tickets_tenant_project_fk'
+    'vulnerability_tickets_tenant_project_fk',
+    'issue_tracker_connections_tracker_type_check'
 )
 ORDER BY conname;
 ")" || {
@@ -338,7 +350,7 @@ ORDER BY conname;
     exit 2
 }
 if [ -z "$INITIAL_STATE" ]; then
-    echo "[validate-deferred] FATAL: none of the seven constraints exist; migration 045 not applied?" >&2
+    echo "[validate-deferred] FATAL: none of the eight constraints exist; migrations 045/050 not applied?" >&2
     exit 2
 fi
 printf '%s\n' "$INITIAL_STATE" | awk '{ print "[validate-deferred]   " $0 }'
@@ -348,7 +360,7 @@ printf '%s\n' "$INITIAL_STATE" | awk '{ print "[validate-deferred]   " $0 }'
 NEED_VALIDATE=0
 printf '%s\n' "$INITIAL_STATE" | grep -q '=f$' && NEED_VALIDATE=1
 if [ "$NEED_VALIDATE" -eq 0 ]; then
-    echo "[validate-deferred] All 7 constraints are already convalidated=true; nothing to do."
+    echo "[validate-deferred] All 8 constraints are already convalidated=true; nothing to do."
     exit 0
 fi
 
@@ -368,7 +380,7 @@ WHERE relkind = 'r'
   AND relname IN (
     'projects', 'sboms', 'vex_statements', 'license_policies',
     'notification_settings', 'notification_logs', 'public_links',
-    'vulnerability_tickets'
+    'vulnerability_tickets', 'issue_tracker_connections'
   )
 ORDER BY relname;
 ")" || {
@@ -376,7 +388,7 @@ ORDER BY relname;
     exit 2
 }
 if [ -z "$RLS_SNAPSHOT" ]; then
-    echo "[validate-deferred] FATAL: one of the eight tables is missing from pg_class" >&2
+    echo "[validate-deferred] FATAL: one of the nine tables is missing from pg_class" >&2
     exit 2
 fi
 printf '%s\n' "$RLS_SNAPSHOT" | awk -F'|' '{ printf "[validate-deferred]   %-22s enable=%s force=%s\n", $1, $2, $3 }'
@@ -438,12 +450,19 @@ if [ "$PSQL_RC" -ne 0 ]; then
     echo "[validate-deferred] psql output (last 80 lines):" >&2
     tail -80 "$PSQL_OUT" | awk '{ print "[validate-deferred]   " $0 }' >&2
 
-    # Surface offending FK rows so the operator can fix data without
+    # Surface offending rows so the operator can fix data without
     # auto-DELETE. The first ERROR line typically includes the exact
     # constraint name; pair it with the parent-orphan inspect query.
+    # Wordings matched (verified empirically on PostgreSQL 15, F368):
+    #   - FK VALIDATE failure:    ... violates foreign key constraint "NAME"
+    #   - CHECK VALIDATE failure: check constraint "NAME" of relation
+    #     "TABLE" is violated by some row
+    #   - CHECK write failure:    new row for relation "TABLE" violates
+    #     check constraint "NAME" (not emitted by VALIDATE, but matched so a
+    #     future in-transaction write failure is classified too)
     OFFENDING_CONS="$(awk '
-        /violates foreign key constraint/ {
-            match($0, /"[a-z_]+_tenant_project_fk"/)
+        /violates foreign key constraint|violates check constraint|is violated by some row/ {
+            match($0, /"[a-z_]+_tenant_project_fk"|"[a-z_]+_tracker_type_check"/)
             if (RSTART > 0) {
                 s = substr($0, RSTART+1, RLENGTH-2)
                 if (!(s in seen)) { seen[s]=1; print s }
@@ -453,9 +472,11 @@ if [ "$PSQL_RC" -ne 0 ]; then
     if [ -n "$OFFENDING_CONS" ]; then
         echo "[validate-deferred] Constraint(s) failing VALIDATE:" >&2
         printf '%s\n' "$OFFENDING_CONS" | awk '{ print "[validate-deferred]   " $0 }' >&2
-        echo "[validate-deferred] Inspect cross-tenant orphan rows via the queries in" >&2
-        echo "[validate-deferred]   apps/api/migrations/045_composite_fk_extension.up.sql Step 3," >&2
-        echo "[validate-deferred] and the operator runbook docs/operations/validate-deferred-constraints.md." >&2
+        echo "[validate-deferred] For *_tenant_project_fk: inspect cross-tenant orphan rows via the queries in" >&2
+        echo "[validate-deferred]   apps/api/migrations/045_composite_fk_extension.up.sql Step 3." >&2
+        echo "[validate-deferred] For issue_tracker_connections_tracker_type_check: inspect out-of-registry rows via" >&2
+        echo "[validate-deferred]   SELECT id, tenant_id, tracker_type FROM issue_tracker_connections WHERE tracker_type NOT IN ('jira', 'backlog', 'github');" >&2
+        echo "[validate-deferred] See the operator runbook docs/operations/validate-deferred-constraints.md." >&2
     fi
     exit 1
 fi
@@ -473,7 +494,8 @@ WHERE conname IN (
     'notification_settings_tenant_project_fk',
     'notification_logs_tenant_project_fk',
     'public_links_tenant_project_fk',
-    'vulnerability_tickets_tenant_project_fk'
+    'vulnerability_tickets_tenant_project_fk',
+    'issue_tracker_connections_tracker_type_check'
 )
 ORDER BY conname;
 ")" || {
@@ -493,7 +515,7 @@ WHERE relkind = 'r'
   AND relname IN (
     'projects', 'sboms', 'vex_statements', 'license_policies',
     'notification_settings', 'notification_logs', 'public_links',
-    'vulnerability_tickets'
+    'vulnerability_tickets', 'issue_tracker_connections'
   )
 ORDER BY relname;
 ")"
@@ -538,12 +560,14 @@ echo "[validate-deferred]   constraints still NOT VALID:    ${FAILED}"
 if [ "$FAILED" -gt 0 ]; then
     echo ""
     echo "[validate-deferred] FAIL: ${FAILED} constraint(s) remain NOT VALID after this run." >&2
-    echo "[validate-deferred]       Cross-tenant integrity violation in existing data is the likely cause." >&2
+    echo "[validate-deferred]       Likely causes: cross-tenant integrity violation in existing data" >&2
+    echo "[validate-deferred]       (*_tenant_project_fk) or an out-of-registry tracker_type row" >&2
+    echo "[validate-deferred]       (issue_tracker_connections_tracker_type_check)." >&2
     echo "[validate-deferred]       Do NOT auto-DELETE; surface the offending rows via the inspect query in" >&2
     echo "[validate-deferred]       apps/api/migrations/045_composite_fk_extension.up.sql Step 3," >&2
     echo "[validate-deferred]       or see docs/operations/validate-deferred-constraints.md." >&2
     exit 1
 fi
 
-echo "[validate-deferred] OK: all 7 deferred constraints are convalidated=true."
+echo "[validate-deferred] OK: all 8 deferred constraints are convalidated=true."
 exit 0

@@ -1,4 +1,4 @@
-# Validate deferred composite-FK constraints (migration 045)
+# Validate deferred constraints (migrations 045 + 050)
 
 > Operator runbook for `docker/scripts/validate-deferred-constraints.sh`.
 > Japanese translation: [`validate-deferred-constraints.ja.md`](./validate-deferred-constraints.ja.md).
@@ -8,7 +8,10 @@
 Migration
 [`apps/api/migrations/045_composite_fk_extension.up.sql`](../../apps/api/migrations/045_composite_fk_extension.up.sql)
 installs seven composite `(tenant_id, project_id) → projects(tenant_id, id)`
-foreign-key constraints on legacy project-child tables:
+foreign-key constraints on legacy project-child tables, and migration
+[`apps/api/migrations/050_issue_tracker_type_check.up.sql`](../../apps/api/migrations/050_issue_tracker_type_check.up.sql)
+adds a `tracker_type` CHECK registry (M25-A F368 extended this runbook to
+cover it):
 
 | Table | Constraint |
 | --- | --- |
@@ -19,11 +22,13 @@ foreign-key constraints on legacy project-child tables:
 | `notification_logs` | `notification_logs_tenant_project_fk` |
 | `public_links` | `public_links_tenant_project_fk` |
 | `vulnerability_tickets` | `vulnerability_tickets_tenant_project_fk` |
+| `issue_tracker_connections` | `issue_tracker_connections_tracker_type_check` |
 
 Each constraint is installed with `NOT VALID` (M8 F157, commit
-[`9367702`](https://github.com/youichi-uda/sbomhub/commit/9367702)). FK
-validation during `migrate apply` would otherwise scan rows under FORCE ROW
-LEVEL SECURITY, and the matching RLS policies (012/013/014/015/021) call
+[`9367702`](https://github.com/youichi-uda/sbomhub/commit/9367702); 050
+follows the same precedent). Constraint validation during `migrate apply`
+would otherwise scan rows under FORCE ROW LEVEL SECURITY, and the matching
+RLS policies (012/013/014/015/021) call
 `current_setting('app.current_tenant_id')` without `missing_ok=true`. With no
 GUC set during migrate, the validation scan crashed the migrator (see
 [F156](https://github.com/youichi-uda/sbomhub/commit/047a21e) for the wider
@@ -32,13 +37,15 @@ context).
 `NOT VALID` skips the initial whole-table scan while still enforcing the
 constraint on every subsequent write. Step 3 of migration 045 runs a
 `DO $$` block that `RAISE`s on any pre-existing `tenant_id` mismatch, so the
-existing data was effectively pre-validated at install time. The flag
-`pg_constraint.convalidated` is the only thing left to flip from `f` → `t`.
+existing FK data was effectively pre-validated at install time (050's
+registry was never DB-enforced before, but the application has only ever
+written registry values). The flag `pg_constraint.convalidated` is the only
+thing left to flip from `f` → `t`.
 
 `docker/scripts/validate-deferred-constraints.sh` performs that flip in a
-single atomic transaction that mirrors Steps 1 and 5 of the migration:
-briefly `NO FORCE` + `DISABLE` RLS on the seven child tables and on the
-`projects` parent, `VALIDATE` the seven constraints under a full-table
+single atomic transaction that mirrors Steps 1 and 5 of migration 045:
+briefly `NO FORCE` + `DISABLE` RLS on the eight constrained tables and on
+the `projects` parent, `VALIDATE` the eight constraints under a full-table
 scan, then restore the snapshotted RLS posture.
 
 > **Why not a per-tenant `SET LOCAL app.current_tenant_id` loop?**
@@ -53,9 +60,10 @@ scan, then restore the snapshotted RLS posture.
 
 ## 2. When to run
 
-- **After the first deploy that includes migration 045.** Validation has
-  been deferred since M8 F157; new installs will see `convalidated=false`
-  on all seven constraints until this script has been run once.
+- **After the first deploy that includes migration 045 (and 050).**
+  Validation has been deferred since M8 F157; new installs will see
+  `convalidated=false` on all eight constraints until this script has
+  been run once.
 - **Periodically (e.g. monthly maintenance window).** The script is
   idempotent — VALIDATE on an already-validated constraint is a metadata
   no-op in PostgreSQL — so a calendar-driven re-run is cheap and keeps
@@ -81,10 +89,11 @@ satisfied. Approximate per-table cost:
   small
 
 As a rule of thumb the script completes in **under one minute** for an
-install with `<100k` rows across the seven tables, and scales roughly
-linearly with the largest table's row count. The DDL transaction holds
-`ACCESS EXCLUSIVE` on all eight tables (the seven child tables plus
-`projects`), so plan to run it during a maintenance window if your
+install with `<100k` rows across the constrained tables, and scales roughly
+linearly with the largest table's row count (`issue_tracker_connections`
+is operator-configuration data and is negligible). The DDL transaction
+holds `ACCESS EXCLUSIVE` on all nine tables (the eight constrained tables
+plus `projects`), so plan to run it during a maintenance window if your
 `notification_logs` retention is multi-million rows.
 
 ## 4. Invocation
@@ -99,7 +108,7 @@ export MIGRATE_DATABASE_URL="postgres://sbomhub_migrator:PASSWORD@localhost:5432
 ```
 
 The DSN must point at the **migrator** role (DDL-capable, `NOT BYPASSRLS`,
-owner of the eight tables — `sbomhub_migrator` on the Enterprise compose).
+owner of the nine tables — `sbomhub_migrator` on the Enterprise compose).
 The application runtime role (`sbomhub_app`, `NOSUPERUSER`,
 `NOBYPASSRLS`) does **not** have DDL privileges and will fail at the
 first `ALTER TABLE`.
@@ -138,23 +147,25 @@ header comment).
 
 | Code | Meaning |
 | --- | --- |
-| 0 | All seven constraints are `convalidated=true` after the run. |
-| 1 | One or more constraints stayed `convalidated=false`. The script prints the offending constraint name(s) and the `(tenant_id, project_id)` pair from the first failing FK probe. See §6 below. |
-| 2 | Prerequisite missing: `psql` not in PATH, `MIGRATE_DATABASE_URL` unset, DB unreachable, role lacks DDL privilege, or one of the eight tables is absent. |
+| 0 | All eight constraints are `convalidated=true` after the run. |
+| 1 | One or more constraints stayed `convalidated=false`. The script prints the offending constraint name(s) and PostgreSQL's `DETAIL:` from the first failing probe. See §6 below. |
+| 2 | Prerequisite missing: `psql` not in PATH, `MIGRATE_DATABASE_URL` unset, DB unreachable, role lacks DDL privilege, or one of the nine tables is absent. |
 
 ## 6. What to do on failure (`exit 1`)
 
-A `convalidated=false` result after this script implies a **real**
-cross-tenant integrity violation in existing data — the constraint
-predicate is correctly identifying a row whose `(tenant_id, project_id)`
-pair does not match a `projects` row of the same tenant.
+A `convalidated=false` result after this script implies a **real** data
+problem in existing rows: for the seven `*_tenant_project_fk` constraints,
+a cross-tenant integrity violation — a row whose `(tenant_id, project_id)`
+pair does not match a `projects` row of the same tenant; for
+`issue_tracker_connections_tracker_type_check`, a connection row whose
+`tracker_type` is outside the closed registry (`jira`, `backlog`,
+`github`).
 
 The script prints:
 
 - the constraint name(s) that failed `VALIDATE`
-- the offending `(tenant_id, project_id)` pair from PostgreSQL's
-  `DETAIL:` line (the first violation only — PG aborts the scan at the
-  first failure)
+- PostgreSQL's `DETAIL:` line for the first violation only — PG aborts
+  the scan at the first failure
 
 **Do not auto-DELETE.** The right next step is to inspect the offending
 rows manually using the queries embedded in Step 3 of migration 045
@@ -172,9 +183,18 @@ WHERE s.tenant_id IS NULL
    OR p.tenant_id <> s.tenant_id;
 ```
 
+For the `tracker_type` CHECK, list out-of-registry connection rows with:
+
+```sql
+SELECT id, tenant_id, tracker_type
+FROM issue_tracker_connections
+WHERE tracker_type NOT IN ('jira', 'backlog', 'github');
+```
+
 Decide on the appropriate remediation with the data owner (typically:
-restore the missing parent project, or reassign the child row to the
-correct tenant). Then re-run this script.
+restore the missing parent project, reassign the child row to the correct
+tenant, or correct/remove the out-of-registry connection row). Then re-run
+this script.
 
 The transaction the script runs is **atomic**: if `VALIDATE` raises, the
 RLS-lifted state is rolled back automatically. No table is left in a
@@ -183,6 +203,7 @@ permissive RLS posture.
 ## 7. Cross-references
 
 - Migration source: [`apps/api/migrations/045_composite_fk_extension.up.sql`](../../apps/api/migrations/045_composite_fk_extension.up.sql)
+- CHECK registry source: [`apps/api/migrations/050_issue_tracker_type_check.up.sql`](../../apps/api/migrations/050_issue_tracker_type_check.up.sql)
 - M8 F157 fix commit: [`9367702`](https://github.com/youichi-uda/sbomhub/commit/9367702)
 - M10-1 issue: [#70](https://github.com/youichi-uda/sbomhub/issues/70)
 - RLS posture reference: migration 023 (FORCE RLS install), migration 030 (public_links RLS removal)
