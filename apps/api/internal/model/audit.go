@@ -372,6 +372,25 @@ const (
 	// in the handler — the cra.Runner only owns the AI-generated /
 	// AI-disabled audit actions (see service/cra).
 	AuditActionCRAReportDecided = "cra_report_decided"
+
+	// AuditActionVEXReusedCrossProject is emitted by the VEX apply
+	// handler (handler/vex.go Apply) when a human 1-click confirms a
+	// cross-project VEX reuse suggestion (M27-A / F381, issue #132):
+	// an approved vex_statement in another project of the SAME tenant is
+	// materialised as a new vex_statements row in the target project via
+	// the shared CreateStatement path. This is the human-approval verb
+	// (auto-apply is forbidden by the "Humans approve" product
+	// principle) and is written by a direct h.audit.Log call inside the
+	// request TenantTx, so it follows the F371 handler-emit discipline:
+	// registered in service/audit.go GetAvailableActions() and pinned in
+	// the F271 expectedEmit + allModelActionValues() sets
+	// (middleware/audit_test.go) in the same change. Details carries
+	// source_statement_id / source_project_id / match_type so the reuse
+	// is reconstructable even after the (CASCADE-reaped)
+	// vex_statement_provenance row is gone; resource_type is ResourceVEX
+	// (no new resource dimension — the target is a vex_statements row)
+	// and resource_id is the new target statement id.
+	AuditActionVEXReusedCrossProject = "vex_statement_reused_cross_project"
 )
 
 // Resource type constants

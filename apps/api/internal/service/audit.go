@@ -620,6 +620,18 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.AuditActionMETIAssessmentOverridden, Label: "METI Assessment Overridden", Category: "meti"},
 		{Action: model.AuditActionMETIAssessmentOverrideCleared, Label: "METI Assessment Override Cleared", Category: "meti"},
 		{Action: model.AuditActionCRAReportDecided, Label: "CRA Report Decided", Category: "cra_report"},
+
+		// F381 (M27-A, issue #132): the VEX apply endpoint's
+		// human-approval verb. A 1-click cross-project reuse
+		// (handler/vex.go Apply) emits vex_statement_reused_cross_project
+		// directly via h.audit.Log — the same handler-emit pattern as the
+		// F371 verbs above. Category "vex" mirrors the existing VEX action
+		// family so the dropdown groups the reuse verb with vex.created /
+		// vex.updated / vex.deleted. Registered here in lockstep with the
+		// model const, the F271 expectedEmit set, and allModelActionValues()
+		// so a future removal from either side trips CI (F271 direction 1 /
+		// direction 2).
+		{Action: model.AuditActionVEXReusedCrossProject, Label: "VEX Statement Reused Cross-Project", Category: "vex"},
 	}
 }
 

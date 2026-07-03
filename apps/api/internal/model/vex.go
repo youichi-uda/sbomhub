@@ -43,6 +43,27 @@ type VEXStatement struct {
 	UpdatedAt       time.Time        `json:"updated_at" db:"updated_at"`
 }
 
+// VEXStatementProvenance records that a target-project vex_statements row
+// was materialised by 1-click reuse of a cross-project VEX suggestion
+// (M27-A / F381, issue #132). One row per applied suggestion, written in
+// the same request TenantTx as the target statement + the
+// vex_statement_reused_cross_project audit row. It is the LIVE attribution
+// join the M28+ provenance UI reads ("from project X"); the immutable
+// forensic copy lives in the audit_logs Details (source_statement_id /
+// source_project_id), so this row is safe to CASCADE-reap if the source or
+// target statement is later deleted (see migration 052 header). AppliedBy
+// is a soft reference (nullable, no FK to users) matching the
+// cra_reports.created_by convention.
+type VEXStatementProvenance struct {
+	ID                uuid.UUID  `json:"id" db:"id"`
+	TenantID          uuid.UUID  `json:"tenant_id" db:"tenant_id"`
+	TargetStatementID uuid.UUID  `json:"target_statement_id" db:"target_statement_id"`
+	SourceStatementID uuid.UUID  `json:"source_statement_id" db:"source_statement_id"`
+	SourceProjectID   uuid.UUID  `json:"source_project_id" db:"source_project_id"`
+	AppliedBy         *uuid.UUID `json:"applied_by,omitempty" db:"applied_by"`
+	AppliedAt         time.Time  `json:"applied_at" db:"applied_at"`
+}
+
 // VEXStatementWithDetails includes vulnerability and component info for display
 type VEXStatementWithDetails struct {
 	VEXStatement

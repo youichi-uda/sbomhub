@@ -2797,6 +2797,13 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		model.AuditActionMETIAssessmentOverridden:      true, // F371 handler-side (meti.go /override)
 		model.AuditActionMETIAssessmentOverrideCleared: true, // F371 handler-side (meti.go DELETE /override)
 		model.AuditActionCRAReportDecided:              true, // F371 handler-side (cra_reports.go Decide)
+		// F381 (M27-A, issue #132): the VEX apply endpoint's
+		// human-approval verb, emitted by handler/vex.go Apply via a
+		// direct h.audit.Log call inside the request TenantTx — the same
+		// handler-side pattern as the F371 verbs above. Registered in
+		// service/audit.go GetAvailableActions() in lockstep (direction-1
+		// asserts this entry has a dropdown registration).
+		model.AuditActionVEXReusedCrossProject: true, // F381 handler-side (vex.go Apply)
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
@@ -3055,6 +3062,11 @@ func allModelActionValues() map[string]bool {
 		model.AuditActionMETIAssessmentOverridden:      true,
 		model.AuditActionMETIAssessmentOverrideCleared: true,
 		model.AuditActionCRAReportDecided:              true,
+		// F381 (M27-A, issue #132): the VEX apply cross-project reuse
+		// verb, lifted into the model/audit.go handler-emit section and
+		// referenced by GetAvailableActions() directly, so direction-2
+		// must recognise it as a valid registry value.
+		model.AuditActionVEXReusedCrossProject: true,
 	}
 }
 

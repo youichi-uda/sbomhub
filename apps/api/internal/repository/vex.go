@@ -87,6 +87,81 @@ func (r *VEXRepository) ComponentBelongsToProject(ctx context.Context, component
 	return exists, err
 }
 
+// GetStatementForTenant returns the vex_statement with id, scoped to
+// tenantID (M27-A / F381, issue #132). It is the tenant-scoped source
+// resolver the apply flow uses: FORCE RLS already makes a foreign tenant's
+// rows invisible when called inside a TenantTx (authoritative boundary),
+// and the explicit `tenant_id = $2` predicate is the defence-in-depth belt
+// that becomes load-bearing only if RLS is ever disabled — the same
+// belt-and-braces shape as ListCrossProjectVEXCandidates. Unlike GetByID
+// (which does not select or filter tenant_id), this selects tenant_id and
+// pins it so a cross-tenant source_statement_id supplied by a client is
+// rejected here rather than silently trusted. Returns (nil, nil) when the
+// statement does not exist or is not visible to the tenant.
+func (r *VEXRepository) GetStatementForTenant(ctx context.Context, tenantID, id uuid.UUID) (*model.VEXStatement, error) {
+	query := `
+		SELECT id, tenant_id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at
+		FROM vex_statements
+		WHERE id = $1 AND tenant_id = $2
+	`
+	var v model.VEXStatement
+	err := r.q(ctx).QueryRowContext(ctx, query, id, tenantID).Scan(
+		&v.ID, &v.TenantID, &v.ProjectID, &v.VulnerabilityID, &v.ComponentID,
+		&v.Status, &v.Justification, &v.ActionStatement, &v.ImpactStatement,
+		&v.CreatedBy, &v.CreatedAt, &v.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// GetComponentPurlInProject returns the purl of componentID when it belongs
+// to a SBOM owned by projectID (M27-A / F381, issue #132). It mirrors the
+// ComponentBelongsToProject join but also returns the coordinate, so the
+// apply flow can re-verify the M26 purl match without a second round-trip.
+// found is false (no error) when the component does not exist, is not
+// visible under RLS, or belongs to another project — the same
+// project-level tightening WITHIN the tenant that F379 applies to reads.
+// The returned purl is COALESCEd to "" so a coordinate-less component never
+// scans as NULL.
+func (r *VEXRepository) GetComponentPurlInProject(ctx context.Context, componentID, projectID uuid.UUID) (string, bool, error) {
+	var purl string
+	err := r.q(ctx).QueryRowContext(ctx, `
+		SELECT COALESCE(c.purl, '')
+		FROM components c
+		JOIN sboms s ON s.id = c.sbom_id
+		WHERE c.id = $1 AND s.project_id = $2`, componentID, projectID).Scan(&purl)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return purl, true, nil
+}
+
+// CreateProvenance inserts a vex_statement_provenance row (M27-A / F381,
+// issue #132). The row must carry the same tenant_id as the target
+// statement so the FORCE RLS WITH CHECK on vex_statement_provenance
+// (migration 052) is satisfied — the caller (VEXService.ApplySuggestion)
+// populates TenantID from the freshly-created target statement, which
+// CreateStatement resolved from the target project inside the same tx.
+func (r *VEXRepository) CreateProvenance(ctx context.Context, p *model.VEXStatementProvenance) error {
+	query := `
+		INSERT INTO vex_statement_provenance
+			(id, tenant_id, target_statement_id, source_statement_id, source_project_id, applied_by, applied_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+	_, err := r.q(ctx).ExecContext(ctx, query,
+		p.ID, p.TenantID, p.TargetStatementID, p.SourceStatementID, p.SourceProjectID, p.AppliedBy, p.AppliedAt,
+	)
+	return err
+}
+
 func (r *VEXRepository) Update(ctx context.Context, v *model.VEXStatement) error {
 	query := `
 		UPDATE vex_statements
