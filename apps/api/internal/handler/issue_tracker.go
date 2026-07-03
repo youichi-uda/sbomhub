@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -11,17 +12,51 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
+// IssueTrackerServiceAPI captures the service surface the handler depends
+// on (F370). Narrowing the dependency to an interface follows the meti.go /
+// cra_reports.go / sbom.go handler precedent: it lets handler tests pin full
+// request→response flows (e.g. the 201 + github base_url default below)
+// with a recording stub, where the concrete service would require a live
+// DB, an external tracker endpoint, and an SSRF-validated public base URL.
+// *service.IssueTrackerService satisfies it unchanged (see the compile-time
+// assertion below NewIssueTrackerHandler).
+type IssueTrackerServiceAPI interface {
+	CreateConnection(ctx context.Context, tenantID uuid.UUID, input service.CreateConnectionInput) (*model.IssueTrackerConnection, error)
+	ListConnections(ctx context.Context, tenantID uuid.UUID) ([]model.IssueTrackerConnection, error)
+	GetConnection(ctx context.Context, id uuid.UUID) (*model.IssueTrackerConnection, error)
+	DeleteConnection(ctx context.Context, id uuid.UUID) error
+	CreateTicket(ctx context.Context, tenantID uuid.UUID, input service.CreateTicketInput) (*model.VulnerabilityTicket, error)
+	GetTicketByVulnerability(ctx context.Context, vulnID uuid.UUID) ([]model.VulnerabilityTicketWithDetails, error)
+	ListTickets(ctx context.Context, tenantID uuid.UUID, status string, limit, offset int) ([]model.VulnerabilityTicketWithDetails, int, error)
+	SyncTicket(ctx context.Context, ticketID uuid.UUID) error
+}
+
+// githubDefaultBaseURL is substituted when a GitHub connection request
+// omits base_url (F370): github.com's API root is a fixed constant — only
+// GitHub Enterprise Server self-hosts differ — unlike Jira/Backlog whose
+// base URL embeds the customer subdomain and therefore stays required.
+// Mirrors the client-side default (client.NewGitHubIssuesClient falls back
+// to the same root for an empty baseURL), but the substitution happens here
+// so the persisted connection row and the API response carry the resolved
+// URL explicitly.
+const githubDefaultBaseURL = "https://api.github.com"
+
 // IssueTrackerHandler handles issue tracker API requests
 type IssueTrackerHandler struct {
-	issueTrackerService *service.IssueTrackerService
+	issueTrackerService IssueTrackerServiceAPI
 }
 
 // NewIssueTrackerHandler creates a new IssueTrackerHandler
-func NewIssueTrackerHandler(issueTrackerService *service.IssueTrackerService) *IssueTrackerHandler {
+func NewIssueTrackerHandler(issueTrackerService IssueTrackerServiceAPI) *IssueTrackerHandler {
 	return &IssueTrackerHandler{
 		issueTrackerService: issueTrackerService,
 	}
 }
+
+// The production service must keep satisfying the handler's dependency
+// surface — a signature drift fails compilation here, not at wiring time
+// in cmd/server.
+var _ IssueTrackerServiceAPI = (*service.IssueTrackerService)(nil)
 
 // CreateConnectionRequest represents the request body for creating a connection
 type CreateConnectionRequest struct {
@@ -46,6 +81,16 @@ func (h *IssueTrackerHandler) CreateConnection(c echo.Context) error {
 	var req CreateConnectionRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "Invalid request body")
+	}
+
+	// F370: an omitted base_url on a github request defaults to the public
+	// API root BEFORE the all-tracker required-field check below, so the
+	// check keeps rejecting an empty base_url for every other tracker
+	// (their contract is unchanged) while GitHub operators no longer have
+	// to know/type the api.github.com constant. GHES operators still pass
+	// their own API root explicitly and it wins over the default.
+	if req.TrackerType == "github" && req.BaseURL == "" {
+		req.BaseURL = githubDefaultBaseURL
 	}
 
 	if req.TrackerType == "" || req.Name == "" || req.BaseURL == "" || req.APIToken == "" {

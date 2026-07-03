@@ -225,7 +225,29 @@ export default function IntegrationsPage() {
             <div className="space-y-4 py-4">
               <div className="space-y-2">
                 <Label htmlFor="tracker_type">{t("service")}</Label>
-                <Select value={trackerType} onValueChange={(v) => setTrackerType(v as TrackerType)}>
+                <Select
+                  value={trackerType}
+                  onValueChange={(v) => {
+                    const next = v as TrackerType;
+                    setTrackerType(next);
+                    // F370: github.com's API root is a fixed constant (only
+                    // GHES self-hosts differ), unlike Jira/Backlog whose
+                    // base URL embeds the customer subdomain — prefill it
+                    // so the operator does not have to know/type it. Only
+                    // an untouched field is prefilled, and switching away
+                    // clears only the exact prefilled constant, so an
+                    // operator-typed URL (e.g. a GHES root) is never
+                    // clobbered in either direction. The API accepts an
+                    // omitted base_url for github too (handler-side
+                    // default), but prefilling keeps the submitted value
+                    // visible in the form.
+                    if (next === "github" && baseUrl === "") {
+                      setBaseUrl("https://api.github.com");
+                    } else if (next !== "github" && baseUrl === "https://api.github.com") {
+                      setBaseUrl("");
+                    }
+                  }}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
