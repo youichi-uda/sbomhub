@@ -307,3 +307,84 @@ func TestCVEImpact_TenantIsolation_BeltAndBraces(t *testing.T) {
 		t.Fatalf("tenant isolation violated: total_project_count = %d, want 1 (foreign tenant's project excluded)", got.TotalProjectCount)
 	}
 }
+
+// TestCVEImpact_MultiSnapshotDedup pins the F390 fix (M28-D): a project that has
+// uploaded several SBOM snapshots, each carrying the SAME logical component
+// (identical name/version/purl) affected by the CVE, must count that component
+// ONCE — not once per snapshot. SBOMHub keeps every SBOM upload (SbomRepository
+// .ListByProject returns them all), and the blast-radius aggregation spans all
+// of a project's snapshots to stay consistent with SearchByCVE and the dashboard
+// counters. Without the SELECT DISTINCT on the logical component identity in
+// AggregateCVEImpact, the shared component's rows accumulate across snapshots and
+// component_count inflates (R1 measured 2 for a 2-snapshot project). The project
+// itself is already deduped by the per-project grouping, so
+// affected_project_count stays 1 regardless.
+//
+// The removal of that DISTINCT is the F390 mutation: it makes this test fail
+// (component_count becomes 3 instead of 2) and is reverted afterwards.
+func TestCVEImpact_MultiSnapshotDedup(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "SNAP-T")
+	sfx := strings.ToUpper(uuid.New().String()[:8])
+	cveID := fmt.Sprintf("CVE-2026-SNAP-%s", sfx)
+	vID := seedVulnVS(t, migDB, cveID)
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vID)
+	})
+
+	// One project, TWO SBOM snapshots. The older and newer snapshot each carry
+	// the SAME logical component (identical name/version/purl) linked to the CVE;
+	// the newer snapshot additionally carries a DISTINCT second component. This
+	// proves the DISTINCT dedups by logical identity (libshared → 1) rather than
+	// blanket-collapsing every component to a single row (libextra survives too).
+	projID := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projID, "snap-app")
+
+	sbomOld := seedSbomVS(t, migDB, tenantT, projID)
+	compOld := seedComponentVS(t, migDB, tenantT, sbomOld, "libshared", "1.0", "pkg:generic/libshared@1.0")
+	linkCompVulnVS(t, migDB, compOld, vID)
+
+	sbomNew := seedSbomVS(t, migDB, tenantT, projID)
+	compNewSame := seedComponentVS(t, migDB, tenantT, sbomNew, "libshared", "1.0", "pkg:generic/libshared@1.0")
+	linkCompVulnVS(t, migDB, compNewSame, vID)
+	compNewOther := seedComponentVS(t, migDB, tenantT, sbomNew, "libextra", "2.0", "pkg:generic/libextra@2.0")
+	linkCompVulnVS(t, migDB, compNewOther, vID)
+
+	got := runImpact(t, appDB, tenantT, cveID)
+	if got == nil {
+		t.Fatalf("expected non-nil impact for %s", cveID)
+	}
+
+	// The project is deduped by grouping regardless of snapshot count.
+	if got.AffectedProjectCount != 1 || len(got.AffectedProjects) != 1 {
+		t.Fatalf("affected_project_count = %d (len %d), want 1", got.AffectedProjectCount, len(got.AffectedProjects))
+	}
+	p := got.AffectedProjects[0]
+
+	// Two DISTINCT logical components: libshared (once, deduped across the two
+	// snapshots) + libextra. A count of 3 means snapshot inflation (DISTINCT
+	// dropped).
+	if p.ComponentCount != 2 || len(p.AffectedComponents) != 2 {
+		t.Fatalf("component_count = %d (len %d), want 2 (libshared deduped across 2 snapshots + libextra); >2 == snapshot inflation", p.ComponentCount, len(p.AffectedComponents))
+	}
+
+	// Exactly one libshared row survives the dedup.
+	shared := 0
+	for _, c := range p.AffectedComponents {
+		if c.Name == "libshared" && c.Version == "1.0" && c.Purl == "pkg:generic/libshared@1.0" {
+			shared++
+		}
+	}
+	if shared != 1 {
+		t.Errorf("libshared appeared %d times across snapshots, want exactly 1 (DISTINCT dedup)", shared)
+	}
+}

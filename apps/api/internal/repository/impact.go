@@ -78,9 +78,31 @@ type impactRow struct {
 //     boundary survives even if RLS were ever disabled (defence in depth). This
 //     is the predicate the M28 tenant-isolation mutation removes to prove the
 //     belt is load-bearing under a BYPASSRLS role.
+//
+// Snapshot de-duplication (M28-D / F390): a project can hold multiple SBOM
+// uploads (SbomRepository keeps every snapshot; ListByProject returns them all,
+// GetLatest is only used where a single "current" SBOM is needed). SBOMHub's
+// cross-project / per-project vulnerability aggregations deliberately span ALL
+// of a project's snapshots and DISTINCT away the duplicates a shared component
+// produces across them — ListByProject (SELECT DISTINCT v.id),
+// CountBySeverity (COUNT(DISTINCT v.id)) and DashboardRepository
+// .GetTopRisksByTenant (DISTINCT ON (v.cve_id)) all do this. The blast-radius
+// view MUST match that convention: it is rendered on the search page directly
+// above SearchByCVE's affected/unaffected listing (which is also all-snapshots,
+// project-deduped), so a latest-SBOM-only filter here would make the summary's
+// "N of M" disagree with the listing right below it. We therefore aggregate over
+// every snapshot and SELECT DISTINCT on the logical component identity
+// (project, name, version, purl) — without it, the same logical component
+// carried by two snapshots of one project inflates component_count (measured 2
+// for a 2-snapshot project in R1). affected_project_count is unaffected (the
+// grouping already dedups per project); this only corrects component_count /
+// affected_components. A "remediated in the latest snapshot but present in an
+// older one" project still surfaces — that is intentional and matches
+// SearchByCVE and the dashboard, which likewise reflect all snapshots; changing
+// it is a separate, whole-app convention decision, not an impact-only tweak.
 func (r *SearchRepository) AggregateCVEImpact(ctx context.Context, tenantID, vulnID uuid.UUID) ([]model.ImpactProject, error) {
 	const query = `
-		SELECT
+		SELECT DISTINCT
 			p.id                    AS project_id,
 			p.name                  AS project_name,
 			c.name                  AS component_name,
@@ -97,7 +119,7 @@ func (r *SearchRepository) AggregateCVEImpact(ctx context.Context, tenantID, vul
 			ON cv.component_id = c.id
 		WHERE cv.vulnerability_id = $2
 		  AND p.tenant_id = $1
-		ORDER BY p.name, c.name, c.version
+		ORDER BY p.name, c.name, COALESCE(c.version, '')
 	`
 	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, vulnID)
 	if err != nil {
