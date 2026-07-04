@@ -1380,6 +1380,20 @@ func TestDetermineActionAndResource_ProjectChildResources(t *testing.T) {
 			wantAction:   model.ActionProjectViewed,
 			wantResource: model.ResourceProject,
 		},
+		{
+			// M29-A (#136, F397): the transitive dependency path-to-root
+			// endpoint is a read-only /components sub-resource. "components"
+			// is NOT in the F188 child-resource hoist list, so this GET
+			// falls through to the /projects branch and MUST classify as
+			// project.viewed — i.e. M29 adds NO new audit action (M28 impact
+			// precedent). If a future change hoists /components or adds a
+			// paths-specific action, this pins the regression.
+			name:         "GET /projects/:id/components/:component_id/paths",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/components/:component_id/paths",
+			wantAction:   model.ActionProjectViewed,
+			wantResource: model.ResourceProject,
+		},
 
 		// ---- /vulnerabilities (nested) ------------------------------------
 		{

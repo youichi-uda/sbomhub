@@ -58,6 +58,7 @@ func (s *stubSbomRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Sbom, er
 type stubComponentRepo struct {
 	comps map[uuid.UUID][]model.Component
 	vulns map[uuid.UUID][]model.ComponentVulnerability
+	byID  map[uuid.UUID]model.Component // for GetByID (M29-A paths handler)
 }
 
 func (s *stubComponentRepo) ListBySbom(_ context.Context, id uuid.UUID) ([]model.Component, error) {
@@ -65,6 +66,21 @@ func (s *stubComponentRepo) ListBySbom(_ context.Context, id uuid.UUID) ([]model
 }
 func (s *stubComponentRepo) ListComponentVulnerabilitiesBySbom(_ context.Context, id uuid.UUID) ([]model.ComponentVulnerability, error) {
 	return s.vulns[id], nil
+}
+func (s *stubComponentRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Component, error) {
+	if c, ok := s.byID[id]; ok {
+		cp := c
+		return &cp, nil
+	}
+	for _, comps := range s.comps {
+		for _, c := range comps {
+			if c.ID == id {
+				cp := c
+				return &cp, nil
+			}
+		}
+	}
+	return nil, sql.ErrNoRows
 }
 
 type stubLicenseRepo struct{}
@@ -845,5 +861,185 @@ func TestDiffGraphHandler_Build_EmitsSingleAuditRow_F237(t *testing.T) {
 		t.Errorf("F237 regression: audit_logs.resource_type = %q, want literal "+
 			"\"sbom_diff\" — the value must survive any future rename of "+
 			"model.ResourceSBOMDiff (F296 promoted from diff_summary.ResourceTypeSbomDiff)", capturedResourceType)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M29-A (#136, F397) — handler tests for ProjectComponentPaths. The traversal
+// itself is exhaustively covered in service/diff/graph_paths_test.go; these
+// pin the HTTP contract: status codes, param parsing, tenant requirement, and
+// the 200 envelope shape. No new audit action (read-only, project.viewed
+// fallthrough — asserted in middleware/audit_test.go).
+// ----------------------------------------------------------------------------
+
+// pathsRawCycloneDX is a minimal CycloneDX 1.5 document: root -> a.
+const pathsRawCycloneDX = `{
+  "bomFormat":"CycloneDX","specVersion":"1.5",
+  "metadata":{"component":{"bom-ref":"root","type":"application","name":"root","version":"1.0","purl":"pkg:my/root@1.0"}},
+  "components":[{"bom-ref":"a","type":"library","name":"a","version":"1.0.0","purl":"pkg:npm/a@1.0.0"}],
+  "dependencies":[{"ref":"root","dependsOn":["a"]}]
+}`
+
+func newPathsTestHandler(t *testing.T, tenantID, projectID uuid.UUID, sbom model.Sbom, byID map[uuid.UUID]model.Component) *DiffHandler {
+	t.Helper()
+	svc := diff.NewService(
+		&stubProjectRepo{owner: tenantID},
+		&stubSbomRepo{
+			byID:      map[uuid.UUID]model.Sbom{sbom.ID: sbom},
+			byProject: map[uuid.UUID][]model.Sbom{projectID: {sbom}},
+		},
+		&stubComponentRepo{comps: map[uuid.UUID][]model.Component{}, byID: byID},
+		&stubLicenseRepo{},
+	)
+	return NewDiffHandler(svc)
+}
+
+func TestProjectComponentPaths_HappyPath(t *testing.T) {
+	tenantID, projectID, sbomID := uuid.New(), uuid.New(), uuid.New()
+	sbom := model.Sbom{ID: sbomID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", RawData: []byte(pathsRawCycloneDX), CreatedAt: time.Now()}
+	compID := uuid.New()
+	h := newPathsTestHandler(t, tenantID, projectID, sbom, map[uuid.UUID]model.Component{
+		compID: {ID: compID, SbomID: sbomID, Name: "a", Version: "1.0.0", Purl: "pkg:npm/a@1.0.0", Type: "library"},
+	})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+projectID.String()+"/components/"+compID.String()+"/paths", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "component_id")
+	c.SetParamValues(projectID.String(), compID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+
+	if err := h.ProjectComponentPaths(c); err != nil {
+		t.Fatalf("ProjectComponentPaths error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp diff.PathsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.ComponentID != compID {
+		t.Errorf("component_id = %s, want %s", resp.ComponentID, compID)
+	}
+	if resp.SbomID != sbomID {
+		t.Errorf("sbom_id = %s, want %s", resp.SbomID, sbomID)
+	}
+	if resp.Format != "cyclonedx" || resp.Degraded {
+		t.Errorf("format=%q degraded=%v, want cyclonedx/false", resp.Format, resp.Degraded)
+	}
+	if !resp.IsDirect {
+		t.Errorf("a is a direct dependency of root, is_direct must be true")
+	}
+	if len(resp.Paths) != 1 || resp.PathCount != 1 {
+		t.Fatalf("want 1 path, got %d (path_count=%d)", len(resp.Paths), resp.PathCount)
+	}
+	if resp.Paths[0][0].ID != "pkg:my/root" || resp.Paths[0][len(resp.Paths[0])-1].ID != "pkg:npm/a" {
+		t.Errorf("path not ordered root -> a: %+v", resp.Paths[0])
+	}
+	if resp.Component.Version != "1.0.0" {
+		t.Errorf("component.version = %q, want 1.0.0", resp.Component.Version)
+	}
+}
+
+func TestProjectComponentPaths_RequiresTenantContext(t *testing.T) {
+	h := newPathsTestHandler(t, uuid.New(), uuid.New(), model.Sbom{ID: uuid.New()}, nil)
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "component_id")
+	c.SetParamValues(uuid.New().String(), uuid.New().String())
+	_ = h.ProjectComponentPaths(c)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectComponentPaths_InvalidIDs(t *testing.T) {
+	tenantID := uuid.New()
+	h := newPathsTestHandler(t, tenantID, uuid.New(), model.Sbom{ID: uuid.New()}, nil)
+
+	cases := []struct {
+		name        string
+		projectID   string
+		componentID string
+	}{
+		{"invalid project id", "not-a-uuid", uuid.New().String()},
+		{"invalid component id", uuid.New().String(), "not-a-uuid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			c.SetParamNames("id", "component_id")
+			c.SetParamValues(tc.projectID, tc.componentID)
+			c.Set(middleware.ContextKeyTenantID, tenantID)
+			_ = h.ProjectComponentPaths(c)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestProjectComponentPaths_InvalidSbomParam(t *testing.T) {
+	tenantID, projectID, sbomID := uuid.New(), uuid.New(), uuid.New()
+	sbom := model.Sbom{ID: sbomID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", RawData: []byte(pathsRawCycloneDX), CreatedAt: time.Now()}
+	compID := uuid.New()
+	h := newPathsTestHandler(t, tenantID, projectID, sbom, map[uuid.UUID]model.Component{
+		compID: {ID: compID, SbomID: sbomID, Name: "a", Version: "1.0.0", Purl: "pkg:npm/a@1.0.0", Type: "library"},
+	})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/?sbom=not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "component_id")
+	c.SetParamValues(projectID.String(), compID.String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	_ = h.ProjectComponentPaths(c)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for bad ?sbom; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectComponentPaths_ComponentNotFound_404(t *testing.T) {
+	tenantID, projectID, sbomID := uuid.New(), uuid.New(), uuid.New()
+	sbom := model.Sbom{ID: sbomID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", RawData: []byte(pathsRawCycloneDX), CreatedAt: time.Now()}
+	h := newPathsTestHandler(t, tenantID, projectID, sbom, map[uuid.UUID]model.Component{}) // no components
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "component_id")
+	c.SetParamValues(projectID.String(), uuid.New().String())
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	_ = h.ProjectComponentPaths(c)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for unknown component; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectComponentPaths_CrossTenant_404(t *testing.T) {
+	tenantID, projectID, sbomID := uuid.New(), uuid.New(), uuid.New()
+	sbom := model.Sbom{ID: sbomID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", RawData: []byte(pathsRawCycloneDX), CreatedAt: time.Now()}
+	compID := uuid.New()
+	h := newPathsTestHandler(t, tenantID, projectID, sbom, map[uuid.UUID]model.Component{
+		compID: {ID: compID, SbomID: sbomID, Name: "a", Version: "1.0.0", Purl: "pkg:npm/a@1.0.0", Type: "library"},
+	})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "component_id")
+	c.SetParamValues(projectID.String(), compID.String())
+	c.Set(middleware.ContextKeyTenantID, uuid.New()) // wrong tenant
+	_ = h.ProjectComponentPaths(c)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for wrong tenant; body=%s", rec.Code, rec.Body.String())
 	}
 }

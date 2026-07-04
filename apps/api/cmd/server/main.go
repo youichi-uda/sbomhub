@@ -878,6 +878,12 @@ func main() {
 		auditMiddleware)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
 	auth.GET("/projects/:id/components", sbomHandler.GetComponents)
+	// M29-A (#136, F397): transitive dependency path-to-root for a single
+	// component. Read-only, on-demand graph reconstruction from raw_data;
+	// no new audit action (falls through to project.viewed like the bare
+	// /components route above). See handler.ProjectComponentPaths +
+	// internal/service/diff/graph_paths.go.
+	auth.GET("/projects/:id/components/:component_id/paths", projectDiffHandler.ProjectComponentPaths)
 	// M1 Codex review #F20: /api/v1/projects/:id/vulnerabilities used to
 	// sit on the Clerk-only `auth` group above, so the CLI's
 	// `sbomhub triage` (which sends `Authorization: Bearer sbh_...`)

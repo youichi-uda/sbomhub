@@ -24,6 +24,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -449,6 +450,80 @@ func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": fmt.Sprintf("audit write failed: %v", err),
 		})
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ProjectComponentPaths handles
+// GET /api/v1/projects/:id/components/:component_id/paths?sbom=<id>.
+//
+// M29-A (#136, F397) — the transitive dependency "path to root" view.
+// For a (usually transitive, usually vulnerable) component it reconstructs
+// the project SBOM's CycloneDX dependency graph on demand and enumerates
+// how the component is pulled in: root → ... → target chains, plus an
+// is_direct flag and degraded / truncated honesty flags.
+//
+// This is a read-only sibling of GET /projects/:id/components (M28 impact
+// precedent): it goes through the same Auth → TenantTx chain and adds NO
+// new audit action. Like the bare /components route it falls through to
+// ActionProjectViewed in the audit middleware, so WithAudit is NOT used
+// here (no audit-or-nothing pair to uphold).
+//
+//   - 400 invalid project id / invalid component id / invalid sbom id
+//   - 401 missing tenant context (auth middleware should already 401 first)
+//   - 404 project not owned by tenant / component not in project /
+//     no SBOMs / sbom not in project
+//   - 500 unexpected error (generic message; specifics logged server-side)
+//   - 200 success
+func (h *DiffHandler) ProjectComponentPaths(c echo.Context) error {
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+	componentID, err := uuid.Parse(c.Param("component_id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid component id"})
+	}
+	var sbomID *uuid.UUID
+	if raw := c.QueryParam("sbom"); raw != "" {
+		sid, err := uuid.Parse(raw)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid sbom id"})
+		}
+		sbomID = &sid
+	}
+
+	resp, err := h.svc.ComputePaths(c.Request().Context(), tenantID, projectID, componentID, sbomID)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// projectRepo.GetByTenant returned no rows — bogus project id
+			// or the tenant does not own it. 404 (do not leak the distinction).
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		case errors.Is(err, diff.ErrComponentNotFound):
+			// Unknown component id OR a component owned by a different
+			// project (F379 ownership) — same 404, no existence leak.
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "component not found"})
+		case errors.Is(err, diff.ErrNoSboms):
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project has no SBOMs"})
+		case errors.Is(err, diff.ErrSbomNotInProject):
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom does not belong to project"})
+		default:
+			// F396: never surface the raw service / repository / SQL error
+			// to the caller. Log the specifics server-side, return a stable
+			// generic message.
+			slog.Error("diff: compute component paths failed",
+				"tenant_id", tenantID, "project_id", projectID,
+				"component_id", componentID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to compute dependency paths",
+			})
+		}
 	}
 
 	return c.JSON(http.StatusOK, resp)
