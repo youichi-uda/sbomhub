@@ -28,9 +28,26 @@ import (
 // sentinel, not a prediction: the web blast-radius summary treats epss_score = 0
 // as "n/a" and suppresses the EPSS badge (F391) so a KEV/critical CVE never
 // shows a misleading "EPSS 0.0%".
+//
+// Nullable-metadata note (F394): vulnerabilities.severity (VARCHAR(20)) and
+// cvss_score (DECIMAL(3,1)) are both NULLABLE — 001_init declares neither NOT
+// NULL, and real NVD/JVN rows do arrive with a missing CVSS (e.g. a CVE awaiting
+// analysis). Scanning a SQL NULL straight into a Go string / float64 fails, so
+// without a guard a KNOWN CVE with null metadata would error and 500 — worse, it
+// would never reach the sql.ErrNoRows path, collapsing the "unknown CVE -> 404"
+// vs "known CVE, null meta" distinction. We COALESCE at the query: severity
+// defaults to 'UNKNOWN' (UPPERCASE, matching the dashboard's CRITICAL/HIGH/...
+// convention and rendering as a graceful gray badge in the web SeverityBadge,
+// which lowercases and falls back to gray for unknown keys) and cvss_score to 0.
+// in_kev is BOOLEAN NOT NULL DEFAULT false (migration 020) so it needs no guard.
 func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID string) (*model.CVEImpactMeta, error) {
 	const query = `
-		SELECT id, severity, cvss_score, 0::numeric AS epss_score, in_kev
+		SELECT
+			id,
+			COALESCE(severity, 'UNKNOWN') AS severity,
+			COALESCE(cvss_score, 0)       AS cvss_score,
+			0::numeric                    AS epss_score,
+			in_kev
 		FROM vulnerabilities
 		WHERE cve_id = $1
 		LIMIT 1

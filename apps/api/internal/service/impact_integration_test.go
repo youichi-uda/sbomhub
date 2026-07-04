@@ -388,3 +388,70 @@ func TestCVEImpact_MultiSnapshotDedup(t *testing.T) {
 		t.Errorf("libshared appeared %d times across snapshots, want exactly 1 (DISTINCT dedup)", shared)
 	}
 }
+
+// TestCVEImpact_NullMetaCoalesced pins the F394 fix (M28-D R2b): a KNOWN CVE
+// whose vulnerabilities row has a NULL severity and/or NULL cvss_score (both
+// columns are nullable in 001_init, and real NVD rows do arrive with a missing
+// CVSS) must NOT crash the impact lookup. Before the fix GetVulnerabilityImpactMeta
+// scanned the SQL NULL straight into a Go string/float64, which errors and 500s
+// — and never reaches the sql.ErrNoRows path, so it also breaks the "unknown CVE
+// -> 404" vs "known CVE" distinction. After the COALESCE guard the metadata
+// resolves to severity='UNKNOWN' (UPPERCASE, dashboard convention) and
+// cvss_score=0, and the affected project still aggregates normally.
+//
+// The removal of the COALESCE is the F394 mutation: with it gone, runImpact's
+// GetCVEImpact returns a scan error and t.Fatal fires (the 500 path), and it is
+// reverted afterwards.
+func TestCVEImpact_NullMetaCoalesced(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "NULLMETA-T")
+	sfx := strings.ToUpper(uuid.New().String()[:8])
+	cveID := fmt.Sprintf("CVE-2026-NULLMETA-%s", sfx)
+
+	// Insert a global vulnerability row with NULL severity AND NULL cvss_score
+	// (vulnerabilities is RLS-exempt, so the migrator pool inserts directly).
+	vNull := uuid.New()
+	if _, err := migDB.Exec(
+		`INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score)
+		 VALUES ($1,$2,'null-meta vuln',NULL,NULL)`, vNull, cveID); err != nil {
+		t.Fatalf("seed null-meta vuln: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vNull)
+	})
+
+	// One project affected by the null-meta CVE.
+	projID := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projID, "nullmeta-app")
+	sbomID := seedSbomVS(t, migDB, tenantT, projID)
+	compID := seedComponentVS(t, migDB, tenantT, sbomID, "libnull", "1.0", "pkg:generic/libnull@1.0")
+	linkCompVulnVS(t, migDB, compID, vNull)
+
+	// runImpact t.Fatals on a scan error, so simply reaching a non-nil result is
+	// the "no 500" assertion the mutation breaks.
+	got := runImpact(t, appDB, tenantT, cveID)
+	if got == nil {
+		t.Fatalf("expected non-nil impact for known null-meta CVE %s (must not 404)", cveID)
+	}
+
+	// COALESCE defaults surface gracefully instead of crashing.
+	if got.Severity != "UNKNOWN" {
+		t.Errorf("severity = %q, want UNKNOWN (COALESCE default)", got.Severity)
+	}
+	if got.CVSSScore != 0 {
+		t.Errorf("cvss_score = %v, want 0 (COALESCE default)", got.CVSSScore)
+	}
+	// The affected project still aggregates normally despite the null metadata.
+	if got.AffectedProjectCount != 1 || len(got.AffectedProjects) != 1 {
+		t.Fatalf("affected_project_count = %d (len %d), want 1", got.AffectedProjectCount, len(got.AffectedProjects))
+	}
+}
