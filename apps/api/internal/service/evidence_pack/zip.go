@@ -17,9 +17,12 @@
 // timestamp — entries are path-sorted, every entry carries a fixed
 // modtime, entries are Stored (uncompressed, so the bytes never depend
 // on flate internals), and every emitted JSON document uses struct field
-// order (stable keys). The ONLY non-deterministic field is
-// manifest.generated_at, which is taken from the injected BuildInput.Now
-// so tests can pin it.
+// order (stable keys). Every timestamp that lands in the bytes is derived
+// from the injected BuildInput.Now, not a live clock: manifest.generated_at
+// AND the bundled vex.cdx.json's metadata.timestamp (the VEX is exported via
+// ExportCycloneDXVEXAt with z.now, NOT the standalone time.Now() export —
+// F408). So two builds with identical project data + identical BuildInput.Now
+// produce byte-identical zips, including vex.cdx.json.
 package evidence_pack
 
 import (
@@ -81,8 +84,15 @@ const manifestDisclaimer = "This pack is submission support, not legal advice; t
 var zipEntryModTime = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // VEXExporter renders the project's VEX statements as a CycloneDX VEX
-// JSON document. Satisfied structurally by *service.VEXService via its
-// ExportCycloneDXVEX method.
+// JSON document at a caller-supplied timestamp. Satisfied structurally by
+// *service.VEXService via its ExportCycloneDXVEXAt method.
+//
+// The timestamp is passed in (rather than the exporter reading time.Now())
+// so the pack's vex.cdx.json metadata.timestamp is derived from the pack's
+// generation time (BuildInput.Now), keeping the zip byte-reproducible for a
+// fixed input (F408, issue #140). The standalone VEX export endpoint keeps
+// using service.VEXService.ExportCycloneDXVEX (live clock), which is
+// unaffected.
 //
 // The interface is declared HERE (in evidence_pack) rather than importing
 // the service package directly so that:
@@ -91,7 +101,7 @@ var zipEntryModTime = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 //     tests), and
 //   - the zip tests can inject a deterministic fake exporter.
 type VEXExporter interface {
-	ExportCycloneDXVEX(ctx context.Context, projectID uuid.UUID) ([]byte, error)
+	ExportCycloneDXVEXAt(ctx context.Context, projectID uuid.UUID, ts time.Time) ([]byte, error)
 }
 
 // WithVEXExporter injects the CycloneDX VEX exporter used to render the
@@ -187,7 +197,11 @@ func (b *Builder) assembleZip(ctx context.Context, z assembleZipInput) (*BuildRe
 		if b.vexExporter == nil {
 			return nil, fmt.Errorf("evidence_pack.Build: zip format requested with VEX section but VEX exporter not wired (server configuration error)")
 		}
-		vexJSON, err := b.vexExporter.ExportCycloneDXVEX(ctx, z.in.ProjectID)
+		// Thread the pack's generation timestamp (z.now / BuildInput.Now) into
+		// the VEX export so vex.cdx.json's metadata.timestamp is pack-derived,
+		// not a live time.Now() — required for the zip to be byte-reproducible
+		// for a fixed input (F408, issue #140).
+		vexJSON, err := b.vexExporter.ExportCycloneDXVEXAt(ctx, z.in.ProjectID, z.now)
 		if err != nil {
 			return nil, fmt.Errorf("evidence_pack.Build: export cyclonedx vex: %w", err)
 		}

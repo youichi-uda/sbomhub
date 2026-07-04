@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -30,7 +31,7 @@ type fakeHandlerVEXExporter struct {
 	data []byte
 }
 
-func (f *fakeHandlerVEXExporter) ExportCycloneDXVEX(_ context.Context, _ uuid.UUID) ([]byte, error) {
+func (f *fakeHandlerVEXExporter) ExportCycloneDXVEXAt(_ context.Context, _ uuid.UUID, _ time.Time) ([]byte, error) {
 	return f.data, nil
 }
 

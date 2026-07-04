@@ -24,21 +24,24 @@ import (
 // F405 / M31 (#140) — zip render target tests.
 // ----------------------------------------------------------------------------
 
-// fakeVEXExporter returns fixed bytes so the zip is byte-deterministic in
-// tests. The real exporter (service.VEXService.ExportCycloneDXVEX) stamps
-// a time.Now timestamp into the CycloneDX metadata, which is out of scope
-// for the builder's determinism guarantee — the builder is deterministic
-// GIVEN deterministic inputs, and the injected exporter is one of them.
+// fakeVEXExporter returns fixed bytes so tests that only care about the
+// presence/plumbing of vex.cdx.json stay simple. The determinism of the
+// timestamp path (F408) is exercised separately by clockVEXExporter, which
+// stamps the ts the builder passes — the real exporter
+// (service.VEXService.ExportCycloneDXVEXAt) does the same with the pack's
+// BuildInput.Now, so the bundled vex.cdx.json is byte-reproducible.
 type fakeVEXExporter struct {
 	data       []byte
 	err        error
 	calls      int
 	gotProject uuid.UUID
+	gotTS      time.Time
 }
 
-func (f *fakeVEXExporter) ExportCycloneDXVEX(_ context.Context, projectID uuid.UUID) ([]byte, error) {
+func (f *fakeVEXExporter) ExportCycloneDXVEXAt(_ context.Context, projectID uuid.UUID, ts time.Time) ([]byte, error) {
 	f.calls++
 	f.gotProject = projectID
+	f.gotTS = ts
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -350,6 +353,74 @@ func TestBuilder_BuildZip_ByteDeterministic(t *testing.T) {
 	c := mk()
 	if !bytes.Equal(a, c) {
 		t.Errorf("zip not byte-deterministic: len(a)=%d len(c)=%d", len(a), len(c))
+	}
+}
+
+// clockVEXExporter mirrors the PRODUCTION exporter
+// (service.VEXService.ExportCycloneDXVEXAt): it stamps the SUPPLIED timestamp
+// into metadata.timestamp instead of a fixed blob or a live clock. This is
+// what makes the determinism assertion below load-bearing for F408 — the
+// bug was that the builder ignored z.now and the real exporter used
+// time.Now(), so two builds with identical BuildInput.Now embedded different
+// vex.cdx.json timestamps → different zip bytes.
+type clockVEXExporter struct{}
+
+func (clockVEXExporter) ExportCycloneDXVEXAt(_ context.Context, _ uuid.UUID, ts time.Time) ([]byte, error) {
+	return []byte(`{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"timestamp":"` +
+		ts.UTC().Format(time.RFC3339) + `"}}`), nil
+}
+
+// TestBuilder_BuildZip_VEXTimestampDeterministic pins F408 (#140): the zip is
+// byte-identical across re-builds with the same BuildInput.Now even when the
+// VEX exporter stamps a timestamp — because the builder threads z.now into
+// ExportCycloneDXVEXAt rather than letting the exporter read a live clock.
+//
+// Before the fix (builder calling ExportCycloneDXVEX → real exporter's
+// time.Now()) this would diverge on vex.cdx.json and thus the manifest SHA
+// and the whole zip. It exercises the REAL timestamp path, not a fixed-bytes
+// fake.
+func TestBuilder_BuildZip_VEXTimestampDeterministic(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	now := time.Date(2026, 7, 4, 1, 2, 3, 0, time.UTC)
+	mk := func() []byte {
+		b := NewBuilder(
+			&fakeVEXReader{rows: []repository.VEXDraft{{
+				ID: uuid.Nil, ProjectID: projectID, CVEID: "CVE-2026-2000", State: "affected",
+				Evidence: json.RawMessage(`[{"kind":"x","ref":"y"}]`), Decision: "approved",
+				CreatedAt: now, UpdatedAt: now,
+			}}},
+			&fakeCRAReader{rows: []repository.CRAReport{}},
+			&fakeProjectReader{project: &model.Project{ID: projectID, Name: "p"}},
+			&fakeMETIReader{rows: []repository.MetiAssessment{{
+				ID: uuid.Nil, ProjectID: projectID, CriterionID: "meti.env_setup.01",
+				CriterionPhase: string(meti.PhaseEnvSetup), Status: "achieved",
+				Evidence: json.RawMessage(`[{"kind":"settings","ref":"z"}]`), CreatedAt: now, UpdatedAt: now,
+			}}},
+			newFakeCatalogForTest(),
+		).WithVEXExporter(clockVEXExporter{})
+		res, err := b.Build(context.Background(), fullZipInput(tenantID, projectID, now))
+		if err != nil {
+			t.Fatalf("zip Build error: %v", err)
+		}
+		return res.ContentBytes
+	}
+	a := mk()
+	c := mk()
+	if !bytes.Equal(a, c) {
+		t.Fatalf("zip not byte-deterministic with a timestamp-stamping VEX exporter: len(a)=%d len(c)=%d", len(a), len(c))
+	}
+
+	// Lock the mechanism, not just the accidental equality: vex.cdx.json's
+	// metadata.timestamp must be the pack timestamp (z.now), NOT a live clock.
+	files := unzip(t, a)
+	vexJSON, ok := files["vex.cdx.json"]
+	if !ok {
+		t.Fatal("vex.cdx.json missing from zip")
+	}
+	wantTS := now.UTC().Format(time.RFC3339)
+	if !bytes.Contains(vexJSON, []byte(`"timestamp":"`+wantTS+`"`)) {
+		t.Errorf("vex.cdx.json timestamp is not the pack timestamp %q; got %s", wantTS, vexJSON)
 	}
 }
 

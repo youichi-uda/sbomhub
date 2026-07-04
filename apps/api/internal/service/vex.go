@@ -486,8 +486,27 @@ func (s *VEXService) DeleteStatement(ctx context.Context, id uuid.UUID) error {
 	return s.vexRepo.Delete(ctx, id)
 }
 
-// ExportCycloneDXVEX exports VEX statements in CycloneDX VEX format
+// ExportCycloneDXVEX exports VEX statements in CycloneDX VEX format,
+// stamping the current wall-clock time into metadata.timestamp. This is the
+// standalone export path (handler/vex.go ExportCycloneDX) where "now" is the
+// correct provenance for when the document was exported.
+//
+// The Evidence Pack zip path must NOT use this: two pack builds with
+// identical project data + identical BuildInput.Now would otherwise embed
+// different metadata.timestamp values, breaking the pack's byte-determinism
+// (a compliance artefact must diff clean across re-builds). That path calls
+// ExportCycloneDXVEXAt with the pack's generation timestamp instead (F408).
 func (s *VEXService) ExportCycloneDXVEX(ctx context.Context, projectID uuid.UUID) ([]byte, error) {
+	return s.ExportCycloneDXVEXAt(ctx, projectID, time.Now())
+}
+
+// ExportCycloneDXVEXAt is ExportCycloneDXVEX with an explicit timestamp for
+// metadata.timestamp instead of time.Now(). It exists so the Evidence Pack
+// assembler can thread the pack's generation time (BuildInput.Now) into the
+// bundled vex.cdx.json, making the pack byte-reproducible for a fixed input
+// (F408, issue #140). Existing callers that want the live clock keep using
+// ExportCycloneDXVEX, which delegates here with time.Now().
+func (s *VEXService) ExportCycloneDXVEXAt(ctx context.Context, projectID uuid.UUID, ts time.Time) ([]byte, error) {
 	statements, err := s.vexRepo.ListByProject(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list VEX statements: %w", err)
@@ -499,7 +518,7 @@ func (s *VEXService) ExportCycloneDXVEX(ctx context.Context, projectID uuid.UUID
 		SpecVersion: "1.5",
 		Version:     1,
 		Metadata: VEXMetadata{
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Timestamp: ts.UTC().Format(time.RFC3339),
 			Tools: []VEXTool{
 				{
 					Vendor:  "SBOMHub",
