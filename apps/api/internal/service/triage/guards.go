@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -222,6 +223,233 @@ func validateOnePointer(ev EvidencePointer) error {
 		return fmt.Errorf("unknown evidence Kind %q", ev.Kind)
 	}
 	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Grounding guard (M32 Wave B, P2)
+// ----------------------------------------------------------------------------
+//
+// ValidateEvidence above only validates the SHAPE of the LLM's
+// self-reported evidence: an advisory_excerpt pointer passes on a
+// Description the model wrote itself, with nothing tying it to the advisory
+// / reachability rows the runner actually loaded. In production those
+// tables are frequently empty, so the LLM fabricates evidence pointers that
+// pass ValidateEvidence and flow straight through to the human approver as a
+// confident, fabricated-evidence VEX.
+//
+// The helpers below let the runner harden that gap in two tiers:
+//
+//   - Tier 1 (IsUngrounded + UngroundedNote + UngroundedConfidenceCeiling):
+//     a zero-grounding clamp. When NO grounding data was loaded at all, a
+//     confident non-under_investigation verdict cannot be trusted; the
+//     runner forces under_investigation, clamps confidence below threshold,
+//     and appends an honest synthetic note preserving the AI's proposal.
+//
+//   - Tier 2 (ValidateGrounding): a per-pointer cross-check. Each
+//     grounded-kind pointer is matched (case-insensitive substring) against
+//     the loaded rows; unmatched ones are FLAGGED (never dropped, never
+//     hard-reject) so a legitimate paraphrase is not lost, while a fabricated
+//     citation gets marked unverified and the draft's confidence is clamped.
+//
+// Both tiers reuse the existing under_investigation state + a synthetic
+// note + a confidence clamp as the "requires human verification" signal —
+// no new draft field or DB column is introduced.
+
+const (
+	// UngroundedNoteTag marks the synthetic evidence pointer appended by
+	// UngroundedNote so the web layer / audit consumers can detect a
+	// Tier-1-clamped draft without parsing free text.
+	UngroundedNoteTag = "ungrounded"
+
+	// UnverifiedGroundingTag marks a grounded-kind evidence pointer that
+	// ValidateGrounding could not match against any loaded advisory /
+	// reachability row. It is appended to the pointer's Note in place; the
+	// pointer is retained (lenient — flag, never drop).
+	UnverifiedGroundingTag = "unverified_grounding"
+)
+
+// GroundingResult summarises a ValidateGrounding pass.
+type GroundingResult struct {
+	// GroundedKinds counts pointers of a grounded kind (advisory_excerpt /
+	// symbol_ref / import_path) that were cross-checked.
+	GroundedKinds int
+	// Matched counts grounded-kind pointers that matched a loaded row.
+	Matched int
+	// Unverified counts grounded-kind pointers that matched nothing and were
+	// flagged in place.
+	Unverified int
+	// Exempt counts self-referential pointers (llm_rationale / analyzer_error)
+	// that are never cross-checked — this is REQUIRED so fallbackDecision
+	// drafts and the Tier-1 synthetic note are never flagged.
+	Exempt int
+}
+
+// IsUngrounded reports whether NO grounding data was loaded for a triage
+// cycle — neither an advisory excerpt nor a reachability row. When true, any
+// grounded-kind evidence the LLM cited is unbacked by retrieved data and a
+// confident verdict must be clamped (Tier 1).
+func IsUngrounded(advisories []AdvisoryExcerptRow, reach []ReachabilityRow) bool {
+	return len(advisories) == 0 && len(reach) == 0
+}
+
+// UngroundedConfidenceCeiling maps an auto-approve threshold to the
+// confidence an ungrounded / unverified draft is clamped to. It is always
+// strictly below the threshold (so a clamped draft can never re-present as
+// high-confidence) while staying non-negative. Half the threshold keeps a
+// small honest "low confidence" signal without implying near-approval.
+func UngroundedConfidenceCeiling(threshold float64) float64 {
+	if threshold <= 0 {
+		return 0
+	}
+	if threshold > 1 {
+		threshold = 1
+	}
+	return threshold / 2
+}
+
+// UngroundedNote builds the synthetic evidence pointer appended to an
+// ungrounded draft (Tier 1). It records HONESTLY that no advisory /
+// reachability evidence backed the verdict, preserving the AI's original
+// proposal (state@confidence) inside the Description so the human approver
+// can see what the model claimed before the clamp. Its kind is
+// analyzer_error, which ValidateGrounding treats as exempt, so re-running
+// the guard never flags this note.
+func UngroundedNote(origState string, origConfidence float64) EvidencePointer {
+	return EvidencePointer{
+		Kind:   EvidenceKindAnalyzerError,
+		Source: "grounding_guard",
+		Note:   UngroundedNoteTag,
+		Description: fmt.Sprintf(
+			"ungrounded: no advisory excerpt or reachability evidence was available for this (project, CVE); AI proposed %s@%.2f but the draft is ungrounded and requires human verification",
+			origState, origConfidence,
+		),
+	}
+}
+
+// ValidateGrounding cross-checks each evidence pointer against the loaded
+// advisory / reachability rows and marks unmatched grounded-kind pointers
+// unverified IN PLACE (mutating evidence[i].Note). It NEVER deletes a
+// pointer and NEVER returns an error — the lenient contract avoids
+// false-negatives when the LLM legitimately paraphrases. The runner reads
+// the returned GroundingResult to decide whether to clamp confidence.
+//
+// Matching rules:
+//   - advisory_excerpt: RawSnippet (else Description) must be a
+//     case-insensitive substring of some advisory's RawExcerpt, or appear in
+//     one of its structured JSON fields (VulnFuncs / AffectedPaths / ...).
+//   - symbol_ref / import_path: Symbol / ImportPath (else Description) must
+//     appear in some reachability row's Evidence JSON.
+//   - llm_rationale / analyzer_error: EXEMPT (self-referential). Never
+//     flagged — this keeps fallbackDecision drafts and the Tier-1 synthetic
+//     note clean.
+func ValidateGrounding(evidence []EvidencePointer, advisories []AdvisoryExcerptRow, reach []ReachabilityRow) GroundingResult {
+	var res GroundingResult
+	for i := range evidence {
+		ev := &evidence[i]
+		switch ev.Kind {
+		case EvidenceKindAdvisoryExcerpt:
+			res.GroundedKinds++
+			if advisoryPointerGrounded(*ev, advisories) {
+				res.Matched++
+			} else {
+				res.Unverified++
+				markUnverifiedGrounding(ev)
+			}
+		case EvidenceKindSymbolRef, EvidenceKindImportPath:
+			res.GroundedKinds++
+			if reachPointerGrounded(*ev, reach) {
+				res.Matched++
+			} else {
+				res.Unverified++
+				markUnverifiedGrounding(ev)
+			}
+		case EvidenceKindLLMRationale, EvidenceKindAnalyzerError:
+			// EXEMPT — self-referential kinds are never cross-checked.
+			res.Exempt++
+		default:
+			// Unknown kinds are already rejected by ValidateEvidence; ignore.
+		}
+	}
+	return res
+}
+
+// advisoryPointerGrounded reports whether an advisory_excerpt pointer's
+// quoted text appears (case-insensitively) in some loaded advisory row.
+func advisoryPointerGrounded(ev EvidencePointer, advisories []AdvisoryExcerptRow) bool {
+	needle := firstNonEmpty(ev.RawSnippet, ev.Description)
+	if needle == "" {
+		return false
+	}
+	nlow := strings.ToLower(strings.TrimSpace(needle))
+	if nlow == "" {
+		return false
+	}
+	for _, a := range advisories {
+		if a.RawExcerpt != "" && strings.Contains(strings.ToLower(a.RawExcerpt), nlow) {
+			return true
+		}
+		if jsonRawContainsFold(a.VulnFuncs, nlow) ||
+			jsonRawContainsFold(a.AffectedPaths, nlow) ||
+			jsonRawContainsFold(a.RequiredConfig, nlow) ||
+			jsonRawContainsFold(a.RequiredEnv, nlow) {
+			return true
+		}
+	}
+	return false
+}
+
+// reachPointerGrounded reports whether a symbol_ref / import_path pointer's
+// symbol/path appears (case-insensitively) in some loaded reachability row's
+// Evidence JSON.
+func reachPointerGrounded(ev EvidencePointer, reach []ReachabilityRow) bool {
+	needle := firstNonEmpty(ev.Symbol, ev.ImportPath, ev.Description)
+	if needle == "" {
+		return false
+	}
+	nlow := strings.ToLower(strings.TrimSpace(needle))
+	if nlow == "" {
+		return false
+	}
+	for _, rr := range reach {
+		if jsonRawContainsFold(rr.Evidence, nlow) {
+			return true
+		}
+	}
+	return false
+}
+
+// markUnverifiedGrounding appends UnverifiedGroundingTag to a pointer's Note
+// without clobbering existing Note content (e.g. the LLM's per-pointer
+// rationale). Idempotent: a pointer is tagged at most once.
+func markUnverifiedGrounding(ev *EvidencePointer) {
+	if strings.Contains(ev.Note, UnverifiedGroundingTag) {
+		return
+	}
+	if ev.Note == "" {
+		ev.Note = UnverifiedGroundingTag
+		return
+	}
+	ev.Note = ev.Note + "; " + UnverifiedGroundingTag
+}
+
+// jsonRawContainsFold reports whether the lowercased raw JSON bytes contain
+// needleLower (already lowercased). Heuristic substring match — see the
+// package-level caveat about paraphrase false-negatives.
+func jsonRawContainsFold(raw json.RawMessage, needleLower string) bool {
+	if len(raw) == 0 || needleLower == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(raw)), needleLower)
+}
+
+// firstNonEmpty returns the first non-empty (after trimming) argument.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // IsValidState reports whether s is in the CycloneDX VEX 1.5 state

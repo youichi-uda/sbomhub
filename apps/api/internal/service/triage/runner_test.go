@@ -269,13 +269,19 @@ func TestRunner_Run_HappyPath_InsertsDraftLLMCallAndAudit(t *testing.T) {
 	userID := uuid.New()
 
 	drafts := &fakeVexDraftStore{}
+	// M32 Wave B: the happy path is a POSITIVE control for the grounding
+	// guard — the LLM's cited evidence (canonicalLLMResponse) must actually
+	// be present in the loaded rows so Tier 2 does NOT flag/clamp it. The
+	// RawExcerpt now contains the advisory_excerpt snippet verbatim and the
+	// reachability Evidence JSON carries the cited symbol.
 	advisories := &fakeAdvisoryReader{rows: []AdvisoryExcerptRow{{
 		ID: uuid.New(), CVEID: "CVE-2026-0001", Source: "ghsa",
-		RawExcerpt: "GHSA advisory excerpt for CVE-2026-0001",
+		RawExcerpt: "GHSA advisory excerpt for CVE-2026-0001: Vulnerable function github.com/example/pkg.Foo accepts attacker-controlled input.",
 	}}}
 	reach := &fakeReachabilityReader{rows: []ReachabilityRow{{
 		ID: uuid.New(), ComponentID: componentID, CVEID: "CVE-2026-0001",
 		Ecosystem: "go", Status: "import_only",
+		Evidence: json.RawMessage(`{"symbol":"github.com/example/pkg.Foo","status":"import_only"}`),
 	}}}
 	llmCalls := &fakeLLMCallWriter{}
 	audit := &fakeAuditWriter{}

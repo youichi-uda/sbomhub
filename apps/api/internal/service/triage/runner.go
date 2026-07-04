@@ -755,6 +755,52 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		return nil, fmt.Errorf("triage.Run: %w", err)
 	}
 
+	// ----------------------------------------------------------------
+	// M32 Wave B (P2): grounding guard. ValidateEvidence above only
+	// checks the SHAPE of the LLM's self-reported evidence — an
+	// advisory_excerpt pointer passes on a Description the model wrote
+	// itself, with nothing tying it to the advisory / reachability rows
+	// we actually loaded (advisories / reach). In production those tables
+	// are frequently empty, so the LLM can fabricate evidence pointers
+	// that pass ValidateEvidence and reach the human approver as a
+	// confident, fabricated-evidence VEX. The two tiers below close that
+	// gap WITHOUT dropping drafts: drafts are always saved-and-flagged,
+	// reusing under_investigation + a synthetic note + a confidence clamp
+	// as the "requires human verification" signal (no new draft field).
+	// ----------------------------------------------------------------
+	origState := string(parsed.State)
+	origConfidence := parsed.Confidence
+
+	// Tier 2 (lenient): cross-check each grounded-kind pointer against the
+	// loaded rows, marking unmatched ones unverified in place. Never drops,
+	// never rejects. Exempt kinds (llm_rationale / analyzer_error) — which
+	// carry fallbackDecision drafts and the Tier-1 synthetic note — are
+	// intentionally left untouched.
+	grounding := ValidateGrounding(parsed.Evidence, advisories, reach)
+
+	// Tier 1 (clamp): a draft is ungrounded when NO grounding data was
+	// loaded at all, or when it cites grounded-kind evidence yet none of it
+	// matched a loaded row (only self-referential exempt pointers remain as
+	// "grounding"). A confident non-under_investigation verdict in that
+	// state is unsupported and must not reach the approver as high-confidence.
+	noVerifiedGrounding := grounding.GroundedKinds > 0 && grounding.Matched == 0
+	if (IsUngrounded(advisories, reach) || noVerifiedGrounding) &&
+		finalState != string(StateUnderInvestigation) {
+		parsed.Evidence = append(parsed.Evidence, UngroundedNote(origState, origConfidence))
+		finalState = string(StateUnderInvestigation)
+		parsed.Confidence = UngroundedConfidenceCeiling(r.threshold)
+		clamped = true
+	} else if grounding.Unverified > 0 {
+		// Some grounded pointers were unverified but at least one matched
+		// (or the draft is already under_investigation). Keep the draft +
+		// state, but drop confidence below the auto-approve threshold so a
+		// partially-fabricated citation can never present as high-confidence.
+		if parsed.Confidence >= r.threshold {
+			parsed.Confidence = UngroundedConfidenceCeiling(r.threshold)
+		}
+		clamped = true
+	}
+
 	evidenceJSON, err := json.Marshal(parsed.Evidence)
 	if err != nil {
 		return nil, fmt.Errorf("triage.Run: marshal evidence: %w", err)
