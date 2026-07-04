@@ -95,7 +95,9 @@ func cvePerfWithChunkSize(t *testing.T, n int) func() {
 // under test.
 func newTestCVESyncJob(db *sql.DB) *CVESyncJob {
 	tenantRepo := repository.NewTenantRepository(db)
-	return NewCVESyncJob(db, tenantRepo, "", 24*time.Hour)
+	// nil advisoryExcerpts: the perf harness pins round-trip counts only —
+	// excerpt grounding (M32) is disabled here so it adds no expectations.
+	return NewCVESyncJob(db, tenantRepo, "", 24*time.Hour, nil)
 }
 
 // TestCVESyncChunkPerf_F258_N100_M50_SingleChunk pins the F258 round-trip

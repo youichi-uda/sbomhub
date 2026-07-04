@@ -872,6 +872,29 @@ func main() {
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
+
+	// M32 Wave C/E: AI VEX triage grounding — reachability upload + targets.
+	// POST persists the CLI's client-side analyser verdicts (a plain
+	// synchronous DB write, so it keeps TenantTx + auditMiddleware like the
+	// SBOM upload above — unlike /triage/run which drops them for LLM
+	// latency). GET /targets feeds the `sbomhub reachability` CLI the
+	// (cve_id, component_id, purl) pairs it needs to attach verdicts to.
+	// Both use MultiAuth so the CLI's Bearer API key is accepted; the write
+	// path's two-tier audit (request-level middleware access log + the
+	// handler's direct reachability_uploaded domain row) mirrors the vex
+	// handlers. GET /targets is read-only (no domain audit).
+	reachabilityHandler := handler.NewReachabilityHandler(reachabilityResultsRepo, auditRepo, projectRepo, vulnRepo)
+	e.POST("/api/v1/projects/:id/reachability", reachabilityHandler.Upload,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.GET("/api/v1/projects/:id/reachability/targets", reachabilityHandler.GetTargets,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	// GET /sbom is the companion read-back to the canonical upload above:
 	// after a CLI / GitHub Actions client uploads with
 	// `Authorization: Bearer sbh_...`, the docs-curl-smoke workflow (and any
@@ -1526,7 +1549,7 @@ func main() {
 	// CVE sync job - runs daily to fetch new/updated CVEs and match against components.
 	// tenantRepo is required for the per-tenant matching loop against RLS-bound
 	// `components` (codex-r4 P1).
-	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour)
+	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo)
 	go cveSyncJob.Start(ctx)
 	slog.Info("CVE sync job started", "interval", "24h")
 

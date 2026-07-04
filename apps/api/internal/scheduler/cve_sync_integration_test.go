@@ -386,7 +386,10 @@ func TestF258_CVESyncChunkedBatch_HappyPath_RealPG_F258(t *testing.T) {
 		componentIDs[i] = f.componentID
 	}
 
-	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour)
+	// nil advisoryExcerpts: this smoke pins F258 chunk-tx semantics, not
+	// M32 excerpt grounding, so grounding is disabled to keep assertions
+	// focused. A real-PG excerpt RLS WITH CHECK smoke is a separate test.
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil)
 
 	start := time.Now()
 	matched, newVulns, err := j.matchTenantsChunked(
@@ -561,7 +564,10 @@ func TestF258_CVESyncChunkAbort_RealPG_F258(t *testing.T) {
 	restorePolicy := installPoisonPolicyCVE(t, migDB, poisonID)
 	defer restorePolicy()
 
-	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour)
+	// nil advisoryExcerpts: this smoke pins F258 chunk-tx semantics, not
+	// M32 excerpt grounding, so grounding is disabled to keep assertions
+	// focused. A real-PG excerpt RLS WITH CHECK smoke is a separate test.
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil)
 
 	// Build the tenant slice matchTenantsChunked will iterate.
 	tenantIDs := seededIDs

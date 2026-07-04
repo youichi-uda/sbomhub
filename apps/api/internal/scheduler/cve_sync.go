@@ -16,6 +16,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service/advisory"
 )
 
 const (
@@ -154,25 +155,50 @@ var cveMatchBatchChunkSize = cveMatchBatchChunkSizeDefault
 // F234 (M15-2, vulnerability_scan.go, read-only) and F244 (M16-4,
 // report_generation.go, read-only); F258 is the first write-heavy
 // application of the pattern.
+// advisoryExcerptUpserter is the narrow persistence contract M32 Wave A
+// (P1) needs to ground the AI VEX triage LLM: it writes the NVD advisory
+// description as an advisory_excerpts row during CVE→tenant linking so the
+// M1-5 triage runner has real advisory text to draft against. Before M32
+// the advisory.NVDParser was only exercised by unit tests — dead in prod,
+// so every VEX draft was produced with zero advisory grounding.
+//
+// It is deliberately narrower than *repository.AdvisoryExcerptsRepository
+// (Upsert only) so the match loop can be unit-tested with a fake that
+// records calls without a real advisory_excerpts table / RLS context. A
+// nil value is treated as "excerpt grounding disabled" everywhere it is
+// consulted (see upsertNVDAdvisoryExcerpt), so a not-yet-wired DI and the
+// existing perf + integration test harnesses never panic.
+type advisoryExcerptUpserter interface {
+	Upsert(ctx context.Context, e *repository.AdvisoryExcerpt) error
+}
+
 type CVESyncJob struct {
-	db         *sql.DB
-	tenantRepo *repository.TenantRepository
-	httpClient *http.Client
-	nvdAPIKey  string
-	interval   time.Duration
+	db               *sql.DB
+	tenantRepo       *repository.TenantRepository
+	httpClient       *http.Client
+	nvdAPIKey        string
+	interval         time.Duration
+	advisoryExcerpts advisoryExcerptUpserter
 }
 
 // NewCVESyncJob creates a new CVE sync job.
 //
 // tenantRepo is required to enumerate tenants for the per-tenant matching
 // loop. Constructing without it would re-introduce the silent-no-op bug.
-func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKey string, interval time.Duration) *CVESyncJob {
+//
+// advisoryExcerpts (M32 Wave A / P1) persists NVD advisory descriptions as
+// advisory_excerpts rows during CVE→tenant linking so the AI VEX triage
+// runner has real advisory grounding. It is appended last and is nil-safe:
+// passing nil disables excerpt grounding (the CVE sync otherwise runs
+// unchanged), which keeps existing callers/tests that don't wire it green.
+func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKey string, interval time.Duration, advisoryExcerpts advisoryExcerptUpserter) *CVESyncJob {
 	return &CVESyncJob{
-		db:         db,
-		tenantRepo: tenantRepo,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
-		nvdAPIKey:  nvdAPIKey,
-		interval:   interval,
+		db:               db,
+		tenantRepo:       tenantRepo,
+		httpClient:       &http.Client{Timeout: 60 * time.Second},
+		nvdAPIKey:        nvdAPIKey,
+		interval:         interval,
+		advisoryExcerpts: advisoryExcerpts,
 	}
 }
 
@@ -806,6 +832,15 @@ func (j *CVESyncJob) matchTenantsChunk(
 					"components_linked", linked,
 					"is_new", entry.isNew,
 				)
+
+				// M32 Wave A (P1): now that this CVE is linked to at least
+				// one of THIS tenant's components, persist the NVD advisory
+				// description as an advisory_excerpts row so the AI VEX
+				// triage runner drafts with real advisory grounding. Runs on
+				// txCtx (the GUC-bound chunk tx) so the excerpt insert shares
+				// the tenant's RLS context. Best-effort: never aborts the
+				// CVE link (see upsertNVDAdvisoryExcerpt).
+				j.upsertNVDAdvisoryExcerpt(txCtx, tenantID, cve)
 			}
 		}
 	}
@@ -899,6 +934,127 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 		linkedCount++
 	}
 	return linkedCount, nil
+}
+
+// upsertNVDAdvisoryExcerpt persists the NVD advisory description for cve as
+// an advisory_excerpts row for tenantID (source "nvd"), so the M1-5 AI VEX
+// triage runner has real advisory grounding instead of drafting blind
+// (M32 Wave A / P1). ctx MUST carry the GUC-bound chunk tx (the caller sets
+// `app.current_tenant_id` to tenantID via SET LOCAL on the same tx), so the
+// advisory_excerpts RLS WITH CHECK passes on the insert.
+//
+// Best-effort — grounding must never regress the CVE sync. A nil upserter,
+// an empty/whitespace description, or a nil/empty parse result are logged
+// (slog) and skipped before any DB work.
+//
+// SAVEPOINT isolation (why, not just log-and-continue): the excerpt write
+// runs on the SHARED chunk tx (ctx's tx), and on PostgreSQL the FIRST
+// statement error puts the whole tx into the aborted state — every
+// subsequent statement (the next tenant's SET LOCAL, the next CVE's link
+// INSERT) then fails with "current transaction is aborted", which would
+// roll back the ENTIRE chunk's core CVE links. An auxiliary best-effort
+// write must never be able to do that (and unlike the
+// component_vulnerabilities INSERT — ON CONFLICT DO NOTHING, essentially
+// never errors — this write additionally carries RLS WITH CHECK, a real
+// failure mode). So the excerpt Upsert is wrapped in a SAVEPOINT: on
+// failure we ROLLBACK TO the savepoint, restoring the tx to its exact
+// pre-excerpt clean state, and return. The core CVE link (inserted BEFORE
+// the savepoint) survives and the chunk commits normally. This function
+// never returns an error and never aborts the enclosing CVE link.
+func (j *CVESyncJob) upsertNVDAdvisoryExcerpt(ctx context.Context, tenantID uuid.UUID, cve CVEInfo) {
+	if j.advisoryExcerpts == nil {
+		return
+	}
+	desc := strings.TrimSpace(cve.Description)
+	if desc == "" {
+		// No advisory text to ground on — skip rather than write an
+		// empty-excerpt row (guards against garbage rows).
+		return
+	}
+
+	// Build the TYPED NVD payload. advisory.NVDParser.Parse routes a plain
+	// string through decodeNVDBytes (which json.Unmarshals and errors on
+	// free text), so we MUST hand it a *NVDCVEPayload — the parser is
+	// pure/deterministic, constructed inline (no injection needed).
+	payload := &advisory.NVDCVEPayload{
+		ID:           cve.ID,
+		Descriptions: []advisory.NVDDescription{{Lang: "en", Value: desc}},
+	}
+	parsed, perr := (&advisory.NVDParser{}).Parse(ctx, payload)
+	if perr != nil {
+		slog.Warn("scheduler: advisory excerpt parse failed, grounding skipped (M32)",
+			"cve_id", cve.ID, "tenant_id", tenantID, "error", perr)
+		return
+	}
+	// Nil parse or no usable raw text -> nothing worth persisting.
+	if parsed == nil || strings.TrimSpace(parsed.RawExcerpt) == "" {
+		return
+	}
+
+	now := time.Now().UTC()
+	excerpt := &repository.AdvisoryExcerpt{
+		TenantID:       tenantID,
+		CVEID:          cve.ID,
+		Source:         string(advisory.SourceNVD),
+		VulnFuncs:      stringsToJSONArray(parsed.VulnFuncs),
+		AffectedPaths:  stringsToJSONArray(parsed.AffectedPaths),
+		RequiredConfig: stringsToJSONArray(parsed.RequiredConfig),
+		RequiredEnv:    stringsToJSONArray(parsed.RequiredEnv),
+		RawExcerpt:     parsed.RawExcerpt,
+		FetchedAt:      &now,
+	}
+	// Resolve the querier from ctx: since the caller passes the chunk's
+	// txCtx, this is the SAME *sql.Tx the chunk (and this CVE's link
+	// INSERT) runs on. The SAVEPOINT / RELEASE / ROLLBACK TO statements
+	// below therefore fence the tx's transaction stack correctly.
+	q := database.Querier(ctx, j.db)
+
+	// Fixed savepoint name is safe for nested reuse across CVEs: each one is
+	// RELEASEd (success) or ROLLBACK-TO'd (failure) before the next CVE's
+	// upsert opens it again.
+	if _, err := q.ExecContext(ctx, "SAVEPOINT sh_advisory_excerpt"); err != nil {
+		// Could not even open the savepoint — do NOT run the Upsert
+		// unguarded (that could poison the chunk tx). Skip grounding.
+		slog.Warn("scheduler: could not open advisory excerpt savepoint, grounding skipped (M32)",
+			"cve_id", cve.ID, "tenant_id", tenantID, "error", err)
+		return
+	}
+
+	if err := j.advisoryExcerpts.Upsert(ctx, excerpt); err != nil {
+		slog.Warn("scheduler: advisory excerpt upsert failed, rolling back to savepoint; CVE link preserved (M32 best-effort)",
+			"cve_id", cve.ID, "tenant_id", tenantID, "error", err)
+		// Restore the tx to its pre-excerpt clean state so the chunk's
+		// subsequent statements are NOT poisoned by the aborted Upsert.
+		if _, rbErr := q.ExecContext(ctx, "ROLLBACK TO SAVEPOINT sh_advisory_excerpt"); rbErr != nil {
+			// ROLLBACK TO itself failing means the tx may be unusable —
+			// there is nothing more we can safely do; the chunk's COMMIT
+			// (or a later statement) will surface it. Log loudly.
+			slog.Error("scheduler: failed to roll back advisory excerpt savepoint, chunk tx may be unusable (M32)",
+				"cve_id", cve.ID, "tenant_id", tenantID, "error", rbErr)
+		}
+		return
+	}
+
+	// Success — release the savepoint. A release failure is benign (the
+	// savepoint is dropped at COMMIT anyway); log and continue.
+	if _, relErr := q.ExecContext(ctx, "RELEASE SAVEPOINT sh_advisory_excerpt"); relErr != nil {
+		slog.Warn("scheduler: failed to release advisory excerpt savepoint (benign) (M32)",
+			"cve_id", cve.ID, "tenant_id", tenantID, "error", relErr)
+	}
+}
+
+// stringsToJSONArray marshals a []string into the json.RawMessage JSONB
+// array shape advisory_excerpts expects. nil/empty maps to nil, which the
+// repository's jsonbOrEmptyArray normalises to the column's '[]' default.
+func stringsToJSONArray(in []string) json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // upsertVulnerability creates or updates a vulnerability record
