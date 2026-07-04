@@ -298,13 +298,28 @@ export function DependencyPathPanel({
               </div>
             )}
 
-            {/* Truncation is reported honestly — never silently dropped. */}
-            {data.truncated && (
+            {/* Truncation WITH paths: "showing the first N" — the enumerated
+                subset is real, more paths exist. Never silently dropped. */}
+            {data.truncated && data.paths.length > 0 && (
               <div
                 data-testid="dependency-path-truncated"
                 className="mb-4 rounded-md border border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-900/30 p-3 text-sm text-yellow-800 dark:text-yellow-200"
               >
                 {t("truncated", { count: data.path_count })}
+              </div>
+            )}
+
+            {/* Truncation WITH zero paths: enumeration hit its computation
+                budget before completing any path. The component IS reachable,
+                so this must NOT show "showing the first 0 paths" nor the
+                "not found in graph" empty state (F400) — it gets its own
+                honest message. */}
+            {data.truncated && data.paths.length === 0 && (
+              <div
+                data-testid="dependency-path-truncated-empty"
+                className="rounded-md border border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-900/30 p-4 text-sm text-yellow-800 dark:text-yellow-200"
+              >
+                {t("truncatedEmpty")}
               </div>
             )}
 
@@ -318,8 +333,11 @@ export function DependencyPathPanel({
               </div>
             )}
 
-            {/* No paths, but the SBOM does carry edges → not in graph. */}
-            {!data.degraded && data.paths.length === 0 && (
+            {/* No paths, not truncated, edges present → genuinely absent from
+                the graph. Gated on !truncated so a budget-truncated (but
+                reachable) component never renders this wrong "not found"
+                copy (F400). */}
+            {!data.degraded && !data.truncated && data.paths.length === 0 && (
               <div
                 data-testid="dependency-path-empty"
                 className="rounded-md border border-muted bg-muted/40 p-4 text-sm text-muted-foreground"

@@ -167,6 +167,45 @@ test.describe('Dependency path-to-root (M29-B)', () => {
     );
   });
 
+  test('truncated with zero paths shows a distinct message, not "not found" (F400)', async ({
+    page,
+  }) => {
+    // Backend hit its enumeration budget before completing any path. The
+    // component IS reachable, so the panel must render the honest
+    // "too complex to enumerate" message and NOT the contradictory
+    // "not found in graph" empty state nor "showing the first 0 paths".
+    await page.route(
+      `**/api/v1/projects/${PROJECT_ID}/components/*/paths`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            component_id: COMPONENT_ID,
+            component: { name: 'qs', version: '6.2.0', purl: 'pkg:npm/qs' },
+            sbom_id: '77777777-7777-4777-8777-777777777777',
+            format: 'cyclonedx',
+            degraded: false,
+            is_direct: false,
+            paths: [],
+            path_count: 0,
+            truncated: true,
+          }),
+        }),
+    );
+    await mockProjectShell(page);
+    await openComponentsTabAndTriggerPath(page);
+
+    // The distinct honest message renders.
+    const distinct = page.getByTestId('dependency-path-truncated-empty');
+    await expect(distinct).toBeVisible();
+    await expect(distinct).toContainText(/computation budget/i);
+
+    // The contradictory states are NOT rendered.
+    await expect(page.getByTestId('dependency-path-empty')).toHaveCount(0);
+    await expect(page.getByTestId('dependency-path-truncated')).toHaveCount(0);
+  });
+
   test('shows informational empty state for degraded (SPDX) SBOMs', async ({
     page,
   }) => {

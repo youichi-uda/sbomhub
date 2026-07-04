@@ -1070,6 +1070,7 @@
     "transitiveTitle": "This is a transitive dependency",
     "transitiveHint": "It is pulled in through the chains below. To change it, upgrade the direct dependency (in blue) at the start of each chain.",
     "truncated": "Showing the first {count} paths. More paths exist but were truncated to keep this view responsive.",
+    "truncatedEmpty": "Dependency paths were too complex to enumerate within the computation budget. This component is present in the dependency graph, but its full set of entry paths could not be computed.",
     "degraded": "Dependency edges are not available for this SBOM (e.g. SPDX). Path-to-root analysis requires a CycloneDX SBOM with a dependencies graph.",
     "empty": "This component was not found in the dependency graph for the selected SBOM.",
     "pathCount": "{count} paths",
