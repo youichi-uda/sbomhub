@@ -174,6 +174,13 @@ type Builder struct {
 	projects ProjectReader
 	meti     METIAssessmentReader
 	catalog  METICatalog
+
+	// vexExporter renders the CycloneDX VEX document for the zip's
+	// vex.cdx.json entry. It is OPTIONAL: the Markdown path never
+	// consults it, so existing 5-arg NewBuilder callers keep working.
+	// It is injected via WithVEXExporter (see zip.go) and is required
+	// only when FormatZip is requested with the VEX section enabled.
+	vexExporter VEXExporter
 }
 
 // NewBuilder constructs a Builder. nil arguments panic at construction
@@ -226,8 +233,14 @@ func (b *Builder) Build(ctx context.Context, in BuildInput) (*BuildResult, error
 	if in.Format == "" {
 		in.Format = FormatMarkdown
 	}
-	if in.Format != FormatMarkdown {
-		return nil, fmt.Errorf("evidence_pack.Build: unsupported format %q (M2-6 supports %q only; PDF/Zip ship in M3)", in.Format, FormatMarkdown)
+	// FormatZip (F405 / M31) is a NEW render target that reuses the
+	// Markdown builder output for its report.md entry (see zip.go);
+	// FormatMarkdown remains the pre-existing default behaviour.
+	switch in.Format {
+	case FormatMarkdown, FormatZip:
+		// supported
+	default:
+		return nil, fmt.Errorf("evidence_pack.Build: unsupported format %q (supported: %q, %q)", in.Format, FormatMarkdown, FormatZip)
 	}
 	now := in.Now
 	if now.IsZero() {
@@ -342,7 +355,9 @@ func (b *Builder) Build(ctx context.Context, in BuildInput) (*BuildResult, error
 		}
 	}
 
-	// Step 5: render the bundle.
+	// Step 5: render the Markdown bundle. This byte body is the
+	// FormatMarkdown output verbatim AND the zip's report.md entry, so
+	// the two formats never drift.
 	body := renderMarkdown(renderInput{
 		Project:               project,
 		Now:                   now,
@@ -357,6 +372,22 @@ func (b *Builder) Build(ctx context.Context, in BuildInput) (*BuildResult, error
 		CRATruncated:          !craFetchAll,
 		METITruncated:         in.IncludeMETIAssessment && !metiFetchAll,
 	})
+
+	// Step 6: FormatZip assembles the Markdown report plus the
+	// machine-readable, integrity-verifiable artefacts into a single
+	// zip. FormatMarkdown falls through to the unchanged return below.
+	if in.Format == FormatZip {
+		return b.assembleZip(ctx, assembleZipInput{
+			in:                in,
+			now:               now,
+			reportMD:          body,
+			craRows:           craRows,
+			metiRows:          metiRows,
+			metiAchievedCount: metiAchievedCnt,
+			vexCount:          vexFetchedCount,
+			craCount:          craFetchedCount,
+		})
+	}
 
 	return &BuildResult{
 		Format:            FormatMarkdown,
