@@ -531,6 +531,49 @@ test.describe('Search Functionality', () => {
         await expect(summary.getByTestId('blast-radius-project')).toHaveCount(0);
     });
 
+    // M28 F395 (#134/#135): a 204 / empty impact response must NOT be rendered
+    // as a fabricated "0 projects affected". "No projects affected" is an
+    // affirmative security claim; showing it when the endpoint returned nothing
+    // (broken / 204) is false reassurance. getImpact throws on an empty
+    // envelope, the search page's best-effort catch hides the summary, and the
+    // byCVE listing still renders. This pins the distinction from the genuine
+    // 200 + affected:[] empty-state test above.
+    test('should NOT render blast-radius summary when impact endpoint returns no body (M28 F395)', async ({ page }) => {
+        const cveResult = {
+            cve_id: 'CVE-2021-44228',
+            description: 'Log4Shell',
+            cvss_score: 10.0,
+            epss_score: 0,
+            severity: 'CRITICAL',
+            affected_projects: [],
+            unaffected_projects: [],
+        };
+
+        // Impact endpoint returns 204 No Content (broken / empty); byCVE 200.
+        await page.route('**/api/v1/vulnerabilities/*/impact', (route) =>
+            route.fulfill({ status: 204 }),
+        );
+        await page.route('**/api/v1/search/cve*', (route) =>
+            route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(cveResult) }),
+        );
+
+        await page.goto('/en/search');
+        await page.waitForLoadState('networkidle');
+        if (await isRedirectedToSignIn(page)) {
+            return;
+        }
+
+        await page.getByPlaceholder('CVE-2021-44228').fill('CVE-2021-44228');
+        await page.getByRole('button', { name: 'Search' }).first().click();
+
+        // The byCVE search resolved and rendered its results container...
+        await expect(page.getByTestId('search-results')).toBeVisible({ timeout: 10000 });
+        // ...but the blast-radius summary must be absent — never a fabricated
+        // "No projects affected" from an empty/204 impact response.
+        await expect(page.getByTestId('blast-radius-summary')).toHaveCount(0);
+        await expect(page.getByTestId('blast-radius-empty')).toHaveCount(0);
+    });
+
     test('should show result count for component search', async ({ page, request }) => {
         if (!projectId) {
             test.skip();

@@ -1812,21 +1812,24 @@ export const api = {
       const raw = await request<CVEImpactResult>(
         `/api/v1/vulnerabilities/${encodeURIComponent(cveId)}/impact`,
       );
-      // F174 / F184 nil defence: the Go handler may marshal an empty
-      // affected_projects slice as JSON null (the `var xs []T` pattern),
-      // and BlastRadiusSummary maps over it unconditionally. safeEnvelope
-      // additionally guards the whole envelope against a 204 / null body.
-      const safe = safeEnvelope<CVEImpactResult>(raw, {
-        cve_id: cveId,
-        severity: "unknown",
-        cvss_score: 0,
-        epss_score: 0,
-        in_kev: false,
-        affected_project_count: 0,
-        total_project_count: 0,
-        affected_projects: [],
-      });
-      return { ...safe, affected_projects: safe.affected_projects ?? [] };
+      // F395 (#134/#135): do NOT apply a whole-envelope zero-impact fallback
+      // here. "0 projects affected" is an affirmative security claim; in a
+      // security product, fabricating it from a 204 / null / empty body would
+      // be false reassurance. A missing envelope means the endpoint returned
+      // nothing (broken / 204) and is distinct from a genuine 200
+      // { affected_project_count: 0, affected_projects: [] }. Throw so the
+      // search page's best-effort catch hides the summary (the byCVE listing
+      // still renders) instead of showing a fake "No projects affected".
+      if (raw == null) {
+        throw new Error(
+          `impact endpoint returned no body for ${cveId}`,
+        );
+      }
+      // Retain the F174 / F184 per-field nil defence, but ONLY on a present
+      // envelope: the Go handler may still marshal an empty affected_projects
+      // slice as JSON null (the `var xs []T` pattern), and BlastRadiusSummary
+      // maps over it unconditionally.
+      return { ...raw, affected_projects: raw.affected_projects ?? [] };
     },
   },
 

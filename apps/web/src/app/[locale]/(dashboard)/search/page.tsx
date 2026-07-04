@@ -233,6 +233,13 @@ export default function SearchPage() {
       // the impact endpoint 404s when the CVE is unknown to the tenant, so
       // a failure here must not blank out the byCVE result the operator
       // already got. The blast-radius summary is a complement, not a gate.
+      //
+      // F395 (#134/#135): getImpact throws on a 204 / null / empty envelope
+      // (a broken or empty response), so this catch sets impactResult = null
+      // and the summary stays hidden rather than fabricating a reassuring
+      // "0 projects affected". A genuine 200 with affected_projects: [] still
+      // returns a present object here and renders the "no projects affected"
+      // empty state — the two cases are deliberately distinct.
       try {
         const impact = await api.vulnerabilities.getImpact(cveQuery.trim());
         setImpactResult(impact);
