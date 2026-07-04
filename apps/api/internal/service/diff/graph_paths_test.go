@@ -664,3 +664,93 @@ func TestEnumeratePaths_ShortestFirst(t *testing.T) {
 		t.Errorf("shortest path = %q, want r -> t", got)
 	}
 }
+
+// ---------- F401: root detection without metadata.component ----------
+
+// TestComputePaths_NoMetadataComponentRootDetection is the F401 regression
+// test. A CycloneDX SBOM with NO metadata.component means orderedIDs[0] is
+// just the first bom.Components entry, which may have a real parent
+// (in-degree > 0). The old findRoots force-added orderedIDs[0] as a root
+// unconditionally (on the false assumption it is always metadata.component),
+// hiding that parent edge and returning a wrong single-node path with
+// is_direct=true. Graph {a,b}, edge b -> a (b dependsOn a), no declared root:
+// querying `a` must return the real parent chain b -> a, NOT the bogus
+// single node [a]. FAILS before the fix (returns "pkg:npm/a"), PASSES after.
+func TestComputePaths_NoMetadataComponentRootDetection(t *testing.T) {
+	tenantID, projectID, sbomID := uuid.New(), uuid.New(), uuid.New()
+	raw := makeCycloneDXBytes(t,
+		[]cdxComponent{
+			{BOMRef: "a", Type: "library", Name: "a", Version: "1.0.0", Purl: "pkg:npm/a@1.0.0"},
+			{BOMRef: "b", Type: "library", Name: "b", Version: "1.0.0", Purl: "pkg:npm/b@1.0.0"},
+		},
+		[]cdxDependency{
+			{Ref: "b", Dependencies: []string{"a"}}, // b -> a: b is the real parent/root
+		},
+	)
+	sbom := model.Sbom{ID: sbomID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", RawData: raw, CreatedAt: time.Now()}
+	compID := uuid.New()
+	svc := newPathsService(t, tenantID, projectID, sbom, map[uuid.UUID]model.Component{
+		compID: mkComp(compID, sbomID, "a", "1.0.0", "pkg:npm/a@1.0.0", "library"),
+	})
+
+	resp, err := svc.ComputePaths(context.Background(), tenantID, projectID, compID, nil)
+	if err != nil {
+		t.Fatalf("ComputePaths error: %v", err)
+	}
+	if len(resp.Paths) != 1 {
+		t.Fatalf("want 1 path, got %d: %v", len(resp.Paths), pathSet(resp.Paths))
+	}
+	if got := pathJoined(resp.Paths[0]); got != "pkg:npm/b -> pkg:npm/a" {
+		t.Errorf("path = %q, want pkg:npm/b -> pkg:npm/a (b is the real parent; a must NOT be force-marked a root)", got)
+	}
+	// a is a direct child of the real root b.
+	if !resp.IsDirect {
+		t.Errorf("is_direct = false, want true (a is a direct child of root b)")
+	}
+}
+
+// TestComputePaths_MetadataComponentRootStillForced is the positive guard:
+// WITH a metadata.component root, the declared root must still be force-added
+// even when a malformed SBOM records an inbound edge to it (the original
+// F-comment rationale). Root R depends on a (R -> a) while a stray x -> R
+// edge gives R in-degree 1; querying `a` must stop at R (path R -> a), not
+// walk past it to x. Passes both before and after the fix — it pins that the
+// fix scopes the force-add to the *declared* root rather than removing it.
+func TestComputePaths_MetadataComponentRootStillForced(t *testing.T) {
+	tenantID, projectID, sbomID := uuid.New(), uuid.New(), uuid.New()
+	raw := makeCycloneDXBytesWithMetadata(t,
+		cdxComponent{BOMRef: "root", Type: "application", Name: "root", Version: "1.0", Purl: "pkg:my/root@1.0"},
+		[]cdxComponent{
+			{BOMRef: "a", Type: "library", Name: "a", Version: "1.0.0", Purl: "pkg:npm/a@1.0.0"},
+			{BOMRef: "x", Type: "library", Name: "x", Version: "1.0.0", Purl: "pkg:npm/x@1.0.0"},
+		},
+		[]cdxDependency{
+			{Ref: "root", Dependencies: []string{"a"}}, // root -> a
+			{Ref: "x", Dependencies: []string{"root"}}, // malformed inbound edge to the root
+		},
+	)
+	sbom := model.Sbom{ID: sbomID, TenantID: tenantID, ProjectID: projectID, Format: "cyclonedx", RawData: raw, CreatedAt: time.Now()}
+	compID := uuid.New()
+	svc := newPathsService(t, tenantID, projectID, sbom, map[uuid.UUID]model.Component{
+		compID: mkComp(compID, sbomID, "a", "1.0.0", "pkg:npm/a@1.0.0", "library"),
+	})
+
+	resp, err := svc.ComputePaths(context.Background(), tenantID, projectID, compID, nil)
+	if err != nil {
+		t.Fatalf("ComputePaths error: %v", err)
+	}
+	// The declared root is force-added, so traversal stops at it: R -> a,
+	// never a -> R -> x.
+	set := pathSet(resp.Paths)
+	if _, ok := set["pkg:my/root -> pkg:npm/a"]; !ok {
+		t.Errorf("want path pkg:my/root -> pkg:npm/a (declared root force-added), got %v", set)
+	}
+	for p := range set {
+		if strings.Contains(p, "pkg:npm/x") {
+			t.Errorf("path walked past the declared root to x: %q", p)
+		}
+	}
+	if !resp.IsDirect {
+		t.Errorf("is_direct = false, want true (a is a direct child of the declared root)")
+	}
+}

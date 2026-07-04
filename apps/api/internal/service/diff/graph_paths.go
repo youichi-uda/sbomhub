@@ -262,10 +262,16 @@ func buildReverseAdjacency(g sbomGraph) map[string][]string {
 
 // findRoots returns the set of node IDs treated as dependency-graph roots:
 // every node with in-degree 0 (nothing depends on it) plus the declared
-// application/root node at orderedIDs[0] (metadata.component, per the
-// CycloneDX 1.6 contract — see parseCycloneDXGraph). Including the declared
-// root explicitly bounds traversal even if a malformed SBOM records an
-// inbound edge to it.
+// application/root node (g.declaredRootID) when the SBOM actually declared a
+// metadata.component (per the CycloneDX 1.6 contract — see
+// parseCycloneDXGraph). Force-adding the declared root explicitly bounds
+// traversal even if a malformed SBOM records an inbound edge to it.
+//
+// F401: the declared root is taken from g.declaredRootID, NOT orderedIDs[0].
+// orderedIDs[0] equals the declared root only when a metadata.component
+// exists; without one it is merely the first bom.Components entry, which may
+// have in-degree > 0 (a real parent). Force-marking that as a root hid the
+// parent edge and produced a bogus single-node path with is_direct=true.
 func findRoots(g sbomGraph) map[string]struct{} {
 	inDegree := make(map[string]int, len(g.nodes))
 	for id := range g.nodes {
@@ -282,8 +288,8 @@ func findRoots(g sbomGraph) map[string]struct{} {
 			roots[id] = struct{}{}
 		}
 	}
-	if len(g.orderedIDs) > 0 {
-		roots[g.orderedIDs[0]] = struct{}{}
+	if g.declaredRootID != "" {
+		roots[g.declaredRootID] = struct{}{}
 	}
 	return roots
 }

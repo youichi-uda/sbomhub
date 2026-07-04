@@ -283,10 +283,20 @@ func computeGraphPair(projectID uuid.UUID, from, to *model.Sbom) *GraphResponse 
 // ordered list of those keys (preserves declaration order for stable
 // frontend layout), and the edge list already translated from
 // bom-refs to match keys.
+//
+// declaredRootID is the match key of the CycloneDX metadata.component
+// (the declared application/root node) when — and only when — the SBOM
+// actually declared one and it was indexed. It is "" for SPDX, empty, or
+// no-metadata-component inputs. findRoots uses it to force-add the *real*
+// declared root as a traversal root; it must NOT be inferred from
+// orderedIDs[0], because without a metadata.component orderedIDs[0] is
+// merely the first bom.Components entry and may legitimately have a parent
+// (F401). The diff-graph consumers (ComputeGraph) ignore this field.
 type sbomGraph struct {
-	nodes      map[string]GraphNode
-	orderedIDs []string
-	edges      []GraphEdge
+	nodes          map[string]GraphNode
+	orderedIDs     []string
+	edges          []GraphEdge
+	declaredRootID string
 }
 
 func emptySbomGraph() sbomGraph {
@@ -428,8 +438,27 @@ func parseCycloneDXGraph(data []byte) sbomGraph {
 	// (application, framework, container, etc). Index it BEFORE
 	// bom.Components so the root node lands at orderedIDs[0] and any
 	// dependencies[].ref pointing at the root bom-ref resolves.
+	//
+	// F401: capture the declared root's match key so findRoots can
+	// force-add the *actual* declared root (not merely orderedIDs[0],
+	// which is only the declared root when a metadata.component exists).
+	// We compute the key directly rather than trusting orderedIDs[0] so a
+	// metadata.component with no usable identity (empty key) but nested
+	// children does not mis-attribute a child as the root.
 	if bom.Metadata != nil && bom.Metadata.Component != nil {
-		indexComponent(*bom.Metadata.Component, 0)
+		mc := *bom.Metadata.Component
+		rootKey := componentMatchKey(model.Component{
+			Name:    mc.Name,
+			Version: mc.Version,
+			Type:    string(mc.Type),
+			Purl:    mc.PackageURL,
+		})
+		indexComponent(mc, 0)
+		if rootKey != "" {
+			if _, ok := out.nodes[rootKey]; ok {
+				out.declaredRootID = rootKey
+			}
+		}
 	}
 
 	if bom.Components != nil {
