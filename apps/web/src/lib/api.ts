@@ -2370,9 +2370,12 @@ export const api = {
         if (orgId) headers["X-Clerk-Org-ID"] = orgId;
       }
       const body: Record<string, unknown> = {};
-      // Only send `format` when explicitly "zip". Omitting it for the
-      // markdown path preserves the exact pre-M31 request shape (the
-      // backend defaults to markdown), so old + new backends agree.
+      // Send `format` only when the caller explicitly picks one (zip or
+      // markdown); omit it for the default/undefined case so the request
+      // stays minimal. A pre-M31 backend has no `format` field, defaults to
+      // markdown, and safely ignores an unknown `format` in the body, so old
+      // + new backends agree either way. The e2e pins both explicit branches
+      // (sentFormat === "zip" and sentFormat === "markdown").
       if (opts?.format === "zip") {
         body.format = "zip";
       } else if (opts?.format === "markdown") {
