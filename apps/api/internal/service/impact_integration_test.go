@@ -1,0 +1,309 @@
+//go:build integration
+
+// Package service — cross-project vulnerability impact (blast radius)
+// integration test (M28-A / F388, issue #134).
+//
+// Run with:
+//
+//	cd apps/api && go test -tags=integration -count=1 \
+//	    -run TestCVEImpact ./internal/service
+//
+// -count=1 is load-bearing: this test asserts against live DB rows +
+// FORCE ROW LEVEL SECURITY behaviour, neither of which is an input to go's
+// test cache. Re-running after re-seeding with an unchanged binary would
+// otherwise return the previous cached verdict.
+//
+// Prerequisites (skipped otherwise — same env contract as the VEX suggestions
+// integration test, whose seed helpers this file reuses):
+//   - docker compose up -d postgres   (or any postgres reachable via env)
+//   - DATABASE_URL set to a sbomhub_app (NOBYPASSRLS) connection string
+//   - MIGRATE_DATABASE_URL set to a sbomhub_migrator connection string
+//   - Schema migrated through the canonical apps/api sequence (the api
+//     server's auto-migrate covers this).
+//
+// What this test pins down (kickoff cases 1-5):
+//
+//  1. Blast radius across the SAME tenant's projects: a CVE affecting projects
+//     A and B (but not C) yields affected_project_count == 2, the exact
+//     affected components + component_count per project, and never lists the
+//     unaffected project C.
+//  2. Tenant isolation — a foreign tenant's project affected by the SAME CVE
+//     (same purl) NEVER appears, and total_project_count counts only the
+//     querying tenant's projects. Guarded twice: RLS (authoritative) + the
+//     query's explicit tenant_id predicate (defence in depth). This is the
+//     assertion the tenant-predicate mutation is expected to break.
+//  3. A known CVE affecting zero of the tenant's projects returns a non-nil
+//     result with count 0 and an empty list (200, not 404); an unknown CVE
+//     returns nil (the handler answers 404).
+//  4. severity / CVSS / KEV / EPSS rollup matches the vulnerability metadata.
+//  5. total_project_count equals the tenant's project total, excluding the
+//     foreign tenant's projects.
+//
+// The seed/env helpers (seedTenantVS, seedProjectVS, seedSbomVS,
+// seedComponentVS, seedVulnVS, linkCompVulnVS, openOrSkipVS, schemaReadyVS,
+// vexSuggestionsTestEnv) are defined in vex_suggestions_integration_test.go —
+// same package, same build tag — and are reused verbatim here.
+package service
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/sbomhub/sbomhub/internal/database"
+	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
+)
+
+// setVulnKEVEPSS marks a seeded global vulnerability as KEV-listed. The
+// vulnerabilities table is global (no RLS), so the migrator pool updates it
+// directly. epss_score is intentionally left alone: it is absent from the
+// canonical schema, so the impact view surfaces EPSS as a fixed 0 (mirroring
+// SearchByCVE / GetTopRisksByTenant) — see repository/impact.go.
+func setVulnKEVEPSS(t *testing.T, migDB *sql.DB, vulnID uuid.UUID, inKEV bool) {
+	t.Helper()
+	if _, err := migDB.Exec(`UPDATE vulnerabilities SET in_kev = $1 WHERE id = $2`, inKEV, vulnID); err != nil {
+		t.Fatalf("set kev on vuln %s: %v", vulnID, err)
+	}
+}
+
+// runImpact drives the real ImpactService.GetCVEImpact for (tenant, cve)
+// through an app-role tx that has SET LOCAL app.current_tenant_id, so RLS is
+// active exactly as on a live request.
+func runImpact(t *testing.T, appDB *sql.DB, tenantID uuid.UUID, cveID string) *model.CVEImpact {
+	t.Helper()
+	tx, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenantID.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL %s: %v", tenantID, err)
+	}
+	svc := NewImpactService(repository.NewSearchRepository(appDB))
+	ctx := database.WithTx(context.Background(), tx)
+	got, err := svc.GetCVEImpact(ctx, tenantID, cveID)
+	if err != nil {
+		t.Fatalf("GetCVEImpact(%s): %v", cveID, err)
+	}
+	return got
+}
+
+func TestCVEImpact_BlastRadius(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	// Close via t.Cleanup (LIFO → runs AFTER the data-deletion cleanup below),
+	// not defer, so the DELETEs don't fire against a closed pool.
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	tenantT := seedTenantVS(t, migDB, "IMP-T")
+	tenantF := seedTenantVS(t, migDB, "IMP-F")
+
+	// Uppercase the hex suffix: GetCVEImpact normalises the input cve_id with
+	// strings.ToUpper (correct for real CVE-YYYY-NNNNN ids), so the seeded
+	// cve_id must already be uppercase to round-trip.
+	sfx := strings.ToUpper(uuid.New().String()[:8])
+	cve := func(n string) string { return fmt.Sprintf("CVE-2026-%s-%s", n, sfx) }
+	vHit := seedVulnVS(t, migDB, cve("HIT"))   // affects A + B (and foreign F)
+	vZero := seedVulnVS(t, migDB, cve("ZERO")) // known but affects nothing in T
+	setVulnKEVEPSS(t, migDB, vHit, true)       // KEV-listed → in_kev rollup = true
+
+	t.Cleanup(func() {
+		// tenants CASCADE reaps projects → sboms → components →
+		// component_vulnerabilities. Global vulnerabilities are not
+		// tenant-scoped, so remove them explicitly.
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vHit, vZero)
+	})
+
+	// --- Tenant T: project A (2 affected components), B (1), C (unaffected) ---
+	projA := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projA, "app-a")
+	sbomA := seedSbomVS(t, migDB, tenantT, projA)
+	compA1 := seedComponentVS(t, migDB, tenantT, sbomA, "libx", "1.0", "pkg:generic/libx@1.0")
+	compA2 := seedComponentVS(t, migDB, tenantT, sbomA, "liby", "2.0", "pkg:generic/liby@2.0")
+	linkCompVulnVS(t, migDB, compA1, vHit)
+	linkCompVulnVS(t, migDB, compA2, vHit)
+
+	projB := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projB, "app-b")
+	sbomB := seedSbomVS(t, migDB, tenantT, projB)
+	compB1 := seedComponentVS(t, migDB, tenantT, sbomB, "libx", "1.0", "pkg:generic/libx@1.0")
+	linkCompVulnVS(t, migDB, compB1, vHit)
+
+	projC := uuid.New() // affected by nothing
+	seedProjectVS(t, migDB, tenantT, projC, "app-c")
+	sbomC := seedSbomVS(t, migDB, tenantT, projC)
+	_ = seedComponentVS(t, migDB, tenantT, sbomC, "libsafe", "9.9", "pkg:generic/libsafe@9.9")
+
+	// --- Foreign tenant F: SAME CVE, SAME purl — strongest leak candidate ---
+	projF := uuid.New()
+	seedProjectVS(t, migDB, tenantF, projF, "foreign-app")
+	sbomF := seedSbomVS(t, migDB, tenantF, projF)
+	compF := seedComponentVS(t, migDB, tenantF, sbomF, "libx", "1.0", "pkg:generic/libx@1.0")
+	linkCompVulnVS(t, migDB, compF, vHit)
+
+	// ---- Case 1 + 2 + 4 + 5: blast radius for vHit, queried as tenant T ----
+	got := runImpact(t, appDB, tenantT, cve("HIT"))
+	if got == nil {
+		t.Fatalf("expected a non-nil impact for known CVE %s", cve("HIT"))
+	}
+
+	// Case 4: metadata rollup matches the seeded vulnerability (seedVulnVS uses
+	// severity=HIGH, cvss=7.5; setVulnKEVEPSS set in_kev=true; EPSS is a fixed
+	// 0 by design until 006_epss lands).
+	if got.Severity != "HIGH" {
+		t.Errorf("severity = %q, want HIGH", got.Severity)
+	}
+	if got.CVSSScore != 7.5 {
+		t.Errorf("cvss_score = %v, want 7.5", got.CVSSScore)
+	}
+	if !got.InKEV {
+		t.Errorf("in_kev = false, want true (KEV rollup)")
+	}
+	if got.EPSSScore != 0 {
+		t.Errorf("epss_score = %v, want 0 (fixed until 006_epss)", got.EPSSScore)
+	}
+
+	// Case 1: exactly A and B affected; C never appears.
+	if got.AffectedProjectCount != 2 {
+		t.Fatalf("affected_project_count = %d, want 2: %+v", got.AffectedProjectCount, got.AffectedProjects)
+	}
+	if len(got.AffectedProjects) != 2 {
+		t.Fatalf("len(affected_projects) = %d, want 2", len(got.AffectedProjects))
+	}
+
+	// Case 2 (tenant isolation) — highest priority: the foreign project must
+	// NOT appear.
+	byID := map[uuid.UUID]model.ImpactProject{}
+	for _, p := range got.AffectedProjects {
+		if p.ProjectID == projF {
+			t.Fatalf("TENANT LEAK: foreign tenant's project %s surfaced in tenant T's impact", projF)
+		}
+		if p.ProjectID == projC {
+			t.Fatalf("unaffected project C %s surfaced in impact", projC)
+		}
+		byID[p.ProjectID] = p
+	}
+
+	// Case 1 detail: component_count per project.
+	pa, okA := byID[projA]
+	pb, okB := byID[projB]
+	if !okA || !okB {
+		t.Fatalf("expected both projA and projB in impact, got %+v", got.AffectedProjects)
+	}
+	if pa.ComponentCount != 2 || len(pa.AffectedComponents) != 2 {
+		t.Errorf("projA component_count = %d (len %d), want 2", pa.ComponentCount, len(pa.AffectedComponents))
+	}
+	if pb.ComponentCount != 1 || len(pb.AffectedComponents) != 1 {
+		t.Errorf("projB component_count = %d (len %d), want 1", pb.ComponentCount, len(pb.AffectedComponents))
+	}
+	// purl carried through on projB's single affected component.
+	if pb.AffectedComponents[0].Purl != "pkg:generic/libx@1.0" {
+		t.Errorf("projB component purl = %q, want pkg:generic/libx@1.0", pb.AffectedComponents[0].Purl)
+	}
+
+	// Case 5: total_project_count is tenant T's project total (A, B, C = 3),
+	// excluding the foreign tenant's project.
+	if got.TotalProjectCount != 3 {
+		t.Fatalf("total_project_count = %d, want 3 (T has A,B,C; foreign F excluded)", got.TotalProjectCount)
+	}
+
+	// ---- Case 3a: known CVE affecting zero of T's projects → 200 empty ----
+	zero := runImpact(t, appDB, tenantT, cve("ZERO"))
+	if zero == nil {
+		t.Fatalf("known-but-unaffecting CVE %s must return non-nil (200 empty), got nil (would be 404)", cve("ZERO"))
+	}
+	if zero.AffectedProjectCount != 0 || len(zero.AffectedProjects) != 0 {
+		t.Errorf("zero-affected impact: count=%d len=%d, want 0/0", zero.AffectedProjectCount, len(zero.AffectedProjects))
+	}
+	if zero.TotalProjectCount != 3 {
+		t.Errorf("zero-affected total_project_count = %d, want 3", zero.TotalProjectCount)
+	}
+
+	// ---- Case 3b: unknown CVE → nil (handler → 404) ----
+	unknown := runImpact(t, appDB, tenantT, fmt.Sprintf("CVE-2099-NOPE-%s", sfx))
+	if unknown != nil {
+		t.Errorf("unknown CVE must return nil (→404), got %+v", unknown)
+	}
+}
+
+// TestCVEImpact_TenantIsolation_BeltAndBraces is the focused tenant-boundary
+// companion. It documents the two-layer guarantee: with a NOBYPASSRLS app role
+// (the CI configuration) RLS is authoritative and the foreign rows are
+// invisible; the query's explicit tenant_id predicate is the defence-in-depth
+// belt that becomes load-bearing only if RLS is ever disabled. Removing that
+// belt (the M28 mutation) under a BYPASSRLS role makes this test fail — both
+// the affected list and total_project_count would then absorb the foreign
+// tenant's project.
+func TestCVEImpact_TenantIsolation_BeltAndBraces(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+	appDB := openOrSkipVS(t, appURL)
+	defer appDB.Close()
+
+	// Report whether the app role bypasses RLS so the run log makes the
+	// guarantee under test explicit.
+	var bypass bool
+	_ = appDB.QueryRow(`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&bypass)
+	t.Logf("app role bypasses RLS = %v (false → RLS authoritative; true → explicit tenant_id predicate is sole guard)", bypass)
+
+	tenantT := seedTenantVS(t, migDB, "ISO-T")
+	tenantF := seedTenantVS(t, migDB, "ISO-F")
+	// Uppercase the hex suffix: GetCVEImpact normalises the input cve_id with
+	// strings.ToUpper (correct for real CVE-YYYY-NNNNN ids), so the seeded
+	// cve_id must already be uppercase to round-trip.
+	sfx := strings.ToUpper(uuid.New().String()[:8])
+	vX := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-ISO-%s", sfx))
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX)
+	})
+
+	// Tenant T: one project affected by vX.
+	projT := uuid.New()
+	seedProjectVS(t, migDB, tenantT, projT, "T target")
+	sbomT := seedSbomVS(t, migDB, tenantT, projT)
+	compT := seedComponentVS(t, migDB, tenantT, sbomT, "libiso", "1.0", "pkg:generic/iso@1.0")
+	linkCompVulnVS(t, migDB, compT, vX)
+
+	// Foreign tenant F: SAME vX, SAME purl — would match if the boundary were
+	// absent.
+	projF := uuid.New()
+	seedProjectVS(t, migDB, tenantF, projF, "F source")
+	sbomF := seedSbomVS(t, migDB, tenantF, projF)
+	compF := seedComponentVS(t, migDB, tenantF, sbomF, "libiso", "1.0", "pkg:generic/iso@1.0")
+	linkCompVulnVS(t, migDB, compF, vX)
+
+	got := runImpact(t, appDB, tenantT, fmt.Sprintf("CVE-2026-ISO-%s", sfx))
+	if got == nil {
+		t.Fatalf("expected non-nil impact for tenant T")
+	}
+
+	// Only tenant T's single project may appear.
+	if got.AffectedProjectCount != 1 {
+		t.Fatalf("tenant isolation violated: affected_project_count = %d, want 1: %+v", got.AffectedProjectCount, got.AffectedProjects)
+	}
+	for _, p := range got.AffectedProjects {
+		if p.ProjectID == projF {
+			t.Fatalf("TENANT LEAK: foreign project %s surfaced", projF)
+		}
+	}
+	// total_project_count must count only tenant T's project (1), not F's.
+	if got.TotalProjectCount != 1 {
+		t.Fatalf("tenant isolation violated: total_project_count = %d, want 1 (foreign tenant's project excluded)", got.TotalProjectCount)
+	}
+}

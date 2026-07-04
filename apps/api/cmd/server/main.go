@@ -374,6 +374,9 @@ func main() {
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo)
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	searchService := service.NewSearchServiceWithNVD(searchRepo, nvdService)
+	// M28-A (F388, #134): cross-project vulnerability impact (blast radius).
+	// Read-only aggregation reusing the tenant-scoped search repository.
+	impactService := service.NewImpactService(searchRepo)
 	epssService := service.NewEPSSService(vulnRepo)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
@@ -574,6 +577,7 @@ func main() {
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	searchHandler := handler.NewSearchHandler(searchService)
+	impactHandler := handler.NewImpactHandler(impactService)
 	epssHandler := handler.NewEPSSHandler(epssService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	complianceHandler := handler.NewComplianceHandler(complianceService)
@@ -1416,6 +1420,11 @@ func main() {
 	auth.GET("/kev/:cve_id", kevHandler.GetByCVE)
 	auth.GET("/vulnerabilities/:cve_id/kev", kevHandler.CheckCVE)
 	auth.GET("/projects/:id/kev", kevHandler.GetProjectKEVVulnerabilities)
+
+	// M28-A (F388, #134): cross-project vulnerability impact (blast radius).
+	// Read-only sibling of the /vulnerabilities/:cve_id/kev and /ipa metadata
+	// endpoints; tenant-scoped aggregation, no new audit action.
+	auth.GET("/vulnerabilities/:cve_id/impact", impactHandler.GetCVEImpact)
 
 	// EOL (End of Life) integration endpoints
 	auth.POST("/eol/sync", eolHandler.SyncCatalog)
