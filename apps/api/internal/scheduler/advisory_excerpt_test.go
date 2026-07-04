@@ -1,21 +1,25 @@
 // Package scheduler — advisory_excerpt_test.go
 //
 // M32 Wave A (P1): unit coverage for wiring the NVD advisory-excerpt
-// extraction into the production CVE→tenant link flow (cve_sync.go
-// upsertNVDAdvisoryExcerpt, called from matchTenantsChunk when a CVE links
-// to at least one of a tenant's components).
+// extraction into the production CVE→tenant link flow. Excerpts are
+// collected during matchTenantsChunk's link loop and persisted in ONE
+// batched savepoint per chunk (writeChunkAdvisoryExcerpts) — one subxid per
+// chunk regardless of CVE count (subxid-cache overflow avoidance), while
+// keeping best-effort isolation (core links precede the savepoint).
 //
 // These tests are hermetic: the CVE→component link wire AND the M32
-// SAVEPOINT / RELEASE / ROLLBACK TO statements are driven against a sqlmock
-// DB (they run on the chunk tx = database.Querier(ctx, db)), while the
+// SAVEPOINT / SET LOCAL re-assert / RELEASE / ROLLBACK TO statements are
+// driven against a sqlmock DB (they run on the chunk tx), while the
 // advisory_excerpts Upsert itself is intercepted by a fake so no real
 // advisory_excerpts table / RLS context is needed.
 //
-// IMPORTANT (RLS caveat): a fake-based unit test proves the excerpt row is
-// built and Upserted with the right fields AND that a failure is fenced by a
-// savepoint — it does NOT prove the advisory_excerpts RLS WITH CHECK passes
-// under the tenant GUC. That is a real-PG assertion left to an integration
-// smoke.
+// IMPORTANT (RLS caveat): a fake-based unit test proves the excerpt rows are
+// built and Upserted with the right fields, that exactly ONE savepoint is
+// opened per chunk, and that a failure is fenced by that savepoint — it does
+// NOT prove the advisory_excerpts RLS WITH CHECK passes under the tenant GUC,
+// nor the (tenant,cve,source) ON CONFLICT idempotency (a repository/real-PG
+// property; the compile-time assertion at the bottom pins that the real repo
+// satisfies the upserter interface). Those are real-PG integration smokes.
 package scheduler
 
 import (
@@ -34,7 +38,7 @@ import (
 // fakeAdvisoryExcerptUpserter records Upsert calls without a DB so the M32
 // excerpt-grounding wiring can be unit-tested hermetically. `err` fails
 // every call; `failCVE` overrides per CVEID — both prove an excerpt failure
-// never aborts the CVE link (it is fenced by a SAVEPOINT).
+// is fenced by the chunk savepoint and never aborts the core CVE links.
 type fakeAdvisoryExcerptUpserter struct {
 	mu      sync.Mutex
 	calls   []repository.AdvisoryExcerpt
@@ -45,8 +49,7 @@ type fakeAdvisoryExcerptUpserter struct {
 func (f *fakeAdvisoryExcerptUpserter) Upsert(_ context.Context, e *repository.AdvisoryExcerpt) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// Value copy: snapshot the struct at call time (the caller reuses the
-	// pointer's backing fields across iterations in the real loop).
+	// Value copy: snapshot the struct at call time.
 	f.calls = append(f.calls, *e)
 	if f.failCVE != nil {
 		if err, ok := f.failCVE[e.CVEID]; ok {
@@ -62,58 +65,52 @@ func (f *fakeAdvisoryExcerptUpserter) callCount() int {
 	return len(f.calls)
 }
 
-// excerptOutcome selects which M32 savepoint statements a linked CVE is
-// expected to issue against the sqlmock DB.
-type excerptOutcome int
+// --- sqlmock expectation helpers (all regex-matched; savepoint statements
+// are anchored with ^...$ so SAVEPOINT does not also match RELEASE/ROLLBACK
+// TO). ---
 
-const (
-	excerptNone     excerptOutcome = iota // grounding skipped: no savepoint at all
-	excerptRelease                        // Upsert ok: SAVEPOINT ... RELEASE
-	excerptRollback                       // Upsert failed: SAVEPOINT ... ROLLBACK TO
-)
-
-// expectTenantSetLocal adds the per-tenant GUC bind expectation.
-func expectTenantSetLocal(mock sqlmock.Sqlmock, tenantID uuid.UUID) {
+func expectSetLocal(mock sqlmock.Sqlmock, tenantID uuid.UUID) {
 	mock.ExpectExec(`SELECT set_config\('app\.current_tenant_id'`).
 		WithArgs(tenantID.String()).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
-// expectOneCVELink adds the sqlmock expectations for ONE CVE inside an
-// already-begun, tenant-GUC-bound chunk tx: the components SELECT (1 row, so
-// the CVE links), the component_vulnerabilities INSERT, and the M32
-// savepoint statements per `out`. The excerpt Upsert itself is intercepted
-// by the fake, NOT sqlmock, so it is not expected here.
-//
-// The savepoint regexes are anchored so `SAVEPOINT` does not also match the
-// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT` strings.
-func expectOneCVELink(mock sqlmock.Sqlmock, out excerptOutcome) {
+// expectLinkOneCVE mocks one CVE's link: components SELECT (1 row → links) +
+// the component_vulnerabilities INSERT.
+func expectLinkOneCVE(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(`SELECT DISTINCT c\.id\s+FROM components`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New().String()))
 	mock.ExpectExec(`INSERT INTO component_vulnerabilities`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	switch out {
-	case excerptRelease:
-		mock.ExpectExec(`^SAVEPOINT sh_advisory_excerpt$`).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(`^RELEASE SAVEPOINT sh_advisory_excerpt$`).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-	case excerptRollback:
-		mock.ExpectExec(`^SAVEPOINT sh_advisory_excerpt$`).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(`^ROLLBACK TO SAVEPOINT sh_advisory_excerpt$`).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-	case excerptNone:
-		// grounding skipped before any DB work — no savepoint statements.
-	}
 }
 
-// driveSingleCVEMatch runs matchTenantsChunked for exactly one tenant and
-// one CVE. `out` describes the expected M32 savepoint behaviour for that
-// CVE. It asserts matchTenantsChunked returns no error and that every
-// sqlmock expectation (crucially ExpectCommit) was met — i.e. the enclosing
-// chunk tx committed and the CVE link is durable. Returns the matched count.
-func driveSingleCVEMatch(t *testing.T, fake advisoryExcerptUpserter, tenantID, vulnID uuid.UUID, cve CVEInfo, out excerptOutcome) (matched int) {
+func expectSavepoint(mock sqlmock.Sqlmock) {
+	mock.ExpectExec(`^SAVEPOINT sh_advisory_excerpt$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func expectRelease(mock sqlmock.Sqlmock) {
+	mock.ExpectExec(`^RELEASE SAVEPOINT sh_advisory_excerpt$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func expectRollbackTo(mock sqlmock.Sqlmock) {
+	mock.ExpectExec(`^ROLLBACK TO SAVEPOINT sh_advisory_excerpt$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+// runChunkMatch builds a sqlmock DB, lets `setup` declare the expected wire,
+// runs one chunk's matchTenantsChunked, and asserts no error + all
+// expectations met (crucially ExpectCommit — the chunk committed). Returns
+// the matched count.
+func runChunkMatch(
+	t *testing.T,
+	fake advisoryExcerptUpserter,
+	tenantIDs []uuid.UUID,
+	cves []CVEInfo,
+	vulnIndex map[string]cveVulnEntry,
+	setup func(sqlmock.Sqlmock),
+) (matched int) {
 	t.Helper()
 
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
@@ -122,38 +119,29 @@ func driveSingleCVEMatch(t *testing.T, fake advisoryExcerptUpserter, tenantID, v
 	}
 	defer db.Close()
 
-	mock.ExpectBegin()
-	expectTenantSetLocal(mock, tenantID)
-	expectOneCVELink(mock, out)
-	mock.ExpectCommit()
+	setup(mock)
 
 	j := NewCVESyncJob(db, repository.NewTenantRepository(db), "", 24*time.Hour, fake)
-
-	matched, _, err = j.matchTenantsChunked(
-		context.Background(),
-		[]uuid.UUID{tenantID},
-		[]CVEInfo{cve},
-		map[string]cveVulnEntry{cve.ID: {id: vulnID, isNew: true}},
-	)
+	matched, _, err = j.matchTenantsChunked(context.Background(), tenantIDs, cves, vulnIndex)
 	if err != nil {
-		t.Fatalf("matchTenantsChunked returned error (excerpt path must never abort the CVE link): %v", err)
+		t.Fatalf("matchTenantsChunked returned error (excerpt path must never abort the chunk): %v", err)
 	}
 	if e := mock.ExpectationsWereMet(); e != nil {
-		t.Errorf("unmet sqlmock expectations (link tx did not complete as expected): %v", e)
+		t.Errorf("unmet sqlmock expectations (chunk tx did not complete as expected): %v", e)
 	}
 	return matched
 }
 
-// TestUpsertNVDAdvisoryExcerpt_HappyPath asserts that a linked CVE with a
-// non-empty NVD description produces exactly one Upsert with source "nvd",
-// the right CVE/tenant, and a non-empty RawExcerpt, fenced by
-// SAVEPOINT ... RELEASE.
+// TestUpsertNVDAdvisoryExcerpt_HappyPathFields drives one tenant + one linked
+// CVE and asserts the excerpt row is built with source "nvd", the right
+// CVE/tenant, RawExcerpt == the parsed description, FetchedAt set — fenced by
+// exactly one SAVEPOINT ... RELEASE.
 //
-// Because driveSingleCVEMatch runs the real production path, this exercises
-// the typed *NVDCVEPayload → NVDParser.Parse route (a plain string would
-// route to decodeNVDBytes and error): the RawExcerpt equality assertion
-// below only holds if Parse actually produced the excerpt from the payload.
-func TestUpsertNVDAdvisoryExcerpt_HappyPath(t *testing.T) {
+// Because runChunkMatch runs the real production path, this exercises the
+// typed *NVDCVEPayload → NVDParser.Parse route (a plain string would route to
+// decodeNVDBytes and error): the RawExcerpt equality assertion only holds if
+// Parse actually produced the excerpt from the payload.
+func TestUpsertNVDAdvisoryExcerpt_HappyPathFields(t *testing.T) {
 	fake := &fakeAdvisoryExcerptUpserter{}
 	tenantID := uuid.New()
 	vulnID := uuid.New()
@@ -163,11 +151,24 @@ func TestUpsertNVDAdvisoryExcerpt_HappyPath(t *testing.T) {
 		Keywords:    []string{"libfoo"},
 	}
 
-	matched := driveSingleCVEMatch(t, fake, tenantID, vulnID, cve, excerptRelease)
-	if matched != 1 {
-		t.Fatalf("matched=%d, want 1 (CVE should link to the single mocked component)", matched)
-	}
+	matched := runChunkMatch(t, fake,
+		[]uuid.UUID{tenantID},
+		[]CVEInfo{cve},
+		map[string]cveVulnEntry{cve.ID: {id: vulnID, isNew: true}},
+		func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			expectSetLocal(mock, tenantID) // link loop
+			expectLinkOneCVE(mock)
+			expectSavepoint(mock)          // one savepoint for the batch
+			expectSetLocal(mock, tenantID) // batch re-assert tenant GUC
+			expectRelease(mock)
+			mock.ExpectCommit()
+		},
+	)
 
+	if matched != 1 {
+		t.Fatalf("matched=%d, want 1", matched)
+	}
 	if got := fake.callCount(); got != 1 {
 		t.Fatalf("advisory excerpt Upsert calls=%d, want exactly 1", got)
 	}
@@ -179,74 +180,85 @@ func TestUpsertNVDAdvisoryExcerpt_HappyPath(t *testing.T) {
 		t.Errorf("CVEID=%q, want %q", got.CVEID, cve.ID)
 	}
 	if got.TenantID != tenantID {
-		t.Errorf("TenantID=%v, want %v (must use the tenant whose GUC is bound in the chunk loop)", got.TenantID, tenantID)
+		t.Errorf("TenantID=%v, want %v", got.TenantID, tenantID)
 	}
-	if strings.TrimSpace(got.RawExcerpt) == "" {
-		t.Errorf("RawExcerpt is empty, want the advisory description as grounding text")
-	}
-	// Proves the parser actually ran on our typed payload: NVDParser sets
-	// RawExcerpt to the (trimmed) English description.
+	// Proves the parser ran on our typed payload: NVDParser sets RawExcerpt
+	// to the trimmed English description.
 	if got.RawExcerpt != strings.TrimSpace(cve.Description) {
-		t.Errorf("RawExcerpt=%q, want the parsed NVD description %q", got.RawExcerpt, strings.TrimSpace(cve.Description))
+		t.Errorf("RawExcerpt=%q, want parsed NVD description %q", got.RawExcerpt, strings.TrimSpace(cve.Description))
 	}
 	if got.FetchedAt == nil {
 		t.Errorf("FetchedAt is nil, want it stamped at write time")
 	}
 }
 
-// TestUpsertNVDAdvisoryExcerpt_EmptyDescription asserts that a linked CVE
-// with no advisory text produces NO Upsert and NO savepoint (guards against
-// empty/garbage rows) while the CVE link itself still happens.
-func TestUpsertNVDAdvisoryExcerpt_EmptyDescription(t *testing.T) {
-	// Both truly empty and whitespace-only must be skipped by the
-	// TrimSpace guard in upsertNVDAdvisoryExcerpt (before any savepoint).
-	for _, desc := range []string{"", "   \n\t  "} {
-		fake := &fakeAdvisoryExcerptUpserter{}
-		cve := CVEInfo{
-			ID:          "CVE-2024-99999",
-			Description: desc,
-			Keywords:    []string{"libbar"},
-		}
-
-		matched := driveSingleCVEMatch(t, fake, uuid.New(), uuid.New(), cve, excerptNone)
-		if matched != 1 {
-			t.Fatalf("matched=%d, want 1 (link must happen even with no advisory text)", matched)
-		}
-		if got := fake.callCount(); got != 0 {
-			t.Fatalf("advisory excerpt Upsert calls=%d for description %q, want 0", got, desc)
-		}
-	}
-}
-
-// TestUpsertNVDAdvisoryExcerpt_UpsertErrorRollsBackSavepoint asserts that
-// when the excerpt Upsert fails, it is fenced by SAVEPOINT ... ROLLBACK TO,
-// the CVE link is preserved, matchTenantsChunked returns no error, and the
-// chunk tx still commits (driveSingleCVEMatch checks ExpectCommit was met).
-func TestUpsertNVDAdvisoryExcerpt_UpsertErrorRollsBackSavepoint(t *testing.T) {
-	fake := &fakeAdvisoryExcerptUpserter{err: errors.New("simulated advisory_excerpts upsert failure")}
+// TestUpsertNVDAdvisoryExcerpt_OneSavepointPerChunk is the regression pin for
+// the subxid-cache fix. It drives ONE chunk covering TWO tenants (each links
+// the same CVE) and asserts that despite TWO excerpt writes, exactly ONE
+// SAVEPOINT (and ONE RELEASE) is issued for the whole chunk, with the tenant
+// GUC re-asserted per tenant inside the batch. A per-CVE-savepoint regression
+// would issue a second SAVEPOINT with no matching expectation and fail here.
+func TestUpsertNVDAdvisoryExcerpt_OneSavepointPerChunk(t *testing.T) {
+	fake := &fakeAdvisoryExcerptUpserter{}
+	tenantA, tenantB := uuid.New(), uuid.New()
+	vulnID := uuid.New()
 	cve := CVEInfo{
-		ID:          "CVE-2024-55555",
-		Description: "Improper input validation in libbaz permits path traversal via the ../ sequence in the name parameter.",
-		Keywords:    []string{"libbaz"},
+		ID:          "CVE-2024-22222",
+		Description: "Server-side request forgery in libnet allows internal endpoint access via a crafted host header.",
+		Keywords:    []string{"libnet"},
 	}
 
-	matched := driveSingleCVEMatch(t, fake, uuid.New(), uuid.New(), cve, excerptRollback)
-	if matched != 1 {
-		t.Fatalf("matched=%d, want 1 (excerpt Upsert error must not abort the CVE link)", matched)
+	matched := runChunkMatch(t, fake,
+		[]uuid.UUID{tenantA, tenantB},
+		[]CVEInfo{cve},
+		map[string]cveVulnEntry{cve.ID: {id: vulnID, isNew: true}},
+		func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			// Link loop: per tenant SET LOCAL + one CVE link each.
+			expectSetLocal(mock, tenantA)
+			expectLinkOneCVE(mock)
+			expectSetLocal(mock, tenantB)
+			expectLinkOneCVE(mock)
+			// Batch: exactly ONE savepoint, then per-tenant GUC re-assert
+			// (candidates are contiguous per tenant: A then B), then ONE
+			// release.
+			expectSavepoint(mock)
+			expectSetLocal(mock, tenantA)
+			expectSetLocal(mock, tenantB)
+			expectRelease(mock)
+			mock.ExpectCommit()
+		},
+	)
+
+	if matched != 2 {
+		t.Fatalf("matched=%d, want 2 (CVE links for both tenants)", matched)
 	}
-	if got := fake.callCount(); got != 1 {
-		t.Fatalf("advisory excerpt Upsert calls=%d, want 1 (the failing call should still have been attempted)", got)
+	if got := fake.callCount(); got != 2 {
+		t.Fatalf("advisory excerpt Upsert calls=%d, want 2 (one per tenant)", got)
+	}
+	// Candidates are collected tenant-by-tenant, so call[0]=A, call[1]=B.
+	if fake.calls[0].TenantID != tenantA || fake.calls[1].TenantID != tenantB {
+		t.Errorf("excerpt tenant order = [%v, %v], want [%v, %v]",
+			fake.calls[0].TenantID, fake.calls[1].TenantID, tenantA, tenantB)
+	}
+	for i, c := range fake.calls {
+		if c.Source != "nvd" {
+			t.Errorf("calls[%d].Source=%q, want nvd", i, c.Source)
+		}
+		if c.CVEID != cve.ID {
+			t.Errorf("calls[%d].CVEID=%q, want %q", i, c.CVEID, cve.ID)
+		}
+		if strings.TrimSpace(c.RawExcerpt) == "" {
+			t.Errorf("calls[%d].RawExcerpt empty, want grounding text", i)
+		}
 	}
 }
 
 // TestUpsertNVDAdvisoryExcerpt_UpsertErrorDoesNotPoisonChunk is the core
-// regression pin for the M32 savepoint fix. It drives ONE tenant with TWO
-// CVEs in the same chunk tx: the FIRST CVE's excerpt Upsert fails (fenced by
-// ROLLBACK TO), and it asserts the SECOND CVE still links (its
-// component_vulnerabilities INSERT still executes on the same tx) and the
-// chunk still COMMITS. Without the savepoint, the first excerpt error would
-// abort the tx and the second link + the COMMIT would fail with
-// "current transaction is aborted" — regressing core CVE sync.
+// non-poisoning pin under the batched design. ONE tenant, TWO CVEs: the FIRST
+// excerpt Upsert fails, and it asserts exactly ONE SAVEPOINT then ROLLBACK TO
+// SAVEPOINT (not per-CVE), the batch is abandoned, yet BOTH core CVE links
+// survive (they precede the savepoint) and the chunk still COMMITs.
 func TestUpsertNVDAdvisoryExcerpt_UpsertErrorDoesNotPoisonChunk(t *testing.T) {
 	cveA := CVEInfo{
 		ID:          "CVE-2024-00001",
@@ -258,67 +270,106 @@ func TestUpsertNVDAdvisoryExcerpt_UpsertErrorDoesNotPoisonChunk(t *testing.T) {
 		Description: "Second advisory: integer overflow in libb size computation.",
 		Keywords:    []string{"libb"},
 	}
-	// Only cveA's excerpt fails; cveB's succeeds — proving the tx survived
-	// the first rollback and remained usable.
+	// Only cveA (the first candidate) fails — proving the whole batch is
+	// abandoned on first error but the core links (and COMMIT) survive.
 	fake := &fakeAdvisoryExcerptUpserter{
 		failCVE: map[string]error{cveA.ID: errors.New("simulated RLS WITH CHECK failure on excerpt A")},
 	}
 	tenantID := uuid.New()
 	vulnA, vulnB := uuid.New(), uuid.New()
 
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
-
-	// Single tenant, single chunk. cves iterate in slice order: A then B.
-	mock.ExpectBegin()
-	expectTenantSetLocal(mock, tenantID)
-	expectOneCVELink(mock, excerptRollback) // cveA: excerpt fails -> ROLLBACK TO
-	expectOneCVELink(mock, excerptRelease)  // cveB: still links + excerpt ok -> RELEASE
-	mock.ExpectCommit()
-
-	j := NewCVESyncJob(db, repository.NewTenantRepository(db), "", 24*time.Hour, fake)
-
-	matched, _, err := j.matchTenantsChunked(
-		context.Background(),
+	matched := runChunkMatch(t, fake,
 		[]uuid.UUID{tenantID},
 		[]CVEInfo{cveA, cveB},
 		map[string]cveVulnEntry{
 			cveA.ID: {id: vulnA, isNew: true},
 			cveB.ID: {id: vulnB, isNew: true},
 		},
+		func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			expectSetLocal(mock, tenantID) // link loop
+			expectLinkOneCVE(mock)         // cveA link (survives)
+			expectLinkOneCVE(mock)         // cveB link (survives)
+			// Batch: ONE savepoint, GUC re-assert once (same tenant), then
+			// cveA's Upsert fails -> ROLLBACK TO -> batch abandoned.
+			expectSavepoint(mock)
+			expectSetLocal(mock, tenantID)
+			expectRollbackTo(mock)
+			mock.ExpectCommit()
+		},
 	)
-	if err != nil {
-		t.Fatalf("matchTenantsChunked returned error (savepoint must keep the chunk tx usable): %v", err)
-	}
-	if e := mock.ExpectationsWereMet(); e != nil {
-		// A failure here (e.g. the cveB INSERT or the COMMIT unmet) is
-		// exactly the poisoning regression this test guards against.
-		t.Errorf("unmet sqlmock expectations (tx poisoned by excerpt A failure?): %v", e)
-	}
+
 	if matched != 2 {
 		t.Fatalf("matched=%d, want 2 (both CVEs must link; excerpt A's failure must not poison the chunk)", matched)
 	}
-	if got := fake.callCount(); got != 2 {
-		t.Fatalf("advisory excerpt Upsert calls=%d, want 2 (both CVEs attempt an excerpt)", got)
+	// cveA attempted (and failed) -> batch abandoned before cveB's excerpt.
+	if got := fake.callCount(); got != 1 {
+		t.Fatalf("advisory excerpt Upsert calls=%d, want 1 (batch abandoned after first failure)", got)
+	}
+	if fake.calls[0].CVEID != cveA.ID {
+		t.Errorf("failed call CVEID=%q, want %q", fake.calls[0].CVEID, cveA.ID)
 	}
 }
 
-// TestUpsertNVDAdvisoryExcerpt_NilUpserterIsSafe asserts the nil-safe DI
-// path: when no upserter is wired (prod DI not yet passing it, existing
-// tests), the CVE sync runs unchanged, issues no savepoint, and never panics.
+// TestUpsertNVDAdvisoryExcerpt_EmptyDescription asserts a linked CVE with no
+// advisory text produces NO Upsert AND NO savepoint (nothing collected → the
+// batch is empty), while the CVE link itself still happens.
+func TestUpsertNVDAdvisoryExcerpt_EmptyDescription(t *testing.T) {
+	for _, desc := range []string{"", "   \n\t  "} {
+		fake := &fakeAdvisoryExcerptUpserter{}
+		tenantID := uuid.New()
+		cve := CVEInfo{
+			ID:          "CVE-2024-99999",
+			Description: desc,
+			Keywords:    []string{"libbar"},
+		}
+
+		matched := runChunkMatch(t, fake,
+			[]uuid.UUID{tenantID},
+			[]CVEInfo{cve},
+			map[string]cveVulnEntry{cve.ID: {id: uuid.New(), isNew: true}},
+			func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				expectSetLocal(mock, tenantID)
+				expectLinkOneCVE(mock)
+				// No savepoint: empty description → no candidate collected.
+				mock.ExpectCommit()
+			},
+		)
+
+		if matched != 1 {
+			t.Fatalf("matched=%d, want 1 (link happens even with no advisory text)", matched)
+		}
+		if got := fake.callCount(); got != 0 {
+			t.Fatalf("advisory excerpt Upsert calls=%d for description %q, want 0", got, desc)
+		}
+	}
+}
+
+// TestUpsertNVDAdvisoryExcerpt_NilUpserterIsSafe asserts the nil-safe DI path:
+// no upserter wired → no candidate collected, no savepoint, no panic, link
+// unchanged.
 func TestUpsertNVDAdvisoryExcerpt_NilUpserterIsSafe(t *testing.T) {
+	tenantID := uuid.New()
 	cve := CVEInfo{
 		ID:          "CVE-2024-77777",
 		Description: "Some advisory text that would be persisted if an upserter were wired.",
 		Keywords:    []string{"libqux"},
 	}
 
-	// A typed nil interface: NewCVESyncJob stores it and the guard in
-	// upsertNVDAdvisoryExcerpt short-circuits before any parse/savepoint.
-	matched := driveSingleCVEMatch(t, nil, uuid.New(), uuid.New(), cve, excerptNone)
+	matched := runChunkMatch(t, nil,
+		[]uuid.UUID{tenantID},
+		[]CVEInfo{cve},
+		map[string]cveVulnEntry{cve.ID: {id: uuid.New(), isNew: true}},
+		func(mock sqlmock.Sqlmock) {
+			mock.ExpectBegin()
+			expectSetLocal(mock, tenantID)
+			expectLinkOneCVE(mock)
+			// No savepoint: nil upserter disables grounding entirely.
+			mock.ExpectCommit()
+		},
+	)
+
 	if matched != 1 {
 		t.Fatalf("matched=%d, want 1 (nil upserter must not disturb the CVE link)", matched)
 	}
@@ -326,4 +377,7 @@ func TestUpsertNVDAdvisoryExcerpt_NilUpserterIsSafe(t *testing.T) {
 
 // (compile-time) *repository.AdvisoryExcerptsRepository must satisfy the
 // scheduler's narrow upserter interface so the main.go DI wiring type-checks.
+// This is also the unit-level pin that the persisted excerpts are idempotent
+// on (tenant_id, cve_id, source): that ON CONFLICT upsert lives in the real
+// repository behind this interface (not the fake).
 var _ advisoryExcerptUpserter = (*repository.AdvisoryExcerptsRepository)(nil)
