@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +23,16 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/evidence_pack"
 )
+
+// fakeHandlerVEXExporter injects deterministic CycloneDX VEX bytes into
+// the zip builder for the handler-level zip tests.
+type fakeHandlerVEXExporter struct {
+	data []byte
+}
+
+func (f *fakeHandlerVEXExporter) ExportCycloneDXVEX(_ context.Context, _ uuid.UUID) ([]byte, error) {
+	return f.data, nil
+}
 
 // ----------------------------------------------------------------------------
 // Fakes — mirror the M1 pattern used by vex_drafts_test.go.
@@ -130,6 +142,78 @@ func TestEvidencePackHandler_Build_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "SBOMHub AI Compliance Evidence Pack") {
 		t.Errorf("body missing header; body=%q", rec.Body.String())
+	}
+}
+
+// TestEvidencePackHandler_Build_Zip pins the F405 / M31 (#140) zip
+// render path: application/zip content type, the zip-specific
+// Content-Disposition + X-Evidence-Pack-Format header, the preserved
+// VEX/CRA count headers, and a well-formed zip body carrying the core
+// entries.
+func TestEvidencePackHandler_Build_Zip(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+
+	vex := &fakeVEXDraftReader{rows: []repository.VEXDraft{}}
+	cra := &fakeCRAReportReader{rows: []repository.CRAReport{}}
+	proj := &fakeProjectReaderHandler{project: &model.Project{ID: projectID, Name: "demo"}}
+	builder := evidence_pack.NewBuilder(vex, cra, proj, nil, nil).
+		WithVEXExporter(&fakeHandlerVEXExporter{data: []byte(`{"bomFormat":"CycloneDX","specVersion":"1.5"}`)})
+	h := NewEvidencePackHandler(builder, nil)
+
+	e := echo.New()
+	// Opt out of METI (builder wired with nil meti reader/catalog).
+	body := bytes.NewBufferString(`{"format":"zip","include_meti_assessment":false}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID.String()+"/evidence-pack/build", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(projectID.String())
+	installTenantContext(c, tenantID, uuid.New(), model.RoleAdmin)
+
+	if err := h.Build(c); err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Errorf("Content-Type = %q, want application/zip", ct)
+	}
+	if f := rec.Header().Get("X-Evidence-Pack-Format"); f != "zip" {
+		t.Errorf("X-Evidence-Pack-Format = %q, want zip", f)
+	}
+	cd := rec.Header().Get("Content-Disposition")
+	if !strings.Contains(cd, "attachment;") || !strings.Contains(cd, ".zip") {
+		t.Errorf("Content-Disposition = %q, want attachment;*.zip", cd)
+	}
+	if rec.Header().Get("X-Evidence-Pack-VEX-Count") != "0" {
+		t.Errorf("X-Evidence-Pack-VEX-Count = %q, want 0", rec.Header().Get("X-Evidence-Pack-VEX-Count"))
+	}
+	if rec.Header().Get("X-Evidence-Pack-CRA-Count") != "0" {
+		t.Errorf("X-Evidence-Pack-CRA-Count = %q, want 0", rec.Header().Get("X-Evidence-Pack-CRA-Count"))
+	}
+
+	// Body must be a well-formed zip carrying report.md, vex.cdx.json,
+	// and manifest.json.
+	raw := rec.Body.Bytes()
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("response body is not a zip: %v", err)
+	}
+	present := map[string]bool{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+		present[f.Name] = true
+	}
+	for _, want := range []string{"report.md", "vex.cdx.json", "manifest.json"} {
+		if !present[want] {
+			t.Errorf("zip missing entry %q (have %v)", want, present)
+		}
 	}
 }
 

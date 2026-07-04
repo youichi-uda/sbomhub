@@ -143,11 +143,15 @@ func (h *EvidencePackHandler) Build(c echo.Context) error {
 	if format == "" {
 		format = evidence_pack.FormatMarkdown
 	}
-	// Reject non-markdown formats at the handler boundary — the
+	// F405 / M31 (#140): markdown (existing, default) and zip are
+	// supported. Anything else is rejected at the handler boundary — the
 	// builder's own check is redundant but kept for defence-in-depth.
-	if format != evidence_pack.FormatMarkdown {
+	switch format {
+	case evidence_pack.FormatMarkdown, evidence_pack.FormatZip:
+		// supported
+	default:
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "unsupported format (M2-6 supports markdown only; PDF/Zip ship in M3)",
+			"error": "unsupported format (supported: markdown, zip)",
 		})
 	}
 
@@ -211,6 +215,25 @@ func (h *EvidencePackHandler) Build(c echo.Context) error {
 		}
 	}
 
+	// F405 / M31 (#140): zip is a machine-readable bundle. Content-
+	// Disposition: attachment triggers a download; the filename matches
+	// buildZipFilename in the builder so the audit row and the downloaded
+	// file agree. The X-Evidence-Pack-VEX-Count / -CRA-Count headers are
+	// preserved and X-Evidence-Pack-Format: zip is added so clients can
+	// branch without sniffing the body. The markdown branch below is
+	// unchanged (backward compatible).
+	if res.Format == evidence_pack.FormatZip {
+		c.Response().Header().Set(echo.HeaderContentType, "application/zip")
+		c.Response().Header().Set(echo.HeaderContentDisposition,
+			fmt.Sprintf("attachment; filename=%q", res.Filename))
+		c.Response().Header().Set("X-Evidence-Pack-Format", "zip")
+		c.Response().Header().Set("X-Evidence-Pack-VEX-Count",
+			fmt.Sprintf("%d", res.VEXApprovedCount))
+		c.Response().Header().Set("X-Evidence-Pack-CRA-Count",
+			fmt.Sprintf("%d", res.CRAApprovedCount))
+		return c.Blob(http.StatusOK, "application/zip", res.ContentBytes)
+	}
+
 	// Stream the Markdown body. Content-Disposition: attachment hints
 	// the browser to trigger a download rather than render in-place;
 	// the filename matches buildFilename in the builder so the audit
@@ -257,7 +280,7 @@ func mapEvidencePackError(err error, tenantID, projectID uuid.UUID) (int, map[st
 		return http.StatusBadRequest, map[string]string{"error": msg}, true
 	}
 	if containsSubstring(msg, "unsupported format") {
-		return http.StatusBadRequest, map[string]string{"error": "unsupported format (M2-6 supports markdown only; PDF/Zip ship in M3)"}, true
+		return http.StatusBadRequest, map[string]string{"error": "unsupported format (supported: markdown, zip)"}, true
 	}
 	slog.Warn("evidence_pack: build failed",
 		"tenant_id", tenantID,
