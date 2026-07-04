@@ -407,7 +407,11 @@ test.describe('Search Functionality', () => {
             cve_id: 'CVE-2021-44228',
             severity: 'critical',
             cvss_score: 10.0,
-            epss_score: 0.975,
+            // F391 (#135): the backend emits a fixed epss_score = 0 until the
+            // optional 006_epss migration lands, so the mock reflects the real
+            // backend behaviour (0), not a value it can never produce. The web
+            // suppresses the EPSS badge on a sentinel 0 — asserted below.
+            epss_score: 0,
             in_kev: true,
             affected_project_count: 2,
             total_project_count: 5,
@@ -434,7 +438,7 @@ test.describe('Search Functionality', () => {
             cve_id: 'CVE-2021-44228',
             description: 'Log4Shell',
             cvss_score: 10.0,
-            epss_score: 0.975,
+            epss_score: 0,
             severity: 'CRITICAL',
             affected_projects: [],
             unaffected_projects: [],
@@ -464,9 +468,11 @@ test.describe('Search Functionality', () => {
         await expect(summary).toHaveAttribute('data-affected-count', '2');
         await expect(summary).toHaveAttribute('data-total-count', '5');
         await expect(summary).toContainText('2 of 5 projects affected');
-        // Rollup badges.
+        // Rollup badges. CVSS is always present; the EPSS badge is suppressed
+        // while the backend emits a sentinel epss_score = 0 (F391) — never a
+        // misleading "EPSS 0.0%".
         await expect(summary.getByTestId('blast-radius-cvss')).toContainText('CVSS 10.0');
-        await expect(summary.getByTestId('blast-radius-epss')).toContainText('EPSS 97.5%');
+        await expect(summary.getByTestId('blast-radius-epss')).toHaveCount(0);
         // Per-project rollup (name + component_count).
         const projects = summary.getByTestId('blast-radius-project');
         await expect(projects).toHaveCount(2);
@@ -483,7 +489,8 @@ test.describe('Search Functionality', () => {
             cve_id: 'CVE-2021-44228',
             severity: 'high',
             cvss_score: 7.5,
-            epss_score: 0.1,
+            // F391 (#135): mirror the backend's fixed epss_score = 0 sentinel.
+            epss_score: 0,
             in_kev: false,
             affected_project_count: 0,
             total_project_count: 5,
@@ -493,7 +500,7 @@ test.describe('Search Functionality', () => {
             cve_id: 'CVE-2021-44228',
             description: 'no local exposure',
             cvss_score: 7.5,
-            epss_score: 0.1,
+            epss_score: 0,
             severity: 'HIGH',
             affected_projects: [],
             unaffected_projects: [],

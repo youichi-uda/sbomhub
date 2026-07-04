@@ -24,7 +24,10 @@ import (
 // migration and is absent from the canonical apps/api migration sequence, so —
 // exactly like SearchByCVE and DashboardRepository.GetTopRisksByTenant — this
 // selects a fixed 0::numeric rather than the column. When 006_epss lands, this
-// and its siblings switch to the real column in lockstep.
+// and its siblings switch to the real column in lockstep. Until then the 0 is a
+// sentinel, not a prediction: the web blast-radius summary treats epss_score = 0
+// as "n/a" and suppresses the EPSS badge (F391) so a KEV/critical CVE never
+// shows a misleading "EPSS 0.0%".
 func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID string) (*model.CVEImpactMeta, error) {
 	const query = `
 		SELECT id, severity, cvss_score, 0::numeric AS epss_score, in_kev
