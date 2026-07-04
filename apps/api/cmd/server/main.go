@@ -699,7 +699,15 @@ func main() {
 		// the exposure the browser silently strips the header before the
 		// fetch handler sees it, and the UI falls back to the old
 		// truncated-page behaviour.
-		ExposeHeaders: []string{echo.HeaderContentDisposition, echo.HeaderContentLength, echo.HeaderContentType, "X-Total-Count"},
+		// M31 F406: the Evidence Pack download reads Content-Disposition
+		// (already exposed above, for the dated filename) plus the
+		// X-Evidence-Pack-* headers for the format + VEX/CRA counts; the
+		// same cross-origin exposure rule applies or the web silently sees
+		// 0 counts and falls back to a UUID filename.
+		ExposeHeaders: []string{
+			echo.HeaderContentDisposition, echo.HeaderContentLength, echo.HeaderContentType, "X-Total-Count",
+			"X-Evidence-Pack-Format", "X-Evidence-Pack-VEX-Count", "X-Evidence-Pack-CRA-Count",
+		},
 	}))
 
 	// Webhook endpoints (no auth required)

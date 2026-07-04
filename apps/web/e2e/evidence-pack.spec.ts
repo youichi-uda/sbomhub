@@ -86,6 +86,13 @@ test.describe('Evidence Pack format toggle (M31 F406)', () => {
         status: 200,
         contentType: 'application/zip',
         headers: {
+          // Replicate production CORS exposure (main.go ExposeHeaders): a
+          // cross-origin fetch can only read these headers when the server
+          // lists them in Access-Control-Expose-Headers. Without it the
+          // browser hides Content-Disposition → download falls back to the
+          // UUID filename (the F406 CI failure).
+          'Access-Control-Expose-Headers':
+            'Content-Disposition, X-Evidence-Pack-Format, X-Evidence-Pack-VEX-Count, X-Evidence-Pack-CRA-Count',
           'Content-Disposition': 'attachment; filename="evidence-pack-demo-20260704.zip"',
           'X-Evidence-Pack-Format': 'zip',
           'X-Evidence-Pack-VEX-Count': '2',
@@ -129,6 +136,8 @@ test.describe('Evidence Pack format toggle (M31 F406)', () => {
         status: 200,
         contentType: 'text/markdown',
         headers: {
+          'Access-Control-Expose-Headers':
+            'Content-Disposition, X-Evidence-Pack-Format, X-Evidence-Pack-VEX-Count, X-Evidence-Pack-CRA-Count',
           'Content-Disposition': 'attachment; filename="evidence-pack-demo-20260704.md"',
           'X-Evidence-Pack-Format': 'markdown',
           'X-Evidence-Pack-VEX-Count': '0',
