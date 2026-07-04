@@ -55,12 +55,33 @@ func (f *fakeSbomRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Sbom, er
 type fakeComponentRepo struct {
 	components map[uuid.UUID][]model.Component
 	vulns      map[uuid.UUID][]model.ComponentVulnerability
+	byID       map[uuid.UUID]model.Component // optional: for GetByID (M29-A paths)
 }
 
 func (f *fakeComponentRepo) ListBySbom(_ context.Context, sbomID uuid.UUID) ([]model.Component, error) {
 	out := make([]model.Component, len(f.components[sbomID]))
 	copy(out, f.components[sbomID])
 	return out, nil
+}
+
+// GetByID resolves a component by id — first from the explicit byID map,
+// then by scanning the per-SBOM components map. Returns sql.ErrNoRows when
+// unknown (mirrors ComponentRepository.GetByID). Added for M29-A (F397)
+// ComputePaths, which resolves the target component's identity.
+func (f *fakeComponentRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Component, error) {
+	if c, ok := f.byID[id]; ok {
+		cp := c
+		return &cp, nil
+	}
+	for _, comps := range f.components {
+		for _, c := range comps {
+			if c.ID == id {
+				cp := c
+				return &cp, nil
+			}
+		}
+	}
+	return nil, sql.ErrNoRows
 }
 
 func (f *fakeComponentRepo) ListComponentVulnerabilitiesBySbom(_ context.Context, sbomID uuid.UUID) ([]model.ComponentVulnerability, error) {

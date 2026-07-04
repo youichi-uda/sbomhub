@@ -62,6 +62,20 @@ func (f *fakeComponentRepo) ListComponentVulnerabilitiesBySbom(_ context.Context
 	return out, nil
 }
 
+// GetByID satisfies the diff.componentReader interface (used only by the
+// M29-A paths traversal, which this package's tests do not exercise).
+func (f *fakeComponentRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Component, error) {
+	for _, comps := range f.components {
+		for _, c := range comps {
+			if c.ID == id {
+				cp := c
+				return &cp, nil
+			}
+		}
+	}
+	return nil, errors.New("sql: no rows in result set")
+}
+
 type fakeLicenseRepo struct {
 	policies map[uuid.UUID][]model.LicensePolicy
 }

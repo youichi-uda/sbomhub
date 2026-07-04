@@ -46,9 +46,15 @@ type sbomLister interface {
 }
 
 // componentReader is the slice of ComponentRepository used here.
+//
+// GetByID is used by the M29-A dependency-path traversal (graph_paths.go,
+// F397) to resolve the target component's identity (name / version / purl /
+// type) so its deterministic match key can be located in the parsed SBOM
+// graph. It is unused by the flat/graph diff paths above.
 type componentReader interface {
 	ListBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error)
 	ListComponentVulnerabilitiesBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.ComponentVulnerability, error)
+	GetByID(ctx context.Context, componentID uuid.UUID) (*model.Component, error)
 }
 
 // licensePolicyReader is the slice of LicensePolicyRepository used here.
