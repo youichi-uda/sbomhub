@@ -702,6 +702,37 @@ export interface CVESearchResult {
   unaffected_projects: UnaffectedProject[];
 }
 
+// M28 F389 (#135): cross-project vulnerability impact (blast radius) types.
+// Mirrors the pinned Wave A backend contract for
+// GET /api/v1/vulnerabilities/:cve_id/impact. The impact endpoint's
+// affected-component shape (name/version/purl, no id/fixed_version)
+// diverges from the search endpoint's AffectedComponent (id/fixed_version,
+// no purl), so these are distinct types rather than a reuse of the search
+// ones — the contract is the source of truth.
+export interface ImpactAffectedComponent {
+  name: string;
+  version: string;
+  purl?: string;
+}
+
+export interface ImpactAffectedProject {
+  project_id: string;
+  project_name: string;
+  affected_components: ImpactAffectedComponent[];
+  component_count: number;
+}
+
+export interface CVEImpactResult {
+  cve_id: string;
+  severity: string;
+  cvss_score: number;
+  epss_score: number;
+  in_kev: boolean;
+  affected_project_count: number;
+  total_project_count: number;
+  affected_projects: ImpactAffectedProject[];
+}
+
 export interface ComponentSearchMatch {
   project_id: string;
   project_name: string;
@@ -1767,6 +1798,35 @@ export const api = {
         url += `&version=${encodeURIComponent(version)}`;
       }
       return request<ComponentSearchResult>(url);
+    },
+  },
+
+  // Vulnerabilities — cross-project impact (blast radius)
+  vulnerabilities: {
+    // M28 F389 (#135): read-only blast-radius rollup for a CVE across the
+    // tenant's projects. Complements search.byCVE (which lists affected /
+    // unaffected projects) with the N-of-M summary + severity/KEV/EPSS
+    // rollup + per-project component_count that the Wave A backend
+    // aggregates at GET /api/v1/vulnerabilities/:cve_id/impact.
+    getImpact: async (cveId: string): Promise<CVEImpactResult> => {
+      const raw = await request<CVEImpactResult>(
+        `/api/v1/vulnerabilities/${encodeURIComponent(cveId)}/impact`,
+      );
+      // F174 / F184 nil defence: the Go handler may marshal an empty
+      // affected_projects slice as JSON null (the `var xs []T` pattern),
+      // and BlastRadiusSummary maps over it unconditionally. safeEnvelope
+      // additionally guards the whole envelope against a 204 / null body.
+      const safe = safeEnvelope<CVEImpactResult>(raw, {
+        cve_id: cveId,
+        severity: "unknown",
+        cvss_score: 0,
+        epss_score: 0,
+        in_kev: false,
+        affected_project_count: 0,
+        total_project_count: 0,
+        affected_projects: [],
+      });
+      return { ...safe, affected_projects: safe.affected_projects ?? [] };
     },
   },
 
