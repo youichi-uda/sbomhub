@@ -2841,6 +2841,13 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		// service/audit.go GetAvailableActions() in lockstep (direction-1
 		// asserts this entry has a dropdown registration).
 		model.AuditActionVEXReusedCrossProject: true, // F381 handler-side (vex.go Apply)
+		// M32 Wave C: the reachability upload endpoint's human/CLI-driven
+		// verb, emitted by handler/reachability.go Upload via a direct
+		// h.audit.Log call inside the request TenantTx — the same
+		// handler-side pattern as the F371 / F381 verbs above. Registered
+		// in service/audit.go GetAvailableActions() in lockstep
+		// (direction-1 asserts this entry has a dropdown registration).
+		model.AuditActionReachabilityUploaded: true, // M32 handler-side (reachability.go Upload)
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
@@ -3104,6 +3111,11 @@ func allModelActionValues() map[string]bool {
 		// referenced by GetAvailableActions() directly, so direction-2
 		// must recognise it as a valid registry value.
 		model.AuditActionVEXReusedCrossProject: true,
+		// M32 Wave C: the reachability upload handler-emit verb, defined
+		// in the model/audit.go handler-emit section and referenced by
+		// GetAvailableActions() directly, so direction-2 must recognise
+		// it as a valid registry value.
+		model.AuditActionReachabilityUploaded: true,
 	}
 }
 
@@ -3300,6 +3312,11 @@ func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 		model.ResourceMETIAssessment: true,
 		model.ResourceSBOMDiff:       true,
 		model.ResourceDiffWebhook:    true,
+		// M32 Wave C: handler-side emit from handler/reachability.go
+		// Upload — the reachability_uploaded audit row carries
+		// resource_type=reachability. Registered in the dropdown by the
+		// same wave (service/audit.go GetAvailableResourceTypes()).
+		model.ResourceReachability: true,
 	}
 
 	// Documented exception allowlist mirroring the F271 pattern for
@@ -3432,5 +3449,10 @@ func allModelResourceValues() map[string]bool {
 		model.ResourceMETIAssessment: true,
 		model.ResourceSBOMDiff:       true,
 		model.ResourceDiffWebhook:    true,
+		// M32 Wave C: reachability upload resource type, defined in
+		// model/audit.go and referenced by GetAvailableResourceTypes()
+		// directly, so direction-2 must recognise it as a valid registry
+		// value.
+		model.ResourceReachability: true,
 	}
 }

@@ -391,6 +391,22 @@ const (
 	// (no new resource dimension — the target is a vex_statements row)
 	// and resource_id is the new target statement id.
 	AuditActionVEXReusedCrossProject = "vex_statement_reused_cross_project"
+
+	// AuditActionReachabilityUploaded is emitted by the reachability
+	// upload handler (handler/reachability.go Upload) when the CLI POSTs
+	// a batch of client-side analyser verdicts to
+	// POST /api/v1/projects/:id/reachability (M32 Wave C). This endpoint
+	// is the sole production writer of reachability_results; the row is
+	// written by a direct h.audit.Log call inside the request TenantTx
+	// (audit-or-nothing) exactly once per request, so it follows the
+	// F371 handler-emit discipline: registered in service/audit.go
+	// GetAvailableActions() and pinned in the F271 expectedEmit +
+	// allModelActionValues() sets (middleware/audit_test.go) in the same
+	// change. resource_type is ResourceReachability and resource_id is
+	// the project id (the batch is scoped to one project); Details
+	// carries the upserted row count so the batch size is reconstructable
+	// from the audit trail alone.
+	AuditActionReachabilityUploaded = "reachability_uploaded"
 )
 
 // Resource type constants
@@ -522,6 +538,17 @@ const (
 	ResourceMETIAssessment = "meti_assessment"
 	ResourceSBOMDiff       = "sbom_diff"
 	ResourceDiffWebhook    = "diff_webhook"
+
+	// ResourceReachability is the resource_type for the reachability
+	// upload endpoint (handler/reachability.go Upload, M32 Wave C). One
+	// reachability_uploaded audit row per batch carries
+	// resource_type=reachability and resource_id=<project id> so a
+	// forensic join lands on the project the analyser verdicts were
+	// persisted against. Registered in service/audit.go
+	// GetAvailableResourceTypes() and pinned in the F281 expectedEmit +
+	// allModelResourceValues() sets (middleware/audit_test.go) in the
+	// same change so a future removal from either side trips CI.
+	ResourceReachability = "reachability"
 )
 
 // CreateAuditLogInput is the input for creating an audit log

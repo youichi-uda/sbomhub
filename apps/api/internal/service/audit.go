@@ -632,6 +632,20 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// so a future removal from either side trips CI (F271 direction 1 /
 		// direction 2).
 		{Action: model.AuditActionVEXReusedCrossProject, Label: "VEX Statement Reused Cross-Project", Category: "vex"},
+
+		// M32 Wave C: the reachability upload endpoint's handler-emit
+		// verb. The CLI runs the analyser client-side and POSTs verdicts
+		// to POST /api/v1/projects/:id/reachability; handler/reachability.go
+		// Upload emits reachability_uploaded once per batch via a direct
+		// h.audit.Log call inside the request TenantTx — the same
+		// handler-emit pattern as the F371 / F381 verbs above. Category
+		// "reachability" mirrors the sibling resource-dimension entry so
+		// the dropdown groups the verb with its resource family.
+		// Registered here in lockstep with the model const, the F271
+		// expectedEmit set, and allModelActionValues() so a future
+		// removal from either side trips CI (F271 direction 1 /
+		// direction 2).
+		{Action: model.AuditActionReachabilityUploaded, Label: "Reachability Uploaded", Category: "reachability"},
 	}
 }
 
@@ -755,6 +769,14 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		{Type: model.ResourceMETIAssessment, Label: "METI Assessment", Category: "meti"},
 		{Type: model.ResourceSBOMDiff, Label: "SBOM Diff", Category: "diff"},
 		{Type: model.ResourceDiffWebhook, Label: "Diff Webhook", Category: "integration"},
+
+		// M32 Wave C: the reachability upload endpoint's resource type.
+		// handler/reachability.go Upload logs reachability_uploaded rows
+		// against this type (resource_id=<project id>). Registered here
+		// in lockstep with the model const, the F281 expectedEmit set,
+		// and allModelResourceValues() so a future removal from either
+		// side trips CI.
+		{Type: model.ResourceReachability, Label: "Reachability", Category: "reachability"},
 	}
 }
 
