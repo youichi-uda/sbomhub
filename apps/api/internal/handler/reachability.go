@@ -225,6 +225,55 @@ func (h *ReachabilityHandler) Upload(c echo.Context) error {
 		})
 	}
 
+	// Grounding-integrity gate (Codex F417, HIGH). reachability_results has
+	// no FK to components / component_vulnerabilities (soft reference), and the
+	// triage runner consumes these rows as AI-VEX grounding evidence by
+	// (tenant, project, cve, component) WITHOUT re-joining the target graph
+	// (ReachabilityResultsRepository.ListByProject filters on tenant_id +
+	// project_id [+ cve_id] [+ component_id] only). So a write-scoped caller
+	// could otherwise persist FORGED verdicts for arbitrary (component, cve)
+	// pairs that are not genuine vulnerability targets, and have them counted
+	// as grounding (even "verified"). Validate every uploaded tuple against the
+	// real, RLS-safe target graph — the same set GET /reachability/targets
+	// exposes — BEFORE any write. All-or-nothing, like the shape checks above:
+	// one non-target tuple rejects the whole batch with nothing persisted and
+	// no audit row emitted.
+	if h.targets == nil {
+		// Defence-in-depth: a mis-wire without a targets reader must refuse
+		// rather than accept unverified verdicts (mirrors the nil-projects guard).
+		slog.Error("reachability upload: targets reader not wired; refusing to serve",
+			"tenant_id", tenantID, "project_id", projectID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "reachability handler misconfigured"})
+	}
+	validTargets, err := h.targets.ListReachabilityTargets(ctx, tenantID, projectID, "")
+	if err != nil {
+		slog.Error("reachability upload: target graph lookup failed; refusing batch",
+			"tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to verify reachability targets",
+		})
+	}
+	// Key on the canonical uuid.UUID (comparable — equal regardless of the
+	// caller's input formatting/case) paired with the exact cve_id.
+	type targetKey struct {
+		component uuid.UUID
+		cve       string
+	}
+	targetSet := make(map[targetKey]struct{}, len(validTargets))
+	for _, t := range validTargets {
+		targetSet[targetKey{component: t.ComponentID, cve: t.CVEID}] = struct{}{}
+	}
+	for i, rr := range rows {
+		if _, ok := targetSet[targetKey{component: rr.ComponentID, cve: rr.CVEID}]; !ok {
+			slog.Warn("reachability upload: result references a non-target (component, cve); rejecting batch",
+				"tenant_id", tenantID, "project_id", projectID, "index", i,
+				"component_id", rr.ComponentID, "cve_id", rr.CVEID)
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("results[%d]: references a (component, cve) that is not a vulnerability target for this project", i),
+			})
+		}
+	}
+
 	// Upsert every row inside the ambient TenantTx. A failure hard-fails
 	// 500 so the transaction (and every prior upsert in this batch) rolls
 	// back — the CLI can safely retry the whole batch.

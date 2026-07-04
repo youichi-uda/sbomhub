@@ -135,7 +135,13 @@ func TestReachabilityHandler_Upload_HappyPath(t *testing.T) {
 	up := &fakeReachabilityUpserter{}
 	audit := &fakeReachabilityAudit{}
 	proj := &fakeReachabilityProjectReader{}
-	h := newTestReachabilityHandler(up, audit, proj)
+	// The uploaded tuples MUST be genuine targets (Codex F417 grounding gate),
+	// so the targets reader returns exactly the (component, cve) pairs uploaded.
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{ComponentID: comp1, CVEID: "CVE-2024-0001"},
+		{ComponentID: comp2, CVEID: "CVE-2024-0002"},
+	}}
+	h := &ReachabilityHandler{upserter: up, audit: audit, projects: proj, targets: tr}
 
 	_, rec, err := doReachabilityUpload(h, tenantID, userID, projectID, string(body))
 	if err != nil {
@@ -403,5 +409,96 @@ func TestReachabilityHandler_Upload_EmptyResults(t *testing.T) {
 	}
 	if up.count() != 0 || len(audit.entries) != 0 {
 		t.Errorf("empty batch wrote rows=%d audit=%d, want 0/0", up.count(), len(audit.entries))
+	}
+}
+
+// TestReachabilityHandler_Upload_ForgedTargetRejected pins the F417 grounding
+// gate: a verdict whose (component_id, cve_id) is NOT a genuine vulnerability
+// target for the project (the targets reader does not return it) is a 400 with
+// nothing persisted and no audit row — a write-scoped caller cannot inject
+// forged grounding evidence for an arbitrary (component, cve) pair.
+func TestReachabilityHandler_Upload_ForgedTargetRejected(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	realComp := uuid.New()
+	forgedComp := uuid.New()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"results": []map[string]interface{}{
+			{
+				"component_id": forgedComp.String(), // not among the real targets
+				"cve_id":       "CVE-2024-9999",
+				"status":       "reachable",
+			},
+		},
+	})
+
+	up := &fakeReachabilityUpserter{}
+	audit := &fakeReachabilityAudit{}
+	// The only genuine target is (realComp, CVE-2024-0001); the upload forges a
+	// different component AND cve.
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{ComponentID: realComp, CVEID: "CVE-2024-0001"},
+	}}
+	h := &ReachabilityHandler{upserter: up, audit: audit, projects: &fakeReachabilityProjectReader{}, targets: tr}
+
+	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if up.count() != 0 {
+		t.Errorf("upserter received %d rows, want 0 on forged target", up.count())
+	}
+	if len(audit.entries) != 0 {
+		t.Errorf("audit emitted %d rows, want 0 on forged target", len(audit.entries))
+	}
+}
+
+// TestReachabilityHandler_Upload_MixedForgedRejectsAll pins all-or-nothing:
+// a batch with one genuine target and one forged (component, cve) is rejected
+// in full — the genuine row is NOT persisted either, and no audit row lands.
+func TestReachabilityHandler_Upload_MixedForgedRejectsAll(t *testing.T) {
+	tenantID := uuid.New()
+	projectID := uuid.New()
+	realComp := uuid.New()
+	forgedComp := uuid.New()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"results": []map[string]interface{}{
+			{
+				"component_id": realComp.String(), // genuine target
+				"cve_id":       "CVE-2024-0001",
+				"status":       "reachable",
+			},
+			{
+				"component_id": forgedComp.String(), // not a target
+				"cve_id":       "CVE-2024-0002",
+				"status":       "not_present",
+			},
+		},
+	})
+
+	up := &fakeReachabilityUpserter{}
+	audit := &fakeReachabilityAudit{}
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{ComponentID: realComp, CVEID: "CVE-2024-0001"},
+	}}
+	h := &ReachabilityHandler{upserter: up, audit: audit, projects: &fakeReachabilityProjectReader{}, targets: tr}
+
+	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	if err != nil {
+		t.Fatalf("Upload returned error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if up.count() != 0 {
+		t.Errorf("upserter received %d rows, want 0 (all-or-nothing on one forged tuple)", up.count())
+	}
+	if len(audit.entries) != 0 {
+		t.Errorf("audit emitted %d rows, want 0 on mixed batch rejection", len(audit.entries))
 	}
 }
