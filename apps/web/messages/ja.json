@@ -702,6 +702,16 @@
     "vulnerabilities": "脆弱性",
     "none": "なし"
   },
+  "BlastRadius": {
+    "title": "影響範囲 (ブラストレイディウス)",
+    "subtitle": "{cve} のプロジェクト横断の影響",
+    "projectsAffected": "{total} プロジェクト中 {affected} プロジェクトに影響",
+    "noProjectsAffected": "影響を受けるプロジェクトはありません",
+    "blastPercent": "プロジェクトの {pct}% に影響",
+    "cvss": "CVSS {score}",
+    "epss": "EPSS {pct}%",
+    "componentCount": "{count} コンポーネント"
+  },
   "Audit": {
     "title": "監査ログ",
     "description": "すべての操作履歴を確認できます（{count}件）",

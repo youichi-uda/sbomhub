@@ -702,6 +702,16 @@
     "vulnerabilities": "Vulnerabilities",
     "none": "None"
   },
+  "BlastRadius": {
+    "title": "Blast Radius",
+    "subtitle": "Cross-project impact of {cve}",
+    "projectsAffected": "{affected} of {total} projects affected",
+    "noProjectsAffected": "No projects affected",
+    "blastPercent": "{pct}% of your projects affected",
+    "cvss": "CVSS {score}",
+    "epss": "EPSS {pct}%",
+    "componentCount": "{count} components"
+  },
   "Audit": {
     "title": "Audit Logs",
     "description": "View all operation history ({count} entries)",

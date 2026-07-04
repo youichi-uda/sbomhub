@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import Link from "next/link";
-import { api, CVESearchResult, ComponentSearchResult } from "@/lib/api";
+import { api, CVESearchResult, CVEImpactResult, ComponentSearchResult } from "@/lib/api";
+import { BlastRadiusSummary } from "@/components/vulnerability/blast-radius-summary";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -209,6 +210,7 @@ export default function SearchPage() {
   const [componentQuery, setComponentQuery] = useState("");
   const [versionQuery, setVersionQuery] = useState("");
   const [cveResult, setCveResult] = useState<CVESearchResult | null>(null);
+  const [impactResult, setImpactResult] = useState<CVEImpactResult | null>(null);
   const [componentResult, setComponentResult] = useState<ComponentSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -220,10 +222,24 @@ export default function SearchPage() {
     setLoading(true);
     setError(null);
     setCveResult(null);
+    setImpactResult(null);
 
     try {
       const result = await api.search.byCVE(cveQuery.trim());
       setCveResult(result);
+
+      // M28 F389 (#135): also fetch the cross-project blast-radius rollup
+      // and render it above the affected/unaffected listing. Best-effort:
+      // the impact endpoint 404s when the CVE is unknown to the tenant, so
+      // a failure here must not blank out the byCVE result the operator
+      // already got. The blast-radius summary is a complement, not a gate.
+      try {
+        const impact = await api.vulnerabilities.getImpact(cveQuery.trim());
+        setImpactResult(impact);
+      } catch (impactErr) {
+        setImpactResult(null);
+        console.error(impactErr);
+      }
     } catch (err) {
       setError(t("cveNotFound"));
       console.error(err);
@@ -335,6 +351,14 @@ export default function SearchPage() {
                 {t("noAffectedProjects")}
               </div>
             )}
+
+          {/* M28 F389 (#135): cross-project blast-radius summary — the
+              org-level "N of M projects affected" headline + severity/KEV/
+              EPSS rollup. Rendered above the detailed affected/unaffected
+              listing it complements. */}
+          {impactResult && (
+            <BlastRadiusSummary impact={impactResult} locale={locale} />
+          )}
 
           {cveResult && <CVESearchResults result={cveResult} locale={locale} />}
         </TabsContent>
