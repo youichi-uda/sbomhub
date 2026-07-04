@@ -5,6 +5,7 @@ import { useTranslations, useLocale } from "next-intl";
 import Link from "next/link";
 import { api, CVESearchResult, CVEImpactResult, ComponentSearchResult } from "@/lib/api";
 import { BlastRadiusSummary } from "@/components/vulnerability/blast-radius-summary";
+import { TransitiveImpact } from "@/components/vulnerability/transitive-impact";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -365,6 +366,15 @@ export default function SearchPage() {
               listing it complements. */}
           {impactResult && (
             <BlastRadiusSummary impact={impactResult} locale={locale} />
+          )}
+
+          {/* M30 F403 (#139): cross-project transitive blast-radius deep-dive.
+              Lazy (expand-on-click) so the backend's on-demand per-SBOM parse
+              only runs when opened. Keyed off the confirmed impact result's
+              cve_id (not the live input) so it always targets the CVE that was
+              actually searched. */}
+          {impactResult && (
+            <TransitiveImpact cveId={impactResult.cve_id} locale={locale} />
           )}
 
           {cveResult && <CVESearchResults result={cveResult} locale={locale} />}

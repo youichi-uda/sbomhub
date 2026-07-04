@@ -733,6 +733,76 @@ export interface CVEImpactResult {
   affected_projects: ImpactAffectedProject[];
 }
 
+// -----------------------------------------------------------------------------
+// M30 F403 (#139): cross-project transitive blast-radius (paths) types.
+// -----------------------------------------------------------------------------
+//
+// Mirrors the pinned Wave A backend contract for
+// GET /api/v1/vulnerabilities/:cve_id/paths (M30_KICKOFF_PROMPT.md §"API 契約").
+// This fuses M28 blast radius (which projects are affected) with M29
+// dependency paths (how the vulnerable component enters each project's graph)
+// across the whole tenant. For each affected project × affected component it
+// returns the transitive entry chains (root → … → vulnerable component) plus
+// the honest per-state flags the UI renders (degraded / in_graph / is_direct /
+// truncated).
+//
+// The path node shape is exactly the M29 ComponentPathNode
+// ({id,name,version,type}) — reused verbatim so the same PathChain renderer
+// draws both surfaces. Node IDs are version-stripped purls (M29 inheritance),
+// so two versions of one library collapse to a single node (the "version
+// granularity caveat" documented in the M30 contract).
+
+/**
+ * One affected component within an affected project, with its transitive
+ * entry paths. `degraded` lives on the parent project (SBOM-format-level);
+ * the flags here are component-level:
+ *   - in_graph=false  → the component is only in an earlier snapshot, absent
+ *     from the project's latest SBOM graph → `paths` empty.
+ *   - is_direct       → the component is a direct dependency (or the root) —
+ *     upgrade it directly; otherwise bump the parent at the chain start.
+ *   - truncated       → path enumeration hit the M29 cap / step budget
+ *     (never a silent drop). With paths → "showing N"; without → "too complex".
+ *   - path_count      → len(paths), the number actually returned.
+ */
+export interface AffectedComponentPaths {
+  name: string;
+  version: string;
+  purl: string;
+  in_graph: boolean;
+  is_direct: boolean;
+  truncated: boolean;
+  path_count: number;
+  paths: ComponentPathNode[][];
+}
+
+/**
+ * One affected project in the cross-project rollup. `sbom_id` / `format` are
+ * the latest SBOM that was traversed. `degraded=true` means that SBOM has no
+ * dependency edges (e.g. SPDX / unparsed), so no entry paths can be computed —
+ * a project-level state rendered once (never repeated per component, F400).
+ */
+export interface AffectedProjectPaths {
+  project_id: string;
+  project_name: string;
+  sbom_id: string;
+  format: string;
+  degraded: boolean;
+  component_count: number;
+  affected_components: AffectedComponentPaths[];
+}
+
+/** GET /api/v1/vulnerabilities/:cve_id/paths response (M28 impact superset). */
+export interface CVEPathsResult {
+  cve_id: string;
+  severity: string;
+  cvss_score: number;
+  epss_score: number;
+  in_kev: boolean;
+  affected_project_count: number;
+  total_project_count: number;
+  affected_projects: AffectedProjectPaths[];
+}
+
 export interface ComponentSearchMatch {
   project_id: string;
   project_name: string;
@@ -1830,6 +1900,43 @@ export const api = {
       // slice as JSON null (the `var xs []T` pattern), and BlastRadiusSummary
       // maps over it unconditionally.
       return { ...raw, affected_projects: raw.affected_projects ?? [] };
+    },
+    // M30 F403 (#139): cross-project transitive blast-radius deep-dive. For
+    // each affected project × affected component, returns the transitive entry
+    // paths (root → … → vulnerable component) + blast-radius counters. Fuses
+    // M28 impact (which projects) with M29 dependency paths (how it enters).
+    // Fetched lazily (expand-on-click) by the TransitiveImpact component, so
+    // the more expensive on-demand per-SBOM parse only runs when opened.
+    getCVEPaths: async (cveId: string): Promise<CVEPathsResult> => {
+      const raw = await request<CVEPathsResult>(
+        `/api/v1/vulnerabilities/${encodeURIComponent(cveId)}/paths`,
+      );
+      // F395 (M28 #134/#135): do NOT collapse a null / 204 / empty envelope to
+      // a zero-impact result. "0 projects affected" is an affirmative security
+      // claim; a missing body means the endpoint returned nothing (broken /
+      // 204) and is distinct from a genuine 200
+      // { affected_project_count: 0, affected_projects: [] }. Throw so the
+      // deep-dive surfaces an error instead of fabricating reassurance — the
+      // same discipline as getImpact above.
+      if (raw == null) {
+        throw new Error(`paths endpoint returned no body for ${cveId}`);
+      }
+      // F164 / F184 defence-in-depth: normalise every Go nil-slice → JSON null
+      // to [] at each nesting level (projects → components → paths → chain), so
+      // the render layer never maps over null even on a partially-populated
+      // envelope.
+      return {
+        ...raw,
+        affected_projects: (raw.affected_projects ?? []).map((project) => ({
+          ...project,
+          affected_components: (project.affected_components ?? []).map(
+            (comp) => ({
+              ...comp,
+              paths: (comp.paths ?? []).map((path) => path ?? []),
+            }),
+          ),
+        })),
+      };
     },
   },
 

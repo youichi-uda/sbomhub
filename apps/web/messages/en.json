@@ -1077,6 +1077,26 @@
     "listView": "List",
     "graphView": "Graph"
   },
+  "TransitiveImpact": {
+    "title": "Transitive entry paths",
+    "subtitle": "For each affected project, how the vulnerable component enters the dependency graph (root → … → component).",
+    "show": "Show transitive entry paths",
+    "hide": "Hide transitive entry paths",
+    "loading": "Analysing transitive paths across projects...",
+    "loadFailed": "Failed to load transitive paths",
+    "noProjectsAffected": "No projects affected",
+    "projectsAffected": "{affected} of {total} projects affected",
+    "componentCount": "{count} components",
+    "directBadge": "Direct",
+    "transitiveBadge": "Transitive",
+    "directHint": "This is a direct dependency — upgrade it directly in this project's manifest.",
+    "transitiveHint": "This is a transitive dependency — upgrade the direct dependency (in blue) at the start of each chain to change it.",
+    "degraded": "Dependency edges are unavailable for this project's SBOM format (e.g. SPDX). The affected components are listed, but their entry paths cannot be computed without a CycloneDX dependencies graph.",
+    "notInGraph": "This component is not present in the project's latest SBOM (it appeared only in an earlier snapshot), so it has no current entry path.",
+    "truncated": "Showing {count} paths. More paths exist but were truncated to keep this view responsive.",
+    "truncatedEmpty": "This component is reachable, but its entry paths were too complex to enumerate within the computation budget.",
+    "noPaths": "No entry path could be computed for this component."
+  },
   "SbomDiff": {
     "Page": {
       "title": "SBOM Change History",

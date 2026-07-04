@@ -383,34 +383,7 @@ export function DependencyPathPanel({
                         data-testid="dependency-path-chain"
                         className="rounded-md border p-3"
                       >
-                        <div className="flex flex-wrap items-center gap-1.5 text-sm">
-                          {path.map((node, ni) => {
-                            const role = roleFor(ni, path.length);
-                            return (
-                              <span
-                                key={`${pi}-${ni}-${node.id}`}
-                                className="inline-flex items-center gap-1.5"
-                              >
-                                <span
-                                  data-role={role}
-                                  className={pathNodeClass(role)}
-                                >
-                                  <span className="font-medium">
-                                    {node.name || node.id}
-                                  </span>
-                                  {node.version && (
-                                    <span className="font-mono text-xs opacity-80">
-                                      {node.version}
-                                    </span>
-                                  )}
-                                </span>
-                                {ni < path.length - 1 && (
-                                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                                )}
-                              </span>
-                            );
-                          })}
-                        </div>
+                        <PathChain nodes={path} />
                       </li>
                     ))}
                   </ol>
@@ -440,6 +413,44 @@ export function DependencyPathPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Presentational renderer for a single dependency chain
+ * (root → … → target) as a row of role-coloured pills separated by
+ * chevrons. Extracted from the M29 list view so the M30 cross-project
+ * transitive blast-radius view (F403, issue #139) reuses the exact same
+ * chain rendering rather than reimplementing it — the role emphasis
+ * (root / direct / intermediate / target) and `data-role` attributes stay
+ * identical across both surfaces. Callers own the surrounding <li> /
+ * container and its data-testid.
+ */
+export function PathChain({ nodes }: { nodes: ComponentPathNode[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-sm">
+      {nodes.map((node, ni) => {
+        const role = roleFor(ni, nodes.length);
+        return (
+          <span
+            key={`${ni}-${node.id}`}
+            className="inline-flex items-center gap-1.5"
+          >
+            <span data-role={role} className={pathNodeClass(role)}>
+              <span className="font-medium">{node.name || node.id}</span>
+              {node.version && (
+                <span className="font-mono text-xs opacity-80">
+                  {node.version}
+                </span>
+              )}
+            </span>
+            {ni < nodes.length - 1 && (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+            )}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
