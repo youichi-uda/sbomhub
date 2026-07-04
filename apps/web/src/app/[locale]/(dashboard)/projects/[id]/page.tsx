@@ -12,6 +12,7 @@ import { Upload, Package, AlertTriangle, ArrowLeft, Shield, Download, FileCheck,
 import { RemediationPanel } from "@/components/vulnerability/remediation-panel";
 import { KEVBadge } from "@/components/vulnerability/kev-badge";
 import { EOLBadge } from "@/components/component/eol-badge";
+import { DependencyPathPanel } from "@/components/component/dependency-path";
 import Link from "next/link";
 
 // M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
@@ -53,6 +54,16 @@ export default function ProjectDetailPage() {
   const [selectedVulnForVex, setSelectedVulnForVex] = useState<Vulnerability | null>(null);
   const [showLicenseForm, setShowLicenseForm] = useState(false);
   const [sbomId, setSbomId] = useState<string | null>(null);
+  // M29-B (F398 #137): the component whose transitive dependency
+  // path-to-root is currently expanded in the components tab. Single
+  // selection keeps the wiring minimal — clicking a different row's
+  // "Dependency path" action switches the panel; clicking the same row
+  // again (or Close) collapses it.
+  const [pathComponent, setPathComponent] = useState<{
+    id: string;
+    name: string;
+    version: string;
+  } | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationLogs, setNotificationLogs] = useState<NotificationLog[]>([]);
   // M13-1 #87 (F174): project-scoped API keys state. The full lifecycle
@@ -490,6 +501,7 @@ export default function ProjectDetailPage() {
                       <th className="text-left py-3 px-4">{t("Components.type")}</th>
                       <th className="text-left py-3 px-4">{t("Components.license")}</th>
                       <th className="text-left py-3 px-4">{t("Components.eolStatus")}</th>
+                      <th className="text-left py-3 px-4"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -513,10 +525,69 @@ export default function ProjectDetailPage() {
                             <span className="text-muted-foreground text-sm">-</span>
                           )}
                         </td>
+                        <td className="py-3 px-4">
+                          {/* M29-B (F398 #137): reveal the transitive
+                              dependency path-to-root for this component.
+                              component_id (comp.id) is available directly
+                              on the row, which is why this deep-dive lives
+                              in the components tab rather than the
+                              vulnerabilities tab (whose entries carry no
+                              component_id). Toggles a single-selection
+                              panel rendered below the table. */}
+                          <Button
+                            size="sm"
+                            variant={
+                              pathComponent?.id === comp.id ? "default" : "outline"
+                            }
+                            data-testid="dependency-path-trigger"
+                            data-component-id={comp.id}
+                            onClick={() =>
+                              setPathComponent((prev) =>
+                                prev?.id === comp.id
+                                  ? null
+                                  : {
+                                      id: comp.id,
+                                      name: comp.name,
+                                      version: comp.version,
+                                    },
+                              )
+                            }
+                          >
+                            {t("DependencyPath.viewButton")}
+                          </Button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {pathComponent && (
+              <div className="mt-6">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-muted-foreground">
+                    {t("DependencyPath.selectedLabel")}{" "}
+                    <span className="font-medium text-foreground">
+                      {pathComponent.name}
+                      {pathComponent.version ? ` ${pathComponent.version}` : ""}
+                    </span>
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setPathComponent(null)}
+                  >
+                    {tc("close")}
+                  </Button>
+                </div>
+                <DependencyPathPanel
+                  key={pathComponent.id}
+                  projectId={projectId}
+                  componentId={pathComponent.id}
+                  componentName={pathComponent.name}
+                  componentVersion={pathComponent.version}
+                  sbomId={sbomId ?? undefined}
+                />
               </div>
             )}
           </CardContent>
