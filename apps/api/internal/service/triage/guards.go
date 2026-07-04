@@ -266,6 +266,17 @@ const (
 	// reachability row. It is appended to the pointer's Note in place; the
 	// pointer is retained (lenient — flag, never drop).
 	UnverifiedGroundingTag = "unverified_grounding"
+
+	// minGroundingMatchLen is the minimum trimmed length a free-text
+	// citation must have before a case-insensitive SUBSTRING match is
+	// accepted as grounding (Codex F416). Without it, a fabricated pointer
+	// carrying a trivial value (RawSnippet="a", a single common word) would
+	// substring-match unrelated loaded text and be treated as verified,
+	// dodging the unverified flag + clamp. Exact matches against a
+	// structured array element (VulnFuncs etc.) or against a reachability
+	// field value are accepted regardless of length — an exact hit is
+	// strong evidence on its own; only the loose substring path is gated.
+	minGroundingMatchLen = 8
 )
 
 // GroundingResult summarises a ValidateGrounding pass.
@@ -326,6 +337,26 @@ func UngroundedNote(origState string, origConfidence float64) EvidencePointer {
 	}
 }
 
+// UncitedStrongVerdictNote builds the synthetic evidence pointer appended
+// when the LLM proposes a confident STRONG negative verdict (not_affected /
+// resolved) yet cites NO grounded-kind evidence at all (only self-referential
+// llm_rationale / analyzer_error pointers) even though advisory / reachability
+// data WAS loaded (R1 #3). It shares the "ungrounded" Note tag so the web /
+// audit layer detects a grounding-clamped draft uniformly, while the
+// Description records the distinct reason and preserves the AI's proposal.
+// Kind is analyzer_error, which ValidateGrounding treats as exempt.
+func UncitedStrongVerdictNote(origState string, origConfidence float64) EvidencePointer {
+	return EvidencePointer{
+		Kind:   EvidenceKindAnalyzerError,
+		Source: "grounding_guard",
+		Note:   UngroundedNoteTag,
+		Description: fmt.Sprintf(
+			"ungrounded: AI proposed a strong %s@%.2f verdict but cited no grounded-kind evidence (advisory_excerpt / symbol_ref / import_path) despite available advisory/reachability data; the draft is ungrounded and requires human verification",
+			origState, origConfidence,
+		),
+	}
+}
+
 // ValidateGrounding cross-checks each evidence pointer against the loaded
 // advisory / reachability rows and marks unmatched grounded-kind pointers
 // unverified IN PLACE (mutating evidence[i].Note). It NEVER deletes a
@@ -333,12 +364,19 @@ func UngroundedNote(origState string, origConfidence float64) EvidencePointer {
 // false-negatives when the LLM legitimately paraphrases. The runner reads
 // the returned GroundingResult to decide whether to clamp confidence.
 //
-// Matching rules:
-//   - advisory_excerpt: RawSnippet (else Description) must be a
-//     case-insensitive substring of some advisory's RawExcerpt, or appear in
-//     one of its structured JSON fields (VulnFuncs / AffectedPaths / ...).
+// Matching rules (hardened per Codex F416 to reject trivial-substring
+// bypass):
+//   - advisory_excerpt: RawSnippet (else Description) must EITHER exactly
+//     (case-insensitive, trimmed) equal an element of one of the advisory's
+//     parsed structured arrays (VulnFuncs / AffectedPaths / RequiredConfig /
+//     RequiredEnv), OR be at least minGroundingMatchLen chars AND a
+//     case-insensitive substring of the advisory's RawExcerpt. A short /
+//     generic citation ("a", a single common word) no longer verifies.
 //   - symbol_ref / import_path: Symbol / ImportPath (else Description) must
-//     appear in some reachability row's Evidence JSON.
+//     match a value extracted from the reachability row's Evidence JSON's
+//     STRUCTURED symbol / import-path fields (never a substring of the raw
+//     JSON text) — exact fold match, or a full path-segment match for
+//     meaningful-length needles.
 //   - llm_rationale / analyzer_error: EXEMPT (self-referential). Never
 //     flagged — this keeps fallbackDecision drafts and the Tier-1 synthetic
 //     note clean.
@@ -374,7 +412,9 @@ func ValidateGrounding(evidence []EvidencePointer, advisories []AdvisoryExcerptR
 }
 
 // advisoryPointerGrounded reports whether an advisory_excerpt pointer's
-// quoted text appears (case-insensitively) in some loaded advisory row.
+// quoted text is MEANINGFULLY grounded in some loaded advisory row: an exact
+// (case-insensitive) match against a structured array element, or a
+// minimum-length substring of the free-text RawExcerpt (Codex F416).
 func advisoryPointerGrounded(ev EvidencePointer, advisories []AdvisoryExcerptRow) bool {
 	needle := firstNonEmpty(ev.RawSnippet, ev.Description)
 	if needle == "" {
@@ -385,13 +425,19 @@ func advisoryPointerGrounded(ev EvidencePointer, advisories []AdvisoryExcerptRow
 		return false
 	}
 	for _, a := range advisories {
-		if a.RawExcerpt != "" && strings.Contains(strings.ToLower(a.RawExcerpt), nlow) {
+		// Path 1: exact match against a parsed structured array element.
+		// Strong, unambiguous grounding — accepted at any length.
+		if jsonArrayHasElementFold(a.VulnFuncs, nlow) ||
+			jsonArrayHasElementFold(a.AffectedPaths, nlow) ||
+			jsonArrayHasElementFold(a.RequiredConfig, nlow) ||
+			jsonArrayHasElementFold(a.RequiredEnv, nlow) {
 			return true
 		}
-		if jsonRawContainsFold(a.VulnFuncs, nlow) ||
-			jsonRawContainsFold(a.AffectedPaths, nlow) ||
-			jsonRawContainsFold(a.RequiredConfig, nlow) ||
-			jsonRawContainsFold(a.RequiredEnv, nlow) {
+		// Path 2: meaningful-length substring of the free-text excerpt.
+		// Gated by minGroundingMatchLen so a trivial / generic token
+		// cannot dodge the flag by coincidentally appearing in the excerpt.
+		if len(nlow) >= minGroundingMatchLen && a.RawExcerpt != "" &&
+			strings.Contains(strings.ToLower(a.RawExcerpt), nlow) {
 			return true
 		}
 	}
@@ -399,8 +445,9 @@ func advisoryPointerGrounded(ev EvidencePointer, advisories []AdvisoryExcerptRow
 }
 
 // reachPointerGrounded reports whether a symbol_ref / import_path pointer's
-// symbol/path appears (case-insensitively) in some loaded reachability row's
-// Evidence JSON.
+// symbol/path matches a value extracted from the STRUCTURED symbol /
+// import-path fields of some reachability row's Evidence JSON (Codex F416).
+// It never substring-searches the raw JSON text.
 func reachPointerGrounded(ev EvidencePointer, reach []ReachabilityRow) bool {
 	needle := firstNonEmpty(ev.Symbol, ev.ImportPath, ev.Description)
 	if needle == "" {
@@ -411,7 +458,133 @@ func reachPointerGrounded(ev EvidencePointer, reach []ReachabilityRow) bool {
 		return false
 	}
 	for _, rr := range reach {
-		if jsonRawContainsFold(rr.Evidence, nlow) {
+		for _, cand := range collectReachCandidates(rr.Evidence) {
+			if groundingValuesMatch(nlow, strings.ToLower(strings.TrimSpace(cand))) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reachEvidenceFieldAllowlist enumerates the Evidence JSON keys whose string
+// values are treated as symbol / import-path identifiers for grounding. The
+// reachability analyzer serialises []EvidencePointer ("symbol",
+// "import_path"), but some rows carry ad-hoc shapes (e.g.
+// {"callgraph_nodes":[...]}), so the allowlist covers common variants.
+var reachEvidenceFieldAllowlist = map[string]bool{
+	"symbol": true, "symbols": true,
+	"import_path": true, "import_paths": true, "importpath": true,
+	"path": true, "paths": true, "callgraph_nodes": true,
+	"function": true, "functions": true, "func": true, "funcs": true,
+	"name": true, "ref": true,
+}
+
+// collectReachCandidates unmarshals a reachability Evidence blob and returns
+// the string values stored under the symbol / import-path structured keys
+// (recursively, including string elements of arrays under those keys). It
+// deliberately ignores non-identifier fields (e.g. "status") so a needle can
+// never match incidental text.
+func collectReachCandidates(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var root interface{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil
+	}
+	var out []string
+	var walk func(node interface{}, keyMatched bool)
+	walk = func(node interface{}, keyMatched bool) {
+		switch t := node.(type) {
+		case map[string]interface{}:
+			for k, v := range t {
+				walk(v, reachEvidenceFieldAllowlist[strings.ToLower(k)])
+			}
+		case []interface{}:
+			for _, el := range t {
+				walk(el, keyMatched)
+			}
+		case string:
+			if keyMatched && strings.TrimSpace(t) != "" {
+				out = append(out, t)
+			}
+		}
+	}
+	walk(root, false)
+	return out
+}
+
+// groundingValuesMatch reports whether a (lowercased) needle grounds against
+// a (lowercased) candidate field value. An exact match is accepted at any
+// length (strong evidence); otherwise a meaningful-length needle must appear
+// in the candidate (or vice versa) at symbol/path token boundaries — so
+// "pkg/foo.Bar" matches a candidate "main -> pkg/foo.Bar" without a trivial
+// bare-substring accepting "a" or "v".
+func groundingValuesMatch(nlow, clow string) bool {
+	if clow == "" {
+		return false
+	}
+	if nlow == clow {
+		return true
+	}
+	if len(nlow) < minGroundingMatchLen {
+		return false
+	}
+	return containsAtBoundary(clow, nlow) || containsAtBoundary(nlow, clow)
+}
+
+// isGroundingSeparator reports whether r delimits symbol / import-path tokens.
+func isGroundingSeparator(r rune) bool {
+	switch r {
+	case '/', '.', ':', '#', ',', ';', ' ', '\t', '\n', '(', ')', '[', ']', '{', '}', '"', '\'', '>', '<', '-', '=':
+		return true
+	}
+	return false
+}
+
+// containsAtBoundary reports whether needle occurs in hay bounded on both
+// sides by a token separator (or the string boundary). This treats needle as
+// a whole path-like token (which may itself contain internal separators)
+// rather than a bare substring, defeating the trivial-substring bypass.
+func containsAtBoundary(hay, needle string) bool {
+	if needle == "" || len(needle) > len(hay) {
+		return false
+	}
+	for from := 0; from+len(needle) <= len(hay); {
+		idx := strings.Index(hay[from:], needle)
+		if idx < 0 {
+			return false
+		}
+		start := from + idx
+		end := start + len(needle)
+		beforeOK := start == 0 || isGroundingSeparator(rune(hay[start-1]))
+		afterOK := end == len(hay) || isGroundingSeparator(rune(hay[end]))
+		if beforeOK && afterOK {
+			return true
+		}
+		from = start + 1
+	}
+	return false
+}
+
+// jsonArrayHasElementFold reports whether raw is a JSON array containing an
+// element whose (trimmed, lowercased) string value equals needleLower.
+// Non-string elements and non-array shapes yield no match.
+func jsonArrayHasElementFold(raw json.RawMessage, needleLower string) bool {
+	if len(raw) == 0 || needleLower == "" {
+		return false
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return false
+	}
+	for _, el := range elems {
+		var s string
+		if err := json.Unmarshal(el, &s); err != nil {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(s)) == needleLower {
 			return true
 		}
 	}
@@ -430,16 +603,6 @@ func markUnverifiedGrounding(ev *EvidencePointer) {
 		return
 	}
 	ev.Note = ev.Note + "; " + UnverifiedGroundingTag
-}
-
-// jsonRawContainsFold reports whether the lowercased raw JSON bytes contain
-// needleLower (already lowercased). Heuristic substring match — see the
-// package-level caveat about paraphrase false-negatives.
-func jsonRawContainsFold(raw json.RawMessage, needleLower string) bool {
-	if len(raw) == 0 || needleLower == "" {
-		return false
-	}
-	return strings.Contains(strings.ToLower(string(raw)), needleLower)
 }
 
 // firstNonEmpty returns the first non-empty (after trimming) argument.

@@ -784,13 +784,32 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	// "grounding"). A confident non-under_investigation verdict in that
 	// state is unsupported and must not reach the approver as high-confidence.
 	noVerifiedGrounding := grounding.GroundedKinds > 0 && grounding.Matched == 0
-	if (IsUngrounded(advisories, reach) || noVerifiedGrounding) &&
-		finalState != string(StateUnderInvestigation) {
+
+	// R1 #3: even when grounding rows WERE loaded, a confident STRONG
+	// negative verdict (not_affected / resolved) that cites ZERO
+	// grounded-kind pointers — only self-referential llm_rationale /
+	// analyzer_error — has no retrieved support behind it and must also be
+	// clamped. fallbackDecision drafts are unaffected: they are already
+	// under_investigation / confidence 0, so this high-confidence-strong
+	// guard never catches them.
+	loadedGrounding := len(advisories) > 0 || len(reach) > 0
+	strongVerdict := finalState == string(StateNotAffected) || finalState == string(StateResolved)
+	strongButUncited := strongVerdict && loadedGrounding &&
+		grounding.GroundedKinds == 0 && parsed.Confidence >= r.threshold
+
+	switch {
+	case (IsUngrounded(advisories, reach) || noVerifiedGrounding) &&
+		finalState != string(StateUnderInvestigation):
 		parsed.Evidence = append(parsed.Evidence, UngroundedNote(origState, origConfidence))
 		finalState = string(StateUnderInvestigation)
 		parsed.Confidence = UngroundedConfidenceCeiling(r.threshold)
 		clamped = true
-	} else if grounding.Unverified > 0 {
+	case strongButUncited:
+		parsed.Evidence = append(parsed.Evidence, UncitedStrongVerdictNote(origState, origConfidence))
+		finalState = string(StateUnderInvestigation)
+		parsed.Confidence = UngroundedConfidenceCeiling(r.threshold)
+		clamped = true
+	case grounding.Unverified > 0:
 		// Some grounded pointers were unverified but at least one matched
 		// (or the draft is already under_investigation). Keep the draft +
 		// state, but drop confidence below the auto-approve threshold so a
