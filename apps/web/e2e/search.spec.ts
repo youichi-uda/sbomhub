@@ -394,6 +394,136 @@ test.describe('Search Functionality', () => {
         }
     });
 
+    // M28 F389 (#135): cross-project vulnerability impact (blast radius).
+    // The web-e2e seed never provisions cross-project data, so intercept
+    // both the CVE search and the new /vulnerabilities/:cve/impact endpoint
+    // with a fixed multi-project blast radius. The real tenant-scoped
+    // aggregation + tenant isolation are covered by the Wave A real-PG
+    // integration tests (issue #134); this pins only the web rendering of
+    // the N-of-M summary + severity/KEV/EPSS rollup + per-project
+    // component_count.
+    test('should render blast-radius summary from impact endpoint (M28 F389)', async ({ page }) => {
+        const impact = {
+            cve_id: 'CVE-2021-44228',
+            severity: 'critical',
+            cvss_score: 10.0,
+            epss_score: 0.975,
+            in_kev: true,
+            affected_project_count: 2,
+            total_project_count: 5,
+            affected_projects: [
+                {
+                    project_id: '11111111-1111-4111-8111-111111111111',
+                    project_name: 'Mock App A',
+                    affected_components: [
+                        { name: 'log4j-core', version: '2.14.0', purl: 'pkg:maven/org.apache.logging.log4j/log4j-core@2.14.0' },
+                    ],
+                    component_count: 1,
+                },
+                {
+                    project_id: '22222222-2222-4222-8222-222222222222',
+                    project_name: 'Mock App B',
+                    affected_components: [
+                        { name: 'log4j-core', version: '2.13.0', purl: 'pkg:maven/org.apache.logging.log4j/log4j-core@2.13.0' },
+                    ],
+                    component_count: 3,
+                },
+            ],
+        };
+        const cveResult = {
+            cve_id: 'CVE-2021-44228',
+            description: 'Log4Shell',
+            cvss_score: 10.0,
+            epss_score: 0.975,
+            severity: 'CRITICAL',
+            affected_projects: [],
+            unaffected_projects: [],
+        };
+
+        // Host-agnostic globs so the intercepts hold regardless of the API
+        // base URL NEXT_PUBLIC_API_URL points at.
+        await page.route('**/api/v1/vulnerabilities/*/impact', (route) =>
+            route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(impact) }),
+        );
+        await page.route('**/api/v1/search/cve*', (route) =>
+            route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(cveResult) }),
+        );
+
+        await page.goto('/en/search');
+        await page.waitForLoadState('networkidle');
+        if (await isRedirectedToSignIn(page)) {
+            return;
+        }
+
+        await page.getByPlaceholder('CVE-2021-44228').fill('CVE-2021-44228');
+        await page.getByRole('button', { name: 'Search' }).first().click();
+
+        const summary = page.getByTestId('blast-radius-summary');
+        await expect(summary).toBeVisible({ timeout: 10000 });
+        // One-glance blast radius: N of M.
+        await expect(summary).toHaveAttribute('data-affected-count', '2');
+        await expect(summary).toHaveAttribute('data-total-count', '5');
+        await expect(summary).toContainText('2 of 5 projects affected');
+        // Rollup badges.
+        await expect(summary.getByTestId('blast-radius-cvss')).toContainText('CVSS 10.0');
+        await expect(summary.getByTestId('blast-radius-epss')).toContainText('EPSS 97.5%');
+        // Per-project rollup (name + component_count).
+        const projects = summary.getByTestId('blast-radius-project');
+        await expect(projects).toHaveCount(2);
+        await expect(summary).toContainText('Mock App A');
+        await expect(summary).toContainText('Mock App B');
+        await expect(summary).toContainText('3 components');
+    });
+
+    // M28 F389 (#135): blast radius of 0 is a valid answer (no local
+    // project is exposed to this CVE) and must read as reassurance, not an
+    // error. Intercept impact with affected_project_count=0.
+    test('should render blast-radius empty state when no projects affected (M28 F389)', async ({ page }) => {
+        const impact = {
+            cve_id: 'CVE-2021-44228',
+            severity: 'high',
+            cvss_score: 7.5,
+            epss_score: 0.1,
+            in_kev: false,
+            affected_project_count: 0,
+            total_project_count: 5,
+            affected_projects: [],
+        };
+        const cveResult = {
+            cve_id: 'CVE-2021-44228',
+            description: 'no local exposure',
+            cvss_score: 7.5,
+            epss_score: 0.1,
+            severity: 'HIGH',
+            affected_projects: [],
+            unaffected_projects: [],
+        };
+
+        await page.route('**/api/v1/vulnerabilities/*/impact', (route) =>
+            route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(impact) }),
+        );
+        await page.route('**/api/v1/search/cve*', (route) =>
+            route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(cveResult) }),
+        );
+
+        await page.goto('/en/search');
+        await page.waitForLoadState('networkidle');
+        if (await isRedirectedToSignIn(page)) {
+            return;
+        }
+
+        await page.getByPlaceholder('CVE-2021-44228').fill('CVE-2021-44228');
+        await page.getByRole('button', { name: 'Search' }).first().click();
+
+        const summary = page.getByTestId('blast-radius-summary');
+        await expect(summary).toBeVisible({ timeout: 10000 });
+        await expect(summary).toHaveAttribute('data-affected-count', '0');
+        await expect(summary.getByTestId('blast-radius-empty')).toBeVisible();
+        await expect(summary).toContainText('No projects affected');
+        // No per-project rows when clean.
+        await expect(summary.getByTestId('blast-radius-project')).toHaveCount(0);
+    });
+
     test('should show result count for component search', async ({ page, request }) => {
         if (!projectId) {
             test.skip();
