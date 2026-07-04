@@ -125,13 +125,13 @@ test.describe('VEX Statement Management', () => {
             await addButton.click();
 
             // Fill in VEX form
-            const statusSelect = page.locator('select').first();
+            const statusSelect = page.locator('select:not([data-testid="evidence-pack-format"])').first();
             if (await statusSelect.isVisible()) {
                 await statusSelect.selectOption('not_affected');
             }
 
             // Select justification if available
-            const justificationSelect = page.locator('select').nth(1);
+            const justificationSelect = page.locator('select:not([data-testid="evidence-pack-format"])').nth(1);
             if (await justificationSelect.isVisible()) {
                 await justificationSelect.selectOption('component_not_present');
             }
@@ -248,13 +248,13 @@ test.describe('VEX Statement Management', () => {
             await addButton.click();
 
             // Fill in VEX form
-            const statusSelect = page.locator('select').first();
+            const statusSelect = page.locator('select:not([data-testid="evidence-pack-format"])').first();
             if (await statusSelect.isVisible()) {
                 await statusSelect.selectOption('not_affected');
             }
 
             // Select justification if available
-            const justificationSelect = page.locator('select').nth(1);
+            const justificationSelect = page.locator('select:not([data-testid="evidence-pack-format"])').nth(1);
             if (await justificationSelect.isVisible()) {
                 await justificationSelect.selectOption('component_not_present');
             }

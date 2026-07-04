@@ -106,12 +106,12 @@ test.describe('License Policy Management', () => {
         await page.waitForTimeout(300);
 
         // Select license - options are formatted as "MIT License (MIT)"
-        const licenseSelect = page.locator('select').first();
+        const licenseSelect = page.locator('select:not([data-testid="evidence-pack-format"])').first();
         await expect(licenseSelect).toBeVisible();
         await licenseSelect.selectOption({ label: 'MIT License (MIT)' });
 
         // Select policy type - second select is for policy type, default is "allowed"
-        const policySelect = page.locator('select').nth(1);
+        const policySelect = page.locator('select:not([data-testid="evidence-pack-format"])').nth(1);
         await expect(policySelect).toBeVisible();
         await policySelect.selectOption('allowed');
 
@@ -140,12 +140,12 @@ test.describe('License Policy Management', () => {
         await page.waitForTimeout(300);
 
         // Select GPL license - options are formatted as "GNU GPL v3.0 (GPL-3.0-only)"
-        const licenseSelect = page.locator('select').first();
+        const licenseSelect = page.locator('select:not([data-testid="evidence-pack-format"])').first();
         await expect(licenseSelect).toBeVisible();
         await licenseSelect.selectOption({ label: 'GNU GPL v3.0 (GPL-3.0-only)' });
 
         // Select denied policy type
-        const policySelect = page.locator('select').nth(1);
+        const policySelect = page.locator('select:not([data-testid="evidence-pack-format"])').nth(1);
         await expect(policySelect).toBeVisible();
         await policySelect.selectOption('denied');
 
