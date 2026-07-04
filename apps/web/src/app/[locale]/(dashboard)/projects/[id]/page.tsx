@@ -88,6 +88,12 @@ export default function ProjectDetailPage() {
   // `uploading` so the button label stays accurate during long
   // generations of large projects.
   const [evidencePackBuilding, setEvidencePackBuilding] = useState(false);
+  // M31 F406 (#141): Evidence Pack format toggle. Defaults to "zip" — the
+  // machine-readable, submittable bundle (report.md + vex.cdx.json + CRA
+  // reports + meti-assessment.json + manifest.json) is the M31 headline
+  // artefact and matches the CLI default (`sbomhub evidence-pack --format
+  // zip`). "markdown" keeps the original single-file bundle one click away.
+  const [evidencePackFormat, setEvidencePackFormat] = useState<"zip" | "markdown">("zip");
 
   const loadProject = useCallback(async () => {
     try {
@@ -223,23 +229,38 @@ export default function ProjectDetailPage() {
     if (activeTab === "apikeys") loadApiKeys();
   }, [activeTab, loadComponents, loadVulnerabilities, loadVexStatements, loadLicensePolicies, loadLicenseViolations, loadNotificationSettings, loadNotificationLogs, loadApiKeys]);
 
-  // handleBuildEvidencePack drives the M2-6 (issue #34) Markdown
-  // bundle download. The server emits the file body with
-  // Content-Disposition: attachment, and api.projects.buildEvidencePack
-  // triggers the browser-native download via a dynamic <a> element.
+  // handleBuildEvidencePack drives the M2-6 (issue #34) bundle download,
+  // now format-aware (M31 F406 #141): "markdown" downloads the original
+  // single-file bundle; "zip" downloads the machine-readable submittable
+  // Zip. The server emits the file body with Content-Disposition:
+  // attachment, and api.projects.buildEvidencePack triggers the
+  // browser-native download via a dynamic <a> element regardless of format
+  // (text/markdown or application/zip blob).
   // We surface success/failure with alert() to match the rest of this
   // page (notification + license forms use the same pattern); a
   // toast-based UX upgrade is tracked for M3 alongside background-job
-  // status.
+  // status. On failure we surface the backend's HTTP error (400 unsupported
+  // format / 403 write permission / 404) verbatim rather than swallowing it.
   async function handleBuildEvidencePack() {
     if (evidencePackBuilding) return;
     setEvidencePackBuilding(true);
     try {
-      const { filename, vexCount, craCount } = await api.projects.buildEvidencePack(projectId);
+      const { filename, vexCount, craCount } = await api.projects.buildEvidencePack(
+        projectId,
+        { format: evidencePackFormat },
+      );
       alert(tp("evidencePackSuccess", { filename, vex: vexCount, cra: craCount }));
     } catch (error) {
       console.error("Failed to build Evidence Pack:", error);
-      alert(tp("evidencePackFailed"));
+      // Honest error surfacing: an APIError carries the backend message
+      // (e.g. "unsupported format", "write permission required"); show it
+      // so the operator is not left guessing why a 400/403/404 fired.
+      const detail = error instanceof Error ? error.message : "";
+      alert(
+        detail
+          ? tp("evidencePackFailedDetail", { error: detail })
+          : tp("evidencePackFailed"),
+      );
     } finally {
       setEvidencePackBuilding(false);
     }
@@ -378,17 +399,34 @@ export default function ProjectDetailPage() {
             <Link href={`/projects/${projectId}/share`}>
               <Button variant="outline">{tp("share")}</Button>
             </Link>
-            {/* M2-6 / issue #34: Evidence Pack 生成 (synchronous
-                Markdown export). Disabled while a build is in-flight
-                so a double-click does not fire two concurrent
-                downloads. The success / failure alert surfaces the
-                returned filename + per-section counts so the operator
-                knows immediately what they got. */}
+            {/* M2-6 / issue #34 + M31 F406 / issue #141: Evidence Pack
+                生成. The format select picks Markdown (original single-file
+                bundle) or Zip (machine-readable submittable bundle). Both
+                are downloaded synchronously; the button is disabled while a
+                build is in-flight so a double-click does not fire two
+                concurrent downloads. The success / failure alert surfaces the
+                returned filename + per-section counts (or the backend HTTP
+                error) so the operator knows immediately what they got. */}
+            <select
+              data-testid="evidence-pack-format"
+              aria-label={tp("evidencePackFormatLabel")}
+              value={evidencePackFormat}
+              onChange={(e) =>
+                setEvidencePackFormat(e.target.value as "zip" | "markdown")
+              }
+              disabled={evidencePackBuilding}
+              className="h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              title={tp("evidencePackFormatLabel")}
+            >
+              <option value="zip">{tp("evidencePackFormatZip")}</option>
+              <option value="markdown">{tp("evidencePackFormatMarkdown")}</option>
+            </select>
             <Button
               variant="outline"
               onClick={handleBuildEvidencePack}
               disabled={evidencePackBuilding}
               title={tp("evidencePackDescription")}
+              data-testid="evidence-pack-build"
             >
               <Download className="h-4 w-4 mr-2" />
               {evidencePackBuilding ? tp("evidencePackGenerating") : tp("evidencePack")}

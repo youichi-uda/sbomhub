@@ -2322,24 +2322,42 @@ export const api = {
       }),
     exportVEX: (projectId: string) =>
       `${API_URL}/api/v1/projects/${projectId}/vex/export`,
-    // Evidence Pack download (Wave M2-6 / issue #34). POSTs to the
-    // sync builder and triggers a browser-native file download via a
+    // Evidence Pack download (Wave M2-6 / issue #34, M31 F406 Zip). POSTs
+    // to the sync builder and triggers a browser-native file download via a
     // dynamic anchor with the Content-Disposition filename.
+    //
+    // `format` selects the artefact shape (contract: M31_KICKOFF_PROMPT.md
+    // §"API 契約"):
+    //   - undefined / "markdown" → the original text/markdown bundle
+    //     (fully back-compatible: the field is omitted from the body so an
+    //     older backend behaves exactly as before).
+    //   - "zip" → an application/zip binary bundle (report.md + vex.cdx.json
+    //     + cra/*.md + meti-assessment.json + manifest.json).
     //
     // We deliberately use fetch() + Blob() here rather than the shared
     // request() helper because:
-    //   - the response body is text/markdown, not JSON
+    //   - the response body is text/markdown or application/zip, not JSON
     //   - we want the server's Content-Disposition filename
     //   - request() throws APIError on non-2xx; we want to surface the
-    //     error text to the operator without losing the response body
+    //     error to the operator without losing the response body. A binary
+    //     Zip download is NOT a JSON envelope, so an HTTP error (400
+    //     unsupported format / 403 write permission / 404 project) is
+    //     surfaced honestly via APIError rather than silently swallowed.
     buildEvidencePack: async (
       projectId: string,
       opts?: {
+        format?: "markdown" | "zip";
         includeVEXApproved?: boolean;
         includeCRAApproved?: boolean;
         includeMETIPlaceholder?: boolean;
       }
-    ): Promise<{ filename: string; sizeBytes: number; vexCount: number; craCount: number }> => {
+    ): Promise<{
+      filename: string;
+      sizeBytes: number;
+      vexCount: number;
+      craCount: number;
+      format: string;
+    }> => {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
@@ -2352,6 +2370,14 @@ export const api = {
         if (orgId) headers["X-Clerk-Org-ID"] = orgId;
       }
       const body: Record<string, unknown> = {};
+      // Only send `format` when explicitly "zip". Omitting it for the
+      // markdown path preserves the exact pre-M31 request shape (the
+      // backend defaults to markdown), so old + new backends agree.
+      if (opts?.format === "zip") {
+        body.format = "zip";
+      } else if (opts?.format === "markdown") {
+        body.format = "markdown";
+      }
       if (opts?.includeVEXApproved !== undefined) {
         body.include_vex_approved = opts.includeVEXApproved;
       }
@@ -2379,13 +2405,21 @@ export const api = {
         }
         throw new APIError(res.status, errBody);
       }
+      // The server echoes the negotiated format (X-Evidence-Pack-Format:
+      // markdown|zip); fall back to the requested format, then markdown.
+      const respFormat =
+        res.headers.get("X-Evidence-Pack-Format") || opts?.format || "markdown";
       // Parse the server-supplied filename out of Content-Disposition
-      // ("attachment; filename=\"evidence-pack-<id>-<ts>.md\""). Falling
+      // ("attachment; filename=\"evidence-pack-<id>-<ts>.md|.zip\""). Falling
       // back to a sensible default if the header is missing keeps the
-      // UI working but loses the timestamped name.
+      // UI working but loses the timestamped name. The fallback extension
+      // tracks the requested format so a zip is never saved as .md.
       const cd = res.headers.get("Content-Disposition") || "";
       const match = cd.match(/filename="([^"]+)"/i);
-      const filename = match ? match[1] : `evidence-pack-${projectId}.md`;
+      const fallbackExt = respFormat === "zip" ? "zip" : "md";
+      const filename = match
+        ? match[1]
+        : `evidence-pack-${projectId}.${fallbackExt}`;
       const vexCount = parseInt(res.headers.get("X-Evidence-Pack-VEX-Count") || "0", 10) || 0;
       const craCount = parseInt(res.headers.get("X-Evidence-Pack-CRA-Count") || "0", 10) || 0;
       const blob = await res.blob();
@@ -2405,7 +2439,7 @@ export const api = {
         // the download before the URL is invalidated.
         setTimeout(() => window.URL.revokeObjectURL(url), 0);
       }
-      return { filename, sizeBytes: blob.size, vexCount, craCount };
+      return { filename, sizeBytes: blob.size, vexCount, craCount, format: respFormat };
     },
     // License policy methods
     getLicensePolicies: async (id: string): Promise<LicensePolicy[]> =>
