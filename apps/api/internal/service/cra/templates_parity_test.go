@@ -341,6 +341,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 		"internal/repository/cra_reports.go":               true, // field comment + Insert error enumeration (probed in 4e)
 		"internal/service/cra/templates.go":                true, // the const block + templateCache keys
 		"internal/service/evidence_pack/builder.go":        true, // README enumeration line (probed in 4f)
+		"internal/service/evidence_pack/zip.go":            true, // M31 F405: doc comment names an enum example (code uses r.ReportType)
 		"internal/service/meti/criteria/sbom_operation.go": true, // doc comment naming the milestones
 	}
 	wantGoTest := map[string]bool{
@@ -348,6 +349,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 		"internal/repository/cra_reports_rls_test.go":     true,
 		"internal/repository/cra_reports_test.go":         true,
 		"internal/service/evidence_pack/builder_test.go":  true,
+		"internal/service/evidence_pack/zip_test.go":      true, // M31 F405: CRA (report_type, lang) collision-suffix test fixtures
 		"internal/service/meti/criteria/criteria_test.go": true,
 	}
 	gotGoNonTest := make(map[string]bool)
