@@ -377,6 +377,11 @@ func main() {
 	// M28-A (F388, #134): cross-project vulnerability impact (blast radius).
 	// Read-only aggregation reusing the tenant-scoped search repository.
 	impactService := service.NewImpactService(searchRepo)
+	// M30-A (F402, #138): cross-project transitive dependency paths. On-demand
+	// fusion of M28 blast radius + M29 reverse reachability — reuses the same
+	// tenant-scoped search repository plus the sbom repository (to load each
+	// affected project's latest SBOM once for traversal).
+	cvePathsService := service.NewCVEPathsService(searchRepo, sbomRepo)
 	epssService := service.NewEPSSService(vulnRepo)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
@@ -578,6 +583,7 @@ func main() {
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	searchHandler := handler.NewSearchHandler(searchService)
 	impactHandler := handler.NewImpactHandler(impactService)
+	cvePathsHandler := handler.NewCVEPathsHandler(cvePathsService)
 	epssHandler := handler.NewEPSSHandler(epssService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	complianceHandler := handler.NewComplianceHandler(complianceService)
@@ -1431,6 +1437,13 @@ func main() {
 	// Read-only sibling of the /vulnerabilities/:cve_id/kev and /ipa metadata
 	// endpoints; tenant-scoped aggregation, no new audit action.
 	auth.GET("/vulnerabilities/:cve_id/impact", impactHandler.GetCVEImpact)
+
+	// M30-A (F402, #138): cross-project transitive dependency paths. Read-only
+	// on-demand sibling of /impact — for each affected project it returns the
+	// root → … → component entry paths against the project's latest SBOM.
+	// Same tenant-scoped chain; falls through to the /vulnerabilities GET audit
+	// classification (vulnerability.viewed) like /impact — no new audit action.
+	auth.GET("/vulnerabilities/:cve_id/paths", cvePathsHandler.GetCVEPaths)
 
 	// EOL (End of Life) integration endpoints
 	auth.POST("/eol/sync", eolHandler.SyncCatalog)

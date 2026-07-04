@@ -1510,6 +1510,29 @@ func TestDetermineActionAndResource_TenantLevelNotSwallowedByProjectHoist(t *tes
 			wantAction:   model.ActionVulnerabilityViewed,
 			wantResource: model.ResourceVulnerability,
 		},
+		{
+			// M28-A (#134, F388): the cross-project blast-radius endpoint is a
+			// read-only tenant-level /vulnerabilities GET, so it classifies as
+			// the EXISTING vulnerability.viewed — no new audit action.
+			name:         "GET /vulnerabilities/:cve_id/impact (M28 blast radius)",
+			method:       "GET",
+			path:         "/api/v1/vulnerabilities/:cve_id/impact",
+			wantAction:   model.ActionVulnerabilityViewed,
+			wantResource: model.ResourceVulnerability,
+		},
+		{
+			// M30-A (#138, F402): the cross-project transitive-paths endpoint is
+			// the on-demand sibling of /impact — also a read-only tenant-level
+			// /vulnerabilities GET, so it MUST fall through to the SAME existing
+			// vulnerability.viewed action. M30 adds NO new audit action (M28/M29
+			// precedent). If a future change adds a paths-specific action or
+			// hoists this route, this pins the regression.
+			name:         "GET /vulnerabilities/:cve_id/paths (M30 transitive paths)",
+			method:       "GET",
+			path:         "/api/v1/vulnerabilities/:cve_id/paths",
+			wantAction:   model.ActionVulnerabilityViewed,
+			wantResource: model.ResourceVulnerability,
+		},
 	}
 
 	for _, tc := range cases {
