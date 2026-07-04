@@ -1058,6 +1058,24 @@
       "usageCI": "CI/CD (GitHub Actions, etc.)"
     }
   },
+  "DependencyPath": {
+    "title": "Dependency path",
+    "description": "How this component is pulled into your project — every dependency chain from the root to this component. For a transitive dependency, the direct dependency at the start of each chain is what you upgrade to remove or update it.",
+    "viewButton": "Dependency path",
+    "selectedLabel": "Dependency path for",
+    "loading": "Analysing dependency paths...",
+    "loadFailed": "Failed to load dependency paths",
+    "directTitle": "This is a direct dependency",
+    "directHint": "Upgrade or replace it directly in your project's manifest.",
+    "transitiveTitle": "This is a transitive dependency",
+    "transitiveHint": "It is pulled in through the chains below. To change it, upgrade the direct dependency (in blue) at the start of each chain.",
+    "truncated": "Showing the first {count} paths. More paths exist but were truncated to keep this view responsive.",
+    "degraded": "Dependency edges are not available for this SBOM (e.g. SPDX). Path-to-root analysis requires a CycloneDX SBOM with a dependencies graph.",
+    "empty": "This component was not found in the dependency graph for the selected SBOM.",
+    "pathCount": "{count} paths",
+    "listView": "List",
+    "graphView": "Graph"
+  },
   "SbomDiff": {
     "Page": {
       "title": "SBOM Change History",

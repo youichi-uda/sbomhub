@@ -1058,6 +1058,24 @@
       "usageCI": "CI/CD (GitHub Actions など)"
     }
   },
+  "DependencyPath": {
+    "title": "依存パス",
+    "description": "このコンポーネントがプロジェクトに取り込まれる経路 — ルートからこのコンポーネントまでの全依存チェーンを表示します。 推移的依存の場合、各チェーンの先頭にある直接依存をアップグレードすることで、除去・更新できます。",
+    "viewButton": "依存パス",
+    "selectedLabel": "依存パス:",
+    "loading": "依存パスを解析中...",
+    "loadFailed": "依存パスの読み込みに失敗しました",
+    "directTitle": "これは直接依存です",
+    "directHint": "プロジェクトのマニフェストで直接アップグレード・置き換えできます。",
+    "transitiveTitle": "これは推移的依存です",
+    "transitiveHint": "下記のチェーンを通じて取り込まれています。 変更するには、各チェーンの先頭にある直接依存 (青) をアップグレードしてください。",
+    "truncated": "先頭 {count} 件のパスを表示しています。 表示を軽量に保つため、これ以上のパスは省略されました。",
+    "degraded": "この SBOM (SPDX など) には依存エッジがありません。 パス解析には dependencies グラフを持つ CycloneDX 形式の SBOM が必要です。",
+    "empty": "選択された SBOM の依存グラフにこのコンポーネントは見つかりませんでした。",
+    "pathCount": "パス {count} 件",
+    "listView": "リスト",
+    "graphView": "グラフ"
+  },
   "SbomDiff": {
     "Page": {
       "title": "SBOM 変更履歴",
