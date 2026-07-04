@@ -491,3 +491,176 @@ func TestComputePaths_ExplicitSbomParam(t *testing.T) {
 		t.Errorf("want direct dep with 1 path, got is_direct=%v paths=%d", resp.IsDirect, len(resp.Paths))
 	}
 }
+
+// ---------- F399: deep-graph enumeration (DFS regression) ----------
+
+// buildDiamondGraph builds a "reconverging diamond chain" of depth k: a
+// stack of k diamonds where each level j has a top node n_j that depends
+// on two middles a_j / b_j which BOTH reconverge on n_{j+1}. There are
+// therefore 2^k distinct simple target(n_k) → root(n_0) paths, each of
+// length 2k+1. The single in-degree-0 node is n_0 (the root). This is the
+// adversarial shape that starves a breadth-first enumerator: the number of
+// partial paths at shallow depths is exponential, so a work budget is
+// exhausted popping shallow partials before ANY partial reaches the deep
+// root — the F399 failure mode.
+func buildDiamondGraph(t *testing.T, k int) (sbomGraph, string) {
+	t.Helper()
+	g := emptySbomGraph()
+	add := func(id string) {
+		if _, ok := g.nodes[id]; !ok {
+			g.nodes[id] = GraphNode{ID: id, Name: id, Version: "1.0.0", Type: "library"}
+			g.orderedIDs = append(g.orderedIDs, id)
+		}
+	}
+	n := func(j int) string { return fmt.Sprintf("n%03d", j) }
+	add(n(0)) // root first so orderedIDs[0] == root
+	for j := 0; j < k; j++ {
+		aj := fmt.Sprintf("a%03d", j)
+		bj := fmt.Sprintf("b%03d", j)
+		add(n(j))
+		add(aj)
+		add(bj)
+		add(n(j + 1))
+		g.edges = append(g.edges,
+			GraphEdge{From: n(j), To: aj},
+			GraphEdge{From: n(j), To: bj},
+			GraphEdge{From: aj, To: n(j + 1)},
+			GraphEdge{From: bj, To: n(j + 1)},
+		)
+	}
+	return g, n(k)
+}
+
+// TestEnumeratePaths_DeepGraphReturnsRealPaths is the F399 regression test.
+// On a deep (k=16 → 2^16 = 65536 simple paths, each length 33) reconverging
+// graph the target IS reachable from the root, but the old breadth-first
+// enumerator exhausts maxPathEnumerationSteps on shallow partials and
+// returns ZERO paths (truncated=true) — useless for exactly the deep
+// transitive components this feature exists to explain. Depth-first
+// enumeration finds complete target → root paths within ~depth pops, so
+// real paths are always returned within budget. FAILS on the old BFS code
+// (len(paths)==0), PASSES after the DFS fix.
+func TestEnumeratePaths_DeepGraphReturnsRealPaths(t *testing.T) {
+	const k = 16
+	g, target := buildDiamondGraph(t, k)
+	childToParents := buildReverseAdjacency(g)
+	roots := findRoots(g)
+
+	paths, truncated := enumeratePaths(g, childToParents, roots, target)
+
+	if len(paths) == 0 {
+		t.Fatalf("F399: deep reachable target returned ZERO paths (truncated=%v) — enumeration starved before reaching the root", truncated)
+	}
+	// Every returned path must start at a root, end at the target, and be
+	// simple (no repeated node).
+	for i, p := range paths {
+		if len(p) == 0 {
+			t.Fatalf("path %d is empty", i)
+		}
+		if _, ok := roots[p[0].ID]; !ok {
+			t.Errorf("path %d does not start at a root: %s", i, pathJoined(p))
+		}
+		if p[len(p)-1].ID != target {
+			t.Errorf("path %d does not end at target %q: %s", i, target, pathJoined(p))
+		}
+		seen := map[string]bool{}
+		for _, node := range p {
+			if seen[node.ID] {
+				t.Errorf("path %d revisits node %q: %s", i, node.ID, pathJoined(p))
+			}
+			seen[node.ID] = true
+		}
+	}
+}
+
+// TestEnumeratePaths_StepBudgetTruncation trips the maxPathEnumerationSteps
+// work budget (NOT the path-count cap) and asserts the already-found real
+// paths are preserved (len > 0), never dropped to zero. The graph is a
+// short guaranteed path (target → zs → R) plus a dense dead-end web (a
+// complete bidirectional graph among 10 nodes, none of which reach a root),
+// so DFS emits the one real path immediately and then burns the remaining
+// budget on the ~e·9! simple partials of the web. truncated=true, exactly
+// one complete path exists (< the cap), and it is preserved.
+func TestEnumeratePaths_StepBudgetTruncation(t *testing.T) {
+	g := emptySbomGraph()
+	add := func(id string) {
+		if _, ok := g.nodes[id]; !ok {
+			g.nodes[id] = GraphNode{ID: id, Name: id, Type: "library"}
+			g.orderedIDs = append(g.orderedIDs, id)
+		}
+	}
+	add("R") // root first → orderedIDs[0] == root
+	add("zs")
+	add("T")
+	// Short, guaranteed real path: R → zs → T (reverse: T → zs → R).
+	g.edges = append(g.edges,
+		GraphEdge{From: "R", To: "zs"},
+		GraphEdge{From: "zs", To: "T"},
+	)
+	const webN = 10
+	web := make([]string, webN)
+	for i := 0; i < webN; i++ {
+		web[i] = fmt.Sprintf("w%02d", i) // "w00".."w09" all sort before "zs"
+		add(web[i])
+	}
+	// Web entry into the target. "w00" sorts before "zs", so the reverse
+	// adjacency of T is ["w00","zs"]; DFS explores "zs" (the real path)
+	// first and only then dives into the dead-end web.
+	g.edges = append(g.edges, GraphEdge{From: "w00", To: "T"})
+	// Dense dead-end web: complete bidirectional graph among the web nodes.
+	// None of them point at a root, so every web branch dead-ends via the
+	// per-path cycle guard — pure budget burn, zero complete paths.
+	for i := 0; i < webN; i++ {
+		for j := 0; j < webN; j++ {
+			if i != j {
+				g.edges = append(g.edges, GraphEdge{From: web[i], To: web[j]})
+			}
+		}
+	}
+
+	childToParents := buildReverseAdjacency(g)
+	roots := findRoots(g)
+	paths, truncated := enumeratePaths(g, childToParents, roots, "T")
+
+	if !truncated {
+		t.Fatalf("expected truncated=true when the step budget is exhausted")
+	}
+	if len(paths) == 0 {
+		t.Fatalf("F399 invariant: step-budget truncation must preserve already-found real paths, got ZERO")
+	}
+	// path_count (as the caller reports it) is len(paths); the shortest and
+	// only real path must be present.
+	if got := pathJoined(paths[0]); got != "R -> zs -> T" {
+		t.Errorf("first (shortest) path = %q, want R -> zs -> T", got)
+	}
+}
+
+// TestEnumeratePaths_ShortestFirst pins the deterministic post-sort: with a
+// direct edge (root → target) AND a longer indirect route (root → m →
+// target), the shorter path must be returned first regardless of DFS
+// discovery order.
+func TestEnumeratePaths_ShortestFirst(t *testing.T) {
+	g := emptySbomGraph()
+	for _, id := range []string{"r", "m", "t"} {
+		g.nodes[id] = GraphNode{ID: id, Name: id, Type: "library"}
+		g.orderedIDs = append(g.orderedIDs, id)
+	}
+	g.edges = []GraphEdge{
+		{From: "r", To: "t"}, // direct: length-2 path
+		{From: "r", To: "m"},
+		{From: "m", To: "t"}, // indirect: length-3 path
+	}
+	childToParents := buildReverseAdjacency(g)
+	roots := findRoots(g)
+	paths, _ := enumeratePaths(g, childToParents, roots, "t")
+
+	if len(paths) != 2 {
+		t.Fatalf("want 2 paths, got %d: %v", len(paths), pathSet(paths))
+	}
+	if len(paths[0]) > len(paths[1]) {
+		t.Errorf("paths not sorted shortest-first: len(paths[0])=%d > len(paths[1])=%d", len(paths[0]), len(paths[1]))
+	}
+	if got := pathJoined(paths[0]); got != "r -> t" {
+		t.Errorf("shortest path = %q, want r -> t", got)
+	}
+}

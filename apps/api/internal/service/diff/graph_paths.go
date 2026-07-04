@@ -37,6 +37,18 @@
 //     graphs even before the path cap is reached; hitting it also sets
 //     truncated=true.
 //
+// Traversal order (F399): enumeratePaths walks depth-first, not
+// breadth-first. A BFS enumerator emits shortest-paths-first, but on a
+// deep AND wide (reconverging) graph the number of shallow partial paths
+// is exponential, so the maxPathEnumerationSteps budget is exhausted
+// popping shallow partials before ANY partial reaches the (deep) root —
+// returning zero paths for a genuinely reachable component. DFS instead
+// completes a full target → root path within ~depth pops, so real paths
+// are always returned within budget. The collected paths are then sorted
+// (length ascending, then lexicographically by node-id sequence) so the
+// "shortest paths first" presentation and deterministic output are
+// preserved regardless of DFS discovery order.
+//
 // F164 (Go nil slice → JSON null) is enforced: Paths is make([][]..., 0).
 package diff
 
@@ -61,13 +73,16 @@ import (
 const maxDependencyPaths = 50
 
 // maxPathEnumerationSteps bounds the total number of partial-path
-// expansions (queue pops) during enumeration. The per-path visited set
+// expansions (stack pops) during enumeration. The per-path visited set
 // prevents cycles, but a wide DAG (e.g. a chain of "diamonds") can still
 // contain an exponential number of distinct simple paths; without a work
-// budget the BFS could enqueue exponentially many partials before the
+// budget the traversal could expand exponentially many partials before the
 // path-count cap is reached. Hitting this budget sets truncated=true.
 // 20000 is far above what any legitimate SBOM reaches (shallow DAGs of a
-// few thousand components) while keeping the worst case bounded.
+// few thousand components) while keeping the worst case bounded. Because
+// enumeration is depth-first (F399), complete root paths are found within
+// ~depth pops, so this budget truncates the *tail* of a huge path set
+// rather than starving before the first path is emitted.
 const maxPathEnumerationSteps = 20000
 
 // ErrComponentNotFound is returned by ComputePaths when the component_id
@@ -290,30 +305,40 @@ func isDirectDependency(childToParents map[string][]string, roots map[string]str
 }
 
 // enumeratePaths walks child → parent edges from the target up to the
-// graph roots, breadth-first (shortest paths first), and returns each
-// discovered path ordered root → ... → target.
+// graph roots depth-first (F399) and returns each discovered path ordered
+// root → ... → target. Because DFS completes a full path within ~depth
+// pops, real paths are always returned within the work budget even on a
+// deep, exponentially-wide graph where a breadth-first walk would starve
+// (see the package doc for the failure mode). The collected paths are
+// sorted before returning — length ascending, then lexicographically by
+// node-id sequence — so the "shortest paths first" presentation and
+// deterministic output hold regardless of DFS discovery order.
 //
-// Cycle guard: each queued partial carries its own node set (a path may
-// not revisit a node), so cyclic dependencies terminate. Caps: at most
+// Cycle guard: each partial carries its own node set (a path may not
+// revisit a node), so cyclic dependencies terminate. Caps: at most
 // maxDependencyPaths paths are returned and at most maxPathEnumerationSteps
-// queue pops are performed; hitting either bound sets truncated=true.
+// stack pops are performed; hitting either bound sets truncated=true.
 func enumeratePaths(g sbomGraph, childToParents map[string][]string, roots map[string]struct{}, targetID string) (paths [][]GraphNode, truncated bool) {
 	paths = make([][]GraphNode, 0)
 	if _, ok := g.nodes[targetID]; !ok {
 		return paths, false
 	}
 
-	// Each queue item is a reverse path (target-first, walking upward).
-	queue := [][]string{{targetID}}
+	// Each stack item is a reverse path (target-first, walking upward).
+	// LIFO ordering makes the walk depth-first: a partial is fully driven
+	// to a root before its siblings are expanded, so a complete path is
+	// emitted within ~depth pops rather than after the entire shallow
+	// frontier (the BFS starvation fixed by F399).
+	stack := [][]string{{targetID}}
 	steps := 0
-	for len(queue) > 0 {
+	for len(stack) > 0 {
 		steps++
 		if steps > maxPathEnumerationSteps {
 			truncated = true
 			break
 		}
-		cur := queue[0]
-		queue = queue[1:]
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
 		tail := cur[len(cur)-1]
 
 		if _, isRoot := roots[tail]; isRoot {
@@ -338,9 +363,25 @@ func enumeratePaths(g sbomGraph, childToParents map[string][]string, roots map[s
 			next := make([]string, len(cur)+1)
 			copy(next, cur)
 			next[len(cur)] = parent
-			queue = append(queue, next)
+			stack = append(stack, next)
 		}
 	}
+
+	// Deterministic, shortest-first presentation independent of DFS
+	// discovery order: sort by length, then lexicographically by the
+	// node-id sequence.
+	sort.SliceStable(paths, func(i, j int) bool {
+		a, b := paths[i], paths[j]
+		if len(a) != len(b) {
+			return len(a) < len(b)
+		}
+		for k := range a {
+			if a[k].ID != b[k].ID {
+				return a[k].ID < b[k].ID
+			}
+		}
+		return false
+	})
 	return paths, truncated
 }
 
