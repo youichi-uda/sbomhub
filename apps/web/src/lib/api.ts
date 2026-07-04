@@ -1867,6 +1867,48 @@ export const api = {
       }),
     getComponents: async (id: string): Promise<Component[]> =>
       (await request<Component[]>(`/api/v1/projects/${id}/components`)) ?? [],
+    // M29-B (F398 / #137): transitive dependency path-to-root for a
+    // single component. Wave A (F397) backend traverses the on-demand
+    // CycloneDX graph in reverse (child → parent) and returns every
+    // root → … → target chain. sbomId is optional (defaults to the
+    // project's latest SBOM server-side). We mirror the getDiffGraph
+    // envelope defence: safeEnvelope collapses a 204 / null body to a
+    // benign empty-paths shape, and the per-slice `?? []` guards the
+    // F164 Go nil-slice → JSON null case so the component's `.map` calls
+    // are safe even on a degraded (SPDX) or not-in-graph response. Unlike
+    // vulnerabilities.getImpact (F395), an empty `paths` here is NOT an
+    // affirmative security claim — "no path found" is informational and
+    // the UI renders a neutral empty state, so the whole-envelope
+    // fallback is appropriate.
+    getComponentPaths: async (
+      projectId: string,
+      componentId: string,
+      sbomId?: string,
+    ): Promise<ComponentPathsResponse> => {
+      const params = new URLSearchParams();
+      if (sbomId) params.set("sbom", sbomId);
+      const qs = params.toString();
+      const raw = await request<ComponentPathsResponse>(
+        `/api/v1/projects/${projectId}/components/${componentId}/paths${qs ? `?${qs}` : ""}`,
+      );
+      const safe = safeEnvelope<ComponentPathsResponse>(raw, {
+        component_id: componentId,
+        component: { name: "", version: "", purl: "" },
+        sbom_id: sbomId ?? "",
+        format: "",
+        degraded: false,
+        is_direct: false,
+        paths: [],
+        path_count: 0,
+        truncated: false,
+      });
+      return {
+        ...safe,
+        // F164 defence-in-depth: the outer slice and every inner path
+        // slice normalised to [] so the render layer never maps over null.
+        paths: (safe.paths ?? []).map((p) => p ?? []),
+      };
+    },
     getVulnerabilities: async (id: string): Promise<Vulnerability[]> =>
       (await request<Vulnerability[]>(`/api/v1/projects/${id}/vulnerabilities`)) ?? [],
     // getVulnerabilitiesWithMeta returns the visible page plus the
@@ -3506,6 +3548,52 @@ export interface ProjectDiffGraphResponse {
   nodes: ProjectDiffGraphNode[];
   edges: ProjectDiffGraphEdge[];
   diff_status: ProjectDiffGraphDiffStatus;
+}
+
+/**
+ * M29-B (F398 / issue #137) — transitive dependency path-to-root.
+ *
+ * One node on a dependency path. `id` is the graph node key (a
+ * version-stripped purl, or a `name|type` fallback) shared by the
+ * backend graph traversal; `name` / `version` / `type` are the display
+ * attributes. Because the node ID collapses versions, two versions of
+ * the same library map to a single node (documented in the M29 API
+ * contract's "version granularity caveat").
+ */
+export interface ComponentPathNode {
+  id: string;
+  name: string;
+  version: string;
+  type: string;
+}
+
+/** The target component whose paths were requested (echoed by the backend). */
+export interface ComponentPathTarget {
+  name: string;
+  version: string;
+  purl: string;
+}
+
+/**
+ * GET /api/v1/projects/:id/components/:component_id/paths response.
+ *
+ * `paths` is a list of root → … → target chains (each a `ComponentPathNode[]`).
+ * `is_direct` is true when the component is a direct dependency of the
+ * root (or is the root itself). `degraded` is true when the SBOM has no
+ * dependency edges (e.g. SPDX) — an informational empty state, not an
+ * error. `truncated` is true when path enumeration hit the backend cap;
+ * the UI reports this honestly rather than hiding the overflow.
+ */
+export interface ComponentPathsResponse {
+  component_id: string;
+  component: ComponentPathTarget;
+  sbom_id: string;
+  format: string;
+  degraded: boolean;
+  is_direct: boolean;
+  paths: ComponentPathNode[][];
+  path_count: number;
+  truncated: boolean;
 }
 
 /**
