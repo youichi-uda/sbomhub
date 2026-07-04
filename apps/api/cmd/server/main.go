@@ -655,13 +655,18 @@ func main() {
 	// surfaces the meti package's package-level lookups as a struct
 	// satisfying evidence_pack.METICatalog so the builder stays free
 	// of package-import order constraints.
+	// F405 / M31 (issue #140): the zip render target (Format=zip) bundles
+	// a CycloneDX VEX document via the existing VEXService.ExportCycloneDXVEX.
+	// WithVEXExporter injects it structurally (the builder never imports
+	// the service package) so the Markdown path stays exporter-free and
+	// the zip path stays fake-testable.
 	evidencePackBuilder := evidence_pack.NewBuilder(
 		vexDraftsRepo,
 		craReportsRepo,
 		projectRepo,
 		metiAssessmentsRepo,
 		metiCatalogAdapter{},
-	)
+	).WithVEXExporter(vexService)
 	evidencePackHandler := handler.NewEvidencePackHandler(evidencePackBuilder, auditRepo)
 
 	// SaaS Handlers
