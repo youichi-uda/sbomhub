@@ -15,7 +15,9 @@ import "github.com/google/uuid"
 // counters — grafted with M29's per-component path chains. Like CVEImpact it
 // is a read-only aggregation with no new table and no new audit action; the
 // per-SBOM traversal is computed on demand (no migration / ingest change /
-// backfill in M30-lite). epss_score stays a fixed 0 until 006_epss lands,
+// backfill in M30-lite). epss_score now reflects the real FIRST.org value
+// (M36 / migration 055 promoted the column into the active chain and
+// CVEImpact's GetVulnerabilityImpactMeta reads it NULL-safely via COALESCE),
 // exactly as CVEImpact.
 //
 // Tenant isolation is structural and identical to CVEImpact: RLS is the

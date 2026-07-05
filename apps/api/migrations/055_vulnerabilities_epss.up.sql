@@ -42,10 +42,12 @@
 --   the scheduled epss_sync (M36-B) populates it. Readers COALESCE the NULL
 --   to 0, which reproduces the pre-migration sentinel-0 semantics exactly
 --   (and keeps the web >0 EPSS-badge suppression, F391, unchanged).
---   Precision is DECIMAL(5,4): FIRST.org publishes 5dp, truncated to 4dp
---   here to stay identical to 006 (full-fidelity DECIMAL(6,5) is a later
---   consideration). The partial index orders NULLS LAST so un-synced rows
---   sink beneath scored ones in "highest EPSS first" queries.
+--   Precision is DECIMAL(5,4): FIRST.org publishes 5dp, rounded to 4dp on
+--   insert (Postgres NUMERIC rounds, half-up) to stay identical to 006
+--   (full-fidelity DECIMAL(6,5) is a later consideration). Range is +/-9.9999
+--   so a probability/percentile of exactly 1.0000 stores fine. The partial
+--   index orders NULLS LAST so un-synced rows sink beneath scored ones in
+--   "highest EPSS first" queries.
 --
 -- RLS:
 --   vulnerabilities is a GLOBAL, non-tenant table: 001_init declares no
