@@ -606,7 +606,11 @@ func main() {
 	// `cra_report_decided` domain audit row emitted by the Decide
 	// endpoint — the AI-generated / AI-disabled audit rows are emitted
 	// by the runner inside its Stage 3 write tx.
-	craReportsHandler := handler.NewCRAReportsHandler(craRunner, craReportsRepo, auditRepo)
+	// M34 F424: craSubmissionsRepo (constructed above for the submissions
+	// handler) is injected so ListReports/GetReport can enrich each report
+	// with a read-time Art.14 deadline status (earliest submitted_at vs
+	// awareness_time + 24h/72h). Compute-on-read only — nothing is persisted.
+	craReportsHandler := handler.NewCRAReportsHandler(craRunner, craReportsRepo, auditRepo, craSubmissionsRepo)
 
 	// CRA submission Record/List handler (M33 F419 / issue #146). Record
 	// emits the cra_submission_recorded audit row and transitions the parent

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -78,6 +79,19 @@ type CRAAuditLogger interface {
 	Log(ctx context.Context, input *model.CreateAuditLogInput) error
 }
 
+// craSubmissionEarliestReader is the narrow subset of
+// *repository.CRASubmissionsRepository the read endpoints use to
+// compute Art.14 deadline status (M34-B / F424). The read endpoints
+// need only the earliest (MIN) submitted_at per report to decide
+// on_time vs late; the full submissions repository surface is not
+// exposed here. Declared as an interface so cra_reports_test.go can
+// substitute a fake with a controllable map. The batch signature
+// (one call per list page, keyed by report id) keeps ListReports free
+// of an N+1 submissions probe.
+type craSubmissionEarliestReader interface {
+	EarliestSubmittedAtByReports(ctx context.Context, tenantID uuid.UUID, reportIDs []uuid.UUID) (map[uuid.UUID]time.Time, error)
+}
+
 // CRAReportsHandler serves the M2-4 CRA report endpoints (issue #36):
 //
 //	POST   /api/v1/projects/:id/cra-reports/run
@@ -104,14 +118,18 @@ type CRAAuditLogger interface {
 //   - F24/F27 limit / offset clamp with explicit reject (no silent clamp)
 //   - F28     X-Total-Count via CountByProject for the list endpoint
 type CRAReportsHandler struct {
-	runner  CRAReportRunner
-	reports CRAReportStore
-	audit   CRAAuditLogger
+	runner      CRAReportRunner
+	reports     CRAReportStore
+	audit       CRAAuditLogger
+	submissions craSubmissionEarliestReader
 }
 
-// NewCRAReportsHandler wires the handler.
-func NewCRAReportsHandler(runner CRAReportRunner, reports CRAReportStore, audit CRAAuditLogger) *CRAReportsHandler {
-	return &CRAReportsHandler{runner: runner, reports: reports, audit: audit}
+// NewCRAReportsHandler wires the handler. `submissions` supplies the
+// earliest-submission lookup the read endpoints use to compute the
+// Art.14 deadline status (M34-B / F424); *repository.CRASubmissionsRepository
+// satisfies it.
+func NewCRAReportsHandler(runner CRAReportRunner, reports CRAReportStore, audit CRAAuditLogger, submissions craSubmissionEarliestReader) *CRAReportsHandler {
+	return &CRAReportsHandler{runner: runner, reports: reports, audit: audit, submissions: submissions}
 }
 
 // ----------------------------------------------------------------------------
@@ -150,10 +168,29 @@ type runReportResponse struct {
 	AIDisabled bool                  `json:"ai_disabled,omitempty"`
 }
 
+// craReportWithDeadline is the read-endpoint wire shape: the persisted
+// cra_reports row (embedded, so all of its JSON fields — including
+// awareness_time — are promoted verbatim) plus the DERIVED Art.14
+// deadline fields computed on read (M34-B / F424). Nothing here is
+// persisted: deadline_status / deadline_at are recomputed on every read
+// from awareness_time + the earliest submission (the 053/054
+// stale-derived-column discipline).
+//
+//	deadline_status: not_applicable | pending | overdue | on_time | late
+//	deadline_at:     awareness_time + {24h,72h}; null for not_applicable
+//	submitted_at:    earliest cra_submissions.submitted_at; null if none
+type craReportWithDeadline struct {
+	*repository.CRAReport
+	DeadlineStatus string     `json:"deadline_status"`
+	DeadlineAt     *time.Time `json:"deadline_at,omitempty"`
+	SubmittedAt    *time.Time `json:"submitted_at,omitempty"`
+}
+
 // craReportListResponse is the JSON envelope returned by ListReports.
-// The total count also lands in the X-Total-Count header (F28).
+// The total count also lands in the X-Total-Count header (F28). Each
+// entry carries the derived Art.14 deadline fields (F424).
 type craReportListResponse struct {
-	Reports []repository.CRAReport `json:"reports"`
+	Reports []craReportWithDeadline `json:"reports"`
 }
 
 // craDecisionRequest captures the human decision on a cra_reports row.
@@ -302,7 +339,14 @@ func (h *CRAReportsHandler) ListReports(c echo.Context) error {
 		c.Response().Header().Set("X-Total-Count", strconv.Itoa(total))
 	}
 
-	return c.JSON(http.StatusOK, craReportListResponse{Reports: reports})
+	// F424: enrich each row with its read-time Art.14 deadline status.
+	// One batched submissions lookup for the whole page (no N+1); the
+	// query is tenant-scoped both by the explicit tenant_id and by RLS
+	// inside the ambient TenantTx the list route runs in.
+	earliest := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, reports)
+	enriched := enrichReportsWithDeadline(reports, earliest, time.Now().UTC())
+
+	return c.JSON(http.StatusOK, craReportListResponse{Reports: enriched})
 }
 
 // ----------------------------------------------------------------------------
@@ -331,7 +375,13 @@ func (h *CRAReportsHandler) GetReport(c echo.Context) error {
 	if status != 0 {
 		return c.JSON(status, body)
 	}
-	return c.JSON(http.StatusOK, report)
+
+	// F424: enrich the single report with its read-time Art.14 deadline
+	// status. The batch reader is reused with a one-element id slice so
+	// the on_time/late judgement uses the same MIN(submitted_at) source
+	// of truth as ListReports.
+	earliest := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, []repository.CRAReport{*report})
+	return c.JSON(http.StatusOK, enrichOneReport(report, earliest, time.Now().UTC()))
 }
 
 // ----------------------------------------------------------------------------
@@ -651,6 +701,15 @@ func (h *CRAReportsHandler) buildRunInput(tc *middleware.TenantContext, projectI
 		}
 		sourceVEXDraft = &parsed
 	}
+	// F424: awareness_time seeds the Art.14 24h/72h clock. Validate the
+	// RFC3339 shape HERE so a mistyped instant is a clean 400 rather than
+	// surfacing as a 500 from the runner's later parse. The runner also
+	// parses it (belt) — this is the loud, caller-fixable gate.
+	if req.AwarenessTime != "" {
+		if _, err := time.Parse(time.RFC3339, req.AwarenessTime); err != nil {
+			return cra.RunInput{}, http.StatusBadRequest, map[string]string{"error": "invalid awareness_time (expected RFC3339)"}
+		}
+	}
 	in := cra.RunInput{
 		TenantID:         tc.TenantID(),
 		ProjectID:        projectID,
@@ -671,6 +730,66 @@ func (h *CRAReportsHandler) buildRunInput(tc *middleware.TenantContext, projectI
 		ReportID:         req.ReportID,
 	}
 	return in, 0, nil
+}
+
+// earliestSubmittedAt batch-loads the earliest (MIN) submitted_at per
+// report for a page of reports and returns the report-id → time map.
+// A submissions-lookup failure is NON-fatal: it is logged loudly and
+// degrades to an empty map, so the primary reports payload still
+// renders (mirroring the CountByProject fall-back in ListReports). The
+// honest limitation is that, during such a transient failure, an
+// already-submitted report degrades to its forward-looking status
+// (pending / overdue) instead of on_time / late — the slog line makes
+// the degradation observable.
+func (h *CRAReportsHandler) earliestSubmittedAt(
+	ctx context.Context,
+	tenantID, projectID uuid.UUID,
+	reports []repository.CRAReport,
+) map[uuid.UUID]time.Time {
+	ids := make([]uuid.UUID, 0, len(reports))
+	for i := range reports {
+		ids = append(ids, reports[i].ID)
+	}
+	earliest, err := h.submissions.EarliestSubmittedAtByReports(ctx, tenantID, ids)
+	if err != nil {
+		slog.Warn("cra_reports: earliest submission lookup failed; deadline status degrades to forward-looking",
+			"tenant_id", tenantID, "project_id", projectID, "error", err)
+		return map[uuid.UUID]time.Time{}
+	}
+	return earliest
+}
+
+// enrichReportsWithDeadline wraps each report with its read-time Art.14
+// deadline judgement. `earliest` maps report id → earliest submitted_at
+// (a report absent from the map is "not submitted yet"); `now` is
+// injected by the caller (time.Now().UTC()).
+func enrichReportsWithDeadline(reports []repository.CRAReport, earliest map[uuid.UUID]time.Time, now time.Time) []craReportWithDeadline {
+	out := make([]craReportWithDeadline, 0, len(reports))
+	for i := range reports {
+		out = append(out, enrichOneReport(&reports[i], earliest, now))
+	}
+	return out
+}
+
+// enrichOneReport computes the derived Art.14 deadline fields for a
+// single report. report.ReportType is the persisted string form; it is
+// converted to the typed cra.ReportType (a string alias) so
+// ComputeDeadline switches on the registered consts rather than a bare
+// wire literal (F341 discipline). A report whose id is absent from
+// `earliest` is treated as not-yet-submitted, so submitted_at is nil.
+func enrichOneReport(report *repository.CRAReport, earliest map[uuid.UUID]time.Time, now time.Time) craReportWithDeadline {
+	var submittedAt *time.Time
+	if t, ok := earliest[report.ID]; ok {
+		tt := t
+		submittedAt = &tt
+	}
+	res := cra.ComputeDeadline(cra.ReportType(report.ReportType), report.AwarenessTime, submittedAt, now)
+	return craReportWithDeadline{
+		CRAReport:      report,
+		DeadlineStatus: string(res.Status),
+		DeadlineAt:     res.DeadlineAt,
+		SubmittedAt:    submittedAt,
+	}
 }
 
 // buildRunReportResponse projects a cra.RunResult into the wire DTO.

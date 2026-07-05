@@ -168,18 +168,49 @@ func (f *fakeCRAAudit) Log(_ context.Context, input *model.CreateAuditLogInput) 
 	return f.err
 }
 
+// fakeCRASubmissions implements craSubmissionEarliestReader (M34-B /
+// F424). `earliest` is the controllable report-id → earliest
+// submitted_at map; ids absent from it are treated as "not submitted"
+// exactly like the real repository (they are simply omitted from the
+// returned map). `err` forces the non-fatal degradation path.
+type fakeCRASubmissions struct {
+	mu       sync.Mutex
+	earliest map[uuid.UUID]time.Time
+	err      error
+	called   bool
+	lastIDs  []uuid.UUID
+}
+
+func (f *fakeCRASubmissions) EarliestSubmittedAtByReports(_ context.Context, _ uuid.UUID, reportIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+	f.lastIDs = append([]uuid.UUID(nil), reportIDs...)
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make(map[uuid.UUID]time.Time, len(reportIDs))
+	for _, id := range reportIDs {
+		if t, ok := f.earliest[id]; ok {
+			out[id] = t
+		}
+	}
+	return out, nil
+}
+
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
 
 type craHarness struct {
-	runner    *fakeCRARunner
-	store     *fakeCRAReportStore
-	audit     *fakeCRAAudit
-	handler   *CRAReportsHandler
-	tenantID  uuid.UUID
-	projectID uuid.UUID
-	userID    uuid.UUID
+	runner      *fakeCRARunner
+	store       *fakeCRAReportStore
+	audit       *fakeCRAAudit
+	submissions *fakeCRASubmissions
+	handler     *CRAReportsHandler
+	tenantID    uuid.UUID
+	projectID   uuid.UUID
+	userID      uuid.UUID
 }
 
 func newCRAHarness() *craHarness {
@@ -201,15 +232,17 @@ func newCRAHarness() *craHarness {
 		byProject: make(map[uuid.UUID][]repository.CRAReport),
 	}
 	audit := &fakeCRAAudit{}
-	h := NewCRAReportsHandler(runner, store, audit)
+	submissions := &fakeCRASubmissions{earliest: make(map[uuid.UUID]time.Time)}
+	h := NewCRAReportsHandler(runner, store, audit, submissions)
 	return &craHarness{
-		runner:    runner,
-		store:     store,
-		audit:     audit,
-		handler:   h,
-		tenantID:  tenantID,
-		projectID: projectID,
-		userID:    userID,
+		runner:      runner,
+		store:       store,
+		audit:       audit,
+		submissions: submissions,
+		handler:     h,
+		tenantID:    tenantID,
+		projectID:   projectID,
+		userID:      userID,
 	}
 }
 
@@ -226,6 +259,32 @@ func (h *craHarness) seedReport(reportID, projectID uuid.UUID) repository.CRARep
 		DraftText:       "draft body",
 		Decision:        "pending",
 		Evidence:        json.RawMessage(`[{"kind":"vex_draft"}]`),
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
+	}
+	h.store.byID[reportID] = r
+	h.store.byProject[projectID] = append(h.store.byProject[projectID], r)
+	return r
+}
+
+// seedReportWith seeds a report with a caller-controlled report_type and
+// awareness instant so the F424 deadline-enrichment tests can drive each
+// DeadlineStatus branch (M34-B). awareness == nil exercises the
+// not_applicable path.
+func (h *craHarness) seedReportWith(reportID, projectID uuid.UUID, reportType string, awareness *time.Time) repository.CRAReport {
+	r := repository.CRAReport{
+		ID:              reportID,
+		TenantID:        h.tenantID,
+		ProjectID:       projectID,
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2026-3100",
+		ReportType:      reportType,
+		Lang:            "ja",
+		State:           "draft",
+		DraftText:       "draft body",
+		Decision:        "pending",
+		Evidence:        json.RawMessage(`[{"kind":"vex_draft"}]`),
+		AwarenessTime:   awareness,
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
 	}
@@ -1089,5 +1148,324 @@ func TestCRAReportsHandler_Reanalyse_SetsAuditResourceID_F208(t *testing.T) {
 	if got == srcID {
 		t.Fatalf("F208 regression: Reanalyse audit_resource_id = source :report_id "+
 			"(history-preservation contract violated; new row %s would be unjoinable)", newReportID)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M34-B / F424 — read endpoints enrich with the derived Art.14 deadline
+// ----------------------------------------------------------------------------
+
+// deadlineEnvelope decodes the enriched ListReports body (the embedded
+// *repository.CRAReport fields are promoted, so report_type /
+// awareness_time sit alongside the derived deadline fields).
+type deadlineEnvelope struct {
+	Reports []deadlineReportView `json:"reports"`
+}
+
+type deadlineReportView struct {
+	ID             uuid.UUID  `json:"id"`
+	ReportType     string     `json:"report_type"`
+	AwarenessTime  *time.Time `json:"awareness_time"`
+	DeadlineStatus string     `json:"deadline_status"`
+	DeadlineAt     *time.Time `json:"deadline_at"`
+	SubmittedAt    *time.Time `json:"submitted_at"`
+}
+
+// TestCRAReportsHandler_ListReports_EnrichesDeadlineStatus_F424 seeds one
+// report per DeadlineStatus and asserts the read endpoint computes each
+// correctly from awareness_time + the batched earliest submission,
+// including deadline_at / submitted_at presence. The submissions reader
+// is invoked exactly once (batch, no N+1) with every page report id.
+func TestCRAReportsHandler_ListReports_EnrichesDeadlineStatus_F424(t *testing.T) {
+	h := newCRAHarness()
+	now := time.Now().UTC()
+
+	// early_warning window = 24h; detailed_notification window = 72h.
+	awarenessRecent := now.Add(-2 * time.Hour) // deadline in the future
+	awarenessOld := now.Add(-48 * time.Hour)   // deadline already passed (24h)
+	submittedRecent := now.Add(-1 * time.Hour) // before the 24h deadline of awarenessRecent
+	submittedLate := now.Add(-1 * time.Hour)   // after the 24h deadline of awarenessOld
+
+	onTimeID := uuid.New()
+	lateID := uuid.New()
+	pendingID := uuid.New()
+	overdueID := uuid.New()
+	naNilID := uuid.New()
+	naFinalID := uuid.New()
+
+	// on_time: submitted before deadline.
+	h.seedReportWith(onTimeID, h.projectID, string(cra.ReportTypeEarlyWarning), &awarenessRecent)
+	h.submissions.earliest[onTimeID] = submittedRecent
+	// late: submitted after deadline.
+	h.seedReportWith(lateID, h.projectID, string(cra.ReportTypeEarlyWarning), &awarenessOld)
+	h.submissions.earliest[lateID] = submittedLate
+	// pending: not submitted, deadline in future.
+	h.seedReportWith(pendingID, h.projectID, string(cra.ReportTypeEarlyWarning), &awarenessRecent)
+	// overdue: not submitted, deadline passed.
+	h.seedReportWith(overdueID, h.projectID, string(cra.ReportTypeEarlyWarning), &awarenessOld)
+	// not_applicable: awareness nil.
+	h.seedReportWith(naNilID, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+	// not_applicable: final_report has no fixed clock even with awareness.
+	h.seedReportWith(naFinalID, h.projectID, string(cra.ReportTypeFinalReport), &awarenessRecent)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleViewer)
+
+	if err := h.handler.ListReports(c); err != nil {
+		t.Fatalf("ListReports returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ListReports status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !h.submissions.called {
+		t.Fatalf("F424: EarliestSubmittedAtByReports must be invoked for enrichment")
+	}
+	if len(h.submissions.lastIDs) != 6 {
+		t.Errorf("F424: batch lookup should carry all 6 page report ids (no N+1), got %d", len(h.submissions.lastIDs))
+	}
+
+	var env deadlineEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("F424: decode enriched body: %v; body=%s", err, rec.Body.String())
+	}
+	byID := make(map[uuid.UUID]deadlineReportView, len(env.Reports))
+	for _, r := range env.Reports {
+		byID[r.ID] = r
+	}
+	if len(byID) != 6 {
+		t.Fatalf("F424: expected 6 enriched reports, got %d", len(byID))
+	}
+
+	// on_time.
+	if v := byID[onTimeID]; v.DeadlineStatus != string(cra.DeadlineOnTime) {
+		t.Errorf("F424: on_time report status = %q, want %q", v.DeadlineStatus, cra.DeadlineOnTime)
+	} else {
+		if v.DeadlineAt == nil || !v.DeadlineAt.Equal(awarenessRecent.Add(24*time.Hour)) {
+			t.Errorf("F424: on_time deadline_at = %v, want %v", v.DeadlineAt, awarenessRecent.Add(24*time.Hour))
+		}
+		if v.SubmittedAt == nil || !v.SubmittedAt.Equal(submittedRecent) {
+			t.Errorf("F424: on_time submitted_at = %v, want %v", v.SubmittedAt, submittedRecent)
+		}
+	}
+	// late.
+	if v := byID[lateID]; v.DeadlineStatus != string(cra.DeadlineLate) {
+		t.Errorf("F424: late report status = %q, want %q", v.DeadlineStatus, cra.DeadlineLate)
+	} else if v.SubmittedAt == nil {
+		t.Errorf("F424: late report must carry submitted_at")
+	}
+	// pending.
+	if v := byID[pendingID]; v.DeadlineStatus != string(cra.DeadlinePending) {
+		t.Errorf("F424: pending report status = %q, want %q", v.DeadlineStatus, cra.DeadlinePending)
+	} else {
+		if v.DeadlineAt == nil {
+			t.Errorf("F424: pending report must carry deadline_at")
+		}
+		if v.SubmittedAt != nil {
+			t.Errorf("F424: pending report must have null submitted_at, got %v", v.SubmittedAt)
+		}
+	}
+	// overdue.
+	if v := byID[overdueID]; v.DeadlineStatus != string(cra.DeadlineOverdue) {
+		t.Errorf("F424: overdue report status = %q, want %q", v.DeadlineStatus, cra.DeadlineOverdue)
+	} else if v.SubmittedAt != nil {
+		t.Errorf("F424: overdue report must have null submitted_at, got %v", v.SubmittedAt)
+	}
+	// not_applicable (awareness nil): no deadline_at.
+	if v := byID[naNilID]; v.DeadlineStatus != string(cra.DeadlineNotApplicable) {
+		t.Errorf("F424: awareness-nil report status = %q, want %q", v.DeadlineStatus, cra.DeadlineNotApplicable)
+	} else if v.DeadlineAt != nil {
+		t.Errorf("F424: not_applicable report must have null deadline_at, got %v", v.DeadlineAt)
+	}
+	// not_applicable (final_report): no window even with awareness.
+	if v := byID[naFinalID]; v.DeadlineStatus != string(cra.DeadlineNotApplicable) {
+		t.Errorf("F424: final_report status = %q, want %q", v.DeadlineStatus, cra.DeadlineNotApplicable)
+	} else {
+		if v.DeadlineAt != nil {
+			t.Errorf("F424: final_report must have null deadline_at, got %v", v.DeadlineAt)
+		}
+		// awareness_time is still surfaced (embedded base struct) even
+		// when the deadline is not_applicable.
+		if v.AwarenessTime == nil || !v.AwarenessTime.Equal(awarenessRecent) {
+			t.Errorf("F424: final_report awareness_time = %v, want %v (base struct surfaced)", v.AwarenessTime, awarenessRecent)
+		}
+	}
+}
+
+// TestCRAReportsHandler_GetReport_EnrichesDeadline_F424 pins the single-
+// report read path: GetReport returns the derived deadline fields for
+// one report using the same MIN(submitted_at) source of truth.
+func TestCRAReportsHandler_GetReport_EnrichesDeadline_F424(t *testing.T) {
+	h := newCRAHarness()
+	now := time.Now().UTC()
+	awareness := now.Add(-2 * time.Hour)
+	submitted := now.Add(-1 * time.Hour)
+
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), &awareness)
+	h.submissions.earliest[rid] = submitted
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String(), nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), rid.String())
+	h.ctxWithRole(c, model.RoleViewer)
+
+	if err := h.handler.GetReport(c); err != nil {
+		t.Fatalf("GetReport returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GetReport status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !h.submissions.called {
+		t.Fatalf("F424: GetReport must invoke EarliestSubmittedAtByReports for enrichment")
+	}
+
+	var v deadlineReportView
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("F424: decode enriched GetReport body: %v; body=%s", err, rec.Body.String())
+	}
+	if v.ID != rid {
+		t.Errorf("F424: GetReport id = %s, want %s", v.ID, rid)
+	}
+	if v.DeadlineStatus != string(cra.DeadlineOnTime) {
+		t.Errorf("F424: GetReport deadline_status = %q, want %q", v.DeadlineStatus, cra.DeadlineOnTime)
+	}
+	if v.DeadlineAt == nil || !v.DeadlineAt.Equal(awareness.Add(24*time.Hour)) {
+		t.Errorf("F424: GetReport deadline_at = %v, want %v", v.DeadlineAt, awareness.Add(24*time.Hour))
+	}
+	if v.SubmittedAt == nil || !v.SubmittedAt.Equal(submitted) {
+		t.Errorf("F424: GetReport submitted_at = %v, want %v", v.SubmittedAt, submitted)
+	}
+}
+
+// TestCRAReportsHandler_GetReport_SubmissionsLookupFails_DegradesForwardLooking_F424
+// pins the non-fatal degradation contract: a submissions-lookup error
+// does not 500 the read; the report still renders with its forward-
+// looking deadline status (here overdue) and a null submitted_at.
+func TestCRAReportsHandler_ListReports_SubmissionsLookupFails_DoesNotFail_F424(t *testing.T) {
+	h := newCRAHarness()
+	now := time.Now().UTC()
+	awarenessOld := now.Add(-48 * time.Hour)
+
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), &awarenessOld)
+	h.submissions.err = errors.New("submissions storm — F424 degradation scenario")
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleViewer)
+
+	if err := h.handler.ListReports(c); err != nil {
+		t.Fatalf("ListReports returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F424: submissions failure must NOT break the list; status = %d, want 200", rec.Code)
+	}
+	var env deadlineEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("F424: decode degraded body: %v", err)
+	}
+	if len(env.Reports) != 1 {
+		t.Fatalf("F424: degraded list should still return the report, got %d", len(env.Reports))
+	}
+	if env.Reports[0].DeadlineStatus != string(cra.DeadlineOverdue) {
+		t.Errorf("F424: degraded status = %q, want overdue (forward-looking)", env.Reports[0].DeadlineStatus)
+	}
+	if env.Reports[0].SubmittedAt != nil {
+		t.Errorf("F424: degraded report must have null submitted_at, got %v", env.Reports[0].SubmittedAt)
+	}
+}
+
+// TestCRAReportsHandler_RunReport_MalformedAwareness_Returns400_F424 pins
+// the run-path validation: a non-empty awareness_time that is not
+// RFC3339 is a clean 400 BEFORE the runner is invoked (rather than a 500
+// surfaced from the runner's later parse).
+func TestCRAReportsHandler_RunReport_MalformedAwareness_Returns400_F424(t *testing.T) {
+	h := newCRAHarness()
+	body, err := json.Marshal(map[string]string{
+		"vulnerability_id": uuid.NewString(),
+		"cve_id":           "CVE-2026-3100",
+		"report_type":      string(cra.ReportTypeEarlyWarning),
+		"lang":             string(cra.LangJA),
+		"awareness_time":   "not-a-timestamp",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/run",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.RunReport(c); err != nil {
+		t.Fatalf("RunReport returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F424: malformed awareness_time status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "awareness_time") {
+		t.Errorf("F424: 400 body should name awareness_time, got %s", rec.Body.String())
+	}
+	if len(h.runner.captured) != 0 {
+		t.Errorf("F424: runner.Run must NOT be called when awareness_time is malformed, got %d", len(h.runner.captured))
+	}
+}
+
+// TestCRAReportsHandler_RunReport_ValidAwareness_Passes_F424 is the
+// positive counterpart: a well-formed RFC3339 awareness_time passes the
+// new validation and reaches the runner.
+func TestCRAReportsHandler_RunReport_ValidAwareness_Passes_F424(t *testing.T) {
+	h := newCRAHarness()
+	body, err := json.Marshal(map[string]string{
+		"vulnerability_id": uuid.NewString(),
+		"cve_id":           "CVE-2026-3100",
+		"report_type":      string(cra.ReportTypeEarlyWarning),
+		"lang":             string(cra.LangJA),
+		"awareness_time":   time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/run",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(h.projectID.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.RunReport(c); err != nil {
+		t.Fatalf("RunReport returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("F424: valid awareness_time status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(h.runner.captured) != 1 {
+		t.Fatalf("F424: runner.Run should run once for valid awareness_time, got %d", len(h.runner.captured))
 	}
 }
