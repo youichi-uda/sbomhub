@@ -1342,6 +1342,14 @@
       "edited": "Edited",
       "rejected": "Rejected"
     },
+    "Deadline": {
+      "onTime": "On time",
+      "late": "Late",
+      "pending": "Due",
+      "overdue": "Overdue",
+      "awarenessTime": "Awareness",
+      "remaining": "{hours}h left"
+    },
     "ReportCard": {
       "draftLabel": "Report body",
       "sourceVEXLabel": "Source VEX draft",

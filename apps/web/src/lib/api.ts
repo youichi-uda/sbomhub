@@ -1445,6 +1445,26 @@ export type CRAReportState =
 export type CRAReportDecision = "pending" | "approved" | "edited" | "rejected";
 
 /**
+ * CRA Art.14 deadline verdict, computed on read by the backend (M34) — the
+ * awareness instant plus the 24h/72h window compared against the earliest
+ * recorded submission. Never persisted (derived state, see migration 053
+ * stale-derived-column rationale). This is NOT a report_type wire value, so
+ * it is outside the F341 census.
+ *
+ *   not_applicable  final_report, or no awareness_time recorded
+ *   pending         not yet submitted, still inside the window
+ *   overdue         not yet submitted, window elapsed
+ *   on_time         submitted at or before the deadline
+ *   late            submitted after the deadline
+ */
+export type CRAReportDeadlineStatus =
+  | "not_applicable"
+  | "pending"
+  | "overdue"
+  | "on_time"
+  | "late";
+
+/**
  * One evidence pointer attached to a CRA report. The emitting shape is
  * locked at cra.Runner's evidenceEntry struct
  * (apps/api/internal/service/cra/runner.go): `{kind, ref?, source?,
@@ -1493,6 +1513,28 @@ export interface CRAReport {
   created_by?: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Operator-attested awareness instant (RFC3339) that starts the Art.14
+   * clock. Persisted on the base report (M34 migration 054); null when the
+   * report predates awareness capture or none was supplied.
+   */
+  awareness_time?: string | null;
+  /**
+   * Deadline verdict, computed on read (M34, not persisted). Optional so an
+   * older API response that omits the enrichment degrades gracefully — the
+   * card guards every deadline rendering on this field being present.
+   */
+  deadline_status?: CRAReportDeadlineStatus;
+  /**
+   * The computed deadline (awareness_time + 24h/72h) as RFC3339, or null for
+   * not_applicable (final_report / no awareness_time).
+   */
+  deadline_at?: string | null;
+  /**
+   * Earliest recorded cra_submissions.submitted_at (RFC3339) used as the
+   * on-time/late basis, or null when nothing has been submitted yet.
+   */
+  submitted_at?: string | null;
 }
 
 export interface CRAReportListResponse {

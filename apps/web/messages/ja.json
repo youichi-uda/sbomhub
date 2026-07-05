@@ -1342,6 +1342,14 @@
       "edited": "編集",
       "rejected": "却下"
     },
+    "Deadline": {
+      "onTime": "期限内",
+      "late": "期限超過",
+      "pending": "期限前",
+      "overdue": "期限切れ",
+      "awarenessTime": "認知日時",
+      "remaining": "残り {hours}h"
+    },
     "ReportCard": {
       "draftLabel": "報告書本文",
       "sourceVEXLabel": "ソース VEX 下書き",

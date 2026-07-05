@@ -42,6 +42,7 @@ import {
 
 import {
   CRAReport,
+  CRAReportDeadlineStatus,
   CRAReportDecision,
   CRAReportEvidence,
   CRAReportState,
@@ -160,6 +161,90 @@ function decisionVariant(
 }
 
 /**
+ * Map the Art.14 deadline verdict (M34) to a Badge variant. Returns null for
+ * not_applicable (final-report type / no awareness_time) so the caller renders no
+ * badge at all. `on_time` reuses the positive/approved variant (`default`),
+ * mirroring stateVariant's `approved → default`, since the Badge primitive
+ * has no dedicated success/green variant. `pending → outline` (neutral,
+ * still open), `overdue`/`late → destructive` (missed / past-window).
+ */
+function deadlineVariant(
+  status: CRAReportDeadlineStatus,
+): "default" | "destructive" | "outline" | null {
+  switch (status) {
+    case "on_time":
+      return "default";
+    case "pending":
+      return "outline";
+    case "overdue":
+    case "late":
+      return "destructive";
+    case "not_applicable":
+    default:
+      return null;
+  }
+}
+
+/**
+ * Translation key for a deadline verdict label. not_applicable has no key
+ * (it renders nothing); the default arm returns the raw status so an
+ * unforeseen backend value stays inspectable via safeT.
+ */
+function deadlineLabelKey(status: CRAReportDeadlineStatus): string {
+  switch (status) {
+    case "on_time":
+      return "onTime";
+    case "late":
+      return "late";
+    case "pending":
+      return "pending";
+    case "overdue":
+      return "overdue";
+    default:
+      return status;
+  }
+}
+
+/**
+ * Format an RFC3339 timestamp (awareness_time) for a muted read-only line.
+ * Mirrors submission-timeline.tsx's formatSubmittedAt: falls back to the raw
+ * string if unparseable so a malformed value stays inspectable rather than
+ * rendering "Invalid Date".
+ */
+function formatTimestamp(value: string, locale: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+/**
+ * Short remaining-time hint for a pending deadline, e.g. "残り Xh" / "Xh left".
+ * Computed at render time from deadline_at (no live countdown — the card is
+ * not re-rendered on a timer). Returns null if deadline_at is unparseable or
+ * already elapsed (a pending status with a past deadline means clock skew;
+ * suppress the misleading "0h"). Rounds up so a sub-hour window still reads as
+ * at least "1h".
+ */
+function remainingTimeLabel(
+  deadlineAt: string,
+  t: (key: string, values?: Record<string, string | number>) => string,
+): string | null {
+  const ms = new Date(deadlineAt).getTime();
+  if (Number.isNaN(ms)) return null;
+  const remainingMs = ms - Date.now();
+  if (remainingMs <= 0) return null;
+  const hours = Math.max(1, Math.ceil(remainingMs / 3_600_000));
+  try {
+    return t("remaining", { hours });
+  } catch {
+    return `${hours}h`;
+  }
+}
+
+/**
  * Build a compact label for an evidence kind (CRA-specific kinds).
  *
  * The case list mirrors the six kinds cra.Runner actually emits
@@ -222,6 +307,7 @@ export function ReportCard({
   const tLang = useTranslations("CRAReports.Lang");
   const tState = useTranslations("CRAReports.State");
   const tDecision = useTranslations("CRAReports.Decision");
+  const tDeadline = useTranslations("CRAReports.Deadline");
   const locale = useLocale();
 
   const [mode, setMode] = useState<"view" | "edit" | "reject" | "submit">(
@@ -254,6 +340,18 @@ export function ReportCard({
   // allowed by design (Art.14 early-warning → detailed → final timeline), so
   // an already-submitted report stays enabled.
   const canSubmit = report.decision === "approved";
+
+  // Art.14 deadline verdict (M34). Guarded on deadline_status being present
+  // so an older API response that omits the enrichment renders no badge.
+  // not_applicable maps to a null variant and is likewise skipped.
+  const deadlineStatus = report.deadline_status;
+  const deadlineBadgeVariant = deadlineStatus
+    ? deadlineVariant(deadlineStatus)
+    : null;
+  const remainingLabel =
+    deadlineStatus === "pending" && report.deadline_at
+      ? remainingTimeLabel(report.deadline_at, tDeadline)
+      : null;
 
   // Deep link back into the M1 triage page for the source VEX draft
   // (issue #32 spec). Use the locale prefix so next-intl routing
@@ -289,6 +387,20 @@ export function ReportCard({
                 {safeT(tDecision, report.decision)}
               </Badge>
             )}
+            {deadlineStatus && deadlineBadgeVariant && (
+              <Badge
+                variant={deadlineBadgeVariant}
+                data-testid="cra-deadline-badge"
+                data-deadline-status={deadlineStatus}
+              >
+                {safeT(tDeadline, deadlineLabelKey(deadlineStatus))}
+                {remainingLabel && (
+                  <span className="ml-1 font-normal opacity-90">
+                    {remainingLabel}
+                  </span>
+                )}
+              </Badge>
+            )}
             {report.provider && (
               <span
                 className="inline-flex items-center gap-1 text-xs text-muted-foreground"
@@ -300,6 +412,18 @@ export function ReportCard({
             )}
           </div>
         </div>
+        {/* Read-only awareness instant (M34). Shown when captured so the
+            deadline verdict badge above is explainable — this is the Art.14
+            clock start. Capture-at-generation only; not editable here. */}
+        {report.awareness_time && (
+          <p
+            className="mt-1 text-xs text-muted-foreground"
+            data-testid="cra-awareness-time"
+          >
+            {safeT(tDeadline, "awarenessTime")}:{" "}
+            {formatTimestamp(report.awareness_time, locale)}
+          </p>
+        )}
       </CardHeader>
 
       <CardContent className="space-y-4">
