@@ -476,6 +476,74 @@ func TestCRAReportsHandler_Reanalyse_HappyPath_RerunsRunner(t *testing.T) {
 	}
 }
 
+// TestCRAReportsHandler_Reanalyse_InheritsSourceAwareness_F427 pins the
+// F427 fix (Codex 20th unique catch): reanalysing a report with an empty
+// body must inherit the source report's awareness_time into the new run so
+// the Art.14 deadline clock survives. Pre-fix the new row got NULL
+// awareness and its deadline collapsed to not_applicable.
+func TestCRAReportsHandler_Reanalyse_InheritsSourceAwareness_F427(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), &awareness)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String()+"/reanalyse",
+		strings.NewReader(""))
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), rid.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.Reanalyse(c); err != nil {
+		t.Fatalf("Reanalyse returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Reanalyse status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(h.runner.captured) != 1 {
+		t.Fatalf("expected 1 runner.Run call, got %d", len(h.runner.captured))
+	}
+	want := awareness.Format(time.RFC3339)
+	if got := h.runner.captured[0].AwarenessTime; got != want {
+		t.Errorf("F427: Reanalyse must inherit source awareness_time = %q, got %q", want, got)
+	}
+}
+
+// TestCRAReportsHandler_Reanalyse_MalformedAwareness_Returns400_F427 pins
+// that a mistyped awareness_time OVERRIDE on Reanalyse is a clean 400
+// (Reanalyse bypasses buildRunInput), not a 500 surfaced from the runner
+// parse, and that it rejects before the runner runs.
+func TestCRAReportsHandler_Reanalyse_MalformedAwareness_Returns400_F427(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReport(rid, h.projectID)
+
+	body, _ := json.Marshal(map[string]string{"awareness_time": "not-a-timestamp"})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+rid.String()+"/reanalyse",
+		strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), rid.String())
+	h.ctxWithRole(c, model.RoleAdmin)
+
+	if err := h.handler.Reanalyse(c); err != nil {
+		t.Fatalf("Reanalyse returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F427: malformed reanalyse awareness_time status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(h.runner.captured) != 0 {
+		t.Errorf("F427: malformed awareness must reject before the runner, got %d Run calls", len(h.runner.captured))
+	}
+}
+
 // ----------------------------------------------------------------------------
 // F8/F9 — cross-project access must 404 (every report-id endpoint)
 // ----------------------------------------------------------------------------
@@ -1347,10 +1415,12 @@ func TestCRAReportsHandler_GetReport_EnrichesDeadline_F424(t *testing.T) {
 	}
 }
 
-// TestCRAReportsHandler_GetReport_SubmissionsLookupFails_DegradesForwardLooking_F424
-// pins the non-fatal degradation contract: a submissions-lookup error
-// does not 500 the read; the report still renders with its forward-
-// looking deadline status (here overdue) and a null submitted_at.
+// TestCRAReportsHandler_ListReports_SubmissionsLookupFails_DoesNotFail_F424
+// pins the F427 (M34 Phase D) contract: a submissions-lookup error does
+// NOT 500 the read (availability preserved), AND it must NOT emit a false
+// forward-looking verdict for a report that may have been filed on time.
+// Instead the deadline verdict is SUPPRESSED — deadline_status is empty so
+// the UI renders no badge — rather than a misleading "overdue".
 func TestCRAReportsHandler_ListReports_SubmissionsLookupFails_DoesNotFail_F424(t *testing.T) {
 	h := newCRAHarness()
 	now := time.Now().UTC()
@@ -1382,11 +1452,13 @@ func TestCRAReportsHandler_ListReports_SubmissionsLookupFails_DoesNotFail_F424(t
 	if len(env.Reports) != 1 {
 		t.Fatalf("F424: degraded list should still return the report, got %d", len(env.Reports))
 	}
-	if env.Reports[0].DeadlineStatus != string(cra.DeadlineOverdue) {
-		t.Errorf("F424: degraded status = %q, want overdue (forward-looking)", env.Reports[0].DeadlineStatus)
+	if env.Reports[0].DeadlineStatus != "" {
+		t.Errorf("F427: on submissions-lookup failure the verdict must be SUPPRESSED "+
+			"(empty deadline_status), got %q — a false verdict would mislead a filed report as overdue",
+			env.Reports[0].DeadlineStatus)
 	}
 	if env.Reports[0].SubmittedAt != nil {
-		t.Errorf("F424: degraded report must have null submitted_at, got %v", env.Reports[0].SubmittedAt)
+		t.Errorf("F427: suppressed report must have null submitted_at, got %v", env.Reports[0].SubmittedAt)
 	}
 }
 

@@ -343,8 +343,8 @@ func (h *CRAReportsHandler) ListReports(c echo.Context) error {
 	// One batched submissions lookup for the whole page (no N+1); the
 	// query is tenant-scoped both by the explicit tenant_id and by RLS
 	// inside the ambient TenantTx the list route runs in.
-	earliest := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, reports)
-	enriched := enrichReportsWithDeadline(reports, earliest, time.Now().UTC())
+	earliest, submissionsKnown := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, reports)
+	enriched := enrichReportsWithDeadline(reports, earliest, time.Now().UTC(), submissionsKnown)
 
 	return c.JSON(http.StatusOK, craReportListResponse{Reports: enriched})
 }
@@ -380,8 +380,8 @@ func (h *CRAReportsHandler) GetReport(c echo.Context) error {
 	// status. The batch reader is reused with a one-element id slice so
 	// the on_time/late judgement uses the same MIN(submitted_at) source
 	// of truth as ListReports.
-	earliest := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, []repository.CRAReport{*report})
-	return c.JSON(http.StatusOK, enrichOneReport(report, earliest, time.Now().UTC()))
+	earliest, submissionsKnown := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, []repository.CRAReport{*report})
+	return c.JSON(http.StatusOK, enrichOneReport(report, earliest, time.Now().UTC(), submissionsKnown))
 }
 
 // ----------------------------------------------------------------------------
@@ -611,6 +611,14 @@ func (h *CRAReportsHandler) Reanalyse(c echo.Context) error {
 		v := *source.SourceVEXDraftID
 		in.SourceVEXDraftID = &v
 	}
+	// F427 (M34 Phase D — Codex 20th unique catch): inherit the source
+	// report's awareness_time so a re-analysed report keeps its Art.14
+	// deadline clock. Without this the new row's awareness_time is NULL and
+	// its deadline collapses to not_applicable. The override below still
+	// replaces it when the caller re-attests a corrected instant.
+	if source.AwarenessTime != nil {
+		in.AwarenessTime = source.AwarenessTime.UTC().Format(time.RFC3339)
+	}
 
 	if override.CVEID != "" {
 		in.CVEID = override.CVEID
@@ -653,6 +661,12 @@ func (h *CRAReportsHandler) Reanalyse(c echo.Context) error {
 		in.ContactPhone = override.ContactPhone
 	}
 	if override.AwarenessTime != "" {
+		// F427 (M34 Phase D): Reanalyse bypasses buildRunInput, so validate
+		// the RFC3339 shape here — a mistyped instant is a clean 400 rather
+		// than a 500 surfaced from the runner's later parse.
+		if _, err := time.Parse(time.RFC3339, override.AwarenessTime); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid awareness_time (expected RFC3339)"})
+		}
 		in.AwarenessTime = override.AwarenessTime
 	}
 
@@ -733,40 +747,44 @@ func (h *CRAReportsHandler) buildRunInput(tc *middleware.TenantContext, projectI
 }
 
 // earliestSubmittedAt batch-loads the earliest (MIN) submitted_at per
-// report for a page of reports and returns the report-id → time map.
-// A submissions-lookup failure is NON-fatal: it is logged loudly and
-// degrades to an empty map, so the primary reports payload still
-// renders (mirroring the CountByProject fall-back in ListReports). The
-// honest limitation is that, during such a transient failure, an
-// already-submitted report degrades to its forward-looking status
-// (pending / overdue) instead of on_time / late — the slog line makes
-// the degradation observable.
+// report for a page of reports and returns (report-id → time map, ok).
+// ok is false when the submissions lookup errored.
+//
+// F427 (M34 Phase D — R1 + Codex 20th convergent): a lookup failure must
+// NOT be swallowed into an empty map, because the enricher would then read
+// "absent" as "not submitted" and assert a FALSE overdue/pending verdict
+// for a report that was in fact filed on time — a misleading compliance
+// signal. Instead we surface ok=false so the caller emits NO deadline
+// verdict (empty status → the UI renders no badge) while the primary
+// reports payload still renders (availability preserved — the divergence
+// from the CountByProject graceful-degradation pattern is deliberate:
+// deadline is compliance-material, a count is cosmetic).
 func (h *CRAReportsHandler) earliestSubmittedAt(
 	ctx context.Context,
 	tenantID, projectID uuid.UUID,
 	reports []repository.CRAReport,
-) map[uuid.UUID]time.Time {
+) (map[uuid.UUID]time.Time, bool) {
 	ids := make([]uuid.UUID, 0, len(reports))
 	for i := range reports {
 		ids = append(ids, reports[i].ID)
 	}
 	earliest, err := h.submissions.EarliestSubmittedAtByReports(ctx, tenantID, ids)
 	if err != nil {
-		slog.Warn("cra_reports: earliest submission lookup failed; deadline status degrades to forward-looking",
+		slog.Warn("cra_reports: earliest submission lookup failed; deadline verdict suppressed (no false status emitted)",
 			"tenant_id", tenantID, "project_id", projectID, "error", err)
-		return map[uuid.UUID]time.Time{}
+		return nil, false
 	}
-	return earliest
+	return earliest, true
 }
 
 // enrichReportsWithDeadline wraps each report with its read-time Art.14
 // deadline judgement. `earliest` maps report id → earliest submitted_at
 // (a report absent from the map is "not submitted yet"); `now` is
 // injected by the caller (time.Now().UTC()).
-func enrichReportsWithDeadline(reports []repository.CRAReport, earliest map[uuid.UUID]time.Time, now time.Time) []craReportWithDeadline {
+func enrichReportsWithDeadline(reports []repository.CRAReport, earliest map[uuid.UUID]time.Time, now time.Time, submissionsKnown bool) []craReportWithDeadline {
 	out := make([]craReportWithDeadline, 0, len(reports))
 	for i := range reports {
-		out = append(out, enrichOneReport(&reports[i], earliest, now))
+		out = append(out, enrichOneReport(&reports[i], earliest, now, submissionsKnown))
 	}
 	return out
 }
@@ -777,7 +795,13 @@ func enrichReportsWithDeadline(reports []repository.CRAReport, earliest map[uuid
 // ComputeDeadline switches on the registered consts rather than a bare
 // wire literal (F341 discipline). A report whose id is absent from
 // `earliest` is treated as not-yet-submitted, so submitted_at is nil.
-func enrichOneReport(report *repository.CRAReport, earliest map[uuid.UUID]time.Time, now time.Time) craReportWithDeadline {
+// submissionsKnown=false (the submissions lookup errored, F427) suppresses
+// the verdict entirely: deadline_status is emitted empty (the UI renders no
+// badge) rather than computing a false "not submitted" status.
+func enrichOneReport(report *repository.CRAReport, earliest map[uuid.UUID]time.Time, now time.Time, submissionsKnown bool) craReportWithDeadline {
+	if !submissionsKnown {
+		return craReportWithDeadline{CRAReport: report, DeadlineStatus: ""}
+	}
 	var submittedAt *time.Time
 	if t, ok := earliest[report.ID]; ok {
 		tt := t
