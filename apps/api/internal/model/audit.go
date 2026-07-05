@@ -407,6 +407,25 @@ const (
 	// carries the upserted row count so the batch size is reconstructable
 	// from the audit trail alone.
 	AuditActionReachabilityUploaded = "reachability_uploaded"
+
+	// AuditActionCRASubmissionRecorded is emitted by the CRA submission
+	// Record handler (handler/cra_submissions.go Record) when a human
+	// records that an approved cra_reports row was submitted to an
+	// authority (M33 Wave B / F419). This is the human-attestation verb
+	// for the last-mile of "AI drafts, humans approve" — the product
+	// never auto-submits, so this row documents an operator assertion,
+	// not a system-stamped send. It is written by a direct h.audit.Log
+	// call inside the request TenantTx (audit-or-nothing) exactly once
+	// per request, following the F371 / F381 handler-emit discipline:
+	// registered in service/audit.go GetAvailableActions() and pinned in
+	// the F271 expectedEmit + allModelActionValues() sets
+	// (middleware/audit_test.go) in the same change. resource_type is
+	// ResourceCRASubmission and resource_id is the new cra_submissions.id
+	// (F208 class — SetAuditResourceID publishes the submission id, not
+	// the parent project); Details carries cra_report_id / authority /
+	// has_reference so the submission is reconstructable from the audit
+	// trail alone.
+	AuditActionCRASubmissionRecorded = "cra_submission_recorded"
 )
 
 // Resource type constants
@@ -549,6 +568,21 @@ const (
 	// allModelResourceValues() sets (middleware/audit_test.go) in the
 	// same change so a future removal from either side trips CI.
 	ResourceReachability = "reachability"
+
+	// ResourceCRASubmission is the resource_type for the CRA submission
+	// Record endpoint (handler/cra_submissions.go Record, M33 Wave B /
+	// F419). One cra_submission_recorded audit row per submission carries
+	// resource_type=cra_submission and resource_id=<cra_submissions.id> so
+	// a forensic join lands on the cra_submissions row the operator
+	// attested — NOT the parent cra_reports row. A separate resource
+	// dimension (rather than reusing ResourceCRAReport) is required by the
+	// F188 / F217 rule that audit_logs.(resource_type, resource_id) joins
+	// onto the per-family physical table: reusing ResourceCRAReport would
+	// lose the join to the submission row. Registered in service/audit.go
+	// GetAvailableResourceTypes() and pinned in the F281 expectedEmit +
+	// allModelResourceValues() sets (middleware/audit_test.go) in the same
+	// change so a future removal from either side trips CI.
+	ResourceCRASubmission = "cra_submission"
 )
 
 // CreateAuditLogInput is the input for creating an audit log

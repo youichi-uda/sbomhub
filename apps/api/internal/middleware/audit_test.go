@@ -2848,6 +2848,13 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		// in service/audit.go GetAvailableActions() in lockstep
 		// (direction-1 asserts this entry has a dropdown registration).
 		model.AuditActionReachabilityUploaded: true, // M32 handler-side (reachability.go Upload)
+		// M33 Wave B (F419): the CRA submission Record endpoint's
+		// human-driven verb, emitted by handler/cra_submissions.go Record
+		// via a direct h.audit.Log call inside the request TenantTx — the
+		// same handler-side pattern as the F371 / F381 / M32 verbs above.
+		// Registered in service/audit.go GetAvailableActions() in lockstep
+		// (direction-1 asserts this entry has a dropdown registration).
+		model.AuditActionCRASubmissionRecorded: true, // M33 handler-side (cra_submissions.go Record)
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
@@ -3116,6 +3123,11 @@ func allModelActionValues() map[string]bool {
 		// GetAvailableActions() directly, so direction-2 must recognise
 		// it as a valid registry value.
 		model.AuditActionReachabilityUploaded: true,
+		// M33 Wave B (F419): the CRA submission recorded handler-emit verb,
+		// defined in the model/audit.go handler-emit section and referenced
+		// by GetAvailableActions() directly, so direction-2 must recognise
+		// it as a valid registry value.
+		model.AuditActionCRASubmissionRecorded: true,
 	}
 }
 
@@ -3317,6 +3329,12 @@ func TestAuditEmitResourceRegistryParity_F281(t *testing.T) {
 		// resource_type=reachability. Registered in the dropdown by the
 		// same wave (service/audit.go GetAvailableResourceTypes()).
 		model.ResourceReachability: true,
+		// M33 Wave B (F419): handler-side emit from
+		// handler/cra_submissions.go Record — the cra_submission_recorded
+		// audit row carries resource_type=cra_submission. Registered in the
+		// dropdown by the same wave (service/audit.go
+		// GetAvailableResourceTypes()).
+		model.ResourceCRASubmission: true,
 	}
 
 	// Documented exception allowlist mirroring the F271 pattern for
@@ -3454,5 +3472,10 @@ func allModelResourceValues() map[string]bool {
 		// directly, so direction-2 must recognise it as a valid registry
 		// value.
 		model.ResourceReachability: true,
+		// M33 Wave B (F419): cra_submission resource type, defined in
+		// model/audit.go and referenced by GetAvailableResourceTypes()
+		// directly, so direction-2 must recognise it as a valid registry
+		// value.
+		model.ResourceCRASubmission: true,
 	}
 }

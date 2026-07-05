@@ -646,6 +646,18 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		// removal from either side trips CI (F271 direction 1 /
 		// direction 2).
 		{Action: model.AuditActionReachabilityUploaded, Label: "Reachability Uploaded", Category: "reachability"},
+
+		// M33 Wave B (F419): the CRA submission Record endpoint's
+		// handler-emit verb. handler/cra_submissions.go Record emits
+		// cra_submission_recorded once per submission via a direct
+		// h.audit.Log call inside the request TenantTx — the same
+		// handler-emit pattern as the F371 / F381 / M32 verbs above.
+		// Category "cra_submission" mirrors the sibling resource-dimension
+		// entry so the dropdown groups the verb with its resource family.
+		// Registered here in lockstep with the model const, the F271
+		// expectedEmit set, and allModelActionValues() so a future removal
+		// from either side trips CI.
+		{Action: model.AuditActionCRASubmissionRecorded, Label: "CRA Submission Recorded", Category: "cra_submission"},
 	}
 }
 
@@ -777,6 +789,15 @@ func (s *AuditService) GetAvailableResourceTypes() []ResourceTypeInfo {
 		// and allModelResourceValues() so a future removal from either
 		// side trips CI.
 		{Type: model.ResourceReachability, Label: "Reachability", Category: "reachability"},
+
+		// M33 Wave B (F419): the CRA submission Record endpoint's resource
+		// type. handler/cra_submissions.go Record logs
+		// cra_submission_recorded rows against this type
+		// (resource_id=<cra_submissions.id>). Registered here in lockstep
+		// with the model const, the F281 expectedEmit set, and
+		// allModelResourceValues() so a future removal from either side
+		// trips CI.
+		{Type: model.ResourceCRASubmission, Label: "CRA Submission", Category: "cra_submission"},
 	}
 }
 

@@ -334,6 +334,13 @@ func main() {
 	// UpdateDecision.
 	craReportsRepo := repository.NewCRAReportsRepository(db)
 
+	// CRA submission records (M33 / issue #145). Human-attested records that
+	// an approved cra_reports row was submitted to an authority under CRA
+	// Art.14. The Record endpoint also flips cra_reports.state -> 'submitted'
+	// inside the same TenantTx (F419), which is the only write path that
+	// makes the 'submitted' state reachable.
+	craSubmissionsRepo := repository.NewCRASubmissionsRepository(db)
+
 	// METI self-assessment store (Wave M3-1 / issue #41). Holds the 32
 	// per-criterion verdicts the evaluator (M3-2) writes and the M3-4
 	// /meti/assessment endpoints read / override.
@@ -600,6 +607,12 @@ func main() {
 	// endpoint — the AI-generated / AI-disabled audit rows are emitted
 	// by the runner inside its Stage 3 write tx.
 	craReportsHandler := handler.NewCRAReportsHandler(craRunner, craReportsRepo, auditRepo)
+
+	// CRA submission Record/List handler (M33 F419 / issue #146). Record
+	// emits the cra_submission_recorded audit row and transitions the parent
+	// report to state='submitted' (approved reports only) atomically under
+	// TenantTx; the auditRepo instance is shared with craReportsHandler.
+	craSubmissionsHandler := handler.NewCRASubmissionsHandler(craSubmissionsRepo, craReportsRepo, auditRepo)
 
 	// METI self-assessment evaluator (Wave M3-2 / issue #40). Runs the
 	// catalog (M3-3) over a (tenant, project) pair and returns one
@@ -1179,6 +1192,23 @@ func main() {
 		triageMultiAuth,
 		appmw.RequireWrite(),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	// CRA Art.14 submission records (M33 F419 / issue #146). POST reuses the
+	// Decide write chain verbatim (TenantTx is load-bearing: it rolls back the
+	// INSERT + state flip + audit atomically on the F32 audit-or-nothing 500).
+	// GET is a read-only timeline (higher rate budget, no domain audit).
+	e.POST("/api/v1/projects/:id/cra-reports/:report_id/submissions",
+		craSubmissionsHandler.Record,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
+	e.GET("/api/v1/projects/:id/cra-reports/:report_id/submissions",
+		craSubmissionsHandler.List,
+		triageMultiAuth,
+		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.POST("/api/v1/projects/:id/cra-reports/:report_id/reanalyse",
