@@ -1600,6 +1600,15 @@ func main() {
 	go cveSyncJob.Start(ctx)
 	slog.Info("CVE sync job started", "interval", "24h")
 
+	// EPSS sync job - runs daily to sync FIRST.org EPSS scores (M36-B / F433).
+	// Populates the epss_score/percentile/updated_at columns migration 055
+	// added to the global vulnerabilities table; readers COALESCE NULL to 0
+	// until this job runs. Same 24h always-on cadence as KEV/EOL/CVE; offline
+	// deploys degrade gracefully (SyncScores logs and returns, EPSS stays 0).
+	epssSyncJob := scheduler.NewEPSSSyncJob(epssService, 24*time.Hour)
+	go epssSyncJob.Start(ctx)
+	slog.Info("EPSS sync job started", "interval", "24h")
+
 	// Vulnerability scan job - runs hourly to scan components against NVD
 	// Uses NVDService with Redis cache for efficient API usage
 	vulnScanJob := scheduler.NewVulnerabilityScanJobFull(db, nvdService, notificationService)
