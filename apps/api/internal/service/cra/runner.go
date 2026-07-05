@@ -477,6 +477,16 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		return nil, fmt.Errorf("cra.Run: lang %q is not in the allowlist", string(in.Lang))
 	}
 
+	// Parse the operator-attested awareness instant ONCE (M34-A / F423)
+	// so both the LLM path and the AI-disabled path persist the same
+	// *time.Time on cra_reports.awareness_time. A malformed value fails
+	// the whole drafting cycle here, before any DB / LLM I/O, so a
+	// mistyped clock start surfaces loudly instead of silently dropping.
+	awarenessTime, err := parseAwarenessTime(in.AwarenessTime)
+	if err != nil {
+		return nil, err
+	}
+
 	// ----------------------------------------------------------------
 	// Stage 1 — short read tx.
 	// ----------------------------------------------------------------
@@ -530,7 +540,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 
 	// AI-disabled fork — skips Stage 2 (no LLM call).
 	if _, ok := provider.(*llm.DisabledProvider); ok {
-		return r.runAIDisabled(ctx, in, provider, sourceVEX)
+		return r.runAIDisabled(ctx, in, provider, sourceVEX, awarenessTime)
 	}
 
 	// ----------------------------------------------------------------
@@ -649,6 +659,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		LLMCallID:        &llmFK,
 		Decision:         "pending",
 		CreatedBy:        in.UserID,
+		AwarenessTime:    awarenessTime,
 	}
 	// Link llm_calls.cra_report_id so the audit table joins back to the
 	// CRA report row this call produced.
@@ -735,7 +746,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 // Wrapped in a single TxManager.RunWrite so the AI-disabled path gets
 // the same connection-pool hygiene as the LLM-enabled path. TOCTOU
 // re-validate (cve_id re-resolve) runs at the top of the write tx.
-func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Provider, sourceVEX *repository.VEXDraft) (*RunResult, error) {
+func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Provider, sourceVEX *repository.VEXDraft, awarenessTime *time.Time) (*RunResult, error) {
 	reason := "BYOK key not configured"
 	if dp, ok := provider.(*llm.DisabledProvider); ok && dp.Reason != "" {
 		reason = dp.Reason
@@ -792,6 +803,7 @@ func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Pr
 		SourceVEXDraftID: &sourceVEXID,
 		Decision:         "pending",
 		CreatedBy:        in.UserID,
+		AwarenessTime:    awarenessTime,
 	}
 
 	if err := r.txManager.RunWrite(ctx, in.TenantID, func(ctx context.Context) error {
@@ -1374,6 +1386,33 @@ func isValidLang(l Lang) bool {
 		}
 	}
 	return false
+}
+
+// parseAwarenessTime parses the operator-attested awareness instant
+// (RunInput.AwarenessTime) into a *time.Time for persistence on
+// cra_reports.awareness_time (M34-A / F423). It is called ONCE in Run()
+// so both the LLM and the AI-disabled path persist the same value.
+//
+// Contract:
+//   - empty / whitespace-only  → (nil, nil): awareness is optional; a
+//     nil column is treated by the read-time deadline computation as
+//     not_applicable (no Art.14 clock can start without an attested
+//     instant).
+//   - non-empty, valid RFC3339 → (&instant, nil), normalised to UTC so
+//     the persisted instant is timezone-canonical.
+//   - non-empty, malformed     → (nil, error): a mistyped clock start
+//     must fail the drafting cycle loudly, not silently drop.
+func parseAwarenessTime(raw string) (*time.Time, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil, fmt.Errorf("cra.Run: awareness_time %q is not a valid RFC3339 timestamp: %w", raw, err)
+	}
+	u := t.UTC()
+	return &u, nil
 }
 
 // ----------------------------------------------------------------------------

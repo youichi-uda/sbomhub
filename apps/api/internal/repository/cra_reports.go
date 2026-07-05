@@ -78,6 +78,15 @@ type CRAReport struct {
 	DecisionAt   *time.Time `json:"decision_at,omitempty"`
 	DecisionNote string     `json:"decision_note,omitempty"`
 
+	// AwarenessTime is the operator-attested awareness instant -- the
+	// start of the CRA Art.14 24h/72h reporting clock (migration 054,
+	// M34-A / F423). Nullable: legacy rows (drafted before the column
+	// existed) stay nil, which the read-time deadline computation treats
+	// as not_applicable. Captured at report generation; deadline_at /
+	// on-time status are DERIVED on read and never persisted (see the 054
+	// header + the 053 stale-derived-column rationale).
+	AwarenessTime *time.Time `json:"awareness_time,omitempty"`
+
 	CreatedBy *uuid.UUID `json:"created_by,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
@@ -241,6 +250,7 @@ func (r *CRAReportsRepository) Insert(ctx context.Context, c *CRAReport) error {
 			source_vex_draft_id, llm_call_id,
 			decision, decision_by, decision_at, decision_note,
 			created_by,
+			awareness_time,
 			created_at, updated_at
 		) VALUES (
 			$1, $2,
@@ -253,6 +263,7 @@ func (r *CRAReportsRepository) Insert(ctx context.Context, c *CRAReport) error {
 			$15, $16,
 			$17, $18, $19, $20,
 			$21,
+			$22,
 			NOW(), NOW()
 		)
 		RETURNING id, created_at, updated_at
@@ -270,6 +281,7 @@ func (r *CRAReportsRepository) Insert(ctx context.Context, c *CRAReport) error {
 		nullableUUID(c.SourceVEXDraftID), nullableUUID(c.LLMCallID),
 		c.Decision, nullableUUID(c.DecisionBy), nullableTime(c.DecisionAt), nullableString(c.DecisionNote),
 		nullableUUID(c.CreatedBy),
+		nullableTime(c.AwarenessTime),
 	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert cra_reports: %w", err)
@@ -300,6 +312,7 @@ func (r *CRAReportsRepository) Get(ctx context.Context, tenantID, id uuid.UUID) 
 			source_vex_draft_id, llm_call_id,
 			decision, decision_by, decision_at, decision_note,
 			created_by,
+			awareness_time,
 			created_at, updated_at
 		FROM cra_reports
 		WHERE tenant_id = $1 AND id = $2
@@ -390,6 +403,7 @@ func (r *CRAReportsRepository) ListByProject(ctx context.Context, tenantID, proj
 			source_vex_draft_id, llm_call_id,
 			decision, decision_by, decision_at, decision_note,
 			created_by,
+			awareness_time,
 			created_at, updated_at
 		FROM cra_reports
 		%s
@@ -645,6 +659,7 @@ func scanCRAReportRow(rs rowScanner) (CRAReport, error) {
 		decisionAt     sql.NullTime
 		decisionNote   sql.NullString
 		createdBy      sql.NullString
+		awarenessTime  sql.NullTime
 	)
 	if err := rs.Scan(
 		&c.ID, &c.TenantID,
@@ -657,6 +672,7 @@ func scanCRAReportRow(rs rowScanner) (CRAReport, error) {
 		&sourceVEXDraft, &llmCallID,
 		&c.Decision, &decisionBy, &decisionAt, &decisionNote,
 		&createdBy,
+		&awarenessTime,
 		&c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return c, err
@@ -700,6 +716,10 @@ func scanCRAReportRow(rs rowScanner) (CRAReport, error) {
 		if u, err := uuid.Parse(createdBy.String); err == nil {
 			c.CreatedBy = &u
 		}
+	}
+	if awarenessTime.Valid {
+		t := awarenessTime.Time
+		c.AwarenessTime = &t
 	}
 	return c, nil
 }

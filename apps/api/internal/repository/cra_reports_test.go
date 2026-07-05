@@ -44,6 +44,10 @@ func TestCRAReportsRepository_Insert_PassesTenantID(t *testing.T) {
 	createdBy := uuid.New()
 	rowID := uuid.New()
 	now := time.Now().UTC()
+	// M34-A / F423: awareness_time binds at $22 (the operator-attested
+	// Art.14 clock start). A non-nil value proves the persist path wires
+	// it through nullableTime at the load-bearing position.
+	awareTime := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	ev := validCRAEvidence()
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO cra_reports")).
@@ -69,6 +73,7 @@ func TestCRAReportsRepository_Insert_PassesTenantID(t *testing.T) {
 			nil,               // $19 decision_at
 			nil,               // $20 decision_note
 			createdBy,         // $21 created_by
+			awareTime,         // $22 awareness_time (M34-A / F423)
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(rowID, now, now))
@@ -90,6 +95,7 @@ func TestCRAReportsRepository_Insert_PassesTenantID(t *testing.T) {
 		SourceVEXDraftID: &sourceVEX,
 		LLMCallID:        &llmID,
 		CreatedBy:        &createdBy,
+		AwarenessTime:    &awareTime,
 	}
 	if err := repo.Insert(context.Background(), c); err != nil {
 		t.Fatalf("Insert: %v", err)
@@ -275,6 +281,7 @@ func TestCRAReportsRepository_Insert_AssignsIDAndDefaults(t *testing.T) {
 			nil,                     // $19 decision_at
 			nil,                     // $20 decision_note
 			nil,                     // $21 created_by
+			nil,                     // $22 awareness_time (nil -> NULL)
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(uuid.New(), now, now))
@@ -396,6 +403,7 @@ var craReportListCols = []string{
 	"source_vex_draft_id", "llm_call_id",
 	"decision", "decision_by", "decision_at", "decision_note",
 	"created_by",
+	"awareness_time",
 	"created_at", "updated_at",
 }
 
@@ -415,6 +423,7 @@ func TestCRAReportsRepository_ListByProject_PassesTenantID(t *testing.T) {
 	vulnID := uuid.New()
 	rowID := uuid.New()
 	now := time.Now().UTC()
+	awareTime := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 
 	mock.ExpectQuery(`SELECT[\s\S]+FROM cra_reports[\s\S]+WHERE tenant_id = \$1 AND project_id = \$2`).
 		WithArgs(tenantID, projectID, 100, 0). // F24-pattern default limit
@@ -429,6 +438,7 @@ func TestCRAReportsRepository_ListByProject_PassesTenantID(t *testing.T) {
 			nil, nil,
 			"pending", nil, nil, nil,
 			nil,
+			awareTime, // awareness_time (M34-A / F423) scans back into the struct
 			now, now,
 		))
 
@@ -447,6 +457,9 @@ func TestCRAReportsRepository_ListByProject_PassesTenantID(t *testing.T) {
 	}
 	if out[0].Lang != "ja" {
 		t.Errorf("unexpected lang: %q", out[0].Lang)
+	}
+	if out[0].AwarenessTime == nil || !out[0].AwarenessTime.Equal(awareTime) {
+		t.Errorf("expected awareness_time %s to scan back, got %v", awareTime, out[0].AwarenessTime)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
@@ -855,6 +868,7 @@ func TestCRAReportsRepo_UpdateDecision_AlreadyApproved_F31(t *testing.T) {
 // bearing key shows up in the marshalled JSON. Adding a new field
 // without a json tag fails this test.
 func TestCRAReport_JSONShape(t *testing.T) {
+	awareTime := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
 	c := CRAReport{
 		ID:              uuid.New(),
 		TenantID:        uuid.New(),
@@ -872,6 +886,7 @@ func TestCRAReport_JSONShape(t *testing.T) {
 		Evidence:        validCRAEvidence(),
 		Decision:        "pending",
 		DecisionNote:    "note",
+		AwarenessTime:   &awareTime,
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
 	}
@@ -886,6 +901,7 @@ func TestCRAReport_JSONShape(t *testing.T) {
 		`"draft_text":`, `"provider":`, `"model":`,
 		`"prompt_hash":`, `"response_hash":`, `"evidence":`,
 		`"decision":`, `"decision_note":`,
+		`"awareness_time":`,
 		`"created_at":`, `"updated_at":`,
 	}
 	for _, key := range required {

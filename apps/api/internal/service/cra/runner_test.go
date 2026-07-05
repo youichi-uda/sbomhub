@@ -950,6 +950,122 @@ func TestRunner_Run_AuditFailure_RollsBackStage3(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
+// Test (M34-A / F423): awareness_time persistence + parse contract
+// ----------------------------------------------------------------------------
+
+// TestRunner_Run_PersistsAwarenessTime_LLMPath pins that the operator-
+// attested awareness instant (RunInput.AwarenessTime, RFC3339) is parsed
+// and set on the persisted cra_reports row on the LLM path. baseInput
+// supplies "2026-06-24T00:00:00Z"; the runner must persist that exact
+// instant so the read-time deadline computation has a clock start.
+func TestRunner_Run_PersistsAwarenessTime_LLMPath(t *testing.T) {
+	h := newTestHarness(t)
+	in := h.baseInput()
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangEN
+	in.AwarenessTime = "2026-06-24T00:00:00Z"
+
+	if _, err := h.runner.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := len(h.craReports.inserted); got != 1 {
+		t.Fatalf("expected 1 cra_reports insert, got %d", got)
+	}
+	got := h.craReports.inserted[0].AwarenessTime
+	want := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	if got == nil {
+		t.Fatalf("awareness_time not persisted (nil) on LLM path")
+	}
+	if !got.Equal(want) {
+		t.Errorf("awareness_time = %v, want %v", got, want)
+	}
+}
+
+// TestRunner_Run_PersistsAwarenessTime_AIDisabledPath pins the same
+// contract on the AI-disabled path (no provider configured): the
+// awareness instant is set on the placeholder draft too.
+func TestRunner_Run_PersistsAwarenessTime_AIDisabledPath(t *testing.T) {
+	h := newTestHarness(t)
+	resolver := &fakeProviderResolver{provider: &llm.DisabledProvider{Reason: "BYOK key not configured"}}
+	h.runner.providerResolver = resolver.resolve
+
+	in := h.baseInput()
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangJA
+	in.AwarenessTime = "2026-06-24T09:30:00Z"
+
+	res, err := h.runner.Run(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if res == nil || !res.AIDisabled {
+		t.Fatalf("expected AI-disabled result, got %+v", res)
+	}
+	if got := len(h.craReports.inserted); got != 1 {
+		t.Fatalf("expected 1 cra_reports insert, got %d", got)
+	}
+	got := h.craReports.inserted[0].AwarenessTime
+	want := time.Date(2026, 6, 24, 9, 30, 0, 0, time.UTC)
+	if got == nil {
+		t.Fatalf("awareness_time not persisted (nil) on AI-disabled path")
+	}
+	if !got.Equal(want) {
+		t.Errorf("awareness_time = %v, want %v", got, want)
+	}
+}
+
+// TestRunner_Run_EmptyAwarenessTime_NilColumn pins that a blank awareness
+// field persists as a nil column (not a zero time) — the read-time
+// deadline computation treats nil as not_applicable, which is the honest
+// posture when the operator did not attest an awareness instant.
+func TestRunner_Run_EmptyAwarenessTime_NilColumn(t *testing.T) {
+	h := newTestHarness(t)
+	in := h.baseInput()
+	in.ReportType = ReportTypeDetailedNotification
+	in.Lang = LangEN
+	in.AwarenessTime = "   " // whitespace-only → nil
+
+	if _, err := h.runner.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if got := len(h.craReports.inserted); got != 1 {
+		t.Fatalf("expected 1 cra_reports insert, got %d", got)
+	}
+	if got := h.craReports.inserted[0].AwarenessTime; got != nil {
+		t.Errorf("expected nil awareness_time for blank input, got %v", got)
+	}
+}
+
+// TestRunner_Run_MalformedAwarenessTime_Rejected pins that a non-empty
+// but non-RFC3339 awareness value fails the drafting cycle loudly BEFORE
+// any DB / LLM I/O, and persists nothing. RunReport surfaces this as an
+// error (Wave B maps it to a 400).
+func TestRunner_Run_MalformedAwarenessTime_Rejected(t *testing.T) {
+	h := newTestHarness(t)
+	in := h.baseInput()
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangJA
+	in.AwarenessTime = "2026-06-24 09:00" // not RFC3339
+
+	_, err := h.runner.Run(context.Background(), in)
+	if err == nil {
+		t.Fatalf("expected error on malformed awareness_time")
+	}
+	if !strings.Contains(err.Error(), "awareness_time") {
+		t.Errorf("error %v should name awareness_time", err)
+	}
+	if got := len(h.craReports.inserted); got != 0 {
+		t.Errorf("expected no cra_reports insert on malformed awareness_time, got %d", got)
+	}
+	if got := len(h.llmCalls.records); got != 0 {
+		t.Errorf("expected no llm_calls on malformed awareness_time, got %d", got)
+	}
+	if h.provider.captured.Purpose != "" {
+		t.Errorf("provider must not be called on malformed awareness_time (got Purpose=%q)", h.provider.captured.Purpose)
+	}
+}
+
+// ----------------------------------------------------------------------------
 // Test 9: buildCRASystemPrompt default arm (F359, M24-3)
 // ----------------------------------------------------------------------------
 

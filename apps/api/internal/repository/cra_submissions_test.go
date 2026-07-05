@@ -397,6 +397,119 @@ func TestCRAReportsRepository_MarkSubmitted_RejectsZero(t *testing.T) {
 	}
 }
 
+// TestCRASubmissionsRepository_EarliestSubmittedAtByReports_PassesArgs
+// pins the batched MIN(submitted_at) query (M34-A / F423): tenant_id at
+// $1, the report-id array cast to ::uuid[] at $2, GROUP BY cra_report_id,
+// and the returned map keyed by report id with each report's earliest
+// submission time. A report id with no submissions is absent from the map
+// (only the two returned rows land; the third id passed in does not).
+func TestCRASubmissionsRepository_EarliestSubmittedAtByReports_PassesArgs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRASubmissionsRepository(db)
+	tenantID := uuid.New()
+	reportA := uuid.New()
+	reportB := uuid.New()
+	reportC := uuid.New() // has no submissions -> absent from the result map
+	earliestA := time.Date(2026, 6, 24, 10, 0, 0, 0, time.UTC)
+	earliestB := time.Date(2026, 6, 25, 8, 30, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`SELECT cra_report_id, MIN\(submitted_at\)[\s\S]+FROM cra_submissions[\s\S]+WHERE tenant_id = \$1 AND cra_report_id = ANY\(\$2::uuid\[\]\)[\s\S]+GROUP BY cra_report_id`).
+		WithArgs(tenantID, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"cra_report_id", "min"}).
+			AddRow(reportA, earliestA).
+			AddRow(reportB, earliestB))
+
+	out, err := repo.EarliestSubmittedAtByReports(context.Background(), tenantID, []uuid.UUID{reportA, reportB, reportC})
+	if err != nil {
+		t.Fatalf("EarliestSubmittedAtByReports: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 entries, got %d (%v)", len(out), out)
+	}
+	if got, ok := out[reportA]; !ok || !got.Equal(earliestA) {
+		t.Errorf("reportA earliest = %v (ok=%v), want %v", got, ok, earliestA)
+	}
+	if got, ok := out[reportB]; !ok || !got.Equal(earliestB) {
+		t.Errorf("reportB earliest = %v (ok=%v), want %v", got, ok, earliestB)
+	}
+	if _, ok := out[reportC]; ok {
+		t.Errorf("reportC has no submissions and must be absent from the map, got present")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCRASubmissionsRepository_EarliestSubmittedAtByReports_EmptyReportIDs
+// pins the short-circuit: an empty slice returns an empty (non-nil) map
+// and issues NO query.
+func TestCRASubmissionsRepository_EarliestSubmittedAtByReports_EmptyReportIDs(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRASubmissionsRepository(db)
+	out, err := repo.EarliestSubmittedAtByReports(context.Background(), uuid.New(), nil)
+	if err != nil {
+		t.Fatalf("EarliestSubmittedAtByReports(empty): %v", err)
+	}
+	if out == nil {
+		t.Fatal("expected a non-nil empty map, got nil")
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(out))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no SQL should have been issued for empty reportIDs: %v", err)
+	}
+}
+
+// TestCRASubmissionsRepository_EarliestSubmittedAtByReports_RejectsZeroTenant
+// mirrors the read-side fail-fast: a zero tenant is rejected before any
+// SQL.
+func TestCRASubmissionsRepository_EarliestSubmittedAtByReports_RejectsZeroTenant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRASubmissionsRepository(db)
+	if _, err := repo.EarliestSubmittedAtByReports(context.Background(), uuid.Nil, []uuid.UUID{uuid.New()}); err == nil {
+		t.Fatal("expected error for zero tenant_id, got nil")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no SQL should have been issued: %v", err)
+	}
+}
+
+// TestCRASubmissionsRepository_EarliestSubmittedAtByReports_WrapsDBError
+// ensures driver errors surface with context.
+func TestCRASubmissionsRepository_EarliestSubmittedAtByReports_WrapsDBError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRASubmissionsRepository(db)
+	mock.ExpectQuery(`SELECT cra_report_id, MIN\(submitted_at\)`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnError(sql.ErrConnDone)
+
+	_, err = repo.EarliestSubmittedAtByReports(context.Background(), uuid.New(), []uuid.UUID{uuid.New()})
+	if err == nil || !errors.Is(err, sql.ErrConnDone) {
+		t.Fatalf("expected wrapped sql.ErrConnDone, got %v", err)
+	}
+}
+
 // TestCRASubmission_JSONShape pins the wire JSON tags. The Wave B (F419)
 // handler serialises this struct directly; the Web (Wave C) and CLI
 // (Wave D) clients read snake_case keys. A missing / renamed tag would

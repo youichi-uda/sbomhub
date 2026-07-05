@@ -33,6 +33,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
@@ -240,6 +241,103 @@ func TestCRASubmissions_TenantIsolation_RLS(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Fatalf("tenantA session sees %d of its own cra_submissions rows for id=%s; expected 1", seen, rowA)
+	}
+}
+
+// recordSubmissionForTenant inserts one cra_submissions row under a
+// tenant-scoped tx (cra_submissions is FORCE RLS, so the GUC must be
+// set). Used to seed the batch-query RLS smoke below with submissions
+// for two tenants at controlled submitted_at instants.
+func recordSubmissionForTenant(t *testing.T, appDB *sql.DB, tenant, report uuid.UUID, authority string, at time.Time) {
+	t.Helper()
+	tx, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("recordSubmissionForTenant begin: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenant.String() + `'`); err != nil {
+		t.Fatalf("recordSubmissionForTenant SET LOCAL: %v", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO cra_submissions (id, tenant_id, cra_report_id, authority, submitted_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, uuid.New(), tenant, report, authority, at); err != nil {
+		t.Fatalf("recordSubmissionForTenant insert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("recordSubmissionForTenant commit: %v", err)
+	}
+	committed = true
+}
+
+// TestCRASubmissions_EarliestSubmittedAtByReports_RLS drives the batched
+// MIN(submitted_at) query (M34-A / F423) through a real tenant tx and
+// pins two properties at once: it returns the EARLIEST submission per
+// report (MIN, not the latest correction), and it is tenant-scoped -- a
+// foreign tenant's report id passed in the batch surfaces nothing under
+// the caller's session (RLS + the explicit tenant_id filter).
+func TestCRASubmissions_EarliestSubmittedAtByReports_RLS(t *testing.T) {
+	appURL, migURL := craSubmissionsTestEnv(t)
+
+	migDB := openOrSkipCRASubmissions(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyCRASubmissions(t, migDB) {
+		return
+	}
+	appDB := openOrSkipCRASubmissions(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForCRASubmissions(t, migDB, "EARLY-A")
+	tenantB := seedTenantForCRASubmissions(t, migDB, "EARLY-B")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
+	})
+
+	reportA := insertApprovedCRAReport(t, appDB, tenantA)
+	reportB := insertApprovedCRAReport(t, appDB, tenantB)
+
+	repo := NewCRASubmissionsRepository(appDB)
+
+	earliestA := time.Date(2026, 6, 24, 8, 0, 0, 0, time.UTC)
+	laterA := time.Date(2026, 6, 25, 8, 0, 0, 0, time.UTC)
+	submB := time.Date(2026, 6, 24, 6, 0, 0, 0, time.UTC)
+
+	// Two submissions for reportA (tenant A): MIN must be earliestA even
+	// though the later one was recorded second (append-only correction).
+	recordSubmissionForTenant(t, appDB, tenantA, reportA, "ENISA CSIRT", laterA)
+	recordSubmissionForTenant(t, appDB, tenantA, reportA, "ENISA CSIRT", earliestA)
+	// A submission for reportB in tenant B — must NOT surface under A.
+	recordSubmissionForTenant(t, appDB, tenantB, reportB, "BSI", submB)
+
+	// Query under tenant A. reportB is passed in the batch but belongs to
+	// tenant B, so it must be absent from the result.
+	txA, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantA: %v", err)
+	}
+	defer txA.Rollback()
+	if _, err := txA.Exec(`SET LOCAL app.current_tenant_id = '` + tenantA.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenantA: %v", err)
+	}
+	ctxA := database.WithTx(context.Background(), txA)
+
+	got, err := repo.EarliestSubmittedAtByReports(ctxA, tenantA, []uuid.UUID{reportA, reportB})
+	if err != nil {
+		t.Fatalf("EarliestSubmittedAtByReports under tenant A: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 entry (reportA), got %d (%v)", len(got), got)
+	}
+	if ea, ok := got[reportA]; !ok || !ea.Equal(earliestA) {
+		t.Errorf("reportA earliest = %v (ok=%v), want %v (MIN of the two submissions)", ea, ok, earliestA)
+	}
+	if _, ok := got[reportB]; ok {
+		t.Errorf("RLS leak: reportB (tenant B) surfaced under tenant A's session")
 	}
 }
 

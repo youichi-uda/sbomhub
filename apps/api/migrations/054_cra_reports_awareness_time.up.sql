@@ -1,0 +1,71 @@
+-- ============================================
+-- Operator-attested awareness_time for cra_reports
+-- (M34-A / issue #148 / F423).
+--
+-- Scope:
+--   CRA (EU Cyber Resilience Act) Art.14 starts its reporting clock at
+--   the instant a manufacturer becomes AWARE of an actively exploited
+--   vulnerability: a 24h early warning, a 72h detailed notification, and
+--   a post-remediation final report are all measured from that awareness
+--   instant. Until this migration the awareness instant was NOT persisted
+--   anywhere: the CRA report runner accepted it as a request field and
+--   flowed it only into the rendered template prose (runner.go
+--   RunInput.AwarenessTime -> CRATemplateData.AwarenessTime), so there
+--   was no column from which "was this submission on time?" could ever be
+--   computed. This migration adds that column so the Art.14 24h/72h
+--   on-time judgement (M34) can be derived on read.
+--
+--   Migration 053 (cra_submissions header, "Deadline / on-time judgement
+--   is intentionally NOT stored here") explicitly deferred exactly this:
+--   it recorded only the human-attested submitted_at and noted that
+--   "awareness_time is not persisted on cra_reports (it only flows into
+--   the rendered template prose), so a derived deadline_at column would
+--   be stale + unsourced ... Art.14 24h/72h on-time computation is
+--   deferred to a later milestone". M34 implements that deferral.
+--
+-- Column shape:
+--   TIMESTAMPTZ, nullable, no default. This is the raw operator-attested
+--   awareness instant -- the START of the Art.14 clock -- and nothing
+--   else. It is the ONLY new state this migration persists.
+--
+-- Why deadline_at / on-time status are NOT stored:
+--   Only the raw awareness instant is persisted here. The deadline
+--   (awareness_time + 24h/72h, per report type) and the on-time / late /
+--   overdue status are DERIVED state and are computed on READ (comparing
+--   the earliest cra_submissions.submitted_at against awareness_time +
+--   the report-type window), never written to a column. This is the
+--   deliberate anti-pattern-avoidance the 053 header warned about: a
+--   stored deadline_at would go stale the moment the awareness instant is
+--   corrected or the report type changes, and would present an unsourced
+--   derived value as if it were attested fact. Read-time computation
+--   keeps a single source of truth (awareness_time + submitted_at) and
+--   lets the display layer recompute cheaply.
+--
+-- Why existing rows are NOT backfilled:
+--   The column is nullable with no default precisely so legacy rows keep
+--   awareness_time = NULL. A NULL awareness instant is treated by the
+--   read-time computation as "not_applicable" (no clock can start without
+--   an attested awareness instant), which is the correct honest posture:
+--   the deadline feature is forward-looking only and never fabricates an
+--   awareness instant for a report drafted before this milestone. No
+--   whole-table UPDATE is issued, so the FORCE-RLS / missing-tenant-GUC
+--   migrator hazard documented in the 051 and 045 headers does not arise.
+--
+-- RLS:
+--   cra_reports has been ENABLE + FORCE ROW LEVEL SECURITY with policy
+--   tenant_isolation_cra_reports since migration 038. Adding a NON-tenant
+--   column via ALTER TABLE ... ADD COLUMN does not touch the table's RLS
+--   state or its policy (the policy is table-level and compares tenant_id,
+--   which is unchanged), so no RLS re-declaration is needed or wanted here
+--   -- exactly as migration 051 added vulnerability_tickets.external_project_key
+--   without re-declaring the 015/023 RLS triple. The lint-migration-rls
+--   gate only requires the RLS triple for a table that DECLARES a
+--   tenant_id column or is ALTER-promoted to carry one; this ALTER adds
+--   neither, so the gate is a no-op for it.
+-- ============================================
+
+ALTER TABLE cra_reports
+    ADD COLUMN awareness_time TIMESTAMPTZ;
+
+COMMENT ON COLUMN cra_reports.awareness_time IS
+    'M34-A / F423 (#148): operator-attested awareness instant -- the start of the CRA Art.14 24h/72h reporting clock. Nullable, deliberately NOT backfilled (legacy rows stay NULL = not_applicable, forward-looking only). Captured at report generation from the runner request. The deadline_at and on-time/late/overdue status are DERIVED and computed on read (awareness_time + report-type window vs earliest cra_submissions.submitted_at); they are never stored, per the migration 053 stale-derived-column rationale.';

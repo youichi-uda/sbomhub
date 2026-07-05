@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/sbomhub/sbomhub/internal/database"
 )
 
@@ -224,6 +225,73 @@ func (r *CRASubmissionsRepository) ListByReport(ctx context.Context, tenantID, c
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate cra_submissions rows: %w", err)
+	}
+	return out, nil
+}
+
+// EarliestSubmittedAtByReports returns, for each of the supplied report
+// ids that has at least one submission, the EARLIEST submitted_at time
+// (MIN) in a single batched query -- the N+1-avoiding companion to
+// ListByReport for the CRA deadline read path (M34-A / F423). The Wave B
+// deadline enrichment loads the reports for a project, then calls this
+// once to fetch every report's first-filing instant, then feeds each
+// MIN(submitted_at) into ComputeDeadline. The earliest submission is the
+// on-time yardstick: a later correction / re-submission never moves the
+// Art.14 clock earlier, so MIN (not MAX / latest) is the correct
+// aggregate.
+//
+// The result map contains an entry ONLY for reports that have a
+// submission; a report id with no submissions is simply absent (the
+// caller treats "absent" as "not submitted yet" -> pending / overdue).
+//
+// tenantID MUST come from the authenticated session. The query is
+// tenant-scoped both by the explicit `tenant_id = $1` clause AND by the
+// RLS policy (via r.q(ctx) joining the request tenant tx), so a foreign
+// tenant's submissions can never surface even if a stray report id from
+// another tenant is passed in reportIDs. An empty reportIDs slice
+// short-circuits to an empty map with no query issued.
+func (r *CRASubmissionsRepository) EarliestSubmittedAtByReports(ctx context.Context, tenantID uuid.UUID, reportIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("CRASubmissionsRepository.EarliestSubmittedAtByReports: tenant_id is required")
+	}
+	out := make(map[uuid.UUID]time.Time, len(reportIDs))
+	if len(reportIDs) == 0 {
+		return out, nil
+	}
+
+	// pq.Array over the string forms + an explicit ::uuid[] cast so the
+	// ANY() comparison is unambiguously uuid = uuid (no implicit text
+	// coercion). Mirrors the []string ANY() pattern in license.go.
+	ids := make([]string, len(reportIDs))
+	for i, id := range reportIDs {
+		ids[i] = id.String()
+	}
+
+	const query = `
+		SELECT cra_report_id, MIN(submitted_at)
+		FROM cra_submissions
+		WHERE tenant_id = $1 AND cra_report_id = ANY($2::uuid[])
+		GROUP BY cra_report_id
+	`
+
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, pq.Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("query cra_submissions earliest submitted_at by reports: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			reportID uuid.UUID
+			earliest time.Time
+		)
+		if err := rows.Scan(&reportID, &earliest); err != nil {
+			return nil, fmt.Errorf("scan cra_submissions earliest submitted_at row: %w", err)
+		}
+		out[reportID] = earliest
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cra_submissions earliest submitted_at rows: %w", err)
 	}
 	return out, nil
 }

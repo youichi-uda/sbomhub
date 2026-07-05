@@ -34,12 +34,15 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/database"
 )
 
 // craReportsTestEnv reuses the same env-helper as the M1 RLS suites
@@ -207,6 +210,112 @@ func TestCRAReports_TenantIsolation_RLS(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Fatalf("tenantA session sees %d of its own cra_reports rows for id=%s; expected 1", seen, rowA)
+	}
+}
+
+// TestCRAReports_AwarenessTime_RLS_RoundTrip verifies the migration 054
+// column end-to-end through the repository (M34-A / F423): the operator-
+// attested awareness instant round-trips a tenant-scoped Insert -> Get
+// (proving the INSERT bind + SELECT + scanner all carry the new column),
+// and a cross-tenant read under another tenant's session does NOT surface
+// the row (and therefore never leaks its awareness_time).
+func TestCRAReports_AwarenessTime_RLS_RoundTrip(t *testing.T) {
+	appURL, migURL := craReportsTestEnv(t)
+
+	migDB := openOrSkipCRAReports(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyCRAReports(t, migDB) {
+		return
+	}
+	// Skip cleanly on a schema that predates migration 054.
+	var hasCol bool
+	if err := migDB.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'cra_reports'
+			  AND column_name = 'awareness_time'
+		)
+	`).Scan(&hasCol); err != nil {
+		t.Skipf("awareness_time column check failed: %v -- skipping", err)
+	}
+	if !hasCol {
+		t.Skip("cra_reports.awareness_time not present -- run migration 054 first")
+	}
+
+	appDB := openOrSkipCRAReports(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForCRAReports(t, migDB, "AW-A")
+	tenantB := seedTenantForCRAReports(t, migDB, "AW-B")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
+	})
+
+	repo := NewCRAReportsRepository(appDB)
+	awareness := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	reportID := uuid.New()
+
+	// --- Insert + read back under tenant A's tx (repository path).
+	txA, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantA: %v", err)
+	}
+	if _, err := txA.Exec(`SET LOCAL app.current_tenant_id = '` + tenantA.String() + `'`); err != nil {
+		_ = txA.Rollback()
+		t.Fatalf("SET LOCAL tenantA: %v", err)
+	}
+	ctxA := database.WithTx(context.Background(), txA)
+	rep := &CRAReport{
+		ID:              reportID,
+		TenantID:        tenantA,
+		ProjectID:       uuid.New(),
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2025-AW",
+		ReportType:      "early_warning",
+		Lang:            "ja",
+		DraftText:       "awareness round-trip body",
+		Evidence:        validCRAEvidence(),
+		AwarenessTime:   &awareness,
+	}
+	if err := repo.Insert(ctxA, rep); err != nil {
+		_ = txA.Rollback()
+		t.Fatalf("Insert under tenant A: %v", err)
+	}
+	got, err := repo.Get(ctxA, tenantA, reportID)
+	if err != nil {
+		_ = txA.Rollback()
+		t.Fatalf("Get under tenant A: %v", err)
+	}
+	if got == nil {
+		_ = txA.Rollback()
+		t.Fatalf("expected the inserted row to be visible under tenant A")
+	}
+	if got.AwarenessTime == nil || !got.AwarenessTime.Equal(awareness) {
+		_ = txA.Rollback()
+		t.Fatalf("awareness_time did not round-trip: got %v, want %v", got.AwarenessTime, awareness)
+	}
+	if err := txA.Commit(); err != nil {
+		t.Fatalf("commit tenantA: %v", err)
+	}
+
+	// --- Cross-tenant read: under tenant B's session even an explicit
+	// Get for tenantA's id is invisible (RLS), so its awareness_time can
+	// never leak.
+	txB, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantB: %v", err)
+	}
+	defer txB.Rollback()
+	if _, err := txB.Exec(`SET LOCAL app.current_tenant_id = '` + tenantB.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenantB: %v", err)
+	}
+	ctxB := database.WithTx(context.Background(), txB)
+	leaked, err := repo.Get(ctxB, tenantA, reportID)
+	if err != nil {
+		t.Fatalf("Get under tenant B: %v", err)
+	}
+	if leaked != nil {
+		t.Fatalf("RLS leak: tenant B surfaced tenant A's cra_report (awareness_time=%v)", leaked.AwarenessTime)
 	}
 }
 

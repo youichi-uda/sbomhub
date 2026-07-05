@@ -340,6 +340,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 	wantGoNonTest := map[string]bool{
 		"internal/repository/cra_reports.go":               true, // field comment + Insert error enumeration (probed in 4e)
 		"internal/repository/cra_submissions.go":           true, // M33 F418: doc comment names the Art.14 submission timeline (24h/72h/final)
+		"internal/service/cra/deadline.go":                 true, // M34 F423: Art.14 deadline switch (typed consts; doc comment names the report-type windows)
 		"internal/service/cra/templates.go":                true, // the const block + templateCache keys
 		"internal/service/evidence_pack/builder.go":        true, // README enumeration line (probed in 4f)
 		"internal/service/evidence_pack/zip.go":            true, // M31 F405: doc comment names an enum example (code uses r.ReportType)
@@ -349,6 +350,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 		"internal/handler/cra_reports_test.go":            true,
 		"internal/repository/cra_reports_rls_test.go":     true,
 		"internal/repository/cra_reports_test.go":         true,
+		"internal/service/cra/deadline_test.go":           true, // M34 F423: deadline table test names the report-type wire values
 		"internal/repository/cra_submissions_rls_test.go": true, // M33 F418: RLS smoke seeds an approved cra_report fixture (report_type literal)
 		"internal/service/evidence_pack/builder_test.go":  true,
 		"internal/service/evidence_pack/zip_test.go":      true, // M31 F405: CRA (report_type, lang) collision-suffix test fixtures
