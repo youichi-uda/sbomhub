@@ -614,18 +614,24 @@ func (h *CRAReportsHandler) SetAwareness(c echo.Context) error {
 
 	// Full-guard validation. valueToWrite stays nil for the clear path so a
 	// nil *time.Time flows straight through to UpdateAwarenessTime (→ SQL NULL).
+	// Parse the TRIMMED value so the non-empty gate and time.Parse agree — a
+	// whitespace-padded but otherwise-valid RFC3339 instant is accepted, not
+	// rejected by a parse of the untrimmed string (M35 F429 Phase D LOW-3).
 	var valueToWrite *time.Time
-	if req.AwarenessTime != nil && strings.TrimSpace(*req.AwarenessTime) != "" {
-		t, perr := time.Parse(time.RFC3339, *req.AwarenessTime)
-		if perr != nil {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid awareness_time (expected RFC3339)"})
+	if req.AwarenessTime != nil {
+		trimmed := strings.TrimSpace(*req.AwarenessTime)
+		if trimmed != "" {
+			t, perr := time.Parse(time.RFC3339, trimmed)
+			if perr != nil {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid awareness_time (expected RFC3339)"})
+			}
+			// The Art.14 clock start is a past/present instant — a future
+			// awareness is nonsensical (nothing to have become aware of yet).
+			if t.After(time.Now().UTC()) {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "awareness_time cannot be in the future"})
+			}
+			valueToWrite = &t
 		}
-		// The Art.14 clock start is a past/present instant — a future
-		// awareness is nonsensical (nothing to have become aware of yet).
-		if t.After(time.Now().UTC()) {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": "awareness_time cannot be in the future"})
-		}
-		valueToWrite = &t
 	}
 
 	// F8/F9 carry-over: load + enforce project boundary BEFORE the UPDATE.

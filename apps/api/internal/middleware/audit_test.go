@@ -186,6 +186,62 @@ func TestDetermineActionAndResource_CRASubmissions_F419(t *testing.T) {
 	}
 }
 
+// TestDetermineActionAndResource_CRAAwareness_F429 pins the M35 classifier
+// skip for PATCH /cra-reports/:report_id/awareness. handler/cra_reports.go
+// SetAwareness emits the authoritative cra_report_awareness_updated domain
+// row inside its TenantTx (F32 audit-or-nothing); the middleware best-effort
+// row must be suppressed so the awareness edit is NOT mislabeled as a
+// decision update (the double-count / mis-label class the sibling F419 /
+// F236 / F237 skips exist to prevent). The guard cases ensure the /awareness
+// suffix check fires ONLY on PATCH and does not shadow the Decide route.
+func TestDetermineActionAndResource_CRAAwareness_F429(t *testing.T) {
+	cases := []struct {
+		name         string
+		method       string
+		path         string
+		wantAction   string
+		wantResource string
+	}{
+		{
+			name:         "PATCH /cra-reports/:report_id/awareness is suppressed (handler-audited, not decision_updated)",
+			method:       "PATCH",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/awareness",
+			wantAction:   "",
+			wantResource: "",
+		},
+		{
+			// Guard: the /awareness skip must not shadow the Decide route.
+			name:         "PUT /cra-reports/:report_id/decision still classifies as decision_updated",
+			method:       "PUT",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/decision",
+			wantAction:   model.ActionCRAReportDecisionUpdated,
+			wantResource: model.ResourceCRAReport,
+		},
+		{
+			// Guard: the skip is gated on the /awareness SUFFIX, so any other
+			// PATCH under cra-reports still classifies as decision_updated.
+			name:         "PATCH /cra-reports/:report_id/decision still classifies as decision_updated",
+			method:       "PATCH",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/decision",
+			wantAction:   model.ActionCRAReportDecisionUpdated,
+			wantResource: model.ResourceCRAReport,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			action, resourceType := determineActionAndResource(tc.method, tc.path)
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q (method=%s path=%s)",
+					action, tc.wantAction, tc.method, tc.path)
+			}
+			if resourceType != tc.wantResource {
+				t.Errorf("resourceType = %q, want %q (method=%s path=%s)",
+					resourceType, tc.wantResource, tc.method, tc.path)
+			}
+		})
+	}
+}
+
 // TestDetermineActionAndResource_ProjectNotShadowedByAPIKey is the inverse
 // guard: classifying /apikeys before /projects must not regress regular
 // project routes such as /projects/:id or /projects/:id/sbom.

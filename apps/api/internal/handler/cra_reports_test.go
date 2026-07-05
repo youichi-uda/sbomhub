@@ -1747,6 +1747,36 @@ func TestCRAReportsHandler_SetAwareness_Future_Returns400_F429(t *testing.T) {
 	}
 }
 
+// TestCRAReportsHandler_SetAwareness_WhitespacePadded_Accepted_F429 pins the
+// Phase D LOW-3 fix: a whitespace-padded but otherwise-valid RFC3339 instant
+// is TRIMMED before time.Parse, so it is accepted (200) and the store is
+// called with the parsed instant — rather than the pre-fix behavior where the
+// non-empty gate trimmed but time.Parse ran on the untrimmed string → a
+// spurious 400 on a valid value.
+func TestCRAReportsHandler_SetAwareness_WhitespacePadded_Accepted_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+
+	awarenessPast := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	padded := "  " + awarenessPast.Format(time.RFC3339) + "  "
+	body, _ := json.Marshal(map[string]string{"awareness_time": padded})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F429 LOW-3: padded valid awareness_time status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.awarenessCalls != 1 {
+		t.Fatalf("F429 LOW-3: padded valid awareness must call UpdateAwarenessTime once, got %d", h.store.awarenessCalls)
+	}
+	if h.store.awarenessArg == nil || !h.store.awarenessArg.Equal(awarenessPast) {
+		t.Errorf("F429 LOW-3: padded value must parse to trimmed instant %v, got %v", awarenessPast, h.store.awarenessArg)
+	}
+}
+
 // TestCRAReportsHandler_SetAwareness_AuditFailure_RollsBack_F429 mirrors
 // Decide's F32 audit-or-nothing: a domain audit failure returns 500 (so the
 // ambient TenantTx rolls back the awareness UPDATE). The UPDATE was
