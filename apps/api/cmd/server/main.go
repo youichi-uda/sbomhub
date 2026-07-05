@@ -1198,6 +1198,19 @@ func main() {
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
+	// CRA Art.14 awareness editable-later (M35 F429 / issue #152). PATCH reuses
+	// the Decide write chain verbatim (TenantTx is load-bearing: it rolls back
+	// the awareness_time UPDATE + audit atomically on the F32 audit-or-nothing
+	// 500). The middleware classifier skips this route (determineActionAndResource
+	// returns "","" for PATCH .../awareness) so the handler's cra_report_awareness_updated
+	// domain row is the single source of truth, not a mislabeled decision_updated.
+	e.PATCH("/api/v1/projects/:id/cra-reports/:report_id/awareness",
+		craReportsHandler.SetAwareness,
+		triageMultiAuth,
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.TenantTx(db),
+		auditMiddleware)
 	// CRA Art.14 submission records (M33 F419 / issue #146). POST reuses the
 	// Decide write chain verbatim (TenantTx is load-bearing: it rolls back the
 	// INSERT + state flip + audit atomically on the F32 audit-or-nothing 500).

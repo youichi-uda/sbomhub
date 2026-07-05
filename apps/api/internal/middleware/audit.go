@@ -366,6 +366,15 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				}
 				return model.ActionCRAReportRun, model.ResourceCRAReport
 			case "PUT", "PATCH":
+				if method == "PATCH" && strings.HasSuffix(path, "/awareness") {
+					// M35 F429: handler/cra_reports.go SetAwareness emits the
+					// authoritative cra_report_awareness_updated domain row inside its
+					// TenantTx (F32 audit-or-nothing). Suppress the best-effort
+					// middleware row here so an awareness edit is not mislabeled as a
+					// decision update. Same handler-audited-route precedent as the
+					// submissions POST skip above (M33 F419/F422).
+					return "", ""
+				}
 				return model.ActionCRAReportDecisionUpdated, model.ResourceCRAReport
 			case "GET":
 				if strings.HasSuffix(path, "/cra-reports") {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,6 +70,11 @@ type CRAReportStore interface {
 	ListByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.CRAReportListFilter) ([]repository.CRAReport, error)
 	CountByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.CRAReportListFilter) (int, error)
 	UpdateDecision(ctx context.Context, tenantID, id uuid.UUID, upd repository.CRAReportDecisionUpdate) error
+	// UpdateAwarenessTime sets/edits/clears the Art.14 awareness instant
+	// on one cra_reports row (M35 F429). A nil awarenessTime clears it to
+	// SQL NULL (deadline degrades to not_applicable); a zero RowsAffected
+	// is wrapped as sql.ErrNoRows so the handler surfaces a 404.
+	UpdateAwarenessTime(ctx context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time) error
 }
 
 // CRAAuditLogger is the subset of *repository.AuditRepository the
@@ -98,6 +104,7 @@ type craSubmissionEarliestReader interface {
 //	GET    /api/v1/projects/:id/cra-reports
 //	GET    /api/v1/projects/:id/cra-reports/:report_id
 //	PUT    /api/v1/projects/:id/cra-reports/:report_id/decision
+//	PATCH  /api/v1/projects/:id/cra-reports/:report_id/awareness
 //	POST   /api/v1/projects/:id/cra-reports/:report_id/reanalyse
 //
 // The handler is intentionally thin — it parses input, surfaces auth /
@@ -198,6 +205,15 @@ type craDecisionRequest struct {
 	Decision        string  `json:"decision"` // approved | edited | rejected
 	DecisionNote    string  `json:"decision_note,omitempty"`
 	EditedDraftText *string `json:"edited_draft_text,omitempty"`
+}
+
+// craAwarenessRequest carries the operator-attested Art.14 awareness
+// instant for SetAwareness (M35 F429). AwarenessTime is a *string so the
+// handler can distinguish an ABSENT field / explicit JSON null (both →
+// CLEAR to NULL) from a supplied RFC3339 instant. An empty string is also
+// treated as CLEAR (the web sends null to unset; empty is tolerated).
+type craAwarenessRequest struct {
+	AwarenessTime *string `json:"awareness_time"`
 }
 
 // ----------------------------------------------------------------------------
@@ -551,6 +567,144 @@ func (h *CRAReportsHandler) Decide(c echo.Context) error {
 }
 
 // ----------------------------------------------------------------------------
+// PATCH /api/v1/projects/:id/cra-reports/:report_id/awareness
+// ----------------------------------------------------------------------------
+
+// SetAwareness sets / edits / clears the Art.14 awareness instant on one
+// cra_reports row (M35 F429 — web-operator self-serve for the clock start
+// that M34 could only capture at generation time). It mirrors Decide's
+// F32 audit-or-nothing structure exactly: the domain audit row is written
+// immediately after the repository UPDATE so the (awareness, audit) pair
+// lands inside the same ambient TenantTx the route is wrapped in — a
+// domain audit failure returns 500 so the TenantTx middleware rolls back
+// the awareness UPDATE, preventing an Art.14 clock-start change from
+// committing without its audit trail.
+//
+// Validation (full guard, M35):
+//   - absent / explicit null / empty (after trim) → CLEAR (write nil, the
+//     deadline degrades to not_applicable).
+//   - non-empty → time.Parse(RFC3339); malformed → 400 (mirrors buildRunInput).
+//   - a parsed instant in the future → 400 (the Art.14 clock start cannot
+//     be in the future).
+//
+// The response is the enriched CRAReport (same shape as GetReport): the
+// deadline is recomputed on read (M34-B / F424), so moving awareness moves
+// deadline_status / deadline_at in the very same response.
+func (h *CRAReportsHandler) SetAwareness(c echo.Context) error {
+	tc := middleware.NewTenantContext(c)
+	if tc == nil || tc.TenantID() == uuid.Nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	if !tc.CanWrite() {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "write permission required"})
+	}
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+	}
+	reportID, err := uuid.Parse(c.Param("report_id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid report id"})
+	}
+
+	var req craAwarenessRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+
+	// Full-guard validation. valueToWrite stays nil for the clear path so a
+	// nil *time.Time flows straight through to UpdateAwarenessTime (→ SQL NULL).
+	var valueToWrite *time.Time
+	if req.AwarenessTime != nil && strings.TrimSpace(*req.AwarenessTime) != "" {
+		t, perr := time.Parse(time.RFC3339, *req.AwarenessTime)
+		if perr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid awareness_time (expected RFC3339)"})
+		}
+		// The Art.14 clock start is a past/present instant — a future
+		// awareness is nonsensical (nothing to have become aware of yet).
+		if t.After(time.Now().UTC()) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "awareness_time cannot be in the future"})
+		}
+		valueToWrite = &t
+	}
+
+	// F8/F9 carry-over: load + enforce project boundary BEFORE the UPDATE.
+	// repository.UpdateAwarenessTime is scoped only by (tenant, id), so
+	// without this pre-flight a cross-project URL would mutate a
+	// foreign-project report. Capture the prior awareness for the trail.
+	report, status, body := h.loadReportScoped(c.Request().Context(), tc.TenantID(), projectID, reportID, "SetAwareness")
+	if status != 0 {
+		return c.JSON(status, body)
+	}
+	priorAwareness := report.AwarenessTime
+
+	if err := h.reports.UpdateAwarenessTime(c.Request().Context(), tc.TenantID(), reportID, valueToWrite); err != nil {
+		// A zero-rows UPDATE (row absent, wrong tenant, or RLS-hidden) is
+		// wrapped as sql.ErrNoRows by the repository — surface the same 404
+		// as loadReportScoped so a TOCTOU delete cannot leak a 500.
+		if errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("cra_reports: UpdateAwarenessTime matched zero rows (absent / cross-tenant / RLS-hidden)",
+				"tenant_id", tc.TenantID(), "project_id", projectID, "report_id", reportID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "cra report not found"})
+		}
+		slog.Warn("cra_reports: UpdateAwarenessTime failed",
+			"tenant_id", tc.TenantID(), "project_id", projectID, "report_id", reportID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update cra report awareness_time"})
+	}
+
+	// Emit the domain-level audit row (cra_report_awareness_updated). The
+	// request-level audit middleware is suppressed for this route (the
+	// /awareness PATCH skip in middleware/audit.go) so this is the single
+	// authoritative row — it captures the before/after awareness instants
+	// for the compliance trail.
+	auditDetails := map[string]interface{}{
+		"project_id":      projectID.String(),
+		"prior_awareness": rfc3339OrNil(priorAwareness),
+		"new_awareness":   rfc3339OrNil(valueToWrite),
+		"cleared":         valueToWrite == nil,
+	}
+	rid := reportID
+	tenantID := tc.TenantID()
+	if err := h.audit.Log(c.Request().Context(), &model.CreateAuditLogInput{
+		TenantID:     &tenantID,
+		UserID:       userIDOrNil(tc),
+		Action:       model.AuditActionCRAReportAwarenessUpdated,
+		ResourceType: model.ResourceCRAReport,
+		ResourceID:   &rid,
+		Details:      auditDetails,
+		IPAddress:    c.RealIP(),
+		UserAgent:    c.Request().UserAgent(),
+	}); err != nil {
+		// F32 (M2 Codex review, carried to M35 F429): hard-fail on domain
+		// audit failure so the ambient TenantTx middleware rolls back the
+		// UpdateAwarenessTime UPDATE. Compliance evidence MUST land
+		// atomically with the awareness edit it documents — an "awareness
+		// applied but audit lost" outcome would silently let an operator
+		// move a CRA report's Article 14 reporting deadline without the
+		// required audit trail. This mirrors Decide above and is the
+		// wire-up reason the awareness route is wrapped in TenantTx
+		// (cmd/server/main.go) — TenantTx rolls back on any 4xx/5xx,
+		// including this 500.
+		slog.Error("cra_reports: domain audit log failed; rolling back awareness update (F32 audit-or-nothing)",
+			"tenant_id", tc.TenantID(), "report_id", reportID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to persist cra report awareness audit trail; awareness update rolled back",
+		})
+	}
+
+	// Reload + enrich exactly like GetReport so the response reflects the
+	// persisted awareness_time / updated_at AND the freshly recomputed
+	// Art.14 deadline (compute-on-read, F424): the same MIN(submitted_at)
+	// source of truth judges on_time/late/pending/overdue.
+	fresh, status, body := h.loadReportScoped(c.Request().Context(), tc.TenantID(), projectID, reportID, "SetAwareness.reload")
+	if status != 0 {
+		return c.JSON(status, body)
+	}
+	earliest, submissionsKnown := h.earliestSubmittedAt(c.Request().Context(), tc.TenantID(), projectID, []repository.CRAReport{*fresh})
+	return c.JSON(http.StatusOK, enrichOneReport(fresh, earliest, time.Now().UTC(), submissionsKnown))
+}
+
+// ----------------------------------------------------------------------------
 // POST /api/v1/projects/:id/cra-reports/:report_id/reanalyse
 // ----------------------------------------------------------------------------
 
@@ -744,6 +898,19 @@ func (h *CRAReportsHandler) buildRunInput(tc *middleware.TenantContext, projectI
 		ReportID:         req.ReportID,
 	}
 	return in, 0, nil
+}
+
+// rfc3339OrNil renders a *time.Time as an RFC3339 string (UTC) for an
+// audit Details map, or nil when the pointer is nil. The nil case
+// serialises to JSON null so the awareness audit trail distinguishes
+// "was/became unset" (null) from an actual instant (F429). Kept as a
+// helper so the prior_awareness / new_awareness pair in SetAwareness
+// cannot drift in format.
+func rfc3339OrNil(t *time.Time) interface{} {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // earliestSubmittedAt batch-loads the earliest (MIN) submitted_at per

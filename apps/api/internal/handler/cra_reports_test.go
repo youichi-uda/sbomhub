@@ -75,6 +75,12 @@ type fakeCRAReportStore struct {
 	listCalled      bool
 	lastCountFilter repository.CRAReportListFilter
 	countCalled     bool
+
+	// M35 F429 awareness UPDATE observation.
+	awarenessErr      error
+	awarenessCalls    int
+	awarenessArg      *time.Time // pointer supplied to UpdateAwarenessTime
+	awarenessArgIsNil bool       // whether the supplied pointer was nil (clear)
 }
 
 func (f *fakeCRAReportStore) Get(_ context.Context, tenantID, id uuid.UUID) (*repository.CRAReport, error) {
@@ -151,6 +157,31 @@ func (f *fakeCRAReportStore) UpdateDecision(_ context.Context, tenantID, id uuid
 		r.DraftText = *upd.EditedDraftText
 	}
 	r.UpdatedAt = now
+	f.byID[id] = r
+	return nil
+}
+
+// UpdateAwarenessTime is the M35 F429 fake. It records the call count and
+// the exact pointer supplied (so a test can assert the parsed time was
+// passed through, or nil on clear) and mutates the stored row so a
+// subsequent loadReportScoped reload observes the new awareness_time (and
+// the enricher recomputes the deadline from it).
+func (f *fakeCRAReportStore) UpdateAwarenessTime(_ context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.awarenessCalls++
+	f.awarenessArg = awarenessTime
+	f.awarenessArgIsNil = awarenessTime == nil
+	if f.awarenessErr != nil {
+		return f.awarenessErr
+	}
+	r, ok := f.byID[id]
+	if !ok || r.TenantID != tenantID {
+		// Mirror the real repository's zero-rows → wrapped sql.ErrNoRows.
+		return fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
+	}
+	r.AwarenessTime = awarenessTime
+	r.UpdatedAt = time.Now().UTC()
 	f.byID[id] = r
 	return nil
 }
@@ -1539,5 +1570,288 @@ func TestCRAReportsHandler_RunReport_ValidAwareness_Passes_F424(t *testing.T) {
 	}
 	if len(h.runner.captured) != 1 {
 		t.Fatalf("F424: runner.Run should run once for valid awareness_time, got %d", len(h.runner.captured))
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M35 F429 — SetAwareness (PATCH .../awareness): set / clear / validate
+// ----------------------------------------------------------------------------
+
+// newAwarenessRequest builds an echo context for a PATCH .../awareness call
+// with the given raw JSON body and role.
+func newAwarenessRequest(t *testing.T, h *craHarness, reportID uuid.UUID, jsonBody, role string) (*httptest.ResponseRecorder, echo.Context) {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/projects/"+h.projectID.String()+"/cra-reports/"+reportID.String()+"/awareness",
+		strings.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id", "report_id")
+	c.SetParamValues(h.projectID.String(), reportID.String())
+	h.ctxWithRole(c, role)
+	return rec, c
+}
+
+// TestCRAReportsHandler_SetAwareness_Set_RecomputesDeadline_F429 pins the
+// happy set path: PATCH with a valid PAST RFC3339 → 200; the store's
+// UpdateAwarenessTime is called with the parsed instant; exactly one
+// cra_report_awareness_updated audit row lands (ResourceCRAReport); and the
+// response carries the new awareness_time with a FRESHLY recomputed
+// deadline_status (the report is seeded with nil awareness = not_applicable
+// and, after setting a 48h-old awareness on a 24h early_warning report with
+// no submission, the read-time verdict becomes overdue).
+func TestCRAReportsHandler_SetAwareness_Set_RecomputesDeadline_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	// Seeded with nil awareness → pre-PATCH the deadline is not_applicable.
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+
+	awarenessPast := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	body, _ := json.Marshal(map[string]string{"awareness_time": awarenessPast.Format(time.RFC3339)})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F429: SetAwareness status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.awarenessCalls != 1 {
+		t.Fatalf("F429: UpdateAwarenessTime call count = %d, want 1", h.store.awarenessCalls)
+	}
+	if h.store.awarenessArg == nil || !h.store.awarenessArg.Equal(awarenessPast) {
+		t.Errorf("F429: UpdateAwarenessTime arg = %v, want parsed %v", h.store.awarenessArg, awarenessPast)
+	}
+	// Exactly one domain audit row, correct action + resource.
+	if got := len(h.audit.entries); got != 1 {
+		t.Fatalf("F429: expected 1 cra_report_awareness_updated audit entry, got %d", got)
+	}
+	if h.audit.entries[0].Action != model.AuditActionCRAReportAwarenessUpdated {
+		t.Errorf("F429: audit action = %q, want %q", h.audit.entries[0].Action, model.AuditActionCRAReportAwarenessUpdated)
+	}
+	if h.audit.entries[0].ResourceType != model.ResourceCRAReport {
+		t.Errorf("F429: audit resource_type = %q, want %q", h.audit.entries[0].ResourceType, model.ResourceCRAReport)
+	}
+	if h.audit.entries[0].ResourceID == nil || *h.audit.entries[0].ResourceID != rid {
+		t.Errorf("F429: audit resource_id = %v, want report id %s", h.audit.entries[0].ResourceID, rid)
+	}
+	if cleared, _ := h.audit.entries[0].Details["cleared"].(bool); cleared {
+		t.Errorf("F429: audit details.cleared = true on a set, want false")
+	}
+	// Response carries the new awareness_time and a recomputed deadline.
+	var v deadlineReportView
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("F429: decode enriched SetAwareness body: %v; body=%s", err, rec.Body.String())
+	}
+	if v.AwarenessTime == nil || !v.AwarenessTime.Equal(awarenessPast) {
+		t.Errorf("F429: response awareness_time = %v, want %v", v.AwarenessTime, awarenessPast)
+	}
+	if v.DeadlineStatus != string(cra.DeadlineOverdue) {
+		t.Errorf("F429: recomputed deadline_status = %q, want %q (past awareness, unsubmitted early_warning)",
+			v.DeadlineStatus, cra.DeadlineOverdue)
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_Clear_DegradesDeadline_F429 pins the
+// clear path: PATCH {"awareness_time": null} → 200; UpdateAwarenessTime is
+// called with a NIL pointer; the response awareness_time is null and the
+// deadline degrades to not_applicable. The report is seeded WITH a past
+// awareness (overdue) so the clear is observably a state change.
+func TestCRAReportsHandler_SetAwareness_Clear_DegradesDeadline_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	seededAwareness := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), &seededAwareness)
+
+	rec, c := newAwarenessRequest(t, h, rid, `{"awareness_time": null}`, model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F429: clear status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.awarenessCalls != 1 {
+		t.Fatalf("F429: clear UpdateAwarenessTime call count = %d, want 1", h.store.awarenessCalls)
+	}
+	if !h.store.awarenessArgIsNil {
+		t.Errorf("F429: clear must pass a nil *time.Time to UpdateAwarenessTime, got %v", h.store.awarenessArg)
+	}
+	if got := len(h.audit.entries); got != 1 {
+		t.Fatalf("F429: clear should emit 1 audit row, got %d", got)
+	}
+	if cleared, _ := h.audit.entries[0].Details["cleared"].(bool); !cleared {
+		t.Errorf("F429: audit details.cleared = false on a clear, want true")
+	}
+	var v deadlineReportView
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("F429: decode cleared SetAwareness body: %v; body=%s", err, rec.Body.String())
+	}
+	if v.AwarenessTime != nil {
+		t.Errorf("F429: cleared response awareness_time = %v, want null", v.AwarenessTime)
+	}
+	if v.DeadlineStatus != string(cra.DeadlineNotApplicable) {
+		t.Errorf("F429: cleared deadline_status = %q, want %q", v.DeadlineStatus, cra.DeadlineNotApplicable)
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_Malformed_Returns400_F429 pins that a
+// non-RFC3339 awareness_time is a clean 400 BEFORE the store is touched.
+func TestCRAReportsHandler_SetAwareness_Malformed_Returns400_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+
+	rec, c := newAwarenessRequest(t, h, rid, `{"awareness_time":"not-a-date"}`, model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F429: malformed awareness_time status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "awareness_time") {
+		t.Errorf("F429: 400 body should name awareness_time, got %s", rec.Body.String())
+	}
+	if h.store.awarenessCalls != 0 {
+		t.Errorf("F429: malformed awareness must NOT call UpdateAwarenessTime, got %d", h.store.awarenessCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F429: malformed awareness must NOT emit an audit row, got %d", len(h.audit.entries))
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_Future_Returns400_F429 pins the new
+// guard: an awareness instant in the future is rejected with 400 (the
+// Art.14 clock start cannot be in the future) and the store is not touched.
+func TestCRAReportsHandler_SetAwareness_Future_Returns400_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+
+	future := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	body, _ := json.Marshal(map[string]string{"awareness_time": future.Format(time.RFC3339)})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F429: future awareness_time status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "future") {
+		t.Errorf("F429: 400 body should mention 'future', got %s", rec.Body.String())
+	}
+	if h.store.awarenessCalls != 0 {
+		t.Errorf("F429: future awareness must NOT call UpdateAwarenessTime, got %d", h.store.awarenessCalls)
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_AuditFailure_RollsBack_F429 mirrors
+// Decide's F32 audit-or-nothing: a domain audit failure returns 500 (so the
+// ambient TenantTx rolls back the awareness UPDATE). The UPDATE was
+// attempted (audit runs AFTER it) and the audit was attempted exactly once.
+func TestCRAReportsHandler_SetAwareness_AuditFailure_RollsBack_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+	h.audit.err = errors.New("audit storm — F429 regression scenario")
+
+	awarenessPast := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	body, _ := json.Marshal(map[string]string{"awareness_time": awarenessPast.Format(time.RFC3339)})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("F429: audit failure status = %d, want 500 (so TenantTx rolls back); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "audit trail") {
+		t.Errorf("F429: 500 body should mention audit trail; got %s", rec.Body.String())
+	}
+	if h.store.awarenessCalls != 1 {
+		t.Errorf("F429: UpdateAwarenessTime call count = %d, want 1 (audit runs AFTER)", h.store.awarenessCalls)
+	}
+	if got := len(h.audit.entries); got != 1 {
+		t.Errorf("F429: audit.Log should be attempted once (it then fails), got %d entries", got)
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_CrossProject_Returns404_NoUpdate pins
+// F8/F9 for the new route: a report_id belonging to a DIFFERENT project of
+// the same tenant is a 404 BEFORE the UPDATE, with no audit row.
+func TestCRAReportsHandler_SetAwareness_CrossProject_Returns404_NoUpdate(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	otherProject := uuid.New()
+	h.seedReportWith(rid, otherProject, string(cra.ReportTypeEarlyWarning), nil)
+
+	awarenessPast := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	body, _ := json.Marshal(map[string]string{"awareness_time": awarenessPast.Format(time.RFC3339)})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F429: cross-project awareness status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if h.store.awarenessCalls != 0 {
+		t.Errorf("F429: cross-project awareness must NOT call UpdateAwarenessTime, got %d", h.store.awarenessCalls)
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F429: cross-project awareness must NOT emit an audit row, got %d", len(h.audit.entries))
+	}
+	if strings.Contains(rec.Body.String(), otherProject.String()) {
+		t.Errorf("F429: 404 body must not leak foreign project_id: %s", rec.Body.String())
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_StoreErrNoRows_Returns404_F429 pins the
+// TOCTOU path: loadReportScoped passes but the UPDATE matches zero rows
+// (row deleted / RLS-hidden between load and write). The repository wraps
+// this as sql.ErrNoRows and the handler must translate it into a 404, not a
+// 500.
+func TestCRAReportsHandler_SetAwareness_StoreErrNoRows_Returns404_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+	h.store.awarenessErr = fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
+
+	awarenessPast := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	body, _ := json.Marshal(map[string]string{"awareness_time": awarenessPast.Format(time.RFC3339)})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleAdmin)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("F429: store ErrNoRows status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(h.audit.entries) != 0 {
+		t.Errorf("F429: a zero-rows UPDATE must NOT emit an audit row, got %d", len(h.audit.entries))
+	}
+}
+
+// TestCRAReportsHandler_SetAwareness_ReadOnly_Returns403_F429 pins that a
+// read-only role cannot drive the awareness write endpoint.
+func TestCRAReportsHandler_SetAwareness_ReadOnly_Returns403_F429(t *testing.T) {
+	h := newCRAHarness()
+	rid := uuid.New()
+	h.seedReportWith(rid, h.projectID, string(cra.ReportTypeEarlyWarning), nil)
+
+	awarenessPast := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	body, _ := json.Marshal(map[string]string{"awareness_time": awarenessPast.Format(time.RFC3339)})
+
+	rec, c := newAwarenessRequest(t, h, rid, string(body), model.RoleViewer)
+	if err := h.handler.SetAwareness(c); err != nil {
+		t.Fatalf("SetAwareness returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("F429: read-only SetAwareness status = %d, want 403", rec.Code)
+	}
+	if h.store.awarenessCalls != 0 {
+		t.Errorf("F429: read-only SetAwareness must NOT call UpdateAwarenessTime, got %d", h.store.awarenessCalls)
 	}
 }
