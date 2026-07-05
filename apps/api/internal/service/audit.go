@@ -621,6 +621,16 @@ func (s *AuditService) GetAvailableActions() []ActionInfo {
 		{Action: model.AuditActionMETIAssessmentOverrideCleared, Label: "METI Assessment Override Cleared", Category: "meti"},
 		{Action: model.AuditActionCRAReportDecided, Label: "CRA Report Decided", Category: "cra_report"},
 
+		// M35 Wave A (F428): the CRA report awareness editable-later verb.
+		// handler/cra_reports.go SetAwareness emits cra_report_awareness_updated
+		// once per PATCH .../awareness via a direct h.audit.Log call inside the
+		// request TenantTx — the same handler-emit pattern as the F371 verbs
+		// above. Category "cra_report" groups it with the cra_report family in
+		// the dropdown. Registered here in lockstep with the model const, the
+		// F271 expectedEmit set, and allModelActionValues() so a future removal
+		// from either side trips CI (F271 direction 1 / direction 2).
+		{Action: model.AuditActionCRAReportAwarenessUpdated, Label: "CRA Report Awareness Updated", Category: "cra_report"},
+
 		// F381 (M27-A, issue #132): the VEX apply endpoint's
 		// human-approval verb. A 1-click cross-project reuse
 		// (handler/vex.go Apply) emits vex_statement_reused_cross_project

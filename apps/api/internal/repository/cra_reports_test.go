@@ -860,6 +860,123 @@ func TestCRAReportsRepo_UpdateDecision_AlreadyApproved_F31(t *testing.T) {
 	}
 }
 
+// TestCRAReportsRepository_UpdateAwarenessTime_SetsAndScopesTenant pins
+// the M35 Wave A UPDATE argument shape: tenant_id at $1 (load-bearing
+// for the belt-and-braces tenant scope), id at $2, and the
+// nullableTime-bound awareness instant at $3. A non-nil time must land
+// as the concrete time value (set/edit path).
+func TestCRAReportsRepository_UpdateAwarenessTime_SetsAndScopesTenant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	tenantID := uuid.New()
+	id := uuid.New()
+	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
+		WithArgs(
+			tenantID,  // $1 tenant scope
+			id,        // $2
+			awareness, // $3 awareness_time (nullableTime of a non-nil ptr)
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, &awareness); err != nil {
+		t.Fatalf("UpdateAwarenessTime: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCRAReportsRepository_UpdateAwarenessTime_ClearBindsNull verifies
+// the "clear to NULL" semantics: a nil *time.Time passes through
+// nullableTime as SQL NULL at $3 (operator unsets a mis-set awareness,
+// which degrades the compute-on-read deadline to not_applicable).
+func TestCRAReportsRepository_UpdateAwarenessTime_ClearBindsNull(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	tenantID := uuid.New()
+	id := uuid.New()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
+		WithArgs(
+			tenantID, // $1
+			id,       // $2
+			nil,      // $3 awareness_time (nil ptr -> nullableTime -> SQL NULL)
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, nil); err != nil {
+		t.Fatalf("UpdateAwarenessTime (clear): %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCRAReportsRepository_UpdateAwarenessTime_RejectsZero pins the
+// per-argument fail-fast: a zero tenant_id or id must error before any
+// SQL is issued (a zero tenant would otherwise be a cross-tenant write
+// primitive).
+func TestCRAReportsRepository_UpdateAwarenessTime_RejectsZero(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	tenantID := uuid.New()
+	id := uuid.New()
+	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+
+	if err := repo.UpdateAwarenessTime(context.Background(), uuid.Nil, id, &awareness); err == nil {
+		t.Fatal("expected error for zero tenant_id, got nil")
+	}
+	if err := repo.UpdateAwarenessTime(context.Background(), tenantID, uuid.Nil, &awareness); err == nil {
+		t.Fatal("expected error for zero id, got nil")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no SQL should have been issued: %v", err)
+	}
+}
+
+// TestCRAReportsRepository_UpdateAwarenessTime_NoRowsErrors verifies the
+// RowsAffected==0 -> wrapped sql.ErrNoRows contract that the handler
+// relies on to surface a 404. Zero rows happens when (tenant, id) does
+// not exist for this session OR when RLS hides a foreign-tenant row.
+func TestCRAReportsRepository_UpdateAwarenessTime_NoRowsErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err = repo.UpdateAwarenessTime(context.Background(), uuid.New(), uuid.New(), &awareness)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected wrapped sql.ErrNoRows, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
 // TestCRAReport_JSONShape pins the wire JSON tags. M1 F28 fix
 // regression: the Web UI relies on snake_case keys; a missing or
 // renamed tag would silently break the /cra/reports page. We do not

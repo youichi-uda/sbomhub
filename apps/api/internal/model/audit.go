@@ -373,6 +373,14 @@ const (
 	// AI-disabled audit actions (see service/cra).
 	AuditActionCRAReportDecided = "cra_report_decided"
 
+	// AuditActionCRAReportAwarenessUpdated is emitted when a human operator
+	// sets/edits/clears the Art.14 awareness instant on a cra_reports row via
+	// PATCH .../awareness (handler/cra_reports.go SetAwareness). Handler-emit
+	// discipline (F32/F422): registered in service/audit.go GetAvailableActions()
+	// and pinned in the F271 expectedEmit + allModelActionValues() sets in the
+	// same change. resource_type = ResourceCRAReport, resource_id = cra_reports.id.
+	AuditActionCRAReportAwarenessUpdated = "cra_report_awareness_updated"
+
 	// AuditActionVEXReusedCrossProject is emitted by the VEX apply
 	// handler (handler/vex.go Apply) when a human 1-click confirms a
 	// cross-project VEX reuse suggestion (M27-A / F381, issue #132):

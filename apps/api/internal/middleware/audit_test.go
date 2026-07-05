@@ -2912,6 +2912,13 @@ func TestAuditEmitRegistryParity_F271(t *testing.T) {
 		// Registered in service/audit.go GetAvailableActions() in lockstep
 		// (direction-1 asserts this entry has a dropdown registration).
 		model.AuditActionCRASubmissionRecorded: true, // M33 handler-side (cra_submissions.go Record)
+		// M35 Wave A (F428): the CRA report awareness editable-later verb,
+		// emitted by handler/cra_reports.go SetAwareness via a direct
+		// h.audit.Log call inside the request TenantTx — the same handler-side
+		// pattern as the F371 / F381 / M32 / M33 verbs above. Registered in
+		// service/audit.go GetAvailableActions() in lockstep (direction-1
+		// asserts this entry has a dropdown registration).
+		model.AuditActionCRAReportAwarenessUpdated: true, // F422 handler-side (cra_reports.go SetAwareness)
 	}
 
 	// Documented exception allowlist: verbs the middleware classifier
@@ -3185,6 +3192,11 @@ func allModelActionValues() map[string]bool {
 		// by GetAvailableActions() directly, so direction-2 must recognise
 		// it as a valid registry value.
 		model.AuditActionCRASubmissionRecorded: true,
+		// M35 Wave A (F428): the CRA report awareness-updated handler-emit
+		// verb, defined in the model/audit.go handler-emit section and
+		// referenced by GetAvailableActions() directly, so direction-2 must
+		// recognise it as a valid registry value.
+		model.AuditActionCRAReportAwarenessUpdated: true,
 	}
 }
 

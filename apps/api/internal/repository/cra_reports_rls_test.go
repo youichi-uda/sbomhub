@@ -36,6 +36,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -316,6 +317,133 @@ func TestCRAReports_AwarenessTime_RLS_RoundTrip(t *testing.T) {
 	}
 	if leaked != nil {
 		t.Fatalf("RLS leak: tenant B surfaced tenant A's cra_report (awareness_time=%v)", leaked.AwarenessTime)
+	}
+}
+
+// TestCRAReports_UpdateAwarenessTime_RLS proves the M35 Wave A write
+// path is tenant-safe end-to-end: tenant B cannot UPDATE tenant A's
+// awareness_time. We deliberately pass tenantID = tenantA (so the
+// method's explicit `tenant_id = $1` clause is *satisfied*) while
+// running under tenant B's session -- this isolates the migration 038
+// FORCE RLS policy as the load-bearing guard. RLS hides A's row from
+// B, so the UPDATE matches zero rows and UpdateAwarenessTime returns
+// the wrapped sql.ErrNoRows the handler surfaces as a 404. We then
+// re-read as tenant A and confirm the original awareness is untouched
+// (no silent cross-tenant mutation slipped through).
+func TestCRAReports_UpdateAwarenessTime_RLS(t *testing.T) {
+	appURL, migURL := craReportsTestEnv(t)
+
+	migDB := openOrSkipCRAReports(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyCRAReports(t, migDB) {
+		return
+	}
+	// Skip cleanly on a schema that predates migration 054.
+	var hasCol bool
+	if err := migDB.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'cra_reports'
+			  AND column_name = 'awareness_time'
+		)
+	`).Scan(&hasCol); err != nil {
+		t.Skipf("awareness_time column check failed: %v -- skipping", err)
+	}
+	if !hasCol {
+		t.Skip("cra_reports.awareness_time not present -- run migration 054 first")
+	}
+
+	appDB := openOrSkipCRAReports(t, appURL)
+	defer appDB.Close()
+
+	tenantA := seedTenantForCRAReports(t, migDB, "UAW-A")
+	tenantB := seedTenantForCRAReports(t, migDB, "UAW-B")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
+	})
+
+	repo := NewCRAReportsRepository(appDB)
+	original := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	reportID := uuid.New()
+
+	// --- Step 1: as tenant A, insert a report carrying the original
+	// awareness instant.
+	txA, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantA: %v", err)
+	}
+	if _, err := txA.Exec(`SET LOCAL app.current_tenant_id = '` + tenantA.String() + `'`); err != nil {
+		_ = txA.Rollback()
+		t.Fatalf("SET LOCAL tenantA: %v", err)
+	}
+	ctxA := database.WithTx(context.Background(), txA)
+	rep := &CRAReport{
+		ID:              reportID,
+		TenantID:        tenantA,
+		ProjectID:       uuid.New(),
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2025-UAW",
+		ReportType:      "early_warning",
+		Lang:            "ja",
+		DraftText:       "awareness update-rls body",
+		Evidence:        validCRAEvidence(),
+		AwarenessTime:   &original,
+	}
+	if err := repo.Insert(ctxA, rep); err != nil {
+		_ = txA.Rollback()
+		t.Fatalf("Insert under tenant A: %v", err)
+	}
+	if err := txA.Commit(); err != nil {
+		t.Fatalf("commit tenantA: %v", err)
+	}
+
+	// --- Step 2: under tenant B's session, attempt to overwrite tenant
+	// A's awareness. tenantID = tenantA is passed on purpose so only RLS
+	// (not the explicit tenant_id clause) can stop the write. Expect
+	// zero rows -> wrapped sql.ErrNoRows.
+	attacker := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	txB, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantB: %v", err)
+	}
+	if _, err := txB.Exec(`SET LOCAL app.current_tenant_id = '` + tenantB.String() + `'`); err != nil {
+		_ = txB.Rollback()
+		t.Fatalf("SET LOCAL tenantB: %v", err)
+	}
+	ctxB := database.WithTx(context.Background(), txB)
+	updErr := repo.UpdateAwarenessTime(ctxB, tenantA, reportID, &attacker)
+	if updErr == nil {
+		_ = txB.Rollback()
+		t.Fatalf("RLS breach: tenant B was able to UPDATE tenant A's awareness_time")
+	}
+	if !errors.Is(updErr, sql.ErrNoRows) {
+		_ = txB.Rollback()
+		t.Fatalf("expected wrapped sql.ErrNoRows from a cross-tenant UpdateAwarenessTime, got %v", updErr)
+	}
+	if err := txB.Rollback(); err != nil {
+		t.Fatalf("rollback tenantB: %v", err)
+	}
+
+	// --- Step 3: re-read as tenant A and confirm the awareness is
+	// untouched (no silent cross-tenant mutation slipped through).
+	txA2, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("appDB.Begin tenantA2: %v", err)
+	}
+	defer txA2.Rollback()
+	if _, err := txA2.Exec(`SET LOCAL app.current_tenant_id = '` + tenantA.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenantA2: %v", err)
+	}
+	ctxA2 := database.WithTx(context.Background(), txA2)
+	got, err := repo.Get(ctxA2, tenantA, reportID)
+	if err != nil {
+		t.Fatalf("Get under tenant A2: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("expected tenant A's row to still exist after the blocked cross-tenant UPDATE")
+	}
+	if got.AwarenessTime == nil || !got.AwarenessTime.Equal(original) {
+		t.Fatalf("cross-tenant mutation leaked: awareness_time is now %v, want unchanged %v", got.AwarenessTime, original)
 	}
 }
 

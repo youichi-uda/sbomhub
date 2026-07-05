@@ -590,6 +590,67 @@ func (r *CRAReportsRepository) UpdateDecision(ctx context.Context, tenantID, id 
 	return nil
 }
 
+// UpdateAwarenessTime overwrites one cra_reports row's awareness_time
+// (the Art.14 clock-start instant, migration 054) in place. It is the
+// sole writer behind the awareness editable-later PATCH endpoint
+// (M35 / handler/cra_reports.go SetAwareness): the M34 run path could
+// only capture-at-generation, so a web-only operator with no run form
+// had no way to set — or correct — a mis-set awareness. This method
+// closes that gap; the compute-on-read deadline (M34) then re-derives
+// automatically on the next read, so no derived state is persisted.
+//
+// A nil awarenessTime binds SQL NULL (nullableTime), which is the
+// "clear" semantics the endpoint exposes: unsetting awareness degrades
+// the derived deadline to not_applicable.
+//
+// tenantID MUST come from the authenticated session, never a
+// user-supplied body -- otherwise this becomes a cross-tenant write
+// primitive. The write is tenant-scoped by BOTH an explicit
+// `tenant_id = $1` clause AND the migration 038 FORCE RLS policy
+// (belt + braces, same rationale as UpdateDecision): under RLS a
+// foreign-tenant id is invisible, so `SET LOCAL app.current_tenant_id`
+// on the ambient TenantTx (joined via r.q(ctx)) makes another tenant's
+// row match zero rows here.
+//
+// Returns sql.ErrNoRows wrapped as a typed error when the UPDATE
+// matches zero rows -- either (tenant, id) does not exist for this
+// session or RLS hides a foreign-tenant row -- so the handler can
+// surface a 404, exactly like UpdateDecision.
+func (r *CRAReportsRepository) UpdateAwarenessTime(
+	ctx context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time,
+) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("CRAReportsRepository.UpdateAwarenessTime: tenant_id is required")
+	}
+	if id == uuid.Nil {
+		return fmt.Errorf("CRAReportsRepository.UpdateAwarenessTime: id is required")
+	}
+
+	const query = `
+		UPDATE cra_reports SET
+			awareness_time = $3,
+			updated_at     = NOW()
+		WHERE tenant_id = $1 AND id = $2
+	`
+
+	res, err := r.q(ctx).ExecContext(ctx, query,
+		tenantID, id, nullableTime(awarenessTime),
+	)
+	if err != nil {
+		return fmt.Errorf("update cra_reports awareness_time: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update cra_reports awareness_time (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		// Same shape as sql.ErrNoRows so handlers can errors.Is-check
+		// and return a 404 (row absent, wrong tenant, or RLS-hidden).
+		return fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
+	}
+	return nil
+}
+
 // MarkSubmitted flips one cra_reports row from its current publication
 // state to 'submitted'. This is the state transition migration 038
 // (:86-96) deliberately deferred to the application layer: it is the
