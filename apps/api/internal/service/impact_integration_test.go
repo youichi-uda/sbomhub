@@ -61,8 +61,9 @@ import (
 
 // setVulnKEVEPSS marks a seeded global vulnerability as KEV-listed. The
 // vulnerabilities table is global (no RLS), so the migrator pool updates it
-// directly. epss_score is intentionally left alone: it is absent from the
-// canonical schema, so the impact view surfaces EPSS as a fixed 0 (mirroring
+// directly. epss_score is intentionally left alone: this seed never syncs an
+// EPSS score, so the row's epss_score stays NULL and the impact view's
+// COALESCE(epss_score, 0) (M36-A / F432) surfaces EPSS as 0 (mirroring
 // SearchByCVE / GetTopRisksByTenant) — see repository/impact.go.
 func setVulnKEVEPSS(t *testing.T, migDB *sql.DB, vulnID uuid.UUID, inKEV bool) {
 	t.Helper()
@@ -159,8 +160,8 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 	}
 
 	// Case 4: metadata rollup matches the seeded vulnerability (seedVulnVS uses
-	// severity=HIGH, cvss=7.5; setVulnKEVEPSS set in_kev=true; EPSS is a fixed
-	// 0 by design until 006_epss lands).
+	// severity=HIGH, cvss=7.5; setVulnKEVEPSS set in_kev=true; no EPSS is synced
+	// for this seed row, so its epss_score stays NULL and COALESCEs to 0).
 	if got.Severity != "HIGH" {
 		t.Errorf("severity = %q, want HIGH", got.Severity)
 	}
@@ -171,7 +172,7 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 		t.Errorf("in_kev = false, want true (KEV rollup)")
 	}
 	if got.EPSSScore != 0 {
-		t.Errorf("epss_score = %v, want 0 (fixed until 006_epss)", got.EPSSScore)
+		t.Errorf("epss_score = %v, want 0 (no EPSS synced for this seed row)", got.EPSSScore)
 	}
 
 	// Case 1: exactly A and B affected; C never appears.

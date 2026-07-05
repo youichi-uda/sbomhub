@@ -93,12 +93,16 @@ func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]mod
 
 // GetTopRisksByTenant returns the top vulnerabilities for a tenant's projects
 func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID uuid.UUID, limit int) ([]model.TopRisk, error) {
-	// Note: If epss_score column doesn't exist, this will still work with 0 values
-	// Run 006_epss.sql migration to enable EPSS scores
+	// M36-A / F432: epss_score is now in the canonical migration chain
+	// (055_vulnerabilities_epss), so this reads the real column instead of the
+	// old 0::numeric sentinel. COALESCE(v.epss_score, 0) keeps it NULL-safe: the
+	// column stays NULL until the scheduled epss_sync (M36-B) populates it, and
+	// scanning a SQL NULL into the bare float64 TopRisk.EPSSScore would error.
+	// An un-synced row therefore still reads 0, exactly as before.
 	query := `
 		SELECT DISTINCT ON (v.cve_id)
 			v.cve_id,
-			0::numeric as epss_score,
+			COALESCE(v.epss_score, 0) as epss_score,
 			v.cvss_score,
 			v.severity,
 			p.id as project_id,

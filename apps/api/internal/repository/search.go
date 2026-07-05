@@ -29,10 +29,16 @@ func (r *SearchRepository) q(ctx context.Context) database.Queryable {
 
 // SearchByCVE searches for all projects affected by a specific CVE
 func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*model.CVESearchResult, error) {
-	// First, get the vulnerability info
-	// Note: Using 0 for epss_score until 006_epss.sql migration is applied
+	// First, get the vulnerability info.
+	// M36-A / F432: epss_score is now in the canonical migration chain
+	// (055_vulnerabilities_epss), so this reads the real column instead of the
+	// old 0::numeric sentinel. COALESCE(epss_score, 0) keeps it NULL-safe (the
+	// column stays NULL until the scheduled epss_sync populates it, and scanning
+	// a SQL NULL into the bare float64 CVESearchResult.EPSSScore would error);
+	// the COALESCE holds the SAME 5th position in the positional SELECT, so the
+	// Scan target order below is unchanged.
 	vulnQuery := `
-		SELECT id, cve_id, description, cvss_score, 0::numeric, severity
+		SELECT id, cve_id, description, cvss_score, COALESCE(epss_score, 0), severity
 		FROM vulnerabilities
 		WHERE cve_id = $1
 		LIMIT 1
@@ -198,10 +204,18 @@ func (r *SearchRepository) SearchByComponent(ctx context.Context, name string, v
 }
 
 func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, componentID uuid.UUID) ([]model.Vulnerability, error) {
-	// Note: Using 0 for epss_score/percentile until 006_epss.sql migration is applied
+	// M36-A / F432: epss_score/epss_percentile are now in the canonical migration
+	// chain (055_vulnerabilities_epss), so this reads the real columns instead of
+	// the old 0::numeric sentinels. COALESCE(v.epss_score, 0) /
+	// COALESCE(v.epss_percentile, 0) keep it NULL-safe (both columns stay NULL
+	// until the scheduled epss_sync populates them, and scanning a SQL NULL into
+	// the bare float64 locals below would error). They hold the SAME 6th/7th
+	// positions in the positional SELECT, so the Scan target order is unchanged;
+	// the `> 0` guard below still leaves the model pointers nil for an un-synced
+	// (COALESCE-0) row, preserving the web >0 EPSS-badge suppression (F391).
 	query := `
 		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
-		       0::numeric, 0::numeric,
+		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
 		       v.source, v.published_at, v.updated_at
 		FROM vulnerabilities v
 		INNER JOIN component_vulnerabilities cv ON v.id = cv.vulnerability_id

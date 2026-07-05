@@ -20,14 +20,18 @@ import (
 // answer 404, keeping "unknown CVE" distinct from "known CVE, zero affected
 // projects" (a valid 200 with an empty list).
 //
-// EPSS note: epss_score is only added by the optional packages/db 006_epss.sql
-// migration and is absent from the canonical apps/api migration sequence, so —
-// exactly like SearchByCVE and DashboardRepository.GetTopRisksByTenant — this
-// selects a fixed 0::numeric rather than the column. When 006_epss lands, this
-// and its siblings switch to the real column in lockstep. Until then the 0 is a
-// sentinel, not a prediction: the web blast-radius summary treats epss_score = 0
-// as "n/a" and suppresses the EPSS badge (F391) so a KEV/critical CVE never
-// shows a misleading "EPSS 0.0%".
+// EPSS note (M36-A / F432): epss_score is now part of the canonical apps/api
+// migration chain (055_vulnerabilities_epss promotes the orphan packages/db
+// 006_epss.sql), so — exactly like SearchByCVE and
+// DashboardRepository.GetTopRisksByTenant — this reads the real column instead
+// of the old fixed 0::numeric sentinel. It reads it NULL-safely with
+// COALESCE(epss_score, 0): the column is nullable and stays NULL until the
+// scheduled epss_sync (M36-B) populates it, and scanning a SQL NULL into the
+// bare float64 CVEImpactMeta.EPSSScore would error (there is no ErrNoRows
+// fallback for a KNOWN CVE, so it would 500). COALESCE reproduces the old
+// sentinel-0 exactly for an un-synced row, and the web blast-radius summary
+// still treats epss_score = 0 as "n/a" and suppresses the EPSS badge (F391) so
+// a KEV/critical CVE never shows a misleading "EPSS 0.0%".
 //
 // Nullable-metadata note (F394): vulnerabilities.severity (VARCHAR(20)) and
 // cvss_score (DECIMAL(3,1)) are both NULLABLE — 001_init declares neither NOT
@@ -46,7 +50,7 @@ func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID
 			id,
 			COALESCE(severity, 'UNKNOWN') AS severity,
 			COALESCE(cvss_score, 0)       AS cvss_score,
-			0::numeric                    AS epss_score,
+			COALESCE(epss_score, 0)       AS epss_score,
 			in_kev
 		FROM vulnerabilities
 		WHERE cve_id = $1
