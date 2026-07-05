@@ -576,6 +576,58 @@ func (r *CRAReportsRepository) UpdateDecision(ctx context.Context, tenantID, id 
 	return nil
 }
 
+// MarkSubmitted flips one cra_reports row from its current publication
+// state to 'submitted'. This is the state transition migration 038
+// (:86-96) deliberately deferred to the application layer: it is the
+// publication lifecycle, NOT the decision lifecycle, and is written by
+// the (manual) submission-record action -- the Record path in the Wave B
+// (F419) handler, inside the SAME TenantTx that INSERTs the
+// cra_submissions row and emits the cra_submission_recorded audit row.
+// Reaching this method is what first makes cra_reports.state='submitted'
+// attainable in prod (the dead 'submitted' UI is otherwise unreachable).
+//
+// The `AND decision = 'approved'` guard is belt-and-braces with the
+// handler's approved-only 409 gate: only an approved report is
+// submittable ("humans approve before submit"). A rejected / pending /
+// edited report is never flipped, even if a caller bypasses the handler.
+//
+// Idempotent by construction: the guard matches on decision, not state,
+// so re-submitting an already-'submitted' approved report matches the
+// same row and keeps state='submitted' (an incident produces many
+// submissions over its Art.14 timeline). n == 0 is therefore NOT an
+// error here -- unlike UpdateDecision, whose zero-rows case signals
+// "already decided" and is surfaced as a 409. Here zero rows can only
+// mean wrong id / foreign tenant / non-approved report, all of which the
+// handler has already gated; a stray zero-row UPDATE is a tolerated
+// no-op, not a failure. We still read RowsAffected so a driver-side
+// RowsAffected error is surfaced.
+func (r *CRAReportsRepository) MarkSubmitted(ctx context.Context, tenantID, reportID uuid.UUID) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("CRAReportsRepository.MarkSubmitted: tenant_id is required")
+	}
+	if reportID == uuid.Nil {
+		return fmt.Errorf("CRAReportsRepository.MarkSubmitted: id is required")
+	}
+
+	const query = `
+		UPDATE cra_reports SET
+			state      = 'submitted',
+			updated_at = NOW()
+		WHERE tenant_id = $1 AND id = $2 AND decision = 'approved'
+	`
+
+	res, err := r.q(ctx).ExecContext(ctx, query, tenantID, reportID)
+	if err != nil {
+		return fmt.Errorf("update cra_reports state (mark submitted): %w", err)
+	}
+	if _, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("update cra_reports state (mark submitted, RowsAffected): %w", err)
+	}
+	// n == 0 is a tolerated idempotent no-op (see doc comment); the
+	// handler's approved-only guard is the authoritative check.
+	return nil
+}
+
 // scanCRAReportRow scans one cra_reports row from either *sql.Row or
 // *sql.Rows. Uses the shared rowScanner interface from
 // advisory_excerpts.go.
