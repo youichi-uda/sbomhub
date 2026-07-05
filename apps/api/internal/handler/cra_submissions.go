@@ -223,11 +223,13 @@ func (h *CRASubmissionsHandler) Record(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to mark cra report submitted"})
 	}
 
-	// F208 / M14-1: publish the newly-minted cra_submissions UUID so the
-	// audit middleware records audit_logs.resource_id = sub.ID (joinable
-	// to cra_submissions) instead of the parent project UUID from :id.
-	middleware.SetAuditResourceID(c, sub.ID)
-
+	// No SetAuditResourceID here (M33 F419 Phase D): the audit middleware
+	// deliberately SKIPS POST .../submissions (determineActionAndResource
+	// returns "" for this route) because it cannot name a resource that is
+	// join-correct on both a 2xx (the new submission) and a 4xx (no
+	// submission exists). The authoritative record is the domain row below,
+	// whose ResourceID is set directly to sub.ID.
+	//
 	// Emit the domain-level audit row (cra_submission_recorded). Written
 	// inside the same ambient TenantTx as the INSERT + state flip so the
 	// (submission, state, audit) triple commits atomically.

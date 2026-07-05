@@ -297,17 +297,16 @@ func TestCRASubmissionsHandler_Record_HappyPath(t *testing.T) {
 		t.Errorf("audit details has_reference = %v, want true", entry.Details["has_reference"])
 	}
 
-	// F208: audit_resource_id context key must hold the NEW submission id.
-	got, ok := c.Get(middleware.ContextKeyAuditResourceID).(uuid.UUID)
-	if !ok {
-		t.Fatalf("F208: audit_resource_id context key must hold uuid.UUID, got %T",
-			c.Get(middleware.ContextKeyAuditResourceID))
-	}
-	if got != h.submissionID {
-		t.Errorf("F208: audit_resource_id = %s, want %s (submission id, NOT project)", got, h.submissionID)
-	}
-	if got == h.projectID {
-		t.Fatalf("F208 regression: audit_resource_id = parent project UUID")
+	// M33 F419 (Phase D): the handler does NOT set the audit_resource_id
+	// context key, because the audit middleware deliberately SKIPS POST
+	// .../submissions (determineActionAndResource returns "" — see
+	// TestDetermineActionAndResource_CRASubmissions_F419). The authoritative
+	// join key is the domain row's ResourceID asserted above (== submissionID);
+	// there is no best-effort middleware row to point anywhere, so leaving the
+	// context key unset is correct (a set value would be dead state).
+	if v := c.Get(middleware.ContextKeyAuditResourceID); v != nil {
+		t.Errorf("audit_resource_id context key = %v, want unset (middleware skips "+
+			"POST .../submissions; the domain audit row carries the submission id)", v)
 	}
 
 	// Response body echoes the created submission.

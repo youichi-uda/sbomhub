@@ -129,6 +129,63 @@ func TestDetermineActionAndResource_APIKey(t *testing.T) {
 	}
 }
 
+// TestDetermineActionAndResource_CRASubmissions_F419 pins the M33 Phase D
+// fix: POST /cra-reports/:report_id/submissions must NOT classify as
+// cra_report.run. Combined with the handler's resource_id that would have
+// produced a phantom cra_report.run row mis-joining a cra_submissions PK
+// under resource_type=cra_report (the F208/F217 break the dedicated
+// ResourceCRASubmission dimension exists to prevent), and a false
+// "submission" row on a rejected 4xx. The middleware suppresses the
+// best-effort row for the POST (the handler emits the authoritative
+// cra_submission_recorded domain row); the GET timeline still audits as
+// cra_report.viewed against the valid :report_id.
+func TestDetermineActionAndResource_CRASubmissions_F419(t *testing.T) {
+	cases := []struct {
+		name         string
+		method       string
+		path         string
+		wantAction   string
+		wantResource string
+	}{
+		{
+			name:         "POST /cra-reports/:report_id/submissions is suppressed (not cra_report.run)",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/submissions",
+			wantAction:   "",
+			wantResource: "",
+		},
+		{
+			name:         "GET /cra-reports/:report_id/submissions audits as cra_report.viewed (valid :report_id join)",
+			method:       "GET",
+			path:         "/api/v1/projects/:id/cra-reports/:report_id/submissions",
+			wantAction:   model.ActionCRAReportViewed,
+			wantResource: model.ResourceCRAReport,
+		},
+		{
+			// Guard: the /submissions suffix check must not shadow the
+			// existing POST /cra-reports/run classification.
+			name:         "POST /cra-reports/run still classifies as cra_report.run",
+			method:       "POST",
+			path:         "/api/v1/projects/:id/cra-reports/run",
+			wantAction:   model.ActionCRAReportRun,
+			wantResource: model.ResourceCRAReport,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			action, resourceType := determineActionAndResource(tc.method, tc.path)
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q (method=%s path=%s)",
+					action, tc.wantAction, tc.method, tc.path)
+			}
+			if resourceType != tc.wantResource {
+				t.Errorf("resourceType = %q, want %q (method=%s path=%s)",
+					resourceType, tc.wantResource, tc.method, tc.path)
+			}
+		})
+	}
+}
+
 // TestDetermineActionAndResource_ProjectNotShadowedByAPIKey is the inverse
 // guard: classifying /apikeys before /projects must not regress regular
 // project routes such as /projects/:id or /projects/:id/sbom.

@@ -344,6 +344,26 @@ func determineActionAndResource(method, path string) (action, resourceType strin
 				if strings.HasSuffix(path, "/reanalyse") {
 					return model.ActionCRAReportReanalysed, model.ResourceCRAReport
 				}
+				// M33 F419 (Phase D — Codex adjunct v2 18th + R1 concur): a
+				// submission POST is NOT a cra_report run. The handler
+				// (handler/cra_submissions.go Record) emits the authoritative
+				// F32 audit-or-nothing cra_submission_recorded row — with
+				// resource_id = the new cra_submissions PK — and ONLY on
+				// success. The middleware classifier cannot name a stable
+				// resource for this route: on a 2xx the subject is the new
+				// submission (sub.ID) but on a 4xx no submission exists and
+				// extractResourceID falls back to :report_id (a cra_reports
+				// PK). Emitting cra_report.run here would (a) mis-join the
+				// success row — a cra_submissions PK filed under
+				// resource_type=cra_report, the exact F208/F217 break the
+				// dedicated ResourceCRASubmission dimension exists to prevent —
+				// and (b) falsely record a "submission" on a rejected 4xx.
+				// Suppress the best-effort middleware row; the handler's domain
+				// row is the single source of truth. (GET .../submissions still
+				// audits as cra_report.viewed against the valid :report_id.)
+				if strings.HasSuffix(path, "/submissions") {
+					return "", ""
+				}
 				return model.ActionCRAReportRun, model.ResourceCRAReport
 			case "PUT", "PATCH":
 				return model.ActionCRAReportDecisionUpdated, model.ResourceCRAReport
