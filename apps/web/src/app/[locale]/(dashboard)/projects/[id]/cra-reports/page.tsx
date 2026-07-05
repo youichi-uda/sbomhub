@@ -316,6 +316,29 @@ export default function CRAReportsPage() {
   );
 
   /**
+   * Set / edit / clear a report's awareness_time (Art.14 clock start, M35).
+   * Non-optimistic (mirrors handleReanalyse, not decideOptimistically): an
+   * awareness edit never removes the row from any pending list, so we just
+   * PATCH and refetch. The server recomputes deadline_status/deadline_at on
+   * read (M34 compute-on-read), so loadReports() lands the recomputed verdict
+   * along with the new awareness_time. Pass null to clear (unset to NULL).
+   */
+  const handleSetAwareness = useCallback(
+    async (report: CRAReport, awarenessTime: string | null) => {
+      setBusyReportId(report.id);
+      try {
+        await api.craReports.awareness(projectId, report.id, awarenessTime);
+        await loadReports();
+      } catch (err) {
+        handleError(err, t("setAwarenessFailed"));
+      } finally {
+        setBusyReportId(null);
+      }
+    },
+    [projectId, loadReports, handleError, t],
+  );
+
+  /**
    * Record a human-attested submission to an authority. On success the row
    * is optimistically flipped to state='submitted' (mirroring the backend's
    * one-tx side-effect) and the created submission is prepended to the
@@ -535,6 +558,7 @@ export default function CRAReportsPage() {
               onEdit={handleEdit}
               onReject={handleReject}
               onReanalyse={handleReanalyse}
+              onSetAwareness={handleSetAwareness}
               onRecordSubmission={handleRecordSubmission}
             />
           ))}

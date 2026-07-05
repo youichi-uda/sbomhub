@@ -2871,6 +2871,23 @@ export const api = {
           body: JSON.stringify(input),
         },
       ),
+    // M35 (Wave B, F430): set / edit / clear the Art.14 awareness instant on
+    // an existing report. Non-null RFC3339 (UTC) sets/edits; null clears
+    // (unset to NULL, deadline degrades to not_applicable). Response is the
+    // enriched CRAReport with deadline recomputed on read (M34). Frozen
+    // contract: PATCH .../awareness, body { awareness_time: <RFC3339>|null }.
+    awareness: (
+      projectId: string,
+      reportId: string,
+      awarenessTime: string | null,
+    ) =>
+      request<CRAReport>(
+        `/api/v1/projects/${projectId}/cra-reports/${reportId}/awareness`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ awareness_time: awarenessTime }),
+        },
+      ),
     reanalyse: (
       projectId: string,
       reportId: string,

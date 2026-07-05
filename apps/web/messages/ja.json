@@ -1310,7 +1310,8 @@
       "editFailed": "編集の保存に失敗しました",
       "rejectFailed": "却下に失敗しました",
       "reanalyseFailed": "再生成に失敗しました",
-      "recordSubmissionFailed": "提出記録に失敗しました"
+      "recordSubmissionFailed": "提出記録に失敗しました",
+      "setAwarenessFailed": "認知日時の更新に失敗しました"
     },
     "Filter": {
       "title": "フィルタ",
@@ -1381,6 +1382,12 @@
       "rejectReasonLabel": "却下理由",
       "rejectReasonPlaceholder": "任意 — この AI 下書きが不適切な理由を記入してください",
       "rejectConfirm": "却下を確定",
+      "awarenessUnset": "未設定",
+      "editAwareness": "認知日時を編集",
+      "awarenessHint": "Art.14 の起算点となる認知日時です。 未来の日時は指定できません。 クリアすると期限計算が無効 (適用外) になります。",
+      "saveAwareness": "保存",
+      "clearAwareness": "クリア",
+      "cancelAwareness": "キャンセル",
       "alreadyDecided": "この報告書は既に {decision} の判断が記録されています。 新規判断は監査ログに上書きされます。"
     }
   },

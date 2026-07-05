@@ -90,6 +90,20 @@ function nowLocalDatetime(): string {
   return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
 }
 
+/**
+ * Convert an RFC3339 UTC instant (awareness_time) to the local, timezone-naive
+ * `YYYY-MM-DDTHH:mm` string a <input type="datetime-local"> expects. Inverse of
+ * `new Date(localValue).toISOString()` used on save. Returns "" for an
+ * unparseable value so the AwarenessForm opens empty rather than "Invalid
+ * Date". (M35 Wave B: prefill the awareness editor from the stored instant.)
+ */
+function rfcToLocalDatetime(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const offsetMs = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
 export interface ReportCardProps {
   report: CRAReport;
   projectId: string;
@@ -104,6 +118,18 @@ export interface ReportCardProps {
   onEdit: (report: CRAReport, values: ReportEditFormValues) => Promise<void> | void;
   onReject: (report: CRAReport, note?: string) => Promise<void> | void;
   onReanalyse: (report: CRAReport) => Promise<void> | void;
+  /**
+   * Set, edit, or clear the report's awareness_time (Art.14 clock start, M35
+   * Wave B). page.tsx PATCHes .../awareness and refetches (non-optimistic —
+   * an awareness edit never removes the row from a pending list). Pass an
+   * RFC3339 UTC string to set/edit, or null to clear (unset). The server
+   * recomputes the deadline on read, so the refetched card reflects the new
+   * deadline verdict.
+   */
+  onSetAwareness: (
+    report: CRAReport,
+    awarenessTime: string | null,
+  ) => Promise<void> | void;
   /**
    * Record a human-attested submission to an authority. Only invoked for
    * approved reports (the button is disabled otherwise). page.tsx maps the
@@ -300,6 +326,7 @@ export function ReportCard({
   onEdit,
   onReject,
   onReanalyse,
+  onSetAwareness,
   onRecordSubmission,
 }: ReportCardProps) {
   const t = useTranslations("CRAReports.ReportCard");
@@ -310,9 +337,9 @@ export function ReportCard({
   const tDeadline = useTranslations("CRAReports.Deadline");
   const locale = useLocale();
 
-  const [mode, setMode] = useState<"view" | "edit" | "reject" | "submit">(
-    "view",
-  );
+  const [mode, setMode] = useState<
+    "view" | "edit" | "reject" | "submit" | "awareness"
+  >("view");
   const [draftExpanded, setDraftExpanded] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
 
@@ -412,17 +439,33 @@ export function ReportCard({
             )}
           </div>
         </div>
-        {/* Read-only awareness instant (M34). Shown when captured so the
-            deadline verdict badge above is explainable — this is the Art.14
-            clock start. Capture-at-generation only; not editable here. */}
-        {report.awareness_time && (
-          <p
-            className="mt-1 text-xs text-muted-foreground"
-            data-testid="cra-awareness-time"
-          >
-            {safeT(tDeadline, "awarenessTime")}:{" "}
-            {formatTimestamp(report.awareness_time, locale)}
-          </p>
+        {/* Awareness instant (M34 capture, M35 editable). The Art.14 clock
+            start that explains the deadline badge above. M35 Wave B made it
+            editable so a web-only operator can set / correct / clear it after
+            generation; the read-only line + edit affordance show whenever the
+            AwarenessForm (rendered in CardContent below) is not open. */}
+        {mode !== "awareness" && (
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="cra-awareness-time"
+            >
+              {safeT(tDeadline, "awarenessTime")}:{" "}
+              {report.awareness_time
+                ? formatTimestamp(report.awareness_time, locale)
+                : t("awarenessUnset")}
+            </p>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setMode("awareness")}
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="cra-awareness-edit"
+            >
+              <Edit3 className="h-3 w-3" />
+              {t("editAwareness")}
+            </button>
+          </div>
         )}
       </CardHeader>
 
@@ -612,6 +655,18 @@ export function ReportCard({
             disabled={busy}
             onSubmit={async (values) => {
               await onRecordSubmission(report, values);
+              setMode("view");
+            }}
+            onCancel={() => setMode("view")}
+          />
+        )}
+
+        {mode === "awareness" && (
+          <AwarenessForm
+            report={report}
+            disabled={busy}
+            onSave={async (awarenessTime) => {
+              await onSetAwareness(report, awarenessTime);
               setMode("view");
             }}
             onCancel={() => setMode("view")}
@@ -911,6 +966,109 @@ function SubmitForm({ report, disabled, onSubmit, onCancel }: SubmitFormProps) {
         </Button>
       </div>
     </form>
+  );
+}
+
+interface AwarenessFormProps {
+  report: CRAReport;
+  disabled?: boolean;
+  onSave: (awarenessTime: string | null) => Promise<void> | void;
+  onCancel: () => void;
+}
+
+/**
+ * AwarenessForm — set / edit / clear the Art.14 awareness instant on an
+ * existing CRA report (M35 Wave B). Mirrors RejectControls' inline shape:
+ * a <input type="datetime-local"> prefilled from report.awareness_time, plus
+ * Save / Clear / Cancel. datetime-local is local & timezone-naive, so Save
+ * normalises to RFC3339 UTC via `new Date(value).toISOString()` (the frozen
+ * contract's request shape); an empty value Saves as null (clear). Clear is a
+ * shortcut that Saves null directly and is disabled when nothing is set. The
+ * server rejects a future instant (400) and recomputes the deadline on read.
+ */
+function AwarenessForm({
+  report,
+  disabled,
+  onSave,
+  onCancel,
+}: AwarenessFormProps) {
+  const t = useTranslations("CRAReports.ReportCard");
+  const [value, setValue] = useState<string>(() =>
+    report.awareness_time ? rfcToLocalDatetime(report.awareness_time) : "",
+  );
+  const [saving, setSaving] = useState(false);
+
+  const runSave = async (normalized: string | null) => {
+    setSaving(true);
+    try {
+      await onSave(normalized);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSave = () => {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      // Empty input ⇒ clear (unset to NULL); deadline degrades to n/a.
+      void runSave(null);
+      return;
+    }
+    const d = new Date(trimmed);
+    // A datetime-local input cannot yield an unparseable non-empty value, but
+    // guard defensively: fall back to clear rather than send "Invalid Date".
+    void runSave(Number.isNaN(d.getTime()) ? null : d.toISOString());
+  };
+
+  return (
+    <div
+      className="space-y-2 border-t pt-4"
+      data-testid="cra-awareness-form"
+    >
+      <label
+        htmlFor={`awareness-${report.id}`}
+        className="block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+      >
+        {t("editAwareness")}
+      </label>
+      <Input
+        id={`awareness-${report.id}`}
+        type="datetime-local"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        disabled={disabled || saving}
+      />
+      <p className="text-xs text-muted-foreground">{t("awarenessHint")}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          disabled={disabled || saving}
+          onClick={handleSave}
+          data-testid="cra-awareness-save"
+        >
+          {t("saveAwareness")}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={disabled || saving || !report.awareness_time}
+          onClick={() => void runSave(null)}
+          data-testid="cra-awareness-clear"
+        >
+          {t("clearAwareness")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={disabled || saving}
+          onClick={onCancel}
+          data-testid="cra-awareness-cancel"
+        >
+          {t("cancelAwareness")}
+        </Button>
+      </div>
+    </div>
   );
 }
 

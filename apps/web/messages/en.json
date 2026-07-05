@@ -1310,7 +1310,8 @@
       "editFailed": "Failed to save edited report",
       "rejectFailed": "Failed to reject report",
       "reanalyseFailed": "Failed to re-run drafting",
-      "recordSubmissionFailed": "Failed to record submission"
+      "recordSubmissionFailed": "Failed to record submission",
+      "setAwarenessFailed": "Failed to update the awareness time"
     },
     "Filter": {
       "title": "Filters",
@@ -1381,6 +1382,12 @@
       "rejectReasonLabel": "Reject reason",
       "rejectReasonPlaceholder": "Optional — why is this AI draft wrong?",
       "rejectConfirm": "Confirm reject",
+      "awarenessUnset": "Not set",
+      "editAwareness": "Edit awareness time",
+      "awarenessHint": "The Art.14 clock start. Must not be in the future; clearing it unsets the deadline (degrades to not applicable).",
+      "saveAwareness": "Save",
+      "clearAwareness": "Clear",
+      "cancelAwareness": "Cancel",
       "alreadyDecided": "This report has already been marked as {decision}. A new decision will overwrite the audit trail."
     }
   },
