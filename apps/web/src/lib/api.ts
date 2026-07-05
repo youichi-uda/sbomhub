@@ -1546,6 +1546,56 @@ export interface RunCRAReportResponse {
 }
 
 // -----------------------------------------------------------------------------
+// CRA submission-tracking (M33 Wave C, F420 — issue M33-C) types
+// -----------------------------------------------------------------------------
+//
+// Records the human-attested fact that an *approved* CRA report was submitted
+// to an authority (CRA Art.14 24h / 72h / final timeline). This is the "AI
+// drafts, humans approve" flow's next step: nothing here auto-submits — the
+// operator asserts "I submitted this" and the row is the audit artefact.
+//
+// Wire contract (frozen, M33_KICKOFF_PROMPT.md "API 契約 (pin)"):
+//   POST /api/v1/projects/:id/cra-reports/:report_id/submissions -> 201 CRASubmission
+//   GET  /api/v1/projects/:id/cra-reports/:report_id/submissions -> { submissions: [...] }
+// The 201 body is guaranteed to carry {id, cra_report_id, authority,
+// submitted_at, reference_number, notes, created_at}. tenant_id / submitted_by
+// / updated_at also live on the DB row (repository.CRASubmission, Wave A) but
+// are not pinned by the contract, so they are typed optional for
+// forward-compatibility. Keep in sync with the Go DTO; a field-name drift
+// silently breaks the timeline the same way M1 #F28 did.
+
+/** One recorded CRA submission (append-only event log; multiple per report). */
+export interface CRASubmission {
+  id: string;
+  cra_report_id: string;
+  authority: string;
+  /** Human-attested submission time (RFC3339). */
+  submitted_at: string;
+  reference_number?: string | null;
+  notes?: string | null;
+  created_at: string;
+  // Not pinned by the 201 contract — present on the DB row, typed optional.
+  tenant_id?: string;
+  submitted_by?: string | null;
+  updated_at?: string;
+}
+
+/** POST submission body — handler/cra_submissions.go request shape. */
+export interface CRASubmissionInput {
+  /** Required, non-empty. Free-text authority name (no enum, per Wave A). */
+  authority: string;
+  /** RFC3339; server defaults to NOW() when omitted. */
+  submitted_at?: string;
+  reference_number?: string;
+  notes?: string;
+}
+
+/** GET submissions envelope (submitted_at DESC). */
+export interface CRASubmissionListResponse {
+  submissions: CRASubmission[];
+}
+
+// -----------------------------------------------------------------------------
 // METI assessment (M3-4 / M3-5, issue #37 + #38) types
 // -----------------------------------------------------------------------------
 //
@@ -2789,6 +2839,47 @@ export const api = {
         {
           method: "POST",
           body: JSON.stringify(input ?? {}),
+        },
+      ),
+  },
+  // CRA submission-tracking (M33 Wave C, F420). Mirrors the craReports
+  // client shape against the frozen contract (M33_KICKOFF_PROMPT.md):
+  //   POST /api/v1/projects/:id/cra-reports/:report_id/submissions
+  //   GET  /api/v1/projects/:id/cra-reports/:report_id/submissions
+  // Backend (Wave B) builds the same contract in parallel; do not wait.
+  craSubmissions: {
+    /**
+     * GET a report's submission timeline (submitted_at DESC). Returns the
+     * bare array; safeEnvelope guards the HTTP 204 / null-body case the
+     * same way craReports.list does.
+     */
+    list: async (
+      projectId: string,
+      reportId: string,
+    ): Promise<CRASubmission[]> => {
+      const raw = await request<CRASubmissionListResponse>(
+        `/api/v1/projects/${projectId}/cra-reports/${reportId}/submissions`,
+      );
+      const safe = safeEnvelope<CRASubmissionListResponse>(raw, {
+        submissions: [],
+      });
+      return Array.isArray(safe.submissions) ? safe.submissions : [];
+    },
+    /**
+     * POST a new submission record. 201 → the created CRASubmission. The
+     * backend rejects a non-approved report with 409 and an empty
+     * authority with 400 (surfaced to the caller as APIError).
+     */
+    record: (
+      projectId: string,
+      reportId: string,
+      input: CRASubmissionInput,
+    ) =>
+      request<CRASubmission>(
+        `/api/v1/projects/${projectId}/cra-reports/${reportId}/submissions`,
+        {
+          method: "POST",
+          body: JSON.stringify(input),
         },
       ),
   },

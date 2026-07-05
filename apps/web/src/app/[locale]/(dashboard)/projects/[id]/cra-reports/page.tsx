@@ -35,10 +35,16 @@ import {
   CRAReport,
   CRAReportDecisionInput,
   CRAReportListFilter,
+  CRASubmission,
+  CRASubmissionInput,
   Project,
 } from "@/lib/api";
 import { AIDisabledBanner } from "@/components/triage/ai-disabled-banner";
-import { ReportCard, ReportEditFormValues } from "@/components/cra-reports/report-card";
+import {
+  ReportCard,
+  ReportEditFormValues,
+  ReportSubmitFormValues,
+} from "@/components/cra-reports/report-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -95,6 +101,12 @@ export default function CRAReportsPage() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [reports, setReports] = useState<CRAReport[]>([]);
+  // Submission timelines keyed by report id. Fetched lazily for approved
+  // reports only (non-approved reports cannot carry submissions — the
+  // backend rejects them with 409).
+  const [submissionsByReport, setSubmissionsByReport] = useState<
+    Record<string, CRASubmission[]>
+  >({});
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -157,15 +169,47 @@ export default function CRAReportsPage() {
     return f;
   }, [filterReportType, filterLang, filterState, filterDecision]);
 
+  /**
+   * Fetch submission timelines for the approved reports in the current
+   * page and merge them into submissionsByReport. Best-effort: a per-report
+   * failure is swallowed (the timeline just stays empty) so one bad row does
+   * not blank the whole queue. Only approved reports are queried since the
+   * backend guarantees no submissions exist for any other decision.
+   */
+  const loadSubmissions = useCallback(
+    async (rows: CRAReport[]) => {
+      const approved = rows.filter((r) => r.decision === "approved");
+      if (approved.length === 0) return;
+      const results = await Promise.all(
+        approved.map(async (r) => {
+          try {
+            const subs = await api.craSubmissions.list(projectId, r.id);
+            return [r.id, subs] as const;
+          } catch {
+            return [r.id, [] as CRASubmission[]] as const;
+          }
+        }),
+      );
+      setSubmissionsByReport((prev) => {
+        const next = { ...prev };
+        for (const [id, subs] of results) next[id] = subs;
+        return next;
+      });
+    },
+    [projectId],
+  );
+
   const loadReports = useCallback(async () => {
     try {
       const res = await api.craReports.listWithMeta(projectId, buildFilter());
       setReports(res.data);
       setTotalCount(res.totalCount);
+      // Fire-and-forget: populate submission timelines for approved rows.
+      void loadSubmissions(res.data);
     } catch (err) {
       handleError(err, t("loadReportsFailed"));
     }
-  }, [projectId, buildFilter, t, handleError]);
+  }, [projectId, buildFilter, t, handleError, loadSubmissions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -269,6 +313,59 @@ export default function CRAReportsPage() {
       }
     },
     [projectId, loadReports, handleError, t],
+  );
+
+  /**
+   * Record a human-attested submission to an authority. On success the row
+   * is optimistically flipped to state='submitted' (mirroring the backend's
+   * one-tx side-effect) and the created submission is prepended to the
+   * report's timeline, then a background refresh reconciles with the server.
+   * On failure the optimistic state change is rolled back.
+   */
+  const handleRecordSubmission = useCallback(
+    async (report: CRAReport, values: ReportSubmitFormValues) => {
+      setBusyReportId(report.id);
+
+      const input: CRASubmissionInput = { authority: values.authority };
+      if (values.submitted_at) {
+        // <input type="datetime-local"> yields a local, zoneless string;
+        // normalise to RFC3339 UTC for the frozen contract. Omit on parse
+        // failure so the server falls back to NOW().
+        const parsed = new Date(values.submitted_at);
+        if (!Number.isNaN(parsed.getTime())) {
+          input.submitted_at = parsed.toISOString();
+        }
+      }
+      if (values.reference_number)
+        input.reference_number = values.reference_number;
+      if (values.notes) input.notes = values.notes;
+
+      const previous = reports;
+      setReports((prev) =>
+        prev.map((r) =>
+          r.id === report.id ? { ...r, state: "submitted" } : r,
+        ),
+      );
+      try {
+        const created = await api.craSubmissions.record(
+          projectId,
+          report.id,
+          input,
+        );
+        setSubmissionsByReport((prev) => ({
+          ...prev,
+          [report.id]: [created, ...(prev[report.id] ?? [])],
+        }));
+        // Background reconcile so the authoritative state lands.
+        loadReports();
+      } catch (err) {
+        setReports(previous);
+        handleError(err, t("recordSubmissionFailed"));
+      } finally {
+        setBusyReportId(null);
+      }
+    },
+    [reports, projectId, loadReports, handleError, t],
   );
 
   // F4 carry-over: drop evidence-less reports from the visible queue,
@@ -433,10 +530,12 @@ export default function CRAReportsPage() {
               report={report}
               projectId={projectId}
               busy={busyReportId === report.id}
+              submissions={submissionsByReport[report.id] ?? []}
               onApprove={handleApprove}
               onEdit={handleEdit}
               onReject={handleReject}
               onReanalyse={handleReanalyse}
+              onRecordSubmission={handleRecordSubmission}
             />
           ))}
         </div>

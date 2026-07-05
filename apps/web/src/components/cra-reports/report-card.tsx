@@ -45,11 +45,14 @@ import {
   CRAReportDecision,
   CRAReportEvidence,
   CRAReportState,
+  CRASubmission,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { SubmissionTimeline } from "@/components/cra-reports/submission-timeline";
 
 const DRAFT_TRUNCATE_LENGTH = 800;
 
@@ -60,15 +63,55 @@ const editSchema = z.object({
 
 export type ReportEditFormValues = z.infer<typeof editSchema>;
 
+// SubmitForm schema. authority is required (backend rejects empty with 400)
+// and free-text VARCHAR(255) (Wave A: no enum). submitted_at is a
+// datetime-local value that page.tsx converts to RFC3339 before POST; an
+// empty value lets the server default to NOW(). reference_number is
+// VARCHAR(255); notes is TEXT (kept generous but bounded client-side).
+const submitSchema = z.object({
+  authority: z.string().min(1, "authority is required").max(255),
+  submitted_at: z.string(),
+  reference_number: z.string().max(255),
+  notes: z.string().max(5000),
+});
+
+export type ReportSubmitFormValues = z.infer<typeof submitSchema>;
+
+/**
+ * Current wall-clock time formatted for a <input type="datetime-local">
+ * value (`YYYY-MM-DDTHH:mm`, local timezone). Used as the SubmitForm
+ * default so the operator only tweaks the time if the real submission
+ * happened earlier.
+ */
+function nowLocalDatetime(): string {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
 export interface ReportCardProps {
   report: CRAReport;
   projectId: string;
   /** Disable controls while a sibling action is in-flight (optimistic update). */
   busy?: boolean;
+  /**
+   * The report's recorded submissions (submitted_at DESC). Only approved
+   * reports can carry submissions; pass an empty array otherwise.
+   */
+  submissions?: CRASubmission[];
   onApprove: (report: CRAReport, note?: string) => Promise<void> | void;
   onEdit: (report: CRAReport, values: ReportEditFormValues) => Promise<void> | void;
   onReject: (report: CRAReport, note?: string) => Promise<void> | void;
   onReanalyse: (report: CRAReport) => Promise<void> | void;
+  /**
+   * Record a human-attested submission to an authority. Only invoked for
+   * approved reports (the button is disabled otherwise). page.tsx maps the
+   * form values to CRASubmissionInput and POSTs to the submissions endpoint.
+   */
+  onRecordSubmission: (
+    report: CRAReport,
+    values: ReportSubmitFormValues,
+  ) => Promise<void> | void;
 }
 
 /**
@@ -167,10 +210,12 @@ export function ReportCard({
   report,
   projectId,
   busy = false,
+  submissions = [],
   onApprove,
   onEdit,
   onReject,
   onReanalyse,
+  onRecordSubmission,
 }: ReportCardProps) {
   const t = useTranslations("CRAReports.ReportCard");
   const tType = useTranslations("CRAReports.ReportType");
@@ -179,7 +224,9 @@ export function ReportCard({
   const tDecision = useTranslations("CRAReports.Decision");
   const locale = useLocale();
 
-  const [mode, setMode] = useState<"view" | "edit" | "reject">("view");
+  const [mode, setMode] = useState<"view" | "edit" | "reject" | "submit">(
+    "view",
+  );
   const [draftExpanded, setDraftExpanded] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
 
@@ -201,6 +248,12 @@ export function ReportCard({
 
   const alreadyDecided = report.decision !== "pending";
   const controlsDisabled = busy || alreadyDecided;
+
+  // Submission recording is only legitimate for an approved report (the
+  // backend rejects any other decision with 409). Multiple submissions are
+  // allowed by design (Art.14 early-warning → detailed → final timeline), so
+  // an already-submitted report stays enabled.
+  const canSubmit = report.decision === "approved";
 
   // Deep link back into the M1 triage page for the source VEX draft
   // (issue #32 spec). Use the locale prefix so next-intl routing
@@ -383,12 +436,15 @@ export function ReportCard({
               {t("reanalyse")}
             </Button>
             <div className="flex-1" />
-            {/* M3 hook — disabled placeholder per issue #32 spec. */}
+            {/* M33 (F420): record a human-attested submission to an
+                authority. Enabled only for approved reports; otherwise it
+                stays disabled with an explanatory tooltip. */}
             <Button
               size="sm"
-              variant="ghost"
-              disabled
-              title={t("submitDisabled")}
+              variant={canSubmit ? "default" : "ghost"}
+              disabled={busy || !canSubmit}
+              title={canSubmit ? undefined : t("submitDisabled")}
+              onClick={() => setMode("submit")}
               data-testid="cra-submit"
             >
               <Send className="mr-1 h-4 w-4" />
@@ -424,6 +480,25 @@ export function ReportCard({
             }}
             onCancel={() => setMode("view")}
           />
+        )}
+
+        {mode === "submit" && (
+          <SubmitForm
+            report={report}
+            disabled={busy}
+            onSubmit={async (values) => {
+              await onRecordSubmission(report, values);
+              setMode("view");
+            }}
+            onCancel={() => setMode("view")}
+          />
+        )}
+
+        {/* Submission ledger (Art.14 timeline). Shown for approved reports
+            — which may accumulate multiple submissions — and whenever a
+            submission already exists, so a historical row is never hidden. */}
+        {(canSubmit || submissions.length > 0) && (
+          <SubmissionTimeline submissions={submissions} />
         )}
       </CardContent>
 
@@ -577,6 +652,129 @@ function EditForm({ report, disabled, onSubmit, onCancel }: EditFormProps) {
         <Button type="submit" size="sm" disabled={disabled || isSubmitting}>
           <FileText className="mr-1 h-4 w-4" />
           {isSubmitting ? t("saving") : t("saveEdit")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={disabled || isSubmitting}
+          onClick={onCancel}
+        >
+          {t("cancel")}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+interface SubmitFormProps {
+  report: CRAReport;
+  disabled?: boolean;
+  onSubmit: (values: ReportSubmitFormValues) => Promise<void> | void;
+  onCancel: () => void;
+}
+
+/**
+ * SubmitForm — record a human-attested submission of an approved CRA report
+ * to an authority (M33 Wave C). Same react-hook-form + zod shape as
+ * EditForm. authority is required; submitted_at defaults to now (operator
+ * adjusts if the real submission happened earlier); reference_number / notes
+ * are optional. Nothing here auto-submits — this only records the operator's
+ * assertion that they submitted the report.
+ */
+function SubmitForm({ report, disabled, onSubmit, onCancel }: SubmitFormProps) {
+  const t = useTranslations("CRAReports.ReportCard");
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<ReportSubmitFormValues>({
+    resolver: zodResolver(submitSchema),
+    defaultValues: {
+      authority: "",
+      submitted_at: nowLocalDatetime(),
+      reference_number: "",
+      notes: "",
+    },
+  });
+
+  return (
+    <form
+      onSubmit={handleSubmit(onSubmit)}
+      className="space-y-3 border-t pt-4"
+      data-testid="cra-submit-form"
+    >
+      <div>
+        <label
+          htmlFor={`submit-authority-${report.id}`}
+          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          {t("authorityLabel")}
+        </label>
+        <Input
+          id={`submit-authority-${report.id}`}
+          type="text"
+          {...register("authority")}
+          disabled={disabled || isSubmitting}
+          placeholder={t("authorityPlaceholder")}
+        />
+        {errors.authority && (
+          <p className="mt-1 text-xs text-red-600">{errors.authority.message}</p>
+        )}
+      </div>
+
+      <div>
+        <label
+          htmlFor={`submit-at-${report.id}`}
+          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          {t("submittedAtLabel")}
+        </label>
+        <Input
+          id={`submit-at-${report.id}`}
+          type="datetime-local"
+          {...register("submitted_at")}
+          disabled={disabled || isSubmitting}
+        />
+      </div>
+
+      <div>
+        <label
+          htmlFor={`submit-ref-${report.id}`}
+          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          {t("referenceNumberLabel")}
+        </label>
+        <Input
+          id={`submit-ref-${report.id}`}
+          type="text"
+          {...register("reference_number")}
+          disabled={disabled || isSubmitting}
+          placeholder={t("referenceNumberPlaceholder")}
+        />
+      </div>
+
+      <div>
+        <label
+          htmlFor={`submit-notes-${report.id}`}
+          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+        >
+          {t("submissionNotesLabel")}
+        </label>
+        <Textarea
+          id={`submit-notes-${report.id}`}
+          rows={2}
+          {...register("notes")}
+          disabled={disabled || isSubmitting}
+          placeholder={t("submissionNotesPlaceholder")}
+        />
+      </div>
+
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={disabled || isSubmitting}>
+          <Send className="mr-1 h-4 w-4" />
+          {isSubmitting ? t("recording") : t("recordSubmit")}
         </Button>
         <Button
           type="button"
