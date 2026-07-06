@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sbomhub/sbomhub/internal/model"
-	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
 // Sentinel errors returned by SearchByCVE so the handler can map them to
@@ -23,17 +22,35 @@ var (
 	ErrCVENotFound = errors.New("search: cve not found")
 )
 
-type SearchService struct {
-	searchRepo *repository.SearchRepository
-	nvdService *NVDService
+// searchRepoAPI is the subset of *repository.SearchRepository that
+// SearchService uses. Declared as an interface so search_test.go can
+// substitute a fake that returns a canned result / a local miss without a
+// real DB. The concrete *repository.SearchRepository satisfies it, so the
+// cmd/server/main.go wiring is unchanged.
+type searchRepoAPI interface {
+	SearchByCVE(ctx context.Context, cveID string) (*model.CVESearchResult, error)
+	SearchByComponent(ctx context.Context, name string, versionConstraint string) (*model.ComponentSearchResult, error)
 }
 
-func NewSearchService(searchRepo *repository.SearchRepository) *SearchService {
+// nvdLookupAPI is the subset of *NVDService that SearchService uses for the
+// NVD fallback. An interface so tests can inject an operational error or a
+// successful-but-empty result. The concrete *NVDService satisfies it.
+type nvdLookupAPI interface {
+	SearchByCVEID(ctx context.Context, cveID string) (*model.Vulnerability, error)
+	SaveVulnerability(ctx context.Context, vuln *model.Vulnerability) error
+}
+
+type SearchService struct {
+	searchRepo searchRepoAPI
+	nvdService nvdLookupAPI
+}
+
+func NewSearchService(searchRepo searchRepoAPI) *SearchService {
 	return &SearchService{searchRepo: searchRepo}
 }
 
 // NewSearchServiceWithNVD creates a SearchService with NVD fallback support
-func NewSearchServiceWithNVD(searchRepo *repository.SearchRepository, nvdService *NVDService) *SearchService {
+func NewSearchServiceWithNVD(searchRepo searchRepoAPI, nvdService nvdLookupAPI) *SearchService {
 	return &SearchService{
 		searchRepo: searchRepo,
 		nvdService: nvdService,
@@ -64,7 +81,11 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 		vuln, err := s.nvdService.SearchByCVEID(ctx, cveID)
 		if err != nil {
 			slog.Warn("NVD API search failed", "cve_id", cveID, "error", err)
-			return nil, fmt.Errorf("%w: %s", ErrCVENotFound, cveID)
+			// An NVD operational failure (timeout / rate-limit / 5xx /
+			// decode error) is NOT evidence the CVE is absent. Return a
+			// non-sentinel error so the handler's default path yields a
+			// generic 500 instead of falsely claiming 404 "CVE not found".
+			return nil, fmt.Errorf("nvd lookup failed for %s: %w", cveID, err)
 		}
 		if vuln == nil {
 			return nil, fmt.Errorf("%w: %s", ErrCVENotFound, cveID)
@@ -87,7 +108,10 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 		}, nil
 	}
 
-	return nil, fmt.Errorf("CVE not found: %s", cveID)
+	// Genuine not-found (no NVD fallback wired and the CVE is not in the
+	// local DB). Wrap the sentinel like the other not-found sites so the
+	// handler maps it to 404 rather than a generic 500.
+	return nil, fmt.Errorf("%w: %s", ErrCVENotFound, cveID)
 }
 
 // SearchByComponent searches for components by name and optional version constraint
