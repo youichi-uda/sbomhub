@@ -2129,11 +2129,17 @@ export const api = {
     // regression signal.
     getVulnerabilitiesWithMeta: async (
       id: string,
-      opts?: { limit?: number; offset?: number },
+      opts?: { limit?: number; offset?: number; sort?: "epss" | "cvss" },
     ): Promise<{ data: Vulnerability[]; totalCount: number }> => {
       const params = new URLSearchParams();
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      // M38-B (F447 #159): server-side priority sort. `sort=epss` orders
+      // by exploitation probability (EPSS) DESC NULLS LAST; the backend
+      // default is `cvss`, so we only emit the param when a sort is
+      // explicitly requested. Unknown values are rejected 400 by the
+      // handler — the UI only ever sends the two contract values.
+      if (opts?.sort !== undefined) params.set("sort", opts.sort);
       const qs = params.toString();
       const path = `/api/v1/projects/${id}/vulnerabilities${qs ? `?${qs}` : ""}`;
 

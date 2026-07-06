@@ -44,6 +44,12 @@ export default function ProjectDetailPage() {
   // (100) for projects with more matched vulns. The truncation banner
   // below trips when this value exceeds the page we actually loaded.
   const [vulnTotalCount, setVulnTotalCount] = useState<number>(0);
+  // M38-B (F447 #159): vulnerabilities list sort key. Default "cvss"
+  // mirrors the frozen backend contract default (no silent behaviour
+  // change vs pre-M38). Toggling to "epss" re-fetches the list ordered
+  // by exploitation probability (EPSS) so operators can triage by
+  // likelihood-of-exploit instead of raw severity.
+  const [vulnSort, setVulnSort] = useState<"cvss" | "epss">("cvss");
   const [vexStatements, setVexStatements] = useState<VEXStatementWithDetails[]>([]);
   const [licensePolicies, setLicensePolicies] = useState<LicensePolicy[]>([]);
   const [licenseViolations, setLicenseViolations] = useState<LicenseViolation[]>([]);
@@ -119,13 +125,17 @@ export default function ProjectDetailPage() {
     try {
       // #F28: use the meta variant so we read X-Total-Count instead
       // of inferring the count from the (page-truncated) array length.
-      const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId);
+      // M38-B (F447 #159): thread the selected sort key so a toggle to
+      // EPSS re-fetches with the exploitation-probability ordering.
+      const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
+        sort: vulnSort,
+      });
       setVulnerabilities(data || []);
       setVulnTotalCount(totalCount);
     } catch (error) {
       console.error("Failed to load vulnerabilities:", error);
     }
-  }, [projectId]);
+  }, [projectId, vulnSort]);
 
   const loadVexStatements = useCallback(async () => {
     try {
@@ -635,12 +645,43 @@ export default function ProjectDetailPage() {
       {activeTab === "vulnerabilities" && (
         <Card>
           <CardHeader>
-            <CardTitle>
-              {t("Vulnerabilities.title")}{" "}
-              <span className="text-sm font-normal text-muted-foreground">
-                ({vulnerabilities.length} / {vulnTotalCount})
-              </span>
-            </CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>
+                {t("Vulnerabilities.title")}{" "}
+                <span className="text-sm font-normal text-muted-foreground">
+                  ({vulnerabilities.length} / {vulnTotalCount})
+                </span>
+              </CardTitle>
+              {/* M38-B (F447 #159): CVSS ⇄ EPSS priority sort toggle.
+                  Default CVSS matches the frozen backend contract default;
+                  selecting EPSS re-fetches ordered by exploitation
+                  probability (loadVulnerabilities depends on vulnSort). */}
+              <div
+                className="flex items-center gap-2"
+                role="group"
+                aria-label={t("Vulnerabilities.sortLabel")}
+              >
+                <span className="text-sm text-muted-foreground">
+                  {t("Vulnerabilities.sortLabel")}:
+                </span>
+                <Button
+                  size="sm"
+                  variant={vulnSort === "cvss" ? "default" : "outline"}
+                  onClick={() => setVulnSort("cvss")}
+                  aria-pressed={vulnSort === "cvss"}
+                >
+                  {t("Vulnerabilities.sortByCvss")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={vulnSort === "epss" ? "default" : "outline"}
+                  onClick={() => setVulnSort("epss")}
+                  aria-pressed={vulnSort === "epss"}
+                >
+                  {t("Vulnerabilities.sortByEpss")}
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
             {/* #F28: warn when the server reports more matches than the
@@ -729,6 +770,26 @@ export default function ProjectDetailPage() {
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-muted-foreground">
                           CVSS: {vuln.cvss_score}
+                        </span>
+                        {/* M38-B (F447 #159): EPSS exploitation
+                            probability. Mirrors the dashboard TopRisksTable
+                            format ((epss*100).toFixed(1)% + red/bold above
+                            0.5). Un-synced rows arrive with epss_score
+                            absent / 0 (backend `>0` guard) — render a muted
+                            "—" rather than a misleading 0.0%. */}
+                        <span className="text-sm text-muted-foreground">
+                          {t("Vulnerabilities.epss")}:{" "}
+                          {typeof vuln.epss_score === "number" && vuln.epss_score > 0 ? (
+                            <span
+                              className={
+                                vuln.epss_score > 0.5 ? "text-red-500 font-bold" : ""
+                              }
+                            >
+                              {(vuln.epss_score * 100).toFixed(1)}%
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
                         </span>
                         <Button
                           size="sm"

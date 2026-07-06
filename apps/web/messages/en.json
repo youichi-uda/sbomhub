@@ -389,7 +389,11 @@
     "critical": "Critical",
     "high": "High",
     "medium": "Medium",
-    "low": "Low"
+    "low": "Low",
+    "epss": "EPSS",
+    "sortLabel": "Sort",
+    "sortByCvss": "CVSS",
+    "sortByEpss": "EPSS"
   },
   "Dashboard": {
     "title": "Dashboard",
