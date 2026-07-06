@@ -1,7 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -121,7 +121,14 @@ export default function ProjectDetailPage() {
     }
   }, [projectId]);
 
+  // M38 Phase D (F448): monotonic request sequence so a slow in-flight
+  // vulnerabilities fetch cannot overwrite the list with a stale order —
+  // toggling CVSS→EPSS quickly, an older CVSS response must not win over
+  // the newer EPSS one. Only the latest request applies its result.
+  const vulnReqSeq = useRef(0);
+
   const loadVulnerabilities = useCallback(async () => {
+    const seq = ++vulnReqSeq.current;
     try {
       // #F28: use the meta variant so we read X-Total-Count instead
       // of inferring the count from the (page-truncated) array length.
@@ -130,9 +137,11 @@ export default function ProjectDetailPage() {
       const { data, totalCount } = await api.projects.getVulnerabilitiesWithMeta(projectId, {
         sort: vulnSort,
       });
+      if (seq !== vulnReqSeq.current) return; // superseded by a newer request
       setVulnerabilities(data || []);
       setVulnTotalCount(totalCount);
     } catch (error) {
+      if (seq !== vulnReqSeq.current) return;
       console.error("Failed to load vulnerabilities:", error);
     }
   }, [projectId, vulnSort]);
