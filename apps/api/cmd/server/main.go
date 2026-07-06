@@ -847,6 +847,11 @@ func main() {
 
 	// Dashboard endpoints
 	auth.GET("/dashboard/summary", dashboardHandler.GetSummary)
+	// M39 (F449 #160): top-risks with a CVSS⇄EPSS sort param (default epss).
+	// Dedicated endpoint so the dashboard toggle can re-fetch server-side
+	// (LIMIT 10 means the top set depends on the sort key) without
+	// parameterizing the whole summary aggregate.
+	auth.GET("/dashboard/top-risks", dashboardHandler.GetTopRisks)
 
 	// Search endpoints
 	auth.GET("/search/cve", searchHandler.SearchByCVE)

@@ -44,7 +44,7 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 			// Synced CVE: the real score passes through.
 			AddRow("CVE-2026-0002", 0.4237, 7.5, "HIGH", projID, "app-a", "liby", "2.0"))
 
-	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10)
+	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "cvss")
 	if err != nil {
 		t.Fatalf("GetTopRisksByTenant: %v", err)
 	}
@@ -88,7 +88,111 @@ func TestGetTopRisksByTenant_NullEPSSWithoutCoalesceErrors(t *testing.T) {
 		}).
 			AddRow("CVE-2026-0003", nil, 9.8, "CRITICAL", projID, "app-a", "libx", "1.0"))
 
-	if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10); err == nil {
+	if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "cvss"); err == nil {
 		t.Fatalf("expected a scan error when a raw NULL epss_score reaches the bare float64 target (the 500 path COALESCE prevents)")
+	}
+}
+
+// TestGetTopRisksByTenant_OuterOrderBy pins the F449 / M39 flip: the OUTER
+// wrapper's ORDER BY must switch on sortBy. "epss" orders by exploitation
+// probability (epss_score DESC NULLS LAST, cvss_score DESC); anything else
+// keeps the historical cvss_score DESC. The assertion is structural on the SQL
+// (regex over the emitted query), so it is non-vacuous: a revert to a single
+// hardcoded ORDER BY would fail one branch or the other. The INNER DISTINCT ON
+// dedup order must stay unchanged in both branches.
+func TestGetTopRisksByTenant_OuterOrderBy(t *testing.T) {
+	cols := []string{
+		"cve_id", "epss_score", "cvss_score", "severity",
+		"project_id", "project_name", "component_name", "component_version",
+	}
+
+	// otherSQL is a literal sample of the OPPOSITE branch's outer clause. The
+	// per-branch wantOuter pattern must NOT match it — that is what makes the
+	// assertion non-vacuous (a single hardcoded ORDER BY could only satisfy one
+	// branch, and the guard proves the two patterns are genuinely exclusive).
+	cases := []struct {
+		name      string
+		sortBy    string
+		wantOuter *regexp.Regexp
+		otherSQL  string
+	}{
+		{
+			name:      "epss",
+			sortBy:    "epss",
+			wantOuter: regexp.MustCompile(`(?is)\)\s+sub\s+ORDER BY epss_score DESC NULLS LAST,\s*cvss_score DESC\s+LIMIT`),
+			otherSQL:  ") sub\n\t\tORDER BY cvss_score DESC, cve_id\n\t\tLIMIT $2",
+		},
+		{
+			name:      "cvss",
+			sortBy:    "cvss",
+			wantOuter: regexp.MustCompile(`(?is)\)\s+sub\s+ORDER BY cvss_score DESC,\s*cve_id\s+LIMIT`),
+			otherSQL:  ") sub\n\t\tORDER BY epss_score DESC NULLS LAST, cvss_score DESC\n\t\tLIMIT $2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			repo := NewDashboardRepository(db)
+
+			// Non-vacuousness guard: the branch's pattern must not also match
+			// the opposite branch's clause.
+			if tc.wantOuter.MatchString(tc.otherSQL) {
+				t.Fatalf("want pattern is vacuous: it also matches the opposite branch's clause %q", tc.otherSQL)
+			}
+
+			tenantID := uuid.New()
+			projID := uuid.New()
+			mock.ExpectQuery(tc.wantOuter.String()).
+				WithArgs(tenantID, 10).
+				WillReturnRows(sqlmock.NewRows(cols).
+					AddRow("CVE-2026-1000", 0.9, 5.0, "MEDIUM", projID, "app", "lib", "1.0"))
+
+			if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, tc.sortBy); err != nil {
+				t.Fatalf("GetTopRisksByTenant(%q): %v", tc.sortBy, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet expectations for sortBy=%q: %v", tc.sortBy, err)
+			}
+		})
+	}
+}
+
+// TestGetTopRisksByTenant_InnerDistinctOnUnchanged confirms the DISTINCT ON
+// dedup order is identical for both sortBy branches (Postgres requires the
+// leading ORDER BY of DISTINCT ON to be the distinct expression). Only the
+// outer wrapper order may change.
+func TestGetTopRisksByTenant_InnerDistinctOnUnchanged(t *testing.T) {
+	cols := []string{
+		"cve_id", "epss_score", "cvss_score", "severity",
+		"project_id", "project_name", "component_name", "component_version",
+	}
+	inner := regexp.MustCompile(`(?is)DISTINCT ON \(v\.cve_id\).*ORDER BY v\.cve_id, v\.cvss_score DESC`)
+
+	for _, sortBy := range []string{"epss", "cvss"} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		repo := NewDashboardRepository(db)
+		tenantID := uuid.New()
+		projID := uuid.New()
+		mock.ExpectQuery(inner.String()).
+			WithArgs(tenantID, 10).
+			WillReturnRows(sqlmock.NewRows(cols).
+				AddRow("CVE-2026-2000", 0.1, 8.0, "HIGH", projID, "app", "lib", "1.0"))
+
+		if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, sortBy); err != nil {
+			t.Fatalf("GetTopRisksByTenant(%q): %v", sortBy, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("inner DISTINCT ON not preserved for sortBy=%q: %v", sortBy, err)
+		}
+		db.Close()
 	}
 }

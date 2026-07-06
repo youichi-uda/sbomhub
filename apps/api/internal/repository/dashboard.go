@@ -91,8 +91,34 @@ func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]mod
 	return nil, fmt.Errorf("deprecated: use GetTopRisksByTenant")
 }
 
-// GetTopRisksByTenant returns the top vulnerabilities for a tenant's projects
-func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID uuid.UUID, limit int) ([]model.TopRisk, error) {
+// topRisksOrderBy returns the ORDER BY clause for the OUTER wrapper of the Top
+// Risks query (F449 / M39). It mirrors component.go's vulnListOrderBy: only one
+// of two fixed clauses is ever chosen, so sortBy is never interpolated into SQL
+// and an out-of-band value degrades safely to cvss (the handler already rejects
+// unknown values with 400). sortBy=="epss" orders by exploitation probability
+// (migration 055's epss_score) descending with `NULLS LAST` so un-scored rows
+// tail the list rather than floating above scored CRITICAL/HIGH rows (Postgres
+// defaults DESC to NULLS FIRST); cvss_score is the tiebreaker. Any other value
+// keeps the historical CVSS-descending order with cve_id as a stable tiebreaker.
+//
+// These clauses reference the OUTER wrapper's aliased columns (epss_score,
+// cvss_score, cve_id from the DISTINCT ON subquery), NOT v.-prefixed columns.
+// The INNER `DISTINCT ON (v.cve_id) ... ORDER BY v.cve_id, v.cvss_score DESC`
+// stays unchanged (Postgres requires DISTINCT ON's leading ORDER BY to be the
+// distinct expression). EPSS is a per-CVE global attribute (055 column comment),
+// so the deduped row carries the correct epss_score and switching only the outer
+// order is well-defined; LIMIT applies after the outer order, yielding the true
+// top-N by the selected axis.
+func topRisksOrderBy(sortBy string) string {
+	if sortBy == "epss" {
+		return "ORDER BY epss_score DESC NULLS LAST, cvss_score DESC"
+	}
+	return "ORDER BY cvss_score DESC, cve_id"
+}
+
+// GetTopRisksByTenant returns the top vulnerabilities for a tenant's projects,
+// ordered by sortBy ("epss" or, for any other value, cvss — see topRisksOrderBy).
+func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID uuid.UUID, limit int, sortBy string) ([]model.TopRisk, error) {
 	// M36-A / F432: epss_score is now in the canonical migration chain
 	// (055_vulnerabilities_epss), so this reads the real column instead of the
 	// old 0::numeric sentinel. COALESCE(v.epss_score, 0) keeps it NULL-safe: the
@@ -118,10 +144,12 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 		ORDER BY v.cve_id, v.cvss_score DESC
 	`
 
-	// Wrap with ordering and limit
+	// Wrap with ordering and limit. Only the OUTER order switches on sortBy;
+	// the INNER DISTINCT ON keeps its required per-CVE dedup order (see
+	// topRisksOrderBy).
 	query = `
 		SELECT * FROM (` + query + `) sub
-		ORDER BY cvss_score DESC
+		` + topRisksOrderBy(sortBy) + `
 		LIMIT $2
 	`
 
