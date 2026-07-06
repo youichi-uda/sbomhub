@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,7 +59,10 @@ func NewCLIService(
 // empty value is ignored (keeps the default). Returns the receiver for chaining.
 func (s *CLIService) WithOSVBaseURL(base string) *CLIService {
 	if base != "" {
-		s.osvBaseURL = base
+		// Trim trailing slash so appending "/querybatch" never yields a
+		// double slash — matches client.OSVClient.WithBaseURL so the two OSV
+		// call sites cannot diverge on a mirror URL like ".../v1/".
+		s.osvBaseURL = strings.TrimRight(base, "/")
 	}
 	return s
 }

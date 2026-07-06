@@ -62,8 +62,11 @@ type EOLCycleResponse struct {
 // SyncCatalog synchronizes the EOL catalog from endoflife.date
 func (s *EOLService) SyncCatalog(ctx context.Context) (*model.EOLSyncResult, error) {
 	if s.offline {
+		// Degrade gracefully: return a non-nil zero result so any caller can read
+		// result fields (ProductsSynced etc.) without a nil-pointer panic. No
+		// error — the product keeps running on already-synced data.
 		slog.Info("sync skipped: offline mode", "source", "eol")
-		return nil, nil
+		return &model.EOLSyncResult{}, nil
 	}
 
 	// Create sync log
@@ -128,8 +131,11 @@ func (s *EOLService) SyncCatalog(ctx context.Context) (*model.EOLSyncResult, err
 // SyncProduct syncs a single product from endoflife.date
 func (s *EOLService) SyncProduct(ctx context.Context, productName string) (*model.EOLSyncResult, error) {
 	if s.offline {
+		// Degrade gracefully: return a non-nil zero result so any caller can read
+		// result fields (ProductsSynced etc.) without a nil-pointer panic. No
+		// error — the product keeps running on already-synced data.
 		slog.Info("sync skipped: offline mode", "source", "eol")
-		return nil, nil
+		return &model.EOLSyncResult{}, nil
 	}
 
 	// Fetch cycles from API

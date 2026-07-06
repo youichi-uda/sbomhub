@@ -878,21 +878,27 @@ func TestEOLService_Offline(t *testing.T) {
 	// nil eolRepo is safe: the offline guards return before the repo is touched.
 	svc := NewEOLService(nil, server.URL, true)
 
-	// SyncCatalog must short-circuit before creating a sync log or fetching.
+	// SyncCatalog must short-circuit before creating a sync log or fetching, and
+	// return a non-nil zero result: handler/eol.go and scheduler/eol_sync.go read
+	// result.ProductsSynced etc. directly, so a nil would panic in offline mode.
 	catResult, err := svc.SyncCatalog(context.Background())
 	if err != nil {
 		t.Errorf("SyncCatalog in offline mode returned error: %v", err)
 	}
-	if catResult != nil {
-		t.Errorf("SyncCatalog in offline mode returned %+v, want nil", catResult)
+	if catResult == nil {
+		t.Fatal("SyncCatalog in offline mode returned nil; callers deref result — want non-nil zero result")
+	}
+	if catResult.ProductsSynced != 0 || catResult.CyclesSynced != 0 {
+		t.Errorf("offline SyncCatalog should report zero synced, got %+v", catResult)
 	}
 
-	// SyncProduct is an exported fetch entry point and must also short-circuit.
+	// SyncProduct is an exported fetch entry point and must also short-circuit
+	// to a non-nil zero result.
 	prodResult, err := svc.SyncProduct(context.Background(), "python")
 	if err != nil {
 		t.Errorf("SyncProduct in offline mode returned error: %v", err)
 	}
-	if prodResult != nil {
-		t.Errorf("SyncProduct in offline mode returned %+v, want nil", prodResult)
+	if prodResult == nil {
+		t.Fatal("SyncProduct in offline mode returned nil; want non-nil zero result")
 	}
 }

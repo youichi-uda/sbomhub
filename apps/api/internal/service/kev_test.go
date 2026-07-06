@@ -519,7 +519,12 @@ func TestKEVService_Offline(t *testing.T) {
 
 	result, err := service.SyncCatalog(context.Background())
 	require.NoError(t, err)
-	assert.Nil(t, result, "SyncCatalog in offline mode should return nil result")
+	// Must be a non-nil zero result: handler/kev.go and scheduler/kev_sync.go
+	// read result.NewEntries etc. directly, so a nil here would panic in offline
+	// mode. Zero counts signal "nothing synced".
+	require.NotNil(t, result, "offline SyncCatalog must return a non-nil zero result (callers deref it)")
+	assert.Equal(t, 0, result.NewEntries)
+	assert.Equal(t, 0, result.TotalProcessed)
 
 	// The guard returns before creating a sync log, so none should exist.
 	latest, err := repo.GetLatestSyncLog(context.Background())

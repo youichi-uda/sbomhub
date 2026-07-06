@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,13 +15,19 @@ import (
 type IPAService struct {
 	ipaRepo   *repository.IPARepository
 	ipaClient *client.IPAClient
+	offline   bool
 }
 
-// NewIPAService creates a new IPAService
-func NewIPAService(ipaRepo *repository.IPARepository) *IPAService {
+// NewIPAService creates a new IPAService.
+//
+// M40: offline gates the outbound IPA / JVNDB RSS fetches so SBOMHUB_OFFLINE
+// covers this source too. (A dedicated IPA mirror URL override is a documented
+// carry-over — IPA fetches two distinct feed hosts.)
+func NewIPAService(ipaRepo *repository.IPARepository, offline bool) *IPAService {
 	return &IPAService{
 		ipaRepo:   ipaRepo,
 		ipaClient: client.NewIPAClient(),
+		offline:   offline,
 	}
 }
 
@@ -124,6 +131,13 @@ type SyncResult struct {
 
 // SyncAnnouncements fetches and stores IPA announcements
 func (s *IPAService) SyncAnnouncements(ctx context.Context) (*SyncResult, error) {
+	if s.offline {
+		// Air-gapped: skip both outbound RSS fetches (IPA + JVNDB) entirely
+		// rather than incurring 2×30s timeouts. Non-nil zero result, no error.
+		slog.Info("sync skipped: offline mode", "source", "ipa")
+		return &SyncResult{}, nil
+	}
+
 	result := &SyncResult{}
 
 	// Fetch security alerts

@@ -97,8 +97,11 @@ type KEVVulnerability struct {
 // SyncCatalog fetches and synchronizes the KEV catalog
 func (s *KEVService) SyncCatalog(ctx context.Context) (*model.KEVSyncResult, error) {
 	if s.offline {
+		// Degrade gracefully: return a non-nil zero result so handler/scheduler
+		// callers can read result fields (NewEntries etc.) without a nil-pointer
+		// panic. No error — the product keeps running on already-synced data.
 		slog.Info("sync skipped: offline mode", "source", "kev")
-		return nil, nil
+		return &model.KEVSyncResult{}, nil
 	}
 
 	// Create sync log

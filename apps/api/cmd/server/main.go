@@ -396,7 +396,7 @@ func main() {
 	auditService := service.NewAuditService(auditRepo, userRepo)
 	analyticsService := service.NewAnalyticsService(analyticsRepo, dashboardRepo)
 	reportService := service.NewReportService(reportRepo, dashboardRepo, analyticsRepo, tenantRepo, checklistRepo, visualizationRepo, "./reports")
-	ipaService := service.NewIPAService(ipaRepo)
+	ipaService := service.NewIPAService(ipaRepo, cfg.Offline)
 	encryptionKey, err := cfg.GetEncryptionKey()
 	if err != nil {
 		slog.Error("Failed to get encryption key", "error", err)

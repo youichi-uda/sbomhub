@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -16,6 +17,7 @@ type RemediationService struct {
 	vulnRepo      *repository.VulnerabilityRepository
 	componentRepo *repository.ComponentRepository
 	osvClient     *client.OSVClient
+	offline       bool
 }
 
 // NewRemediationService creates a new remediation service.
@@ -33,6 +35,7 @@ func NewRemediationService(
 		vulnRepo:      vulnRepo,
 		componentRepo: componentRepo,
 		osvClient:     client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
+		offline:       offline,
 	}
 }
 
@@ -127,6 +130,22 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 
 // GetRemediationByCVE fetches remediation by CVE ID
 func (s *RemediationService) GetRemediationByCVE(ctx context.Context, cveID string, componentName, componentVersion string) (*RemediationResponse, error) {
+	// M40: in offline/air-gapped mode OSV is unreachable. Unlike GetRemediation
+	// (which has a DB fallback), this path is OSV-only, so degrade gracefully to
+	// the known-workarounds + manual response — mirroring the online OSV-failure
+	// fallback above — instead of surfacing a misleading "not found" error.
+	if s.offline {
+		slog.Info("remediation: OSV lookup skipped, offline mode", "cve_id", cveID)
+		return &RemediationResponse{
+			CVEID: cveID,
+			Remediation: RemediationDetails{
+				Type:     "manual",
+				Commands: map[string]string{},
+			},
+			Workarounds: getKnownWorkarounds(cveID),
+		}, nil
+	}
+
 	// Fetch from OSV API
 	osvVuln, err := s.osvClient.GetVulnerability(ctx, cveID)
 	if err != nil {
