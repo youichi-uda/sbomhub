@@ -52,7 +52,7 @@ func (s *AnalyticsService) GetSummary(ctx context.Context, tenantID uuid.UUID, d
 
 	// If no trend data, use dashboard data
 	if len(vulnTrend) == 0 {
-		vulnTrend, err = s.getTrendFromDashboard(ctx, days)
+		vulnTrend, err = s.getTrendFromDashboard(ctx, tenantID, days)
 		if err != nil {
 			vulnTrend = []model.VulnerabilityTrendPoint{}
 		}
@@ -121,13 +121,18 @@ func (s *AnalyticsService) getDefaultSLOAchievement() []model.SLOAchievement {
 	}
 }
 
-// getTrendFromDashboard gets trend data from the dashboard repository
-func (s *AnalyticsService) getTrendFromDashboard(ctx context.Context, days int) ([]model.VulnerabilityTrendPoint, error) {
+// getTrendFromDashboard gets trend data from the dashboard repository.
+//
+// M41 (F462): repointed from the deprecated always-error GetTrend(ctx, days)
+// stub to the tenant-scoped GetTrendByTenant. tenantID is threaded from the
+// callers (GetSummary / GetVulnerabilityTrend), both of which already have it
+// in scope, so the fallback trend is now correctly isolated to the tenant.
+func (s *AnalyticsService) getTrendFromDashboard(ctx context.Context, tenantID uuid.UUID, days int) ([]model.VulnerabilityTrendPoint, error) {
 	if s.dashboardRepo == nil {
 		return nil, nil
 	}
 
-	trend, err := s.dashboardRepo.GetTrend(ctx, days)
+	trend, err := s.dashboardRepo.GetTrendByTenant(ctx, tenantID, days)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +185,7 @@ func (s *AnalyticsService) GetVulnerabilityTrend(ctx context.Context, tenantID u
 	}
 
 	if len(trend) == 0 {
-		trend, err = s.getTrendFromDashboard(ctx, days)
+		trend, err = s.getTrendFromDashboard(ctx, tenantID, days)
 		if err != nil {
 			return []model.VulnerabilityTrendPoint{}, nil
 		}

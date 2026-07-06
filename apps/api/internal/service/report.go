@@ -455,20 +455,38 @@ func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID
 		GeneratedAt: time.Now(),
 	}
 
-	// Get dashboard data
+	// Get dashboard data.
+	//
+	// M41 (F460): these MUST use the tenant-scoped *ByTenant variants. The
+	// non-tenant GetTotal*/GetVulnerabilityCounts/GetProjectScores/GetTopRisks/
+	// GetTrend methods were always-error deprecated stubs, so the old
+	// `err == nil { assign }` guards silently never fired and every report
+	// shipped with Summary counts = 0, an empty severity breakdown and no Top
+	// Risks / Project Scores / Trend. tenantID is already set on the RLS GUC by
+	// runWithTenantTx, so the *ByTenant queries see exactly this tenant's rows.
+	//
+	// M41 (F461): each read now logs at WARN on a non-nil error (the silent
+	// swallow is precisely why the empty-report bug hid for so long). We still
+	// degrade gracefully — a single failing section leaves its data empty
+	// rather than failing the whole report — but a real DB error now produces a
+	// visible signal instead of a silently-empty section.
 	if s.dashboardRepo != nil {
 		// Get total projects
-		if totalProjects, err := s.dashboardRepo.GetTotalProjects(ctx); err == nil {
+		if totalProjects, err := s.dashboardRepo.GetTotalProjectsByTenant(ctx, tenantID); err == nil {
 			data.Summary.TotalProjects = totalProjects
+		} else {
+			slog.Warn("report: total projects unavailable", "tenant_id", tenantID, "error", err)
 		}
 
 		// Get total components
-		if totalComponents, err := s.dashboardRepo.GetTotalComponents(ctx); err == nil {
+		if totalComponents, err := s.dashboardRepo.GetTotalComponentsByTenant(ctx, tenantID); err == nil {
 			data.Summary.TotalComponents = totalComponents
+		} else {
+			slog.Warn("report: total components unavailable", "tenant_id", tenantID, "error", err)
 		}
 
 		// Get vulnerability counts
-		if vulnCounts, err := s.dashboardRepo.GetVulnerabilityCounts(ctx); err == nil {
+		if vulnCounts, err := s.dashboardRepo.GetVulnerabilityCountsByTenant(ctx, tenantID); err == nil {
 			data.Summary.TotalVulnerabilities = vulnCounts.Critical + vulnCounts.High +
 				vulnCounts.Medium + vulnCounts.Low
 
@@ -478,20 +496,26 @@ func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID
 				"MEDIUM":   vulnCounts.Medium,
 				"LOW":      vulnCounts.Low,
 			}
+		} else {
+			slog.Warn("report: vulnerability counts unavailable", "tenant_id", tenantID, "error", err)
 		}
 
 		// Get project scores
-		if projectScores, err := s.dashboardRepo.GetProjectScores(ctx); err == nil {
+		if projectScores, err := s.dashboardRepo.GetProjectScoresByTenant(ctx, tenantID); err == nil {
 			data.ProjectScores = projectScores
+		} else {
+			slog.Warn("report: project scores unavailable", "tenant_id", tenantID, "error", err)
 		}
 
 		// Get top risks
-		if topRisks, err := s.dashboardRepo.GetTopRisks(ctx, 10); err == nil {
+		if topRisks, err := s.dashboardRepo.GetTopRisksByTenant(ctx, tenantID, 10, "epss"); err == nil {
 			data.TopRisks = topRisks
+		} else {
+			slog.Warn("report: top risks unavailable", "tenant_id", tenantID, "error", err)
 		}
 
 		// Get trend data
-		if trend, err := s.dashboardRepo.GetTrend(ctx, 30); err == nil {
+		if trend, err := s.dashboardRepo.GetTrendByTenant(ctx, tenantID, 30); err == nil {
 			for _, t := range trend {
 				data.VulnerabilityData.TrendData = append(data.VulnerabilityData.TrendData, model.TrendPoint{
 					Date:     t.Date,
@@ -501,6 +525,8 @@ func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID
 					Low:      t.Low,
 				})
 			}
+		} else {
+			slog.Warn("report: vulnerability trend unavailable", "tenant_id", tenantID, "error", err)
 		}
 	}
 

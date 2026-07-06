@@ -285,6 +285,134 @@ func TestGenerateReport_ErrorPathReturnsNilLauncher(t *testing.T) {
 	}
 }
 
+// M41 (F460) regression guard for gatherReportData.
+//
+// gatherReportData shipped with ZERO coverage. It called SIX deprecated
+// dashboard-repo methods (GetTotalProjects / GetTotalComponents /
+// GetVulnerabilityCounts / GetProjectScores / GetTopRisks / GetTrend) that
+// ALWAYS returned an error, each guarded by `if ...; err == nil { assign }`, so
+// the assignments never ran and every executive/technical report shipped with
+// Summary counts = 0, an empty severity breakdown and no Top Risks / Project
+// Scores / Trend. The fix swaps all six to the tenant-scoped *ByTenant variants.
+//
+// This test drives gatherReportData over a go-sqlmock DashboardRepository whose
+// *ByTenant queries return canned rows, and asserts the dashboard data actually
+// flows into the report struct. It is NON-VACUOUS: on the broken code the
+// deprecated stubs return an error without ever issuing a query, so TopRisks
+// stays empty and TotalProjects stays 0 — both asserted here — and the mock's
+// per-*ByTenant expectations go unmet. Verified 2026-07-06 (Opus fallback): with
+// GetTopRisksByTenant reverted to the deprecated GetTopRisks(ctx, 10), this test
+// FAILS ("len(data.TopRisks) = 0, want 1"); restoring the fix makes it pass.
+//
+// Only dashboardRepo is wired non-nil — gatherReportData guards the analytics /
+// checklist / visualization sections behind their own nil repo checks, so those
+// branches are skipped and no other mock is needed.
+func TestGatherReportData_PopulatesSummaryAndTopRisksFromTenantScopedDashboard(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tenantID := uuid.New()
+	projID := uuid.New()
+
+	// Queries fire in gatherReportData's order (projects, components,
+	// vuln-counts, project-scores, top-risks, trend). sqlmock defaults to
+	// ordered matching, so this also pins the call order and the exact
+	// tenant-scoped arg shape of each *ByTenant query.
+
+	// 1. GetTotalProjectsByTenant(ctx, tenantID)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM projects WHERE tenant_id = \$1`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
+
+	// 2. GetTotalComponentsByTenant(ctx, tenantID)
+	mock.ExpectQuery(`FROM components c\s+INNER JOIN sboms`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(42))
+
+	// 3. GetVulnerabilityCountsByTenant(ctx, tenantID)
+	mock.ExpectQuery(`SELECT\s+COALESCE\(SUM\(CASE WHEN v\.severity = 'CRITICAL' THEN 1 ELSE 0 END\), 0\) as critical,`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"critical", "high", "medium", "low"}).
+			AddRow(3, 5, 2, 1))
+
+	// 4. GetProjectScoresByTenant(ctx, tenantID)
+	mock.ExpectQuery(`FROM projects p\s+LEFT JOIN sboms`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "critical", "high", "medium", "low"}).
+			AddRow(projID, "app-a", 3, 5, 2, 1))
+
+	// 5. GetTopRisksByTenant(ctx, tenantID, 10, "epss")
+	mock.ExpectQuery(`DISTINCT ON \(v\.cve_id\)`).
+		WithArgs(tenantID, 10).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"cve_id", "epss_score", "cvss_score", "severity",
+			"project_id", "project_name", "component_name", "component_version",
+		}).AddRow("CVE-2026-9999", 0.75, 9.1, "CRITICAL", projID, "app-a", "libz", "1.2"))
+
+	// 6. GetTrendByTenant(ctx, tenantID, 30) — arg order is (days, tenantID).
+	mock.ExpectQuery(`WITH date_series AS`).
+		WithArgs(30, tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"date", "critical", "high", "medium", "low"}).
+			AddRow(time.Now(), 1, 2, 3, 4))
+
+	dashboardRepo := repository.NewDashboardRepository(db)
+	svc := NewReportService(nil, dashboardRepo, nil, nil, nil, nil, t.TempDir())
+
+	now := time.Now()
+	data, err := svc.gatherReportData(context.Background(), tenantID, now.AddDate(0, -1, 0), now)
+	if err != nil {
+		t.Fatalf("gatherReportData: %v", err)
+	}
+
+	// Summary fields must reflect the mocked dashboard reads (0 on broken code).
+	if data.Summary.TotalProjects != 7 {
+		t.Errorf("Summary.TotalProjects = %d, want 7", data.Summary.TotalProjects)
+	}
+	if data.Summary.TotalComponents != 42 {
+		t.Errorf("Summary.TotalComponents = %d, want 42", data.Summary.TotalComponents)
+	}
+	if data.Summary.TotalVulnerabilities != 11 { // 3+5+2+1
+		t.Errorf("Summary.TotalVulnerabilities = %d, want 11", data.Summary.TotalVulnerabilities)
+	}
+
+	// Severity breakdown must be populated (empty map on broken code).
+	if got := data.VulnerabilityData.BySeverity["CRITICAL"]; got != 3 {
+		t.Errorf("BySeverity[CRITICAL] = %d, want 3", got)
+	}
+	if got := data.VulnerabilityData.BySeverity["HIGH"]; got != 5 {
+		t.Errorf("BySeverity[HIGH] = %d, want 5", got)
+	}
+
+	// Top Risks: the key assertion — non-empty and correctly populated.
+	if len(data.TopRisks) != 1 {
+		t.Fatalf("len(data.TopRisks) = %d, want 1", len(data.TopRisks))
+	}
+	if data.TopRisks[0].CVEID != "CVE-2026-9999" {
+		t.Errorf("TopRisks[0].CVEID = %q, want CVE-2026-9999", data.TopRisks[0].CVEID)
+	}
+	if data.TopRisks[0].EPSSScore != 0.75 {
+		t.Errorf("TopRisks[0].EPSSScore = %v, want 0.75", data.TopRisks[0].EPSSScore)
+	}
+	if data.TopRisks[0].CVSSScore != 9.1 {
+		t.Errorf("TopRisks[0].CVSSScore = %v, want 9.1", data.TopRisks[0].CVSSScore)
+	}
+
+	// Project scores and trend must also flow through.
+	if len(data.ProjectScores) != 1 {
+		t.Errorf("len(data.ProjectScores) = %d, want 1", len(data.ProjectScores))
+	}
+	if len(data.VulnerabilityData.TrendData) != 1 {
+		t.Errorf("len(TrendData) = %d, want 1", len(data.VulnerabilityData.TrendData))
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations (a deprecated stub would skip the query entirely): %v", err)
+	}
+}
+
 func TestSetDB_IsNilSafeAndIdempotent(t *testing.T) {
 	svc := NewReportService(nil, nil, nil, nil, nil, nil, t.TempDir())
 	if svc.db != nil {

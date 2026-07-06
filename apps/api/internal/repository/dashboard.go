@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"database/sql"
-	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/database"
@@ -24,21 +23,6 @@ func NewDashboardRepository(db *sql.DB) *DashboardRepository {
 // tenant GUC set by TenantTx (codex-r1 Finding 2).
 func (r *DashboardRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
-}
-
-// Deprecated: Use GetTotalProjectsByTenant for proper tenant isolation
-func (r *DashboardRepository) GetTotalProjects(ctx context.Context) (int, error) {
-	return 0, fmt.Errorf("deprecated: use GetTotalProjectsByTenant")
-}
-
-// Deprecated: Use GetTotalComponentsByTenant for proper tenant isolation
-func (r *DashboardRepository) GetTotalComponents(ctx context.Context) (int, error) {
-	return 0, fmt.Errorf("deprecated: use GetTotalComponentsByTenant")
-}
-
-// Deprecated: Use GetVulnerabilityCountsByTenant for proper tenant isolation
-func (r *DashboardRepository) GetVulnerabilityCounts(ctx context.Context) (model.VulnerabilityCounts, error) {
-	return model.VulnerabilityCounts{}, fmt.Errorf("deprecated: use GetVulnerabilityCountsByTenant")
 }
 
 // GetTotalProjectsByTenant returns the total number of projects for a tenant
@@ -84,11 +68,6 @@ func (r *DashboardRepository) GetVulnerabilityCountsByTenant(ctx context.Context
 		&counts.Low,
 	)
 	return counts, err
-}
-
-// Deprecated: Use GetTopRisksByTenant for proper tenant isolation
-func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]model.TopRisk, error) {
-	return nil, fmt.Errorf("deprecated: use GetTopRisksByTenant")
 }
 
 // topRisksOrderBy returns the ORDER BY clause for the OUTER wrapper of the Top
@@ -187,11 +166,6 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 	return risks, rows.Err()
 }
 
-// Deprecated: Use GetProjectScoresByTenant for proper tenant isolation
-func (r *DashboardRepository) GetProjectScores(ctx context.Context) ([]model.ProjectScore, error) {
-	return nil, fmt.Errorf("deprecated: use GetProjectScoresByTenant")
-}
-
 // GetProjectScoresByTenant returns project risk scores for a tenant
 func (r *DashboardRepository) GetProjectScoresByTenant(ctx context.Context, tenantID uuid.UUID) ([]model.ProjectScore, error) {
 	query := `
@@ -243,11 +217,6 @@ func (r *DashboardRepository) GetProjectScoresByTenant(ctx context.Context, tena
 		scores = []model.ProjectScore{}
 	}
 	return scores, rows.Err()
-}
-
-// Deprecated: Use GetTrendByTenant for proper tenant isolation
-func (r *DashboardRepository) GetTrend(ctx context.Context, days int) ([]model.TrendPoint, error) {
-	return nil, fmt.Errorf("deprecated: use GetTrendByTenant")
 }
 
 // GetTrendByTenant returns vulnerability trend data for a tenant
