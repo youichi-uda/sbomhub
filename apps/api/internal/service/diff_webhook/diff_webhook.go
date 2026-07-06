@@ -239,6 +239,23 @@ func (s *Service) FireIfThreshold(
 	// Deliver with retries.
 	status, errMsg := s.deliver(ctx, settings.WebhookURL, body, signature)
 
+	// F445: errMsg from deliver() may embed a raw network/framework error or
+	// remote HTTP status/body. It is persisted (settings.last_error, surfaced
+	// by GET /tenant/settings/diff-webhook) and returned to the client
+	// (FireDecision.ErrorMessage → diff-webhook test route). Keep the raw
+	// detail server-side (slog) and downgrade to a generic message for
+	// everything persisted or returned. The numeric HTTP status is carried
+	// separately in Status/last_fired_at, so no operator visibility is lost.
+	if errMsg != "" {
+		slog.Warn("diff_webhook: delivery failed",
+			"tenant_id", tenantID,
+			"project_id", projectID,
+			"status", status,
+			"error", errMsg,
+		)
+		errMsg = "webhook delivery failed"
+	}
+
 	// Persist operational visibility.
 	_ = s.settings.UpdateFireResult(ctx, tenantID, status, errMsg)
 

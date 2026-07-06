@@ -135,8 +135,14 @@ func TestRunScan_NVDFailureMarksFailed(t *testing.T) {
 	if state != service.ScanStateFailed {
 		t.Fatalf("tracker state = %q, want %q", state, service.ScanStateFailed)
 	}
-	if errMsg == "" || !contains(errMsg, "nvd timeout") {
-		t.Fatalf("tracker errMsg = %q, want it to mention 'nvd timeout'", errMsg)
+	// F445: ScanStatus.Error is returned verbatim to the client, so the
+	// stored message must be a generic marker and must NOT leak the raw
+	// scanner error string.
+	if !contains(errMsg, "nvd: scan failed") {
+		t.Fatalf("tracker errMsg = %q, want generic 'nvd: scan failed'", errMsg)
+	}
+	if contains(errMsg, "nvd timeout") {
+		t.Fatalf("tracker errMsg = %q leaked the raw scanner error 'nvd timeout'", errMsg)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
@@ -176,8 +182,12 @@ func TestRunScan_JVNFailureMarksFailed(t *testing.T) {
 	if state != service.ScanStateFailed {
 		t.Fatalf("tracker state = %q, want %q", state, service.ScanStateFailed)
 	}
-	if !contains(errMsg, "jvn 503") {
-		t.Fatalf("tracker errMsg = %q, want it to mention 'jvn 503'", errMsg)
+	// F445: generic marker only; raw scanner error must not be persisted.
+	if !contains(errMsg, "jvn: scan failed") {
+		t.Fatalf("tracker errMsg = %q, want generic 'jvn: scan failed'", errMsg)
+	}
+	if contains(errMsg, "jvn 503") {
+		t.Fatalf("tracker errMsg = %q leaked the raw scanner error 'jvn 503'", errMsg)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
@@ -219,8 +229,13 @@ func TestRunScan_BothFailuresAggregated(t *testing.T) {
 	if state != service.ScanStateFailed {
 		t.Fatalf("tracker state = %q, want %q", state, service.ScanStateFailed)
 	}
-	if !contains(errMsg, "nvd boom") || !contains(errMsg, "jvn boom") {
-		t.Fatalf("tracker errMsg = %q, want both 'nvd boom' and 'jvn boom'", errMsg)
+	// F445: both scanner labels are still surfaced (the operator can see both
+	// failed via the generic markers), but neither raw error may leak.
+	if !contains(errMsg, "nvd: scan failed") || !contains(errMsg, "jvn: scan failed") {
+		t.Fatalf("tracker errMsg = %q, want both 'nvd: scan failed' and 'jvn: scan failed'", errMsg)
+	}
+	if contains(errMsg, "nvd boom") || contains(errMsg, "jvn boom") {
+		t.Fatalf("tracker errMsg = %q leaked a raw scanner error", errMsg)
 	}
 }
 
@@ -294,8 +309,13 @@ func TestRunScan_TxBeginFailureMarksFailed(t *testing.T) {
 	if state != service.ScanStateFailed {
 		t.Fatalf("tracker state = %q, want %q", state, service.ScanStateFailed)
 	}
-	if !contains(errMsg, "tx:") || !contains(errMsg, "db down") {
-		t.Fatalf("tracker errMsg = %q, want 'tx:' + 'db down'", errMsg)
+	// F445: the "tx:" label stays so ops knows it was a tx-level failure, but
+	// the raw DB error ("db down") must not be stored in ScanStatus.Error.
+	if !contains(errMsg, "tx: scan failed") {
+		t.Fatalf("tracker errMsg = %q, want generic 'tx: scan failed'", errMsg)
+	}
+	if contains(errMsg, "db down") {
+		t.Fatalf("tracker errMsg = %q leaked the raw tx error 'db down'", errMsg)
 	}
 }
 

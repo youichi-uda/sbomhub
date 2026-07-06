@@ -93,7 +93,11 @@ func (s *KEVService) SyncCatalog(ctx context.Context) (*model.KEVSyncResult, err
 	// Fetch catalog
 	catalog, err := s.fetchCatalog(ctx)
 	if err != nil {
-		s.finishSyncLog(ctx, syncLog, model.KEVSyncStatusFailed, err.Error(), nil)
+		// F445: keep raw network/framework detail server-side only; the
+		// persisted error_message is returned to clients via
+		// GET /kev/sync/latest, so store a generic message.
+		slog.Warn("kev: sync failed", "error", err)
+		s.finishSyncLog(ctx, syncLog, model.KEVSyncStatusFailed, "KEV catalog sync failed", nil)
 		return nil, fmt.Errorf("failed to fetch KEV catalog: %w", err)
 	}
 
@@ -102,7 +106,9 @@ func (s *KEVService) SyncCatalog(ctx context.Context) (*model.KEVSyncResult, err
 	// Get existing CVE IDs for comparison
 	existingCVEs, err := s.kevRepo.GetAllCVEIDs(ctx)
 	if err != nil {
-		s.finishSyncLog(ctx, syncLog, model.KEVSyncStatusFailed, err.Error(), nil)
+		// F445: raw DB error kept server-side only; persisted message generic.
+		slog.Warn("kev: sync failed", "error", err)
+		s.finishSyncLog(ctx, syncLog, model.KEVSyncStatusFailed, "KEV catalog sync failed", nil)
 		return nil, fmt.Errorf("failed to get existing CVE IDs: %w", err)
 	}
 	existingSet := make(map[string]bool)

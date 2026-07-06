@@ -378,9 +378,13 @@ func (h *SbomHandler) runDiffWebhookAutoTrigger(ctx context.Context, sbomID, ten
 			// ingest never persisted. ErrSbomNotInProject means
 			// the project/tenant pairing failed which is a real
 			// misconfig. Either way — audit + bail.
+			// F445: audit details["error"] is returned to the tenant via the
+			// audit viewer, so keep the raw error out of it — log it, store
+			// a generic marker.
+			slog.Warn("sbom: auto-fire diff compute failed", "sbom_id", sbomID, "error", err)
 			return h.writeAutoFiredAudit(txCtx, sbomID, tenantID, projectID, autoFireAuditDetails{
 				Status:    model.DiffWebhookAutoFireStatusError,
-				ErrorText: "diff compute: " + err.Error(),
+				ErrorText: "diff compute failed",
 			})
 		}
 
@@ -404,9 +408,10 @@ func (h *SbomHandler) runDiffWebhookAutoTrigger(ctx context.Context, sbomID, ten
 			// write failed (F168 propagation from the webhook
 			// service). Audit + bail — the inner audit failure
 			// already logged via slog inside the webhook service.
+			slog.Warn("sbom: auto-fire threshold/delivery failed", "sbom_id", sbomID, "error", fireErr)
 			return h.writeAutoFiredAudit(txCtx, sbomID, tenantID, projectID, autoFireAuditDetails{
 				Status:     model.DiffWebhookAutoFireStatusError,
-				ErrorText:  "fire if threshold: " + fireErr.Error(),
+				ErrorText:  "fire if threshold failed",
 				FromSbomID: resp.From.SbomID.String(),
 				ToSbomID:   resp.To.SbomID.String(),
 			})
@@ -545,8 +550,11 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //   - Any tx-level failure (BeginTx / set_config / Commit) is recorded
 //     under the "tx:" prefix.
 //   - If `errs` is non-empty at the end of the run, ScanTracker.MarkFailed
-//     is called with the joined error string. ONLY when every scanner
-//     returns nil AND the tx commits cleanly is MarkCompleted called.
+//     is called with a joined GENERIC marker string (F445: the raw scanner /
+//     tx error is logged via slog and never stored, because ScanStatus.Error
+//     is returned verbatim to the client on a 200 status response). ONLY when
+//     every scanner returns nil AND the tx commits cleanly is MarkCompleted
+//     called.
 //
 // Without this contract, a transient NVD/JVN outage would land the
 // CLI-observed scan status at "completed, 0 vulnerabilities" and
@@ -572,8 +580,11 @@ func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 		// Scan with NVD
 		if h.nvdService != nil {
 			if err := h.nvdService.ScanComponents(txCtx, sbomID); err != nil {
-				slog.Error("Auto NVD scan failed", "sbom_id", sbomID, "error", err)
-				errs = append(errs, "nvd: "+err.Error())
+				// F445: log the raw scanner error server-side only; the
+				// string recorded in ScanStatus.Error is returned to the
+				// client on a 200 status response, so keep it generic.
+				slog.Warn("sbom: scan failed", "sbom_id", sbomID, "scanner", "nvd", "error", err)
+				errs = append(errs, "nvd: scan failed")
 			} else {
 				slog.Info("Auto NVD scan completed", "sbom_id", sbomID)
 			}
@@ -582,8 +593,9 @@ func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 		// Scan with JVN
 		if h.jvnService != nil {
 			if err := h.jvnService.ScanComponents(txCtx, sbomID); err != nil {
-				slog.Error("Auto JVN scan failed", "sbom_id", sbomID, "error", err)
-				errs = append(errs, "jvn: "+err.Error())
+				// F445: raw scanner error to logs only; stored string is generic.
+				slog.Warn("sbom: scan failed", "sbom_id", sbomID, "scanner", "jvn", "error", err)
+				errs = append(errs, "jvn: scan failed")
 			} else {
 				slog.Info("Auto JVN scan completed", "sbom_id", sbomID)
 			}
@@ -597,9 +609,10 @@ func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 		return nil
 	})
 	if txErr != nil {
-		slog.Error("Background scan tx failed",
-			"sbom_id", sbomID, "tenant_id", tenantID, "error", txErr)
-		errs = append(errs, "tx: "+txErr.Error())
+		// F445: the tenant-tx error can carry DB/driver internals; log it
+		// server-side only and record a generic marker in ScanStatus.Error.
+		slog.Warn("sbom: scan failed", "sbom_id", sbomID, "tenant_id", tenantID, "scanner", "tx", "error", txErr)
+		errs = append(errs, "tx: scan failed")
 	}
 
 	if h.scanTracker != nil {

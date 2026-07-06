@@ -317,15 +317,21 @@ func (s *NotificationService) sendWebhook(ctx context.Context, webhookURL string
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "failed", err.Error())
+		// F445: raw network/framework error (and any remote detail) is kept
+		// server-side only; the persisted error_message is returned to
+		// clients via the notification logs, so store a generic message.
+		slog.Warn("notification: webhook delivery failed", "channel", channel, "error", err)
+		s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "failed", "notification delivery failed")
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		errMsg := fmt.Sprintf("webhook returned status %d", resp.StatusCode)
-		s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "failed", errMsg)
-		return fmt.Errorf("%s", errMsg)
+		// F445: the remote HTTP status is raw delivery detail; keep it in
+		// slog only and persist a generic client-facing message.
+		slog.Warn("notification: webhook delivery failed", "channel", channel, "status", resp.StatusCode)
+		s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "failed", "notification delivery failed")
+		return fmt.Errorf("webhook returned status %d", resp.StatusCode)
 	}
 
 	s.logNotification(ctx, tenantID, projectID, channel, string(jsonPayload), "sent", "")
@@ -374,7 +380,10 @@ func (s *NotificationService) sendEmailNotification(ctx context.Context, emailAd
 
 	for _, to := range recipients {
 		if err := s.sendSMTPEmail(to, subject, htmlBody, textBody); err != nil {
-			s.logNotification(ctx, tenantID, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "failed", err.Error())
+			// F445: raw SMTP/framework error kept server-side only; persisted
+			// error_message is client-facing, so store a generic message.
+			slog.Warn("notification: email delivery failed", "error", err)
+			s.logNotification(ctx, tenantID, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "failed", "notification delivery failed")
 			return err
 		}
 		s.logNotification(ctx, tenantID, projectID, model.NotificationChannelEmail, fmt.Sprintf("to: %s", to), "sent", "")

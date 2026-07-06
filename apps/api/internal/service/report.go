@@ -297,7 +297,9 @@ func (s *ReportService) generateReportAsync(tenantID uuid.UUID, report *model.Ge
 				"panic", r,
 				"duration_ms", time.Since(startTime).Milliseconds(),
 			)
-			s.markReportFailed(ctx, tenantID, report, fmt.Sprintf("Internal error: %v", r))
+			// F445: the panic value is logged above; GeneratedReport.ErrorMessage
+			// is returned to clients, so persist a generic message only.
+			s.markReportFailed(ctx, tenantID, report, "report generation failed")
 		}
 	}()
 
@@ -320,8 +322,10 @@ func (s *ReportService) generateReportAsync(tenantID uuid.UUID, report *model.Ge
 		)
 		// Generation tx rolled back. Record the failure in its own fresh
 		// tenant tx so the row reflects "failed" instead of staying
-		// "generating" forever.
-		s.markReportFailed(ctx, tenantID, report, err.Error())
+		// "generating" forever. F445: the raw err is logged above;
+		// GeneratedReport.ErrorMessage is returned to clients, so persist a
+		// generic message only.
+		s.markReportFailed(ctx, tenantID, report, "report generation failed")
 		return
 	}
 

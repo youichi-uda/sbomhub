@@ -65,7 +65,11 @@ func (s *EOLService) SyncCatalog(ctx context.Context) (*model.EOLSyncResult, err
 	// Get all products we want to sync (from our pre-seeded list)
 	existingProducts, err := s.eolRepo.GetAllProductNames(ctx)
 	if err != nil {
-		s.finishSyncLog(ctx, syncLog, model.EOLSyncStatusFailed, err.Error(), nil)
+		// F445: keep raw DB/framework detail server-side only; the persisted
+		// error_message is returned to clients via GET /eol/sync/latest, so
+		// store a generic message.
+		slog.Warn("eol: sync failed", "error", err)
+		s.finishSyncLog(ctx, syncLog, model.EOLSyncStatusFailed, "EOL catalog sync failed", nil)
 		return nil, fmt.Errorf("failed to get existing products: %w", err)
 	}
 
