@@ -135,7 +135,7 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 	if err != nil {
 		slog.Error("Clerk JWT verification failed", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
-			"error": "invalid token: " + err.Error(),
+			"error": "invalid token",
 		})
 	}
 

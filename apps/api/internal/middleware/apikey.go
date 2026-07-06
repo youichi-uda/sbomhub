@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -40,8 +41,11 @@ func APIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 			// Validate the key
 			key, err := keyService.ValidateKey(c.Request().Context(), apiKey)
 			if err != nil {
+				// Opaque auth failure: never leak whether it was a bad key
+				// or an internal lookup error (F445). Log detail, return generic.
+				slog.Warn("apikey: key validation failed", "error", err)
 				return c.JSON(http.StatusUnauthorized, map[string]string{
-					"error": err.Error(),
+					"error": "invalid API key",
 				})
 			}
 
@@ -73,8 +77,9 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 				// Validate the key if present
 				key, err := keyService.ValidateKey(c.Request().Context(), apiKey)
 				if err != nil {
+					slog.Warn("apikey: key validation failed", "error", err)
 					return c.JSON(http.StatusUnauthorized, map[string]string{
-						"error": err.Error(),
+						"error": "invalid API key",
 					})
 				}
 				c.Set(ContextKeyAPI, key)

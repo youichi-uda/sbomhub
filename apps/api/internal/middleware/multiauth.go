@@ -98,7 +98,7 @@ func handleAPIKeyAuth(
 	if err != nil {
 		slog.Debug("MultiAuth: API key validation failed", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
-			"error": err.Error(),
+			"error": "invalid API key",
 		})
 	}
 	c.Set(ContextKeyAPI, key)
