@@ -72,9 +72,13 @@ type CRAReportStore interface {
 	UpdateDecision(ctx context.Context, tenantID, id uuid.UUID, upd repository.CRAReportDecisionUpdate) error
 	// UpdateAwarenessTime sets/edits/clears the Art.14 awareness instant
 	// on one cra_reports row (M35 F429). A nil awarenessTime clears it to
-	// SQL NULL (deadline degrades to not_applicable); a zero RowsAffected
-	// is wrapped as sql.ErrNoRows so the handler surfaces a 404.
-	UpdateAwarenessTime(ctx context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time) error
+	// SQL NULL (deadline degrades to not_applicable). It returns the
+	// PRE-update awareness (nil when previously unset), captured atomically
+	// inside the UPDATE via a FOR UPDATE + RETURNING CTE so the audit
+	// trail's prior_awareness cannot go stale under a concurrent edit
+	// (F435). A zero-rows UPDATE is wrapped as sql.ErrNoRows so the handler
+	// surfaces a 404.
+	UpdateAwarenessTime(ctx context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time) (*time.Time, error)
 }
 
 // CRAAuditLogger is the subset of *repository.AuditRepository the
@@ -637,14 +641,19 @@ func (h *CRAReportsHandler) SetAwareness(c echo.Context) error {
 	// F8/F9 carry-over: load + enforce project boundary BEFORE the UPDATE.
 	// repository.UpdateAwarenessTime is scoped only by (tenant, id), so
 	// without this pre-flight a cross-project URL would mutate a
-	// foreign-project report. Capture the prior awareness for the trail.
-	report, status, body := h.loadReportScoped(c.Request().Context(), tc.TenantID(), projectID, reportID, "SetAwareness")
-	if status != 0 {
+	// foreign-project report. We discard the loaded row: the prior
+	// awareness for the audit trail is captured ATOMICALLY inside the
+	// UPDATE below (F435) — reading it here from the pre-flight SELECT
+	// would let a concurrent edit make prior_awareness stale (TOCTOU).
+	if _, status, body := h.loadReportScoped(c.Request().Context(), tc.TenantID(), projectID, reportID, "SetAwareness"); status != 0 {
 		return c.JSON(status, body)
 	}
-	priorAwareness := report.AwarenessTime
 
-	if err := h.reports.UpdateAwarenessTime(c.Request().Context(), tc.TenantID(), reportID, valueToWrite); err != nil {
+	// prior is the pre-update awareness captured atomically by the CTE +
+	// FOR UPDATE + RETURNING in the repository (F435), not the stale value
+	// from the pre-flight SELECT above.
+	prior, err := h.reports.UpdateAwarenessTime(c.Request().Context(), tc.TenantID(), reportID, valueToWrite)
+	if err != nil {
 		// A zero-rows UPDATE (row absent, wrong tenant, or RLS-hidden) is
 		// wrapped as sql.ErrNoRows by the repository — surface the same 404
 		// as loadReportScoped so a TOCTOU delete cannot leak a 500.
@@ -665,7 +674,7 @@ func (h *CRAReportsHandler) SetAwareness(c echo.Context) error {
 	// for the compliance trail.
 	auditDetails := map[string]interface{}{
 		"project_id":      projectID.String(),
-		"prior_awareness": rfc3339OrNil(priorAwareness),
+		"prior_awareness": rfc3339OrNil(prior),
 		"new_awareness":   rfc3339OrNil(valueToWrite),
 		"cleared":         valueToWrite == nil,
 	}

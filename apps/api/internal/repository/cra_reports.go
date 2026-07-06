@@ -612,43 +612,78 @@ func (r *CRAReportsRepository) UpdateDecision(ctx context.Context, tenantID, id 
 // on the ambient TenantTx (joined via r.q(ctx)) makes another tenant's
 // row match zero rows here.
 //
+// The pre-update awareness is captured ATOMICALLY and returned as
+// `prior` (nil when it was previously unset / SQL NULL). A `prev` CTE
+// SELECTs the current awareness_time FOR UPDATE — locking the row and
+// pinning the value the (concurrent-serialised) UPDATE is about to
+// overwrite — and the UPDATE's RETURNING re-reads that pinned value.
+// Because the read and the write are a SINGLE statement there is no
+// read-write gap, so the awareness audit trail's prior_awareness cannot
+// go stale under a concurrent edit (F435 — the M35 load-then-update
+// SELECT/UPDATE split was a TOCTOU on the audited prior value).
+//
 // Returns sql.ErrNoRows wrapped as a typed error when the UPDATE
 // matches zero rows -- either (tenant, id) does not exist for this
 // session or RLS hides a foreign-tenant row -- so the handler can
-// surface a 404, exactly like UpdateDecision.
+// surface a 404, exactly like UpdateDecision. Under READ COMMITTED the
+// FOR UPDATE lock serialises concurrent awareness edits and EvalPlanQual
+// re-reads the latest committed row, so the RETURNING prior is the true
+// immediately-preceding value.
 func (r *CRAReportsRepository) UpdateAwarenessTime(
 	ctx context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time,
-) error {
+) (prior *time.Time, err error) {
 	if tenantID == uuid.Nil {
-		return fmt.Errorf("CRAReportsRepository.UpdateAwarenessTime: tenant_id is required")
+		return nil, fmt.Errorf("CRAReportsRepository.UpdateAwarenessTime: tenant_id is required")
 	}
 	if id == uuid.Nil {
-		return fmt.Errorf("CRAReportsRepository.UpdateAwarenessTime: id is required")
+		return nil, fmt.Errorf("CRAReportsRepository.UpdateAwarenessTime: id is required")
 	}
 
+	// prev locks the target row (FOR UPDATE) and captures its
+	// awareness_time BEFORE the UPDATE overwrites it. prev is JOINed into
+	// the UPDATE's FROM so RETURNING prev.awareness_time surfaces the
+	// pinned pre-update value directly. NOTE: a scalar subquery
+	// `RETURNING (SELECT awareness_time FROM prev)` does NOT work here --
+	// against real Postgres it yields NULL (verified via real-PG smoke,
+	// F435); the FROM-join is the canonical old-value capture. Single
+	// statement = zero read-write gap; under READ COMMITTED the FOR UPDATE
+	// serialises concurrent edits (EvalPlanQual re-reads the latest
+	// committed row) so the returned prior is the true immediately-
+	// preceding value. Both prev and the UPDATE carry the explicit
+	// tenant_id = $1 belt to the migration 038 FORCE RLS braces.
 	const query = `
-		UPDATE cra_reports SET
+		WITH prev AS (
+			SELECT id, awareness_time FROM cra_reports
+			WHERE tenant_id = $1 AND id = $2
+			FOR UPDATE
+		)
+		UPDATE cra_reports c SET
 			awareness_time = $3,
 			updated_at     = NOW()
-		WHERE tenant_id = $1 AND id = $2
+		FROM prev
+		WHERE c.tenant_id = $1 AND c.id = $2 AND prev.id = c.id
+		RETURNING prev.awareness_time
 	`
 
-	res, err := r.q(ctx).ExecContext(ctx, query,
+	var nt sql.NullTime
+	err = r.q(ctx).QueryRowContext(ctx, query,
 		tenantID, id, nullableTime(awarenessTime),
-	)
+	).Scan(&nt)
+	if err == sql.ErrNoRows {
+		// Zero rows updated (row absent, wrong tenant, or RLS-hidden).
+		// Same wrapped shape as before so handlers can errors.Is-check
+		// and return a 404.
+		return nil, fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
+	}
 	if err != nil {
-		return fmt.Errorf("update cra_reports awareness_time: %w", err)
+		return nil, fmt.Errorf("update cra_reports awareness_time: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update cra_reports awareness_time (RowsAffected): %w", err)
+	if nt.Valid {
+		t := nt.Time
+		return &t, nil
 	}
-	if n == 0 {
-		// Same shape as sql.ErrNoRows so handlers can errors.Is-check
-		// and return a 404 (row absent, wrong tenant, or RLS-hidden).
-		return fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
-	}
-	return nil
+	// Prior awareness was NULL / unset.
+	return nil, nil
 }
 
 // MarkSubmitted flips one cra_reports row from its current publication

@@ -860,12 +860,20 @@ func TestCRAReportsRepo_UpdateDecision_AlreadyApproved_F31(t *testing.T) {
 	}
 }
 
-// TestCRAReportsRepository_UpdateAwarenessTime_SetsAndScopesTenant pins
-// the M35 Wave A UPDATE argument shape: tenant_id at $1 (load-bearing
-// for the belt-and-braces tenant scope), id at $2, and the
-// nullableTime-bound awareness instant at $3. A non-nil time must land
-// as the concrete time value (set/edit path).
-func TestCRAReportsRepository_UpdateAwarenessTime_SetsAndScopesTenant(t *testing.T) {
+// TestCRAReportsRepository_UpdateAwarenessTime_SetsAndReturnsPriorAtomic
+// pins the F435 atomic prior-capture contract AND the M35 argument shape.
+// The `prev` CTE locks + captures the pre-update awareness FOR UPDATE and,
+// JOINed into the UPDATE's FROM, `RETURNING prev.awareness_time` surfaces
+// it, so the returned `prior` is the value the row held BEFORE this write —
+// never the post-update value. The regex matcher requires the `prev` CTE,
+// `FOR UPDATE`, the `FROM prev` join, and the `RETURNING prev.awareness_time`
+// capture to be present, so a regression that drops the atomic capture
+// (reverting to a bare UPDATE) OR to the scalar-subquery
+// `RETURNING (SELECT ... FROM prev)` form (which yields NULL against real
+// Postgres, F435) fails here before the return-value assertion runs.
+// tenant_id binds at $1 (belt to the RLS braces), id at $2, and the
+// nullableTime-bound new instant at $3.
+func TestCRAReportsRepository_UpdateAwarenessTime_SetsAndReturnsPriorAtomic(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -875,18 +883,107 @@ func TestCRAReportsRepository_UpdateAwarenessTime_SetsAndScopesTenant(t *testing
 	repo := NewCRAReportsRepository(db)
 	tenantID := uuid.New()
 	id := uuid.New()
-	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+	priorA := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC) // value the row holds before the write
+	newB := time.Date(2026, 6, 25, 9, 0, 0, 0, time.UTC)   // value we write ($3) → DB row becomes B
 
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
+	mock.ExpectQuery(`WITH prev AS[\s\S]+FOR UPDATE[\s\S]+UPDATE cra_reports c SET[\s\S]+FROM prev[\s\S]+RETURNING prev\.awareness_time`).
 		WithArgs(
-			tenantID,  // $1 tenant scope
-			id,        // $2
-			awareness, // $3 awareness_time (nullableTime of a non-nil ptr)
+			tenantID, // $1 tenant scope
+			id,       // $2
+			newB,     // $3 awareness_time (nullableTime of a non-nil ptr)
 		).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"awareness_time"}).AddRow(priorA))
 
-	if err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, &awareness); err != nil {
+	got, err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, &newB)
+	if err != nil {
 		t.Fatalf("UpdateAwarenessTime: %v", err)
+	}
+	if got == nil || !got.Equal(priorA) {
+		t.Fatalf("F435: expected returned prior == pre-update %v, got %v", priorA, got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCRAReportsRepository_UpdateAwarenessTime_ReturnsPriorPerCall walks
+// the F435 contract across successive edits: with the row at A, writing B
+// returns prior A; writing C next returns prior B. This is the audit-
+// fidelity property — each awareness edit's prior_awareness reflects the
+// value that immediately preceded it, not a stale pre-flight read. (The
+// FOR UPDATE serialisation that makes this hold under real concurrency is
+// exercised by the orchestrator's real-PG smoke; here the RETURNING wiring
+// that carries the pinned prev value out is pinned.)
+func TestCRAReportsRepository_UpdateAwarenessTime_ReturnsPriorPerCall(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	tenantID := uuid.New()
+	id := uuid.New()
+	aTime := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
+	bTime := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
+	cTime := time.Date(2026, 6, 26, 0, 0, 0, 0, time.UTC)
+
+	// Call 1: row currently at A, write B → RETURNING prior = A.
+	mock.ExpectQuery(`WITH prev AS[\s\S]+FOR UPDATE[\s\S]+RETURNING`).
+		WithArgs(tenantID, id, bTime).
+		WillReturnRows(sqlmock.NewRows([]string{"awareness_time"}).AddRow(aTime))
+	// Call 2: row now at B, write C → RETURNING prior = B.
+	mock.ExpectQuery(`WITH prev AS[\s\S]+FOR UPDATE[\s\S]+RETURNING`).
+		WithArgs(tenantID, id, cTime).
+		WillReturnRows(sqlmock.NewRows([]string{"awareness_time"}).AddRow(bTime))
+
+	prior1, err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, &bTime)
+	if err != nil {
+		t.Fatalf("UpdateAwarenessTime call 1: %v", err)
+	}
+	if prior1 == nil || !prior1.Equal(aTime) {
+		t.Fatalf("F435: call 1 expected prior == A (%v), got %v", aTime, prior1)
+	}
+	prior2, err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, &cTime)
+	if err != nil {
+		t.Fatalf("UpdateAwarenessTime call 2: %v", err)
+	}
+	if prior2 == nil || !prior2.Equal(bTime) {
+		t.Fatalf("F435: call 2 expected prior == B (%v), got %v", bTime, prior2)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCRAReportsRepository_UpdateAwarenessTime_NullPriorReturnsNil pins the
+// unset-prior case: when the row's awareness_time was SQL NULL before the
+// write, the RETURNING prev value is NULL, so the method returns a nil
+// *time.Time. The handler renders that as JSON null prior_awareness, so the
+// audit trail distinguishes "was unset" from an actual instant (F429/F435).
+func TestCRAReportsRepository_UpdateAwarenessTime_NullPriorReturnsNil(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewCRAReportsRepository(db)
+	tenantID := uuid.New()
+	id := uuid.New()
+	newB := time.Date(2026, 6, 25, 9, 0, 0, 0, time.UTC)
+
+	// RETURNING yields a NULL awareness_time (row previously unset).
+	mock.ExpectQuery(`WITH prev AS[\s\S]+FOR UPDATE[\s\S]+RETURNING`).
+		WithArgs(tenantID, id, newB).
+		WillReturnRows(sqlmock.NewRows([]string{"awareness_time"}).AddRow(nil))
+
+	got, err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, &newB)
+	if err != nil {
+		t.Fatalf("UpdateAwarenessTime: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("F435: expected nil prior for a previously-unset awareness, got %v", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
@@ -896,7 +993,9 @@ func TestCRAReportsRepository_UpdateAwarenessTime_SetsAndScopesTenant(t *testing
 // TestCRAReportsRepository_UpdateAwarenessTime_ClearBindsNull verifies
 // the "clear to NULL" semantics: a nil *time.Time passes through
 // nullableTime as SQL NULL at $3 (operator unsets a mis-set awareness,
-// which degrades the compute-on-read deadline to not_applicable).
+// which degrades the compute-on-read deadline to not_applicable). The
+// pre-clear value is still captured + returned as prior (F435) so the
+// audit trail records exactly what was cleared.
 func TestCRAReportsRepository_UpdateAwarenessTime_ClearBindsNull(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -907,17 +1006,22 @@ func TestCRAReportsRepository_UpdateAwarenessTime_ClearBindsNull(t *testing.T) {
 	repo := NewCRAReportsRepository(db)
 	tenantID := uuid.New()
 	id := uuid.New()
+	priorA := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
 
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
+	mock.ExpectQuery(`WITH prev AS[\s\S]+FOR UPDATE[\s\S]+RETURNING`).
 		WithArgs(
 			tenantID, // $1
 			id,       // $2
 			nil,      // $3 awareness_time (nil ptr -> nullableTime -> SQL NULL)
 		).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"awareness_time"}).AddRow(priorA))
 
-	if err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, nil); err != nil {
+	got, err := repo.UpdateAwarenessTime(context.Background(), tenantID, id, nil)
+	if err != nil {
 		t.Fatalf("UpdateAwarenessTime (clear): %v", err)
+	}
+	if got == nil || !got.Equal(priorA) {
+		t.Fatalf("F435: clear must still return the pre-clear prior %v, got %v", priorA, got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
@@ -940,10 +1044,10 @@ func TestCRAReportsRepository_UpdateAwarenessTime_RejectsZero(t *testing.T) {
 	id := uuid.New()
 	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
 
-	if err := repo.UpdateAwarenessTime(context.Background(), uuid.Nil, id, &awareness); err == nil {
+	if _, err := repo.UpdateAwarenessTime(context.Background(), uuid.Nil, id, &awareness); err == nil {
 		t.Fatal("expected error for zero tenant_id, got nil")
 	}
-	if err := repo.UpdateAwarenessTime(context.Background(), tenantID, uuid.Nil, &awareness); err == nil {
+	if _, err := repo.UpdateAwarenessTime(context.Background(), tenantID, uuid.Nil, &awareness); err == nil {
 		t.Fatal("expected error for zero id, got nil")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -952,9 +1056,11 @@ func TestCRAReportsRepository_UpdateAwarenessTime_RejectsZero(t *testing.T) {
 }
 
 // TestCRAReportsRepository_UpdateAwarenessTime_NoRowsErrors verifies the
-// RowsAffected==0 -> wrapped sql.ErrNoRows contract that the handler
-// relies on to surface a 404. Zero rows happens when (tenant, id) does
-// not exist for this session OR when RLS hides a foreign-tenant row.
+// zero-rows -> wrapped sql.ErrNoRows contract that the handler relies on to
+// surface a 404. With the F435 CTE the UPDATE ... RETURNING yields no row
+// when (tenant, id) does not exist for this session OR when RLS hides a
+// foreign-tenant row, so QueryRow's Scan returns sql.ErrNoRows and prior is
+// nil.
 func TestCRAReportsRepository_UpdateAwarenessTime_NoRowsErrors(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -965,12 +1071,16 @@ func TestCRAReportsRepository_UpdateAwarenessTime_NoRowsErrors(t *testing.T) {
 	repo := NewCRAReportsRepository(db)
 	awareness := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
 
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE cra_reports SET")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Empty result set → QueryRow.Scan returns sql.ErrNoRows.
+	mock.ExpectQuery(`WITH prev AS[\s\S]+FOR UPDATE[\s\S]+RETURNING`).
+		WillReturnRows(sqlmock.NewRows([]string{"awareness_time"}))
 
-	err = repo.UpdateAwarenessTime(context.Background(), uuid.New(), uuid.New(), &awareness)
+	prior, err := repo.UpdateAwarenessTime(context.Background(), uuid.New(), uuid.New(), &awareness)
 	if err == nil || !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected wrapped sql.ErrNoRows, got %v", err)
+	}
+	if prior != nil {
+		t.Fatalf("expected nil prior on zero rows, got %v", prior)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)

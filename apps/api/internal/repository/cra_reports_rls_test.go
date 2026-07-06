@@ -411,7 +411,7 @@ func TestCRAReports_UpdateAwarenessTime_RLS(t *testing.T) {
 		t.Fatalf("SET LOCAL tenantB: %v", err)
 	}
 	ctxB := database.WithTx(context.Background(), txB)
-	updErr := repo.UpdateAwarenessTime(ctxB, tenantA, reportID, &attacker)
+	_, updErr := repo.UpdateAwarenessTime(ctxB, tenantA, reportID, &attacker)
 	if updErr == nil {
 		_ = txB.Rollback()
 		t.Fatalf("RLS breach: tenant B was able to UPDATE tenant A's awareness_time")

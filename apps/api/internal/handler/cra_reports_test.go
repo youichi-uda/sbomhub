@@ -161,29 +161,32 @@ func (f *fakeCRAReportStore) UpdateDecision(_ context.Context, tenantID, id uuid
 	return nil
 }
 
-// UpdateAwarenessTime is the M35 F429 fake. It records the call count and
-// the exact pointer supplied (so a test can assert the parsed time was
-// passed through, or nil on clear) and mutates the stored row so a
-// subsequent loadReportScoped reload observes the new awareness_time (and
-// the enricher recomputes the deadline from it).
-func (f *fakeCRAReportStore) UpdateAwarenessTime(_ context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time) error {
+// UpdateAwarenessTime is the M35 F429 / F435 fake. It records the call
+// count and the exact pointer supplied (so a test can assert the parsed
+// time was passed through, or nil on clear) and mutates the stored row so
+// a subsequent loadReportScoped reload observes the new awareness_time
+// (and the enricher recomputes the deadline from it). It returns the
+// PRE-update awareness (captured before the mutation), mirroring the real
+// repository's atomic FOR UPDATE + RETURNING prior contract (F435).
+func (f *fakeCRAReportStore) UpdateAwarenessTime(_ context.Context, tenantID, id uuid.UUID, awarenessTime *time.Time) (*time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.awarenessCalls++
 	f.awarenessArg = awarenessTime
 	f.awarenessArgIsNil = awarenessTime == nil
 	if f.awarenessErr != nil {
-		return f.awarenessErr
+		return nil, f.awarenessErr
 	}
 	r, ok := f.byID[id]
 	if !ok || r.TenantID != tenantID {
 		// Mirror the real repository's zero-rows → wrapped sql.ErrNoRows.
-		return fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
+		return nil, fmt.Errorf("update cra_reports awareness_time: %w", sql.ErrNoRows)
 	}
+	prior := r.AwarenessTime
 	r.AwarenessTime = awarenessTime
 	r.UpdatedAt = time.Now().UTC()
 	f.byID[id] = r
-	return nil
+	return prior, nil
 }
 
 type fakeCRAAudit struct {
