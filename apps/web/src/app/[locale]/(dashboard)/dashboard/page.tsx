@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useLocale } from "next-intl";
 import Link from "next/link";
@@ -21,6 +21,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { AlertCircle, Shield, Package, FolderOpen, TrendingUp, Clock, CheckCircle, AlertTriangle, HelpCircle } from "lucide-react";
 
@@ -246,11 +247,47 @@ export default function DashboardPage() {
   const t = useTranslations("Dashboard");
   const tc = useTranslations("Common");
   const teol = useTranslations("EOL");
+  const tv = useTranslations("Vulnerabilities");
   const locale = useLocale();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [eolSummaries, setEolSummaries] = useState<Record<string, EOLSummary>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // M39-B (F450 #161): Top Risks CVSS⇄EPSS sort toggle. Default `epss` matches
+  // the widget's "By EPSS" label (differs intentionally from the M38 per-project
+  // list, which defaulted to cvss). Toggling re-fetches server-side — a browser
+  // re-sort of the already-fetched top-10 could not surface a high-EPSS/low-CVSS
+  // CVE, because the backend LIMIT 10 is applied AFTER the chosen ordering.
+  const [topRisksSort, setTopRisksSort] = useState<"epss" | "cvss">("epss");
+  // Server-fetched top risks for the selected sort. `null` until the first
+  // toggle re-fetch resolves; render falls back to summary.top_risks (which
+  // Wave A makes EPSS-ordered by default) so there is no initial flash.
+  const [topRisks, setTopRisks] = useState<TopRisk[] | null>(null);
+  // Request-sequence guard (mirrors the F448 vulnReqSeq pattern): a slow older
+  // response must not overwrite a newer toggle's order. Only the latest applies.
+  const topRisksReqSeq = useRef(0);
+
+  const loadTopRisks = useCallback(async (sort: "epss" | "cvss") => {
+    const seq = ++topRisksReqSeq.current;
+    try {
+      const data = await api.dashboard.getTopRisks({ sort });
+      if (seq !== topRisksReqSeq.current) return; // superseded by a newer request
+      setTopRisks(data || []);
+    } catch (err) {
+      if (seq !== topRisksReqSeq.current) return;
+      console.error("Failed to load top risks:", err);
+    }
+  }, []);
+
+  const handleTopRisksSort = useCallback(
+    (sort: "epss" | "cvss") => {
+      if (sort === topRisksSort) return;
+      setTopRisksSort(sort);
+      loadTopRisks(sort);
+    },
+    [topRisksSort, loadTopRisks],
+  );
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -399,16 +436,49 @@ export default function DashboardPage() {
         {/* Top Risks Table */}
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <AlertCircle className="h-5 w-5 text-red-500" />
-              {t("topEpss")}
-            </CardTitle>
-            <CardDescription>
-              {t("topEpssDescription")}
-            </CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <AlertCircle className="h-5 w-5 text-red-500" />
+                  {t("topEpss")}
+                </CardTitle>
+                <CardDescription className="mt-1.5">
+                  {t("topEpssDescription")}
+                </CardDescription>
+              </div>
+              {/* M39-B (F450 #161): CVSS ⇄ EPSS sort toggle. Default EPSS
+                  matches the widget's "By EPSS" label; selecting a sort
+                  re-fetches server-side (handleTopRisksSort → getTopRisks)
+                  so the backend LIMIT 10 picks the true top-10 by that axis. */}
+              <div
+                className="flex items-center gap-2"
+                role="group"
+                aria-label={tv("sortLabel")}
+              >
+                <span className="text-sm text-muted-foreground">
+                  {tv("sortLabel")}:
+                </span>
+                <Button
+                  size="sm"
+                  variant={topRisksSort === "epss" ? "default" : "outline"}
+                  onClick={() => handleTopRisksSort("epss")}
+                  aria-pressed={topRisksSort === "epss"}
+                >
+                  {tv("sortByEpss")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={topRisksSort === "cvss" ? "default" : "outline"}
+                  onClick={() => handleTopRisksSort("cvss")}
+                  aria-pressed={topRisksSort === "cvss"}
+                >
+                  {tv("sortByCvss")}
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <TopRisksTable risks={summary.top_risks} noDataMessage={t("noVulnerabilities")} locale={locale} />
+            <TopRisksTable risks={topRisks ?? summary.top_risks} noDataMessage={t("noVulnerabilities")} locale={locale} />
           </CardContent>
         </Card>
 

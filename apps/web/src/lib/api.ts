@@ -1948,6 +1948,14 @@ export const api = {
   // Dashboard
   dashboard: {
     getSummary: () => request<DashboardSummary>("/api/v1/dashboard/summary"),
+    // M39-B (F450 #161): Top Risks CVSS⇄EPSS sort toggle. Server-side sort so
+    // LIMIT 10 selects the true top-10 by the chosen axis (a client re-sort of
+    // the already-fetched rows could not pull in a high-EPSS/low-CVSS CVE).
+    // Backend default is `epss` (matches the widget's "By EPSS" label).
+    getTopRisks: ({ sort }: { sort?: "epss" | "cvss" } = {}) =>
+      request<TopRisk[]>(
+        "/api/v1/dashboard/top-risks" + (sort ? "?sort=" + sort : ""),
+      ),
   },
 
   // Search
