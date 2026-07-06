@@ -267,29 +267,36 @@ export default function DashboardPage() {
   // Request-sequence guard (mirrors the F448 vulnReqSeq pattern): a slow older
   // response must not overwrite a newer toggle's order. Only the latest applies.
   const topRisksReqSeq = useRef(0);
+  // The sort order of the rows ACTUALLY displayed. Starts "epss" because the
+  // initial fallback (summary.top_risks) is EPSS-ordered (Wave A). On a failed
+  // re-fetch we snap the toggle back to THIS — not the previous button state —
+  // so rapid toggling that supersedes an in-flight request can't strand the
+  // button claiming an order the table never displayed (F451).
+  const displayedTopRisksSort = useRef<"epss" | "cvss">("epss");
 
-  const loadTopRisks = useCallback(async (sort: "epss" | "cvss", revertSort?: "epss" | "cvss") => {
+  const loadTopRisks = useCallback(async (sort: "epss" | "cvss") => {
     const seq = ++topRisksReqSeq.current;
     try {
       const data = await api.dashboard.getTopRisks({ sort });
       if (seq !== topRisksReqSeq.current) return; // superseded by a newer request
       setTopRisks(data || []);
+      displayedTopRisksSort.current = sort; // the table now reflects `sort`
     } catch (err) {
       if (seq !== topRisksReqSeq.current) return;
       console.error("Failed to load top risks:", err);
-      // F451: this fetch would have applied `sort`, but it failed, so revert
-      // the toggle to the order that is actually still displayed — otherwise
-      // the button would claim an ordering the failed request never applied.
-      if (revertSort !== undefined) setTopRisksSort(revertSort);
+      // F451: this fetch would have applied `sort` but failed. Snap the toggle
+      // back to the order actually on screen (not the previous button state,
+      // which rapid toggling could have left pointing at data that never
+      // loaded) so the button never claims an order the table isn't showing.
+      setTopRisksSort(displayedTopRisksSort.current);
     }
   }, []);
 
   const handleTopRisksSort = useCallback(
     (sort: "epss" | "cvss") => {
       if (sort === topRisksSort) return;
-      const prev = topRisksSort;
       setTopRisksSort(sort);
-      loadTopRisks(sort, prev);
+      loadTopRisks(sort);
     },
     [topRisksSort, loadTopRisks],
   );
