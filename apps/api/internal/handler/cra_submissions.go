@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -136,6 +137,14 @@ func (h *CRASubmissionsHandler) Record(c echo.Context) error {
 	if authority == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "authority is required"})
 	}
+	// authority maps to VARCHAR(255): a character (rune) limit, not bytes.
+	// Guard with utf8.RuneCountInString so a valid Japanese authority
+	// (multi-byte, well under 255 chars but over 255 bytes) is NOT wrongly
+	// rejected, and an over-length value returns 400 instead of a 500 from
+	// the DB.
+	if utf8.RuneCountInString(authority) > 255 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "authority must be 255 characters or fewer"})
+	}
 
 	// submitted_at is human-attested. Omitted → server NOW() (the column
 	// is NOT NULL). A present-but-malformed value is a caller error (400),
@@ -158,6 +167,12 @@ func (h *CRASubmissionsHandler) Record(c echo.Context) error {
 	// empty / whitespace-only value as absent (nil → SQL NULL) so the
 	// has_reference audit flag and the stored row stay meaningful.
 	referenceNumber := trimmedPtrOrNil(req.ReferenceNumber)
+	// reference_number maps to VARCHAR(255) (nullable). Same rune-count
+	// guard as authority so an over-length value is a 400, not a DB 500.
+	// notes maps to TEXT (unbounded), so it needs no length guard.
+	if referenceNumber != nil && utf8.RuneCountInString(*referenceNumber) > 255 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "reference_number must be 255 characters or fewer"})
+	}
 	notes := trimmedPtrOrNil(req.Notes)
 
 	uid := userIDOrNil(tc)

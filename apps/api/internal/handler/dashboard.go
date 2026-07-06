@@ -1,19 +1,31 @@
 package handler
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+
 	"github.com/sbomhub/sbomhub/internal/middleware"
-	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/model"
 )
 
-type DashboardHandler struct {
-	dashboardService *service.DashboardService
+// dashboardServiceAPI is the subset of *service.DashboardService the
+// handler uses. Declared as an interface so dashboard_test.go can
+// substitute a fake without a real DB. The concrete
+// *service.DashboardService satisfies it, so the cmd/server/main.go wiring
+// is unchanged.
+type dashboardServiceAPI interface {
+	GetSummary(ctx context.Context, tenantID uuid.UUID) (*model.DashboardSummary, error)
 }
 
-func NewDashboardHandler(ds *service.DashboardService) *DashboardHandler {
+type DashboardHandler struct {
+	dashboardService dashboardServiceAPI
+}
+
+func NewDashboardHandler(ds dashboardServiceAPI) *DashboardHandler {
 	return &DashboardHandler{dashboardService: ds}
 }
 
@@ -26,7 +38,10 @@ func (h *DashboardHandler) GetSummary(c echo.Context) error {
 
 	summary, err := h.dashboardService.GetSummary(c.Request().Context(), tenantID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// DB / unknown fault: log the detail server-side, return a generic
+		// message (F396 — never leak err.Error() to the client).
+		slog.Warn("dashboard: get summary failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load dashboard summary"})
 	}
 	return c.JSON(http.StatusOK, summary)
 }

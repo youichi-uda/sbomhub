@@ -2,12 +2,25 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+)
+
+// Sentinel errors returned by SearchByCVE so the handler can map them to
+// the right HTTP status with errors.Is, instead of matching on error
+// strings or leaking the raw (possibly DB-internal) message to the client.
+var (
+	// ErrInvalidCVEID is returned when the query is not a well-formed CVE
+	// ID. The handler maps it to 400.
+	ErrInvalidCVEID = errors.New("search: invalid cve id")
+	// ErrCVENotFound is returned when the CVE is not in the local DB and no
+	// NVD fallback resolves it. The handler maps it to 404.
+	ErrCVENotFound = errors.New("search: cve not found")
 )
 
 type SearchService struct {
@@ -33,7 +46,7 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 	// Normalize CVE ID
 	cveID = strings.ToUpper(strings.TrimSpace(cveID))
 	if !strings.HasPrefix(cveID, "CVE-") {
-		return nil, fmt.Errorf("invalid CVE ID format: %s", cveID)
+		return nil, fmt.Errorf("%w: %s", ErrInvalidCVEID, cveID)
 	}
 
 	// Try local database first
@@ -51,10 +64,10 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 		vuln, err := s.nvdService.SearchByCVEID(ctx, cveID)
 		if err != nil {
 			slog.Warn("NVD API search failed", "cve_id", cveID, "error", err)
-			return nil, fmt.Errorf("CVE not found: %s", cveID)
+			return nil, fmt.Errorf("%w: %s", ErrCVENotFound, cveID)
 		}
 		if vuln == nil {
-			return nil, fmt.Errorf("CVE not found: %s", cveID)
+			return nil, fmt.Errorf("%w: %s", ErrCVENotFound, cveID)
 		}
 
 		// Save to local DB for future queries

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -649,5 +650,89 @@ func TestCRASubmissionsHandler_List_ReportNotFound_Returns404(t *testing.T) {
 	}
 	if h.subs.listCalls != 0 {
 		t.Errorf("ListByReport MUST NOT run when report not found, got %d", h.subs.listCalls)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Record — length guards (F436). authority / reference_number map to
+// VARCHAR(255): an over-length value must be rejected with 400 at the
+// handler, not silently forwarded to the DB (which would 500). The guard
+// counts runes (utf8.RuneCountInString), not bytes, so a 255-rune Japanese
+// authority (>255 bytes) is accepted. (pre-fix: no guard → the over-length
+// cases proceed to a 201, so these assertions fail on pre-fix code.)
+// ----------------------------------------------------------------------------
+
+func TestCRASubmissionsHandler_Record_AuthorityTooLong_Returns400(t *testing.T) {
+	h := newCRASubHarness()
+	h.seedReport("approved")
+
+	// 256 runes of a 3-byte Japanese character: 256 chars, 768 bytes.
+	body, _ := json.Marshal(map[string]string{"authority": strings.Repeat("あ", 256)})
+	c, rec := h.newRecordCtx(string(body))
+	h.setAuth(c, model.RoleAdmin, true)
+
+	if err := h.handler.Record(c); err != nil {
+		t.Fatalf("Record returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("over-length authority status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "authority") {
+		t.Errorf("400 body should mention authority, got %s", rec.Body.String())
+	}
+	if h.subs.recordCalls != 0 {
+		t.Errorf("Record MUST NOT run for over-length authority, got %d", h.subs.recordCalls)
+	}
+}
+
+func TestCRASubmissionsHandler_Record_ReferenceNumberTooLong_Returns400(t *testing.T) {
+	h := newCRASubHarness()
+	h.seedReport("approved")
+
+	body, _ := json.Marshal(map[string]string{
+		"authority":        "ENISA CSIRT",
+		"reference_number": strings.Repeat("a", 256), // 256 runes
+	})
+	c, rec := h.newRecordCtx(string(body))
+	h.setAuth(c, model.RoleAdmin, true)
+
+	if err := h.handler.Record(c); err != nil {
+		t.Fatalf("Record returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("over-length reference_number status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "reference_number") {
+		t.Errorf("400 body should mention reference_number, got %s", rec.Body.String())
+	}
+	if h.subs.recordCalls != 0 {
+		t.Errorf("Record MUST NOT run for over-length reference_number, got %d", h.subs.recordCalls)
+	}
+}
+
+// A 255-rune Japanese authority is 765 bytes but exactly 255 characters, so
+// it is at the VARCHAR(255) limit and MUST be accepted. A byte-length guard
+// (len() > 255) would wrongly reject it — this proves the rune count is used.
+func TestCRASubmissionsHandler_Record_Authority255Runes_Accepted(t *testing.T) {
+	h := newCRASubHarness()
+	h.seedReport("approved")
+
+	authority := strings.Repeat("あ", 255) // 255 runes, 765 bytes
+	if utf8.RuneCountInString(authority) != 255 {
+		t.Fatalf("test setup: authority rune count = %d, want 255", utf8.RuneCountInString(authority))
+	}
+	body, _ := json.Marshal(map[string]string{"authority": authority})
+	c, rec := h.newRecordCtx(string(body))
+	h.setAuth(c, model.RoleAdmin, true)
+
+	if err := h.handler.Record(c); err != nil {
+		t.Fatalf("Record returned unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("255-rune authority status = %d, want 201 (must not be rejected on length); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if h.subs.recordCalls != 1 {
+		t.Errorf("Record should run once for an at-limit authority, got %d", h.subs.recordCalls)
 	}
 }
