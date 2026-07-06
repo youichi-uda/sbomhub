@@ -38,25 +38,37 @@ type KEVRepositoryInterface interface {
 type KEVService struct {
 	client  *http.Client
 	kevRepo KEVRepositoryInterface
+	baseURL string
+	offline bool
 }
 
 // NewKEVService creates a new KEVService
-func NewKEVService(kevRepo *repository.KEVRepository) *KEVService {
+func NewKEVService(kevRepo *repository.KEVRepository, baseURL string, offline bool) *KEVService {
+	if baseURL == "" {
+		baseURL = kevCatalogURL
+	}
 	return &KEVService{
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
 		kevRepo: kevRepo,
+		baseURL: baseURL,
+		offline: offline,
 	}
 }
 
 // NewKEVServiceWithRepo creates a new KEVService with a custom repository (for testing)
-func NewKEVServiceWithRepo(kevRepo KEVRepositoryInterface) *KEVService {
+func NewKEVServiceWithRepo(kevRepo KEVRepositoryInterface, baseURL string, offline bool) *KEVService {
+	if baseURL == "" {
+		baseURL = kevCatalogURL
+	}
 	return &KEVService{
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
 		kevRepo: kevRepo,
+		baseURL: baseURL,
+		offline: offline,
 	}
 }
 
@@ -84,6 +96,11 @@ type KEVVulnerability struct {
 
 // SyncCatalog fetches and synchronizes the KEV catalog
 func (s *KEVService) SyncCatalog(ctx context.Context) (*model.KEVSyncResult, error) {
+	if s.offline {
+		slog.Info("sync skipped: offline mode", "source", "kev")
+		return nil, nil
+	}
+
 	// Create sync log
 	syncLog, err := s.kevRepo.CreateSyncLog(ctx)
 	if err != nil {
@@ -175,7 +192,7 @@ func (s *KEVService) SyncCatalog(ctx context.Context) (*model.KEVSyncResult, err
 }
 
 func (s *KEVService) fetchCatalog(ctx context.Context) (*KEVCatalogResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", kevCatalogURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", s.baseURL, nil)
 	if err != nil {
 		return nil, err
 	}

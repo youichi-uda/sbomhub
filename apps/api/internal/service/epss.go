@@ -20,14 +20,21 @@ const (
 type EPSSService struct {
 	client   *http.Client
 	vulnRepo *repository.VulnerabilityRepository
+	baseURL  string
+	offline  bool
 }
 
-func NewEPSSService(vulnRepo *repository.VulnerabilityRepository) *EPSSService {
+func NewEPSSService(vulnRepo *repository.VulnerabilityRepository, baseURL string, offline bool) *EPSSService {
+	if baseURL == "" {
+		baseURL = epssAPIURL
+	}
 	return &EPSSService{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		vulnRepo: vulnRepo,
+		baseURL:  baseURL,
+		offline:  offline,
 	}
 }
 
@@ -49,6 +56,11 @@ type EPSSItem struct {
 
 // SyncScores fetches EPSS scores for all CVEs in the database
 func (s *EPSSService) SyncScores(ctx context.Context) error {
+	if s.offline {
+		slog.Info("sync skipped: offline mode", "source", "epss")
+		return nil
+	}
+
 	// Get all CVE IDs
 	cveIDs, err := s.vulnRepo.GetAllCVEIDs(ctx)
 	if err != nil {
@@ -95,7 +107,7 @@ func (s *EPSSService) SyncScores(ctx context.Context) error {
 
 func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map[string]repository.EPSSData, error) {
 	// Build URL with CVE IDs
-	url := fmt.Sprintf("%s?cve=%s", epssAPIURL, strings.Join(cveIDs, ","))
+	url := fmt.Sprintf("%s?cve=%s", s.baseURL, strings.Join(cveIDs, ","))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -134,6 +146,10 @@ func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map
 
 // GetScore fetches EPSS score for a single CVE (real-time)
 func (s *EPSSService) GetScore(ctx context.Context, cveID string) (*repository.EPSSData, error) {
+	if s.offline {
+		return nil, nil
+	}
+
 	scores, err := s.fetchEPSSScores(ctx, []string{cveID})
 	if err != nil {
 		return nil, err

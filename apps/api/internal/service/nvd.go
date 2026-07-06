@@ -32,26 +32,51 @@ type NVDService struct {
 	compRepo   *repository.ComponentRepository
 	cache      *cache.NVDCache
 	apiKey     string
+	// baseURL is the NVD REST base endpoint. It defaults to nvdAPIBase but is
+	// overridable (M40 Wave B) so the orchestrator can point it at an
+	// air-gapped mirror or an httptest server. Empty string falls back to the
+	// nvdAPIBase const in the constructor.
+	baseURL string
+	// offline short-circuits every HTTP fetch entry point when true (M40 Wave B
+	// air-gapped degrade mode): scans return empty results with no error so the
+	// enclosing SBOM scan continues without network access.
+	offline bool
 }
 
-// NewNVDService creates a new NVD service (without cache - for backwards compatibility)
-func NewNVDService(vr *repository.VulnerabilityRepository, cr *repository.ComponentRepository, apiKey string) *NVDService {
+// NewNVDService creates a new NVD service (without cache - for backwards compatibility).
+//
+// baseURL and offline (M40 Wave B) are appended last: baseURL overrides the
+// nvdAPIBase default (empty => nvdAPIBase); offline enables air-gapped degrade
+// mode where fetches short-circuit to empty results.
+func NewNVDService(vr *repository.VulnerabilityRepository, cr *repository.ComponentRepository, apiKey string, baseURL string, offline bool) *NVDService {
+	if baseURL == "" {
+		baseURL = nvdAPIBase
+	}
 	return &NVDService{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		vulnRepo:   vr,
 		compRepo:   cr,
 		apiKey:     apiKey,
+		baseURL:    baseURL,
+		offline:    offline,
 	}
 }
 
-// NewNVDServiceWithCache creates a new NVD service with Redis cache
-func NewNVDServiceWithCache(vr *repository.VulnerabilityRepository, cr *repository.ComponentRepository, apiKey string, nvdCache *cache.NVDCache) *NVDService {
+// NewNVDServiceWithCache creates a new NVD service with Redis cache.
+//
+// baseURL and offline (M40 Wave B) carry the same semantics as NewNVDService.
+func NewNVDServiceWithCache(vr *repository.VulnerabilityRepository, cr *repository.ComponentRepository, apiKey string, nvdCache *cache.NVDCache, baseURL string, offline bool) *NVDService {
+	if baseURL == "" {
+		baseURL = nvdAPIBase
+	}
 	return &NVDService{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		vulnRepo:   vr,
 		compRepo:   cr,
 		cache:      nvdCache,
 		apiKey:     apiKey,
+		baseURL:    baseURL,
+		offline:    offline,
 	}
 }
 
@@ -103,6 +128,11 @@ type nvdComponentKey struct {
 // ScanComponents scans all components in an SBOM for vulnerabilities
 // Uses Redis cache and deduplication for efficiency
 func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "nvd")
+		return nil
+	}
+
 	components, err := s.compRepo.ListBySbom(ctx, sbomID)
 	if err != nil {
 		return fmt.Errorf("failed to get components: %w", err)
@@ -276,6 +306,11 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 }
 
 func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) ([]model.Vulnerability, error) {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "nvd")
+		return nil, nil
+	}
+
 	keyword := name
 	if version != "" {
 		keyword = fmt.Sprintf("%s %s", name, version)
@@ -285,7 +320,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 	params.Set("keywordSearch", keyword)
 	params.Set("resultsPerPage", "20")
 
-	req, err := http.NewRequestWithContext(ctx, "GET", nvdAPIBase+"?"+params.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", s.baseURL+"?"+params.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -375,10 +410,15 @@ func scoreToCvss2Severity(score float64) string {
 // SearchByCVEID searches for a specific CVE by ID from NVD API
 // Returns the vulnerability info if found, nil if not found
 func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vulnerability, error) {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "nvd")
+		return nil, nil
+	}
+
 	params := url.Values{}
 	params.Set("cveId", cveID)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", nvdAPIBase+"?"+params.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", s.baseURL+"?"+params.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}

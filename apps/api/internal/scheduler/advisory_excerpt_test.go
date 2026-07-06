@@ -121,7 +121,7 @@ func runChunkMatch(
 
 	setup(mock)
 
-	j := NewCVESyncJob(db, repository.NewTenantRepository(db), "", 24*time.Hour, fake)
+	j := NewCVESyncJob(db, repository.NewTenantRepository(db), "", 24*time.Hour, fake, "", false)
 	matched, _, err = j.matchTenantsChunked(context.Background(), tenantIDs, cves, vulnIndex)
 	if err != nil {
 		t.Fatalf("matchTenantsChunked returned error (excerpt path must never abort the chunk): %v", err)

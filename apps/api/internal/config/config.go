@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Mode represents the application deployment mode
@@ -21,6 +22,22 @@ type Config struct {
 	NVDAPIKey   string
 	BaseURL     string
 	Environment string // development, staging, production
+
+	// External data-source URL overrides (M40). Empty = use the service's
+	// built-in default endpoint. Set to point a source at an internal mirror for
+	// air-gapped / firewalled deployments (SBOMHUB_<SRC>_URL).
+	EPSSURL string // FIRST.org EPSS
+	KEVURL  string // CISA KEV catalog
+	NVDURL  string // NVD (shared by the per-SBOM keyword scan and the delta-feed sync)
+	EOLURL  string // endoflife.date
+	JVNURL  string // JVN / MyJVN
+	OSVURL  string // OSV.dev
+
+	// Offline / air-gapped mode (M40, SBOMHUB_OFFLINE). When true, every outbound
+	// external data-source fetch is skipped and degrades gracefully (structured
+	// log, no error) instead of failing — the rest of the product keeps running
+	// on already-synced data. Mirrors the LLM "disabled provider" degrade shape.
+	Offline bool
 
 	// Clerk authentication (SaaS mode)
 	ClerkSecretKey     string
@@ -70,6 +87,17 @@ func Load() *Config {
 		NVDAPIKey:   getEnv("NVD_API_KEY", ""),
 		BaseURL:     getEnv("BASE_URL", "http://localhost:3000"),
 		Environment: env,
+
+		// External data-source URL overrides + offline mode (M40). Defaults are
+		// empty so each service falls back to its own built-in const (single
+		// source of truth for the default URL — not duplicated here).
+		EPSSURL: getEnv("SBOMHUB_EPSS_URL", ""),
+		KEVURL:  getEnv("SBOMHUB_KEV_URL", ""),
+		NVDURL:  getEnv("SBOMHUB_NVD_URL", ""),
+		EOLURL:  getEnv("SBOMHUB_EOL_URL", ""),
+		JVNURL:  getEnv("SBOMHUB_JVN_URL", ""),
+		OSVURL:  getEnv("SBOMHUB_OSV_URL", ""),
+		Offline: getEnvBool("SBOMHUB_OFFLINE", false),
 
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),
@@ -198,4 +226,19 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// getEnvBool reads a boolean env var. Accepts 1/true/yes/on (case-insensitive)
+// as true and 0/false/no/off as false; any other value (including unset/empty)
+// falls back to defaultValue.
+func getEnvBool(key string, defaultValue bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultValue
+	}
 }

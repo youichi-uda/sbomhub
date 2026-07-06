@@ -23,15 +23,22 @@ const (
 type EOLService struct {
 	client  *http.Client
 	eolRepo *repository.EOLRepository
+	baseURL string
+	offline bool
 }
 
 // NewEOLService creates a new EOLService
-func NewEOLService(eolRepo *repository.EOLRepository) *EOLService {
+func NewEOLService(eolRepo *repository.EOLRepository, baseURL string, offline bool) *EOLService {
+	if baseURL == "" {
+		baseURL = endoflifeAPIBaseURL
+	}
 	return &EOLService{
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
 		eolRepo: eolRepo,
+		baseURL: baseURL,
+		offline: offline,
 	}
 }
 
@@ -54,6 +61,11 @@ type EOLCycleResponse struct {
 
 // SyncCatalog synchronizes the EOL catalog from endoflife.date
 func (s *EOLService) SyncCatalog(ctx context.Context) (*model.EOLSyncResult, error) {
+	if s.offline {
+		slog.Info("sync skipped: offline mode", "source", "eol")
+		return nil, nil
+	}
+
 	// Create sync log
 	syncLog, err := s.eolRepo.CreateSyncLog(ctx)
 	if err != nil {
@@ -115,6 +127,11 @@ func (s *EOLService) SyncCatalog(ctx context.Context) (*model.EOLSyncResult, err
 
 // SyncProduct syncs a single product from endoflife.date
 func (s *EOLService) SyncProduct(ctx context.Context, productName string) (*model.EOLSyncResult, error) {
+	if s.offline {
+		slog.Info("sync skipped: offline mode", "source", "eol")
+		return nil, nil
+	}
+
 	// Fetch cycles from API
 	cycles, err := s.fetchProductCycles(ctx, productName)
 	if err != nil {
@@ -158,7 +175,7 @@ func (s *EOLService) SyncProduct(ctx context.Context, productName string) (*mode
 }
 
 func (s *EOLService) fetchProductCycles(ctx context.Context, productName string) ([]EOLCycleResponse, error) {
-	url := fmt.Sprintf("%s/%s.json", endoflifeAPIBaseURL, productName)
+	url := fmt.Sprintf("%s/%s.json", s.baseURL, productName)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

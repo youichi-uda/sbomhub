@@ -179,6 +179,14 @@ type CVESyncJob struct {
 	nvdAPIKey        string
 	interval         time.Duration
 	advisoryExcerpts advisoryExcerptUpserter
+	// baseURL is the NVD REST base endpoint for the modified-CVE feed. It
+	// defaults to cveSyncAPIURL but is overridable (M40 Wave B) from the same
+	// orchestrator config value as NVDService.baseURL (cfg.NVDURL), so the
+	// scheduled feed and on-demand scans share one override.
+	baseURL string
+	// offline short-circuits the scheduled feed when true (M40 Wave B
+	// air-gapped degrade mode): Run() returns nil before any pagination/network.
+	offline bool
 }
 
 // NewCVESyncJob creates a new CVE sync job.
@@ -191,7 +199,15 @@ type CVESyncJob struct {
 // runner has real advisory grounding. It is appended last and is nil-safe:
 // passing nil disables excerpt grounding (the CVE sync otherwise runs
 // unchanged), which keeps existing callers/tests that don't wire it green.
-func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKey string, interval time.Duration, advisoryExcerpts advisoryExcerptUpserter) *CVESyncJob {
+//
+// baseURL and offline (M40 Wave B) are appended last: baseURL overrides the
+// cveSyncAPIURL default (empty => cveSyncAPIURL) and is wired from the same
+// orchestrator value (cfg.NVDURL) as NVDService; offline makes Run() a no-op
+// so the scheduled feed short-circuits before any network access.
+func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKey string, interval time.Duration, advisoryExcerpts advisoryExcerptUpserter, baseURL string, offline bool) *CVESyncJob {
+	if baseURL == "" {
+		baseURL = cveSyncAPIURL
+	}
 	return &CVESyncJob{
 		db:               db,
 		tenantRepo:       tenantRepo,
@@ -199,6 +215,8 @@ func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKe
 		nvdAPIKey:        nvdAPIKey,
 		interval:         interval,
 		advisoryExcerpts: advisoryExcerpts,
+		baseURL:          baseURL,
+		offline:          offline,
 	}
 }
 
@@ -229,6 +247,11 @@ func (j *CVESyncJob) Start(ctx context.Context) {
 
 // Run executes a single CVE sync cycle
 func (j *CVESyncJob) Run(ctx context.Context) error {
+	if j.offline {
+		slog.Info("sync skipped: offline mode", "source", "nvd")
+		return nil
+	}
+
 	slog.Info("starting CVE sync")
 	startTime := time.Now()
 
@@ -328,7 +351,7 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 		params.Set("startIndex", fmt.Sprintf("%d", startIndex))
 		params.Set("resultsPerPage", fmt.Sprintf("%d", cveSyncResultsPerPage))
 
-		req, err := http.NewRequestWithContext(ctx, "GET", cveSyncAPIURL+"?"+params.Encode(), nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", j.baseURL+"?"+params.Encode(), nil)
 		if err != nil {
 			return nil, err
 		}

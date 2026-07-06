@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/client"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
@@ -20,9 +22,22 @@ type CLIService struct {
 	sbomRepo      *repository.SbomRepository
 	componentRepo *repository.ComponentRepository
 	httpClient    *http.Client
+	// osvBaseURL is the OSV API base endpoint used by the CheckVulnerabilities
+	// batch query. It defaults to client.DefaultOSVBaseURL (M40 Wave B) so this
+	// path and the client.OSVClient can never diverge; the orchestrator can
+	// override it via WithOSVBaseURL for air-gapped mirrors.
+	osvBaseURL string
+	// offline short-circuits the OSV batch query to an empty result when true
+	// (M40 Wave B air-gapped degrade mode). Toggle via WithOffline.
+	offline bool
 }
 
 // NewCLIService creates a new CLIService.
+//
+// M40 Wave B: the OSV base URL defaults to client.DefaultOSVBaseURL and offline
+// defaults to false. The constructor signature is kept stable (existing callers
+// keep compiling); use WithOSVBaseURL / WithOffline to carry the orchestrator's
+// URL-override / air-gapped wiring.
 func NewCLIService(
 	pr *repository.ProjectRepository,
 	sr *repository.SbomRepository,
@@ -35,7 +50,25 @@ func NewCLIService(
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		osvBaseURL: client.DefaultOSVBaseURL,
 	}
+}
+
+// WithOSVBaseURL overrides the OSV base URL used by CheckVulnerabilities. An
+// empty value is ignored (keeps the default). Returns the receiver for chaining.
+func (s *CLIService) WithOSVBaseURL(base string) *CLIService {
+	if base != "" {
+		s.osvBaseURL = base
+	}
+	return s
+}
+
+// WithOffline toggles air-gapped degrade mode (M40 Wave B). When enabled the OSV
+// batch query short-circuits to an empty result with no error and no network
+// access. Returns the receiver for chaining.
+func (s *CLIService) WithOffline(offline bool) *CLIService {
+	s.offline = offline
+	return s
 }
 
 // GetOrCreateProject finds a project by name within a tenant, or creates it if not found.
@@ -211,6 +244,16 @@ type CLIComponentInput struct {
 
 // CheckVulnerabilities checks vulnerabilities using OSV API.
 func (s *CLIService) CheckVulnerabilities(ctx context.Context, components []CLIComponentInput) (*CLIVulnerabilityResult, error) {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "osv")
+		return &CLIVulnerabilityResult{
+			TotalComponents: len(components),
+			TotalVulns:      0,
+			BySeverity:      map[string]int{},
+			Vulnerabilities: []CLIVulnerabilityEntry{},
+		}, nil
+	}
+
 	if len(components) == 0 {
 		return &CLIVulnerabilityResult{
 			TotalComponents: 0,
@@ -260,7 +303,7 @@ func (s *CLIService) CheckVulnerabilities(ctx context.Context, components []CLIC
 		return nil, fmt.Errorf("failed to marshal OSV request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.osv.dev/v1/querybatch", bytes.NewReader(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.osvBaseURL+"/querybatch", bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OSV request: %w", err)
 	}

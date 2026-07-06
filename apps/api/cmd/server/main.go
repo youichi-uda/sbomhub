@@ -373,8 +373,8 @@ func main() {
 	// as GET /diff so a UI download button can pass through whatever
 	// the user has selected on the diff detail page.
 	projectDiffExportService := diff_export.NewService(projectDiffService)
-	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache)
-	jvnService := service.NewJVNService(vulnRepo, componentRepo)
+	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache, cfg.NVDURL, cfg.Offline)
+	jvnService := service.NewJVNService(vulnRepo, componentRepo, cfg.JVNURL, cfg.Offline)
 	statsService := service.NewStatsService(statsRepo)
 	vexService := service.NewVEXService(vexRepo, vulnRepo)
 	licensePolicyService := service.NewLicensePolicyService(licensePolicyRepo, componentRepo)
@@ -389,7 +389,7 @@ func main() {
 	// tenant-scoped search repository plus the sbom repository (to load each
 	// affected project's latest SBOM once for traversal).
 	cvePathsService := service.NewCVEPathsService(searchRepo, sbomRepo)
-	epssService := service.NewEPSSService(vulnRepo)
+	epssService := service.NewEPSSService(vulnRepo, cfg.EPSSURL, cfg.Offline)
 	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
 	publicLinkService := service.NewPublicLinkService(db, publicLinkRepo, projectRepo, sbomRepo, componentRepo)
@@ -409,10 +409,10 @@ func main() {
 		slog.Info("Issue tracker SSRF protection enabled", "allowed_domains", issueTrackerAllowedDomains)
 	}
 	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, encryptionKey, issueTrackerAllowedDomains)
-	remediationService := service.NewRemediationService(vulnRepo, componentRepo)
-	kevService := service.NewKEVService(kevRepo)
+	remediationService := service.NewRemediationService(vulnRepo, componentRepo, cfg.OSVURL, cfg.Offline)
+	kevService := service.NewKEVService(kevRepo, cfg.KEVURL, cfg.Offline)
 	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
-	eolService := service.NewEOLService(eolRepo)
+	eolService := service.NewEOLService(eolRepo, cfg.EOLURL, cfg.Offline)
 
 	// In-memory tracker for background SBOM scans. Observed by
 	// GET /api/v1/projects/:id/sboms/:sbom_id/scan-status so the CLI
@@ -775,7 +775,7 @@ func main() {
 	mcp.GET("/projects/:id/sboms", sbomHandler.List)
 
 	// CLI Service and Handler
-	cliService := service.NewCLIService(projectRepo, sbomRepo, componentRepo)
+	cliService := service.NewCLIService(projectRepo, sbomRepo, componentRepo).WithOSVBaseURL(cfg.OSVURL).WithOffline(cfg.Offline)
 	cliHandler := handler.NewCLIHandler(cliService)
 
 	// CLI endpoints (API key auth)
@@ -1608,7 +1608,7 @@ func main() {
 	// CVE sync job - runs daily to fetch new/updated CVEs and match against components.
 	// tenantRepo is required for the per-tenant matching loop against RLS-bound
 	// `components` (codex-r4 P1).
-	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo)
+	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo, cfg.NVDURL, cfg.Offline)
 	go cveSyncJob.Start(ctx)
 	slog.Info("CVE sync job started", "interval", "24h")
 

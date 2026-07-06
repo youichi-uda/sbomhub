@@ -18,15 +18,21 @@ type RemediationService struct {
 	osvClient     *client.OSVClient
 }
 
-// NewRemediationService creates a new remediation service
+// NewRemediationService creates a new remediation service.
+//
+// M40: osvBaseURL ("" = OSV default) and offline are threaded into the OSV
+// client so remediation lookups honor SBOMHUB_OSV_URL / SBOMHUB_OFFLINE like the
+// rest of the external data sources.
 func NewRemediationService(
 	vulnRepo *repository.VulnerabilityRepository,
 	componentRepo *repository.ComponentRepository,
+	osvBaseURL string,
+	offline bool,
 ) *RemediationService {
 	return &RemediationService{
 		vulnRepo:      vulnRepo,
 		componentRepo: componentRepo,
-		osvClient:     client.NewOSVClient(),
+		osvClient:     client.NewOSVClient().WithBaseURL(osvBaseURL).WithOffline(offline),
 	}
 }
 

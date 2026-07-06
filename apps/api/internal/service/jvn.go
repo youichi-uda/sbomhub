@@ -26,16 +26,31 @@ type JVNService struct {
 	vulnRepo      *repository.VulnerabilityRepository
 	componentRepo *repository.ComponentRepository
 	httpClient    *http.Client
+	// baseURL is the MyJVN API base endpoint. It defaults to jvnAPIBaseURL but
+	// is overridable (M40 Wave B) for air-gapped mirrors / httptest servers.
+	baseURL string
+	// offline short-circuits every HTTP fetch entry point when true (M40 Wave B
+	// air-gapped degrade mode).
+	offline bool
 }
 
-// NewJVNService creates a new JVN service
-func NewJVNService(vulnRepo *repository.VulnerabilityRepository, componentRepo *repository.ComponentRepository) *JVNService {
+// NewJVNService creates a new JVN service.
+//
+// baseURL and offline (M40 Wave B) are appended last: baseURL overrides the
+// jvnAPIBaseURL default (empty => jvnAPIBaseURL); offline enables air-gapped
+// degrade mode where scans short-circuit to empty results.
+func NewJVNService(vulnRepo *repository.VulnerabilityRepository, componentRepo *repository.ComponentRepository, baseURL string, offline bool) *JVNService {
+	if baseURL == "" {
+		baseURL = jvnAPIBaseURL
+	}
 	return &JVNService{
 		vulnRepo:      vulnRepo,
 		componentRepo: componentRepo,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		baseURL: baseURL,
+		offline: offline,
 	}
 }
 
@@ -86,6 +101,11 @@ type JVNCVSS struct {
 
 // ScanComponents scans components for JVN vulnerabilities
 func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "jvn")
+		return nil
+	}
+
 	components, err := s.componentRepo.ListBySbom(ctx, sbomID)
 	if err != nil {
 		return fmt.Errorf("failed to get components: %w", err)
@@ -138,6 +158,11 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) e
 }
 
 func (s *JVNService) searchByKeyword(ctx context.Context, keyword string) ([]model.Vulnerability, error) {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "jvn")
+		return nil, nil
+	}
+
 	params := url.Values{}
 	params.Set("method", "getVulnOverviewList")
 	params.Set("feed", "hnd")
@@ -145,7 +170,7 @@ func (s *JVNService) searchByKeyword(ctx context.Context, keyword string) ([]mod
 	params.Set("maxCountItem", "10")
 	params.Set("lang", "ja")
 
-	reqURL := fmt.Sprintf("%s?%s", jvnAPIBaseURL, params.Encode())
+	reqURL := fmt.Sprintf("%s?%s", s.baseURL, params.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -259,13 +284,18 @@ func (s *JVNService) mapCVSSSeverity(severity string) string {
 
 // GetVulnerabilitiesByJVNID fetches detailed info for a specific JVNDB ID
 func (s *JVNService) GetVulnerabilitiesByJVNID(ctx context.Context, jvnID string) (*model.Vulnerability, error) {
+	if s.offline {
+		slog.Info("scan skipped: offline mode", "source", "jvn")
+		return nil, nil
+	}
+
 	params := url.Values{}
 	params.Set("method", "getVulnDetailInfo")
 	params.Set("feed", "hnd")
 	params.Set("vulnId", jvnID)
 	params.Set("lang", "ja")
 
-	reqURL := fmt.Sprintf("%s?%s", jvnAPIBaseURL, params.Encode())
+	reqURL := fmt.Sprintf("%s?%s", s.baseURL, params.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {

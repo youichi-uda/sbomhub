@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -162,7 +164,7 @@ func TestKEVService_CheckCVEInKEV(t *testing.T) {
 			tt.setup(repo)
 
 			// Create service with mock repository
-			service := NewKEVServiceWithRepo(repo)
+			service := NewKEVServiceWithRepo(repo, "", false)
 
 			// Call actual service method
 			result, err := service.CheckCVEInKEV(context.Background(), tt.cveID)
@@ -215,7 +217,7 @@ func TestKEVService_GetByCVE(t *testing.T) {
 			repo := newMockKEVRepository()
 			tt.setup(repo)
 
-			service := NewKEVServiceWithRepo(repo)
+			service := NewKEVServiceWithRepo(repo, "", false)
 			entry, err := service.GetByCVE(context.Background(), tt.cveID)
 			require.NoError(t, err)
 
@@ -406,7 +408,7 @@ func TestKEVService_ParseVulnerability(t *testing.T) {
 
 func TestKEVService_GetSyncSettings(t *testing.T) {
 	repo := newMockKEVRepository()
-	service := NewKEVServiceWithRepo(repo)
+	service := NewKEVServiceWithRepo(repo, "", false)
 
 	settings, err := service.GetSyncSettings(context.Background())
 	require.NoError(t, err)
@@ -431,11 +433,96 @@ func TestKEVService_GetCatalog(t *testing.T) {
 		DateAdded: time.Now().AddDate(0, 0, -25),
 	})
 
-	service := NewKEVServiceWithRepo(repo)
+	service := NewKEVServiceWithRepo(repo, "", false)
 
 	entries, total, err := service.GetCatalog(context.Background(), 10, 0)
 	require.NoError(t, err)
 
 	assert.Equal(t, 2, total)
 	assert.Len(t, entries, 2)
+}
+
+// TestKEVService_SyncCatalog_InjectedURL proves that s.baseURL is actually used
+// to fetch the catalog: an httptest server returns a canned CISA KEV catalog
+// and we assert SyncCatalog parsed and persisted it.
+func TestKEVService_SyncCatalog_InjectedURL(t *testing.T) {
+	const body = `{
+		"title": "CISA Catalog of Known Exploited Vulnerabilities",
+		"catalogVersion": "2024.01.15",
+		"dateReleased": "2024-01-15T00:00:00.000Z",
+		"count": 2,
+		"vulnerabilities": [
+			{
+				"cveID": "CVE-2021-44228",
+				"vendorProject": "Apache",
+				"product": "Log4j2",
+				"vulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability",
+				"dateAdded": "2021-12-10",
+				"shortDescription": "RCE",
+				"requiredAction": "Apply updates per vendor instructions.",
+				"dueDate": "2021-12-24",
+				"knownRansomwareCampaignUse": "Known",
+				"notes": ""
+			},
+			{
+				"cveID": "CVE-2021-45046",
+				"vendorProject": "Apache",
+				"product": "Log4j2",
+				"vulnerabilityName": "Apache Log4j2 Denial of Service Vulnerability",
+				"dateAdded": "2021-12-15",
+				"shortDescription": "DoS",
+				"requiredAction": "Apply updates per vendor instructions.",
+				"dueDate": "2021-12-29",
+				"knownRansomwareCampaignUse": "Unknown",
+				"notes": ""
+			}
+		]
+	}`
+
+	var hit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	repo := newMockKEVRepository()
+	service := NewKEVServiceWithRepo(repo, server.URL, false)
+
+	result, err := service.SyncCatalog(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, hit, "expected the injected server URL to be hit")
+	assert.Equal(t, "2024.01.15", result.CatalogVersion)
+	assert.Equal(t, 2, result.TotalProcessed)
+	assert.Equal(t, 2, result.NewEntries)
+
+	// Verify the parsed data landed in the repo.
+	entry, err := repo.GetByCVE(context.Background(), "CVE-2021-44228")
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+	assert.Equal(t, "Apache", entry.VendorProject)
+	assert.True(t, entry.KnownRansomwareUse)
+}
+
+// TestKEVService_Offline asserts that offline mode short-circuits SyncCatalog
+// before any HTTP call. The server handler fails the test if it is reached.
+func TestKEVService_Offline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("offline mode must not make HTTP calls")
+	}))
+	defer server.Close()
+
+	repo := newMockKEVRepository()
+	service := NewKEVServiceWithRepo(repo, server.URL, true)
+
+	result, err := service.SyncCatalog(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, result, "SyncCatalog in offline mode should return nil result")
+
+	// The guard returns before creating a sync log, so none should exist.
+	latest, err := repo.GetLatestSyncLog(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, latest, "offline mode should not create a sync log")
 }

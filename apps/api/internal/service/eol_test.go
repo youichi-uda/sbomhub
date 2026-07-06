@@ -829,3 +829,70 @@ func TestEOLStats_Fields(t *testing.T) {
 		t.Errorf("expected status success, got %s", stats.LatestSyncStatus.Status)
 	}
 }
+
+// TestEOLService_FetchProductCycles_InjectedURL proves that s.baseURL is
+// actually used when building the per-product cycle URL: an httptest server
+// stands in for endoflife.date and we assert the cycles are parsed from it.
+func TestEOLService_FetchProductCycles_InjectedURL(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]EOLCycleResponse{
+			{Cycle: "3.12", ReleaseDate: "2023-10-02", EOL: "2028-10-31", Latest: "3.12.1"},
+			{Cycle: "3.11", ReleaseDate: "2022-10-24", EOL: "2027-10-31", Latest: "3.11.7"},
+		})
+	}))
+	defer server.Close()
+
+	// eolRepo is not needed for the fetchProductCycles path.
+	svc := NewEOLService(nil, server.URL, false)
+
+	cycles, err := svc.fetchProductCycles(context.Background(), "python")
+	if err != nil {
+		t.Fatalf("fetchProductCycles returned error: %v", err)
+	}
+	if gotPath != "/python.json" {
+		t.Errorf("expected request path /python.json, got %s", gotPath)
+	}
+	if len(cycles) != 2 {
+		t.Fatalf("expected 2 cycles, got %d", len(cycles))
+	}
+	if cycles[0].Cycle != "3.12" {
+		t.Errorf("expected first cycle 3.12, got %v", cycles[0].Cycle)
+	}
+	if cycles[0].Latest != "3.12.1" {
+		t.Errorf("expected latest 3.12.1, got %s", cycles[0].Latest)
+	}
+}
+
+// TestEOLService_Offline asserts that offline mode short-circuits BEFORE any
+// HTTP call is made from either exported fetch entry point (SyncCatalog and
+// SyncProduct). The server handler fails the test if it is ever reached.
+func TestEOLService_Offline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("offline mode must not make HTTP calls")
+	}))
+	defer server.Close()
+
+	// nil eolRepo is safe: the offline guards return before the repo is touched.
+	svc := NewEOLService(nil, server.URL, true)
+
+	// SyncCatalog must short-circuit before creating a sync log or fetching.
+	catResult, err := svc.SyncCatalog(context.Background())
+	if err != nil {
+		t.Errorf("SyncCatalog in offline mode returned error: %v", err)
+	}
+	if catResult != nil {
+		t.Errorf("SyncCatalog in offline mode returned %+v, want nil", catResult)
+	}
+
+	// SyncProduct is an exported fetch entry point and must also short-circuit.
+	prodResult, err := svc.SyncProduct(context.Background(), "python")
+	if err != nil {
+		t.Errorf("SyncProduct in offline mode returned error: %v", err)
+	}
+	if prodResult != nil {
+		t.Errorf("SyncProduct in offline mode returned %+v, want nil", prodResult)
+	}
+}

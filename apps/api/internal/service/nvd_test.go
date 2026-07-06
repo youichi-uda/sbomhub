@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -317,12 +318,119 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Note: We cannot easily test searchByKeyword directly without modifying
-	// the constant nvdAPIBase. Instead, we test the response parsing logic.
-	// For a full integration test, consider using dependency injection for the base URL.
-	_ = &NVDService{
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		apiKey:     "test-api-key",
+	// M40 Wave B: the base URL is now injectable, so searchByKeyword can be
+	// driven end-to-end against an httptest server (recon flagged this as the
+	// gap at nvd_test.go:320-322).
+	svc := NewNVDService(nil, nil, "test-api-key", server.URL, false)
+	vulns, err := svc.searchByKeyword(context.Background(), "lodash", "4.17.20")
+	if err != nil {
+		t.Fatalf("searchByKeyword returned error: %v", err)
+	}
+	if len(vulns) != 1 {
+		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
+	}
+	if vulns[0].CVEID != "CVE-2023-9999" {
+		t.Errorf("expected CVE-2023-9999, got %s", vulns[0].CVEID)
+	}
+	if vulns[0].CVSSScore != 7.5 {
+		t.Errorf("expected CVSS 7.5, got %f", vulns[0].CVSSScore)
+	}
+	if vulns[0].Severity != "HIGH" {
+		t.Errorf("expected HIGH severity, got %s", vulns[0].Severity)
+	}
+	if vulns[0].Source != "NVD" {
+		t.Errorf("expected source NVD, got %s", vulns[0].Source)
+	}
+}
+
+// TestNVDService_SearchByCVEID_HTTPMock drives SearchByCVEID against an
+// injected httptest base URL (M40 Wave B).
+func TestNVDService_SearchByCVEID_HTTPMock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("cveId"); got != "CVE-2021-44228" {
+			t.Errorf("expected cveId query CVE-2021-44228, got %q", got)
+		}
+		response := NVDResponse{
+			ResultsPerPage: 1,
+			TotalResults:   1,
+			Vulnerabilities: []NVDVulnEntry{
+				{
+					CVE: NVDCVE{
+						ID:        "CVE-2021-44228",
+						Published: "2021-12-10T10:15:00Z",
+						Descriptions: []NVDDesc{
+							{Lang: "en", Value: "Log4Shell"},
+						},
+						Metrics: NVDMetrics{
+							CvssMetricV31: []CvssMetric{
+								{CvssData: CvssData{BaseScore: 10.0, BaseSeverity: "CRITICAL"}},
+							},
+						},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	svc := NewNVDService(nil, nil, "", server.URL, false)
+	vuln, err := svc.SearchByCVEID(context.Background(), "CVE-2021-44228")
+	if err != nil {
+		t.Fatalf("SearchByCVEID returned error: %v", err)
+	}
+	if vuln == nil {
+		t.Fatal("expected a vulnerability, got nil")
+	}
+	if vuln.CVEID != "CVE-2021-44228" {
+		t.Errorf("expected CVE-2021-44228, got %s", vuln.CVEID)
+	}
+	if vuln.Severity != "CRITICAL" {
+		t.Errorf("expected CRITICAL, got %s", vuln.Severity)
+	}
+}
+
+// TestNVDService_Offline_NoHTTP asserts offline mode short-circuits every
+// fetch entry point to an empty result with no error and no network hit
+// (M40 Wave B air-gapped degrade mode).
+func TestNVDService_Offline_NoHTTP(t *testing.T) {
+	hit := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	svc := NewNVDService(nil, nil, "", server.URL, true)
+
+	vulns, err := svc.searchByKeyword(context.Background(), "lodash", "4.17.20")
+	if err != nil {
+		t.Fatalf("offline searchByKeyword should not error, got %v", err)
+	}
+	if len(vulns) != 0 {
+		t.Errorf("offline searchByKeyword should return empty, got %d", len(vulns))
+	}
+
+	vuln, err := svc.SearchByCVEID(context.Background(), "CVE-2021-44228")
+	if err != nil {
+		t.Fatalf("offline SearchByCVEID should not error, got %v", err)
+	}
+	if vuln != nil {
+		t.Errorf("offline SearchByCVEID should return nil, got %v", vuln)
+	}
+
+	if hit {
+		t.Error("offline mode must not make any HTTP request")
+	}
+}
+
+// TestNVDService_DefaultBaseURL asserts an empty baseURL falls back to the
+// nvdAPIBase const (M40 Wave B).
+func TestNVDService_DefaultBaseURL(t *testing.T) {
+	svc := NewNVDService(nil, nil, "", "", false)
+	if svc.baseURL != nvdAPIBase {
+		t.Errorf("expected default baseURL %q, got %q", nvdAPIBase, svc.baseURL)
 	}
 }
 
@@ -394,7 +502,7 @@ func TestNVDService_HTTPMock_NetworkError(t *testing.T) {
 }
 
 func TestNewNVDService(t *testing.T) {
-	svc := NewNVDService(nil, nil, "test-key")
+	svc := NewNVDService(nil, nil, "test-key", "", false)
 
 	if svc == nil {
 		t.Fatal("NewNVDService returned nil")
@@ -411,7 +519,7 @@ func TestNewNVDService(t *testing.T) {
 }
 
 func TestNewNVDService_EmptyAPIKey(t *testing.T) {
-	svc := NewNVDService(nil, nil, "")
+	svc := NewNVDService(nil, nil, "", "", false)
 
 	if svc == nil {
 		t.Fatal("NewNVDService returned nil")
@@ -585,7 +693,7 @@ func TestNVDService_ScanComponents_RequiresRepositories(t *testing.T) {
 	// Note: ScanComponents will panic if called with nil repositories
 	// This is expected behavior - the service must be properly initialized
 
-	svc := NewNVDService(nil, nil, "test-key")
+	svc := NewNVDService(nil, nil, "test-key", "", false)
 	if svc.vulnRepo != nil {
 		t.Error("expected nil vulnRepo when initialized with nil")
 	}

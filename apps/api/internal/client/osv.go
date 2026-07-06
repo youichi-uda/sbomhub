@@ -4,25 +4,60 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 )
 
-const osvAPIURL = "https://api.osv.dev/v1"
+// DefaultOSVBaseURL is the exported default OSV API base endpoint (M40 Wave B).
+// Both this client and service/cli.go's batch query derive their request URLs
+// from it so the two OSV call sites can never diverge; the orchestrator can
+// override it (air-gapped mirror) via WithBaseURL.
+const DefaultOSVBaseURL = "https://api.osv.dev/v1"
 
 // OSVClient is a client for the OSV (Open Source Vulnerabilities) API
 type OSVClient struct {
 	httpClient *http.Client
+	// baseURL is the OSV API base endpoint. Defaults to DefaultOSVBaseURL and
+	// is overridable via WithBaseURL (M40 Wave B).
+	baseURL string
+	// offline short-circuits every HTTP fetch entry point when true (M40 Wave B
+	// air-gapped degrade mode). Toggle via WithOffline.
+	offline bool
 }
 
-// NewOSVClient creates a new OSV API client
+// NewOSVClient creates a new OSV API client.
+//
+// The base URL defaults to DefaultOSVBaseURL and offline defaults to false.
+// M40 Wave B: use WithBaseURL / WithOffline to override (this constructor stays
+// zero-arg so existing callers keep compiling; the option methods carry the
+// orchestrator's air-gapped / URL-override wiring).
 func NewOSVClient() *OSVClient {
 	return &OSVClient{
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		baseURL: DefaultOSVBaseURL,
 	}
+}
+
+// WithBaseURL overrides the OSV base URL — used by the orchestrator to point at
+// an air-gapped mirror and by tests to point at an httptest.Server. An empty
+// value is ignored (keeps the default). Returns the receiver for chaining.
+func (c *OSVClient) WithBaseURL(base string) *OSVClient {
+	if base != "" {
+		c.baseURL = strings.TrimRight(base, "/")
+	}
+	return c
+}
+
+// WithOffline toggles air-gapped degrade mode (M40 Wave B). When enabled every
+// fetch entry point short-circuits to an empty result with no error and no
+// network access. Returns the receiver for chaining.
+func (c *OSVClient) WithOffline(offline bool) *OSVClient {
+	c.offline = offline
+	return c
 }
 
 // OSVVulnerability represents an OSV vulnerability response
@@ -86,7 +121,12 @@ type OSVQueryResponse struct {
 
 // GetVulnerability fetches a specific vulnerability by ID (CVE, GHSA, etc.)
 func (c *OSVClient) GetVulnerability(ctx context.Context, vulnID string) (*OSVVulnerability, error) {
-	url := fmt.Sprintf("%s/vulns/%s", osvAPIURL, vulnID)
+	if c.offline {
+		slog.Info("scan skipped: offline mode", "source", "osv")
+		return nil, nil
+	}
+
+	url := fmt.Sprintf("%s/vulns/%s", c.baseURL, vulnID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
