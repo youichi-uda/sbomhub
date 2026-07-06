@@ -48,7 +48,7 @@ func TestGetCVEPaths_ErrorDoesNotLeakInternal(t *testing.T) {
 	leaky := errors.New(`aggregate cve affected components for CVE-2021-1: sql: Scan error on column index 5, name "type": converting NULL to string is unsupported; host=10.0.0.5 user="sbomhub_app" password=hunter2`)
 	h := NewCVEPathsHandler(stubCVEPathsService{err: leaky})
 
-	c, rec := newPathsCtx(t, "CVE-2021-1", true)
+	c, rec := newPathsCtx(t, "CVE-2021-0001", true)
 	if err := h.GetCVEPaths(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestGetCVEPaths_ErrorDoesNotLeakInternal(t *testing.T) {
 // swallow the not-found path.
 func TestGetCVEPaths_UnknownCVEIs404(t *testing.T) {
 	h := NewCVEPathsHandler(stubCVEPathsService{paths: nil, err: nil})
-	c, rec := newPathsCtx(t, "CVE-9999-0", true)
+	c, rec := newPathsCtx(t, "CVE-9999-0001", true)
 	if err := h.GetCVEPaths(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
@@ -93,12 +93,12 @@ func TestGetCVEPaths_UnknownCVEIs404(t *testing.T) {
 // serialise as [] (F164), never null.
 func TestGetCVEPaths_ZeroAffectedIs200(t *testing.T) {
 	empty := &model.CVEPathsResponse{
-		CVEID: "CVE-2024-EMPTY", Severity: "HIGH", CVSSScore: 7.5,
+		CVEID: "CVE-2024-0001", Severity: "HIGH", CVSSScore: 7.5,
 		AffectedProjectCount: 0, TotalProjectCount: 5,
 		AffectedProjects: []model.AffectedProjectPaths{},
 	}
 	h := NewCVEPathsHandler(stubCVEPathsService{paths: empty})
-	c, rec := newPathsCtx(t, "CVE-2024-EMPTY", true)
+	c, rec := newPathsCtx(t, "CVE-2024-0001", true)
 	if err := h.GetCVEPaths(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestGetCVEPaths_ZeroAffectedIs200(t *testing.T) {
 // context -> 401, never reaching the service.
 func TestGetCVEPaths_MissingTenantIs401(t *testing.T) {
 	h := NewCVEPathsHandler(stubCVEPathsService{})
-	c, rec := newPathsCtx(t, "CVE-2021-1", false)
+	c, rec := newPathsCtx(t, "CVE-2021-0001", false)
 	if err := h.GetCVEPaths(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestGetCVEPaths_MissingCVEIs400(t *testing.T) {
 // round-trips with the affected project + component chain intact.
 func TestGetCVEPaths_HappyPathShape(t *testing.T) {
 	resp := &model.CVEPathsResponse{
-		CVEID: "CVE-2024-QS", Severity: "HIGH", CVSSScore: 7.5, InKEV: true,
+		CVEID: "CVE-2024-0002", Severity: "HIGH", CVSSScore: 7.5, InKEV: true,
 		AffectedProjectCount: 1, TotalProjectCount: 3,
 		AffectedProjects: []model.AffectedProjectPaths{{
 			ProjectID: uuid.New(), ProjectName: "iot-gateway", SbomID: uuid.New(),
@@ -163,7 +163,7 @@ func TestGetCVEPaths_HappyPathShape(t *testing.T) {
 		}},
 	}
 	h := NewCVEPathsHandler(stubCVEPathsService{paths: resp})
-	c, rec := newPathsCtx(t, "CVE-2024-QS", true)
+	c, rec := newPathsCtx(t, "CVE-2024-0002", true)
 	if err := h.GetCVEPaths(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}

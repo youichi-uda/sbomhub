@@ -123,16 +123,9 @@ func TestRedactProviderError_NonURLErrorWithKeySubstring(t *testing.T) {
 	}
 }
 
-// TestRedactURLString_MalformedFallback verifies a parse failure falls
-// back to the static placeholder so the raw URL cannot leak through a
-// shortcut path.
-func TestRedactURLString_MalformedFallback(t *testing.T) {
-	// Control char in the URL makes url.Parse fail.
-	got := redactURLString("ht\x7ftp://oops?key=secret")
-	if strings.Contains(got, "secret") {
-		t.Errorf("malformed URL fallback leaked the secret: %q", got)
-	}
-	if got != "[REDACTED-URL]" {
-		t.Errorf("got %q, want [REDACTED-URL]", got)
-	}
-}
+// NOTE (M42 Wave 2): TestRedactURLString_MalformedFallback moved to
+// internal/redact/redact_test.go alongside the redactURLString
+// implementation, which now lives in the internal/redact leaf package.
+// RedactProviderError above is a thin re-export of redact.Error, so the
+// TestRedactProviderError_* cases in this file continue to exercise the
+// exported contract unchanged.

@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // KEVHandler handles KEV integration API requests
@@ -69,10 +70,10 @@ func (h *KEVHandler) ListCatalog(c echo.Context) error {
 // GetByCVE handles GET /api/v1/kev/:cve_id
 func (h *KEVHandler) GetByCVE(c echo.Context) error {
 	ctx := c.Request().Context()
-	cveID := c.Param("cve_id")
 
-	if cveID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "CVE ID is required")
+	cveID, err := validation.ValidateCVEID(c.Param("cve_id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid CVE ID format")
 	}
 
 	entry, err := h.kevService.GetByCVE(ctx, cveID)
@@ -160,10 +161,10 @@ func (h *KEVHandler) GetLatestSync(c echo.Context) error {
 // CheckCVE handles GET /api/v1/vulnerabilities/:cve_id/kev
 func (h *KEVHandler) CheckCVE(c echo.Context) error {
 	ctx := c.Request().Context()
-	cveID := c.Param("cve_id")
 
-	if cveID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "CVE ID is required")
+	cveID, err := validation.ValidateCVEID(c.Param("cve_id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid CVE ID format")
 	}
 
 	inKEV, err := h.kevService.CheckCVEInKEV(ctx, cveID)

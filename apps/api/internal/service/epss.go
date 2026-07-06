@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 const (
@@ -106,10 +108,39 @@ func (s *EPSSService) SyncScores(ctx context.Context) error {
 }
 
 func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map[string]repository.EPSSData, error) {
-	// Build URL with CVE IDs
-	url := fmt.Sprintf("%s?cve=%s", s.baseURL, strings.Join(cveIDs, ","))
+	// Validate + normalize every CVE ID and DROP any malformed one before it
+	// can reach the external FIRST EPSS URL. A single bad ID must not fail the
+	// whole batch — it is filtered out and logged (M42 Wave 1). This is the
+	// input-boundary guard for the request; the escaping below is defence in
+	// depth.
+	validIDs := make([]string, 0, len(cveIDs))
+	for _, raw := range cveIDs {
+		id, err := validation.ValidateCVEID(raw)
+		if err != nil {
+			slog.Warn("epss: dropping malformed CVE ID from batch", "cve_id", raw)
+			continue
+		}
+		validIDs = append(validIDs, id)
+	}
+	if len(validIDs) == 0 {
+		// Nothing valid to ask about — return an empty result rather than
+		// hitting the API with an empty query.
+		return map[string]repository.EPSSData{}, nil
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Build the request URL with net/url so the cve param is percent-encoded.
+	// Each ID is escaped individually and joined with a LITERAL comma so the
+	// FIRST EPSS documented comma-separated batch contract keeps working while
+	// anything dangerous inside a value is still escaped. Validated IDs contain
+	// only [A-Z0-9-] (nothing QueryEscape touches), so for real CVEs the
+	// encoded form is identical to the input.
+	escaped := make([]string, len(validIDs))
+	for i, id := range validIDs {
+		escaped[i] = url.QueryEscape(id)
+	}
+	reqURL := fmt.Sprintf("%s?cve=%s", s.baseURL, strings.Join(escaped, ","))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -144,18 +175,25 @@ func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map
 	return scores, nil
 }
 
-// GetScore fetches EPSS score for a single CVE (real-time)
+// GetScore fetches EPSS score for a single CVE (real-time). The CVE ID is
+// validated first: a malformed ID returns validation.ErrInvalidCVEID WITHOUT
+// making any external call (the handler maps that to 400).
 func (s *EPSSService) GetScore(ctx context.Context, cveID string) (*repository.EPSSData, error) {
-	if s.offline {
-		return nil, nil
-	}
-
-	scores, err := s.fetchEPSSScores(ctx, []string{cveID})
+	normalized, err := validation.ValidateCVEID(cveID)
 	if err != nil {
 		return nil, err
 	}
 
-	if data, ok := scores[cveID]; ok {
+	if s.offline {
+		return nil, nil
+	}
+
+	scores, err := s.fetchEPSSScores(ctx, []string{normalized})
+	if err != nil {
+		return nil, err
+	}
+
+	if data, ok := scores[normalized]; ok {
 		return &data, nil
 	}
 	return nil, nil

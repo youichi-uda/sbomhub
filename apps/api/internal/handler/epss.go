@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 type EPSSHandler struct {
@@ -27,9 +28,9 @@ func (h *EPSSHandler) SyncScores(c echo.Context) error {
 
 // GetScore gets EPSS score for a specific CVE
 func (h *EPSSHandler) GetScore(c echo.Context) error {
-	cveID := c.Param("cve_id")
-	if cveID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cve_id is required"})
+	cveID, err := validation.ValidateCVEID(c.Param("cve_id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid CVE ID format"})
 	}
 
 	score, err := h.epssService.GetScore(c.Request().Context(), cveID)

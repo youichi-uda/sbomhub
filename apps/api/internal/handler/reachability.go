@@ -17,6 +17,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // reachabilityUpserter is the narrow write surface the reachability
@@ -196,6 +197,17 @@ func (h *ReachabilityHandler) Upload(c echo.Context) error {
 		if cveID == "" {
 			return c.JSON(http.StatusBadRequest, map[string]string{
 				"error": fmt.Sprintf("results[%d]: cve_id is required", i),
+			})
+		}
+		// Validate + normalize the cve_id at the input boundary (M42 Wave 1).
+		// All-or-nothing like the other shape checks: one malformed cve_id
+		// rejects the whole batch with nothing persisted. The normalized
+		// (upper-cased) form is what gets stored and what the grounding-target
+		// gate below matches against the canonical target graph.
+		cveID, err = validation.ValidateCVEID(cveID)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("results[%d]: invalid CVE ID format", i),
 			})
 		}
 

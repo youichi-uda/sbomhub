@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // Sentinel errors returned by SearchByCVE so the handler can map them to
@@ -60,11 +61,16 @@ func NewSearchServiceWithNVD(searchRepo searchRepoAPI, nvdService nvdLookupAPI) 
 // SearchByCVE searches for all projects affected by a specific CVE
 // Uses hybrid approach: local DB first, then NVD API fallback
 func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.CVESearchResult, error) {
-	// Normalize CVE ID
-	cveID = strings.ToUpper(strings.TrimSpace(cveID))
-	if !strings.HasPrefix(cveID, "CVE-") {
+	// Validate + normalize the CVE ID at the input boundary (M42 Wave 1).
+	// Replaces the earlier weak HasPrefix("CVE-") check with the canonical
+	// anchored-regex validator, so injection payloads / truncated IDs are
+	// rejected here. The service sentinel is wrapped so the handler's existing
+	// ErrInvalidCVEID -> 400 mapping keeps working unchanged.
+	normalized, err := validation.ValidateCVEID(cveID)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalidCVEID, cveID)
 	}
+	cveID = normalized
 
 	// Try local database first
 	result, err := s.searchRepo.SearchByCVE(ctx, cveID)

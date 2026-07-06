@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/redact"
 )
 
 type AuditRepository struct {
@@ -50,7 +51,20 @@ func (r *AuditRepository) q(ctx context.Context) database.Queryable {
 // construct AuditLog values with IPAddress=nil and would otherwise fail
 // the INSERT.
 func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
-	detailsJSON, err := json.Marshal(a.Details)
+	// M42 Wave 2 defense-in-depth choke point: EVERY audit writer funnels
+	// through Create (Log delegates here; the audit middleware, all ~20
+	// handler/service writers, and the webhook system-event writers all
+	// land here), so scrubbing secret-shaped material once at this single
+	// point means no call site can forget. redact.Details returns a
+	// deep-scrubbed COPY — a.Details is never mutated, so a caller that
+	// reuses its map after Log() is unaffected — and the scrub is
+	// PATTERN-SCOPED: only unambiguous secret shapes (auth query params,
+	// Bearer tokens, Authorization headers, DSN passwords) are redacted,
+	// so compliance evidence (cve_id, resource UUIDs, provider/model
+	// names, AI/human justification prose, counts) survives verbatim. A
+	// nil Details map returns nil and marshals to the same `null` as
+	// before this choke point existed.
+	detailsJSON, err := json.Marshal(redact.Details(a.Details))
 	if err != nil {
 		detailsJSON = []byte("{}")
 	}

@@ -24,6 +24,23 @@ func (f *fakeSearchRepo) SearchByComponent(ctx context.Context, name string, ver
 	return nil, nil
 }
 
+// recordingSearchRepo captures the cveID SearchByCVE forwards to the repo so a
+// test can assert the value was normalized (trimmed + upper-cased) before the
+// lookup. It returns its canned result for the recorded call.
+type recordingSearchRepo struct {
+	result   *model.CVESearchResult
+	gotCVEID string
+}
+
+func (r *recordingSearchRepo) SearchByCVE(ctx context.Context, cveID string) (*model.CVESearchResult, error) {
+	r.gotCVEID = cveID
+	return r.result, nil
+}
+
+func (r *recordingSearchRepo) SearchByComponent(ctx context.Context, name string, versionConstraint string) (*model.ComponentSearchResult, error) {
+	return nil, nil
+}
+
 // fakeNVD is an nvdLookupAPI stub letting a test choose the NVD outcome:
 // an operational error, or a successful-but-empty (nil, nil) result.
 type fakeNVD struct {
@@ -72,6 +89,54 @@ func TestSearchByCVE_NVDEmptyResult_IsNotFound(t *testing.T) {
 	_, err := svc.SearchByCVE(context.Background(), "CVE-2024-0002")
 	if !errors.Is(err, ErrCVENotFound) {
 		t.Fatalf("empty NVD result must classify as ErrCVENotFound (404); got %v", err)
+	}
+}
+
+// TestSearchByCVE_MalformedCVE_Rejected guards the M42 Wave 1 boundary
+// validation: a malformed CVE ID must be rejected with ErrInvalidCVEID (→ 400)
+// BEFORE any repository / NVD lookup runs. The fake repo below would panic-free
+// return a nil result, but the point is the sentinel classification: each of
+// these inputs is not a well-formed CVE ID and must never reach the DB.
+func TestSearchByCVE_MalformedCVE_Rejected(t *testing.T) {
+	svc := NewSearchService(&fakeSearchRepo{})
+
+	for _, bad := range []string{
+		"",
+		"not-a-cve",
+		"CVE-2021",              // no sequence
+		"CVE-2021-123",          // 3-digit sequence, below \d{4,}
+		"CVE-2021-44228 OR 1=1", // injection tail
+		"CVE-2021-4&x",          // injection chars
+		"library-name",          // a component name, not a CVE
+	} {
+		_, err := svc.SearchByCVE(context.Background(), bad)
+		if !errors.Is(err, ErrInvalidCVEID) {
+			t.Errorf("SearchByCVE(%q) err = %v, want ErrInvalidCVEID (400)", bad, err)
+		}
+	}
+}
+
+// TestSearchByCVE_ValidCVE_NormalizesAndPasses proves the validator does not
+// reject real modern CVEs and that lowercase input is normalized through to the
+// repository call. The fake records the cveID it is handed; we assert it is the
+// upper-cased canonical form. A 5-digit (log4shell) and 7-digit ID both pass.
+func TestSearchByCVE_ValidCVE_NormalizesAndPasses(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"cve-2021-44228", "CVE-2021-44228"},     // lowercase, 5-digit
+		{"CVE-2023-1234567", "CVE-2023-1234567"}, // 7-digit sequence
+		{" CVE-2014-0160 ", "CVE-2014-0160"},     // padded, 4-digit
+	} {
+		rec := &recordingSearchRepo{result: &model.CVESearchResult{CVEID: tc.want}}
+		svc := NewSearchService(rec)
+		if _, err := svc.SearchByCVE(context.Background(), tc.in); err != nil {
+			t.Fatalf("SearchByCVE(%q) unexpected error: %v", tc.in, err)
+		}
+		if rec.gotCVEID != tc.want {
+			t.Errorf("SearchByCVE(%q) passed %q to repo, want normalized %q", tc.in, rec.gotCVEID, tc.want)
+		}
 	}
 }
 

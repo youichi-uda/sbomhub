@@ -8,6 +8,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // SSVCHandler handles SSVC-related HTTP requests
@@ -225,9 +226,9 @@ func (h *SSVCHandler) GetAssessmentByCVE(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid project ID")
 	}
 
-	cveID := c.Param("cve_id")
-	if cveID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "CVE ID is required")
+	cveID, err := validation.ValidateCVEID(c.Param("cve_id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid CVE ID format")
 	}
 
 	assessment, err := h.ssvcService.GetAssessmentByCVE(c.Request().Context(), projectID, cveID)

@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // cvePathsService is the read-only surface GetCVEPaths needs from the paths
@@ -51,9 +52,9 @@ func (h *CVEPathsHandler) GetCVEPaths(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
 	}
 
-	cveID := c.Param("cve_id")
-	if cveID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cve_id is required"})
+	cveID, err := validation.ValidateCVEID(c.Param("cve_id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid CVE ID format"})
 	}
 
 	paths, err := h.svc.GetCVEPaths(c.Request().Context(), tenantID, cveID)

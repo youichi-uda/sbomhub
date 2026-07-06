@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // IPAHandler handles IPA integration API requests
@@ -45,10 +46,10 @@ func (h *IPAHandler) ListAnnouncements(c echo.Context) error {
 // GetAnnouncementsByCVE handles GET /api/v1/vulnerabilities/:cve_id/ipa
 func (h *IPAHandler) GetAnnouncementsByCVE(c echo.Context) error {
 	ctx := c.Request().Context()
-	cveID := c.Param("cve_id")
 
-	if cveID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "CVE ID is required")
+	cveID, err := validation.ValidateCVEID(c.Param("cve_id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid CVE ID format")
 	}
 
 	announcements, err := h.ipaService.GetAnnouncementsByCVE(ctx, cveID)

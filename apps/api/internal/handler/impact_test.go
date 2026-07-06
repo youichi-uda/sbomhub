@@ -52,7 +52,7 @@ func TestGetCVEImpact_ErrorDoesNotLeakInternal(t *testing.T) {
 	leaky := errors.New(`resolve vulnerability meta for CVE-2021-1: sql: Scan error on column index 1, name "severity": converting NULL to string is unsupported; host=10.0.0.5 user="sbomhub_app" password=hunter2`)
 	h := NewImpactHandler(stubImpactService{err: leaky})
 
-	c, rec := newImpactCtx(t, "CVE-2021-1")
+	c, rec := newImpactCtx(t, "CVE-2021-0001")
 	if err := h.GetCVEImpact(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestGetCVEImpact_ErrorDoesNotLeakInternal(t *testing.T) {
 func TestGetCVEImpact_UnknownCVEIs404(t *testing.T) {
 	h := NewImpactHandler(stubImpactService{impact: nil, err: nil})
 
-	c, rec := newImpactCtx(t, "CVE-9999-0")
+	c, rec := newImpactCtx(t, "CVE-9999-0001")
 	if err := h.GetCVEImpact(c); err != nil {
 		t.Fatalf("handler returned error: %v", err)
 	}
