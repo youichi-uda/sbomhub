@@ -1160,5 +1160,8 @@ func mapCRARunnerError(err error) (int, map[string]string, bool) {
 			return http.StatusBadRequest, map[string]string{"error": msg}, true
 		}
 	}
-	return http.StatusInternalServerError, map[string]string{"error": msg}, true
+	// Unrecognised runner error = internal fault. Do NOT echo the raw
+	// runner/internal error to the client (F444); log it, return generic.
+	slog.Warn("cra runner: unclassified error", "error", err)
+	return http.StatusInternalServerError, map[string]string{"error": "failed to generate CRA report"}, true
 }
