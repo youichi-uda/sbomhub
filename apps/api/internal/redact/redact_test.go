@@ -34,6 +34,10 @@ func TestString_RedactsSecrets(t *testing.T) {
 		// just the scheme word (the value is all-letters mixed-case base64, so it
 		// is caught by the mixed-case credential shape, not a digit/special).
 		{"authorization basic base64", "Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz", "Authorization: [REDACTED]"},
+		// M42 Phase D r2: a Digest header spreads the credential across
+		// comma-separated params (response=<hash> is the real secret); with a
+		// recognised scheme the WHOLE value is redacted, not just the first param.
+		{"authorization digest", `Authorization: Digest username="u", realm="r", nonce="abc", response="deadbeef1234567890abcdef"`, "deadbeef1234567890abcdef", "Authorization: [REDACTED]"},
 		{"dsn password", "dial postgres://appuser:S3cr3tPw@db.internal:5432/app", "S3cr3tPw", "postgres://appuser:[REDACTED]@db.internal:5432/app"},
 		{"dsn empty user", "redis://:R3disPw@cache:6379", "R3disPw", "redis://:[REDACTED]@cache:6379"},
 	}
@@ -78,6 +82,10 @@ func TestString_PreservesNonSecrets(t *testing.T) {
 		"Authorization: role-based access control is enforced",
 		"The flag bearer approach was rejected",
 		"Authorization: Basic authentication is required by the endpoint",
+		// snake_case OAuth terms are prose, not credentials (underscore alone no
+		// longer qualifies as a credential shape).
+		"Bearer access_token and refresh_token are rotated via PKCE",
+		"the client_secret is stored in Vault, never in a Bearer access_token",
 	}
 	for _, s := range preserved {
 		if got := String(s); got != s {

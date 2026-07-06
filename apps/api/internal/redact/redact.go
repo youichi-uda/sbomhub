@@ -76,7 +76,7 @@ var (
 	// control` in prose is left intact, because "role-based" is not
 	// credential-shaped).
 	authHeaderRe = regexp.MustCompile(
-		`(?i)(authorization:\s*)((?:bearer|basic|digest|negotiate|ntlm|apikey|token)\s+)?(\S+)`,
+		`(?i)(authorization:\s*)((?:bearer|basic|digest|negotiate|ntlm|apikey|token)\s+)?(\S+)(.*)`,
 	)
 
 	// dsnPasswordPattern matches the PASSWORD component of a connection
@@ -114,10 +114,18 @@ func String(s string) string {
 
 // looksLikeCredential reports whether v has the shape of a real secret token
 // rather than a dictionary word. Credentials are >=8 chars and carry entropy a
-// word does not: a digit, a token special char (. _ ~ + / =), or mixed case
-// (base64 / API keys). Hyphen alone does NOT qualify, so hyphenated prose like
-// "role-based" is treated as a word, not a secret. This is the gate that keeps
-// the audit-trail evidence contract (§8.5) intact while still catching creds.
+// word does not: a digit, a token special char (. ~ + / =), or mixed case
+// (base64 / API keys). Neither a hyphen NOR an underscore alone qualifies, so
+// hyphenated/snake_case prose like "role-based" or the OAuth terms
+// "access_token" / "client_secret" are treated as words, not secrets. This is
+// the gate that keeps the audit-trail evidence contract (§8.5) intact while
+// still catching creds.
+//
+// Known residual (accepted, pattern-scoped tradeoff, favouring evidence
+// integrity): an all-lowercase-alpha base64 value with no digit/padding (e.g. a
+// short weak Basic credential) is not distinguishable from a word and is left
+// intact; and a digit-bearing hyphenated term after "Bearer" (e.g. "3-legged")
+// may be over-redacted. Both are rare relative to the prose they protect.
 func looksLikeCredential(v string) bool {
 	if len(v) < 8 {
 		return false
@@ -127,7 +135,7 @@ func looksLikeCredential(v string) bool {
 		switch {
 		case r >= '0' && r <= '9':
 			hasDigit = true
-		case r == '.' || r == '_' || r == '~' || r == '+' || r == '/' || r == '=':
+		case r == '.' || r == '~' || r == '+' || r == '/' || r == '=':
 			hasSpecial = true
 		case r >= 'A' && r <= 'Z':
 			hasUpper = true
@@ -139,17 +147,29 @@ func looksLikeCredential(v string) bool {
 }
 
 // redactAuthHeader redacts the credential of an Authorization-header match when
-// the value is credential-shaped, preserving the `Authorization: ` prefix (and
-// dropping the scheme word + secret together).
+// the value is credential-shaped, preserving the `Authorization: ` prefix.
+//
+// When a recognised auth scheme precedes the value (Bearer/Basic/Digest/...),
+// the WHOLE remaining value is credential material — Digest, for example,
+// carries comma-separated params (realm, nonce, response=<hash>) after the first
+// token — so the entire line portion is redacted. A bare credential (no scheme)
+// redacts only the token and keeps any trailing text.
 func redactAuthHeader(match string) string {
 	m := authHeaderRe.FindStringSubmatch(match)
 	if m == nil {
 		return match
 	}
-	if looksLikeCredential(m[3]) {
-		return m[1] + placeholder
+	prefix, scheme, first, rest := m[1], m[2], m[3], m[4]
+	if !looksLikeCredential(first) {
+		// Prose: "Authorization: role-based access control",
+		// "Authorization: Basic authentication is required".
+		return match
 	}
-	return match
+	if scheme != "" {
+		// scheme + first + rest are all credential material (Digest params etc.).
+		return prefix + placeholder
+	}
+	return prefix + placeholder + rest
 }
 
 // redactBearer redacts a standalone Bearer token only when it is
