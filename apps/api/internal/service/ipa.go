@@ -234,9 +234,13 @@ func (s *IPAService) SyncForTenant(ctx context.Context, tenantID uuid.UUID) (*Sy
 		return nil, err
 	}
 
-	// Update tenant's last sync time
-	if err := s.ipaRepo.UpdateLastSyncAt(ctx, tenantID); err != nil {
-		// Log but don't fail
+	// Update tenant's last sync time — but not in offline mode, where nothing was
+	// actually fetched. Recording a fresh last_sync_at there would misrepresent
+	// data freshness (M40 Phase D).
+	if !s.offline {
+		if err := s.ipaRepo.UpdateLastSyncAt(ctx, tenantID); err != nil {
+			// Log but don't fail
+		}
 	}
 
 	return result, nil

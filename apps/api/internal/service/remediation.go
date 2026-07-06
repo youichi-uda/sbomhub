@@ -98,6 +98,14 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 		CVEID:    vuln.CVEID,
 		Summary:  vuln.Description,
 		Severity: vuln.Severity,
+		// Default to the manual fallback so the response is always complete —
+		// including when OSV returns no data (offline mode returns (nil,nil), and
+		// a genuine not-found). The OSV enrichment below upgrades this to an
+		// "upgrade" remediation when a fixed version is known.
+		Remediation: RemediationDetails{
+			Type:     "manual",
+			Commands: map[string]string{},
+		},
 	}
 
 	// Get remediation info from OSV - try to find any affected package

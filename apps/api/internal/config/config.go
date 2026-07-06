@@ -33,10 +33,12 @@ type Config struct {
 	JVNURL  string // JVN / MyJVN
 	OSVURL  string // OSV.dev
 
-	// Offline / air-gapped mode (M40, SBOMHUB_OFFLINE). When true, every outbound
-	// external data-source fetch is skipped and degrades gracefully (structured
-	// log, no error) instead of failing — the rest of the product keeps running
-	// on already-synced data. Mirrors the LLM "disabled provider" degrade shape.
+	// Offline / air-gapped mode (M40, SBOMHUB_OFFLINE). When true, every external
+	// vulnerability data-source sync (EPSS, KEV, NVD, EOL, JVN, OSV, IPA) skips
+	// its outbound fetch and degrades gracefully (structured log, no error)
+	// instead of failing — the product keeps running on already-synced data.
+	// Mirrors the LLM "disabled provider" degrade shape. (The GHSA advisory
+	// client used for AI-triage grounding is not gated here — see carry-over.)
 	Offline bool
 
 	// Clerk authentication (SaaS mode)
