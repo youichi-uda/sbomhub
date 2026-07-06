@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -86,7 +87,8 @@ func (h *AuditHandler) List(c echo.Context) error {
 
 	result, err := h.auditService.List(c.Request().Context(), tenantID, filter)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("audit: list failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list audit logs"})
 	}
 
 	return c.JSON(http.StatusOK, result)
@@ -148,7 +150,8 @@ func (h *AuditHandler) Export(c echo.Context) error {
 
 	csvData, err := h.auditService.ExportCSV(c.Request().Context(), tenantID, filter)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("audit: export csv failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to export audit logs"})
 	}
 
 	// Generate filename with timestamp
@@ -180,7 +183,8 @@ func (h *AuditHandler) GetStatistics(c echo.Context) error {
 
 	stats, err := h.auditService.GetStatistics(c.Request().Context(), tenantID, days)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("audit: get statistics failed", "tenant_id", tenantID, "days", days, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load audit statistics"})
 	}
 
 	return c.JSON(http.StatusOK, stats)

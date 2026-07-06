@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -39,7 +41,8 @@ func (h *AnalyticsHandler) GetSummary(c echo.Context) error {
 
 	summary, err := h.analyticsService.GetSummary(c.Request().Context(), tenantID, days)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("analytics: get summary failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load analytics summary"})
 	}
 
 	return c.JSON(http.StatusOK, summary)
@@ -64,7 +67,8 @@ func (h *AnalyticsHandler) GetMTTR(c echo.Context) error {
 
 	mttr, err := h.analyticsService.GetMTTR(c.Request().Context(), tenantID, days)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("analytics: get mttr failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load MTTR analytics"})
 	}
 
 	return c.JSON(http.StatusOK, mttr)
@@ -89,7 +93,8 @@ func (h *AnalyticsHandler) GetVulnerabilityTrend(c echo.Context) error {
 
 	trend, err := h.analyticsService.GetVulnerabilityTrend(c.Request().Context(), tenantID, days)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("analytics: get vulnerability trend failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load vulnerability trend"})
 	}
 
 	return c.JSON(http.StatusOK, trend)
@@ -114,7 +119,8 @@ func (h *AnalyticsHandler) GetSLOAchievement(c echo.Context) error {
 
 	slo, err := h.analyticsService.GetSLOAchievement(c.Request().Context(), tenantID, days)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("analytics: get slo achievement failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load SLO achievement"})
 	}
 
 	return c.JSON(http.StatusOK, slo)
@@ -139,7 +145,8 @@ func (h *AnalyticsHandler) GetComplianceTrend(c echo.Context) error {
 
 	trend, err := h.analyticsService.GetComplianceTrend(c.Request().Context(), tenantID, days)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("analytics: get compliance trend failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load compliance trend"})
 	}
 
 	return c.JSON(http.StatusOK, trend)
@@ -157,7 +164,8 @@ func (h *AnalyticsHandler) GetSLOTargets(c echo.Context) error {
 
 	targets, err := h.analyticsService.GetSLOTargets(c.Request().Context(), tenantID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("analytics: get slo targets failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load SLO targets"})
 	}
 
 	return c.JSON(http.StatusOK, targets)
@@ -188,7 +196,15 @@ func (h *AnalyticsHandler) UpdateSLOTarget(c echo.Context) error {
 
 	err := h.analyticsService.UpdateSLOTarget(c.Request().Context(), tenantID, input.Severity, input.TargetHours)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F443: only echo the raw service error for caller-fixable validation
+		// failures (bad severity / non-positive hours → 400). The repository
+		// (DB) error is now %w-wrapped internal — log it and return a generic
+		// body instead of leaking the SQL/driver string at a blanket 400.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		slog.Warn("analytics: update slo target failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update SLO target"})
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})

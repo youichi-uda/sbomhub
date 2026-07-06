@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -46,7 +47,8 @@ func (h *ComplianceHandler) Check(c echo.Context) error {
 
 	result, err := h.complianceService.CheckCompliance(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: compliance check failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to check compliance"})
 	}
 
 	return c.JSON(http.StatusOK, result)
@@ -66,7 +68,8 @@ func (h *ComplianceHandler) ExportReport(c echo.Context) error {
 
 	result, err := h.complianceService.CheckCompliance(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: export report compliance check failed", "project_id", projectID, "format", format, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to export compliance report"})
 	}
 
 	switch format {
@@ -75,7 +78,8 @@ func (h *ComplianceHandler) ExportReport(c echo.Context) error {
 	case "pdf":
 		data, err := h.complianceService.GenerateCompliancePDF(c.Request().Context(), projectID, result)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			slog.Warn("compliance: export report pdf generation failed", "project_id", projectID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate compliance report"})
 		}
 		filename := fmt.Sprintf("compliance-report-%s-%s.pdf", projectID.String()[:8], time.Now().Format("20060102"))
 		c.Response().Header().Set("Content-Type", "application/pdf")
@@ -85,7 +89,8 @@ func (h *ComplianceHandler) ExportReport(c echo.Context) error {
 	case "xlsx":
 		data, err := h.complianceService.GenerateComplianceExcel(c.Request().Context(), projectID, result)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			slog.Warn("compliance: export report xlsx generation failed", "project_id", projectID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate compliance report"})
 		}
 		filename := fmt.Sprintf("compliance-report-%s-%s.xlsx", projectID.String()[:8], time.Now().Format("20060102"))
 		c.Response().Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -112,7 +117,8 @@ func (h *ComplianceHandler) GetChecklist(c echo.Context) error {
 	tenantID := getTenantID(c)
 	result, err := h.complianceService.GetChecklist(c.Request().Context(), tenantID, projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: get checklist failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load checklist"})
 	}
 
 	return c.JSON(http.StatusOK, result)
@@ -144,7 +150,8 @@ func (h *ComplianceHandler) UpdateChecklistResponse(c echo.Context) error {
 
 	err = h.complianceService.UpdateChecklistResponse(c.Request().Context(), tenantID, projectID, checkID, req.Response, req.Note, userID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: update checklist response failed", "tenant_id", tenantID, "project_id", projectID, "check_id", checkID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update checklist response"})
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
@@ -167,7 +174,8 @@ func (h *ComplianceHandler) DeleteChecklistResponse(c echo.Context) error {
 	tenantID := getTenantID(c)
 	err = h.complianceService.DeleteChecklistResponse(c.Request().Context(), tenantID, projectID, checkID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: delete checklist response failed", "tenant_id", tenantID, "project_id", projectID, "check_id", checkID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete checklist response"})
 	}
 
 	return c.NoContent(http.StatusNoContent)
@@ -189,7 +197,8 @@ func (h *ComplianceHandler) GetVisualizationSettings(c echo.Context) error {
 	tenantID := getTenantID(c)
 	result, err := h.complianceService.GetVisualizationSettings(c.Request().Context(), tenantID, projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: get visualization settings failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load visualization settings"})
 	}
 
 	return c.JSON(http.StatusOK, result)
@@ -211,7 +220,8 @@ func (h *ComplianceHandler) UpdateVisualizationSettings(c echo.Context) error {
 	tenantID := getTenantID(c)
 	settings, err := h.complianceService.UpdateVisualizationSettings(c.Request().Context(), tenantID, projectID, &input)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: update visualization settings failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update visualization settings"})
 	}
 
 	return c.JSON(http.StatusOK, settings)
@@ -229,7 +239,8 @@ func (h *ComplianceHandler) DeleteVisualizationSettings(c echo.Context) error {
 	tenantID := getTenantID(c)
 	err = h.complianceService.DeleteVisualizationSettings(c.Request().Context(), tenantID, projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("compliance: delete visualization settings failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete visualization settings"})
 	}
 
 	return c.NoContent(http.StatusNoContent)

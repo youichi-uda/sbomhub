@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -37,14 +38,16 @@ func (h *ReportHandler) GetSettings(c echo.Context) error {
 		// Return all settings
 		settings, err := h.reportService.GetAllSettings(c.Request().Context(), tenantID)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			slog.Warn("report: get all settings failed", "tenant_id", tenantID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load report settings"})
 		}
 		return c.JSON(http.StatusOK, settings)
 	}
 
 	settings, err := h.reportService.GetSettings(c.Request().Context(), tenantID, reportType)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("report: get settings failed", "tenant_id", tenantID, "report_type", reportType, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load report settings"})
 	}
 
 	return c.JSON(http.StatusOK, settings)
@@ -82,7 +85,8 @@ func (h *ReportHandler) UpdateSettings(c echo.Context) error {
 
 	settings, err := h.reportService.UpdateSettings(c.Request().Context(), tenantID, input)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("report: update settings failed", "tenant_id", tenantID, "report_type", input.ReportType, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update report settings"})
 	}
 
 	return c.JSON(http.StatusOK, settings)
@@ -135,7 +139,8 @@ func (h *ReportHandler) Generate(c echo.Context) error {
 
 	report, launcher, err := h.reportService.GenerateReport(c.Request().Context(), tenantID, userID, input)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("report: generate failed", "tenant_id", tenantID, "report_type", input.ReportType, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate report"})
 	}
 
 	// F208 / M14-1: publish the newly-minted report UUID so the audit
@@ -181,7 +186,8 @@ func (h *ReportHandler) List(c echo.Context) error {
 
 	reports, total, err := h.reportService.ListReports(c.Request().Context(), tenantID, page, limit)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("report: list failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list reports"})
 	}
 
 	totalPages := total / limit
@@ -238,7 +244,8 @@ func (h *ReportHandler) Download(c echo.Context) error {
 
 	data, filename, err := h.reportService.GetReportFile(c.Request().Context(), tenantID, reportID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		slog.Warn("report: get report file failed", "tenant_id", tenantID, "report_id", reportID, "error", err)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "report not found"})
 	}
 
 	// Determine content type

@@ -31,11 +31,25 @@ type vexApplyService interface {
 	ApplySuggestion(ctx context.Context, in service.ApplySuggestionInput) (*service.VEXApplyResult, error)
 }
 
+// vexWriteService is the subset of *service.VEXService the Create/Update
+// endpoints use. Declared as an interface (like vexApplyService) so
+// vex_test.go can substitute a fake and assert the F443 validation-vs-
+// internal HTTP status split (400 for ValidationErrorf, 500 for a
+// %w-wrapped DB error) without a live DB. In production it is the same
+// *service.VEXService held in vexService.
+type vexWriteService interface {
+	CreateStatement(ctx context.Context, input service.CreateVEXStatementInput) (*model.VEXStatement, error)
+	UpdateStatement(ctx context.Context, id uuid.UUID, input service.UpdateVEXStatementInput) (*model.VEXStatement, error)
+}
+
 type VEXHandler struct {
 	vexService *service.VEXService
 	// applier drives the cross-project apply flow; it is vexService in
 	// production and a fake in the audit unit test.
 	applier vexApplyService
+	// writer drives the Create/Update statement flow; it is vexService in
+	// production and a fake in the F443 status-split unit test.
+	writer vexWriteService
 	// audit is the writer for the vex_statement_reused_cross_project row.
 	// May be nil for the legacy handler construction paths that never call
 	// Apply (Create/Update/List/etc. do not touch it).
@@ -45,7 +59,7 @@ type VEXHandler struct {
 // NewVEXHandler wires the handler. audit is required for the M27 Apply
 // endpoint's audit-or-nothing emit; the other endpoints do not use it.
 func NewVEXHandler(vexService *service.VEXService, audit VEXAuditLogger) *VEXHandler {
-	return &VEXHandler{vexService: vexService, applier: vexService, audit: audit}
+	return &VEXHandler{vexService: vexService, applier: vexService, writer: vexService, audit: audit}
 }
 
 type CreateVEXRequest struct {
@@ -109,9 +123,18 @@ func (h *VEXHandler) Create(c echo.Context) error {
 		CreatedBy:       createdBy,
 	}
 
-	statement, err := h.vexService.CreateStatement(c.Request().Context(), input)
+	statement, err := h.writer.CreateStatement(c.Request().Context(), input)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F443: split the blanket 400. CreateStatement mixes self-authored
+		// validation feedback (bad status, missing justification, duplicate,
+		// non-owned component) with %w-wrapped DB errors. Only the former is
+		// safe to echo at 400; a DB fault is a 500 with a generic body and the
+		// raw error kept in the server log.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		slog.Warn("vex: create statement failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save VEX statement"})
 	}
 
 	// F208 / M14-1: publish the newly-minted VEX UUID so the audit
@@ -153,9 +176,17 @@ func (h *VEXHandler) Update(c echo.Context) error {
 		ImpactStatement: req.ImpactStatement,
 	}
 
-	statement, err := h.vexService.UpdateStatement(c.Request().Context(), vexID, input)
+	statement, err := h.writer.UpdateStatement(c.Request().Context(), vexID, input)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F443: split the blanket 400 (see Create). UpdateStatement mixes
+		// validation feedback (not found, bad status, missing justification)
+		// with %w-wrapped DB errors; only validation is echoed at 400, a DB
+		// fault is a generic 500 with the raw error in the server log.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		slog.Warn("vex: update statement failed", "vex_id", vexID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save VEX statement"})
 	}
 
 	return c.JSON(http.StatusOK, statement)
@@ -423,7 +454,11 @@ func (h *VEXHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.vexService.DeleteStatement(c.Request().Context(), vexID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		// DeleteStatement returns the raw repository error (static "not found"
+		// for rows==0, or a raw driver error otherwise); never echo it to the
+		// client (F442). Generic 404 body + full error to the server log.
+		slog.Warn("vex: delete statement failed", "vex_id", vexID, "error", err)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "VEX statement not found"})
 	}
 
 	return c.NoContent(http.StatusNoContent)

@@ -34,7 +34,7 @@ type CreateLicensePolicyInput struct {
 func (s *LicensePolicyService) CreatePolicy(ctx context.Context, input CreateLicensePolicyInput) (*model.LicensePolicy, error) {
 	// Validate policy type
 	if !isValidPolicyType(input.PolicyType) {
-		return nil, fmt.Errorf("invalid policy type: %s", input.PolicyType)
+		return nil, ValidationErrorf("invalid policy type: %s", input.PolicyType)
 	}
 
 	// Check if policy already exists
@@ -43,7 +43,7 @@ func (s *LicensePolicyService) CreatePolicy(ctx context.Context, input CreateLic
 		return nil, fmt.Errorf("failed to check existing policy: %w", err)
 	}
 	if existing != nil {
-		return nil, fmt.Errorf("policy already exists for license: %s", input.LicenseID)
+		return nil, ValidationErrorf("policy already exists for license: %s", input.LicenseID)
 	}
 
 	// Use common license name if available
@@ -95,12 +95,12 @@ func (s *LicensePolicyService) UpdatePolicy(ctx context.Context, id uuid.UUID, i
 		return nil, fmt.Errorf("failed to get license policy: %w", err)
 	}
 	if policy == nil {
-		return nil, fmt.Errorf("license policy not found")
+		return nil, ValidationErrorf("license policy not found")
 	}
 
 	// Validate policy type
 	if !isValidPolicyType(input.PolicyType) {
-		return nil, fmt.Errorf("invalid policy type: %s", input.PolicyType)
+		return nil, ValidationErrorf("invalid policy type: %s", input.PolicyType)
 	}
 
 	policy.PolicyType = input.PolicyType

@@ -142,7 +142,11 @@ func (h *DiffHandler) ProjectDiff(c echo.Context) error {
 			// the generic 500.
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "from sbom is already the newest in the project"})
 		default:
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			// F442: never surface the raw service / repository / SQL error
+			// to the caller. Log specifics server-side, return a generic body.
+			slog.Warn("diff: compute project diff failed",
+				"tenant_id", tenantID, "project_id", projectID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to compute project diff"})
 		}
 	}
 
@@ -244,7 +248,11 @@ func (h *DiffHandler) ProjectDiffSummary(c echo.Context) error {
 				"reason": disabled.Reason,
 			})
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// F442: never surface the raw service / repository / SQL error to
+		// the caller. Log specifics server-side, return a generic body.
+		slog.Warn("diff: generate diff summary failed",
+			"tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate diff summary"})
 	}
 	return c.JSON(http.StatusOK, resp)
 }
@@ -391,7 +399,11 @@ func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
 		case errors.Is(err, diff.ErrNoNewerSbom):
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "from sbom is already the newest in the project"})
 		default:
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			// F442: never surface the raw service / repository / SQL error
+			// to the caller. Log specifics server-side, return a generic body.
+			slog.Warn("diff: compute diff graph failed",
+				"tenant_id", tenantID, "project_id", projectID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to compute diff graph"})
 		}
 	}
 
@@ -447,8 +459,12 @@ func (h *DiffHandler) ProjectDiffGraph(c echo.Context) error {
 		// F168: do NOT swallow this. The audit log is the only durable
 		// proof that the operator viewed the graph; a missing row would
 		// silently break the audit chain.
+		// F442: log the raw error server-side; the client gets a stable
+		// generic body (no err.Error() interpolation).
+		slog.Warn("diff: graph audit write failed",
+			"tenant_id", tenantID, "project_id", projectID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": fmt.Sprintf("audit write failed: %v", err),
+			"error": "audit write failed",
 		})
 	}
 
@@ -542,5 +558,10 @@ func mapDiffExportError(c echo.Context, err error) error {
 	case errors.Is(err, diff.ErrNoNewerSbom):
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "from sbom is already the newest in the project"})
 	}
-	return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	// F442: never surface the raw service / repository / SQL error to the
+	// caller. Log specifics server-side, return a generic body. (Tenant /
+	// project ids are not in this helper's scope; the CSV/PDF callers log
+	// them via their own request context.)
+	slog.Warn("diff: export diff failed", "error", err)
+	return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to export diff"})
 }

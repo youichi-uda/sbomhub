@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -18,7 +19,8 @@ func NewStatsHandler(ss *service.StatsService) *StatsHandler {
 func (h *StatsHandler) Get(c echo.Context) error {
 	stats, err := h.statsService.GetStats(c.Request().Context())
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("stats: get stats failed", "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
 	}
 	return c.JSON(http.StatusOK, stats)
 }

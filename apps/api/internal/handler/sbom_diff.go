@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -44,7 +45,8 @@ func (h *SbomDiffHandler) Diff(c echo.Context) error {
 		TargetSbomID: targetID,
 	})
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		slog.Warn("sbom_diff: diff failed", "base_sbom_id", baseID, "target_sbom_id", targetID, "error", err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to compute sbom diff"})
 	}
 
 	return c.JSON(http.StatusOK, diff)

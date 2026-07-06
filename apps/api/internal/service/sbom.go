@@ -33,7 +33,12 @@ func NewSbomService(sr *repository.SbomRepository, cr *repository.ComponentRepos
 func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, error) {
 	info, err := detectFormatAndVersion(data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to detect SBOM format: %w", err)
+		// F443: format-detection failure is caller-fixable feedback about a
+		// malformed upload (bad JSON / unknown SBOM shape). The parser error
+		// text is safe + helpful, so surface it at 400 via ErrValidation.
+		// %v inlines the parser message — the goal is errors.Is(ErrValidation)
+		// + a clean message, not to preserve the %w chain.
+		return nil, ValidationErrorf("failed to parse SBOM: %v", err)
 	}
 
 	// Resolve the tenant_id of the parent project so that both the new sbom
@@ -62,7 +67,9 @@ func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []by
 
 	components, err := parseComponents(data, info.Format, info.Version)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse components: %w", err)
+		// F443: component parse failure is likewise caller-fixable feedback
+		// about a malformed upload; surface it at 400 via ErrValidation.
+		return nil, ValidationErrorf("failed to parse SBOM: %v", err)
 	}
 
 	for _, comp := range components {

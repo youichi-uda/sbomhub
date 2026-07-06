@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -10,8 +13,24 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
+// licensePolicyService is the subset of *service.LicensePolicyService the
+// handler depends on. Declaring the dependency as an interface (rather than
+// the concrete type) lets tests inject a stub that returns validation vs
+// internal errors, which is what the F443 400/500 split test requires — the
+// concrete service is DB-backed and cannot be driven to a %w-wrapped repo
+// failure in a unit test. *service.LicensePolicyService satisfies this.
+type licensePolicyService interface {
+	CreatePolicy(ctx context.Context, input service.CreateLicensePolicyInput) (*model.LicensePolicy, error)
+	UpdatePolicy(ctx context.Context, id uuid.UUID, input service.UpdateLicensePolicyInput) (*model.LicensePolicy, error)
+	GetPolicy(ctx context.Context, id uuid.UUID) (*model.LicensePolicy, error)
+	ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.LicensePolicy, error)
+	DeletePolicy(ctx context.Context, id uuid.UUID) error
+	CheckViolations(ctx context.Context, projectID uuid.UUID, sbomID uuid.UUID) ([]model.LicenseViolation, error)
+	GetCommonLicenses() map[string]string
+}
+
 type LicensePolicyHandler struct {
-	licenseService *service.LicensePolicyService
+	licenseService licensePolicyService
 }
 
 func NewLicensePolicyHandler(licenseService *service.LicensePolicyService) *LicensePolicyHandler {
@@ -51,7 +70,15 @@ func (h *LicensePolicyHandler) Create(c echo.Context) error {
 
 	policy, err := h.licenseService.CreatePolicy(c.Request().Context(), input)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F443: only self-authored validation errors (bad policy type,
+		// duplicate policy) are safe to echo at 400. A %w-wrapped repo /
+		// DB failure must not leak its driver string — 500 + generic body,
+		// full error to the server log only.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		slog.Warn("license: create policy failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save license policy"})
 	}
 
 	// F208 / M14-1: publish the newly-minted license-policy UUID so the
@@ -91,7 +118,14 @@ func (h *LicensePolicyHandler) Update(c echo.Context) error {
 
 	policy, err := h.licenseService.UpdatePolicy(c.Request().Context(), policyID, input)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F443: same split as Create — validation feedback (unknown policy,
+		// bad policy type) at 400; %w-wrapped repo / DB failures at 500 with
+		// a generic body so the driver string never reaches the client.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		slog.Warn("license: update policy failed", "policy_id", policyID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save license policy"})
 	}
 
 	return c.JSON(http.StatusOK, policy)
@@ -142,7 +176,12 @@ func (h *LicensePolicyHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.licenseService.DeletePolicy(c.Request().Context(), policyID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		// DeletePolicy returns the raw repository error (which is either a
+		// static "not found" for rows==0 or a raw driver error otherwise);
+		// never echo it to the client (F442). Generic 404 body + full error
+		// to the server log.
+		slog.Warn("license: delete policy failed", "policy_id", policyID, "error", err)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "license policy not found"})
 	}
 
 	return c.NoContent(http.StatusNoContent)
@@ -162,7 +201,8 @@ func (h *LicensePolicyHandler) CheckViolations(c echo.Context) error {
 
 	violations, err := h.licenseService.CheckViolations(c.Request().Context(), projectID, sbomID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("license: check violations failed", "project_id", projectID, "sbom_id", sbomID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to check license violations"})
 	}
 
 	if violations == nil {

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -25,7 +26,8 @@ func (h *NotificationHandler) GetSettings(c echo.Context) error {
 
 	settings, err := h.notificationService.GetSettings(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("notification: get settings failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get notification settings"})
 	}
 
 	return c.JSON(http.StatusOK, settings)
@@ -45,7 +47,8 @@ func (h *NotificationHandler) UpdateSettings(c echo.Context) error {
 
 	settings, err := h.notificationService.UpdateSettings(c.Request().Context(), projectID, input)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("notification: update settings failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update notification settings"})
 	}
 
 	return c.JSON(http.StatusOK, settings)
@@ -59,7 +62,8 @@ func (h *NotificationHandler) TestNotification(c echo.Context) error {
 	}
 
 	if err := h.notificationService.SendTestNotification(c.Request().Context(), projectID); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("notification: send test notification failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to send test notification"})
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "test notification sent"})
@@ -74,7 +78,8 @@ func (h *NotificationHandler) GetLogs(c echo.Context) error {
 
 	logs, err := h.notificationService.GetLogs(c.Request().Context(), projectID, 50)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("notification: get logs failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get notification logs"})
 	}
 
 	return c.JSON(http.StatusOK, logs)

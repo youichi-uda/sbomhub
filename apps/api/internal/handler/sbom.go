@@ -185,7 +185,16 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 
 	sbom, err := h.sbomService.Import(c.Request().Context(), projectID, body)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F443: only echo the raw service error when it is a caller-fixable
+		// validation failure (malformed SBOM → 400 with helpful parser
+		// feedback). Everything else is a %w-wrapped internal/DB error — log
+		// the specifics server-side and return a generic body so we do not
+		// leak the driver error string or misreport a 500 as a 400.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		slog.Warn("sbom: import failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to import SBOM"})
 	}
 
 	// F208 / M14-1: publish the newly-minted sbom UUID so the audit
@@ -624,7 +633,10 @@ func (h *SbomHandler) List(c echo.Context) error {
 
 	sboms, err := h.sbomService.ListByProject(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// F442: never surface the raw service / repository / SQL error to
+		// the caller. Log specifics server-side, return a generic body.
+		slog.Warn("sbom: list sboms failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list SBOMs"})
 	}
 
 	return c.JSON(http.StatusOK, sboms)
@@ -638,7 +650,10 @@ func (h *SbomHandler) GetComponents(c echo.Context) error {
 
 	components, err := h.sbomService.GetComponents(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// F442: never surface the raw service / repository / SQL error to
+		// the caller. Log specifics server-side, return a generic body.
+		slog.Warn("sbom: list components failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list components"})
 	}
 
 	return c.JSON(http.StatusOK, components)
@@ -714,13 +729,19 @@ func (h *SbomHandler) GetVulnerabilities(c echo.Context) error {
 	// backward-compatible.
 	total, err := h.sbomService.CountVulnerabilities(c.Request().Context(), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// F442: never surface the raw service / repository / SQL error to
+		// the caller. Log specifics server-side, return a generic body.
+		slog.Warn("sbom: count vulnerabilities failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to count vulnerabilities"})
 	}
 	c.Response().Header().Set("X-Total-Count", strconv.Itoa(total))
 
 	vulns, err := h.sbomService.GetVulnerabilitiesPaginated(c.Request().Context(), projectID, limit, offset)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// F442: never surface the raw service / repository / SQL error to
+		// the caller. Log specifics server-side, return a generic body.
+		slog.Warn("sbom: list vulnerabilities failed", "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list vulnerabilities"})
 	}
 	if vulns == nil {
 		vulns = []model.Vulnerability{}
@@ -808,7 +829,11 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom not found"})
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		// F442: never surface the raw service / repository / SQL error to
+		// the caller. Log specifics server-side, return a generic body.
+		slog.Warn("sbom: get scan status failed",
+			"project_id", projectID, "sbom_id", sbomID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get scan status"})
 	}
 	summary := summariseVulnerabilities(vulns)
 

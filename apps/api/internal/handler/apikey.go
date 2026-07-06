@@ -27,9 +27,12 @@ var errInvalidPermissionsBody = map[string]string{"error": "invalid permissions"
 // maps to a generic 400 body so the service's allowlist error message
 // does not leak the recognised values verbatim through the wire
 // response (the message stays in server logs for operator
-// diagnostics). Every other error is rendered as a 400 with the
-// service message — these are caller-fixable validation errors (e.g.
-// "name is required") that we do want to echo back.
+// diagnostics). F442: every other error is likewise rendered with a
+// generic 400 body — the reachable non-sentinel errors from CreateKey /
+// CreateProjectKey are internal %w-wraps (key generation / repository
+// insert), and both callers already pre-validate `name`, so echoing
+// err.Error() here would only leak internal/DB error strings. The full
+// error is preserved in the server log for operator diagnostics.
 func mapCreateKeyError(c echo.Context, err error) error {
 	if errors.Is(err, service.ErrInvalidPermissions) {
 		slog.Warn("apikey: rejected create with invalid permissions",
@@ -39,7 +42,12 @@ func mapCreateKeyError(c echo.Context, err error) error {
 		)
 		return c.JSON(http.StatusBadRequest, errInvalidPermissionsBody)
 	}
-	return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	slog.Warn("apikey: create key failed",
+		"path", c.Path(),
+		"tenant_id", middleware.NewTenantContext(c).TenantID(),
+		"error", err,
+	)
+	return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to create API key"})
 }
 
 type APIKeyHandler struct {
@@ -141,7 +149,10 @@ func (h *APIKeyHandler) DeleteTenant(c echo.Context) error {
 	}
 
 	if err := h.keyService.DeleteKeyByTenant(c.Request().Context(), keyID, tenantID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		// Raw repository error (static "not found or not authorized" for
+		// rows==0, or a raw driver error otherwise); never echo it (F442).
+		slog.Warn("apikey: delete key failed", "key_id", keyID, "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
 	}
 
 	return c.NoContent(http.StatusNoContent)
@@ -251,7 +262,10 @@ func (h *APIKeyHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.keyService.DeleteKey(c.Request().Context(), tenantID, keyID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+		// Raw repository error (static "not found" for rows==0, or a raw
+		// driver error otherwise); never echo it (F442).
+		slog.Warn("apikey: delete key failed", "key_id", keyID, "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
 	}
 
 	return c.NoContent(http.StatusNoContent)

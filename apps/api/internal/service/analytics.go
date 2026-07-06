@@ -239,13 +239,21 @@ func (s *AnalyticsService) UpdateSLOTarget(ctx context.Context, tenantID uuid.UU
 		"LOW":      true,
 	}
 	if !validSeverities[severity] {
-		return fmt.Errorf("invalid severity: %s", severity)
+		// F443: caller-fixable input → surface at 400 via ErrValidation.
+		return ValidationErrorf("invalid severity: %s", severity)
 	}
 
 	// Validate target hours
 	if targetHours <= 0 {
-		return fmt.Errorf("target hours must be positive")
+		// F443: caller-fixable input → surface at 400 via ErrValidation.
+		return ValidationErrorf("target hours must be positive")
 	}
 
-	return s.analyticsRepo.UpsertSLOTarget(ctx, tenantID, severity, targetHours)
+	// F443: the repository error was previously returned raw (no %w), so the
+	// handler's blanket-400 echoed the driver/SQL string to the client. Wrap
+	// it so it is classified as internal (NOT ErrValidation) → 500 + generic.
+	if err := s.analyticsRepo.UpsertSLOTarget(ctx, tenantID, severity, targetHours); err != nil {
+		return fmt.Errorf("upsert slo target: %w", err)
+	}
+	return nil
 }

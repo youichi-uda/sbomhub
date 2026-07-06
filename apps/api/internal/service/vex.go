@@ -288,12 +288,12 @@ type CreateVEXStatementInput struct {
 func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStatementInput) (*model.VEXStatement, error) {
 	// Validate status
 	if !isValidStatus(input.Status) {
-		return nil, fmt.Errorf("invalid VEX status: %s", input.Status)
+		return nil, ValidationErrorf("invalid VEX status: %s", input.Status)
 	}
 
 	// Validate justification if status is not_affected
 	if input.Status == model.VEXStatusNotAffected && input.Justification == "" {
-		return nil, fmt.Errorf("justification is required when status is not_affected")
+		return nil, ValidationErrorf("justification is required when status is not_affected")
 	}
 
 	// F379 write defence (issue #131): a component-specific statement must
@@ -310,7 +310,7 @@ func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStateme
 			return nil, fmt.Errorf("failed to verify component ownership: %w", err)
 		}
 		if !belongs {
-			return nil, fmt.Errorf("component does not belong to project")
+			return nil, ValidationErrorf("component does not belong to project")
 		}
 	}
 
@@ -320,7 +320,7 @@ func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStateme
 		return nil, fmt.Errorf("failed to check existing statement: %w", err)
 	}
 	if existing != nil {
-		return nil, fmt.Errorf("VEX statement already exists for this vulnerability")
+		return nil, ValidationErrorf("VEX statement already exists for this vulnerability")
 	}
 
 	// Resolve the tenant_id of the parent project so the INSERT satisfies
@@ -366,17 +366,17 @@ func (s *VEXService) UpdateStatement(ctx context.Context, id uuid.UUID, input Up
 		return nil, fmt.Errorf("failed to get VEX statement: %w", err)
 	}
 	if statement == nil {
-		return nil, fmt.Errorf("VEX statement not found")
+		return nil, ValidationErrorf("VEX statement not found")
 	}
 
 	// Validate status
 	if !isValidStatus(input.Status) {
-		return nil, fmt.Errorf("invalid VEX status: %s", input.Status)
+		return nil, ValidationErrorf("invalid VEX status: %s", input.Status)
 	}
 
 	// Validate justification if status is not_affected
 	if input.Status == model.VEXStatusNotAffected && input.Justification == "" {
-		return nil, fmt.Errorf("justification is required when status is not_affected")
+		return nil, ValidationErrorf("justification is required when status is not_affected")
 	}
 
 	statement.Status = input.Status

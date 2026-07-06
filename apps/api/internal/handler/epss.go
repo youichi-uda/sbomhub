@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -18,7 +19,8 @@ func NewEPSSHandler(es *service.EPSSService) *EPSSHandler {
 // SyncScores triggers EPSS score synchronization
 func (h *EPSSHandler) SyncScores(c echo.Context) error {
 	if err := h.epssService.SyncScores(c.Request().Context()); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("epss: sync scores failed", "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to sync EPSS scores"})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "sync completed"})
 }
@@ -32,7 +34,8 @@ func (h *EPSSHandler) GetScore(c echo.Context) error {
 
 	score, err := h.epssService.GetScore(c.Request().Context(), cveID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("epss: get score failed", "cve_id", cveID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get EPSS score"})
 	}
 	if score == nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "EPSS score not found"})

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -32,7 +33,8 @@ func (h *ProjectHandler) Create(c echo.Context) error {
 
 	project, err := h.projectService.Create(c.Request().Context(), tenantID, req)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("project: create failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create project"})
 	}
 
 	// F208 / M14-1: publish the newly-minted project UUID so the audit
@@ -56,7 +58,8 @@ func (h *ProjectHandler) List(c echo.Context) error {
 
 	projects, err := h.projectService.List(c.Request().Context(), tenantID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("project: list failed", "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list projects"})
 	}
 
 	return c.JSON(http.StatusOK, projects)
@@ -95,7 +98,8 @@ func (h *ProjectHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.projectService.Delete(c.Request().Context(), tenantID, id); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("project: delete failed", "tenant_id", tenantID, "project_id", id, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete project"})
 	}
 
 	return c.NoContent(http.StatusNoContent)

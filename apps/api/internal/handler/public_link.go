@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -69,7 +70,12 @@ func (h *PublicLinkHandler) Create(c echo.Context) error {
 		Password:         req.Password,
 	})
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F442: the service error can wrap a raw repo/bcrypt/token-gen
+		// failure (info disclosure for a security product). Log the detail
+		// server-side; return a generic message. Status unchanged (400).
+		slog.Warn("public_link: create failed",
+			"tenant_id", middleware.GetTenantID(c), "project_id", projectID, "error", err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to create public link"})
 	}
 
 	// F208 / M14-1: publish the newly-minted public-link UUID so the
@@ -93,7 +99,9 @@ func (h *PublicLinkHandler) List(c echo.Context) error {
 
 	links, err := h.publicLinkService.ListByProject(c.Request().Context(), middleware.GetTenantID(c), projectID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("public_link: list failed",
+			"tenant_id", middleware.GetTenantID(c), "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list public links"})
 	}
 	return c.JSON(http.StatusOK, links)
 }
@@ -141,7 +149,12 @@ func (h *PublicLinkHandler) Update(c echo.Context) error {
 		Password:         req.Password,
 	})
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		// F442: the service error can wrap a raw repo/bcrypt failure or the
+		// "public link not found" sentinel (info disclosure for a security
+		// product). Log the detail; return a generic message. Status 400.
+		slog.Warn("public_link: update failed",
+			"tenant_id", middleware.GetTenantID(c), "link_id", linkID, "error", err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to update public link"})
 	}
 
 	return c.JSON(http.StatusOK, link)
@@ -154,7 +167,9 @@ func (h *PublicLinkHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.publicLinkService.Delete(c.Request().Context(), middleware.GetTenantID(c), linkID); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("public_link: delete failed",
+			"tenant_id", middleware.GetTenantID(c), "link_id", linkID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete public link"})
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -168,7 +183,15 @@ func (h *PublicLinkHandler) PublicGet(c echo.Context) error {
 
 	view, link, err := h.publicLinkService.GetPublicView(c.Request().Context(), token, password)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": err.Error()})
+		// F442: this anonymous share-flow error mixes self-authored token-
+		// validation sentinels (bad password / inactive / expired / not
+		// found) with raw DB errors from the token lookup and the tenant-
+		// scoped content reads. A single payload cannot safely echo the
+		// latter, so return one generic 403 that still signals an access /
+		// credential problem without leaking internals; the precise cause
+		// is logged. Status unchanged (403).
+		slog.Warn("public_link: public view denied", "ip", c.RealIP(), "error", err)
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "invalid password or the share link is unavailable"})
 	}
 
 	// The anonymous /public/:token route has no tenant middleware; the
@@ -190,7 +213,11 @@ func (h *PublicLinkHandler) PublicDownload(c echo.Context) error {
 
 	raw, link, err := h.publicLinkService.GetPublicSbomRaw(c.Request().Context(), token, password)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": err.Error()})
+		// F442: same anonymous share-flow mix as PublicGet — token-
+		// validation sentinels alongside raw DB errors. Return one generic
+		// 403 (access / credential signal, no internals) and log the cause.
+		slog.Warn("public_link: public download denied", "ip", c.RealIP(), "error", err)
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "invalid password or the share link is unavailable"})
 	}
 
 	// Same defense-in-depth tenant scoping as PublicGet: the anonymous
@@ -198,7 +225,9 @@ func (h *PublicLinkHandler) PublicDownload(c echo.Context) error {
 	// token lookup) is what we pass to the counter/log calls.
 	limitReached, err := h.publicLinkService.IsDownloadLimitReached(c.Request().Context(), link.TenantID, link.ID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		slog.Warn("public_link: download limit check failed",
+			"link_id", link.ID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to process download"})
 	}
 	if limitReached {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "download limit reached"})
