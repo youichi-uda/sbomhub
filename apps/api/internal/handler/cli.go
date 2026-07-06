@@ -174,7 +174,7 @@ func (h *CLIHandler) Check(c echo.Context) error {
 	var req service.CheckVulnerabilitiesRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "invalid request body: " + err.Error(),
+			"error": "invalid request body",
 		})
 	}
 

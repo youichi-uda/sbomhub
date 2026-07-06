@@ -28,7 +28,7 @@ func (h *ProjectHandler) Create(c echo.Context) error {
 
 	var req model.CreateProjectRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
 
 	project, err := h.projectService.Create(c.Request().Context(), tenantID, req)
