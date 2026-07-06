@@ -119,14 +119,14 @@ func TestGetTopRisksByTenant_OuterOrderBy(t *testing.T) {
 		{
 			name:      "epss",
 			sortBy:    "epss",
-			wantOuter: regexp.MustCompile(`(?is)\)\s+sub\s+ORDER BY epss_score DESC NULLS LAST,\s*cvss_score DESC\s+LIMIT`),
-			otherSQL:  ") sub\n\t\tORDER BY cvss_score DESC, cve_id\n\t\tLIMIT $2",
+			wantOuter: regexp.MustCompile(`(?is)\)\s+sub\s+ORDER BY epss_score DESC NULLS LAST,\s*cvss_score DESC NULLS LAST,\s*cve_id\s+LIMIT`),
+			otherSQL:  ") sub\n\t\tORDER BY cvss_score DESC NULLS LAST, cve_id\n\t\tLIMIT $2",
 		},
 		{
 			name:      "cvss",
 			sortBy:    "cvss",
-			wantOuter: regexp.MustCompile(`(?is)\)\s+sub\s+ORDER BY cvss_score DESC,\s*cve_id\s+LIMIT`),
-			otherSQL:  ") sub\n\t\tORDER BY epss_score DESC NULLS LAST, cvss_score DESC\n\t\tLIMIT $2",
+			wantOuter: regexp.MustCompile(`(?is)\)\s+sub\s+ORDER BY cvss_score DESC NULLS LAST,\s*cve_id\s+LIMIT`),
+			otherSQL:  ") sub\n\t\tORDER BY epss_score DESC NULLS LAST, cvss_score DESC NULLS LAST, cve_id\n\t\tLIMIT $2",
 		},
 	}
 

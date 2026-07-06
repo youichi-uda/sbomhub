@@ -268,7 +268,7 @@ export default function DashboardPage() {
   // response must not overwrite a newer toggle's order. Only the latest applies.
   const topRisksReqSeq = useRef(0);
 
-  const loadTopRisks = useCallback(async (sort: "epss" | "cvss") => {
+  const loadTopRisks = useCallback(async (sort: "epss" | "cvss", revertSort?: "epss" | "cvss") => {
     const seq = ++topRisksReqSeq.current;
     try {
       const data = await api.dashboard.getTopRisks({ sort });
@@ -277,14 +277,19 @@ export default function DashboardPage() {
     } catch (err) {
       if (seq !== topRisksReqSeq.current) return;
       console.error("Failed to load top risks:", err);
+      // F451: this fetch would have applied `sort`, but it failed, so revert
+      // the toggle to the order that is actually still displayed — otherwise
+      // the button would claim an ordering the failed request never applied.
+      if (revertSort !== undefined) setTopRisksSort(revertSort);
     }
   }, []);
 
   const handleTopRisksSort = useCallback(
     (sort: "epss" | "cvss") => {
       if (sort === topRisksSort) return;
+      const prev = topRisksSort;
       setTopRisksSort(sort);
-      loadTopRisks(sort);
+      loadTopRisks(sort, prev);
     },
     [topRisksSort, loadTopRisks],
   );

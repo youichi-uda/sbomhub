@@ -110,10 +110,14 @@ func (r *DashboardRepository) GetTopRisks(ctx context.Context, limit int) ([]mod
 // order is well-defined; LIMIT applies after the outer order, yielding the true
 // top-N by the selected axis.
 func topRisksOrderBy(sortBy string) string {
+	// cve_id is the final unique tiebreaker so the LIMIT-N cutoff is
+	// deterministic for rows tied on the sort key(s) (F451). cvss_score is
+	// nullable on the vulnerabilities table, so NULLS LAST keeps un-scored
+	// CVEs from floating to the top of the CVSS tiebreak.
 	if sortBy == "epss" {
-		return "ORDER BY epss_score DESC NULLS LAST, cvss_score DESC"
+		return "ORDER BY epss_score DESC NULLS LAST, cvss_score DESC NULLS LAST, cve_id"
 	}
-	return "ORDER BY cvss_score DESC, cve_id"
+	return "ORDER BY cvss_score DESC NULLS LAST, cve_id"
 }
 
 // GetTopRisksByTenant returns the top vulnerabilities for a tenant's projects,
