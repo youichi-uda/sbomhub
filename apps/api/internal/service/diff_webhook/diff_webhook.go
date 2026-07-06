@@ -218,7 +218,11 @@ func (s *Service) FireIfThreshold(
 			// audit row cannot land, surface that to the caller — a
 			// silent failure here is the exact UX regression F168
 			// flagged.
-			if aErr := s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, 0, "decrypt secret: "+dErr.Error(), counts); aErr != nil {
+			// F445: writeAudit stores errMsg into audit details["error"],
+			// returned to the tenant via GET /audit-logs — keep the raw
+			// crypto error out of it (log it, store the generic marker).
+			slog.Warn("diff_webhook: decrypt secret failed", "tenant_id", tenantID, "project_id", projectID, "error", dErr)
+			if aErr := s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, 0, "decrypt secret", counts); aErr != nil {
 				return nil, fmt.Errorf("decrypt secret + audit log: %w", aErr)
 			}
 			return &FireDecision{Triggered: true, ErrorMessage: "decrypt secret"}, nil
