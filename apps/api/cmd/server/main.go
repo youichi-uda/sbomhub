@@ -1502,7 +1502,8 @@ func main() {
 		}
 		dec, ferr := projectDiffWebhookService.FireIfThreshold(c.Request().Context(), tenantID, syntheticProject, synthetic)
 		if ferr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": ferr.Error()})
+			slog.Warn("diff-webhook test failed", "tenant_id", tenantID, "error", ferr)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to test diff webhook"})
 		}
 		return c.JSON(http.StatusOK, map[string]interface{}{
 			"triggered":     dec.Triggered,

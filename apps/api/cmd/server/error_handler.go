@@ -26,15 +26,27 @@ import (
 // default handler (StatusText, not err.Error()), so they need no special case.
 func sanitizingErrorHandler(next echo.HTTPErrorHandler) echo.HTTPErrorHandler {
 	return func(err error, c echo.Context) {
-		if he, ok := err.(*echo.HTTPError); ok && he.Code >= 500 {
-			slog.Warn("http 5xx error",
-				"method", c.Request().Method,
-				"path", c.Path(),
-				"status", he.Code,
-				"detail", fmt.Sprintf("%v", he.Message),
-				"internal", he.Internal,
-			)
-			err = echo.NewHTTPError(he.Code)
+		if he, ok := err.(*echo.HTTPError); ok {
+			// Mirror Echo's DefaultHTTPErrorHandler: when Internal is itself an
+			// *echo.HTTPError it is PROMOTED to the effective error (its code +
+			// message are what get rendered). So evaluate the promoted error's
+			// code, not just the outer one — otherwise an outer 4xx wrapping an
+			// internal 5xx (NewHTTPError(400).SetInternal(NewHTTPError(500,
+			// "pq: secret"))) would slip past and leak the internal message.
+			eff := he
+			if inner, ok := he.Internal.(*echo.HTTPError); ok {
+				eff = inner
+			}
+			if eff.Code >= 500 {
+				slog.Warn("http 5xx error",
+					"method", c.Request().Method,
+					"path", c.Path(),
+					"status", eff.Code,
+					"detail", fmt.Sprintf("%v", eff.Message),
+					"internal", he.Internal,
+				)
+				err = echo.NewHTTPError(eff.Code)
+			}
 		}
 		next(err, c)
 	}

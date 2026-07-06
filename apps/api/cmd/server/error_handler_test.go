@@ -57,6 +57,27 @@ func TestSanitizingErrorHandler_RawErrorGenericized(t *testing.T) {
 	}
 }
 
+func TestSanitizingErrorHandler_InternalPromoted5xxGenericized(t *testing.T) {
+	e := echo.New()
+	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
+
+	// Echo promotes an *HTTPError Internal to the effective error, so an outer
+	// 4xx wrapping an internal 5xx renders the internal (raw) message unless we
+	// evaluate the promoted code. Pre-fix (outer-code-only check) this leaked.
+	const secret = "pq: internal secret via SetInternal"
+	e.GET("/nested", func(c echo.Context) error {
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").
+			SetInternal(echo.NewHTTPError(http.StatusInternalServerError, secret))
+	})
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nested", nil))
+
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("internal-promoted 5xx leaked the raw error: %q", rec.Body.String())
+	}
+}
+
 func TestSanitizingErrorHandler_4xxMessagePreserved(t *testing.T) {
 	e := echo.New()
 	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
