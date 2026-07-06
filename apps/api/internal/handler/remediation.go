@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -32,8 +33,15 @@ func (h *RemediationHandler) GetRemediation(c echo.Context) error {
 	ctx := c.Request().Context()
 	remediation, err := h.remediationService.GetRemediation(ctx, id)
 	if err != nil {
+		// F44x: GetRemediation wraps the repository lookup failure as
+		// "vulnerability not found: %w" — echoing err.Error() leaked the raw
+		// driver error. The service collapses genuine not-found and backend
+		// faults into the same error, so without a service seam they cannot be
+		// distinguished here: return a stable 404 message and keep the raw
+		// detail in the server log only.
+		slog.Warn("remediation: lookup failed", "vulnerability_id", id, "error", err)
 		return c.JSON(http.StatusNotFound, map[string]string{
-			"error": err.Error(),
+			"error": "vulnerability not found",
 		})
 	}
 
@@ -65,8 +73,14 @@ func (h *RemediationHandler) GetRemediationByCVE(c echo.Context) error {
 	ctx := c.Request().Context()
 	remediation, err := h.remediationService.GetRemediationByCVE(ctx, cveID, req.ComponentName, req.ComponentVersion)
 	if err != nil {
+		// F44x: GetRemediationByCVE wraps the OSV client failure as
+		// "failed to fetch from OSV: %w" — echoing err.Error() leaked the raw
+		// upstream/HTTP error. A genuine not-found and an OSV backend failure
+		// are indistinguishable here without a service seam, so return a stable
+		// message and keep the raw detail in the server log only.
+		slog.Warn("remediation: OSV lookup failed", "cve_id", cveID, "error", err)
 		return c.JSON(http.StatusNotFound, map[string]string{
-			"error": err.Error(),
+			"error": "remediation not available",
 		})
 	}
 

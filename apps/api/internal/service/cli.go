@@ -69,7 +69,11 @@ func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID,
 func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, int, error) {
 	info, err := detectFormatAndVersion(data)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to detect SBOM format: %w", err)
+		// F443: format-detection failure is caller-fixable feedback about a
+		// malformed upload (bad JSON / unknown SBOM shape). The message is
+		// safe + helpful, so mark it with ErrValidation so the handler
+		// surfaces it at 400 (mirrors SbomService.Import).
+		return nil, 0, ValidationErrorf("failed to detect SBOM format: %v", err)
 	}
 
 	// Resolve the tenant_id of the parent project. Required because
@@ -97,7 +101,9 @@ func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data [
 
 	components, err := parseComponents(data, info.Format, info.Version)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to parse components: %w", err)
+		// F443: component parse failure is likewise caller-fixable feedback
+		// about a malformed upload; surface it at 400 via ErrValidation.
+		return nil, 0, ValidationErrorf("failed to parse components: %v", err)
 	}
 
 	for _, comp := range components {

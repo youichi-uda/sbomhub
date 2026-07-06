@@ -701,6 +701,12 @@ func main() {
 	eolHandler := handler.NewEOLHandler(eolService)
 
 	e := echo.New()
+
+	// F444: wrap the error handler so every 5xx *echo.HTTPError is collapsed
+	// to a generic body (detail logged server-side), closing the whole
+	// raw-error-leak class in one place. See sanitizingErrorHandler.
+	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
+
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks

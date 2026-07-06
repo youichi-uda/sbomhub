@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,11 +97,15 @@ type recordingIssueTrackerService struct {
 
 	createConnectionCalls []service.CreateConnectionInput
 	connectionToReturn    *model.IssueTrackerConnection
+	// createConnectionErr, when set, is returned from CreateConnection so the
+	// F44x validation-vs-internal status split is unit-testable without a live
+	// DB / external tracker. Zero value (nil) preserves the 201 flows above.
+	createConnectionErr error
 }
 
 func (s *recordingIssueTrackerService) CreateConnection(_ context.Context, _ uuid.UUID, input service.CreateConnectionInput) (*model.IssueTrackerConnection, error) {
 	s.createConnectionCalls = append(s.createConnectionCalls, input)
-	return s.connectionToReturn, nil
+	return s.connectionToReturn, s.createConnectionErr
 }
 
 func (s *recordingIssueTrackerService) ListConnections(context.Context, uuid.UUID) ([]model.IssueTrackerConnection, error) {
@@ -251,5 +257,77 @@ func TestCreateConnection_GitHubBaseURLDefault(t *testing.T) {
 				t.Errorf("service CreateConnection called %d times, want 0 (400 fires before the service)", len(stub.createConnectionCalls))
 			}
 		})
+	}
+}
+
+// doCreateConnectionGitHub drives CreateConnection with a fully-valid GitHub
+// body so control passes every handler-side check and reaches the service
+// call, where the recording stub injects the error under test.
+func doCreateConnectionGitHub(h *IssueTrackerHandler) (*httptest.ResponseRecorder, error) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations", strings.NewReader(
+		`{"tracker_type":"github","name":"n","base_url":"https://api.github.com","api_token":"t","default_project_key":"octocat/hello-world"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
+	return rec, h.CreateConnection(c)
+}
+
+// itRawDriverLeak is a representative raw internal error string that must never
+// reach the client through CreateConnection (the F44x leak).
+const itRawDriverLeak = "pq: SSL connection has been closed unexpectedly"
+
+// TestCreateConnection_ValidationError_400 pins that a service validation error
+// (ValidationErrorf — e.g. the SSRF/base-URL check) is echoed verbatim at 400:
+// the legitimate caller-facing feedback the F44x split must PRESERVE.
+func TestCreateConnection_ValidationError_400(t *testing.T) {
+	stub := &recordingIssueTrackerService{
+		t:                   t,
+		createConnectionErr: service.ValidationErrorf("invalid base URL: %s", "URL must use HTTPS scheme"),
+	}
+	h := NewIssueTrackerHandler(stub)
+
+	_, err := doCreateConnectionGitHub(h)
+	he, ok := err.(*echo.HTTPError)
+	if !ok {
+		t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+	}
+	if he.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; message=%v", he.Code, http.StatusBadRequest, he.Message)
+	}
+	if msg, _ := he.Message.(string); msg != "invalid base URL: URL must use HTTPS scheme" {
+		t.Errorf("message = %q, want the validation feedback echoed verbatim", msg)
+	}
+	if len(stub.createConnectionCalls) != 1 {
+		t.Errorf("service CreateConnection called %d times, want 1", len(stub.createConnectionCalls))
+	}
+}
+
+// TestCreateConnection_InternalError_500_NoLeak pins the F44x fix: a %w-wrapped
+// internal error (crypto / external connection-test / DB) is a 500 with a
+// GENERIC message — the raw driver string must not leak. Pre-fix this returned
+// 400 + the raw string echoed by the handler.
+func TestCreateConnection_InternalError_500_NoLeak(t *testing.T) {
+	stub := &recordingIssueTrackerService{
+		t:                   t,
+		createConnectionErr: fmt.Errorf("failed to encrypt token: %w", errors.New(itRawDriverLeak)),
+	}
+	h := NewIssueTrackerHandler(stub)
+
+	_, err := doCreateConnectionGitHub(h)
+	he, ok := err.(*echo.HTTPError)
+	if !ok {
+		t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
+	}
+	if he.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; message=%v", he.Code, http.StatusInternalServerError, he.Message)
+	}
+	msg, _ := he.Message.(string)
+	if msg != "failed to create connection" {
+		t.Errorf("message = %q, want the generic client message", msg)
+	}
+	if strings.Contains(msg, itRawDriverLeak) {
+		t.Errorf("message leaked the raw driver string: %q", msg)
 	}
 }

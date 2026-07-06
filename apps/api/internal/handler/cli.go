@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -107,16 +109,33 @@ func (h *CLIHandler) Upload(c echo.Context) error {
 	// Get or create project
 	project, created, err := h.cliService.GetOrCreateProject(ctx, tenantID, projectName, description)
 	if err != nil {
+		// GetOrCreateProject only ever returns %w-wrapped DB errors
+		// (search / create) — none are caller-fixable, so log the raw
+		// error server-side and return a generic body.
+		slog.Warn("cli: get or create project failed", "tenant_id", tenantID, "project_name", projectName, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
+			"error": "failed to resolve project",
 		})
 	}
 
-	// Upload SBOM
+	// Upload SBOM.
+	//
+	// F443-style mixed-400 split (mirrors SbomHandler.Upload): UploadSBOM
+	// returns a MIX of caller-fixable parse/format failures (marked with
+	// service.ErrValidation → 400 with the helpful message) and %w-wrapped
+	// internal errors (tenant lookup / SBOM insert / component insert →
+	// 500 generic, raw error logged server-side only). The pre-fix path
+	// blanket-400'd every failure AND echoed the raw driver string.
 	sbom, componentCount, err := h.cliService.UploadSBOM(ctx, project.ID, sbomData)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": err.Error(),
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+			})
+		}
+		slog.Warn("cli: upload sbom failed", "project_id", project.ID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to import SBOM",
 		})
 	}
 
@@ -167,8 +186,12 @@ func (h *CLIHandler) Check(c echo.Context) error {
 
 	result, err := h.cliService.CheckVulnerabilities(c.Request().Context(), req.Components)
 	if err != nil {
+		// Only internal failures reach here (OSV request/response, JSON
+		// (un)marshal). None are caller-fixable, so log the raw error
+		// server-side and return a generic body.
+		slog.Warn("cli: check vulnerabilities failed", "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
+			"error": "failed to check vulnerabilities",
 		})
 	}
 
@@ -194,8 +217,9 @@ func (h *CLIHandler) ListProjects(c echo.Context) error {
 	// Use existing repository method via service
 	projects, err := h.cliService.ListProjects(c.Request().Context(), tenantID)
 	if err != nil {
+		slog.Warn("cli: list projects failed", "tenant_id", tenantID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
+			"error": "failed to list projects",
 		})
 	}
 
@@ -263,8 +287,9 @@ func (h *CLIHandler) CreateProject(c echo.Context) error {
 
 	project, created, err := h.cliService.GetOrCreateProject(c.Request().Context(), tenantID, req.Name, req.Description)
 	if err != nil {
+		slog.Warn("cli: get or create project failed", "tenant_id", tenantID, "project_name", req.Name, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
+			"error": "failed to create project",
 		})
 	}
 

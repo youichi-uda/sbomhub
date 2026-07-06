@@ -82,12 +82,20 @@ type CreateConnectionInput struct {
 
 // CreateConnection creates a new issue tracker connection
 func (s *IssueTrackerService) CreateConnection(ctx context.Context, tenantID uuid.UUID, input CreateConnectionInput) (*model.IssueTrackerConnection, error) {
-	// SECURITY: Validate BaseURL to prevent SSRF attacks
+	// SECURITY: Validate BaseURL to prevent SSRF attacks.
+	// VALIDATION (F44x): caller-caused, client-fixable input — validateBaseURL
+	// only ever returns self-authored, leak-free messages (bad scheme/format,
+	// blocked internal host, domain not in the SaaS allowlist), so it is SAFE
+	// to echo at 400. ValidationErrorf makes errors.Is(err, ErrValidation) true
+	// while preserving the exact message.
 	if err := s.validateBaseURL(input.BaseURL); err != nil {
-		return nil, fmt.Errorf("invalid base URL: %w", err)
+		return nil, ValidationErrorf("invalid base URL: %v", err)
 	}
 
-	// Encrypt the API token
+	// Encrypt the API token.
+	// INTERNAL (F44x): a crypto failure is a server fault, not caller input —
+	// left %w so errors.Is(err, ErrValidation) is false and the handler maps it
+	// to a generic 500 (raw error logged server-side only).
 	encryptedToken, err := s.encrypt(input.APIToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt token: %w", err)
@@ -107,11 +115,15 @@ func (s *IssueTrackerService) CreateConnection(ctx context.Context, tenantID uui
 		IsActive:           true,
 	}
 
-	// Test connection before saving
+	// Test connection before saving.
+	// INTERNAL (F44x): the wrapped error comes from the external tracker client
+	// (via doRequest) and can carry raw HTTP status/response detail, so it is
+	// NOT safe to echo — left %w → generic 500, raw error logged server-side.
 	if err := s.testConnection(ctx, conn, input.APIToken); err != nil {
 		return nil, fmt.Errorf("connection test failed: %w", err)
 	}
 
+	// INTERNAL (F44x): raw repository/DB error — not validation, not echoed.
 	if err := s.issueTrackerRepo.CreateConnection(ctx, conn); err != nil {
 		return nil, err
 	}
@@ -172,25 +184,32 @@ type CreateTicketInput struct {
 
 // CreateTicket creates a new ticket for a vulnerability
 func (s *IssueTrackerService) CreateTicket(ctx context.Context, tenantID uuid.UUID, input CreateTicketInput) (*model.VulnerabilityTicket, error) {
-	// Get connection
+	// Get connection.
+	// INTERNAL (F44x): raw repository/DB error — not echoed.
 	conn, err := s.issueTrackerRepo.GetConnection(ctx, input.ConnectionID)
 	if err != nil {
 		return nil, err
 	}
+	// VALIDATION (F44x): the caller referenced a connection_id that does not
+	// exist — client-fixable, safe self-authored message → 400.
 	if conn == nil {
-		return nil, fmt.Errorf("connection not found")
+		return nil, ValidationErrorf("connection not found")
 	}
 
-	// Check if ticket already exists
+	// Check if ticket already exists.
+	// INTERNAL (F44x): raw repository/DB error — not echoed.
 	existing, err := s.issueTrackerRepo.GetTicketByVulnerability(ctx, input.VulnerabilityID, input.ConnectionID)
 	if err != nil {
 		return nil, err
 	}
+	// VALIDATION (F44x): duplicate — the caller can act on this (a ticket for
+	// this vulnerability already exists), safe to echo at 400.
 	if existing != nil {
-		return nil, fmt.Errorf("ticket already exists for this vulnerability")
+		return nil, ValidationErrorf("ticket already exists for this vulnerability")
 	}
 
-	// Decrypt API token
+	// Decrypt API token.
+	// INTERNAL (F44x): crypto failure is a server fault — left %w → generic 500.
 	apiToken, err := s.decrypt(conn.AuthTokenEncrypted)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt token: %w", err)
@@ -219,9 +238,16 @@ func (s *IssueTrackerService) CreateTicket(ctx context.Context, tenantID uuid.UU
 	case model.TrackerTypeGitHub:
 		externalTicket, err = s.createGitHubTicket(ctx, conn, apiToken, projectKey, input)
 	default:
+		// INTERNAL (F44x): the tracker type comes from the STORED connection
+		// row (validated at creation, not from this request), so an unsupported
+		// value here is a server-side data-integrity fault, not caller input —
+		// left non-validation → generic 500.
 		return nil, fmt.Errorf("unsupported tracker type: %s", conn.TrackerType)
 	}
 
+	// INTERNAL (F44x): the external ticket creation error wraps the raw tracker
+	// client error (which can carry HTTP status/response detail) — NOT safe to
+	// echo, left %w → generic 500, raw error logged server-side.
 	if err != nil {
 		return nil, fmt.Errorf("failed to create external ticket: %w", err)
 	}

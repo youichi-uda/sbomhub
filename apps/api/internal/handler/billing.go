@@ -360,8 +360,12 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 func (h *BillingHandler) syncBySubscriptionID(c echo.Context, ctx context.Context, tenantID uuid.UUID, lsSubID string) error {
 	sub, err := h.fetchLemonSqueezySubscriptionByID(lsSubID)
 	if err != nil {
-		slog.Error("failed to fetch subscription by ID", "error", err, "ls_subscription_id", lsSubID)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("Failed to fetch subscription: %v", err)})
+		// F44x: the Lemon Squeezy API error (which can carry the raw upstream
+		// HTTP status + response body from fetchLemonSqueezySubscriptionByID)
+		// must not reach the client. The raw error is already captured in the
+		// server log above; return a generic message only.
+		slog.Error("billing: fetch subscription by ID failed", "error", err, "ls_subscription_id", lsSubID)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to fetch subscription"})
 	}
 
 	if sub == nil {

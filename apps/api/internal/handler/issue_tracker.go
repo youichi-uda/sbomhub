@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -132,7 +134,18 @@ func (h *IssueTrackerHandler) CreateConnection(c echo.Context) error {
 
 	conn, err := h.issueTrackerService.CreateConnection(ctx, tenantID, input)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		// F44x: split the former blanket 400 (which echoed the raw service
+		// error). CreateConnection mixes self-authored validation feedback
+		// (invalid base URL — safe to echo) with %w-wrapped internal errors
+		// (crypto, external connection-test HTTP detail, DB). Only validation
+		// is echoed at 400; everything else is a generic 500 with the raw error
+		// kept in the server log (and further genericized by the global 5xx
+		// handler — defense in depth).
+		if errors.Is(err, service.ErrValidation) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		slog.Warn("issue tracker: create connection failed", "tenant_id", tenantID, "error", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to create connection")
 	}
 
 	// F208 / M14-1: publish the newly-minted integration UUID so the
@@ -259,7 +272,17 @@ func (h *IssueTrackerHandler) CreateTicket(c echo.Context) error {
 
 	ticket, err := h.issueTrackerService.CreateTicket(ctx, tenantID, input)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		// F44x: split the former blanket 400 (see CreateConnection).
+		// CreateTicket mixes validation feedback (connection not found,
+		// duplicate ticket — safe to echo) with %w-wrapped internal errors
+		// (crypto, external ticket-creation HTTP detail, DB). Only validation
+		// is echoed at 400; everything else is a generic 500 with the raw error
+		// logged server-side.
+		if errors.Is(err, service.ErrValidation) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+		slog.Warn("issue tracker: create ticket failed", "tenant_id", tenantID, "vuln_id", vulnID, "error", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to create ticket")
 	}
 
 	// F208 / M14-1: publish the newly-minted ticket UUID so the audit

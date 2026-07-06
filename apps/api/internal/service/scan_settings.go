@@ -136,19 +136,21 @@ func (s *ScanSettingsService) Update(ctx context.Context, tenantID uuid.UUID, in
 	}
 	if input.ScheduleType != nil {
 		if !isValidScheduleType(*input.ScheduleType) {
-			return nil, fmt.Errorf("invalid schedule type: %s", *input.ScheduleType)
+			// Caller-fixable validation feedback → mark with ErrValidation so
+			// the handler surfaces it at 400 (not blanket-500).
+			return nil, ValidationErrorf("invalid schedule type: %s", *input.ScheduleType)
 		}
 		existing.ScheduleType = *input.ScheduleType
 	}
 	if input.ScheduleHour != nil {
 		if *input.ScheduleHour < 0 || *input.ScheduleHour > 23 {
-			return nil, fmt.Errorf("invalid schedule hour: %d", *input.ScheduleHour)
+			return nil, ValidationErrorf("invalid schedule hour: %d", *input.ScheduleHour)
 		}
 		existing.ScheduleHour = *input.ScheduleHour
 	}
 	if input.ScheduleDay != nil {
 		if *input.ScheduleDay < 0 || *input.ScheduleDay > 6 {
-			return nil, fmt.Errorf("invalid schedule day: %d", *input.ScheduleDay)
+			return nil, ValidationErrorf("invalid schedule day: %d", *input.ScheduleDay)
 		}
 		existing.ScheduleDay = input.ScheduleDay
 	}
