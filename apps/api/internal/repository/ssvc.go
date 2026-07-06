@@ -247,7 +247,7 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 	}
 	defer rows.Close()
 
-	var assessments []model.SSVCAssessmentWithVuln
+	assessments := []model.SSVCAssessmentWithVuln{}
 	for rows.Next() {
 		var a model.SSVCAssessmentWithVuln
 		if err := rows.Scan(
@@ -344,7 +344,7 @@ func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, assessmentID 
 	}
 	defer rows.Close()
 
-	var history []model.SSVCAssessmentHistory
+	history := []model.SSVCAssessmentHistory{}
 	for rows.Next() {
 		var h model.SSVCAssessmentHistory
 		if err := rows.Scan(
@@ -383,7 +383,7 @@ func (r *SSVCRepository) GetImmediateAssessments(ctx context.Context) ([]model.S
 	}
 	defer rows.Close()
 
-	var assessments []model.SSVCAssessmentWithVuln
+	assessments := []model.SSVCAssessmentWithVuln{}
 	for rows.Next() {
 		var a model.SSVCAssessmentWithVuln
 		if err := rows.Scan(

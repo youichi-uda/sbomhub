@@ -104,7 +104,7 @@ func (r *KEVRepository) List(ctx context.Context, limit, offset int) ([]model.KE
 	}
 	defer rows.Close()
 
-	var entries []model.KEVEntry
+	entries := []model.KEVEntry{}
 	for rows.Next() {
 		var e model.KEVEntry
 		if err := rows.Scan(
@@ -137,7 +137,7 @@ func (r *KEVRepository) GetRecentEntries(ctx context.Context, after time.Time) (
 	}
 	defer rows.Close()
 
-	var entries []model.KEVEntry
+	entries := []model.KEVEntry{}
 	for rows.Next() {
 		var e model.KEVEntry
 		if err := rows.Scan(
@@ -355,7 +355,7 @@ func (r *KEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uui
 	}
 	defer rows.Close()
 
-	var vulnerabilities []model.Vulnerability
+	vulnerabilities := []model.Vulnerability{}
 	for rows.Next() {
 		var v model.Vulnerability
 		if err := rows.Scan(
