@@ -20,11 +20,15 @@
 // the primary consumer is the compliance audit trail, and over-redaction
 // would corrupt evidence (cve_id values, resource UUIDs, provider/model
 // names, and free-form AI-drafted / human-authored justification prose
-// must all survive verbatim — they do, because none of them match a
-// secret shape).
+// must all survive verbatim). The Bearer/Authorization arms therefore
+// redact only credential-SHAPED values (see looksLikeCredential): common
+// prose such as "validates the Bearer token" or "Authorization: role-based
+// access control" is left intact because those words are not credential
+// shaped, while `Bearer <jwt>` / `Basic <base64>` are removed.
 package redact
 
 import (
+	"encoding/json"
 	"errors"
 	"net/url"
 	"regexp"
@@ -55,22 +59,24 @@ var (
 		`(?i)([?&](?:key|api[_-]?key|access_token|token|secret|password|passwd|pwd)=)[^&"\s]*`,
 	)
 
-	// bearerTokenPattern matches an RFC 6750 Bearer token wherever it
-	// appears (`Authorization: Bearer <tok>`, a logged header dump, a
-	// stringified request). Group 1 keeps the `Bearer ` prefix; the
-	// token value is redacted.
-	bearerTokenPattern = regexp.MustCompile(
-		`(?i)(bearer\s+)[A-Za-z0-9._\-]+`,
+	// bearerRe matches a standalone RFC 6750 Bearer token (`Bearer <tok>`)
+	// wherever it appears outside an Authorization header. Whether the
+	// captured value is actually redacted is decided by looksLikeCredential
+	// in redactBearer, so justification prose such as "validates the Bearer
+	// token" is NOT mangled — the word "token" is not credential-shaped.
+	bearerRe = regexp.MustCompile(
+		`(?i)(bearer\s+)([A-Za-z0-9._~+/=-]+)`,
 	)
 
-	// authHeaderPattern matches an `Authorization: <value>` header line
-	// and redacts the first value token. For a `Bearer`/`Basic` value
-	// the value token is `Bearer`/`Basic`; bearerTokenPattern (applied
-	// first in String) has already collapsed `Bearer <tok>` to `Bearer
-	// [REDACTED]`, so this arm exists to catch bare-credential forms such
-	// as `Authorization: sk-abc123`.
-	authHeaderPattern = regexp.MustCompile(
-		`(?i)(authorization:\s*)\S+`,
+	// authHeaderRe matches an `Authorization: [<scheme>] <value>` header.
+	// redactAuthHeader redacts the whole credential ONLY when the value is
+	// credential-shaped, which simultaneously fixes under-redaction
+	// (`Authorization: Basic <base64>` — the base64 blob, not just the scheme
+	// word, is removed) and over-redaction (`Authorization: role-based access
+	// control` in prose is left intact, because "role-based" is not
+	// credential-shaped).
+	authHeaderRe = regexp.MustCompile(
+		`(?i)(authorization:\s*)((?:bearer|basic|digest|negotiate|ntlm|apikey|token)\s+)?(\S+)`,
 	)
 
 	// dsnPasswordPattern matches the PASSWORD component of a connection
@@ -96,13 +102,67 @@ func String(s string) string {
 		return s
 	}
 	s = queryAuthParamPattern.ReplaceAllString(s, "${1}"+placeholder)
-	// Bearer before Authorization: so `Authorization: Bearer <tok>`
-	// collapses the token via the Bearer arm rather than leaving `<tok>`
-	// dangling after the single-token Authorization match.
-	s = bearerTokenPattern.ReplaceAllString(s, "${1}"+placeholder)
-	s = authHeaderPattern.ReplaceAllString(s, "${1}"+placeholder)
+	// Authorization headers first (handles `Authorization: Bearer <tok>` and
+	// `Authorization: Basic <base64>`), then standalone `Bearer <tok>` not
+	// behind a header. Both gate on looksLikeCredential so justification prose
+	// ("Bearer token", "Authorization: role-based access") is preserved.
+	s = authHeaderRe.ReplaceAllStringFunc(s, redactAuthHeader)
+	s = bearerRe.ReplaceAllStringFunc(s, redactBearer)
 	s = dsnPasswordPattern.ReplaceAllString(s, "${1}"+placeholder+"${2}")
 	return s
+}
+
+// looksLikeCredential reports whether v has the shape of a real secret token
+// rather than a dictionary word. Credentials are >=8 chars and carry entropy a
+// word does not: a digit, a token special char (. _ ~ + / =), or mixed case
+// (base64 / API keys). Hyphen alone does NOT qualify, so hyphenated prose like
+// "role-based" is treated as a word, not a secret. This is the gate that keeps
+// the audit-trail evidence contract (§8.5) intact while still catching creds.
+func looksLikeCredential(v string) bool {
+	if len(v) < 8 {
+		return false
+	}
+	var hasDigit, hasSpecial, hasUpper, hasLower bool
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '.' || r == '_' || r == '~' || r == '+' || r == '/' || r == '=':
+			hasSpecial = true
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		}
+	}
+	return hasDigit || hasSpecial || (hasUpper && hasLower)
+}
+
+// redactAuthHeader redacts the credential of an Authorization-header match when
+// the value is credential-shaped, preserving the `Authorization: ` prefix (and
+// dropping the scheme word + secret together).
+func redactAuthHeader(match string) string {
+	m := authHeaderRe.FindStringSubmatch(match)
+	if m == nil {
+		return match
+	}
+	if looksLikeCredential(m[3]) {
+		return m[1] + placeholder
+	}
+	return match
+}
+
+// redactBearer redacts a standalone Bearer token only when it is
+// credential-shaped, so "Bearer token"/"Bearer authentication" prose is intact.
+func redactBearer(match string) string {
+	m := bearerRe.FindStringSubmatch(match)
+	if m == nil {
+		return match
+	}
+	if looksLikeCredential(m[2]) {
+		return m[1] + placeholder
+	}
+	return match
 }
 
 // Details returns a deep-scrubbed COPY of an audit detail map. Every
@@ -168,6 +228,12 @@ func scrubValue(v interface{}) interface{} {
 			out[i] = scrubValue(vv)
 		}
 		return out
+	case json.RawMessage:
+		// Raw JSON blob: scrub secret-shaped substrings while keeping it raw
+		// JSON so marshalling is unchanged.
+		return json.RawMessage(String(string(val)))
+	case []byte:
+		return []byte(String(string(val)))
 	default:
 		return v
 	}

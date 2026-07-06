@@ -30,6 +30,10 @@ func TestString_RedactsSecrets(t *testing.T) {
 		{"bearer", "Bearer eyJhbGciOiJIUzI1Ni.payload-sig", "eyJhbGciOiJIUzI1Ni.payload-sig", "Bearer [REDACTED]"},
 		{"authorization bearer", "Authorization: Bearer eyJ0okenSECRET", "eyJ0okenSECRET", "Authorization: [REDACTED]"},
 		{"authorization bare", "Authorization: sk-liveSECRETkey", "sk-liveSECRETkey", "Authorization: [REDACTED]"},
+		// M42 Phase D: a Basic base64 credential must be removed IN FULL, not
+		// just the scheme word (the value is all-letters mixed-case base64, so it
+		// is caught by the mixed-case credential shape, not a digit/special).
+		{"authorization basic base64", "Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz", "Authorization: [REDACTED]"},
 		{"dsn password", "dial postgres://appuser:S3cr3tPw@db.internal:5432/app", "S3cr3tPw", "postgres://appuser:[REDACTED]@db.internal:5432/app"},
 		{"dsn empty user", "redis://:R3disPw@cache:6379", "R3disPw", "redis://:[REDACTED]@cache:6379"},
 	}
@@ -65,6 +69,15 @@ func TestString_PreservesNonSecrets(t *testing.T) {
 		"2026-07-06T12:34:56Z",
 		"https://github.com/apache/logging-log4j2/releases", // plain URL, no auth
 		"postgres://db.internal:5432/app",                   // host:port, no userinfo -> no password
+		// M42 Phase D over-redaction guard: "Bearer"/"Authorization:" are common
+		// English words in auth-CVE justifications and MUST survive — only
+		// credential-SHAPED values are redacted, and these dictionary words are
+		// not credential shaped.
+		"validates the Bearer token signature before use",
+		"attackers can bypass Bearer authentication entirely",
+		"Authorization: role-based access control is enforced",
+		"The flag bearer approach was rejected",
+		"Authorization: Basic authentication is required by the endpoint",
 	}
 	for _, s := range preserved {
 		if got := String(s); got != s {

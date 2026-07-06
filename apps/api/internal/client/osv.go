@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -126,7 +127,9 @@ func (c *OSVClient) GetVulnerability(ctx context.Context, vulnID string) (*OSVVu
 		return nil, nil
 	}
 
-	url := fmt.Sprintf("%s/vulns/%s", c.baseURL, vulnID)
+	// M42: path-escape the vuln ID so a malformed value cannot alter the
+	// request path (defense in depth; the by-CVE handler also validates first).
+	url := fmt.Sprintf("%s/vulns/%s", c.baseURL, neturl.PathEscape(vulnID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

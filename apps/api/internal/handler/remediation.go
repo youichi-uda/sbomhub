@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/service"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // RemediationHandler handles remediation API endpoints
@@ -62,6 +63,16 @@ func (h *RemediationHandler) GetRemediationByCVE(c echo.Context) error {
 			"error": "CVE ID is required",
 		})
 	}
+	// M42: reject a malformed CVE ID before it can reach the external OSV
+	// request URL (this endpoint feeds the OSV /vulns/<id> path). Use the
+	// normalized ID downstream.
+	normalizedCVE, verr := validation.ValidateCVEID(cveID)
+	if verr != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "invalid CVE ID format",
+		})
+	}
+	cveID = normalizedCVE
 
 	var req RemediationByCVERequest
 	if err := c.Bind(&req); err != nil {
