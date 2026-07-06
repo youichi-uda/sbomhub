@@ -344,8 +344,10 @@ func TestGatherReportData_PopulatesSummaryAndTopRisksFromTenantScopedDashboard(t
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "critical", "high", "medium", "low"}).
 			AddRow(projID, "app-a", 3, 5, 2, 1))
 
-	// 5. GetTopRisksByTenant(ctx, tenantID, 10, "epss")
-	mock.ExpectQuery(`DISTINCT ON \(v\.cve_id\)`).
+	// 5. GetTopRisksByTenant(ctx, tenantID, 10, "epss") — pin the EPSS outer
+	// ordering so a revert to sortBy="cvss" (wrong for a compliance report) is
+	// caught, not just the presence of the query.
+	mock.ExpectQuery(`(?is)DISTINCT ON \(v\.cve_id\).*ORDER BY epss_score DESC NULLS LAST`).
 		WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"cve_id", "epss_score", "cvss_score", "severity",

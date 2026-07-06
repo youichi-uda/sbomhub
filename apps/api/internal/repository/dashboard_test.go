@@ -62,6 +62,52 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 	}
 }
 
+// TestGetTopRisksByTenant_CoalescesCVSSScore asserts cvss_score is COALESCE'd
+// like epss_score (M41). cvss_score is nullable (migration 001, DECIMAL(3,1)) and
+// TopRisk.CVSSScore is a bare float64, so a CVE with no NVD CVSS (e.g. a JVN-only
+// match) would error the scan and empty the whole Top Risks section — the exact
+// "report/dashboard TopRisks is empty" symptom. COALESCE(v.cvss_score, 0) makes
+// such a row read 0. Structural: this fails on the pre-fix bare `v.cvss_score`.
+func TestGetTopRisksByTenant_CoalescesCVSSScore(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewDashboardRepository(db)
+
+	pattern := regexp.MustCompile(`(?is)` + regexp.QuoteMeta("COALESCE(v.cvss_score, 0)") + `\s+as\s+cvss_score`)
+	if pattern.MatchString("v.cvss_score,") {
+		t.Fatalf("pattern is vacuous: it also matches the bare pre-fix column")
+	}
+
+	tenantID := uuid.New()
+	projID := uuid.New()
+	mock.ExpectQuery(pattern.String()).
+		WithArgs(tenantID, 10).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"cve_id", "epss_score", "cvss_score", "severity",
+			"project_id", "project_name", "component_name", "component_version",
+		}).
+			// CVE with no NVD CVSS: COALESCE(v.cvss_score, 0) -> 0 (a bare scan errors).
+			AddRow("CVE-2026-0003", float64(0), float64(0), "MEDIUM", projID, "app-a", "libz", "1.2"))
+
+	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "epss")
+	if err != nil {
+		t.Fatalf("GetTopRisksByTenant: %v", err)
+	}
+	if len(risks) != 1 {
+		t.Fatalf("len(risks) = %d, want 1", len(risks))
+	}
+	if risks[0].CVSSScore != 0 {
+		t.Errorf("risks[0].CVSSScore = %v, want 0 (no-CVSS row COALESCEs to 0)", risks[0].CVSSScore)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 // TestGetTopRisksByTenant_NullEPSSWithoutCoalesceErrors documents WHY the
 // COALESCE is load-bearing (M36-A / F432): TopRisk.EPSSScore is a bare float64,
 // so a raw SQL NULL scanned into it errors. The 055 column is nullable and stays

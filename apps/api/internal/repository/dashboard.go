@@ -108,11 +108,16 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 	// column stays NULL until the scheduled epss_sync (M36-B) populates it, and
 	// scanning a SQL NULL into the bare float64 TopRisk.EPSSScore would error.
 	// An un-synced row therefore still reads 0, exactly as before.
+	//
+	// M41: cvss_score is COALESCE'd for the identical reason — it is nullable
+	// (migration 001, DECIMAL(3,1)) and TopRisk.CVSSScore is a bare float64, so a
+	// CVE without an NVD CVSS (e.g. a JVN-only match) would error the scan and
+	// empty the whole Top Risks section (the report + dashboard symptom).
 	query := `
 		SELECT DISTINCT ON (v.cve_id)
 			v.cve_id,
 			COALESCE(v.epss_score, 0) as epss_score,
-			v.cvss_score,
+			COALESCE(v.cvss_score, 0) as cvss_score,
 			v.severity,
 			p.id as project_id,
 			p.name as project_name,
