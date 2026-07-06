@@ -728,6 +728,22 @@ func (h *SbomHandler) GetVulnerabilities(c echo.Context) error {
 		// n < 0 falls through to 0.
 	}
 
+	// F446 (M38): `?sort=` selects the ORDER BY column of the paginated
+	// list. Default "cvss" preserves the historical highest-CVSS-first
+	// ordering; "epss" sorts by exploitation probability (migration 055's
+	// idx_vulnerabilities_epss). Same "reject out-of-band, default on
+	// missing" posture as the #F26 limit / #F27 offset clamps above, so an
+	// unknown value (typo / probe) surfaces as a 400 rather than silently
+	// falling back — this rejects BEFORE CountVulnerabilities runs so the
+	// X-Total-Count header path stays untouched on the reject branch.
+	sortBy := "cvss"
+	if v := c.QueryParam("sort"); v != "" {
+		if v != "cvss" && v != "epss" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid sort"})
+		}
+		sortBy = v
+	}
+
 	// #F28 (Web UI data integrity): emit X-Total-Count so the Web UI
 	// can render an accurate "N / total 件" indicator and trip a
 	// warning banner when there is more than one page of vulns. The
@@ -749,7 +765,7 @@ func (h *SbomHandler) GetVulnerabilities(c echo.Context) error {
 	}
 	c.Response().Header().Set("X-Total-Count", strconv.Itoa(total))
 
-	vulns, err := h.sbomService.GetVulnerabilitiesPaginated(c.Request().Context(), projectID, limit, offset)
+	vulns, err := h.sbomService.GetVulnerabilitiesPaginated(c.Request().Context(), projectID, limit, offset, sortBy)
 	if err != nil {
 		// F442: never surface the raw service / repository / SQL error to
 		// the caller. Log specifics server-side, return a generic body.

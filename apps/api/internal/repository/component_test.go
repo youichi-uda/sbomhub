@@ -337,9 +337,9 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "successful get vulnerabilities",
 			sbomID: sbomID,
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"}).
-					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, "NVD", true, now, now, false, now, now).
-					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, "NVD", false, nil, nil, nil, now, now)
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"}).
+					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, 0.42, 0.88, "NVD", true, now, now, false, now, now).
+					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, 0.0, 0.0, "NVD", false, nil, nil, nil, now, now)
 				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
 					WithArgs(sbomID).
 					WillReturnRows(rows)
@@ -362,13 +362,25 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 				if vulns[1].InKEV {
 					t.Errorf("expected second vuln to not be in KEV")
 				}
+				// F446: epss_score/epss_percentile are scanned into the
+				// model — a synced row (>0) sets the pointer, an un-synced
+				// (0) row leaves it nil so the web badge stays suppressed.
+				if vulns[0].EPSSScore == nil || *vulns[0].EPSSScore != 0.42 {
+					t.Errorf("expected first vuln EPSSScore 0.42, got %v", vulns[0].EPSSScore)
+				}
+				if vulns[0].EPSSPercentile == nil || *vulns[0].EPSSPercentile != 0.88 {
+					t.Errorf("expected first vuln EPSSPercentile 0.88, got %v", vulns[0].EPSSPercentile)
+				}
+				if vulns[1].EPSSScore != nil {
+					t.Errorf("expected second vuln EPSSScore nil (un-synced), got %v", *vulns[1].EPSSScore)
+				}
 			},
 		},
 		{
 			name:   "no vulnerabilities found",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"})
+				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"})
 				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
@@ -394,7 +406,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.setupMock()
-			result, err := repo.GetVulnerabilities(context.Background(), tt.sbomID)
+			result, err := repo.GetVulnerabilities(context.Background(), tt.sbomID, "cvss")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetVulnerabilities() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -664,16 +676,17 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t 
 	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 50, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"id", "cve_id", "description", "severity", "cvss_score",
+			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at",
 		}).
-			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, "NVD",
+			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now).
-			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, "NVD",
+			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now))
 
-	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0)
+	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "cvss")
 	if err != nil {
 		t.Fatalf("GetVulnerabilitiesPaginated: %v", err)
 	}
@@ -694,6 +707,119 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t 
 		t.Errorf("F29: CVE-B must appear exactly once (would be 0 under the pre-fix duplicate-row query), got %d occurrences", seen[cveBID])
 	}
 
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446 pins the
+// M38 EPSS-sort switch: sort=="epss" must emit `ORDER BY v.epss_score DESC
+// NULLS LAST, v.id` and any other value (incl. "" / "cvss") must keep
+// `ORDER BY v.cvss_score DESC NULLS LAST, v.id`. The assertion is a
+// go-sqlmock regex on the emitted SQL — non-vacuous vs a hardcoded single
+// ORDER BY, because a regression that always sorted by cvss would fail the
+// epss case (the epss ORDER BY regex would not match the cvss query and
+// sqlmock returns "unexpected query"), and vice versa. The epss case also
+// pins that epss_score/epss_percentile are scanned into the model (>0 sets
+// the pointer, un-synced 0 leaves it nil).
+func TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446(t *testing.T) {
+	sbomID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name         string
+		sortBy       string
+		wantOrderBy  string // go-sqlmock regex the emitted SQL MUST contain
+		wantEPSSScan bool   // assert the epss pointers are populated from the row
+	}{
+		{"epss sorts by epss_score", "epss", `ORDER BY v\.epss_score DESC NULLS LAST, v\.id`, true},
+		{"cvss sorts by cvss_score", "cvss", `ORDER BY v\.cvss_score DESC NULLS LAST, v\.id`, false},
+		{"empty defaults to cvss", "", `ORDER BY v\.cvss_score DESC NULLS LAST, v\.id`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			repo := NewComponentRepository(db)
+
+			vulnID := uuid.New()
+			// The load-bearing assertion: the ORDER BY branch specific to
+			// this sortBy MUST appear in the emitted SQL. If the code chose
+			// the wrong column, this regex would not match and sqlmock would
+			// surface "unexpected query", failing the call below.
+			mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*`+tt.wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
+				WithArgs(sbomID, 50, 0).
+				WillReturnRows(sqlmock.NewRows([]string{
+					"id", "cve_id", "description", "severity", "cvss_score",
+					"epss_score", "epss_percentile", "source",
+					"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+					"published_at", "updated_at",
+				}).AddRow(vulnID, "CVE-2024-EPSS", "epss-sorted vuln", "CRITICAL", 9.1,
+					0.55, 0.97, "NVD", false, nil, nil, nil, now, now))
+
+			got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, tt.sortBy)
+			if err != nil {
+				t.Fatalf("GetVulnerabilitiesPaginated(sort=%q): %v", tt.sortBy, err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("expected 1 vuln, got %d", len(got))
+			}
+			// epss_score/epss_percentile are always scanned (positional
+			// alignment) regardless of the sort column; the row here carries
+			// 0.55/0.97 so both pointers must be populated.
+			if got[0].EPSSScore == nil || *got[0].EPSSScore != 0.55 {
+				t.Errorf("expected scanned EPSSScore 0.55, got %v", got[0].EPSSScore)
+			}
+			if got[0].EPSSPercentile == nil || *got[0].EPSSPercentile != 0.97 {
+				t.Errorf("expected scanned EPSSPercentile 0.97, got %v", got[0].EPSSPercentile)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestComponentRepository_GetVulnerabilitiesPaginated_UnsyncedEPSSNil_F446 pins
+// the `> 0` guard: a row whose COALESCE'd epss columns are 0 (un-synced) must
+// leave the model pointers nil so the web EPSS badge stays suppressed.
+func TestComponentRepository_GetVulnerabilitiesPaginated_UnsyncedEPSSNil_F446(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	repo := NewComponentRepository(db)
+
+	sbomID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, 50, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score",
+			"epss_score", "epss_percentile", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}).AddRow(uuid.New(), "CVE-2024-NULL", "un-synced vuln", "LOW", 3.1,
+			0.0, 0.0, "NVD", false, nil, nil, nil, now, now))
+
+	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "epss")
+	if err != nil {
+		t.Fatalf("GetVulnerabilitiesPaginated: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 vuln, got %d", len(got))
+	}
+	if got[0].EPSSScore != nil {
+		t.Errorf("un-synced (0) epss_score must scan to nil, got %v", *got[0].EPSSScore)
+	}
+	if got[0].EPSSPercentile != nil {
+		t.Errorf("un-synced (0) epss_percentile must scan to nil, got %v", *got[0].EPSSPercentile)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}

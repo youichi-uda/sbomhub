@@ -110,7 +110,8 @@ func (s *SbomService) GetVulnerabilities(ctx context.Context, projectID uuid.UUI
 		}
 		return nil, err
 	}
-	return s.componentRepo.GetVulnerabilities(ctx, sbom.ID)
+	// Default (unpaginated) path keeps the historical CVSS-descending order.
+	return s.componentRepo.GetVulnerabilities(ctx, sbom.ID, "cvss")
 }
 
 // GetVulnerabilitiesPaginated returns a single page of the latest
@@ -132,7 +133,11 @@ func (s *SbomService) GetVulnerabilities(ctx context.Context, projectID uuid.UUI
 //     slice to mirror GetVulnerabilities' historical behaviour (the
 //     CLI's triage loop short-circuits on len==0 with a "脆弱性は検出
 //     されませんでした" message rather than treating it as an error).
-func (s *SbomService) GetVulnerabilitiesPaginated(ctx context.Context, projectID uuid.UUID, limit, offset int) ([]model.Vulnerability, error) {
+//   - sortBy selects the ORDER BY column (F446 / M38): "epss" sorts by
+//     exploitation probability descending, any other value (incl. "" /
+//     "cvss") keeps the historical CVSS-descending order. The handler
+//     validates it to {"", "cvss", "epss"} before calling.
+func (s *SbomService) GetVulnerabilitiesPaginated(ctx context.Context, projectID uuid.UUID, limit, offset int, sortBy string) ([]model.Vulnerability, error) {
 	sbom, err := s.sbomRepo.GetLatest(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -140,7 +145,7 @@ func (s *SbomService) GetVulnerabilitiesPaginated(ctx context.Context, projectID
 		}
 		return nil, err
 	}
-	return s.componentRepo.GetVulnerabilitiesPaginated(ctx, sbom.ID, limit, offset)
+	return s.componentRepo.GetVulnerabilitiesPaginated(ctx, sbom.ID, limit, offset, sortBy)
 }
 
 // CountVulnerabilities returns the total number of vulnerabilities
@@ -191,7 +196,8 @@ func (s *SbomService) GetVulnerabilitiesBySbom(ctx context.Context, projectID, s
 		// would let a caller probe sbom_id existence across projects.
 		return nil, sql.ErrNoRows
 	}
-	return s.componentRepo.GetVulnerabilities(ctx, sbomID)
+	// Scan-status / per-SBOM lookups keep the historical CVSS-descending order.
+	return s.componentRepo.GetVulnerabilities(ctx, sbomID, "cvss")
 }
 
 // detectFormat is deprecated, use detectFormatAndVersion instead

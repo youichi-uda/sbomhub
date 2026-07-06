@@ -620,10 +620,11 @@ func TestGetVulnerabilitiesBySbom_VerifiesProjectMembership(t *testing.T) {
 		mock.ExpectQuery("FROM vulnerabilities v").
 			WithArgs(sbomID).
 			WillReturnRows(sqlmock.NewRows([]string{
-				"id", "cve_id", "description", "severity", "cvss_score", "source",
+				"id", "cve_id", "description", "severity", "cvss_score",
+				"epss_score", "epss_percentile", "source",
 				"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 				"published_at", "updated_at",
-			}).AddRow(uuid.New(), "CVE-2024-1", "desc", "CRITICAL", 9.8, "NVD",
+			}).AddRow(uuid.New(), "CVE-2024-1", "desc", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now))
 
 		vulns, err := svc.GetVulnerabilitiesBySbom(context.Background(), projectID, sbomID)

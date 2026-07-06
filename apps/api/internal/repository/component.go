@@ -58,16 +58,40 @@ func (r *ComponentRepository) ListBySbom(ctx context.Context, sbomID uuid.UUID) 
 	return components, nil
 }
 
-func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uuid.UUID) ([]model.Vulnerability, error) {
+// vulnListOrderBy returns the ORDER BY clause for the /vulnerabilities
+// list (F446 / M38). sortBy=="epss" sorts by exploitation probability
+// (EPSS, migration 055's idx_vulnerabilities_epss) descending; any other
+// value (incl. "" and "cvss") keeps the historical CVSS-descending order.
+// Both clauses use `NULLS LAST` so un-scored rows tail the list rather
+// than floating above scored CRITICAL/HIGH rows (Postgres defaults DESC
+// to NULLS FIRST), and `v.id` is a stable tiebreaker so the offset cursor
+// pages consistently. The value is never interpolated into SQL — only one
+// of two fixed clauses is chosen — so an unexpected sortBy degrades safely
+// to cvss (the handler already rejects out-of-band values with 400).
+func vulnListOrderBy(sortBy string) string {
+	if sortBy == "epss" {
+		return "ORDER BY v.epss_score DESC NULLS LAST, v.id"
+	}
+	return "ORDER BY v.cvss_score DESC NULLS LAST, v.id"
+}
+
+func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uuid.UUID, sortBy string) ([]model.Vulnerability, error) {
+	// F446: epss_score/epss_percentile are read via COALESCE(...,0) (NULL
+	// until epss_sync populates them) with the `> 0` guard below leaving
+	// the model pointers nil for un-synced rows — same pattern as
+	// SearchRepository.getComponentVulnerabilities so the web EPSS badge
+	// stays suppressed for 0/nil.
 	query := `
-		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score, COALESCE(v.source, 'NVD'),
+		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
+		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
+		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at
 		FROM vulnerabilities v
 		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
 		JOIN components c ON c.id = cv.component_id
 		WHERE c.sbom_id = $1
-		ORDER BY v.cvss_score DESC
+		` + vulnListOrderBy(sortBy) + `
 	`
 	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
 	if err != nil {
@@ -78,10 +102,19 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.Source,
+		var epssScore, epssPercentile float64
+		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
+			&epssScore, &epssPercentile,
+			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
 			&v.PublishedAt, &v.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if epssScore > 0 {
+			v.EPSSScore = &epssScore
+		}
+		if epssPercentile > 0 {
+			v.EPSSPercentile = &epssPercentile
 		}
 		vulns = append(vulns, v)
 	}
@@ -149,13 +182,17 @@ func (r *ComponentRepository) CountVulnerabilities(ctx context.Context, sbomID u
 //     currently do not have — every external call site clamps).
 //   - offset < 0 is normalised to 0.
 //
-// Order is preserved (cvss_score DESC) with v.id as a stable
-// tiebreaker so the offset cursor walks the most-severe vulns first
-// and pages remain consistent across calls even when several CVEs
-// share the same CVSS score (or NULL). `NULLS LAST` keeps unscored
-// rows at the tail rather than letting Postgres' default
-// `NULLS FIRST` for DESC float them above scored CRITICAL/HIGH rows.
-func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, sbomID uuid.UUID, limit, offset int) ([]model.Vulnerability, error) {
+// Order follows sortBy (F446 / M38): "epss" sorts by exploitation
+// probability descending, anything else (incl. "" / "cvss") keeps the
+// historical cvss_score DESC. Both keep v.id as a stable tiebreaker so
+// the offset cursor walks a deterministic order and pages remain
+// consistent across calls even when several CVEs share the same score
+// (or NULL). `NULLS LAST` keeps unscored rows at the tail rather than
+// letting Postgres' default `NULLS FIRST` for DESC float them above
+// scored rows. Switching the ORDER BY column is safe because the
+// `WHERE EXISTS (...)` de-duplication (not DISTINCT/GROUP BY) is
+// independent of the sort key.
+func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, sbomID uuid.UUID, limit, offset int, sortBy string) ([]model.Vulnerability, error) {
 	if offset < 0 {
 		offset = 0
 	}
@@ -163,7 +200,7 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// 0 fall through to the unpaginated query so internal aggregators
 	// (e.g. scan-status severity counts) can opt out explicitly.
 	if limit <= 0 {
-		return r.GetVulnerabilities(ctx, sbomID)
+		return r.GetVulnerabilities(ctx, sbomID, sortBy)
 	}
 	// #F29: EXISTS subquery dedupes by vulnerability_id — exactly one
 	// row per matched vulnerability, matching CountVulnerabilities'
@@ -171,8 +208,14 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// SELECT would multiply rows by the number of (component_id)
 	// linkages per vulnerability and silently hide later CVEs behind
 	// duplicates within a page.
-	const query = `
-		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score, COALESCE(v.source, 'NVD'),
+	//
+	// F446: epss_score/epss_percentile are added via COALESCE(...,0) with
+	// the `> 0` guard below leaving the model pointers nil for un-synced
+	// rows (mirrors SearchRepository.getComponentVulnerabilities).
+	query := `
+		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
+		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
+		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at
 		FROM vulnerabilities v
@@ -182,7 +225,7 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 			JOIN components c ON c.id = cv.component_id
 			WHERE cv.vulnerability_id = v.id AND c.sbom_id = $1
 		)
-		ORDER BY v.cvss_score DESC NULLS LAST, v.id
+		` + vulnListOrderBy(sortBy) + `
 		LIMIT $2 OFFSET $3
 	`
 	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID, limit, offset)
@@ -194,10 +237,19 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore, &v.Source,
+		var epssScore, epssPercentile float64
+		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
+			&epssScore, &epssPercentile,
+			&v.Source,
 			&v.InKEV, &v.KEVDateAdded, &v.KEVDueDate, &v.KEVRansomwareUse,
 			&v.PublishedAt, &v.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if epssScore > 0 {
+			v.EPSSScore = &epssScore
+		}
+		if epssPercentile > 0 {
+			v.EPSSPercentile = &epssPercentile
 		}
 		vulns = append(vulns, v)
 	}

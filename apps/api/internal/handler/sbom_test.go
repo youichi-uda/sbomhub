@@ -506,10 +506,11 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, 200, 100).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"id", "cve_id", "description", "severity", "cvss_score",
+			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at",
-		}).AddRow(uuid.New(), "CVE-2024-1", "desc", "HIGH", 7.5, "NVD",
+		}).AddRow(uuid.New(), "CVE-2024-1", "desc", "HIGH", 7.5, 0.0, 0.0, "NVD",
 			false, nil, nil, nil, now, now))
 
 	sbomService := service.NewSbomService(
@@ -536,6 +537,125 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
+}
+
+// ----------------------------------------------------------------------------
+// F446 (M38) — GetVulnerabilities honours ?sort=epss|cvss
+// ----------------------------------------------------------------------------
+//
+// `?sort=` selects the ORDER BY column of the paginated list. Default /
+// missing → cvss (historical behaviour preserved); "epss" sorts by
+// exploitation probability; an unknown value is rejected with 400 BEFORE
+// any SQL runs (same loud-failure posture as the #F26 limit / #F27 offset
+// clamps). The tests pin:
+//   F446.1 (SortInvalid):   ?sort=bad → 400, no SQL.
+//   F446.2 (SortEpss):      ?sort=epss → paginated query ORDER BY epss_score.
+//   F446.3 (SortDefaultCvss): no ?sort= → paginated query ORDER BY cvss_score.
+
+// TestSBOMHandler_GetVulnerabilities_SortInvalid_F446 pins that an
+// out-of-band sort value is rejected with 400 before the repository runs.
+// No sqlmock expectations are registered — including the CountVulnerabilities
+// query — so a regression that let the bad value through (or moved the
+// reject after the X-Total-Count fetch) would trip sqlmock's "unexpected
+// query" alongside the response-code check.
+func TestSBOMHandler_GetVulnerabilities_SortInvalid_F446(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, "sort=bad")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("F446: sort=bad must return 400, got %d (body=%s)",
+			rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), "invalid sort") {
+		t.Errorf("F446: expected 'invalid sort' body, got %s", rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// driveSortHappyPath wires the full mock chain (GetLatest + COUNT +
+// GetLatest + paginated SELECT) and pins the paginated query's ORDER BY via
+// a go-sqlmock regex. wantOrderBy is non-vacuous: a regression that sorted
+// by the wrong column would fail to match this regex, sqlmock would return
+// "unexpected query", and the handler would surface 500 instead of 200.
+func driveSortHappyPath(t *testing.T, query, wantOrderBy string) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	projectID := uuid.New()
+	sbomID := uuid.New()
+	now := time.Now()
+
+	// CountVulnerabilities (#F28) runs first: GetLatest + COUNT(*).
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	mock.ExpectQuery(`SELECT COUNT\(DISTINCT v.id\) FROM vulnerabilities v`).
+		WithArgs(sbomID).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+
+	// GetVulnerabilitiesPaginated repeats GetLatest then runs the page.
+	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+		WithArgs(projectID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "format", "version", "raw_data", "created_at",
+		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
+	// The load-bearing assertion — the paginated SELECT MUST carry the
+	// expected ORDER BY branch for this sort value.
+	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*`+wantOrderBy+`.*LIMIT \$2 OFFSET \$3`).
+		WithArgs(sbomID, VulnsDefaultLimit, 0).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "cve_id", "description", "severity", "cvss_score",
+			"epss_score", "epss_percentile", "source",
+			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+			"published_at", "updated_at",
+		}))
+
+	sbomService := service.NewSbomService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+	)
+	h := NewSbomHandler(db, sbomService, nil, nil, nil)
+
+	rec := driveGetVulnerabilities(t, mock, h, projectID, query)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("F446: query=%q must succeed, got %d (body=%s)",
+			query, rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSBOMHandler_GetVulnerabilities_SortEpss_F446 pins that ?sort=epss
+// threads through to an epss_score ORDER BY.
+func TestSBOMHandler_GetVulnerabilities_SortEpss_F446(t *testing.T) {
+	driveSortHappyPath(t, "sort=epss", `ORDER BY v\.epss_score DESC NULLS LAST, v\.id`)
+}
+
+// TestSBOMHandler_GetVulnerabilities_SortDefaultCvss_F446 pins that a
+// missing ?sort= defaults to a cvss_score ORDER BY (historical behaviour).
+func TestSBOMHandler_GetVulnerabilities_SortDefaultCvss_F446(t *testing.T) {
+	driveSortHappyPath(t, "", `ORDER BY v\.cvss_score DESC NULLS LAST, v\.id`)
 }
 
 // ----------------------------------------------------------------------------
@@ -768,13 +888,14 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 	mock.ExpectQuery(`FROM vulnerabilities v WHERE EXISTS.*LIMIT \$2 OFFSET \$3`).
 		WithArgs(sbomID, VulnsDefaultLimit, 0).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "cve_id", "description", "severity", "cvss_score", "source",
+			"id", "cve_id", "description", "severity", "cvss_score",
+			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at",
 		}).
-			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, "NVD",
+			AddRow(cveAID, "CVE-2024-AAAA", "high-fanout vuln", "CRITICAL", 9.8, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now).
-			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, "NVD",
+			AddRow(cveBID, "CVE-2024-BBBB", "single-component vuln", "HIGH", 7.5, 0.0, 0.0, "NVD",
 				false, nil, nil, nil, now, now))
 
 	sbomService := service.NewSbomService(
