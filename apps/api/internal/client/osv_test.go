@@ -98,6 +98,22 @@ func TestOSVClient_GetVulnerability_OversizedBodyError(t *testing.T) {
 	}
 }
 
+// TestOSVClient_IsOffline pins the M43 Phase D R4 accessor the scheduler's
+// offline-drift guard keys on: it must track WithOffline exactly (false by
+// default, flips both ways) without touching any fetch behaviour.
+func TestOSVClient_IsOffline(t *testing.T) {
+	c := NewOSVClient()
+	if c.IsOffline() {
+		t.Error("IsOffline() = true on a fresh client, want false")
+	}
+	if !c.WithOffline(true).IsOffline() {
+		t.Error("IsOffline() = false after WithOffline(true), want true")
+	}
+	if c.WithOffline(false).IsOffline() {
+		t.Error("IsOffline() = true after WithOffline(false), want false")
+	}
+}
+
 // TestOSVClient_Offline_NoHTTP asserts offline mode short-circuits
 // GetVulnerability to nil with no network hit (M40 Wave B).
 func TestOSVClient_Offline_NoHTTP(t *testing.T) {

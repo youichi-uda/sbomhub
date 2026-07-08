@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +23,48 @@ import (
 	"github.com/sbomhub/sbomhub/internal/client"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
+
+// GetBySource satisfies the M43 Phase D R4-widened advisoryExcerptUpserter
+// contract for the base M32 fake (Go allows methods in any file of the
+// declaring package): it always reports "no existing row" (nil, nil), which
+// keeps every pre-R4 test's tombstone behaviour byte-identical — a tombstone
+// against no existing row writes a plain empty row. Tests that need
+// existing-row semantics use fakeAdvisoryExcerptStore below, whose own
+// GetBySource shadows this one.
+func (f *fakeAdvisoryExcerptUpserter) GetBySource(context.Context, uuid.UUID, string, string) (*repository.AdvisoryExcerpt, error) {
+	return nil, nil
+}
+
+// fakeAdvisoryExcerptStore extends the M32 fake with a configurable
+// GetBySource read so the M43 Phase D R4 tombstone clobber guard can be
+// unit-tested hermetically: `existing` seeds the rows the store already
+// holds (keyed tenant|cve|source via excerptStoreKey), getKeys records which
+// keys the writer consulted (and in what order), and getErr fails every read
+// (the chunk-abort path). Upsert recording is inherited from the embedded
+// fake.
+type fakeAdvisoryExcerptStore struct {
+	fakeAdvisoryExcerptUpserter
+	existing map[string]*repository.AdvisoryExcerpt
+	getKeys  []string
+	getErr   error
+}
+
+func excerptStoreKey(tenantID uuid.UUID, cveID, source string) string {
+	return tenantID.String() + "|" + cveID + "|" + source
+}
+
+func (f *fakeAdvisoryExcerptStore) GetBySource(_ context.Context, tenantID uuid.UUID, cveID, source string) (*repository.AdvisoryExcerpt, error) {
+	key := excerptStoreKey(tenantID, cveID, source)
+	f.getKeys = append(f.getKeys, key)
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if e, ok := f.existing[key]; ok {
+		cp := *e // value copy: callers must not mutate the seeded row
+		return &cp, nil
+	}
+	return nil, nil
+}
 
 // TestNewCVESyncJob_DefaultBaseURL asserts an empty baseURL falls back to the
 // cveSyncAPIURL const (M40 Wave B).
@@ -1196,20 +1241,26 @@ func TestCVESyncJob_FetchOSVVulnFuncs_PolitenessSleepCtxAware(t *testing.T) {
 	}
 }
 
-// TestCVESyncJob_FetchOSVVulnFuncs_Mass404SuppressesTombstones pins the M43
-// Phase D R3 finding 2 safety valve: a tick whose every lookup (≥
-// osvVulnFuncsMass404SuppressThreshold of them) comes back "no record" is
-// the signature of an OSV endpoint anomaly (e.g. an air-gapped mirror
-// 404-ing every path), NOT of every candidate CVE genuinely vanishing — so
-// the tick writes ZERO tombstones (candidates stay stale and retry next
-// tick, positive rows are not overwritten by empty rows) and emits exactly
-// one Warn carrying the attempt count and not-found rate.
-func TestCVESyncJob_FetchOSVVulnFuncs_Mass404SuppressesTombstones(t *testing.T) {
+// TestCVESyncJob_FetchOSVVulnFuncs_Mass404WritesTombstonesAndWarns pins the
+// M43 Phase D R4 redesign of the R3 mass-404 valve (Codex 42nd [High]): a
+// tick whose EVERY lookup (>= osvVulnFuncsMass404WarnThreshold of them)
+// returns "no record" still tombstones ALL of them. Suppressing the
+// tombstones (the R3 behaviour) re-introduced the R1 starvation for a
+// LEGITIMATE all-404 backlog: with the cap-sized head of the deterministic
+// candidate order genuinely absent from OSV, no tombstone was ever written,
+// so the same CVEs re-consumed the entire fetch cap tick after tick and
+// every CVE sorted after them stayed stale forever. The anomaly signature
+// (mirror misconfiguration / endpoint outage) is preserved as EXACTLY ONE
+// observability Warn — no suppression; the mass-tombstone threat the valve
+// used to cover is handled structurally by the write path, which never
+// clobbers an existing non-empty vuln_funcs row (see
+// TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow).
+func TestCVESyncJob_FetchOSVVulnFuncs_Mass404WritesTombstonesAndWarns(t *testing.T) {
 	zeroOSVFetchDelay(t)
 	logs := captureSlog(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound) // misconfigured mirror: 404 for every path
+		w.WriteHeader(http.StatusNotFound) // every path 404s: outage OR a genuine all-404 backlog
 	}))
 	defer server.Close()
 
@@ -1222,25 +1273,34 @@ func TestCVESyncJob_FetchOSVVulnFuncs_Mass404SuppressesTombstones(t *testing.T) 
 	}
 	out := j.fetchOSVVulnFuncs(context.Background(), ids)
 
-	if len(out) != 0 {
-		t.Fatalf("all-404 tick produced %d outcomes, want 0 (tombstones suppressed)", len(out))
+	if len(out) != 25 {
+		t.Fatalf("all-404 tick produced %d outcomes, want 25 (the negative cache must fill even on all-404 ticks — suppression = R1 starvation)", len(out))
+	}
+	for _, id := range ids {
+		o, ok := out[id]
+		if !ok {
+			t.Fatalf("%s missing from outcomes, want a tombstone outcome", id)
+		}
+		if len(o.symbols) != 0 {
+			t.Errorf("%s outcome symbols = %v, want empty (tombstone)", id, o.symbols)
+		}
 	}
 	got := logs.String()
-	if n := strings.Count(got, osvMass404SuppressWarnMsg); n != 1 {
-		t.Errorf("mass-404 suppression Warn logged %d times, want exactly 1 (logs: %s)", n, got)
+	if n := strings.Count(got, osvMass404WarnMsg); n != 1 {
+		t.Errorf("mass-404 observability Warn logged %d times, want exactly 1 (logs: %s)", n, got)
 	}
 	if !strings.Contains(got, "level=WARN") ||
 		!strings.Contains(got, "fetches=25") ||
 		!strings.Contains(got, "not_found=25") {
-		t.Errorf("suppression Warn must carry level=WARN + fetches/not_found counts, got: %s", got)
+		t.Errorf("observability Warn must carry level=WARN + fetches/not_found counts, got: %s", got)
 	}
 }
 
 // TestCVESyncJob_FetchOSVVulnFuncs_PartialMass404StillTombstones is the
-// finding 2 valve's normal-operation guard: with ANY non-404 response in the
-// tick (24× 404 + 1 resolved record here) the definitive-404 rate is below
-// 100%, so 404s tombstone exactly as before (M43 Phase D R2 finding 1
-// semantics) and no suppression Warn fires.
+// all-404 Warn's normal-operation guard (M43 Phase D R4): with ANY non-404
+// response in the tick (24× 404 + 1 resolved record here) the not-found rate
+// is below 100%, so 404s tombstone exactly as before (M43 Phase D R2
+// finding 1 semantics) and the anomaly Warn does not fire.
 func TestCVESyncJob_FetchOSVVulnFuncs_PartialMass404StillTombstones(t *testing.T) {
 	zeroOSVFetchDelay(t)
 	logs := captureSlog(t)
@@ -1280,25 +1340,25 @@ func TestCVESyncJob_FetchOSVVulnFuncs_PartialMass404StillTombstones(t *testing.T
 	if o := out["CVE-2025-1111"]; len(o.symbols) == 0 {
 		t.Error("resolved CVE lost its symbols")
 	}
-	if strings.Contains(logs.String(), osvMass404SuppressWarnMsg) {
-		t.Error("suppression Warn fired on a below-100%-rate tick, want none")
+	if strings.Contains(logs.String(), osvMass404WarnMsg) {
+		t.Error("mass-404 anomaly Warn fired on a below-100%-rate tick, want none")
 	}
 }
 
 // TestCVESyncJob_SyncOSVVulnFuncs_OfflineClientOnlineJobDrift pins the M43
-// Phase D R3 finding 3 drift combination: the JOB is online (j.offline =
-// false, so the existing guard does not trip) but the OSV CLIENT has been
-// flipped offline — its GetVulnerability short-circuits to (nil, nil), which
-// is byte-identical to a real 404, so pre-fix every candidate was
-// mass-tombstoned. The tick-level valve reclassifies the all-(nil, nil) tick
-// as transient: zero HTTP requests, zero tombstone rows (no write-pass tx at
-// all), one Warn; candidates stay stale and retry next tick. The existing
+// Phase D R4 offline-drift guard (which replaces the R3 valve's drift role):
+// the JOB is online (j.offline = false, so the existing guard does not trip)
+// but the OSV CLIENT has been flipped offline — its GetVulnerability
+// short-circuits to (nil, nil), byte-identical to a real 404, so letting the
+// pass run would mass-tombstone the entire candidate set. R4 disambiguates
+// STRUCTURALLY via the client.IsOffline accessor: syncOSVVulnFuncs skips the
+// whole pass up front — no candidate enumeration (the nil *sql.DB proves
+// zero DB access), no HTTP, no tombstones — with exactly one skip Warn.
+// Candidates stay stale and retry once the drift is fixed. The existing
 // j.offline guard (Offline_NoCalls test) is unchanged.
 func TestCVESyncJob_SyncOSVVulnFuncs_OfflineClientOnlineJobDrift(t *testing.T) {
-	mockp, j, fake, setOSV := newOSVSyncMockDB(t)
-	mock := *mockp
+	zeroOSVFetchDelay(t)
 	logs := captureSlog(t)
-	tenantID := uuid.New()
 
 	hit := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1306,36 +1366,254 @@ func TestCVESyncJob_SyncOSVVulnFuncs_OfflineClientOnlineJobDrift(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
-	setOSV(server.URL)
+
+	fake := &fakeAdvisoryExcerptUpserter{}
+	// nil *sql.DB: the drift skip must fire BEFORE Pass A's candidate
+	// enumeration ever touches the pool.
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, fake, "", false)
+	j.WithOSVBaseURL(server.URL)
 	j.osv.WithOffline(true) // the drift: offline client under an online job
 
-	pairs := make([][2]string, 0, 25)
-	for i := 0; i < 25; i++ {
-		pairs = append(pairs, [2]string{
-			fmt.Sprintf("CVE-2025-8%03d", i),
-			fmt.Sprintf("pkg:golang/github.com/drift/mod%d@v1.0.0", i),
-		})
-	}
-	// ONLY the read pass: ExpectationsWereMet fails if a write-pass BEGIN
-	// happens.
-	mock.ExpectBegin()
-	expectSetLocal(mock, tenantID)
-	expectOSVCandidateQuery(mock, osvCandidateRows(pairs...))
-	mock.ExpectCommit()
+	j.syncOSVVulnFuncs(context.Background(), []uuid.UUID{uuid.New()})
 
-	j.syncOSVVulnFuncs(context.Background(), []uuid.UUID{tenantID})
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet sqlmock expectations: %v", err)
-	}
 	if hit {
-		t.Error("offline OSV client must not make any HTTP request")
+		t.Error("offline-drifted client must not make any HTTP request")
 	}
 	if fake.callCount() != 0 {
 		t.Fatalf("Upsert calls = %d, want 0 (offline-client drift must not tombstone)", fake.callCount())
 	}
-	if !strings.Contains(logs.String(), osvMass404SuppressWarnMsg) {
-		t.Errorf("drift tick must emit the mass-404 suppression Warn, logs: %s", logs.String())
+	if n := strings.Count(logs.String(), osvOfflineDriftSkipWarnMsg); n != 1 {
+		t.Errorf("drift skip Warn logged %d times, want exactly 1 (logs: %s)", n, logs.String())
+	}
+
+	// Defence-in-depth: even a DIRECT fetch loop consults IsOffline — zero
+	// lookups, zero outcomes — so nothing downstream can tombstone off the
+	// client's (nil, nil) short-circuit regardless of the caller.
+	out := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-1111"})
+	if hit {
+		t.Error("offline-drifted client must not make any HTTP request (direct fetch)")
+	}
+	if len(out) != 0 {
+		t.Errorf("direct fetch resolved %d CVEs, want 0", len(out))
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow pins the
+// M43 Phase D R4 structural replacement for the R3 suppression valve: before
+// writing a TOMBSTONE (definitive negative), the write pass reads the
+// existing (tenant, cve, source='osv') row via GetBySource ON THE CHUNK TX
+// and, when that row carries non-empty vuln_funcs, preserves the row's data
+// wholesale and refreshes ONLY fetched_at — so a mirror misconfiguration
+// mass-404-ing every path can never empty previously-positive rows, no
+// matter how many ticks it survives. Decision table:
+//   - 404 vs existing positive row  → data preserved, fetched_at refreshed
+//   - 404 vs existing tombstone     → stays an empty tombstone
+//   - 404 vs no existing row        → new empty tombstone
+//   - positive fetch                → new data replaces the row unconditionally
+//     (no pre-write read: fresh symbols are authoritative)
+func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-0404", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-0404", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["a.B"]`), RawExcerpt: "kept excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-0405", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-0405", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`[]`), FetchedAt: &stale, // existing tombstone
+		},
+		excerptStoreKey(tenantID, "CVE-2025-0407", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-0407", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["old.Sym"]`), RawExcerpt: "old excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	// One write chunk: BEGIN, tenant GUC, four fake-intercepted read/upserts,
+	// COMMIT. Any extra SQL fails ExpectationsWereMet.
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	outcomes := map[string]osvVulnFuncsOutcome{
+		"CVE-2025-0404": {},                                             // 404 vs positive row
+		"CVE-2025-0405": {},                                             // 404 vs existing tombstone
+		"CVE-2025-0406": {},                                             // 404 vs no row
+		"CVE-2025-0407": {symbols: []string{"x.New"}, excerpt: "fresh"}, // positive vs positive row
+	}
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{
+			"CVE-2025-0404", "CVE-2025-0405", "CVE-2025-0406", "CVE-2025-0407",
+		}}},
+		outcomes)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 4 || tenants != 1 {
+		t.Fatalf("(rows, tenants) = (%d, %d), want (4, 1)", rows, tenants)
+	}
+	if store.callCount() != 4 {
+		t.Fatalf("Upsert calls = %d, want 4", store.callCount())
+	}
+	byCVE := map[string]repository.AdvisoryExcerpt{}
+	for _, c := range store.calls {
+		byCVE[c.CVEID] = c
+	}
+
+	kept := byCVE["CVE-2025-0404"]
+	var funcs []string
+	if err := json.Unmarshal(kept.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "a.B" {
+		t.Errorf("preserved VulnFuncs = %s (err %v), want [\"a.B\"] (a tombstone must not clobber a positive row)", kept.VulnFuncs, err)
+	}
+	if kept.RawExcerpt != "kept excerpt" {
+		t.Errorf("preserved RawExcerpt = %q, want %q", kept.RawExcerpt, "kept excerpt")
+	}
+	if kept.FetchedAt == nil {
+		t.Fatal("preserved row FetchedAt nil, want refreshed (the negative cache keys on it)")
+	}
+	if !kept.FetchedAt.After(stale.Add(time.Hour)) {
+		t.Errorf("preserved row FetchedAt = %v, want refreshed past the stale stamp %v", kept.FetchedAt, stale)
+	}
+
+	if tomb := byCVE["CVE-2025-0405"]; len(tomb.VulnFuncs) != 0 || tomb.FetchedAt == nil {
+		t.Errorf("existing-tombstone row = (%s, %v), want empty VulnFuncs + refreshed FetchedAt", tomb.VulnFuncs, tomb.FetchedAt)
+	}
+	if tomb := byCVE["CVE-2025-0406"]; len(tomb.VulnFuncs) != 0 || tomb.FetchedAt == nil {
+		t.Errorf("no-existing-row tombstone = (%s, %v), want empty VulnFuncs + stamped FetchedAt", tomb.VulnFuncs, tomb.FetchedAt)
+	}
+
+	pos := byCVE["CVE-2025-0407"]
+	if err := json.Unmarshal(pos.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "x.New" {
+		t.Errorf("positive VulnFuncs = %s (err %v), want [\"x.New\"] (fresh symbols are authoritative)", pos.VulnFuncs, err)
+	}
+	if pos.RawExcerpt != "fresh" {
+		t.Errorf("positive RawExcerpt = %q, want %q", pos.RawExcerpt, "fresh")
+	}
+
+	// Only the three tombstone writes consult GetBySource; the positive write
+	// never reads (its data is authoritative), keeping the added per-row read
+	// cost proportional to the tick's tombstone count.
+	wantKeys := []string{
+		excerptStoreKey(tenantID, "CVE-2025-0404", osvVulnFuncsSource),
+		excerptStoreKey(tenantID, "CVE-2025-0405", osvVulnFuncsSource),
+		excerptStoreKey(tenantID, "CVE-2025-0406", osvVulnFuncsSource),
+	}
+	if len(store.getKeys) != len(wantKeys) {
+		t.Fatalf("GetBySource calls = %v, want %v (tombstones only)", store.getKeys, wantKeys)
+	}
+	for i := range wantKeys {
+		if store.getKeys[i] != wantKeys[i] {
+			t.Errorf("GetBySource call %d = %q, want %q", i, store.getKeys[i], wantKeys[i])
+		}
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_PreWriteReadErrorAbortsChunk pins the R4
+// clobber guard's failure posture: the pre-write GetBySource runs INSIDE the
+// chunk tx (with real PG an error there has already aborted the tx
+// server-side), so a read failure aborts the chunk exactly like an Upsert
+// failure — rollback, ZERO counted rows (the caller's totals must match
+// durable rows), warn + continue at the caller. The rows self-heal next tick
+// via the freshness window.
+func TestCVESyncJob_WriteOSVVulnFuncs_PreWriteReadErrorAbortsChunk(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+
+	store := &fakeAdvisoryExcerptStore{getErr: errors.New("simulated aborted-tx read failure")}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectRollback()
+
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{"CVE-2025-0404"}}},
+		map[string]osvVulnFuncsOutcome{"CVE-2025-0404": {}})
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 0 || tenants != 0 {
+		t.Errorf("(rows, tenants) = (%d, %d), want (0, 0) on chunk abort", rows, tenants)
+	}
+	if store.callCount() != 0 {
+		t.Errorf("Upsert calls = %d, want 0 (the read failed before any write)", store.callCount())
+	}
+}
+
+// TestOSVImportPathWithinModule_SimdAllowed pins the M43 Phase D R4 Medium
+// fix (Codex 42nd, web-verified against pkg.go.dev): go1.26.5 ships the new
+// top-level standard-library package "simd" (simd/archsimd), so Go vulndb
+// stdlib records citing it must pass the allowlist instead of being
+// conservatively dropped to import-level reachability.
+func TestOSVImportPathWithinModule_SimdAllowed(t *testing.T) {
+	if !osvImportPathWithinModule("stdlib", "simd/archsimd") {
+		t.Error(`osvImportPathWithinModule("stdlib", "simd/archsimd") = false, want true (go1.26.5 std package)`)
+	}
+	if !osvImportPathWithinModule("stdlib", "simd") {
+		t.Error(`osvImportPathWithinModule("stdlib", "simd") = false, want true`)
+	}
+}
+
+// TestGoStdlibTopLevelPackages_ToolchainDrift executes `go list std` with
+// the test environment's toolchain and asserts the toolchain's top-level
+// package segments (with "internal" / "vendor" / "cmd" excluded — not
+// importable by user code / toolchain-only, per the allowlist docstring) are
+// a SUBSET of goStdlibTopLevelPackages: a Go release adding a new top-level
+// std package fails this test and forces the allowlist to follow (M43 Phase
+// D R4 — "simd" was exactly such a miss). The reverse direction is
+// deliberately permitted: the allowlist may run AHEAD of older toolchains
+// (e.g. "simd" before go1.26.5) without failing on them.
+func TestGoStdlibTopLevelPackages_ToolchainDrift(t *testing.T) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go binary not on PATH; toolchain drift check skipped")
+	}
+	out, err := exec.Command(goBin, "list", "std").Output()
+	if err != nil {
+		t.Skipf("`go list std` failed (%v); toolchain drift check skipped", err)
+	}
+
+	seen := make(map[string]struct{})
+	var missing []string
+	for _, line := range strings.Split(string(out), "\n") {
+		pkg := strings.TrimSpace(line)
+		if pkg == "" {
+			continue
+		}
+		first := pkg
+		if i := strings.IndexByte(pkg, '/'); i >= 0 {
+			first = pkg[:i]
+		}
+		if first == "internal" || first == "vendor" || first == "cmd" {
+			continue
+		}
+		if _, dup := seen[first]; dup {
+			continue
+		}
+		seen[first] = struct{}{}
+		if _, ok := goStdlibTopLevelPackages[first]; !ok {
+			missing = append(missing, first)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("`go list std` produced no top-level segments; unexpected empty output")
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Errorf("toolchain std packages missing from goStdlibTopLevelPackages (add them to cve_sync.go): %v", missing)
 	}
 }
 

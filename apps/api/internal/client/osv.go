@@ -70,6 +70,17 @@ func (c *OSVClient) WithOffline(offline bool) *OSVClient {
 	return c
 }
 
+// IsOffline reports whether the client is in air-gapped degrade mode (M43
+// Phase D R4). Callers that schedule their own network passes (e.g.
+// scheduler.CVESyncJob's OSV vuln_funcs pass) consult it up front so a
+// "client offline / caller online" configuration drift skips the pass
+// entirely instead of misreading the offline short-circuit's (nil, nil) —
+// byte-identical to a real 404 — as a definitive negative for every lookup.
+// Pure accessor: no fetch entry point changes behaviour.
+func (c *OSVClient) IsOffline() bool {
+	return c.offline
+}
+
 // OSVVulnerability represents an OSV vulnerability response
 type OSVVulnerability struct {
 	ID        string        `json:"id"`
