@@ -1509,6 +1509,14 @@ include prose outside the JSON. Do not invent evidence — every
   ]
 }
 
+Weigh reachability evidence by its precision. A symbol-level finding
+(status="reachable" whose evidence shows a vulnerable symbol actually
+referenced from the project's source) is a materially stronger signal
+than import-level presence alone. status="import_only" means the
+vulnerable module exists as a dependency but no call into a vulnerable
+symbol was confirmed — on its own it is NOT sufficient justification
+for state="not_affected".
+
 When evidence is thin or contradictory, prefer state="under_investigation"
 with confidence reflecting your uncertainty. Never set state="not_affected"
 without at least one evidence pointer.`
@@ -1563,6 +1571,9 @@ func BuildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []Reachabi
 				fmt.Fprintf(&b, "      evidence: %s\n", truncate(string(rr.Evidence), 400))
 			}
 		}
+		// M43 F468: status legend so the model weighs symbol-level hits
+		// above import-only presence (prompt_hash changes with this edit).
+		b.WriteString("  (Reading these rows: status=reachable backed by a symbol hit in its evidence means a vulnerable symbol is actually referenced by the project. status=import_only means the module is present as a dependency but no vulnerable-symbol call was confirmed.)\n")
 	}
 	b.WriteString("\nProduce the VEX JSON now.")
 	return b.String()
