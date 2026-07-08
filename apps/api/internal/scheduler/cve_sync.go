@@ -1326,18 +1326,26 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 // abort) write nothing and retry next tick; definitive negatives (404 / no
 // symbols) ALWAYS write a tombstone row (M43 Phase D R4 — the R3 valve that
 // suppressed tombstones on all-404 ticks re-introduced the R1 starvation for
-// a legitimate all-404 backlog and was removed, Codex 42nd [High]). Three
+// a legitimate all-404 backlog and was removed, Codex 42nd [High]). Four
 // STRUCTURAL guards replace the valve's threat coverage:
-//   - NON-AUTHORITATIVE empties (goID == "": true 404, alias 404, skeletal
-//     `{}` body, non-Go record with no GO- alias — M43 Phase D R6 authority
-//     rule) never clobber an existing non-empty vuln_funcs row — the write
-//     path preserves the row's data wholesale and refreshes only fetched_at
-//     (writeOSVVulnFuncsChunk), so neither a misconfigured mirror 404-ing
-//     every path nor a partial mirror missing the Go vulndb side can empty
-//     previously-positive rows. AUTHORITATIVE empties (goID != "": a
-//     retrieved GO- record body with zero symbols) DO overwrite — an
-//     upstream retraction must propagate (M43 Phase D R5/R6) — and destroying
-//     a positive row that way emits one retraction Warn;
+//   - Record LINKAGE (M43 Phase D R7, round 6 High finding): a retrieved
+//     body is accepted only when it vouches for the lookup — its own ID is
+//     the requested id, or its aliases name the CVE (osvRecordLinked).
+//     Unlinked bodies (e.g. one canned GO- record served for every path)
+//     are rejected wholesale — symbols, excerpt, aliases, and clobber
+//     authority all unused — with one osvUnlinkedRecordWarnMsg Warn, and
+//     the CVE tombstones preserve-side;
+//   - NON-AUTHORITATIVE empties (goID == "": true 404, alias 404, linked
+//     non-GO body with no usable GO- alias, unlinked/skeletal body — M43
+//     Phase D R6 authority rule + R7 linkage) never clobber an existing
+//     non-empty vuln_funcs row — the write path preserves the row's data
+//     wholesale and refreshes only fetched_at (writeOSVVulnFuncsChunk), so
+//     neither a misconfigured mirror 404-ing every path nor a partial
+//     mirror missing the Go vulndb side can empty previously-positive rows.
+//     AUTHORITATIVE empties (goID != "": a retrieved LINKED GO- record body
+//     with zero symbols) DO overwrite — an upstream retraction must
+//     propagate (M43 Phase D R5/R6) — and destroying a positive row that
+//     way emits one retraction Warn (post-COMMIT, M43 Phase D R7);
 //   - an ANOMALOUS mass-404 tick (>= osvVulnFuncsMass404WarnThreshold
 //     definitive 404s, zero record bodies retrieved — R6 predicate) writes
 //     its tombstones with a BACKDATED fetched_at
@@ -1349,10 +1357,13 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 //     tombstones.
 //
 // A mass-404 tick (same predicate as the anomaly determination) additionally
-// emits ONE observability Warn (no suppression). The pass never returns an
-// error and never disturbs the core CVE sync; abandoned work self-heals on
-// the next tick via the freshness window and the (tenant_id, cve_id, source)
-// idempotent upsert.
+// emits ONE observability Warn (no suppression), and a mass-SKELETAL tick —
+// threshold-many record bodies retrieved with zero GO- identities and zero
+// symbols, the shape the mass-404 predicate cannot see — emits one
+// osvMassSkeletalWarnMsg Warn of its own (Warn-only, normal freshness; M43
+// Phase D R7). The pass never returns an error and never disturbs the core
+// CVE sync; abandoned work self-heals on the next tick via the freshness
+// window and the (tenant_id, cve_id, source) idempotent upsert.
 // ============================================================================
 
 const (
@@ -1486,15 +1497,18 @@ const osvOfflineDriftSkipWarnMsg = "scheduler: OSV client is offline but the CVE
 
 // osvTombstonePreserveInfoMsg is the exact Info line emitted when a
 // NON-AUTHORITATIVE empty outcome (goID == "" — a true 404, an alias 404, a
-// skeletal `200 {}` body, or a non-Go record with no GO- alias; M43 Phase D
-// R6 widened the set from R5's true-404-only) lands on an existing POSITIVE
-// (non-empty vuln_funcs) row and the R4 clobber guard preserves it: OSV
-// yielded nothing authoritative for a CVE whose stored row still carries
-// symbols — a divergence operators may want to reconcile (authoritative
-// withdrawals propagate ONLY via a GO- record body's empty overwrite, so a
-// persistent divergence here means the stored symbols have no verifiable
-// upstream source anymore). A const so the test contract pins operators'
-// grep target verbatim.
+// linked non-Go record with no usable GO- alias, or an UNLINKED body
+// rejected wholesale by the R7 linkage rule, skeletal `{}` included; M43
+// Phase D R6 widened the set from R5's true-404-only, R7 folded in the
+// unlinked shapes) lands on an existing POSITIVE (non-empty vuln_funcs) row
+// and the R4 clobber guard preserves it: OSV yielded nothing authoritative
+// for a CVE whose stored row still carries symbols — a divergence operators
+// may want to reconcile (authoritative withdrawals propagate ONLY via a
+// linked GO- record body's empty overwrite, so a persistent divergence here
+// means the stored symbols have no verifiable upstream source anymore).
+// Emitted only after the chunk's COMMIT succeeds (M43 Phase D R7, round 6
+// finding 2 — the line describes a write, so it must describe a durable
+// one). A const so the test contract pins operators' grep target verbatim.
 const osvTombstonePreserveInfoMsg = "scheduler: OSV yielded no authoritative Go vulndb record for a CVE whose stored row carries non-empty vuln_funcs; preserving row data, refreshing fetched_at only (M43 Phase D R5)"
 
 // osvRetractionOverwriteWarnMsg is the exact Warn emitted when an
@@ -1509,9 +1523,46 @@ const osvTombstonePreserveInfoMsg = "scheduler: OSV yielded no authoritative Go 
 // actual positive-row overwrites — an authoritative empty landing on an
 // already-empty or absent row (routine whole-module advisories without symbol
 // lists re-tombstoning every window) stays silent, so the Warn keeps its
-// mass-wipe signal instead of drowning in weekly refresh noise. A const so
-// the test contract pins operators' grep target verbatim.
+// mass-wipe signal instead of drowning in weekly refresh noise. Emitted only
+// after the chunk's COMMIT succeeds (M43 Phase D R7, round 6 finding 2 — a
+// rolled-back overwrite is a false wipe alarm). A const so the test contract
+// pins operators' grep target verbatim.
 const osvRetractionOverwriteWarnMsg = "scheduler: authoritative Go vulndb retraction is overwriting a previously-positive vuln_funcs row (GO- record body with zero symbols); if this fires en masse, verify the OSV mirror serves complete Go vulndb bodies (M43 Phase D R6)"
+
+// osvUnlinkedRecordWarnMsg is the exact Warn emitted when a lookup RETRIEVES
+// a record body that fails the R7 linkage rule (M43 Phase D R7, round 6 High
+// finding): the body neither identifies as the id the lookup requested nor
+// lists the CVE under determination among its aliases. Every real OSV
+// response satisfies the rule (GET /vulns/{id} returns the record for that
+// id, or an alias home that names it), so a failing body is crafted or
+// mis-routed mirror output — e.g. one canned GO- record served for every
+// path, which pre-R7 could either wipe positive rows via the
+// authoritative-empty path (canned body without symbols) or inject one
+// unrelated advisory's selectors into every tenant row (canned body WITH
+// symbols). The record is rejected WHOLESALE — symbols unused, excerpt
+// unused, aliases not followed, no clobber authority — and the CVE
+// tombstones preserve-side. Attrs are cve_id / got_id / requested_id (the
+// fetch stage has no tenant). A const so the test contract pins operators'
+// grep target verbatim.
+const osvUnlinkedRecordWarnMsg = "scheduler: OSV lookup returned a record body that neither identifies as the requested id nor lists the CVE among its aliases; rejecting the record wholesale (symbols and excerpt unused, no clobber authority) and tombstoning preserve-side — possible crafted or mis-routed OSV mirror response (M43 Phase D R7)"
+
+// osvMassSkeletalWarnMsg is the exact Warn emitted when a tick's lookups
+// both reach the mass threshold (osvVulnFuncsMass404WarnThreshold, shared
+// with the mass-404 determination) in fetches AND in retrieved record
+// bodies, yet not ONE outcome carries a Go vulndb identity (goID) or
+// extractable symbols (M43 Phase D R7, round 6 finding 4). The mass-404
+// predicate is blind to this shape: a stub mirror answering every path
+// `200 {}` (or canned junk bodies) keeps notFound at 0 and recordsRetrieved
+// climbing, so no anomaly fires even though the tick determined nothing.
+// Warn-ONLY — deliberately NO anomalous fetched_at backdate — because the
+// same counters describe a LEGITIMATE backlog of Go-ecosystem CVEs whose
+// advisories are GHSA/CVE-home-only: a Go-ecosystem candidate with no GO-
+// record in OSV is a normal, permanent state (the alias follow-up 404s, or
+// there is no GO- alias at all), and backdating would re-spend the fetch cap
+// on that backlog every 2–3 days forever. The R4 clobber guard and the R7
+// linkage rule already bound the damage of the hostile reading. A const so
+// the test contract pins operators' grep target verbatim.
+const osvMassSkeletalWarnMsg = "scheduler: OSV lookups this tick retrieved record bodies at the mass threshold yet yielded zero Go vulndb identities and zero symbols; possible stub/skeletal mirror serving empty or canned bodies — tombstones written with NORMAL freshness (a legitimate GHSA-home-only backlog looks identical, so no backdated retry) (M43 Phase D R7)"
 
 // osvVulnFuncsFetchCap is the effective per-tick fetch cap. Production
 // always uses the default; tests may temporarily override (defer-restore)
@@ -1583,27 +1634,34 @@ type osvVulnFuncsOutcome struct {
 	// finding) is the clobber-authority token for empty outcomes: the ID of
 	// the Go vulndb record BODY this determination came from, set exactly
 	// when a retrieved record's own ID field carries the "GO-" prefix (main
-	// lookup or alias follow-up), "" otherwise. R5's recordFound stood up
-	// whenever the MAIN lookup returned ANY non-nil record, which promoted
-	// three non-authoritative shapes to authoritative empties: (a) a
-	// GHSA/CVE home record whose GO- alias fetch 404s (partial mirror), (b)
-	// a skeletal `200 {}` body (ID empty), (c) a non-Go record with no GO-
-	// alias at all — each could silently wipe existing positive rows every
-	// freshness window. R6 keys the authority on the GO- record body itself,
-	// splitting the DEFINITIVE-negative shapes as:
-	//   - symbols empty, goID != "": an AUTHORITATIVE empty — a Go vulndb
-	//     body was retrieved and yields no extractable symbols (upstream
-	//     withdrew or corrected the advisory's symbol list). The write path
-	//     propagates it: the row is overwritten wholesale (empty vuln_funcs
-	//     plus the record's excerpt), and overwriting a previously-positive
-	//     row emits osvRetractionOverwriteWarnMsg.
+	// lookup or alias follow-up) AND the body passed the R7 linkage rule
+	// (osvRecordLinked — it identifies as the requested id or aliases the
+	// CVE; round 6 High finding: without linkage, one canned GO- record
+	// served for every path either wiped positive rows via authoritative
+	// emptiness or injected its symbols into every tenant row), "" otherwise.
+	// R5's recordFound stood up whenever the MAIN lookup returned ANY
+	// non-nil record, which promoted three non-authoritative shapes to
+	// authoritative empties: (a) a GHSA/CVE home record whose GO- alias
+	// fetch 404s (partial mirror), (b) a skeletal `200 {}` body (ID empty),
+	// (c) a non-Go record with no GO- alias at all — each could silently
+	// wipe existing positive rows every freshness window. R6 keys the
+	// authority on the GO- record body itself, splitting the
+	// DEFINITIVE-negative shapes as:
+	//   - symbols empty, goID != "": an AUTHORITATIVE empty — a linked Go
+	//     vulndb body was retrieved and yields no extractable symbols
+	//     (upstream withdrew or corrected the advisory's symbol list). The
+	//     write path propagates it: the row is overwritten wholesale (empty
+	//     vuln_funcs plus the record's excerpt), and overwriting a
+	//     previously-positive row emits osvRetractionOverwriteWarnMsg.
 	//   - symbols empty, goID == "": a PRESERVE-side tombstone (true 404,
-	//     alias 404, skeletal body, or non-Go record without a GO- alias).
+	//     alias 404, linked non-Go record without a usable GO- alias, or an
+	//     UNLINKED body rejected wholesale by R7 — skeletal `{}` included).
 	//     The write path treats it exactly like a true 404: it must never
 	//     clobber an existing positive row — the row's data is preserved and
 	//     only fetched_at refreshes (the R4 clobber guard).
 	// Positive outcomes (symbols non-empty) replace the row unconditionally
-	// either way; their goID is informational only.
+	// either way; their goID is informational only. Since R7 a positive can
+	// only come from a LINKED body — unlinked symbols are never extracted.
 	goID string
 }
 
@@ -1815,25 +1873,35 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // Go ecosystem_specific.imports), ONE follow-up lookup of the first "GO-"
 // alias is attempted.
 //
+// Record LINKAGE (M43 Phase D R7, round 6 High finding): every retrieved
+// body must vouch for the lookup that produced it before ANY field is used —
+// its own ID is the requested id (the CVE on the main lookup, the GO- alias
+// on the follow-up), or its aliases name the CVE under determination
+// (osvRecordLinked). An unlinked body is rejected wholesale (symbols /
+// excerpt / aliases / clobber authority all unused) with one
+// osvUnlinkedRecordWarnMsg Warn, and the CVE tombstones preserve-side.
+//
 // Outcome classification (M43 Phase D R2 finding 1; R5 split the negative
-// shape; R6 re-keyed the split on the GO- record BODY — see
-// osvVulnFuncsOutcome.goID):
-//   - DEFINITIVE positive — symbols extracted: outcome with symbols. Replaces
-//     the row unconditionally.
-//   - DEFINITIVE negative, AUTHORITATIVE empty — a record whose own ID field
-//     is "GO-"-prefixed (main lookup or alias follow-up) was retrieved and
-//     yields no symbols: outcome with EMPTY symbols and goID set. The write
-//     path propagates it as an upstream retraction, overwriting the row
-//     wholesale (and Warn-ing when that destroys a positive row).
-//   - DEFINITIVE negative, PRESERVE-side — no GO- record body was retrieved:
-//     a true 404 (main lookup nil, nil), a GO- alias follow-up that 404s
-//     (partial mirror), a skeletal `200 {}` body, or a non-Go record with no
-//     GO- alias. Outcome with EMPTY symbols and goID == "". A tombstone,
-//     persisted so the freshness window negative-caches the CVE instead of
-//     starving the fetch cap every tick; the write path's clobber guard
-//     preserves any existing positive row. (R5 classified the alias-404 /
-//     skeletal / no-alias shapes as authoritative — the round 5 High
-//     finding: partial mirrors silently wiped positive rows.)
+// shape; R6 re-keyed the split on the GO- record BODY; R7 gated everything
+// on linkage — see osvVulnFuncsOutcome.goID):
+//   - DEFINITIVE positive — symbols extracted from a LINKED body: outcome
+//     with symbols. Replaces the row unconditionally.
+//   - DEFINITIVE negative, AUTHORITATIVE empty — a LINKED record whose own
+//     ID field is "GO-"-prefixed (main lookup or alias follow-up) was
+//     retrieved and yields no symbols: outcome with EMPTY symbols and goID
+//     set. The write path propagates it as an upstream retraction,
+//     overwriting the row wholesale (and Warn-ing when that destroys a
+//     positive row).
+//   - DEFINITIVE negative, PRESERVE-side — no linked GO- record body was
+//     retrieved: a true 404 (main lookup nil, nil), a GO- alias follow-up
+//     that 404s (partial mirror), a linked non-Go body with no usable GO-
+//     alias, or an UNLINKED body rejected by R7 (skeletal `200 {}` and
+//     canned/mis-routed records). Outcome with EMPTY symbols and goID == "".
+//     A tombstone, persisted so the freshness window negative-caches the CVE
+//     instead of starving the fetch cap every tick; the write path's clobber
+//     guard preserves any existing positive row. (R5 classified the
+//     alias-404 / skeletal / no-alias shapes as authoritative — the round 5
+//     High finding: partial mirrors silently wiped positive rows.)
 //   - UNDETERMINED — transient fetch failure (network error / non-404 HTTP
 //     status / ctx abort) or an alias follow-up skipped by the fetch cap: NO
 //     outcome. Nothing is written; the CVE stays stale and retries next tick.
@@ -1845,7 +1913,11 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // but the tombstones are NOT suppressed (suppression re-introduced the R1
 // starvation for legitimate all-404 backlogs; see the threshold const for
 // the full rationale, the R6 predicate trade-off, and the structural guards
-// that cover the valve's original threats).
+// that cover the valve's original threats). A mass-SKELETAL tick — at least
+// the same threshold of fetches AND retrieved bodies with zero GO-
+// identities and zero symbols, the determined-nothing shape the mass-404
+// predicate cannot see — additionally draws one osvMassSkeletalWarnMsg Warn
+// (Warn-only, normal freshness; M43 Phase D R7, round 6 finding 4).
 //
 // Bounds: ≤ osvVulnFuncsFetchCap total HTTP requests per call (main +
 // follow-ups combined), osvVulnFuncsFetchDelay ctx-aware politeness pause
@@ -1885,6 +1957,14 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 	// guarded at both entry points.)
 	notFound := 0
 	recordsRetrieved := 0
+	// symbolsSeen / goIDsSeen count DEFINITIVE outcomes carrying extracted
+	// symbols / a GO- record-body identity this tick (M43 Phase D R7, round 6
+	// finding 4): together with fetches and recordsRetrieved they feed the
+	// mass-skeletal determination below — a tick that retrieves plenty of
+	// bodies yet determines nothing is the stub-mirror signature the mass-404
+	// predicate cannot see (notFound stays 0).
+	symbolsSeen := 0
+	goIDsSeen := 0
 
 	// fetch performs one capped, delayed lookup. ok=false marks a TRANSIENT
 	// failure (network/5xx/timeout/ctx abort — logged): the caller must NOT
@@ -1935,12 +2015,36 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 			out[cveID] = osvVulnFuncsOutcome{}
 			continue
 		}
+		// Record linkage verification (M43 Phase D R7, round 6 High finding):
+		// the GO- prefix check below trusts the BODY to identify itself, but
+		// nothing before R7 tied the body to the CVE the lookup asked about.
+		// A crafted or mis-routed mirror answering every /vulns/{cve} path
+		// with ONE canned GO- record could therefore (a) wipe positive rows
+		// tick over tick via the authoritative-empty path when the canned
+		// body carries no symbols, or (b) inject one unrelated advisory's
+		// selectors into every tenant row when it does. Accept the body only
+		// when it vouches for the request — its own ID is the requested CVE
+		// id, or its aliases name the CVE. Anything else is rejected
+		// WHOLESALE: symbols unused, excerpt unused, aliases not followed
+		// (an unlinked record's alias list is equally untrusted), no clobber
+		// authority. The CVE still reaches a definitive outcome — a
+		// PRESERVE-side empty tombstone (goID == "", so the write path's
+		// clobber guard keeps existing positive rows) — with one operator
+		// Warn per rejected lookup.
+		if !osvRecordLinked(vuln, cveID, cveID) {
+			slog.Warn(osvUnlinkedRecordWarnMsg,
+				"cve_id", cveID, "got_id", vuln.ID, "requested_id", cveID)
+			out[cveID] = osvVulnFuncsOutcome{}
+			continue
+		}
 		symbols := extractOSVGoVulnFuncs(vuln)
 		excerpt := osvExcerptText(vuln)
 		// goID is the clobber-authority token (M43 Phase D R6): set exactly
 		// when a retrieved record BODY identifies itself as a Go vulndb
 		// record via its own "GO-"-prefixed ID field. Only such a body may
 		// authorise an empty-symbols outcome to overwrite positive rows.
+		// Since R7 the body must additionally have passed the linkage check
+		// above (or the follow-up's below) before its ID is consulted.
 		goID := ""
 		if strings.HasPrefix(vuln.ID, "GO-") {
 			goID = vuln.ID
@@ -1960,7 +2064,21 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 				if !aok {
 					continue // transient alias failure — no tombstone
 				}
-				if av != nil {
+				switch {
+				case av == nil:
+					// Alias 404 — see the fall-through comment below.
+				case !osvRecordLinked(av, alias, cveID):
+					// M43 Phase D R7 linkage on the follow-up: the body is
+					// neither the record the alias promised (its ID differs
+					// from the requested GO- id) nor an alias home naming
+					// the CVE — canned junk or a skeletal `{}` under the
+					// GO- path. Reject it wholesale like an unlinked main
+					// record; only the follow-up body is rejected, so the
+					// accepted MAIN record's excerpt is kept and the empty
+					// outcome below stays preserve-side (goID == "").
+					slog.Warn(osvUnlinkedRecordWarnMsg,
+						"cve_id", cveID, "got_id", av.ID, "requested_id", alias)
+				default:
 					symbols = extractOSVGoVulnFuncs(av)
 					if len(symbols) > 0 {
 						if e := osvExcerptText(av); e != "" {
@@ -1970,9 +2088,12 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 					if strings.HasPrefix(av.ID, "GO-") {
 						goID = av.ID
 					}
-					// A non-GO body here (skeletal `{}` / foreign mirror
-					// junk under the GO- path) leaves goID empty: the empty
-					// outcome below stays preserve-side (M43 Phase D R6).
+					// A LINKED non-GO body here (e.g. the GHSA home served
+					// under the GO- path, still aliasing the CVE) leaves
+					// goID empty: the empty outcome below stays
+					// preserve-side (M43 Phase D R6; unlinked non-GO shapes
+					// — skeletal `{}` / foreign junk — are rejected by the
+					// R7 linkage arm above instead).
 				}
 				// av == nil (alias 404) falls through with goID still empty:
 				// both lookups were definitive so an empty-symbols outcome
@@ -1986,12 +2107,18 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 		}
 
 		// Definitive either way: symbols (positive), an AUTHORITATIVE empty
-		// (goID set — a Go vulndb body exists and carries nothing
+		// (goID set — a linked Go vulndb body exists and carries nothing
 		// selector-shaped for the Go analyzer: an upstream retraction the
 		// write path propagates), or a PRESERVE-side empty (goID == "" — no
-		// Go vulndb body retrieved; the write path treats it like a true
-		// 404). See osvVulnFuncsOutcome for the full decision table (M43
-		// Phase D R6).
+		// linked Go vulndb body retrieved; the write path treats it like a
+		// true 404). See osvVulnFuncsOutcome for the full decision table
+		// (M43 Phase D R6/R7).
+		if len(symbols) > 0 {
+			symbolsSeen++
+		}
+		if goID != "" {
+			goIDsSeen++
+		}
 		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt, goID: goID}
 	}
 
@@ -2027,6 +2154,32 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 			"threshold", osvVulnFuncsMass404WarnThreshold,
 			"tombstones", len(out),
 			"shortened_freshness_retry", osvVulnFuncsAnomalyRetryInterval.String())
+	}
+
+	// Mass-skeletal observability Warn (M43 Phase D R7, round 6 finding 4):
+	// the mass-404 predicate above is blind to a mirror that answers every
+	// path `200 {}` (or any canned/unlinked junk) — notFound stays 0 while
+	// recordsRetrieved climbs, yet the tick determines NOTHING: zero GO-
+	// record identities, zero symbols, every outcome a preserve-side
+	// tombstone. That shape gets one operator Warn of its own. Warn-ONLY —
+	// deliberately no anomalous backdate — because the same counters also
+	// describe a LEGITIMATE backlog of Go-ecosystem CVEs whose advisories
+	// are GHSA/CVE-home-only: a Go-ecosystem candidate with no GO- record in
+	// OSV is a normal, permanent state (the alias follow-up 404s, or there
+	// is no GO- alias at all), so backdating would re-spend the fetch cap on
+	// that backlog every 2–3 days forever. The write path's clobber guard
+	// plus the R7 linkage rule already bound the hostile reading's damage;
+	// disjoint from the mass-404 anomaly by construction (that one requires
+	// recordsRetrieved == 0, this one requires it at threshold or above).
+	if fetches >= osvVulnFuncsMass404WarnThreshold &&
+		recordsRetrieved >= osvVulnFuncsMass404WarnThreshold &&
+		goIDsSeen == 0 && symbolsSeen == 0 {
+		slog.Warn(osvMassSkeletalWarnMsg,
+			"fetches", fetches,
+			"records_retrieved", recordsRetrieved,
+			"not_found", notFound,
+			"threshold", osvVulnFuncsMass404WarnThreshold,
+			"tombstones", len(out))
 	}
 	return out, anomalousTick
 }
@@ -2111,23 +2264,31 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 // database.Querier onto the chunk tx, so the read runs under the SET LOCAL
 // tenant GUC, same F185 discipline as the Upsert. What happens next depends
 // on the outcome's clobber authority (osvVulnFuncsOutcome.goID):
-//   - PRESERVE-side empty (goID == "" — true 404, alias 404, skeletal body,
-//     non-Go record without a GO- alias) vs an existing non-empty
-//     vuln_funcs row: the write preserves the row's data wholesale
-//     (vuln_funcs, the other JSONB fields, raw_excerpt), refreshes ONLY
-//     fetched_at, and emits one osvTombstonePreserveInfoMsg Info line — so
-//     neither a mass-404 anomaly nor a partial mirror can ever empty
-//     previously-positive rows while the freshness window still advances.
-//   - AUTHORITATIVE empty (goID != "" — a GO- record body with no symbols,
-//     an upstream retraction; M43 Phase D R5/R6): overwrites the row
-//     wholesale so retractions propagate. When the prior row was POSITIVE —
-//     the one write shape that destroys stored symbols — exactly one
-//     osvRetractionOverwriteWarnMsg Warn (tenant_id, cve_id, go_id) makes
-//     the wipe operator-visible (round 5 High finding: R5 overwrote
-//     silently). Already-empty / absent prior rows overwrite silently
-//     (routine whole-module advisories re-tombstoning every window).
+//   - PRESERVE-side empty (goID == "" — true 404, alias 404, linked non-Go
+//     record without a usable GO- alias, or an unlinked body rejected by
+//     the R7 linkage rule) vs an existing non-empty vuln_funcs row: the
+//     write preserves the row's data wholesale (vuln_funcs, the other JSONB
+//     fields, raw_excerpt), refreshes ONLY fetched_at, and buffers one
+//     osvTombstonePreserveInfoMsg Info line — so neither a mass-404 anomaly
+//     nor a partial mirror can ever empty previously-positive rows while
+//     the freshness window still advances.
+//   - AUTHORITATIVE empty (goID != "" — a linked GO- record body with no
+//     symbols, an upstream retraction; M43 Phase D R5/R6): overwrites the
+//     row wholesale so retractions propagate. When the prior row was
+//     POSITIVE — the one write shape that destroys stored symbols — exactly
+//     one buffered osvRetractionOverwriteWarnMsg Warn (tenant_id, cve_id,
+//     go_id) makes the wipe operator-visible (round 5 High finding: R5
+//     overwrote silently). Already-empty / absent prior rows overwrite
+//     silently (routine whole-module advisories re-tombstoning every
+//     window).
 //   - POSITIVE writes skip the read entirely: fresh symbols are
 //     authoritative and replace the row unconditionally.
+//
+// Both observability lines are BUFFERED (osvVulnFuncsWriteLogEvent) and
+// emitted by emitOSVVulnFuncsWriteLogs only after tx.Commit() succeeds (M43
+// Phase D R7, round 6 finding 2): they describe writes, and pre-R7 they
+// fired mid-tx, so a chunk whose commit then failed had already logged
+// preservations/retractions that never became durable.
 //
 // Round-trip cost of the guard (M43 Phase D R4 round 4 Low finding — the
 // earlier "bounded by the fetch cap" wording was wrong; R6 extended the
@@ -2198,6 +2359,11 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 	}
 
 	chunkRows, chunkTenants := 0, 0
+	// pendingLogs buffers the chunk's preserve-Info / retraction-Warn
+	// observability events (M43 Phase D R7, round 6 finding 2): both lines
+	// describe writes, so they are emitted only after tx.Commit() succeeds —
+	// a chunk that rolls back logged nothing, because nothing happened.
+	var pendingLogs []osvVulnFuncsWriteLogEvent
 	for _, cand := range chunk {
 		if _, sErr := tx.ExecContext(ctx,
 			`SELECT set_config('app.current_tenant_id', $1, true)`,
@@ -2228,11 +2394,14 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 			// Phase D R4/R5/R6) — see the docstring for the full decision
 			// table. Every empty write reads the existing row once; the
 			// outcome's goID then decides between preserving (goID == "" —
-			// no GO- record body backs the emptiness, so it must never wipe
-			// stored symbols) and overwriting (goID != "" — an authoritative
-			// Go vulndb retraction, Warn-logged when it destroys a positive
-			// row).
-			retractionOverwrite := false
+			// no linked GO- record body backs the emptiness, so it must
+			// never wipe stored symbols) and overwriting (goID != "" — an
+			// authoritative Go vulndb retraction, Warn-logged when it
+			// destroys a positive row). Both observability lines are
+			// BUFFERED and emitted only after the chunk's COMMIT succeeds
+			// (M43 Phase D R7, round 6 finding 2 — a mid-tx emission logged
+			// preservations/retractions a failed commit then rolled back).
+			var logEvent *osvVulnFuncsWriteLogEvent
 			if len(o.symbols) == 0 {
 				existing, gErr := j.advisoryExcerpts.GetBySource(txCtx, cand.tenantID, cveID, osvVulnFuncsSource)
 				if gErr != nil {
@@ -2255,16 +2424,17 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 						// but the divergence is operator-relevant — the
 						// stored symbols no longer have a verifiable
 						// upstream source.
-						slog.Info(osvTombstonePreserveInfoMsg,
-							"tenant_id", cand.tenantID, "cve_id", cveID)
+						logEvent = &osvVulnFuncsWriteLogEvent{
+							tenantID: cand.tenantID, cveID: cveID}
 					} else {
 						// M43 Phase D R6 (round 5 High finding): the one
 						// write shape that destroys stored symbols — an
 						// authoritative Go vulndb retraction overwriting a
-						// positive row. Warn AFTER the Upsert succeeds so
-						// the log line matches a write that actually
-						// happened.
-						retractionOverwrite = true
+						// positive row. It must never happen silently, and
+						// the Warn must never lie: emitted post-COMMIT so
+						// the log line matches a write that is durable.
+						logEvent = &osvVulnFuncsWriteLogEvent{retraction: true,
+							tenantID: cand.tenantID, cveID: cveID, goID: o.goID}
 					}
 				}
 			}
@@ -2274,9 +2444,8 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 				return 0, 0, fmt.Errorf("scheduler: chunk %d OSV vuln_funcs upsert for tenant %s cve %s: %w",
 					chunkIndex, cand.tenantID, cveID, uErr)
 			}
-			if retractionOverwrite {
-				slog.Warn(osvRetractionOverwriteWarnMsg,
-					"tenant_id", cand.tenantID, "cve_id", cveID, "go_id", o.goID)
+			if logEvent != nil {
+				pendingLogs = append(pendingLogs, *logEvent)
 			}
 			chunkRows++
 			wrote = true
@@ -2290,6 +2459,11 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 		return 0, 0, fmt.Errorf("scheduler: commit chunk %d OSV vuln_funcs tx: %w", chunkIndex, cErr)
 	}
 	committed = true
+	// Emit the buffered preserve/retraction lines only now (M43 Phase D R7,
+	// round 6 finding 2): the COMMIT succeeded, so every line describes a
+	// write that is durable. A failed commit returns above and the events
+	// are dropped with the rolled-back writes they described.
+	emitOSVVulnFuncsWriteLogs(pendingLogs)
 	return chunkRows, chunkTenants, nil
 }
 
@@ -2630,4 +2804,65 @@ func firstGoVulndbAlias(aliases []string) string {
 		}
 	}
 	return ""
+}
+
+// osvAliasesContain reports whether aliases names id — whitespace-trimmed
+// exact match; OSV alias lists carry canonical ids (M43 Phase D R7).
+func osvAliasesContain(aliases []string, id string) bool {
+	for _, a := range aliases {
+		if strings.TrimSpace(a) == id {
+			return true
+		}
+	}
+	return false
+}
+
+// osvRecordLinked reports whether a retrieved OSV record BODY vouches for
+// the lookup that produced it (M43 Phase D R7, round 6 High finding): either
+// the body's own ID field IS the id the lookup requested (requestedID — the
+// CVE id on the main lookup, the GO- alias on the follow-up; Go vulndb
+// records often omit their own alias list, so self-identification must
+// suffice), or its aliases name the CVE under determination (cveID — how a
+// GHSA/GO- alias home vouches for a CVE-keyed request). Every real OSV
+// response satisfies one arm; a body failing both is crafted or mis-routed
+// mirror output and must be rejected wholesale by the caller — its symbols,
+// excerpt, aliases, and clobber authority all belong to some OTHER
+// vulnerability.
+func osvRecordLinked(vuln *client.OSVVulnerability, requestedID, cveID string) bool {
+	if vuln == nil {
+		return false
+	}
+	return strings.TrimSpace(vuln.ID) == requestedID || osvAliasesContain(vuln.Aliases, cveID)
+}
+
+// osvVulnFuncsWriteLogEvent is one deferred preserve-Info / retraction-Warn
+// observability line accumulated by writeOSVVulnFuncsChunk (M43 Phase D R7,
+// round 6 finding 2): both lines describe WRITES, so emitting them mid-tx —
+// the pre-R7 behaviour — logged preservations/retractions that a failed
+// COMMIT then rolled back (an operator-facing lie; a rolled-back retraction
+// Warn is a false wipe alarm). Events are buffered per chunk and handed to
+// emitOSVVulnFuncsWriteLogs only after tx.Commit() returns nil; an aborted
+// chunk emits nothing, because none of its writes happened.
+type osvVulnFuncsWriteLogEvent struct {
+	retraction bool // false: preserve Info; true: retraction-overwrite Warn
+	tenantID   uuid.UUID
+	cveID      string
+	goID       string // retraction events only
+}
+
+// emitOSVVulnFuncsWriteLogs emits a committed chunk's buffered
+// preserve/retraction lines in buffered order (M43 Phase D R7, round 6
+// finding 2). Split out of the chunk writer so the commit-gated contract is
+// unit-testable (TestEmitOSVVulnFuncsWriteLogs); the caller invokes it
+// exactly once per chunk, strictly after a successful COMMIT.
+func emitOSVVulnFuncsWriteLogs(events []osvVulnFuncsWriteLogEvent) {
+	for _, e := range events {
+		if e.retraction {
+			slog.Warn(osvRetractionOverwriteWarnMsg,
+				"tenant_id", e.tenantID, "cve_id", e.cveID, "go_id", e.goID)
+		} else {
+			slog.Info(osvTombstonePreserveInfoMsg,
+				"tenant_id", e.tenantID, "cve_id", e.cveID)
+		}
+	}
 }

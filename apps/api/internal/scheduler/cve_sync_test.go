@@ -867,10 +867,15 @@ func TestCVESyncJob_SyncOSVVulnFuncs_NoSymbolsWritesTombstone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Go record, imports present, but no symbols[] anywhere. The record
-		// id is GO-prefixed so no alias follow-up fires either.
+		// id is GO-prefixed so no alias follow-up fires either, and it lists
+		// the requested CVE among its aliases — the LINKED shape every real
+		// Go vulndb record has (M43 Phase D R7 linkage rule: an unlinked
+		// body would be rejected wholesale instead of tombstoning
+		// authoritatively).
 		_, _ = w.Write([]byte(`{
 			"id": "GO-2025-2222",
 			"summary": "whole-module vulnerability",
+			"aliases": ["CVE-2025-2222"],
 			"affected": [
 				{"package": {"name": "github.com/a/b", "ecosystem": "Go"},
 				 "ecosystem_specific": {"imports": [{"path": "github.com/a/b"}]}}
@@ -947,11 +952,14 @@ func TestCVESyncJob_SyncOSVVulnFuncs_RecordNoSymbolsOverwritesPositiveRow(t *tes
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// The record EXISTS (GO-prefixed: no alias follow-up) but its symbol
-		// list is gone — the upstream retraction shape.
+		// The record EXISTS (GO-prefixed: no alias follow-up), is LINKED to
+		// the requested CVE via its aliases (M43 Phase D R7 — retraction
+		// authority additionally requires linkage), but its symbol list is
+		// gone — the upstream retraction shape.
 		_, _ = w.Write([]byte(`{
 			"id": "GO-2025-2222",
 			"summary": "symbols withdrawn upstream",
+			"aliases": ["CVE-2025-2222"],
 			"affected": [
 				{"package": {"name": "github.com/a/b", "ecosystem": "Go"},
 				 "ecosystem_specific": {"imports": [{"path": "github.com/a/b"}]}}
@@ -1116,7 +1124,9 @@ func TestCVESyncJob_SyncOSVVulnFuncs_AliasNotFoundPreservesPositiveRow(t *testin
 // GO- alias at all. Under R5 both counted as authoritative empties and wiped
 // existing positive rows; under R6 neither retrieved a GO- record body, so
 // both are preserve-side: data kept, fetched_at refreshed, one preserve Info
-// each, no retraction Warn.
+// each, no retraction Warn. (Since M43 Phase D R7 the skeletal `{}` shape is
+// additionally rejected by the linkage rule with an unlinked-record Warn —
+// its preserve-side classification here is unchanged.)
 func TestCVESyncJob_SyncOSVVulnFuncs_NonAuthoritativeRecordPreservesPositiveRow(t *testing.T) {
 	zeroOSVFetchDelay(t)
 	logs := captureSlog(t)
@@ -2328,6 +2338,581 @@ func TestCVESyncJob_WriteOSVVulnFuncs_PreWriteReadErrorAbortsChunk(t *testing.T)
 	}
 	if store.callCount() != 0 {
 		t.Errorf("Upsert calls = %d, want 0 (the read failed before any write)", store.callCount())
+	}
+}
+
+// ============================================================================
+// M43 Phase D R7 (round 6 findings): record linkage verification (High),
+// commit-gated preserve/retraction logs (Low), alias non-GO body branch pins
+// (Low), and mass-skeletal mirror observability (Low).
+// ============================================================================
+
+// TestCVESyncJob_FetchOSVVulnFuncs_UnlinkedMainRecordRejected pins the M43
+// Phase D R7 linkage rule on the MAIN lookup (round 6 High finding): before
+// R7 the GO- prefix check trusted the BODY to identify itself, but nothing
+// tied the body to the CVE the lookup asked about, so a crafted / mis-routed
+// mirror answering every /vulns/{cve} path with ONE canned GO- record could
+// (a) gain clobber authority over unrelated CVEs' positive rows (canned body
+// without symbols → authoritative empty → positive wipe every freshness
+// window) or (b) inject one advisory's selectors into every tenant row
+// (canned body WITH symbols → positive outcome). R7 accepts a retrieved body
+// only when it vouches for the request — body.ID == the requested id, or the
+// CVE named among body.aliases. Anything else is rejected WHOLESALE: symbols
+// unused, excerpt unused, aliases not followed, no clobber authority — the
+// outcome is a PRESERVE-side empty tombstone (existing positive rows survive
+// via the R4 clobber guard) and exactly one osvUnlinkedRecordWarnMsg Warn
+// (cve_id, got_id, requested_id — the fetch stage has no tenant) fires per
+// rejected lookup.
+func TestCVESyncJob_FetchOSVVulnFuncs_UnlinkedMainRecordRejected(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	// The canned unrelated Go vulndb record a hostile/broken mirror serves
+	// for every path: aliases name a FOREIGN CVE, never the requested one.
+	unlinkedNoSymbols := `{
+		"id": "GO-2020-0001",
+		"summary": "canned unrelated record",
+		"aliases": ["CVE-2020-9999"],
+		"affected": [
+			{"package": {"name": "github.com/u/v", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/u/v"}]}}
+		]
+	}`
+	unlinkedWithSymbols := `{
+		"id": "GO-2020-0001",
+		"summary": "canned unrelated record with symbols",
+		"aliases": ["CVE-2020-9999"],
+		"affected": [
+			{"package": {"name": "github.com/u/v", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/u/v", "symbols": ["Inject"]}]}}
+		]
+	}`
+	linkedWithSymbols := `{
+		"id": "GO-2025-7003",
+		"summary": "linked go record",
+		"aliases": ["CVE-2025-7003"],
+		"affected": [
+			{"package": {"name": "github.com/u/v", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/u/v", "symbols": ["Real"]}]}}
+		]
+	}`
+	// Linkage's OTHER acceptance arm: the body's own ID IS the requested CVE
+	// id (a CVE-home record) — accepted even with no aliases at all.
+	cveHomeRecord := `{
+		"id": "CVE-2025-7004",
+		"summary": "cve home record",
+		"affected": [{"package": {"name": "github.com/u/v", "ecosystem": "Go"}}]
+	}`
+
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-7001"):
+			_, _ = w.Write([]byte(unlinkedNoSymbols))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-7002"):
+			_, _ = w.Write([]byte(unlinkedWithSymbols))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-7003"):
+			_, _ = w.Write([]byte(linkedWithSymbols))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-7004"):
+			_, _ = w.Write([]byte(cveHomeRecord))
+		default:
+			t.Errorf("unexpected OSV request path %q (an unlinked record's aliases must never be followed)", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(),
+		[]string{"CVE-2025-7001", "CVE-2025-7002", "CVE-2025-7003", "CVE-2025-7004"})
+
+	if anomalous {
+		t.Error("anomalousTick = true on a tick that retrieved record bodies, want false (unlinked rejection is not the mass-404 anomaly)")
+	}
+	if got := atomic.LoadInt32(&requests); got != 4 {
+		t.Errorf("OSV requests = %d, want 4 (one per CVE, no alias follow-ups)", got)
+	}
+
+	for _, id := range []string{"CVE-2025-7001", "CVE-2025-7002"} {
+		o, ok := out[id]
+		if !ok {
+			t.Fatalf("%s missing from outcomes, want a preserve-side tombstone (linkage rejection is still definitive — the freshness window must advance)", id)
+		}
+		if len(o.symbols) != 0 {
+			t.Errorf("%s symbols = %v, want none (an unlinked record's symbols must never be injected)", id, o.symbols)
+		}
+		if o.goID != "" {
+			t.Errorf("%s goID = %q, want empty (an unlinked record must not gain clobber authority over positive rows)", id, o.goID)
+		}
+		if o.excerpt != "" {
+			t.Errorf("%s excerpt = %q, want empty (wholesale rejection: the unrelated record's text must not become grounding)", id, o.excerpt)
+		}
+	}
+
+	pos, ok := out["CVE-2025-7003"]
+	if !ok || len(pos.symbols) != 1 || pos.symbols[0] != "v.Real" {
+		t.Errorf("linked record outcome = %+v (ok=%v), want symbols [\"v.Real\"] (linkage via aliases keeps the normal positive path)", pos, ok)
+	}
+	if pos.goID != "GO-2025-7003" {
+		t.Errorf("linked record goID = %q, want GO-2025-7003", pos.goID)
+	}
+
+	home, ok := out["CVE-2025-7004"]
+	if !ok || len(home.symbols) != 0 || home.goID != "" {
+		t.Errorf("cve-home outcome = %+v (ok=%v), want an accepted preserve-side empty (body.ID == requested id is the other linkage arm)", home, ok)
+	}
+	if home.excerpt != "cve home record" {
+		t.Errorf("cve-home excerpt = %q, want %q (accepted records keep their excerpt)", home.excerpt, "cve home record")
+	}
+
+	got := logs.String()
+	if n := strings.Count(got, osvUnlinkedRecordWarnMsg); n != 2 {
+		t.Errorf("unlinked-record Warn logged %d times, want exactly 2 (one per rejected lookup; logs: %s)", n, got)
+	}
+	if !strings.Contains(got, "got_id=GO-2020-0001") ||
+		!strings.Contains(got, "requested_id=CVE-2025-7001") ||
+		!strings.Contains(got, "cve_id=CVE-2025-7002") {
+		t.Errorf("unlinked Warn must carry cve_id + got_id + requested_id attrs, got: %s", got)
+	}
+}
+
+// TestCVESyncJob_SyncOSVVulnFuncs_UnlinkedRecordPreservesPositiveRow drives
+// the R7 linkage rejection END-TO-END through the write path (round 6 High
+// finding, injection arm): the tenant holds a positive row, and the mirror
+// serves a canned UNLINKED GO- record WITH symbols for the CVE's path. The
+// unrelated selectors must not replace the stored ones (no positive write),
+// the rejection tombstones preserve-side — row data kept wholesale,
+// fetched_at refreshed, one preserve Info — with one unlinked Warn and no
+// retraction Warn.
+func TestCVESyncJob_SyncOSVVulnFuncs_UnlinkedRecordPreservesPositiveRow(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-7005", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-7005", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["keep.Me"]`), RawExcerpt: "kept excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Canned GO- record, symbols present, but aliases never name the
+		// requested CVE: the injection shape.
+		_, _ = w.Write([]byte(`{
+			"id": "GO-2020-0001",
+			"summary": "canned unrelated record with symbols",
+			"aliases": ["CVE-2020-9999"],
+			"affected": [
+				{"package": {"name": "github.com/u/v", "ecosystem": "Go"},
+				 "ecosystem_specific": {"imports": [{"path": "github.com/u/v", "symbols": ["Inject"]}]}}
+			]
+		}`))
+	}))
+	defer server.Close()
+	j.WithOSVBaseURL(server.URL)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	expectOSVCandidateQuery(mock, osvCandidateRows(
+		[2]string{"CVE-2025-7005", "pkg:golang/github.com/p/q@v1.0.0"},
+	))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	j.syncOSVVulnFuncs(context.Background(), []uuid.UUID{tenantID})
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if store.callCount() != 1 {
+		t.Fatalf("Upsert calls = %d, want 1", store.callCount())
+	}
+	row := store.calls[0]
+	var funcs []string
+	if err := json.Unmarshal(row.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "keep.Me" {
+		t.Errorf("VulnFuncs = %s (err %v), want [\"keep.Me\"] (an unlinked record's symbols must not replace the stored row)", row.VulnFuncs, err)
+	}
+	if row.RawExcerpt != "kept excerpt" {
+		t.Errorf("RawExcerpt = %q, want the preserved %q", row.RawExcerpt, "kept excerpt")
+	}
+	if row.FetchedAt == nil || !row.FetchedAt.After(stale.Add(time.Hour)) {
+		t.Errorf("FetchedAt = %v, want refreshed past the stale stamp (the rejection is still a definitive determination)", row.FetchedAt)
+	}
+	wantKey := excerptStoreKey(tenantID, "CVE-2025-7005", osvVulnFuncsSource)
+	if len(store.getKeys) != 1 || store.getKeys[0] != wantKey {
+		t.Errorf("GetBySource calls = %v, want exactly [%s]", store.getKeys, wantKey)
+	}
+	got := logs.String()
+	if n := strings.Count(got, osvUnlinkedRecordWarnMsg); n != 1 {
+		t.Errorf("unlinked Warn logged %d times, want exactly 1 (logs: %s)", n, got)
+	}
+	if n := strings.Count(got, osvTombstonePreserveInfoMsg); n != 1 {
+		t.Errorf("preserve Info logged %d times, want exactly 1 (logs: %s)", n, got)
+	}
+	if strings.Contains(got, osvRetractionOverwriteWarnMsg) {
+		t.Error("retraction Warn fired for an unlinked record, want none (no clobber authority)")
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_AliasFollowUpLinkage pins the R7 linkage
+// rule on the ALIAS follow-up plus the previously un-pinned non-GO alias
+// body branch (round 6 findings 1 and 3). Follow-up acceptance: the body's
+// own ID IS the requested GO- alias (aliases may be absent — Go vulndb
+// records often do not list their own aliases), or its aliases name the CVE
+// under determination. Table:
+//   - GO- body, ID == requested alias, NO aliases, symbols → accepted →
+//     positive (finding 1d)
+//   - GO- body, DIFFERENT id, foreign aliases, symbols     → rejected →
+//     preserve-side + unlinked Warn (requested_id = the GO- alias)
+//   - non-GO GHSA body LINKED via aliases naming the CVE   → accepted, but
+//     no GO- identity → preserve-side, no Warn (finding 3)
+//   - skeletal `{}` body                                   → unlinked →
+//     rejected → preserve-side + unlinked Warn (finding 3)
+func TestCVESyncJob_FetchOSVVulnFuncs_AliasFollowUpLinkage(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	prevCap := osvVulnFuncsFetchCap
+	osvVulnFuncsFetchCap = 20
+	t.Cleanup(func() { osvVulnFuncsFetchCap = prevCap })
+	logs := captureSlog(t)
+
+	ghsaHome := func(cve, goAlias string) string {
+		return `{
+			"id": "GHSA-home-` + cve + `",
+			"summary": "ghsa home ` + cve + `",
+			"aliases": ["` + cve + `", "` + goAlias + `"],
+			"affected": [{"package": {"name": "github.com/w/x", "ecosystem": "Go"}}]
+		}`
+	}
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8001"):
+			_, _ = w.Write([]byte(ghsaHome("CVE-2025-8001", "GO-2025-8001")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8001"):
+			// Self-identifying GO- body, aliases ABSENT: must be accepted via
+			// its own ID matching the requested alias (finding 1d).
+			_, _ = w.Write([]byte(`{
+				"id": "GO-2025-8001",
+				"summary": "go vulndb body",
+				"affected": [
+					{"package": {"name": "github.com/w/x", "ecosystem": "Go"},
+					 "ecosystem_specific": {"imports": [{"path": "github.com/w/x", "symbols": ["Sym"]}]}}
+				]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8003"):
+			_, _ = w.Write([]byte(ghsaHome("CVE-2025-8003", "GO-2025-8003")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8003"):
+			// Canned unrelated GO- record under the alias path: neither the
+			// requested id nor an alias of the CVE — must be rejected.
+			_, _ = w.Write([]byte(`{
+				"id": "GO-2020-0001",
+				"summary": "canned unrelated record",
+				"aliases": ["CVE-2020-9999"],
+				"affected": [
+					{"package": {"name": "github.com/u/v", "ecosystem": "Go"},
+					 "ecosystem_specific": {"imports": [{"path": "github.com/u/v", "symbols": ["Inject"]}]}}
+				]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8004"):
+			_, _ = w.Write([]byte(ghsaHome("CVE-2025-8004", "GO-2025-8004")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8004"):
+			// Non-GO body under the GO- path but LINKED (aliases name the
+			// CVE): accepted, yet carries no GO- identity → preserve-side.
+			_, _ = w.Write([]byte(`{
+				"id": "GHSA-zzzz-yyyy-xxxx",
+				"summary": "ghsa served under the GO- path",
+				"aliases": ["CVE-2025-8004"]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8005"):
+			_, _ = w.Write([]byte(ghsaHome("CVE-2025-8005", "GO-2025-8005")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8005"):
+			_, _ = w.Write([]byte(`{}`)) // skeletal: unlinked junk
+		default:
+			t.Errorf("unexpected OSV request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	out, _ := j.fetchOSVVulnFuncs(context.Background(),
+		[]string{"CVE-2025-8001", "CVE-2025-8003", "CVE-2025-8004", "CVE-2025-8005"})
+
+	if got := atomic.LoadInt32(&requests); got != 8 {
+		t.Errorf("OSV requests = %d, want 8 (main + one alias follow-up each)", got)
+	}
+
+	pos, ok := out["CVE-2025-8001"]
+	if !ok || len(pos.symbols) != 1 || pos.symbols[0] != "x.Sym" {
+		t.Errorf("self-identifying alias body outcome = %+v (ok=%v), want symbols [\"x.Sym\"] (av.ID == requested GO- id must be accepted even with no aliases)", pos, ok)
+	}
+	if pos.goID != "GO-2025-8001" {
+		t.Errorf("self-identifying alias body goID = %q, want GO-2025-8001", pos.goID)
+	}
+
+	for _, id := range []string{"CVE-2025-8003", "CVE-2025-8004", "CVE-2025-8005"} {
+		o, ok := out[id]
+		if !ok {
+			t.Fatalf("%s missing from outcomes, want a preserve-side tombstone", id)
+		}
+		if len(o.symbols) != 0 {
+			t.Errorf("%s symbols = %v, want none", id, o.symbols)
+		}
+		if o.goID != "" {
+			t.Errorf("%s goID = %q, want empty (preserve-side)", id, o.goID)
+		}
+	}
+	// Rejecting the follow-up body must not discard the accepted MAIN
+	// record's excerpt.
+	if o := out["CVE-2025-8003"]; o.excerpt != "ghsa home CVE-2025-8003" {
+		t.Errorf("CVE-2025-8003 excerpt = %q, want the accepted main record's summary", o.excerpt)
+	}
+
+	got := logs.String()
+	if n := strings.Count(got, osvUnlinkedRecordWarnMsg); n != 2 {
+		t.Errorf("unlinked Warn logged %d times, want exactly 2 (the canned GO- body and the skeletal body; the linked GHSA body is accepted silently; logs: %s)", n, got)
+	}
+	if !strings.Contains(got, "requested_id=GO-2025-8003") ||
+		!strings.Contains(got, "got_id=GO-2020-0001") ||
+		!strings.Contains(got, "requested_id=GO-2025-8005") {
+		t.Errorf("unlinked Warn must carry the requested GO- alias in requested_id, got: %s", got)
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_CommitFailureSuppressesWriteLogs pins the
+// M43 Phase D R7 commit-gating of the write pass's observability lines
+// (round 6 finding 2): the preserve Info and retraction Warn describe WRITES,
+// but pre-R7 they were emitted mid-tx — a chunk whose COMMIT then failed had
+// already logged a preservation / retraction that never became durable
+// (operator-facing lies, and a rolled-back retraction Warn is a false wipe
+// alarm). R7 buffers the chunk's events and emits them only after
+// tx.Commit() succeeds: a failed commit emits NEITHER line (the chunk-abort
+// Warn still fires) and contributes zero rows.
+func TestCVESyncJob_WriteOSVVulnFuncs_CommitFailureSuppressesWriteLogs(t *testing.T) {
+	logs := captureSlog(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-0404", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-0404", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["a.B"]`), RawExcerpt: "kept excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-0408", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-0408", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["gone.Sym"]`), RawExcerpt: "pre-retraction excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit().WillReturnError(errors.New("simulated commit failure"))
+
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{"CVE-2025-0404", "CVE-2025-0408"}}},
+		map[string]osvVulnFuncsOutcome{
+			"CVE-2025-0404": {},                     // would-be preserve Info
+			"CVE-2025-0408": {goID: "GO-2025-0408"}, // would-be retraction Warn
+		}, false)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 0 || tenants != 0 {
+		t.Errorf("(rows, tenants) = (%d, %d), want (0, 0) on commit failure", rows, tenants)
+	}
+	got := logs.String()
+	if strings.Contains(got, osvTombstonePreserveInfoMsg) {
+		t.Errorf("preserve Info fired despite a failed COMMIT — the preservation never became durable (logs: %s)", got)
+	}
+	if strings.Contains(got, osvRetractionOverwriteWarnMsg) {
+		t.Errorf("retraction Warn fired despite a failed COMMIT — a rolled-back wipe is a false alarm (logs: %s)", got)
+	}
+	if !strings.Contains(got, "OSV vuln_funcs write chunk aborted") {
+		t.Errorf("chunk-abort Warn missing after commit failure, got: %s", got)
+	}
+}
+
+// TestEmitOSVVulnFuncsWriteLogs unit-pins the extracted emitter the R7
+// commit-gating hangs on (round 6 finding 2): buffered events reproduce the
+// exact pre-R7 lines — preserve at Info with (tenant_id, cve_id), retraction
+// at Warn with (tenant_id, cve_id, go_id) — in buffered order, and an empty
+// batch emits nothing.
+func TestEmitOSVVulnFuncsWriteLogs(t *testing.T) {
+	logs := captureSlog(t)
+	tenantID := uuid.New()
+
+	emitOSVVulnFuncsWriteLogs(nil) // aborted / event-less chunks emit nothing
+	if got := logs.String(); got != "" {
+		t.Errorf("empty batch emitted output: %s", got)
+	}
+
+	emitOSVVulnFuncsWriteLogs([]osvVulnFuncsWriteLogEvent{
+		{tenantID: tenantID, cveID: "CVE-2025-0404"},
+		{retraction: true, tenantID: tenantID, cveID: "CVE-2025-0408", goID: "GO-2025-0408"},
+	})
+	got := logs.String()
+	if n := strings.Count(got, osvTombstonePreserveInfoMsg); n != 1 {
+		t.Errorf("preserve Info logged %d times, want exactly 1 (logs: %s)", n, got)
+	}
+	if n := strings.Count(got, osvRetractionOverwriteWarnMsg); n != 1 {
+		t.Errorf("retraction Warn logged %d times, want exactly 1 (logs: %s)", n, got)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+		switch {
+		case strings.Contains(line, osvTombstonePreserveInfoMsg):
+			if !strings.Contains(line, "level=INFO") ||
+				!strings.Contains(line, "tenant_id="+tenantID.String()) ||
+				!strings.Contains(line, "cve_id=CVE-2025-0404") {
+				t.Errorf("preserve line must be INFO with tenant_id + cve_id, got: %s", line)
+			}
+		case strings.Contains(line, osvRetractionOverwriteWarnMsg):
+			if !strings.Contains(line, "level=WARN") ||
+				!strings.Contains(line, "tenant_id="+tenantID.String()) ||
+				!strings.Contains(line, "cve_id=CVE-2025-0408") ||
+				!strings.Contains(line, "go_id=GO-2025-0408") {
+				t.Errorf("retraction line must be WARN with tenant_id + cve_id + go_id, got: %s", line)
+			}
+		}
+	}
+	if pi, ri := strings.Index(got, osvTombstonePreserveInfoMsg), strings.Index(got, osvRetractionOverwriteWarnMsg); pi > ri {
+		t.Errorf("events emitted out of buffered order (preserve at %d, retraction at %d)", pi, ri)
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_MassSkeletalWarns pins the M43 Phase D R7
+// observability fill-in for the mass-404 predicate's blind spot (round 6
+// finding 4): a mirror answering EVERY path 200 `{}` (or any canned junk)
+// never increments notFound, so the mass-404 Warn stays silent — yet the tick
+// determines nothing (no GO- identity, no symbols; every outcome a
+// preserve-side tombstone), which is exactly the stub-mirror signature. R7
+// emits ONE osvMassSkeletalWarnMsg Warn when a tick fetches and retrieves at
+// least the mass threshold of record bodies with ZERO GO- identities and
+// ZERO symbols. Warn-ONLY, deliberately no anomalous backdate: the same
+// counters describe a legitimate backlog of Go-ecosystem CVEs whose
+// advisories are GHSA/CVE-home-only (a Go-ecosystem candidate with no GO-
+// record in OSV is a normal, permanent state), so tombstones keep NORMAL
+// freshness — pinned here via anomalousTick == false, which is the only
+// signal the write pass backdates on.
+func TestCVESyncJob_FetchOSVVulnFuncs_MassSkeletalWarns(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`)) // every path: skeletal 200
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := make([]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		ids = append(ids, fmt.Sprintf("CVE-2025-7%03d", i))
+	}
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+
+	if anomalous {
+		t.Error("anomalousTick = true on a mass-skeletal tick, want false (Warn-only: a legitimate GHSA-home-only backlog is indistinguishable, so no backdate)")
+	}
+	if len(out) != 25 {
+		t.Fatalf("outcomes = %d, want 25 preserve-side tombstones", len(out))
+	}
+	for id, o := range out {
+		if len(o.symbols) != 0 || o.goID != "" {
+			t.Errorf("%s outcome = %+v, want a preserve-side empty", id, o)
+		}
+	}
+	got := logs.String()
+	if n := strings.Count(got, osvMassSkeletalWarnMsg); n != 1 {
+		t.Errorf("mass-skeletal Warn logged %d times, want exactly 1 (logs: %s)", n, got)
+	}
+	if !strings.Contains(got, "fetches=25") || !strings.Contains(got, "records_retrieved=25") {
+		t.Errorf("mass-skeletal Warn must carry fetches + records_retrieved counts, got: %s", got)
+	}
+	if strings.Contains(got, osvMass404WarnMsg) {
+		t.Error("mass-404 Warn fired on a zero-404 tick, want none (the two anomaly signatures are disjoint)")
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_MassLinkedRecordsNoSkeletalWarn is the
+// mass-skeletal Warn's normal-operation guard (M43 Phase D R7 finding 4): a
+// tick of the same size whose every lookup retrieves a LINKED GO- record
+// WITH symbols determines plenty — no skeletal Warn, no mass-404 Warn, all
+// positive outcomes.
+func TestCVESyncJob_FetchOSVVulnFuncs_MassLinkedRecordsNoSkeletalWarn(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		w.Header().Set("Content-Type", "application/json")
+		// A per-path linked Go vulndb record: id GO-<n>, aliases naming the
+		// requested CVE, symbols present.
+		fmt.Fprintf(w, `{
+			"id": %q,
+			"summary": "linked record",
+			"aliases": [%q],
+			"affected": [
+				{"package": {"name": "github.com/l/m", "ecosystem": "Go"},
+				 "ecosystem_specific": {"imports": [{"path": "github.com/l/m", "symbols": ["Do"]}]}}
+			]
+		}`, "GO-"+strings.TrimPrefix(id, "CVE-"), id)
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := make([]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		ids = append(ids, fmt.Sprintf("CVE-2025-7%03d", i))
+	}
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+
+	if anomalous {
+		t.Error("anomalousTick = true on an all-positive tick, want false")
+	}
+	if len(out) != 25 {
+		t.Fatalf("outcomes = %d, want 25 positives", len(out))
+	}
+	for id, o := range out {
+		if len(o.symbols) != 1 || o.symbols[0] != "m.Do" {
+			t.Errorf("%s symbols = %v, want [\"m.Do\"]", id, o.symbols)
+		}
+	}
+	got := logs.String()
+	if strings.Contains(got, osvMassSkeletalWarnMsg) {
+		t.Error("mass-skeletal Warn fired on an all-positive tick, want none")
+	}
+	if strings.Contains(got, osvMass404WarnMsg) {
+		t.Error("mass-404 Warn fired on an all-positive tick, want none")
 	}
 }
 
