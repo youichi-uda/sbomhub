@@ -911,7 +911,7 @@ func main() {
 	// path's two-tier audit (request-level middleware access log + the
 	// handler's direct reachability_uploaded domain row) mirrors the vex
 	// handlers. GET /targets is read-only (no domain audit).
-	reachabilityHandler := handler.NewReachabilityHandler(reachabilityResultsRepo, auditRepo, projectRepo, vulnRepo)
+	reachabilityHandler := handler.NewReachabilityHandler(reachabilityResultsRepo, auditRepo, projectRepo, vulnRepo, advisoryExcerptsRepo)
 	e.POST("/api/v1/projects/:id/reachability", reachabilityHandler.Upload,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
 		appmw.RequireWrite(),

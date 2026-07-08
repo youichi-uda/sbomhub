@@ -170,6 +170,89 @@ GET /api/v1/projects/:id/vulnerabilities
 
 ---
 
+### Reachability
+
+The CLI reachability flow: the CLI fetches the project's (cve_id, component_id)
+worklist from `GET .../reachability/targets`, runs the static reachability
+analyzer locally against the project source, and POSTs one verdict per pair
+back to `POST .../reachability`.
+
+#### List Reachability Targets
+
+```
+GET /api/v1/projects/:id/reachability/targets
+```
+
+**Query Parameters:**
+- `ecosystem` (string, optional): only return targets whose purl-derived ecosystem matches (e.g. `go`, `npm`)
+
+**Response:**
+```json
+{
+  "targets": [
+    {
+      "cve_id": "CVE-2024-0001",
+      "component_id": "uuid",
+      "purl": "pkg:golang/example.com/foo@v1.2.3",
+      "component_name": "foo",
+      "component_version": "v1.2.3",
+      "ecosystem": "go",
+      "vuln_funcs": ["xml.Unmarshal", "Pkg.Type.Method"]
+    }
+  ]
+}
+```
+
+- `ecosystem` is derived from the purl server-side; it may be `""` when the component carries no package URL.
+- `vuln_funcs` (string array, optional): the advisory-declared vulnerable symbols
+  for the row's CVE, unioned across advisory sources (NVD / GHSA / JVN) and
+  normalized server-side to `Pkg.Func` / `Pkg.Type.Method` selectors (trimmed,
+  trailing `()` stripped, malformed entries dropped, de-duplicated). The field
+  is **omitted entirely** when no well-formed symbol is known for the CVE — the
+  CLI then falls back to import-only analysis for that pair.
+
+#### Upload Reachability Results
+
+```
+POST /api/v1/projects/:id/reachability
+```
+
+**Request Body:**
+```json
+{
+  "results": [
+    {
+      "component_id": "uuid",
+      "cve_id": "CVE-2024-0001",
+      "ecosystem": "go",
+      "status": "reachable",
+      "confidence": 0.87,
+      "analyzer_version": "v1.2.3",
+      "analyzed_at": "2026-07-05T10:00:00Z",
+      "evidence": { "callgraph_nodes": ["main.main"] }
+    }
+  ]
+}
+```
+
+- `component_id`, `cve_id`, and `status` are required; the other fields are optional.
+- `status` must be one of `not_present` | `import_only` | `reachable` | `unknown`.
+- `confidence`, when present, must be within `[0, 1]`.
+- Every `(component_id, cve_id)` pair must be a genuine vulnerability target of
+  the project — the same set `GET .../reachability/targets` returns. One
+  non-target pair rejects the whole batch with `400` and nothing persisted.
+- The batch is all-or-nothing: any invalid row or persistence failure rolls the
+  entire upload back, so the CLI can safely retry the whole batch.
+
+**Response (201):**
+```json
+{
+  "upserted": 1
+}
+```
+
+---
+
 ### VEX Statements
 
 #### Create VEX Statement

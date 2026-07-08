@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/sbomhub/sbomhub/internal/database"
 )
 
@@ -221,6 +222,85 @@ func (r *AdvisoryExcerptsRepository) GetBySource(ctx context.Context, tenantID u
 		return nil, fmt.Errorf("query advisory_excerpts by source: %w", err)
 	}
 	return &e, nil
+}
+
+// ListVulnFuncsByCVEs returns, for each requested CVE, the union of the
+// vuln_funcs symbol strings across every advisory source row (nvd / ghsa /
+// jvn) the tenant holds for that CVE, keyed by cve_id (M43 Wave 1 / F465,
+// issue #167: GET /reachability/targets enriches each target row with the
+// advisory-declared vulnerable symbols so the CLI can run a symbol-level
+// reachability walk instead of import-only analysis).
+//
+// Contract:
+//   - CVEs with no advisory_excerpts rows (or whose rows carry no string
+//     symbols) are simply absent from the returned map — callers treat a
+//     missing key as "no symbols known".
+//   - The per-CVE order is stable: rows are read ORDER BY source ASC, and
+//     elements keep their on-disk array order within each row. No
+//     de-duplication happens here; the handler edge owns normalisation
+//     (trim / "()" strip / shape filter / dedupe) as its single source of
+//     truth.
+//   - vuln_funcs is written as a JSON array of strings by the scheduler
+//     (stringsToJSONArray), but Upsert passes raw JSON through, so foreign
+//     shapes are tolerated leniently: a non-array value skips the row and a
+//     non-string element skips the element, rather than failing the whole
+//     worklist read.
+//   - An empty cveIDs slice short-circuits to an empty map with no SQL
+//     issued.
+//
+// tenantID MUST come from the authenticated session (same warning as
+// GetByCVE): rows are filtered by the explicit tenant clause AND by the
+// migration 033 FORCE RLS policy when running inside a TenantTx.
+func (r *AdvisoryExcerptsRepository) ListVulnFuncsByCVEs(ctx context.Context, tenantID uuid.UUID, cveIDs []string) (map[string][]string, error) {
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("AdvisoryExcerptsRepository.ListVulnFuncsByCVEs: tenant_id is required")
+	}
+	out := make(map[string][]string, len(cveIDs))
+	if len(cveIDs) == 0 {
+		return out, nil
+	}
+
+	// ORDER BY makes the union order deterministic across calls (ghsa <
+	// jvn < nvd lexicographically) so the handler's stable dedupe yields a
+	// reproducible wire order for the CLI.
+	const query = `
+		SELECT cve_id, vuln_funcs
+		FROM advisory_excerpts
+		WHERE tenant_id = $1 AND cve_id = ANY($2)
+		ORDER BY cve_id ASC, source ASC
+	`
+	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, pq.Array(cveIDs))
+	if err != nil {
+		return nil, fmt.Errorf("query advisory_excerpts vuln_funcs by cves: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cveID string
+			raw   []byte
+		)
+		if err := rows.Scan(&cveID, &raw); err != nil {
+			return nil, fmt.Errorf("scan advisory_excerpts vuln_funcs row: %w", err)
+		}
+		var elems []json.RawMessage
+		if err := json.Unmarshal(raw, &elems); err != nil {
+			// Lenient: a non-array vuln_funcs value (possible via raw
+			// pass-through Upsert) must not 500 the CLI worklist read.
+			continue
+		}
+		for _, elem := range elems {
+			var s string
+			if err := json.Unmarshal(elem, &s); err != nil {
+				continue // non-string element: skip, keep the rest
+			}
+			out[cveID] = append(out[cveID], s)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate advisory_excerpts vuln_funcs rows: %w", err)
+	}
+	return out, nil
 }
 
 // rowScanner abstracts *sql.Row and *sql.Rows for shared scan helpers.

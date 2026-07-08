@@ -169,6 +169,89 @@ GET /api/v1/projects/:id/vulnerabilities
 
 ---
 
+### 到達可能性（Reachability）
+
+CLI の到達可能性解析フロー: CLI は `GET .../reachability/targets` からプロジェクトの
+(cve_id, component_id) ワークリストを取得し、プロジェクトのソースコードに対して
+静的到達可能性アナライザをローカル実行し、ペアごとの判定結果を
+`POST .../reachability` に送信します。
+
+#### 到達可能性ターゲット一覧
+
+```
+GET /api/v1/projects/:id/reachability/targets
+```
+
+**クエリパラメータ:**
+- `ecosystem` (string, 任意): purl から導出したエコシステムが一致するターゲットのみ返す（例: `go`, `npm`）
+
+**レスポンス:**
+```json
+{
+  "targets": [
+    {
+      "cve_id": "CVE-2024-0001",
+      "component_id": "uuid",
+      "purl": "pkg:golang/example.com/foo@v1.2.3",
+      "component_name": "foo",
+      "component_version": "v1.2.3",
+      "ecosystem": "go",
+      "vuln_funcs": ["xml.Unmarshal", "Pkg.Type.Method"]
+    }
+  ]
+}
+```
+
+- `ecosystem` はサーバ側で purl から導出されます。コンポーネントに purl がない場合は `""` になることがあります。
+- `vuln_funcs`（文字列配列, 任意）: その行の CVE についてアドバイザリが指摘する脆弱な
+  シンボルの一覧。アドバイザリソース（NVD / GHSA / JVN）横断で union し、サーバ側で
+  `Pkg.Func` / `Pkg.Type.Method` 形式のセレクタに正規化して返します（trim、末尾の
+  `()` 除去、不正形式の除外、重複排除）。CVE に整形済みシンボルが 1 つもない場合、
+  フィールド自体が**省略**されます — その場合 CLI は該当ペアを import-only 解析に
+  フォールバックします。
+
+#### 到達可能性結果のアップロード
+
+```
+POST /api/v1/projects/:id/reachability
+```
+
+**リクエストボディ:**
+```json
+{
+  "results": [
+    {
+      "component_id": "uuid",
+      "cve_id": "CVE-2024-0001",
+      "ecosystem": "go",
+      "status": "reachable",
+      "confidence": 0.87,
+      "analyzer_version": "v1.2.3",
+      "analyzed_at": "2026-07-05T10:00:00Z",
+      "evidence": { "callgraph_nodes": ["main.main"] }
+    }
+  ]
+}
+```
+
+- `component_id`, `cve_id`, `status` は必須。それ以外のフィールドは任意です。
+- `status` は `not_present` | `import_only` | `reachable` | `unknown` のいずれか。
+- `confidence` を指定する場合は `[0, 1]` の範囲内であること。
+- すべての `(component_id, cve_id)` ペアは、そのプロジェクトの正規の脆弱性ターゲット
+  （`GET .../reachability/targets` が返す集合と同一）でなければなりません。ターゲット外の
+  ペアが 1 件でも含まれるとバッチ全体が `400` で拒否され、何も永続化されません。
+- バッチは all-or-nothing です: 不正な行や永続化失敗があるとアップロード全体が
+  ロールバックされるため、CLI はバッチ全体を安全にリトライできます。
+
+**レスポンス (201):**
+```json
+{
+  "upserted": 1
+}
+```
+
+---
+
 ### VEXステートメント
 
 #### VEXステートメント作成

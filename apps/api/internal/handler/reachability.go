@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -67,6 +68,19 @@ type reachabilityTargetsReader interface {
 	ListReachabilityTargets(ctx context.Context, tenantID, projectID uuid.UUID, ecosystem string) ([]repository.ReachabilityTarget, error)
 }
 
+// reachabilityVulnFuncsReader is the advisory-excerpt read surface GET
+// /reachability/targets uses to enrich each target row with the
+// advisory-declared vulnerable symbols (M43 Wave 1 / F465, issue #167).
+// *repository.AdvisoryExcerptsRepository satisfies it via
+// ListVulnFuncsByCVEs (a single batch read for the whole worklist — one
+// CVE may have nvd/ghsa/jvn rows, whose symbol lists are unioned).
+// Declared as an interface so reachability_targets_test.go can substitute
+// a fake without a live PostgreSQL (same rationale as the other narrow
+// interfaces above).
+type reachabilityVulnFuncsReader interface {
+	ListVulnFuncsByCVEs(ctx context.Context, tenantID uuid.UUID, cveIDs []string) (map[string][]string, error)
+}
+
 // reachabilityStatuses is the closed set of verdicts the analyser
 // contract defines (migration 034 CHECK constraint). Validating in the
 // handler surfaces an enum violation as a clean 400 BEFORE the DB round
@@ -98,15 +112,22 @@ type ReachabilityHandler struct {
 	// *repository.VulnerabilityRepository). It runs under the ambient TenantTx
 	// so its components join is RLS-scoped to the caller's tenant.
 	targets reachabilityTargetsReader
+	// vulnFuncs is the advisory-excerpt read surface GET /reachability/targets
+	// uses to attach the normalised vuln_funcs symbol list to each target row
+	// (production: *repository.AdvisoryExcerptsRepository). It runs under the
+	// ambient TenantTx so the read is RLS-scoped to the caller's tenant.
+	vulnFuncs reachabilityVulnFuncsReader
 }
 
-// NewReachabilityHandler wires the handler. All four dependencies are
+// NewReachabilityHandler wires the handler. All five dependencies are
 // required: the upserter to persist verdicts, the audit logger for the
 // mandatory reachability_uploaded row (audit-or-nothing), the project reader
-// for the tenant-scoped 404 on the soft-reference project_id, and the targets
-// reader for the CLI worklist read endpoint (GET /reachability/targets).
-func NewReachabilityHandler(upserter reachabilityUpserter, audit ReachabilityAuditLogger, projects ReachabilityProjectReader, targets reachabilityTargetsReader) *ReachabilityHandler {
-	return &ReachabilityHandler{upserter: upserter, audit: audit, projects: projects, targets: targets}
+// for the tenant-scoped 404 on the soft-reference project_id, the targets
+// reader for the CLI worklist read endpoint (GET /reachability/targets), and
+// the vulnFuncs reader for that endpoint's per-target vuln_funcs enrichment
+// (M43 Wave 1 / F465).
+func NewReachabilityHandler(upserter reachabilityUpserter, audit ReachabilityAuditLogger, projects ReachabilityProjectReader, targets reachabilityTargetsReader, vulnFuncs reachabilityVulnFuncsReader) *ReachabilityHandler {
+	return &ReachabilityHandler{upserter: upserter, audit: audit, projects: projects, targets: targets, vulnFuncs: vulnFuncs}
 }
 
 // reachabilityResultInput is one uploaded verdict. component_id / cve_id /
@@ -337,13 +358,19 @@ func (h *ReachabilityHandler) Upload(c echo.Context) error {
 // response: a (cve_id, component_id) pair the CLI analyzer must judge.
 // ecosystem is derived from purl at the edge (repository.EcosystemFromPurl);
 // purl may be "" when the component row carries no package URL.
+// vuln_funcs is the normalised union of the advisory-declared vulnerable
+// symbols for the row's CVE (M43 Wave 1 / F465, issue #167); it is OMITTED
+// (not an empty array) when no well-formed symbol is known — the CLI treats
+// both the same way, and omitempty keeps the common no-symbols worklist
+// small.
 type reachabilityTargetItem struct {
-	CVEID            string `json:"cve_id"`
-	ComponentID      string `json:"component_id"`
-	Purl             string `json:"purl"`
-	ComponentName    string `json:"component_name"`
-	ComponentVersion string `json:"component_version"`
-	Ecosystem        string `json:"ecosystem"`
+	CVEID            string   `json:"cve_id"`
+	ComponentID      string   `json:"component_id"`
+	Purl             string   `json:"purl"`
+	ComponentName    string   `json:"component_name"`
+	ComponentVersion string   `json:"component_version"`
+	Ecosystem        string   `json:"ecosystem"`
+	VulnFuncs        []string `json:"vuln_funcs,omitempty"`
 }
 
 // reachabilityTargetsResponse is the 200 body: the CLI reachability worklist.
@@ -386,6 +413,15 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 			"tenant_id", tenantID, "project_id", projectID)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "reachability handler misconfigured"})
 	}
+	if h.vulnFuncs == nil {
+		// Defence-in-depth, mirroring the nil-targets guard: a mis-wire must
+		// refuse loudly rather than silently serve a worklist stripped of the
+		// vuln_funcs enrichment (which would silently degrade every CLI run
+		// to import-only analysis).
+		slog.Error("reachability targets: vuln_funcs reader not wired; refusing to serve",
+			"tenant_id", tenantID, "project_id", projectID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "reachability handler misconfigured"})
+	}
 
 	// ?ecosystem=go (optional): filter server-side to the given ecosystem.
 	// When absent, every ecosystem is returned.
@@ -398,6 +434,30 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list reachability targets"})
 	}
 
+	// vuln_funcs enrichment (M43 Wave 1 / F465): one batch read over the
+	// distinct CVE ids in the worklist, then normalise per CVE at this edge
+	// (the single source of truth for symbol normalisation — see
+	// normalizeVulnFuncs) and attach to every row of that CVE.
+	cveIDs := make([]string, 0, len(rows))
+	seenCVE := make(map[string]struct{}, len(rows))
+	for _, t := range rows {
+		if _, ok := seenCVE[t.CVEID]; ok {
+			continue
+		}
+		seenCVE[t.CVEID] = struct{}{}
+		cveIDs = append(cveIDs, t.CVEID)
+	}
+	rawFuncsByCVE, err := h.vulnFuncs.ListVulnFuncsByCVEs(ctx, tenantID, cveIDs)
+	if err != nil {
+		slog.Error("reachability targets: vuln_funcs lookup failed",
+			"tenant_id", tenantID, "project_id", projectID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list reachability targets"})
+	}
+	funcsByCVE := make(map[string][]string, len(rawFuncsByCVE))
+	for cve, raw := range rawFuncsByCVE {
+		funcsByCVE[cve] = normalizeVulnFuncs(raw)
+	}
+
 	items := make([]reachabilityTargetItem, 0, len(rows))
 	for _, t := range rows {
 		items = append(items, reachabilityTargetItem{
@@ -407,10 +467,82 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 			ComponentName:    t.ComponentName,
 			ComponentVersion: t.ComponentVersion,
 			Ecosystem:        repository.EcosystemFromPurl(t.Purl),
+			VulnFuncs:        funcsByCVE[t.CVEID], // nil (field omitted) when no symbol survived
 		})
 	}
 
 	return c.JSON(http.StatusOK, reachabilityTargetsResponse{Targets: items})
+}
+
+// normalizeVulnFuncs canonicalises the advisory-declared symbol list for the
+// GET /reachability/targets wire (M43 Wave 1 / F465, issue #167). This edge
+// is the single source of truth for the normalisation: the CLI's
+// parseSymbolSelectors treats ONE malformed selector ("Foo", "Foo()", 4+
+// dot-parts) as fatal for the whole symbol walk — degrading the entire run
+// to import-only — so anything not shaped like "Pkg.Func" /
+// "Pkg.Type.Method" must be dropped before it ships.
+//
+// Pipeline per element (frozen spec):
+//
+//	TrimSpace → strip one trailing "()" → dot-split; keep only 2 or 3
+//	non-empty parts (1 = bare name, 4+ = over-qualified: drop) → drop
+//	elements whose parts are not Go-identifier-shaped (spaces, "/", "$",
+//	"<>", ":", "-", ... — conservative) → de-duplicate preserving
+//	first-seen order.
+//
+// Returns nil (not an empty slice) when nothing survives, so the caller's
+// omitempty field drops off the wire entirely.
+func normalizeVulnFuncs(raw []string) []string {
+	var out []string
+	seen := make(map[string]struct{}, len(raw))
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(s, "()")
+		if s == "" {
+			continue
+		}
+		parts := strings.Split(s, ".")
+		if len(parts) < 2 || len(parts) > 3 {
+			continue
+		}
+		wellFormed := true
+		for _, p := range parts {
+			if !isGoIdentifier(p) {
+				wellFormed = false
+				break
+			}
+		}
+		if !wellFormed {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// isGoIdentifier reports whether s is shaped like a Go identifier (first
+// rune a letter or underscore, rest letters/digits/underscores; Unicode
+// letters allowed per the Go spec). Used by normalizeVulnFuncs to drop
+// selector parts the advisory heuristics let through that the CLI's AST
+// walk could never match (paths with "/", Java-style "Foo$Bar", generics
+// noise, embedded spaces, ...).
+func isGoIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || unicode.IsLetter(r):
+		case i > 0 && unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // requireProjectInTenant ensures projectID belongs to tenantID before any

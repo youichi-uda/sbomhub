@@ -11,6 +11,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // TestAdvisoryExcerptsRepository_Upsert_PassesTenantID asserts that
@@ -290,6 +291,159 @@ func TestAdvisoryExcerptsRepository_GetByCVE_RejectsZeroTenant(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("no SQL should have been issued: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources pins
+// the M43 Wave 1 (F465) batch-read contract: one CVE with several source
+// rows (ghsa + nvd here) yields the UNION of their vuln_funcs string
+// arrays in row order (ORDER BY cve_id, source — asserted via the SQL
+// regex), un-deduplicated (normalisation/dedupe is the handler edge's
+// job); a requested CVE with no rows is simply absent from the map; and
+// tenant_id is bound at position 1 with an explicit WHERE clause (the
+// belt to migration 033's RLS braces, same rationale as GetByCVE).
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	tenantID := uuid.New()
+	cveIDs := []string{"CVE-2025-1", "CVE-2025-2"}
+
+	mock.ExpectQuery(`SELECT cve_id, vuln_funcs[\s\S]+FROM advisory_excerpts[\s\S]+WHERE tenant_id = \$1 AND cve_id = ANY\(\$2\)[\s\S]+ORDER BY cve_id ASC, source ASC`).
+		WithArgs(tenantID, pq.Array(cveIDs)).
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs"}).
+			AddRow("CVE-2025-1", []byte(`["xml.Unmarshal","Bar.baz()"]`)).
+			AddRow("CVE-2025-1", []byte(`["html.Parse"]`)))
+		// CVE-2025-2 has no advisory_excerpts rows at all.
+
+	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, cveIDs)
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	want1 := []string{"xml.Unmarshal", "Bar.baz()", "html.Parse"}
+	if len(got["CVE-2025-1"]) != len(want1) {
+		t.Fatalf("CVE-2025-1 funcs = %v, want %v", got["CVE-2025-1"], want1)
+	}
+	for i := range want1 {
+		if got["CVE-2025-1"][i] != want1[i] {
+			t.Errorf("CVE-2025-1 funcs[%d] = %q, want %q (row order must be preserved)", i, got["CVE-2025-1"][i], want1[i])
+		}
+	}
+	if _, present := got["CVE-2025-2"]; present {
+		t.Errorf("CVE-2025-2 present in map (%v); a CVE with no rows must be absent", got["CVE-2025-2"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_LenientDecode pins
+// the lenient JSON handling: a row whose vuln_funcs is not a JSON array
+// is skipped whole, and a non-string element inside an otherwise valid
+// array is skipped individually — neither may fail the read (the CLI
+// worklist must not 500 over one weird row written via raw-passthrough
+// Upsert).
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_LenientDecode(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	tenantID := uuid.New()
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM advisory_excerpts")).
+		WithArgs(tenantID, pq.Array([]string{"CVE-2025-3"})).
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs"}).
+			AddRow("CVE-2025-3", []byte(`{"not":"an array"}`)).
+			AddRow("CVE-2025-3", []byte(`["ok.Func",{"name":"html.Parse"},42,"also.Ok"]`)))
+
+	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, []string{"CVE-2025-3"})
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	want := []string{"ok.Func", "also.Ok"}
+	if len(got["CVE-2025-3"]) != len(want) {
+		t.Fatalf("CVE-2025-3 funcs = %v, want %v", got["CVE-2025-3"], want)
+	}
+	for i := range want {
+		if got["CVE-2025-3"][i] != want[i] {
+			t.Errorf("CVE-2025-3 funcs[%d] = %q, want %q", i, got["CVE-2025-3"][i], want[i])
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_RejectsZeroTenant
+// mirrors the GetByCVE fail-fast: a tenant-unscoped batch read must be
+// refused before any SQL is issued (RLS would blank it anyway, but the
+// explicit refusal keeps the error identifiable AND keeps tenant
+// isolation if RLS is ever lifted — compare audit_logs/api_keys 028-030).
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_RejectsZeroTenant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	_, err = repo.ListVulnFuncsByCVEs(context.Background(), uuid.Nil, []string{"CVE-2025-1"})
+	if err == nil {
+		t.Fatal("expected error for zero tenant_id, got nil")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no SQL should have been issued: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_EmptyInputNoSQL pins
+// the short-circuit: an empty cveIDs slice returns an empty, non-nil map
+// without touching the database (the handler calls unconditionally even
+// for an empty worklist).
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_EmptyInputNoSQL(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	got, err := repo.ListVulnFuncsByCVEs(context.Background(), uuid.New(), nil)
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("expected empty non-nil map, got %v", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("no SQL should have been issued: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_WrapsDBError checks
+// the query error surfaces wrapped (not swallowed into an empty map,
+// which the handler would misread as "no symbols known").
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_WrapsDBError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	mock.ExpectQuery(regexp.QuoteMeta("FROM advisory_excerpts")).
+		WillReturnError(sql.ErrConnDone)
+
+	_, err = repo.ListVulnFuncsByCVEs(context.Background(), uuid.New(), []string{"CVE-2025-1"})
+	if err == nil || !errors.Is(err, sql.ErrConnDone) {
+		t.Fatalf("expected wrapped sql.ErrConnDone, got %v", err)
 	}
 }
 
