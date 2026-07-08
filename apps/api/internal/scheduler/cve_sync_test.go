@@ -1,9 +1,11 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,9 +135,24 @@ func TestCVESyncJob_FetchModifiedCVEs_HTTPMock(t *testing.T) {
 // (defer-restore pattern, same as cveMatchBatchChunkSize overrides).
 func zeroOSVFetchDelay(t *testing.T) {
 	t.Helper()
-	prev := osvVulnFuncsFetchDelay
+	prevDelay := osvVulnFuncsFetchDelay
 	osvVulnFuncsFetchDelay = 0
-	t.Cleanup(func() { osvVulnFuncsFetchDelay = prev })
+	t.Cleanup(func() { osvVulnFuncsFetchDelay = prevDelay })
+}
+
+// captureSlog redirects the PROCESS-GLOBAL default slog logger into a buffer
+// for the duration of one test (restored via t.Cleanup) so log-line
+// contracts — e.g. the M43 Phase D R3 mass-404 suppression Warn — can be
+// asserted. Tests using it must not run in parallel (none in this package
+// do). The code under test logs synchronously from the test goroutine, so a
+// plain buffer is safe.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 // wave1NormalizeReplica restates the FROZEN Wave 1 wire-normalisation spec
@@ -233,6 +250,13 @@ func TestOSVGoPackageIdent(t *testing.T) {
 		{"gopkg.in/check.v1", "check", true},
 		// Subpackages under a gopkg.in module keep the plain last segment.
 		{"gopkg.in/mgo.v2/bson", "bson", true},
+		// M43 Phase D R3 finding 4: the "<ident>.v<N>" resolution is a
+		// gopkg.in-documented convention, NOT a general rule — the same shape
+		// on any other host is a guess (github.com/foo/bar.v2 may declare
+		// package bar, bar_v2, ...) and keeps the conservative skip.
+		{"github.com/foo/bar.v2", "", false},
+		{"example.com/x/foo.v3", "", false},
+		{"bar.v2", "", false},
 		// NOT the gopkg.in shape: digits must follow "v" exclusively, the
 		// prefix must be identifier-shaped, and both halves must be present.
 		{"gopkg.in/yaml.v2x", "", false},
@@ -420,8 +444,11 @@ func TestExtractOSVGoVulnFuncs_ImportPathMustMatchModule(t *testing.T) {
 // TestExtractOSVGoVulnFuncs_StdlibPathsAllowed pins that the module-prefix
 // requirement (finding 4) keeps working for Go vulndb's "stdlib" module,
 // whose imports[].path values are bare stdlib package paths ("html/template")
-// that are NOT prefixed by the module name — while still rejecting
-// domain-shaped module paths smuggled under a "stdlib" record.
+// that are NOT prefixed by the module name — while rejecting BOTH
+// domain-shaped module paths AND (M43 Phase D R3 finding 1) dot-less
+// external module paths ("corp/internal/vuln") smuggled under a forged
+// "stdlib" record: the first path segment must be a real Go standard-library
+// top-level package.
 func TestExtractOSVGoVulnFuncs_StdlibPathsAllowed(t *testing.T) {
 	got := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
 		"id": "GO-2025-7777",
@@ -429,16 +456,67 @@ func TestExtractOSVGoVulnFuncs_StdlibPathsAllowed(t *testing.T) {
 			{"package": {"name": "stdlib", "ecosystem": "Go"},
 			 "ecosystem_specific": {"imports": [
 				{"path": "html/template", "symbols": ["Parse"]},
-				{"path": "github.com/evil/mod", "symbols": ["Injected"]}
+				{"path": "fmt", "symbols": ["Sprintf"]},
+				{"path": "github.com/evil/mod", "symbols": ["Injected"]},
+				{"path": "corp/internal/vuln", "symbols": ["Forged"]}
 			 ]}}
 		]
 	}`))
-	want := []string{"template.Parse"}
+	want := []string{"template.Parse", "fmt.Sprintf"}
 	if len(got) != len(want) {
 		t.Fatalf("extractOSVGoVulnFuncs = %v, want %v", got, want)
 	}
-	if got[0] != want[0] {
-		t.Errorf("extractOSVGoVulnFuncs[0] = %q, want %q", got[0], want[0])
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("extractOSVGoVulnFuncs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestOSVImportPathWithinModule pins the M43 Phase D R3 finding 1 fix
+// directly on the helper: under Go vulndb's synthetic "stdlib" / "toolchain"
+// modules an imports[].path is admitted ONLY when its first segment is a Go
+// standard-library top-level package (goStdlibTopLevelPackages allowlist) —
+// the R2 "no dot in the first segment" heuristic let a forged stdlib record
+// smuggle "corp/internal/vuln"-style external module paths through, planting
+// fake selectors ("vuln.X") that steer the CLI AST walk toward false
+// reachable verdicts. Real modules keep the R2 module-prefix rule unchanged.
+func TestOSVImportPathWithinModule(t *testing.T) {
+	cases := []struct {
+		module, path string
+		want         bool
+	}{
+		// stdlib carve-out: real standard-library package paths pass.
+		{"stdlib", "fmt", true},
+		{"stdlib", "html/template", true},
+		{"stdlib", "net/http", true},
+		{"stdlib", "crypto/tls", true},
+		{"toolchain", "fmt", true},
+		// R3 finding 1: dot-less first segments that are NOT stdlib
+		// top-level packages are rejected.
+		{"stdlib", "corp/internal/vuln", false},
+		{"stdlib", "internal/poison", false},
+		{"stdlib", "vendor/golang.org/x/net/http2", false},
+		{"toolchain", "corp/internal/vuln", false},
+		// Conservative by design: cmd/* is not in `go doc std`, so
+		// toolchain-only paths drop to import-level reachability.
+		{"toolchain", "cmd/go", false},
+		// Domain-shaped smuggles keep failing as under R2.
+		{"stdlib", "github.com/evil/mod", false},
+		// Empty / blank inputs.
+		{"stdlib", "", false},
+		{"", "fmt", false},
+		{"stdlib", "   ", false},
+		// Non-synthetic modules: R2 finding 4 module-prefix rule unchanged.
+		{"github.com/a/b", "github.com/a/b", true},
+		{"github.com/a/b", "github.com/a/b/pkg", true},
+		{"github.com/a/b", "github.com/a/bx", false},
+		{"github.com/a/b", "fmt", false},
+	}
+	for _, tc := range cases {
+		if got := osvImportPathWithinModule(tc.module, tc.path); got != tc.want {
+			t.Errorf("osvImportPathWithinModule(%q, %q) = %v, want %v", tc.module, tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -1115,6 +1193,149 @@ func TestCVESyncJob_FetchOSVVulnFuncs_PolitenessSleepCtxAware(t *testing.T) {
 	}
 	if _, ok := out["CVE-2025-4444"]; ok {
 		t.Error("aborted CVE must have no outcome (no tombstone)")
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_Mass404SuppressesTombstones pins the M43
+// Phase D R3 finding 2 safety valve: a tick whose every lookup (≥
+// osvVulnFuncsMass404SuppressThreshold of them) comes back "no record" is
+// the signature of an OSV endpoint anomaly (e.g. an air-gapped mirror
+// 404-ing every path), NOT of every candidate CVE genuinely vanishing — so
+// the tick writes ZERO tombstones (candidates stay stale and retry next
+// tick, positive rows are not overwritten by empty rows) and emits exactly
+// one Warn carrying the attempt count and not-found rate.
+func TestCVESyncJob_FetchOSVVulnFuncs_Mass404SuppressesTombstones(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // misconfigured mirror: 404 for every path
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := make([]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		ids = append(ids, fmt.Sprintf("CVE-2025-9%03d", i))
+	}
+	out := j.fetchOSVVulnFuncs(context.Background(), ids)
+
+	if len(out) != 0 {
+		t.Fatalf("all-404 tick produced %d outcomes, want 0 (tombstones suppressed)", len(out))
+	}
+	got := logs.String()
+	if n := strings.Count(got, osvMass404SuppressWarnMsg); n != 1 {
+		t.Errorf("mass-404 suppression Warn logged %d times, want exactly 1 (logs: %s)", n, got)
+	}
+	if !strings.Contains(got, "level=WARN") ||
+		!strings.Contains(got, "fetches=25") ||
+		!strings.Contains(got, "not_found=25") {
+		t.Errorf("suppression Warn must carry level=WARN + fetches/not_found counts, got: %s", got)
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_PartialMass404StillTombstones is the
+// finding 2 valve's normal-operation guard: with ANY non-404 response in the
+// tick (24× 404 + 1 resolved record here) the definitive-404 rate is below
+// 100%, so 404s tombstone exactly as before (M43 Phase D R2 finding 1
+// semantics) and no suppression Warn fires.
+func TestCVESyncJob_FetchOSVVulnFuncs_PartialMass404StillTombstones(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-1111") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(osvGoFixtureJSON))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := make([]string, 0, 25)
+	for i := 0; i < 24; i++ {
+		ids = append(ids, fmt.Sprintf("CVE-2025-9%03d", i))
+	}
+	ids = append(ids, "CVE-2025-1111")
+	out := j.fetchOSVVulnFuncs(context.Background(), ids)
+
+	if len(out) != 25 {
+		t.Fatalf("outcomes = %d, want 25 (24 tombstones + 1 positive)", len(out))
+	}
+	tombstones := 0
+	for _, o := range out {
+		if len(o.symbols) == 0 {
+			tombstones++
+		}
+	}
+	if tombstones != 24 {
+		t.Errorf("tombstone outcomes = %d, want 24 (partial 404s keep tombstoning)", tombstones)
+	}
+	if o := out["CVE-2025-1111"]; len(o.symbols) == 0 {
+		t.Error("resolved CVE lost its symbols")
+	}
+	if strings.Contains(logs.String(), osvMass404SuppressWarnMsg) {
+		t.Error("suppression Warn fired on a below-100%-rate tick, want none")
+	}
+}
+
+// TestCVESyncJob_SyncOSVVulnFuncs_OfflineClientOnlineJobDrift pins the M43
+// Phase D R3 finding 3 drift combination: the JOB is online (j.offline =
+// false, so the existing guard does not trip) but the OSV CLIENT has been
+// flipped offline — its GetVulnerability short-circuits to (nil, nil), which
+// is byte-identical to a real 404, so pre-fix every candidate was
+// mass-tombstoned. The tick-level valve reclassifies the all-(nil, nil) tick
+// as transient: zero HTTP requests, zero tombstone rows (no write-pass tx at
+// all), one Warn; candidates stay stale and retry next tick. The existing
+// j.offline guard (Offline_NoCalls test) is unchanged.
+func TestCVESyncJob_SyncOSVVulnFuncs_OfflineClientOnlineJobDrift(t *testing.T) {
+	mockp, j, fake, setOSV := newOSVSyncMockDB(t)
+	mock := *mockp
+	logs := captureSlog(t)
+	tenantID := uuid.New()
+
+	hit := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	setOSV(server.URL)
+	j.osv.WithOffline(true) // the drift: offline client under an online job
+
+	pairs := make([][2]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		pairs = append(pairs, [2]string{
+			fmt.Sprintf("CVE-2025-8%03d", i),
+			fmt.Sprintf("pkg:golang/github.com/drift/mod%d@v1.0.0", i),
+		})
+	}
+	// ONLY the read pass: ExpectationsWereMet fails if a write-pass BEGIN
+	// happens.
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	expectOSVCandidateQuery(mock, osvCandidateRows(pairs...))
+	mock.ExpectCommit()
+
+	j.syncOSVVulnFuncs(context.Background(), []uuid.UUID{tenantID})
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if hit {
+		t.Error("offline OSV client must not make any HTTP request")
+	}
+	if fake.callCount() != 0 {
+		t.Fatalf("Upsert calls = %d, want 0 (offline-client drift must not tombstone)", fake.callCount())
+	}
+	if !strings.Contains(logs.String(), osvMass404SuppressWarnMsg) {
+		t.Errorf("drift tick must emit the mass-404 suppression Warn, logs: %s", logs.String())
 	}
 }
 

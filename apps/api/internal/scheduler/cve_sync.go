@@ -1308,7 +1308,10 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 // Failure posture: warn + skip at every level (chunk tx abort, fetch
 // failure). TRANSIENT fetch failures (network error / non-404 status / ctx
 // abort) write nothing and retry next tick; definitive negatives (404 / no
-// symbols) write a tombstone row (see above). The pass never returns an
+// symbols) write a tombstone row (see above) — UNLESS the whole tick's
+// lookups (≥ osvVulnFuncsMass404SuppressThreshold of them) were 404s, in
+// which case the mass-404 valve (M43 Phase D R3 findings 2+3) suppresses
+// every tombstone for the tick and warns instead. The pass never returns an
 // error and never disturbs the core CVE sync; abandoned work self-heals on
 // the next tick via the freshness window and the (tenant_id, cve_id, source)
 // idempotent upsert.
@@ -1354,7 +1357,30 @@ const (
 	// hostile OSV summary/details blobs. Rune-based so multibyte (Japanese)
 	// text is never cut mid-sequence.
 	osvExcerptMaxRunes = 2000
+
+	// osvVulnFuncsMass404SuppressThreshold is the per-tick mass-tombstone
+	// safety valve (M43 Phase D R3 findings 2+3): when a tick performs at
+	// least this many OSV lookups and EVERY one of them returns "no record"
+	// ((nil, nil) from the client — a definitive 404 in normal operation),
+	// the tick's would-be tombstones are all suppressed (nothing is written;
+	// candidates stay stale and retry next tick) and one slog.Warn is
+	// emitted with the counts and rate. A 100% not-found tick is the
+	// signature of an OSV endpoint anomaly — a misconfigured air-gapped
+	// mirror 404-ing every path — or of an offline-drifted client
+	// (client.WithOffline(true) under an online job: the client's offline
+	// short-circuit returns the SAME (nil, nil) as a real 404, so per-call
+	// disambiguation is impossible without touching internal/client).
+	// Without the valve such a tick tombstones the ENTIRE candidate set and
+	// overwrites previously-positive rows with empty ones as their
+	// freshness expires. Partial-404 ticks (any non-404 response) and small
+	// all-404 ticks (< threshold lookups) tombstone exactly as before.
+	osvVulnFuncsMass404SuppressThreshold = 20
 )
+
+// osvMass404SuppressWarnMsg is the exact Warn message emitted when the
+// mass-404 valve trips — a const so the test contract pins operators'
+// grep target verbatim.
+const osvMass404SuppressWarnMsg = "scheduler: every OSV lookup this tick returned no record; suspected endpoint anomaly or offline-client drift — tombstones suppressed for this tick (M43 Phase D R3)"
 
 // osvVulnFuncsFetchCap is the effective per-tick fetch cap. Production
 // always uses the default; tests may temporarily override (defer-restore)
@@ -1628,6 +1654,13 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 //     status / ctx abort) or an alias follow-up skipped by the fetch cap: NO
 //     outcome. Nothing is written; the CVE stays stale and retries next tick.
 //
+// Mass-404 safety valve (M43 Phase D R3 findings 2+3): if the tick performed
+// at least osvVulnFuncsMass404SuppressThreshold lookups and 100% of them
+// returned "no record", every would-be tombstone is reclassified as
+// UNDETERMINED — an empty outcome map is returned (nothing written, one
+// slog.Warn). See the threshold const for the rationale (endpoint anomaly /
+// offline-client drift signature).
+//
 // Bounds: ≤ osvVulnFuncsFetchCap total HTTP requests per call (main +
 // follow-ups combined), osvVulnFuncsFetchDelay ctx-aware politeness pause
 // between requests (finding 6: a cancelled ctx aborts the pause immediately
@@ -1648,6 +1681,10 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 		fetchCap = osvVulnFuncsFetchCapDefault
 	}
 	fetches := 0
+	// notFound counts lookups that returned (nil, nil) — a definitive 404 in
+	// normal operation, but also what an offline-drifted client returns for
+	// EVERY call. Feeds the mass-404 valve below.
+	notFound := 0
 
 	// fetch performs one capped, delayed lookup. ok=false marks a TRANSIENT
 	// failure (network/5xx/timeout/ctx abort — logged): the caller must NOT
@@ -1665,6 +1702,9 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 		if err != nil {
 			slog.Warn("scheduler: OSV lookup failed, skipping without tombstone (M43 F467)", "id", id, "error", err)
 			return nil, false
+		}
+		if v == nil {
+			notFound++
 		}
 		return v, true
 	}
@@ -1724,6 +1764,24 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 		// tombstone (negative — the record(s) exist but carry nothing
 		// selector-shaped for the Go analyzer).
 		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt}
+	}
+
+	// Mass-404 safety valve (M43 Phase D R3 findings 2+3): a large tick in
+	// which EVERY lookup came back "no record" is an endpoint anomaly /
+	// offline-client drift signature, not the whole candidate set genuinely
+	// vanishing from OSV — reclassify the tick's determinations as transient
+	// (no tombstones; candidates stay stale and retry next tick). By
+	// construction every entry in out is an empty tombstone here: any
+	// positive or no-symbols outcome requires a non-nil record, which would
+	// make notFound < fetches.
+	if fetches >= osvVulnFuncsMass404SuppressThreshold && notFound == fetches {
+		slog.Warn(osvMass404SuppressWarnMsg,
+			"fetches", fetches,
+			"not_found", notFound,
+			"not_found_rate", 1.0,
+			"threshold", osvVulnFuncsMass404SuppressThreshold,
+			"suppressed_tombstones", len(out))
+		return map[string]osvVulnFuncsOutcome{}
 	}
 	return out
 }
@@ -1944,14 +2002,40 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 	return out
 }
 
+// goStdlibTopLevelPackages is the allowlist of Go standard-library TOP-LEVEL
+// package path segments, per `go doc std` (M43 Phase D R3 finding 1). Update
+// on Go releases when a new top-level std package lands (e.g. "structs",
+// "unique", "weak" in recent releases); a new package missing here is
+// conservatively DROPPED (its symbols never reach vuln_funcs — import-level
+// reachability via VulnerableModules still covers the finding), never
+// falsely admitted. Deliberately excluded: "internal" / "vendor" (not
+// importable by user code, so their symbols can never match an app AST walk)
+// and "cmd" (toolchain binaries — same reason).
+var goStdlibTopLevelPackages = map[string]struct{}{
+	"archive": {}, "bufio": {}, "builtin": {}, "bytes": {}, "cmp": {},
+	"compress": {}, "container": {}, "context": {}, "crypto": {},
+	"database": {}, "debug": {}, "embed": {}, "encoding": {}, "errors": {},
+	"expvar": {}, "flag": {}, "fmt": {}, "go": {}, "hash": {}, "html": {},
+	"image": {}, "index": {}, "io": {}, "iter": {}, "log": {}, "maps": {},
+	"math": {}, "mime": {}, "net": {}, "os": {}, "path": {}, "plugin": {},
+	"reflect": {}, "regexp": {}, "runtime": {}, "slices": {}, "sort": {},
+	"strconv": {}, "strings": {}, "structs": {}, "sync": {}, "syscall": {},
+	"testing": {}, "text": {}, "time": {}, "unicode": {}, "unique": {},
+	"unsafe": {}, "weak": {},
+}
+
 // osvImportPathWithinModule reports whether an OSV imports[].path plausibly
 // belongs to the affected module it is declared under (M43 Phase D R2
 // finding 4): the path must equal the module name or be a "/"-delimited
 // subpath of it. Go vulndb's synthetic "stdlib" / "toolchain" modules are the
 // exception — their imports[].path values are bare standard-library package
 // paths ("html/template") never prefixed by the module name, so for those the
-// check instead requires a non-domain-shaped first segment (no "."), which
-// still rejects smuggled external module paths.
+// path's FIRST segment must be a real standard-library top-level package
+// (goStdlibTopLevelPackages). The R2 heuristic ("no '.' in the first
+// segment") was not enough (R3 finding 1): a record forging package.name
+// "stdlib" could smuggle a dot-less external module path like
+// "corp/internal/vuln", planting fake selectors ("vuln.X") in vuln_funcs
+// that steer the CLI AST walk toward false reachable verdicts.
 func osvImportPathWithinModule(module, path string) bool {
 	module = strings.TrimSpace(module)
 	path = strings.TrimSpace(path)
@@ -1963,7 +2047,8 @@ func osvImportPathWithinModule(module, path string) bool {
 		if i := strings.IndexByte(path, '/'); i >= 0 {
 			first = path[:i]
 		}
-		return !strings.Contains(first, ".")
+		_, ok := goStdlibTopLevelPackages[first]
+		return ok
 	}
 	return path == module || strings.HasPrefix(path, module+"/")
 }
@@ -1981,11 +2066,15 @@ func osvImportPathWithinModule(module, path string) bool {
 //     previous segment ("github.com/labstack/echo/v4" → "echo") — Go
 //     modules forbid /v0 and /v1 suffixes, so "v1" endings are kept
 //     verbatim (k8s.io/api/core/v1 really is package v1);
-//   - a gopkg.in-style versioned segment "<ident>.v<N>" resolves to
-//     "<ident>" ("gopkg.in/yaml.v2" → "yaml"): by gopkg.in convention the
-//     dot-version suffix names the module version, and the source package
-//     declares the bare ident (M43 Phase D R2 finding 3 — previously the
-//     whole gopkg.in/yaml.vN family was dropped, starving those selectors);
+//   - a versioned segment "<ident>.v<N>" resolves to "<ident>"
+//     ("gopkg.in/yaml.v2" → "yaml") ONLY when the path lives under
+//     "gopkg.in/" (M43 Phase D R3 finding 4): the dot-version suffix naming
+//     the module version while the source package declares the bare ident is
+//     gopkg.in's documented convention (M43 Phase D R2 finding 3 —
+//     previously the whole gopkg.in/yaml.vN family was dropped, starving
+//     those selectors). The same "<ident>.v<N>" shape on any other host
+//     ("github.com/foo/bar.v2") is a guess — the package could equally
+//     declare bar_v2 or anything else — so it keeps the conservative skip;
 //   - any other non-identifier result ("github.com/foo/go-bar" → "go-bar")
 //     returns ok=false: the caller skips those imports conservatively.
 func osvGoPackageIdent(path string) (string, bool) {
@@ -1999,8 +2088,10 @@ func osvGoPackageIdent(path string) (string, bool) {
 		last = segs[len(segs)-2]
 	}
 	if !isGoIdentifierShaped(last) {
-		if ident, ok := gopkgInVersionedIdent(last); ok {
-			return ident, true
+		if strings.HasPrefix(p, "gopkg.in/") {
+			if ident, ok := gopkgInVersionedIdent(last); ok {
+				return ident, true
+			}
 		}
 		return "", false
 	}
@@ -2009,9 +2100,10 @@ func osvGoPackageIdent(path string) (string, bool) {
 
 // gopkgInVersionedIdent resolves a gopkg.in-style versioned path segment
 // "<ident>.v<N>" (N = one or more digits) to "<ident>" (M43 Phase D R2
-// finding 3). Anything else — non-identifier prefix, missing halves, a
-// version tail that is not "v"+digits — returns ok=false so the caller keeps
-// its conservative skip.
+// finding 3). The CALLER restricts its use to paths under "gopkg.in/" (M43
+// Phase D R3 finding 4) — the convention is host-specific. Anything else —
+// non-identifier prefix, missing halves, a version tail that is not
+// "v"+digits — returns ok=false so the caller keeps its conservative skip.
 func gopkgInVersionedIdent(seg string) (string, bool) {
 	i := strings.LastIndexByte(seg, '.')
 	if i <= 0 || i == len(seg)-1 {
