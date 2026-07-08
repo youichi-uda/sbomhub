@@ -2213,6 +2213,302 @@ func TestBuildPrompt_VulnFuncsSmallListVerbatim(t *testing.T) {
 	}
 }
 
+// TestBuildPrompt_AffectedPathsTruncated (M43 Phase D R2 finding 3):
+// affected_paths gets the same per-row prompt budget as vuln_funcs — an
+// unbounded render of a pathological path list would bloat the prompt and
+// drown the reachability evidence exactly like an unbounded symbol list.
+func TestBuildPrompt_AffectedPathsTruncated(t *testing.T) {
+	paths := make([]string, 500)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("src/pkg%d/handlers/file%d.go", i, i)
+	}
+	rawPaths, err := json.Marshal(paths)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	adv := []AdvisoryExcerptRow{{
+		ID:            uuid.New(),
+		CVEID:         "CVE-2024-0003",
+		Source:        "osv",
+		AffectedPaths: rawPaths,
+	}}
+
+	prompt := BuildPrompt("CVE-2024-0003", adv, nil)
+	line := promptLineAfter(t, prompt, "affected_paths: ")
+
+	// Budget ~800 bytes for the JSON body plus the small "+N more" marker;
+	// the untruncated fixture is ~15KB, so anything near that means the
+	// render did not truncate.
+	const budget = 800
+	if len(line) > budget+len(" …(+9999 more)") {
+		t.Fatalf("affected_paths render = %d bytes, want <= ~%d (+marker); render did not truncate:\n%s", len(line), budget, line)
+	}
+
+	// The marker must be present and account for every elided element.
+	idx := strings.Index(line, "] …(+")
+	if idx < 0 {
+		t.Fatalf("render missing the \"…(+N more)\" marker: %q", line)
+	}
+	var kept []string
+	if err := json.Unmarshal([]byte(line[:idx+1]), &kept); err != nil {
+		t.Fatalf("truncated render is not a valid JSON array up to ']': %v (%q)", err, line[:idx+1])
+	}
+	if len(kept) == 0 {
+		t.Fatalf("render kept 0 elements; want at least the leading paths within budget")
+	}
+	var n int
+	if _, err := fmt.Sscanf(line[idx+2:], "…(+%d more)", &n); err != nil {
+		t.Fatalf("cannot parse elided-count marker from %q: %v", line[idx+2:], err)
+	}
+	if len(kept)+n != len(paths) {
+		t.Errorf("kept %d + elided %d = %d, want %d (every element accounted for)", len(kept), n, len(kept)+n, len(paths))
+	}
+	for i := range kept {
+		if kept[i] != paths[i] {
+			t.Fatalf("kept[%d] = %q, want %q (leading elements in order)", i, kept[i], paths[i])
+		}
+	}
+}
+
+// TestBuildPrompt_AffectedPathsSmallListVerbatim: at-or-under-budget
+// payloads render byte-for-byte with no marker — prompt_hash stability for
+// the common small case (mirrors the vuln_funcs contract above).
+func TestBuildPrompt_AffectedPathsSmallListVerbatim(t *testing.T) {
+	adv := []AdvisoryExcerptRow{{
+		ID:            uuid.New(),
+		CVEID:         "CVE-2024-0004",
+		Source:        "ghsa",
+		AffectedPaths: json.RawMessage(`["src/parser.go","lib/decode.go"]`),
+	}}
+	prompt := BuildPrompt("CVE-2024-0004", adv, nil)
+	if !strings.Contains(prompt, "affected_paths: [\"src/parser.go\",\"lib/decode.go\"]\n") {
+		t.Fatalf("small affected_paths must render verbatim; prompt=\n%s", prompt)
+	}
+	if strings.Contains(prompt, "more)") {
+		t.Errorf("small list must not carry a truncation marker; prompt=\n%s", prompt)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M43 Phase D R2 finding 1 — OSV negative-tombstone rows must not count as
+// grounding. The M43 OSV vuln_funcs sync writes a content-free tombstone
+// (source='osv', vuln_funcs '[]', raw_excerpt NULL, all other structured
+// arrays '[]') for a definitive upstream 404 so the freshness window can
+// negative-cache the miss. Such a row carries ZERO grounding content, so
+// the triage runner must treat a tombstone-only CVE exactly like "no
+// advisory rows at all" (Tier-1 ungrounded clamp fires, nothing rendered
+// into the prompt, no advisory_excerpt FK).
+// ----------------------------------------------------------------------------
+
+// tombstoneExcerptRow builds the exact shape the OSV sync persists for a
+// definitive negative (scheduler/cve_sync.go): every structured array is
+// the JSONB '[]' literal and raw_excerpt is NULL (empty string in-process).
+func tombstoneExcerptRow(id uuid.UUID, cveID string) AdvisoryExcerptRow {
+	return AdvisoryExcerptRow{
+		ID:             id,
+		CVEID:          cveID,
+		Source:         "osv",
+		VulnFuncs:      json.RawMessage(`[]`),
+		AffectedPaths:  json.RawMessage(`[]`),
+		RequiredConfig: json.RawMessage(`[]`),
+		RequiredEnv:    json.RawMessage(`[]`),
+		RawExcerpt:     "",
+	}
+}
+
+// TestDropContentFreeExcerpts pins the content-free predicate: a row is
+// dropped only when RawExcerpt is empty AND all four structured arrays are
+// empty ('[]' / null / absent). Any single populated field keeps the row,
+// and a foreign-shaped (non-array) payload counts as content — lenient,
+// mirroring the repository's raw pass-through tolerance.
+func TestDropContentFreeExcerpts(t *testing.T) {
+	cases := []struct {
+		name string
+		row  AdvisoryExcerptRow
+		keep bool
+	}{
+		{"tombstone_all_empty_arrays", tombstoneExcerptRow(uuid.New(), "CVE-1"), false},
+		{"tombstone_nil_arrays", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "osv"}, false},
+		{"tombstone_null_and_whitespace", AdvisoryExcerptRow{
+			ID: uuid.New(), CVEID: "CVE-1", Source: "osv",
+			VulnFuncs: json.RawMessage(`null`), AffectedPaths: json.RawMessage(` [] `),
+		}, false},
+		{"raw_excerpt_only", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "nvd", RawExcerpt: "buffer overflow in parse()"}, true},
+		{"vuln_funcs_only", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "osv", VulnFuncs: json.RawMessage(`["pkg.Foo"]`)}, true},
+		{"affected_paths_only", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "ghsa", AffectedPaths: json.RawMessage(`["src/a.go"]`)}, true},
+		{"required_config_only", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "ghsa", RequiredConfig: json.RawMessage(`["debug=true"]`)}, true},
+		{"required_env_only", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "ghsa", RequiredEnv: json.RawMessage(`["GODEBUG"]`)}, true},
+		{"foreign_shape_counts_as_content", AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-1", Source: "jvn", VulnFuncs: json.RawMessage(`{"not":"an array"}`)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dropContentFreeExcerpts([]AdvisoryExcerptRow{tc.row})
+			if tc.keep && len(got) != 1 {
+				t.Fatalf("row was dropped, want kept: %+v", tc.row)
+			}
+			if !tc.keep && len(got) != 0 {
+				t.Fatalf("row was kept, want dropped: %+v", tc.row)
+			}
+		})
+	}
+
+	// Mixed input: only the content-free rows disappear, order preserved.
+	real1 := AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-2", Source: "ghsa", RawExcerpt: "x"}
+	real2 := AdvisoryExcerptRow{ID: uuid.New(), CVEID: "CVE-2", Source: "nvd", VulnFuncs: json.RawMessage(`["a.B"]`)}
+	got := dropContentFreeExcerpts([]AdvisoryExcerptRow{real1, tombstoneExcerptRow(uuid.New(), "CVE-2"), real2})
+	if len(got) != 2 || got[0].ID != real1.ID || got[1].ID != real2.ID {
+		t.Fatalf("mixed filter = %+v, want [real1 real2] in order", got)
+	}
+}
+
+// TestRunner_Run_TombstoneOnlyAdvisory_TreatedAsUngrounded: a CVE whose only
+// advisory_excerpts row is a content-free OSV tombstone must behave exactly
+// like a CVE with no advisory rows: the Tier-1 ungrounded clamp fires on a
+// confident verdict, the tombstone never renders into the prompt, and the
+// draft's advisory_excerpt FK stays nil (it must not point at a tombstone).
+func TestRunner_Run_TombstoneOnlyAdvisory_TreatedAsUngrounded(t *testing.T) {
+	componentID := uuid.New()
+	tombID := uuid.New()
+	// state=affected with only self-referential llm_rationale evidence:
+	// pre-filter, the tombstone row made loadedGrounding=true and
+	// IsUngrounded=false, so this draft sailed through UNclamped.
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: jsonResp(t, "affected", "", 0.9)}}
+	drafts := &fakeVexDraftStore{}
+	r := NewRunner(RunnerConfig{
+		Drafts:                   drafts,
+		Advisories:               &fakeAdvisoryReader{rows: []AdvisoryExcerptRow{tombstoneExcerptRow(tombID, "CVE-2026-0800")}},
+		Reachability:             &fakeReachabilityReader{}, // empty → no grounding
+		LLMCalls:                 &fakeLLMCallWriter{},
+		Audit:                    &fakeAuditWriter{},
+		Provider:                 stub,
+		Threshold:                0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0800"),
+	})
+
+	res, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0800",
+		ComponentID: &componentID,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	// Prompt: the tombstone must not render — the advisory section reads
+	// exactly like the zero-rows case.
+	prompt := stub.captured.Messages[0].Content
+	if strings.Contains(prompt, tombID.String()) {
+		t.Errorf("tombstone row leaked into the prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "(none — advisory parsing has no data for this CVE)") {
+		t.Errorf("tombstone-only CVE must render the no-advisory placeholder; prompt=\n%s", prompt)
+	}
+
+	// Draft: Tier-1 ungrounded clamp fired.
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 saved draft (never dropped), got %d", got)
+	}
+	d := drafts.inserted[0]
+	if d.State != string(StateUnderInvestigation) {
+		t.Errorf("tombstone-only grounding must clamp to under_investigation, got %q", d.State)
+	}
+	if d.Confidence == nil || *d.Confidence >= 0.7 {
+		t.Errorf("confidence must be clamped below threshold 0.7, got %v", d.Confidence)
+	}
+	if !res.Clamped {
+		t.Errorf("expected RunResult.Clamped=true for a tombstone-only draft")
+	}
+	if d.AdvisoryExcerptID != nil {
+		t.Errorf("advisory_excerpt_id must stay nil, got %v (a draft FK must never point at a tombstone)", d.AdvisoryExcerptID)
+	}
+
+	// Synthetic Tier-1 note present, preserving the AI's proposal.
+	var found bool
+	for _, ev := range decodeEvidence(t, d.Evidence) {
+		if ev.Kind == EvidenceKindAnalyzerError && ev.Note == UngroundedNoteTag {
+			found = true
+			if !strings.Contains(ev.Description, "no advisory excerpt or reachability evidence") {
+				t.Errorf("expected the Tier-1 zero-grounding note, got %q", ev.Description)
+			}
+			if !strings.Contains(ev.Description, "affected") || !strings.Contains(ev.Description, "0.90") {
+				t.Errorf("synthetic note must preserve original proposal (state@confidence), got %q", ev.Description)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected a synthetic ungrounded analyzer_error note on the draft")
+	}
+}
+
+// TestRunner_Run_TombstonePlusRealAdvisory_PromptAndFKUseRealRow: when a
+// content-free tombstone coexists with a real advisory row (the production
+// order: ghsa sorts before osv), only the real row may feed the prompt, the
+// grounding guard, and the draft's advisory_excerpt FK. The draft stays
+// unclamped because its citation is grounded in the REAL row.
+func TestRunner_Run_TombstonePlusRealAdvisory_PromptAndFKUseRealRow(t *testing.T) {
+	componentID := uuid.New()
+	realID := uuid.New()
+	tombID := uuid.New()
+	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
+		"not_affected", "code_not_reachable", 0.9,
+		[]map[string]interface{}{
+			{"kind": "advisory_excerpt", "raw_snippet": "func Parse mishandles nested anchors", "source": "advisory_parser"},
+		},
+	)}}
+	advisories := &fakeAdvisoryReader{rows: []AdvisoryExcerptRow{
+		{
+			ID: realID, CVEID: "CVE-2026-0801", Source: "ghsa",
+			RawExcerpt: "GHSA-yaml: func Parse mishandles nested anchors leading to unbounded recursion.",
+		},
+		tombstoneExcerptRow(tombID, "CVE-2026-0801"),
+	}}
+	drafts := &fakeVexDraftStore{}
+	r := NewRunner(RunnerConfig{
+		Drafts: drafts, Advisories: advisories,
+		Reachability: &fakeReachabilityReader{}, LLMCalls: &fakeLLMCallWriter{},
+		Audit: &fakeAuditWriter{}, Provider: stub, Threshold: 0.7,
+		ComponentVulnerabilities: &fakeComponentVulnResolver{ids: []uuid.UUID{componentID}},
+		VulnerabilityCVE:         okVulnCVE("CVE-2026-0801"),
+	})
+
+	res, err := r.Run(context.Background(), RunInput{
+		TenantID: uuid.New(), ProjectID: uuid.New(),
+		VulnerabilityID: uuid.New(), CVEID: "CVE-2026-0801",
+		ComponentID: &componentID,
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	// Prompt: real advisory rendered, tombstone absent.
+	prompt := stub.captured.Messages[0].Content
+	if !strings.Contains(prompt, realID.String()) {
+		t.Errorf("real advisory row missing from the prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "func Parse mishandles nested anchors") {
+		t.Errorf("real advisory excerpt missing from the prompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, tombID.String()) {
+		t.Errorf("tombstone row leaked into the prompt:\n%s", prompt)
+	}
+
+	// Draft: grounded in the real row — no clamp, FK points at the real row.
+	if got := len(drafts.inserted); got != 1 {
+		t.Fatalf("expected 1 draft, got %d", got)
+	}
+	d := drafts.inserted[0]
+	if d.State != "not_affected" {
+		t.Errorf("draft grounded in the real advisory must not clamp, got state %q", d.State)
+	}
+	if res.Clamped {
+		t.Errorf("did not expect a clamp when the citation matches the real advisory")
+	}
+	if d.AdvisoryExcerptID == nil || *d.AdvisoryExcerptID != realID {
+		t.Errorf("advisory_excerpt_id = %v, want the real row %s (never a tombstone)", d.AdvisoryExcerptID, realID)
+	}
+}
+
 // ----------------------------------------------------------------------------
 // Tiny helper used by multiple test cases above.
 // ----------------------------------------------------------------------------

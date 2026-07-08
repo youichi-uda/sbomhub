@@ -527,6 +527,11 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err != nil {
 			return fmt.Errorf("cra.Run: load advisory excerpts: %w", err)
 		}
+		// M43 Phase D R2 finding 2: drop content-free negative-tombstone
+		// rows at the load edge, before either consumer (buildCRAUserPrompt
+		// and buildEvidence) sees them. See dropContentFreeExcerpts for the
+		// tombstone provenance.
+		advisories = dropContentFreeExcerpts(advisories)
 		reachRows, err = r.reachabilityResults.ListByProject(ctx, in.TenantID, in.ProjectID, repository.ReachabilityResultListFilter{
 			CVEID: in.CVEID,
 		})
@@ -1117,7 +1122,10 @@ func buildCRAUserPrompt(in RunInput, sourceVEX *repository.VEXDraft, advisories 
 				fmt.Fprintf(&b, "      excerpt: %s\n", truncate(a.RawExcerpt, 600))
 			}
 			if len(a.VulnFuncs) > 0 && string(a.VulnFuncs) != "[]" {
-				fmt.Fprintf(&b, "      vuln_funcs: %s\n", string(a.VulnFuncs))
+				// M43 Phase D R2 finding 2: same whole-element budget as
+				// the triage prompt — an OSV / Go vulndb union of hundreds
+				// of symbols must not bloat the CRA prompt either.
+				fmt.Fprintf(&b, "      vuln_funcs: %s\n", renderVulnFuncs(a.VulnFuncs, vulnFuncsPromptBudget))
 			}
 		}
 	}
@@ -1439,4 +1447,94 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "...(truncated)"
+}
+
+// vulnFuncsPromptBudget caps the rendered vuln_funcs JSON per advisory row
+// in the CRA user prompt (M43 Phase D R2 finding 2). Same rationale and
+// value as the triage prompt: advisory unions can carry hundreds of
+// symbols (OSV / Go vulndb structured lists) and an unbounded render
+// bloats the prompt. Duplicated from triage/runner.go per the tiny-helpers
+// discipline above — keep the two in sync.
+const vulnFuncsPromptBudget = 800
+
+// renderVulnFuncs renders an advisory string-array JSON payload for the
+// prompt, keeping whole JSON elements until budget bytes are used and
+// appending " …(+N more)" for the elided tail. Payloads at or under budget
+// pass through byte-for-byte (prompt_hash stability); an over-budget
+// payload that does not parse as a string array falls back to the plain
+// byte truncation used elsewhere in this prompt. Duplicated from
+// triage/runner.go per the tiny-helpers discipline above — keep in sync.
+func renderVulnFuncs(raw json.RawMessage, budget int) string {
+	if len(raw) <= budget {
+		return string(raw)
+	}
+	var funcs []string
+	if err := json.Unmarshal(raw, &funcs); err != nil {
+		return truncate(string(raw), budget)
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	kept := 0
+	for _, f := range funcs {
+		enc, err := json.Marshal(f)
+		if err != nil {
+			continue
+		}
+		add := len(enc)
+		if kept > 0 {
+			add++ // separating comma
+		}
+		if b.Len()+add+1 > budget { // +1 for the closing bracket
+			break
+		}
+		if kept > 0 {
+			b.WriteByte(',')
+		}
+		b.Write(enc)
+		kept++
+	}
+	b.WriteByte(']')
+	if n := len(funcs) - kept; n > 0 {
+		fmt.Fprintf(&b, " …(+%d more)", n)
+	}
+	return b.String()
+}
+
+// dropContentFreeExcerpts filters out advisory rows that carry no usable
+// content: RawExcerpt empty AND every structured array (VulnFuncs /
+// AffectedPaths / RequiredConfig / RequiredEnv) empty. Such rows exist by
+// design: the M43 OSV vuln_funcs sync (scheduler/cve_sync.go) writes a
+// negative TOMBSTONE row (source='osv', vuln_funcs '[]', raw_excerpt NULL)
+// for a definitive upstream miss so the freshness window can negative-cache
+// it. In the CRA runner a tombstone would otherwise render as a
+// content-free advisory line in the LLM prompt AND land as an
+// advisory_excerpt entry in the cra_reports.evidence citation chain
+// (buildEvidence cites every loaded row) — a compliance artefact must not
+// cite a row with nothing in it. Filtering at the load edge covers both
+// consumers at once (M43 Phase D R2 finding 2). Duplicated from
+// triage/runner.go per the tiny-helpers discipline above — keep in sync.
+func dropContentFreeExcerpts(advisories []repository.AdvisoryExcerpt) []repository.AdvisoryExcerpt {
+	out := make([]repository.AdvisoryExcerpt, 0, len(advisories))
+	for _, a := range advisories {
+		if a.RawExcerpt == "" &&
+			jsonArrayEmpty(a.VulnFuncs) &&
+			jsonArrayEmpty(a.AffectedPaths) &&
+			jsonArrayEmpty(a.RequiredConfig) &&
+			jsonArrayEmpty(a.RequiredEnv) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// jsonArrayEmpty reports whether raw carries no JSON array content: nil /
+// empty bytes, JSON null, or the empty array literal. Postgres JSONB
+// canonicalises the on-disk value to exactly `[]` (and the repository
+// normalises nil to '[]' on write), so a byte comparison suffices; foreign
+// shapes count as content and are kept — lenient, mirroring the repository
+// read. Duplicated from triage/runner.go — keep in sync.
+func jsonArrayEmpty(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "null" || s == "[]"
 }

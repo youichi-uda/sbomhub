@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -1114,6 +1115,216 @@ func TestBuildCRASystemPrompt_UnknownReportType_LoudDefaultArm_F359(t *testing.T
 		if strings.Contains(p, "unregistered type") {
 			t.Errorf("F359: registered type %q must not trip the default arm",
 				string(rt))
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M43 Phase D R2 finding 2 — CRA prompt vuln_funcs budget + OSV tombstone
+// exclusion. Mirrors the triage runner coverage: the CRA user prompt used
+// to render vuln_funcs unbounded, and content-free OSV negative-tombstone
+// rows (source='osv', vuln_funcs '[]', raw_excerpt NULL — written by the
+// M43 OSV sync for definitive upstream misses) leaked into both the prompt
+// and the cra_reports.evidence citation chain.
+// ----------------------------------------------------------------------------
+
+// craPromptLineAfter extracts the rest of the line following the first
+// occurrence of marker (mirrors promptLineAfter in the triage tests).
+func craPromptLineAfter(t *testing.T, prompt, marker string) string {
+	t.Helper()
+	idx := strings.Index(prompt, marker)
+	if idx < 0 {
+		t.Fatalf("prompt does not contain %q:\n%s", marker, prompt)
+	}
+	rest := prompt[idx+len(marker):]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	return rest
+}
+
+// tombstoneAdvisoryExcerpt builds the exact row shape the OSV sync persists
+// for a definitive negative (scheduler/cve_sync.go): every structured array
+// is the JSONB '[]' literal and raw_excerpt is NULL (empty in-process).
+func tombstoneAdvisoryExcerpt(id, tenantID uuid.UUID, cveID string) repository.AdvisoryExcerpt {
+	return repository.AdvisoryExcerpt{
+		ID:             id,
+		TenantID:       tenantID,
+		CVEID:          cveID,
+		Source:         "osv",
+		VulnFuncs:      json.RawMessage(`[]`),
+		AffectedPaths:  json.RawMessage(`[]`),
+		RequiredConfig: json.RawMessage(`[]`),
+		RequiredEnv:    json.RawMessage(`[]`),
+		RawExcerpt:     "",
+	}
+}
+
+// TestBuildCRAUserPrompt_VulnFuncsTruncated: the CRA user prompt applies
+// the same whole-element budget to vuln_funcs as the triage prompt — an
+// OSV / Go vulndb union of hundreds of symbols must not bloat the prompt.
+func TestBuildCRAUserPrompt_VulnFuncsTruncated(t *testing.T) {
+	funcs := make([]string, 500)
+	for i := range funcs {
+		funcs[i] = fmt.Sprintf("pkg%d.Func%d", i, i)
+	}
+	rawFuncs, err := json.Marshal(funcs)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	advisories := []repository.AdvisoryExcerpt{{
+		ID:        uuid.New(),
+		CVEID:     "CVE-2026-4000",
+		Source:    "osv",
+		VulnFuncs: rawFuncs,
+	}}
+	in := RunInput{CVEID: "CVE-2026-4000", ReportType: ReportTypeEarlyWarning, Lang: LangEN}
+
+	prompt := buildCRAUserPrompt(in, nil, advisories, nil)
+	line := craPromptLineAfter(t, prompt, "vuln_funcs: ")
+
+	// Budget ~800 bytes for the JSON body plus the small "+N more" marker;
+	// the untruncated fixture is ~9KB, so anything near that means the
+	// render did not truncate.
+	const budget = 800
+	if len(line) > budget+len(" …(+9999 more)") {
+		t.Fatalf("vuln_funcs render = %d bytes, want <= ~%d (+marker); render did not truncate:\n%s", len(line), budget, line)
+	}
+
+	// The marker must be present and account for every elided element,
+	// and the kept prefix must be the leading elements in order.
+	idx := strings.Index(line, "] …(+")
+	if idx < 0 {
+		t.Fatalf("render missing the \"…(+N more)\" marker: %q", line)
+	}
+	var kept []string
+	if err := json.Unmarshal([]byte(line[:idx+1]), &kept); err != nil {
+		t.Fatalf("truncated render is not a valid JSON array up to ']': %v (%q)", err, line[:idx+1])
+	}
+	if len(kept) == 0 {
+		t.Fatalf("render kept 0 elements; want at least the leading symbols within budget")
+	}
+	var n int
+	if _, err := fmt.Sscanf(line[idx+2:], "…(+%d more)", &n); err != nil {
+		t.Fatalf("cannot parse elided-count marker from %q: %v", line[idx+2:], err)
+	}
+	if len(kept)+n != len(funcs) {
+		t.Errorf("kept %d + elided %d = %d, want %d (every element accounted for)", len(kept), n, len(kept)+n, len(funcs))
+	}
+	for i := range kept {
+		if kept[i] != funcs[i] {
+			t.Fatalf("kept[%d] = %q, want %q (leading elements in order)", i, kept[i], funcs[i])
+		}
+	}
+}
+
+// TestBuildCRAUserPrompt_VulnFuncsSmallListVerbatim: at-or-under-budget
+// payloads render byte-for-byte with no marker — prompt_hash stability for
+// the common small case (matches the triage contract).
+func TestBuildCRAUserPrompt_VulnFuncsSmallListVerbatim(t *testing.T) {
+	advisories := []repository.AdvisoryExcerpt{{
+		ID:        uuid.New(),
+		CVEID:     "CVE-2026-4001",
+		Source:    "ghsa",
+		VulnFuncs: json.RawMessage(`["xml.Unmarshal","Pkg.Type.Method"]`),
+	}}
+	in := RunInput{CVEID: "CVE-2026-4001", ReportType: ReportTypeEarlyWarning, Lang: LangEN}
+	prompt := buildCRAUserPrompt(in, nil, advisories, nil)
+	if !strings.Contains(prompt, "vuln_funcs: [\"xml.Unmarshal\",\"Pkg.Type.Method\"]\n") {
+		t.Fatalf("small vuln_funcs must render verbatim; prompt=\n%s", prompt)
+	}
+	if strings.Contains(prompt, "more)") {
+		t.Errorf("small list must not carry a truncation marker; prompt=\n%s", prompt)
+	}
+}
+
+// TestRunner_Run_TombstoneAdvisory_ExcludedFromPromptAndEvidence: a
+// content-free OSV tombstone coexisting with a real advisory row must feed
+// NEITHER the LLM prompt NOR the cra_reports.evidence citation chain —
+// only the real row may appear in both.
+func TestRunner_Run_TombstoneAdvisory_ExcludedFromPromptAndEvidence(t *testing.T) {
+	h := newTestHarness(t)
+	realID := h.advisories.rows[0].ID
+	tombID := uuid.New()
+	// Production GetByCVE orders by source ASC, so the osv tombstone
+	// follows the harness's ghsa row.
+	h.advisories.rows = append(h.advisories.rows, tombstoneAdvisoryExcerpt(tombID, h.tenantID, h.cveID))
+
+	in := h.baseInput()
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangEN
+
+	if _, err := h.runner.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	// Prompt: real advisory rendered, tombstone absent.
+	prompt := h.provider.captured.Messages[0].Content
+	if !strings.Contains(prompt, realID.String()) {
+		t.Errorf("real advisory row missing from the prompt:\n%s", prompt)
+	}
+	if strings.Contains(prompt, tombID.String()) {
+		t.Errorf("tombstone row leaked into the prompt:\n%s", prompt)
+	}
+
+	// Evidence: exactly one advisory_excerpt entry, pointing at the real row.
+	if got := len(h.craReports.inserted); got != 1 {
+		t.Fatalf("expected 1 cra_reports insert, got %d", got)
+	}
+	var evid []evidenceEntry
+	if err := json.Unmarshal(h.craReports.inserted[0].Evidence, &evid); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	var advisoryRefs []string
+	for _, e := range evid {
+		if e.Kind == "advisory_excerpt" {
+			advisoryRefs = append(advisoryRefs, e.Ref)
+		}
+	}
+	if len(advisoryRefs) != 1 || advisoryRefs[0] != realID.String() {
+		t.Errorf("advisory_excerpt evidence refs = %v, want exactly [%s] (tombstone must not be cited)", advisoryRefs, realID)
+	}
+}
+
+// TestRunner_Run_TombstoneOnlyAdvisory_PromptRendersNoneAndNoEvidence: when
+// the ONLY advisory row is a tombstone, the prompt renders the no-advisory
+// placeholder and the evidence chain carries no advisory_excerpt entry —
+// identical to a CVE with no advisory rows at all. The report itself still
+// lands (the vex_draft + template evidence entries keep the array non-empty).
+func TestRunner_Run_TombstoneOnlyAdvisory_PromptRendersNoneAndNoEvidence(t *testing.T) {
+	h := newTestHarness(t)
+	tombID := uuid.New()
+	h.advisories.rows = []repository.AdvisoryExcerpt{tombstoneAdvisoryExcerpt(tombID, h.tenantID, h.cveID)}
+
+	in := h.baseInput()
+	in.ReportType = ReportTypeEarlyWarning
+	in.Lang = LangEN
+
+	if _, err := h.runner.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	prompt := h.provider.captured.Messages[0].Content
+	if strings.Contains(prompt, tombID.String()) {
+		t.Errorf("tombstone row leaked into the prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "(none — advisory parser has no data for this CVE)") {
+		t.Errorf("tombstone-only CVE must render the no-advisory placeholder; prompt=\n%s", prompt)
+	}
+
+	if got := len(h.craReports.inserted); got != 1 {
+		t.Fatalf("expected 1 cra_reports insert, got %d", got)
+	}
+	var evid []evidenceEntry
+	if err := json.Unmarshal(h.craReports.inserted[0].Evidence, &evid); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	if len(evid) == 0 {
+		t.Errorf("evidence must stay non-empty (vex_draft + template entries)")
+	}
+	for _, e := range evid {
+		if e.Kind == "advisory_excerpt" {
+			t.Errorf("tombstone must not be cited as advisory_excerpt evidence: %+v", e)
 		}
 	}
 }

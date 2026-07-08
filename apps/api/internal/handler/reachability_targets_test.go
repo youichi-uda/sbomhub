@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -298,7 +299,7 @@ func TestNormalizeVulnFuncs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeVulnFuncs(tc.in)
+			got := normalizeVulnFuncs(uuid.Nil, "CVE-TEST", tc.in)
 			if len(got) != len(tc.want) {
 				t.Fatalf("normalizeVulnFuncs(%v) = %v, want %v", tc.in, got, tc.want)
 			}
@@ -328,7 +329,7 @@ func TestNormalizeVulnFuncs_CapAt200(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
 	}
-	got := normalizeVulnFuncs(raw)
+	got := normalizeVulnFuncs(uuid.Nil, "CVE-TEST", raw)
 	if len(got) != 200 {
 		t.Fatalf("len = %d, want 200 (cap)", len(got))
 	}
@@ -350,7 +351,7 @@ func TestNormalizeVulnFuncs_AtCapBoundaryUntouched(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
 	}
-	got := normalizeVulnFuncs(raw)
+	got := normalizeVulnFuncs(uuid.Nil, "CVE-TEST", raw)
 	if len(got) != 200 {
 		t.Fatalf("len = %d, want all 200 kept at the cap boundary", len(got))
 	}
@@ -393,6 +394,94 @@ func TestReachabilityHandler_GetTargets_VulnFuncsCappedAt200(t *testing.T) {
 	}
 	if got[0] != "pkg0.Func0" || got[199] != "pkg199.Func199" {
 		t.Errorf("vuln_funcs[0]=%q vuln_funcs[199]=%q, want pkg0.Func0 / pkg199.Func199 (first 200, order preserved)", got[0], got[199])
+	}
+}
+
+// TestNormalizeVulnFuncs_CapWarnCarriesContext (M43 Phase D R2 finding 5):
+// the cap Warn is the only operator-visible trace that advisory symbols
+// were dropped at the serving edge; without the (tenant, cve) pair it is
+// unactionable in aggregate logs. Pin that both land on the log line.
+func TestNormalizeVulnFuncs_CapWarnCarriesContext(t *testing.T) {
+	var sb strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, nil)))
+	defer slog.SetDefault(prev)
+
+	tenantID := uuid.New()
+	raw := make([]string, 0, 201)
+	for i := 0; i < 201; i++ {
+		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
+	}
+	got := normalizeVulnFuncs(tenantID, "CVE-2024-0555", raw)
+	if len(got) != 200 {
+		t.Fatalf("len = %d, want 200 (cap)", len(got))
+	}
+	logged := sb.String()
+	if !strings.Contains(logged, "vuln_funcs capped") {
+		t.Fatalf("expected a cap warn to be emitted, got log: %q", logged)
+	}
+	if !strings.Contains(logged, "CVE-2024-0555") {
+		t.Errorf("cap warn missing cve_id context: %q", logged)
+	}
+	if !strings.Contains(logged, tenantID.String()) {
+		t.Errorf("cap warn missing tenant_id context: %q", logged)
+	}
+
+	// At the boundary (no elements dropped) no Warn may fire — the log line
+	// must mean "symbols were actually dropped", nothing weaker.
+	sb.Reset()
+	if got := normalizeVulnFuncs(tenantID, "CVE-2024-0556", raw[:200]); len(got) != 200 {
+		t.Fatalf("boundary len = %d, want 200", len(got))
+	}
+	if sb.Len() != 0 {
+		t.Errorf("no warn expected at the exact cap boundary, got: %q", sb.String())
+	}
+}
+
+// TestReachabilityHandler_GetTargets_OSVSymbolsSurviveCap (M43 Phase D R2
+// finding 4): the repository's union order puts the osv row's structured
+// symbols at the HEAD of the per-CVE list (see ListVulnFuncsByCVEs), and the
+// handler cap trims from the TAIL — so when a noisy source contributes 200+
+// symbols, the osv symbols still ship. The fake mirrors the repository's
+// documented osv-first order; the order itself is pinned by the repository
+// test (UnionsSources), this test pins the cap-side of the contract.
+func TestReachabilityHandler_GetTargets_OSVSymbolsSurviveCap(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2024-0888", ComponentID: uuid.New(), Purl: "pkg:golang/x@v1", ComponentName: "x", ComponentVersion: "v1"},
+	}}
+	// osv row first (one structured symbol), then a noisy source's 200
+	// symbols — pre-R2, lexicographic order (osv LAST) let the noise consume
+	// the whole cap and push the osv symbol off the wire.
+	raw := []string{"osvpkg.VulnFunc"}
+	for i := 0; i < 200; i++ {
+		raw = append(raw, fmt.Sprintf("noisy%d.Func%d", i, i))
+	}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string][]string{"CVE-2024-0888": raw}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(resp.Targets))
+	}
+	got := resp.Targets[0].VulnFuncs
+	if len(got) != 200 {
+		t.Fatalf("vuln_funcs len = %d, want 200 (cap)", len(got))
+	}
+	if got[0] != "osvpkg.VulnFunc" {
+		t.Errorf("vuln_funcs[0] = %q, want osvpkg.VulnFunc (osv-first union head must survive the cap)", got[0])
+	}
+	if got[199] != "noisy198.Func198" {
+		t.Errorf("vuln_funcs[199] = %q, want noisy198.Func198 (tail trimmed, not head)", got[199])
 	}
 }
 

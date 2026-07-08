@@ -455,7 +455,7 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 	}
 	funcsByCVE := make(map[string][]string, len(rawFuncsByCVE))
 	for cve, raw := range rawFuncsByCVE {
-		funcsByCVE[cve] = normalizeVulnFuncs(raw)
+		funcsByCVE[cve] = normalizeVulnFuncs(tenantID, cve, raw)
 	}
 
 	items := make([]reachabilityTargetItem, 0, len(rows))
@@ -498,7 +498,13 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 //
 // Returns nil (not an empty slice) when nothing survives, so the caller's
 // omitempty field drops off the wire entirely.
-func normalizeVulnFuncs(raw []string) []string {
+//
+// tenantID / cveID are logging context only (M43 Phase D R2 finding 5):
+// the cap Warn below is the only operator-visible trace that advisory
+// symbols were dropped at the serving edge, and without the (tenant, cve)
+// pair the line is unactionable in aggregate logs. They play no part in
+// the normalisation itself.
+func normalizeVulnFuncs(tenantID uuid.UUID, cveID string, raw []string) []string {
 	var out []string
 	seen := make(map[string]struct{}, len(raw))
 	for _, s := range raw {
@@ -529,6 +535,7 @@ func normalizeVulnFuncs(raw []string) []string {
 	}
 	if len(out) > maxVulnFuncsPerCVE {
 		slog.Warn("reachability targets: vuln_funcs capped",
+			"tenant_id", tenantID, "cve_id", cveID,
 			"normalized", len(out), "cap", maxVulnFuncsPerCVE)
 		out = out[:maxVulnFuncsPerCVE]
 	}

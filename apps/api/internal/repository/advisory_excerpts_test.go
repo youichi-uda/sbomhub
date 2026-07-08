@@ -296,9 +296,10 @@ func TestAdvisoryExcerptsRepository_GetByCVE_RejectsZeroTenant(t *testing.T) {
 
 // TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources pins
 // the M43 Wave 1 (F465) batch-read contract: one CVE with several source
-// rows (ghsa + nvd here) yields the UNION of their vuln_funcs string
-// arrays in row order (ORDER BY cve_id, source — asserted via the SQL
-// regex), un-deduplicated (normalisation/dedupe is the handler edge's
+// rows (osv + ghsa here) yields the UNION of their vuln_funcs string
+// arrays in row order — osv rows FIRST, then the remaining sources
+// lexicographically (M43 Phase D R2 finding 4; asserted via the ORDER BY
+// regex) — un-deduplicated (normalisation/dedupe is the handler edge's
 // job); a requested CVE with no rows is simply absent from the map; and
 // tenant_id is bound at position 1 with an explicit WHERE clause (the
 // belt to migration 033's RLS braces, same rationale as GetByCVE).
@@ -313,11 +314,15 @@ func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources(t *testing
 	tenantID := uuid.New()
 	cveIDs := []string{"CVE-2025-1", "CVE-2025-2"}
 
-	mock.ExpectQuery(`SELECT cve_id, vuln_funcs[\s\S]+FROM advisory_excerpts[\s\S]+WHERE tenant_id = \$1 AND cve_id = ANY\(\$2\)[\s\S]+ORDER BY cve_id ASC, source ASC`).
+	// Rows arrive osv-first (the new ORDER BY puts source='osv' ahead of
+	// the lexicographic tail) so the osv structured symbols occupy the
+	// head of the union — the handler's 200-symbol delivery cap trims from
+	// the tail, so osv symbols must survive ahead of noisier sources.
+	mock.ExpectQuery(`SELECT cve_id, vuln_funcs[\s\S]+FROM advisory_excerpts[\s\S]+WHERE tenant_id = \$1 AND cve_id = ANY\(\$2\)[\s\S]+ORDER BY cve_id ASC, CASE WHEN source = 'osv' THEN 0 ELSE 1 END ASC, source ASC`).
 		WithArgs(tenantID, pq.Array(cveIDs)).
 		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs"}).
-			AddRow("CVE-2025-1", []byte(`["xml.Unmarshal","Bar.baz()"]`)).
-			AddRow("CVE-2025-1", []byte(`["html.Parse"]`)))
+			AddRow("CVE-2025-1", []byte(`["xml.Unmarshal","Bar.baz()"]`)). // osv row
+			AddRow("CVE-2025-1", []byte(`["html.Parse"]`)))                // ghsa row
 		// CVE-2025-2 has no advisory_excerpts rows at all.
 
 	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, cveIDs)

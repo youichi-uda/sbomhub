@@ -235,11 +235,16 @@ func (r *AdvisoryExcerptsRepository) GetBySource(ctx context.Context, tenantID u
 //   - CVEs with no advisory_excerpts rows (or whose rows carry no string
 //     symbols) are simply absent from the returned map — callers treat a
 //     missing key as "no symbols known".
-//   - The per-CVE order is stable: rows are read ORDER BY source ASC, and
-//     elements keep their on-disk array order within each row. No
-//     de-duplication happens here; the handler edge owns normalisation
-//     (trim / "()" strip / shape filter / dedupe) as its single source of
-//     truth.
+//   - The per-CVE order is stable: the 'osv' row first, then the remaining
+//     sources in lexicographic order (ghsa < jvn < nvd), and elements keep
+//     their on-disk array order within each row. osv leads because it is
+//     the source that carries the structured Go vulndb symbol lists, and
+//     the handler caps delivery at 200 symbols per CVE — with plain
+//     lexicographic order (osv last) a noisy free-text-derived source
+//     could consume the whole cap and crowd the structured osv symbols
+//     off the wire (M43 Phase D R2 finding 4). No de-duplication happens
+//     here; the handler edge owns normalisation (trim / "()" strip /
+//     shape filter / dedupe) as its single source of truth.
 //   - vuln_funcs is written as a JSON array of strings by the scheduler
 //     (stringsToJSONArray), but Upsert passes raw JSON through, so foreign
 //     shapes are tolerated leniently: a non-array value skips the row and a
@@ -260,14 +265,17 @@ func (r *AdvisoryExcerptsRepository) ListVulnFuncsByCVEs(ctx context.Context, te
 		return out, nil
 	}
 
-	// ORDER BY makes the union order deterministic across calls (ghsa <
-	// jvn < nvd lexicographically) so the handler's stable dedupe yields a
-	// reproducible wire order for the CLI.
+	// ORDER BY makes the union order deterministic across calls so the
+	// handler's stable dedupe yields a reproducible wire order for the
+	// CLI: the osv row leads (structured Go vulndb symbols must sit at the
+	// head of the union so the handler's 200-symbol delivery cap trims
+	// noisier sources, not them — M43 Phase D R2 finding 4), then the
+	// remaining sources lexicographically (ghsa < jvn < nvd).
 	const query = `
 		SELECT cve_id, vuln_funcs
 		FROM advisory_excerpts
 		WHERE tenant_id = $1 AND cve_id = ANY($2)
-		ORDER BY cve_id ASC, source ASC
+		ORDER BY cve_id ASC, CASE WHEN source = 'osv' THEN 0 ELSE 1 END ASC, source ASC
 	`
 	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID, pq.Array(cveIDs))
 	if err != nil {
