@@ -28,16 +28,27 @@
 //
 //  3. The CHECK constraint on `source` still rejects unknown values
 //     even from the privileged migrator role -- caught by attempting
-//     an INSERT with source='osv' (not in the allow-list).
+//     an INSERT with source='redhat' (outside the 4-entry registry of
+//     migration 056: nvd / ghsa / jvn / osv).
+//
+//  4. ListVulnFuncsByCVEs unions sources with 'osv' rows first (M43
+//     Phase D: the serving edge caps at 200 selectors, so the
+//     structured OSV symbols must never be pushed off by noisy
+//     heuristic sources) -- executed against real PostgreSQL because
+//     the ORDER BY semantics are otherwise only regex-pinned in
+//     sqlmock.
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+
+	"github.com/sbomhub/sbomhub/internal/database"
 )
 
 func advisoryExcerptsTestEnv(t *testing.T) (appURL, migURL string) {
@@ -250,5 +261,76 @@ func TestAdvisoryExcerpts_SourceCheckConstraint(t *testing.T) {
 		) VALUES ($1, $2, 'CVE-2025-CK', 'osv')
 	`, uuid.New(), tenant); err != nil {
 		t.Fatalf("CHECK constraint rejected source='osv'; migration 056 is meant to allow it: %v", err)
+	}
+}
+
+// TestAdvisoryExcerpts_ListVulnFuncsByCVEs_OSVFirstOrdering pins the
+// M43 Phase D union order on real PostgreSQL: 'osv' rows come first,
+// remaining sources follow in lexicographic order (ghsa < jvn < nvd).
+// The serving edge (handler normalizeVulnFuncs) keeps only the first
+// 200 selectors, so if a noisy heuristic source sorted ahead of the
+// structured OSV row, the precise Go vulndb symbols could be pushed
+// off the wire — the sqlmock unit test only regex-pins the ORDER BY
+// text; this test executes it.
+func TestAdvisoryExcerpts_ListVulnFuncsByCVEs_OSVFirstOrdering(t *testing.T) {
+	_, migURL := advisoryExcerptsTestEnv(t)
+	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
+	defer migDB.Close()
+	if !schemaReadyAdvisoryExcerpts(t, migDB) {
+		return
+	}
+	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "ORD")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
+	})
+
+	const cve = "CVE-2025-1111"
+	// Insert in an order unrelated to the expected output so the test
+	// cannot pass by insertion-order accident: nvd, osv, ghsa.
+	for _, row := range []struct {
+		source string
+		funcs  string
+	}{
+		{"nvd", `["noise.FromNVD"]`},
+		{"osv", `["yaml.Unmarshal","yaml.Decoder.Decode"]`},
+		{"ghsa", `["extra.FromGHSA"]`},
+	} {
+		if err := execAsTenant(t, migDB, tenant, `
+			INSERT INTO advisory_excerpts (
+				id, tenant_id, cve_id, source, vuln_funcs, raw_excerpt
+			) VALUES ($1, $2, $3, $4, $5::jsonb, 'ordering probe')
+		`, uuid.New(), tenant, cve, row.source, row.funcs); err != nil {
+			t.Fatalf("seed %s row: %v", row.source, err)
+		}
+	}
+
+	tx, err := migDB.Begin()
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenant.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenant GUC: %v", err)
+	}
+	ctx := database.WithTx(context.Background(), tx)
+
+	repo := NewAdvisoryExcerptsRepository(migDB)
+	got, err := repo.ListVulnFuncsByCVEs(ctx, tenant, []string{cve})
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	want := []string{
+		"yaml.Unmarshal", "yaml.Decoder.Decode", // osv first (priority 0)
+		"extra.FromGHSA", // then ghsa (lexicographic)
+		"noise.FromNVD",  // then nvd
+	}
+	funcs := got[cve]
+	if len(funcs) != len(want) {
+		t.Fatalf("union length = %d (%v), want %d (%v)", len(funcs), funcs, len(want), want)
+	}
+	for i := range want {
+		if funcs[i] != want[i] {
+			t.Fatalf("union[%d] = %q, want %q (full: %v)", i, funcs[i], want[i], funcs)
+		}
 	}
 }
