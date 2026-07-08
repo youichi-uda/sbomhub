@@ -1608,7 +1608,7 @@ func main() {
 	// CVE sync job - runs daily to fetch new/updated CVEs and match against components.
 	// tenantRepo is required for the per-tenant matching loop against RLS-bound
 	// `components` (codex-r4 P1).
-	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo, cfg.NVDURL, cfg.Offline)
+	cveSyncJob := scheduler.NewCVESyncJob(db, tenantRepo, cfg.NVDAPIKey, 24*time.Hour, advisoryExcerptsRepo, cfg.NVDURL, cfg.Offline).WithOSVBaseURL(cfg.OSVURL)
 	go cveSyncJob.Start(ctx)
 	slog.Info("CVE sync job started", "interval", "24h")
 

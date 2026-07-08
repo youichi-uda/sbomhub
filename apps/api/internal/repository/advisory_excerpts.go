@@ -26,7 +26,7 @@ type AdvisoryExcerpt struct {
 	TenantID uuid.UUID
 
 	CVEID  string
-	Source string // one of 'nvd' | 'ghsa' | 'jvn' (CHECK-enforced)
+	Source string // one of 'nvd' | 'ghsa' | 'jvn' | 'osv' (CHECK-enforced, migration 056)
 
 	// Structured parser output. JSONB array shape on disk; the
 	// in-process representation is json.RawMessage so callers can
@@ -101,7 +101,7 @@ func (r *AdvisoryExcerptsRepository) Upsert(ctx context.Context, e *AdvisoryExce
 		return fmt.Errorf("AdvisoryExcerptsRepository.Upsert: cve_id is required")
 	}
 	if e.Source == "" {
-		return fmt.Errorf("AdvisoryExcerptsRepository.Upsert: source is required (one of nvd|ghsa|jvn)")
+		return fmt.Errorf("AdvisoryExcerptsRepository.Upsert: source is required (one of nvd|ghsa|jvn|osv)")
 	}
 	if e.ID == uuid.Nil {
 		e.ID = uuid.New()

@@ -11,9 +11,11 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/client"
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/advisory"
@@ -187,6 +189,13 @@ type CVESyncJob struct {
 	// offline short-circuits the scheduled feed when true (M40 Wave B
 	// air-gapped degrade mode): Run() returns nil before any pagination/network.
 	offline bool
+	// osv (M43 Wave 3 / F467, #169) fetches OSV records so the post-match
+	// vuln_funcs pass (syncOSVVulnFuncs) can persist Go vulndb structured
+	// vulnerable symbols as advisory_excerpts source='osv' rows. Constructed
+	// by NewCVESyncJob with the same offline flag as the NVD feed (offline
+	// => every OSV fetch short-circuits with zero network access); the base
+	// URL is overridable via WithOSVBaseURL (air-gapped mirror / httptest).
+	osv *client.OSVClient
 }
 
 // NewCVESyncJob creates a new CVE sync job.
@@ -204,6 +213,12 @@ type CVESyncJob struct {
 // cveSyncAPIURL default (empty => cveSyncAPIURL) and is wired from the same
 // orchestrator value (cfg.NVDURL) as NVDService; offline makes Run() a no-op
 // so the scheduled feed short-circuits before any network access.
+//
+// M43 Wave 3 (F467, #169): the job also constructs an OSV client (default
+// base URL, same offline flag) for the post-match vuln_funcs pass. The
+// signature is deliberately unchanged — the OSV base URL override
+// (cfg.OSVURL) is carried by the chainable WithOSVBaseURL, mirroring
+// NewCLIService(...).WithOSVBaseURL(cfg.OSVURL) at the main.go call site.
 func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKey string, interval time.Duration, advisoryExcerpts advisoryExcerptUpserter, baseURL string, offline bool) *CVESyncJob {
 	if baseURL == "" {
 		baseURL = cveSyncAPIURL
@@ -217,7 +232,20 @@ func NewCVESyncJob(db *sql.DB, tenantRepo *repository.TenantRepository, nvdAPIKe
 		advisoryExcerpts: advisoryExcerpts,
 		baseURL:          baseURL,
 		offline:          offline,
+		osv:              client.NewOSVClient().WithOffline(offline),
 	}
+}
+
+// WithOSVBaseURL overrides the OSV API base endpoint used by the M43 Wave 3
+// vuln_funcs pass (air-gapped mirror / httptest injection). An empty value is
+// a no-op (keeps client.DefaultOSVBaseURL), matching client.OSVClient's
+// WithBaseURL and CLIService.WithOSVBaseURL semantics. Returns the receiver
+// for chaining at the main.go wiring site.
+func (j *CVESyncJob) WithOSVBaseURL(base string) *CVESyncJob {
+	if j.osv != nil {
+		j.osv.WithBaseURL(base)
+	}
+	return j
 }
 
 // Start starts the CVE sync job
@@ -305,6 +333,13 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		// chunk's tx but the loop continued with the next chunk.
 		slog.Warn("CVE match enumeration returned early", "error", err)
 	}
+
+	// Phase 3 (M43 Wave 3 / F467, #169): OSV / Go vulndb structured
+	// vulnerable-symbol grounding. Best-effort and self-fenced: every
+	// failure inside is logged and absorbed, never failing the sync tick.
+	// Scoped to CVEs already linked to Go-ecosystem components (NOT the
+	// full NVD feed) — see syncOSVVulnFuncs for the fetch-count bounds.
+	j.syncOSVVulnFuncs(ctx, tenantIDs)
 
 	// Update last sync time
 	if err := j.updateLastSyncTime(ctx, startTime); err != nil {
@@ -1212,4 +1247,679 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 		ON CONFLICT (key) DO UPDATE SET value = $1::text, updated_at = NOW()
 	`, t.Format(time.RFC3339))
 	return err
+}
+
+// ============================================================================
+// M43 Wave 3 (F467, issue #169): OSV / Go vulndb structured vulnerable
+// symbols → advisory_excerpts.vuln_funcs (source 'osv', migration 056).
+//
+// Why: until M43 Wave 3 the ONLY vuln_funcs producer was the NVD prose
+// heuristic (backtick-anchored regex in service/advisory), so production
+// vuln_funcs were almost always empty and the M43 Wave 1 GET
+// /reachability/targets enrichment had nothing to serve. Go vulndb publishes
+// the same information STRUCTURED, as
+// affected[].ecosystem_specific.imports[] = {path, symbols[]}, exposed
+// through the OSV API. This pass converts those to the wire-safe
+// "Pkg.Func" / "Pkg.Type.Method" selector form the Wave 1 edge
+// (handler.normalizeVulnFuncs) forwards and the vendored Go analyzer
+// (service/reachability/go_analyzer.go parseSymbolSelectors/matchSelector)
+// actually matches against.
+//
+// Scope + fetch bounds (per daily Run() tick):
+//   - Candidates = CVEs linked (component_vulnerabilities) to a component
+//     whose purl is Go-ecosystem (repository.EcosystemFromPurl == "go"),
+//     enumerated per tenant under RLS — i.e. exactly the CVE set that can
+//     appear as Go reachability targets, INCLUDING the backlog linked by
+//     earlier ticks (a "this tick's NVD feed only" scope would leave every
+//     pre-existing production link empty forever).
+//   - Freshness window: a (tenant, cve) whose source='osv' excerpt row was
+//     fetched within osvVulnFuncsRefreshInterval is skipped, so steady-state
+//     re-fetch load is ~ (distinct Go CVEs) / 7 per day.
+//   - Each distinct CVE is fetched ONCE per tick (plus at most ONE Go vulndb
+//     alias follow-up) and the result is fanned out to every tenant that
+//     needs it — never re-fetched per tenant.
+//   - osvVulnFuncsFetchCap hard-bounds HTTP requests per tick; CVEs beyond
+//     the cap stay stale and are retried next tick (the freshness window
+//     naturally pages through them).
+//   - offline=true short-circuits the whole pass with zero network access
+//     (Run() returns before it; the guard here is defence-in-depth and the
+//     OSV client itself is also constructed WithOffline).
+//
+// Failure posture: warn + skip at every level (fetch error, 404, chunk tx
+// abort). The pass never returns an error and never disturbs the core CVE
+// sync; abandoned work self-heals on the next tick via the freshness window
+// and the (tenant_id, cve_id, source) idempotent upsert.
+// ============================================================================
+
+const (
+	// osvVulnFuncsSource is the advisory_excerpts.source value for rows
+	// produced by this pass (registry extended by migration 056).
+	osvVulnFuncsSource = "osv"
+
+	// osvVulnFuncsRefreshInterval is how long a source='osv' excerpt row is
+	// considered fresh. Go vulndb entries do gain/adjust symbols after
+	// publication, so rows are re-pulled weekly rather than write-once.
+	osvVulnFuncsRefreshInterval = 7 * 24 * time.Hour
+
+	// osvVulnFuncsFetchCapDefault bounds OSV HTTP requests per Run() tick
+	// (main lookups + alias follow-ups combined). 500 covers typical
+	// self-host deployments' full Go CVE surface in one tick while keeping
+	// the worst-case tick duration (cap × (latency + delay)) in minutes.
+	osvVulnFuncsFetchCapDefault = 500
+)
+
+// osvVulnFuncsFetchCap is the effective per-tick fetch cap. Production
+// always uses the default; tests may temporarily override (defer-restore)
+// to exercise the cap path with small fixtures — same pattern as
+// cveMatchBatchChunkSize.
+var osvVulnFuncsFetchCap = osvVulnFuncsFetchCapDefault
+
+// osvVulnFuncsFetchDelay is a politeness pause between consecutive OSV
+// lookups (osv.dev is unauthenticated; the daily tick is latency-tolerant).
+// Tests set it to 0 (defer-restore) so httptest loops stay instant.
+var osvVulnFuncsFetchDelay = 100 * time.Millisecond
+
+// osvGoCVECandidateQuery enumerates, for ONE tenant (RLS-scoped via the
+// chunk tx's app.current_tenant_id GUC — components is FORCE RLS), the
+// distinct (cve_id, purl) pairs of that tenant's component-linked CVEs whose
+// component looks Go-ecosystem, excluding pairs whose source='osv' excerpt
+// row is still fresh. The purl is re-checked Go-side with
+// repository.EcosystemFromPurl so the authoritative ecosystem derivation
+// stays in one place (the ILIKE is only a row-transfer prefilter, matching
+// the vulnerability.go comment about not trusting purl LIKEs in SQL).
+// $1 = tenant id (belt+braces alongside the advisory_excerpts RLS policy),
+// $2 = freshness cutoff (rows with fetched_at >= $2 are fresh; NULL
+// fetched_at compares as unknown => NOT EXISTS => stale => re-fetched).
+const osvGoCVECandidateQuery = `
+	SELECT DISTINCT v.cve_id, COALESCE(c.purl, '')
+	FROM components c
+	JOIN component_vulnerabilities cv ON cv.component_id = c.id
+	JOIN vulnerabilities v ON v.id = cv.vulnerability_id
+	WHERE c.purl ILIKE 'pkg:golang%'
+	  AND NOT EXISTS (
+		SELECT 1 FROM advisory_excerpts ae
+		WHERE ae.tenant_id = $1
+		  AND ae.cve_id = v.cve_id
+		  AND ae.source = 'osv'
+		  AND ae.fetched_at >= $2
+	  )
+	ORDER BY v.cve_id
+`
+
+// osvTenantCandidates is one tenant's ordered list of CVE ids needing a
+// (fresh) source='osv' excerpt row.
+type osvTenantCandidates struct {
+	tenantID uuid.UUID
+	cveIDs   []string
+}
+
+// osvVulnFuncsOutcome is the per-CVE fetch result fanned out to every tenant
+// that listed the CVE: the wire-safe selector list plus the OSV summary /
+// details text persisted as raw_excerpt grounding.
+type osvVulnFuncsOutcome struct {
+	symbols []string
+	excerpt string
+}
+
+// syncOSVVulnFuncs is the Phase 3 entry point (see the section header above
+// for scope/bounds/failure posture). tenantIDs is the same slice Run()
+// already enumerated for the match phase.
+func (j *CVESyncJob) syncOSVVulnFuncs(ctx context.Context, tenantIDs []uuid.UUID) {
+	if j.advisoryExcerpts == nil || j.osv == nil || j.offline {
+		return
+	}
+	if j.db == nil || len(tenantIDs) == 0 {
+		return
+	}
+	start := time.Now()
+
+	// Pass A (read-only, chunked, one pooled conn): per-tenant candidate
+	// enumeration under RLS. No network happens while any tx is open.
+	candidates := j.listOSVCandidates(ctx, tenantIDs)
+	if len(candidates) == 0 {
+		slog.Debug("OSV vuln_funcs sync: no stale Go-ecosystem CVE candidates (M43 F467)")
+		return
+	}
+
+	// Dedupe CVE ids across tenants preserving first-seen order: each CVE is
+	// fetched exactly once and fanned out per tenant below.
+	var orderedCVEs []string
+	seen := make(map[string]struct{})
+	for _, cand := range candidates {
+		for _, id := range cand.cveIDs {
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			orderedCVEs = append(orderedCVEs, id)
+		}
+	}
+
+	// Network phase: one lookup per distinct CVE (+ ≤1 alias follow-up),
+	// hard-capped per tick.
+	outcomes := j.fetchOSVVulnFuncs(ctx, orderedCVEs)
+
+	// Pass B (write, chunked, one pooled conn): fan the per-CVE outcomes out
+	// to per-(tenant, cve) source='osv' excerpt rows. CVEs with no symbols
+	// are NOT written (no empty rows).
+	rowsUpserted, tenantsWritten := j.writeOSVVulnFuncs(ctx, candidates, outcomes)
+
+	slog.Info("OSV vuln_funcs sync completed (M43 F467)",
+		"tenants_scanned", len(tenantIDs),
+		"candidate_cves", len(orderedCVEs),
+		"cves_with_symbols", len(outcomes),
+		"rows_upserted", rowsUpserted,
+		"tenants_written", tenantsWritten,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+}
+
+// listOSVCandidates runs Pass A across every tenant: same pooled-connection
+// + chunked-tx shape as matchTenantsChunked (F258 heritage), but read-only —
+// so, mirroring F234's read-only contract, tenants already enumerated before
+// a chunk abort keep their results and the loop continues with the next
+// chunk. Returns tenants in input order, each with its sorted CVE id list.
+func (j *CVESyncJob) listOSVCandidates(ctx context.Context, tenantIDs []uuid.UUID) []osvTenantCandidates {
+	conn, err := j.db.Conn(ctx)
+	if err != nil {
+		slog.Warn("scheduler: acquire pooled conn for OSV candidate enumeration failed (M43 F467)", "error", err)
+		return nil
+	}
+	defer conn.Close()
+
+	chunkSize := cveMatchBatchChunkSize
+	if chunkSize <= 0 {
+		chunkSize = cveMatchBatchChunkSizeDefault
+	}
+	numChunks := (len(tenantIDs) + chunkSize - 1) / chunkSize
+	cutoff := time.Now().UTC().Add(-osvVulnFuncsRefreshInterval)
+
+	var out []osvTenantCandidates
+	for chunkIndex := 0; chunkIndex < numChunks; chunkIndex++ {
+		start := chunkIndex * chunkSize
+		end := start + chunkSize
+		if end > len(tenantIDs) {
+			end = len(tenantIDs)
+		}
+		chunkOut, chunkErr := j.listOSVCandidatesChunk(ctx, conn, chunkIndex, tenantIDs[start:end], cutoff)
+		out = append(out, chunkOut...)
+		if chunkErr != nil {
+			slog.Warn("scheduler: OSV candidate chunk aborted, continuing with next chunk (M43 F467)",
+				"chunk_index", chunkIndex, "num_chunks", numChunks, "error", chunkErr)
+		}
+	}
+	return out
+}
+
+// listOSVCandidatesChunk enumerates one chunk's tenants inside one tx
+// (SET LOCAL tenant GUC per tenant, then the candidate SELECT). Read-only:
+// tenants read before an error are returned alongside the error (F234
+// partial-count contract). Rows are fully drained and closed before the next
+// tenant's set_config Exec — same lib/pq open-Rows discipline as
+// linkCVEToTenantComponents.
+func (j *CVESyncJob) listOSVCandidatesChunk(
+	ctx context.Context,
+	conn *sql.Conn,
+	chunkIndex int,
+	chunk []uuid.UUID,
+	cutoff time.Time,
+) ([]osvTenantCandidates, error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: begin chunk %d OSV candidate tx: %w", chunkIndex, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var out []osvTenantCandidates
+	for _, tenantID := range chunk {
+		if _, sErr := tx.ExecContext(ctx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			tenantID.String(),
+		); sErr != nil {
+			return out, fmt.Errorf("scheduler: chunk %d OSV candidate SET LOCAL failed for tenant %s: %w",
+				chunkIndex, tenantID, sErr)
+		}
+
+		rows, qErr := tx.QueryContext(ctx, osvGoCVECandidateQuery, tenantID, cutoff)
+		if qErr != nil {
+			return out, fmt.Errorf("scheduler: chunk %d OSV candidate query failed for tenant %s: %w",
+				chunkIndex, tenantID, qErr)
+		}
+		// Drain fully before the next round-trip on this pinned conn.
+		type cvePurl struct{ cveID, purl string }
+		pairs := make([]cvePurl, 0)
+		for rows.Next() {
+			var p cvePurl
+			if sErr := rows.Scan(&p.cveID, &p.purl); sErr != nil {
+				continue
+			}
+			pairs = append(pairs, p)
+		}
+		if iErr := rows.Err(); iErr != nil {
+			rows.Close()
+			return out, fmt.Errorf("scheduler: chunk %d OSV candidate rows failed for tenant %s: %w",
+				chunkIndex, tenantID, iErr)
+		}
+		rows.Close()
+
+		// Go-side authoritative ecosystem check + per-tenant CVE dedupe
+		// (a CVE can hit several Go purls; the SELECT is DISTINCT on the
+		// pair, not the CVE).
+		var cveIDs []string
+		seenCVE := make(map[string]struct{}, len(pairs))
+		for _, p := range pairs {
+			if repository.EcosystemFromPurl(p.purl) != "go" {
+				continue
+			}
+			if _, dup := seenCVE[p.cveID]; dup {
+				continue
+			}
+			seenCVE[p.cveID] = struct{}{}
+			cveIDs = append(cveIDs, p.cveID)
+		}
+		if len(cveIDs) > 0 {
+			out = append(out, osvTenantCandidates{tenantID: tenantID, cveIDs: cveIDs})
+		}
+	}
+
+	if cErr := tx.Commit(); cErr != nil {
+		return out, fmt.Errorf("scheduler: commit chunk %d OSV candidate tx: %w", chunkIndex, cErr)
+	}
+	committed = true
+	return out, nil
+}
+
+// fetchOSVVulnFuncs resolves each candidate CVE against the OSV API exactly
+// once and extracts Go vulndb vulnerable symbols in wire-safe selector form.
+//
+// CVE→OSV resolution: GET /v1/vulns/{id} accepts a CVE id directly (osv.dev
+// resolves aliases server-side; this is the same contract
+// service/remediation.go has relied on in production since M14). When the
+// returned record is NOT the Go vulndb entry (e.g. a GHSA/CVE record with no
+// Go ecosystem_specific.imports), ONE follow-up lookup of the first "GO-"
+// alias is attempted. 404s return (nil, nil) from the client and are skipped.
+//
+// Bounds: ≤ osvVulnFuncsFetchCap total HTTP requests per call (main +
+// follow-ups combined), osvVulnFuncsFetchDelay politeness pause between
+// requests, ctx cancellation checked per CVE. CVEs left beyond the cap stay
+// stale (no row written) and are retried next tick.
+func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map[string]osvVulnFuncsOutcome {
+	out := make(map[string]osvVulnFuncsOutcome, len(cveIDs))
+	fetchCap := osvVulnFuncsFetchCap
+	if fetchCap <= 0 {
+		fetchCap = osvVulnFuncsFetchCapDefault
+	}
+	fetches := 0
+
+	// fetch performs one capped, delayed, warn-on-error lookup. Returns nil
+	// on any failure (logged) or 404.
+	fetch := func(id string) *client.OSVVulnerability {
+		if fetches > 0 && osvVulnFuncsFetchDelay > 0 {
+			time.Sleep(osvVulnFuncsFetchDelay)
+		}
+		fetches++
+		v, err := j.osv.GetVulnerability(ctx, id)
+		if err != nil {
+			slog.Warn("scheduler: OSV lookup failed, skipping (M43 F467)", "id", id, "error", err)
+			return nil
+		}
+		return v
+	}
+
+	for _, cveID := range cveIDs {
+		if ctx.Err() != nil {
+			slog.Warn("scheduler: OSV vuln_funcs fetch cancelled (M43 F467)", "error", ctx.Err())
+			break
+		}
+		if fetches >= fetchCap {
+			slog.Info("scheduler: OSV vuln_funcs fetch cap reached; remaining CVEs deferred to next sync (M43 F467)",
+				"cap", fetchCap, "resolved", len(out))
+			break
+		}
+
+		vuln := fetch(cveID)
+		if vuln == nil {
+			continue // fetch error or no OSV record (404) — skip, retry next tick
+		}
+		symbols := extractOSVGoVulnFuncs(vuln)
+		excerpt := osvExcerptText(vuln)
+
+		// Alias follow-up: the alias-resolved record may be a GHSA/CVE home
+		// without Go vulndb's imports[]. One extra lookup of the first GO-
+		// alias, still under the cap.
+		if len(symbols) == 0 && !strings.HasPrefix(vuln.ID, "GO-") && fetches < fetchCap {
+			if alias := firstGoVulndbAlias(vuln.Aliases); alias != "" {
+				if av := fetch(alias); av != nil {
+					symbols = extractOSVGoVulnFuncs(av)
+					if len(symbols) > 0 {
+						if e := osvExcerptText(av); e != "" {
+							excerpt = e
+						}
+					}
+				}
+			}
+		}
+
+		if len(symbols) == 0 {
+			continue // nothing structured to ground on — no row (requirement: no empty rows)
+		}
+		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt}
+	}
+	return out
+}
+
+// writeOSVVulnFuncs runs Pass B: fans the per-CVE outcomes out to
+// per-(tenant, cve) advisory_excerpts rows (source 'osv') under each
+// tenant's RLS GUC, chunked on one pooled connection. Write-heavy contract
+// mirrors matchTenantsChunk: a chunk that fails to COMMIT contributes ZERO
+// to the returned counters (its upserts rolled back), is logged, and the
+// loop continues with the next chunk.
+func (j *CVESyncJob) writeOSVVulnFuncs(
+	ctx context.Context,
+	candidates []osvTenantCandidates,
+	outcomes map[string]osvVulnFuncsOutcome,
+) (rowsUpserted, tenantsWritten int) {
+	// Keep only (tenant, cve) pairs whose CVE actually yielded symbols.
+	writes := make([]osvTenantCandidates, 0, len(candidates))
+	for _, cand := range candidates {
+		cveIDs := make([]string, 0, len(cand.cveIDs))
+		for _, id := range cand.cveIDs {
+			if o, ok := outcomes[id]; ok && len(o.symbols) > 0 {
+				cveIDs = append(cveIDs, id)
+			}
+		}
+		if len(cveIDs) > 0 {
+			writes = append(writes, osvTenantCandidates{tenantID: cand.tenantID, cveIDs: cveIDs})
+		}
+	}
+	if len(writes) == 0 {
+		return 0, 0
+	}
+
+	conn, err := j.db.Conn(ctx)
+	if err != nil {
+		slog.Warn("scheduler: acquire pooled conn for OSV vuln_funcs write failed (M43 F467)", "error", err)
+		return 0, 0
+	}
+	defer conn.Close()
+
+	chunkSize := cveMatchBatchChunkSize
+	if chunkSize <= 0 {
+		chunkSize = cveMatchBatchChunkSizeDefault
+	}
+	numChunks := (len(writes) + chunkSize - 1) / chunkSize
+
+	for chunkIndex := 0; chunkIndex < numChunks; chunkIndex++ {
+		start := chunkIndex * chunkSize
+		end := start + chunkSize
+		if end > len(writes) {
+			end = len(writes)
+		}
+		chunkRows, chunkTenants, chunkErr := j.writeOSVVulnFuncsChunk(ctx, conn, chunkIndex, writes[start:end], outcomes)
+		if chunkErr != nil {
+			slog.Warn("scheduler: OSV vuln_funcs write chunk aborted, continuing with next chunk (M43 F467)",
+				"chunk_index", chunkIndex, "num_chunks", numChunks, "error", chunkErr)
+		}
+		rowsUpserted += chunkRows
+		tenantsWritten += chunkTenants
+	}
+	return rowsUpserted, tenantsWritten
+}
+
+// writeOSVVulnFuncsChunk upserts one chunk's excerpt rows inside one tx:
+// per tenant SET LOCAL GUC (advisory_excerpts RLS WITH CHECK), then one
+// Upsert per (tenant, cve). The tx carries ONLY excerpt writes — unlike the
+// M32 batch there are no core links to fence, so no savepoint is needed: an
+// abort loses only this chunk's excerpt rows, which self-heal next tick.
+// Returns (0, 0, err) on rollback so the caller's totals match durable rows.
+func (j *CVESyncJob) writeOSVVulnFuncsChunk(
+	ctx context.Context,
+	conn *sql.Conn,
+	chunkIndex int,
+	chunk []osvTenantCandidates,
+	outcomes map[string]osvVulnFuncsOutcome,
+) (rowsUpserted, tenantsWritten int, err error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("scheduler: begin chunk %d OSV vuln_funcs tx: %w", chunkIndex, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Route the repository Upsert onto this tx (same database.WithTx
+	// discipline as matchTenantsChunk) so the SET LOCAL GUC is visible to
+	// the RLS WITH CHECK.
+	txCtx := database.WithTx(ctx, tx)
+	now := time.Now().UTC()
+
+	chunkRows, chunkTenants := 0, 0
+	for _, cand := range chunk {
+		if _, sErr := tx.ExecContext(ctx,
+			`SELECT set_config('app.current_tenant_id', $1, true)`,
+			cand.tenantID.String(),
+		); sErr != nil {
+			return 0, 0, fmt.Errorf("scheduler: chunk %d OSV vuln_funcs SET LOCAL failed for tenant %s: %w",
+				chunkIndex, cand.tenantID, sErr)
+		}
+		wrote := false
+		for _, cveID := range cand.cveIDs {
+			o := outcomes[cveID]
+			excerpt := &repository.AdvisoryExcerpt{
+				TenantID:   cand.tenantID,
+				CVEID:      cveID,
+				Source:     osvVulnFuncsSource,
+				VulnFuncs:  stringsToJSONArray(o.symbols),
+				RawExcerpt: o.excerpt,
+				FetchedAt:  &now,
+			}
+			if uErr := j.advisoryExcerpts.Upsert(txCtx, excerpt); uErr != nil {
+				slog.Warn("scheduler: OSV vuln_funcs upsert failed, aborting chunk (M43 F467)",
+					"chunk_index", chunkIndex, "tenant_id", cand.tenantID, "cve_id", cveID, "error", uErr)
+				return 0, 0, fmt.Errorf("scheduler: chunk %d OSV vuln_funcs upsert for tenant %s cve %s: %w",
+					chunkIndex, cand.tenantID, cveID, uErr)
+			}
+			chunkRows++
+			wrote = true
+		}
+		if wrote {
+			chunkTenants++
+		}
+	}
+
+	if cErr := tx.Commit(); cErr != nil {
+		return 0, 0, fmt.Errorf("scheduler: commit chunk %d OSV vuln_funcs tx: %w", chunkIndex, cErr)
+	}
+	committed = true
+	return chunkRows, chunkTenants, nil
+}
+
+// extractOSVGoVulnFuncs converts an OSV record's Go vulndb structured
+// symbols (affected[].ecosystem_specific.imports[] = {path, symbols[]}) to
+// the wire-safe selector list, unioned across every affected/import entry
+// with first-seen-order dedupe. Non-Go affected entries and malformed
+// shapes are skipped leniently (EcosystemSpecific is a decoded
+// map[string]interface{}; foreign feeds put arbitrary JSON there).
+func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
+	if vuln == nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, aff := range vuln.Affected {
+		if !strings.EqualFold(aff.Package.Ecosystem, "Go") {
+			continue
+		}
+		rawImports, ok := aff.EcosystemSpecific["imports"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, ri := range rawImports {
+			imp, ok := ri.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			path, _ := imp["path"].(string)
+			pkgIdent, ok := osvGoPackageIdent(path)
+			if !ok {
+				// e.g. gopkg.in/yaml.v2 ("yaml.v2" is not an identifier) or
+				// hyphenated last segments: the default source-level package
+				// ident is unknowable from the path alone, and a wrong guess
+				// would ship selectors the AST walk can never match — skip
+				// conservatively (import-level reachability still covers the
+				// module via VulnerableModules).
+				slog.Debug("scheduler: OSV import path has no identifier-shaped package segment, symbols skipped (M43 F467)",
+					"osv_id", vuln.ID, "path", path)
+				continue
+			}
+			rawSymbols, ok := imp["symbols"].([]interface{})
+			if !ok {
+				continue // whole-package entry (no symbol list) — nothing selector-shaped to store
+			}
+			for _, rs := range rawSymbols {
+				sym, ok := rs.(string)
+				if !ok {
+					continue
+				}
+				sel, ok := osvWireSafeSelector(pkgIdent, sym)
+				if !ok {
+					slog.Debug("scheduler: OSV symbol not wire-safe, skipped (M43 F467)",
+						"osv_id", vuln.ID, "path", path, "symbol", sym)
+					continue
+				}
+				if _, dup := seen[sel]; dup {
+					continue
+				}
+				seen[sel] = struct{}{}
+				out = append(out, sel)
+			}
+		}
+	}
+	return out
+}
+
+// osvGoPackageIdent derives the source-level package identifier the AST
+// matcher compares against from a Go vulndb import path. The vendored
+// analyzer (go_analyzer.go inspectFileForSelectors) matches
+// ast.SelectorExpr.X's *ast.Ident NAME — i.e. the local package ident,
+// which for an unaliased import defaults to the package's declared name.
+// Heuristic (path-only; the declared name is not in the OSV record):
+//
+//   - last path segment ("html/template" → "template",
+//     "golang.org/x/net/http2" → "http2");
+//   - a trailing module MAJOR-version segment v2+ is stripped to the
+//     previous segment ("github.com/labstack/echo/v4" → "echo") — Go
+//     modules forbid /v0 and /v1 suffixes, so "v1" endings are kept
+//     verbatim (k8s.io/api/core/v1 really is package v1);
+//   - a non-identifier result (gopkg.in/yaml.v2 → "yaml.v2",
+//     "github.com/foo/go-bar" → "go-bar") returns ok=false: the caller
+//     skips those imports conservatively.
+func osvGoPackageIdent(path string) (string, bool) {
+	p := strings.TrimSuffix(strings.TrimSpace(path), "/")
+	if p == "" {
+		return "", false
+	}
+	segs := strings.Split(p, "/")
+	last := segs[len(segs)-1]
+	if len(segs) >= 2 && isGoModuleMajorVersionSegment(last) {
+		last = segs[len(segs)-2]
+	}
+	if !isGoIdentifierShaped(last) {
+		return "", false
+	}
+	return last, true
+}
+
+// isGoModuleMajorVersionSegment reports whether s is a module major-version
+// path segment ("v2", "v13", ...). v0/v1 return false: Go modules never use
+// them as path suffixes, while real packages named v1 (k8s-style versioned
+// API groups) are common.
+func isGoModuleMajorVersionSegment(s string) bool {
+	if len(s) < 2 || s[0] != 'v' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != "v0" && s != "v1"
+}
+
+// osvWireSafeSelector joins pkgIdent and a Go vulndb symbol ("Parse" or
+// "Decoder.Decode") into the selector form the M43 Wave 1 wire requires and
+// validates it against the SAME frozen spec as handler.normalizeVulnFuncs
+// (trim → strip one trailing "()" → dot-split → exactly 2..3 parts → every
+// part Go-identifier-shaped). Anything that would be dropped at the serving
+// edge is rejected here so no dead weight lands in vuln_funcs.
+func osvWireSafeSelector(pkgIdent, symbol string) (string, bool) {
+	s := strings.TrimSpace(symbol)
+	s = strings.TrimSuffix(s, "()")
+	if s == "" {
+		return "", false
+	}
+	sel := pkgIdent + "." + s
+	parts := strings.Split(sel, ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return "", false
+	}
+	for _, p := range parts {
+		if !isGoIdentifierShaped(p) {
+			return "", false
+		}
+	}
+	return sel, true
+}
+
+// isGoIdentifierShaped mirrors handler.isGoIdentifier (reachability.go, the
+// Wave 1 single source of truth for the wire normalisation): first rune a
+// letter/underscore, rest letters/digits/underscores, Unicode letters
+// allowed. Duplicated here because the handler's helper is unexported in
+// another package; the scheduler test suite pins the produced selectors
+// against a re-statement of the same frozen spec.
+func isGoIdentifierShaped(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || unicode.IsLetter(r):
+		case i > 0 && unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// osvExcerptText picks the grounding text persisted as raw_excerpt: the OSV
+// summary, falling back to details. May be empty (raw_excerpt is nullable;
+// the structured symbols are the value of an 'osv' row).
+func osvExcerptText(vuln *client.OSVVulnerability) string {
+	if vuln == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(vuln.Summary); s != "" {
+		return s
+	}
+	return strings.TrimSpace(vuln.Details)
+}
+
+// firstGoVulndbAlias returns the first "GO-" (Go vulndb) id in aliases, or
+// "" when none is present.
+func firstGoVulndbAlias(aliases []string) string {
+	for _, a := range aliases {
+		if strings.HasPrefix(strings.TrimSpace(a), "GO-") {
+			return strings.TrimSpace(a)
+		}
+	}
+	return ""
 }
