@@ -490,6 +490,12 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 //	"<>", ":", "-", ... — conservative) → de-duplicate preserving
 //	first-seen order.
 //
+// After normalisation the list is capped at maxVulnFuncsPerCVE (M43
+// Phase D review): the scheduler caps at store time too, but the DB can
+// already hold larger unions (pre-cap inventory, other write paths), and
+// an unbounded list bloats every worklist response and every CLI symbol
+// walk. Defence-in-depth at the serving edge.
+//
 // Returns nil (not an empty slice) when nothing survives, so the caller's
 // omitempty field drops off the wire entirely.
 func normalizeVulnFuncs(raw []string) []string {
@@ -521,8 +527,21 @@ func normalizeVulnFuncs(raw []string) []string {
 		seen[s] = struct{}{}
 		out = append(out, s)
 	}
+	if len(out) > maxVulnFuncsPerCVE {
+		slog.Warn("reachability targets: vuln_funcs capped",
+			"normalized", len(out), "cap", maxVulnFuncsPerCVE)
+		out = out[:maxVulnFuncsPerCVE]
+	}
 	return out
 }
+
+// maxVulnFuncsPerCVE bounds the advisory-declared symbol list shipped per
+// CVE on GET /reachability/targets (M43 Phase D review). 200 comfortably
+// covers real advisory unions (Go vulndb symbol lists run in the tens)
+// while keeping a pathological union from inflating the worklist response
+// and the CLI's AST walk. Keep in sync with the scheduler's store-time cap
+// (internal/scheduler/cve_sync.go).
+const maxVulnFuncsPerCVE = 200
 
 // isGoIdentifier reports whether s is shaped like a Go identifier (first
 // rune a letter or underscore, rest letters/digits/underscores; Unicode

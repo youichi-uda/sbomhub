@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -2112,6 +2113,103 @@ func TestRunner_Run_ComponentIDSupplied_BypassesFanOutCap_F25(t *testing.T) {
 	}
 	if drafts.inserted[0].ComponentID != pinned {
 		t.Errorf("draft.ComponentID = %v, want %v (pinned)", drafts.inserted[0].ComponentID, pinned)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// BuildPrompt rendering (M43 Phase D review: vuln_funcs truncation)
+// ----------------------------------------------------------------------------
+
+// promptLineAfter extracts the rest of the line following the first
+// occurrence of marker in prompt (test helper for prompt render checks).
+func promptLineAfter(t *testing.T, prompt, marker string) string {
+	t.Helper()
+	i := strings.Index(prompt, marker)
+	if i < 0 {
+		t.Fatalf("prompt missing %q; prompt=\n%s", marker, prompt)
+	}
+	rest := prompt[i+len(marker):]
+	if j := strings.IndexByte(rest, '\n'); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
+}
+
+// TestBuildPrompt_VulnFuncsTruncated: an advisory row carrying hundreds of
+// symbols (OSV / Go vulndb unions can be huge) must not flood the prompt.
+// The render keeps whole JSON elements up to the byte budget and marks the
+// elided tail with "…(+N more)" so the model knows the list is incomplete.
+// Only the prompt render truncates — storage and the targets wire carry
+// their own (200-entry) cap independently.
+func TestBuildPrompt_VulnFuncsTruncated(t *testing.T) {
+	funcs := make([]string, 500)
+	for i := range funcs {
+		funcs[i] = fmt.Sprintf("pkg%d.Func%d", i, i)
+	}
+	rawFuncs, err := json.Marshal(funcs)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	adv := []AdvisoryExcerptRow{{
+		ID:        uuid.New(),
+		CVEID:     "CVE-2024-0001",
+		Source:    "osv",
+		VulnFuncs: rawFuncs,
+	}}
+
+	prompt := BuildPrompt("CVE-2024-0001", adv, nil)
+	line := promptLineAfter(t, prompt, "vuln_funcs: ")
+
+	// Budget ~800 bytes for the JSON body plus the small "+N more" marker;
+	// the untruncated fixture is ~9KB, so anything near that means the
+	// render did not truncate.
+	const budget = 800
+	if len(line) > budget+len(" …(+9999 more)") {
+		t.Fatalf("vuln_funcs render = %d bytes, want <= ~%d (+marker); render did not truncate:\n%s", len(line), budget, line)
+	}
+
+	// The marker must be present and account for every elided element.
+	idx := strings.Index(line, "] …(+")
+	if idx < 0 {
+		t.Fatalf("render missing the \"…(+N more)\" marker: %q", line)
+	}
+	var kept []string
+	if err := json.Unmarshal([]byte(line[:idx+1]), &kept); err != nil {
+		t.Fatalf("truncated render is not a valid JSON array up to ']': %v (%q)", err, line[:idx+1])
+	}
+	if len(kept) == 0 {
+		t.Fatalf("render kept 0 elements; want at least the leading symbols within budget")
+	}
+	var n int
+	if _, err := fmt.Sscanf(line[idx+2:], "…(+%d more)", &n); err != nil {
+		t.Fatalf("cannot parse elided-count marker from %q: %v", line[idx+2:], err)
+	}
+	if len(kept)+n != len(funcs) {
+		t.Errorf("kept %d + elided %d = %d, want %d (every element accounted for)", len(kept), n, len(kept)+n, len(funcs))
+	}
+	for i := range kept {
+		if kept[i] != funcs[i] {
+			t.Fatalf("kept[%d] = %q, want %q (leading elements in order)", i, kept[i], funcs[i])
+		}
+	}
+}
+
+// TestBuildPrompt_VulnFuncsSmallListVerbatim: at-or-under-budget payloads
+// render byte-for-byte with no marker — prompt_hash stability for the
+// common small case (historical equality joins depend on it).
+func TestBuildPrompt_VulnFuncsSmallListVerbatim(t *testing.T) {
+	adv := []AdvisoryExcerptRow{{
+		ID:        uuid.New(),
+		CVEID:     "CVE-2024-0002",
+		Source:    "ghsa",
+		VulnFuncs: json.RawMessage(`["xml.Unmarshal","Pkg.Type.Method"]`),
+	}}
+	prompt := BuildPrompt("CVE-2024-0002", adv, nil)
+	if !strings.Contains(prompt, "vuln_funcs: [\"xml.Unmarshal\",\"Pkg.Type.Method\"]\n") {
+		t.Fatalf("small vuln_funcs must render verbatim; prompt=\n%s", prompt)
+	}
+	if strings.Contains(prompt, "more)") {
+		t.Errorf("small list must not carry a truncation marker; prompt=\n%s", prompt)
 	}
 }
 

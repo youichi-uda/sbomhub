@@ -205,11 +205,13 @@ GET /api/v1/projects/:id/reachability/targets
 
 - `ecosystem` is derived from the purl server-side; it may be `""` when the component carries no package URL.
 - `vuln_funcs` (string array, optional): the advisory-declared vulnerable symbols
-  for the row's CVE, unioned across advisory sources (NVD / GHSA / JVN) and
+  for the row's CVE, unioned across advisory sources (NVD / GHSA / JVN / OSV —
+  the OSV entries come from the Go vulndb structured symbol lists) and
   normalized server-side to `Pkg.Func` / `Pkg.Type.Method` selectors (trimmed,
-  trailing `()` stripped, malformed entries dropped, de-duplicated). The field
-  is **omitted entirely** when no well-formed symbol is known for the CVE — the
-  CLI then falls back to import-only analysis for that pair.
+  trailing `()` stripped, malformed entries dropped, de-duplicated, capped at
+  200 symbols per CVE). The field is **omitted entirely** when no well-formed
+  symbol is known for the CVE — the CLI then falls back to import-only
+  analysis for that pair.
 
 #### Upload Reachability Results
 

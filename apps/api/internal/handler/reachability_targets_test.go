@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -310,6 +311,88 @@ func TestNormalizeVulnFuncs(t *testing.T) {
 				t.Errorf("normalizeVulnFuncs(%v) = %v, want nil (omitempty depends on it)", tc.in, got)
 			}
 		})
+	}
+}
+
+// TestNormalizeVulnFuncs_CapAt200 (M43 Phase D review): the per-CVE symbol
+// list is capped at 200 entries as a defence-in-depth layer — the scheduler
+// caps at store time too, but pre-existing DB inventory (or another write
+// path) can still hold more, and an unbounded list bloats every worklist
+// response and every CLI symbol walk. The cap applies AFTER normalisation
+// (trim / "()" strip / shape filter / dedupe), so the first 200 normalised
+// survivors ship — not the first 200 raw elements.
+func TestNormalizeVulnFuncs_CapAt200(t *testing.T) {
+	// Malformed noise up front: all dropped by the shape filter, so they
+	// must not consume cap slots.
+	raw := []string{"Foo", "a.b.c.d", "   ", "Bar.baz()"} // "Bar.baz" survives as element 0
+	for i := 0; i < 500; i++ {
+		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
+	}
+	got := normalizeVulnFuncs(raw)
+	if len(got) != 200 {
+		t.Fatalf("len = %d, want 200 (cap)", len(got))
+	}
+	if got[0] != "Bar.baz" {
+		t.Errorf("got[0] = %q, want Bar.baz (cap must run after normalisation, keeping first-seen order)", got[0])
+	}
+	for i := 1; i < 200; i++ {
+		want := fmt.Sprintf("pkg%d.Func%d", i-1, i-1)
+		if got[i] != want {
+			t.Fatalf("got[%d] = %q, want %q (first 200 normalised survivors, order preserved)", i, got[i], want)
+		}
+	}
+}
+
+// TestNormalizeVulnFuncs_AtCapBoundaryUntouched: exactly 200 survivors pass
+// through complete — the cap only bites on 201+.
+func TestNormalizeVulnFuncs_AtCapBoundaryUntouched(t *testing.T) {
+	raw := make([]string, 0, 200)
+	for i := 0; i < 200; i++ {
+		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
+	}
+	got := normalizeVulnFuncs(raw)
+	if len(got) != 200 {
+		t.Fatalf("len = %d, want all 200 kept at the cap boundary", len(got))
+	}
+	if got[199] != "pkg199.Func199" {
+		t.Errorf("got[199] = %q, want pkg199.Func199", got[199])
+	}
+}
+
+// TestReachabilityHandler_GetTargets_VulnFuncsCappedAt200: end-to-end wire
+// check for the cap — a CVE with 500 stored symbols ships exactly 200 on
+// the targets response, preserving normalised order.
+func TestReachabilityHandler_GetTargets_VulnFuncsCappedAt200(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2024-0777", ComponentID: uuid.New(), Purl: "pkg:golang/x@v1", ComponentName: "x", ComponentVersion: "v1"},
+	}}
+	raw := make([]string, 0, 500)
+	for i := 0; i < 500; i++ {
+		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
+	}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string][]string{"CVE-2024-0777": raw}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(resp.Targets))
+	}
+	got := resp.Targets[0].VulnFuncs
+	if len(got) != 200 {
+		t.Fatalf("vuln_funcs len = %d, want 200 (per-CVE cap on the wire)", len(got))
+	}
+	if got[0] != "pkg0.Func0" || got[199] != "pkg199.Func199" {
+		t.Errorf("vuln_funcs[0]=%q vuln_funcs[199]=%q, want pkg0.Func0 / pkg199.Func199 (first 200, order preserved)", got[0], got[199])
 	}
 }
 

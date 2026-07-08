@@ -226,7 +226,7 @@ func (r *AdvisoryExcerptsRepository) GetBySource(ctx context.Context, tenantID u
 
 // ListVulnFuncsByCVEs returns, for each requested CVE, the union of the
 // vuln_funcs symbol strings across every advisory source row (nvd / ghsa /
-// jvn) the tenant holds for that CVE, keyed by cve_id (M43 Wave 1 / F465,
+// jvn / osv) the tenant holds for that CVE, keyed by cve_id (M43 Wave 1 / F465,
 // issue #167: GET /reachability/targets enriches each target row with the
 // advisory-declared vulnerable symbols so the CLI can run a symbol-level
 // reachability walk instead of import-only analysis).

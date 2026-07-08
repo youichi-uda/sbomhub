@@ -1549,7 +1549,7 @@ func BuildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []Reachabi
 				fmt.Fprintf(&b, "      excerpt: %s\n", truncate(a.RawExcerpt, 600))
 			}
 			if len(a.VulnFuncs) > 0 && string(a.VulnFuncs) != "[]" {
-				fmt.Fprintf(&b, "      vuln_funcs: %s\n", string(a.VulnFuncs))
+				fmt.Fprintf(&b, "      vuln_funcs: %s\n", renderVulnFuncs(a.VulnFuncs, vulnFuncsPromptBudget))
 			}
 			if len(a.AffectedPaths) > 0 && string(a.AffectedPaths) != "[]" {
 				fmt.Fprintf(&b, "      affected_paths: %s\n", string(a.AffectedPaths))
@@ -1683,6 +1683,59 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "...(truncated)"
+}
+
+// vulnFuncsPromptBudget caps the rendered vuln_funcs JSON per advisory row
+// in the triage prompt (M43 Phase D review). Advisory unions can carry
+// hundreds of symbols (OSV / Go vulndb structured lists), and an unbounded
+// render bloats the prompt and drowns the reachability evidence the model
+// must weigh. Storage and the /reachability/targets wire keep their own
+// caps; only the prompt render truncates here. Sized to sit alongside the
+// existing truncate(..., 600) excerpt / truncate(..., 400) evidence budgets.
+const vulnFuncsPromptBudget = 800
+
+// renderVulnFuncs renders an advisory vuln_funcs JSON array for the prompt,
+// keeping whole JSON elements until budget bytes are used and appending
+// " …(+N more)" for the elided tail (so the model knows the list is
+// incomplete rather than exhaustive). Payloads at or under budget pass
+// through byte-for-byte — prompt_hash stability for the common small case.
+// An over-budget payload that does not parse as a string array (foreign
+// shape tolerated leniently, mirroring the repository read) falls back to
+// the plain byte truncation used elsewhere in this prompt.
+func renderVulnFuncs(raw json.RawMessage, budget int) string {
+	if len(raw) <= budget {
+		return string(raw)
+	}
+	var funcs []string
+	if err := json.Unmarshal(raw, &funcs); err != nil {
+		return truncate(string(raw), budget)
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	kept := 0
+	for _, f := range funcs {
+		enc, err := json.Marshal(f)
+		if err != nil {
+			continue
+		}
+		add := len(enc)
+		if kept > 0 {
+			add++ // separating comma
+		}
+		if b.Len()+add+1 > budget { // +1 for the closing bracket
+			break
+		}
+		if kept > 0 {
+			b.WriteByte(',')
+		}
+		b.Write(enc)
+		kept++
+	}
+	b.WriteByte(']')
+	if n := len(funcs) - kept; n > 0 {
+		fmt.Fprintf(&b, " …(+%d more)", n)
+	}
+	return b.String()
 }
 
 func uuidPtr(u uuid.UUID) *uuid.UUID {
