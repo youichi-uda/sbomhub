@@ -2828,6 +2828,18 @@ func osvAliasesContain(aliases []string, id string) bool {
 // mirror output and must be rejected wholesale by the caller — its symbols,
 // excerpt, aliases, and clobber authority all belong to some OTHER
 // vulnerability.
+//
+// Known limitations (M43 Phase D R7, documented deliberately):
+//   - Linkage is SELF-ATTESTED: a hostile mirror that writes the requested
+//     CVE into a forged record's aliases passes this check and can still
+//     inject symbols or exercise retraction authority. Linkage closes the
+//     canned-response / mis-routing classes only; the configured OSV
+//     endpoint (SBOMHUB_OSV_URL, operator-controlled TLS origin) remains
+//     inside the trust boundary, same as the NVD/GHSA feeds.
+//   - Matching is trim-exact and case-sensitive: OSV ids are canonical
+//     uppercase, so a mirror emitting non-canonical ids sees its records
+//     rejected as unlinked — the fail-safe direction (preserve-side empty
+//     plus Warn; no data loss).
 func osvRecordLinked(vuln *client.OSVVulnerability, requestedID, cveID string) bool {
 	if vuln == nil {
 		return false
