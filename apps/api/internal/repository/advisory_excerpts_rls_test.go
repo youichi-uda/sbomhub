@@ -229,15 +229,26 @@ func TestAdvisoryExcerpts_SourceCheckConstraint(t *testing.T) {
 	// the negative-path INSERT must run inside a tx with the tenant GUC
 	// set; otherwise the row is rejected by the RLS policy before the
 	// CHECK constraint fires.
+	// M43 F467: migration 056 extended the allow-list to include 'osv'
+	// (Go vulndb structured symbols), so the rejection probe uses a value
+	// outside the 4-entry registry and 'osv' is asserted as accepted.
 	err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO advisory_excerpts (
 			id, tenant_id, cve_id, source
-		) VALUES ($1, $2, 'CVE-2025-CK', 'osv')
+		) VALUES ($1, $2, 'CVE-2025-CK', 'redhat')
 	`, uuid.New(), tenant)
 	if err == nil {
-		t.Fatalf("CHECK constraint allowed source='osv'; the allow-list is meant to be nvd|ghsa|jvn only")
+		t.Fatalf("CHECK constraint allowed source='redhat'; the allow-list is meant to be nvd|ghsa|jvn|osv only")
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "check") {
 		t.Fatalf("expected a CHECK constraint violation, got: %v", err)
+	}
+
+	if err := execAsTenant(t, migDB, tenant, `
+		INSERT INTO advisory_excerpts (
+			id, tenant_id, cve_id, source
+		) VALUES ($1, $2, 'CVE-2025-CK', 'osv')
+	`, uuid.New(), tenant); err != nil {
+		t.Fatalf("CHECK constraint rejected source='osv'; migration 056 is meant to allow it: %v", err)
 	}
 }
