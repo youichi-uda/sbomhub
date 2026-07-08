@@ -175,9 +175,11 @@ var cveMatchBatchChunkSize = cveMatchBatchChunkSizeDefault
 //
 // M43 Phase D R4 widened the contract with GetBySource: the OSV tombstone
 // write path reads the existing (tenant, cve, source='osv') row before
-// writing, so a definitive negative can never clobber an existing non-empty
-// vuln_funcs row (the structural replacement for the R3 mass-404 suppression
-// valve — see writeOSVVulnFuncsChunk).
+// writing, so a TRUE 404 can never clobber an existing non-empty vuln_funcs
+// row (the structural replacement for the R3 mass-404 suppression valve —
+// see writeOSVVulnFuncsChunk). Since M43 Phase D R5 the guard applies to
+// true 404s only: a record-backed empty (recordFound=true) overwrites the
+// row so upstream retractions propagate.
 type advisoryExcerptUpserter interface {
 	Upsert(ctx context.Context, e *repository.AdvisoryExcerpt) error
 	// GetBySource returns the single (tenant, cve, source) row, or (nil, nil)
@@ -1322,12 +1324,18 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 // abort) write nothing and retry next tick; definitive negatives (404 / no
 // symbols) ALWAYS write a tombstone row (M43 Phase D R4 — the R3 valve that
 // suppressed tombstones on all-404 ticks re-introduced the R1 starvation for
-// a legitimate all-404 backlog and was removed, Codex 42nd [High]). Two
+// a legitimate all-404 backlog and was removed, Codex 42nd [High]). Three
 // STRUCTURAL guards replace the valve's threat coverage:
-//   - tombstones never clobber an existing non-empty vuln_funcs row — the
-//     write path preserves the row's data wholesale and refreshes only
-//     fetched_at (writeOSVVulnFuncsChunk), so a misconfigured mirror
-//     404-ing every path can never empty previously-positive rows;
+//   - TRUE-404 tombstones (recordFound=false) never clobber an existing
+//     non-empty vuln_funcs row — the write path preserves the row's data
+//     wholesale and refreshes only fetched_at (writeOSVVulnFuncsChunk), so a
+//     misconfigured mirror 404-ing every path can never empty
+//     previously-positive rows. Record-backed empties (recordFound=true)
+//     DO overwrite — an upstream retraction must propagate (M43 Phase D R5);
+//   - an ANOMALOUS all-404 tick (>= osvVulnFuncsMass404WarnThreshold
+//     lookups, 100% definitive 404s) writes its tombstones with a BACKDATED
+//     fetched_at (osvVulnFuncsAnomalyRetryInterval, M43 Phase D R5), so a
+//     repaired mirror's blind spot is ~2 days, not the full 7-day window;
 //   - an offline-drifted client (client offline / job online, whose
 //     short-circuit is byte-identical to a real 404) skips the whole pass
 //     up front via OSVClient.IsOffline — no enumeration, no fetches, no
@@ -1396,22 +1404,46 @@ const (
 	// CVE sorted after them forever, re-introducing the R1 starvation the
 	// tombstones exist to fix (Codex 42nd [High]). R4 therefore ALWAYS
 	// writes definitive-404 tombstones and covers the valve's original
-	// threats structurally instead: the write path never clobbers an
-	// existing non-empty vuln_funcs row (writeOSVVulnFuncsChunk), and an
-	// offline-drifted client — whose short-circuit is byte-identical to a
-	// real 404 — skips the pass entirely via OSVClient.IsOffline (see
-	// syncOSVVulnFuncs).
+	// threats structurally instead: the write path never lets a true 404
+	// clobber an existing non-empty vuln_funcs row (writeOSVVulnFuncsChunk),
+	// and an offline-drifted client — whose short-circuit is byte-identical
+	// to a real 404 — skips the pass entirely via OSVClient.IsOffline (see
+	// syncOSVVulnFuncs). Since M43 Phase D R5 the same 100%-404 trigger also
+	// marks the tick ANOMALOUS: its tombstones are written with a backdated
+	// fetched_at (osvVulnFuncsAnomalyRetryInterval) so a repaired mirror is
+	// negative-cached for ~2 days instead of the full freshness window.
 	osvVulnFuncsMass404WarnThreshold = 20
+
+	// osvVulnFuncsAnomalyRetryInterval is how quickly the tombstones written
+	// by an ANOMALOUS tick re-enter the candidate set (M43 Phase D R5). An
+	// anomalous tick is the mass-404 Warn's own trigger — at least
+	// osvVulnFuncsMass404WarnThreshold lookups, 100% of them definitive 404s —
+	// which is the signature of a misconfigured mirror / endpoint outage as
+	// much as of a legitimate all-404 backlog. R4 wrote those tombstones with
+	// fetched_at = now, so a mirror repaired minutes after the bad tick still
+	// left every affected CVE negative-cached for the full
+	// osvVulnFuncsRefreshInterval (7 days) — a blind spot in which freshly
+	// published symbols were invisible. R5 keeps writing the tombstones (the
+	// R1 starvation fix is untouched: the NOT EXISTS freshness clause still
+	// excludes them) but BACKDATES their fetched_at by
+	// (osvVulnFuncsRefreshInterval - osvVulnFuncsAnomalyRetryInterval), so
+	// they age out of the freshness window after ~this interval (~2 days)
+	// instead of the full 7. Normal ticks (any non-404 lookup) are unaffected.
+	osvVulnFuncsAnomalyRetryInterval = 48 * time.Hour
 )
 
 // osvMass404WarnMsg is the exact Warn message emitted when a tick of at
 // least osvVulnFuncsMass404WarnThreshold lookups returns "no record" for
-// EVERY one of them (M43 Phase D R4) — an observability-only signal for a
-// possible OSV mirror/endpoint anomaly. Unlike the R3 valve it replaces, it
-// does NOT suppress the tick's tombstones: a legitimate all-404 backlog must
-// enter the negative cache or the R1 starvation returns (Codex 42nd [High]).
-// A const so the test contract pins operators' grep target verbatim.
-const osvMass404WarnMsg = "scheduler: every OSV lookup this tick returned no record; possible OSV mirror/endpoint anomaly — tombstones still written, existing non-empty rows preserved (M43 Phase D R4)"
+// EVERY one of them (M43 Phase D R4) — a signal for a possible OSV
+// mirror/endpoint anomaly. Unlike the R3 valve it replaces, it does NOT
+// suppress the tick's tombstones: a legitimate all-404 backlog must enter the
+// negative cache or the R1 starvation returns (Codex 42nd [High]). Since M43
+// Phase D R5 the anomalous tick's tombstones are additionally written with
+// SHORTENED freshness — fetched_at backdated so they re-candidate after
+// ~osvVulnFuncsAnomalyRetryInterval instead of the full refresh window — and
+// the message says so. A const so the test contract pins operators' grep
+// target verbatim.
+const osvMass404WarnMsg = "scheduler: every OSV lookup this tick returned no record; possible OSV mirror/endpoint anomaly — tombstones still written but with shortened freshness (fetched_at backdated so affected CVEs retry in ~2 days instead of the full 7-day window), existing non-empty rows preserved (M43 Phase D R5)"
 
 // osvOfflineDriftSkipWarnMsg is the exact Warn emitted when the OSV client
 // is offline while the CVE sync job itself is online (M43 Phase D R4): the
@@ -1421,6 +1453,17 @@ const osvMass404WarnMsg = "scheduler: every OSV lookup this tick returned no rec
 // tombstones. A const so the test contract pins operators' grep target
 // verbatim.
 const osvOfflineDriftSkipWarnMsg = "scheduler: OSV client is offline but the CVE sync job is online; skipping OSV vuln_funcs pass (M43 Phase D R4 offline-drift guard)"
+
+// osvTombstonePreserveInfoMsg is the exact Info line emitted when a true-404
+// tombstone (recordFound=false) lands on an existing POSITIVE (non-empty
+// vuln_funcs) row and the R4 clobber guard preserves it (M43 Phase D R5
+// observability): OSV currently has NO record for a CVE whose stored row
+// still carries symbols — a divergence operators may want to reconcile
+// (authoritative withdrawals propagate via the recordFound=true empty
+// overwrite, never via 404s, so a persistent 404-vs-positive divergence
+// means the stored symbols have no verifiable upstream source anymore). A
+// const so the test contract pins operators' grep target verbatim.
+const osvTombstonePreserveInfoMsg = "scheduler: OSV has no record for a CVE whose stored row carries non-empty vuln_funcs; preserving row data, refreshing fetched_at only (M43 Phase D R5)"
 
 // osvVulnFuncsFetchCap is the effective per-tick fetch cap. Production
 // always uses the default; tests may temporarily override (defer-restore)
@@ -1488,6 +1531,21 @@ type osvTenantCandidates struct {
 type osvVulnFuncsOutcome struct {
 	symbols []string
 	excerpt string
+	// recordFound (M43 Phase D R5) distinguishes the two DEFINITIVE-negative
+	// shapes an empty symbols list can mean:
+	//   - true: an OSV record for the CVE WAS retrieved this tick but yielded
+	//     no extractable Go symbols — an AUTHORITATIVE empty (upstream
+	//     withdrew or corrected the advisory's symbol list). The write path
+	//     propagates it: the row is overwritten wholesale (empty vuln_funcs
+	//     plus the record's excerpt), so a retraction finally reaches
+	//     existing positive rows instead of being preserved forever.
+	//   - false: a true 404 (no record retrieved anywhere). The write path
+	//     treats it as a tombstone that must never clobber an existing
+	//     positive row — it preserves the row's data and refreshes only
+	//     fetched_at (the R4 clobber guard).
+	// Positive outcomes (symbols non-empty) carry recordFound=true and
+	// replace the row unconditionally either way.
+	recordFound bool
 }
 
 // syncOSVVulnFuncs is the Phase 3 entry point (see the section header above
@@ -1536,15 +1594,18 @@ func (j *CVESyncJob) syncOSVVulnFuncs(ctx context.Context, tenantIDs []uuid.UUID
 	}
 
 	// Network phase: one lookup per distinct CVE (+ ≤1 alias follow-up),
-	// hard-capped per tick.
-	outcomes := j.fetchOSVVulnFuncs(ctx, orderedCVEs)
+	// hard-capped per tick. anomalousTick (M43 Phase D R5) reports the
+	// all-404 anomaly determination so the write pass can backdate the tick's
+	// tombstone fetched_at (shortened negative cache, see
+	// osvVulnFuncsAnomalyRetryInterval).
+	outcomes, anomalousTick := j.fetchOSVVulnFuncs(ctx, orderedCVEs)
 
 	// Pass B (write, chunked, one pooled conn): fan the per-CVE outcomes out
 	// to per-(tenant, cve) source='osv' excerpt rows. Definitive negatives
 	// (404 / no symbols) are written as empty-vuln_funcs tombstone rows so
 	// the freshness window negative-caches them (M43 Phase D R2 finding 1);
 	// undetermined CVEs (transient failure / fetch cap) get no row.
-	rowsUpserted, tenantsWritten := j.writeOSVVulnFuncs(ctx, candidates, outcomes)
+	rowsUpserted, tenantsWritten := j.writeOSVVulnFuncs(ctx, candidates, outcomes, anomalousTick)
 
 	withSymbols, tombstones := 0, 0
 	for _, o := range outcomes {
@@ -1695,12 +1756,20 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // Go ecosystem_specific.imports), ONE follow-up lookup of the first "GO-"
 // alias is attempted.
 //
-// Outcome classification (M43 Phase D R2 finding 1):
-//   - DEFINITIVE positive — symbols extracted: outcome with symbols.
-//   - DEFINITIVE negative — 404 (client returns nil, nil), or the record(s)
-//     exist but yield no symbols with no follow-up left to try: outcome with
-//     EMPTY symbols (a tombstone, persisted so the freshness window negative-
-//     caches the CVE instead of starving the fetch cap every tick).
+// Outcome classification (M43 Phase D R2 finding 1; R5 split the negative
+// shape on recordFound):
+//   - DEFINITIVE positive — symbols extracted: outcome with symbols
+//     (recordFound=true).
+//   - DEFINITIVE negative, TRUE 404 — the main lookup returned no record
+//     (client returns nil, nil): outcome with EMPTY symbols and
+//     recordFound=false. A tombstone, persisted so the freshness window
+//     negative-caches the CVE instead of starving the fetch cap every tick;
+//     the write path's clobber guard preserves any existing positive row.
+//   - DEFINITIVE negative, AUTHORITATIVE empty — the record(s) exist but
+//     yield no symbols with no follow-up left to try (including a main
+//     record whose GO- alias 404s): outcome with EMPTY symbols and
+//     recordFound=true. The write path propagates it as an upstream
+//     retraction, overwriting the row wholesale.
 //   - UNDETERMINED — transient fetch failure (network error / non-404 HTTP
 //     status / ctx abort) or an alias follow-up skipped by the fetch cap: NO
 //     outcome. Nothing is written; the CVE stays stale and retries next tick.
@@ -1720,7 +1789,14 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // beyond the cap stay stale (no row written) and are retried next tick — and
 // because determined negatives now leave the candidate set via tombstones,
 // the freshness window genuinely pages the backlog through the cap.
-func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map[string]osvVulnFuncsOutcome {
+//
+// The second return value, anomalousTick (M43 Phase D R5), is true exactly
+// when the all-404 Warn fired: at least osvVulnFuncsMass404WarnThreshold
+// lookups were performed and 100% of them were definitive 404s. The write
+// pass uses it to backdate the tick's tombstone fetched_at (see
+// osvVulnFuncsAnomalyRetryInterval) so a mirror misconfiguration is
+// negative-cached for ~2 days instead of the full freshness window.
+func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (map[string]osvVulnFuncsOutcome, bool) {
 	out := make(map[string]osvVulnFuncsOutcome, len(cveIDs))
 	// Defence-in-depth (mirrors syncOSVVulnFuncs' guards): neither an
 	// offline job nor an offline-drifted CLIENT (M43 Phase D R4 — its
@@ -1728,7 +1804,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 	// classified as a definitive 404 tombstone, no matter who calls this
 	// loop directly.
 	if j.offline || j.osv == nil || j.osv.IsOffline() {
-		return out
+		return out, false
 	}
 	fetchCap := osvVulnFuncsFetchCap
 	if fetchCap <= 0 {
@@ -1780,8 +1856,11 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 			continue // transient failure — no tombstone, retry next tick
 		}
 		if vuln == nil {
-			// Definitive: OSV has no record for this CVE. Tombstone it so the
-			// freshness window stops re-spending fetch budget on it.
+			// Definitive: OSV has no record for this CVE — a TRUE 404
+			// (recordFound=false, M43 Phase D R5). Tombstone it so the
+			// freshness window stops re-spending fetch budget on it; the
+			// write path's clobber guard keys on recordFound=false to
+			// preserve any existing positive row.
 			out[cveID] = osvVulnFuncsOutcome{}
 			continue
 		}
@@ -1811,14 +1890,20 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 					}
 				}
 				// av == nil (alias 404) falls through: both lookups were
-				// definitive, so an empty-symbols tombstone below is correct.
+				// definitive, so an empty-symbols outcome below is correct —
+				// and it is still recordFound=true (the MAIN record was
+				// retrieved), so the write path treats it as an authoritative
+				// empty, not a true 404 (M43 Phase D R5).
 			}
 		}
 
-		// Definitive either way: symbols (positive) or an empty-symbols
-		// tombstone (negative — the record(s) exist but carry nothing
-		// selector-shaped for the Go analyzer).
-		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt}
+		// Definitive either way: symbols (positive) or an AUTHORITATIVE empty
+		// (negative — the record(s) exist but carry nothing selector-shaped
+		// for the Go analyzer). recordFound=true on both (a record WAS
+		// retrieved this tick), which lets the write path propagate the
+		// empty case as an upstream retraction instead of preserving stale
+		// positive rows forever (M43 Phase D R5).
+		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt, recordFound: true}
 	}
 
 	// All-404 observability Warn (M43 Phase D R4, replacing the R3
@@ -1829,18 +1914,22 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 	// candidate order genuinely absent from OSV), so the tombstones are NOT
 	// suppressed: suppression starved that backlog's negative cache forever
 	// (Codex 42nd [High]). The mirror-misconfiguration threat is covered
-	// structurally by the write path's clobber guard instead
-	// (writeOSVVulnFuncsChunk), and offline-client drift never reaches this
-	// loop (IsOffline guard above).
-	if fetches >= osvVulnFuncsMass404WarnThreshold && notFound == fetches {
+	// structurally by the write path's clobber guard
+	// (writeOSVVulnFuncsChunk), by the R5 backdated fetched_at on this tick's
+	// tombstones (they re-candidate in ~osvVulnFuncsAnomalyRetryInterval, so
+	// the anomaly's blind spot is ~2 days, not 7), and offline-client drift
+	// never reaches this loop (IsOffline guard above).
+	anomalousTick := fetches >= osvVulnFuncsMass404WarnThreshold && notFound == fetches
+	if anomalousTick {
 		slog.Warn(osvMass404WarnMsg,
 			"fetches", fetches,
 			"not_found", notFound,
 			"not_found_rate", 1.0,
 			"threshold", osvVulnFuncsMass404WarnThreshold,
-			"tombstones", len(out))
+			"tombstones", len(out),
+			"shortened_freshness_retry", osvVulnFuncsAnomalyRetryInterval.String())
 	}
-	return out
+	return out, anomalousTick
 }
 
 // writeOSVVulnFuncs runs Pass B: fans the per-CVE outcomes out to
@@ -1849,10 +1938,17 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 // mirrors matchTenantsChunk: a chunk that fails to COMMIT contributes ZERO
 // to the returned counters (its upserts rolled back), is logged, and the
 // loop continues with the next chunk.
+//
+// anomalousTick (M43 Phase D R5) is fetchOSVVulnFuncs' all-404 anomaly
+// determination: when true, TOMBSTONE rows are stamped with a BACKDATED
+// fetched_at (see osvVulnFuncsAnomalyRetryInterval) so a possible mirror
+// misconfiguration is negative-cached for ~2 days instead of the full
+// freshness window.
 func (j *CVESyncJob) writeOSVVulnFuncs(
 	ctx context.Context,
 	candidates []osvTenantCandidates,
 	outcomes map[string]osvVulnFuncsOutcome,
+	anomalousTick bool,
 ) (rowsUpserted, tenantsWritten int) {
 	// Keep only (tenant, cve) pairs whose CVE reached a definitive outcome
 	// this tick — symbols OR a negative tombstone (M43 Phase D R2 finding 1).
@@ -1893,7 +1989,7 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 		if end > len(writes) {
 			end = len(writes)
 		}
-		chunkRows, chunkTenants, chunkErr := j.writeOSVVulnFuncsChunk(ctx, conn, chunkIndex, writes[start:end], outcomes)
+		chunkRows, chunkTenants, chunkErr := j.writeOSVVulnFuncsChunk(ctx, conn, chunkIndex, writes[start:end], outcomes, anomalousTick)
 		if chunkErr != nil {
 			slog.Warn("scheduler: OSV vuln_funcs write chunk aborted, continuing with next chunk (M43 F467)",
 				"chunk_index", chunkIndex, "num_chunks", numChunks, "error", chunkErr)
@@ -1909,19 +2005,32 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 // (tenant, cve) an optional pre-write read plus one Upsert.
 //
 // Tombstone clobber guard (M43 Phase D R4, the structural replacement for
-// the R3 mass-404 suppression valve): a TOMBSTONE write (empty symbols)
-// first reads the existing (tenant, cve, 'osv') row via GetBySource ON THIS
-// TX — txCtx routes the repository's database.Querier onto the chunk tx, so
-// the read runs under the SET LOCAL tenant GUC, same F185 discipline as the
-// Upsert. If the existing row carries non-empty vuln_funcs, the write
-// preserves the row's data wholesale (vuln_funcs, the other JSONB fields,
-// raw_excerpt) and refreshes ONLY fetched_at, so a mass-404 anomaly can
-// never empty previously-positive rows while the freshness window still
-// advances. POSITIVE writes skip the read — fresh symbols are authoritative
-// and replace the row unconditionally — keeping the added round-trips
-// proportional to the tick's tombstone count (bounded by the fetch cap). A
-// GetBySource failure aborts the chunk exactly like an Upsert failure: with
-// real PG the error has already aborted the tx server-side.
+// the R3 mass-404 suppression valve; R5 narrowed it to TRUE 404s): a
+// TRUE-404 tombstone write (empty symbols, recordFound=false) first reads
+// the existing (tenant, cve, 'osv') row via GetBySource ON THIS TX — txCtx
+// routes the repository's database.Querier onto the chunk tx, so the read
+// runs under the SET LOCAL tenant GUC, same F185 discipline as the Upsert.
+// If the existing row carries non-empty vuln_funcs, the write preserves the
+// row's data wholesale (vuln_funcs, the other JSONB fields, raw_excerpt),
+// refreshes ONLY fetched_at, and emits one osvTombstonePreserveInfoMsg Info
+// line — so a mass-404 anomaly can never empty previously-positive rows
+// while the freshness window still advances. POSITIVE writes and
+// AUTHORITATIVE-empty writes (recordFound=true — the record exists but
+// yields no symbols, an upstream retraction; M43 Phase D R5) skip the read:
+// their fetched data is authoritative and replaces the row unconditionally.
+//
+// Round-trip cost of the guard (M43 Phase D R4 round 4 Low finding — the
+// earlier "bounded by the fetch cap" wording was wrong): the pre-write read
+// fires once per true-404 TOMBSTONE ROW WRITE, i.e. per (tenant, cve) pair
+// AFTER tenant fan-out, not per distinct CVE — a single tombstoned CVE
+// listed by T tenants costs T reads. The fetch cap bounds distinct-CVE
+// lookups only, so it does NOT bound this cost; the correct bound is the
+// pass's own write count: at most one extra read per row write, i.e. ≤2×
+// the pre-R4 per-row round-trips, and strictly less whenever the tick has
+// positive or authoritative-empty outcomes (which never read).
+//
+// A GetBySource failure aborts the chunk exactly like an Upsert failure:
+// with real PG the error has already aborted the tx server-side.
 //
 // The tx carries ONLY excerpt reads/writes — unlike the M32 batch there are
 // no core links to fence, so no savepoint is needed: an abort loses only
@@ -1933,6 +2042,7 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 	chunkIndex int,
 	chunk []osvTenantCandidates,
 	outcomes map[string]osvVulnFuncsOutcome,
+	anomalousTick bool,
 ) (rowsUpserted, tenantsWritten int, err error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -1950,6 +2060,19 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 	// the RLS WITH CHECK.
 	txCtx := database.WithTx(ctx, tx)
 	now := time.Now().UTC()
+	// M43 Phase D R5: an ANOMALOUS tick (100% definitive-404, >= the mass-404
+	// Warn threshold) stamps its tombstones with a BACKDATED fetched_at so
+	// they age out of the freshness window after
+	// ~osvVulnFuncsAnomalyRetryInterval (~2 days) instead of the full
+	// osvVulnFuncsRefreshInterval (7 days): if the tick was a mirror
+	// misconfiguration, the blind spot after the mirror is repaired shrinks
+	// from 7 days to ~2. Normal ticks stamp now; positive rows always stamp
+	// now (an anomalous tick cannot produce positives — 100% 404 means no
+	// record was retrieved).
+	tombstoneFetchedAt := now
+	if anomalousTick {
+		tombstoneFetchedAt = now.Add(-(osvVulnFuncsRefreshInterval - osvVulnFuncsAnomalyRetryInterval))
+	}
 
 	chunkRows, chunkTenants := 0, 0
 	for _, cand := range chunk {
@@ -1963,18 +2086,29 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 		wrote := false
 		for _, cveID := range cand.cveIDs {
 			o := outcomes[cveID]
+			// fetchedAt is a fresh per-row variable (its address is stored on
+			// the excerpt): tombstones take the possibly-backdated anomaly
+			// stamp (M43 Phase D R5), positives always take now.
+			fetchedAt := now
+			if len(o.symbols) == 0 {
+				fetchedAt = tombstoneFetchedAt
+			}
 			excerpt := &repository.AdvisoryExcerpt{
 				TenantID:   cand.tenantID,
 				CVEID:      cveID,
 				Source:     osvVulnFuncsSource,
 				VulnFuncs:  stringsToJSONArray(o.symbols),
 				RawExcerpt: o.excerpt,
-				FetchedAt:  &now,
+				FetchedAt:  &fetchedAt,
 			}
-			// Tombstone clobber guard (M43 Phase D R4) — see the docstring:
-			// a definitive negative must never empty an existing POSITIVE
-			// row; it only refreshes that row's fetched_at.
-			if len(o.symbols) == 0 {
+			// Tombstone clobber guard (M43 Phase D R4, narrowed to TRUE 404s
+			// by R5) — see the docstring: a true 404 (recordFound=false) must
+			// never empty an existing POSITIVE row; it only refreshes that
+			// row's fetched_at. An AUTHORITATIVE empty (recordFound=true —
+			// the record exists but yields no symbols, an upstream
+			// withdrawal/correction) skips the read and overwrites the row
+			// wholesale below, so retractions actually propagate.
+			if len(o.symbols) == 0 && !o.recordFound {
 				existing, gErr := j.advisoryExcerpts.GetBySource(txCtx, cand.tenantID, cveID, osvVulnFuncsSource)
 				if gErr != nil {
 					slog.Warn("scheduler: OSV vuln_funcs pre-write read failed, aborting chunk (M43 Phase D R4)",
@@ -1988,6 +2122,13 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 					excerpt.RequiredConfig = existing.RequiredConfig
 					excerpt.RequiredEnv = existing.RequiredEnv
 					excerpt.RawExcerpt = existing.RawExcerpt
+					// M43 Phase D R5 observability: OSV has NO record for a
+					// CVE whose stored row still carries symbols. Preserving
+					// is the safe call (a 404 is not a retraction), but the
+					// divergence is operator-relevant — the stored symbols no
+					// longer have a verifiable upstream source.
+					slog.Info(osvTombstonePreserveInfoMsg,
+						"tenant_id", cand.tenantID, "cve_id", cveID)
 				}
 			}
 			if uErr := j.advisoryExcerpts.Upsert(txCtx, excerpt); uErr != nil {
@@ -2124,6 +2265,17 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 // still covers the finding), never falsely admitted. Deliberately excluded:
 // "internal" / "vendor" (not importable by user code, so their symbols can
 // never match an app AST walk) and "cmd" (toolchain binaries — same reason).
+//
+// Operational caveat (M43 Phase D R5, round 4 Low finding):
+// GOEXPERIMENT-gated packages — "simd" is the live example, visible in
+// `go list std` only under GOEXPERIMENT=simd on toolchains that gate it —
+// are INVISIBLE to the drift test's plain `go list std` run, so the drift
+// test can never force them into (or notice them missing from) this
+// allowlist. When adding a gated package here, ALSO pin it with an explicit
+// test the way TestOSVImportPathWithinModule_SimdAllowed pins "simd";
+// without that pin, nothing stops a later "cleanup" from silently dropping
+// the entry and re-introducing the conservative-drop starvation for that
+// package's selectors.
 var goStdlibTopLevelPackages = map[string]struct{}{
 	"archive": {}, "bufio": {}, "builtin": {}, "bytes": {}, "cmp": {},
 	"compress": {}, "container": {}, "context": {}, "crypto": {},
