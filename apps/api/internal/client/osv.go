@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	neturl "net/url"
@@ -16,6 +17,14 @@ import (
 // from it so the two OSV call sites can never diverge; the orchestrator can
 // override it (air-gapped mirror) via WithBaseURL.
 const DefaultOSVBaseURL = "https://api.osv.dev/v1"
+
+// maxOSVResponseBytes bounds how much of an OSV response body is read before
+// decoding (M43 Phase D R2 finding 2). Real OSV records are tens of KB; 5MB
+// leaves generous headroom while ensuring a hostile or misconfigured endpoint
+// (or an air-gapped mirror serving the wrong content) cannot balloon caller
+// memory. A body exceeding the bound is treated as a decode error, which
+// every GetVulnerability caller already handles (warn + skip / propagate).
+const maxOSVResponseBytes = 5 << 20 // 5 MiB
 
 // OSVClient is a client for the OSV (Open Source Vulnerabilities) API
 type OSVClient struct {
@@ -151,8 +160,20 @@ func (c *OSVClient) GetVulnerability(ctx context.Context, vulnID string) (*OSVVu
 		return nil, fmt.Errorf("OSV API returned status %d", resp.StatusCode)
 	}
 
+	// Bounded read (M43 Phase D R2 finding 2): read at most one byte past the
+	// cap so over-limit bodies are detected deterministically (a streaming
+	// decoder could otherwise succeed on a prefix-complete JSON document and
+	// silently ignore the oversized tail).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOSVResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read OSV response: %w", err)
+	}
+	if len(body) > maxOSVResponseBytes {
+		return nil, fmt.Errorf("failed to decode OSV response: body exceeds %d bytes", maxOSVResponseBytes)
+	}
+
 	var vuln OSVVulnerability
-	if err := json.NewDecoder(resp.Body).Decode(&vuln); err != nil {
+	if err := json.Unmarshal(body, &vuln); err != nil {
 		return nil, fmt.Errorf("failed to decode OSV response: %w", err)
 	}
 

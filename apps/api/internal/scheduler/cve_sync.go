@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -293,6 +294,17 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// Fetch CVEs modified since last sync
 	cves, err := j.fetchModifiedCVEs(ctx, lastSync)
 	if err != nil {
+		// M43 Phase D R2 finding 6: the OSV vuln_funcs backfill (Phase 3) is
+		// independent of the NVD feed, so an NVD outage must not starve it.
+		// Run it (best-effort, self-fenced) and THEN surface the NVD error.
+		// The last-sync time is deliberately NOT advanced (unchanged early-
+		// return contract), so the NVD window is retried in full next tick.
+		slog.Warn("CVE sync: NVD fetch failed; running OSV vuln_funcs pass before returning", "error", err)
+		if tenantIDs, terr := j.tenantRepo.ListAllIDs(ctx); terr != nil {
+			slog.Warn("CVE sync: failed to list tenants for OSV pass after NVD failure", "error", terr)
+		} else {
+			j.syncOSVVulnFuncs(ctx, tenantIDs)
+		}
 		return fmt.Errorf("failed to fetch CVEs: %w", err)
 	}
 
@@ -1274,21 +1286,32 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 //     pre-existing production link empty forever).
 //   - Freshness window: a (tenant, cve) whose source='osv' excerpt row was
 //     fetched within osvVulnFuncsRefreshInterval is skipped, so steady-state
-//     re-fetch load is ~ (distinct Go CVEs) / 7 per day.
+//     re-fetch load is ~ (distinct Go CVEs) / 7 per day. Definitive
+//     negatives (OSV 404 / record with no extractable symbols) are written
+//     as EMPTY-vuln_funcs tombstone rows (M43 Phase D R2 finding 1) so the
+//     window is a real negative cache — without them, determined negatives
+//     sat permanently at the front of the deterministic candidate order and,
+//     combined with the fetch cap, starved every CVE sorted after them.
+//     Tombstones are wire-inert: ListVulnFuncsByCVEs unions nothing out of
+//     an empty array row.
 //   - Each distinct CVE is fetched ONCE per tick (plus at most ONE Go vulndb
 //     alias follow-up) and the result is fanned out to every tenant that
 //     needs it — never re-fetched per tenant.
 //   - osvVulnFuncsFetchCap hard-bounds HTTP requests per tick; CVEs beyond
-//     the cap stay stale and are retried next tick (the freshness window
-//     naturally pages through them).
+//     the cap stay stale (no row, not even a tombstone) and are retried next
+//     tick — the tombstones above are what let the freshness window actually
+//     page the backlog through the cap tick over tick.
 //   - offline=true short-circuits the whole pass with zero network access
 //     (Run() returns before it; the guard here is defence-in-depth and the
 //     OSV client itself is also constructed WithOffline).
 //
-// Failure posture: warn + skip at every level (fetch error, 404, chunk tx
-// abort). The pass never returns an error and never disturbs the core CVE
-// sync; abandoned work self-heals on the next tick via the freshness window
-// and the (tenant_id, cve_id, source) idempotent upsert.
+// Failure posture: warn + skip at every level (chunk tx abort, fetch
+// failure). TRANSIENT fetch failures (network error / non-404 status / ctx
+// abort) write nothing and retry next tick; definitive negatives (404 / no
+// symbols) write a tombstone row (see above). The pass never returns an
+// error and never disturbs the core CVE sync; abandoned work self-heals on
+// the next tick via the freshness window and the (tenant_id, cve_id, source)
+// idempotent upsert.
 // ============================================================================
 
 const (
@@ -1306,6 +1329,31 @@ const (
 	// self-host deployments' full Go CVE surface in one tick while keeping
 	// the worst-case tick duration (cap × (latency + delay)) in minutes.
 	osvVulnFuncsFetchCapDefault = 500
+
+	// osvVulnFuncsMaxSymbolsPerCVE caps how many selectors a single OSV
+	// record may contribute to one vuln_funcs row (M43 Phase D R2 finding 2).
+	// Real Go vulndb records carry a handful to a few dozen symbols; 200
+	// leaves headroom while keeping a hostile/degenerate record from
+	// ballooning the advisory_excerpts row and every downstream read
+	// (ListVulnFuncsByCVEs → wire → CLI AST walk). Extraction truncates at
+	// the cap (first-seen order preserved) with a slog.Warn.
+	osvVulnFuncsMaxSymbolsPerCVE = 200
+
+	// osvVulnFuncsMaxSelectorBytes caps one selector's byte length (M43
+	// Phase D R2 finding 2). Legitimate "Pkg.Type.Method" selectors are tens
+	// of bytes; anything past 256 is a crafted or corrupt symbol and is
+	// dropped by osvWireSafeSelector like any other non-wire-safe shape.
+	osvVulnFuncsMaxSelectorBytes = 256
+
+	// osvExcerptMaxRunes caps the raw_excerpt grounding text persisted by
+	// this pass (M43 Phase D R2 finding 2). The NVD path stores the advisory
+	// description verbatim (typical NVD descriptions are well under 2000
+	// chars and there is no NVD-side cap to inherit), and the triage runner
+	// truncates excerpts to 600 chars at prompt-build time anyway — 2000
+	// runes keeps full grounding fidelity for real records while bounding
+	// hostile OSV summary/details blobs. Rune-based so multibyte (Japanese)
+	// text is never cut mid-sequence.
+	osvExcerptMaxRunes = 2000
 )
 
 // osvVulnFuncsFetchCap is the effective per-tick fetch cap. Production
@@ -1327,7 +1375,10 @@ var osvVulnFuncsFetchDelay = 100 * time.Millisecond
 // repository.EcosystemFromPurl so the authoritative ecosystem derivation
 // stays in one place (the ILIKE is only a row-transfer prefilter, matching
 // the vulnerability.go comment about not trusting purl LIKEs in SQL).
-// $1 = tenant id (belt+braces alongside the advisory_excerpts RLS policy),
+// $1 = tenant id — used BOTH as an explicit c.tenant_id predicate (M43
+// Phase D R2 finding 5: the repo layer's belt+braces discipline, so the
+// query stays tenant-correct even if the RLS GUC binding ever regresses)
+// AND in the advisory_excerpts NOT EXISTS,
 // $2 = freshness cutoff (rows with fetched_at >= $2 are fresh; NULL
 // fetched_at compares as unknown => NOT EXISTS => stale => re-fetched).
 const osvGoCVECandidateQuery = `
@@ -1335,7 +1386,8 @@ const osvGoCVECandidateQuery = `
 	FROM components c
 	JOIN component_vulnerabilities cv ON cv.component_id = c.id
 	JOIN vulnerabilities v ON v.id = cv.vulnerability_id
-	WHERE c.purl ILIKE 'pkg:golang%'
+	WHERE c.tenant_id = $1
+	  AND c.purl ILIKE 'pkg:golang%'
 	  AND NOT EXISTS (
 		SELECT 1 FROM advisory_excerpts ae
 		WHERE ae.tenant_id = $1
@@ -1356,6 +1408,17 @@ type osvTenantCandidates struct {
 // osvVulnFuncsOutcome is the per-CVE fetch result fanned out to every tenant
 // that listed the CVE: the wire-safe selector list plus the OSV summary /
 // details text persisted as raw_excerpt grounding.
+//
+// M43 Phase D R2 finding 1 — tombstone semantics: presence in the outcomes
+// map means the CVE reached a DEFINITIVE determination this tick. An entry
+// with empty symbols is a negative tombstone (OSV 404 / record with no
+// extractable symbols): it is still written as an empty-vuln_funcs 'osv'
+// row so its fetched_at enters the freshness window and the CVE leaves the
+// candidate set for osvVulnFuncsRefreshInterval. Without that, determined
+// negatives sat permanently at the front of the deterministic candidate
+// order and — combined with osvVulnFuncsFetchCap — starved every CVE behind
+// them forever. Transient failures (network error / non-404 HTTP status /
+// ctx abort) produce NO map entry: no tombstone, retried next tick.
 type osvVulnFuncsOutcome struct {
 	symbols []string
 	excerpt string
@@ -1400,14 +1463,25 @@ func (j *CVESyncJob) syncOSVVulnFuncs(ctx context.Context, tenantIDs []uuid.UUID
 	outcomes := j.fetchOSVVulnFuncs(ctx, orderedCVEs)
 
 	// Pass B (write, chunked, one pooled conn): fan the per-CVE outcomes out
-	// to per-(tenant, cve) source='osv' excerpt rows. CVEs with no symbols
-	// are NOT written (no empty rows).
+	// to per-(tenant, cve) source='osv' excerpt rows. Definitive negatives
+	// (404 / no symbols) are written as empty-vuln_funcs tombstone rows so
+	// the freshness window negative-caches them (M43 Phase D R2 finding 1);
+	// undetermined CVEs (transient failure / fetch cap) get no row.
 	rowsUpserted, tenantsWritten := j.writeOSVVulnFuncs(ctx, candidates, outcomes)
 
+	withSymbols, tombstones := 0, 0
+	for _, o := range outcomes {
+		if len(o.symbols) > 0 {
+			withSymbols++
+		} else {
+			tombstones++
+		}
+	}
 	slog.Info("OSV vuln_funcs sync completed (M43 F467)",
 		"tenants_scanned", len(tenantIDs),
 		"candidate_cves", len(orderedCVEs),
-		"cves_with_symbols", len(outcomes),
+		"cves_with_symbols", withSymbols,
+		"cves_tombstoned", tombstones,
 		"rows_upserted", rowsUpserted,
 		"tenants_written", tenantsWritten,
 		"duration_ms", time.Since(start).Milliseconds(),
@@ -1542,33 +1616,57 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // service/remediation.go has relied on in production since M14). When the
 // returned record is NOT the Go vulndb entry (e.g. a GHSA/CVE record with no
 // Go ecosystem_specific.imports), ONE follow-up lookup of the first "GO-"
-// alias is attempted. 404s return (nil, nil) from the client and are skipped.
+// alias is attempted.
+//
+// Outcome classification (M43 Phase D R2 finding 1):
+//   - DEFINITIVE positive — symbols extracted: outcome with symbols.
+//   - DEFINITIVE negative — 404 (client returns nil, nil), or the record(s)
+//     exist but yield no symbols with no follow-up left to try: outcome with
+//     EMPTY symbols (a tombstone, persisted so the freshness window negative-
+//     caches the CVE instead of starving the fetch cap every tick).
+//   - UNDETERMINED — transient fetch failure (network error / non-404 HTTP
+//     status / ctx abort) or an alias follow-up skipped by the fetch cap: NO
+//     outcome. Nothing is written; the CVE stays stale and retries next tick.
 //
 // Bounds: ≤ osvVulnFuncsFetchCap total HTTP requests per call (main +
-// follow-ups combined), osvVulnFuncsFetchDelay politeness pause between
-// requests, ctx cancellation checked per CVE. CVEs left beyond the cap stay
-// stale (no row written) and are retried next tick.
+// follow-ups combined), osvVulnFuncsFetchDelay ctx-aware politeness pause
+// between requests (finding 6: a cancelled ctx aborts the pause immediately
+// instead of blocking shutdown), ctx cancellation checked per CVE. CVEs left
+// beyond the cap stay stale (no row written) and are retried next tick — and
+// because determined negatives now leave the candidate set via tombstones,
+// the freshness window genuinely pages the backlog through the cap.
 func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map[string]osvVulnFuncsOutcome {
 	out := make(map[string]osvVulnFuncsOutcome, len(cveIDs))
+	// Defence-in-depth (mirrors syncOSVVulnFuncs' guard): offline must never
+	// classify the client's "no record" short-circuit as a definitive 404
+	// tombstone.
+	if j.offline || j.osv == nil {
+		return out
+	}
 	fetchCap := osvVulnFuncsFetchCap
 	if fetchCap <= 0 {
 		fetchCap = osvVulnFuncsFetchCapDefault
 	}
 	fetches := 0
 
-	// fetch performs one capped, delayed, warn-on-error lookup. Returns nil
-	// on any failure (logged) or 404.
-	fetch := func(id string) *client.OSVVulnerability {
+	// fetch performs one capped, delayed lookup. ok=false marks a TRANSIENT
+	// failure (network/5xx/timeout/ctx abort — logged): the caller must NOT
+	// tombstone. (nil, true) is a definitive 404.
+	fetch := func(id string) (*client.OSVVulnerability, bool) {
 		if fetches > 0 && osvVulnFuncsFetchDelay > 0 {
-			time.Sleep(osvVulnFuncsFetchDelay)
+			select {
+			case <-ctx.Done():
+				return nil, false
+			case <-time.After(osvVulnFuncsFetchDelay):
+			}
 		}
 		fetches++
 		v, err := j.osv.GetVulnerability(ctx, id)
 		if err != nil {
-			slog.Warn("scheduler: OSV lookup failed, skipping (M43 F467)", "id", id, "error", err)
-			return nil
+			slog.Warn("scheduler: OSV lookup failed, skipping without tombstone (M43 F467)", "id", id, "error", err)
+			return nil, false
 		}
-		return v
+		return v, true
 	}
 
 	for _, cveID := range cveIDs {
@@ -1582,9 +1680,15 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 			break
 		}
 
-		vuln := fetch(cveID)
+		vuln, ok := fetch(cveID)
+		if !ok {
+			continue // transient failure — no tombstone, retry next tick
+		}
 		if vuln == nil {
-			continue // fetch error or no OSV record (404) — skip, retry next tick
+			// Definitive: OSV has no record for this CVE. Tombstone it so the
+			// freshness window stops re-spending fetch budget on it.
+			out[cveID] = osvVulnFuncsOutcome{}
+			continue
 		}
 		symbols := extractOSVGoVulnFuncs(vuln)
 		excerpt := osvExcerptText(vuln)
@@ -1592,9 +1696,18 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 		// Alias follow-up: the alias-resolved record may be a GHSA/CVE home
 		// without Go vulndb's imports[]. One extra lookup of the first GO-
 		// alias, still under the cap.
-		if len(symbols) == 0 && !strings.HasPrefix(vuln.ID, "GO-") && fetches < fetchCap {
+		if len(symbols) == 0 && !strings.HasPrefix(vuln.ID, "GO-") {
 			if alias := firstGoVulndbAlias(vuln.Aliases); alias != "" {
-				if av := fetch(alias); av != nil {
+				if fetches >= fetchCap {
+					// The cap blocked the follow-up, so the determination is
+					// incomplete — no tombstone; the CVE retries next tick.
+					continue
+				}
+				av, aok := fetch(alias)
+				if !aok {
+					continue // transient alias failure — no tombstone
+				}
+				if av != nil {
 					symbols = extractOSVGoVulnFuncs(av)
 					if len(symbols) > 0 {
 						if e := osvExcerptText(av); e != "" {
@@ -1602,12 +1715,14 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) map
 						}
 					}
 				}
+				// av == nil (alias 404) falls through: both lookups were
+				// definitive, so an empty-symbols tombstone below is correct.
 			}
 		}
 
-		if len(symbols) == 0 {
-			continue // nothing structured to ground on — no row (requirement: no empty rows)
-		}
+		// Definitive either way: symbols (positive) or an empty-symbols
+		// tombstone (negative — the record(s) exist but carry nothing
+		// selector-shaped for the Go analyzer).
 		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt}
 	}
 	return out
@@ -1624,12 +1739,15 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 	candidates []osvTenantCandidates,
 	outcomes map[string]osvVulnFuncsOutcome,
 ) (rowsUpserted, tenantsWritten int) {
-	// Keep only (tenant, cve) pairs whose CVE actually yielded symbols.
+	// Keep only (tenant, cve) pairs whose CVE reached a definitive outcome
+	// this tick — symbols OR a negative tombstone (M43 Phase D R2 finding 1).
+	// Undetermined CVEs (transient failure / fetch cap) have no outcome
+	// entry, get no row, and retry next tick.
 	writes := make([]osvTenantCandidates, 0, len(candidates))
 	for _, cand := range candidates {
 		cveIDs := make([]string, 0, len(cand.cveIDs))
 		for _, id := range cand.cveIDs {
-			if o, ok := outcomes[id]; ok && len(o.symbols) > 0 {
+			if _, ok := outcomes[id]; ok {
 				cveIDs = append(cveIDs, id)
 			}
 		}
@@ -1748,6 +1866,15 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 // with first-seen-order dedupe. Non-Go affected entries and malformed
 // shapes are skipped leniently (EcosystemSpecific is a decoded
 // map[string]interface{}; foreign feeds put arbitrary JSON there).
+//
+// Hardening (M43 Phase D R2):
+//   - finding 4: an imports[].path must belong to its affected module
+//     (osvImportPathWithinModule) — a crafted record cannot attribute
+//     unrelated packages' selectors (path "fmt" under github.com/a/b) to a
+//     module the tenant actually ships.
+//   - finding 2: output is truncated at osvVulnFuncsMaxSymbolsPerCVE
+//     selectors (slog.Warn), and osvWireSafeSelector drops selectors over
+//     osvVulnFuncsMaxSelectorBytes.
 func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 	if vuln == nil {
 		return nil
@@ -1768,14 +1895,20 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 				continue
 			}
 			path, _ := imp["path"].(string)
+			if !osvImportPathWithinModule(aff.Package.Name, path) {
+				slog.Debug("scheduler: OSV import path escapes its affected module, symbols dropped (M43 Phase D R2 finding 4)",
+					"osv_id", vuln.ID, "module", aff.Package.Name, "path", path)
+				continue
+			}
 			pkgIdent, ok := osvGoPackageIdent(path)
 			if !ok {
-				// e.g. gopkg.in/yaml.v2 ("yaml.v2" is not an identifier) or
-				// hyphenated last segments: the default source-level package
-				// ident is unknowable from the path alone, and a wrong guess
-				// would ship selectors the AST walk can never match — skip
-				// conservatively (import-level reachability still covers the
-				// module via VulnerableModules).
+				// e.g. hyphenated last segments ("github.com/foo/go-bar"):
+				// the default source-level package ident is unknowable from
+				// the path alone, and a wrong guess would ship selectors the
+				// AST walk can never match — skip conservatively
+				// (import-level reachability still covers the module via
+				// VulnerableModules). gopkg.in-style "<ident>.v<N>" segments
+				// ARE resolvable and no longer land here (finding 3).
 				slog.Debug("scheduler: OSV import path has no identifier-shaped package segment, symbols skipped (M43 F467)",
 					"osv_id", vuln.ID, "path", path)
 				continue
@@ -1798,12 +1931,41 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 				if _, dup := seen[sel]; dup {
 					continue
 				}
+				if len(out) >= osvVulnFuncsMaxSymbolsPerCVE {
+					slog.Warn("scheduler: OSV record exceeds per-CVE symbol cap, truncating (M43 Phase D R2 finding 2)",
+						"osv_id", vuln.ID, "cap", osvVulnFuncsMaxSymbolsPerCVE)
+					return out
+				}
 				seen[sel] = struct{}{}
 				out = append(out, sel)
 			}
 		}
 	}
 	return out
+}
+
+// osvImportPathWithinModule reports whether an OSV imports[].path plausibly
+// belongs to the affected module it is declared under (M43 Phase D R2
+// finding 4): the path must equal the module name or be a "/"-delimited
+// subpath of it. Go vulndb's synthetic "stdlib" / "toolchain" modules are the
+// exception — their imports[].path values are bare standard-library package
+// paths ("html/template") never prefixed by the module name, so for those the
+// check instead requires a non-domain-shaped first segment (no "."), which
+// still rejects smuggled external module paths.
+func osvImportPathWithinModule(module, path string) bool {
+	module = strings.TrimSpace(module)
+	path = strings.TrimSpace(path)
+	if module == "" || path == "" {
+		return false
+	}
+	if module == "stdlib" || module == "toolchain" {
+		first := path
+		if i := strings.IndexByte(path, '/'); i >= 0 {
+			first = path[:i]
+		}
+		return !strings.Contains(first, ".")
+	}
+	return path == module || strings.HasPrefix(path, module+"/")
 }
 
 // osvGoPackageIdent derives the source-level package identifier the AST
@@ -1819,9 +1981,13 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 //     previous segment ("github.com/labstack/echo/v4" → "echo") — Go
 //     modules forbid /v0 and /v1 suffixes, so "v1" endings are kept
 //     verbatim (k8s.io/api/core/v1 really is package v1);
-//   - a non-identifier result (gopkg.in/yaml.v2 → "yaml.v2",
-//     "github.com/foo/go-bar" → "go-bar") returns ok=false: the caller
-//     skips those imports conservatively.
+//   - a gopkg.in-style versioned segment "<ident>.v<N>" resolves to
+//     "<ident>" ("gopkg.in/yaml.v2" → "yaml"): by gopkg.in convention the
+//     dot-version suffix names the module version, and the source package
+//     declares the bare ident (M43 Phase D R2 finding 3 — previously the
+//     whole gopkg.in/yaml.vN family was dropped, starving those selectors);
+//   - any other non-identifier result ("github.com/foo/go-bar" → "go-bar")
+//     returns ok=false: the caller skips those imports conservatively.
 func osvGoPackageIdent(path string) (string, bool) {
 	p := strings.TrimSuffix(strings.TrimSpace(path), "/")
 	if p == "" {
@@ -1833,9 +1999,37 @@ func osvGoPackageIdent(path string) (string, bool) {
 		last = segs[len(segs)-2]
 	}
 	if !isGoIdentifierShaped(last) {
+		if ident, ok := gopkgInVersionedIdent(last); ok {
+			return ident, true
+		}
 		return "", false
 	}
 	return last, true
+}
+
+// gopkgInVersionedIdent resolves a gopkg.in-style versioned path segment
+// "<ident>.v<N>" (N = one or more digits) to "<ident>" (M43 Phase D R2
+// finding 3). Anything else — non-identifier prefix, missing halves, a
+// version tail that is not "v"+digits — returns ok=false so the caller keeps
+// its conservative skip.
+func gopkgInVersionedIdent(seg string) (string, bool) {
+	i := strings.LastIndexByte(seg, '.')
+	if i <= 0 || i == len(seg)-1 {
+		return "", false
+	}
+	ident, ver := seg[:i], seg[i+1:]
+	if !isGoIdentifierShaped(ident) {
+		return "", false
+	}
+	if len(ver) < 2 || ver[0] != 'v' {
+		return "", false
+	}
+	for j := 1; j < len(ver); j++ {
+		if ver[j] < '0' || ver[j] > '9' {
+			return "", false
+		}
+	}
+	return ident, true
 }
 
 // isGoModuleMajorVersionSegment reports whether s is a module major-version
@@ -1859,7 +2053,9 @@ func isGoModuleMajorVersionSegment(s string) bool {
 // validates it against the SAME frozen spec as handler.normalizeVulnFuncs
 // (trim → strip one trailing "()" → dot-split → exactly 2..3 parts → every
 // part Go-identifier-shaped). Anything that would be dropped at the serving
-// edge is rejected here so no dead weight lands in vuln_funcs.
+// edge is rejected here so no dead weight lands in vuln_funcs. Selectors over
+// osvVulnFuncsMaxSelectorBytes are additionally rejected (M43 Phase D R2
+// finding 2) — a size bound the edge does not enforce but storage should.
 func osvWireSafeSelector(pkgIdent, symbol string) (string, bool) {
 	s := strings.TrimSpace(symbol)
 	s = strings.TrimSuffix(s, "()")
@@ -1867,6 +2063,9 @@ func osvWireSafeSelector(pkgIdent, symbol string) (string, bool) {
 		return "", false
 	}
 	sel := pkgIdent + "." + s
+	if len(sel) > osvVulnFuncsMaxSelectorBytes {
+		return "", false
+	}
 	parts := strings.Split(sel, ".")
 	if len(parts) < 2 || len(parts) > 3 {
 		return "", false
@@ -1901,16 +2100,27 @@ func isGoIdentifierShaped(s string) bool {
 }
 
 // osvExcerptText picks the grounding text persisted as raw_excerpt: the OSV
-// summary, falling back to details. May be empty (raw_excerpt is nullable;
-// the structured symbols are the value of an 'osv' row).
+// summary, falling back to details, capped at osvExcerptMaxRunes (M43 Phase D
+// R2 finding 2). May be empty (raw_excerpt is nullable; the structured
+// symbols are the value of an 'osv' row).
 func osvExcerptText(vuln *client.OSVVulnerability) string {
 	if vuln == nil {
 		return ""
 	}
-	if s := strings.TrimSpace(vuln.Summary); s != "" {
+	text := strings.TrimSpace(vuln.Summary)
+	if text == "" {
+		text = strings.TrimSpace(vuln.Details)
+	}
+	return truncateRunes(text, osvExcerptMaxRunes)
+}
+
+// truncateRunes returns s truncated to at most n runes, never cutting inside
+// a UTF-8 sequence.
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return strings.TrimSpace(vuln.Details)
+	return string([]rune(s)[:n])
 }
 
 // firstGoVulndbAlias returns the first "GO-" (Go vulndb) id in aliases, or

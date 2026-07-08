@@ -69,6 +69,35 @@ func TestOSVClient_GetVulnerability_HTTPMock(t *testing.T) {
 	}
 }
 
+// TestOSVClient_GetVulnerability_OversizedBodyError pins the M43 Phase D R2
+// finding 2 response-size bound: a body larger than 5MB
+// (maxOSVResponseBytes) is rejected as a decode error instead of being
+// buffered/parsed without limit — a hostile or misconfigured OSV endpoint
+// cannot balloon scheduler memory.
+func TestOSVClient_GetVulnerability_OversizedBodyError(t *testing.T) {
+	// Valid JSON whose total size is just over 5MB: the limit must trip on
+	// SIZE, not on JSON validity.
+	huge := `{"id":"CVE-2025-1","summary":"` + strings.Repeat("a", 5<<20) + `"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(huge))
+	}))
+	defer server.Close()
+
+	c := NewOSVClient().WithBaseURL(server.URL)
+	vuln, err := c.GetVulnerability(context.Background(), "CVE-2025-1")
+	if err == nil {
+		id := "<nil>"
+		if vuln != nil {
+			id = vuln.ID
+		}
+		t.Fatalf("expected an error for a >5MB body, got vuln id=%q", id)
+	}
+	if vuln != nil {
+		t.Errorf("expected nil vuln on oversized body, got id=%q", vuln.ID)
+	}
+}
+
 // TestOSVClient_Offline_NoHTTP asserts offline mode short-circuits
 // GetVulnerability to nil with no network hit (M40 Wave B).
 func TestOSVClient_Offline_NoHTTP(t *testing.T) {
