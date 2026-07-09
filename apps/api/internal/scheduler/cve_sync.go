@@ -2553,6 +2553,17 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) ([]string, []osvScoped
 	scopedIdx := make(map[string]int)       // module → index into scoped
 	seenScoped := make(map[string]struct{}) // module + "\x00" + selector
 	scopedTotal := 0
+	scopedDropped := 0
+	// The scoped-cap branch below can drop attributions on BOTH exit paths
+	// (the flat-cap truncating return and the normal return), so the Warn
+	// fires from a defer — once per record, with the total dropped count
+	// (M43 Phase D R9; parity with the flat cap Warn).
+	defer func() {
+		if scopedDropped > 0 {
+			slog.Warn("scheduler: OSV cross-module duplicates exceed per-CVE scoped symbol cap, scoped attributions dropped (M43 Phase D R9)",
+				"osv_id", vuln.ID, "cap", osvVulnFuncsMaxSymbolsPerCVE, "dropped", scopedDropped)
+		}
+	}()
 	addScoped := func(module, sel string) {
 		key := module + "\x00" + sel
 		if _, dup := seenScoped[key]; dup {
@@ -2562,7 +2573,11 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) ([]string, []osvScoped
 			// Only reachable via cross-module duplicates (the flat cap
 			// return below ends both accumulations otherwise); bounded so
 			// a hostile record cannot balloon the scoped column past the
-			// flat column's own cap.
+			// flat column's own cap. The selector still ships in the flat
+			// union, but THIS module's scoped entry loses it — its
+			// scoped-routed target rows would miss it silently — so count
+			// the drop for the deferred Warn above.
+			scopedDropped++
 			return
 		}
 		seenScoped[key] = struct{}{}

@@ -611,25 +611,29 @@ const maxVulnFuncsPerCVE = 200
 // purl against the local go.mod to pick the module it analyses, so a
 // divergence here would scope symbols to a module the CLI resolves
 // differently — silently emptying the per-target symbol walk. Both sides:
-// strip the "pkg:golang/" (or scheme-less "golang/") prefix, cut at the
-// first of '@' (version), '?' (qualifiers), '#' (subpath), then
-// percent-decode the remaining path.
+// strip the exact-case "pkg:" scheme if present, match the purl type
+// segment "golang" case-insensitively (scheme-less "golang/" producers
+// stay tolerated), cut at the first of '@' (version), '?' (qualifiers),
+// '#' (subpath), then percent-decode the remaining path.
 func goModuleFromPurl(purl string) (string, bool) {
 	s := strings.TrimSpace(purl)
 	if s == "" {
 		return "", false
 	}
-	const prefix = "pkg:golang/"
-	// Some producers omit the pkg: scheme; tolerate a bare "golang/" too
-	// (mirrors the CLI).
-	switch {
-	case strings.HasPrefix(s, prefix):
-		s = strings.TrimPrefix(s, prefix)
-	case strings.HasPrefix(s, "golang/"):
-		s = strings.TrimPrefix(s, "golang/")
-	default:
+	// The purl type is case-insensitive per the purl spec, and
+	// repository.EcosystemFromPurl lowercases it before matching — so a
+	// pkg:GOLANG/... component row IS served on the ecosystem="go" path
+	// and must derive a module here too, or its scoped symbols silently
+	// degrade to import_only (M43 Phase D R9 finding 1). The "pkg:"
+	// scheme stays exact-case (same premise as EcosystemFromPurl), and
+	// the module path itself keeps its case — Go module paths are
+	// case-sensitive.
+	rest := strings.TrimPrefix(s, "pkg:")
+	i := strings.IndexByte(rest, '/')
+	if i < 0 || !strings.EqualFold(rest[:i], "golang") {
 		return "", false
 	}
+	s = rest[i+1:]
 	// Strip version (@), qualifiers (?) and subpath (#) — the module path
 	// is everything before the first of these.
 	if i := strings.IndexAny(s, "@?#"); i >= 0 {

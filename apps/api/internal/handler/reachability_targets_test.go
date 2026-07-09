@@ -686,6 +686,18 @@ func TestGoModuleFromPurl(t *testing.T) {
 		{"pkg:golang/github.com%2Fa%2Fb@v1.0.0", "github.com/a/b", true},
 		// Surrounding whitespace tolerated.
 		{"  pkg:golang/github.com/a/b@v1  ", "github.com/a/b", true},
+		// The purl type is case-insensitive (purl spec; parity with
+		// repository.EcosystemFromPurl, which lowercases the type before
+		// matching — a pkg:GOLANG row IS served on the ecosystem="go"
+		// path, so it must derive a module here too; M43 Phase D R9
+		// finding 1). The module path itself keeps its case.
+		{"pkg:GOLANG/github.com/foo/bar@v1", "github.com/foo/bar", true},
+		{"Golang/x", "x", true},
+		{"pkg:golang/github.com/Foo/Bar", "github.com/Foo/Bar", true},
+		// The "pkg:" scheme itself stays exact-case — EcosystemFromPurl
+		// rejects "PKG:" the same way, so such a row never reaches the
+		// scoped-serving path in the first place.
+		{"PKG:golang/github.com/a/b", "", false},
 		// Not derivable: non-golang / malformed / empty — the caller
 		// serves the unscoped union only.
 		{"pkg:npm/lodash@4.17.21", "", false},

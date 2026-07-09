@@ -668,6 +668,51 @@ func TestExtractOSVGoVulnFuncs_SymbolCap(t *testing.T) {
 	}
 }
 
+// TestExtractOSVGoVulnFuncs_ScopedCapDropWarns pins the M43 Phase D R9
+// fix (round 9 Low finding): when cross-module duplicate attributions push
+// the scoped total past osvVulnFuncsMaxSymbolsPerCVE, the drop must not be
+// silent. The dropped selector still ships in the flat union, but the
+// second module's scoped entry never receives it — target rows routed
+// through the scoped column silently lose the selector — so a Warn with
+// the osv_id and dropped count fires (parity with the flat cap Warn).
+func TestExtractOSVGoVulnFuncs_ScopedCapDropWarns(t *testing.T) {
+	logs := captureSlog(t)
+	symbols := make([]string, 0, osvVulnFuncsMaxSymbolsPerCVE)
+	for i := 0; i < osvVulnFuncsMaxSymbolsPerCVE; i++ {
+		symbols = append(symbols, fmt.Sprintf("Sym%03d", i))
+	}
+	b, err := json.Marshal(symbols)
+	if err != nil {
+		t.Fatalf("marshal symbols: %v", err)
+	}
+	// Module 1 fills BOTH the flat union and the scoped total to exactly
+	// the cap; module 2 (same fork family, same package ident "mod")
+	// re-declares two of the same selectors — flat-union dups, so only
+	// the scoped-cap branch sees them, and both are dropped there.
+	flat, scoped := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
+		"id": "GO-2025-9991",
+		"affected": [
+			{"package": {"name": "github.com/x/mod", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/x/mod", "symbols": `+string(b)+`}]}},
+			{"package": {"name": "github.com/x/mod/v3", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/x/mod/v3", "symbols": ["Sym000", "Sym001"]}]}}
+		]
+	}`))
+	if len(flat) != osvVulnFuncsMaxSymbolsPerCVE {
+		t.Fatalf("flat = %d selectors, want %d (module 1 fills the cap)", len(flat), osvVulnFuncsMaxSymbolsPerCVE)
+	}
+	if len(scoped) != 1 || scoped[0].Module != "github.com/x/mod" || len(scoped[0].VulnFuncs) != osvVulnFuncsMaxSymbolsPerCVE {
+		t.Fatalf("scoped = %+v, want only github.com/x/mod with %d funcs (v3 attributions dropped at cap)", scoped, osvVulnFuncsMaxSymbolsPerCVE)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "scoped symbol cap") || !strings.Contains(out, "GO-2025-9991") {
+		t.Errorf("scoped-cap drop must Warn with the osv_id (parity with the flat cap Warn), got logs:\n%s", out)
+	}
+	if !strings.Contains(out, "dropped=2") {
+		t.Errorf("scoped-cap Warn must carry the dropped count (want dropped=2), got logs:\n%s", out)
+	}
+}
+
 // TestOSVWireSafeSelector_ByteLengthCap pins the M43 Phase D R2 finding 2
 // selector size bound: a selector longer than 256 bytes
 // (osvVulnFuncsMaxSelectorBytes) is dropped; exactly 256 bytes is kept.
