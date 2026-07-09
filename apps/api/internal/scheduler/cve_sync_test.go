@@ -339,6 +339,23 @@ func osvVulnFromJSON(t *testing.T, raw string) *client.OSVVulnerability {
 	return &v
 }
 
+// TestOSVCandidateQuery_CoversGoAndNpm pins the M44 Wave 2 (F470) candidate
+// prefilter: the OSV pass enumerates BOTH Go- and npm-ecosystem purls (the
+// ILIKEs are row-transfer prefilters only; repository.EcosystemFromPurl
+// remains the authoritative Go-side derivation), and keeps the explicit
+// tenant predicate (M43 Phase D R2 finding 5).
+func TestOSVCandidateQuery_CoversGoAndNpm(t *testing.T) {
+	for _, want := range []string{
+		`c.purl ILIKE 'pkg:golang%'`,
+		`c.purl ILIKE 'pkg:npm%'`,
+		`c.tenant_id = $1`,
+	} {
+		if !strings.Contains(osvCVECandidateQuery, want) {
+			t.Errorf("candidate query missing %q:\n%s", want, osvCVECandidateQuery)
+		}
+	}
+}
+
 const osvGoFixtureJSON = `{
 	"id": "GO-2025-1111",
 	"summary": "HTML template injection in libfoo",
@@ -757,9 +774,10 @@ func TestOSVExcerptText_RuneCap(t *testing.T) {
 // SET LOCAL + candidate SELECT (rows provided by the caller), then COMMIT.
 // The regex also pins the explicit components tenant predicate
 // (c.tenant_id = $1 — M43 Phase D R2 finding 5, belt+braces alongside the
-// RLS GUC): a query without it fails to match and the test errors.
+// RLS GUC) and BOTH ecosystem prefilters (pkg:golang + pkg:npm — M44 Wave 2
+// / F470): a query missing any of them fails to match and the test errors.
 func expectOSVCandidateQuery(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
-	mock.ExpectQuery(`SELECT DISTINCT v\.cve_id, COALESCE\(c\.purl, ''\)[\s\S]*c\.tenant_id = \$1`).
+	mock.ExpectQuery(`SELECT DISTINCT v\.cve_id, COALESCE\(c\.purl, ''\)[\s\S]*c\.tenant_id = \$1[\s\S]*pkg:golang%[\s\S]*pkg:npm%`).
 		WillReturnRows(rows)
 }
 
@@ -786,10 +804,12 @@ func newOSVSyncMockDB(t *testing.T) (*sqlmock.Sqlmock, *CVESyncJob, *fakeAdvisor
 }
 
 // TestCVESyncJob_SyncOSVVulnFuncs_EndToEnd drives the full pass for one
-// tenant: candidate enumeration (a Go purl row AND an npm purl row — the
-// latter must be filtered ecosystem-side WITHOUT ever reaching the OSV API),
-// one OSV fetch, selector conversion, and one source='osv' excerpt upsert
-// under the tenant GUC.
+// tenant: candidate enumeration (a Go purl row AND a pypi purl row — the
+// latter is outside the pass's Go/npm ecosystems and must be filtered
+// ecosystem-side WITHOUT ever reaching the OSV API; npm rows are IN scope
+// since M44 Wave 2 / F470 and have their own end-to-end test below), one OSV
+// fetch, selector conversion, and one source='osv' excerpt upsert under the
+// tenant GUC.
 func TestCVESyncJob_SyncOSVVulnFuncs_EndToEnd(t *testing.T) {
 	mockp, j, fake, setOSV := newOSVSyncMockDB(t)
 	mock := *mockp
@@ -799,7 +819,7 @@ func TestCVESyncJob_SyncOSVVulnFuncs_EndToEnd(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&requests, 1)
 		if !strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-1111") {
-			t.Errorf("unexpected OSV request path %q (npm-purl CVE must never be fetched)", r.URL.Path)
+			t.Errorf("unexpected OSV request path %q (pypi-purl CVE must never be fetched)", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(osvGoFixtureJSON))
@@ -812,7 +832,7 @@ func TestCVESyncJob_SyncOSVVulnFuncs_EndToEnd(t *testing.T) {
 	expectSetLocal(mock, tenantID)
 	expectOSVCandidateQuery(mock, osvCandidateRows(
 		[2]string{"CVE-2025-1111", "pkg:golang/github.com/foo/bar@v1.2.3"},
-		[2]string{"CVE-2025-9999", "pkg:npm/leftpad@1.0.0"}, // Go-side ecosystem filter drops this
+		[2]string{"CVE-2025-9999", "pkg:pypi/leftpad@1.0.0"}, // Go-side ecosystem filter drops this (not Go/npm)
 	))
 	mock.ExpectCommit()
 	// Pass B (write chunk).
@@ -1643,12 +1663,24 @@ func TestCVESyncJob_SyncOSVVulnFuncs_Offline_NoCalls(t *testing.T) {
 	// WithOffline short-circuit, M40 pattern). With tombstones (M43 Phase D
 	// R2 finding 1) this also pins that offline "no record" responses are
 	// NOT misread as definitive 404 negatives.
-	out, _ := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-1111"})
+	out, _ := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-1111"}, nil)
 	if hit {
 		t.Error("offline OSV client must not make any HTTP request")
 	}
 	if len(out) != 0 {
 		t.Errorf("offline fetch resolved %d CVEs, want 0", len(out))
+	}
+
+	// M44 F470: the offline fences are ecosystem-agnostic — an npm-needing
+	// CVE (which would otherwise spend a GHSA- follow-up) makes zero
+	// requests and reaches zero outcomes too.
+	out, _ = j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2019-10744"},
+		map[string]osvCVEEcosystems{"CVE-2019-10744": {needNpm: true}})
+	if hit {
+		t.Error("offline OSV client must not make any HTTP request for npm CVEs either (M44 F470)")
+	}
+	if len(out) != 0 {
+		t.Errorf("offline npm fetch resolved %d CVEs, want 0", len(out))
 	}
 }
 
@@ -1702,7 +1734,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_AliasDeterminations(t *testing.T) {
 	j.WithOSVBaseURL(server.URL)
 
 	out, _ := j.fetchOSVVulnFuncs(context.Background(),
-		[]string{"CVE-2025-1001", "CVE-2025-1002", "CVE-2025-1003"})
+		[]string{"CVE-2025-1001", "CVE-2025-1002", "CVE-2025-1003"}, nil)
 
 	if got := atomic.LoadInt32(&requests); got != 5 {
 		t.Errorf("OSV requests = %d, want 5 (2 + 2 + 1 capped)", got)
@@ -1749,7 +1781,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_CtxCancelledStopsLoop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	out, _ := j.fetchOSVVulnFuncs(ctx, []string{"CVE-2025-1111", "CVE-2025-4444"})
+	out, _ := j.fetchOSVVulnFuncs(ctx, []string{"CVE-2025-1111", "CVE-2025-4444"}, nil)
 
 	if got := atomic.LoadInt32(&requests); got != 0 {
 		t.Errorf("OSV requests = %d, want 0 (cancelled ctx must stop the loop up front)", got)
@@ -1786,7 +1818,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_PolitenessSleepCtxAware(t *testing.T) {
 	defer timer.Stop()
 
 	start := time.Now()
-	out, _ := j.fetchOSVVulnFuncs(ctx, []string{"CVE-2025-1111", "CVE-2025-4444"})
+	out, _ := j.fetchOSVVulnFuncs(ctx, []string{"CVE-2025-1111", "CVE-2025-4444"}, nil)
 	elapsed := time.Since(start)
 
 	if elapsed >= 3*time.Second {
@@ -1833,7 +1865,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_Mass404WritesTombstonesAndWarns(t *testing
 	for i := 0; i < 25; i++ {
 		ids = append(ids, fmt.Sprintf("CVE-2025-9%03d", i))
 	}
-	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, nil)
 
 	if !anomalous {
 		t.Error("anomalousTick = false on a 100% definitive-404 tick over the Warn threshold, want true (the write pass keys the R5 fetched_at backdate on it)")
@@ -1895,7 +1927,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_PartialMass404StillTombstones(t *testing.T
 		ids = append(ids, fmt.Sprintf("CVE-2025-9%03d", i))
 	}
 	ids = append(ids, "CVE-2025-1111")
-	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, nil)
 
 	if anomalous {
 		t.Error("anomalousTick = true on a tick that retrieved a record body, want false (normal ticks must keep the full freshness window)")
@@ -1952,7 +1984,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_Mass404WithTransientStillAnomalous(t *test
 	}
 	// The transient sits mid-tick, not at an edge.
 	ids = append(ids[:10], append([]string{"CVE-2025-8500"}, ids[10:]...)...)
-	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, nil)
 
 	if !anomalous {
 		t.Error("anomalousTick = false on 25×404 + 1×transient, want true (>= threshold 404s with ZERO records retrieved — a transient must not veto the anomaly)")
@@ -2001,7 +2033,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_Mass404BelowThresholdNotAnomalous(t *testi
 		ids = append(ids, fmt.Sprintf("CVE-2025-9%03d", i))
 	}
 	ids = append(ids, "CVE-2025-8500")
-	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, nil)
 
 	if anomalous {
 		t.Error("anomalousTick = true with only 19 definitive 404s, want false (the threshold counts 404s, not fetches)")
@@ -2196,7 +2228,7 @@ func TestCVESyncJob_SyncOSVVulnFuncs_OfflineClientOnlineJobDrift(t *testing.T) {
 	// Defence-in-depth: even a DIRECT fetch loop consults IsOffline — zero
 	// lookups, zero outcomes — so nothing downstream can tombstone off the
 	// client's (nil, nil) short-circuit regardless of the caller.
-	out, _ := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-1111"})
+	out, _ := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-1111"}, nil)
 	if hit {
 		t.Error("offline-drifted client must not make any HTTP request (direct fetch)")
 	}
@@ -2272,10 +2304,14 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 		"CVE-2025-0404": {}, // true 404 vs positive row
 		"CVE-2025-0405": {}, // true 404 vs existing tombstone
 		"CVE-2025-0406": {}, // true 404 vs no row
-		"CVE-2025-0407": { // positive vs positive row
-			symbols: []string{"x.New"},
-			scoped:  []osvScopedVulnFuncs{{Module: "github.com/fresh/mod", VulnFuncs: []string{"x.New"}}},
-			excerpt: "fresh",
+		"CVE-2025-0407": { // GO-VOUCHED positive vs positive row (M44 F470:
+			// goSymbols marks the structured-Go extraction that authorises
+			// the unconditional replace; an npm-prose-only positive would
+			// take the merge path instead — see the npm authority test)
+			symbols:   []string{"x.New"},
+			scoped:    []osvScopedVulnFuncs{{Module: "github.com/fresh/mod", VulnFuncs: []string{"x.New"}}},
+			excerpt:   "fresh",
+			goSymbols: true,
 		},
 		"CVE-2025-0408": {excerpt: "withdrawn upstream", goID: "GO-2025-0408"}, // authoritative empty vs positive row
 	}
@@ -2598,7 +2634,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_UnlinkedMainRecordRejected(t *testing.T) {
 	j.WithOSVBaseURL(server.URL)
 
 	out, anomalous := j.fetchOSVVulnFuncs(context.Background(),
-		[]string{"CVE-2025-7001", "CVE-2025-7002", "CVE-2025-7003", "CVE-2025-7004"})
+		[]string{"CVE-2025-7001", "CVE-2025-7002", "CVE-2025-7003", "CVE-2025-7004"}, nil)
 
 	if anomalous {
 		t.Error("anomalousTick = true on a tick that retrieved record bodies, want false (unlinked rejection is not the mass-404 anomaly)")
@@ -2825,7 +2861,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_AliasFollowUpLinkage(t *testing.T) {
 	j.WithOSVBaseURL(server.URL)
 
 	out, _ := j.fetchOSVVulnFuncs(context.Background(),
-		[]string{"CVE-2025-8001", "CVE-2025-8003", "CVE-2025-8004", "CVE-2025-8005"})
+		[]string{"CVE-2025-8001", "CVE-2025-8003", "CVE-2025-8004", "CVE-2025-8005"}, nil)
 
 	if got := atomic.LoadInt32(&requests); got != 8 {
 		t.Errorf("OSV requests = %d, want 8 (main + one alias follow-up each)", got)
@@ -3006,7 +3042,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_MassSkeletalWarns(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		ids = append(ids, fmt.Sprintf("CVE-2025-7%03d", i))
 	}
-	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, nil)
 
 	if anomalous {
 		t.Error("anomalousTick = true on a mass-skeletal tick, want false (Warn-only: a legitimate GHSA-home-only backlog is indistinguishable, so no backdate)")
@@ -3064,7 +3100,7 @@ func TestCVESyncJob_FetchOSVVulnFuncs_MassLinkedRecordsNoSkeletalWarn(t *testing
 	for i := 0; i < 25; i++ {
 		ids = append(ids, fmt.Sprintf("CVE-2025-7%03d", i))
 	}
-	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids)
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, nil)
 
 	if anomalous {
 		t.Error("anomalousTick = true on an all-positive tick, want false")
@@ -3254,5 +3290,780 @@ func TestCVESyncJob_Run_NVDFailureStillRunsOSVPass(t *testing.T) {
 	}
 	if fake.calls[0].CVEID != "CVE-2025-1111" || fake.calls[0].Source != osvVulnFuncsSource {
 		t.Errorf("row = (%q, %q), want (CVE-2025-1111, osv)", fake.calls[0].CVEID, fake.calls[0].Source)
+	}
+}
+
+// ============================================================================
+// M44 Wave 2 (F470): OSV pass extended to npm — GHSA- alias follow-up + npm
+// prose extraction → the same source='osv' rows, npm package names in the
+// vuln_funcs_scoped module slot, and NO clobber authority for prose.
+// Hermetic like the M43 suite above: httptest OSV, sqlmock wire, fake
+// excerpt store.
+// ============================================================================
+
+// osvNpmCVEHomeFixtureJSON is the shape OSV really returns for a CVE-id
+// lookup of an npm vulnerability (2026-07-10 recon): a CVE-namespace record
+// with plain prose (no backticks), no affected packages, and the GHSA home
+// only reachable through aliases.
+const osvNpmCVEHomeFixtureJSON = `{
+	"id": "CVE-2019-10744",
+	"summary": "lodash CVE-namespace prose without backticks",
+	"details": "Versions of lodash lower than 4.17.12 are vulnerable to Prototype Pollution.",
+	"aliases": ["GHSA-jf85-cpcp-j695"]
+}`
+
+// osvNpmGHSAFixtureJSON mirrors the real GHSA-jf85-cpcp-j695 (lodash
+// CVE-2019-10744) OSV record: markdown details with backticked tokens, npm
+// affected entries for the fork family, and a non-npm (RubyGems) entry that
+// must not receive a scoped attribution.
+const osvNpmGHSAFixtureJSON = `{
+	"id": "GHSA-jf85-cpcp-j695",
+	"summary": "Prototype Pollution in lodash",
+	"details": "Versions of ` + "`lodash`" + ` before 4.17.12 are vulnerable to Prototype Pollution. The function ` + "`defaultsDeep`" + ` allows a malicious user to modify the prototype of ` + "`Object`" + ` via a crafted payload.\n\n## Recommendation\n\nUpgrade to version 4.17.12 or later.",
+	"aliases": ["CVE-2019-10744"],
+	"affected": [
+		{"package": {"name": "lodash", "ecosystem": "npm"}},
+		{"package": {"name": "lodash-es", "ecosystem": "npm"}},
+		{"package": {"name": "lodash-rails", "ecosystem": "RubyGems"}}
+	]
+}`
+
+// npmWireNormalizeReplica restates the FROZEN M44 Wave 3 npm
+// wire-normalisation spec from handler.normalizeVulnFuncsNpm
+// (reachability.go): TrimSpace → strip one trailing "()" → dot-split → 1..3
+// non-empty JS-identifier-shaped parts ('$'/'_' legal) → ≤256 bytes →
+// first-seen-order dedupe. Re-implemented here (the handler helpers are
+// unexported in another package) so the scheduler's stored npm tokens are
+// pinned against the exact rules the serving edge applies — the same
+// load-bearing producer/consumer pin wave1NormalizeReplica provides for Go
+// selectors (a drift here silently empties the npm wire).
+func npmWireNormalizeReplica(raw []string) []string {
+	isJSIdent := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		for i, r := range s {
+			switch {
+			case r == '_' || r == '$' || unicode.IsLetter(r):
+			case i > 0 && unicode.IsDigit(r):
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	var out []string
+	seen := make(map[string]struct{}, len(raw))
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(s, "()")
+		if s == "" || len(s) > 256 {
+			continue
+		}
+		parts := strings.Split(s, ".")
+		if len(parts) < 1 || len(parts) > 3 {
+			continue
+		}
+		ok := true
+		for _, p := range parts {
+			if !isJSIdent(p) {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// assertNpmWireSafe asserts every produced npm token survives the M44 Wave 3
+// serving-edge normalisation UNCHANGED (same elements, same order).
+func assertNpmWireSafe(t *testing.T, funcs []string) {
+	t.Helper()
+	norm := npmWireNormalizeReplica(funcs)
+	if len(norm) != len(funcs) {
+		t.Fatalf("npm wire normalisation dropped elements: stored %v, survives %v", funcs, norm)
+	}
+	for i := range funcs {
+		if norm[i] != funcs[i] {
+			t.Errorf("npm wire normalisation changed element %d: stored %q, survives %q", i, funcs[i], norm[i])
+		}
+	}
+}
+
+// TestExtractOSVNpmVulnFuncs pins the npm extraction contract (M44 F470):
+// prose tokens filtered through the npm gates, attributed to EVERY affected
+// npm package (first-seen order, non-npm ecosystems excluded, "@scope/name"
+// verbatim), and DROPPED WHOLESALE — flat included — when the record lists
+// no npm affected entry (scope unknown must never pollute the CVE-wide
+// union; M43 anti-pattern 72).
+func TestExtractOSVNpmVulnFuncs(t *testing.T) {
+	flat, scoped := extractOSVNpmVulnFuncs(osvVulnFromJSON(t, osvNpmGHSAFixtureJSON))
+	if len(flat) != 1 || flat[0] != "defaultsDeep" {
+		t.Fatalf("flat = %v, want [\"defaultsDeep\"] (function-adjacent token only; the backticked package name and `Object` must not leak)", flat)
+	}
+	assertNpmWireSafe(t, flat)
+	wantScoped := []osvScopedVulnFuncs{
+		{Module: "lodash", VulnFuncs: []string{"defaultsDeep"}},
+		{Module: "lodash-es", VulnFuncs: []string{"defaultsDeep"}},
+	}
+	if len(scoped) != len(wantScoped) {
+		t.Fatalf("scoped = %+v, want %+v (every npm package attributed, RubyGems excluded)", scoped, wantScoped)
+	}
+	for i := range wantScoped {
+		if scoped[i].Module != wantScoped[i].Module ||
+			len(scoped[i].VulnFuncs) != 1 || scoped[i].VulnFuncs[0] != "defaultsDeep" {
+			t.Errorf("scoped[%d] = %+v, want %+v", i, scoped[i], wantScoped[i])
+		}
+	}
+
+	// Scope unknown: prose token present but NO npm affected entry → both
+	// shapes empty, nothing stored.
+	noNpmAffected := osvVulnFromJSON(t, `{
+		"id": "CVE-2025-4242",
+		"details": "The function `+"`defaultsDeep`"+` is vulnerable to prototype pollution.",
+		"affected": [{"package": {"name": "lodash-rails", "ecosystem": "RubyGems"}}]
+	}`)
+	if f, s := extractOSVNpmVulnFuncs(noNpmAffected); len(f) != 0 || len(s) != 0 {
+		t.Errorf("scope-unknown record: got (%v, %v), want both empty (drop, never CVE-wide)", f, s)
+	}
+
+	// Scoped npm package names pass through verbatim, @scope/name included.
+	scopedPkg := osvVulnFromJSON(t, `{
+		"id": "GHSA-aaaa-bbbb-cccc",
+		"details": "The function `+"`run`"+` is vulnerable to command injection.",
+		"aliases": ["CVE-2025-4243"],
+		"affected": [{"package": {"name": "@scope/pkg", "ecosystem": "npm"}}]
+	}`)
+	f, s := extractOSVNpmVulnFuncs(scopedPkg)
+	if len(f) != 1 || f[0] != "run" || len(s) != 1 || s[0].Module != "@scope/pkg" {
+		t.Errorf("scoped-package record: got (%v, %+v), want ([run], [{@scope/pkg [run]}])", f, s)
+	}
+
+	if f, s := extractOSVNpmVulnFuncs(nil); f != nil || s != nil {
+		t.Errorf("nil record: got (%v, %v), want (nil, nil)", f, s)
+	}
+}
+
+// TestExtractOSVNpmVulnFuncs_ScopedCap pins the npm scoped attribution
+// bound: the per-package fan-out (every npm package receives the token
+// list) is capped at osvVulnFuncsMaxSymbolsPerCVE TOTAL attributions, with
+// one Warn carrying the dropped count — parity with the R9 Go scoped-cap
+// Warn.
+func TestExtractOSVNpmVulnFuncs_ScopedCap(t *testing.T) {
+	logs := captureSlog(t)
+	var b strings.Builder
+	for i := 0; i < 90; i++ {
+		fmt.Fprintf(&b, "The function `fn%03d` is vulnerable. ", i)
+	}
+	vuln := &client.OSVVulnerability{
+		ID:      "GHSA-cap-cap-cap1",
+		Details: b.String(),
+		Affected: []client.OSVAffected{
+			{Package: client.OSVPackage{Name: "p1", Ecosystem: "npm"}},
+			{Package: client.OSVPackage{Name: "p2", Ecosystem: "npm"}},
+			{Package: client.OSVPackage{Name: "p3", Ecosystem: "npm"}},
+		},
+	}
+	flat, scoped := extractOSVNpmVulnFuncs(vuln)
+	if len(flat) != 90 {
+		t.Fatalf("flat = %d tokens, want 90", len(flat))
+	}
+	if len(scoped) != 3 {
+		t.Fatalf("scoped = %d entries, want 3 (p3 keeps a truncated entry)", len(scoped))
+	}
+	if len(scoped[0].VulnFuncs) != 90 || len(scoped[1].VulnFuncs) != 90 || len(scoped[2].VulnFuncs) != 20 {
+		t.Errorf("scoped sizes = (%d, %d, %d), want (90, 90, 20) — total capped at %d",
+			len(scoped[0].VulnFuncs), len(scoped[1].VulnFuncs), len(scoped[2].VulnFuncs), osvVulnFuncsMaxSymbolsPerCVE)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "scoped symbol cap") || !strings.Contains(got, "GHSA-cap-cap-cap1") || !strings.Contains(got, "dropped=70") {
+		t.Errorf("scoped-cap drop must Warn with osv_id and dropped count, got logs:\n%s", got)
+	}
+}
+
+// TestNpmWireSafeSymbol pins the npm store-time shape gate (M44 F470): 1..3
+// JS-identifier dot-parts ('$' allowed, bare names LEGAL — the npm-dominant
+// form, unlike Go's 2..3-part selectors), one trailing call-parens group
+// stripped, byte cap enforced. Deliberately shape-only: semantic noise
+// (`headers.location`) is the prose extractor's job to gate, and what
+// reaches this function must only be checked for wire legality.
+func TestNpmWireSafeSymbol(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"defaultsDeep", "defaultsDeep", true},
+		{"a.b.c", "a.b.c", true},
+		{"$.extend", "$.extend", true},
+		{"_.merge", "_.merge", true},
+		{"escape()", "escape", true},
+		{"pad(1, 2)", "pad", true},
+		{" spaced ", "spaced", true},
+		{"headers.location", "headers.location", true}, // shape-legal; precision is the extractor's gate
+		{"a.b.c.d", "", false},
+		{"", "", false},
+		{"1abc", "", false},
+		{"with space", "", false},
+		{"a-b", "", false},
+		{"a/b", "", false},
+		{"a..b", "", false},
+		{strings.Repeat("A", 257), "", false},
+		{strings.Repeat("A", 256), strings.Repeat("A", 256), true},
+	}
+	for _, c := range cases {
+		got, ok := npmWireSafeSymbol(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("npmWireSafeSymbol(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// TestCVESyncJob_SyncOSVVulnFuncs_NpmEndToEnd drives the full pass for one
+// npm CVE: candidate enumeration keeps the npm purl (M44 F470 — the M43
+// Go-only filter dropped it), the main lookup returns the CVE-namespace
+// record (plain prose, no tokens), ONE GHSA- alias follow-up retrieves the
+// markdown home, and the upsert stores the extracted token flat + scoped to
+// the affected npm packages with the GHSA summary as grounding.
+func TestCVESyncJob_SyncOSVVulnFuncs_NpmEndToEnd(t *testing.T) {
+	mockp, j, fake, setOSV := newOSVSyncMockDB(t)
+	mock := *mockp
+	tenantID := uuid.New()
+
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2019-10744"):
+			_, _ = w.Write([]byte(osvNpmCVEHomeFixtureJSON))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-jf85-cpcp-j695"):
+			_, _ = w.Write([]byte(osvNpmGHSAFixtureJSON))
+		default:
+			t.Errorf("unexpected OSV request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setOSV(server.URL)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	expectOSVCandidateQuery(mock, osvCandidateRows(
+		[2]string{"CVE-2019-10744", "pkg:npm/lodash@4.17.11"},
+	))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	j.syncOSVVulnFuncs(context.Background(), []uuid.UUID{tenantID})
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Errorf("OSV requests = %d, want exactly 2 (main + one GHSA- alias follow-up)", got)
+	}
+	if fake.callCount() != 1 {
+		t.Fatalf("Upsert calls = %d, want 1", fake.callCount())
+	}
+	call := fake.calls[0]
+	if call.TenantID != tenantID || call.CVEID != "CVE-2019-10744" || call.Source != osvVulnFuncsSource {
+		t.Errorf("row keyed (%v, %q, %q), want (%v, CVE-2019-10744, osv)", call.TenantID, call.CVEID, call.Source, tenantID)
+	}
+	var funcs []string
+	if err := json.Unmarshal(call.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "defaultsDeep" {
+		t.Errorf("VulnFuncs = %s (err %v), want [\"defaultsDeep\"]", call.VulnFuncs, err)
+	}
+	assertNpmWireSafe(t, funcs)
+	var scopedRows []osvScopedVulnFuncs
+	if err := json.Unmarshal(call.VulnFuncsScoped, &scopedRows); err != nil {
+		t.Fatalf("VulnFuncsScoped not the scoped JSON shape: %v (%s)", err, call.VulnFuncsScoped)
+	}
+	wantScoped := []osvScopedVulnFuncs{
+		{Module: "lodash", VulnFuncs: []string{"defaultsDeep"}},
+		{Module: "lodash-es", VulnFuncs: []string{"defaultsDeep"}},
+	}
+	if len(scopedRows) != len(wantScoped) {
+		t.Fatalf("VulnFuncsScoped = %+v, want %+v", scopedRows, wantScoped)
+	}
+	for i := range wantScoped {
+		if scopedRows[i].Module != wantScoped[i].Module ||
+			len(scopedRows[i].VulnFuncs) != 1 || scopedRows[i].VulnFuncs[0] != "defaultsDeep" {
+			t.Errorf("VulnFuncsScoped[%d] = %+v, want %+v", i, scopedRows[i], wantScoped[i])
+		}
+	}
+	if call.RawExcerpt != "Prototype Pollution in lodash" {
+		t.Errorf("RawExcerpt = %q, want the token-bearing GHSA record's summary", call.RawExcerpt)
+	}
+	if call.FetchedAt == nil {
+		t.Error("FetchedAt nil, want stamped")
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_BothEcosystemsThreeRequestBound pins the
+// M44 F470 per-CVE fetch bound: a CVE listed by BOTH ecosystems spends
+// exactly main + GO- follow-up + GHSA- follow-up = 3 requests, and the one
+// outcome carries both sides — Go selectors + npm tokens in the flat union,
+// both scoped attributions, the GO- clobber authority, and the Go-side
+// excerpt (structured source outranks prose).
+func TestCVESyncJob_FetchOSVVulnFuncs_BothEcosystemsThreeRequestBound(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8101"):
+			_, _ = w.Write([]byte(`{
+				"id": "CVE-2025-8101",
+				"summary": "cve home prose",
+				"aliases": ["GO-2025-8101", "GHSA-8101-aaaa-bbbb"]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8101"):
+			_, _ = w.Write([]byte(`{
+				"id": "GO-2025-8101",
+				"summary": "go vulndb summary",
+				"aliases": ["CVE-2025-8101"],
+				"affected": [
+					{"package": {"name": "github.com/x/y", "ecosystem": "Go"},
+					 "ecosystem_specific": {"imports": [{"path": "github.com/x/y", "symbols": ["Handle"]}]}}
+				]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-8101-aaaa-bbbb"):
+			_, _ = w.Write([]byte(`{
+				"id": "GHSA-8101-aaaa-bbbb",
+				"summary": "ghsa summary",
+				"details": "The function ` + "`pad`" + ` is vulnerable to a prototype pollution attack.",
+				"aliases": ["CVE-2025-8101"],
+				"affected": [{"package": {"name": "leftpad", "ecosystem": "npm"}}]
+			}`))
+		default:
+			t.Errorf("unexpected OSV request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	out, _ := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-8101"},
+		map[string]osvCVEEcosystems{"CVE-2025-8101": {needGo: true, needNpm: true}})
+
+	if got := atomic.LoadInt32(&requests); got != 3 {
+		t.Errorf("OSV requests = %d, want exactly 3 (main + GO- + GHSA-; the per-CVE bound)", got)
+	}
+	o, ok := out["CVE-2025-8101"]
+	if !ok {
+		t.Fatal("both-ecosystem CVE missing from outcomes")
+	}
+	wantFlat := []string{"y.Handle", "pad"}
+	if len(o.symbols) != len(wantFlat) || o.symbols[0] != wantFlat[0] || o.symbols[1] != wantFlat[1] {
+		t.Errorf("symbols = %v, want %v (Go selectors first, then npm tokens)", o.symbols, wantFlat)
+	}
+	if len(o.scoped) != 2 ||
+		o.scoped[0].Module != "github.com/x/y" || len(o.scoped[0].VulnFuncs) != 1 || o.scoped[0].VulnFuncs[0] != "y.Handle" ||
+		o.scoped[1].Module != "leftpad" || len(o.scoped[1].VulnFuncs) != 1 || o.scoped[1].VulnFuncs[0] != "pad" {
+		t.Errorf("scoped = %+v, want [{github.com/x/y [y.Handle]} {leftpad [pad]}]", o.scoped)
+	}
+	if o.goID != "GO-2025-8101" || !o.goSymbols || !o.goVouched() {
+		t.Errorf("(goID, goSymbols) = (%q, %v), want (GO-2025-8101, true) — the Go side must keep its authority", o.goID, o.goSymbols)
+	}
+	if o.excerpt != "go vulndb summary" {
+		t.Errorf("excerpt = %q, want the Go-symbol-bearing record's summary (outranks the GHSA excerpt)", o.excerpt)
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_GHSAFollowUpCapBlocked pins the
+// undetermined shape on the npm follow-up (M44 F470, mirroring the M43 GO-
+// cap rule): when the fetch cap blocks the GHSA- follow-up of a
+// both-ecosystem CVE, NO outcome is written — even though the Go side
+// already resolved positively — because a fresh row missing the npm side
+// would negative-cache the npm tokens for a full freshness window.
+func TestCVESyncJob_FetchOSVVulnFuncs_GHSAFollowUpCapBlocked(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	prevCap := osvVulnFuncsFetchCap
+	osvVulnFuncsFetchCap = 2
+	t.Cleanup(func() { osvVulnFuncsFetchCap = prevCap })
+
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8102"):
+			_, _ = w.Write([]byte(`{
+				"id": "CVE-2025-8102",
+				"summary": "cve home prose",
+				"aliases": ["GO-2025-8102", "GHSA-8102-aaaa-bbbb"]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8102"):
+			_, _ = w.Write([]byte(`{
+				"id": "GO-2025-8102",
+				"summary": "go vulndb summary",
+				"aliases": ["CVE-2025-8102"],
+				"affected": [
+					{"package": {"name": "github.com/x/y", "ecosystem": "Go"},
+					 "ecosystem_specific": {"imports": [{"path": "github.com/x/y", "symbols": ["Handle"]}]}}
+				]
+			}`))
+		default:
+			t.Errorf("the capped GHSA- follow-up must never be fetched, got %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	out, _ := j.fetchOSVVulnFuncs(context.Background(), []string{"CVE-2025-8102"},
+		map[string]osvCVEEcosystems{"CVE-2025-8102": {needGo: true, needNpm: true}})
+
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Errorf("OSV requests = %d, want 2 (main + GO-; cap blocks the GHSA-)", got)
+	}
+	if len(out) != 0 {
+		t.Errorf("outcomes = %v, want none (determination incomplete — the CVE retries next tick)", out)
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_GHSAAliasDeterminations pins the npm
+// follow-up decision table (M44 F470, the GHSA mirror of the M43 GO- alias
+// determinations):
+//   - linked GHSA body, no extractable tokens → PRESERVE-side tombstone
+//     (prose silence is not a withdrawal — no authority token exists)
+//   - GHSA alias 404 → definitive → PRESERVE-side tombstone
+//   - UNLINKED GHSA body (foreign id, aliases without the CVE) → rejected
+//     wholesale with the R7 Warn; tokens/excerpt unused; PRESERVE-side
+//     tombstone with the MAIN record's excerpt kept
+//   - GHSA alias transient 500 → NOT definitive → no outcome
+func TestCVESyncJob_FetchOSVVulnFuncs_GHSAAliasDeterminations(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	cveHome := func(cve, ghsaAlias string) string {
+		return `{
+			"id": "` + cve + `",
+			"summary": "main prose for ` + cve + `",
+			"aliases": ["` + ghsaAlias + `"]
+		}`
+	}
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8201"):
+			_, _ = w.Write([]byte(cveHome("CVE-2025-8201", "GHSA-8201-aaaa-bbbb")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-8201-aaaa-bbbb"):
+			// Linked (id == requested) but token-less: a routine npm
+			// determination.
+			_, _ = w.Write([]byte(`{
+				"id": "GHSA-8201-aaaa-bbbb",
+				"summary": "ghsa home without backticks",
+				"aliases": ["CVE-2025-8201"],
+				"affected": [{"package": {"name": "leftpad", "ecosystem": "npm"}}]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8202"):
+			_, _ = w.Write([]byte(cveHome("CVE-2025-8202", "GHSA-8202-aaaa-bbbb")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-8202-aaaa-bbbb"):
+			w.WriteHeader(http.StatusNotFound) // definitive alias 404
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8203"):
+			_, _ = w.Write([]byte(cveHome("CVE-2025-8203", "GHSA-8203-aaaa-bbbb")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-8203-aaaa-bbbb"):
+			// UNLINKED: foreign id, aliases name a different CVE — canned
+			// junk that must be rejected wholesale (tokens unused).
+			_, _ = w.Write([]byte(`{
+				"id": "GHSA-9999-zzzz-yyyy",
+				"summary": "junk",
+				"details": "The function ` + "`evil`" + ` is vulnerable to everything.",
+				"aliases": ["CVE-2020-0001"],
+				"affected": [{"package": {"name": "evilpkg", "ecosystem": "npm"}}]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8204"):
+			_, _ = w.Write([]byte(cveHome("CVE-2025-8204", "GHSA-8204-aaaa-bbbb")))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-8204-aaaa-bbbb"):
+			w.WriteHeader(http.StatusInternalServerError) // transient
+		default:
+			t.Errorf("unexpected OSV request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := []string{"CVE-2025-8201", "CVE-2025-8202", "CVE-2025-8203", "CVE-2025-8204"}
+	ecos := make(map[string]osvCVEEcosystems, len(ids))
+	for _, id := range ids {
+		ecos[id] = osvCVEEcosystems{needNpm: true}
+	}
+	out, _ := j.fetchOSVVulnFuncs(context.Background(), ids, ecos)
+
+	if got := atomic.LoadInt32(&requests); got != 8 {
+		t.Errorf("OSV requests = %d, want 8 (4 mains + 4 GHSA- follow-ups)", got)
+	}
+	for _, id := range []string{"CVE-2025-8201", "CVE-2025-8202", "CVE-2025-8203"} {
+		o, ok := out[id]
+		if !ok {
+			t.Errorf("%s missing from outcomes, want a preserve-side tombstone", id)
+			continue
+		}
+		if len(o.symbols) != 0 || o.goID != "" || o.goVouched() {
+			t.Errorf("%s outcome = %+v, want a preserve-side empty (no npm authority exists)", id, o)
+		}
+	}
+	if o := out["CVE-2025-8203"]; o.excerpt != "main prose for CVE-2025-8203" {
+		t.Errorf("unlinked-GHSA outcome excerpt = %q, want the accepted MAIN record's excerpt kept", o.excerpt)
+	}
+	if _, ok := out["CVE-2025-8204"]; ok {
+		t.Error("transient GHSA- follow-up must NOT produce an outcome (retry next tick)")
+	}
+	got := logs.String()
+	if !strings.Contains(got, osvUnlinkedRecordWarnMsg) ||
+		!strings.Contains(got, "got_id=GHSA-9999-zzzz-yyyy") ||
+		!strings.Contains(got, "requested_id=GHSA-8203-aaaa-bbbb") {
+		t.Errorf("unlinked GHSA body must Warn with got_id/requested_id, got logs:\n%s", got)
+	}
+	if strings.Contains(got, "evil") && strings.Contains(got, "symbols") {
+		t.Errorf("rejected body's tokens must never be extracted, got logs:\n%s", got)
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_NpmProseAuthority pins the M44 F470
+// authority rule at the write edge: npm prose extraction NEVER destroys
+// stored data.
+//   - npm-only POSITIVE vs existing POSITIVE row → MERGE: flat union
+//     (existing first), outcome's npm entries unioned into the stored
+//     scoped attribution per module, AffectedPaths etc. preserved, the
+//     outcome's excerpt adopted;
+//   - npm-only POSITIVE vs absent row → written as-is;
+//   - npm-only POSITIVE vs existing row with the SAME npm module → tokens
+//     union per module (add-only: prose has no retraction authority);
+//   - npm EMPTY vs existing POSITIVE row → preserved wholesale + ONE
+//     preserve Info (the M43 R4/R5 guard, unchanged);
+//   - npm-only POSITIVE vs FOREIGN-shaped stored bytes → preserved
+//     wholesale (never clobber what you do not understand);
+//
+// and no retraction Warn fires anywhere — prose cannot retract.
+func TestCVESyncJob_WriteOSVVulnFuncs_NpmProseAuthority(t *testing.T) {
+	logs := captureSlog(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-9001", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9001", Source: osvVulnFuncsSource,
+			VulnFuncs:       json.RawMessage(`["a.B"]`),
+			VulnFuncsScoped: json.RawMessage(`[{"module":"github.com/kept/mod","vuln_funcs":["a.B"]}]`),
+			AffectedPaths:   json.RawMessage(`["src/x.go"]`),
+			RawExcerpt:      "kept go excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9003", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9003", Source: osvVulnFuncsSource,
+			VulnFuncs:       json.RawMessage(`["defaultsDeep"]`),
+			VulnFuncsScoped: json.RawMessage(`[{"module":"lodash","vuln_funcs":["defaultsDeep"]}]`),
+			RawExcerpt:      "old ghsa excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9004", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9004", Source: osvVulnFuncsSource,
+			VulnFuncs:       json.RawMessage(`["keep.Me"]`),
+			VulnFuncsScoped: json.RawMessage(`[{"module":"github.com/keep/mod","vuln_funcs":["keep.Me"]}]`),
+			RawExcerpt:      "kept excerpt 9004", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9005", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9005", Source: osvVulnFuncsSource,
+			VulnFuncs:       json.RawMessage(`{"not":"an array"}`),
+			VulnFuncsScoped: json.RawMessage(`{"foreign":"shape"}`),
+			RawExcerpt:      "foreign excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	npmPositive := osvVulnFuncsOutcome{
+		symbols: []string{"defaultsDeep"},
+		scoped:  []osvScopedVulnFuncs{{Module: "lodash", VulnFuncs: []string{"defaultsDeep"}}},
+		excerpt: "ghsa excerpt",
+		// goID == "" and goSymbols == false: npm-prose-only, no authority.
+	}
+	outcomes := map[string]osvVulnFuncsOutcome{
+		"CVE-2025-9001": npmPositive, // merge into Go-positive row
+		"CVE-2025-9002": npmPositive, // no existing row → as-is
+		"CVE-2025-9003": { // same-module union, empty outcome excerpt
+			symbols: []string{"defaultsDeep", "merge"},
+			scoped:  []osvScopedVulnFuncs{{Module: "lodash", VulnFuncs: []string{"defaultsDeep", "merge"}}},
+		},
+		"CVE-2025-9004": {excerpt: "ghsa prose without tokens"}, // npm empty vs positive → preserve + Info
+		"CVE-2025-9005": npmPositive,                            // foreign-shaped row → preserve wholesale
+	}
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{
+			"CVE-2025-9001", "CVE-2025-9002", "CVE-2025-9003", "CVE-2025-9004", "CVE-2025-9005",
+		}}},
+		outcomes, false)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 5 || tenants != 1 {
+		t.Fatalf("(rows, tenants) = (%d, %d), want (5, 1)", rows, tenants)
+	}
+	byCVE := map[string]repository.AdvisoryExcerpt{}
+	for _, c := range store.calls {
+		byCVE[c.CVEID] = c
+	}
+
+	merged := byCVE["CVE-2025-9001"]
+	var funcs []string
+	if err := json.Unmarshal(merged.VulnFuncs, &funcs); err != nil ||
+		len(funcs) != 2 || funcs[0] != "a.B" || funcs[1] != "defaultsDeep" {
+		t.Errorf("merged VulnFuncs = %s (err %v), want [\"a.B\",\"defaultsDeep\"] (existing first — Go data survives)", merged.VulnFuncs, err)
+	}
+	var scoped []osvScopedVulnFuncs
+	if err := json.Unmarshal(merged.VulnFuncsScoped, &scoped); err != nil || len(scoped) != 2 ||
+		scoped[0].Module != "github.com/kept/mod" || len(scoped[0].VulnFuncs) != 1 || scoped[0].VulnFuncs[0] != "a.B" ||
+		scoped[1].Module != "lodash" || len(scoped[1].VulnFuncs) != 1 || scoped[1].VulnFuncs[0] != "defaultsDeep" {
+		t.Errorf("merged VulnFuncsScoped = %s (err %v), want kept Go entry + appended lodash entry", merged.VulnFuncsScoped, err)
+	}
+	if string(merged.AffectedPaths) != `["src/x.go"]` {
+		t.Errorf("merged AffectedPaths = %s, want preserved", merged.AffectedPaths)
+	}
+	if merged.RawExcerpt != "ghsa excerpt" {
+		t.Errorf("merged RawExcerpt = %q, want the outcome's fresh excerpt", merged.RawExcerpt)
+	}
+	if merged.FetchedAt == nil || !merged.FetchedAt.After(stale.Add(time.Hour)) {
+		t.Errorf("merged FetchedAt = %v, want refreshed", merged.FetchedAt)
+	}
+
+	fresh := byCVE["CVE-2025-9002"]
+	if err := json.Unmarshal(fresh.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "defaultsDeep" {
+		t.Errorf("fresh VulnFuncs = %s (err %v), want [\"defaultsDeep\"] (no row to merge with)", fresh.VulnFuncs, err)
+	}
+	if fresh.RawExcerpt != "ghsa excerpt" {
+		t.Errorf("fresh RawExcerpt = %q, want %q", fresh.RawExcerpt, "ghsa excerpt")
+	}
+
+	union := byCVE["CVE-2025-9003"]
+	if err := json.Unmarshal(union.VulnFuncs, &funcs); err != nil ||
+		len(funcs) != 2 || funcs[0] != "defaultsDeep" || funcs[1] != "merge" {
+		t.Errorf("union VulnFuncs = %s (err %v), want [\"defaultsDeep\",\"merge\"]", union.VulnFuncs, err)
+	}
+	if err := json.Unmarshal(union.VulnFuncsScoped, &scoped); err != nil || len(scoped) != 1 ||
+		scoped[0].Module != "lodash" || len(scoped[0].VulnFuncs) != 2 ||
+		scoped[0].VulnFuncs[0] != "defaultsDeep" || scoped[0].VulnFuncs[1] != "merge" {
+		t.Errorf("union VulnFuncsScoped = %s (err %v), want ONE lodash entry with both tokens", union.VulnFuncsScoped, err)
+	}
+	if union.RawExcerpt != "old ghsa excerpt" {
+		t.Errorf("union RawExcerpt = %q, want preserved (outcome excerpt empty)", union.RawExcerpt)
+	}
+
+	preserved := byCVE["CVE-2025-9004"]
+	if err := json.Unmarshal(preserved.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "keep.Me" {
+		t.Errorf("preserved VulnFuncs = %s (err %v), want [\"keep.Me\"] (npm emptiness must never clobber)", preserved.VulnFuncs, err)
+	}
+	if preserved.RawExcerpt != "kept excerpt 9004" {
+		t.Errorf("preserved RawExcerpt = %q, want kept", preserved.RawExcerpt)
+	}
+
+	foreign := byCVE["CVE-2025-9005"]
+	if string(foreign.VulnFuncs) != `{"not":"an array"}` || string(foreign.VulnFuncsScoped) != `{"foreign":"shape"}` {
+		t.Errorf("foreign-shape row = (%s, %s), want preserved verbatim", foreign.VulnFuncs, foreign.VulnFuncsScoped)
+	}
+	if foreign.RawExcerpt != "foreign excerpt" {
+		t.Errorf("foreign RawExcerpt = %q, want preserved", foreign.RawExcerpt)
+	}
+
+	// Every npm-only positive AND every empty consulted the store once —
+	// the merge guard's read cost is bounded by the row-write count, same
+	// argument as the R4 guard.
+	if len(store.getKeys) != 5 {
+		t.Errorf("GetBySource calls = %d (%v), want 5", len(store.getKeys), store.getKeys)
+	}
+	got := logs.String()
+	if n := strings.Count(got, osvTombstonePreserveInfoMsg); n != 1 {
+		t.Errorf("preserve Info logged %d times, want exactly 1 (the 9004 empty-vs-positive quadrant)", n)
+	}
+	if strings.Contains(got, osvRetractionOverwriteWarnMsg) {
+		t.Errorf("retraction Warn fired on an npm tick, want none (prose has no retraction authority): %s", got)
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_MassLinkedGHSANoSkeletalWarn pins the M44
+// F470 mass-skeletal predicate extension: a threshold-sized npm backlog
+// whose every lookup retrieves a LINKED GHSA home with no extractable
+// tokens is a legitimate determination pattern (~54% of real npm advisories
+// carry no usable prose tokens), NOT a skeletal mirror — no Warn. The
+// linkage requirement keeps the suppression honest: a stub serving one
+// canned GHSA body for every path stays unlinked (M43 R7) and still Warns
+// (pinned by TestCVESyncJob_FetchOSVVulnFuncs_MassSkeletalWarns above,
+// whose `{}` bodies remain unlinked).
+func TestCVESyncJob_FetchOSVVulnFuncs_MassLinkedGHSANoSkeletalWarn(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	logs := captureSlog(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		w.Header().Set("Content-Type", "application/json")
+		// A per-path LINKED GHSA home: aliases name the requested CVE, npm
+		// affected present, prose without backticks → zero tokens.
+		fmt.Fprintf(w, `{
+			"id": %q,
+			"summary": "plain ghsa prose",
+			"aliases": [%q],
+			"affected": [{"package": {"name": "leftpad", "ecosystem": "npm"}}]
+		}`, "GHSA-"+strings.TrimPrefix(id, "CVE-"), id)
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := make([]string, 0, 25)
+	ecos := make(map[string]osvCVEEcosystems, 25)
+	for i := 0; i < 25; i++ {
+		id := fmt.Sprintf("CVE-2025-8%03d", i)
+		ids = append(ids, id)
+		ecos[id] = osvCVEEcosystems{needNpm: true}
+	}
+	out, anomalous := j.fetchOSVVulnFuncs(context.Background(), ids, ecos)
+
+	if anomalous {
+		t.Error("anomalousTick = true on a linked-GHSA npm backlog, want false")
+	}
+	if len(out) != 25 {
+		t.Fatalf("outcomes = %d, want 25 preserve-side tombstones", len(out))
+	}
+	for id, o := range out {
+		if len(o.symbols) != 0 || o.goID != "" {
+			t.Errorf("%s outcome = %+v, want a preserve-side empty", id, o)
+		}
+	}
+	got := logs.String()
+	if strings.Contains(got, osvMassSkeletalWarnMsg) {
+		t.Error("mass-skeletal Warn fired on a linked-GHSA npm backlog, want none (M44 F470 ghsaLinkedSeen suppression)")
+	}
+	if strings.Contains(got, osvMass404WarnMsg) {
+		t.Error("mass-404 Warn fired on a zero-404 tick, want none")
 	}
 }

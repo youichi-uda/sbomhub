@@ -1,6 +1,10 @@
 package advisory
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestExtractVulnFuncs(t *testing.T) {
 	tests := []struct {
@@ -147,6 +151,134 @@ func TestDedupeStrings(t *testing.T) {
 	}
 	if dedupeStrings(nil) != nil {
 		t.Error("nil input should yield nil output")
+	}
+}
+
+// ============================================================================
+// M44 Wave 2 (F470): npm-tuned prose extraction. GHSA/OSV npm advisories name
+// vulnerable functions ONLY in markdown prose (no structured symbol source
+// exists for npm), so the npm extractor accepts the shapes npm prose actually
+// uses — bare export names (`defaultsDeep`), `pkg.method`, `_.method` — while
+// gating on function context to keep precision.
+// ============================================================================
+
+func TestExtractVulnFuncsNpm(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{
+			// Real GHSA-jf85-cpcp-j695 (lodash CVE-2019-10744) prose shape:
+			// the bare export name adjacent to "function" must be accepted
+			// WITHOUT a "vulnerable ... function" qualifier (the qualifier
+			// requirement matched 2/100 real npm advisories — 2026-07-10
+			// recon); the backticked PACKAGE name (`lodash`) and the
+			// incidental `Object` reference must not leak in.
+			"lodash_function_adjacent_bare_name",
+			"Versions of `lodash` before 4.17.12 are vulnerable to Prototype Pollution. " +
+				"The function `defaultsDeep` allows a malicious user to modify the prototype of `Object` " +
+				"via {constructor: {prototype: {...}}} causing the addition of properties on all objects.",
+			[]string{"defaultsDeep"},
+		},
+		{
+			"function_word_after_backtick",
+			"The `merge` function is vulnerable to prototype pollution.",
+			[]string{"merge"},
+		},
+		{
+			"method_word_with_call_parens_stripped",
+			"the `escape()` method mishandles HTML entities",
+			[]string{"escape"},
+		},
+		{
+			// Dotted call chains are accepted when vulnerability keywords
+			// appear near the token (function/method adjacency not required).
+			"dotted_chain_with_context",
+			"A crafted request to `auth.api.removeUser` allows unauthorized deletion in affected versions.",
+			[]string{"auth.api.removeUser"},
+		},
+		{
+			"lodash_underscore_binding",
+			"Affected versions allow attackers to modify object properties via `_.merge`.",
+			[]string{"_.merge"},
+		},
+		{
+			// Non-function property access without function/vulnerability
+			// context must be dropped (the headers.location class of noise —
+			// 2026-07-10 recon).
+			"property_access_without_context",
+			"The redirect handler copies the request URL into `headers.location` before returning it.",
+			nil,
+		},
+		{
+			"url_dropped",
+			"See `https://example.com/advisories/123` for details. This is vulnerable.",
+			nil,
+		},
+		{
+			"version_dropped",
+			"Upgrade to `4.17.21` to fix this vulnerable behavior.",
+			nil,
+		},
+		{
+			// File names survive the JS-identifier shape check (handler + ts
+			// are identifiers) so the extension denylist must drop them.
+			"file_names_dropped",
+			"The vulnerable code lives in `handler.ts` and `config.json`.",
+			nil,
+		},
+		{
+			"contextless_backtick_dropped",
+			"Use `defaultsDeep` when merging configuration objects.",
+			nil,
+		},
+		{
+			"four_part_selector_dropped",
+			"the vulnerable function `a.b.c.d` is exported",
+			nil,
+		},
+		{
+			"single_char_bare_token_dropped",
+			"the `_` function is vulnerable",
+			nil,
+		},
+		{
+			"dedupe_across_rules",
+			"The `merge` function is vulnerable. Calling the `merge` method is unsafe.",
+			[]string{"merge"},
+		},
+		{
+			"dollar_identifier_accepted",
+			"The `$.extend` function is vulnerable to prototype pollution.",
+			[]string{"$.extend"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractVulnFuncsNpm(tt.in)
+			if !equalStringSlice(got, tt.want) {
+				t.Errorf("got %v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractVulnFuncsNpm_Cap pins the per-advisory output bound (aligned
+// with the scheduler's 200-selector per-CVE cap): a degenerate advisory
+// cannot balloon the extraction.
+func TestExtractVulnFuncsNpm_Cap(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 250; i++ {
+		fmt.Fprintf(&b, "The function `fn%03d` is vulnerable. ", i)
+	}
+	got := ExtractVulnFuncsNpm(b.String())
+	if len(got) != 200 {
+		t.Fatalf("extracted %d tokens, want capped at 200", len(got))
+	}
+	if got[0] != "fn000" || got[199] != "fn199" {
+		t.Errorf("cap must keep first-seen order: got[0]=%q got[199]=%q", got[0], got[199])
 	}
 }
 

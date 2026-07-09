@@ -1280,6 +1280,10 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 // ============================================================================
 // M43 Wave 3 (F467, issue #169): OSV / Go vulndb structured vulnerable
 // symbols → advisory_excerpts.vuln_funcs (source 'osv', migration 056).
+// M44 Wave 2 (F470): the same pass extended to npm — GHSA- alias follow-up +
+// npm-tuned prose extraction (no structured npm symbol source exists;
+// 2026-07-10 recon), stored into the same rows with npm package names in the
+// vuln_funcs_scoped module slot and NO clobber authority of any kind.
 //
 // Why: until M43 Wave 3 the ONLY vuln_funcs producer was the NVD prose
 // heuristic (backtick-anchored regex in service/advisory), so production
@@ -1291,15 +1295,22 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 // "Pkg.Func" / "Pkg.Type.Method" selector form the Wave 1 edge
 // (handler.normalizeVulnFuncs) forwards and the vendored Go analyzer
 // (service/reachability/go_analyzer.go parseSymbolSelectors/matchSelector)
-// actually matches against.
+// actually matches against. For npm (M44 F470) the best available source is
+// the GHSA markdown mirrored into OSV records: backtick tokens pass a
+// function-context + JS-shape filter (advisory.ExtractVulnFuncsNpm) and are
+// attributed to the record's affected npm packages — precision is mixed by
+// nature and the CLI's binding-aware matching is the downstream defence.
 //
 // Scope + fetch bounds (per daily Run() tick):
 //   - Candidates = CVEs linked (component_vulnerabilities) to a component
-//     whose purl is Go-ecosystem (repository.EcosystemFromPurl == "go"),
-//     enumerated per tenant under RLS — i.e. exactly the CVE set that can
-//     appear as Go reachability targets, INCLUDING the backlog linked by
-//     earlier ticks (a "this tick's NVD feed only" scope would leave every
-//     pre-existing production link empty forever).
+//     whose purl is Go- or npm-ecosystem (repository.EcosystemFromPurl,
+//     M44 F470 widened from Go-only), enumerated per tenant under RLS —
+//     i.e. exactly the CVE set that can appear as Go/npm reachability
+//     targets, INCLUDING the backlog linked by earlier ticks (a "this
+//     tick's NVD feed only" scope would leave every pre-existing production
+//     link empty forever). Each CVE remembers WHICH ecosystems listed it
+//     (osvCVEEcosystems) so the fetch stage spends follow-ups only where
+//     they can pay off.
 //   - Freshness window: a (tenant, cve) whose source='osv' excerpt row was
 //     fetched within osvVulnFuncsRefreshInterval is skipped, so steady-state
 //     re-fetch load is ~ (distinct Go CVEs) / 7 per day. Definitive
@@ -1310,9 +1321,11 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 //     combined with the fetch cap, starved every CVE sorted after them.
 //     Tombstones are wire-inert: ListVulnFuncsByCVEs unions nothing out of
 //     an empty array row.
-//   - Each distinct CVE is fetched ONCE per tick (plus at most ONE Go vulndb
-//     alias follow-up) and the result is fanned out to every tenant that
-//     needs it — never re-fetched per tenant.
+//   - Each distinct CVE is fetched ONCE per tick, plus at most ONE Go vulndb
+//     alias follow-up and (M44 F470) at most ONE GHSA alias follow-up when
+//     npm listed it — ≤3 requests per CVE, ≤2 for single-ecosystem CVEs —
+//     and the result is fanned out to every tenant that needs it — never
+//     re-fetched per tenant.
 //   - osvVulnFuncsFetchCap hard-bounds HTTP requests per tick; CVEs beyond
 //     the cap stay stale (no row, not even a tombstone) and are retried next
 //     tick — the tombstones above are what let the freshness window actually
@@ -1549,20 +1562,24 @@ const osvUnlinkedRecordWarnMsg = "scheduler: OSV lookup returned a record body t
 // osvMassSkeletalWarnMsg is the exact Warn emitted when a tick's lookups
 // both reach the mass threshold (osvVulnFuncsMass404WarnThreshold, shared
 // with the mass-404 determination) in fetches AND in retrieved record
-// bodies, yet not ONE outcome carries a Go vulndb identity (goID) or
-// extractable symbols (M43 Phase D R7, round 6 finding 4). The mass-404
-// predicate is blind to this shape: a stub mirror answering every path
-// `200 {}` (or canned junk bodies) keeps notFound at 0 and recordsRetrieved
-// climbing, so no anomaly fires even though the tick determined nothing.
-// Warn-ONLY — deliberately NO anomalous fetched_at backdate — because the
-// same counters describe a LEGITIMATE backlog of Go-ecosystem CVEs whose
-// advisories are GHSA/CVE-home-only: a Go-ecosystem candidate with no GO-
-// record in OSV is a normal, permanent state (the alias follow-up 404s, or
-// there is no GO- alias at all), and backdating would re-spend the fetch cap
-// on that backlog every 2–3 days forever. The R4 clobber guard and the R7
-// linkage rule already bound the damage of the hostile reading. A const so
-// the test contract pins operators' grep target verbatim.
-const osvMassSkeletalWarnMsg = "scheduler: OSV lookups this tick retrieved record bodies at the mass threshold yet yielded zero Go vulndb identities and zero symbols; possible stub/skeletal mirror serving empty or canned bodies — tombstones written with NORMAL freshness (a legitimate GHSA-home-only backlog looks identical, so no backdated retry) (M43 Phase D R7)"
+// bodies, yet not ONE outcome carries a Go vulndb identity (goID), a linked
+// GHSA record body retrieved for an npm-needing CVE (ghsaLinkedSeen, M44
+// F470 — a real GHSA home with no extractable prose tokens is a routine npm
+// determination, not a skeletal mirror; linkage stops a canned record from
+// inflating the count), or extractable symbols (M43 Phase D R7, round 6
+// finding 4). The mass-404 predicate is blind to this shape: a stub mirror
+// answering every path `200 {}` (or canned junk bodies) keeps notFound at 0
+// and recordsRetrieved climbing, so no anomaly fires even though the tick
+// determined nothing. Warn-ONLY — deliberately NO anomalous fetched_at
+// backdate — because the same counters describe a LEGITIMATE backlog of
+// Go-ecosystem CVEs whose advisories are GHSA/CVE-home-only: a Go-ecosystem
+// candidate with no GO- record in OSV is a normal, permanent state (the
+// alias follow-up 404s, or there is no GO- alias at all), and backdating
+// would re-spend the fetch cap on that backlog every 2–3 days forever. The
+// R4 clobber guard and the R7 linkage rule already bound the damage of the
+// hostile reading. A const so the test contract pins operators' grep target
+// verbatim.
+const osvMassSkeletalWarnMsg = "scheduler: OSV lookups this tick retrieved record bodies at the mass threshold yet yielded zero Go vulndb identities, zero linked GHSA bodies, and zero symbols; possible stub/skeletal mirror serving empty or canned bodies — tombstones written with NORMAL freshness (a legitimate GHSA-home-only backlog looks identical, so no backdated retry) (M43 Phase D R7 / M44 F470)"
 
 // osvVulnFuncsFetchCap is the effective per-tick fetch cap. Production
 // always uses the default; tests may temporarily override (defer-restore)
@@ -1575,13 +1592,14 @@ var osvVulnFuncsFetchCap = osvVulnFuncsFetchCapDefault
 // Tests set it to 0 (defer-restore) so httptest loops stay instant.
 var osvVulnFuncsFetchDelay = 100 * time.Millisecond
 
-// osvGoCVECandidateQuery enumerates, for ONE tenant (RLS-scoped via the
+// osvCVECandidateQuery enumerates, for ONE tenant (RLS-scoped via the
 // chunk tx's app.current_tenant_id GUC — components is FORCE RLS), the
 // distinct (cve_id, purl) pairs of that tenant's component-linked CVEs whose
-// component looks Go-ecosystem, excluding pairs whose source='osv' excerpt
-// row is still fresh. The purl is re-checked Go-side with
+// component looks Go- or npm-ecosystem (M44 Wave 2 / F470 widened the M43
+// Go-only prefilter), excluding pairs whose source='osv' excerpt row is
+// still fresh. The purl is re-checked Go-side with
 // repository.EcosystemFromPurl so the authoritative ecosystem derivation
-// stays in one place (the ILIKE is only a row-transfer prefilter, matching
+// stays in one place (the ILIKEs are only a row-transfer prefilter, matching
 // the vulnerability.go comment about not trusting purl LIKEs in SQL).
 // $1 = tenant id — used BOTH as an explicit c.tenant_id predicate (M43
 // Phase D R2 finding 5: the repo layer's belt+braces discipline, so the
@@ -1589,13 +1607,13 @@ var osvVulnFuncsFetchDelay = 100 * time.Millisecond
 // AND in the advisory_excerpts NOT EXISTS,
 // $2 = freshness cutoff (rows with fetched_at >= $2 are fresh; NULL
 // fetched_at compares as unknown => NOT EXISTS => stale => re-fetched).
-const osvGoCVECandidateQuery = `
+const osvCVECandidateQuery = `
 	SELECT DISTINCT v.cve_id, COALESCE(c.purl, '')
 	FROM components c
 	JOIN component_vulnerabilities cv ON cv.component_id = c.id
 	JOIN vulnerabilities v ON v.id = cv.vulnerability_id
 	WHERE c.tenant_id = $1
-	  AND c.purl ILIKE 'pkg:golang%'
+	  AND (c.purl ILIKE 'pkg:golang%' OR c.purl ILIKE 'pkg:npm%')
 	  AND NOT EXISTS (
 		SELECT 1 FROM advisory_excerpts ae
 		WHERE ae.tenant_id = $1
@@ -1611,6 +1629,19 @@ const osvGoCVECandidateQuery = `
 type osvTenantCandidates struct {
 	tenantID uuid.UUID
 	cveIDs   []string
+}
+
+// osvCVEEcosystems records which OSV-pass ecosystems listed a CVE as a
+// candidate (M44 Wave 2 / F470): the fetch stage keys its alias follow-ups
+// and extraction passes on it — needGo drives the GO- follow-up + structured
+// Go extraction, needNpm the GHSA- follow-up + npm prose extraction. A CVE
+// linked to BOTH a Go and an npm component (across any tenants) carries
+// both flags and may spend up to two follow-ups (≤3 requests total).
+// Derived purl-side per candidate pair via repository.EcosystemFromPurl and
+// unioned across tenants.
+type osvCVEEcosystems struct {
+	needGo  bool
+	needNpm bool
 }
 
 // osvVulnFuncsOutcome is the per-CVE fetch result fanned out to every tenant
@@ -1667,10 +1698,42 @@ type osvVulnFuncsOutcome struct {
 	//     The write path treats it exactly like a true 404: it must never
 	//     clobber an existing positive row — the row's data is preserved and
 	//     only fetched_at refreshes (the R4 clobber guard).
-	// Positive outcomes (symbols non-empty) replace the row unconditionally
-	// either way; their goID is informational only. Since R7 a positive can
-	// only come from a LINKED body — unlinked symbols are never extracted.
+	// Positive outcomes (symbols non-empty) whose GO side vouches
+	// (goVouched: Go symbols extracted from a linked body, or goID set)
+	// replace the row unconditionally, as they always have; npm-prose-ONLY
+	// positives instead MERGE into an existing positive row (M44 F470 — see
+	// goSymbols below). Since R7 a positive can only come from a LINKED body
+	// — unlinked symbols are never extracted.
 	goID string
+	// goSymbols (M44 Wave 2 / F470) records whether the flat union contains
+	// selectors extracted from Go vulndb's STRUCTURED imports[].symbols (a
+	// linked GO-/main record body). It exists because npm joined the pass
+	// with a strictly weaker source — backtick tokens heuristically pulled
+	// out of GHSA prose — which must carry NO destructive authority of any
+	// kind (anti-pattern 71: a record retrieved ≠ authoritative):
+	//   - empty npm extraction issues no authority token (goID stays ""), so
+	//     "linked GHSA body but zero tokens" tombstones PRESERVE-side — prose
+	//     silence is not evidence of an upstream withdrawal;
+	//   - a POSITIVE outcome that is npm-prose-only (goSymbols == false AND
+	//     goID == "", i.e. !goVouched) must not wholesale-replace an existing
+	//     positive row either: on a mixed Go+npm CVE whose Go side degraded
+	//     to preserve-side THIS tick (partial mirror), replacement would wipe
+	//     the stored Go selectors under cover of fresh npm tokens. The write
+	//     path merges instead (union flat, per-module-union scoped) — npm
+	//     tokens land, stored data survives.
+	// The converse (goVouched positive wholesale-replacing a row that held
+	// npm tokens while THIS tick's GHSA side yielded nothing) is accepted:
+	// the structured Go source outranks prose, and the npm tokens re-merge at
+	// the next freshness window. Documented as an honest limitation.
+	goSymbols bool
+}
+
+// goVouched reports whether the outcome's Go side vouches for destructive
+// writes (M44 Wave 2 / F470): structured Go symbols were extracted, or a
+// linked GO- record body was retrieved (goID). Positive outcomes without it
+// are npm-prose-only and take the merge path in writeOSVVulnFuncsChunk.
+func (o osvVulnFuncsOutcome) goVouched() bool {
+	return o.goSymbols || o.goID != ""
 }
 
 // syncOSVVulnFuncs is the Phase 3 entry point (see the section header above
@@ -1698,9 +1761,9 @@ func (j *CVESyncJob) syncOSVVulnFuncs(ctx context.Context, tenantIDs []uuid.UUID
 
 	// Pass A (read-only, chunked, one pooled conn): per-tenant candidate
 	// enumeration under RLS. No network happens while any tx is open.
-	candidates := j.listOSVCandidates(ctx, tenantIDs)
+	candidates, ecosystems := j.listOSVCandidates(ctx, tenantIDs)
 	if len(candidates) == 0 {
-		slog.Debug("OSV vuln_funcs sync: no stale Go-ecosystem CVE candidates (M43 F467)")
+		slog.Debug("OSV vuln_funcs sync: no stale Go/npm-ecosystem CVE candidates (M43 F467 / M44 F470)")
 		return
 	}
 
@@ -1718,12 +1781,13 @@ func (j *CVESyncJob) syncOSVVulnFuncs(ctx context.Context, tenantIDs []uuid.UUID
 		}
 	}
 
-	// Network phase: one lookup per distinct CVE (+ ≤1 alias follow-up),
-	// hard-capped per tick. anomalousTick (M43 Phase D R5) reports the
-	// mass-404 anomaly determination so the write pass can backdate the
+	// Network phase: one lookup per distinct CVE (+ ≤1 alias follow-up per
+	// needed ecosystem — GO- and/or GHSA-, so ≤3 requests per CVE; M44
+	// F470), hard-capped per tick. anomalousTick (M43 Phase D R5) reports
+	// the mass-404 anomaly determination so the write pass can backdate the
 	// tick's tombstone fetched_at (shortened negative cache, see
 	// osvVulnFuncsAnomalyRetryInterval).
-	outcomes, anomalousTick := j.fetchOSVVulnFuncs(ctx, orderedCVEs)
+	outcomes, anomalousTick := j.fetchOSVVulnFuncs(ctx, orderedCVEs, ecosystems)
 
 	// Pass B (write, chunked, one pooled conn): fan the per-CVE outcomes out
 	// to per-(tenant, cve) source='osv' excerpt rows. Definitive negatives
@@ -1755,12 +1819,15 @@ func (j *CVESyncJob) syncOSVVulnFuncs(ctx context.Context, tenantIDs []uuid.UUID
 // + chunked-tx shape as matchTenantsChunked (F258 heritage), but read-only —
 // so, mirroring F234's read-only contract, tenants already enumerated before
 // a chunk abort keep their results and the loop continues with the next
-// chunk. Returns tenants in input order, each with its sorted CVE id list.
-func (j *CVESyncJob) listOSVCandidates(ctx context.Context, tenantIDs []uuid.UUID) []osvTenantCandidates {
+// chunk. Returns tenants in input order, each with its sorted CVE id list,
+// plus the cross-tenant CVE → ecosystems union (M44 F470) the fetch stage
+// keys its per-ecosystem follow-ups on.
+func (j *CVESyncJob) listOSVCandidates(ctx context.Context, tenantIDs []uuid.UUID) ([]osvTenantCandidates, map[string]osvCVEEcosystems) {
+	ecosystems := make(map[string]osvCVEEcosystems)
 	conn, err := j.db.Conn(ctx)
 	if err != nil {
 		slog.Warn("scheduler: acquire pooled conn for OSV candidate enumeration failed (M43 F467)", "error", err)
-		return nil
+		return nil, ecosystems
 	}
 	defer conn.Close()
 
@@ -1778,14 +1845,14 @@ func (j *CVESyncJob) listOSVCandidates(ctx context.Context, tenantIDs []uuid.UUI
 		if end > len(tenantIDs) {
 			end = len(tenantIDs)
 		}
-		chunkOut, chunkErr := j.listOSVCandidatesChunk(ctx, conn, chunkIndex, tenantIDs[start:end], cutoff)
+		chunkOut, chunkErr := j.listOSVCandidatesChunk(ctx, conn, chunkIndex, tenantIDs[start:end], cutoff, ecosystems)
 		out = append(out, chunkOut...)
 		if chunkErr != nil {
 			slog.Warn("scheduler: OSV candidate chunk aborted, continuing with next chunk (M43 F467)",
 				"chunk_index", chunkIndex, "num_chunks", numChunks, "error", chunkErr)
 		}
 	}
-	return out
+	return out, ecosystems
 }
 
 // listOSVCandidatesChunk enumerates one chunk's tenants inside one tx
@@ -1793,13 +1860,17 @@ func (j *CVESyncJob) listOSVCandidates(ctx context.Context, tenantIDs []uuid.UUI
 // tenants read before an error are returned alongside the error (F234
 // partial-count contract). Rows are fully drained and closed before the next
 // tenant's set_config Exec — same lib/pq open-Rows discipline as
-// linkCVEToTenantComponents.
+// linkCVEToTenantComponents. ecosystems (M44 F470) is the caller's shared
+// CVE → ecosystems union; every kept pair's purl-derived ecosystem is OR-ed
+// into it (a chunk abort keeps the flags already recorded — harmless: those
+// CVEs' tenants were returned too).
 func (j *CVESyncJob) listOSVCandidatesChunk(
 	ctx context.Context,
 	conn *sql.Conn,
 	chunkIndex int,
 	chunk []uuid.UUID,
 	cutoff time.Time,
+	ecosystems map[string]osvCVEEcosystems,
 ) ([]osvTenantCandidates, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -1822,7 +1893,7 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 				chunkIndex, tenantID, sErr)
 		}
 
-		rows, qErr := tx.QueryContext(ctx, osvGoCVECandidateQuery, tenantID, cutoff)
+		rows, qErr := tx.QueryContext(ctx, osvCVECandidateQuery, tenantID, cutoff)
 		if qErr != nil {
 			return out, fmt.Errorf("scheduler: chunk %d OSV candidate query failed for tenant %s: %w",
 				chunkIndex, tenantID, qErr)
@@ -1845,14 +1916,23 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 		rows.Close()
 
 		// Go-side authoritative ecosystem check + per-tenant CVE dedupe
-		// (a CVE can hit several Go purls; the SELECT is DISTINCT on the
-		// pair, not the CVE).
+		// (a CVE can hit several Go/npm purls; the SELECT is DISTINCT on the
+		// pair, not the CVE). Each kept pair also records WHICH ecosystem
+		// listed the CVE (M44 F470) — the fetch stage keys its GO-/GHSA-
+		// alias follow-ups and extraction passes on the union.
 		var cveIDs []string
 		seenCVE := make(map[string]struct{}, len(pairs))
 		for _, p := range pairs {
-			if repository.EcosystemFromPurl(p.purl) != "go" {
+			eco := ecosystems[p.cveID]
+			switch repository.EcosystemFromPurl(p.purl) {
+			case "go":
+				eco.needGo = true
+			case "npm":
+				eco.needNpm = true
+			default:
 				continue
 			}
+			ecosystems[p.cveID] = eco
 			if _, dup := seenCVE[p.cveID]; dup {
 				continue
 			}
@@ -1872,7 +1952,9 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 }
 
 // fetchOSVVulnFuncs resolves each candidate CVE against the OSV API exactly
-// once and extracts Go vulndb vulnerable symbols in wire-safe selector form.
+// once and extracts vulnerable symbols: Go vulndb STRUCTURED symbols in
+// wire-safe selector form (M43), plus npm prose-extracted tokens for CVEs
+// that npm components listed (M44 Wave 2 / F470).
 //
 // CVE→OSV resolution: GET /v1/vulns/{id} accepts a CVE id directly (osv.dev
 // resolves aliases server-side; this is the same contract
@@ -1880,6 +1962,21 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // returned record is NOT the Go vulndb entry (e.g. a GHSA/CVE record with no
 // Go ecosystem_specific.imports), ONE follow-up lookup of the first "GO-"
 // alias is attempted.
+//
+// npm extension (M44 F470): ecosystems says which ecosystems listed each CVE
+// (union across tenants; a missing entry defaults to Go-only, preserving the
+// M43 call shape for direct callers). For npm-needing CVEs the main record's
+// summary/details prose runs through the npm extractor
+// (extractOSVNpmVulnFuncs); when that yields nothing and the main record is
+// not itself the GHSA home, ONE follow-up lookup of the first "GHSA-" alias
+// is attempted — npm CVE-namespace records carry plain prose without
+// backticks, so the GHSA markdown home is where the tokens live (2026-07-10
+// recon). Both follow-ups obey the same cap/politeness/linkage rules, so the
+// per-CVE bound is ≤3 requests (main + GO- + GHSA-; Go-only and npm-only
+// CVEs keep the M43 ≤2 bound). npm extraction NEVER mints clobber authority:
+// no npm analogue of goID exists, and a positive outcome records whether the
+// GO side contributed (osvVulnFuncsOutcome.goSymbols) so the write path can
+// deny npm-prose-only positives the wholesale replace.
 //
 // Record LINKAGE (M43 Phase D R7, round 6 High finding): every retrieved
 // body must vouch for the lookup that produced it before ANY field is used —
@@ -1941,7 +2038,7 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // write pass uses it to backdate the tick's tombstone fetched_at (see
 // osvVulnFuncsAnomalyRetryInterval) so a mirror misconfiguration is
 // negative-cached for 2–3 days instead of the full freshness window.
-func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (map[string]osvVulnFuncsOutcome, bool) {
+func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string, ecosystems map[string]osvCVEEcosystems) (map[string]osvVulnFuncsOutcome, bool) {
 	out := make(map[string]osvVulnFuncsOutcome, len(cveIDs))
 	// Defence-in-depth (mirrors syncOSVVulnFuncs' guards): neither an
 	// offline job nor an offline-drifted CLIENT (M43 Phase D R4 — its
@@ -1970,9 +2067,18 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 	// finding 4): together with fetches and recordsRetrieved they feed the
 	// mass-skeletal determination below — a tick that retrieves plenty of
 	// bodies yet determines nothing is the stub-mirror signature the mass-404
-	// predicate cannot see (notFound stays 0).
+	// predicate cannot see (notFound stays 0). ghsaLinkedSeen (M44 F470)
+	// counts LINKED GHSA- record bodies retrieved for npm-needing CVEs: a
+	// legitimate npm backlog routinely retrieves real GHSA homes that yield
+	// no extractable prose tokens (~54% of npm advisories — 2026-07-10
+	// recon), which is a genuine determination, not a skeletal mirror —
+	// linkage ties each body to its own CVE, so a canned single record
+	// cannot inflate the count. Deliberately incremented ONLY under
+	// eco.needNpm, so Go-only deployments keep the M43 Warn behaviour
+	// bit-for-bit.
 	symbolsSeen := 0
 	goIDsSeen := 0
+	ghsaLinkedSeen := 0
 
 	// fetch performs one capped, delayed lookup. ok=false marks a TRANSIENT
 	// failure (network/5xx/timeout/ctx abort — logged): the caller must NOT
@@ -2045,7 +2151,14 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 			out[cveID] = osvVulnFuncsOutcome{}
 			continue
 		}
-		symbols, scoped := extractOSVGoVulnFuncs(vuln)
+		// eco says which ecosystems listed this CVE (M44 F470). A missing
+		// entry defaults to Go-only — the exact M43 behaviour — so direct
+		// callers passing a nil map keep the old contract.
+		eco, ecoKnown := ecosystems[cveID]
+		if !ecoKnown {
+			eco = osvCVEEcosystems{needGo: true}
+		}
+		goFlat, goScoped := extractOSVGoVulnFuncs(vuln)
 		excerpt := osvExcerptText(vuln)
 		// goID is the clobber-authority token (M43 Phase D R6): set exactly
 		// when a retrieved record BODY identifies itself as a Go vulndb
@@ -2057,11 +2170,25 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 		if strings.HasPrefix(vuln.ID, "GO-") {
 			goID = vuln.ID
 		}
+		// npm prose extraction on the main record (M44 F470) — usually
+		// empty: the CVE-namespace record OSV returns for a CVE-id lookup
+		// carries plain prose without backticks and no npm affected entries
+		// (2026-07-10 recon), but a mirror may serve the GHSA home directly.
+		var npmFlat []string
+		var npmScoped []osvScopedVulnFuncs
+		if eco.needNpm {
+			npmFlat, npmScoped = extractOSVNpmVulnFuncs(vuln)
+			if strings.HasPrefix(vuln.ID, "GHSA-") {
+				ghsaLinkedSeen++
+			}
+		}
 
-		// Alias follow-up: the alias-resolved record may be a GHSA/CVE home
-		// without Go vulndb's imports[]. One extra lookup of the first GO-
-		// alias, still under the cap.
-		if len(symbols) == 0 && goID == "" {
+		// GO- alias follow-up: the alias-resolved record may be a GHSA/CVE
+		// home without Go vulndb's imports[]. One extra lookup of the first
+		// GO- alias, still under the cap. Gated on the CVE actually having a
+		// Go-ecosystem candidate (eco.needGo, M44 F470) — an npm-only CVE
+		// must not spend budget chasing Go vulndb records nobody will match.
+		if eco.needGo && len(goFlat) == 0 && goID == "" {
 			if alias := firstGoVulndbAlias(vuln.Aliases); alias != "" {
 				if fetches >= fetchCap {
 					// The cap blocked the follow-up, so the determination is
@@ -2087,8 +2214,8 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 					slog.Warn(osvUnlinkedRecordWarnMsg,
 						"cve_id", cveID, "got_id", av.ID, "requested_id", alias)
 				default:
-					symbols, scoped = extractOSVGoVulnFuncs(av)
-					if len(symbols) > 0 {
+					goFlat, goScoped = extractOSVGoVulnFuncs(av)
+					if len(goFlat) > 0 {
 						if e := osvExcerptText(av); e != "" {
 							excerpt = e
 						}
@@ -2114,20 +2241,75 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 			}
 		}
 
-		// Definitive either way: symbols (positive), an AUTHORITATIVE empty
-		// (goID set — a linked Go vulndb body exists and carries nothing
-		// selector-shaped for the Go analyzer: an upstream retraction the
-		// write path propagates), or a PRESERVE-side empty (goID == "" — no
-		// linked Go vulndb body retrieved; the write path treats it like a
-		// true 404). See osvVulnFuncsOutcome for the full decision table
-		// (M43 Phase D R6/R7).
+		// GHSA- alias follow-up (M44 F470), the npm mirror-image of the GO-
+		// follow-up above: fires only when npm needs the CVE, the main
+		// record's prose yielded nothing, and the main record is not itself
+		// the GHSA home (re-fetching it would determine nothing new). Same
+		// cap / transient / linkage discipline; a linked GHSA body confers
+		// NO clobber authority — an empty extraction below still tombstones
+		// preserve-side (prose silence is not an upstream withdrawal).
+		if eco.needNpm && len(npmFlat) == 0 && !strings.HasPrefix(vuln.ID, "GHSA-") {
+			if alias := firstGHSAAlias(vuln.Aliases); alias != "" {
+				if fetches >= fetchCap {
+					// The cap blocked the follow-up — determination
+					// incomplete (even a Go-positive side must wait: writing
+					// now would stamp a fresh row missing the npm side and
+					// starve it for a full freshness window).
+					continue
+				}
+				av, aok := fetch(alias)
+				if !aok {
+					continue // transient alias failure — no tombstone
+				}
+				switch {
+				case av == nil:
+					// GHSA alias 404 (partial mirror) — definitive; the npm
+					// side stays empty and, if the Go side is empty too, the
+					// outcome below is a preserve-side tombstone.
+				case !osvRecordLinked(av, alias, cveID):
+					// R7 linkage on the GHSA follow-up: reject the body
+					// wholesale (tokens, excerpt, affected packages all
+					// unused); the accepted MAIN record's excerpt is kept.
+					slog.Warn(osvUnlinkedRecordWarnMsg,
+						"cve_id", cveID, "got_id", av.ID, "requested_id", alias)
+				default:
+					ghsaLinkedSeen++
+					npmFlat, npmScoped = extractOSVNpmVulnFuncs(av)
+					// Adopt the GHSA excerpt only when it carries the tick's
+					// only symbols — a Go-symbol-bearing record's excerpt
+					// (adopted above) outranks it.
+					if len(npmFlat) > 0 && len(goFlat) == 0 {
+						if e := osvExcerptText(av); e != "" {
+							excerpt = e
+						}
+					}
+				}
+			}
+		}
+
+		// Definitive either way: symbols (positive — wholesale-replacing
+		// only when the GO side vouches, merging when npm-prose-only; M44
+		// F470), an AUTHORITATIVE empty (goID set — a linked Go vulndb body
+		// exists and carries nothing selector-shaped for the Go analyzer: an
+		// upstream retraction the write path propagates), or a PRESERVE-side
+		// empty (goID == "" — no linked GO- body retrieved and no npm tokens
+		// extracted; the write path treats it like a true 404). See
+		// osvVulnFuncsOutcome for the full decision table (M43 Phase D
+		// R6/R7, M44 F470).
+		symbols, scoped := combineOSVVulnFuncs(vuln.ID, goFlat, goScoped, npmFlat, npmScoped)
 		if len(symbols) > 0 {
 			symbolsSeen++
 		}
 		if goID != "" {
 			goIDsSeen++
 		}
-		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, scoped: scoped, excerpt: excerpt, goID: goID}
+		out[cveID] = osvVulnFuncsOutcome{
+			symbols:   symbols,
+			scoped:    scoped,
+			excerpt:   excerpt,
+			goID:      goID,
+			goSymbols: len(goFlat) > 0,
+		}
 	}
 
 	// Mass-404 observability Warn (M43 Phase D R4, replacing the R3
@@ -2181,12 +2363,13 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 	// recordsRetrieved == 0, this one requires it at threshold or above).
 	if fetches >= osvVulnFuncsMass404WarnThreshold &&
 		recordsRetrieved >= osvVulnFuncsMass404WarnThreshold &&
-		goIDsSeen == 0 && symbolsSeen == 0 {
+		goIDsSeen == 0 && symbolsSeen == 0 && ghsaLinkedSeen == 0 {
 		slog.Warn(osvMassSkeletalWarnMsg,
 			"fetches", fetches,
 			"records_retrieved", recordsRetrieved,
 			"not_found", notFound,
 			"threshold", osvVulnFuncsMass404WarnThreshold,
+			"ghsa_linked", ghsaLinkedSeen,
 			"tombstones", len(out))
 	}
 	return out, anomalousTick
@@ -2289,8 +2472,25 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 //     overwrote silently). Already-empty / absent prior rows overwrite
 //     silently (routine whole-module advisories re-tombstoning every
 //     window).
-//   - POSITIVE writes skip the read entirely: fresh symbols are
-//     authoritative and replace the row unconditionally.
+//   - GO-VOUCHED POSITIVE writes (goVouched: structured Go symbols extracted
+//     or a linked GO- body retrieved) skip the read entirely: fresh
+//     structured symbols are authoritative and replace the row
+//     unconditionally — the M43 positive contract, unchanged.
+//   - NPM-PROSE-ONLY POSITIVE writes (M44 Wave 2 / F470: symbols present but
+//     !goVouched) read the existing row like empties do. Against an existing
+//     POSITIVE row they MERGE — flat union (existing order first),
+//     per-module union of the outcome's npm scoped entries into the stored
+//     scoped attribution, all other stored fields preserved, the outcome's
+//     excerpt adopted when non-empty — because a heuristic prose extraction
+//     must never destroy stored data: on a mixed Go+npm CVE whose Go side
+//     degraded to preserve-side THIS tick, a wholesale replace would wipe
+//     the stored Go selectors under cover of fresh npm tokens. Against an
+//     absent/empty row the outcome writes as-is. A consequence, documented
+//     deliberately: npm tokens are add-only — prose carries no retraction
+//     authority (a token's disappearance from a GHSA edit is not evidence of
+//     withdrawal), so stale npm tokens persist until a goID-backed
+//     retraction wipes the row; the caps bound the growth and the CLI's
+//     binding-aware matching absorbs the precision cost.
 //
 // Both observability lines are BUFFERED (osvVulnFuncsWriteLogEvent) and
 // emitted by emitOSVVulnFuncsWriteLogs only after tx.Commit() succeeds (M43
@@ -2447,6 +2647,22 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 							tenantID: cand.tenantID, cveID: cveID, goID: o.goID}
 					}
 				}
+			} else if !o.goVouched() {
+				// npm-prose-only POSITIVE (M44 Wave 2 / F470): tokens with no
+				// Go-side backing must not wholesale-replace stored data —
+				// read the existing row and MERGE into a positive one (see
+				// the docstring's decision table). Same F185 tx-routed read
+				// and same abort-on-error posture as the empty path above.
+				existing, gErr := j.advisoryExcerpts.GetBySource(txCtx, cand.tenantID, cveID, osvVulnFuncsSource)
+				if gErr != nil {
+					slog.Warn("scheduler: OSV vuln_funcs pre-write read failed, aborting chunk (M44 F470)",
+						"chunk_index", chunkIndex, "tenant_id", cand.tenantID, "cve_id", cveID, "error", gErr)
+					return 0, 0, fmt.Errorf("scheduler: chunk %d OSV vuln_funcs pre-write read for tenant %s cve %s: %w",
+						chunkIndex, cand.tenantID, cveID, gErr)
+				}
+				if existing != nil && jsonArrayNonEmpty(existing.VulnFuncs) {
+					mergeNpmProsePositiveIntoRow(excerpt, existing, &o)
+				}
 			}
 			if uErr := j.advisoryExcerpts.Upsert(txCtx, excerpt); uErr != nil {
 				slog.Warn("scheduler: OSV vuln_funcs upsert failed, aborting chunk (M43 F467)",
@@ -2475,6 +2691,135 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 	// are dropped with the rolled-back writes they described.
 	emitOSVVulnFuncsWriteLogs(pendingLogs)
 	return chunkRows, chunkTenants, nil
+}
+
+// mergeNpmProsePositiveIntoRow merges an npm-prose-only POSITIVE outcome
+// into an existing POSITIVE row's data (M44 Wave 2 / F470), mutating dst
+// (the pending upsert row, pre-filled from the outcome) in place:
+//
+//   - flat vuln_funcs: existing selectors first (order kept), then the
+//     outcome's tokens not already present, capped at
+//     osvVulnFuncsMaxSymbolsPerCVE;
+//   - vuln_funcs_scoped: existing module entries kept verbatim (order and
+//     content — Go attributions survive untouched); each outcome entry
+//     unions into its same-module entry or appends as a new one, under the
+//     same total cap;
+//   - AffectedPaths / RequiredConfig / RequiredEnv: preserved from the row;
+//   - RawExcerpt: the outcome's excerpt when non-empty (the freshest linked
+//     record text), else preserved.
+//
+// FAIL-SAFE: if either stored JSONB field does not decode as its expected
+// shape (foreign bytes — jsonArrayNonEmpty already classified the flat
+// column as non-empty), the row's data is preserved WHOLESALE and only
+// fetched_at refreshes, mirroring the R4 clobber guard's "never clobber what
+// you do not understand"; the outcome's tokens are dropped for this window
+// and re-extracted at the next one. Cap overflow drops are logged at Debug
+// (not Warn) deliberately: this runs mid-tx, and the R7 buffered-log rule
+// reserves committed-write Warns for the post-COMMIT emitter.
+func mergeNpmProsePositiveIntoRow(dst, existing *repository.AdvisoryExcerpt, o *osvVulnFuncsOutcome) {
+	preserveWholesale := func() {
+		dst.VulnFuncs = existing.VulnFuncs
+		dst.VulnFuncsScoped = existing.VulnFuncsScoped
+		dst.RawExcerpt = existing.RawExcerpt
+	}
+	var existingFlat []string
+	if err := json.Unmarshal(existing.VulnFuncs, &existingFlat); err != nil {
+		preserveWholesale()
+		dst.AffectedPaths = existing.AffectedPaths
+		dst.RequiredConfig = existing.RequiredConfig
+		dst.RequiredEnv = existing.RequiredEnv
+		return
+	}
+	var existingScoped []osvScopedVulnFuncs
+	if len(existing.VulnFuncsScoped) > 0 {
+		if err := json.Unmarshal(existing.VulnFuncsScoped, &existingScoped); err != nil {
+			preserveWholesale()
+			dst.AffectedPaths = existing.AffectedPaths
+			dst.RequiredConfig = existing.RequiredConfig
+			dst.RequiredEnv = existing.RequiredEnv
+			return
+		}
+	}
+
+	dropped := 0
+	flat := make([]string, 0, len(existingFlat)+len(o.symbols))
+	seen := make(map[string]struct{}, len(existingFlat)+len(o.symbols))
+	for _, s := range existingFlat {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		flat = append(flat, s)
+	}
+	for _, s := range o.symbols {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		if len(flat) >= osvVulnFuncsMaxSymbolsPerCVE {
+			dropped++
+			continue
+		}
+		seen[s] = struct{}{}
+		flat = append(flat, s)
+	}
+
+	scoped := make([]osvScopedVulnFuncs, 0, len(existingScoped)+len(o.scoped))
+	scopedIdx := make(map[string]int, len(existingScoped)+len(o.scoped))
+	scopedTotal := 0
+	for _, sc := range existingScoped {
+		// Defensive copy: entries decoded from the row are fresh, but the
+		// outcome's entries below may share one backing token slice.
+		entry := osvScopedVulnFuncs{Module: sc.Module, VulnFuncs: append([]string(nil), sc.VulnFuncs...)}
+		scoped = append(scoped, entry)
+		scopedIdx[sc.Module] = len(scoped) - 1
+		scopedTotal += len(entry.VulnFuncs)
+	}
+	for _, sc := range o.scoped {
+		i, ok := scopedIdx[sc.Module]
+		if !ok {
+			scoped = append(scoped, osvScopedVulnFuncs{Module: sc.Module})
+			i = len(scoped) - 1
+			scopedIdx[sc.Module] = i
+		}
+		inModule := make(map[string]struct{}, len(scoped[i].VulnFuncs))
+		for _, s := range scoped[i].VulnFuncs {
+			inModule[s] = struct{}{}
+		}
+		for _, s := range sc.VulnFuncs {
+			if _, dup := inModule[s]; dup {
+				continue
+			}
+			if scopedTotal >= osvVulnFuncsMaxSymbolsPerCVE {
+				dropped++
+				continue
+			}
+			inModule[s] = struct{}{}
+			scoped[i].VulnFuncs = append(scoped[i].VulnFuncs, s)
+			scopedTotal++
+		}
+	}
+	if dropped > 0 {
+		slog.Debug("scheduler: npm merge exceeds per-CVE symbol caps, npm overflow dropped (M44 F470)",
+			"cve_id", dst.CVEID, "cap", osvVulnFuncsMaxSymbolsPerCVE, "dropped", dropped)
+	}
+	// Drop module entries left empty by the cap (a new module appended at
+	// the bound whose every token was then dropped) — an empty scoped entry
+	// serves nothing and would churn the stored JSON.
+	compacted := make([]osvScopedVulnFuncs, 0, len(scoped))
+	for _, sc := range scoped {
+		if len(sc.VulnFuncs) > 0 {
+			compacted = append(compacted, sc)
+		}
+	}
+
+	dst.VulnFuncs = stringsToJSONArray(flat)
+	dst.VulnFuncsScoped = scopedVulnFuncsToJSON(compacted)
+	dst.AffectedPaths = existing.AffectedPaths
+	dst.RequiredConfig = existing.RequiredConfig
+	dst.RequiredEnv = existing.RequiredEnv
+	if dst.RawExcerpt == "" {
+		dst.RawExcerpt = existing.RawExcerpt
+	}
 }
 
 // jsonArrayNonEmpty reports whether raw holds a JSON array with at least one
@@ -2677,6 +3022,219 @@ func scopedVulnFuncsToJSON(in []osvScopedVulnFuncs) json.RawMessage {
 		return nil
 	}
 	return b
+}
+
+// extractOSVNpmVulnFuncs converts an OSV/GHSA record's npm prose into
+// candidate vulnerable-function tokens (M44 Wave 2 / F470). npm has no
+// structured symbol source — OSV npm records carry a null
+// ecosystem_specific and the GHSA REST vulnerable_functions field is
+// unpopulated (0/100 recent npm advisories, 2026-07-10 recon) — so tokens
+// come from the summary/details markdown via the npm-tuned prose extractor
+// (advisory.ExtractVulnFuncsNpm: function/method-adjacency or dotted-chain +
+// vulnerability-keyword gates, JS-identifier shape filter, file/URL/version
+// shapes dropped).
+//
+// Returns the same two shapes as extractOSVGoVulnFuncs:
+//
+//   - flat: the deduped token list (feeds the CVE-level vuln_funcs union and
+//     the triage prompt grounding);
+//   - scoped: the SAME token list attributed to EVERY affected npm package
+//     (affected[].package.name where ecosystem == "npm", first-seen order,
+//     "@scope/name" kept verbatim) — prose carries no per-package
+//     attribution, and a lodash-style advisory really does cover its
+//     lodash/lodash-es/lodash.defaultsdeep forks, so each package's target
+//     rows receive the tokens (the R8f cross-module duplicate rule's npm
+//     analogue).
+//
+// SCOPE-UNKNOWN DROP (design decision, M43 anti-pattern 72): when the record
+// lists NO npm affected entry there is nothing to attribute the tokens to,
+// and the whole extraction is dropped — flat included — rather than stored
+// CVE-wide. Candidate purls are NOT used as a scope fallback: they come from
+// the NVD keyword/name-LIKE component match, which is too noisy to anchor
+// symbol attribution (a wrong package would steer the CLI's binding-aware
+// matching toward false reachable verdicts). In practice the GHSA follow-up
+// body always carries its npm affected entries, so the drop only hits
+// degenerate/foreign records.
+//
+// Bounds mirror the Go extraction: per-token npmWireSafeSymbol (1..3
+// JS-identifier dot-parts, osvVulnFuncsMaxSelectorBytes), flat capped at
+// osvVulnFuncsMaxSymbolsPerCVE, scoped attribution total capped at the same
+// bound (packages beyond it lose their attribution, Warn'd once per record —
+// parity with the R9 scoped-cap Warn).
+func extractOSVNpmVulnFuncs(vuln *client.OSVVulnerability) ([]string, []osvScopedVulnFuncs) {
+	if vuln == nil {
+		return nil, nil
+	}
+	var pkgs []string
+	seenPkg := make(map[string]struct{})
+	for _, aff := range vuln.Affected {
+		if !strings.EqualFold(aff.Package.Ecosystem, "npm") {
+			continue
+		}
+		name := strings.TrimSpace(aff.Package.Name)
+		if name == "" {
+			continue
+		}
+		if _, dup := seenPkg[name]; dup {
+			continue
+		}
+		seenPkg[name] = struct{}{}
+		pkgs = append(pkgs, name)
+	}
+	if len(pkgs) == 0 {
+		return nil, nil // scope unknown — drop, never store CVE-wide
+	}
+
+	prose := strings.TrimSpace(vuln.Summary + "\n" + vuln.Details)
+	var out []string
+	seen := make(map[string]struct{})
+	for _, tok := range advisory.ExtractVulnFuncsNpm(prose) {
+		sym, ok := npmWireSafeSymbol(tok)
+		if !ok {
+			slog.Debug("scheduler: npm prose token not wire-safe, skipped (M44 F470)",
+				"osv_id", vuln.ID, "token", tok)
+			continue
+		}
+		if _, dup := seen[sym]; dup {
+			continue
+		}
+		if len(out) >= osvVulnFuncsMaxSymbolsPerCVE {
+			slog.Warn("scheduler: npm prose extraction exceeds per-CVE symbol cap, truncating (M44 F470)",
+				"osv_id", vuln.ID, "cap", osvVulnFuncsMaxSymbolsPerCVE)
+			break
+		}
+		seen[sym] = struct{}{}
+		out = append(out, sym)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+
+	var scoped []osvScopedVulnFuncs
+	scopedTotal := 0
+	scopedDropped := 0
+	for _, p := range pkgs {
+		n := len(out)
+		if scopedTotal+n > osvVulnFuncsMaxSymbolsPerCVE {
+			n = osvVulnFuncsMaxSymbolsPerCVE - scopedTotal
+		}
+		scopedDropped += len(out) - n
+		if n <= 0 {
+			continue
+		}
+		scoped = append(scoped, osvScopedVulnFuncs{Module: p, VulnFuncs: out[:n]})
+		scopedTotal += n
+	}
+	if scopedDropped > 0 {
+		slog.Warn("scheduler: npm per-package attributions exceed per-CVE scoped symbol cap, scoped attributions dropped (M44 F470)",
+			"osv_id", vuln.ID, "cap", osvVulnFuncsMaxSymbolsPerCVE, "dropped", scopedDropped)
+	}
+	return out, scoped
+}
+
+// npmWireSafeSymbol validates one npm prose token for storage (M44 Wave 2 /
+// F470) — the npm counterpart of osvWireSafeSelector, against the npm wire
+// shape the M44 serving edge will apply (1..3 dot-parts, each
+// JS-identifier-shaped, '$' allowed; bare export names are the npm-dominant
+// form and ARE wire-legal, unlike Go's 2..3-part selectors). TrimSpace →
+// strip one trailing call-parens group → byte-length bound
+// (osvVulnFuncsMaxSelectorBytes) → shape check. The prose extractor already
+// enforces the same shape; this is the scheduler's belt+braces so no foreign
+// caller can slip a non-wire token into vuln_funcs.
+func npmWireSafeSymbol(token string) (string, bool) {
+	s := strings.TrimSpace(token)
+	if i := strings.IndexByte(s, '('); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if s == "" || len(s) > osvVulnFuncsMaxSelectorBytes {
+		return "", false
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) < 1 || len(parts) > 3 {
+		return "", false
+	}
+	for _, p := range parts {
+		if !isJSIdentifierShaped(p) {
+			return "", false
+		}
+	}
+	return s, true
+}
+
+// isJSIdentifierShaped mirrors advisory.isJSIdentifierShaped (unexported in
+// another package, duplicated here the same way isGoIdentifierShaped
+// duplicates handler.isGoIdentifier): first rune a letter/underscore/'$',
+// rest letters/digits/underscores/'$', Unicode letters allowed.
+func isJSIdentifierShaped(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || r == '$' || unicode.IsLetter(r):
+		case i > 0 && unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// combineOSVVulnFuncs merges one CVE's npm prose extraction into its Go
+// structured extraction (M44 Wave 2 / F470): flat = Go selectors first, then
+// npm tokens not already present (first-seen dedupe, the same rule the Go
+// union applies across modules); scoped = Go module entries followed by npm
+// package entries. Both caps re-apply to the COMBINED lists — each side was
+// individually capped at osvVulnFuncsMaxSymbolsPerCVE, so a mixed-ecosystem
+// CVE could otherwise store up to 2× the bound. Go entries are never dropped
+// in favour of npm ones (the structured source outranks prose); npm overflow
+// is dropped with one Warn.
+func combineOSVVulnFuncs(osvID string, goFlat []string, goScoped []osvScopedVulnFuncs, npmFlat []string, npmScoped []osvScopedVulnFuncs) ([]string, []osvScopedVulnFuncs) {
+	if len(npmFlat) == 0 {
+		return goFlat, goScoped
+	}
+	if len(goFlat) == 0 && len(goScoped) == 0 {
+		return npmFlat, npmScoped
+	}
+	dropped := 0
+	flat := goFlat
+	seen := make(map[string]struct{}, len(goFlat)+len(npmFlat))
+	for _, s := range goFlat {
+		seen[s] = struct{}{}
+	}
+	for _, s := range npmFlat {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		if len(flat) >= osvVulnFuncsMaxSymbolsPerCVE {
+			dropped++
+			continue
+		}
+		seen[s] = struct{}{}
+		flat = append(flat, s)
+	}
+	scoped := goScoped
+	scopedTotal := 0
+	for _, sc := range goScoped {
+		scopedTotal += len(sc.VulnFuncs)
+	}
+	for _, sc := range npmScoped {
+		n := len(sc.VulnFuncs)
+		if scopedTotal+n > osvVulnFuncsMaxSymbolsPerCVE {
+			n = osvVulnFuncsMaxSymbolsPerCVE - scopedTotal
+		}
+		dropped += len(sc.VulnFuncs) - n
+		if n <= 0 {
+			continue
+		}
+		scoped = append(scoped, osvScopedVulnFuncs{Module: sc.Module, VulnFuncs: sc.VulnFuncs[:n]})
+		scopedTotal += n
+	}
+	if dropped > 0 {
+		slog.Warn("scheduler: combined Go+npm extraction exceeds per-CVE symbol caps, npm overflow dropped (M44 F470)",
+			"osv_id", osvID, "cap", osvVulnFuncsMaxSymbolsPerCVE, "dropped", dropped)
+	}
+	return flat, scoped
 }
 
 // goStdlibTopLevelPackages is the allowlist of Go standard-library TOP-LEVEL
@@ -2912,6 +3470,19 @@ func truncateRunes(s string, n int) string {
 func firstGoVulndbAlias(aliases []string) string {
 	for _, a := range aliases {
 		if strings.HasPrefix(strings.TrimSpace(a), "GO-") {
+			return strings.TrimSpace(a)
+		}
+	}
+	return ""
+}
+
+// firstGHSAAlias returns the first "GHSA-" (GitHub Security Advisory) id in
+// aliases, or "" when none is present — the npm mirror-image of
+// firstGoVulndbAlias (M44 Wave 2 / F470): npm CVE-namespace records carry
+// their symbol-bearing markdown only on the GHSA alias home.
+func firstGHSAAlias(aliases []string) string {
+	for _, a := range aliases {
+		if strings.HasPrefix(strings.TrimSpace(a), "GHSA-") {
 			return strings.TrimSpace(a)
 		}
 	}
