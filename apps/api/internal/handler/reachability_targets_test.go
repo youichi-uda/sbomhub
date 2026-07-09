@@ -660,6 +660,316 @@ func TestReachabilityHandler_GetTargets_ScopedOnlyModuleMismatchOmitsField(t *te
 	}
 }
 
+// TestReachabilityHandler_GetTargets_NpmScopedDelivery (M44 Wave 3 / F471):
+// an npm target row receives the scoped symbols stored under its npm package
+// name — including the npm-native bare export shape ("defaultsDeep") that the
+// Go-only M43 edge dropped 100% of the time. This is the red→green pin for
+// the ecosystem-aware delivery edge: pre-F471, goModuleFromPurl returned
+// ("", false) for pkg:npm purls (scoped entries never matched) AND
+// normalizeVulnFuncs required 2..3 dot-parts (bare export names dropped), so
+// the row shipped with vuln_funcs omitted and the CLI silently degraded every
+// npm pair to import-only analysis.
+func TestReachabilityHandler_GetTargets_NpmScopedDelivery(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2025-5001", ComponentID: uuid.New(), Purl: "pkg:npm/lodash@4.17.21", ComponentName: "lodash", ComponentVersion: "4.17.21"},
+	}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2025-5001": {Scoped: []repository.ScopedVulnFuncs{
+			{Module: "lodash", Funcs: []string{"defaultsDeep", "_.defaultsDeep"}},
+		}},
+	}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(resp.Targets))
+	}
+	want := []string{"defaultsDeep", "_.defaultsDeep"}
+	got := resp.Targets[0].VulnFuncs
+	if len(got) != len(want) {
+		t.Fatalf("vuln_funcs = %v, want %v (npm scoped entries must be delivered under the npm package name, bare export shape kept)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("vuln_funcs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestNormalizeVulnFuncsNpm pins the npm-arm normalisation rules (M44 Wave 3
+// / F471): bare JS identifiers and 1..3-part dotted selectors survive
+// (npm advisories overwhelmingly name bare exports like "defaultsDeep");
+// path/URL shapes, bare versions, whitespace-embedded strings, 4+ parts and
+// oversized blobs drop. Trim / "()" strip / stable dedupe are shared with
+// the Go arm.
+func TestNormalizeVulnFuncsNpm(t *testing.T) {
+	long := strings.Repeat("a", 257)
+	atCap := strings.Repeat("a", 256)
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil input", nil, nil},
+		{"bare export kept", []string{"defaultsDeep"}, []string{"defaultsDeep"}},
+		{"underscore receiver kept", []string{"_.merge"}, []string{"_.merge"}},
+		{"dollar receiver kept", []string{"$.ajax"}, []string{"$.ajax"}},
+		{"node module selector kept", []string{"child_process.exec"}, []string{"child_process.exec"}},
+		{"three parts kept", []string{"a.b.c"}, []string{"a.b.c"}},
+		// Form-valid but semantically generic ("headers.location" is a
+		// property access, not a vulnerable function): the shape check is
+		// deliberately FORM-ONLY — dropping such tokens is the W2
+		// extraction stage's responsibility at store time, this edge
+		// cannot tell them apart from a genuine recv.method selector.
+		{"generic property access kept (form-only check)", []string{"headers.location"}, []string{"headers.location"}},
+		{"trailing parens stripped", []string{"defaultsDeep()"}, []string{"defaultsDeep"}},
+		{"whitespace trimmed", []string{"  defaultsDeep\t"}, []string{"defaultsDeep"}},
+		{"url dropped", []string{"https://evil"}, nil},
+		{"path dropped", []string{"lib/lodash.js"}, nil},
+		{"bare version dropped", []string{"1.2.3"}, nil},
+		{"digit-led part dropped", []string{"1pkg.foo"}, nil},
+		{"four parts dropped", []string{"a.b.c.d"}, nil},
+		{"embedded space dropped", []string{"prototype pollution"}, nil},
+		{"empty part dropped", []string{".foo", "foo."}, nil},
+		{"empty string dropped", []string{"", "   ", "()"}, nil},
+		{"over 256 bytes dropped", []string{long}, nil},
+		{"exactly 256 bytes kept", []string{atCap}, []string{atCap}},
+		{"dedupe keeps first-seen order", []string{"b", "a", "b"}, []string{"b", "a"}},
+		{"dedupe across paren variants", []string{"merge", "merge()"}, []string{"merge"}},
+		// Cross-ecosystem: a Go-shaped selector is 2..3 identifier parts,
+		// which is a valid JS selector shape too — it passes. Harmless:
+		// the CLI's binding-aware matching only fires on symbols the npm
+		// package actually binds (see normalizeVulnFuncsNpm).
+		{"go-shaped selector passes JS rules", []string{"Pkg.Type.Method", "xml.Unmarshal"}, []string{"Pkg.Type.Method", "xml.Unmarshal"}},
+		{"mixed keeps only well-formed", []string{"defaultsDeep", "https://evil", "1.2.3", "_.merge()", "a.b.c.d"}, []string{"defaultsDeep", "_.merge"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeVulnFuncsNpm(uuid.Nil, "CVE-TEST", tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("normalizeVulnFuncsNpm(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("normalizeVulnFuncsNpm(%v)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+				}
+			}
+			if len(tc.want) == 0 && got != nil {
+				t.Errorf("normalizeVulnFuncsNpm(%v) = %v, want nil (omitempty depends on it)", tc.in, got)
+			}
+		})
+	}
+}
+
+// TestNormalizeVulnFuncsNpm_CapAt200: the npm arm shares the
+// maxVulnFuncsPerCVE cap (and its post-normalisation placement) with the Go
+// arm through the common pipeline.
+func TestNormalizeVulnFuncsNpm_CapAt200(t *testing.T) {
+	raw := []string{"https://evil", "1.2.3"} // dropped: must not consume cap slots
+	for i := 0; i < 300; i++ {
+		raw = append(raw, fmt.Sprintf("export%d", i))
+	}
+	got := normalizeVulnFuncsNpm(uuid.Nil, "CVE-TEST", raw)
+	if len(got) != 200 {
+		t.Fatalf("len = %d, want 200 (cap)", len(got))
+	}
+	if got[0] != "export0" || got[199] != "export199" {
+		t.Errorf("got[0]=%q got[199]=%q, want export0 / export199 (first 200 normalised survivors)", got[0], got[199])
+	}
+}
+
+// TestNormalizeVulnFuncsForEcosystem pins the dispatch rule (M44 Wave 3 /
+// F471): "npm" → JS rules, "go" → Go rules, and any OTHER ecosystem ("" for
+// purl-less rows, "maven", ...) conservatively keeps the Go rules — the
+// exact pre-F471 behaviour for those rows.
+func TestNormalizeVulnFuncsForEcosystem(t *testing.T) {
+	in := []string{"defaultsDeep", "xml.Unmarshal"}
+	cases := []struct {
+		ecosystem string
+		want      []string
+	}{
+		{"npm", []string{"defaultsDeep", "xml.Unmarshal"}},
+		{"go", []string{"xml.Unmarshal"}},
+		{"", []string{"xml.Unmarshal"}},
+		{"maven", []string{"xml.Unmarshal"}},
+	}
+	for _, tc := range cases {
+		got := normalizeVulnFuncsForEcosystem(uuid.Nil, "CVE-TEST", tc.ecosystem, in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("ecosystem %q: got %v, want %v", tc.ecosystem, got, tc.want)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("ecosystem %q: got[%d] = %q, want %q", tc.ecosystem, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+// TestReachabilityHandler_GetTargets_NpmScopedPackageAndCaseFolding
+// (M44 Wave 3 / F471): scoped npm matching covers @scope/name packages —
+// whether the purl percent-encodes the whole namespace (%40scope%2Fname),
+// only the "@" (Syft's %40scope/name), or uses a literal "@" — and the purl
+// type matches case-insensitively (pkg:NPM), parity with the pkg:GOLANG
+// handling (EcosystemFromPurl lowercases the type, so such rows ARE served
+// with ecosystem "npm" and must reach the scoped entries too).
+func TestReachabilityHandler_GetTargets_NpmScopedPackageAndCaseFolding(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2025-5002", ComponentID: uuid.New(), Purl: "pkg:npm/%40nestjs%2Fcore@8.0.0", ComponentName: "@nestjs/core", ComponentVersion: "8.0.0"},
+		{CVEID: "CVE-2025-5002", ComponentID: uuid.New(), Purl: "pkg:npm/%40nestjs/core@8.0.0", ComponentName: "@nestjs/core", ComponentVersion: "8.0.0"},
+		{CVEID: "CVE-2025-5002", ComponentID: uuid.New(), Purl: "pkg:npm/@nestjs/core@8.0.0", ComponentName: "@nestjs/core", ComponentVersion: "8.0.0"},
+		{CVEID: "CVE-2025-5002", ComponentID: uuid.New(), Purl: "pkg:NPM/lodash@4.17.21", ComponentName: "lodash", ComponentVersion: "4.17.21"},
+	}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2025-5002": {Scoped: []repository.ScopedVulnFuncs{
+			{Module: "@nestjs/core", Funcs: []string{"createApplication"}},
+			{Module: "lodash", Funcs: []string{"defaultsDeep"}},
+		}},
+	}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 4 {
+		t.Fatalf("targets len = %d, want 4", len(resp.Targets))
+	}
+	want := [][]string{
+		{"createApplication"}, // fully percent-encoded @scope/name
+		{"createApplication"}, // Syft-style %40scope/name
+		{"createApplication"}, // literal-@ producer
+		{"defaultsDeep"},      // pkg:NPM type case-folds; other package's symbols must not leak
+	}
+	for i, w := range want {
+		got := resp.Targets[i].VulnFuncs
+		if len(got) != len(w) {
+			t.Fatalf("targets[%d] (purl %s) vuln_funcs = %v, want %v", i, resp.Targets[i].Purl, got, w)
+		}
+		for j := range w {
+			if got[j] != w[j] {
+				t.Errorf("targets[%d].vuln_funcs[%d] = %q, want %q", i, j, got[j], w[j])
+			}
+		}
+	}
+}
+
+// TestReachabilityHandler_GetTargets_UnscopedUnionEcosystemNormalized
+// (M44 Wave 3 / F471): the unscoped (prose/legacy) union is CVE-wide, but
+// each row normalises it under its OWN ecosystem's rules — an npm-shaped
+// bare export in a shared union drops naturally from a Go row's wire (the
+// CLI's Go parseSymbolSelectors would hard-fail the whole symbol walk on
+// it), while the npm sibling row keeps it. The Go-shaped selector passes on
+// both rows (valid in both grammars — harmless on npm, see the form-only
+// note on normalizeVulnFuncsNpm).
+func TestReachabilityHandler_GetTargets_UnscopedUnionEcosystemNormalized(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2025-5003", ComponentID: uuid.New(), Purl: "pkg:golang/example.com/foo@v1.0.0", ComponentName: "foo", ComponentVersion: "v1.0.0"},
+		{CVEID: "CVE-2025-5003", ComponentID: uuid.New(), Purl: "pkg:npm/lodash@4.17.21", ComponentName: "lodash", ComponentVersion: "4.17.21"},
+	}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2025-5003": {Unscoped: []string{"defaultsDeep", "xml.Unmarshal"}},
+	}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 2 {
+		t.Fatalf("targets len = %d, want 2", len(resp.Targets))
+	}
+	want := [][]string{
+		{"xml.Unmarshal"},                 // Go row: bare npm export dropped by the Go rules
+		{"defaultsDeep", "xml.Unmarshal"}, // npm row: both shapes are valid JS selectors
+	}
+	for i, w := range want {
+		got := resp.Targets[i].VulnFuncs
+		if len(got) != len(w) {
+			t.Fatalf("targets[%d] (purl %s) vuln_funcs = %v, want %v", i, resp.Targets[i].Purl, got, w)
+		}
+		for j := range w {
+			if got[j] != w[j] {
+				t.Errorf("targets[%d].vuln_funcs[%d] = %q, want %q", i, j, got[j], w[j])
+			}
+		}
+	}
+}
+
+// TestNpmPackageFromPurl pins the handler-side purl → npm package name
+// derivation (M44 Wave 3 / F471). The result is matched verbatim against
+// the Module slot of the CVE's scoped vuln_funcs entries (W2 stores npm
+// scoped entries under the package name, "@scope/name" included), so the
+// parsing premises mirror goModuleFromPurl: exact-case "pkg:" scheme,
+// case-insensitive type segment, case-preserving name.
+func TestNpmPackageFromPurl(t *testing.T) {
+	cases := []struct {
+		purl string
+		want string
+		ok   bool
+	}{
+		{"pkg:npm/lodash@4.17.21", "lodash", true},
+		// Scoped packages in every producer variant: fully encoded,
+		// Syft-style (only the "@" encoded), and literal "@".
+		{"pkg:npm/%40scope%2Fname@1.0.0", "@scope/name", true},
+		{"pkg:npm/%40scope/name@1.0.0", "@scope/name", true},
+		{"pkg:npm/@scope/name@1.0.0", "@scope/name", true},
+		{"pkg:npm/@scope/name", "@scope/name", true},
+		// Version absent / qualifiers / subpath cut points.
+		{"pkg:npm/lodash", "lodash", true},
+		{"pkg:npm/lodash?arch=amd64", "lodash", true},
+		{"pkg:npm/lodash#sub/dir", "lodash", true},
+		// Scheme-less producer tolerance (mirrors goModuleFromPurl).
+		{"npm/lodash@1.0.0", "lodash", true},
+		// The purl type is case-insensitive; the name keeps its case.
+		{"pkg:NPM/lodash@4.17.21", "lodash", true},
+		{"pkg:npm/jQuery@1.7.2", "jQuery", true},
+		// Surrounding whitespace tolerated.
+		{"  pkg:npm/lodash@4.17.21  ", "lodash", true},
+		// The "pkg:" scheme stays exact-case (EcosystemFromPurl rejects
+		// "PKG:" too, so such a row never reaches the scoped path).
+		{"PKG:npm/lodash@4.17.21", "", false},
+		// Not derivable: non-npm / malformed / empty — the caller serves
+		// the unscoped union only.
+		{"pkg:golang/github.com/a/b@v1.0.0", "", false},
+		{"pkg:npm/", "", false},
+		{"pkg:npm/@1.0.0", "", false},
+		{"lodash@4.17.21", "", false},
+		{"", "", false},
+		{"   ", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := npmPackageFromPurl(tc.purl)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("npmPackageFromPurl(%q) = (%q, %v), want (%q, %v)", tc.purl, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
 // TestGoModuleFromPurl pins the handler-side purl → Go module derivation
 // (M43 Phase D R8f). It MUST stay derivation-compatible with the CLI's
 // goModuleFromPurl (sbomhub-cli/internal/api/reachability.go) — the CLI

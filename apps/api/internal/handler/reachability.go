@@ -463,27 +463,47 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 
 	// Per-row symbol projection (M43 Phase D round 8 / R8f): a target row
 	// receives (a) the scoped entries whose module matches the row's
-	// purl-derived Go module, then (b) the unscoped union (prose sources /
+	// purl-derived module, then (b) the unscoped union (prose sources /
 	// pre-057 legacy rows) — normalised as one list so the delivery cap
 	// still trims the tail (structured, module-matched symbols lead). The
 	// pre-R8f behaviour attached the CVE-LEVEL union to every row, so one
 	// CVE spanning several Go modules leaked component B's symbols into
 	// component A's row and a project call into B's package flipped A to a
 	// false `reachable` (over-report). Rows whose module cannot be derived
-	// (no purl / non-golang purl) get only the unscoped union; a row with
+	// (no purl / underivable purl) get only the unscoped union; a row with
 	// scoped entries but no module match and no unscoped symbols omits the
 	// field entirely (import-only is the correct CLI fallback for it).
-	// Results are memoised per (cve, module) so the normalisation (and its
-	// cap Warn) runs once per distinct pair, not once per row.
-	type cveModuleKey struct{ cve, module string }
+	//
+	// Both the module derivation and the normalisation dispatch on the
+	// row's purl-derived ecosystem (M44 Wave 3 / F471): a pkg:golang row
+	// matches scoped entries by Go module path and normalises under the Go
+	// selector rules; a pkg:npm row matches by npm package name (W2 stores
+	// npm scoped entries under the package name, "@scope/name" included)
+	// and normalises under the JS selector rules — which accept the
+	// npm-native bare export shape ("defaultsDeep") the Go rules drop.
+	// Every other ecosystem conservatively keeps the Go behaviour (no
+	// scoped match, Go normalisation), exactly as pre-F471. The unscoped
+	// union is normalised by the ROW's normaliser too, so a cross-ecosystem
+	// token in a shared prose union drops naturally on the rows it cannot
+	// apply to (a bare npm export never reaches a Go row's wire).
+	// Results are memoised per (cve, ecosystem, module) so the
+	// normalisation (and its cap Warn) runs once per distinct triple, not
+	// once per row.
+	type cveModuleKey struct{ cve, ecosystem, module string }
 	funcsCache := make(map[cveModuleKey][]string)
-	funcsForRow := func(cveID, purl string) []string {
+	funcsForRow := func(cveID, purl, ecosystem string) []string {
 		raw, ok := rawFuncsByCVE[cveID]
 		if !ok {
 			return nil
 		}
-		module, _ := goModuleFromPurl(purl) // "" when not derivable → unscoped only
-		key := cveModuleKey{cve: cveID, module: module}
+		var module string
+		switch ecosystem {
+		case "npm":
+			module, _ = npmPackageFromPurl(purl) // "" when not derivable → unscoped only
+		default:
+			module, _ = goModuleFromPurl(purl) // "" when not derivable → unscoped only
+		}
+		key := cveModuleKey{cve: cveID, ecosystem: ecosystem, module: module}
 		if cached, ok := funcsCache[key]; ok {
 			return cached
 		}
@@ -496,34 +516,51 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 			}
 		}
 		union = append(union, raw.Unscoped...)
-		out := normalizeVulnFuncs(tenantID, cveID, union)
+		out := normalizeVulnFuncsForEcosystem(tenantID, cveID, ecosystem, union)
 		funcsCache[key] = out
 		return out
 	}
 
 	items := make([]reachabilityTargetItem, 0, len(rows))
 	for _, t := range rows {
+		ecosystem := repository.EcosystemFromPurl(t.Purl)
 		items = append(items, reachabilityTargetItem{
 			CVEID:            t.CVEID,
 			ComponentID:      t.ComponentID.String(),
 			Purl:             t.Purl,
 			ComponentName:    t.ComponentName,
 			ComponentVersion: t.ComponentVersion,
-			Ecosystem:        repository.EcosystemFromPurl(t.Purl),
-			VulnFuncs:        funcsForRow(t.CVEID, t.Purl), // nil (field omitted) when no symbol survived
+			Ecosystem:        ecosystem,
+			VulnFuncs:        funcsForRow(t.CVEID, t.Purl, ecosystem), // nil (field omitted) when no symbol survived
 		})
 	}
 
 	return c.JSON(http.StatusOK, reachabilityTargetsResponse{Targets: items})
 }
 
+// normalizeVulnFuncsForEcosystem dispatches the advisory-declared symbol
+// normalisation on the target row's purl-derived ecosystem (M44 Wave 3 /
+// F471): "npm" rows take the JS selector rules (normalizeVulnFuncsNpm),
+// everything else — "go", "" (no purl) and any other ecosystem — keeps the
+// original Go rules (normalizeVulnFuncs), which is exactly the pre-F471
+// behaviour for those rows. New ecosystems must add an explicit arm here;
+// defaulting to the conservative Go shape check keeps an unknown ecosystem
+// from shipping selectors no analyzer requested.
+func normalizeVulnFuncsForEcosystem(tenantID uuid.UUID, cveID, ecosystem string, raw []string) []string {
+	if ecosystem == "npm" {
+		return normalizeVulnFuncsNpm(tenantID, cveID, raw)
+	}
+	return normalizeVulnFuncs(tenantID, cveID, raw)
+}
+
 // normalizeVulnFuncs canonicalises the advisory-declared symbol list for the
-// GET /reachability/targets wire (M43 Wave 1 / F465, issue #167). This edge
-// is the single source of truth for the normalisation: the CLI's
-// parseSymbolSelectors treats ONE malformed selector ("Foo", "Foo()", 4+
-// dot-parts) as fatal for the whole symbol walk — degrading the entire run
-// to import-only — so anything not shaped like "Pkg.Func" /
-// "Pkg.Type.Method" must be dropped before it ships.
+// GET /reachability/targets wire (M43 Wave 1 / F465, issue #167) — the GO
+// ecosystem rules (npm rows dispatch to normalizeVulnFuncsNpm instead, see
+// normalizeVulnFuncsForEcosystem). This edge is the single source of truth
+// for the normalisation: the CLI's parseSymbolSelectors treats ONE malformed
+// selector ("Foo", "Foo()", 4+ dot-parts) as fatal for the whole symbol walk
+// — degrading the entire run to import-only — so anything not shaped like
+// "Pkg.Func" / "Pkg.Type.Method" must be dropped before it ships.
 //
 // Pipeline per element (frozen spec):
 //
@@ -543,11 +580,50 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 // omitempty field drops off the wire entirely.
 //
 // tenantID / cveID are logging context only (M43 Phase D R2 finding 5):
-// the cap Warn below is the only operator-visible trace that advisory
-// symbols were dropped at the serving edge, and without the (tenant, cve)
-// pair the line is unactionable in aggregate logs. They play no part in
-// the normalisation itself.
+// the cap Warn is the only operator-visible trace that advisory symbols
+// were dropped at the serving edge, and without the (tenant, cve) pair the
+// line is unactionable in aggregate logs. They play no part in the
+// normalisation itself.
 func normalizeVulnFuncs(tenantID uuid.UUID, cveID string, raw []string) []string {
+	return normalizeVulnFuncsShaped(tenantID, cveID, raw, isGoVulnFuncSelector)
+}
+
+// normalizeVulnFuncsNpm is the npm-ecosystem arm of the vuln_funcs
+// normalisation (M44 Wave 3 / F471). npm advisories overwhelmingly name
+// bare export identifiers ("defaultsDeep") — a shape the Go rules drop 100%
+// of the time — so the accepted forms are:
+//
+//   - a bare JS identifier: "defaultsDeep", "_", "$" ("$" and "_" are valid
+//     JS identifier characters);
+//   - a dotted receiver selector with 1..3 JS-identifier-shaped parts:
+//     "_.merge", "child_process.exec", "a.b.c" (4+ parts: drop).
+//
+// Shared with the Go arm: TrimSpace, one trailing "()" strip, stable
+// first-seen dedupe and the maxVulnFuncsPerCVE cap. Dropped: path/URL
+// shapes ("/" or ":" never survive the identifier check), bare version
+// strings ("1.2.3" — digit-led parts), whitespace-embedded strings, and
+// anything longer than maxNpmVulnFuncBytes (JS minifier blobs / prose
+// fragments the extraction heuristics let through).
+//
+// NOTE: the shape check is deliberately FORM-ONLY. A form-valid but
+// semantically generic token like "headers.location" (a property access,
+// not a vulnerable function) is the W2 extraction stage's responsibility to
+// drop at store time — this edge cannot tell it apart from a genuine
+// "recv.method" selector and must not try. Symmetrically, a Go-shaped
+// "Pkg.Type.Method" arriving in an npm row's union passes here (3
+// identifier parts is a valid JS selector shape): harmless, because the
+// CLI's binding-aware matching only fires on symbols the npm package
+// actually binds.
+func normalizeVulnFuncsNpm(tenantID uuid.UUID, cveID string, raw []string) []string {
+	return normalizeVulnFuncsShaped(tenantID, cveID, raw, isNpmVulnFuncSelector)
+}
+
+// normalizeVulnFuncsShaped is the shared vuln_funcs pipeline: TrimSpace →
+// strip one trailing "()" → drop empties → keep only elements the
+// ecosystem's wellFormed shape check accepts → de-duplicate preserving
+// first-seen order → cap at maxVulnFuncsPerCVE (with the operator Warn).
+// The ecosystem arms differ ONLY in the wellFormed predicate.
+func normalizeVulnFuncsShaped(tenantID uuid.UUID, cveID string, raw []string, wellFormed func(string) bool) []string {
 	var out []string
 	seen := make(map[string]struct{}, len(raw))
 	for _, s := range raw {
@@ -556,18 +632,7 @@ func normalizeVulnFuncs(tenantID uuid.UUID, cveID string, raw []string) []string
 		if s == "" {
 			continue
 		}
-		parts := strings.Split(s, ".")
-		if len(parts) < 2 || len(parts) > 3 {
-			continue
-		}
-		wellFormed := true
-		for _, p := range parts {
-			if !isGoIdentifier(p) {
-				wellFormed = false
-				break
-			}
-		}
-		if !wellFormed {
+		if !wellFormed(s) {
 			continue
 		}
 		if _, dup := seen[s]; dup {
@@ -584,6 +649,47 @@ func normalizeVulnFuncs(tenantID uuid.UUID, cveID string, raw []string) []string
 	}
 	return out
 }
+
+// isGoVulnFuncSelector is the Go arm's shape check: 2 or 3 dot-separated
+// parts, each Go-identifier-shaped (the frozen M43 spec — see
+// normalizeVulnFuncs).
+func isGoVulnFuncSelector(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return false
+	}
+	for _, p := range parts {
+		if !isGoIdentifier(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// isNpmVulnFuncSelector is the npm arm's shape check: 1..3 dot-separated
+// parts, each JS-identifier-shaped, total length ≤ maxNpmVulnFuncBytes
+// (see normalizeVulnFuncsNpm for the rationale and the form-only caveat).
+func isNpmVulnFuncSelector(s string) bool {
+	if len(s) > maxNpmVulnFuncBytes {
+		return false
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) > 3 {
+		return false
+	}
+	for _, p := range parts {
+		if !isJSIdentifier(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// maxNpmVulnFuncBytes bounds one npm vuln_funcs selector (M44 Wave 3 /
+// F471). Real npm export names and recv.method selectors run well under
+// 100 bytes; anything longer is minifier output or a prose fragment the
+// extraction heuristics let through, and would only bloat the worklist.
+const maxNpmVulnFuncBytes = 256
 
 // maxVulnFuncsPerCVE bounds the advisory-declared symbol list shipped per
 // CVE on GET /reachability/targets (M43 Phase D review). 200 comfortably
@@ -649,6 +755,69 @@ func goModuleFromPurl(purl string) (string, bool) {
 	return s, true
 }
 
+// npmPackageFromPurl extracts the npm package name from a Package URL of
+// the form pkg:npm/<name>@<version> (M44 Wave 3 / F471), e.g.
+//
+//	pkg:npm/lodash@4.17.21              -> lodash
+//	pkg:npm/%40scope%2Fname@1.0.0       -> @scope/name
+//	pkg:npm/%40scope/name@1.0.0         -> @scope/name  (Syft encodes only the "@")
+//	pkg:npm/@scope/name@1.0.0           -> @scope/name  (literal-@ producer tolerance)
+//
+// It is the npm counterpart of goModuleFromPurl: the serving edge matches
+// the result against the Module slot of the CVE's scoped vuln_funcs entries
+// (W2 stores npm scoped entries under the package name, "@scope/name"
+// included — no migration needed). Returns ("", false) for empty input or a
+// non-npm purl; the caller then serves only the unscoped symbol union for
+// that target row.
+//
+// Same parsing premises as goModuleFromPurl: the "pkg:" scheme stays
+// exact-case (parity with repository.EcosystemFromPurl, so a "PKG:" row
+// never reaches the scoped-serving path anyway), the purl type segment
+// "npm" matches case-insensitively (purl spec; a pkg:NPM row IS served with
+// ecosystem "npm"), and the decoded package name keeps its case (npm names
+// are compared verbatim against the stored Module).
+func npmPackageFromPurl(purl string) (string, bool) {
+	s := strings.TrimSpace(purl)
+	if s == "" {
+		return "", false
+	}
+	rest := strings.TrimPrefix(s, "pkg:")
+	i := strings.IndexByte(rest, '/')
+	if i < 0 || !strings.EqualFold(rest[:i], "npm") {
+		return "", false
+	}
+	s = rest[i+1:]
+	// Strip qualifiers (?) and subpath (#) first, then the version. The
+	// version delimiter is the first '@' — except that a literal leading
+	// scope marker ("@scope/name@1.0.0", non-spec but common) must not be
+	// mistaken for it, so the search starts after position 0.
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	verFrom := 0
+	if strings.HasPrefix(s, "@") {
+		verFrom = 1
+	}
+	if i := strings.IndexByte(s[verFrom:], '@'); i >= 0 {
+		s = s[:verFrom+i]
+	}
+	if s == "" {
+		return "", false
+	}
+	// purl path segments are percent-encoded; decode conservatively (this
+	// is what turns %40scope%2Fname into @scope/name).
+	if decoded, err := url.PathUnescape(s); err == nil {
+		s = decoded
+	}
+	// A scoped name must carry both the scope and the package part —
+	// "@scope/name". A lone "@..." without "/" is a malformed purl
+	// ("pkg:npm/@1.0.0"): no scoped entry can be stored under it.
+	if strings.HasPrefix(s, "@") && !strings.Contains(s, "/") {
+		return "", false
+	}
+	return s, true
+}
+
 // isGoIdentifier reports whether s is shaped like a Go identifier (first
 // rune a letter or underscore, rest letters/digits/underscores; Unicode
 // letters allowed per the Go spec). Used by normalizeVulnFuncs to drop
@@ -662,6 +831,28 @@ func isGoIdentifier(s string) bool {
 	for i, r := range s {
 		switch {
 		case r == '_' || unicode.IsLetter(r):
+		case i > 0 && unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isJSIdentifier reports whether s is shaped like a JavaScript identifier
+// (first rune a letter, "_" or "$"; rest may add digits — the conservative
+// core of the ECMAScript IdentifierName grammar, Unicode letters allowed).
+// Used by the npm arm of the vuln_funcs normalisation: it is a strict
+// superset of isGoIdentifier ("$" is the only addition), so every Go-shaped
+// selector part also passes here — see the cross-ecosystem note on
+// normalizeVulnFuncsNpm.
+func isJSIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || r == '$' || unicode.IsLetter(r):
 		case i > 0 && unicode.IsDigit(r):
 		default:
 			return false
