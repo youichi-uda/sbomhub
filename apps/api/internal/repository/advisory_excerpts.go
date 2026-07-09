@@ -32,10 +32,17 @@ type AdvisoryExcerpt struct {
 	// in-process representation is json.RawMessage so callers can
 	// either unmarshal into a typed struct or pass the bytes through
 	// without rewriting. nil maps to '[]' on insert.
-	VulnFuncs      json.RawMessage
-	AffectedPaths  json.RawMessage
-	RequiredConfig json.RawMessage
-	RequiredEnv    json.RawMessage
+	//
+	// VulnFuncsScoped (migration 057, M43 Phase D round 8 / R8f) is the
+	// module-scoped companion to the flat VulnFuncs union, shape
+	// [{"module": "<Go module path>", "vuln_funcs": ["Pkg.Func", ...]}, ...].
+	// Written by the scheduler's OSV pass; '[]' for prose sources
+	// (nvd/ghsa/jvn), tombstones, and pre-057 legacy rows.
+	VulnFuncs       json.RawMessage
+	VulnFuncsScoped json.RawMessage
+	AffectedPaths   json.RawMessage
+	RequiredConfig  json.RawMessage
+	RequiredEnv     json.RawMessage
 
 	// Verbatim slice of advisory text the parser based the structured
 	// fields on. Empty string is stored as SQL NULL (see header on
@@ -110,29 +117,31 @@ func (r *AdvisoryExcerptsRepository) Upsert(ctx context.Context, e *AdvisoryExce
 	const query = `
 		INSERT INTO advisory_excerpts (
 			id, tenant_id, cve_id, source,
-			vuln_funcs, affected_paths, required_config, required_env,
+			vuln_funcs, vuln_funcs_scoped, affected_paths, required_config, required_env,
 			raw_excerpt, fetched_at,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4,
-			$5, $6, $7, $8,
-			$9, $10,
+			$5, $6, $7, $8, $9,
+			$10, $11,
 			NOW(), NOW()
 		)
 		ON CONFLICT (tenant_id, cve_id, source) DO UPDATE SET
-			vuln_funcs      = EXCLUDED.vuln_funcs,
-			affected_paths  = EXCLUDED.affected_paths,
-			required_config = EXCLUDED.required_config,
-			required_env    = EXCLUDED.required_env,
-			raw_excerpt     = EXCLUDED.raw_excerpt,
-			fetched_at      = EXCLUDED.fetched_at,
-			updated_at      = NOW()
+			vuln_funcs        = EXCLUDED.vuln_funcs,
+			vuln_funcs_scoped = EXCLUDED.vuln_funcs_scoped,
+			affected_paths    = EXCLUDED.affected_paths,
+			required_config   = EXCLUDED.required_config,
+			required_env      = EXCLUDED.required_env,
+			raw_excerpt       = EXCLUDED.raw_excerpt,
+			fetched_at        = EXCLUDED.fetched_at,
+			updated_at        = NOW()
 		RETURNING id, created_at, updated_at
 	`
 
 	err := r.q(ctx).QueryRowContext(ctx, query,
 		e.ID, e.TenantID, e.CVEID, e.Source,
 		jsonbOrEmptyArray(e.VulnFuncs),
+		jsonbOrEmptyArray(e.VulnFuncsScoped),
 		jsonbOrEmptyArray(e.AffectedPaths),
 		jsonbOrEmptyArray(e.RequiredConfig),
 		jsonbOrEmptyArray(e.RequiredEnv),
@@ -163,7 +172,7 @@ func (r *AdvisoryExcerptsRepository) GetByCVE(ctx context.Context, tenantID uuid
 
 	const query = `
 		SELECT id, tenant_id, cve_id, source,
-			vuln_funcs, affected_paths, required_config, required_env,
+			vuln_funcs, vuln_funcs_scoped, affected_paths, required_config, required_env,
 			raw_excerpt, fetched_at,
 			created_at, updated_at
 		FROM advisory_excerpts
@@ -207,7 +216,7 @@ func (r *AdvisoryExcerptsRepository) GetBySource(ctx context.Context, tenantID u
 
 	const query = `
 		SELECT id, tenant_id, cve_id, source,
-			vuln_funcs, affected_paths, required_config, required_env,
+			vuln_funcs, vuln_funcs_scoped, affected_paths, required_config, required_env,
 			raw_excerpt, fetched_at,
 			created_at, updated_at
 		FROM advisory_excerpts
@@ -224,43 +233,84 @@ func (r *AdvisoryExcerptsRepository) GetBySource(ctx context.Context, tenantID u
 	return &e, nil
 }
 
-// ListVulnFuncsByCVEs returns, for each requested CVE, the union of the
-// vuln_funcs symbol strings across every advisory source row (nvd / ghsa /
-// jvn / osv) the tenant holds for that CVE, keyed by cve_id (M43 Wave 1 / F465,
+// ScopedVulnFuncs is one module's advisory-declared symbol list, decoded
+// from an advisory_excerpts.vuln_funcs_scoped element (migration 057, M43
+// Phase D round 8 / R8f). Module is the OSV affected[].package.name the
+// symbols were declared under (Go vulndb's synthetic "stdlib" /
+// "toolchain" verbatim); Funcs keeps the on-disk order.
+type ScopedVulnFuncs struct {
+	Module string
+	Funcs  []string
+}
+
+// CVEVulnFuncs is one CVE's advisory-declared symbol inventory as
+// ListVulnFuncsByCVEs returns it (M43 Phase D round 8 / R8f):
+//
+//   - Scoped: module-attributed lists from rows that carry a well-formed
+//     vuln_funcs_scoped value. The serving edge hands a target row only
+//     the entries whose Module matches the component's purl-derived Go
+//     module.
+//   - Unscoped: the flat vuln_funcs unions of rows WITHOUT module
+//     attribution (nvd/ghsa/jvn prose rows, pre-057 legacy osv rows) —
+//     served to every target row of the CVE, as before.
+type CVEVulnFuncs struct {
+	Unscoped []string
+	Scoped   []ScopedVulnFuncs
+}
+
+// ListVulnFuncsByCVEs returns, for each requested CVE, the advisory-declared
+// vulnerable symbols across every advisory source row (nvd / ghsa / jvn /
+// osv) the tenant holds for that CVE, keyed by cve_id (M43 Wave 1 / F465,
 // issue #167: GET /reachability/targets enriches each target row with the
 // advisory-declared vulnerable symbols so the CLI can run a symbol-level
-// reachability walk instead of import-only analysis).
+// reachability walk instead of import-only analysis). Since M43 Phase D
+// round 8 (R8f) the result separates module-scoped symbols from the
+// unscoped union — see CVEVulnFuncs.
 //
 // Contract:
 //   - CVEs with no advisory_excerpts rows (or whose rows carry no string
 //     symbols) are simply absent from the returned map — callers treat a
 //     missing key as "no symbols known".
+//   - Per-row routing (R8f): a row whose vuln_funcs_scoped holds at least
+//     one well-formed entry contributes ONLY those entries (to Scoped) —
+//     its flat vuln_funcs is deliberately NOT added to Unscoped, because
+//     the flat column is the union of the scoped lists and double-adding
+//     it would re-broadcast every module's symbols to every target row,
+//     silently undoing the scoping. A row whose vuln_funcs_scoped is
+//     empty / absent / malformed (nvd/ghsa/jvn prose rows, pre-057 legacy
+//     osv rows, tombstones) contributes its flat vuln_funcs to Unscoped,
+//     exactly as before R8f.
 //   - The per-CVE order is stable: the 'osv' row first, then the remaining
 //     sources in lexicographic order (ghsa < jvn < nvd), and elements keep
-//     their on-disk array order within each row. osv leads because it is
-//     the source that carries the structured Go vulndb symbol lists, and
-//     the handler caps delivery at 200 symbols per CVE — with plain
-//     lexicographic order (osv last) a noisy free-text-derived source
-//     could consume the whole cap and crowd the structured osv symbols
-//     off the wire (M43 Phase D R2 finding 4). No de-duplication happens
-//     here; the handler edge owns normalisation (trim / "()" strip /
-//     shape filter / dedupe) as its single source of truth.
+//     their on-disk array order within each row (Scoped entries keep row
+//     order too). osv leads because it is the source that carries the
+//     structured Go vulndb symbol lists, and the handler caps delivery at
+//     200 symbols per CVE — with plain lexicographic order (osv last) a
+//     noisy free-text-derived source could consume the whole cap and crowd
+//     the structured osv symbols off the wire (M43 Phase D R2 finding 4).
+//     No de-duplication happens here; the handler edge owns normalisation
+//     (trim / "()" strip / shape filter / dedupe) as its single source of
+//     truth.
 //   - vuln_funcs is written as a JSON array of strings by the scheduler
 //     (stringsToJSONArray), but Upsert passes raw JSON through, so foreign
 //     shapes are tolerated leniently: a non-array value skips the row and a
 //     non-string element skips the element, rather than failing the whole
-//     worklist read.
+//     worklist read. vuln_funcs_scoped gets the same lenient posture: a
+//     non-array value or a malformed element ({module,vuln_funcs} shape
+//     violation, empty module, no string funcs) is skipped, and a row left
+//     with zero well-formed scoped entries falls back to the unscoped-flat
+//     contribution above.
 //   - An empty cveIDs slice short-circuits to an empty map with no SQL
 //     issued.
 //
 // tenantID MUST come from the authenticated session (same warning as
 // GetByCVE): rows are filtered by the explicit tenant clause AND by the
 // migration 033 FORCE RLS policy when running inside a TenantTx.
-func (r *AdvisoryExcerptsRepository) ListVulnFuncsByCVEs(ctx context.Context, tenantID uuid.UUID, cveIDs []string) (map[string][]string, error) {
+func (r *AdvisoryExcerptsRepository) ListVulnFuncsByCVEs(ctx context.Context, tenantID uuid.UUID, cveIDs []string) (map[string]CVEVulnFuncs, error) {
 	if tenantID == uuid.Nil {
 		return nil, fmt.Errorf("AdvisoryExcerptsRepository.ListVulnFuncsByCVEs: tenant_id is required")
 	}
-	out := make(map[string][]string, len(cveIDs))
+	out := make(map[string]CVEVulnFuncs, len(cveIDs))
 	if len(cveIDs) == 0 {
 		return out, nil
 	}
@@ -272,7 +322,7 @@ func (r *AdvisoryExcerptsRepository) ListVulnFuncsByCVEs(ctx context.Context, te
 	// noisier sources, not them — M43 Phase D R2 finding 4), then the
 	// remaining sources lexicographically (ghsa < jvn < nvd).
 	const query = `
-		SELECT cve_id, vuln_funcs
+		SELECT cve_id, vuln_funcs, vuln_funcs_scoped
 		FROM advisory_excerpts
 		WHERE tenant_id = $1 AND cve_id = ANY($2)
 		ORDER BY cve_id ASC, CASE WHEN source = 'osv' THEN 0 ELSE 1 END ASC, source ASC
@@ -285,30 +335,85 @@ func (r *AdvisoryExcerptsRepository) ListVulnFuncsByCVEs(ctx context.Context, te
 
 	for rows.Next() {
 		var (
-			cveID string
-			raw   []byte
+			cveID     string
+			rawFlat   []byte
+			rawScoped []byte
 		)
-		if err := rows.Scan(&cveID, &raw); err != nil {
+		if err := rows.Scan(&cveID, &rawFlat, &rawScoped); err != nil {
 			return nil, fmt.Errorf("scan advisory_excerpts vuln_funcs row: %w", err)
 		}
-		var elems []json.RawMessage
-		if err := json.Unmarshal(raw, &elems); err != nil {
-			// Lenient: a non-array vuln_funcs value (possible via raw
-			// pass-through Upsert) must not 500 the CLI worklist read.
-			continue
-		}
-		for _, elem := range elems {
-			var s string
-			if err := json.Unmarshal(elem, &s); err != nil {
-				continue // non-string element: skip, keep the rest
+		entry := out[cveID]
+		if scopedEntries := decodeScopedVulnFuncs(rawScoped); len(scopedEntries) > 0 {
+			// Scoped row: contributes module-attributed lists ONLY. Its
+			// flat vuln_funcs is the union of these lists — adding it to
+			// Unscoped as well would deliver every module's symbols to
+			// every target row again (the R8f finding).
+			entry.Scoped = append(entry.Scoped, scopedEntries...)
+		} else {
+			// Unscoped row (prose source / legacy / tombstone): flat
+			// union, lenient decode as before.
+			var elems []json.RawMessage
+			if err := json.Unmarshal(rawFlat, &elems); err != nil {
+				// Lenient: a non-array vuln_funcs value (possible via raw
+				// pass-through Upsert) must not 500 the CLI worklist read.
+				continue
 			}
-			out[cveID] = append(out[cveID], s)
+			for _, elem := range elems {
+				var s string
+				if err := json.Unmarshal(elem, &s); err != nil {
+					continue // non-string element: skip, keep the rest
+				}
+				entry.Unscoped = append(entry.Unscoped, s)
+			}
+		}
+		// Only materialise the key when the row contributed something —
+		// a CVE with only empty/tombstone rows must stay absent from the
+		// map ("no symbols known"), same as before R8f.
+		if len(entry.Unscoped) > 0 || len(entry.Scoped) > 0 {
+			out[cveID] = entry
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate advisory_excerpts vuln_funcs rows: %w", err)
 	}
 	return out, nil
+}
+
+// decodeScopedVulnFuncs leniently decodes one vuln_funcs_scoped JSONB value
+// (shape [{"module": "...", "vuln_funcs": ["Pkg.Func", ...]}, ...]) into
+// its well-formed entries. Lenient per the ListVulnFuncsByCVEs contract: a
+// non-array value yields nil (the caller treats the row as unscoped), a
+// malformed element / empty module / non-string func is skipped, and an
+// entry left with zero string funcs is dropped (it could contribute
+// nothing and must not flip the row into the scoped-only routing arm).
+func decodeScopedVulnFuncs(raw []byte) []ScopedVulnFuncs {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return nil
+	}
+	var out []ScopedVulnFuncs
+	for _, elem := range elems {
+		var e struct {
+			Module    string            `json:"module"`
+			VulnFuncs []json.RawMessage `json:"vuln_funcs"`
+		}
+		if err := json.Unmarshal(elem, &e); err != nil || e.Module == "" {
+			continue
+		}
+		funcs := make([]string, 0, len(e.VulnFuncs))
+		for _, f := range e.VulnFuncs {
+			var s string
+			if err := json.Unmarshal(f, &s); err != nil {
+				continue // non-string func: skip, keep the rest
+			}
+			funcs = append(funcs, s)
+		}
+		if len(funcs) == 0 {
+			continue
+		}
+		out = append(out, ScopedVulnFuncs{Module: e.Module, Funcs: funcs})
+	}
+	return out
 }
 
 // rowScanner abstracts *sql.Row and *sql.Rows for shared scan helpers.
@@ -322,23 +427,25 @@ func scanAdvisoryExcerpt(rs rowScanner) (AdvisoryExcerpt, error) {
 
 func scanAdvisoryExcerptRow(rs rowScanner) (AdvisoryExcerpt, error) {
 	var (
-		e          AdvisoryExcerpt
-		vulnFuncs  []byte
-		affPaths   []byte
-		reqConfig  []byte
-		reqEnv     []byte
-		rawExcerpt sql.NullString
-		fetchedAt  sql.NullTime
+		e               AdvisoryExcerpt
+		vulnFuncs       []byte
+		vulnFuncsScoped []byte
+		affPaths        []byte
+		reqConfig       []byte
+		reqEnv          []byte
+		rawExcerpt      sql.NullString
+		fetchedAt       sql.NullTime
 	)
 	if err := rs.Scan(
 		&e.ID, &e.TenantID, &e.CVEID, &e.Source,
-		&vulnFuncs, &affPaths, &reqConfig, &reqEnv,
+		&vulnFuncs, &vulnFuncsScoped, &affPaths, &reqConfig, &reqEnv,
 		&rawExcerpt, &fetchedAt,
 		&e.CreatedAt, &e.UpdatedAt,
 	); err != nil {
 		return e, err
 	}
 	e.VulnFuncs = bytesToJSON(vulnFuncs)
+	e.VulnFuncsScoped = bytesToJSON(vulnFuncsScoped)
 	e.AffectedPaths = bytesToJSON(affPaths)
 	e.RequiredConfig = bytesToJSON(reqConfig)
 	e.RequiredEnv = bytesToJSON(reqEnv)

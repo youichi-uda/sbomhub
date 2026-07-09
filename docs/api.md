@@ -205,13 +205,18 @@ GET /api/v1/projects/:id/reachability/targets
 
 - `ecosystem` is derived from the purl server-side; it may be `""` when the component carries no package URL.
 - `vuln_funcs` (string array, optional): the advisory-declared vulnerable symbols
-  for the row's CVE, unioned across advisory sources (NVD / GHSA / JVN / OSV —
+  for the row, unioned across advisory sources (NVD / GHSA / JVN / OSV —
   the OSV entries come from the Go vulndb structured symbol lists) and
   normalized server-side to `Pkg.Func` / `Pkg.Type.Method` selectors (trimmed,
   trailing `()` stripped, malformed entries dropped, de-duplicated, capped at
-  200 symbols per CVE). The field is **omitted entirely** when no well-formed
-  symbol is known for the CVE — the CLI then falls back to import-only
-  analysis for that pair.
+  200 symbols per CVE). OSV-derived symbols are **module-scoped**: only the
+  symbols declared for the component's own purl-derived Go module are delivered
+  on that row (they lead the list), so a CVE spanning several Go modules does
+  not leak one module's symbols into a sibling component's row; symbols from
+  prose sources (NVD etc.) carry no module attribution and are delivered on
+  every row of the CVE, after the scoped ones. The field is **omitted
+  entirely** when no well-formed symbol is known for the row — the CLI then
+  falls back to import-only analysis for that pair.
 
 #### Upload Reachability Results
 

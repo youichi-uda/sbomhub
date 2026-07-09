@@ -324,7 +324,9 @@ func TestAdvisoryExcerpts_ListVulnFuncsByCVEs_OSVFirstOrdering(t *testing.T) {
 		"extra.FromGHSA", // then ghsa (lexicographic)
 		"noise.FromNVD",  // then nvd
 	}
-	funcs := got[cve]
+	// R8f: all three seeded rows carry no vuln_funcs_scoped data, so their
+	// flat unions land in Unscoped (the legacy / prose-source path).
+	funcs := got[cve].Unscoped
 	if len(funcs) != len(want) {
 		t.Fatalf("union length = %d (%v), want %d (%v)", len(funcs), funcs, len(want), want)
 	}

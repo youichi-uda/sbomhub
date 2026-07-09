@@ -1629,6 +1629,14 @@ type osvTenantCandidates struct {
 // ctx abort) produce NO map entry: no tombstone, retried next tick.
 type osvVulnFuncsOutcome struct {
 	symbols []string
+	// scoped is the module-attributed companion of symbols (M43 Phase D
+	// round 8 / R8f, migration 057): the same extraction pass that built
+	// the flat union attributes each selector to the OSV affected module
+	// it was declared under, so the serving edge can hand each component
+	// target only its own module's symbols. Empty exactly when symbols is
+	// empty (both come from the one extractOSVGoVulnFuncs call), so
+	// tombstones and authoritative empties naturally store '[]' for both.
+	scoped  []osvScopedVulnFuncs
 	excerpt string
 	// goID (M43 Phase D R6, narrowing R5's recordFound bool — round 5 High
 	// finding) is the clobber-authority token for empty outcomes: the ID of
@@ -2037,7 +2045,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 			out[cveID] = osvVulnFuncsOutcome{}
 			continue
 		}
-		symbols := extractOSVGoVulnFuncs(vuln)
+		symbols, scoped := extractOSVGoVulnFuncs(vuln)
 		excerpt := osvExcerptText(vuln)
 		// goID is the clobber-authority token (M43 Phase D R6): set exactly
 		// when a retrieved record BODY identifies itself as a Go vulndb
@@ -2079,7 +2087,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 					slog.Warn(osvUnlinkedRecordWarnMsg,
 						"cve_id", cveID, "got_id", av.ID, "requested_id", alias)
 				default:
-					symbols = extractOSVGoVulnFuncs(av)
+					symbols, scoped = extractOSVGoVulnFuncs(av)
 					if len(symbols) > 0 {
 						if e := osvExcerptText(av); e != "" {
 							excerpt = e
@@ -2119,7 +2127,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string) (ma
 		if goID != "" {
 			goIDsSeen++
 		}
-		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, excerpt: excerpt, goID: goID}
+		out[cveID] = osvVulnFuncsOutcome{symbols: symbols, scoped: scoped, excerpt: excerpt, goID: goID}
 	}
 
 	// Mass-404 observability Warn (M43 Phase D R4, replacing the R3
@@ -2383,12 +2391,13 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 				fetchedAt = tombstoneFetchedAt
 			}
 			excerpt := &repository.AdvisoryExcerpt{
-				TenantID:   cand.tenantID,
-				CVEID:      cveID,
-				Source:     osvVulnFuncsSource,
-				VulnFuncs:  stringsToJSONArray(o.symbols),
-				RawExcerpt: o.excerpt,
-				FetchedAt:  &fetchedAt,
+				TenantID:        cand.tenantID,
+				CVEID:           cveID,
+				Source:          osvVulnFuncsSource,
+				VulnFuncs:       stringsToJSONArray(o.symbols),
+				VulnFuncsScoped: scopedVulnFuncsToJSON(o.scoped),
+				RawExcerpt:      o.excerpt,
+				FetchedAt:       &fetchedAt,
 			}
 			// Empty-write clobber guard + retraction observability (M43
 			// Phase D R4/R5/R6) — see the docstring for the full decision
@@ -2413,6 +2422,7 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 				if existing != nil && jsonArrayNonEmpty(existing.VulnFuncs) {
 					if o.goID == "" {
 						excerpt.VulnFuncs = existing.VulnFuncs
+						excerpt.VulnFuncsScoped = existing.VulnFuncsScoped
 						excerpt.AffectedPaths = existing.AffectedPaths
 						excerpt.RequiredConfig = existing.RequiredConfig
 						excerpt.RequiredEnv = existing.RequiredEnv
@@ -2483,6 +2493,24 @@ func jsonArrayNonEmpty(raw json.RawMessage) bool {
 	return len(arr) > 0
 }
 
+// osvScopedVulnFuncs is one module's selector list in the on-disk
+// advisory_excerpts.vuln_funcs_scoped shape (migration 057, M43 Phase D
+// round 8 / R8f):
+//
+//	[{"module": "<Go module path>", "vuln_funcs": ["Pkg.Func", ...]}, ...]
+//
+// Module is the OSV affected[].package.name the selectors were declared
+// under — already vetted against imports[].path by
+// osvImportPathWithinModule, so a crafted record cannot mis-attribute
+// selectors — with Go vulndb's synthetic "stdlib" / "toolchain" modules
+// stored verbatim (they match the pkg:golang/stdlib-style purls Syft
+// emits for Go binaries). The read side is
+// repository.ScopedVulnFuncs / decodeScopedVulnFuncs.
+type osvScopedVulnFuncs struct {
+	Module    string   `json:"module"`
+	VulnFuncs []string `json:"vuln_funcs"`
+}
+
 // extractOSVGoVulnFuncs converts an OSV record's Go vulndb structured
 // symbols (affected[].ecosystem_specific.imports[] = {path, symbols[]}) to
 // the wire-safe selector list, unioned across every affected/import entry
@@ -2490,20 +2518,63 @@ func jsonArrayNonEmpty(raw json.RawMessage) bool {
 // shapes are skipped leniently (EcosystemSpecific is a decoded
 // map[string]interface{}; foreign feeds put arbitrary JSON there).
 //
+// Returns BOTH shapes the writer stores (M43 Phase D round 8 / R8f):
+//
+//   - flat: the CVE-level union, unchanged from pre-R8f (it keeps feeding
+//     advisory_excerpts.vuln_funcs, the triage prompt / grounding readers,
+//     and legacy-row serving);
+//   - scoped: the same selectors attributed to the affected module they
+//     were declared under (module = affected[].package.name, first-seen
+//     module order, per-module first-seen selector order, per-module
+//     dedupe). Imports of the SAME module union into one entry. A selector
+//     that recurs under a SECOND module (e.g. a fork family like
+//     github.com/x/mod and github.com/x/mod/v3 declaring the same
+//     "pkg.Func") is a flat-union dup — flat keeps only the first
+//     occurrence — but IS attributed to each module it appears under, so
+//     neither module's targets lose it; the scoped total is bounded by the
+//     same osvVulnFuncsMaxSymbolsPerCVE cap.
+//
 // Hardening (M43 Phase D R2):
 //   - finding 4: an imports[].path must belong to its affected module
 //     (osvImportPathWithinModule) — a crafted record cannot attribute
 //     unrelated packages' selectors (path "fmt" under github.com/a/b) to a
 //     module the tenant actually ships.
 //   - finding 2: output is truncated at osvVulnFuncsMaxSymbolsPerCVE
-//     selectors (slog.Warn), and osvWireSafeSelector drops selectors over
-//     osvVulnFuncsMaxSelectorBytes.
-func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
+//     selectors (slog.Warn; the truncating return ends the scoped
+//     accumulation at the same point), and osvWireSafeSelector drops
+//     selectors over osvVulnFuncsMaxSelectorBytes.
+func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) ([]string, []osvScopedVulnFuncs) {
 	if vuln == nil {
-		return nil
+		return nil, nil
 	}
 	var out []string
 	seen := make(map[string]struct{})
+	var scoped []osvScopedVulnFuncs
+	scopedIdx := make(map[string]int)       // module → index into scoped
+	seenScoped := make(map[string]struct{}) // module + "\x00" + selector
+	scopedTotal := 0
+	addScoped := func(module, sel string) {
+		key := module + "\x00" + sel
+		if _, dup := seenScoped[key]; dup {
+			return
+		}
+		if scopedTotal >= osvVulnFuncsMaxSymbolsPerCVE {
+			// Only reachable via cross-module duplicates (the flat cap
+			// return below ends both accumulations otherwise); bounded so
+			// a hostile record cannot balloon the scoped column past the
+			// flat column's own cap.
+			return
+		}
+		seenScoped[key] = struct{}{}
+		i, ok := scopedIdx[module]
+		if !ok {
+			scoped = append(scoped, osvScopedVulnFuncs{Module: module})
+			i = len(scoped) - 1
+			scopedIdx[module] = i
+		}
+		scoped[i].VulnFuncs = append(scoped[i].VulnFuncs, sel)
+		scopedTotal++
+	}
 	for _, aff := range vuln.Affected {
 		if !strings.EqualFold(aff.Package.Ecosystem, "Go") {
 			continue
@@ -2540,6 +2611,11 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 			if !ok {
 				continue // whole-package entry (no symbol list) — nothing selector-shaped to store
 			}
+			// module is the scoped-attribution key: the affected module
+			// name the (validated) import path lives under. TrimSpace
+			// mirrors osvImportPathWithinModule's own comparison; the
+			// validation above guarantees it is non-empty here.
+			module := strings.TrimSpace(aff.Package.Name)
 			for _, rs := range rawSymbols {
 				sym, ok := rs.(string)
 				if !ok {
@@ -2552,19 +2628,40 @@ func extractOSVGoVulnFuncs(vuln *client.OSVVulnerability) []string {
 					continue
 				}
 				if _, dup := seen[sel]; dup {
+					// Flat-union dup (same CVE, seen under an earlier
+					// module or import) — still attribute it to THIS
+					// module so its targets receive it too (R8f).
+					addScoped(module, sel)
 					continue
 				}
 				if len(out) >= osvVulnFuncsMaxSymbolsPerCVE {
 					slog.Warn("scheduler: OSV record exceeds per-CVE symbol cap, truncating (M43 Phase D R2 finding 2)",
 						"osv_id", vuln.ID, "cap", osvVulnFuncsMaxSymbolsPerCVE)
-					return out
+					return out, scoped
 				}
 				seen[sel] = struct{}{}
 				out = append(out, sel)
+				addScoped(module, sel)
 			}
 		}
 	}
-	return out
+	return out, scoped
+}
+
+// scopedVulnFuncsToJSON marshals the module-scoped selector list into the
+// json.RawMessage JSONB shape advisory_excerpts.vuln_funcs_scoped expects
+// (migration 057). nil/empty maps to nil, which the repository's
+// jsonbOrEmptyArray normalises to the column's '[]' default — mirroring
+// stringsToJSONArray.
+func scopedVulnFuncsToJSON(in []osvScopedVulnFuncs) json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // goStdlibTopLevelPackages is the allowlist of Go standard-library TOP-LEVEL

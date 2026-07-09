@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -78,7 +79,7 @@ type reachabilityTargetsReader interface {
 // a fake without a live PostgreSQL (same rationale as the other narrow
 // interfaces above).
 type reachabilityVulnFuncsReader interface {
-	ListVulnFuncsByCVEs(ctx context.Context, tenantID uuid.UUID, cveIDs []string) (map[string][]string, error)
+	ListVulnFuncsByCVEs(ctx context.Context, tenantID uuid.UUID, cveIDs []string) (map[string]repository.CVEVulnFuncs, error)
 }
 
 // reachabilityStatuses is the closed set of verdicts the analyser
@@ -358,11 +359,15 @@ func (h *ReachabilityHandler) Upload(c echo.Context) error {
 // response: a (cve_id, component_id) pair the CLI analyzer must judge.
 // ecosystem is derived from purl at the edge (repository.EcosystemFromPurl);
 // purl may be "" when the component row carries no package URL.
-// vuln_funcs is the normalised union of the advisory-declared vulnerable
-// symbols for the row's CVE (M43 Wave 1 / F465, issue #167); it is OMITTED
-// (not an empty array) when no well-formed symbol is known — the CLI treats
-// both the same way, and omitempty keeps the common no-symbols worklist
-// small.
+// vuln_funcs is the normalised advisory-declared vulnerable symbol list for
+// THIS row (M43 Wave 1 / F465, issue #167): OSV/Go-vulndb symbols scoped to
+// the component's purl-derived Go module lead, followed by the unscoped
+// (prose-source / legacy) union shared by every row of the CVE (M43 Phase D
+// round 8 / R8f — pre-R8f the whole CVE union shipped to every row, leaking
+// sibling modules' symbols). The wire shape is unchanged: a flat string
+// array, OMITTED (not an empty array) when no well-formed symbol is known
+// for this row — the CLI treats both the same way, and omitempty keeps the
+// common no-symbols worklist small.
 type reachabilityTargetItem struct {
 	CVEID            string   `json:"cve_id"`
 	ComponentID      string   `json:"component_id"`
@@ -435,9 +440,11 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 	}
 
 	// vuln_funcs enrichment (M43 Wave 1 / F465): one batch read over the
-	// distinct CVE ids in the worklist, then normalise per CVE at this edge
-	// (the single source of truth for symbol normalisation — see
-	// normalizeVulnFuncs) and attach to every row of that CVE.
+	// distinct CVE ids in the worklist, then normalise at this edge (the
+	// single source of truth for symbol normalisation — see
+	// normalizeVulnFuncs). Since M43 Phase D round 8 (R8f) the attachment
+	// is per ROW, not per CVE: OSV-derived symbols are scoped to the
+	// component's purl-derived Go module (see funcsForRow below).
 	cveIDs := make([]string, 0, len(rows))
 	seenCVE := make(map[string]struct{}, len(rows))
 	for _, t := range rows {
@@ -453,9 +460,45 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 			"tenant_id", tenantID, "project_id", projectID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list reachability targets"})
 	}
-	funcsByCVE := make(map[string][]string, len(rawFuncsByCVE))
-	for cve, raw := range rawFuncsByCVE {
-		funcsByCVE[cve] = normalizeVulnFuncs(tenantID, cve, raw)
+
+	// Per-row symbol projection (M43 Phase D round 8 / R8f): a target row
+	// receives (a) the scoped entries whose module matches the row's
+	// purl-derived Go module, then (b) the unscoped union (prose sources /
+	// pre-057 legacy rows) — normalised as one list so the delivery cap
+	// still trims the tail (structured, module-matched symbols lead). The
+	// pre-R8f behaviour attached the CVE-LEVEL union to every row, so one
+	// CVE spanning several Go modules leaked component B's symbols into
+	// component A's row and a project call into B's package flipped A to a
+	// false `reachable` (over-report). Rows whose module cannot be derived
+	// (no purl / non-golang purl) get only the unscoped union; a row with
+	// scoped entries but no module match and no unscoped symbols omits the
+	// field entirely (import-only is the correct CLI fallback for it).
+	// Results are memoised per (cve, module) so the normalisation (and its
+	// cap Warn) runs once per distinct pair, not once per row.
+	type cveModuleKey struct{ cve, module string }
+	funcsCache := make(map[cveModuleKey][]string)
+	funcsForRow := func(cveID, purl string) []string {
+		raw, ok := rawFuncsByCVE[cveID]
+		if !ok {
+			return nil
+		}
+		module, _ := goModuleFromPurl(purl) // "" when not derivable → unscoped only
+		key := cveModuleKey{cve: cveID, module: module}
+		if cached, ok := funcsCache[key]; ok {
+			return cached
+		}
+		var union []string
+		if module != "" {
+			for _, sc := range raw.Scoped {
+				if sc.Module == module {
+					union = append(union, sc.Funcs...)
+				}
+			}
+		}
+		union = append(union, raw.Unscoped...)
+		out := normalizeVulnFuncs(tenantID, cveID, union)
+		funcsCache[key] = out
+		return out
 	}
 
 	items := make([]reachabilityTargetItem, 0, len(rows))
@@ -467,7 +510,7 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 			ComponentName:    t.ComponentName,
 			ComponentVersion: t.ComponentVersion,
 			Ecosystem:        repository.EcosystemFromPurl(t.Purl),
-			VulnFuncs:        funcsByCVE[t.CVEID], // nil (field omitted) when no symbol survived
+			VulnFuncs:        funcsForRow(t.CVEID, t.Purl), // nil (field omitted) when no symbol survived
 		})
 	}
 
@@ -549,6 +592,58 @@ func normalizeVulnFuncs(tenantID uuid.UUID, cveID string, raw []string) []string
 // and the CLI's AST walk. Keep in sync with the scheduler's store-time cap
 // (internal/scheduler/cve_sync.go).
 const maxVulnFuncsPerCVE = 200
+
+// goModuleFromPurl extracts the Go module path from a Package URL of the
+// form pkg:golang/<namespace>/<name>@<version>?<qualifiers>#<subpath>,
+// e.g.
+//
+//	pkg:golang/github.com/jackc/pgx/v5@v5.5.0 -> github.com/jackc/pgx/v5
+//	pkg:golang/example.test/vulnpkg@v1.0.0    -> example.test/vulnpkg
+//	pkg:golang/stdlib@go1.22.4                -> stdlib
+//
+// Returns ("", false) for empty input or a non-golang purl — the caller
+// then serves only the unscoped symbol union for that target row (no
+// module attribution is possible, and non-Go ecosystems have no scoped
+// entries to match anyway).
+//
+// MUST stay derivation-compatible with the CLI's goModuleFromPurl
+// (sbomhub-cli/internal/api/reachability.go): the CLI matches the same
+// purl against the local go.mod to pick the module it analyses, so a
+// divergence here would scope symbols to a module the CLI resolves
+// differently — silently emptying the per-target symbol walk. Both sides:
+// strip the "pkg:golang/" (or scheme-less "golang/") prefix, cut at the
+// first of '@' (version), '?' (qualifiers), '#' (subpath), then
+// percent-decode the remaining path.
+func goModuleFromPurl(purl string) (string, bool) {
+	s := strings.TrimSpace(purl)
+	if s == "" {
+		return "", false
+	}
+	const prefix = "pkg:golang/"
+	// Some producers omit the pkg: scheme; tolerate a bare "golang/" too
+	// (mirrors the CLI).
+	switch {
+	case strings.HasPrefix(s, prefix):
+		s = strings.TrimPrefix(s, prefix)
+	case strings.HasPrefix(s, "golang/"):
+		s = strings.TrimPrefix(s, "golang/")
+	default:
+		return "", false
+	}
+	// Strip version (@), qualifiers (?) and subpath (#) — the module path
+	// is everything before the first of these.
+	if i := strings.IndexAny(s, "@?#"); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" {
+		return "", false
+	}
+	// purl path segments are percent-encoded; decode conservatively.
+	if decoded, err := url.PathUnescape(s); err == nil {
+		s = decoded
+	}
+	return s, true
+}
 
 // isGoIdentifier reports whether s is shaped like a Go identifier (first
 // rune a letter or underscore, rest letters/digits/underscores; Unicode

@@ -44,21 +44,23 @@ func (f *fakeReachabilityTargetsReader) ListReachabilityTargets(_ context.Contex
 // assert the handler batches the DISTINCT worklist CVEs into a single call,
 // and returns a canned raw (pre-normalisation) symbol map — normalisation is
 // the handler's job, so the fake deliberately returns un-normalised strings.
+// Since M43 Phase D round 8 (R8f) the map value separates module-scoped
+// entries from the unscoped union (repository.CVEVulnFuncs).
 type fakeReachabilityVulnFuncsReader struct {
-	byCVE     map[string][]string
+	byCVE     map[string]repository.CVEVulnFuncs
 	err       error
 	gotCVEIDs []string
 	gotCalls  int
 }
 
-func (f *fakeReachabilityVulnFuncsReader) ListVulnFuncsByCVEs(_ context.Context, _ uuid.UUID, cveIDs []string) (map[string][]string, error) {
+func (f *fakeReachabilityVulnFuncsReader) ListVulnFuncsByCVEs(_ context.Context, _ uuid.UUID, cveIDs []string) (map[string]repository.CVEVulnFuncs, error) {
 	f.gotCalls++
 	f.gotCVEIDs = cveIDs
 	if f.err != nil {
 		return nil, f.err
 	}
 	if f.byCVE == nil {
-		return map[string][]string{}, nil
+		return map[string]repository.CVEVulnFuncs{}, nil
 	}
 	return f.byCVE, nil
 }
@@ -129,8 +131,8 @@ func TestReachabilityHandler_GetTargets_HappyPath(t *testing.T) {
 	}}
 	// Raw (pre-normalisation) union as the repo would return it: the handler
 	// must trim, strip "()", drop the bare name, and dedupe before shipping.
-	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string][]string{
-		"CVE-2024-0001": {" xml.Unmarshal ", "Foo", "Bar.baz()", "xml.Unmarshal"},
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2024-0001": {Unscoped: []string{" xml.Unmarshal ", "Foo", "Bar.baz()", "xml.Unmarshal"}},
 		// CVE-2024-0002 intentionally absent: no advisory symbols known.
 	}}
 	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
@@ -214,8 +216,8 @@ func TestReachabilityHandler_GetTargets_VulnFuncsSharedAcrossRows(t *testing.T) 
 		{CVEID: "CVE-2024-0009", ComponentID: compA, Purl: "pkg:golang/a@v1", ComponentName: "a", ComponentVersion: "v1"},
 		{CVEID: "CVE-2024-0009", ComponentID: compB, Purl: "pkg:golang/b@v2", ComponentName: "b", ComponentVersion: "v2"},
 	}}
-	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string][]string{
-		"CVE-2024-0009": {"Pkg.Type.Method"},
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2024-0009": {Unscoped: []string{"Pkg.Type.Method"}},
 	}}
 	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
 
@@ -371,7 +373,7 @@ func TestReachabilityHandler_GetTargets_VulnFuncsCappedAt200(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		raw = append(raw, fmt.Sprintf("pkg%d.Func%d", i, i))
 	}
-	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string][]string{"CVE-2024-0777": raw}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{"CVE-2024-0777": {Unscoped: raw}}}
 	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
 
 	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
@@ -456,7 +458,7 @@ func TestReachabilityHandler_GetTargets_OSVSymbolsSurviveCap(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		raw = append(raw, fmt.Sprintf("noisy%d.Func%d", i, i))
 	}
-	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string][]string{"CVE-2024-0888": raw}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{"CVE-2024-0888": {Unscoped: raw}}}
 	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
 
 	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
@@ -553,5 +555,150 @@ func TestReachabilityHandler_GetTargets_ProjectNotFound(t *testing.T) {
 	}
 	if vf.gotCalls != 0 {
 		t.Errorf("vuln_funcs reader called %d times, want 0 on project-not-found", vf.gotCalls)
+	}
+}
+
+// TestReachabilityHandler_GetTargets_VulnFuncsScopedPerModule pins the M43
+// Phase D round 8 (R8f) Medium fix: when one CVE spans several Go modules,
+// each target row receives ONLY the scoped symbols of its own purl-derived
+// module (plus the unscoped prose/legacy union) — component A's row must
+// not carry component B's module symbols, because a project call into B's
+// package would then flip A to a false `reachable` verdict (over-report).
+// A target on a module with no scoped entry gets just the unscoped union,
+// and a non-Go row matches no scoped entry by construction. The batch-read
+// contract is unchanged: one call for the whole worklist.
+func TestReachabilityHandler_GetTargets_VulnFuncsScopedPerModule(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2025-4242", ComponentID: uuid.New(), Purl: "pkg:golang/github.com/mod/a@v1.0.0", ComponentName: "a", ComponentVersion: "v1.0.0"},
+		{CVEID: "CVE-2025-4242", ComponentID: uuid.New(), Purl: "pkg:golang/github.com/mod/b@v2.1.0", ComponentName: "b", ComponentVersion: "v2.1.0"},
+		{CVEID: "CVE-2025-4242", ComponentID: uuid.New(), Purl: "pkg:golang/github.com/mod/c@v0.3.0", ComponentName: "c", ComponentVersion: "v0.3.0"},
+		{CVEID: "CVE-2025-4242", ComponentID: uuid.New(), Purl: "pkg:npm/lodash@4.17.21", ComponentName: "lodash", ComponentVersion: "4.17.21"},
+	}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2025-4242": {
+			Scoped: []repository.ScopedVulnFuncs{
+				{Module: "github.com/mod/a", Funcs: []string{"a.F"}},
+				{Module: "github.com/mod/b", Funcs: []string{"b.G"}},
+			},
+			Unscoped: []string{"n.H"},
+		},
+	}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 4 {
+		t.Fatalf("targets len = %d, want 4", len(resp.Targets))
+	}
+	want := [][]string{
+		{"a.F", "n.H"}, // module a: its own scoped symbol first, then the unscoped union
+		{"b.G", "n.H"}, // module b: b.G only — a.F must NOT leak here (the R8f finding)
+		{"n.H"},        // module c: no scoped entry — unscoped union only
+		{"n.H"},        // npm row: no Go module derivable — unscoped union only
+	}
+	for i, w := range want {
+		got := resp.Targets[i].VulnFuncs
+		if len(got) != len(w) {
+			t.Fatalf("targets[%d] (purl %s) vuln_funcs = %v, want %v", i, resp.Targets[i].Purl, got, w)
+		}
+		for j := range w {
+			if got[j] != w[j] {
+				t.Errorf("targets[%d].vuln_funcs[%d] = %q, want %q (full: %v)", i, j, got[j], w[j], got)
+			}
+		}
+	}
+	if vf.gotCalls != 1 {
+		t.Errorf("vuln_funcs reader called %d times, want exactly 1 batch call (scoping is a per-row projection, not a per-row read)", vf.gotCalls)
+	}
+}
+
+// TestReachabilityHandler_GetTargets_ScopedOnlyModuleMismatchOmitsField
+// (M43 Phase D R8f): when a CVE's symbol inventory is ONLY scoped entries
+// and none matches the target's module, the row has no symbol data for its
+// module — vuln_funcs must be OMITTED (import-only is the correct CLI
+// fallback), not populated with another module's symbols and not an empty
+// array.
+func TestReachabilityHandler_GetTargets_ScopedOnlyModuleMismatchOmitsField(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2025-4243", ComponentID: uuid.New(), Purl: "pkg:golang/github.com/mod/other@v1.0.0", ComponentName: "other", ComponentVersion: "v1.0.0"},
+	}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2025-4243": {Scoped: []repository.ScopedVulnFuncs{
+			{Module: "github.com/mod/a", Funcs: []string{"a.F"}},
+		}},
+	}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(resp.Targets))
+	}
+	if resp.Targets[0].VulnFuncs != nil {
+		t.Errorf("vuln_funcs = %v, want field omitted (scoped-only inventory, module mismatch)", resp.Targets[0].VulnFuncs)
+	}
+	if body := rec.Body.String(); strings.Contains(body, `"vuln_funcs"`) {
+		t.Errorf("vuln_funcs key must be absent from the wire on module mismatch; body=%s", body)
+	}
+}
+
+// TestGoModuleFromPurl pins the handler-side purl → Go module derivation
+// (M43 Phase D R8f). It MUST stay derivation-compatible with the CLI's
+// goModuleFromPurl (sbomhub-cli/internal/api/reachability.go) — the CLI
+// resolves the same purl against the local go.mod, so a divergence would
+// scope symbols to a module the CLI never matches.
+func TestGoModuleFromPurl(t *testing.T) {
+	cases := []struct {
+		purl string
+		want string
+		ok   bool
+	}{
+		{"pkg:golang/github.com/jackc/pgx/v5@v5.5.0", "github.com/jackc/pgx/v5", true},
+		{"pkg:golang/example.test/vulnpkg@v1.0.0", "example.test/vulnpkg", true},
+		// No namespace (single-segment module) and Syft's Go-binary stdlib purl.
+		{"pkg:golang/mymod@v1.2.3", "mymod", true},
+		{"pkg:golang/stdlib@go1.22.4", "stdlib", true},
+		// Version absent / qualifiers / subpath cut points.
+		{"pkg:golang/github.com/a/b", "github.com/a/b", true},
+		{"pkg:golang/github.com/a/b?type=module", "github.com/a/b", true},
+		{"pkg:golang/github.com/a/b#sub/dir", "github.com/a/b", true},
+		// Scheme-less producer tolerance (mirrors the CLI).
+		{"golang/github.com/a/b@v1.0.0", "github.com/a/b", true},
+		// Percent-encoded segments decode.
+		{"pkg:golang/github.com%2Fa%2Fb@v1.0.0", "github.com/a/b", true},
+		// Surrounding whitespace tolerated.
+		{"  pkg:golang/github.com/a/b@v1  ", "github.com/a/b", true},
+		// Not derivable: non-golang / malformed / empty — the caller
+		// serves the unscoped union only.
+		{"pkg:npm/lodash@4.17.21", "", false},
+		{"pkg:golang/", "", false},
+		{"pkg:golang/@v1.0.0", "", false},
+		{"github.com/a/b@v1.0.0", "", false},
+		{"", "", false},
+		{"   ", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := goModuleFromPurl(tc.purl)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("goModuleFromPurl(%q) = (%q, %v), want (%q, %v)", tc.purl, got, ok, tc.want, tc.ok)
+		}
 	}
 }

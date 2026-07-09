@@ -386,7 +386,7 @@ const osvGoFixtureJSON = `{
 // non-wire-safe symbols dropped. The gopkg.in/yaml.v2 module's OWN entry
 // resolves to package ident "yaml" (finding 3).
 func TestExtractOSVGoVulnFuncs_ConvertsAndUnions(t *testing.T) {
-	got := extractOSVGoVulnFuncs(osvVulnFromJSON(t, osvGoFixtureJSON))
+	got, _ := extractOSVGoVulnFuncs(osvVulnFromJSON(t, osvGoFixtureJSON))
 	want := []string{"template.Parse", "template.Template.Execute", "baz.Do", "baz.Parse", "yaml.Unmarshal"}
 	if len(got) != len(want) {
 		t.Fatalf("extractOSVGoVulnFuncs = %v, want %v", got, want)
@@ -410,11 +410,86 @@ func TestExtractOSVGoVulnFuncs_ConvertsAndUnions(t *testing.T) {
 	}
 }
 
+// TestExtractOSVGoVulnFuncs_ScopedByModule pins the M43 Phase D round 8
+// (R8f) module attribution: alongside the flat union, extraction returns
+// the same selectors grouped by the OSV affected module they were declared
+// under (module = affected[].package.name, "stdlib" verbatim), with
+// same-module imports unioned into ONE entry (the fixture's two
+// github.com/foo/bar/baz imports) and modules kept in first-seen order.
+// The serving edge keys on this attribution to stop one module's symbols
+// from reaching a sibling module's target rows.
+func TestExtractOSVGoVulnFuncs_ScopedByModule(t *testing.T) {
+	flat, scoped := extractOSVGoVulnFuncs(osvVulnFromJSON(t, osvGoFixtureJSON))
+	want := []osvScopedVulnFuncs{
+		{Module: "stdlib", VulnFuncs: []string{"template.Parse", "template.Template.Execute"}},
+		{Module: "github.com/foo/bar", VulnFuncs: []string{"baz.Do", "baz.Parse"}},
+		{Module: "gopkg.in/yaml.v2", VulnFuncs: []string{"yaml.Unmarshal"}},
+	}
+	if len(scoped) != len(want) {
+		t.Fatalf("scoped = %+v, want %+v", scoped, want)
+	}
+	for i := range want {
+		if scoped[i].Module != want[i].Module {
+			t.Fatalf("scoped[%d].Module = %q, want %q", i, scoped[i].Module, want[i].Module)
+		}
+		if len(scoped[i].VulnFuncs) != len(want[i].VulnFuncs) {
+			t.Fatalf("scoped[%d] (%s) funcs = %v, want %v", i, scoped[i].Module, scoped[i].VulnFuncs, want[i].VulnFuncs)
+		}
+		for j := range want[i].VulnFuncs {
+			if scoped[i].VulnFuncs[j] != want[i].VulnFuncs[j] {
+				t.Errorf("scoped[%d].VulnFuncs[%d] = %q, want %q", i, j, scoped[i].VulnFuncs[j], want[i].VulnFuncs[j])
+			}
+		}
+		assertWireSafe(t, scoped[i].VulnFuncs)
+	}
+	// In this fixture no selector recurs across modules, so the flat union
+	// and the scoped attribution carry exactly the same selectors.
+	total := 0
+	for _, sc := range scoped {
+		total += len(sc.VulnFuncs)
+	}
+	if total != len(flat) {
+		t.Errorf("scoped total = %d selectors, flat = %d — want equal for a record without cross-module duplicates", total, len(flat))
+	}
+}
+
+// TestExtractOSVGoVulnFuncs_ScopedCrossModuleDuplicate pins the R8f
+// cross-module duplicate rule: a selector declared under TWO modules (a
+// fork/major-version family — github.com/x/mod and github.com/x/mod/v3
+// both resolve to package ident "mod") is a flat-union dup (flat keeps the
+// first occurrence only, unchanged pre-R8f behaviour) but IS attributed to
+// EACH module in scoped, so neither module's target rows lose it.
+func TestExtractOSVGoVulnFuncs_ScopedCrossModuleDuplicate(t *testing.T) {
+	flat, scoped := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
+		"id": "GO-2025-9990",
+		"affected": [
+			{"package": {"name": "github.com/x/mod", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/x/mod", "symbols": ["Parse"]}]}},
+			{"package": {"name": "github.com/x/mod/v3", "ecosystem": "Go"},
+			 "ecosystem_specific": {"imports": [{"path": "github.com/x/mod/v3", "symbols": ["Parse", "Extra"]}]}}
+		]
+	}`))
+	wantFlat := []string{"mod.Parse", "mod.Extra"}
+	if len(flat) != len(wantFlat) || flat[0] != wantFlat[0] || flat[1] != wantFlat[1] {
+		t.Fatalf("flat = %v, want %v (global first-seen dedupe unchanged)", flat, wantFlat)
+	}
+	if len(scoped) != 2 {
+		t.Fatalf("scoped = %+v, want 2 module entries", scoped)
+	}
+	if scoped[0].Module != "github.com/x/mod" || len(scoped[0].VulnFuncs) != 1 || scoped[0].VulnFuncs[0] != "mod.Parse" {
+		t.Errorf("scoped[0] = %+v, want {github.com/x/mod [mod.Parse]}", scoped[0])
+	}
+	if scoped[1].Module != "github.com/x/mod/v3" || len(scoped[1].VulnFuncs) != 2 ||
+		scoped[1].VulnFuncs[0] != "mod.Parse" || scoped[1].VulnFuncs[1] != "mod.Extra" {
+		t.Errorf("scoped[1] = %+v, want {github.com/x/mod/v3 [mod.Parse mod.Extra]} (the duplicate must reach the second module too)", scoped[1])
+	}
+}
+
 // TestExtractOSVGoVulnFuncs_NoGoData asserts nil / non-Go / symbol-less
 // records extract to nothing (→ no row upserted downstream).
 func TestExtractOSVGoVulnFuncs_NoGoData(t *testing.T) {
-	if got := extractOSVGoVulnFuncs(nil); got != nil {
-		t.Errorf("nil record: got %v, want nil", got)
+	if got, scoped := extractOSVGoVulnFuncs(nil); got != nil || scoped != nil {
+		t.Errorf("nil record: got (%v, %v), want (nil, nil)", got, scoped)
 	}
 	noSymbols := osvVulnFromJSON(t, `{
 		"id": "GO-2025-2222",
@@ -425,8 +500,8 @@ func TestExtractOSVGoVulnFuncs_NoGoData(t *testing.T) {
 			 "ecosystem_specific": {"imports": [{"path": "x", "symbols": ["Y"]}]}}
 		]
 	}`)
-	if got := extractOSVGoVulnFuncs(noSymbols); len(got) != 0 {
-		t.Errorf("symbol-less record: got %v, want empty", got)
+	if got, scoped := extractOSVGoVulnFuncs(noSymbols); len(got) != 0 || len(scoped) != 0 {
+		t.Errorf("symbol-less record: got (%v, %v), want both empty", got, scoped)
 	}
 }
 
@@ -435,7 +510,7 @@ func TestExtractOSVGoVulnFuncs_NoGoData(t *testing.T) {
 // segment) resolve to "<ident>" instead of being dropped wholesale, so the
 // whole gopkg.in/yaml.vN family produces selectors again.
 func TestExtractOSVGoVulnFuncs_GopkgInVersionedPackage(t *testing.T) {
-	got := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
+	got, _ := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
 		"id": "GO-2025-5555",
 		"affected": [
 			{"package": {"name": "gopkg.in/yaml.v2", "ecosystem": "Go"},
@@ -462,7 +537,7 @@ func TestExtractOSVGoVulnFuncs_GopkgInVersionedPackage(t *testing.T) {
 // unrelated packages' selectors (e.g. path "fmt" under github.com/a/b) to a
 // module; non-"/"-boundary prefixes (github.com/a/bx) are also rejected.
 func TestExtractOSVGoVulnFuncs_ImportPathMustMatchModule(t *testing.T) {
-	got := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
+	got, _ := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
 		"id": "GO-2025-6666",
 		"affected": [
 			{"package": {"name": "github.com/a/b", "ecosystem": "Go"},
@@ -495,7 +570,7 @@ func TestExtractOSVGoVulnFuncs_ImportPathMustMatchModule(t *testing.T) {
 // "stdlib" record: the first path segment must be a real Go standard-library
 // top-level package.
 func TestExtractOSVGoVulnFuncs_StdlibPathsAllowed(t *testing.T) {
-	got := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
+	got, _ := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
 		"id": "GO-2025-7777",
 		"affected": [
 			{"package": {"name": "stdlib", "ecosystem": "Go"},
@@ -578,7 +653,7 @@ func TestExtractOSVGoVulnFuncs_SymbolCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal symbols: %v", err)
 	}
-	got := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
+	got, _ := extractOSVGoVulnFuncs(osvVulnFromJSON(t, `{
 		"id": "GO-2025-8888",
 		"affected": [
 			{"package": {"name": "github.com/a/b", "ecosystem": "Go"},
@@ -738,6 +813,36 @@ func TestCVESyncJob_SyncOSVVulnFuncs_EndToEnd(t *testing.T) {
 		}
 	}
 	assertWireSafe(t, funcs)
+
+	// M43 Phase D round 8 (R8f): the same write also stores the
+	// module-scoped attribution (migration 057) so the serving edge can
+	// stop cross-module symbol leakage — the on-disk shape is
+	// [{"module": ..., "vuln_funcs": [...]}, ...] in first-seen module order.
+	var scopedRows []osvScopedVulnFuncs
+	if err := json.Unmarshal(call.VulnFuncsScoped, &scopedRows); err != nil {
+		t.Fatalf("VulnFuncsScoped not the scoped JSON shape: %v (%s)", err, call.VulnFuncsScoped)
+	}
+	wantScoped := []osvScopedVulnFuncs{
+		{Module: "stdlib", VulnFuncs: []string{"template.Parse", "template.Template.Execute"}},
+		{Module: "github.com/foo/bar", VulnFuncs: []string{"baz.Do", "baz.Parse"}},
+		{Module: "gopkg.in/yaml.v2", VulnFuncs: []string{"yaml.Unmarshal"}},
+	}
+	if len(scopedRows) != len(wantScoped) {
+		t.Fatalf("VulnFuncsScoped = %+v, want %+v", scopedRows, wantScoped)
+	}
+	for i := range wantScoped {
+		if scopedRows[i].Module != wantScoped[i].Module {
+			t.Fatalf("VulnFuncsScoped[%d].Module = %q, want %q", i, scopedRows[i].Module, wantScoped[i].Module)
+		}
+		if len(scopedRows[i].VulnFuncs) != len(wantScoped[i].VulnFuncs) {
+			t.Fatalf("VulnFuncsScoped[%d] funcs = %v, want %v", i, scopedRows[i].VulnFuncs, wantScoped[i].VulnFuncs)
+		}
+		for j := range wantScoped[i].VulnFuncs {
+			if scopedRows[i].VulnFuncs[j] != wantScoped[i].VulnFuncs[j] {
+				t.Errorf("VulnFuncsScoped[%d].VulnFuncs[%d] = %q, want %q", i, j, scopedRows[i].VulnFuncs[j], wantScoped[i].VulnFuncs[j])
+			}
+		}
+	}
 }
 
 // TestCVESyncJob_SyncOSVVulnFuncs_FanOutSingleFetch pins the "fetch once,
@@ -2091,7 +2196,9 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
 		excerptStoreKey(tenantID, "CVE-2025-0404", osvVulnFuncsSource): {
 			TenantID: tenantID, CVEID: "CVE-2025-0404", Source: osvVulnFuncsSource,
-			VulnFuncs: json.RawMessage(`["a.B"]`), RawExcerpt: "kept excerpt", FetchedAt: &stale,
+			VulnFuncs:       json.RawMessage(`["a.B"]`),
+			VulnFuncsScoped: json.RawMessage(`[{"module":"github.com/kept/mod","vuln_funcs":["a.B"]}]`),
+			RawExcerpt:      "kept excerpt", FetchedAt: &stale,
 		},
 		excerptStoreKey(tenantID, "CVE-2025-0405", osvVulnFuncsSource): {
 			TenantID: tenantID, CVEID: "CVE-2025-0405", Source: osvVulnFuncsSource,
@@ -2103,7 +2210,9 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 		},
 		excerptStoreKey(tenantID, "CVE-2025-0408", osvVulnFuncsSource): {
 			TenantID: tenantID, CVEID: "CVE-2025-0408", Source: osvVulnFuncsSource,
-			VulnFuncs: json.RawMessage(`["gone.Sym"]`), RawExcerpt: "pre-retraction excerpt", FetchedAt: &stale,
+			VulnFuncs:       json.RawMessage(`["gone.Sym"]`),
+			VulnFuncsScoped: json.RawMessage(`[{"module":"github.com/gone/mod","vuln_funcs":["gone.Sym"]}]`),
+			RawExcerpt:      "pre-retraction excerpt", FetchedAt: &stale,
 		},
 	}}
 	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
@@ -2115,10 +2224,14 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 	mock.ExpectCommit()
 
 	outcomes := map[string]osvVulnFuncsOutcome{
-		"CVE-2025-0404": {},                                                    // true 404 vs positive row
-		"CVE-2025-0405": {},                                                    // true 404 vs existing tombstone
-		"CVE-2025-0406": {},                                                    // true 404 vs no row
-		"CVE-2025-0407": {symbols: []string{"x.New"}, excerpt: "fresh"},        // positive vs positive row
+		"CVE-2025-0404": {}, // true 404 vs positive row
+		"CVE-2025-0405": {}, // true 404 vs existing tombstone
+		"CVE-2025-0406": {}, // true 404 vs no row
+		"CVE-2025-0407": { // positive vs positive row
+			symbols: []string{"x.New"},
+			scoped:  []osvScopedVulnFuncs{{Module: "github.com/fresh/mod", VulnFuncs: []string{"x.New"}}},
+			excerpt: "fresh",
+		},
 		"CVE-2025-0408": {excerpt: "withdrawn upstream", goID: "GO-2025-0408"}, // authoritative empty vs positive row
 	}
 	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
@@ -2146,6 +2259,12 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 	if err := json.Unmarshal(kept.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "a.B" {
 		t.Errorf("preserved VulnFuncs = %s (err %v), want [\"a.B\"] (a tombstone must not clobber a positive row)", kept.VulnFuncs, err)
 	}
+	// M43 Phase D R8f: the preserve path copies vuln_funcs_scoped wholesale
+	// too — losing the module attribution while keeping the flat union would
+	// silently degrade the row back to CVE-wide (cross-module) serving.
+	if string(kept.VulnFuncsScoped) != `[{"module":"github.com/kept/mod","vuln_funcs":["a.B"]}]` {
+		t.Errorf("preserved VulnFuncsScoped = %s, want the seeded scoped attribution kept verbatim", kept.VulnFuncsScoped)
+	}
 	if kept.RawExcerpt != "kept excerpt" {
 		t.Errorf("preserved RawExcerpt = %q, want %q", kept.RawExcerpt, "kept excerpt")
 	}
@@ -2156,16 +2275,19 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 		t.Errorf("preserved row FetchedAt = %v, want refreshed past the stale stamp %v", kept.FetchedAt, stale)
 	}
 
-	if tomb := byCVE["CVE-2025-0405"]; len(tomb.VulnFuncs) != 0 || tomb.FetchedAt == nil {
-		t.Errorf("existing-tombstone row = (%s, %v), want empty VulnFuncs + refreshed FetchedAt", tomb.VulnFuncs, tomb.FetchedAt)
+	if tomb := byCVE["CVE-2025-0405"]; len(tomb.VulnFuncs) != 0 || len(tomb.VulnFuncsScoped) != 0 || tomb.FetchedAt == nil {
+		t.Errorf("existing-tombstone row = (%s, %s, %v), want empty VulnFuncs + empty VulnFuncsScoped + refreshed FetchedAt", tomb.VulnFuncs, tomb.VulnFuncsScoped, tomb.FetchedAt)
 	}
-	if tomb := byCVE["CVE-2025-0406"]; len(tomb.VulnFuncs) != 0 || tomb.FetchedAt == nil {
-		t.Errorf("no-existing-row tombstone = (%s, %v), want empty VulnFuncs + stamped FetchedAt", tomb.VulnFuncs, tomb.FetchedAt)
+	if tomb := byCVE["CVE-2025-0406"]; len(tomb.VulnFuncs) != 0 || len(tomb.VulnFuncsScoped) != 0 || tomb.FetchedAt == nil {
+		t.Errorf("no-existing-row tombstone = (%s, %s, %v), want empty VulnFuncs + empty VulnFuncsScoped + stamped FetchedAt", tomb.VulnFuncs, tomb.VulnFuncsScoped, tomb.FetchedAt)
 	}
 
 	pos := byCVE["CVE-2025-0407"]
 	if err := json.Unmarshal(pos.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "x.New" {
 		t.Errorf("positive VulnFuncs = %s (err %v), want [\"x.New\"] (fresh symbols are authoritative)", pos.VulnFuncs, err)
+	}
+	if string(pos.VulnFuncsScoped) != `[{"module":"github.com/fresh/mod","vuln_funcs":["x.New"]}]` {
+		t.Errorf("positive VulnFuncsScoped = %s, want the fresh outcome's scoped attribution (R8f)", pos.VulnFuncsScoped)
 	}
 	if pos.RawExcerpt != "fresh" {
 		t.Errorf("positive RawExcerpt = %q, want %q", pos.RawExcerpt, "fresh")
@@ -2178,6 +2300,9 @@ func TestCVESyncJob_WriteOSVVulnFuncs_TombstonePreservesPositiveRow(t *testing.T
 	retr := byCVE["CVE-2025-0408"]
 	if len(retr.VulnFuncs) != 0 {
 		t.Errorf("retraction VulnFuncs = %s, want empty (a goID-backed empty outcome must overwrite the positive row)", retr.VulnFuncs)
+	}
+	if len(retr.VulnFuncsScoped) != 0 {
+		t.Errorf("retraction VulnFuncsScoped = %s, want empty (the retraction wipes the module attribution with the flat union — R8f)", retr.VulnFuncsScoped)
 	}
 	if retr.RawExcerpt != "withdrawn upstream" {
 		t.Errorf("retraction RawExcerpt = %q, want %q (the retraction record's own excerpt)", retr.RawExcerpt, "withdrawn upstream")
@@ -3004,11 +3129,11 @@ func TestOSVTombstoneRow_ListVulnFuncsByCVEs_Harmless(t *testing.T) {
 	defer db.Close()
 	tenantID := uuid.New()
 
-	mock.ExpectQuery(`SELECT cve_id, vuln_funcs\s+FROM advisory_excerpts`).
-		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs"}).
-			AddRow("CVE-2025-1", []byte(`[]`)).            // osv tombstone
-			AddRow("CVE-2025-1", []byte(`["tpl.Parse"]`)). // real nvd row
-			AddRow("CVE-2025-2", []byte(`[]`)))            // tombstone only
+	mock.ExpectQuery(`SELECT cve_id, vuln_funcs, vuln_funcs_scoped\s+FROM advisory_excerpts`).
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs", "vuln_funcs_scoped"}).
+			AddRow("CVE-2025-1", []byte(`[]`), []byte(`[]`)).            // osv tombstone (both columns empty)
+			AddRow("CVE-2025-1", []byte(`["tpl.Parse"]`), []byte(`[]`)). // real nvd row
+			AddRow("CVE-2025-2", []byte(`[]`), []byte(`[]`)))            // tombstone only
 
 	repo := repository.NewAdvisoryExcerptsRepository(db)
 	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, []string{"CVE-2025-1", "CVE-2025-2"})
@@ -3018,8 +3143,11 @@ func TestOSVTombstoneRow_ListVulnFuncsByCVEs_Harmless(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
-	if funcs := got["CVE-2025-1"]; len(funcs) != 1 || funcs[0] != "tpl.Parse" {
+	if funcs := got["CVE-2025-1"].Unscoped; len(funcs) != 1 || funcs[0] != "tpl.Parse" {
 		t.Errorf("CVE-2025-1 funcs = %v, want exactly [tpl.Parse] (tombstone adds nothing)", funcs)
+	}
+	if scoped := got["CVE-2025-1"].Scoped; len(scoped) != 0 {
+		t.Errorf("CVE-2025-1 scoped = %+v, want none (tombstone scoped '[]' adds nothing)", scoped)
 	}
 	if _, ok := got["CVE-2025-2"]; ok {
 		t.Error("CVE-2025-2 (tombstone only) must be absent from the map, not an empty entry")

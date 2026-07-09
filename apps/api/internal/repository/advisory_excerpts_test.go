@@ -36,37 +36,40 @@ func TestAdvisoryExcerptsRepository_Upsert_PassesTenantID(t *testing.T) {
 	now := time.Now().UTC()
 
 	vulnFuncs := json.RawMessage(`[{"name":"html.Parse","package":"html/template"}]`)
+	vulnFuncsScoped := json.RawMessage(`[{"module":"github.com/a/b","vuln_funcs":["b.Parse"]}]`)
 	affectedPaths := json.RawMessage(`["internal/html/parse.go"]`)
 	requiredConfig := json.RawMessage(`[]`)
 	requiredEnv := json.RawMessage(`["DEBUG=true"]`)
 
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO advisory_excerpts")).
 		WithArgs(
-			excerptID,              // $1  id
-			tenantID,               // $2  tenant_id
-			"CVE-2025-12345",       // $3  cve_id
-			"ghsa",                 // $4  source
-			[]byte(vulnFuncs),      // $5  vuln_funcs
-			[]byte(affectedPaths),  // $6  affected_paths
-			[]byte(requiredConfig), // $7  required_config
-			[]byte(requiredEnv),    // $8  required_env
-			"raw advisory text",    // $9  raw_excerpt
-			fetched,                // $10 fetched_at
+			excerptID,               // $1  id
+			tenantID,                // $2  tenant_id
+			"CVE-2025-12345",        // $3  cve_id
+			"ghsa",                  // $4  source
+			[]byte(vulnFuncs),       // $5  vuln_funcs
+			[]byte(vulnFuncsScoped), // $6  vuln_funcs_scoped (migration 057)
+			[]byte(affectedPaths),   // $7  affected_paths
+			[]byte(requiredConfig),  // $8  required_config
+			[]byte(requiredEnv),     // $9  required_env
+			"raw advisory text",     // $10 raw_excerpt
+			fetched,                 // $11 fetched_at
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(excerptID, now, now))
 
 	e := &AdvisoryExcerpt{
-		ID:             excerptID,
-		TenantID:       tenantID,
-		CVEID:          "CVE-2025-12345",
-		Source:         "ghsa",
-		VulnFuncs:      vulnFuncs,
-		AffectedPaths:  affectedPaths,
-		RequiredConfig: requiredConfig,
-		RequiredEnv:    requiredEnv,
-		RawExcerpt:     "raw advisory text",
-		FetchedAt:      &fetched,
+		ID:              excerptID,
+		TenantID:        tenantID,
+		CVEID:           "CVE-2025-12345",
+		Source:          "ghsa",
+		VulnFuncs:       vulnFuncs,
+		VulnFuncsScoped: vulnFuncsScoped,
+		AffectedPaths:   affectedPaths,
+		RequiredConfig:  requiredConfig,
+		RequiredEnv:     requiredEnv,
+		RawExcerpt:      "raw advisory text",
+		FetchedAt:       &fetched,
 	}
 	if err := repo.Upsert(context.Background(), e); err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -167,11 +170,12 @@ func TestAdvisoryExcerptsRepository_Upsert_AssignsIDIfZero(t *testing.T) {
 			"CVE-2025-1",     // $3  cve_id
 			"nvd",            // $4  source
 			[]byte("[]"),     // $5  vuln_funcs default
-			[]byte("[]"),     // $6  affected_paths default
-			[]byte("[]"),     // $7  required_config default
-			[]byte("[]"),     // $8  required_env default
-			nil,              // $9  raw_excerpt (empty -> NULL)
-			nil,              // $10 fetched_at (nil)
+			[]byte("[]"),     // $6  vuln_funcs_scoped default (migration 057)
+			[]byte("[]"),     // $7  affected_paths default
+			[]byte("[]"),     // $8  required_config default
+			[]byte("[]"),     // $9  required_env default
+			nil,              // $10 raw_excerpt (empty -> NULL)
+			nil,              // $11 fetched_at (nil)
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(uuid.New(), now, now))
@@ -241,7 +245,7 @@ func TestAdvisoryExcerptsRepository_GetByCVE_PassesTenantID(t *testing.T) {
 
 	rowCols := []string{
 		"id", "tenant_id", "cve_id", "source",
-		"vuln_funcs", "affected_paths", "required_config", "required_env",
+		"vuln_funcs", "vuln_funcs_scoped", "affected_paths", "required_config", "required_env",
 		"raw_excerpt", "fetched_at",
 		"created_at", "updated_at",
 	}
@@ -250,7 +254,7 @@ func TestAdvisoryExcerptsRepository_GetByCVE_PassesTenantID(t *testing.T) {
 		WithArgs(tenantID, "CVE-2025-12345").
 		WillReturnRows(sqlmock.NewRows(rowCols).AddRow(
 			rowID, tenantID, "CVE-2025-12345", "nvd",
-			[]byte(`["html.Parse"]`), []byte(`[]`), []byte(`[]`), []byte(`[]`),
+			[]byte(`["html.Parse"]`), []byte(`[{"module":"stdlib","vuln_funcs":["html.Parse"]}]`), []byte(`[]`), []byte(`[]`), []byte(`[]`),
 			nil, nil,
 			now, now,
 		))
@@ -267,6 +271,9 @@ func TestAdvisoryExcerptsRepository_GetByCVE_PassesTenantID(t *testing.T) {
 	}
 	if string(out[0].VulnFuncs) != `["html.Parse"]` {
 		t.Errorf("unexpected VulnFuncs: %s", out[0].VulnFuncs)
+	}
+	if string(out[0].VulnFuncsScoped) != `[{"module":"stdlib","vuln_funcs":["html.Parse"]}]` {
+		t.Errorf("unexpected VulnFuncsScoped: %s", out[0].VulnFuncsScoped)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
@@ -296,8 +303,9 @@ func TestAdvisoryExcerptsRepository_GetByCVE_RejectsZeroTenant(t *testing.T) {
 
 // TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources pins
 // the M43 Wave 1 (F465) batch-read contract: one CVE with several source
-// rows (osv + ghsa here) yields the UNION of their vuln_funcs string
-// arrays in row order — osv rows FIRST, then the remaining sources
+// rows (osv + ghsa here, both WITHOUT module attribution — the legacy /
+// prose shape) yields the UNION of their vuln_funcs string arrays in
+// Unscoped in row order — osv rows FIRST, then the remaining sources
 // lexicographically (M43 Phase D R2 finding 4; asserted via the ORDER BY
 // regex) — un-deduplicated (normalisation/dedupe is the handler edge's
 // job); a requested CVE with no rows is simply absent from the map; and
@@ -318,11 +326,11 @@ func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources(t *testing
 	// the lexicographic tail) so the osv structured symbols occupy the
 	// head of the union — the handler's 200-symbol delivery cap trims from
 	// the tail, so osv symbols must survive ahead of noisier sources.
-	mock.ExpectQuery(`SELECT cve_id, vuln_funcs[\s\S]+FROM advisory_excerpts[\s\S]+WHERE tenant_id = \$1 AND cve_id = ANY\(\$2\)[\s\S]+ORDER BY cve_id ASC, CASE WHEN source = 'osv' THEN 0 ELSE 1 END ASC, source ASC`).
+	mock.ExpectQuery(`SELECT cve_id, vuln_funcs, vuln_funcs_scoped[\s\S]+FROM advisory_excerpts[\s\S]+WHERE tenant_id = \$1 AND cve_id = ANY\(\$2\)[\s\S]+ORDER BY cve_id ASC, CASE WHEN source = 'osv' THEN 0 ELSE 1 END ASC, source ASC`).
 		WithArgs(tenantID, pq.Array(cveIDs)).
-		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs"}).
-			AddRow("CVE-2025-1", []byte(`["xml.Unmarshal","Bar.baz()"]`)). // osv row
-			AddRow("CVE-2025-1", []byte(`["html.Parse"]`)))                // ghsa row
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs", "vuln_funcs_scoped"}).
+			AddRow("CVE-2025-1", []byte(`["xml.Unmarshal","Bar.baz()"]`), []byte(`[]`)). // legacy osv row (pre-057: no scoped data)
+			AddRow("CVE-2025-1", []byte(`["html.Parse"]`), []byte(`[]`)))                // ghsa row
 		// CVE-2025-2 has no advisory_excerpts rows at all.
 
 	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, cveIDs)
@@ -330,16 +338,128 @@ func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_UnionsSources(t *testing
 		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
 	}
 	want1 := []string{"xml.Unmarshal", "Bar.baz()", "html.Parse"}
-	if len(got["CVE-2025-1"]) != len(want1) {
-		t.Fatalf("CVE-2025-1 funcs = %v, want %v", got["CVE-2025-1"], want1)
+	if len(got["CVE-2025-1"].Unscoped) != len(want1) {
+		t.Fatalf("CVE-2025-1 funcs = %v, want %v", got["CVE-2025-1"].Unscoped, want1)
 	}
 	for i := range want1 {
-		if got["CVE-2025-1"][i] != want1[i] {
-			t.Errorf("CVE-2025-1 funcs[%d] = %q, want %q (row order must be preserved)", i, got["CVE-2025-1"][i], want1[i])
+		if got["CVE-2025-1"].Unscoped[i] != want1[i] {
+			t.Errorf("CVE-2025-1 funcs[%d] = %q, want %q (row order must be preserved)", i, got["CVE-2025-1"].Unscoped[i], want1[i])
 		}
+	}
+	if len(got["CVE-2025-1"].Scoped) != 0 {
+		t.Errorf("CVE-2025-1 scoped = %v, want none ('[]' scoped rows serve unscoped — backwards compat)", got["CVE-2025-1"].Scoped)
 	}
 	if _, present := got["CVE-2025-2"]; present {
 		t.Errorf("CVE-2025-2 present in map (%v); a CVE with no rows must be absent", got["CVE-2025-2"])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_ScopedRowRouting pins
+// the M43 Phase D round 8 (R8f) per-row routing rule:
+//
+//   - a row with a well-formed vuln_funcs_scoped contributes ONLY its
+//     scoped entries — its flat vuln_funcs must NOT also land in Unscoped
+//     (double-adding would re-broadcast every module's symbols to every
+//     target row, silently undoing the scoping);
+//   - a row without scoped data (nvd prose here, and legacy osv rows)
+//     contributes its flat vuln_funcs to Unscoped as before;
+//   - scoped entries keep row order and on-disk element order.
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_ScopedRowRouting(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	tenantID := uuid.New()
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM advisory_excerpts")).
+		WithArgs(tenantID, pq.Array([]string{"CVE-2025-7"})).
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs", "vuln_funcs_scoped"}).
+			// osv row (057 writer shape): flat = union of the scoped lists.
+			AddRow("CVE-2025-7",
+				[]byte(`["a.F","b.G"]`),
+				[]byte(`[{"module":"github.com/mod/a","vuln_funcs":["a.F"]},{"module":"github.com/mod/b","vuln_funcs":["b.G"]}]`)).
+			// nvd prose row: no module attribution.
+			AddRow("CVE-2025-7", []byte(`["n.H"]`), []byte(`[]`)))
+
+	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, []string{"CVE-2025-7"})
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	entry := got["CVE-2025-7"]
+	// Double-delivery prevention: the scoped row's flat union ("a.F","b.G")
+	// must be absent from Unscoped.
+	if len(entry.Unscoped) != 1 || entry.Unscoped[0] != "n.H" {
+		t.Fatalf("Unscoped = %v, want [n.H] only (a scoped row's flat union must not leak into the unscoped delivery)", entry.Unscoped)
+	}
+	if len(entry.Scoped) != 2 {
+		t.Fatalf("Scoped = %+v, want 2 module entries", entry.Scoped)
+	}
+	if entry.Scoped[0].Module != "github.com/mod/a" || len(entry.Scoped[0].Funcs) != 1 || entry.Scoped[0].Funcs[0] != "a.F" {
+		t.Errorf("Scoped[0] = %+v, want {github.com/mod/a [a.F]}", entry.Scoped[0])
+	}
+	if entry.Scoped[1].Module != "github.com/mod/b" || len(entry.Scoped[1].Funcs) != 1 || entry.Scoped[1].Funcs[0] != "b.G" {
+		t.Errorf("Scoped[1] = %+v, want {github.com/mod/b [b.G]}", entry.Scoped[1])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_ScopedLenientDecode
+// pins the lenient posture on the NEW column (M43 Phase D R8f): a
+// malformed scoped element (wrong shape / empty module / no string funcs)
+// is skipped individually; a row whose scoped value decodes to ZERO
+// well-formed entries (non-array, or all elements malformed) falls back to
+// the legacy unscoped-flat contribution instead of failing the read or
+// silently dropping the row.
+func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_ScopedLenientDecode(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAdvisoryExcerptsRepository(db)
+	tenantID := uuid.New()
+
+	mock.ExpectQuery(regexp.QuoteMeta("FROM advisory_excerpts")).
+		WithArgs(tenantID, pq.Array([]string{"CVE-2025-8", "CVE-2025-9"})).
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs", "vuln_funcs_scoped"}).
+			// Broken elements inside an otherwise valid scoped array: the
+			// non-object, the empty-module, the funcs-free and the
+			// non-string-func entries are skipped; the last entry survives
+			// (with its non-string func filtered out).
+			AddRow("CVE-2025-8",
+				[]byte(`["ok.Func"]`),
+				[]byte(`["not-an-object",{"module":"","vuln_funcs":["x.Y"]},{"module":"github.com/no/funcs"},{"module":"github.com/only/junk","vuln_funcs":[42]},{"module":"github.com/mod/ok","vuln_funcs":["ok.Func",42]}]`)).
+			// Scoped value not an array at all: the row falls back to
+			// unscoped-flat (legacy routing).
+			AddRow("CVE-2025-9", []byte(`["legacy.Func"]`), []byte(`{"not":"an array"}`)))
+
+	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, []string{"CVE-2025-8", "CVE-2025-9"})
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	e8 := got["CVE-2025-8"]
+	if len(e8.Scoped) != 1 || e8.Scoped[0].Module != "github.com/mod/ok" ||
+		len(e8.Scoped[0].Funcs) != 1 || e8.Scoped[0].Funcs[0] != "ok.Func" {
+		t.Errorf("CVE-2025-8 Scoped = %+v, want the single well-formed {github.com/mod/ok [ok.Func]} entry", e8.Scoped)
+	}
+	if len(e8.Unscoped) != 0 {
+		t.Errorf("CVE-2025-8 Unscoped = %v, want empty (a row with >=1 well-formed scoped entry routes scoped-only)", e8.Unscoped)
+	}
+	e9 := got["CVE-2025-9"]
+	if len(e9.Unscoped) != 1 || e9.Unscoped[0] != "legacy.Func" {
+		t.Errorf("CVE-2025-9 Unscoped = %v, want [legacy.Func] (non-array scoped value falls back to legacy flat routing)", e9.Unscoped)
+	}
+	if len(e9.Scoped) != 0 {
+		t.Errorf("CVE-2025-9 Scoped = %+v, want none", e9.Scoped)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
@@ -364,21 +484,21 @@ func TestAdvisoryExcerptsRepository_ListVulnFuncsByCVEs_LenientDecode(t *testing
 
 	mock.ExpectQuery(regexp.QuoteMeta("FROM advisory_excerpts")).
 		WithArgs(tenantID, pq.Array([]string{"CVE-2025-3"})).
-		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs"}).
-			AddRow("CVE-2025-3", []byte(`{"not":"an array"}`)).
-			AddRow("CVE-2025-3", []byte(`["ok.Func",{"name":"html.Parse"},42,"also.Ok"]`)))
+		WillReturnRows(sqlmock.NewRows([]string{"cve_id", "vuln_funcs", "vuln_funcs_scoped"}).
+			AddRow("CVE-2025-3", []byte(`{"not":"an array"}`), []byte(`[]`)).
+			AddRow("CVE-2025-3", []byte(`["ok.Func",{"name":"html.Parse"},42,"also.Ok"]`), []byte(`[]`)))
 
 	got, err := repo.ListVulnFuncsByCVEs(context.Background(), tenantID, []string{"CVE-2025-3"})
 	if err != nil {
 		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
 	}
 	want := []string{"ok.Func", "also.Ok"}
-	if len(got["CVE-2025-3"]) != len(want) {
-		t.Fatalf("CVE-2025-3 funcs = %v, want %v", got["CVE-2025-3"], want)
+	if len(got["CVE-2025-3"].Unscoped) != len(want) {
+		t.Fatalf("CVE-2025-3 funcs = %v, want %v", got["CVE-2025-3"].Unscoped, want)
 	}
 	for i := range want {
-		if got["CVE-2025-3"][i] != want[i] {
-			t.Errorf("CVE-2025-3 funcs[%d] = %q, want %q", i, got["CVE-2025-3"][i], want[i])
+		if got["CVE-2025-3"].Unscoped[i] != want[i] {
+			t.Errorf("CVE-2025-3 funcs[%d] = %q, want %q", i, got["CVE-2025-3"].Unscoped[i], want[i])
 		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
