@@ -6,8 +6,9 @@
 //
 // MVP scope (M1):
 //
-//   - Go ecosystem only. npm is intentionally out of scope and is deferred to
-//     M2 (user 確認 2026-06-24). See go_analyzer.go for the entry point.
+//   - Go (M1): see go_analyzer.go for the entry point. npm (M44 Wave 1,
+//     F469): see npm_analyzer.go — same contract, implemented as a
+//     lockfile-graph + comment-stripping regex source scanner.
 //   - Heuristic 2-stage decision: (1) import path presence in module graph,
 //     (2) symbol-name reference in source tree via go/packages AST walk.
 //   - Full call-graph analysis (golang.org/x/vuln equivalent) is out of scope:
@@ -106,7 +107,7 @@ type ReachabilityResult struct {
 	Status       Status            `json:"status"`
 	Confidence   float64           `json:"confidence"`
 	Evidence     []EvidencePointer `json:"evidence"`
-	Ecosystem    string            `json:"ecosystem"` // "go" for M1; "npm" deferred to M2
+	Ecosystem    string            `json:"ecosystem"` // "go" (M1) or "npm" (M44)
 	AnalyzedAt   time.Time         `json:"analyzed_at"`
 	AnalyzerName string            `json:"analyzer_name"` // e.g. "go_analyzer/v1"
 	DurationMS   int64             `json:"duration_ms"`
@@ -128,8 +129,9 @@ type ReachabilityInput struct {
 	// Used only for evidence labelling, not for matching.
 	AdvisoryID string
 
-	// Ecosystem must be "go" for M1. Any other value causes the Go analyzer
-	// to return StatusUnknown with an analyzer_error evidence entry.
+	// Ecosystem selects the analyzer: "go" (GoAnalyzer) or "npm"
+	// (NpmAnalyzer, M44 Wave 1, F469). An analyzer handed any other value
+	// returns StatusUnknown with an analyzer_error evidence entry.
 	Ecosystem string
 
 	// VulnerableModules is the set of import paths that are considered
@@ -137,6 +139,11 @@ type ReachabilityInput struct {
 	// module graph; prefix matches are NOT performed (the caller must
 	// supply exact module paths as published in OSV / GHSA, e.g.
 	// "github.com/jackc/pgx/v5", not "github.com/jackc/pgx").
+	//
+	// For npm the entries are registry package names (scoped names like
+	// "@scope/name" included, NOT purl-encoded); matching is exact but
+	// case-insensitive, against package.json plus any lockfile, so
+	// transitive dependencies count as present.
 	VulnerableModules []string
 
 	// VulnerableSymbols is the set of fully-qualified symbol names to grep
@@ -149,6 +156,16 @@ type ReachabilityInput struct {
 	// false positives across packages. ※要確認: this may be too strict
 	// for advisories that only publish bare symbol names; revisit after
 	// the M1-4 evaluation set.
+	//
+	// For npm (M44) the server-normalised selector forms are 1..3
+	// dot-separated JavaScript identifiers ("$" allowed):
+	//
+	//   - "defaultsDeep"          (bare export name — the most common form)
+	//   - "pkg.method" / "a.b.c"  (receiver.method / call chain)
+	//
+	// The npm analyzer matches them binding-aware, only inside files that
+	// import the vulnerable package, and skips malformed entries
+	// INDIVIDUALLY instead of rejecting the whole set.
 	VulnerableSymbols []string
 }
 

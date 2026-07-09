@@ -1,0 +1,37 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      acme-lodash:
+        specifier: ^4.17.0
+        version: 4.17.21
+      '@acme/scoped-lib':
+        specifier: ^1.2.0
+        version: 1.2.3
+
+packages:
+
+  acme-lodash@4.17.21:
+    resolution: {integrity: sha512-fixturefixturefixturefixturefixturefixturefixture==}
+
+  '@acme/scoped-lib@1.2.3':
+    resolution: {integrity: sha512-fixturefixturefixturefixturefixturefixturefixture==}
+
+  acme-deep-transitive@1.0.4:
+    resolution: {integrity: sha512-fixturefixturefixturefixturefixturefixturefixture==}
+
+snapshots:
+
+  acme-lodash@4.17.21: {}
+
+  '@acme/scoped-lib@1.2.3':
+    dependencies:
+      acme-deep-transitive: 1.0.4
+
+  acme-deep-transitive@1.0.4: {}

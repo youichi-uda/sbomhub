@@ -1,0 +1,9 @@
+{
+  "name": "fixture-yarn",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "acme-lodash": "^4.17.0",
+    "@acme/scoped-lib": "^1.2.0"
+  }
+}

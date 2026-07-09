@@ -1,0 +1,13 @@
+{
+  "name": "fixture-app",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "acme-lodash": "^4.17.0",
+    "@acme/scoped-lib": "^1.2.0",
+    "acme-transitive-parent": "^2.0.0"
+  },
+  "devDependencies": {
+    "acme-dev-tool": "^3.0.0"
+  }
+}
