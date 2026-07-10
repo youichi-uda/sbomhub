@@ -1375,7 +1375,14 @@ func stripJSComments(src string) string {
 //     — false negative, damage bounded to one line;
 //   - a // or /* sequence inside a ${...} interpolation is treated as a
 //     comment, so a pathological `${x // }` can blank the rest of the
-//     template's line — false negative.
+//     template's line — false negative;
+//   - JSX is not modelled: a closing tag `</div>` or self-closing `}/>`
+//     puts the `/` in regex-start position (prev token `<` or `}`), so
+//     the rest of THAT line is blanked — same-line code after JSX in
+//     .jsx/.tsx files is missed (false negative, one-line bound; the
+//     next line resyncs). Biasing `<` toward division instead would
+//     break genuine `a < /re/.test(s)` comparisons, so the corner is
+//     accepted (M44 Phase D R3 review).
 //
 // All are acceptable for a conservative scanner whose output feeds an LLM +
 // human approval pipeline.
