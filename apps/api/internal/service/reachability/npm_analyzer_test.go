@@ -672,7 +672,10 @@ func npmWriteFile(t *testing.T, root, rel, content string) {
 // /dev/zero) passed the npmMaxFileSizeBytes gate and os.ReadFile read the
 // TARGET — an unbounded-read DoS plus a false-positive vector (the target's
 // content influenced the verdict). Symlinks (file and directory alike) must
-// be skipped and surfaced only as an informational evidence note.
+// be skipped; only symlinks with a SOURCE-FILE extension — the ones that
+// would have been scan candidates as regular files — are counted in the
+// informational note (round-2 finding 4: counting directory links and
+// non-source links too overstated the note).
 func TestNpmAnalyze_SymlinksNotFollowed(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -698,14 +701,22 @@ func TestNpmAnalyze_SymlinksNotFollowed(t *testing.T) {
 	wantSymlinks := 1
 
 	// Directory symlink: WalkDir surfaces it as a non-dir entry; it must
-	// not be followed (and never was), but it is now counted in the note.
+	// not be followed (and never was), but its basename has no source
+	// extension, so it was never a scan candidate and must NOT be counted
+	// (round-2 finding 4: counting it overstated the note).
 	npmWriteFile(t, outside, "linked_dir/inner.js", vuln)
 	require.NoError(t, os.Symlink(filepath.Join(outside, "linked_dir"),
 		filepath.Join(root, "linked_dir")))
-	wantSymlinks++
+
+	// Non-source file symlink (README/asset links, .bin shims and the like):
+	// skipped, but not a candidate — must NOT be counted either.
+	npmWriteFile(t, outside, "notes.txt", "plain text\n")
+	require.NoError(t, os.Symlink(filepath.Join(outside, "notes.txt"),
+		filepath.Join(root, "notes_link.txt")))
 
 	// Unbounded device node, when the platform has one: before the fix,
 	// os.ReadFile on this link never terminated (R1 reproduced the DoS).
+	// Its .js name makes it a would-be candidate, so it IS counted.
 	if _, err := os.Stat("/dev/zero"); err == nil {
 		require.NoError(t, os.Symlink("/dev/zero", filepath.Join(root, "zero_link.js")))
 		wantSymlinks++
@@ -725,8 +736,10 @@ func TestNpmAnalyze_SymlinksNotFollowed(t *testing.T) {
 		assert.NotContains(t, e.FilePath, "big_link")
 		assert.NotContains(t, e.FilePath, "zero_link")
 		assert.NotContains(t, e.FilePath, "linked_dir")
+		assert.NotContains(t, e.FilePath, "notes_link")
 	}
-	assert.True(t, npmHasDescription(res, fmt.Sprintf("%d symlink(s) skipped", wantSymlinks)),
+	assert.True(t, npmHasDescription(res,
+		fmt.Sprintf("%d symlink(s) with source-file extensions skipped", wantSymlinks)),
 		"expected a %d-symlink note, got %+v", wantSymlinks, res.Evidence)
 }
 
@@ -1002,5 +1015,202 @@ func TestStripJSCode_StringAndTemplateBlanking(t *testing.T) {
 	assert.Contains(t, codeOnly, "_.merge(a, b)")
 	assert.Contains(t, codeOnly, "deep")
 	// Newlines survive so the line index still works.
+	assert.Equal(t, strings.Count(src, "\n"), strings.Count(codeOnly, "\n"))
+}
+
+// ---------------------------------------------------------------------------
+// M44 Phase D round 2 regression tests (R3a: npm analyzer findings), kept in
+// lockstep with the CLI suite.
+// ---------------------------------------------------------------------------
+
+// TestNpmAnalyze_MethodDefinitionKeyNotAUse guards round-2 finding 1: an
+// object-literal / class-body method DEFINITION key that happens to carry the
+// vulnerable symbol's name (`const o = { merge() {…} }`) is not a use of the
+// imported binding — before the fix the `merge(` text was read as a call and
+// the verdict went false-reachable. The decisive shape is that the ')'
+// matching the identifier's '(' is directly followed by '{' (a block never
+// follows a call expression without a statement break), so real calls —
+// including `foo(merge(1))` and `if (merge(x)) {`, whose extra ')' sits
+// between the call's ')' and the '{' — keep matching.
+func TestNpmAnalyze_MethodDefinitionKeyNotAUse(t *testing.T) {
+	t.Parallel()
+	analyze := func(t *testing.T, source string) *ReachabilityResult {
+		t.Helper()
+		root := t.TempDir()
+		npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+		npmWriteFile(t, root, "src/app.js", source)
+		res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root,
+			ReachabilityInput{
+				Ecosystem:         "npm",
+				VulnerableModules: []string{"acme-lodash"},
+				VulnerableSymbols: []string{"merge"},
+			})
+		require.NoError(t, err)
+		return res
+	}
+	wantImportOnly := func(t *testing.T, res *ReachabilityResult) {
+		t.Helper()
+		assert.Equal(t, StatusImportOnly, res.Status)
+		assert.Empty(t, npmEvidenceOfKind(res, EvidenceKindSymbolRef))
+		assert.True(t, npmHasDescription(res, "binding imported but no use found"),
+			"expected the unused-binding note, got %+v", res.Evidence)
+	}
+
+	t.Run("object method shorthand key is not a use", func(t *testing.T) {
+		wantImportOnly(t, analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"const o = { merge(a, b) { return a; } };\n"+
+				"export default o;\n"))
+	})
+
+	t.Run("async and getter shorthand keys are not uses", func(t *testing.T) {
+		wantImportOnly(t, analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"const o = { async merge(a) { return a; } };\n"+
+				"const p = { get merge() { return 1; } };\n"+
+				"export default [o, p];\n"))
+	})
+
+	t.Run("class method key is not a use", func(t *testing.T) {
+		wantImportOnly(t, analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"class C { merge(x) { return x; } }\n"+
+				"export default C;\n"))
+	})
+
+	t.Run("Allman-style body brace on the next line is still a definition", func(t *testing.T) {
+		wantImportOnly(t, analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"const o = { merge (a, b)\n"+
+				"{ return a; } };\n"+
+				"export default o;\n"))
+	})
+
+	t.Run("sloppy-mode function declaration is not a use", func(t *testing.T) {
+		// var + function-declaration redeclaration is valid sloppy-mode JS;
+		// the declaration's `merge(` must not read as a call of the binding.
+		wantImportOnly(t, analyze(t,
+			"var { merge } = require('acme-lodash');\n"+
+				"function merge(a) { return a; }\n"))
+	})
+
+	t.Run("call in argument position is a use", func(t *testing.T) {
+		res := analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"export const r = JSON.stringify(merge({}, {}));\n")
+		assert.Equal(t, StatusReachable, res.Status)
+	})
+
+	t.Run("call in an if condition is a use", func(t *testing.T) {
+		res := analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"if (merge({})) { console.log('hit'); }\n")
+		assert.Equal(t, StatusReachable, res.Status)
+	})
+
+	t.Run("shorthand property value is still a use", func(t *testing.T) {
+		// `{ merge }` REFERENCES the binding (hands the function around) —
+		// the definition-key exclusion must not over-reach into it.
+		res := analyze(t,
+			"import { merge } from 'acme-lodash';\n"+
+				"export const o = { merge };\n")
+		assert.Equal(t, StatusReachable, res.Status)
+	})
+}
+
+// TestNpmAnalyze_RegexLiteralStringParity guards round-2 finding 2 (R1b
+// reproduced it live): stripJSCode did not model regex literals, so a quote
+// or backtick INSIDE a regex (`/'/`, "/\\`/") opened a phantom string in
+// codeOnly; the parity flip turned later real string text into phantom code
+// and `_.merge(` inside a docstring became a false-reachable symbol hit.
+// Regex literals are now lexed via a prev-token heuristic and blanked, while
+// division expressions stay untouched.
+func TestNpmAnalyze_RegexLiteralStringParity(t *testing.T) {
+	t.Parallel()
+	analyze := func(t *testing.T, source string, symbols []string) *ReachabilityResult {
+		t.Helper()
+		root := t.TempDir()
+		npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+		npmWriteFile(t, root, "src/app.js", source)
+		res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root,
+			ReachabilityInput{
+				Ecosystem:         "npm",
+				VulnerableModules: []string{"acme-lodash"},
+				VulnerableSymbols: symbols,
+			})
+		require.NoError(t, err)
+		return res
+	}
+	wantImportOnly := func(t *testing.T, res *ReachabilityResult) {
+		t.Helper()
+		assert.Equal(t, StatusImportOnly, res.Status)
+		assert.Empty(t, npmEvidenceOfKind(res, EvidenceKindSymbolRef))
+	}
+
+	t.Run("quote in regex must not turn a same-line string into code", func(t *testing.T) {
+		// Same line matters: the string lexer resyncs at newlines, so the
+		// R1b parity flip is confined to (and reproduced on) one line.
+		wantImportOnly(t, analyze(t,
+			"const _ = require('acme-lodash');\n"+
+				"const esc = /'/; const doc = 'docs: _.merge(a, b) example';\n"+
+				"module.exports = { _, esc, doc };\n",
+			[]string{"merge", "_.merge"}))
+	})
+
+	t.Run("backtick in regex must not open a phantom template", func(t *testing.T) {
+		// R1b: the parity flip from /\`/ swallowed the REAL template opener,
+		// so the template's multi-line text body became phantom code.
+		wantImportOnly(t, analyze(t,
+			"const _ = require('acme-lodash');\n"+
+				"const re = /\\`/;\n"+
+				"const tpl = `multi\n"+
+				"line _.merge(a, b) text\n"+
+				"end`;\n"+
+				"module.exports = { _, re, tpl };\n",
+			[]string{"merge", "_.merge"}))
+	})
+
+	t.Run("regex as a call argument", func(t *testing.T) {
+		wantImportOnly(t, analyze(t,
+			"const _ = require('acme-lodash');\n"+
+				"const out = 'x'.replace(/'/g, '-'); const doc = 'see _.merge(a, b)';\n"+
+				"module.exports = { _, out, doc };\n",
+			[]string{"merge", "_.merge"}))
+	})
+
+	t.Run("division is not misread as a regex", func(t *testing.T) {
+		res := analyze(t,
+			"const _ = require('acme-lodash');\n"+
+				"const ratio = 10 / 2 / 5;\n"+
+				"_.defaultsDeep({}, {});\n",
+			[]string{"defaultsDeep"})
+		require.Equal(t, StatusReachable, res.Status,
+			"division must not blank following code")
+		symbols := npmEvidenceOfKind(res, EvidenceKindSymbolRef)
+		require.Len(t, symbols, 1)
+		assert.Equal(t, 3, symbols[0].Line)
+	})
+}
+
+func TestStripJSCode_RegexLiterals(t *testing.T) {
+	t.Parallel()
+	src := "const esc = /'/; const doc = 'STRTEXT _.merge(a, b)';\n" +
+		"const re = /RXBODY[/]\\//gi;\n" +
+		"const ratio = a / b / c;\n" +
+		"return /'/.test(s) ? 1 : 0;\n"
+	stripped, codeOnly := stripJSCode(src)
+	require.Equal(t, len(src), len(stripped), "offsets must be preserved")
+	require.Equal(t, len(src), len(codeOnly), "offsets must be preserved")
+	// The quote inside /'/ must not flip string parity: the next string
+	// stays a string (blanked in codeOnly) and its declaration stays code.
+	assert.NotContains(t, codeOnly, "STRTEXT")
+	assert.NotContains(t, codeOnly, "_.merge(")
+	assert.NotContains(t, codeOnly, "RXBODY")
+	assert.NotContains(t, codeOnly, "gi")
+	assert.Contains(t, codeOnly, "const doc =")
+	assert.Contains(t, codeOnly, "a / b / c")
+	assert.Contains(t, codeOnly, ".test(s) ? 1 : 0")
+	// stripped only blanks comments: string text stays readable there.
+	assert.Contains(t, stripped, "STRTEXT")
 	assert.Equal(t, strings.Count(src, "\n"), strings.Count(codeOnly, "\n"))
 }

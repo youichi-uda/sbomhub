@@ -211,7 +211,7 @@ func (a *NpmAnalyzer) Analyze(ctx context.Context, projectPath string, input Rea
 	if scan.symlinksSkipped > 0 {
 		result.Evidence = append(result.Evidence, EvidencePointer{
 			Kind: EvidenceKindAnalyzerError,
-			Description: fmt.Sprintf("%d symlink(s) skipped during the source walk "+
+			Description: fmt.Sprintf("%d symlink(s) with source-file extensions skipped during the source walk "+
 				"(symlinks are never followed: the link's lstat size would bypass the %d-byte file cap while os.ReadFile reads the target)",
 				scan.symlinksSkipped, npmMaxFileSizeBytes),
 		})
@@ -691,7 +691,7 @@ type npmScanResult struct {
 	// influence the verdict.
 	noteEvidence    []EvidencePointer
 	truncated       bool // npmMaxSourceFiles budget exhausted
-	symlinksSkipped int  // symlinks (file or dir) skipped by the walk
+	symlinksSkipped int  // symlinks with source-file extensions skipped by the walk
 }
 
 // scanNpmSource walks the project tree once, performing the import-level
@@ -738,12 +738,19 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 			// (/dev/zero) would pass the npmMaxFileSizeBytes gate below
 			// and os.ReadFile would read the TARGET — an unbounded-read
 			// DoS and a way to smuggle out-of-tree content into the
-			// verdict. Skipping is false-negative direction; symlinks are
-			// counted for an informational evidence note. Other irregular
-			// files (FIFOs, sockets, device nodes) are skipped silently —
-			// reading them could block forever.
+			// verdict. Skipping is false-negative direction. Only symlinks
+			// whose basename carries a source extension are counted for
+			// the informational evidence note: those are the ones that
+			// would have been scan candidates as regular files, so
+			// skipping them can hide first-party source. Directory links,
+			// README/asset links, .bin shims and the like were never
+			// candidates — counting them (as round 1 did) overstated the
+			// note. Other irregular files (FIFOs, sockets, device nodes)
+			// are skipped silently — reading them could block forever.
 			if t&fs.ModeSymlink != 0 {
-				res.symlinksSkipped++
+				if _, ok := npmSourceExts[strings.ToLower(filepath.Ext(d.Name()))]; ok {
+					res.symlinksSkipped++
+				}
 			}
 			return nil
 		}
@@ -1104,10 +1111,19 @@ func npmIdentBoundaryBefore(s string, off int) bool {
 // blanked). A use is an occurrence with identifier boundaries on both sides
 // that is not a member-access leaf (preceded by "."), not an object-literal
 // key (followed by ":", which also skips `cond ? local : x` — an accepted
-// false-negative), and not inside any declaration span (import/require
-// statements: the occurrence there IS the declaration, not a use). Both
-// calls (local(...)) and bare references (arr.map(local)) qualify: a
-// reference hands the vulnerable function around, so it may be executed.
+// false-negative), not a method-definition key or function-declaration name
+// (followed by "(" whose matching ")" is directly followed by "{":
+// `merge() {…}` shorthand in an object literal or class body, `function
+// merge(…) {` — see npmMethodDefKeyParen for the rule and its residual
+// corners), and not inside any declaration span (import/require statements:
+// the occurrence there IS the declaration, not a use). Both calls
+// (local(...)) and bare references (arr.map(local)) qualify: a reference
+// hands the vulnerable function around, so it may be executed.
+//
+// Known limit (regex-analyzer class, documented): scope shadowing is not
+// modelled. `function f(merge) { return merge(1); }` counts the parameter's
+// call as a use of the same-named imported binding — a residual
+// false-positive corner owned by the LLM judgement / human approval stages.
 func npmFindIdentifierUse(codeOnly, local string, declSpans [][2]int) (int, bool) {
 	for from := 0; from < len(codeOnly); {
 		i := strings.Index(codeOnly[from:], local)
@@ -1133,6 +1149,9 @@ func npmFindIdentifierUse(codeOnly, local string, declSpans [][2]int) (int, bool
 		if j < len(codeOnly) && codeOnly[j] == ':' {
 			continue // object-literal key, not a reference
 		}
+		if j < len(codeOnly) && codeOnly[j] == '(' && npmMethodDefKeyParen(codeOnly, j) {
+			continue // method-definition key / function-declaration name, not a use
+		}
 		inDecl := false
 		for _, sp := range declSpans {
 			if off >= sp[0] && off < sp[1] {
@@ -1146,6 +1165,51 @@ func npmFindIdentifierUse(codeOnly, local string, declSpans [][2]int) (int, bool
 		return off, true
 	}
 	return 0, false
+}
+
+// npmMethodDefKeyParen reports whether the "(" at open in codeOnly opens
+// the parameter list of a method/function DEFINITION named by the
+// identifier immediately before it, rather than a call's argument list: the
+// token after the ")" matching open is "{". That shape is decisive on the
+// paren-matched view — a block never directly follows a call expression
+// without a statement break, and control flow like `if (merge(x)) {` keeps
+// its own ")" between the call's ")" and the "{". It covers object-literal
+// and class-body method shorthand (`merge(a) {`, incl. async/get/set/
+// static/* modifiers, which sit BEFORE the identifier and need no handling
+// here) plus function declarations/expressions (`function merge() {`).
+// Parens are counted on codeOnly, where comment, string, template and
+// regex-literal bodies are already blanked, so delimiters inside literals
+// cannot skew the depth.
+//
+// Residual corners (accepted, false direction noted):
+//   - a call expression followed by a block statement on the NEXT line
+//     (`merge(x)` + newline + `{ … }`, valid via ASI) reads as a
+//     definition — false negative;
+//   - TS class methods with return-type annotations (`merge(): void {`)
+//     are NOT excluded (the ":" sits between ")" and "{"; skipping type
+//     text would misread ternaries), and TS generic keys (`merge<T>() {`)
+//     are not recognised — both stay counted as uses, residual false
+//     positives;
+//   - unbalanced parens (truncated file) fail open: treated as a use.
+func npmMethodDefKeyParen(codeOnly string, open int) bool {
+	depth := 0
+	for i := open; i < len(codeOnly); i++ {
+		switch codeOnly[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				j := i + 1
+				for j < len(codeOnly) && (codeOnly[j] == ' ' || codeOnly[j] == '\t' ||
+					codeOnly[j] == '\n' || codeOnly[j] == '\r') {
+					j++
+				}
+				return j < len(codeOnly) && codeOnly[j] == '{'
+			}
+		}
+	}
+	return false // unbalanced parens: fail open, the caller counts a use
 }
 
 // lookupNpmSpecifier resolves a module specifier to a matched vulnerable
@@ -1290,14 +1354,31 @@ func stripJSComments(src string) string {
 // — that would violate the analyzer's false-negative-only error direction.
 // Symbol matching runs on codeOnly outright.
 //
-// Known heuristic limits (false-negative direction, documented for
-// maintainers): regex literals are not modelled, so `/\/*` inside a regex
-// can eat code until the next `*/`, and a quote inside a regex opens a
-// phantom string in codeOnly until the next quote; a // or /* sequence
-// inside a ${...} interpolation is treated as a comment, so a pathological
-// `${x // }`  can blank the rest of the template's line. All are acceptable
-// for a conservative scanner whose output feeds an LLM + human approval
-// pipeline.
+// Regex literals ARE modelled (M44 Phase D round 2): a "/" in code position
+// that opens neither comment form starts a regex literal when the previous
+// non-blank token cannot end an expression (prev-token heuristic, see
+// npmRegexLiteralStarts); the body — escapes and [...] character classes
+// (a "/" inside one does not terminate) — and any trailing flags are
+// blanked in codeOnly, delimiters kept, comment sequences inside ignored.
+// Before round 2, a quote or backtick inside a regex (/'/ or an escaped
+// backtick) opened a phantom string in codeOnly and the parity flip turned
+// later real string text into phantom code — a false-POSITIVE vector (R1b
+// reproduced it), now closed.
+//
+// Known heuristic limits, each with its error direction (the analyzer's
+// budget prefers false negatives):
+//   - a regex directly after ")" (`if (cond) /re/.test(s)`) is read as
+//     division because ")" usually ends an expression; its body is then
+//     NOT blanked, keeping the old false-positive exposure in that corner;
+//   - a division misread as a regex blanks code to the end of the line
+//     only (regex literals cannot span newlines; the lexer resyncs there)
+//     — false negative, damage bounded to one line;
+//   - a // or /* sequence inside a ${...} interpolation is treated as a
+//     comment, so a pathological `${x // }` can blank the rest of the
+//     template's line — false negative.
+//
+// All are acceptable for a conservative scanner whose output feeds an LLM +
+// human approval pipeline.
 func stripJSCode(src string) (stripped, codeOnly string) {
 	out := []byte(src)  // comments blanked
 	code := []byte(src) // comments + string/template bodies blanked
@@ -1308,6 +1389,7 @@ func stripJSCode(src string) (stripped, codeOnly string) {
 		stSingle
 		stDouble
 		stBacktick
+		stRegex
 	)
 	state := stCode
 	// interpDepth holds one unbalanced-'{' counter per template literal
@@ -1315,25 +1397,28 @@ func stripJSCode(src string) (stripped, codeOnly string) {
 	// decides when a '}' closes that interpolation (returning to template
 	// text) rather than an object literal inside it.
 	var interpDepth []int
+	// regexInClass tracks a [...] character class inside the current regex
+	// literal: a '/' inside one does not terminate the regex.
+	regexInClass := false
 	for i := 0; i < len(src); i++ {
 		c := src[i]
 		switch state {
 		case stCode:
 			switch c {
 			case '/':
-				if i+1 < len(src) {
-					switch src[i+1] {
-					case '/':
-						state = stLineComment
-						out[i], out[i+1] = ' ', ' '
-						code[i], code[i+1] = ' ', ' '
-						i++
-					case '*':
-						state = stBlockComment
-						out[i], out[i+1] = ' ', ' '
-						code[i], code[i+1] = ' ', ' '
-						i++
-					}
+				if i+1 < len(src) && src[i+1] == '/' {
+					state = stLineComment
+					out[i], out[i+1] = ' ', ' '
+					code[i], code[i+1] = ' ', ' '
+					i++
+				} else if i+1 < len(src) && src[i+1] == '*' {
+					state = stBlockComment
+					out[i], out[i+1] = ' ', ' '
+					code[i], code[i+1] = ' ', ' '
+					i++
+				} else if npmRegexLiteralStarts(code, i) {
+					state = stRegex
+					regexInClass = false
 				}
 			case '\'':
 				state = stSingle
@@ -1412,9 +1497,103 @@ func stripJSCode(src string) (stripped, codeOnly string) {
 			case c != '\n':
 				code[i] = ' '
 			}
+		case stRegex:
+			switch {
+			case c == '\\':
+				code[i] = ' '
+				if i+1 < len(src) && src[i+1] != '\n' {
+					code[i+1] = ' '
+					i++ // skip escaped char (incl. \/ and \])
+				}
+			case c == '/' && !regexInClass:
+				state = stCode
+				// Consume trailing flags (identifier runes right after the
+				// closing '/'): left in place they would read as phantom
+				// code identifiers.
+				for i+1 < len(src) {
+					r, size := utf8.DecodeRuneInString(src[i+1:])
+					if !isNpmIdentRune(r) {
+						break
+					}
+					for k := 1; k <= size; k++ {
+						code[i+k] = ' '
+					}
+					i += size
+				}
+			case c == '\n':
+				// Regex literals cannot span lines: resync. This also
+				// bounds the damage of a division misread as a regex to
+				// one line.
+				state = stCode
+				regexInClass = false
+			default:
+				if c == '[' {
+					regexInClass = true
+				} else if c == ']' {
+					regexInClass = false
+				}
+				code[i] = ' '
+			}
 		}
 	}
 	return string(out), string(code)
+}
+
+// npmRegexLiteralStarts decides whether the "/" at off (already known not
+// to open a comment) begins a regex literal rather than a division
+// operator, via the classic prev-token heuristic: a regex can only start
+// where the previous token cannot END an expression. code is the partially
+// blanked codeOnly view built so far (comment and string/template bodies
+// already spaces), so the last non-blank byte before off is the tail of the
+// previous meaningful token.
+//
+//	division after: an identifier/number tail, ")", "]", a string or
+//	                template closing delimiter, or postfix "++"/"--"
+//	regex after:    everything else — punctuation ("=", "(", ",", ":",
+//	                ";", "!", "&", "|", "?", "{", "}", "<", ">", "+",
+//	                "-", "*", "%", "^", "~"), an expression-position
+//	                keyword (return, typeof, case, in, of, new, delete,
+//	                void, instanceof, throw, do, else, yield, await), or
+//	                the start of the file
+//
+// Known misclassification corners are documented on stripJSCode.
+func npmRegexLiteralStarts(code []byte, off int) bool {
+	i := off - 1
+	for i >= 0 && (code[i] == ' ' || code[i] == '\t' || code[i] == '\n' || code[i] == '\r') {
+		i--
+	}
+	if i < 0 {
+		return true // start of file: expression position
+	}
+	switch code[i] {
+	case ')', ']', '\'', '"', '`':
+		return false // expression tail → division
+	case '+', '-':
+		// `x++ / y` and `x-- / y`: postfix inc/dec ends an expression;
+		// a single binary "+"/"-" does not ("s" + /re/.source).
+		return !(i > 0 && code[i-1] == code[i])
+	}
+	r, _ := utf8.DecodeLastRune(code[:i+1])
+	if !isNpmIdentRune(r) {
+		return true // other punctuation: expression position
+	}
+	// Identifier / number / keyword tail: extract the word and let the
+	// expression-position keywords through.
+	end := i + 1
+	start := end
+	for start > 0 {
+		pr, size := utf8.DecodeLastRune(code[:start])
+		if !isNpmIdentRune(pr) {
+			break
+		}
+		start -= size
+	}
+	switch string(code[start:end]) {
+	case "return", "typeof", "case", "in", "of", "new", "delete", "void",
+		"instanceof", "throw", "do", "else", "yield", "await":
+		return true
+	}
+	return false // identifier or numeric literal → division
 }
 
 // npmLineIndex maps byte offsets to 1-based line/column pairs.
