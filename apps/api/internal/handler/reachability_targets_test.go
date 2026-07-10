@@ -1024,3 +1024,36 @@ func TestGoModuleFromPurl(t *testing.T) {
 		}
 	}
 }
+
+// TestReachabilityHandler_GetTargets_NpmScopedCaseFold pins the M44 Phase D
+// R2c rule: npm scoped entries match the purl-derived package name
+// case-insensitively (legacy mixed-case registry names like JSONStream vs a
+// lowercase advisory attribution — the CLI analyzer folds case too), while
+// Go rows keep the exact-match rule (M43 R8f, case-significant module paths).
+func TestReachabilityHandler_GetTargets_NpmScopedCaseFold(t *testing.T) {
+	tr := &fakeReachabilityTargetsReader{rows: []repository.ReachabilityTarget{
+		{CVEID: "CVE-2025-5002", ComponentID: uuid.New(), Purl: "pkg:npm/JSONStream@1.3.5", ComponentName: "JSONStream", ComponentVersion: "1.3.5"},
+	}}
+	vf := &fakeReachabilityVulnFuncsReader{byCVE: map[string]repository.CVEVulnFuncs{
+		"CVE-2025-5002": {Scoped: []repository.ScopedVulnFuncs{
+			{Module: "jsonstream", Funcs: []string{"parse"}},
+		}},
+	}}
+	h := &ReachabilityHandler{projects: &fakeReachabilityProjectReader{}, targets: tr, vulnFuncs: vf}
+
+	rec, err := doReachabilityTargets(h, uuid.New(), uuid.New(), "")
+	if err != nil {
+		t.Fatalf("GetTargets returned error: %v", err)
+	}
+	var resp targetsResponseShape
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Targets) != 1 {
+		t.Fatalf("targets len = %d, want 1", len(resp.Targets))
+	}
+	got := resp.Targets[0].VulnFuncs
+	if len(got) != 1 || got[0] != "parse" {
+		t.Fatalf("vuln_funcs = %v, want [parse] (npm scoped match must fold case)", got)
+	}
+}

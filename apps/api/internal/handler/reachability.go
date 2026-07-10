@@ -510,7 +510,14 @@ func (h *ReachabilityHandler) GetTargets(c echo.Context) error {
 		var union []string
 		if module != "" {
 			for _, sc := range raw.Scoped {
-				if sc.Module == module {
+				// npm rows match case-insensitively: the registry enforces
+				// lowercase for new packages but legacy mixed-case names
+				// (jQuery, JSONStream, …) still exist and the CLI analyzer's
+				// matchNpmPackages already folds case — a case-sensitive edge
+				// here would silently withhold scoped symbols the analyzer
+				// could have matched (M44 Phase D R2c). Go module paths keep
+				// the exact match (M43 R8f behaviour, case-significant).
+				if sc.Module == module || (ecosystem == "npm" && strings.EqualFold(sc.Module, module)) {
 					union = append(union, sc.Funcs...)
 				}
 			}
