@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -46,11 +48,12 @@ import (
 //	         like "merge" or "get" would destroy precision).
 //
 // Like the Go analyzer, this is a conservative static heuristic, not a call
-// graph: comment-stripping plus statement-shaped regexes err on the side of
-// skipping constructs they cannot classify (multi-line trickery, computed
-// require targets, re-export chains, aliased phantom bindings), so results
-// lean towards false NEGATIVES and the LLM judgement / human approval
-// stages own the final call. The zero value is a usable analyzer.
+// graph: comment AND string/template-literal stripping (see stripJSCode)
+// plus statement-shaped regexes err on the side of skipping constructs they
+// cannot classify (multi-line trickery, computed require targets, re-export
+// chains, aliased phantom bindings), so results lean towards false
+// NEGATIVES and the LLM judgement / human approval stages own the final
+// call. The zero value is a usable analyzer.
 type NpmAnalyzer struct {
 	// SkipSourceScan disables stages 2 and 3 and decides only from the
 	// dependency graph (mirrors GoAnalyzer.SkipPackagesLoad). Intended for
@@ -197,11 +200,20 @@ func (a *NpmAnalyzer) Analyze(ctx context.Context, projectPath string, input Rea
 	}
 
 	result.Evidence = append(result.Evidence, scan.importEvidence...)
+	result.Evidence = append(result.Evidence, scan.noteEvidence...)
 
 	if scan.truncated {
 		result.Evidence = append(result.Evidence, EvidencePointer{
 			Kind:        EvidenceKindAnalyzerError,
 			Description: fmt.Sprintf("source scan stopped after %d files; results may be incomplete", npmMaxSourceFiles),
+		})
+	}
+	if scan.symlinksSkipped > 0 {
+		result.Evidence = append(result.Evidence, EvidencePointer{
+			Kind: EvidenceKindAnalyzerError,
+			Description: fmt.Sprintf("%d symlink(s) skipped during the source walk "+
+				"(symlinks are never followed: the link's lstat size would bypass the %d-byte file cap while os.ReadFile reads the target)",
+				scan.symlinksSkipped, npmMaxFileSizeBytes),
 		})
 	}
 
@@ -588,8 +600,15 @@ type npmSymbolSelector struct {
 func (s npmSymbolSelector) leaf() string { return s.parts[len(s.parts)-1] }
 
 // npmIdentRe is the JavaScript identifier shape accepted in selector parts
-// ("$" is legal in JS, unlike Go).
-var npmIdentRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+// and import-clause bindings ("$" is legal in JS, unlike Go): first rune a
+// Unicode letter, "_" or "$"; the rest may add Unicode digits. This is
+// deliberately in LOCKSTEP with the server-side selector filter
+// isJSIdentifier (apps/api/internal/handler/reachability.go) and the CLI
+// filter isJSIdentifierShaped (sbomhub-cli cmd/sbomhub/commands/
+// reachability.go): a selector those filters let through must never be
+// silently dropped here as "malformed" (that demoted e.g. "café.parse"
+// projects to import_only with no symbol matching at all).
+var npmIdentRe = regexp.MustCompile(`^[\p{L}_$][\p{L}\p{Nd}_$]*$`)
 
 // parseNpmSymbolSelectors parses the server-normalised selectors. The
 // server is trusted to have sanitised them already, so no re-sanitisation
@@ -655,8 +674,10 @@ var (
 	reNpmImportDynamic = regexp.MustCompile(`\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 	// require('spec') anywhere
 	reNpmRequire = regexp.MustCompile(`\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)`)
-	// const|let|var <ident> = require('spec')
-	reNpmRequireBind = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
+	// const|let|var <ident> = require('spec') — the identifier class matches
+	// npmIdentRe (Unicode letters/digits allowed, in lockstep with the
+	// server-side isJSIdentifier rule).
+	reNpmRequireBind = regexp.MustCompile(`\b(?:const|let|var)\s+([\p{L}_$][\p{L}\p{Nd}_$]*)\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 	// const|let|var { a, b: c } = require('spec')  (single-level destructuring)
 	reNpmRequireDestructure = regexp.MustCompile(`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
 )
@@ -665,7 +686,12 @@ var (
 type npmScanResult struct {
 	importEvidence []EvidencePointer
 	symbolEvidence []EvidencePointer
-	truncated      bool // npmMaxSourceFiles budget exhausted
+	// noteEvidence carries informational analyzer_error entries produced by
+	// the scan itself (e.g. "binding imported but no use found"); they never
+	// influence the verdict.
+	noteEvidence    []EvidencePointer
+	truncated       bool // npmMaxSourceFiles budget exhausted
+	symlinksSkipped int  // symlinks (file or dir) skipped by the walk
 }
 
 // scanNpmSource walks the project tree once, performing the import-level
@@ -705,6 +731,22 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 			}
 			return nil
 		}
+		if t := d.Type(); !t.IsRegular() {
+			// Never follow symlinks (file OR directory links): d.Info()
+			// reports the LINK's own lstat size, not the target's, so a
+			// tiny link to a huge file or an unbounded device node
+			// (/dev/zero) would pass the npmMaxFileSizeBytes gate below
+			// and os.ReadFile would read the TARGET — an unbounded-read
+			// DoS and a way to smuggle out-of-tree content into the
+			// verdict. Skipping is false-negative direction; symlinks are
+			// counted for an informational evidence note. Other irregular
+			// files (FIFOs, sockets, device nodes) are skipped silently —
+			// reading them could block forever.
+			if t&fs.ModeSymlink != 0 {
+				res.symlinksSkipped++
+			}
+			return nil
+		}
 		if _, ok := npmSourceExts[strings.ToLower(filepath.Ext(d.Name()))]; !ok {
 			return nil
 		}
@@ -740,32 +782,60 @@ type npmFileBindings struct {
 	// call `<receiver>.<symbol>(` counts as a symbol reference.
 	receivers []string
 	// named maps ORIGINAL export names (import {orig as alias}) to the
-	// offset of the import that bound them. A named binding of a vulnerable
-	// symbol counts as a symbol reference by itself.
-	named map[string]int
+	// binding's local name and declaration offset. A named binding counts
+	// as a symbol reference only when its LOCAL name is used (called or
+	// referenced) outside binding declarations — the import statement alone
+	// proves nothing and claiming reachable for it would be a false
+	// positive, violating the analyzer's false-negative-only error budget.
+	named map[string]npmNamedBinding
+}
+
+// npmNamedBinding records one named binding (ESM named import or require
+// destructure) of a vulnerable package within a file.
+type npmNamedBinding struct {
+	local  string // local identifier the binding is usable as (alias-aware)
+	offset int    // byte offset of the binding declaration (for the unused-binding note)
 }
 
 // scanNpmFile performs the per-file import scan and file-scoped symbol
 // match, appending evidence to res. content is the raw file text; all
-// regexes run on a comment-stripped copy with identical byte offsets so
-// line/column evidence maps back to the original.
+// regexes run on lexed copies with identical byte offsets (see stripJSCode)
+// so line/column evidence maps back to the original.
 func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 	selectors []npmSymbolSelector, res *npmScanResult,
 	seenImport, seenSymbol map[string]struct{},
 	memberRegexCache map[string]*regexp.Regexp,
 ) {
-	stripped := stripJSComments(content)
+	stripped, codeOnly := stripJSCode(content)
 	lines := newNpmLineIndex(stripped)
+
+	// inCode reports whether the byte at offset off survived the
+	// string/template blanking of stripJSCode, i.e. a regex match anchored
+	// there sits in real code. Import/require matches (which run on
+	// stripped, because they must read the quoted specifier) are validated
+	// at two offsets: the match start (a keyword letter — blanked to ' '
+	// inside a string, so the comparison fails there) and the specifier's
+	// closing quote (a delimiter that only survives blanking when the
+	// specifier is a real string literal in code, not text inside an
+	// enclosing string or template literal the match straddled into).
+	inCode := func(off int) bool { return codeOnly[off] == stripped[off] }
 
 	bindings := make(map[string]*npmFileBindings) // pkg lower → bindings
 	bindingsFor := func(lower string) *npmFileBindings {
 		b := bindings[lower]
 		if b == nil {
-			b = &npmFileBindings{named: make(map[string]int)}
+			b = &npmFileBindings{named: make(map[string]npmNamedBinding)}
 			bindings[lower] = b
 		}
 		return b
 	}
+
+	// declSpans collects the byte spans of every binding-declaration
+	// statement seen in this file (import ... from, const x = require(...),
+	// destructuring requires) — for ANY package, vulnerable or not. An
+	// identifier occurrence inside one of these spans is a declaration,
+	// not a use; see npmFindIdentifierUse.
+	var declSpans [][2]int
 
 	recordImport := func(pkg npmPackageHit, specifier string, offset int, form string) {
 		key := relFile + "\x00" + pkg.lower
@@ -789,6 +859,10 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 
 	// -- import ... from / export ... from --
 	for _, m := range reNpmImportFrom.FindAllStringSubmatchIndex(stripped, -1) {
+		if !inCode(m[0]) || !inCode(m[7]) {
+			continue // statement text inside a string/template literal
+		}
+		declSpans = append(declSpans, [2]int{m[0], m[1]})
 		keyword := stripped[m[2]:m[3]]
 		clause := stripped[m[4]:m[5]]
 		spec := stripped[m[6]:m[7]]
@@ -806,8 +880,8 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 			b := bindingsFor(pkg.lower)
 			b.receivers = append(b.receivers, receivers...)
 			for _, n := range named {
-				if _, dup := b.named[n]; !dup {
-					b.named[n] = m[0]
+				if _, dup := b.named[n.orig]; !dup {
+					b.named[n.orig] = npmNamedBinding{local: n.local, offset: m[0]}
 				}
 			}
 		}
@@ -815,6 +889,9 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 
 	// -- import 'spec' (side-effect) --
 	for _, m := range reNpmImportBare.FindAllStringSubmatchIndex(stripped, -1) {
+		if !inCode(m[0]) || !inCode(m[3]) {
+			continue
+		}
 		spec := stripped[m[2]:m[3]]
 		if pkg, ok := lookupNpmSpecifier(spec, pkgByLower); ok {
 			recordImport(pkg, spec, m[0], "import")
@@ -823,6 +900,9 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 
 	// -- import('spec') (dynamic) --
 	for _, m := range reNpmImportDynamic.FindAllStringSubmatchIndex(stripped, -1) {
+		if !inCode(m[0]) || !inCode(m[3]) {
+			continue
+		}
 		spec := stripped[m[2]:m[3]]
 		if pkg, ok := lookupNpmSpecifier(spec, pkgByLower); ok {
 			recordImport(pkg, spec, m[0], "dynamic import")
@@ -831,6 +911,9 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 
 	// -- require('spec') — all call sites, import-level evidence --
 	for _, m := range reNpmRequire.FindAllStringSubmatchIndex(stripped, -1) {
+		if !inCode(m[0]) || !inCode(m[3]) {
+			continue
+		}
 		spec := stripped[m[2]:m[3]]
 		if pkg, ok := lookupNpmSpecifier(spec, pkgByLower); ok {
 			recordImport(pkg, spec, m[0], "require")
@@ -839,6 +922,10 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 
 	// -- const x = require('spec') — receiver binding --
 	for _, m := range reNpmRequireBind.FindAllStringSubmatchIndex(stripped, -1) {
+		if !inCode(m[0]) || !inCode(m[5]) {
+			continue
+		}
+		declSpans = append(declSpans, [2]int{m[0], m[1]})
 		ident := stripped[m[2]:m[3]]
 		spec := stripped[m[4]:m[5]]
 		if pkg, ok := lookupNpmSpecifier(spec, pkgByLower); ok {
@@ -849,6 +936,10 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 
 	// -- const {a, b: c} = require('spec') — named bindings --
 	for _, m := range reNpmRequireDestructure.FindAllStringSubmatchIndex(stripped, -1) {
+		if !inCode(m[0]) || !inCode(m[5]) {
+			continue
+		}
+		declSpans = append(declSpans, [2]int{m[0], m[1]})
 		items := stripped[m[2]:m[3]]
 		spec := stripped[m[4]:m[5]]
 		pkg, ok := lookupNpmSpecifier(spec, pkgByLower)
@@ -857,16 +948,17 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 		}
 		b := bindingsFor(pkg.lower)
 		for _, item := range strings.Split(items, ",") {
-			name := item
+			orig, local := item, item
 			if i := strings.IndexByte(item, ':'); i >= 0 {
-				name = item[:i]
+				orig, local = item[:i], item[i+1:]
 			}
-			name = strings.TrimSpace(name)
-			if !npmIdentRe.MatchString(name) {
+			orig = strings.TrimSpace(orig)
+			local = strings.TrimSpace(local)
+			if !npmIdentRe.MatchString(orig) || !npmIdentRe.MatchString(local) {
 				continue // nested destructuring, "...rest", etc — skip
 			}
-			if _, dup := b.named[name]; !dup {
-				b.named[name] = m[0]
+			if _, dup := b.named[orig]; !dup {
+				b.named[orig] = npmNamedBinding{local: local, offset: m[0]}
 			}
 		}
 	}
@@ -899,6 +991,30 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 		})
 	}
 
+	// Unused named-binding notes are deduped per package+leaf within the
+	// file (two selectors sharing a leaf would otherwise double-report).
+	notedUnused := make(map[string]struct{})
+	recordUnusedBinding := func(sel npmSymbolSelector, pkg npmPackageHit, offset int) {
+		key := pkg.lower + "\x00" + sel.leaf()
+		if _, dup := notedUnused[key]; dup {
+			return
+		}
+		notedUnused[key] = struct{}{}
+		if len(res.importEvidence)+len(res.symbolEvidence)+len(res.noteEvidence) >= npmMaxSourceEvidence {
+			return // informational only; never affects the verdict
+		}
+		line, col := lines.locate(offset)
+		res.noteEvidence = append(res.noteEvidence, EvidencePointer{
+			Kind:     EvidenceKindAnalyzerError, // re-used as informational
+			FilePath: relFile,
+			Line:     line,
+			Column:   col,
+			Description: fmt.Sprintf("vulnerable symbol %s of package %s: "+
+				"binding imported but no use found outside import/require declarations; "+
+				"not counted as a symbol reference", sel.leaf(), pkg.name),
+		})
+	}
+
 	// Deterministic evidence order: sort the per-package binding sets
 	// (map iteration order would otherwise randomise multi-package files).
 	lowers := make([]string, 0, len(bindings))
@@ -914,29 +1030,47 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 			leaf := sel.leaf()
 
 			// (i) named import / require-destructure binding of the symbol.
-			if off, ok := b.named[leaf]; ok {
-				recordSymbol(sel, pkg, off, "named import binding")
+			// The binding alone is NOT a hit — `import {merge}` with no
+			// call or reference must stay import_only. The LOCAL name must
+			// be used outside binding declarations: called (merge(...)) or
+			// referenced (arr.map(merge)) — a bare reference hands the
+			// function around, so it may still execute.
+			if nb, ok := b.named[leaf]; ok {
+				if useOff, found := npmFindIdentifierUse(codeOnly, nb.local, declSpans); found {
+					recordSymbol(sel, pkg, useOff, "use of named import binding")
+				} else {
+					recordUnusedBinding(sel, pkg, nb.offset)
+				}
 			}
 
 			// (ii) <receiver>.<leaf>( member call — plus, for 3-part
 			// selectors, the 2-part trailing chain <receiver>.<mid>.<leaf>(.
+			// Every identifier part is QuoteMeta'd: "$" is a legal JS
+			// identifier character but a regex ANCHOR, so an unquoted
+			// "$watch" tail could never match. The receiver's left boundary
+			// is checked on the preceding rune instead of `\b`: "$" is not
+			// a \w character, so `\b\$` DEMANDED a word char before the
+			// receiver — it never matched `$.ajax(` at statement start yet
+			// happily matched the different identifier `x$.ajax(`.
 			var tails []string
-			tails = append(tails, leaf)
+			tails = append(tails, regexp.QuoteMeta(leaf))
 			if len(sel.parts) == 3 {
-				tails = append(tails, sel.parts[1]+`\s*\.\s*`+sel.parts[2])
+				tails = append(tails, regexp.QuoteMeta(sel.parts[1])+`\s*\.\s*`+regexp.QuoteMeta(sel.parts[2]))
 			}
 			for _, recv := range b.receivers {
 				for _, tail := range tails {
-					pattern := `\b` + regexp.QuoteMeta(recv) + `\s*\.\s*` + tail + `\s*\(`
+					pattern := regexp.QuoteMeta(recv) + `\s*\.\s*` + tail + `\s*\(`
 					re := memberRegexCache[pattern]
 					if re == nil {
 						re = regexp.MustCompile(pattern)
 						memberRegexCache[pattern] = re
 					}
-					for _, loc := range re.FindAllStringIndex(stripped, -1) {
-						// Reject property-chain prefixes (`x.recv.leaf(`):
-						// the receiver must not itself be a member access.
-						if p := loc[0]; p > 0 && (stripped[p-1] == '.' || stripped[p-1] == '$') {
+					for _, loc := range re.FindAllStringIndex(codeOnly, -1) {
+						// The receiver must start at an identifier
+						// boundary: not the tail of a longer identifier
+						// (x$.ajax) and not itself a member access
+						// (chain.recv.leaf()).
+						if !npmIdentBoundaryBefore(codeOnly, loc[0]) {
 							continue
 						}
 						recordSymbol(sel, pkg, loc[0], "member call via binding")
@@ -945,6 +1079,73 @@ func scanNpmFile(relFile, content string, pkgByLower map[string]npmPackageHit,
 			}
 		}
 	}
+}
+
+// isNpmIdentRune reports whether r can appear in a JavaScript identifier as
+// accepted by npmIdentRe (Unicode letters/digits plus "_" and "$").
+func isNpmIdentRune(r rune) bool {
+	return r == '_' || r == '$' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// npmIdentBoundaryBefore reports whether off sits at an identifier start
+// boundary: the rune immediately before off must not be an identifier rune
+// (which would make the match a suffix of a longer identifier) and must not
+// be "." (which would make the match a member-access leaf).
+func npmIdentBoundaryBefore(s string, off int) bool {
+	if off == 0 {
+		return true
+	}
+	r, _ := utf8.DecodeLastRuneInString(s[:off])
+	return !isNpmIdentRune(r) && r != '.'
+}
+
+// npmFindIdentifierUse returns the byte offset of the first free-standing
+// use of the identifier local in codeOnly (string/template bodies already
+// blanked). A use is an occurrence with identifier boundaries on both sides
+// that is not a member-access leaf (preceded by "."), not an object-literal
+// key (followed by ":", which also skips `cond ? local : x` — an accepted
+// false-negative), and not inside any declaration span (import/require
+// statements: the occurrence there IS the declaration, not a use). Both
+// calls (local(...)) and bare references (arr.map(local)) qualify: a
+// reference hands the vulnerable function around, so it may be executed.
+func npmFindIdentifierUse(codeOnly, local string, declSpans [][2]int) (int, bool) {
+	for from := 0; from < len(codeOnly); {
+		i := strings.Index(codeOnly[from:], local)
+		if i < 0 {
+			return 0, false
+		}
+		off := from + i
+		from = off + 1
+		if !npmIdentBoundaryBefore(codeOnly, off) {
+			continue
+		}
+		end := off + len(local)
+		if end < len(codeOnly) {
+			if r, _ := utf8.DecodeRuneInString(codeOnly[end:]); isNpmIdentRune(r) {
+				continue
+			}
+		}
+		j := end
+		for j < len(codeOnly) && (codeOnly[j] == ' ' || codeOnly[j] == '\t' ||
+			codeOnly[j] == '\n' || codeOnly[j] == '\r') {
+			j++
+		}
+		if j < len(codeOnly) && codeOnly[j] == ':' {
+			continue // object-literal key, not a reference
+		}
+		inDecl := false
+		for _, sp := range declSpans {
+			if off >= sp[0] && off < sp[1] {
+				inDecl = true
+				break
+			}
+		}
+		if inDecl {
+			continue
+		}
+		return off, true
+	}
+	return 0, false
 }
 
 // lookupNpmSpecifier resolves a module specifier to a matched vulnerable
@@ -981,17 +1182,26 @@ func npmPackageFromSpecifier(spec string) string {
 	return segs[0]
 }
 
+// npmNamedImport is one named binding from an ESM import clause: the
+// ORIGINAL export name (selector matching keys on it) plus the LOCAL
+// identifier it is bound to ("import {orig as local}"), which is what
+// use-site detection must search the file for.
+type npmNamedImport struct {
+	orig  string
+	local string
+}
+
 // parseNpmImportClause splits an ESM import clause (the text between
 // `import` and `from`) into receiver bindings (default and namespace
 // imports — usable as `<binding>.<symbol>(`), and named bindings (original
-// export names; aliases resolve to the ORIGINAL name for matching).
+// export name plus local alias).
 //
 //	" _ "                        → receivers [_]
 //	" * as ns "                  → receivers [ns]
-//	" _, { merge as m, get } "   → receivers [_], named [merge get]
+//	" _, { merge as m, get } "   → receivers [_], named [merge→m, get→get]
 //	" { default as lodash } "    → receivers [lodash]
-//	" { type Foo, bar } "        → named [bar]   (TS inline type specifier)
-func parseNpmImportClause(clause string) (receivers []string, named []string) {
+//	" { type Foo, bar } "        → named [bar→bar]   (TS inline type specifier)
+func parseNpmImportClause(clause string) (receivers []string, named []npmNamedImport) {
 	braceOpen := strings.IndexByte(clause, '{')
 	braceClose := strings.LastIndexByte(clause, '}')
 
@@ -1042,95 +1252,169 @@ func parseNpmImportClause(clause string) (receivers []string, named []string) {
 			}
 			continue
 		}
-		if npmIdentRe.MatchString(orig) {
-			named = append(named, orig)
+		if npmIdentRe.MatchString(orig) && npmIdentRe.MatchString(alias) {
+			named = append(named, npmNamedImport{orig: orig, local: alias})
 		}
 	}
 	return receivers, named
 }
 
 // ---------------------------------------------------------------------------
-// comment stripping + line index
+// comment/string stripping + line index
 // ---------------------------------------------------------------------------
 
 // stripJSComments returns src with // line comments and /* */ block
-// comments replaced by spaces (newlines preserved), so byte offsets and
-// line/column positions in the result map 1:1 onto the original. String
-// literals ('…', "…", `…`) are respected, including backslash escapes.
+// comments replaced by spaces (newlines preserved). Thin wrapper around
+// stripJSCode, kept for callers that only need the comment-stripped view.
+func stripJSComments(src string) string {
+	stripped, _ := stripJSCode(src)
+	return stripped
+}
+
+// stripJSCode lexes src once and returns two equal-length views whose byte
+// offsets (and therefore line/column positions) map 1:1 onto the original:
+//
+//   - stripped: // line comments and /* */ block comments replaced by
+//     spaces (newlines preserved); string and template literal bodies are
+//     kept intact so import/require specifiers remain readable.
+//   - codeOnly: additionally, single-/double-quoted string bodies and
+//     template-literal text (escape sequences included) are replaced by
+//     spaces, quote/backtick delimiters kept. Template-literal ${...}
+//     interpolations are code and are preserved; nesting (templates inside
+//     interpolations inside templates …) is handled via a depth stack.
+//
+// Import/require regexes run on stripped (they must read the quoted
+// specifier) and validate their match offsets against codeOnly, so a
+// statement that merely appears inside a string or template literal
+// (docstrings, log messages) can no longer fake an import or a symbol hit
+// — that would violate the analyzer's false-negative-only error direction.
+// Symbol matching runs on codeOnly outright.
 //
 // Known heuristic limits (false-negative direction, documented for
 // maintainers): regex literals are not modelled, so `/\/*` inside a regex
-// can eat code until the next `*/`; template-literal ${} interpolations are
-// treated as string content, so comment-like text inside them survives.
-// Both are acceptable for a conservative scanner whose output feeds an LLM
-// + human approval pipeline.
-func stripJSComments(src string) string {
-	out := []byte(src)
+// can eat code until the next `*/`, and a quote inside a regex opens a
+// phantom string in codeOnly until the next quote; a // or /* sequence
+// inside a ${...} interpolation is treated as a comment, so a pathological
+// `${x // }`  can blank the rest of the template's line. All are acceptable
+// for a conservative scanner whose output feeds an LLM + human approval
+// pipeline.
+func stripJSCode(src string) (stripped, codeOnly string) {
+	out := []byte(src)  // comments blanked
+	code := []byte(src) // comments + string/template bodies blanked
 	const (
-		code = iota
-		lineComment
-		blockComment
-		single
-		double
-		backtick
+		stCode = iota
+		stLineComment
+		stBlockComment
+		stSingle
+		stDouble
+		stBacktick
 	)
-	state := code
-	for i := 0; i < len(out); i++ {
-		c := out[i]
+	state := stCode
+	// interpDepth holds one unbalanced-'{' counter per template literal
+	// whose ${...} interpolation is currently open; the innermost counter
+	// decides when a '}' closes that interpolation (returning to template
+	// text) rather than an object literal inside it.
+	var interpDepth []int
+	for i := 0; i < len(src); i++ {
+		c := src[i]
 		switch state {
-		case code:
+		case stCode:
 			switch c {
 			case '/':
-				if i+1 < len(out) {
-					switch out[i+1] {
+				if i+1 < len(src) {
+					switch src[i+1] {
 					case '/':
-						state = lineComment
+						state = stLineComment
 						out[i], out[i+1] = ' ', ' '
+						code[i], code[i+1] = ' ', ' '
 						i++
 					case '*':
-						state = blockComment
+						state = stBlockComment
 						out[i], out[i+1] = ' ', ' '
+						code[i], code[i+1] = ' ', ' '
 						i++
 					}
 				}
 			case '\'':
-				state = single
+				state = stSingle
 			case '"':
-				state = double
+				state = stDouble
 			case '`':
-				state = backtick
+				state = stBacktick
+			case '{':
+				if n := len(interpDepth); n > 0 {
+					interpDepth[n-1]++
+				}
+			case '}':
+				if n := len(interpDepth); n > 0 {
+					if interpDepth[n-1] == 0 {
+						interpDepth = interpDepth[:n-1]
+						state = stBacktick
+					} else {
+						interpDepth[n-1]--
+					}
+				}
 			}
-		case lineComment:
+		case stLineComment:
 			if c == '\n' {
-				state = code
+				state = stCode
 			} else {
-				out[i] = ' '
+				out[i], code[i] = ' ', ' '
 			}
-		case blockComment:
-			if c == '*' && i+1 < len(out) && out[i+1] == '/' {
+		case stBlockComment:
+			if c == '*' && i+1 < len(src) && src[i+1] == '/' {
 				out[i], out[i+1] = ' ', ' '
+				code[i], code[i+1] = ' ', ' '
 				i++
-				state = code
+				state = stCode
 			} else if c != '\n' {
-				out[i] = ' '
+				out[i], code[i] = ' ', ' '
 			}
-		case single, double, backtick:
+		case stSingle, stDouble:
 			quote := byte('\'')
-			if state == double {
+			if state == stDouble {
 				quote = '"'
-			} else if state == backtick {
-				quote = '`'
 			}
-			if c == '\\' {
-				i++ // skip escaped char
-			} else if c == quote {
-				state = code
-			} else if c == '\n' && state != backtick {
-				state = code // unterminated string literal: resync
+			switch {
+			case c == '\\':
+				code[i] = ' '
+				if i+1 < len(src) {
+					if src[i+1] != '\n' {
+						code[i+1] = ' '
+					}
+					i++ // skip escaped char
+				}
+			case c == quote:
+				state = stCode
+			case c == '\n':
+				state = stCode // unterminated string literal: resync
+			default:
+				code[i] = ' '
+			}
+		case stBacktick:
+			switch {
+			case c == '\\':
+				code[i] = ' '
+				if i+1 < len(src) {
+					if src[i+1] != '\n' {
+						code[i+1] = ' '
+					}
+					i++ // skip escaped char
+				}
+			case c == '`':
+				state = stCode
+			case c == '$' && i+1 < len(src) && src[i+1] == '{':
+				// ${ opens an interpolation: its body is code. The "${"
+				// and matching "}" delimiters stay visible in both views.
+				interpDepth = append(interpDepth, 0)
+				state = stCode
+				i++ // consume '{' so it is not counted as a brace
+			case c != '\n':
+				code[i] = ' '
 			}
 		}
 	}
-	return string(out)
+	return string(out), string(code)
 }
 
 // npmLineIndex maps byte offsets to 1-based line/column pairs.

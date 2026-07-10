@@ -10,6 +10,7 @@ package reachability
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,7 +142,11 @@ func TestNpmAnalyze_Reachable_ESMNamedImport_ScopedPackage(t *testing.T) {
 	require.Len(t, symbols, 1)
 	assert.Equal(t, "deepMerge", symbols[0].Symbol)
 	assert.Equal(t, "src/esm_consumer.ts", symbols[0].FilePath)
-	assert.Equal(t, 2, symbols[0].Line)
+	// Since M44 Phase D, a named import binding alone is NOT a symbol hit
+	// (an unused import must stay import_only); the evidence points at the
+	// USE site — the deepMerge(a, b) call on line 6 — not the import
+	// statement on line 2.
+	assert.Equal(t, 6, symbols[0].Line)
 	assert.Contains(t, symbols[0].Description, "named import binding")
 }
 
@@ -584,17 +589,23 @@ func TestNpmPackageFromSpecifier(t *testing.T) {
 
 func TestParseNpmImportClause(t *testing.T) {
 	t.Parallel()
+	// Named bindings carry BOTH the original export name (selector matching
+	// keys on it) and the local alias (M44 Phase D: use-site detection must
+	// search the file for the LOCAL identifier — for `merge as m` an unused
+	// `merge` string proves nothing, only uses of `m` do).
 	cases := []struct {
 		clause    string
 		receivers []string
-		named     []string
+		named     []npmNamedImport
 	}{
 		{" _ ", []string{"_"}, nil},
 		{" * as ns ", []string{"ns"}, nil},
-		{" _, { merge as m, get } ", []string{"_"}, []string{"merge", "get"}},
+		{" _, { merge as m, get } ", []string{"_"},
+			[]npmNamedImport{{orig: "merge", local: "m"}, {orig: "get", local: "get"}}},
 		{" { default as lodash } ", []string{"lodash"}, nil},
-		{" { type Foo, bar } ", nil, []string{"bar"}},
-		{" { a, b, c } ", nil, []string{"a", "b", "c"}},
+		{" { type Foo, bar } ", nil, []npmNamedImport{{orig: "bar", local: "bar"}}},
+		{" { a, b, c } ", nil,
+			[]npmNamedImport{{orig: "a", local: "a"}, {orig: "b", local: "b"}, {orig: "c", local: "c"}}},
 		{" d, * as ns ", []string{"d", "ns"}, nil},
 	}
 	for _, tc := range cases {
@@ -641,4 +652,355 @@ func TestNpmLineIndex(t *testing.T) {
 	assert.Equal(t, []int{2, 2}, []int{line, col})
 	line, col = ix.locate(7) // "e"
 	assert.Equal(t, []int{4, 1}, []int{line, col})
+}
+
+// ---------------------------------------------------------------------------
+// M44 Phase D round 1 regression tests (R2a: findings 1-5)
+// ---------------------------------------------------------------------------
+
+// npmWriteFile writes one file under root, creating parent directories.
+func npmWriteFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	p := filepath.Join(root, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+	require.NoError(t, os.WriteFile(p, []byte(content), 0o644))
+}
+
+// TestNpmAnalyze_SymlinksNotFollowed guards the size-cap bypass (finding 1):
+// d.Info() on a symlink reports the LINK's own lstat size, so before the fix
+// a tiny symlink pointing at a huge file (or an unbounded device node like
+// /dev/zero) passed the npmMaxFileSizeBytes gate and os.ReadFile read the
+// TARGET — an unbounded-read DoS plus a false-positive vector (the target's
+// content influenced the verdict). Symlinks (file and directory alike) must
+// be skipped and surfaced only as an informational evidence note.
+func TestNpmAnalyze_SymlinksNotFollowed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+	npmWriteFile(t, root, "package-lock.json", `{
+		"lockfileVersion": 3,
+		"packages": {"node_modules/acme-lodash": {"version": "4.17.21"}}
+	}`)
+
+	// Big REGULAR target outside the project: vulnerable-looking code on
+	// top, padded past npmMaxFileSizeBytes so a direct in-tree copy would be
+	// size-capped — only the symlink's small lstat size lets it through.
+	vuln := "const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n"
+	big := vuln + strings.Repeat("// pad\n", npmMaxFileSizeBytes/7+1024)
+	npmWriteFile(t, outside, "big_target.js", big)
+
+	if err := os.Symlink(filepath.Join(outside, "big_target.js"),
+		filepath.Join(root, "big_link.js")); err != nil {
+		t.Skipf("cannot create symlinks on this platform: %v", err)
+	}
+	wantSymlinks := 1
+
+	// Directory symlink: WalkDir surfaces it as a non-dir entry; it must
+	// not be followed (and never was), but it is now counted in the note.
+	npmWriteFile(t, outside, "linked_dir/inner.js", vuln)
+	require.NoError(t, os.Symlink(filepath.Join(outside, "linked_dir"),
+		filepath.Join(root, "linked_dir")))
+	wantSymlinks++
+
+	// Unbounded device node, when the platform has one: before the fix,
+	// os.ReadFile on this link never terminated (R1 reproduced the DoS).
+	if _, err := os.Stat("/dev/zero"); err == nil {
+		require.NoError(t, os.Symlink("/dev/zero", filepath.Join(root, "zero_link.js")))
+		wantSymlinks++
+	}
+
+	a := &NpmAnalyzer{}
+	res, err := a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-lodash"},
+			VulnerableSymbols: []string{"defaultsDeep"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusImportOnly, res.Status,
+		"symlinked content must not influence the verdict")
+	for _, e := range res.Evidence {
+		assert.NotContains(t, e.FilePath, "big_link")
+		assert.NotContains(t, e.FilePath, "zero_link")
+		assert.NotContains(t, e.FilePath, "linked_dir")
+	}
+	assert.True(t, npmHasDescription(res, fmt.Sprintf("%d symlink(s) skipped", wantSymlinks)),
+		"expected a %d-symlink note, got %+v", wantSymlinks, res.Evidence)
+}
+
+// TestNpmAnalyze_StringLiteralContentIgnored guards finding 2: require()/
+// import statements and member-call text inside '…'/"…" string literals and
+// template-literal text must produce neither import evidence/bindings nor
+// symbol hits (docstrings and log messages were a false-reachable vector —
+// the analyzer's error budget is false-negative-only). Code inside
+// template-literal ${...} interpolations is real code and must keep
+// matching.
+func TestNpmAnalyze_StringLiteralContentIgnored(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	npmWriteFile(t, root, "package.json",
+		`{"dependencies": {"acme-lodash": "^1.0.0", "acme-str-only": "^1.0.0", "acme-tpl-pkg": "^1.0.0"}}`)
+	npmWriteFile(t, root, "src/strings.js",
+		"const _ = require('acme-lodash');\n"+
+			"\n"+
+			"const doc = \"call require('acme-str-only') then _.merge(a, b)\";\n"+
+			"const doc2 = 'single: require(\"acme-str-only\") and _.merge(';\n"+
+			"const tpl = `template: require('acme-str-only') and _.merge( text`;\n"+
+			"\n"+
+			"module.exports = { doc, doc2, tpl, _ };\n")
+	npmWriteFile(t, root, "src/tpl_code.js",
+		"const _ = require('acme-lodash');\n"+
+			"export const msg = `sum: ${_.defaultsDeep({}, {})} via ${require('acme-tpl-pkg').x}`;\n")
+
+	a := &NpmAnalyzer{}
+
+	// (a) A package referenced ONLY inside string/template text: stage 2
+	// must not see a source import at all.
+	res, err := a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-str-only"},
+			VulnerableSymbols: []string{"merge"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusImportOnly, res.Status)
+	for _, e := range npmEvidenceOfKind(res, EvidenceKindImportPath) {
+		assert.Zero(t, e.Line, "string-literal require must not yield source import evidence: %+v", e)
+	}
+	assert.True(t, npmHasDescription(res, "no first-party source file imports"),
+		"expected the transitive/unused note, got %+v", res.Evidence)
+
+	// (b) A really-imported package whose symbol appears only inside
+	// string/template text: must stay import_only, not reachable.
+	res, err = a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-lodash"},
+			VulnerableSymbols: []string{"merge", "_.merge"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusImportOnly, res.Status,
+		"symbol text inside string literals must not be a symbol hit")
+	assert.Empty(t, npmEvidenceOfKind(res, EvidenceKindSymbolRef))
+
+	// (c) Code inside a template-literal ${...} interpolation IS code:
+	// the member call must be found.
+	res, err = a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-lodash"},
+			VulnerableSymbols: []string{"defaultsDeep"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReachable, res.Status,
+		"member call inside ${...} interpolation must stay detectable")
+	symbols := npmEvidenceOfKind(res, EvidenceKindSymbolRef)
+	require.Len(t, symbols, 1)
+	assert.Equal(t, "src/tpl_code.js", symbols[0].FilePath)
+
+	// (d) require() inside a ${...} interpolation is a real import.
+	res, err = a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-tpl-pkg"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusImportOnly, res.Status)
+	var tplImport bool
+	for _, e := range npmEvidenceOfKind(res, EvidenceKindImportPath) {
+		if e.FilePath == "src/tpl_code.js" {
+			tplImport = true
+		}
+	}
+	assert.True(t, tplImport, "require inside ${...} must yield import evidence, got %+v", res.Evidence)
+}
+
+// TestNpmAnalyze_DollarIdentifierSelectors guards finding 3: "$" is a legal
+// JS identifier character but a regex anchor, so before the fix the
+// member-call pattern was doubly broken — `$watch` became "end-of-line
+// anchor + watch" (never matches) and the leading `\b` DEMANDED a word char
+// before a `$` receiver, so `$.ajax(` at statement start never matched while
+// `x$.ajax(` (a different identifier) falsely did.
+func TestNpmAnalyze_DollarIdentifierSelectors(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	npmWriteFile(t, root, "package.json",
+		`{"dependencies": {"acme-jquery": "^1.0.0", "acme-vue": "^1.0.0"}}`)
+	npmWriteFile(t, root, "src/jq.js",
+		"const $ = require('acme-jquery');\n"+
+			"const x$ = { ajax() {} };\n"+
+			"$.ajax({ url: '/api' });\n"+
+			"x$.ajax({ url: '/decoy' });\n")
+	npmWriteFile(t, root, "src/vue.js",
+		"const svc = require('acme-vue');\n"+
+			"svc.$watch('prop', () => {});\n")
+
+	a := &NpmAnalyzer{}
+
+	// `$` as the receiver: $.ajax( at statement start must match; the
+	// x$.ajax( decoy (different identifier) must NOT.
+	res, err := a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-jquery"},
+			VulnerableSymbols: []string{"$.ajax"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReachable, res.Status)
+	symbols := npmEvidenceOfKind(res, EvidenceKindSymbolRef)
+	require.Len(t, symbols, 1, "exactly the $.ajax( call, not the x$.ajax( decoy: %+v", symbols)
+	assert.Equal(t, 3, symbols[0].Line)
+	assert.Equal(t, 1, symbols[0].Column)
+
+	// `$` inside the method name: svc.$watch( must match.
+	res, err = a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-vue"},
+			VulnerableSymbols: []string{"svc.$watch"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReachable, res.Status)
+	symbols = npmEvidenceOfKind(res, EvidenceKindSymbolRef)
+	require.Len(t, symbols, 1)
+	assert.Equal(t, "src/vue.js", symbols[0].FilePath)
+	assert.Equal(t, 2, symbols[0].Line)
+}
+
+// TestNpmAnalyze_NamedImportRequiresUse guards finding 4: a named import /
+// require-destructure binding of a vulnerable symbol is only a symbol
+// reference when the LOCAL identifier is actually used outside binding
+// declarations — either called (merge(...)) or referenced (arr.map(merge);
+// a bare reference hands the function around, so it may execute). An import
+// that is never used must stay import_only (false-positive direction
+// otherwise) with an explanatory evidence note.
+func TestNpmAnalyze_NamedImportRequiresUse(t *testing.T) {
+	t.Parallel()
+	analyze := func(t *testing.T, source string) *ReachabilityResult {
+		t.Helper()
+		root := t.TempDir()
+		npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+		npmWriteFile(t, root, "src/app.js", source)
+		res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root,
+			ReachabilityInput{
+				Ecosystem:         "npm",
+				VulnerableModules: []string{"acme-lodash"},
+				VulnerableSymbols: []string{"merge"},
+			})
+		require.NoError(t, err)
+		return res
+	}
+
+	t.Run("unused named import is import_only with note", func(t *testing.T) {
+		res := analyze(t, "import { merge } from 'acme-lodash';\nexport const answer = 42;\n")
+		assert.Equal(t, StatusImportOnly, res.Status)
+		assert.Empty(t, npmEvidenceOfKind(res, EvidenceKindSymbolRef))
+		assert.True(t, npmHasDescription(res, "binding imported but no use found"),
+			"expected the unused-binding note, got %+v", res.Evidence)
+	})
+
+	t.Run("call is reachable", func(t *testing.T) {
+		res := analyze(t, "import { merge } from 'acme-lodash';\nmerge({}, {});\n")
+		assert.Equal(t, StatusReachable, res.Status)
+		symbols := npmEvidenceOfKind(res, EvidenceKindSymbolRef)
+		require.Len(t, symbols, 1)
+		assert.Equal(t, 2, symbols[0].Line)
+		assert.Contains(t, symbols[0].Description, "named import binding")
+	})
+
+	t.Run("bare reference (callback passing) is reachable", func(t *testing.T) {
+		res := analyze(t, "import { merge } from 'acme-lodash';\n"+
+			"export const out = [1].map(merge);\n")
+		assert.Equal(t, StatusReachable, res.Status)
+	})
+
+	t.Run("aliased import matched via alias use", func(t *testing.T) {
+		res := analyze(t, "import { merge as m } from 'acme-lodash';\nm({}, {});\n")
+		assert.Equal(t, StatusReachable, res.Status)
+	})
+
+	t.Run("aliased import not matched by same-named local fn", func(t *testing.T) {
+		// The vulnerable binding's LOCAL name is m; a different local
+		// function that happens to be called merge must not count.
+		res := analyze(t, "import { merge as m } from 'acme-lodash';\n"+
+			"const merge = () => {};\nmerge();\n")
+		assert.Equal(t, StatusImportOnly, res.Status)
+	})
+
+	t.Run("unused require destructure is import_only", func(t *testing.T) {
+		res := analyze(t, "const { merge } = require('acme-lodash');\nexport const answer = 42;\n")
+		assert.Equal(t, StatusImportOnly, res.Status)
+		assert.True(t, npmHasDescription(res, "binding imported but no use found"))
+	})
+
+	t.Run("object-literal key is not a use", func(t *testing.T) {
+		res := analyze(t, "import { merge } from 'acme-lodash';\n"+
+			"export const o = { merge: 1 };\n")
+		assert.Equal(t, StatusImportOnly, res.Status)
+	})
+}
+
+// TestNpmAnalyze_UnicodeIdentifierSelector guards finding 5: the server-side
+// filter (isJSIdentifier) and the CLI filter (isJSIdentifierShaped) accept
+// Unicode letters in selector parts, so the analyzer must too — before the
+// fix the ASCII-only npmIdentRe silently dropped such selectors as
+// "malformed" and the verdict degraded to import_only.
+func TestNpmAnalyze_UnicodeIdentifierSelector(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-uni": "^1.0.0"}}`)
+	npmWriteFile(t, root, "src/uni.js",
+		"const café = require('acme-uni');\ncafé.parse('data');\n")
+
+	res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-uni"},
+			VulnerableSymbols: []string{"café.parse"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReachable, res.Status)
+	assert.False(t, npmHasDescription(res, "malformed"),
+		"a Unicode-letter selector must not be skipped as malformed: %+v", res.Evidence)
+	symbols := npmEvidenceOfKind(res, EvidenceKindSymbolRef)
+	require.Len(t, symbols, 1)
+	assert.Equal(t, "café.parse", symbols[0].Symbol)
+	assert.Equal(t, 2, symbols[0].Line)
+}
+
+func TestParseNpmSymbolSelectors_UnicodeIdentifiers(t *testing.T) {
+	t.Parallel()
+	valid, malformed := parseNpmSymbolSelectors([]string{
+		"café.parse", "変数.メソッド", "1café",
+	})
+	require.Len(t, valid, 2, "Unicode-letter selectors must parse: %+v (malformed %v)", valid, malformed)
+	assert.Equal(t, "café.parse", valid[0].full)
+	assert.Equal(t, "メソッド", valid[1].leaf())
+	assert.Equal(t, []string{"1café"}, malformed, "leading digit still malformed")
+}
+
+func TestStripJSCode_StringAndTemplateBlanking(t *testing.T) {
+	t.Parallel()
+	src := "const a = require('x');\n" +
+		"const s = \"require('y') and _.merge(\";\n" +
+		"const t = `text ${_.merge(a, b)} more ${`inner ${deep} rest`} end`;\n"
+	stripped, codeOnly := stripJSCode(src)
+	require.Equal(t, len(src), len(stripped), "offsets must be preserved")
+	require.Equal(t, len(src), len(codeOnly), "offsets must be preserved")
+	// stripped keeps string content (import specifiers must stay readable).
+	assert.Contains(t, stripped, "require('y')")
+	// codeOnly blanks string bodies and template text…
+	assert.NotContains(t, codeOnly, "require('y')")
+	assert.NotContains(t, codeOnly, "text")
+	assert.NotContains(t, codeOnly, "more")
+	assert.NotContains(t, codeOnly, "inner")
+	assert.NotContains(t, codeOnly, "end")
+	// …but keeps real code, including inside ${} interpolations (nested).
+	assert.Contains(t, codeOnly, "require(")
+	assert.Contains(t, codeOnly, "_.merge(a, b)")
+	assert.Contains(t, codeOnly, "deep")
+	// Newlines survive so the line index still works.
+	assert.Equal(t, strings.Count(src, "\n"), strings.Count(codeOnly, "\n"))
 }
