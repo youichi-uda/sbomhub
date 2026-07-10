@@ -1524,26 +1524,50 @@ const osvOfflineDriftSkipWarnMsg = "scheduler: OSV client is offline but the CVE
 // one). A const so the test contract pins operators' grep target verbatim.
 const osvTombstonePreserveInfoMsg = "scheduler: OSV yielded no authoritative Go vulndb record for a CVE whose stored row carries non-empty vuln_funcs; preserving row data, refreshing fetched_at only (M43 Phase D R5)"
 
-// osvRetractionOverwriteWarnMsg is the exact Warn emitted when an
-// AUTHORITATIVE-empty outcome — a retrieved Go vulndb record BODY
-// ("GO-"-prefixed ID field) with zero extractable symbols, i.e. an upstream
-// withdrawal/correction — overwrites a previously-POSITIVE (non-empty
-// vuln_funcs) row (M43 Phase D R6, round 5 High finding). This is the ONE
-// write shape that destroys stored symbols, so it must never happen silently:
-// a mirror that starts serving degraded GO- bodies would otherwise wipe every
-// positive row, one freshness window at a time, with nothing in the logs (the
-// mass-404 Warn keys on 404s, not on degraded 200s). Deliberately scoped to
-// actual positive-row overwrites — an authoritative empty landing on an
-// already-empty or absent row (routine whole-module advisories without symbol
-// lists re-tombstoning every window) stays silent, so the Warn keeps its
+// osvRetractionOverwriteWarnMsg is the exact Warn emitted when a live GO-
+// retraction — a retrieved Go vulndb record BODY ("GO-"-prefixed ID field)
+// with zero extractable Go symbols, i.e. an upstream withdrawal/correction —
+// DESTROYS data on a previously-POSITIVE (non-empty vuln_funcs) row (M43
+// Phase D R6, round 5 High finding). This is the write shape that loses
+// stored symbols, so it must never happen silently: a mirror that starts
+// serving degraded GO- bodies would otherwise wipe every positive row, one
+// freshness window at a time, with nothing in the logs (the mass-404 Warn
+// keys on 404s, not on degraded 200s). Deliberately scoped to actual
+// destruction — an authoritative empty landing on an already-empty or absent
+// row (routine whole-module advisories without symbol lists re-tombstoning
+// every window) stays silent, and since M44 Phase D R3b (round 2 finding 2)
+// a NO-OP re-application to a row whose Go side an earlier window already
+// cleared downgrades to osvRetractionNoopInfoMsg — so the Warn keeps its
 // mass-wipe signal instead of drowning in weekly refresh noise. Since M44
 // Phase D R2b the overwrite is ecosystem-scoped and the Warn carries
 // preserved_npm_entries: the count of npm-attributed scoped entries
 // applyGoRetractionToRow kept through the wipe (0 = the M43 wholesale
-// shape). Emitted only after the chunk's COMMIT succeeds (M43 Phase D R7,
-// round 6 finding 2 — a rolled-back overwrite is a false wipe alarm). A
-// const so the test contract pins operators' grep target verbatim.
+// shape); since R3b it also carries dropped_go_entries, the count of
+// data-bearing Go entries destroyed, and it covers the MIXED positive shape
+// too (round 2 finding 1: the retraction rode a tick whose GHSA follow-up
+// extracted npm tokens — the Go-side clear crosses this same observability
+// before the npm merge). Emitted only after the chunk's COMMIT succeeds
+// (M43 Phase D R7, round 6 finding 2 — a rolled-back overwrite is a false
+// wipe alarm). A const so the test contract pins operators' grep target
+// verbatim.
 const osvRetractionOverwriteWarnMsg = "scheduler: authoritative Go vulndb retraction is overwriting a previously-positive vuln_funcs row (GO- record body with zero symbols); if this fires en masse, verify the OSV mirror serves complete Go vulndb bodies (M43 Phase D R6)"
+
+// osvRetractionNoopInfoMsg is the exact Info line emitted when a live GO-
+// retraction (goRetraction: linked GO- body, zero Go symbols) lands on a
+// previously-positive row and applyGoRetractionToRow finds NOTHING left to
+// destroy — no Go-shaped scoped entry carrying data and no flat token that
+// leaves the rebuilt union (M44 Phase D R3b, round 2 finding 2). The shape is
+// routine: a mixed Go+npm row whose Go side was already cleared by an earlier
+// window keeps non-empty vuln_funcs through its surviving npm entries, so a
+// retraction that stays live upstream re-applies every freshness window —
+// pre-R3b each re-application re-fired osvRetractionOverwriteWarnMsg even
+// though nothing was destroyed after the first, eroding the Warn's mass-wipe
+// signal (Warn must mean "stored data was destroyed by this write", the same
+// discipline that moved both lines post-COMMIT in M43 R7). Attrs are
+// tenant_id / cve_id / go_id / preserved_npm_entries. Emitted only after the
+// chunk's COMMIT succeeds, like its Warn sibling. A const so the test
+// contract pins operators' grep target verbatim.
+const osvRetractionNoopInfoMsg = "scheduler: authoritative Go vulndb retraction re-applied to a row with no Go-attributed data left to retract; nothing destroyed, surviving npm entries carry the row, fetched_at refreshed (M44 Phase D R3b)"
 
 // osvUnlinkedRecordWarnMsg is the exact Warn emitted when a lookup RETRIEVES
 // a record body that fails the R7 linkage rule (M43 Phase D R7, round 6 High
@@ -1712,24 +1736,32 @@ type osvVulnFuncsOutcome struct {
 	//     Phase D R2b): Go-attributed data is cleared, npm-attributed scoped
 	//     entries survive with the flat list rebuilt as their union
 	//     (applyGoRetractionToRow; rows without npm entries wipe wholesale
-	//     exactly as M43 defined), and overwriting a previously-positive row
-	//     emits osvRetractionOverwriteWarnMsg with preserved_npm_entries.
-	//     Minted ONLY for CVEs whose candidates included a Go-ecosystem
-	//     component (eco.needGo, M44 Phase D R2b finding 1): an npm-only CVE
-	//     never carries Go clobber authority, whatever body the mirror
-	//     serves for its path.
+	//     exactly as M43 defined), and an application that actually destroys
+	//     data on a previously-positive row emits
+	//     osvRetractionOverwriteWarnMsg with preserved_npm_entries +
+	//     dropped_go_entries — a NO-OP re-application (Go side already
+	//     cleared, npm entries carrying the row) logs
+	//     osvRetractionNoopInfoMsg instead (M44 Phase D R3b, round 2
+	//     finding 2). Minted ONLY for CVEs whose candidates included a
+	//     Go-ecosystem component (eco.needGo, M44 Phase D R2b finding 1): an
+	//     npm-only CVE never carries Go clobber authority, whatever body the
+	//     mirror serves for its path.
 	//   - symbols empty, goID == "": a PRESERVE-side tombstone (true 404,
 	//     alias 404, linked non-Go record without a usable GO- alias, or an
 	//     UNLINKED body rejected wholesale by R7 — skeletal `{}` included).
 	//     The write path treats it exactly like a true 404: it must never
 	//     clobber an existing positive row — the row's data is preserved and
 	//     only fetched_at refreshes (the R4 clobber guard).
-	// Positive outcomes (symbols non-empty) whose GO side vouches
-	// (goVouched: Go symbols extracted from a linked body, or goID set)
-	// replace the row unconditionally, as they always have; npm-prose-ONLY
-	// positives instead MERGE into an existing positive row (M44 F470 — see
-	// goSymbols below). Since R7 a positive can only come from a LINKED body
-	// — unlinked symbols are never extracted.
+	// Positive outcomes (symbols non-empty) carrying structured Go symbols
+	// (goSymbols) replace the row unconditionally, as they always have. A
+	// MIXED positive — goID minted but zero Go symbols (goRetraction), the
+	// npm side supplying the tokens — applies the ecosystem-scoped
+	// retraction to the stored row and merges its npm tokens on top (M44
+	// Phase D R3b, round 2 finding 1: pre-R3b this shape wholesale-replaced
+	// via goVouched, wiping stored Go entries without the retraction Warn);
+	// npm-prose-ONLY positives MERGE into an existing positive row (M44
+	// F470 — see goSymbols below). Since R7 a positive can only come from a
+	// LINKED body — unlinked symbols are never extracted.
 	goID string
 	// goSymbols (M44 Wave 2 / F470) records whether the flat union contains
 	// selectors extracted from Go vulndb's STRUCTURED imports[].symbols (a
@@ -1758,8 +1790,31 @@ type osvVulnFuncsOutcome struct {
 // writes (M44 Wave 2 / F470): structured Go symbols were extracted, or a
 // linked GO- record body was retrieved (goID). Positive outcomes without it
 // are npm-prose-only and take the merge path in writeOSVVulnFuncsChunk.
+// Since M44 Phase D R3b the vouch is no longer a licence for a wholesale
+// replace on its own: a goVouched positive WITHOUT Go symbols is a live
+// retraction (goRetraction below) and its destructive half must run through
+// the retraction semantics, not the unconditional positive overwrite.
 func (o osvVulnFuncsOutcome) goVouched() bool {
 	return o.goSymbols || o.goID != ""
+}
+
+// goRetraction reports whether the outcome carries a live Go vulndb
+// retraction event (M44 Phase D R3b, round 2 finding 1): a linked GO- record
+// body was retrieved (goID minted) yet yielded ZERO structured Go symbols —
+// an upstream withdrawal of the Go-side data. The flag is ORTHOGONAL to the
+// positive/empty split: on a pure empty outcome it coincides with the M43
+// authoritative-empty shape, but on a MIXED outcome — the GHSA follow-up
+// extracted npm prose tokens in the same tick, so symbols is non-empty — the
+// retraction is still live, and pre-R3b the mixed shape fell through
+// goVouched() into the unconditional-replace positive path: the stored row's
+// Go scoped entries vanished WITHOUT the retraction Warn (and its stored npm
+// entries were replaced instead of merged), so a degraded mirror could wipe
+// Go symbols unobserved whenever the advisory's GHSA side carried backticks.
+// The write path routes every goRetraction outcome through
+// applyGoRetractionToRow so Go-side destruction always crosses the
+// retraction observability, npm tokens merging on top afterwards.
+func (o osvVulnFuncsOutcome) goRetraction() bool {
+	return o.goID != "" && !o.goSymbols
 }
 
 // syncOSVVulnFuncs is the Phase 3 entry point (see the section header above
@@ -2515,16 +2570,34 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 //     rebuilt as their union (applyGoRetractionToRow; a row with no
 //     decodable npm-shaped scoped entries — every M43-era shape — still
 //     wipes wholesale, byte-identical to pre-R2b). When the prior row was
-//     POSITIVE — the one write shape that destroys stored symbols — exactly
-//     one buffered osvRetractionOverwriteWarnMsg Warn (tenant_id, cve_id,
-//     go_id, preserved_npm_entries) makes the wipe operator-visible (round
-//     5 High finding: R5 overwrote silently). Already-empty / absent prior
-//     rows overwrite silently (routine whole-module advisories
-//     re-tombstoning every window).
-//   - GO-VOUCHED POSITIVE writes (goVouched: structured Go symbols extracted
-//     or a linked GO- body retrieved) skip the read entirely: fresh
+//     POSITIVE and the application actually DESTROYED stored data — the
+//     write shape that loses symbols — exactly one buffered
+//     osvRetractionOverwriteWarnMsg Warn (tenant_id, cve_id, go_id,
+//     preserved_npm_entries, dropped_go_entries) makes the wipe
+//     operator-visible (round 5 High finding: R5 overwrote silently). A
+//     NO-OP application — the row's Go side already cleared by an earlier
+//     window, its surviving npm entries keeping vuln_funcs non-empty while
+//     the upstream retraction stays live — downgrades to the
+//     osvRetractionNoopInfoMsg Info instead of re-firing the Warn every
+//     freshness window (M44 Phase D R3b, round 2 finding 2).
+//     Already-empty / absent prior rows overwrite silently (routine
+//     whole-module advisories re-tombstoning every window).
+//   - GO-SYMBOL-VOUCHED POSITIVE writes (goSymbols: structured Go symbols
+//     extracted from a linked body) skip the read entirely: fresh
 //     structured symbols are authoritative and replace the row
 //     unconditionally — the M43 positive contract, unchanged.
+//   - MIXED POSITIVE writes (M44 Phase D R3b, round 2 finding 1:
+//     goRetraction — a linked GO- body with ZERO Go symbols, i.e. a live
+//     retraction, while the GHSA follow-up extracted npm tokens into
+//     symbols) read the existing row like empties do. Against an existing
+//     POSITIVE row the Go-side clear runs through the SAME retraction
+//     semantics as the authoritative-empty arm (applyGoRetractionToRow on a
+//     scratch row) and the outcome's npm tokens then MERGE on top (old npm
+//     ∪ new npm) — pre-R3b this shape wholesale-replaced via goVouched, so
+//     stored Go entries vanished without the retraction Warn and stored npm
+//     entries were dropped instead of merged. Warn / no-op Info exactly as
+//     the authoritative-empty arm. Against an absent/empty row the outcome
+//     writes as-is, silently.
 //   - NPM-PROSE-ONLY POSITIVE writes (M44 Wave 2 / F470: symbols present but
 //     !goVouched) read the existing row like empties do. Against an existing
 //     POSITIVE row they MERGE — flat union (existing order first),
@@ -2556,7 +2629,8 @@ func (j *CVESyncJob) writeOSVVulnFuncs(
 // lookups only, so it does NOT bound this cost; the correct bound is the
 // pass's own write count: at most one extra read per row write, i.e. ≤2×
 // the pre-R4 per-row round-trips, and strictly less whenever the tick has
-// positive outcomes (which never read).
+// go-symbol-vouched positive outcomes (since M44 F470/R3b the only shape
+// that never reads — npm-prose-only and mixed positives read like empties).
 //
 // A GetBySource failure aborts the chunk exactly like an Upsert failure:
 // with real PG the error has already aborted the tx server-side.
@@ -2686,8 +2760,8 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 						logEvent = &osvVulnFuncsWriteLogEvent{
 							tenantID: cand.tenantID, cveID: cveID}
 					} else {
-						// M43 Phase D R6 (round 5 High finding): the one
-						// write shape that destroys stored symbols — an
+						// M43 Phase D R6 (round 5 High finding): the write
+						// shape that destroys stored symbols — an
 						// authoritative Go vulndb retraction overwriting a
 						// positive row. It must never happen silently, and
 						// the Warn must never lie: emitted post-COMMIT so
@@ -2700,11 +2774,59 @@ func (j *CVESyncJob) writeOSVVulnFuncsChunk(
 						// overwrite. See applyGoRetractionToRow for the
 						// module classification rule; the preserved count
 						// rides on the Warn as preserved_npm_entries.
-						preservedNpm := applyGoRetractionToRow(excerpt, existing)
+						//
+						// M44 Phase D R3b (round 2 finding 2): the Warn must
+						// never cry wolf either — a mixed row whose npm
+						// entries survived an earlier window's retraction
+						// keeps non-empty vuln_funcs, so a still-live
+						// upstream retraction re-applies every freshness
+						// window as a NO-OP. Only an application that
+						// actually destroyed stored data Warns; the no-op
+						// downgrades to the osvRetractionNoopInfoMsg Info.
+						droppedGo, preservedNpm, destroyed := applyGoRetractionToRow(excerpt, existing)
 						logEvent = &osvVulnFuncsWriteLogEvent{retraction: true,
-							tenantID: cand.tenantID, cveID: cveID, goID: o.goID,
-							preservedNpm: preservedNpm}
+							retractionNoop: !destroyed,
+							tenantID:       cand.tenantID, cveID: cveID, goID: o.goID,
+							preservedNpm: preservedNpm, droppedGo: droppedGo}
 					}
+				}
+			} else if o.goRetraction() {
+				// MIXED positive (M44 Phase D R3b, round 2 finding 1): npm
+				// prose tokens rode the same tick as a LIVE GO- retraction
+				// (linked GO- body, zero Go symbols). Pre-R3b this shape fell
+				// through goVouched() into the unconditional-replace positive
+				// path below: the stored row's Go scoped entries vanished
+				// WITHOUT the retraction Warn — a mirror serving degraded GO-
+				// bodies could wipe Go symbols unobserved whenever the
+				// advisory's GHSA side carried backtick tokens — and the
+				// stored npm entries were replaced instead of merged. Now the
+				// Go-side clear always runs through the retraction semantics
+				// (applyGoRetractionToRow, against a scratch row so the
+				// intermediate is "existing minus its Go side") and the
+				// outcome's npm tokens MERGE on top (old npm ∪ new npm, the
+				// F470 union), with the same F185 tx-routed read and the same
+				// abort-on-error posture as the other read paths. The Warn /
+				// no-op Info split matches the empty-outcome retraction arm
+				// above (finding 2 discipline: Warn only on destruction).
+				existing, gErr := j.advisoryExcerpts.GetBySource(txCtx, cand.tenantID, cveID, osvVulnFuncsSource)
+				if gErr != nil {
+					slog.Warn("scheduler: OSV vuln_funcs pre-write read failed, aborting chunk (M44 Phase D R3b)",
+						"chunk_index", chunkIndex, "tenant_id", cand.tenantID, "cve_id", cveID, "error", gErr)
+					return 0, 0, fmt.Errorf("scheduler: chunk %d OSV vuln_funcs pre-write read for tenant %s cve %s: %w",
+						chunkIndex, cand.tenantID, cveID, gErr)
+				}
+				if existing != nil && jsonArrayNonEmpty(existing.VulnFuncs) {
+					// The scratch row's flat MUST decode as an empty array
+					// (not nil) so the merge below reads it as "no stored
+					// tokens" instead of tripping its preserve-wholesale
+					// fail-safe on the wholesale-wipe shapes.
+					retracted := &repository.AdvisoryExcerpt{VulnFuncs: json.RawMessage(`[]`)}
+					droppedGo, preservedNpm, destroyed := applyGoRetractionToRow(retracted, existing)
+					mergeNpmProsePositiveIntoRow(excerpt, retracted, &o)
+					logEvent = &osvVulnFuncsWriteLogEvent{retraction: true,
+						retractionNoop: !destroyed,
+						tenantID:       cand.tenantID, cveID: cveID, goID: o.goID,
+						preservedNpm: preservedNpm, droppedGo: droppedGo}
 				}
 			} else if !o.goVouched() {
 				// npm-prose-only POSITIVE (M44 Wave 2 / F470): tokens with no
@@ -2881,11 +3003,15 @@ func mergeNpmProsePositiveIntoRow(dst, existing *repository.AdvisoryExcerpt, o *
 	}
 }
 
-// applyGoRetractionToRow applies a GO--authoritative empty outcome to an
-// existing POSITIVE row ECOSYSTEM-scoped (M44 Phase D R2b finding 1) —
-// mergeNpmProsePositiveIntoRow's destructive-direction sibling — mutating
-// dst (the pending upsert row, pre-filled with empty vuln_funcs and the
-// outcome's excerpt) in place. A linked GO- record body with zero symbols is
+// applyGoRetractionToRow applies a live GO- retraction (a linked GO- record
+// body with zero Go symbols) to an existing POSITIVE row ECOSYSTEM-scoped
+// (M44 Phase D R2b finding 1) — mergeNpmProsePositiveIntoRow's
+// destructive-direction sibling — mutating dst in place. dst is either the
+// pending upsert row (the authoritative-empty arm: pre-filled with empty
+// vuln_funcs and the outcome's excerpt) or a scratch row the MIXED arm then
+// merges the outcome's npm tokens into (M44 Phase D R3b finding 1: the
+// intermediate "existing minus its Go side"; its flat must be pre-filled
+// with a decodable empty array). A linked GO- record body with zero symbols is
 // an upstream withdrawal of the GO-side data ONLY: it carries no statement
 // about the npm prose tokens W2 merged into the same (tenant, cve) row, so
 // wiping the row wholesale (the pre-R2b behaviour) destroyed npm data no npm
@@ -2907,29 +3033,61 @@ func mergeNpmProsePositiveIntoRow(dst, existing *repository.AdvisoryExcerpt, o *
 //   - RawExcerpt: the outcome's excerpt when non-empty (the retraction
 //     record's own text), else preserved.
 //
-// Returns the number of preserved npm scoped entries, which rides on the
-// retraction Warn as preserved_npm_entries. 0 means the wipe was TOTAL —
-// the M43 wholesale retraction, byte-identical to pre-R2b: dst stays as the
-// caller filled it (empty vuln_funcs + the outcome's excerpt). That is the
-// deliberate posture for the no-scoped and undecodable-scoped shapes too:
-// npm tokens only enter 'osv' rows through extractOSVNpmVulnFuncs and the
-// W2 merge path, both of which always write valid scoped JSON keyed by npm
-// package name (the scope-unknown drop guarantees no npm token is ever
-// stored unattributed), so a row without decodable scoped entries cannot
-// hold scheduler-written npm data and keeps the full M43 retraction
-// semantics — foreign-shaped scoped bytes do not weaken an authoritative
-// retraction the way they veto the UNAUTHORISED npm merge.
-func applyGoRetractionToRow(dst, existing *repository.AdvisoryExcerpt) (preservedNpm int) {
+// Returns (M44 Phase D R3b widened the R2b single preservedNpm return):
+//
+//   - droppedGo: the number of Go-shaped scoped entries that CARRIED DATA
+//     (non-empty vuln_funcs) and were dropped — the count of positive Go
+//     entries this application actually destroyed, riding on the retraction
+//     Warn as dropped_go_entries. Data-free entries (whatever their shape)
+//     and the no-scoped / undecodable-scoped wholesale shapes count 0: the
+//     former destroy nothing, the latter carry no per-entry attribution to
+//     count.
+//   - preservedNpm: the number of preserved npm scoped entries, riding on
+//     the retraction Warn as preserved_npm_entries. 0 means the wipe was
+//     TOTAL — the M43 wholesale retraction, byte-identical to pre-R2b: dst
+//     stays as the caller filled it (empty vuln_funcs + the outcome's
+//     excerpt). That is the deliberate posture for the no-scoped and
+//     undecodable-scoped shapes too: npm tokens only enter 'osv' rows
+//     through extractOSVNpmVulnFuncs and the W2 merge path, both of which
+//     always write valid scoped JSON keyed by npm package name (the
+//     scope-unknown drop guarantees no npm token is ever stored
+//     unattributed), so a row without decodable scoped entries cannot hold
+//     scheduler-written npm data and keeps the full M43 retraction
+//     semantics — foreign-shaped scoped bytes do not weaken an
+//     authoritative retraction the way they veto the UNAUTHORISED npm
+//     merge.
+//   - destroyed: whether this application actually removed stored data
+//     (round 2 finding 2 — the write path's Warn/Info pivot: Warn is
+//     reserved for destruction). True on every wholesale shape (the caller
+//     only invokes against a non-empty flat, all of which a wholesale wipe
+//     destroys), when droppedGo > 0, and when the rebuilt flat loses tokens
+//     the stored flat carried (Go selectors and pre-R8f legacy leftovers
+//     attributed to no kept entry, or a stored flat that does not decode as
+//     []string and is being replaced by the rebuilt union). False exactly
+//     when the application was a NO-OP on the row's data — the repeat
+//     application of a still-live upstream retraction to a row whose Go
+//     side an earlier window already cleared: the rebuild is deterministic
+//     (stored order, first-seen dedupe, fixed cap), so a second pass over
+//     its own output reproduces it byte-for-byte and classifies false.
+func applyGoRetractionToRow(dst, existing *repository.AdvisoryExcerpt) (droppedGo, preservedNpm int, destroyed bool) {
 	if len(existing.VulnFuncsScoped) == 0 {
-		return 0
+		return 0, 0, true
 	}
 	var existingScoped []osvScopedVulnFuncs
 	if err := json.Unmarshal(existing.VulnFuncsScoped, &existingScoped); err != nil {
-		return 0
+		return 0, 0, true
 	}
 	kept := make([]osvScopedVulnFuncs, 0, len(existingScoped))
 	for _, sc := range existingScoped {
-		if osvScopedModuleLooksGo(sc.Module) || len(sc.VulnFuncs) == 0 {
+		if osvScopedModuleLooksGo(sc.Module) {
+			if len(sc.VulnFuncs) > 0 {
+				droppedGo++
+			}
+			continue
+		}
+		if len(sc.VulnFuncs) == 0 {
+			// Data-free churn entry: dropped from the rebuild but destroys
+			// nothing, so it counts toward neither droppedGo nor destroyed.
 			continue
 		}
 		// Defensive copy, same discipline as the merge path: dst's JSON is
@@ -2940,7 +3098,7 @@ func applyGoRetractionToRow(dst, existing *repository.AdvisoryExcerpt) (preserve
 		})
 	}
 	if len(kept) == 0 {
-		return 0
+		return droppedGo, 0, true
 	}
 	dropped := 0
 	var flat []string
@@ -2962,6 +3120,23 @@ func applyGoRetractionToRow(dst, existing *repository.AdvisoryExcerpt) (preserve
 		slog.Debug("scheduler: npm union preserved through a Go retraction exceeds the per-CVE flat cap, overflow dropped from flat only (M44 Phase D R2b)",
 			"cve_id", dst.CVEID, "cap", osvVulnFuncsMaxSymbolsPerCVE, "dropped", dropped)
 	}
+	// Flat-loss detection (M44 Phase D R3b, round 2 finding 2): tokens the
+	// stored flat carried but the rebuilt union does not — Go selectors and
+	// pre-R8f legacy leftovers attributed to no kept entry — leave with this
+	// application even when no scoped entry was dropped, so they count as
+	// destruction. A stored flat that does not decode as []string (foreign
+	// bytes jsonArrayNonEmpty classified non-empty) is conservatively lost:
+	// the rebuilt union replaces bytes we do not understand.
+	var existingFlat []string
+	flatLost := json.Unmarshal(existing.VulnFuncs, &existingFlat) != nil
+	if !flatLost {
+		for _, s := range existingFlat {
+			if _, ok := seen[s]; !ok {
+				flatLost = true
+				break
+			}
+		}
+	}
 	dst.VulnFuncs = stringsToJSONArray(flat)
 	dst.VulnFuncsScoped = scopedVulnFuncsToJSON(kept)
 	dst.AffectedPaths = existing.AffectedPaths
@@ -2970,7 +3145,7 @@ func applyGoRetractionToRow(dst, existing *repository.AdvisoryExcerpt) (preserve
 	if dst.RawExcerpt == "" {
 		dst.RawExcerpt = existing.RawExcerpt
 	}
-	return len(kept)
+	return droppedGo, len(kept), droppedGo > 0 || flatLost
 }
 
 // osvScopedModuleLooksGo classifies one stored vuln_funcs_scoped module name
@@ -3728,16 +3903,33 @@ func osvRecordLinked(vuln *client.OSVVulnerability, requestedID, cveID string) b
 // emitOSVVulnFuncsWriteLogs only after tx.Commit() returns nil; an aborted
 // chunk emits nothing, because none of its writes happened.
 type osvVulnFuncsWriteLogEvent struct {
-	retraction bool // false: preserve Info; true: retraction-overwrite Warn
-	tenantID   uuid.UUID
-	cveID      string
-	goID       string // retraction events only
+	retraction bool // false: preserve Info; true: retraction applied (Warn or no-op Info)
+	// retractionNoop (M44 Phase D R3b, round 2 finding 2; retraction events
+	// only) marks an application that destroyed NOTHING —
+	// applyGoRetractionToRow dropped no data-bearing Go entry and lost no
+	// flat token, i.e. the repeat application of a still-live upstream
+	// retraction to a row whose Go side an earlier window already cleared.
+	// It downgrades the emission from osvRetractionOverwriteWarnMsg to
+	// osvRetractionNoopInfoMsg: Warn is reserved for writes that actually
+	// destroy stored data, so its mass-wipe signal never drowns in weekly
+	// refresh noise from surviving mixed rows.
+	retractionNoop bool
+	tenantID       uuid.UUID
+	cveID          string
+	goID           string // retraction events only
 	// preservedNpm (M44 Phase D R2b, retraction events only) is the number
 	// of npm-attributed scoped entries applyGoRetractionToRow kept through
 	// the ecosystem-scoped wipe, emitted as preserved_npm_entries so an
 	// operator can tell a total wipe (0 — the M43 wholesale shape) from a
 	// Go-side-only clear that left the row's npm tokens standing.
 	preservedNpm int
+	// droppedGo (M44 Phase D R3b, retraction Warn events only) is the number
+	// of data-bearing Go-shaped scoped entries the application destroyed,
+	// emitted as dropped_go_entries. 0 on a Warn means the destruction was a
+	// wholesale wipe of a row without per-entry attribution (no decodable
+	// scoped entries — the M43 shape) or a flat-only loss (pre-R8f legacy
+	// leftovers).
+	droppedGo int
 }
 
 // emitOSVVulnFuncsWriteLogs emits a committed chunk's buffered
@@ -3747,11 +3939,21 @@ type osvVulnFuncsWriteLogEvent struct {
 // exactly once per chunk, strictly after a successful COMMIT.
 func emitOSVVulnFuncsWriteLogs(events []osvVulnFuncsWriteLogEvent) {
 	for _, e := range events {
-		if e.retraction {
-			slog.Warn(osvRetractionOverwriteWarnMsg,
+		switch {
+		case e.retraction && e.retractionNoop:
+			// M44 Phase D R3b (round 2 finding 2): a retraction application
+			// that destroyed nothing — no Go data left to retract — must not
+			// re-fire the Warn every freshness window; Info keeps the
+			// still-live upstream retraction visible without the alarm.
+			slog.Info(osvRetractionNoopInfoMsg,
 				"tenant_id", e.tenantID, "cve_id", e.cveID, "go_id", e.goID,
 				"preserved_npm_entries", e.preservedNpm)
-		} else {
+		case e.retraction:
+			slog.Warn(osvRetractionOverwriteWarnMsg,
+				"tenant_id", e.tenantID, "cve_id", e.cveID, "go_id", e.goID,
+				"preserved_npm_entries", e.preservedNpm,
+				"dropped_go_entries", e.droppedGo)
+		default:
 			slog.Info(osvTombstonePreserveInfoMsg,
 				"tenant_id", e.tenantID, "cve_id", e.cveID)
 		}

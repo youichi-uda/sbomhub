@@ -4322,3 +4322,433 @@ func TestOSVScopedModuleLooksGo(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyGoRetractionToRow_DestroyedDetection pins the M44 Phase D R3b
+// (round 2 finding 2) widening of applyGoRetractionToRow's return contract:
+// (droppedGo, preservedNpm, destroyed), where destroyed is the write path's
+// Warn/Info pivot — Warn is reserved for applications that actually removed
+// stored data. Wholesale shapes (no scoped / undecodable scoped / nothing
+// kept) always destroy (the caller only invokes against a non-empty flat);
+// a kept-entry rebuild destroys exactly when a data-bearing Go entry was
+// dropped or the stored flat carried tokens the rebuilt union does not
+// (pre-R8f legacy leftovers); the repeat application to an already-cleared
+// row is a no-op and must classify destroyed=false.
+func TestApplyGoRetractionToRow_DestroyedDetection(t *testing.T) {
+	cases := []struct {
+		name          string
+		existing      repository.AdvisoryExcerpt
+		wantDroppedGo int
+		wantPreserved int
+		wantDestroyed bool
+	}{
+		{
+			name: "no scoped entries: M43 wholesale wipe destroys",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`["x.Y"]`),
+			},
+			wantDroppedGo: 0, wantPreserved: 0, wantDestroyed: true,
+		},
+		{
+			name: "undecodable scoped: wholesale wipe destroys",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs:       json.RawMessage(`["x.Y"]`),
+				VulnFuncsScoped: json.RawMessage(`{"not":"an array"}`),
+			},
+			wantDroppedGo: 0, wantPreserved: 0, wantDestroyed: true,
+		},
+		{
+			name: "all-Go scoped: nothing kept, dropped entries counted",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`["x.Y","t.P"]`),
+				VulnFuncsScoped: json.RawMessage(`[
+					{"module":"github.com/a/b","vuln_funcs":["x.Y"]},
+					{"module":"stdlib","vuln_funcs":["t.P"]}
+				]`),
+			},
+			wantDroppedGo: 2, wantPreserved: 0, wantDestroyed: true,
+		},
+		{
+			name: "mixed scoped: Go dropped and counted, npm kept, empty npm entry uncounted",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`["x.Y","d"]`),
+				VulnFuncsScoped: json.RawMessage(`[
+					{"module":"github.com/a/b","vuln_funcs":["x.Y"]},
+					{"module":"lodash","vuln_funcs":["d"]},
+					{"module":"@s/p","vuln_funcs":[]}
+				]`),
+			},
+			wantDroppedGo: 1, wantPreserved: 1, wantDestroyed: true,
+		},
+		{
+			name: "npm-only row (repeat application): no-op, destroyed=false",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`["d","r"]`),
+				VulnFuncsScoped: json.RawMessage(`[
+					{"module":"lodash","vuln_funcs":["d"]},
+					{"module":"@s/p","vuln_funcs":["r"]}
+				]`),
+			},
+			wantDroppedGo: 0, wantPreserved: 2, wantDestroyed: false,
+		},
+		{
+			name: "npm-only row with legacy unattributed flat token: flat loss destroys",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`["legacy.Go","d"]`),
+				VulnFuncsScoped: json.RawMessage(`[
+					{"module":"lodash","vuln_funcs":["d"]}
+				]`),
+			},
+			wantDroppedGo: 0, wantPreserved: 1, wantDestroyed: true,
+		},
+		{
+			name: "data-free Go entry: dropped from rebuild but destroys nothing",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`["d"]`),
+				VulnFuncsScoped: json.RawMessage(`[
+					{"module":"github.com/a/b","vuln_funcs":[]},
+					{"module":"lodash","vuln_funcs":["d"]}
+				]`),
+			},
+			wantDroppedGo: 0, wantPreserved: 1, wantDestroyed: false,
+		},
+		{
+			name: "foreign flat bytes with kept npm entries: conservative destroyed",
+			existing: repository.AdvisoryExcerpt{
+				VulnFuncs: json.RawMessage(`{"foreign":"bytes"}`),
+				VulnFuncsScoped: json.RawMessage(`[
+					{"module":"lodash","vuln_funcs":["d"]}
+				]`),
+			},
+			wantDroppedGo: 0, wantPreserved: 1, wantDestroyed: true,
+		},
+	}
+	for _, c := range cases {
+		dst := &repository.AdvisoryExcerpt{CVEID: "CVE-2025-9999", RawExcerpt: "note"}
+		droppedGo, preservedNpm, destroyed := applyGoRetractionToRow(dst, &c.existing)
+		if droppedGo != c.wantDroppedGo || preservedNpm != c.wantPreserved || destroyed != c.wantDestroyed {
+			t.Errorf("%s: applyGoRetractionToRow = (%d, %d, %v), want (%d, %d, %v)",
+				c.name, droppedGo, preservedNpm, destroyed, c.wantDroppedGo, c.wantPreserved, c.wantDestroyed)
+		}
+	}
+
+	// The no-op shape must also leave the rebuilt data identical to the
+	// stored npm side (the second-application idempotency the destroyed=false
+	// classification relies on).
+	existing := &repository.AdvisoryExcerpt{
+		VulnFuncs: json.RawMessage(`["d","r"]`),
+		VulnFuncsScoped: json.RawMessage(`[
+			{"module":"lodash","vuln_funcs":["d"]},
+			{"module":"@s/p","vuln_funcs":["r"]}
+		]`),
+		AffectedPaths: json.RawMessage(`["src/x.js"]`),
+		RawExcerpt:    "kept excerpt",
+	}
+	dst := &repository.AdvisoryExcerpt{CVEID: "CVE-2025-9999"}
+	if _, _, destroyed := applyGoRetractionToRow(dst, existing); destroyed {
+		t.Fatal("npm-only rebuild classified destroyed=true, want false")
+	}
+	var flat []string
+	if err := json.Unmarshal(dst.VulnFuncs, &flat); err != nil || len(flat) != 2 || flat[0] != "d" || flat[1] != "r" {
+		t.Errorf("no-op rebuild flat = %s (err %v), want [\"d\",\"r\"]", dst.VulnFuncs, err)
+	}
+	if string(dst.AffectedPaths) != `["src/x.js"]` || dst.RawExcerpt != "kept excerpt" {
+		t.Errorf("no-op rebuild (AffectedPaths, RawExcerpt) = (%s, %q), want preserved", dst.AffectedPaths, dst.RawExcerpt)
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_MixedRetractionMergesNpm pins the M44
+// Phase D R3b fix for round 2 finding 1 (Medium): a MIXED outcome — a linked
+// GO- record body with ZERO Go symbols (a live upstream retraction) whose
+// GHSA follow-up extracted npm prose tokens in the same tick — must NOT take
+// the wholesale-replace positive path. Pre-R3b it did (goVouched() stood up
+// on the goID alone), so the stored row's Go scoped entries vanished with no
+// retraction Warn and its stored npm entries were replaced instead of
+// merged: a degraded mirror could wipe Go symbols unobserved whenever the
+// advisory's GHSA side carried backticks. Post-R3b the write path applies
+// the ecosystem-scoped retraction to the stored row first
+// (applyGoRetractionToRow — Go-shaped entries clear via retraction
+// semantics), merges the outcome's npm tokens on top (old npm ∪ new npm),
+// and emits the post-commit retraction Warn with dropped_go_entries +
+// preserved_npm_entries whenever Go data was actually destroyed.
+//   - CVE-2025-9301: mixed row (Go + npm scoped) → Go entry cleared, npm
+//     union kept, Warn (dropped_go_entries=1, preserved_npm_entries=1);
+//   - CVE-2025-9302: absent row → the outcome writes as-is, no log;
+//   - CVE-2025-9303: Go-only row → wholesale Go wipe then npm tokens land,
+//     Warn (dropped_go_entries=1, preserved_npm_entries=0).
+func TestCVESyncJob_WriteOSVVulnFuncs_MixedRetractionMergesNpm(t *testing.T) {
+	logs := captureSlog(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-9301", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9301", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["a.B","defaultsDeep"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"github.com/kept/mod","vuln_funcs":["a.B"]},
+				{"module":"lodash","vuln_funcs":["defaultsDeep"]}
+			]`),
+			AffectedPaths: json.RawMessage(`["src/x.go"]`),
+			RawExcerpt:    "old mixed excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9303", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9303", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["gone.Sym"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"github.com/gone/mod","vuln_funcs":["gone.Sym"]}
+			]`),
+			AffectedPaths: json.RawMessage(`["src/gone.go"]`),
+			RawExcerpt:    "gone excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	outcomes := map[string]osvVulnFuncsOutcome{
+		"CVE-2025-9301": {
+			symbols: []string{"merge"},
+			scoped:  []osvScopedVulnFuncs{{Module: "lodash", VulnFuncs: []string{"merge"}}},
+			excerpt: "ghsa note 9301", goID: "GO-2025-9301",
+		},
+		"CVE-2025-9302": {
+			symbols: []string{"send"},
+			scoped:  []osvScopedVulnFuncs{{Module: "@scope/pkg", VulnFuncs: []string{"send"}}},
+			excerpt: "ghsa note 9302", goID: "GO-2025-9302",
+		},
+		"CVE-2025-9303": {
+			symbols: []string{"flat2"},
+			scoped:  []osvScopedVulnFuncs{{Module: "underscore", VulnFuncs: []string{"flat2"}}},
+			excerpt: "ghsa note 9303", goID: "GO-2025-9303",
+		},
+	}
+	for id, o := range outcomes {
+		if !o.goRetraction() || !o.goVouched() {
+			t.Fatalf("%s (goRetraction, goVouched) = (%v, %v), want (true, true) — the mixed shape under test", id, o.goRetraction(), o.goVouched())
+		}
+	}
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{"CVE-2025-9301", "CVE-2025-9302", "CVE-2025-9303"}}},
+		outcomes, false)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 3 || tenants != 1 {
+		t.Fatalf("(rows, tenants) = (%d, %d), want (3, 1)", rows, tenants)
+	}
+	// The mixed shape reads the existing row like empties do (one pre-write
+	// read per row) — the read fuels both the retraction and the merge.
+	if len(store.getKeys) != 3 {
+		t.Errorf("GetBySource calls = %v, want one pre-write read per mixed write (3)", store.getKeys)
+	}
+	byCVE := map[string]repository.AdvisoryExcerpt{}
+	for _, c := range store.calls {
+		byCVE[c.CVEID] = c
+	}
+
+	mixed := byCVE["CVE-2025-9301"]
+	var funcs []string
+	if err := json.Unmarshal(mixed.VulnFuncs, &funcs); err != nil ||
+		len(funcs) != 2 || funcs[0] != "defaultsDeep" || funcs[1] != "merge" {
+		t.Errorf("mixed VulnFuncs = %s (err %v), want [\"defaultsDeep\",\"merge\"] (Go cleared via retraction, old npm ∪ new npm)", mixed.VulnFuncs, err)
+	}
+	var scoped []osvScopedVulnFuncs
+	if err := json.Unmarshal(mixed.VulnFuncsScoped, &scoped); err != nil || len(scoped) != 1 ||
+		scoped[0].Module != "lodash" || len(scoped[0].VulnFuncs) != 2 ||
+		scoped[0].VulnFuncs[0] != "defaultsDeep" || scoped[0].VulnFuncs[1] != "merge" {
+		t.Errorf("mixed VulnFuncsScoped = %s (err %v), want the npm module carrying the old∪new union only", mixed.VulnFuncsScoped, err)
+	}
+	if string(mixed.AffectedPaths) != `["src/x.go"]` {
+		t.Errorf("mixed AffectedPaths = %s, want preserved (npm entries survived)", mixed.AffectedPaths)
+	}
+	if mixed.RawExcerpt != "ghsa note 9301" {
+		t.Errorf("mixed RawExcerpt = %q, want the outcome's excerpt", mixed.RawExcerpt)
+	}
+	if mixed.FetchedAt == nil || !mixed.FetchedAt.After(stale.Add(time.Hour)) {
+		t.Errorf("mixed FetchedAt = %v, want refreshed", mixed.FetchedAt)
+	}
+
+	fresh := byCVE["CVE-2025-9302"]
+	if err := json.Unmarshal(fresh.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "send" {
+		t.Errorf("absent-row VulnFuncs = %s (err %v), want [\"send\"] (the outcome as-is)", fresh.VulnFuncs, err)
+	}
+
+	goOnly := byCVE["CVE-2025-9303"]
+	if err := json.Unmarshal(goOnly.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "flat2" {
+		t.Errorf("go-only VulnFuncs = %s (err %v), want [\"flat2\"] (wholesale Go wipe, then npm lands)", goOnly.VulnFuncs, err)
+	}
+	if err := json.Unmarshal(goOnly.VulnFuncsScoped, &scoped); err != nil || len(scoped) != 1 ||
+		scoped[0].Module != "underscore" {
+		t.Errorf("go-only VulnFuncsScoped = %s (err %v), want only the fresh npm entry", goOnly.VulnFuncsScoped, err)
+	}
+	if len(goOnly.AffectedPaths) != 0 {
+		t.Errorf("go-only AffectedPaths = %s, want empty (the wholesale retraction wipes unattributed fields)", goOnly.AffectedPaths)
+	}
+
+	got := logs.String()
+	if n := strings.Count(got, osvRetractionOverwriteWarnMsg); n != 2 {
+		t.Errorf("retraction Warn logged %d times, want exactly 2 — Go data was destroyed on 9301 and 9303 (logs: %s)", n, got)
+	}
+	if n := strings.Count(got, "dropped_go_entries=1"); n != 2 {
+		t.Errorf("dropped_go_entries=1 appears %d times, want 2 (one data-bearing Go entry destroyed per Warn), logs:\n%s", n, got)
+	}
+	if !strings.Contains(got, "preserved_npm_entries=1") {
+		t.Errorf("mixed-row Warn must carry preserved_npm_entries=1, got logs:\n%s", got)
+	}
+	if !strings.Contains(got, "preserved_npm_entries=0") {
+		t.Errorf("go-only Warn must carry preserved_npm_entries=0, got logs:\n%s", got)
+	}
+	if !strings.Contains(got, "go_id=GO-2025-9301") || !strings.Contains(got, "go_id=GO-2025-9303") {
+		t.Errorf("Warns must carry the retracting GO- ids, got logs:\n%s", got)
+	}
+	if strings.Contains(got, "go_id=GO-2025-9302") {
+		t.Errorf("absent-row mixed write must emit nothing, got logs:\n%s", got)
+	}
+	if strings.Contains(got, osvRetractionNoopInfoMsg) || strings.Contains(got, osvTombstonePreserveInfoMsg) {
+		t.Errorf("no Info lines expected on destructive mixed writes, got logs:\n%s", got)
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_RepeatRetractionNoopInfo pins the M44
+// Phase D R3b fix for round 2 finding 2 (Low): the retraction Warn fires
+// ONLY when the application actually destroys stored data. A mixed row whose
+// npm entries survived an earlier ecosystem-scoped retraction keeps
+// non-empty vuln_funcs, so a still-live upstream GO- retraction re-applies
+// every freshness window — pre-R3b each re-application re-fired the Warn
+// though nothing was destroyed after the first. Post-R3b the no-op
+// application downgrades to osvRetractionNoopInfoMsg Info.
+//   - CVE-2025-9401: npm-only row (the post-retraction state) + pure empty
+//     retraction outcome → Info, no Warn, row's npm data intact;
+//   - CVE-2025-9402: Go+npm row (first application) + pure empty retraction
+//     outcome → Warn, the destructive contract unchanged;
+//   - CVE-2025-9403: npm-only row + MIXED outcome (retraction + fresh npm
+//     tokens) → Info, npm merge still lands.
+func TestCVESyncJob_WriteOSVVulnFuncs_RepeatRetractionNoopInfo(t *testing.T) {
+	logs := captureSlog(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-9401", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9401", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["defaultsDeep","run"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"lodash","vuln_funcs":["defaultsDeep"]},
+				{"module":"@scope/pkg","vuln_funcs":["run"]}
+			]`),
+			AffectedPaths: json.RawMessage(`["src/x.js"]`),
+			RawExcerpt:    "kept excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9402", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9402", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["gone.Sym","defaultsDeep"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"github.com/gone/mod","vuln_funcs":["gone.Sym"]},
+				{"module":"lodash","vuln_funcs":["defaultsDeep"]}
+			]`),
+			RawExcerpt: "first-application excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9403", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9403", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["defaultsDeep"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"lodash","vuln_funcs":["defaultsDeep"]}
+			]`),
+			RawExcerpt: "mixed kept excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	outcomes := map[string]osvVulnFuncsOutcome{
+		"CVE-2025-9401": {goID: "GO-2025-9401", excerpt: "withdrawal note 9401"},
+		"CVE-2025-9402": {goID: "GO-2025-9402", excerpt: "withdrawal note 9402"},
+		"CVE-2025-9403": {
+			symbols: []string{"merge"},
+			scoped:  []osvScopedVulnFuncs{{Module: "lodash", VulnFuncs: []string{"merge"}}},
+			excerpt: "ghsa note 9403", goID: "GO-2025-9403",
+		},
+	}
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{"CVE-2025-9401", "CVE-2025-9402", "CVE-2025-9403"}}},
+		outcomes, false)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 3 || tenants != 1 {
+		t.Fatalf("(rows, tenants) = (%d, %d), want (3, 1)", rows, tenants)
+	}
+	byCVE := map[string]repository.AdvisoryExcerpt{}
+	for _, c := range store.calls {
+		byCVE[c.CVEID] = c
+	}
+
+	// 9401: the no-op — npm data intact, fetched_at refreshed.
+	noop := byCVE["CVE-2025-9401"]
+	var funcs []string
+	if err := json.Unmarshal(noop.VulnFuncs, &funcs); err != nil ||
+		len(funcs) != 2 || funcs[0] != "defaultsDeep" || funcs[1] != "run" {
+		t.Errorf("no-op VulnFuncs = %s (err %v), want the stored npm union intact", noop.VulnFuncs, err)
+	}
+	var scoped []osvScopedVulnFuncs
+	if err := json.Unmarshal(noop.VulnFuncsScoped, &scoped); err != nil || len(scoped) != 2 ||
+		scoped[0].Module != "lodash" || scoped[1].Module != "@scope/pkg" {
+		t.Errorf("no-op VulnFuncsScoped = %s (err %v), want both npm entries intact", noop.VulnFuncsScoped, err)
+	}
+	if string(noop.AffectedPaths) != `["src/x.js"]` {
+		t.Errorf("no-op AffectedPaths = %s, want preserved", noop.AffectedPaths)
+	}
+	if noop.FetchedAt == nil || !noop.FetchedAt.After(stale.Add(time.Hour)) {
+		t.Errorf("no-op FetchedAt = %v, want refreshed (the freshness window must still advance)", noop.FetchedAt)
+	}
+
+	// 9402: first application — Go cleared, npm kept.
+	first := byCVE["CVE-2025-9402"]
+	if err := json.Unmarshal(first.VulnFuncs, &funcs); err != nil || len(funcs) != 1 || funcs[0] != "defaultsDeep" {
+		t.Errorf("first-application VulnFuncs = %s (err %v), want [\"defaultsDeep\"] (Go cleared)", first.VulnFuncs, err)
+	}
+
+	// 9403: mixed no-op — merge still lands.
+	mixedNoop := byCVE["CVE-2025-9403"]
+	if err := json.Unmarshal(mixedNoop.VulnFuncs, &funcs); err != nil ||
+		len(funcs) != 2 || funcs[0] != "defaultsDeep" || funcs[1] != "merge" {
+		t.Errorf("mixed no-op VulnFuncs = %s (err %v), want [\"defaultsDeep\",\"merge\"] (npm merge lands, nothing destroyed)", mixedNoop.VulnFuncs, err)
+	}
+
+	got := logs.String()
+	if n := strings.Count(got, osvRetractionOverwriteWarnMsg); n != 1 {
+		t.Errorf("retraction Warn logged %d times, want exactly 1 (only 9402 destroyed data), logs:\n%s", n, got)
+	}
+	if !strings.Contains(got, "go_id=GO-2025-9402") {
+		t.Errorf("the one Warn must be 9402's, got logs:\n%s", got)
+	}
+	if n := strings.Count(got, osvRetractionNoopInfoMsg); n != 2 {
+		t.Errorf("no-op retraction Info logged %d times, want exactly 2 (9401 and 9403), logs:\n%s", n, got)
+	}
+	if !strings.Contains(got, "go_id=GO-2025-9401") || !strings.Contains(got, "go_id=GO-2025-9403") {
+		t.Errorf("no-op Infos must carry their GO- ids, got logs:\n%s", got)
+	}
+	if !strings.Contains(got, "preserved_npm_entries=2") {
+		t.Errorf("9401's no-op Info must carry preserved_npm_entries=2, got logs:\n%s", got)
+	}
+	if strings.Contains(got, osvTombstonePreserveInfoMsg) {
+		t.Errorf("preserve Info fired on retraction writes, want none, logs:\n%s", got)
+	}
+}
