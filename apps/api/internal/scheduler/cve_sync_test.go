@@ -2980,7 +2980,7 @@ func TestEmitOSVVulnFuncsWriteLogs(t *testing.T) {
 
 	emitOSVVulnFuncsWriteLogs([]osvVulnFuncsWriteLogEvent{
 		{tenantID: tenantID, cveID: "CVE-2025-0404"},
-		{retraction: true, tenantID: tenantID, cveID: "CVE-2025-0408", goID: "GO-2025-0408"},
+		{retraction: true, tenantID: tenantID, cveID: "CVE-2025-0408", goID: "GO-2025-0408", preservedNpm: 3},
 	})
 	got := logs.String()
 	if n := strings.Count(got, osvTombstonePreserveInfoMsg); n != 1 {
@@ -3001,8 +3001,9 @@ func TestEmitOSVVulnFuncsWriteLogs(t *testing.T) {
 			if !strings.Contains(line, "level=WARN") ||
 				!strings.Contains(line, "tenant_id="+tenantID.String()) ||
 				!strings.Contains(line, "cve_id=CVE-2025-0408") ||
-				!strings.Contains(line, "go_id=GO-2025-0408") {
-				t.Errorf("retraction line must be WARN with tenant_id + cve_id + go_id, got: %s", line)
+				!strings.Contains(line, "go_id=GO-2025-0408") ||
+				!strings.Contains(line, "preserved_npm_entries=3") {
+				t.Errorf("retraction line must be WARN with tenant_id + cve_id + go_id + preserved_npm_entries, got: %s", line)
 			}
 		}
 	}
@@ -3452,15 +3453,18 @@ func TestExtractOSVNpmVulnFuncs(t *testing.T) {
 	}
 }
 
-// TestExtractOSVNpmVulnFuncs_ScopedCap pins the npm scoped attribution
-// bound: the per-package fan-out (every npm package receives the token
-// list) is capped at osvVulnFuncsMaxSymbolsPerCVE TOTAL attributions, with
-// one Warn carrying the dropped count — parity with the R9 Go scoped-cap
-// Warn.
-func TestExtractOSVNpmVulnFuncs_ScopedCap(t *testing.T) {
+// TestExtractOSVNpmVulnFuncs_PerPackageCap pins the npm scoped attribution
+// bound as PER PACKAGE (M44 Phase D R2b finding 2): every affected npm
+// package receives the SAME (flat-capped) token list. Under the earlier
+// shared per-CVE total, an advisory whose token count sat near the cap gave
+// the first affected package the whole budget and starved every fork
+// package behind it (2×150 tokens → 150/50). No cap Warn fires: the flat
+// cap above already bounds each package's list, so per-package attribution
+// can no longer drop anything here.
+func TestExtractOSVNpmVulnFuncs_PerPackageCap(t *testing.T) {
 	logs := captureSlog(t)
 	var b strings.Builder
-	for i := 0; i < 90; i++ {
+	for i := 0; i < 150; i++ {
 		fmt.Fprintf(&b, "The function `fn%03d` is vulnerable. ", i)
 	}
 	vuln := &client.OSVVulnerability{
@@ -3469,23 +3473,31 @@ func TestExtractOSVNpmVulnFuncs_ScopedCap(t *testing.T) {
 		Affected: []client.OSVAffected{
 			{Package: client.OSVPackage{Name: "p1", Ecosystem: "npm"}},
 			{Package: client.OSVPackage{Name: "p2", Ecosystem: "npm"}},
-			{Package: client.OSVPackage{Name: "p3", Ecosystem: "npm"}},
 		},
 	}
 	flat, scoped := extractOSVNpmVulnFuncs(vuln)
-	if len(flat) != 90 {
-		t.Fatalf("flat = %d tokens, want 90", len(flat))
+	if len(flat) != 150 {
+		t.Fatalf("flat = %d tokens, want 150", len(flat))
 	}
-	if len(scoped) != 3 {
-		t.Fatalf("scoped = %d entries, want 3 (p3 keeps a truncated entry)", len(scoped))
+	if len(scoped) != 2 {
+		t.Fatalf("scoped = %d entries, want 2 (every affected package attributed)", len(scoped))
 	}
-	if len(scoped[0].VulnFuncs) != 90 || len(scoped[1].VulnFuncs) != 90 || len(scoped[2].VulnFuncs) != 20 {
-		t.Errorf("scoped sizes = (%d, %d, %d), want (90, 90, 20) — total capped at %d",
-			len(scoped[0].VulnFuncs), len(scoped[1].VulnFuncs), len(scoped[2].VulnFuncs), osvVulnFuncsMaxSymbolsPerCVE)
+	if len(scoped[0].VulnFuncs) != 150 || len(scoped[1].VulnFuncs) != 150 {
+		t.Errorf("scoped sizes = (%d, %d), want (150, 150) — the %d cap applies per package, later packages must not starve",
+			len(scoped[0].VulnFuncs), len(scoped[1].VulnFuncs), osvVulnFuncsMaxSymbolsPerCVE)
+	}
+	for i, sc := range scoped {
+		if len(sc.VulnFuncs) != 150 {
+			continue // size mismatch already reported above
+		}
+		if sc.VulnFuncs[0] != "fn000" || sc.VulnFuncs[149] != "fn149" {
+			t.Errorf("scoped[%d] token bounds = (%q, %q), want the identical (fn000, fn149) set each package receives",
+				i, sc.VulnFuncs[0], sc.VulnFuncs[149])
+		}
 	}
 	got := logs.String()
-	if !strings.Contains(got, "scoped symbol cap") || !strings.Contains(got, "GHSA-cap-cap-cap1") || !strings.Contains(got, "dropped=70") {
-		t.Errorf("scoped-cap drop must Warn with osv_id and dropped count, got logs:\n%s", got)
+	if strings.Contains(got, "scoped symbol cap") {
+		t.Errorf("scoped-cap Warn fired under the per-package rule, want none:\n%s", got)
 	}
 }
 
@@ -4065,5 +4077,248 @@ func TestCVESyncJob_FetchOSVVulnFuncs_MassLinkedGHSANoSkeletalWarn(t *testing.T)
 	}
 	if strings.Contains(got, osvMass404WarnMsg) {
 		t.Error("mass-404 Warn fired on a zero-404 tick, want none")
+	}
+}
+
+// TestCVESyncJob_FetchOSVVulnFuncs_NpmOnlyCVEMintsNoGoAuthority pins the M44
+// Phase D R2b finding 1 gate at the fetch edge: a CVE that ONLY npm
+// components listed (eco.needGo == false) must never mint Go clobber
+// authority OR extract Go structured symbols, no matter what body the mirror
+// serves for its CVE path. Pre-gate, a mirror answering /vulns/{cve} with a
+// LINKED GO- body (a) with zero symbols stood up an authoritative empty that
+// wholesale-wiped the tenant's stored npm tokens, and (b) with symbols
+// injected Go selectors no Go component of the CVE exists to match. Both
+// shapes must classify as PRESERVE-side empties (symbols 0, goID "").
+// The GO- alias follow-up budget is equally gated: an npm-only CVE whose
+// home record carries a GO- alias spends main + GHSA- only.
+func TestCVESyncJob_FetchOSVVulnFuncs_NpmOnlyCVEMintsNoGoAuthority(t *testing.T) {
+	zeroOSVFetchDelay(t)
+	var requests int32
+	var goPathFetched int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8301"):
+			// LINKED GO- retraction shape served straight off the CVE path:
+			// aliases vouch for the CVE, symbol list empty.
+			_, _ = w.Write([]byte(`{
+				"id": "GO-2025-8301",
+				"summary": "symbols withdrawn upstream",
+				"aliases": ["CVE-2025-8301"],
+				"affected": [
+					{"package": {"name": "github.com/a/b", "ecosystem": "Go"},
+					 "ecosystem_specific": {"imports": [{"path": "github.com/a/b"}]}}
+				]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8302"):
+			// LINKED GO- body WITH structured symbols.
+			_, _ = w.Write([]byte(`{
+				"id": "GO-2025-8302",
+				"summary": "go vulndb summary",
+				"aliases": ["CVE-2025-8302"],
+				"affected": [
+					{"package": {"name": "github.com/x/y", "ecosystem": "Go"},
+					 "ecosystem_specific": {"imports": [{"path": "github.com/x/y", "symbols": ["Handle"]}]}}
+				]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/CVE-2025-8303"):
+			// CVE home carrying BOTH alias kinds: only the GHSA- one may be
+			// followed for an npm-only CVE.
+			_, _ = w.Write([]byte(`{
+				"id": "CVE-2025-8303",
+				"summary": "cve home prose",
+				"aliases": ["GO-2025-8303", "GHSA-8303-aaaa-bbbb"]
+			}`))
+		case strings.HasSuffix(r.URL.Path, "/vulns/GHSA-8303-aaaa-bbbb"):
+			w.WriteHeader(http.StatusNotFound) // definitive GHSA 404
+		case strings.HasSuffix(r.URL.Path, "/vulns/GO-2025-8303"):
+			atomic.AddInt32(&goPathFetched, 1)
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected OSV request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	j := NewCVESyncJob(nil, nil, "", 24*time.Hour, &fakeAdvisoryExcerptUpserter{}, "", false)
+	j.WithOSVBaseURL(server.URL)
+
+	ids := []string{"CVE-2025-8301", "CVE-2025-8302", "CVE-2025-8303"}
+	ecos := make(map[string]osvCVEEcosystems, len(ids))
+	for _, id := range ids {
+		ecos[id] = osvCVEEcosystems{needNpm: true}
+	}
+	out, _ := j.fetchOSVVulnFuncs(context.Background(), ids, ecos)
+
+	if got := atomic.LoadInt32(&goPathFetched); got != 0 {
+		t.Errorf("GO- alias fetched %d times for an npm-only CVE, want 0 (follow-up budget is needGo-gated)", got)
+	}
+	if got := atomic.LoadInt32(&requests); got != 4 {
+		t.Errorf("OSV requests = %d, want 4 (3 mains + the 8303 GHSA- follow-up)", got)
+	}
+	for _, id := range ids {
+		o, ok := out[id]
+		if !ok {
+			t.Errorf("%s missing from outcomes, want a preserve-side tombstone", id)
+			continue
+		}
+		if len(o.symbols) != 0 || len(o.scoped) != 0 {
+			t.Errorf("%s symbols = (%v, %+v), want empty — npm-only CVEs must not extract Go structured symbols", id, o.symbols, o.scoped)
+		}
+		if o.goID != "" || o.goSymbols || o.goVouched() {
+			t.Errorf("%s (goID, goSymbols) = (%q, %v), want (\"\", false) — npm-only CVEs must never mint Go clobber authority", id, o.goID, o.goSymbols)
+		}
+	}
+}
+
+// TestCVESyncJob_WriteOSVVulnFuncs_GoRetractionPreservesNpmScopedEntries pins
+// the M44 Phase D R2b ecosystem-scoped retraction rule at the write edge: a
+// GO- authoritative empty clears the GO-side data of a positive row but must
+// NOT destroy the npm prose entries W2 stored on the same (tenant, cve) row —
+// a Go vulndb record's empty symbol list says nothing about npm tokens.
+//   - mixed row → Go-shaped scoped entries cleared, npm-shaped entries
+//     (bare and @scope/ npm names) kept, flat rebuilt as the union of the
+//     kept entries, AffectedPaths etc. preserved, retraction Warn carries
+//     preserved_npm_entries=2;
+//   - Go-only scoped row (module paths + the stdlib synthetic) → wholesale
+//     wipe exactly as M43 defined it, preserved_npm_entries=0.
+func TestCVESyncJob_WriteOSVVulnFuncs_GoRetractionPreservesNpmScopedEntries(t *testing.T) {
+	logs := captureSlog(t)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	tenantID := uuid.New()
+	stale := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	store := &fakeAdvisoryExcerptStore{existing: map[string]*repository.AdvisoryExcerpt{
+		excerptStoreKey(tenantID, "CVE-2025-9101", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9101", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["a.B","defaultsDeep","run"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"github.com/kept/mod","vuln_funcs":["a.B"]},
+				{"module":"lodash","vuln_funcs":["defaultsDeep"]},
+				{"module":"@scope/pkg","vuln_funcs":["run"]}
+			]`),
+			AffectedPaths: json.RawMessage(`["src/x.go"]`),
+			RawExcerpt:    "old mixed excerpt", FetchedAt: &stale,
+		},
+		excerptStoreKey(tenantID, "CVE-2025-9102", osvVulnFuncsSource): {
+			TenantID: tenantID, CVEID: "CVE-2025-9102", Source: osvVulnFuncsSource,
+			VulnFuncs: json.RawMessage(`["gone.Sym","template.Parse"]`),
+			VulnFuncsScoped: json.RawMessage(`[
+				{"module":"github.com/gone/mod","vuln_funcs":["gone.Sym"]},
+				{"module":"stdlib","vuln_funcs":["template.Parse"]}
+			]`),
+			RawExcerpt: "gone excerpt", FetchedAt: &stale,
+		},
+	}}
+	j := NewCVESyncJob(db, nil, "", 24*time.Hour, store, "", false)
+
+	mock.ExpectBegin()
+	expectSetLocal(mock, tenantID)
+	mock.ExpectCommit()
+
+	outcomes := map[string]osvVulnFuncsOutcome{
+		"CVE-2025-9101": {goID: "GO-2025-9101", excerpt: "withdrawal note"},
+		"CVE-2025-9102": {goID: "GO-2025-9102", excerpt: "gone note"},
+	}
+	rows, tenants := j.writeOSVVulnFuncs(context.Background(),
+		[]osvTenantCandidates{{tenantID: tenantID, cveIDs: []string{"CVE-2025-9101", "CVE-2025-9102"}}},
+		outcomes, false)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+	if rows != 2 || tenants != 1 {
+		t.Fatalf("(rows, tenants) = (%d, %d), want (2, 1)", rows, tenants)
+	}
+	byCVE := map[string]repository.AdvisoryExcerpt{}
+	for _, c := range store.calls {
+		byCVE[c.CVEID] = c
+	}
+
+	mixed := byCVE["CVE-2025-9101"]
+	var funcs []string
+	if err := json.Unmarshal(mixed.VulnFuncs, &funcs); err != nil ||
+		len(funcs) != 2 || funcs[0] != "defaultsDeep" || funcs[1] != "run" {
+		t.Errorf("mixed VulnFuncs = %s (err %v), want [\"defaultsDeep\",\"run\"] (Go cleared, flat rebuilt from the kept npm union)", mixed.VulnFuncs, err)
+	}
+	var scoped []osvScopedVulnFuncs
+	if err := json.Unmarshal(mixed.VulnFuncsScoped, &scoped); err != nil || len(scoped) != 2 ||
+		scoped[0].Module != "lodash" || len(scoped[0].VulnFuncs) != 1 || scoped[0].VulnFuncs[0] != "defaultsDeep" ||
+		scoped[1].Module != "@scope/pkg" || len(scoped[1].VulnFuncs) != 1 || scoped[1].VulnFuncs[0] != "run" {
+		t.Errorf("mixed VulnFuncsScoped = %s (err %v), want ONLY the npm entries kept in order", mixed.VulnFuncsScoped, err)
+	}
+	if string(mixed.AffectedPaths) != `["src/x.go"]` {
+		t.Errorf("mixed AffectedPaths = %s, want preserved (not ecosystem-attributed — retraction must not touch it)", mixed.AffectedPaths)
+	}
+	if mixed.RawExcerpt != "withdrawal note" {
+		t.Errorf("mixed RawExcerpt = %q, want the retraction record's excerpt", mixed.RawExcerpt)
+	}
+	if mixed.FetchedAt == nil || !mixed.FetchedAt.After(stale.Add(time.Hour)) {
+		t.Errorf("mixed FetchedAt = %v, want refreshed", mixed.FetchedAt)
+	}
+
+	goOnly := byCVE["CVE-2025-9102"]
+	if len(goOnly.VulnFuncs) != 0 || len(goOnly.VulnFuncsScoped) != 0 {
+		t.Errorf("go-only row = (%s, %s), want both empty (the M43 wholesale retraction, unchanged)", goOnly.VulnFuncs, goOnly.VulnFuncsScoped)
+	}
+	if goOnly.RawExcerpt != "gone note" {
+		t.Errorf("go-only RawExcerpt = %q, want the retraction record's excerpt", goOnly.RawExcerpt)
+	}
+
+	got := logs.String()
+	if n := strings.Count(got, osvRetractionOverwriteWarnMsg); n != 2 {
+		t.Errorf("retraction Warn logged %d times, want exactly 2 (logs: %s)", n, got)
+	}
+	if !strings.Contains(got, "preserved_npm_entries=2") {
+		t.Errorf("mixed-row retraction Warn must carry preserved_npm_entries=2, got logs:\n%s", got)
+	}
+	if !strings.Contains(got, "preserved_npm_entries=0") {
+		t.Errorf("go-only retraction Warn must carry preserved_npm_entries=0, got logs:\n%s", got)
+	}
+	if strings.Contains(got, osvTombstonePreserveInfoMsg) {
+		t.Errorf("preserve Info fired on retraction writes, want none (logs: %s)", got)
+	}
+}
+
+// TestOSVScopedModuleLooksGo pins the M44 Phase D R2b shape rule that
+// decides which stored scoped entries a GO- retraction clears. The two
+// writers draw from (nearly) disjoint namespaces — Go vulndb module paths
+// vs npm package names — and the ambiguous residue must land preserve-side
+// (classify npm): weakening a retraction is recoverable, wiping npm tokens
+// is not (prose extraction carries no restore authority).
+func TestOSVScopedModuleLooksGo(t *testing.T) {
+	cases := []struct {
+		module string
+		wantGo bool
+	}{
+		// Go vulndb synthetics.
+		{"stdlib", true},
+		{"toolchain", true},
+		{" stdlib ", true}, // stored verbatim-trimmed; classification trims too
+		// Go module paths: '/' without the npm '@' scope prefix.
+		{"github.com/x/y", true},
+		{"golang.org/x/crypto", true},
+		{"gopkg.in/yaml.v2", true},
+		{"corp/internal/vuln", true}, // dot-less first segment still Go: npm names cannot contain '/'
+		// npm package names: preserved.
+		{"lodash", false},
+		{"socket.io", false},           // dotted bare name is npm, not a Go host
+		{"lodash.defaultsdeep", false}, // lodash fork family
+		{"@scope/pkg", false},          // the ONLY '/'-bearing npm shape, '@'-prefixed
+		{"@babel/traverse", false},
+		// Ambiguous residue → preserve-side by design.
+		{"example.com", false}, // hypothetical single-segment Go module: Go vulndb does not publish these
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := osvScopedModuleLooksGo(c.module); got != c.wantGo {
+			t.Errorf("osvScopedModuleLooksGo(%q) = %v, want %v", c.module, got, c.wantGo)
+		}
 	}
 }
