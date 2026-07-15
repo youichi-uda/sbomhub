@@ -44,12 +44,27 @@ func (r *IssueTrackerRepository) CreateConnection(ctx context.Context, conn *mod
 	return err
 }
 
-// GetConnection gets a connection by ID
+// GetConnection gets a connection by ID.
+//
+// auth_email, default_project_key, and default_issue_type are the three
+// nullable string columns of the 015 schema (a GitHub PAT connection has
+// no auth_email at all) and the model fields are plain strings, so the
+// SELECTs here and in ListConnections / ListConnectionsByType COALESCE
+// them to ” — same pattern as GetTicket's external_project_key (F366).
+// The application itself always writes ” for absent values
+// (CreateConnection / UpdateConnection bind the plain string fields
+// directly), but rows seeded by operators / support tooling / direct SQL
+// carry NULL, which used to abort the scan with "converting NULL to
+// string is unsupported" and take down ticket_sync for the whole tenant.
+// last_sync_at stays a bare column: it scans into *time.Time, where NULL
+// is representable and meaningful.
 func (r *IssueTrackerRepository) GetConnection(ctx context.Context, id uuid.UUID) (*model.IssueTrackerConnection, error) {
 	query := `
-		SELECT id, tenant_id, tracker_type, name, base_url, auth_type, auth_email,
-			auth_token_encrypted, default_project_key, default_issue_type, is_active,
-			last_sync_at, created_at, updated_at
+		SELECT id, tenant_id, tracker_type, name, base_url, auth_type,
+			COALESCE(auth_email, ''),
+			auth_token_encrypted,
+			COALESCE(default_project_key, ''), COALESCE(default_issue_type, ''),
+			is_active, last_sync_at, created_at, updated_at
 		FROM issue_tracker_connections
 		WHERE id = $1
 	`
@@ -74,9 +89,11 @@ func (r *IssueTrackerRepository) GetConnection(ctx context.Context, id uuid.UUID
 // ListConnections lists connections for a tenant
 func (r *IssueTrackerRepository) ListConnections(ctx context.Context, tenantID uuid.UUID) ([]model.IssueTrackerConnection, error) {
 	query := `
-		SELECT id, tenant_id, tracker_type, name, base_url, auth_type, auth_email,
-			auth_token_encrypted, default_project_key, default_issue_type, is_active,
-			last_sync_at, created_at, updated_at
+		SELECT id, tenant_id, tracker_type, name, base_url, auth_type,
+			COALESCE(auth_email, ''),
+			auth_token_encrypted,
+			COALESCE(default_project_key, ''), COALESCE(default_issue_type, ''),
+			is_active, last_sync_at, created_at, updated_at
 		FROM issue_tracker_connections
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -108,9 +125,11 @@ func (r *IssueTrackerRepository) ListConnections(ctx context.Context, tenantID u
 // ListConnectionsByType lists connections of a specific type for a tenant
 func (r *IssueTrackerRepository) ListConnectionsByType(ctx context.Context, tenantID uuid.UUID, trackerType model.TrackerType) ([]model.IssueTrackerConnection, error) {
 	query := `
-		SELECT id, tenant_id, tracker_type, name, base_url, auth_type, auth_email,
-			auth_token_encrypted, default_project_key, default_issue_type, is_active,
-			last_sync_at, created_at, updated_at
+		SELECT id, tenant_id, tracker_type, name, base_url, auth_type,
+			COALESCE(auth_email, ''),
+			auth_token_encrypted,
+			COALESCE(default_project_key, ''), COALESCE(default_issue_type, ''),
+			is_active, last_sync_at, created_at, updated_at
 		FROM issue_tracker_connections
 		WHERE tenant_id = $1 AND tracker_type = $2
 		ORDER BY created_at DESC
@@ -199,12 +218,25 @@ func (r *IssueTrackerRepository) CreateTicket(ctx context.Context, ticket *model
 // fall back to the URL-derived repository" sentinel (F366). GetTicket is the
 // only read that needs the column: SyncTicket re-fetches by ID through it,
 // and no API response exposes per-ticket rows any other way.
+//
+// external_ticket_key, external_status, priority, assignee, and summary are
+// the other five nullable columns of the 015 schema, all scanned into plain
+// string model fields, so every read of vulnerability_tickets (here,
+// GetTicketByVulnerability, ListTicketsByVulnerability, ListTickets,
+// GetTicketsToSync) COALESCEs them to ” as well. The application always
+// writes ” for absent values (CreateTicket / UpdateTicket bind the plain
+// string fields directly), but a row seeded by an operator / import SQL with
+// e.g. assignee = NULL would otherwise abort the scan with "converting NULL
+// to string is unsupported" — taking down GetTicketsToSync (the whole
+// tenant's ticket_sync) and the ListTickets API for that tenant, the exact
+// failure class fixed on issue_tracker_connections' GetConnection.
 func (r *IssueTrackerRepository) GetTicket(ctx context.Context, id uuid.UUID) (*model.VulnerabilityTicket, error) {
 	query := `
 		SELECT id, tenant_id, vulnerability_id, project_id, connection_id,
-			external_ticket_id, external_ticket_key, external_ticket_url,
+			external_ticket_id, COALESCE(external_ticket_key, ''), external_ticket_url,
 			COALESCE(external_project_key, ''),
-			local_status, external_status, priority, assignee, summary,
+			local_status, COALESCE(external_status, ''), COALESCE(priority, ''),
+			COALESCE(assignee, ''), COALESCE(summary, ''),
 			last_synced_at, created_at, updated_at
 		FROM vulnerability_tickets
 		WHERE id = $1
@@ -232,8 +264,9 @@ func (r *IssueTrackerRepository) GetTicket(ctx context.Context, id uuid.UUID) (*
 func (r *IssueTrackerRepository) GetTicketByVulnerability(ctx context.Context, vulnID, connectionID uuid.UUID) (*model.VulnerabilityTicket, error) {
 	query := `
 		SELECT id, tenant_id, vulnerability_id, project_id, connection_id,
-			external_ticket_id, external_ticket_key, external_ticket_url,
-			local_status, external_status, priority, assignee, summary,
+			external_ticket_id, COALESCE(external_ticket_key, ''), external_ticket_url,
+			local_status, COALESCE(external_status, ''), COALESCE(priority, ''),
+			COALESCE(assignee, ''), COALESCE(summary, ''),
 			last_synced_at, created_at, updated_at
 		FROM vulnerability_tickets
 		WHERE vulnerability_id = $1 AND connection_id = $2
@@ -261,8 +294,9 @@ func (r *IssueTrackerRepository) GetTicketByVulnerability(ctx context.Context, v
 func (r *IssueTrackerRepository) ListTicketsByVulnerability(ctx context.Context, vulnID uuid.UUID) ([]model.VulnerabilityTicketWithDetails, error) {
 	query := `
 		SELECT t.id, t.tenant_id, t.vulnerability_id, t.project_id, t.connection_id,
-			t.external_ticket_id, t.external_ticket_key, t.external_ticket_url,
-			t.local_status, t.external_status, t.priority, t.assignee, t.summary,
+			t.external_ticket_id, COALESCE(t.external_ticket_key, ''), t.external_ticket_url,
+			t.local_status, COALESCE(t.external_status, ''), COALESCE(t.priority, ''),
+			COALESCE(t.assignee, ''), COALESCE(t.summary, ''),
 			t.last_synced_at, t.created_at, t.updated_at,
 			v.cve_id, v.severity, c.tracker_type, c.name, p.name
 		FROM vulnerability_tickets t
@@ -318,8 +352,9 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 	// List query
 	query := `
 		SELECT t.id, t.tenant_id, t.vulnerability_id, t.project_id, t.connection_id,
-			t.external_ticket_id, t.external_ticket_key, t.external_ticket_url,
-			t.local_status, t.external_status, t.priority, t.assignee, t.summary,
+			t.external_ticket_id, COALESCE(t.external_ticket_key, ''), t.external_ticket_url,
+			t.local_status, COALESCE(t.external_status, ''), COALESCE(t.priority, ''),
+			COALESCE(t.assignee, ''), COALESCE(t.summary, ''),
 			t.last_synced_at, t.created_at, t.updated_at,
 			v.cve_id, v.severity, c.tracker_type, c.name, p.name
 		FROM vulnerability_tickets t
@@ -384,8 +419,9 @@ func (r *IssueTrackerRepository) GetTicketsToSync(ctx context.Context, olderThan
 	cutoff := time.Now().Add(-olderThan)
 	query := `
 		SELECT t.id, t.tenant_id, t.vulnerability_id, t.project_id, t.connection_id,
-			t.external_ticket_id, t.external_ticket_key, t.external_ticket_url,
-			t.local_status, t.external_status, t.priority, t.assignee, t.summary,
+			t.external_ticket_id, COALESCE(t.external_ticket_key, ''), t.external_ticket_url,
+			t.local_status, COALESCE(t.external_status, ''), COALESCE(t.priority, ''),
+			COALESCE(t.assignee, ''), COALESCE(t.summary, ''),
 			t.last_synced_at, t.created_at, t.updated_at
 		FROM vulnerability_tickets t
 		JOIN issue_tracker_connections c ON t.connection_id = c.id
