@@ -89,7 +89,7 @@ func TestAnalyze_UnknownOnUnsupportedEcosystem(t *testing.T) {
 	assert.Equal(t, StatusUnknown, res.Status)
 	require.Len(t, res.Evidence, 1)
 	assert.Contains(t, res.Evidence[0].Description, "npm")
-	assert.Contains(t, res.Evidence[0].Description, "M2")
+	assert.Contains(t, res.Evidence[0].Description, "npm analyzer")
 }
 
 func TestAnalyze_UnknownOnMissingGoMod(t *testing.T) {

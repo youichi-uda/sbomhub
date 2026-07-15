@@ -169,13 +169,13 @@ type ReachabilityInput struct {
 	VulnerableSymbols []string
 }
 
-// AffectedVersionRange is reserved for future use (M2): semver-aware
-// matching against the resolved module version. M1 treats any presence
-// in the module graph as a match, leaving version-range filtering to the
-// advisory parser / LLM stage.
+// AffectedVersionRange is reserved for future use: semver-aware matching
+// against the resolved module version. The analyzers currently treat any
+// presence in the module graph as a match, leaving version-range filtering
+// to the advisory parser / LLM stage (not yet implemented).
 //
 // ※要確認: kept here so the eventual ParsedAdvisory adapter has a clear
-// projection target; remove if M2 decides to do range filtering inside
+// projection target; remove if version-range filtering ends up living in
 // the advisory parser instead.
 type AffectedVersionRange struct {
 	Introduced string `json:"introduced,omitempty"`

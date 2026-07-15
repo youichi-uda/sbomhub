@@ -15,8 +15,10 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// TODO M2: npm reachability — see issue #25 and PRODUCT_REBOOT_PLAN.md §7.1.
-// User confirmed on 2026-06-24 that M1 ships Go only.
+// GoAnalyzer is the Go-only analyzer. npm reachability shipped separately
+// as npm_analyzer.go (NpmAnalyzer, M44 Wave 1, F469); ecosystem dispatch is
+// the caller's responsibility (the triage runner picks the analyzer per
+// advisory ecosystem). See PRODUCT_REBOOT_PLAN.md §7.1 and issue #25.
 
 // GoAnalyzer implements the two-stage heuristic reachability check for
 // Go projects described in the package doc.
@@ -74,7 +76,7 @@ func (a *GoAnalyzer) Analyze(ctx context.Context, projectPath string, input Reac
 	}
 	if input.Ecosystem != "" && input.Ecosystem != "go" {
 		return unknownResult(result,
-			fmt.Sprintf("unsupported ecosystem %q (M1 supports go only; npm deferred to M2)",
+			fmt.Sprintf("unsupported ecosystem %q (GoAnalyzer handles go only; use the npm analyzer for npm)",
 				input.Ecosystem)), nil
 	}
 	if len(input.VulnerableModules) == 0 {

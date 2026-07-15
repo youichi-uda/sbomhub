@@ -1,0 +1,33 @@
+# vendored.sha256 — divergence pin for the VENDORED reachability analyzer
+# sources (M45 Wave 3, C4a). This file is IDENTICAL in both repos:
+#   backend: sbomhub/apps/api/internal/service/reachability/
+#   CLI:     sbomhub-cli/internal/reachability/
+#
+# Each data line below is "<sha256>  <filename>", where <sha256> is the
+# SHA-256 of the file's NORMALISED BODY. Normalisation == stripVendorHeader()
+# in vendor_sync_test.go: the `package <name>` clause line, then everything
+# from the first non-blank / non-`//`-comment line after it to EOF. The
+# header comment blocks (which intentionally differ between the two copies)
+# are excluded, so this pin is byte-identical in both repos.
+#
+# WHAT THIS PIN CATCHES / DOES NOT CATCH (read before trusting it):
+#   * CATCHES (single-repo, no sibling checkout needed): editing a vendored
+#     file's body WITHOUT updating this pin. TestVendoredAnalyzerMatchesPin
+#     recomputes the hashes and fails on mismatch — tamper-evident even in
+#     the CLI's solo CI where the cross-repo byte comparison is skipped.
+#   * DOES NOT CATCH: the two repos silently diverging when BOTH sides update
+#     file+pin together but to DIFFERENT content. Each repo's self-check would
+#     still pass. True cross-repo equivalence is only proven by
+#     TestVendoredAnalyzer{InSyncWithBackend,InSyncWithCLI}, which byte-compare
+#     the two checked-out copies and require the sbom-all workspace layout
+#     (they skip in single-repo CI).
+#   In short: SHA pin = per-repo tamper-evidence; workspace test = real
+#   cross-repo equivalence. Neither alone is complete; together they are
+#   defence in depth.
+#
+# To update after an intentional analyzer change: apply the SAME diff to BOTH
+# copies, then regenerate this file in BOTH repos (the test failure message
+# prints the expected vs actual hashes to paste back in).
+9ac0b6d03cc3176de7f3b2e8a7e178f127c2f52171be708b51d8b368a33b2b0e  types.go
+2e15a80375250356c56f8003c7da72a20ff4d9b040aeec8f6f891c80f0acdd26  go_analyzer.go
+edf036df2f10982de82d2c136a2d1e82e51f205c40e8ec2dbd3f7accecedef26  npm_analyzer.go
