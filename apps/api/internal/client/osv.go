@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,16 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrOSVNotFound is the sentinel returned by GetVulnerability when OSV answers
+// a lookup with HTTP 404 — a DEFINITIVE negative (M45 Wave 1 C1). Callers
+// distinguish it from a transient fetch failure with errors.Is: the scheduler
+// translates it into a definitive-404 outcome (tombstone) and the remediation
+// service routes it to its not-found path. It is intentionally NOT returned by
+// the offline short-circuit, which stays (nil, nil) so the M40 Wave B
+// "degrade with no error" contract (IsOffline guard + TestOSVClient_Offline_NoHTTP)
+// is preserved.
+var ErrOSVNotFound = errors.New("osv: vulnerability not found")
 
 // DefaultOSVBaseURL is the exported default OSV API base endpoint (M40 Wave B).
 // Both this client and service/cli.go's batch query derive their request URLs
@@ -164,7 +175,11 @@ func (c *OSVClient) GetVulnerability(ctx context.Context, vulnID string) (*OSVVu
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil
+		// M45 Wave 1 C1: a 404 is a DEFINITIVE negative, surfaced as a typed
+		// sentinel so callers can tell it apart from a transient fetch failure
+		// (network/5xx/timeout) with errors.Is. The offline short-circuit above
+		// stays (nil, nil) — only the wire 404 carries ErrOSVNotFound.
+		return nil, ErrOSVNotFound
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -236,6 +251,49 @@ type RemediationInfo struct {
 	FixedVersion     string   `json:"fixed_version"`
 	AffectedVersions []string `json:"affected_versions"`
 	Workarounds      []string `json:"workarounds"`
+}
+
+// aliasesContain reports whether aliases names id — whitespace-trimmed exact
+// match; OSV alias lists carry canonical ids (M43 Phase D R7, moved to the
+// client package in M45 Wave 1 C2).
+func aliasesContain(aliases []string, id string) bool {
+	for _, a := range aliases {
+		if strings.TrimSpace(a) == id {
+			return true
+		}
+	}
+	return false
+}
+
+// RecordLinked reports whether a retrieved OSV record BODY vouches for the
+// lookup that produced it (M43 Phase D R7, round 6 High finding; moved from the
+// scheduler to the client package in M45 Wave 1 C2 so every OSV consumer — the
+// vuln_funcs sync and the remediation service — shares one linkage authority):
+// either the body's own ID field IS the id the lookup requested (requestedID —
+// the CVE id on a direct lookup, the GO- alias on a follow-up; Go vulndb
+// records often omit their own alias list, so self-identification must
+// suffice), or its aliases name the CVE under determination (cveID — how a
+// GHSA/GO- alias home vouches for a CVE-keyed request). Every real OSV response
+// satisfies one arm; a body failing both is crafted or mis-routed mirror output
+// and must be rejected by the caller — its symbols, excerpt, aliases, and
+// clobber authority all belong to some OTHER vulnerability.
+//
+// Known limitations (M43 Phase D R7, documented deliberately):
+//   - Linkage is SELF-ATTESTED: a hostile mirror that writes the requested
+//     CVE into a forged record's aliases passes this check and can still
+//     inject symbols or exercise retraction authority. Linkage closes the
+//     canned-response / mis-routing classes only; the configured OSV endpoint
+//     (SBOMHUB_OSV_URL, operator-controlled TLS origin) remains inside the
+//     trust boundary, same as the NVD/GHSA feeds.
+//   - Matching is trim-exact and case-sensitive: OSV ids are canonical
+//     uppercase, so a mirror emitting non-canonical ids sees its records
+//     rejected as unlinked — the fail-safe direction (reject + caller Warn; no
+//     silent acceptance of foreign data).
+func RecordLinked(vuln *OSVVulnerability, requestedID, cveID string) bool {
+	if vuln == nil {
+		return false
+	}
+	return strings.TrimSpace(vuln.ID) == requestedID || aliasesContain(vuln.Aliases, cveID)
 }
 
 func matchesPackage(pkg OSVPackage, name, ecosystem string) bool {

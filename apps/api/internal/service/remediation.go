@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -80,7 +81,11 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 
 	// Fetch from OSV API
 	osvVuln, err := s.osvClient.GetVulnerability(ctx, vuln.CVEID)
-	if err != nil {
+	// M45 Wave 1 C1: a definitive 404 (ErrOSVNotFound) is NOT a fetch failure —
+	// it means OSV has no record, so fall through to the nil-flow below (manual
+	// remediation + known workarounds), the same output the DB fallback would
+	// produce. Only a genuine transient/HTTP failure takes the error branch.
+	if err != nil && !errors.Is(err, client.ErrOSVNotFound) {
 		// If OSV fails, return basic info from our database
 		return &RemediationResponse{
 			CVEID:    vuln.CVEID,
@@ -92,6 +97,18 @@ func (s *RemediationService) GetRemediation(ctx context.Context, vulnID uuid.UUI
 			},
 			Workarounds: getKnownWorkarounds(vuln.CVEID),
 		}, nil
+	}
+
+	// M45 Wave 1 C2: a retrieved body that does not vouch for the requested CVE
+	// (mis-routed / canned mirror answering every /vulns/{id} path with one
+	// record) must not be surfaced as "upgrade" guidance for THIS CVE. Downgrade
+	// it to not-found — drop the body so the manual fallback + workarounds render
+	// — with one operator Warn. ErrOSVNotFound already left osvVuln nil, so the
+	// nil guard skips the check on the definitive-404 path.
+	if osvVuln != nil && !client.RecordLinked(osvVuln, vuln.CVEID, vuln.CVEID) {
+		slog.Warn("remediation: OSV record does not vouch for the requested CVE; ignoring as unlinked (M45 Wave 1 C2)",
+			"cve_id", vuln.CVEID, "got_id", osvVuln.ID)
+		osvVuln = nil
 	}
 
 	response := &RemediationResponse{
@@ -156,10 +173,26 @@ func (s *RemediationService) GetRemediationByCVE(ctx context.Context, cveID stri
 
 	// Fetch from OSV API
 	osvVuln, err := s.osvClient.GetVulnerability(ctx, cveID)
+	// M45 Wave 1 C1: map the typed 404 to the "not found in OSV" path FIRST.
+	// Before typing, a 404 arrived as (nil, nil) and reached the osvVuln == nil
+	// branch below; now it arrives as ErrOSVNotFound and would otherwise be
+	// dressed up as a misleading "failed to fetch" (500-class) error. Route it
+	// explicitly to the existing not-found message the handler maps to 404.
+	if errors.Is(err, client.ErrOSVNotFound) {
+		return nil, fmt.Errorf("vulnerability not found in OSV: %s", cveID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch from OSV: %w", err)
 	}
 	if osvVuln == nil {
+		return nil, fmt.Errorf("vulnerability not found in OSV: %s", cveID)
+	}
+	// M45 Wave 1 C2: an unlinked body (mis-routed / canned mirror record that
+	// does not vouch for the requested CVE) is downgraded to not-found rather
+	// than surfaced as "upgrade" guidance for the wrong advisory.
+	if !client.RecordLinked(osvVuln, cveID, cveID) {
+		slog.Warn("remediation: OSV record does not vouch for the requested CVE; treating as not found (M45 Wave 1 C2)",
+			"cve_id", cveID, "got_id", osvVuln.ID)
 		return nil, fmt.Errorf("vulnerability not found in OSV: %s", cveID)
 	}
 

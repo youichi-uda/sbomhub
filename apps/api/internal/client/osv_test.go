@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,6 +96,103 @@ func TestOSVClient_GetVulnerability_OversizedBodyError(t *testing.T) {
 	}
 	if vuln != nil {
 		t.Errorf("expected nil vuln on oversized body, got id=%q", vuln.ID)
+	}
+}
+
+// TestOSVClient_GetVulnerability_404ReturnsErrNotFound pins the M45 Wave 1 C1
+// typed-404 contract: a wire 404 surfaces as (nil, ErrOSVNotFound), matchable
+// with errors.Is, so callers can distinguish a definitive negative from a
+// transient fetch failure.
+func TestOSVClient_GetVulnerability_404ReturnsErrNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	c := NewOSVClient().WithBaseURL(server.URL)
+	vuln, err := c.GetVulnerability(context.Background(), "CVE-2025-0404")
+	if !errors.Is(err, ErrOSVNotFound) {
+		t.Fatalf("GetVulnerability on 404 err = %v, want errors.Is(ErrOSVNotFound)", err)
+	}
+	if vuln != nil {
+		t.Errorf("GetVulnerability on 404 vuln = %+v, want nil", vuln)
+	}
+}
+
+// TestOSVClient_GetVulnerability_5xxIsNotErrNotFound guards the sentinel's
+// discrimination: a transient 5xx must NOT match ErrOSVNotFound, so the
+// scheduler keeps treating it as a retryable failure (no tombstone) rather
+// than a definitive negative.
+func TestOSVClient_GetVulnerability_5xxIsNotErrNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := NewOSVClient().WithBaseURL(server.URL)
+	_, err := c.GetVulnerability(context.Background(), "CVE-2025-0500")
+	if err == nil {
+		t.Fatal("GetVulnerability on 500 err = nil, want a non-nil error")
+	}
+	if errors.Is(err, ErrOSVNotFound) {
+		t.Errorf("GetVulnerability on 500 matched ErrOSVNotFound, want a distinct transient error (err=%v)", err)
+	}
+}
+
+// TestRecordLinked pins the M45 Wave 1 C2 linkage authority moved from the
+// scheduler to the client package: a body vouches for a lookup when its own ID
+// is the requested id OR its aliases name the CVE; an unrelated body is
+// unlinked.
+func TestRecordLinked(t *testing.T) {
+	tests := []struct {
+		name        string
+		vuln        *OSVVulnerability
+		requestedID string
+		cveID       string
+		want        bool
+	}{
+		{
+			name:        "self-identifying id matches requestedID",
+			vuln:        &OSVVulnerability{ID: "CVE-2025-1", Aliases: nil},
+			requestedID: "CVE-2025-1",
+			cveID:       "CVE-2025-1",
+			want:        true,
+		},
+		{
+			name:        "aliases name the CVE (alias home)",
+			vuln:        &OSVVulnerability{ID: "GHSA-xxxx-yyyy-zzzz", Aliases: []string{"CVE-2025-1"}},
+			requestedID: "GHSA-xxxx-yyyy-zzzz",
+			cveID:       "CVE-2025-1",
+			want:        true,
+		},
+		{
+			name:        "alias match wins even when id differs from requestedID",
+			vuln:        &OSVVulnerability{ID: "GO-2025-0001", Aliases: []string{" CVE-2025-1 "}},
+			requestedID: "GO-2025-9999",
+			cveID:       "CVE-2025-1",
+			want:        true,
+		},
+		{
+			name:        "unrelated body: id mismatch and no alias",
+			vuln:        &OSVVulnerability{ID: "GO-2025-0002", Aliases: []string{"CVE-2099-9"}},
+			requestedID: "CVE-2025-1",
+			cveID:       "CVE-2025-1",
+			want:        false,
+		},
+		{
+			name:        "nil body is unlinked",
+			vuln:        nil,
+			requestedID: "CVE-2025-1",
+			cveID:       "CVE-2025-1",
+			want:        false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RecordLinked(tt.vuln, tt.requestedID, tt.cveID); got != tt.want {
+				t.Errorf("RecordLinked(%+v, %q, %q) = %v, want %v", tt.vuln, tt.requestedID, tt.cveID, got, tt.want)
+			}
+		})
 	}
 }
 

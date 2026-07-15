@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1343,7 +1344,7 @@ func (j *CVESyncJob) updateLastSyncTime(ctx context.Context, t time.Time) error 
 // STRUCTURAL guards replace the valve's threat coverage:
 //   - Record LINKAGE (M43 Phase D R7, round 6 High finding): a retrieved
 //     body is accepted only when it vouches for the lookup — its own ID is
-//     the requested id, or its aliases name the CVE (osvRecordLinked).
+//     the requested id, or its aliases name the CVE (client.RecordLinked).
 //     Unlinked bodies (e.g. one canned GO- record served for every path)
 //     are rejected wholesale — symbols, excerpt, aliases, and clobber
 //     authority all unused — with one osvUnlinkedRecordWarnMsg Warn, and
@@ -1717,7 +1718,7 @@ type osvVulnFuncsOutcome struct {
 	// the Go vulndb record BODY this determination came from, set exactly
 	// when a retrieved record's own ID field carries the "GO-" prefix (main
 	// lookup or alias follow-up) AND the body passed the R7 linkage rule
-	// (osvRecordLinked — it identifies as the requested id or aliases the
+	// (client.RecordLinked — it identifies as the requested id or aliases the
 	// CVE; round 6 High finding: without linkage, one canned GO- record
 	// served for every path either wiped positive rows via authoritative
 	// emptiness or injected its symbols into every tenant row), "" otherwise.
@@ -2067,7 +2068,7 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 // body must vouch for the lookup that produced it before ANY field is used —
 // its own ID is the requested id (the CVE on the main lookup, the GO- alias
 // on the follow-up), or its aliases name the CVE under determination
-// (osvRecordLinked). An unlinked body is rejected wholesale (symbols /
+// (client.RecordLinked). An unlinked body is rejected wholesale (symbols /
 // excerpt / aliases / clobber authority all unused) with one
 // osvUnlinkedRecordWarnMsg Warn, and the CVE tombstones preserve-side.
 //
@@ -2178,11 +2179,24 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string, eco
 		}
 		fetches++
 		v, err := j.osv.GetVulnerability(ctx, id)
+		if errors.Is(err, client.ErrOSVNotFound) {
+			// Definitive 404 (M45 Wave 1 C1): the client now surfaces a 404 as
+			// a typed sentinel. Translate it back into this closure's external
+			// contract — (nil, true) = a DEFINITIVE negative — so the downstream
+			// tombstone / preserve / authority decision table is unchanged.
+			// notFound feeds the mass-404 anomaly signal exactly as before.
+			notFound++
+			return nil, true
+		}
 		if err != nil {
 			slog.Warn("scheduler: OSV lookup failed, skipping without tombstone (M43 F467)", "id", id, "error", err)
 			return nil, false
 		}
 		if v == nil {
+			// Belt-and-suspenders: no wire 404 reaches here anymore (it is
+			// ErrOSVNotFound above) and offline is guarded at the entry point,
+			// but a (nil, nil) still counts as a definitive negative — the
+			// pre-C1 contract — never a record body.
 			notFound++
 		} else {
 			recordsRetrieved++
@@ -2230,7 +2244,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string, eco
 		// PRESERVE-side empty tombstone (goID == "", so the write path's
 		// clobber guard keeps existing positive rows) — with one operator
 		// Warn per rejected lookup.
-		if !osvRecordLinked(vuln, cveID, cveID) {
+		if !client.RecordLinked(vuln, cveID, cveID) {
 			slog.Warn(osvUnlinkedRecordWarnMsg,
 				"cve_id", cveID, "got_id", vuln.ID, "requested_id", cveID)
 			out[cveID] = osvVulnFuncsOutcome{}
@@ -2301,7 +2315,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string, eco
 				switch {
 				case av == nil:
 					// Alias 404 — see the fall-through comment below.
-				case !osvRecordLinked(av, alias, cveID):
+				case !client.RecordLinked(av, alias, cveID):
 					// M43 Phase D R7 linkage on the follow-up: the body is
 					// neither the record the alias promised (its ID differs
 					// from the requested GO- id) nor an alias home naming
@@ -2365,7 +2379,7 @@ func (j *CVESyncJob) fetchOSVVulnFuncs(ctx context.Context, cveIDs []string, eco
 					// GHSA alias 404 (partial mirror) — definitive; the npm
 					// side stays empty and, if the Go side is empty too, the
 					// outcome below is a preserve-side tombstone.
-				case !osvRecordLinked(av, alias, cveID):
+				case !client.RecordLinked(av, alias, cveID):
 					// R7 linkage on the GHSA follow-up: reject the body
 					// wholesale (tokens, excerpt, affected packages all
 					// unused); the accepted MAIN record's excerpt is kept.
@@ -3853,46 +3867,9 @@ func firstGHSAAlias(aliases []string) string {
 	return ""
 }
 
-// osvAliasesContain reports whether aliases names id — whitespace-trimmed
-// exact match; OSV alias lists carry canonical ids (M43 Phase D R7).
-func osvAliasesContain(aliases []string, id string) bool {
-	for _, a := range aliases {
-		if strings.TrimSpace(a) == id {
-			return true
-		}
-	}
-	return false
-}
-
-// osvRecordLinked reports whether a retrieved OSV record BODY vouches for
-// the lookup that produced it (M43 Phase D R7, round 6 High finding): either
-// the body's own ID field IS the id the lookup requested (requestedID — the
-// CVE id on the main lookup, the GO- alias on the follow-up; Go vulndb
-// records often omit their own alias list, so self-identification must
-// suffice), or its aliases name the CVE under determination (cveID — how a
-// GHSA/GO- alias home vouches for a CVE-keyed request). Every real OSV
-// response satisfies one arm; a body failing both is crafted or mis-routed
-// mirror output and must be rejected wholesale by the caller — its symbols,
-// excerpt, aliases, and clobber authority all belong to some OTHER
-// vulnerability.
-//
-// Known limitations (M43 Phase D R7, documented deliberately):
-//   - Linkage is SELF-ATTESTED: a hostile mirror that writes the requested
-//     CVE into a forged record's aliases passes this check and can still
-//     inject symbols or exercise retraction authority. Linkage closes the
-//     canned-response / mis-routing classes only; the configured OSV
-//     endpoint (SBOMHUB_OSV_URL, operator-controlled TLS origin) remains
-//     inside the trust boundary, same as the NVD/GHSA feeds.
-//   - Matching is trim-exact and case-sensitive: OSV ids are canonical
-//     uppercase, so a mirror emitting non-canonical ids sees its records
-//     rejected as unlinked — the fail-safe direction (preserve-side empty
-//     plus Warn; no data loss).
-func osvRecordLinked(vuln *client.OSVVulnerability, requestedID, cveID string) bool {
-	if vuln == nil {
-		return false
-	}
-	return strings.TrimSpace(vuln.ID) == requestedID || osvAliasesContain(vuln.Aliases, cveID)
-}
+// Record linkage lives in the client package as client.RecordLinked /
+// aliasesContain since M45 Wave 1 C2 (moved so the remediation service shares
+// the same authority). The scheduler's call sites below delegate to it.
 
 // osvVulnFuncsWriteLogEvent is one deferred preserve-Info / retraction-Warn
 // observability line accumulated by writeOSVVulnFuncsChunk (M43 Phase D R7,

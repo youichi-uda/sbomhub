@@ -1,8 +1,151 @@
 package service
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// captureServiceSlog redirects the process-global default slog logger into a
+// buffer for one test (restored via t.Cleanup) so Warn-line contracts can be
+// asserted. Tests using it must not run in parallel.
+func captureServiceSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// osvLinkedRemediationFixture is a well-formed OSV record whose own ID IS the
+// requested CVE (linked) and which carries a fixed version — the positive
+// control for the M45 Wave 1 C2 linkage guard.
+const osvLinkedRemediationFixture = `{
+	"id": "CVE-2025-7777",
+	"summary": "linked test vuln",
+	"severity": [{"type": "CVSS_V3", "score": "7.5"}],
+	"affected": [
+		{
+			"package": {"name": "libfoo", "ecosystem": "npm"},
+			"ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.2.3"}]}],
+			"versions": ["1.0.0", "1.1.0"]
+		}
+	]
+}`
+
+// osvUnlinkedRemediationFixture is a mis-routed / canned record: its ID is an
+// unrelated GO- advisory and its aliases do NOT name the requested CVE, yet it
+// carries a (foreign) fixed version 9.9.9 that must NOT be surfaced as upgrade
+// guidance for the requested CVE (M45 Wave 1 C2).
+const osvUnlinkedRemediationFixture = `{
+	"id": "GO-2025-0001",
+	"summary": "canned unrelated record",
+	"aliases": ["CVE-9999-0000"],
+	"affected": [
+		{
+			"package": {"name": "libfoo", "ecosystem": "npm"},
+			"ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "9.9.9"}]}]
+		}
+	]
+}`
+
+// TestGetRemediationByCVE_404ReturnsNotFound pins the M45 Wave 1 C1 trap fix:
+// a definitive OSV 404 must map to the "not found in OSV" message (which the
+// handler renders as 404), NOT the "failed to fetch" (500-class) message it
+// would have become once the client started returning a typed sentinel.
+func TestGetRemediationByCVE_404ReturnsNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	svc := NewRemediationService(nil, nil, server.URL, false)
+	resp, err := svc.GetRemediationByCVE(context.Background(), "CVE-2025-0404", "libfoo", "1.0.0")
+	if err == nil {
+		t.Fatalf("GetRemediationByCVE on 404 err = nil (resp=%+v), want a not-found error", resp)
+	}
+	if !strings.Contains(err.Error(), "not found in OSV") {
+		t.Errorf("GetRemediationByCVE on 404 err = %q, want it to contain %q (not the failed-to-fetch message)", err.Error(), "not found in OSV")
+	}
+	if strings.Contains(err.Error(), "failed to fetch") {
+		t.Errorf("GetRemediationByCVE on 404 err = %q, must NOT be the transient failed-to-fetch message", err.Error())
+	}
+}
+
+// TestGetRemediationByCVE_TransientErrorSurfacesFetchFailure guards the other
+// side: a 5xx is transient and must surface as "failed to fetch from OSV",
+// distinct from the definitive not-found path.
+func TestGetRemediationByCVE_TransientErrorSurfacesFetchFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	svc := NewRemediationService(nil, nil, server.URL, false)
+	_, err := svc.GetRemediationByCVE(context.Background(), "CVE-2025-0500", "libfoo", "1.0.0")
+	if err == nil {
+		t.Fatal("GetRemediationByCVE on 500 err = nil, want a fetch-failure error")
+	}
+	if !strings.Contains(err.Error(), "failed to fetch") {
+		t.Errorf("GetRemediationByCVE on 500 err = %q, want it to contain %q", err.Error(), "failed to fetch")
+	}
+	if strings.Contains(err.Error(), "not found in OSV") {
+		t.Errorf("GetRemediationByCVE on 500 err = %q, must NOT be the definitive not-found message", err.Error())
+	}
+}
+
+// TestGetRemediationByCVE_UnlinkedBodyDowngradedToNotFound pins the M45 Wave 1
+// C2 linkage降格: a retrieved body that does not vouch for the requested CVE
+// (mis-routed / canned mirror) is treated as not-found — its foreign fixed
+// version is never surfaced as upgrade guidance — and emits one operator Warn.
+func TestGetRemediationByCVE_UnlinkedBodyDowngradedToNotFound(t *testing.T) {
+	logs := captureServiceSlog(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(osvUnlinkedRemediationFixture))
+	}))
+	defer server.Close()
+
+	svc := NewRemediationService(nil, nil, server.URL, false)
+	resp, err := svc.GetRemediationByCVE(context.Background(), "CVE-2025-7777", "libfoo", "1.0.0")
+	if err == nil {
+		t.Fatalf("GetRemediationByCVE on an unlinked body err = nil (resp=%+v), want a not-found error", resp)
+	}
+	if !strings.Contains(err.Error(), "not found in OSV") {
+		t.Errorf("unlinked-body err = %q, want the not-found message", err.Error())
+	}
+	if !strings.Contains(logs.String(), "does not vouch for the requested CVE") {
+		t.Errorf("expected an unlinked-record Warn in logs, got: %s", logs.String())
+	}
+}
+
+// TestGetRemediationByCVE_LinkedBodyUpgrades is the positive control: a linked
+// body (ID == requested CVE) with a fixed version passes the linkage guard and
+// yields an upgrade remediation.
+func TestGetRemediationByCVE_LinkedBodyUpgrades(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(osvLinkedRemediationFixture))
+	}))
+	defer server.Close()
+
+	svc := NewRemediationService(nil, nil, server.URL, false)
+	resp, err := svc.GetRemediationByCVE(context.Background(), "CVE-2025-7777", "libfoo", "1.0.0")
+	if err != nil {
+		t.Fatalf("GetRemediationByCVE on a linked body returned error: %v", err)
+	}
+	if resp.Remediation.Type != "upgrade" {
+		t.Errorf("Remediation.Type = %q, want upgrade", resp.Remediation.Type)
+	}
+	if resp.Remediation.TargetVersion != "1.2.3" {
+		t.Errorf("Remediation.TargetVersion = %q, want 1.2.3", resp.Remediation.TargetVersion)
+	}
+}
 
 func TestDetectEcosystem(t *testing.T) {
 	tests := []struct {
