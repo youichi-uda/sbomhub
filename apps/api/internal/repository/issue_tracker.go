@@ -290,7 +290,17 @@ func (r *IssueTrackerRepository) GetTicketByVulnerability(ctx context.Context, v
 	return &ticket, nil
 }
 
-// ListTicketsByVulnerability lists all tickets for a vulnerability
+// ListTicketsByVulnerability lists all tickets for a vulnerability.
+//
+// v.severity is COALESCEd to ” for the same reason as the ticket's own
+// nullable columns (see GetTicket): vulnerabilities.severity is a
+// nullable VARCHAR(20) (001_init) scanned into the plain string
+// VulnerabilityTicketWithDetails.Severity, so a ticket joined to a
+// severity-less vulnerability would otherwise abort the whole list with
+// "converting NULL to string is unsupported" (a 500 on the tickets API).
+// The other JOIN-source columns scanned here and in ListTickets
+// (v.cve_id, c.tracker_type, c.name, p.name) are all NOT NULL in their
+// DDLs, so they stay bare.
 func (r *IssueTrackerRepository) ListTicketsByVulnerability(ctx context.Context, vulnID uuid.UUID) ([]model.VulnerabilityTicketWithDetails, error) {
 	query := `
 		SELECT t.id, t.tenant_id, t.vulnerability_id, t.project_id, t.connection_id,
@@ -298,7 +308,7 @@ func (r *IssueTrackerRepository) ListTicketsByVulnerability(ctx context.Context,
 			t.local_status, COALESCE(t.external_status, ''), COALESCE(t.priority, ''),
 			COALESCE(t.assignee, ''), COALESCE(t.summary, ''),
 			t.last_synced_at, t.created_at, t.updated_at,
-			v.cve_id, v.severity, c.tracker_type, c.name, p.name
+			v.cve_id, COALESCE(v.severity, ''), c.tracker_type, c.name, p.name
 		FROM vulnerability_tickets t
 		JOIN vulnerabilities v ON t.vulnerability_id = v.id
 		JOIN issue_tracker_connections c ON t.connection_id = c.id
@@ -356,7 +366,7 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 			t.local_status, COALESCE(t.external_status, ''), COALESCE(t.priority, ''),
 			COALESCE(t.assignee, ''), COALESCE(t.summary, ''),
 			t.last_synced_at, t.created_at, t.updated_at,
-			v.cve_id, v.severity, c.tracker_type, c.name, p.name
+			v.cve_id, COALESCE(v.severity, ''), c.tracker_type, c.name, p.name
 		FROM vulnerability_tickets t
 		JOIN vulnerabilities v ON t.vulnerability_id = v.id
 		JOIN issue_tracker_connections c ON t.connection_id = c.id

@@ -333,12 +333,17 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 	assertAppRoleEnforcesRLS(t, appDB)
 
 	tenant := seedTenantForIssueTrackerCheck(t, migDB, "tkt-nullscan")
+	// vulnID has a NULL severity (a real state: correlation can land a
+	// CVE before scoring); vulnSevID carries a populated severity. The
+	// NULL-column ticket joins to vulnID so ListTickets /
+	// ListTicketsByVulnerability exercise COALESCE(v.severity, '').
 	vulnID := uuid.New()
+	vulnSevID := uuid.New()
 	t.Cleanup(func() {
 		// CASCADE FK on tenants reaps project / connection / ticket rows;
-		// the global vulnerabilities row has no tenant CASCADE.
+		// the global vulnerabilities rows have no tenant CASCADE.
 		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vulnID)
+		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1, $2)`, vulnID, vulnSevID)
 	})
 
 	// FK deps: a tenant-scoped project + connection(s), and a global
@@ -351,10 +356,16 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 	`, projectID, tenant); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	// severity omitted => NULL (the JOIN-source NULL-scan case).
+	if _, err := migDB.Exec(`
+		INSERT INTO vulnerabilities (id, cve_id) VALUES ($1, $2)
+	`, vulnID, "CVE-2026-NULLSCAN-"+tenant.String()[:8]); err != nil {
+		t.Fatalf("seed NULL-severity vulnerability: %v", err)
+	}
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, severity) VALUES ($1, $2, 'HIGH')
-	`, vulnID, "CVE-2026-NULLSCAN-"+tenant.String()[:8]); err != nil {
-		t.Fatalf("seed vulnerability: %v", err)
+	`, vulnSevID, "CVE-2026-NULLSCAN-SEV-"+tenant.String()[:8]); err != nil {
+		t.Fatalf("seed populated-severity vulnerability: %v", err)
 	}
 	// Two connections so both tickets satisfy UNIQUE(vulnerability_id,
 	// connection_id) under the single seeded vulnerability.
@@ -388,9 +399,11 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 		}
 	})
 
-	// --- Seed ticket 2: every nullable string column populated, and
-	// last_synced_at set to now so it is NOT eligible for
-	// GetTicketsToSync (isolating that assertion to the NULL ticket).
+	// --- Seed ticket 2: every nullable string column populated, joined
+	// to the populated-severity vulnerability (pinning the non-NULL
+	// v.severity round-trip). last_synced_at set to now so it is NOT
+	// eligible for GetTicketsToSync (isolating that assertion to the
+	// NULL ticket).
 	popTicketID := uuid.New()
 	popSyncedAt := time.Now().UTC().Truncate(time.Second)
 	withTenantGUC(t, migDB, tenant, func(tx *sql.Tx) {
@@ -403,7 +416,7 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 			) VALUES ($1, $2, $3, $4, $5, '55', 'KEY-55',
 				'https://github.com/octocat/hello-world/issues/55',
 				'open', 'in_review', 'high', 'alice', 'populated summary', $6)
-		`, popTicketID, tenant, vulnID, projectID, popConnID, popSyncedAt); err != nil {
+		`, popTicketID, tenant, vulnSevID, projectID, popConnID, popSyncedAt); err != nil {
 			t.Fatalf("seed populated ticket: %v", err)
 		}
 	})
@@ -516,9 +529,16 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 			case nullTicketID:
 				listNull = true
 				assertNullTicket(t, &list[i].VulnerabilityTicket, "ListTickets(null)")
+				// JOIN-source NULL: vulnID has NULL severity -> COALESCE ''.
+				if list[i].Severity != "" {
+					t.Errorf("ListTickets(null): Severity = %q, want \"\" for NULL v.severity", list[i].Severity)
+				}
 			case popTicketID:
 				listPop = true
 				assertPopTicket(t, &list[i].VulnerabilityTicket, "ListTickets(pop)")
+				if list[i].Severity != "HIGH" {
+					t.Errorf("ListTickets(pop): Severity = %q, want %q", list[i].Severity, "HIGH")
+				}
 			}
 		}
 		if !listNull || !listPop {
@@ -535,6 +555,10 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 			if byVuln[i].ID == nullTicketID {
 				bvNull = true
 				assertNullTicket(t, &byVuln[i].VulnerabilityTicket, "ListTicketsByVulnerability(null)")
+				// vulnID has NULL severity -> COALESCE '' on the JOIN.
+				if byVuln[i].Severity != "" {
+					t.Errorf("ListTicketsByVulnerability(null): Severity = %q, want \"\" for NULL v.severity", byVuln[i].Severity)
+				}
 			}
 		}
 		if !bvNull {
