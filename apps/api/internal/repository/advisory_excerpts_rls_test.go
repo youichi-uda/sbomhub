@@ -42,8 +42,10 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
@@ -334,5 +336,250 @@ func TestAdvisoryExcerpts_ListVulnFuncsByCVEs_OSVFirstOrdering(t *testing.T) {
 		if funcs[i] != want[i] {
 			t.Fatalf("union[%d] = %q, want %q (full: %v)", i, funcs[i], want[i], funcs)
 		}
+	}
+}
+
+// sameStrSlice is a local []string equality helper (kept file-scoped so the
+// C5 additions do not depend on reflect or on a shared test util that another
+// _test.go might also declare).
+func sameStrSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestAdvisoryExcerpts_ScopedVulnFuncsRoundtrip_RealPG pins the migration
+// 057 vuln_funcs_scoped write→read roundtrip on real PostgreSQL: a scoped
+// osv row written through AdvisoryExcerptsRepository.Upsert (the $6 =
+// vuln_funcs_scoped bind) is decoded back by ListVulnFuncsByCVEs with its
+// module attribution + on-disk order intact, and — crucially — the scoped
+// row's flat vuln_funcs is NOT re-broadcast into Unscoped (the R8f
+// double-add guard). The sqlmock unit tests only pin the Go-side decode /
+// routing branches against fabricated bytes; this drives the real JSONB
+// column: the NOT NULL DEFAULT '[]' normalisation, PG's JSONB canonicalising
+// of the stored value, and the lenient scoped decode path across a genuine
+// round-trip. Two CVEs:
+//
+//   - clean scoped row (2 modules) → Scoped=2, Unscoped empty.
+//   - partially-malformed scoped row (one empty-module element that the
+//     decoder must skip, one well-formed element, plus a flat union) → the
+//     good element still routes the row scoped-only, so the malformed shape
+//     never contaminates Unscoped.
+func TestAdvisoryExcerpts_ScopedVulnFuncsRoundtrip_RealPG(t *testing.T) {
+	_, migURL := advisoryExcerptsTestEnv(t)
+	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
+	// C27 trap avoidance: register Close FIRST so it runs LAST (t.Cleanup is
+	// LIFO); the row DELETE registered later runs while the handle is open.
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyAdvisoryExcerpts(t, migDB) {
+		return
+	}
+	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "SCRT")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
+	})
+
+	repo := NewAdvisoryExcerptsRepository(migDB)
+	fetched := time.Now().UTC()
+
+	const (
+		cveClean  = "CVE-2025-SCOPED-CLEAN"
+		cveLenien = "CVE-2025-SCOPED-LENIENT"
+	)
+
+	// upsertScoped writes one osv row through the repo inside a TenantTx —
+	// advisory_excerpts is FORCE RLS so the WITH CHECK needs the tenant GUC.
+	upsertScoped := func(cve string, flat, scoped json.RawMessage) {
+		t.Helper()
+		e := &AdvisoryExcerpt{
+			TenantID:        tenant,
+			CVEID:           cve,
+			Source:          "osv",
+			VulnFuncs:       flat,
+			VulnFuncsScoped: scoped,
+			RawExcerpt:      "scoped roundtrip probe",
+			FetchedAt:       &fetched,
+		}
+		tx, err := migDB.Begin()
+		if err != nil {
+			t.Fatalf("begin write tx (%s): %v", cve, err)
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenant.String() + `'`); err != nil {
+			t.Fatalf("SET LOCAL write (%s): %v", cve, err)
+		}
+		if err := repo.Upsert(database.WithTx(context.Background(), tx), e); err != nil {
+			t.Fatalf("Upsert scoped row (%s): %v", cve, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit write (%s): %v", cve, err)
+		}
+		committed = true
+	}
+
+	upsertScoped(cveClean,
+		json.RawMessage(`["a.Foo","a.Bar","b.Baz"]`),
+		json.RawMessage(`[{"module":"example.com/a","vuln_funcs":["a.Foo","a.Bar"]},{"module":"example.com/b","vuln_funcs":["b.Baz"]}]`),
+	)
+	// One malformed element (empty module -> skipped by decodeScopedVulnFuncs)
+	// alongside one well-formed element; the flat union carries the ghost
+	// symbol too. The surviving well-formed entry keeps the row on the
+	// scoped-only routing arm, so the flat union (incl. the ghost) must NOT
+	// leak into Unscoped.
+	upsertScoped(cveLenien,
+		json.RawMessage(`["ghost.Fn","ok.Real"]`),
+		json.RawMessage(`[{"module":"","vuln_funcs":["ghost.Fn"]},{"module":"example.com/ok","vuln_funcs":["ok.Real"]}]`),
+	)
+
+	// Read both back in a fresh TenantTx.
+	readTx, err := migDB.Begin()
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer func() { _ = readTx.Rollback() }()
+	if _, err := readTx.Exec(`SET LOCAL app.current_tenant_id = '` + tenant.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL read: %v", err)
+	}
+	got, err := repo.ListVulnFuncsByCVEs(
+		database.WithTx(context.Background(), readTx), tenant, []string{cveClean, cveLenien},
+	)
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+
+	// --- clean scoped row.
+	clean, ok := got[cveClean]
+	if !ok {
+		t.Fatalf("%s absent from result; a scoped row must materialise the key", cveClean)
+	}
+	if len(clean.Unscoped) != 0 {
+		t.Fatalf("%s Unscoped = %v, want empty (scoped osv row must not double-add its flat union to Unscoped)",
+			cveClean, clean.Unscoped)
+	}
+	if len(clean.Scoped) != 2 {
+		t.Fatalf("%s Scoped entries = %d (%+v), want 2 through the JSONB roundtrip", cveClean, len(clean.Scoped), clean.Scoped)
+	}
+	if clean.Scoped[0].Module != "example.com/a" || !sameStrSlice(clean.Scoped[0].Funcs, []string{"a.Foo", "a.Bar"}) {
+		t.Fatalf("%s Scoped[0] = %+v, want {example.com/a [a.Foo a.Bar]} (module attribution + on-disk order)", cveClean, clean.Scoped[0])
+	}
+	if clean.Scoped[1].Module != "example.com/b" || !sameStrSlice(clean.Scoped[1].Funcs, []string{"b.Baz"}) {
+		t.Fatalf("%s Scoped[1] = %+v, want {example.com/b [b.Baz]}", cveClean, clean.Scoped[1])
+	}
+
+	// --- lenient scoped row: malformed element skipped, no Unscoped leak.
+	lenient, ok := got[cveLenien]
+	if !ok {
+		t.Fatalf("%s absent from result; the one well-formed scoped element must materialise the key", cveLenien)
+	}
+	if len(lenient.Unscoped) != 0 {
+		t.Fatalf("%s Unscoped = %v, want empty: a malformed scoped element must be skipped WITHOUT falling the row back to the flat-union (Unscoped) arm while a well-formed sibling survives",
+			cveLenien, lenient.Unscoped)
+	}
+	if len(lenient.Scoped) != 1 {
+		t.Fatalf("%s Scoped entries = %d (%+v), want 1 (empty-module element dropped)", cveLenien, len(lenient.Scoped), lenient.Scoped)
+	}
+	if lenient.Scoped[0].Module != "example.com/ok" || !sameStrSlice(lenient.Scoped[0].Funcs, []string{"ok.Real"}) {
+		t.Fatalf("%s Scoped[0] = %+v, want {example.com/ok [ok.Real]}", cveLenien, lenient.Scoped[0])
+	}
+}
+
+// TestAdvisoryExcerpts_ScopedUnionRouting_RealPG is the R8f sibling of the
+// OSVFirstOrdering test: it seeds a SCOPED osv row (non-empty
+// vuln_funcs_scoped) alongside two prose rows (nvd / ghsa, unscoped) for one
+// CVE and pins, on real PostgreSQL, that the per-row routing + osv-first
+// union interact correctly:
+//
+//   - the scoped osv row contributes ONLY to Scoped (its flat vuln_funcs is
+//     deliberately absent from Unscoped);
+//   - the prose rows contribute their flat vuln_funcs to Unscoped;
+//   - within Unscoped the surviving prose rows keep lexicographic order
+//     (ghsa < nvd) — the osv row leading the CASE ordering does not perturb
+//     the unscoped tail because it never lands there.
+//
+// The existing OSVFirstOrdering test seeded three all-unscoped rows, so it
+// could not observe the scoped-vs-prose split against a real JSONB column;
+// this one does.
+func TestAdvisoryExcerpts_ScopedUnionRouting_RealPG(t *testing.T) {
+	_, migURL := advisoryExcerptsTestEnv(t)
+	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
+	t.Cleanup(func() { _ = migDB.Close() })
+	if !schemaReadyAdvisoryExcerpts(t, migDB) {
+		return
+	}
+	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "SCUR")
+	t.Cleanup(func() {
+		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
+	})
+
+	const cve = "CVE-2025-2222"
+
+	// Scoped osv row (module-attributed) + two prose rows. Inserted nvd
+	// before ghsa so the expected Unscoped order (ghsa < nvd) cannot pass by
+	// insertion accident.
+	if err := execAsTenant(t, migDB, tenant, `
+		INSERT INTO advisory_excerpts (id, tenant_id, cve_id, source, vuln_funcs, vuln_funcs_scoped, raw_excerpt)
+		VALUES ($1, $2, $3, 'osv',
+			'["osv.A","osv.B"]'::jsonb,
+			'[{"module":"example.com/mod","vuln_funcs":["osv.A","osv.B"]}]'::jsonb,
+			'scoped union probe')
+	`, uuid.New(), tenant, cve); err != nil {
+		t.Fatalf("seed scoped osv row: %v", err)
+	}
+	if err := execAsTenant(t, migDB, tenant, `
+		INSERT INTO advisory_excerpts (id, tenant_id, cve_id, source, vuln_funcs, raw_excerpt)
+		VALUES ($1, $2, $3, 'nvd', '["nvd.N"]'::jsonb, 'prose probe nvd')
+	`, uuid.New(), tenant, cve); err != nil {
+		t.Fatalf("seed nvd row: %v", err)
+	}
+	if err := execAsTenant(t, migDB, tenant, `
+		INSERT INTO advisory_excerpts (id, tenant_id, cve_id, source, vuln_funcs, raw_excerpt)
+		VALUES ($1, $2, $3, 'ghsa', '["ghsa.G"]'::jsonb, 'prose probe ghsa')
+	`, uuid.New(), tenant, cve); err != nil {
+		t.Fatalf("seed ghsa row: %v", err)
+	}
+
+	tx, err := migDB.Begin()
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenant.String() + `'`); err != nil {
+		t.Fatalf("SET LOCAL tenant GUC: %v", err)
+	}
+
+	repo := NewAdvisoryExcerptsRepository(migDB)
+	got, err := repo.ListVulnFuncsByCVEs(database.WithTx(context.Background(), tx), tenant, []string{cve})
+	if err != nil {
+		t.Fatalf("ListVulnFuncsByCVEs: %v", err)
+	}
+	cv, ok := got[cve]
+	if !ok {
+		t.Fatalf("%s absent from result", cve)
+	}
+
+	// Scoped: only the osv row.
+	if len(cv.Scoped) != 1 {
+		t.Fatalf("Scoped entries = %d (%+v), want 1 (only the osv scoped row)", len(cv.Scoped), cv.Scoped)
+	}
+	if cv.Scoped[0].Module != "example.com/mod" || !sameStrSlice(cv.Scoped[0].Funcs, []string{"osv.A", "osv.B"}) {
+		t.Fatalf("Scoped[0] = %+v, want {example.com/mod [osv.A osv.B]}", cv.Scoped[0])
+	}
+
+	// Unscoped: prose rows only, ghsa before nvd; osv symbols must NOT appear.
+	wantUnscoped := []string{"ghsa.G", "nvd.N"}
+	if !sameStrSlice(cv.Unscoped, wantUnscoped) {
+		t.Fatalf("Unscoped = %v, want %v (prose rows lexicographic, scoped osv row must not leak into Unscoped)",
+			cv.Unscoped, wantUnscoped)
 	}
 }
