@@ -15,6 +15,7 @@ import (
 
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service/advisorytext"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
 
@@ -1551,16 +1552,16 @@ func BuildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []Reachabi
 		for i, a := range advisories {
 			fmt.Fprintf(&b, "  [%d] id=%s source=%s\n", i, a.ID, a.Source)
 			if a.RawExcerpt != "" {
-				fmt.Fprintf(&b, "      excerpt: %s\n", truncate(a.RawExcerpt, 600))
+				fmt.Fprintf(&b, "      excerpt: %s\n", advisorytext.Truncate(a.RawExcerpt, 600))
 			}
 			if len(a.VulnFuncs) > 0 && string(a.VulnFuncs) != "[]" {
-				fmt.Fprintf(&b, "      vuln_funcs: %s\n", renderVulnFuncs(a.VulnFuncs, vulnFuncsPromptBudget))
+				fmt.Fprintf(&b, "      vuln_funcs: %s\n", advisorytext.RenderVulnFuncs(a.VulnFuncs, advisorytext.VulnFuncsPromptBudget))
 			}
 			if len(a.AffectedPaths) > 0 && string(a.AffectedPaths) != "[]" {
 				// M43 Phase D R2 finding 3: affected_paths shares the
 				// vuln_funcs render budget — same unbounded-JSON-array
 				// exposure, same whole-element truncation contract.
-				fmt.Fprintf(&b, "      affected_paths: %s\n", renderVulnFuncs(a.AffectedPaths, vulnFuncsPromptBudget))
+				fmt.Fprintf(&b, "      affected_paths: %s\n", advisorytext.RenderVulnFuncs(a.AffectedPaths, advisorytext.VulnFuncsPromptBudget))
 			}
 		}
 	}
@@ -1576,7 +1577,7 @@ func BuildPrompt(cveID string, advisories []AdvisoryExcerptRow, reach []Reachabi
 			fmt.Fprintf(&b, "  [%d] id=%s component=%s ecosystem=%s status=%s confidence=%s\n",
 				i, rr.ID, rr.ComponentID, rr.Ecosystem, rr.Status, conf)
 			if len(rr.Evidence) > 0 && string(rr.Evidence) != "{}" {
-				fmt.Fprintf(&b, "      evidence: %s\n", truncate(string(rr.Evidence), 400))
+				fmt.Fprintf(&b, "      evidence: %s\n", advisorytext.Truncate(string(rr.Evidence), 400))
 			}
 		}
 		// M43 F468: status legend so the model weighs symbol-level hits
@@ -1686,70 +1687,6 @@ func preview(s string, n int) string {
 	return s[:n]
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "...(truncated)"
-}
-
-// vulnFuncsPromptBudget caps the rendered vuln_funcs AND affected_paths
-// JSON per advisory row in the triage prompt (M43 Phase D review; R2
-// finding 3 extended it to affected_paths). Advisory unions can carry
-// hundreds of symbols (OSV / Go vulndb structured lists), and an unbounded
-// render bloats the prompt and drowns the reachability evidence the model
-// must weigh. Storage and the /reachability/targets wire keep their own
-// caps; only the prompt render truncates here. Sized to sit alongside the
-// existing truncate(..., 600) excerpt / truncate(..., 400) evidence budgets.
-// Mirrored in service/cra (same name) — keep the two in sync.
-const vulnFuncsPromptBudget = 800
-
-// renderVulnFuncs renders an advisory string-array JSON payload (vuln_funcs
-// / affected_paths) for the prompt, keeping whole JSON elements until
-// budget bytes are used and appending " …(+N more)" for the elided tail
-// (so the model knows the list is incomplete rather than exhaustive).
-// Payloads at or under budget pass through byte-for-byte — prompt_hash
-// stability for the common small case. An over-budget payload that does
-// not parse as a string array (foreign shape tolerated leniently,
-// mirroring the repository read) falls back to the plain byte truncation
-// used elsewhere in this prompt.
-// Mirrored in service/cra (same name) — keep the two in sync.
-func renderVulnFuncs(raw json.RawMessage, budget int) string {
-	if len(raw) <= budget {
-		return string(raw)
-	}
-	var funcs []string
-	if err := json.Unmarshal(raw, &funcs); err != nil {
-		return truncate(string(raw), budget)
-	}
-	var b strings.Builder
-	b.WriteByte('[')
-	kept := 0
-	for _, f := range funcs {
-		enc, err := json.Marshal(f)
-		if err != nil {
-			continue
-		}
-		add := len(enc)
-		if kept > 0 {
-			add++ // separating comma
-		}
-		if b.Len()+add+1 > budget { // +1 for the closing bracket
-			break
-		}
-		if kept > 0 {
-			b.WriteByte(',')
-		}
-		b.Write(enc)
-		kept++
-	}
-	b.WriteByte(']')
-	if n := len(funcs) - kept; n > 0 {
-		fmt.Fprintf(&b, " …(+%d more)", n)
-	}
-	return b.String()
-}
-
 // dropContentFreeExcerpts filters out advisory rows that carry no usable
 // content: RawExcerpt empty AND every structured array (VulnFuncs /
 // AffectedPaths / RequiredConfig / RequiredEnv) empty. Such rows exist by
@@ -1764,31 +1701,20 @@ func renderVulnFuncs(raw json.RawMessage, budget int) string {
 // guards.go about tombstones — keeps the grounding logic untouched: a
 // tombstone-only CVE is indistinguishable downstream from "no advisory
 // rows at all" (M43 Phase D R2 finding 1).
-// Mirrored in service/cra (same name) — keep the two in sync.
+//
+// The content-free classification itself is advisorytext.ContentFree,
+// shared byte-for-byte with the CRA runner (M45 Wave 2 C3); only this
+// row-type-specific loop stays local because AdvisoryExcerptRow and
+// repository.AdvisoryExcerpt differ.
 func dropContentFreeExcerpts(advisories []AdvisoryExcerptRow) []AdvisoryExcerptRow {
 	out := make([]AdvisoryExcerptRow, 0, len(advisories))
 	for _, a := range advisories {
-		if a.RawExcerpt == "" &&
-			jsonArrayEmpty(a.VulnFuncs) &&
-			jsonArrayEmpty(a.AffectedPaths) &&
-			jsonArrayEmpty(a.RequiredConfig) &&
-			jsonArrayEmpty(a.RequiredEnv) {
+		if advisorytext.ContentFree(a.RawExcerpt, a.VulnFuncs, a.AffectedPaths, a.RequiredConfig, a.RequiredEnv) {
 			continue
 		}
 		out = append(out, a)
 	}
 	return out
-}
-
-// jsonArrayEmpty reports whether raw carries no JSON array content: nil /
-// empty bytes, JSON null, or the empty array literal. Postgres JSONB
-// canonicalises the on-disk value to exactly `[]` (and the repository
-// normalises nil to '[]' on write), so a byte comparison suffices; foreign
-// shapes (raw pass-through Upsert) count as content — lenient, mirroring
-// the repository read — so they are never silently treated as absent.
-func jsonArrayEmpty(raw json.RawMessage) bool {
-	s := strings.TrimSpace(string(raw))
-	return s == "" || s == "null" || s == "[]"
 }
 
 func uuidPtr(u uuid.UUID) *uuid.UUID {
