@@ -110,19 +110,18 @@ func applySuggestionVS(t *testing.T, appDB *sql.DB, tenantID uuid.UUID, in Apply
 func TestVEXApply_PurlMatch_CreatesStatementAndProvenance(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyApply(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "AP")
 	sfx := uuid.New().String()[:8]
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-AP1-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Source project A: component-specific approved statement on a shared purl.
@@ -197,20 +196,19 @@ func TestVEXApply_PurlMatch_CreatesStatementAndProvenance(t *testing.T) {
 func TestVEXApply_ForeignTenantSource_Rejected(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyApply(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "APT")
 	tenantF := seedTenantVS(t, migDB, "APF")
 	sfx := uuid.New().String()[:8]
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APX-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Foreign tenant F owns the source statement (same purl / vuln — the
@@ -261,20 +259,19 @@ func TestVEXApply_ForeignTenantSource_Rejected(t *testing.T) {
 func TestVEXApply_MatchReverification_Injection(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyApply(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "APM")
 	sfx := uuid.New().String()[:8]
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APM1-%s", sfx))
 	v2 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APM2-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, v1, v2)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, v1, v2); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Source project A: component-specific statement for coordinate P1 on v1.
@@ -328,19 +325,18 @@ func TestVEXApply_MatchReverification_Injection(t *testing.T) {
 func TestVEXApply_ExistingTarget_409(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyApply(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "APC")
 	sfx := uuid.New().String()[:8]
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APC1-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	projA := uuid.New()
@@ -392,20 +388,19 @@ func TestVEXApply_ExistingTarget_409(t *testing.T) {
 func TestVEXApply_TargetNotLinkedToVuln_Rejected(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyApply(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "APL")
 	sfx := uuid.New().String()[:8]
 	vAgn := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APL-AGN-%s", sfx))
 	vPurl := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APL-PURL-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vAgn, vPurl)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vAgn, vPurl); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Source project A.
@@ -501,19 +496,18 @@ func TestVEXApply_TargetNotLinkedToVuln_Rejected(t *testing.T) {
 func TestVEXApply_ProjectWideExisting_409(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyApply(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "APW")
 	sfx := uuid.New().String()[:8]
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APW1-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Source project A: component-specific approved statement on a shared purl.

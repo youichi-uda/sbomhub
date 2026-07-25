@@ -19,10 +19,174 @@ package repository
 
 import (
 	"database/sql"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 )
+
+// ---------------------------------------------------------------------------
+// C27: cleanup-trap eradication + tenant-leak gate (M46).
+//
+// Root cause of the historical leak (2,869 orphan tenants rows on the shared
+// dev DB): tests opened the migrator handle with `defer migDB.Close()` and
+// registered the tenant DELETE with t.Cleanup. t.Cleanup functions run AFTER
+// the test function returns — i.e. after all defers — so the DELETE always
+// hit a closed *sql.DB (`sql: database is closed`) and was silenced by
+// `_, _ =`. Every test run leaked its tenants.
+//
+// The regime enforced here:
+//
+//  1. openIntegrationDB registers Close via t.Cleanup at open time. Because
+//     t.Cleanup is LIFO, the Close registered FIRST runs LAST — any delete
+//     cleanup registered later still sees an open handle. Never use
+//     `defer db.Close()` for handles that cleanups depend on.
+//  2. seedIntegrationTenant registers its own DELETE cleanup immediately
+//     after a successful INSERT, so a later t.Fatal cannot strand the row,
+//     and reports delete failures via t.Errorf (see policy note below).
+//  3. Every test tenant carries the canonical marker prefix
+//     c27TenantOrgPrefix in clerk_org_id (and slug), and TestMain fails the
+//     package run if the number of marker rows grew during the run.
+//
+// Cleanup-failure policy (deliberate): a failed tenant delete calls
+// t.Errorf on the OWNING test, failing that test only. Rationale: the
+// package-level gate below would fail anyway; failing the owning test
+// pinpoints WHICH test leaked instead of leaving a package-level puzzle.
+// A DELETE that matches 0 rows is not an error (tests may legitimately
+// remove their own tenants mid-test).
+//
+// Gate limitations (documented, not hidden):
+//   - Rows created without the marker prefix are invisible to the gate.
+//     The only such row today is the slug='default' tenant created through
+//     the production GetOrCreateDefault path in tenant_rls_test.go; that
+//     test deletes it in its own (now un-trapped) cleanup.
+//   - Non-tenant global rows (vulnerabilities CVE-M5-1-*, audit_logs with
+//     tenant_id NULL) are reaped by their own error-visible cleanups but
+//     not counted by this gate.
+//   - Two concurrent `go test` invocations of the SAME package against the
+//     same DB can trip the gate spuriously (each package has its own prefix,
+//     so cross-package parallelism inside one `go test ./...` run is safe).
+// ---------------------------------------------------------------------------
+
+// c27TenantOrgPrefix marks every tenant row created by this package's
+// integration tests (clerk_org_id and slug prefix). Per-package prefixes:
+// repository=itest-repo-, scheduler=itest-sched-, service=itest-svc-,
+// middleware=itest-mw-.
+const c27TenantOrgPrefix = "itest-repo-"
+
+// openIntegrationDB opens url, skips the test when the DB is unreachable,
+// and registers Close via t.Cleanup so it runs AFTER (LIFO) any cleanup
+// registered later by the test body.
+func openIntegrationDB(t *testing.T, url string) *sql.DB {
+	t.Helper()
+	if url == "" {
+		t.Skip("DATABASE_URL / MIGRATE_DATABASE_URL not set — skipping")
+	}
+	db, err := sql.Open("postgres", url)
+	if err != nil {
+		t.Skipf("sql.Open: %v — skipping", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		t.Skipf("db unreachable: %v — skipping", err)
+	}
+	// C27 cleanup-trap: register Close FIRST so it runs LAST.
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// seedIntegrationTenant inserts a canonical marker-prefixed tenant as the
+// migrator role and registers an error-visible DELETE cleanup immediately.
+// ON DELETE CASCADE on the tenants FKs reaps all tenant-scoped child rows.
+func seedIntegrationTenant(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	org := c27TenantOrgPrefix + label + "-" + id.String()
+	if _, err := migDB.Exec(
+		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
+		id, org, "itest "+label, c27TenantOrgPrefix+label+"-"+id.String()[:8],
+	); err != nil {
+		t.Fatalf("seed tenant %s: %v", label, err)
+	}
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, id); err != nil {
+			t.Errorf("C27 cleanup: delete tenant %s (%s): %v", id, org, err)
+		}
+	})
+	return id
+}
+
+// registerCleanupExec registers an error-visible cleanup for rows that the
+// tenant CASCADE does not reap (global tables: vulnerabilities, audit_logs
+// with tenant_id NULL, ...).
+func registerCleanupExec(t *testing.T, db *sql.DB, what, query string, args ...any) {
+	t.Helper()
+	t.Cleanup(func() {
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Errorf("C27 cleanup %s: %v", what, err)
+		}
+	})
+}
+
+// countC27Tenants returns the number of marker rows, or -1 on error.
+func countC27Tenants(db *sql.DB) int64 {
+	var n int64
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM tenants WHERE clerk_org_id LIKE $1`,
+		c27TenantOrgPrefix+"%",
+	).Scan(&n); err != nil {
+		return -1
+	}
+	return n
+}
+
+// TestMain is the leak gate: it counts marker tenants before and after the
+// package's tests and fails the run when the count grew. Only active under
+// -tags=integration (this file's build tag); the unit-test build keeps the
+// default TestMain.
+func TestMain(m *testing.M) {
+	url := os.Getenv("MIGRATE_DATABASE_URL")
+	if url == "" {
+		url = os.Getenv("DATABASE_URL")
+	}
+	var gateDB *sql.DB
+	before := int64(-1)
+	if url != "" {
+		if db, err := sql.Open("postgres", url); err == nil {
+			if db.Ping() == nil {
+				gateDB = db
+				before = countC27Tenants(db)
+			} else {
+				_ = db.Close()
+			}
+		}
+	}
+	code := m.Run()
+	if gateDB != nil {
+		after := countC27Tenants(gateDB)
+		switch {
+		case before < 0 || after < 0:
+			fmt.Fprintf(os.Stderr,
+				"C27 leak gate: tenant count query failed (before=%d after=%d) — gate inconclusive\n",
+				before, after)
+		case after > before:
+			fmt.Fprintf(os.Stderr,
+				"C27 LEAK GATE FAILED: %q tenants grew %d -> %d during this run — a test leaked rows\n",
+				c27TenantOrgPrefix, before, after)
+			if code == 0 {
+				code = 1
+			}
+		case after > 0:
+			fmt.Fprintf(os.Stderr,
+				"C27 leak gate: no growth this run, but %d pre-existing %q rows remain (residue from older runs)\n",
+				after, c27TenantOrgPrefix)
+		}
+		_ = gateDB.Close()
+	}
+	os.Exit(code)
+}
 
 // withTenantGUC opens a transaction on db, sets the tenant GUC to
 // tenantID, runs fn against the tx, then COMMITs. On any failure (incl.

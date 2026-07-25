@@ -43,15 +43,9 @@ func rlsTestEnv(t *testing.T) (appURL, migURL string) {
 // intentionally non-fatal so CI without postgres just skips the test.
 func openOrSkip(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open failed (%v) — skipping RLS test", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("DB unreachable (%v) — skipping RLS test", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // schemaReady returns true if the multi-tenant tables we need exist.
@@ -81,7 +75,6 @@ func schemaReady(t *testing.T, db *sql.DB) bool {
 func TestRLS_AppRoleNotBypassRLS(t *testing.T) {
 	appURL, _ := rlsTestEnv(t)
 	db := openOrSkip(t, appURL)
-	defer db.Close()
 
 	var role string
 	var bypass bool
@@ -104,45 +97,22 @@ func TestRLS_TenantIsolation_Sboms(t *testing.T) {
 	appURL, migURL := rlsTestEnv(t)
 
 	migDB := openOrSkip(t, migURL)
-	defer migDB.Close()
 	if !schemaReady(t, migDB) {
 		t.Skip("schema not migrated yet — run the api server (or migrate up) first")
 	}
 
 	appDB := openOrSkip(t, appURL)
-	defer appDB.Close()
 
 	// Provision two test tenants + one project each as the migrator. The
 	// projects/sboms inserts here run as migrator (table owner with default
 	// FORCE RLS — but FORCE RLS still applies, so we set the tenant GUC).
-	tenantA := uuid.New()
-	tenantB := uuid.New()
+	// C27: seedIntegrationTenant registers error-visible tenant DELETE
+	// cleanups (LIFO-safe vs the Close registered in openIntegrationDB);
+	// ON DELETE CASCADE removes projects/sboms.
+	tenantA := seedIntegrationTenant(t, migDB, "rls-A")
+	tenantB := seedIntegrationTenant(t, migDB, "rls-B")
 	projectA := uuid.New()
 	projectB := uuid.New()
-
-	cleanup := func() {
-		// Use migrator role; tenants table has no RLS, ON DELETE CASCADE
-		// removes projects/sboms.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	}
-	t.Cleanup(cleanup)
-	cleanup()
-
-	mustExec := func(db *sql.DB, q string, args ...any) {
-		t.Helper()
-		if _, err := db.Exec(q, args...); err != nil {
-			t.Fatalf("exec %q: %v", q, err)
-		}
-	}
-
-	// Seed tenants (no RLS on tenants table).
-	mustExec(migDB,
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES
-		   ($1, $2, $3, $4),
-		   ($5, $6, $7, $8)`,
-		tenantA, "rls-test-A-"+tenantA.String(), "RLS Test A", "rls-test-a-"+tenantA.String()[:8],
-		tenantB, "rls-test-B-"+tenantB.String(), "RLS Test B", "rls-test-b-"+tenantB.String()[:8],
-	)
 
 	// Seed projects as migrator under each tenant's GUC. Wrap in tx so we
 	// can SET LOCAL.

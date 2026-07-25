@@ -91,16 +91,9 @@ func schemaReadyLLMCalls(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForLLMCalls(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "llm-calls-test-"+label+"-"+id.String(),
-		"LLMCalls Test "+label,
-		"llm-calls-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "llm-"+label)
 }
 
 // openOrSkipLLMCalls is a local wrapper around sql.Open that skips the
@@ -108,15 +101,9 @@ func seedTenantForLLMCalls(t *testing.T, migDB *sql.DB, label string) uuid.UUID 
 // without Postgres just skips this file.
 func openOrSkipLLMCalls(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestLLMCalls_TenantIsolation_RLS verifies the load-bearing security
@@ -128,20 +115,13 @@ func TestLLMCalls_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := llmCallsTestEnv(t)
 
 	migDB := openOrSkipLLMCalls(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyLLMCalls(t, migDB) {
 		return
 	}
 	appDB := openOrSkipLLMCalls(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForLLMCalls(t, migDB, "A")
 	tenantB := seedTenantForLLMCalls(t, migDB, "B")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the llm_calls rows we are about to
-		// insert.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Step 1: as app role under tenant A, insert one llm_calls row.
 	rowA := uuid.New()

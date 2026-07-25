@@ -104,21 +104,24 @@ type osvCandFixture struct {
 
 // seedOSVCandBase provisions tenant + project + sbom + one Go component
 // (all FORCE RLS post-027, seeded via insertRowWithTenantGUC — reused from
-// cve_sync_integration_test.go in this same package). Registers a t.Cleanup
-// (LIFO-ordered vs the migDB Close cleanup) that deletes the tenant, which
-// cascades to projects / sboms / components / component_vulnerabilities /
-// advisory_excerpts.
+// cve_sync_integration_test.go in this same package). Registers the
+// tenant-DELETE t.Cleanup BEFORE the INSERT (Fatal-safe: a failed INSERT
+// just means the DELETE matches 0 rows) and LIFO-ordered vs the Close that
+// schedOpenOrSkip registered at open time; the delete cascades to projects
+// / sboms / components / component_vulnerabilities / advisory_excerpts.
 func seedOSVCandBase(t *testing.T, migDB *sql.DB, tag string) osvCandFixture {
 	t.Helper()
 	fx := osvCandFixture{tenantID: uuid.New(), componentID: uuid.New()}
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, fx.tenantID)
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, fx.tenantID); err != nil {
+			t.Errorf("C27 cleanup: delete tenant %s: %v", fx.tenantID, err)
+		}
 	})
 
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		fx.tenantID, "osvc-"+tag+"-"+fx.tenantID.String(),
-		"OSVCand "+tag, "osvc-"+tag+"-"+fx.tenantID.String()[:8],
+		fx.tenantID, c27TenantOrgPrefix+"osvc-"+tag+"-"+fx.tenantID.String(),
+		"OSVCand "+tag, c27TenantOrgPrefix+"osvc-"+tag+"-"+fx.tenantID.String()[:8],
 	); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
@@ -250,14 +253,10 @@ func TestOSVVulnFuncs_ListOSVCandidatesChunk_FreshnessBoundary_RealPG(t *testing
 	appURL, migURL := schedIntEnv(t)
 
 	migDB := schedOpenOrSkip(t, migURL)
-	// C27 trap avoidance: register Close FIRST so it runs LAST; the seeder's
-	// row-DELETE cleanups (registered later) run while the handle is open.
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schedSchemaReadyOSVExcerpts(t, migDB) {
 		return
 	}
 	appDB := schedOpenOrSkip(t, appURL)
-	t.Cleanup(func() { _ = appDB.Close() })
 
 	fx := seedOSVCandBase(t, migDB, "boundary")
 	tok := uuid.New().String()[:8]
@@ -267,7 +266,9 @@ func TestOSVVulnFuncs_ListOSVCandidatesChunk_FreshnessBoundary_RealPG(t *testing
 	cveNull := "CVE-OSVC-" + tok + "-NULL"
 	allCVEs := []string{cveFresh, cveBound, cveStale, cveNull}
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = ANY($1)`, pq.Array(allCVEs))
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = ANY($1)`, pq.Array(allCVEs)); err != nil {
+			t.Errorf("C27 cleanup: delete OSV vulnerabilities: %v", err)
+		}
 	})
 	for _, c := range allCVEs {
 		linkOSVCandCVE(t, migDB, fx, c)
@@ -359,12 +360,10 @@ func TestOSVVulnFuncs_ListOSVCandidates_BackdateRecandidacy_RealPG(t *testing.T)
 	appURL, migURL := schedIntEnv(t)
 
 	migDB := schedOpenOrSkip(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schedSchemaReadyOSVExcerpts(t, migDB) {
 		return
 	}
 	appDB := schedOpenOrSkip(t, appURL)
-	t.Cleanup(func() { _ = appDB.Close() })
 
 	fx := seedOSVCandBase(t, migDB, "backdate")
 	tok := uuid.New().String()[:8]
@@ -376,7 +375,9 @@ func TestOSVVulnFuncs_ListOSVCandidates_BackdateRecandidacy_RealPG(t *testing.T)
 	cveNull := "CVE-OSVC-" + tok + "-NULL"
 	allCVEs := []string{cveNormalFresh, cveBackWritten, cveBackNotYet, cveBackReCand, cveStale, cveNull}
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = ANY($1)`, pq.Array(allCVEs))
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = ANY($1)`, pq.Array(allCVEs)); err != nil {
+			t.Errorf("C27 cleanup: delete OSV vulnerabilities: %v", err)
+		}
 	})
 	for _, c := range allCVEs {
 		linkOSVCandCVE(t, migDB, fx, c)

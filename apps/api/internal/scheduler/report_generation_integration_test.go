@@ -151,10 +151,12 @@ func seedSchedIntReportTenants(t *testing.T, migDB *sql.DB, n int, tag string) (
 				placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
 				args = append(args, id)
 			}
-			_, _ = migDB.Exec(
+			if _, err := migDB.Exec(
 				"DELETE FROM tenants WHERE id IN ("+strings.Join(placeholders, ",")+")",
 				args...,
-			)
+			); err != nil {
+				t.Errorf("C27 cleanup: batch-delete tenants: %v", err)
+			}
 		}
 	}
 	// Pre-cleanup in case an earlier failed run left residue.
@@ -171,10 +173,10 @@ func seedSchedIntReportTenants(t *testing.T, migDB *sql.DB, n int, tag string) (
 		args := make([]any, 0, 4*(end-start))
 		argIdx := 1
 		for _, id := range ids[start:end] {
-			slug := fmt.Sprintf("f244-%s-%s", tag, id.String()[:8])
+			slug := fmt.Sprintf(c27TenantOrgPrefix+"f244-%s-%s", tag, id.String()[:8])
 			values = append(values,
 				fmt.Sprintf("($%d, $%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2, argIdx+3))
-			args = append(args, id, "f244-"+tag+"-"+id.String(), "F244 "+tag+" "+id.String()[:8], slug)
+			args = append(args, id, c27TenantOrgPrefix+"f244-"+tag+"-"+id.String(), "F244 "+tag+" "+id.String()[:8], slug)
 			argIdx += 4
 		}
 		if _, err := migDB.Exec(
@@ -208,16 +210,18 @@ func seedSchedIntReportTenantsSequential(t *testing.T, migDB *sql.DB, n int, tag
 	}
 	cleanup := func() {
 		for _, id := range ids {
-			_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, id)
+			if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, id); err != nil {
+				t.Errorf("C27 cleanup: delete tenant %s: %v", id, err)
+			}
 		}
 	}
 	cleanup()
 
 	for i, id := range ids {
-		slug := fmt.Sprintf("f244-%s-%s", tag, id.String()[:8])
+		slug := fmt.Sprintf(c27TenantOrgPrefix+"f244-%s-%s", tag, id.String()[:8])
 		if _, err := migDB.Exec(
 			`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-			id, "f244-"+tag+"-"+id.String(), fmt.Sprintf("F244 %s %d", tag, i), slug,
+			id, c27TenantOrgPrefix+"f244-"+tag+"-"+id.String(), fmt.Sprintf("F244 %s %d", tag, i), slug,
 		); err != nil {
 			cleanup()
 			t.Fatalf("seed tenant %d: %v", i, err)
@@ -331,13 +335,11 @@ func TestF244_ReportGenerationChunkedBatch_HappyPath_RealPG_F244(t *testing.T) {
 	appURL, migURL := schedIntEnvReport(t)
 
 	migDB := schedOpenOrSkip(t, migURL)
-	defer migDB.Close()
 	if !schedSchemaReadyReport(t, migDB) {
 		return
 	}
 
 	appDB := schedOpenOrSkip(t, appURL)
-	defer appDB.Close()
 	// Small pool so a leak surfaces as a hang / next-test-flake fast.
 	appDB.SetMaxOpenConns(3)
 
@@ -439,13 +441,11 @@ func TestF244_ReportGenerationChunkAbort_RealPG_F244(t *testing.T) {
 	appURL, migURL := schedIntEnvReport(t)
 
 	migDB := schedOpenOrSkip(t, migURL)
-	defer migDB.Close()
 	if !schedSchemaReadyReport(t, migDB) {
 		return
 	}
 
 	appDB := schedOpenOrSkip(t, appURL)
-	defer appDB.Close()
 	appDB.SetMaxOpenConns(3)
 
 	const N = 12

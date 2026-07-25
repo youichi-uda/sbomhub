@@ -144,16 +144,9 @@ func schemaReadyM5_1(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForM5_1(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "m5-1-rls-"+label+"-"+id.String(),
-		"M5-1 RLS "+label,
-		"m5-1-rls-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "m5-"+label)
 }
 
 func seedProjectForM5_1(t *testing.T, migDB *sql.DB, tenant uuid.UUID, label string) uuid.UUID {
@@ -173,15 +166,9 @@ func seedProjectForM5_1(t *testing.T, migDB *sql.DB, tenant uuid.UUID, label str
 
 func openOrSkipM5_1(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // setTenantGUC runs SET LOCAL app.current_tenant_id on tx. Helper used
@@ -199,20 +186,15 @@ func setTenantGUC(t *testing.T, tx *sql.Tx, tenantID uuid.UUID) {
 func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "vreA")
 	tenantB := seedTenantForM5_1(t, migDB, "vreB")
 	projectA := seedProjectForM5_1(t, migDB, tenantA, "vreA")
 	projectB := seedProjectForM5_1(t, migDB, tenantB, "vreB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// Pre-seed a vulnerability row (FK target). vulnerabilities is
 	// NOT tenant-scoped (global CVE catalog), so we use the migrator
@@ -224,7 +206,8 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 	`, vulnID, "CVE-M5-1-VRE-"+vulnID.String()[:8]); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
-	t.Cleanup(func() { _, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vulnID) })
+	registerCleanupExec(t, migDB, "M5-1 vulnerabilities row",
+		`DELETE FROM vulnerabilities WHERE id = $1`, vulnID)
 
 	rowA := uuid.New()
 
@@ -306,18 +289,13 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 func TestM5_1_TenantIsolation_SLOTargets(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "sloA")
 	tenantB := seedTenantForM5_1(t, migDB, "sloB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Step 1: tenant A inserts a per-tenant override.
 	rowA := uuid.New()
@@ -397,18 +375,13 @@ func TestM5_1_TenantIsolation_SLOTargets(t *testing.T) {
 func TestM5_1_TenantIsolation_ReportSettings(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "rsA")
 	tenantB := seedTenantForM5_1(t, migDB, "rsB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	rowA := uuid.New()
 	txA, err := appDB.Begin()
@@ -455,18 +428,13 @@ func TestM5_1_TenantIsolation_ReportSettings(t *testing.T) {
 func TestM5_1_TenantIsolation_IPASyncSettings(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "ipaA")
 	tenantB := seedTenantForM5_1(t, migDB, "ipaB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	rowA := uuid.New()
 	txA, err := appDB.Begin()
@@ -514,20 +482,15 @@ func TestM5_1_TenantIsolation_IPASyncSettings(t *testing.T) {
 func TestM5_1_TenantIsolation_GitHubTables(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "ghA")
 	tenantB := seedTenantForM5_1(t, migDB, "ghB")
 	projectA := seedProjectForM5_1(t, migDB, tenantA, "ghA")
 	projectB := seedProjectForM5_1(t, migDB, tenantB, "ghB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Step 1: tenant A inserts a github_connection.
 	connA := uuid.New()
@@ -619,20 +582,15 @@ func TestM5_1_TenantIsolation_GitHubTables(t *testing.T) {
 func TestM5_1_TenantIsolation_SSVCAssessmentHistory(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "sahA")
 	tenantB := seedTenantForM5_1(t, migDB, "sahB")
 	projectA := seedProjectForM5_1(t, migDB, tenantA, "sahA")
 	projectB := seedProjectForM5_1(t, migDB, tenantB, "sahB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// Seed a vulnerability + assessments per tenant (assessments
 	// table has FORCE RLS post-042, so we use the app role via SET
@@ -644,7 +602,8 @@ func TestM5_1_TenantIsolation_SSVCAssessmentHistory(t *testing.T) {
 	`, vulnID, "CVE-M5-1-SAH-"+vulnID.String()[:8]); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
-	t.Cleanup(func() { _, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vulnID) })
+	registerCleanupExec(t, migDB, "M5-1 vulnerabilities row",
+		`DELETE FROM vulnerabilities WHERE id = $1`, vulnID)
 
 	// As tenant A, create an assessment + history row.
 	assessA := uuid.New()
@@ -750,20 +709,15 @@ func TestM5_1_TenantIsolation_SSVCAssessmentHistory(t *testing.T) {
 func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 	appURL, migURL := m5_1TestEnv(t)
 	migDB := openOrSkipM5_1(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyM5_1(t, migDB) {
 		return
 	}
 	appDB := openOrSkipM5_1(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForM5_1(t, migDB, "ssaA")
 	tenantB := seedTenantForM5_1(t, migDB, "ssaB")
 	projectA := seedProjectForM5_1(t, migDB, tenantA, "ssaA")
 	projectB := seedProjectForM5_1(t, migDB, tenantB, "ssaB")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	vulnID := uuid.New()
 	if _, err := migDB.Exec(`
@@ -772,7 +726,8 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 	`, vulnID, "CVE-M5-1-SSACFK-"+vulnID.String()[:8]); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
-	t.Cleanup(func() { _, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vulnID) })
+	registerCleanupExec(t, migDB, "M5-1 vulnerabilities row",
+		`DELETE FROM vulnerabilities WHERE id = $1`, vulnID)
 
 	// Tenant A attempts to attach an ssvc_assessment to tenant B's
 	// project_id. WITH CHECK passes (row.tenant_id=A == GUC=A). The

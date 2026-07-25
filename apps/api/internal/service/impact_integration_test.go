@@ -99,12 +99,10 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 	migDB := openOrSkipVS(t, migURL)
 	// Close via t.Cleanup (LIFO → runs AFTER the data-deletion cleanup below),
 	// not defer, so the DELETEs don't fire against a closed pool.
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "IMP-T")
 	tenantF := seedTenantVS(t, migDB, "IMP-F")
@@ -122,8 +120,9 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 		// tenants CASCADE reaps projects → sboms → components →
 		// component_vulnerabilities. Global vulnerabilities are not
 		// tenant-scoped, so remove them explicitly.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vHit, vZero)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vHit, vZero); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// --- Tenant T: project A (2 affected components), B (1), C (unaffected) ---
@@ -249,12 +248,10 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 func TestCVEImpact_TenantIsolation_BeltAndBraces(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	// Report whether the app role bypasses RLS so the run log makes the
 	// guarantee under test explicit.
@@ -270,8 +267,9 @@ func TestCVEImpact_TenantIsolation_BeltAndBraces(t *testing.T) {
 	sfx := strings.ToUpper(uuid.New().String()[:8])
 	vX := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-ISO-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Tenant T: one project affected by vX.
@@ -326,20 +324,19 @@ func TestCVEImpact_TenantIsolation_BeltAndBraces(t *testing.T) {
 func TestCVEImpact_MultiSnapshotDedup(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "SNAP-T")
 	sfx := strings.ToUpper(uuid.New().String()[:8])
 	cveID := fmt.Sprintf("CVE-2026-SNAP-%s", sfx)
 	vID := seedVulnVS(t, migDB, cveID)
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vID)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vID); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// One project, TWO SBOM snapshots. The older and newer snapshot each carry
@@ -406,12 +403,10 @@ func TestCVEImpact_MultiSnapshotDedup(t *testing.T) {
 func TestCVEImpact_NullMetaCoalesced(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "NULLMETA-T")
 	sfx := strings.ToUpper(uuid.New().String()[:8])
@@ -426,8 +421,9 @@ func TestCVEImpact_NullMetaCoalesced(t *testing.T) {
 		t.Fatalf("seed null-meta vuln: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vNull)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vNull); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// One project affected by the null-meta CVE.

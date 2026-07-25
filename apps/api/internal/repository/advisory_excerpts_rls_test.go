@@ -96,29 +96,16 @@ func schemaReadyAdvisoryExcerpts(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForAdvisoryExcerpts(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "advex-test-"+label+"-"+id.String(),
-		"AdvEx Test "+label,
-		"advex-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "advex-"+label)
 }
 
 func openOrSkipAdvisoryExcerpts(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestAdvisoryExcerpts_TenantIsolation_RLS verifies the load-bearing
@@ -130,18 +117,13 @@ func TestAdvisoryExcerpts_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := advisoryExcerptsTestEnv(t)
 
 	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyAdvisoryExcerpts(t, migDB) {
 		return
 	}
 	appDB := openOrSkipAdvisoryExcerpts(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForAdvisoryExcerpts(t, migDB, "A")
 	tenantB := seedTenantForAdvisoryExcerpts(t, migDB, "B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Step 1: as app role under tenant A, insert one excerpt.
 	rowA := uuid.New()
@@ -229,14 +211,10 @@ func TestAdvisoryExcerpts_TenantIsolation_RLS(t *testing.T) {
 func TestAdvisoryExcerpts_SourceCheckConstraint(t *testing.T) {
 	_, migURL := advisoryExcerptsTestEnv(t)
 	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyAdvisoryExcerpts(t, migDB) {
 		return
 	}
 	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "CK")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	// M9 F158: migration 023+ puts advisory_excerpts under FORCE RLS, so
 	// the negative-path INSERT must run inside a tx with the tenant GUC
@@ -277,14 +255,10 @@ func TestAdvisoryExcerpts_SourceCheckConstraint(t *testing.T) {
 func TestAdvisoryExcerpts_ListVulnFuncsByCVEs_OSVFirstOrdering(t *testing.T) {
 	_, migURL := advisoryExcerptsTestEnv(t)
 	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyAdvisoryExcerpts(t, migDB) {
 		return
 	}
 	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "ORD")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	const cve = "CVE-2025-1111"
 	// Insert in an order unrelated to the expected output so the test
@@ -374,16 +348,10 @@ func sameStrSlice(a, b []string) bool {
 func TestAdvisoryExcerpts_ScopedVulnFuncsRoundtrip_RealPG(t *testing.T) {
 	_, migURL := advisoryExcerptsTestEnv(t)
 	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
-	// C27 trap avoidance: register Close FIRST so it runs LAST (t.Cleanup is
-	// LIFO); the row DELETE registered later runs while the handle is open.
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyAdvisoryExcerpts(t, migDB) {
 		return
 	}
 	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "SCRT")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	repo := NewAdvisoryExcerptsRepository(migDB)
 	fetched := time.Now().UTC()
@@ -513,14 +481,10 @@ func TestAdvisoryExcerpts_ScopedVulnFuncsRoundtrip_RealPG(t *testing.T) {
 func TestAdvisoryExcerpts_ScopedUnionRouting_RealPG(t *testing.T) {
 	_, migURL := advisoryExcerptsTestEnv(t)
 	migDB := openOrSkipAdvisoryExcerpts(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyAdvisoryExcerpts(t, migDB) {
 		return
 	}
 	tenant := seedTenantForAdvisoryExcerpts(t, migDB, "SCUR")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	const cve = "CVE-2025-2222"
 

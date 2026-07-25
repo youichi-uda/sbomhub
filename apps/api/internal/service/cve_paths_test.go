@@ -61,9 +61,9 @@ type cdxMeta struct {
 	Component *cdxComp `json:"component,omitempty"`
 }
 type cdxBOM struct {
-	BOMFormat    string   `json:"bomFormat"`
-	SpecVersion  string   `json:"specVersion"`
-	Metadata     *cdxMeta `json:"metadata,omitempty"`
+	BOMFormat    string    `json:"bomFormat"`
+	SpecVersion  string    `json:"specVersion"`
+	Metadata     *cdxMeta  `json:"metadata,omitempty"`
 	Components   []cdxComp `json:"components"`
 	Dependencies []cdxDep  `json:"dependencies"`
 }

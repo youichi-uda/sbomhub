@@ -115,16 +115,9 @@ func schemaReadyScanSettings(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForScanSettings(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "scan-settings-test-"+label+"-"+id.String(),
-		"ScanSettings Test "+label,
-		"scan-settings-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "scanset-"+label)
 }
 
 // openOrSkipScanSettings is a local wrapper around sql.Open that skips the
@@ -132,15 +125,9 @@ func seedTenantForScanSettings(t *testing.T, migDB *sql.DB, label string) uuid.U
 // without Postgres just skips this file.
 func openOrSkipScanSettings(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestScanSettings_TenantIsolation_RLS verifies the load-bearing security
@@ -154,19 +141,13 @@ func TestScanSettings_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := scanSettingsTestEnv(t)
 
 	migDB := openOrSkipScanSettings(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyScanSettings(t, migDB) {
 		return
 	}
 	appDB := openOrSkipScanSettings(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForScanSettings(t, migDB, "A")
 	tenantB := seedTenantForScanSettings(t, migDB, "B")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the scan_settings rows.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Step 1: as app role under tenant A, insert one scan_settings row.
 	txA, err := appDB.Begin()

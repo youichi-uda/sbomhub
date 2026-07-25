@@ -87,29 +87,16 @@ func schemaReadyMetiAssessments(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForMetiAssessments(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "meti-assess-test-"+label+"-"+id.String(),
-		"MetiAssess Test "+label,
-		"meti-assess-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "meti-"+label)
 }
 
 func openOrSkipMetiAssessments(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestMetiAssessments_TenantIsolation_RLS verifies migration 039's
@@ -120,18 +107,13 @@ func TestMetiAssessments_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := metiAssessmentsTestEnv(t)
 
 	migDB := openOrSkipMetiAssessments(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyMetiAssessments(t, migDB) {
 		return
 	}
 	appDB := openOrSkipMetiAssessments(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForMetiAssessments(t, migDB, "A")
 	tenantB := seedTenantForMetiAssessments(t, migDB, "B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	projectA := uuid.New()
 	rowA := uuid.New()
@@ -221,14 +203,10 @@ func TestMetiAssessments_TenantIsolation_RLS(t *testing.T) {
 func TestMetiAssessments_EvidenceShape(t *testing.T) {
 	_, migURL := metiAssessmentsTestEnv(t)
 	migDB := openOrSkipMetiAssessments(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyMetiAssessments(t, migDB) {
 		return
 	}
 	tenant := seedTenantForMetiAssessments(t, migDB, "EV")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	// M9 F158: meti_assessments is under FORCE RLS, so each negative-
 	// path INSERT must run inside a tx with the tenant GUC set.
@@ -278,14 +256,10 @@ func TestMetiAssessments_EvidenceShape(t *testing.T) {
 func TestMetiAssessments_PhaseStatusAndOverrideChecks(t *testing.T) {
 	_, migURL := metiAssessmentsTestEnv(t)
 	migDB := openOrSkipMetiAssessments(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyMetiAssessments(t, migDB) {
 		return
 	}
 	tenant := seedTenantForMetiAssessments(t, migDB, "CK")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	// M9 F158: meti_assessments is under FORCE RLS.
 
@@ -358,14 +332,10 @@ func TestMetiAssessments_PhaseStatusAndOverrideChecks(t *testing.T) {
 func TestMetiAssessments_UniqueCriterionPerProject(t *testing.T) {
 	_, migURL := metiAssessmentsTestEnv(t)
 	migDB := openOrSkipMetiAssessments(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyMetiAssessments(t, migDB) {
 		return
 	}
 	tenant := seedTenantForMetiAssessments(t, migDB, "UN")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	project := uuid.New()
 

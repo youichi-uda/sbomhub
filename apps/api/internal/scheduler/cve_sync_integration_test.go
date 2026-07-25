@@ -168,17 +168,19 @@ func seedSchedIntCVETenants(t *testing.T, migDB *sql.DB, n int, tag string) ([]f
 		// Delete tenants; ON DELETE CASCADE cleans sboms + components +
 		// component_vulnerabilities.
 		for _, f := range fixtures {
-			_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, f.tenantID)
+			if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, f.tenantID); err != nil {
+				t.Errorf("C27 cleanup: delete tenant %s: %v", f.tenantID, err)
+			}
 		}
 	}
 	cleanup()
 
 	for i, f := range fixtures {
-		slug := fmt.Sprintf("f258-%s-%s", tag, f.tenantID.String()[:8])
+		slug := fmt.Sprintf(c27TenantOrgPrefix+"f258-%s-%s", tag, f.tenantID.String()[:8])
 		if _, err := migDB.Exec(
 			`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
 			f.tenantID,
-			"f258-"+tag+"-"+f.tenantID.String(),
+			c27TenantOrgPrefix+"f258-"+tag+"-"+f.tenantID.String(),
 			fmt.Sprintf("F258 %s %d", tag, i),
 			slug,
 		); err != nil {
@@ -265,8 +267,23 @@ func buildCVEIntegrationFixture(t *testing.T, migDB *sql.DB, m int, tag string) 
 	vulnIndex := make(map[string]cveVulnEntry, m)
 	vulnIDs := make([]uuid.UUID, m)
 
+	// C27: precompute the cve_id list and define cleanup BEFORE seeding so
+	// a mid-loop failure cannot strand already-inserted rows (the caller's
+	// deferred cleanup only exists after this function returns).
+	cveIDs := make([]string, m)
 	for i := 0; i < m; i++ {
-		cveID := fmt.Sprintf("CVE-F258-%s-%04d", tag, i)
+		cveIDs[i] = fmt.Sprintf("CVE-F258-%s-%04d", tag, i)
+	}
+	cleanup := func() {
+		for _, cveID := range cveIDs {
+			if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID); err != nil {
+				t.Errorf("C27 cleanup: delete vulnerability %s: %v", cveID, err)
+			}
+		}
+	}
+
+	for i := 0; i < m; i++ {
+		cveID := cveIDs[i]
 		vulnID := uuid.New()
 		vulnIDs[i] = vulnID
 		cves[i] = CVEInfo{
@@ -289,21 +306,11 @@ func buildCVEIntegrationFixture(t *testing.T, migDB *sql.DB, m int, tag string) 
 			ON CONFLICT (cve_id) DO UPDATE SET updated_at = NOW()
 			RETURNING id
 		`, vulnID, cveID, cves[i].Description, cves[i].Severity, cves[i].CVSSScore); err != nil {
+			cleanup()
 			t.Fatalf("upsert vulnerability %s: %v", cveID, err)
 		}
 	}
 
-	cleanup := func() {
-		for _, cveID := range func() []string {
-			ids := make([]string, len(cves))
-			for i, c := range cves {
-				ids[i] = c.ID
-			}
-			return ids
-		}() {
-			_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID)
-		}
-	}
 	return cves, vulnIndex, cleanup
 }
 
@@ -344,13 +351,11 @@ func TestF258_CVESyncChunkedBatch_HappyPath_RealPG_F258(t *testing.T) {
 	appURL, migURL := schedIntEnvCVE(t)
 
 	migDB := schedOpenOrSkip(t, migURL)
-	defer migDB.Close()
 	if !schedSchemaReadyCVE(t, migDB) {
 		return
 	}
 
 	appDB := schedOpenOrSkip(t, appURL)
-	defer appDB.Close()
 	// Small pool so a leak surfaces as a hang / next-test-flake fast.
 	appDB.SetMaxOpenConns(3)
 
@@ -486,13 +491,11 @@ func TestF258_CVESyncChunkAbort_RealPG_F258(t *testing.T) {
 	appURL, migURL := schedIntEnvCVE(t)
 
 	migDB := schedOpenOrSkip(t, migURL)
-	defer migDB.Close()
 	if !schedSchemaReadyCVE(t, migDB) {
 		return
 	}
 
 	appDB := schedOpenOrSkip(t, appURL)
-	defer appDB.Close()
 	appDB.SetMaxOpenConns(3)
 
 	const (

@@ -79,15 +79,9 @@ func tenantCreateTestEnv(t *testing.T) (appURL, migURL string) {
 
 func openOrSkipTenantCreate(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // schemaReadyTenantCreate verifies that scan_settings is under FORCE RLS
@@ -150,12 +144,10 @@ func TestTenantCreate_LandsBothTenantAndScanSettings_RLS(t *testing.T) {
 	appURL, migURL := tenantCreateTestEnv(t)
 
 	migDB := openOrSkipTenantCreate(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyTenantCreate(t, migDB) {
 		return
 	}
 	appDB := openOrSkipTenantCreate(t, appURL)
-	defer appDB.Close()
 
 	repo := NewTenantRepository(appDB)
 
@@ -165,20 +157,24 @@ func TestTenantCreate_LandsBothTenantAndScanSettings_RLS(t *testing.T) {
 	// collisions on clerk_org_id / slug. Both have UNIQUE indexes
 	// (migration 001 / 002) so we suffix with the uuid head.
 	suffix := tenantID.String()[:12]
-	t.Cleanup(func() {
-		// scan_settings CASCADE-deletes via tenant_id FK (migration 010).
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
-	})
 
+	// C27: this tenant is created through the production repo.Create path
+	// (not seedIntegrationTenant), so it registers its own error-visible
+	// cleanup and carries the marker prefix for the leak gate.
 	tenant := &model.Tenant{
 		ID:         tenantID,
-		ClerkOrgID: "f187-test-" + suffix,
+		ClerkOrgID: c27TenantOrgPrefix + "f187-" + suffix,
 		Name:       "F187 Test Tenant " + suffix,
-		Slug:       "f187-" + suffix,
+		Slug:       c27TenantOrgPrefix + "f187-" + suffix,
 		Plan:       model.PlanEnterprise,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID); err != nil {
+			t.Errorf("C27 cleanup: delete tenant %s: %v", tenantID, err)
+		}
+	})
 
 	// --- Step 1: Create through the runtime app role. Pre-fix this
 	// returns `pq: new row violates row-level security policy for
@@ -242,19 +238,7 @@ func TestTenantCreate_LandsBothTenantAndScanSettings_RLS(t *testing.T) {
 	// the scan_settings row F187 just persisted — the SET LOCAL inside
 	// Create() is `is_local=true`, so it must not have leaked past the
 	// Commit on the pooled connection.
-	otherTenantID := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		otherTenantID,
-		"f187-other-"+otherTenantID.String()[:12],
-		"F187 Other "+otherTenantID.String()[:8],
-		"f187-other-"+otherTenantID.String()[:8],
-	); err != nil {
-		t.Fatalf("seed otherTenant: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, otherTenantID)
-	})
+	otherTenantID := seedIntegrationTenant(t, migDB, "f187-other")
 
 	withTx(otherTenantID, func(tx *sql.Tx) error {
 		var leak int
@@ -285,18 +269,22 @@ func TestTenantCreate_GetOrCreateDefault_RoundTrips(t *testing.T) {
 	appURL, migURL := tenantCreateTestEnv(t)
 
 	migDB := openOrSkipTenantCreate(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyTenantCreate(t, migDB) {
 		return
 	}
 	appDB := openOrSkipTenantCreate(t, appURL)
-	defer appDB.Close()
 
 	// GetOrCreateDefault uses a fixed slug "default" which collides
 	// with whatever previous test run / actual app has done. Reset
 	// before/after under the migrator role (which sees everything).
+	// C27 gate blind spot (documented in rls_test_helpers): the default
+	// tenant is created by production code with clerk_org_id='self-hosted',
+	// so it cannot carry the marker prefix; this error-visible cleanup is
+	// its only reaper.
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE slug = 'default'`)
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE slug = 'default'`); err != nil {
+			t.Errorf("C27 cleanup: delete default tenant: %v", err)
+		}
 	})
 	if _, err := migDB.Exec(`DELETE FROM tenants WHERE slug = 'default'`); err != nil {
 		t.Fatalf("pre-clean default tenant: %v", err)

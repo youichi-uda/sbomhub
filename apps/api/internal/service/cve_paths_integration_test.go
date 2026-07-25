@@ -105,12 +105,10 @@ func joinPathIDs(chain []model.PathNode) string {
 func TestCVEPaths_CrossProjectAndTenantIsolation(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "PATHS-T")
 	tenantF := seedTenantVS(t, migDB, "PATHS-F")
@@ -121,8 +119,9 @@ func TestCVEPaths_CrossProjectAndTenantIsolation(t *testing.T) {
 	vZero := seedVulnVS(t, migDB, cve("ZERO")) // known, affects nothing in T
 
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vHit, vZero)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vHit, vZero); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// --- Tenant T, project A: app-a → express → qs (qs TRANSITIVE) ---
@@ -260,12 +259,10 @@ func TestCVEPaths_CrossProjectAndTenantIsolation(t *testing.T) {
 func TestCVEPaths_TenantGUCLoadBearing(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	var bypass bool
 	_ = appDB.QueryRow(`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&bypass)
@@ -277,8 +274,9 @@ func TestCVEPaths_TenantGUCLoadBearing(t *testing.T) {
 	cveID := fmt.Sprintf("CVE-2026-GUC-%s", sfx)
 	vX := seedVulnVS(t, migDB, cveID)
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Tenant T: projT with qs behind app-t.

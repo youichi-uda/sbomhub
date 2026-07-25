@@ -105,16 +105,9 @@ func schemaReadyComplianceChecklist(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForComplianceChecklist(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "checklist-rls-test-"+label+"-"+id.String(),
-		"ChecklistRLS Test "+label,
-		"checklist-rls-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "checklist-"+label)
 }
 
 // seedProjectForComplianceChecklist creates a minimal projects row for
@@ -141,15 +134,9 @@ func seedProjectForComplianceChecklist(t *testing.T, migDB *sql.DB, tenant uuid.
 
 func openOrSkipComplianceChecklist(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestComplianceChecklist_TenantIsolation_RLS verifies migration 040's
@@ -161,21 +148,15 @@ func TestComplianceChecklist_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := complianceChecklistTestEnv(t)
 
 	migDB := openOrSkipComplianceChecklist(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyComplianceChecklist(t, migDB) {
 		return
 	}
 	appDB := openOrSkipComplianceChecklist(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForComplianceChecklist(t, migDB, "A")
 	tenantB := seedTenantForComplianceChecklist(t, migDB, "B")
 	projectA := seedProjectForComplianceChecklist(t, migDB, tenantA, "A")
 	projectB := seedProjectForComplianceChecklist(t, migDB, tenantB, "B")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the projects + checklist rows.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	rowA := uuid.New()
 
@@ -316,7 +297,6 @@ func TestComplianceChecklist_TenantIsolation_RLS(t *testing.T) {
 func TestComplianceChecklist_RepositoryRejectsMissingTenantID(t *testing.T) {
 	_, migURL := complianceChecklistTestEnv(t)
 	migDB := openOrSkipComplianceChecklist(t, migURL)
-	defer migDB.Close()
 
 	repo := NewChecklistRepository(migDB)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -376,18 +356,13 @@ func TestChecklistRepository_TenantTxFlow_RLSAllows(t *testing.T) {
 	appURL, migURL := complianceChecklistTestEnv(t)
 
 	migDB := openOrSkipComplianceChecklist(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyComplianceChecklist(t, migDB) {
 		return
 	}
 	appDB := openOrSkipComplianceChecklist(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForComplianceChecklist(t, migDB, "txflowA")
 	projectA := seedProjectForComplianceChecklist(t, migDB, tenantA, "txflowA")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantA)
-	})
 
 	repo := NewChecklistRepository(appDB)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -556,20 +531,15 @@ func TestChecklist_RejectCrossTenantProjectID_F75(t *testing.T) {
 	appURL, migURL := complianceChecklistTestEnv(t)
 
 	migDB := openOrSkipComplianceChecklist(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyComplianceChecklistF75(t, migDB) {
 		return
 	}
 	appDB := openOrSkipComplianceChecklist(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForComplianceChecklist(t, migDB, "f75A")
 	tenantB := seedTenantForComplianceChecklist(t, migDB, "f75B")
 	projectA := seedProjectForComplianceChecklist(t, migDB, tenantA, "f75A")
 	projectB := seedProjectForComplianceChecklist(t, migDB, tenantB, "f75B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Direct INSERT path: as tenant A app session, target tenant B's
 	// project_id. WITH CHECK on tenant_id passes (row's tenant_id is A,

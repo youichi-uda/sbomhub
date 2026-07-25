@@ -104,16 +104,9 @@ func schemaReadyPublicLinks(t *testing.T, db *sql.DB) bool {
 // returns its UUID. The tenants table has no RLS so this is straightforward.
 func seedTenantForPublicLink(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "publink-test-"+label+"-"+id.String(),
-		"PublicLink Test "+label,
-		"publink-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "publink-"+label)
 }
 
 // seedProjectForPublicLink inserts a projects row via the migrator role.
@@ -197,26 +190,12 @@ func seedPublicLink(
 func TestPublicLink_TokenLookupWorksWithoutTenantContext(t *testing.T) {
 	appURL, migURL := publicLinkTestEnv(t)
 
-	migDB, err := sql.Open("postgres", migURL)
-	if err != nil {
-		t.Skipf("sql.Open(migURL) failed: %v — skipping", err)
-	}
-	defer migDB.Close()
-	if err := migDB.Ping(); err != nil {
-		t.Skipf("migDB unreachable: %v — skipping", err)
-	}
+	migDB := openIntegrationDB(t, migURL)
 	if !schemaReadyPublicLinks(t, migDB) {
 		return
 	}
 
-	appDB, err := sql.Open("postgres", appURL)
-	if err != nil {
-		t.Skipf("sql.Open(appURL) failed: %v — skipping", err)
-	}
-	defer appDB.Close()
-	if err := appDB.Ping(); err != nil {
-		t.Skipf("appDB unreachable: %v — skipping", err)
-	}
+	appDB := openIntegrationDB(t, appURL)
 
 	// Confirm we really are connected as a NOBYPASSRLS role — this is
 	// the configuration that exposed the original public-link bug.
@@ -232,11 +211,6 @@ func TestPublicLink_TokenLookupWorksWithoutTenantContext(t *testing.T) {
 
 	tenantID := seedTenantForPublicLink(t, migDB, "lookup")
 	projectID := seedProjectForPublicLink(t, migDB, tenantID, "lookup")
-	t.Cleanup(func() {
-		// ON DELETE CASCADE on the tenants FK takes the project and
-		// public_links rows with it.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
-	})
 
 	repo := NewPublicLinkRepository(appDB)
 	ctx := context.Background()
@@ -296,34 +270,17 @@ func TestPublicLink_TokenLookupWorksWithoutTenantContext(t *testing.T) {
 func TestPublicLink_ApplicationLayerTenantIsolation(t *testing.T) {
 	appURL, migURL := publicLinkTestEnv(t)
 
-	migDB, err := sql.Open("postgres", migURL)
-	if err != nil {
-		t.Skipf("sql.Open(migURL) failed: %v — skipping", err)
-	}
-	defer migDB.Close()
-	if err := migDB.Ping(); err != nil {
-		t.Skipf("migDB unreachable: %v — skipping", err)
-	}
+	migDB := openIntegrationDB(t, migURL)
 	if !schemaReadyPublicLinks(t, migDB) {
 		return
 	}
 
-	appDB, err := sql.Open("postgres", appURL)
-	if err != nil {
-		t.Skipf("sql.Open(appURL) failed: %v — skipping", err)
-	}
-	defer appDB.Close()
-	if err := appDB.Ping(); err != nil {
-		t.Skipf("appDB unreachable: %v — skipping", err)
-	}
+	appDB := openIntegrationDB(t, appURL)
 
 	tenantA := seedTenantForPublicLink(t, migDB, "A")
 	tenantB := seedTenantForPublicLink(t, migDB, "B")
 	projectA := seedProjectForPublicLink(t, migDB, tenantA, "A")
 	projectB := seedProjectForPublicLink(t, migDB, tenantB, "B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	repo := NewPublicLinkRepository(appDB)
 	ctx := context.Background()

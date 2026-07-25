@@ -66,15 +66,9 @@ func issueTrackerCheckTestEnv(t *testing.T) (appURL, migURL string) {
 
 func openOrSkipIssueTrackerCheck(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // schemaReadyIssueTrackerCheck skips when the table itself is missing
@@ -128,16 +122,9 @@ func schemaReadyIssueTrackerCheck(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForIssueTrackerCheck(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "tracker-check-test-"+label+"-"+id.String(),
-		"TrackerCheck Test "+label,
-		"tracker-check-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "tracker-"+label)
 }
 
 // TestIssueTrackerConnections_TrackerTypeCheck_F357 verifies the
@@ -147,17 +134,11 @@ func seedTenantForIssueTrackerCheck(t *testing.T, migDB *sql.DB, label string) u
 func TestIssueTrackerConnections_TrackerTypeCheck_F357(t *testing.T) {
 	_, migURL := issueTrackerCheckTestEnv(t)
 	migDB := openOrSkipIssueTrackerCheck(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyIssueTrackerCheck(t, migDB) {
 		return
 	}
 
 	tenant := seedTenantForIssueTrackerCheck(t, migDB, "F357")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the issue_tracker_connections
-		// rows inserted below (RI actions bypass RLS by design).
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	insertConn := func(trackerType, name string) error {
 		// auth_type has a DEFAULT; every other NOT NULL column is

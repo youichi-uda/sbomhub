@@ -154,23 +154,13 @@ func TestIssueTrackerConnections_NullableColumnScan(t *testing.T) {
 	appURL, migURL := llmCallsTestEnv(t)
 
 	migDB := openOrSkipIssueTrackerCheck(t, migURL)
-	// C27 cleanup-trap: register closes via t.Cleanup (not defer) so the
-	// fixture-delete cleanup registered LATER runs FIRST (LIFO) — a
-	// deferred Close would fire before t.Cleanup and leave the seed rows
-	// resident against a closed *sql.DB.
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyNullScan(t, migDB, "issue_tracker_connections") {
 		return
 	}
 	appDB := openOrSkipIssueTrackerCheck(t, appURL)
-	t.Cleanup(func() { _ = appDB.Close() })
 	assertAppRoleEnforcesRLS(t, appDB)
 
 	tenant := seedTenantForIssueTrackerCheck(t, migDB, "nullscan")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the connection rows.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	// --- Seed 1: GitHub-PAT-shaped row. auth_email, default_project_key,
 	// default_issue_type, last_sync_at all omitted => NULL in the DB.
@@ -324,12 +314,10 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 	appURL, migURL := llmCallsTestEnv(t)
 
 	migDB := openOrSkipIssueTrackerCheck(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyNullScan(t, migDB, "vulnerability_tickets") {
 		return
 	}
 	appDB := openOrSkipIssueTrackerCheck(t, appURL)
-	t.Cleanup(func() { _ = appDB.Close() })
 	assertAppRoleEnforcesRLS(t, appDB)
 
 	tenant := seedTenantForIssueTrackerCheck(t, migDB, "tkt-nullscan")
@@ -339,12 +327,11 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 	// ListTicketsByVulnerability exercise COALESCE(v.severity, '').
 	vulnID := uuid.New()
 	vulnSevID := uuid.New()
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps project / connection / ticket rows;
-		// the global vulnerabilities rows have no tenant CASCADE.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1, $2)`, vulnID, vulnSevID)
-	})
+	// C27: the tenant DELETE is registered by the seed helper (CASCADE FK
+	// reaps project / connection / ticket rows); the global vulnerabilities
+	// rows have no tenant CASCADE and are reaped explicitly here.
+	registerCleanupExec(t, migDB, "nullscan vulnerabilities",
+		`DELETE FROM vulnerabilities WHERE id IN ($1, $2)`, vulnID, vulnSevID)
 
 	// FK deps: a tenant-scoped project + connection(s), and a global
 	// (RLS-exempt) vulnerability row.

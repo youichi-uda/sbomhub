@@ -82,29 +82,16 @@ func schemaReadyCRASubmissions(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForCRASubmissions(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "cra-submission-test-"+label+"-"+id.String(),
-		"CRASubmission Test "+label,
-		"cra-submission-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "crasub-"+label)
 }
 
 func openOrSkipCRASubmissions(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // insertApprovedCRAReport inserts one approved cra_reports row inside a
@@ -153,20 +140,13 @@ func TestCRASubmissions_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := craSubmissionsTestEnv(t)
 
 	migDB := openOrSkipCRASubmissions(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRASubmissions(t, migDB) {
 		return
 	}
 	appDB := openOrSkipCRASubmissions(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForCRASubmissions(t, migDB, "A")
 	tenantB := seedTenantForCRASubmissions(t, migDB, "B")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the cra_reports + cra_submissions
-		// rows we insert.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// FK parent: an approved cra_reports row in tenant A.
 	reportA := insertApprovedCRAReport(t, appDB, tenantA)
@@ -285,18 +265,13 @@ func TestCRASubmissions_EarliestSubmittedAtByReports_RLS(t *testing.T) {
 	appURL, migURL := craSubmissionsTestEnv(t)
 
 	migDB := openOrSkipCRASubmissions(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRASubmissions(t, migDB) {
 		return
 	}
 	appDB := openOrSkipCRASubmissions(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForCRASubmissions(t, migDB, "EARLY-A")
 	tenantB := seedTenantForCRASubmissions(t, migDB, "EARLY-B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	reportA := insertApprovedCRAReport(t, appDB, tenantA)
 	reportB := insertApprovedCRAReport(t, appDB, tenantB)
@@ -351,17 +326,12 @@ func TestCRASubmissions_Repository_RLS(t *testing.T) {
 	appURL, migURL := craSubmissionsTestEnv(t)
 
 	migDB := openOrSkipCRASubmissions(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRASubmissions(t, migDB) {
 		return
 	}
 	appDB := openOrSkipCRASubmissions(t, appURL)
-	defer appDB.Close()
 
 	tenant := seedTenantForCRASubmissions(t, migDB, "REPO")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	report := insertApprovedCRAReport(t, appDB, tenant)
 	repo := NewCRASubmissionsRepository(appDB)

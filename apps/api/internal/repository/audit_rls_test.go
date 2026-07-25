@@ -109,16 +109,9 @@ func schemaReadyAuditLogs(t *testing.T, db *sql.DB) bool {
 // returns its UUID. The tenants table has no RLS so this is straightforward.
 func seedTenantForAudit(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "audit-test-"+label+"-"+id.String(),
-		"Audit Test "+label,
-		"audit-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "audit-"+label)
 }
 
 // TestAudit_InsertSucceedsWithoutTenantContext is the core acceptance
@@ -134,26 +127,12 @@ func seedTenantForAudit(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 func TestAudit_InsertSucceedsWithoutTenantContext(t *testing.T) {
 	appURL, migURL := auditTestEnv(t)
 
-	migDB, err := sql.Open("postgres", migURL)
-	if err != nil {
-		t.Skipf("sql.Open(migURL) failed: %v — skipping", err)
-	}
-	defer migDB.Close()
-	if err := migDB.Ping(); err != nil {
-		t.Skipf("migDB unreachable: %v — skipping", err)
-	}
+	migDB := openIntegrationDB(t, migURL)
 	if !schemaReadyAuditLogs(t, migDB) {
 		return
 	}
 
-	appDB, err := sql.Open("postgres", appURL)
-	if err != nil {
-		t.Skipf("sql.Open(appURL) failed: %v — skipping", err)
-	}
-	defer appDB.Close()
-	if err := appDB.Ping(); err != nil {
-		t.Skipf("appDB unreachable: %v — skipping", err)
-	}
+	appDB := openIntegrationDB(t, appURL)
 
 	// Confirm we really are connected as a NOBYPASSRLS role — this is
 	// the configuration that exposed the original webhook-audit bug.
@@ -168,12 +147,6 @@ func TestAudit_InsertSucceedsWithoutTenantContext(t *testing.T) {
 	}
 
 	tenantID := seedTenantForAudit(t, migDB, "insert")
-	t.Cleanup(func() {
-		// ON DELETE CASCADE on the tenants FK takes the audit_logs rows
-		// with tenant_id set; the tenant_id=NULL row is cleaned up via
-		// the explicit id-based DELETE below.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
-	})
 
 	repo := NewAuditRepository(appDB)
 	ctx := context.Background()
@@ -193,9 +166,8 @@ func TestAudit_InsertSucceedsWithoutTenantContext(t *testing.T) {
 		t.Fatalf("Create(tenant_id=NULL) failed under sbomhub_app with no tenant GUC: %v "+
 			"— this is the P0 #18-followup regression; migration 029 likely missing", err)
 	}
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM audit_logs WHERE id = $1`, systemLog.ID)
-	})
+	registerCleanupExec(t, migDB, "tenantless audit_logs row",
+		`DELETE FROM audit_logs WHERE id = $1`, systemLog.ID)
 
 	// Case 2: tenant-scoped event written outside a TenantTx tx. This
 	// mirrors webhook_clerk.go's organization.created / .updated and
@@ -228,32 +200,15 @@ func TestAudit_InsertSucceedsWithoutTenantContext(t *testing.T) {
 func TestAudit_ApplicationLayerTenantIsolation(t *testing.T) {
 	appURL, migURL := auditTestEnv(t)
 
-	migDB, err := sql.Open("postgres", migURL)
-	if err != nil {
-		t.Skipf("sql.Open(migURL) failed: %v — skipping", err)
-	}
-	defer migDB.Close()
-	if err := migDB.Ping(); err != nil {
-		t.Skipf("migDB unreachable: %v — skipping", err)
-	}
+	migDB := openIntegrationDB(t, migURL)
 	if !schemaReadyAuditLogs(t, migDB) {
 		return
 	}
 
-	appDB, err := sql.Open("postgres", appURL)
-	if err != nil {
-		t.Skipf("sql.Open(appURL) failed: %v — skipping", err)
-	}
-	defer appDB.Close()
-	if err := appDB.Ping(); err != nil {
-		t.Skipf("appDB unreachable: %v — skipping", err)
-	}
+	appDB := openIntegrationDB(t, appURL)
 
 	tenantA := seedTenantForAudit(t, migDB, "A")
 	tenantB := seedTenantForAudit(t, migDB, "B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	repo := NewAuditRepository(appDB)
 	ctx := context.Background()
@@ -265,11 +220,10 @@ func TestAudit_ApplicationLayerTenantIsolation(t *testing.T) {
 	logA2 := seedAuditLog(t, ctx, repo, &tenantA, "tenant A row 2", now.Add(time.Second))
 	logB := seedAuditLog(t, ctx, repo, &tenantB, "tenant B row", now)
 	logSystem := seedAuditLog(t, ctx, repo, nil, "system row (no tenant)", now)
-	t.Cleanup(func() {
-		// CASCADE cleans up the tenant-scoped rows when the tenant goes
-		// away; the system (tenant_id=NULL) row needs an explicit DELETE.
-		_, _ = migDB.Exec(`DELETE FROM audit_logs WHERE id = $1`, logSystem.ID)
-	})
+	// CASCADE cleans up the tenant-scoped rows when the tenant goes
+	// away; the system (tenant_id=NULL) row needs an explicit DELETE.
+	registerCleanupExec(t, migDB, "tenantless audit_logs row",
+		`DELETE FROM audit_logs WHERE id = $1`, logSystem.ID)
 
 	// 1. List(tenantA) must contain logA1 + logA2 and must NOT contain
 	//    logB or logSystem.

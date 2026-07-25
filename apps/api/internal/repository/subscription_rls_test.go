@@ -118,16 +118,9 @@ func schemaReadySubscriptions(t *testing.T, db *sql.DB) bool {
 // straightforward.
 func seedTenantForSubscription(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "sub-test-"+label+"-"+id.String(),
-		"Subscription Test "+label,
-		"sub-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "sub-"+label)
 }
 
 // TestSubscription_WebhookLookupSucceedsWithoutTenantContext is the core
@@ -143,26 +136,12 @@ func seedTenantForSubscription(t *testing.T, migDB *sql.DB, label string) uuid.U
 func TestSubscription_WebhookLookupSucceedsWithoutTenantContext(t *testing.T) {
 	appURL, migURL := subscriptionTestEnv(t)
 
-	migDB, err := sql.Open("postgres", migURL)
-	if err != nil {
-		t.Skipf("sql.Open(migURL) failed: %v — skipping", err)
-	}
-	defer migDB.Close()
-	if err := migDB.Ping(); err != nil {
-		t.Skipf("migDB unreachable: %v — skipping", err)
-	}
+	migDB := openIntegrationDB(t, migURL)
 	if !schemaReadySubscriptions(t, migDB) {
 		return
 	}
 
-	appDB, err := sql.Open("postgres", appURL)
-	if err != nil {
-		t.Skipf("sql.Open(appURL) failed: %v — skipping", err)
-	}
-	defer appDB.Close()
-	if err := appDB.Ping(); err != nil {
-		t.Skipf("appDB unreachable: %v — skipping", err)
-	}
+	appDB := openIntegrationDB(t, appURL)
 
 	// Confirm we really are connected as a NOBYPASSRLS role — this is
 	// the configuration that exposed the original webhook-lookup bug.
@@ -177,11 +156,6 @@ func TestSubscription_WebhookLookupSucceedsWithoutTenantContext(t *testing.T) {
 	}
 
 	tenantID := seedTenantForSubscription(t, migDB, "webhook")
-	t.Cleanup(func() {
-		// ON DELETE CASCADE on the tenants FK reaps subscriptions,
-		// subscription_events, and usage_records rows.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
-	})
 
 	repo := NewSubscriptionRepository(appDB)
 	ctx := context.Background()
@@ -270,32 +244,15 @@ func TestSubscription_WebhookLookupSucceedsWithoutTenantContext(t *testing.T) {
 func TestSubscription_ApplicationLayerTenantIsolation(t *testing.T) {
 	appURL, migURL := subscriptionTestEnv(t)
 
-	migDB, err := sql.Open("postgres", migURL)
-	if err != nil {
-		t.Skipf("sql.Open(migURL) failed: %v — skipping", err)
-	}
-	defer migDB.Close()
-	if err := migDB.Ping(); err != nil {
-		t.Skipf("migDB unreachable: %v — skipping", err)
-	}
+	migDB := openIntegrationDB(t, migURL)
 	if !schemaReadySubscriptions(t, migDB) {
 		return
 	}
 
-	appDB, err := sql.Open("postgres", appURL)
-	if err != nil {
-		t.Skipf("sql.Open(appURL) failed: %v — skipping", err)
-	}
-	defer appDB.Close()
-	if err := appDB.Ping(); err != nil {
-		t.Skipf("appDB unreachable: %v — skipping", err)
-	}
+	appDB := openIntegrationDB(t, appURL)
 
 	tenantA := seedTenantForSubscription(t, migDB, "A")
 	tenantB := seedTenantForSubscription(t, migDB, "B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	repo := NewSubscriptionRepository(appDB)
 	ctx := context.Background()

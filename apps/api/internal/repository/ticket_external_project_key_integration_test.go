@@ -62,15 +62,9 @@ func ticketProjectKeyTestEnv(t *testing.T) (appURL, migURL string) {
 
 func openOrSkipTicketProjectKey(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // schemaReadyTicketProjectKey skips when the table itself is missing (schema
@@ -134,29 +128,18 @@ func schemaReadyTicketProjectKey(t *testing.T, db *sql.DB) bool {
 func TestVulnerabilityTickets_ExternalProjectKey_F366(t *testing.T) {
 	_, migURL := ticketProjectKeyTestEnv(t)
 	migDB := openOrSkipTicketProjectKey(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyTicketProjectKey(t, migDB) {
 		return
 	}
 
-	tenant := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		tenant, "ticket-repo-test-"+tenant.String(),
-		"TicketRepo Test F366",
-		"ticket-repo-test-"+tenant.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant: %v", err)
-	}
+	// C27: seedIntegrationTenant registers the tenant DELETE cleanup
+	// (CASCADE FK reaps the project / connection / ticket rows; RI actions
+	// bypass RLS by design). The global vulnerabilities row has no tenant
+	// CASCADE and is reaped explicitly below.
+	tenant := seedIntegrationTenant(t, migDB, "ticket-f366")
 	vulnID := uuid.New()
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the project / connection / ticket
-		// rows (RI actions bypass RLS by design); the global
-		// vulnerabilities row has no tenant CASCADE and is reaped
-		// explicitly.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vulnID)
-	})
+	registerCleanupExec(t, migDB, "F366 vulnerabilities row",
+		`DELETE FROM vulnerabilities WHERE id = $1`, vulnID)
 
 	projectID := uuid.New()
 	connID := uuid.New()

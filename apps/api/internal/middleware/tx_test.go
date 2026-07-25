@@ -41,6 +41,12 @@ func txEnv(t *testing.T) (appURL, migURL string) {
 	return appURL, migURL
 }
 
+// c27TenantOrgPrefix marks every tenant row created by this package's
+// integration tests; the TestMain leak gate below counts rows carrying it.
+// See internal/repository/rls_test_helpers_integration_test.go for the full
+// C27 cleanup-trap rationale (defer Close vs t.Cleanup LIFO ordering).
+const c27TenantOrgPrefix = "itest-mw-"
+
 func openOrSkipTx(t *testing.T, url string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("postgres", url)
@@ -51,7 +57,66 @@ func openOrSkipTx(t *testing.T, url string) *sql.DB {
 		_ = db.Close()
 		t.Skipf("DB unreachable (%v) — skipping", err)
 	}
+	// C27 cleanup-trap: register Close via t.Cleanup (never defer) so the
+	// tenant-delete cleanups registered later run first (LIFO).
+	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// countC27Tenants returns the number of marker rows, or -1 on error.
+func countC27Tenants(db *sql.DB) int64 {
+	var n int64
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM tenants WHERE clerk_org_id LIKE $1`,
+		c27TenantOrgPrefix+"%",
+	).Scan(&n); err != nil {
+		return -1
+	}
+	return n
+}
+
+// TestMain is the C27 leak gate: fails the package run when the number of
+// marker tenants grew during the run. Integration builds only.
+func TestMain(m *testing.M) {
+	url := os.Getenv("MIGRATE_DATABASE_URL")
+	if url == "" {
+		url = os.Getenv("DATABASE_URL")
+	}
+	var gateDB *sql.DB
+	before := int64(-1)
+	if url != "" {
+		if db, err := sql.Open("postgres", url); err == nil {
+			if db.Ping() == nil {
+				gateDB = db
+				before = countC27Tenants(db)
+			} else {
+				_ = db.Close()
+			}
+		}
+	}
+	code := m.Run()
+	if gateDB != nil {
+		after := countC27Tenants(gateDB)
+		switch {
+		case before < 0 || after < 0:
+			fmt.Fprintf(os.Stderr,
+				"C27 leak gate: tenant count query failed (before=%d after=%d) — gate inconclusive\n",
+				before, after)
+		case after > before:
+			fmt.Fprintf(os.Stderr,
+				"C27 LEAK GATE FAILED: %q tenants grew %d -> %d during this run — a test leaked rows\n",
+				c27TenantOrgPrefix, before, after)
+			if code == 0 {
+				code = 1
+			}
+		case after > 0:
+			fmt.Fprintf(os.Stderr,
+				"C27 leak gate: no growth this run, but %d pre-existing %q rows remain (residue from older runs)\n",
+				after, c27TenantOrgPrefix)
+		}
+		_ = gateDB.Close()
+	}
+	os.Exit(code)
 }
 
 func txSchemaReady(t *testing.T, db *sql.DB) bool {
@@ -84,13 +149,17 @@ func seedTenantProject(t *testing.T, migDB *sql.DB, label string) (tenantID, pro
 	}
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		tenantID, "tx-test-"+label+"-"+tenantID.String(),
-		"TenantTx "+label, "tx-"+label+"-"+slugSuffix,
+		tenantID, c27TenantOrgPrefix+label+"-"+tenantID.String(),
+		"TenantTx "+label, c27TenantOrgPrefix+label+"-"+slugSuffix,
 	); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
+	// C27: registered immediately after the INSERT (a later t.Fatal cannot
+	// strand the row) and error-visible (a failed delete fails this test).
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID); err != nil {
+			t.Errorf("C27 cleanup: delete tenant %s: %v", tenantID, err)
+		}
 	})
 
 	// projects has RLS, so even the migrator needs the GUC to insert.
@@ -136,13 +205,11 @@ func TestTenantTx_IsolatesInsertedSboms(t *testing.T) {
 	appURL, migURL := txEnv(t)
 
 	migDB := openOrSkipTx(t, migURL)
-	defer migDB.Close()
 	if !txSchemaReady(t, migDB) {
 		t.Skip("schema not migrated yet — run the api server (or migrate up) first")
 	}
 
 	appDB := openOrSkipTx(t, appURL)
-	defer appDB.Close()
 
 	tenantA, projectA := seedTenantProject(t, migDB, "A")
 	tenantB, _ := seedTenantProject(t, migDB, "B")
@@ -189,12 +256,10 @@ func TestTenantTx_IsolatesInsertedSboms(t *testing.T) {
 func TestTenantTx_PanicRollsBack(t *testing.T) {
 	appURL, migURL := txEnv(t)
 	migDB := openOrSkipTx(t, migURL)
-	defer migDB.Close()
 	if !txSchemaReady(t, migDB) {
 		t.Skip("schema not migrated yet — run the api server first")
 	}
 	appDB := openOrSkipTx(t, appURL)
-	defer appDB.Close()
 
 	tenantA, projectA := seedTenantProject(t, migDB, "panic")
 	sbomID := uuid.New()
@@ -236,12 +301,10 @@ func TestTenantTx_PanicRollsBack(t *testing.T) {
 func TestTenantTx_RollsBackOnErrorStatus(t *testing.T) {
 	appURL, migURL := txEnv(t)
 	migDB := openOrSkipTx(t, migURL)
-	defer migDB.Close()
 	if !txSchemaReady(t, migDB) {
 		t.Skip("schema not migrated yet — run the api server first")
 	}
 	appDB := openOrSkipTx(t, appURL)
-	defer appDB.Close()
 
 	tenantA, projectA := seedTenantProject(t, migDB, "errstatus")
 	sbomID := uuid.New()
@@ -290,12 +353,10 @@ func TestTenantTx_RollsBackOnErrorStatus(t *testing.T) {
 func TestTenantTx_ParallelTenantsNoLeak(t *testing.T) {
 	appURL, migURL := txEnv(t)
 	migDB := openOrSkipTx(t, migURL)
-	defer migDB.Close()
 	if !txSchemaReady(t, migDB) {
 		t.Skip("schema not migrated yet — run the api server first")
 	}
 	appDB := openOrSkipTx(t, appURL)
-	defer appDB.Close()
 	appDB.SetMaxOpenConns(40)
 
 	const N = 100
@@ -358,7 +419,6 @@ func TestTenantTx_ParallelTenantsNoLeak(t *testing.T) {
 func TestTenantTx_RejectsMissingTenant(t *testing.T) {
 	appURL, _ := txEnv(t)
 	appDB := openOrSkipTx(t, appURL)
-	defer appDB.Close()
 
 	e := echo.New()
 	mw := TenantTx(appDB)

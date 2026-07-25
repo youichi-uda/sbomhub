@@ -78,6 +78,9 @@ func openOrSkipVS(t *testing.T, url string) *sql.DB {
 		_ = db.Close()
 		t.Skipf("db unreachable: %v -- skipping", err)
 	}
+	// C27 cleanup-trap: register Close via t.Cleanup (never defer) so
+	// row-DELETE cleanups registered later run first (LIFO).
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
@@ -143,10 +146,18 @@ func seedTenantVS(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	id := uuid.New()
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1,$2,$3,$4)`,
-		id, "vex-sugg-"+label+"-"+id.String(), "VEXSugg "+label, "vex-sugg-"+label+"-"+id.String()[:8],
+		id, c27TenantOrgPrefix+label+"-"+id.String(), "VEXSugg "+label,
+		c27TenantOrgPrefix+label+"-"+id.String()[:8],
 	); err != nil {
 		t.Fatalf("seed tenant %s: %v", label, err)
 	}
+	// C27: registered immediately after the INSERT (a later t.Fatal cannot
+	// strand the row) and error-visible; CASCADE reaps tenant-scoped rows.
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, id); err != nil {
+			t.Errorf("C27 cleanup: delete tenant %s: %v", id, err)
+		}
+	})
 	return id
 }
 
@@ -199,6 +210,15 @@ func seedVulnVS(t *testing.T, migDB *sql.DB, cveID string) uuid.UUID {
 		 VALUES ($1,$2,'test vuln','HIGH',7.5)`, id, cveID); err != nil {
 		t.Fatalf("seed vuln %s: %v", cveID, err)
 	}
+	// C27: registered here so a later t.Fatal in the test body (e.g. a
+	// subsequent seed failing) cannot strand this global row. Per-test
+	// vulnerability cleanups that also delete this id are harmless
+	// (the second DELETE matches 0 rows).
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, id); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerability %s (%s): %v", id, cveID, err)
+		}
+	})
 	return id
 }
 
@@ -258,12 +278,10 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 	// returns, which is BEFORE any t.Cleanup, so the data-deletion cleanup
 	// below would otherwise run its DELETEs against an already-closed pool
 	// (error swallowed → leaked rows).
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "T")
 	tenantF := seedTenantVS(t, migDB, "F")
@@ -281,8 +299,9 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 		// tenants CASCADE reaps projects → sboms → components →
 		// component_vulnerabilities → vex_statements. Global vulnerabilities
 		// are not tenant-scoped, so remove them explicitly.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2,$3,$4,$5)`, v1, v2, v3, v4, v5)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2,$3,$4,$5)`, v1, v2, v3, v4, v5); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// --- Tenant T, project A (source) ---
@@ -457,12 +476,10 @@ func TestVEXSuggestions_TenantIsolation_BeltAndBraces(t *testing.T) {
 	migDB := openOrSkipVS(t, migURL)
 	// See TestVEXSuggestions_CrossProjectAggregation: close via t.Cleanup so
 	// it runs after (not before) the data-deletion cleanup below.
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	// Report whether the app role bypasses RLS so the run log makes the
 	// guarantee under test explicit.
@@ -475,8 +492,9 @@ func TestVEXSuggestions_TenantIsolation_BeltAndBraces(t *testing.T) {
 	sfx := uuid.New().String()[:8]
 	vX := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-ISO-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1,$2)`, tenantT, tenantF)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Target project in tenant T with a component affected by vX.
@@ -517,12 +535,10 @@ func TestVEXSuggestions_TenantIsolation_BeltAndBraces(t *testing.T) {
 func TestVEXSuggestions_SourceComponentProjectAttribution(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "ATTR")
 	sfx := uuid.New().String()[:8]
@@ -531,8 +547,9 @@ func TestVEXSuggestions_SourceComponentProjectAttribution(t *testing.T) {
 	vMis := seedVulnVS(t, migDB, cveMis) // mis-attributed source
 	vOK := seedVulnVS(t, migDB, cveOK)   // legitimate control
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vMis, vOK)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id IN ($1,$2)`, vMis, vOK); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Project C owns the component that project A's statement wrongly points at.
@@ -622,19 +639,18 @@ func createStatementVS(t *testing.T, appDB *sql.DB, tenantID uuid.UUID, in Creat
 func TestVEXCreateStatement_RejectsForeignProjectComponent(t *testing.T) {
 	appURL, migURL := vexSuggestionsTestEnv(t)
 	migDB := openOrSkipVS(t, migURL)
-	t.Cleanup(func() { _ = migDB.Close() })
 	if !schemaReadyVS(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVS(t, appURL)
-	defer appDB.Close()
 
 	tenantT := seedTenantVS(t, migDB, "WD")
 	sfx := uuid.New().String()[:8]
 	v := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-WD-%s", sfx))
 	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantT)
-		_, _ = migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v); err != nil {
+			t.Errorf("C27 cleanup: delete vulnerabilities rows: %v", err)
+		}
 	})
 
 	// Project A owns compA; project C owns compC.

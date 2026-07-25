@@ -88,29 +88,16 @@ func schemaReadyCRAReports(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForCRAReports(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "cra-report-test-"+label+"-"+id.String(),
-		"CRAReport Test "+label,
-		"cra-report-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "crarep-"+label)
 }
 
 func openOrSkipCRAReports(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestCRAReports_TenantIsolation_RLS verifies migration 038's load-
@@ -121,19 +108,13 @@ func TestCRAReports_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := craReportsTestEnv(t)
 
 	migDB := openOrSkipCRAReports(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRAReports(t, migDB) {
 		return
 	}
 	appDB := openOrSkipCRAReports(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForCRAReports(t, migDB, "A")
 	tenantB := seedTenantForCRAReports(t, migDB, "B")
-	t.Cleanup(func() {
-		// CASCADE FK on tenants reaps the cra_reports rows we insert.
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	projectA := uuid.New()
 	vulnA := uuid.New()
@@ -224,7 +205,6 @@ func TestCRAReports_AwarenessTime_RLS_RoundTrip(t *testing.T) {
 	appURL, migURL := craReportsTestEnv(t)
 
 	migDB := openOrSkipCRAReports(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRAReports(t, migDB) {
 		return
 	}
@@ -244,13 +224,9 @@ func TestCRAReports_AwarenessTime_RLS_RoundTrip(t *testing.T) {
 	}
 
 	appDB := openOrSkipCRAReports(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForCRAReports(t, migDB, "AW-A")
 	tenantB := seedTenantForCRAReports(t, migDB, "AW-B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	repo := NewCRAReportsRepository(appDB)
 	awareness := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
@@ -334,7 +310,6 @@ func TestCRAReports_UpdateAwarenessTime_RLS(t *testing.T) {
 	appURL, migURL := craReportsTestEnv(t)
 
 	migDB := openOrSkipCRAReports(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRAReports(t, migDB) {
 		return
 	}
@@ -354,13 +329,9 @@ func TestCRAReports_UpdateAwarenessTime_RLS(t *testing.T) {
 	}
 
 	appDB := openOrSkipCRAReports(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForCRAReports(t, migDB, "UAW-A")
 	tenantB := seedTenantForCRAReports(t, migDB, "UAW-B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	repo := NewCRAReportsRepository(appDB)
 	original := time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC)
@@ -456,14 +427,10 @@ func TestCRAReports_UpdateAwarenessTime_RLS(t *testing.T) {
 func TestCRAReports_EvidenceRequired(t *testing.T) {
 	_, migURL := craReportsTestEnv(t)
 	migDB := openOrSkipCRAReports(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRAReports(t, migDB) {
 		return
 	}
 	tenant := seedTenantForCRAReports(t, migDB, "EV")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	// M9 F158: cra_reports is under FORCE RLS, so the negative-path
 	// INSERTs below must run inside a tx with the tenant GUC set.
@@ -519,14 +486,10 @@ func TestCRAReports_EvidenceRequired(t *testing.T) {
 func TestCRAReports_ReportTypeLangStateAndDecisionChecks(t *testing.T) {
 	_, migURL := craReportsTestEnv(t)
 	migDB := openOrSkipCRAReports(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyCRAReports(t, migDB) {
 		return
 	}
 	tenant := seedTenantForCRAReports(t, migDB, "CK")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
-	})
 
 	good := `'[{"kind":"vex_draft","ref":"00000000-0000-0000-0000-000000000001"}]'::jsonb`
 

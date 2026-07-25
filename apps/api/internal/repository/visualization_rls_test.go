@@ -96,16 +96,9 @@ func schemaReadyVisualization(t *testing.T, db *sql.DB) bool {
 
 func seedTenantForVisualization(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
-	id := uuid.New()
-	if _, err := migDB.Exec(
-		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, "viz-rls-test-"+label+"-"+id.String(),
-		"VizRLS Test "+label,
-		"viz-rls-test-"+label+"-"+id.String()[:8],
-	); err != nil {
-		t.Fatalf("seed tenant %s: %v", label, err)
-	}
-	return id
+	// C27: delegates to seedIntegrationTenant, which registers an
+	// error-visible tenant DELETE cleanup at seed time.
+	return seedIntegrationTenant(t, migDB, "viz-"+label)
 }
 
 func seedProjectForVisualization(t *testing.T, migDB *sql.DB, tenant uuid.UUID, label string) uuid.UUID {
@@ -125,15 +118,9 @@ func seedProjectForVisualization(t *testing.T, migDB *sql.DB, tenant uuid.UUID, 
 
 func openOrSkipVisualization(t *testing.T, url string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", url)
-	if err != nil {
-		t.Skipf("sql.Open: %v -- skipping", err)
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		t.Skipf("db unreachable: %v -- skipping", err)
-	}
-	return db
+	// C27: delegates to openIntegrationDB, which registers Close via
+	// t.Cleanup (LIFO) so later-registered delete cleanups run first.
+	return openIntegrationDB(t, url)
 }
 
 // TestVisualization_TenantIsolation_RLS verifies migration 040's
@@ -145,20 +132,15 @@ func TestVisualization_TenantIsolation_RLS(t *testing.T) {
 	appURL, migURL := visualizationTestEnv(t)
 
 	migDB := openOrSkipVisualization(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyVisualization(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVisualization(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForVisualization(t, migDB, "A")
 	tenantB := seedTenantForVisualization(t, migDB, "B")
 	projectA := seedProjectForVisualization(t, migDB, tenantA, "A")
 	projectB := seedProjectForVisualization(t, migDB, tenantB, "B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	rowA := uuid.New()
 
@@ -280,7 +262,6 @@ func TestVisualization_TenantIsolation_RLS(t *testing.T) {
 func TestVisualization_RepositoryRejectsMissingTenantID(t *testing.T) {
 	_, migURL := visualizationTestEnv(t)
 	migDB := openOrSkipVisualization(t, migURL)
-	defer migDB.Close()
 
 	repo := NewVisualizationRepository(migDB)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -317,18 +298,13 @@ func TestVisualizationRepository_TenantTxFlow_RLSAllows(t *testing.T) {
 	appURL, migURL := visualizationTestEnv(t)
 
 	migDB := openOrSkipVisualization(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyVisualization(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVisualization(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForVisualization(t, migDB, "txflowA")
 	projectA := seedProjectForVisualization(t, migDB, tenantA, "txflowA")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id = $1`, tenantA)
-	})
 
 	repo := NewVisualizationRepository(appDB)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -464,20 +440,15 @@ func TestVisualization_RejectCrossTenantProjectID_F75(t *testing.T) {
 	appURL, migURL := visualizationTestEnv(t)
 
 	migDB := openOrSkipVisualization(t, migURL)
-	defer migDB.Close()
 	if !schemaReadyVisualizationF75(t, migDB) {
 		return
 	}
 	appDB := openOrSkipVisualization(t, appURL)
-	defer appDB.Close()
 
 	tenantA := seedTenantForVisualization(t, migDB, "f75A")
 	tenantB := seedTenantForVisualization(t, migDB, "f75B")
 	_ = seedProjectForVisualization(t, migDB, tenantA, "f75A")
 	projectB := seedProjectForVisualization(t, migDB, tenantB, "f75B")
-	t.Cleanup(func() {
-		_, _ = migDB.Exec(`DELETE FROM tenants WHERE id IN ($1, $2)`, tenantA, tenantB)
-	})
 
 	// --- Direct INSERT path: tenant A session targeting tenant B's
 	// project_id.
