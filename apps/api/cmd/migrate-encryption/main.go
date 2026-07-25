@@ -489,46 +489,13 @@ func processBatch(ctx context.Context, db *sql.DB, tenantID string, tgt target, 
 		`SELECT %s, %s FROM %s WHERE %s IS NOT NULL AND length(%s::text) > 0 AND ($1 = '' OR %s > NULLIF($1, '')::uuid) ORDER BY %s LIMIT $2 FOR UPDATE`,
 		tgt.RowID, tgt.Column, tgt.Table, tgt.Column, tgt.Column, tgt.RowID, tgt.RowID,
 	)
-	// Drain the SELECT cursor into memory before any UPDATE happens. lib/pq
-	// does not support issuing a new Exec on the same transaction while a
-	// Query iterator is still open — the second statement's Parse message
-	// races against the still-buffered Portal output and the driver surfaces
-	// it as `pq: unexpected Parse response 'C'; driver: bad connection`.
-	// The SELECT carries FOR UPDATE so the row locks persist until the
-	// surrounding transaction commits / rolls back; reading the batch into a
-	// slice does not relax the locking contract.
-	type batchRow struct {
-		rowID string
-		raw   []byte
-	}
 	rows, err := tx.QueryContext(ctx, q, after, opts.BatchSize)
 	if err != nil {
 		return 0, after, dbErr{fmt.Errorf("query %s.%s tenant=%s: %w", tgt.Table, tgt.Column, tenantID, err)}
 	}
-	batch := make([]batchRow, 0, opts.BatchSize)
-	for rows.Next() {
-		var br batchRow
-		if tgt.Format == "bytea" {
-			if err := rows.Scan(&br.rowID, &br.raw); err != nil {
-				rows.Close()
-				return 0, after, dbErr{fmt.Errorf("scan row: %w", err)}
-			}
-		} else {
-			var text string
-			if err := rows.Scan(&br.rowID, &text); err != nil {
-				rows.Close()
-				return 0, after, dbErr{fmt.Errorf("scan row: %w", err)}
-			}
-			br.raw = []byte(text)
-		}
-		batch = append(batch, br)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, after, dbErr{fmt.Errorf("iterate rows: %w", err)}
-	}
-	if err := rows.Close(); err != nil {
-		return 0, after, dbErr{fmt.Errorf("close rows: %w", err)}
+	batch, err := scanEncryptedBatch(rows, tgt.Format, opts.BatchSize)
+	if err != nil {
+		return 0, after, err
 	}
 
 	count := 0
@@ -567,6 +534,53 @@ func processBatch(ctx context.Context, db *sql.DB, tenantID string, tgt target, 
 	}
 	committed = true
 	return count, last, nil
+}
+
+// batchRow is one drained row of an encrypted-column batch SELECT.
+type batchRow struct {
+	rowID string
+	raw   []byte
+}
+
+// scanEncryptedBatch drains the SELECT cursor into memory before any UPDATE
+// happens. lib/pq does not support issuing a new Exec on the same
+// transaction while a Query iterator is still open — the second statement's
+// Parse message races against the still-buffered Portal output and the
+// driver surfaces it as `pq: unexpected Parse response 'C'; driver: bad
+// connection`. The SELECT carries FOR UPDATE so the row locks persist until
+// the surrounding transaction commits / rolls back; reading the batch into a
+// slice does not relax the locking contract.
+//
+// rows is always closed on return (deferred, so early error returns cannot
+// leak the cursor — sqlclosecheck M46 Track C); a Close failure surfaces as
+// a dbErr unless a scan/iterate error was already recorded.
+func scanEncryptedBatch(rows *sql.Rows, format string, capacity int) (batch []batchRow, err error) {
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && err == nil {
+			batch = nil
+			err = dbErr{fmt.Errorf("close rows: %w", cerr)}
+		}
+	}()
+	batch = make([]batchRow, 0, capacity)
+	for rows.Next() {
+		var br batchRow
+		if format == "bytea" {
+			if err := rows.Scan(&br.rowID, &br.raw); err != nil {
+				return nil, dbErr{fmt.Errorf("scan row: %w", err)}
+			}
+		} else {
+			var text string
+			if err := rows.Scan(&br.rowID, &text); err != nil {
+				return nil, dbErr{fmt.Errorf("scan row: %w", err)}
+			}
+			br.raw = []byte(text)
+		}
+		batch = append(batch, br)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dbErr{fmt.Errorf("iterate rows: %w", err)}
+	}
+	return batch, nil
 }
 
 func processRow(ctx context.Context, tx *sql.Tx, tenantID, rowID string, tgt target, ciphertext []byte, oldKey, newKey []byte, opts options, expected *dryRunExpectations) (rowReport, error) {

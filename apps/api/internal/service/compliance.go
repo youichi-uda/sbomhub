@@ -86,26 +86,17 @@ func (s *ComplianceService) CheckCompliance(ctx context.Context, projectID uuid.
 		Categories: []model.ComplianceCategory{},
 	}
 
-	// SBOM Generation checks
-	sbomCategory, err := s.checkSBOMGeneration(ctx, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("SBOM checks failed: %w", err)
-	}
-	result.Categories = append(result.Categories, sbomCategory)
+	// SBOM Generation checks. The three check helpers below never fail:
+	// repository errors are folded into the check outcome (an unreachable
+	// repo simply means the check is "not passed"), so they return the
+	// category directly (M46 Track C, unparam cleanup).
+	result.Categories = append(result.Categories, s.checkSBOMGeneration(ctx, projectID))
 
 	// Vulnerability Management checks
-	vulnCategory, err := s.checkVulnerabilityManagement(ctx, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("vulnerability checks failed: %w", err)
-	}
-	result.Categories = append(result.Categories, vulnCategory)
+	result.Categories = append(result.Categories, s.checkVulnerabilityManagement(ctx, projectID))
 
 	// License Management checks
-	licenseCategory, err := s.checkLicenseManagement(ctx, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("license checks failed: %w", err)
-	}
-	result.Categories = append(result.Categories, licenseCategory)
+	result.Categories = append(result.Categories, s.checkLicenseManagement(ctx, projectID))
 
 	// METI Minimum Elements checks
 	minElementsCategory, err := s.checkMinimumElements(ctx, projectID)
@@ -123,7 +114,7 @@ func (s *ComplianceService) CheckCompliance(ctx context.Context, projectID uuid.
 	return result, nil
 }
 
-func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID uuid.UUID) (model.ComplianceCategory, error) {
+func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID uuid.UUID) model.ComplianceCategory {
 	category := model.ComplianceCategory{
 		Name:     string(model.ComplianceCategorySBOM),
 		Label:    "SBOM生成",
@@ -199,10 +190,10 @@ func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID u
 	}
 	category.Checks = append(category.Checks, check3)
 
-	return category, nil
+	return category
 }
 
-func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, projectID uuid.UUID) (model.ComplianceCategory, error) {
+func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, projectID uuid.UUID) model.ComplianceCategory {
 	category := model.ComplianceCategory{
 		Name:     string(model.ComplianceCategoryVulnerability),
 		Label:    "脆弱性管理",
@@ -271,10 +262,10 @@ func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, pr
 	}
 	category.Checks = append(category.Checks, check3)
 
-	return category, nil
+	return category
 }
 
-func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectID uuid.UUID) (model.ComplianceCategory, error) {
+func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectID uuid.UUID) model.ComplianceCategory {
 	category := model.ComplianceCategory{
 		Name:     string(model.ComplianceCategoryLicense),
 		Label:    "ライセンス管理",
@@ -339,7 +330,7 @@ func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectI
 	}
 	category.Checks = append(category.Checks, check2)
 
-	return category, nil
+	return category
 }
 
 // checkMinimumElements checks METI guideline ver2.0 minimum elements (7 items)
@@ -1000,50 +991,70 @@ func (s *ComplianceService) buildCompliancePDFFooter() core.Row {
 	)
 }
 
+// reportErrs collects the first error produced by a long sequence of report
+// write calls (excelize cell writes, csv row writes). Before M46 Track C the
+// ~50 excelize error returns in GenerateComplianceExcel were silently
+// discarded, so a cell-level failure still yielded a "successful" — but
+// corrupt or incomplete — workbook. Collecting the FIRST error (later calls
+// after a failure are typically knock-on noise) and checking it once before
+// serialization keeps the call sites readable while propagating failure to
+// the HTTP handler.
+type reportErrs struct{ err error }
+
+// collect records err if it is the first failure seen.
+func (e *reportErrs) collect(err error) {
+	if e.err == nil && err != nil {
+		e.err = err
+	}
+}
+
 // GenerateComplianceExcel generates an Excel compliance report using excelize
 func (s *ComplianceService) GenerateComplianceExcel(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
 	f := excelize.NewFile()
 	defer f.Close()
 
+	ec := &reportErrs{}
+
 	// Create Summary sheet
 	sheetName := "サマリー"
-	f.SetSheetName("Sheet1", sheetName)
+	ec.collect(f.SetSheetName("Sheet1", sheetName))
 
 	// Set column widths
-	f.SetColWidth(sheetName, "A", "A", 25)
-	f.SetColWidth(sheetName, "B", "B", 35)
+	ec.collect(f.SetColWidth(sheetName, "A", "A", 25))
+	ec.collect(f.SetColWidth(sheetName, "B", "B", 35))
 
 	// Header style
-	headerStyle, _ := f.NewStyle(&excelize.Style{
+	headerStyle, err := f.NewStyle(&excelize.Style{
 		Font:      &excelize.Font{Bold: true, Size: 14, Color: "#FFFFFF"},
 		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#4472C4"}, Pattern: 1},
 		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
 	})
+	ec.collect(err)
 
 	// Title
-	f.MergeCell(sheetName, "A1", "B1")
-	f.SetCellValue(sheetName, "A1", "経産省SBOMガイドライン コンプライアンスレポート")
-	f.SetCellStyle(sheetName, "A1", "B1", headerStyle)
-	f.SetRowHeight(sheetName, 1, 30)
+	ec.collect(f.MergeCell(sheetName, "A1", "B1"))
+	ec.collect(f.SetCellValue(sheetName, "A1", "経産省SBOMガイドライン コンプライアンスレポート"))
+	ec.collect(f.SetCellStyle(sheetName, "A1", "B1", headerStyle))
+	ec.collect(f.SetRowHeight(sheetName, 1, 30))
 
 	// Metadata
-	f.SetCellValue(sheetName, "A3", "プロジェクトID")
-	f.SetCellValue(sheetName, "B3", projectID.String()[:8])
-	f.SetCellValue(sheetName, "A4", "評価日時")
-	f.SetCellValue(sheetName, "B4", time.Now().Format("2006-01-02 15:04:05"))
+	ec.collect(f.SetCellValue(sheetName, "A3", "プロジェクトID"))
+	ec.collect(f.SetCellValue(sheetName, "B3", projectID.String()[:8]))
+	ec.collect(f.SetCellValue(sheetName, "A4", "評価日時"))
+	ec.collect(f.SetCellValue(sheetName, "B4", time.Now().Format("2006-01-02 15:04:05")))
 
 	// Summary
 	pct := 0.0
 	if result.MaxScore > 0 {
 		pct = float64(result.Score) / float64(result.MaxScore) * 100
 	}
-	f.SetCellValue(sheetName, "A6", "総合スコア")
-	f.SetCellValue(sheetName, "B6", fmt.Sprintf("%d / %d (%.0f%%)", result.Score, result.MaxScore, pct))
+	ec.collect(f.SetCellValue(sheetName, "A6", "総合スコア"))
+	ec.collect(f.SetCellValue(sheetName, "B6", fmt.Sprintf("%d / %d (%.0f%%)", result.Score, result.MaxScore, pct)))
 
 	// Category scores
 	row := 8
-	f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "カテゴリ別スコア")
-	f.SetCellStyle(sheetName, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), headerStyle)
+	ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "カテゴリ別スコア"))
+	ec.collect(f.SetCellStyle(sheetName, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), headerStyle))
 	row++
 
 	for _, category := range result.Categories {
@@ -1051,57 +1062,60 @@ func (s *ComplianceService) GenerateComplianceExcel(ctx context.Context, project
 		if category.MaxScore > 0 {
 			catPct = float64(category.Score) / float64(category.MaxScore) * 100
 		}
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), category.Label)
-		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), fmt.Sprintf("%d / %d (%.0f%%)", category.Score, category.MaxScore, catPct))
+		ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), category.Label))
+		ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), fmt.Sprintf("%d / %d (%.0f%%)", category.Score, category.MaxScore, catPct)))
 		row++
 	}
 
 	// Create Details sheet
 	detailSheet := "チェック項目詳細"
-	f.NewSheet(detailSheet)
-	f.SetColWidth(detailSheet, "A", "A", 25)
-	f.SetColWidth(detailSheet, "B", "B", 40)
-	f.SetColWidth(detailSheet, "C", "C", 10)
-	f.SetColWidth(detailSheet, "D", "D", 30)
-	f.SetColWidth(detailSheet, "E", "E", 40)
+	_, err = f.NewSheet(detailSheet)
+	ec.collect(err)
+	ec.collect(f.SetColWidth(detailSheet, "A", "A", 25))
+	ec.collect(f.SetColWidth(detailSheet, "B", "B", 40))
+	ec.collect(f.SetColWidth(detailSheet, "C", "C", 10))
+	ec.collect(f.SetColWidth(detailSheet, "D", "D", 30))
+	ec.collect(f.SetColWidth(detailSheet, "E", "E", 40))
 
 	// Headers
-	f.SetCellValue(detailSheet, "A1", "カテゴリ")
-	f.SetCellValue(detailSheet, "B1", "チェック項目")
-	f.SetCellValue(detailSheet, "C1", "結果")
-	f.SetCellValue(detailSheet, "D1", "詳細")
-	f.SetCellValue(detailSheet, "E1", "推奨事項")
-	f.SetCellStyle(detailSheet, "A1", "E1", headerStyle)
+	ec.collect(f.SetCellValue(detailSheet, "A1", "カテゴリ"))
+	ec.collect(f.SetCellValue(detailSheet, "B1", "チェック項目"))
+	ec.collect(f.SetCellValue(detailSheet, "C1", "結果"))
+	ec.collect(f.SetCellValue(detailSheet, "D1", "詳細"))
+	ec.collect(f.SetCellValue(detailSheet, "E1", "推奨事項"))
+	ec.collect(f.SetCellStyle(detailSheet, "A1", "E1", headerStyle))
 
 	// Pass/Fail styles
-	passStyle, _ := f.NewStyle(&excelize.Style{
+	passStyle, err := f.NewStyle(&excelize.Style{
 		Font: &excelize.Font{Color: "#008000"},
 	})
-	failStyle, _ := f.NewStyle(&excelize.Style{
+	ec.collect(err)
+	failStyle, err := f.NewStyle(&excelize.Style{
 		Font: &excelize.Font{Color: "#FF0000"},
 	})
+	ec.collect(err)
 
 	// Data rows
 	row = 2
 	for _, category := range result.Categories {
 		for _, check := range category.Checks {
-			f.SetCellValue(detailSheet, fmt.Sprintf("A%d", row), category.Label)
-			f.SetCellValue(detailSheet, fmt.Sprintf("B%d", row), check.Label)
+			ec.collect(f.SetCellValue(detailSheet, fmt.Sprintf("A%d", row), category.Label))
+			ec.collect(f.SetCellValue(detailSheet, fmt.Sprintf("B%d", row), check.Label))
 
 			if check.Passed {
-				f.SetCellValue(detailSheet, fmt.Sprintf("C%d", row), "達成")
-				f.SetCellStyle(detailSheet, fmt.Sprintf("C%d", row), fmt.Sprintf("C%d", row), passStyle)
+				ec.collect(f.SetCellValue(detailSheet, fmt.Sprintf("C%d", row), "達成"))
+				ec.collect(f.SetCellStyle(detailSheet, fmt.Sprintf("C%d", row), fmt.Sprintf("C%d", row), passStyle))
 			} else {
-				f.SetCellValue(detailSheet, fmt.Sprintf("C%d", row), "未達成")
-				f.SetCellStyle(detailSheet, fmt.Sprintf("C%d", row), fmt.Sprintf("C%d", row), failStyle)
+				ec.collect(f.SetCellValue(detailSheet, fmt.Sprintf("C%d", row), "未達成"))
+				ec.collect(f.SetCellStyle(detailSheet, fmt.Sprintf("C%d", row), fmt.Sprintf("C%d", row), failStyle))
 			}
 
 			if check.Details != nil {
-				f.SetCellValue(detailSheet, fmt.Sprintf("D%d", row), *check.Details)
+				ec.collect(f.SetCellValue(detailSheet, fmt.Sprintf("D%d", row), *check.Details))
 			}
 
 			if !check.Passed {
-				f.SetCellValue(detailSheet, fmt.Sprintf("E%d", row), getRecommendation(check.ID))
+				ec.collect(f.SetCellValue(detailSheet, fmt.Sprintf("E%d", row), getRecommendation(check.ID)))
 			}
 			row++
 		}
@@ -1109,23 +1123,30 @@ func (s *ComplianceService) GenerateComplianceExcel(ctx context.Context, project
 
 	// Create Recommendations sheet
 	recSheet := "推奨事項"
-	f.NewSheet(recSheet)
-	f.SetColWidth(recSheet, "A", "A", 40)
-	f.SetColWidth(recSheet, "B", "B", 50)
+	_, err = f.NewSheet(recSheet)
+	ec.collect(err)
+	ec.collect(f.SetColWidth(recSheet, "A", "A", 40))
+	ec.collect(f.SetColWidth(recSheet, "B", "B", 50))
 
-	f.SetCellValue(recSheet, "A1", "未達成項目")
-	f.SetCellValue(recSheet, "B1", "推奨事項")
-	f.SetCellStyle(recSheet, "A1", "B1", headerStyle)
+	ec.collect(f.SetCellValue(recSheet, "A1", "未達成項目"))
+	ec.collect(f.SetCellValue(recSheet, "B1", "推奨事項"))
+	ec.collect(f.SetCellStyle(recSheet, "A1", "B1", headerStyle))
 
 	row = 2
 	for _, category := range result.Categories {
 		for _, check := range category.Checks {
 			if !check.Passed {
-				f.SetCellValue(recSheet, fmt.Sprintf("A%d", row), check.Label)
-				f.SetCellValue(recSheet, fmt.Sprintf("B%d", row), getRecommendation(check.ID))
+				ec.collect(f.SetCellValue(recSheet, fmt.Sprintf("A%d", row), check.Label))
+				ec.collect(f.SetCellValue(recSheet, fmt.Sprintf("B%d", row), getRecommendation(check.ID)))
 				row++
 			}
 		}
+	}
+
+	// A corrupt workbook must not be reported as success — fail before
+	// serializing if any cell/sheet/style write above failed.
+	if ec.err != nil {
+		return nil, fmt.Errorf("failed to build Excel report: %w", ec.err)
 	}
 
 	// Write to buffer
@@ -1141,19 +1162,20 @@ func (s *ComplianceService) GenerateComplianceExcel(ctx context.Context, project
 func (s *ComplianceService) GenerateComplianceCSV(ctx context.Context, projectID uuid.UUID, result *model.ComplianceResult) ([]byte, error) {
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
+	ec := &reportErrs{}
 
 	// Write BOM for Excel compatibility
 	buf.Write([]byte{0xEF, 0xBB, 0xBF})
 
 	// Header
-	writer.Write([]string{"経済産業省コンプライアンスレポート"})
-	writer.Write([]string{"プロジェクトID", projectID.String()})
-	writer.Write([]string{"評価日時", time.Now().Format("2006-01-02 15:04:05")})
-	writer.Write([]string{"総合スコア", fmt.Sprintf("%d / %d", result.Score, result.MaxScore)})
-	writer.Write([]string{""})
+	ec.collect(writer.Write([]string{"経済産業省コンプライアンスレポート"}))
+	ec.collect(writer.Write([]string{"プロジェクトID", projectID.String()}))
+	ec.collect(writer.Write([]string{"評価日時", time.Now().Format("2006-01-02 15:04:05")}))
+	ec.collect(writer.Write([]string{"総合スコア", fmt.Sprintf("%d / %d", result.Score, result.MaxScore)}))
+	ec.collect(writer.Write([]string{""}))
 
 	// Column headers
-	writer.Write([]string{"カテゴリ", "チェック項目", "結果", "詳細", "推奨事項"})
+	ec.collect(writer.Write([]string{"カテゴリ", "チェック項目", "結果", "詳細", "推奨事項"}))
 
 	// Data rows
 	for _, category := range result.Categories {
@@ -1170,17 +1192,23 @@ func (s *ComplianceService) GenerateComplianceCSV(ctx context.Context, projectID
 			if !check.Passed {
 				recommendation = getRecommendation(check.ID)
 			}
-			writer.Write([]string{
+			ec.collect(writer.Write([]string{
 				category.Label,
 				check.Label,
 				status,
 				details,
 				recommendation,
-			})
+			}))
 		}
 	}
 
 	writer.Flush()
+	// csv.Writer keeps a sticky error; Error() after Flush also covers
+	// failures that only surface at flush time.
+	ec.collect(writer.Error())
+	if ec.err != nil {
+		return nil, fmt.Errorf("failed to build CSV report: %w", ec.err)
+	}
 	return buf.Bytes(), nil
 }
 

@@ -199,6 +199,48 @@ func TestDryRun_NoDBWriteAndReport(t *testing.T) {
 	assertExpectations(t, mock)
 }
 
+// TestDryRun_ProcessesEachTenantInOwnTransaction pins the per-tenant
+// batching contract: every tenant gets its own transaction with its own
+// `set_config('app.current_tenant_id', ...)` — sqlmock's ordered
+// expectations would fail if tenant_b's rows were read inside tenant_a's
+// transaction (or with tenant_a's tenant context).
+func TestDryRun_ProcessesEachTenantInOwnTransaction(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+	plainA := []byte("tenant-a-secret")
+	plainB := []byte("tenant-b-secret")
+	ctA, err := llm.Encrypt(plainA, testOldKey)
+	if err != nil {
+		t.Fatalf("encrypt a: %v", err)
+	}
+	ctB, err := llm.Encrypt(plainB, testOldKey)
+	if err != nil {
+		t.Fatalf("encrypt b: %v", err)
+	}
+	expectTenants(mock, "tenant_a", "tenant_b")
+	expectTenantBatch(mock, "tenant_a", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("tenant_a", ctA))
+	expectTenantBatch(mock, "tenant_b", defaultLLMTarget(), "", 1000,
+		sqlmock.NewRows([]string{"tenant_id", "encrypted_api_key"}).AddRow("tenant_b", ctB))
+
+	rep, code, err := run(context.Background(), db, testOldKey, testNewKey, options{
+		Mode:      modeDryRun,
+		BatchSize: 1000,
+		Targets:   []target{defaultLLMTarget()},
+	}, nil, testNow)
+	if err != nil || code != exitOK {
+		t.Fatalf("run dry multi-tenant = code %d err %v", code, err)
+	}
+	if rep.TotalRows != 2 || rep.Succeeded != 2 {
+		t.Fatalf("unexpected report: %#v", rep)
+	}
+	if rep.Rows[0].TenantID != "tenant_a" || rep.Rows[0].SHA256 != digest(plainA) ||
+		rep.Rows[1].TenantID != "tenant_b" || rep.Rows[1].SHA256 != digest(plainB) {
+		t.Fatalf("unexpected per-tenant rows: %#v", rep.Rows)
+	}
+	assertExpectations(t, mock)
+}
+
 func TestApplyRequiresDryRunReport(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("OLD_ENCRYPTION_KEY", string(testOldKey))

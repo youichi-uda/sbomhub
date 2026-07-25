@@ -240,8 +240,12 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 		// The GetSubscription API now uses subscription.plan as source of truth
 	}
 
-	// Log event
-	h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
+	// Log event. Failures must not change the HTTP response: a non-2xx
+	// makes Lemon Squeezy re-deliver the webhook forever, which can corrupt
+	// billing state. The subscription row is already committed above, so
+	// losing the event/audit row only loses history — surface it via slog
+	// so operators can reconcile, and keep the 200.
+	if err := h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,
 		TenantID:       tenantID,
@@ -251,15 +255,23 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 		NewPlan:        plan,
 		NewStatus:      payload.Data.Attributes.Status,
 		CreatedAt:      now,
-	})
+	}); err != nil {
+		slog.Error("failed to record subscription event",
+			"error", err, "event_type", "subscription_created",
+			"subscription_id", sub.ID, "tenant_id", tenantID)
+	}
 
-	h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+	if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
 		TenantID:     &tenantID,
 		Action:       model.ActionSubscriptionCreated,
 		ResourceType: model.ResourceSubscription,
 		ResourceID:   &sub.ID,
 		Details:      map[string]interface{}{"plan": plan, "status": payload.Data.Attributes.Status},
-	})
+	}); err != nil {
+		slog.Error("failed to write subscription audit log",
+			"error", err, "action", model.ActionSubscriptionCreated,
+			"subscription_id", sub.ID, "tenant_id", tenantID)
+	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -296,8 +308,10 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, p
 		}
 	}
 
-	// Log event
-	h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
+	// Log event. Same contract as subscription_created: keep the 200 on
+	// event/audit write failure (provider retries on non-2xx), but make the
+	// loss visible via slog.
+	if err := h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,
 		TenantID:       sub.TenantID,
@@ -307,14 +321,22 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, p
 		PreviousPlan:   previousPlan,
 		NewPlan:        newPlan,
 		CreatedAt:      time.Now(),
-	})
+	}); err != nil {
+		slog.Error("failed to record subscription event",
+			"error", err, "event_type", "subscription_updated",
+			"subscription_id", sub.ID, "tenant_id", sub.TenantID)
+	}
 
-	h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+	if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
 		TenantID:     &sub.TenantID,
 		Action:       model.ActionSubscriptionUpdated,
 		ResourceType: model.ResourceSubscription,
 		ResourceID:   &sub.ID,
-	})
+	}); err != nil {
+		slog.Error("failed to write subscription audit log",
+			"error", err, "action", model.ActionSubscriptionUpdated,
+			"subscription_id", sub.ID, "tenant_id", sub.TenantID)
+	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -340,7 +362,9 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCancelled(c echo.Context,
 
 	// Note: Don't downgrade plan immediately - subscription is still active until ends_at
 
-	h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
+	// Keep the 200 on event/audit write failure (provider retries on
+	// non-2xx), but make the loss visible via slog.
+	if err := h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,
 		TenantID:       sub.TenantID,
@@ -348,14 +372,22 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCancelled(c echo.Context,
 		PreviousStatus: previousStatus,
 		NewStatus:      model.StatusCancelled,
 		CreatedAt:      now,
-	})
+	}); err != nil {
+		slog.Error("failed to record subscription event",
+			"error", err, "event_type", "subscription_cancelled",
+			"subscription_id", sub.ID, "tenant_id", sub.TenantID)
+	}
 
-	h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+	if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
 		TenantID:     &sub.TenantID,
 		Action:       model.ActionSubscriptionCancelled,
 		ResourceType: model.ResourceSubscription,
 		ResourceID:   &sub.ID,
-	})
+	}); err != nil {
+		slog.Error("failed to write subscription audit log",
+			"error", err, "action", model.ActionSubscriptionCancelled,
+			"subscription_id", sub.ID, "tenant_id", sub.TenantID)
+	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -457,21 +489,6 @@ func (h *LemonSqueezyWebhookHandler) productNameToPlan(productName string) strin
 		return model.PlanStarter
 	}
 	return model.PlanFree
-}
-
-// variantToPlan maps Lemon Squeezy variant ID to plan name (legacy, uses variant name if available)
-func (h *LemonSqueezyWebhookHandler) variantToPlan(variantID int) string {
-	variantStr := intToString(variantID)
-	switch variantStr {
-	case h.cfg.LemonSqueezyStarterVariant:
-		return model.PlanStarter
-	case h.cfg.LemonSqueezyProVariant:
-		return model.PlanPro
-	case h.cfg.LemonSqueezyTeamVariant:
-		return model.PlanTeam
-	default:
-		return model.PlanFree
-	}
 }
 
 func parseTime(s string) *time.Time {
