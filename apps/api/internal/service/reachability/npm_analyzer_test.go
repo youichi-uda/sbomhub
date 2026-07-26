@@ -11,8 +11,10 @@ package reachability
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1213,4 +1215,209 @@ func TestStripJSCode_RegexLiterals(t *testing.T) {
 	// stripped only blanks comments: string text stays readable there.
 	assert.Contains(t, stripped, "STRTEXT")
 	assert.Equal(t, strings.Count(src, "\n"), strings.Count(codeOnly, "\n"))
+}
+
+// TestNpmAnalyze_ReadFailureDegradesConfidence guards the final-round Medium
+// finding: a candidate source file that cannot be read (vanished, permission
+// denied, or swapped mid-scan — see readFileInRoot) must never be skipped
+// SILENTLY. Before the fix, making the single file that imports the
+// vulnerable package unreadable produced a verdict indistinguishable from a
+// clean negative (import_only at 0.60 plus the "no first-party source file
+// imports" note): an attacker racing the scanner could yank the one file
+// proving reachability and forge a clean result. Now the lost candidate is
+// counted, surfaced as analyzer_error evidence, and import_only confidence
+// drops to the degraded 0.50 tier (same as a failed source scan).
+func TestNpmAnalyze_ReadFailureDegradesConfidence(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("0o000 file modes do not deny reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := t.TempDir()
+	npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+	npmWriteFile(t, root, "package-lock.json", `{
+		"lockfileVersion": 3,
+		"packages": {"node_modules/acme-lodash": {"version": "4.17.21"}}
+	}`)
+	// The ONLY file that imports the vulnerable package: would be reachable
+	// if readable. Made unreadable to simulate the mid-scan loss.
+	npmWriteFile(t, root, "src/only_consumer.js",
+		"const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n")
+	require.NoError(t, os.Chmod(filepath.Join(root, "src", "only_consumer.js"), 0o000))
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(root, "src", "only_consumer.js"), 0o644)
+	})
+
+	a := &NpmAnalyzer{}
+	res, err := a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-lodash"},
+			VulnerableSymbols: []string{"defaultsDeep"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusImportOnly, res.Status,
+		"stage-1 graph hit stands; the unreadable file cannot prove more")
+	assert.InDelta(t, 0.50, res.Confidence, 0.001,
+		"a scan that LOST a candidate file must be degraded, not a clean 0.60")
+	assert.True(t, npmHasDescription(res, "could not be securely read"),
+		"expected a read-failure evidence note, got %+v", res.Evidence)
+}
+
+// TestNpmAnalyze_ReadFailureKeepsReachableConfidence: read failures can only
+// HIDE evidence, never mint it, so a reachable verdict backed by evidence
+// from files that WERE read keeps its confidence — only the incompleteness
+// note is added.
+func TestNpmAnalyze_ReadFailureKeepsReachableConfidence(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("0o000 file modes do not deny reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := t.TempDir()
+	npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+	npmWriteFile(t, root, "package-lock.json", `{
+		"lockfileVersion": 3,
+		"packages": {"node_modules/acme-lodash": {"version": "4.17.21"}}
+	}`)
+	npmWriteFile(t, root, "src/consumer.js",
+		"const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n")
+	npmWriteFile(t, root, "src/lost.js",
+		"const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n")
+	require.NoError(t, os.Chmod(filepath.Join(root, "src", "lost.js"), 0o000))
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(root, "src", "lost.js"), 0o644)
+	})
+
+	a := &NpmAnalyzer{}
+	res, err := a.Analyze(context.Background(), root,
+		ReachabilityInput{
+			Ecosystem:         "npm",
+			VulnerableModules: []string{"acme-lodash"},
+			VulnerableSymbols: []string{"defaultsDeep"},
+		})
+	require.NoError(t, err)
+	assert.Equal(t, StatusReachable, res.Status)
+	assert.InDelta(t, 0.70, res.Confidence, 0.001,
+		"found evidence stands on its own; lost files must not weaken it")
+	assert.True(t, npmHasDescription(res, "could not be securely read"),
+		"the incompleteness must still be recorded, got %+v", res.Evidence)
+}
+
+// TestReadFileInRoot_SwapDetected guards the final-round High finding
+// (TOCTOU): os.Root does NOT provide O_NOFOLLOW semantics on path components
+// — symlinks whose targets stay INSIDE the root are followed (measured on
+// go1.26.4; the canary subtest pins that fact so a future Go semantics
+// change is noticed). A regular file swapped for an in-root symlink between
+// the walker's lstat and the open therefore opens fine under os.Root alone;
+// before the fix readFileInRoot returned the TARGET's content, letting an
+// attacker smuggle node_modules code into the first-party scan (forging
+// reachable evidence) or redirect the one file proving reachability at a
+// harmless blob (hiding a real reachable). The fix detects the swap by
+// identity: fstat of the opened handle must match the walk-time lstat
+// (os.SameFile) and a post-open lstat must still name the same regular file.
+func TestReadFileInRoot_SwapDetected(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	npmWriteFile(t, root, "node_modules/payload.js", "THIRD_PARTY")
+	npmWriteFile(t, root, "src/a.js", "FIRST_PARTY")
+	if err := os.Symlink("probe", filepath.Join(root, "symlink_probe")); err != nil {
+		t.Skipf("cannot create symlinks on this platform: %v", err)
+	}
+
+	r, err := os.OpenRoot(root)
+	require.NoError(t, err)
+	defer r.Close()
+
+	t.Run("canary: raw os.Root follows in-root symlinks", func(t *testing.T) {
+		// Not a bug in os.Root — documented behaviour — but the fact the
+		// fix exists for. If this subtest ever fails, os.Root stopped
+		// following in-root links and the comments on readFileInRoot /
+		// scanNpmSource should be revisited.
+		npmWriteFile(t, root, "src/canary_target.js", "CANARY")
+		require.NoError(t, os.Symlink("canary_target.js",
+			filepath.Join(root, "src", "canary_link.js")))
+		f, err := r.Open("src/canary_link.js")
+		require.NoError(t, err,
+			"os.Root no longer follows in-root symlinks: update the TOCTOU comments")
+		defer f.Close()
+		data, err := io.ReadAll(f)
+		require.NoError(t, err)
+		assert.Equal(t, "CANARY", string(data))
+	})
+
+	t.Run("swap to in-root symlink rejected", func(t *testing.T) {
+		target := filepath.Join(root, "src", "a.js")
+		walkInfo, err := os.Lstat(target) // what WalkDir's d.Info() saw
+		require.NoError(t, err)
+		require.True(t, walkInfo.Mode().IsRegular())
+		// The attack: between the walker's lstat and the open, the checked
+		// regular file becomes a symlink to skipped third-party code whose
+		// target stays inside the root.
+		require.NoError(t, os.Remove(target))
+		require.NoError(t, os.Symlink("../node_modules/payload.js", target))
+
+		data, err := readFileInRoot(r, "src/a.js", walkInfo, npmMaxFileSizeBytes)
+		require.Error(t, err, "in-root symlink swap must be detected, not followed")
+		assert.Nil(t, data, "third-party content must never be returned")
+	})
+
+	t.Run("swap to out-of-root symlink rejected", func(t *testing.T) {
+		outside := t.TempDir()
+		npmWriteFile(t, outside, "secret.js", "OUTSIDE")
+		npmWriteFile(t, root, "src/b.js", "FIRST_PARTY")
+		target := filepath.Join(root, "src", "b.js")
+		walkInfo, err := os.Lstat(target)
+		require.NoError(t, err)
+		require.NoError(t, os.Remove(target))
+		require.NoError(t, os.Symlink(filepath.Join(outside, "secret.js"), target))
+
+		data, err := readFileInRoot(r, "src/b.js", walkInfo, npmMaxFileSizeBytes)
+		require.Error(t, err, "os.Root must refuse resolution escaping the root")
+		assert.Nil(t, data)
+	})
+
+	t.Run("swap to different regular file rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			// Documented residual: on Windows os.SameFile resolves the
+			// walk-side file ID lazily from the PATH, so a regular→regular
+			// replacement is content-change-equivalent and passes.
+			t.Skip("regular-file replacement detection is Unix-only (see readFileInRoot)")
+		}
+		npmWriteFile(t, root, "src/c.js", "FIRST_PARTY")
+		target := filepath.Join(root, "src", "c.js")
+		walkInfo, err := os.Lstat(target)
+		require.NoError(t, err)
+		require.NoError(t, os.Remove(target))
+		npmWriteFile(t, root, "src/c.js", "REPLACEMENT")
+
+		data, err := readFileInRoot(r, "src/c.js", walkInfo, npmMaxFileSizeBytes)
+		require.Error(t, err, "identity (dev/inode) mismatch must be detected")
+		assert.Nil(t, data)
+	})
+
+	t.Run("file over the limit at open time rejected", func(t *testing.T) {
+		// Exercises the fstat size gate: the walker's lstat size check can
+		// be stale (file grown after it), so readFileInRoot re-verifies
+		// against the handle.
+		npmWriteFile(t, root, "src/grown.js", "0123456789")
+		walkInfo, err := os.Lstat(filepath.Join(root, "src", "grown.js"))
+		require.NoError(t, err)
+		data, err := readFileInRoot(r, "src/grown.js", walkInfo, 4)
+		require.Error(t, err, "size must be re-verified on the opened handle")
+		assert.Nil(t, data)
+	})
+
+	t.Run("unswapped file still reads", func(t *testing.T) {
+		npmWriteFile(t, root, "src/ok.js", "LEGIT")
+		walkInfo, err := os.Lstat(filepath.Join(root, "src", "ok.js"))
+		require.NoError(t, err)
+		data, err := readFileInRoot(r, "src/ok.js", walkInfo, npmMaxFileSizeBytes)
+		require.NoError(t, err)
+		assert.Equal(t, "LEGIT", string(data))
+	})
 }
