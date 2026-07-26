@@ -109,10 +109,14 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 	// scanning a SQL NULL into the bare float64 TopRisk.EPSSScore would error.
 	// An un-synced row therefore still reads 0, exactly as before.
 	//
-	// M41: cvss_score is COALESCE'd for the identical reason — it is nullable
-	// (migration 001, DECIMAL(3,1)) and TopRisk.CVSSScore is a bare float64, so a
-	// CVE without an NVD CVSS (e.g. a JVN-only match) would error the scan and
-	// empty the whole Top Risks section (the report + dashboard symptom).
+	// M46 wave 4 (supersedes M41's COALESCE): cvss_score is read BARE into
+	// the *float64 TopRisk.CVSSScore. The old COALESCE(v.cvss_score, 0)
+	// avoided the NULL-scan 500, but at the cost of a 0-sentinel: CVSS 0.0
+	// is a real "None" score, so an un-scored (NVD "Awaiting Analysis")
+	// CRITICAL rendered as "CVSS 0.0" on the dashboard and in the PDF/Excel
+	// reports — presented as harmless. nil = un-scored (JSON: omitted),
+	// non-nil 0.0 = the real score; the outer ORDER BY already carries
+	// NULLS LAST (topRisksOrderBy) so un-scored rows tail the list.
 	// M46 B2: v.severity and c.version are DDL-nullable (an un-triaged
 	// NVD "Awaiting Analysis" row has NULL severity) and the TopRisk
 	// fields are plain strings — COALESCE'd to '' so one such row no
@@ -121,7 +125,7 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 		SELECT DISTINCT ON (v.cve_id)
 			v.cve_id,
 			COALESCE(v.epss_score, 0) as epss_score,
-			COALESCE(v.cvss_score, 0) as cvss_score,
+			v.cvss_score,
 			COALESCE(v.severity, '') as severity,
 			p.id as project_id,
 			p.name as project_name,

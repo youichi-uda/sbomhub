@@ -25,11 +25,13 @@ import "github.com/google/uuid"
 // an explicit tenant_id predicate (belt). project_id is crossed deliberately;
 // tenant_id never is.
 type CVEPathsResponse struct {
-	CVEID     string  `json:"cve_id"`
-	Severity  string  `json:"severity"`
-	CVSSScore float64 `json:"cvss_score"`
-	EPSSScore float64 `json:"epss_score"`
-	InKEV     bool    `json:"in_kev"`
+	CVEID    string `json:"cve_id"`
+	Severity string `json:"severity"`
+	// CVSSScore is nil for un-scored CVEs (no 0-sentinel — CVSS 0.0 is a
+	// real "None" score; see model.Vulnerability.CVSSScore, M46 wave 4).
+	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	EPSSScore float64  `json:"epss_score"`
+	InKEV     bool     `json:"in_kev"`
 	// AffectedProjectCount is len(AffectedProjects); mirrors CVEImpact.
 	AffectedProjectCount int `json:"affected_project_count"`
 	// TotalProjectCount is the tenant's total project count (the "N of M"

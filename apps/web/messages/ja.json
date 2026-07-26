@@ -717,6 +717,7 @@
     "noProjectsAffected": "影響を受けるプロジェクトはありません",
     "blastPercent": "プロジェクトの {pct}% に影響",
     "cvss": "CVSS {score}",
+    "cvssUnscored": "CVSS 未採点",
     "epss": "EPSS {pct}%",
     "componentCount": "{count} コンポーネント"
   },

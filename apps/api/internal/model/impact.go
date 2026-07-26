@@ -14,11 +14,13 @@ import "github.com/google/uuid"
 // carries an explicit tenant_id predicate (the belt). project_id is crossed
 // deliberately; tenant_id never is.
 type CVEImpact struct {
-	CVEID     string  `json:"cve_id"`
-	Severity  string  `json:"severity"`
-	CVSSScore float64 `json:"cvss_score"`
-	EPSSScore float64 `json:"epss_score"`
-	InKEV     bool    `json:"in_kev"`
+	CVEID    string `json:"cve_id"`
+	Severity string `json:"severity"`
+	// CVSSScore is nil for un-scored CVEs (no 0-sentinel — CVSS 0.0 is a
+	// real "None" score; see model.Vulnerability.CVSSScore, M46 wave 4).
+	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	EPSSScore float64  `json:"epss_score"`
+	InKEV     bool     `json:"in_kev"`
 	// AffectedProjectCount is len(AffectedProjects); emitted explicitly so the
 	// web summary can render "N of M projects affected" without walking the
 	// list.
@@ -54,7 +56,10 @@ type ImpactComponent struct {
 type CVEImpactMeta struct {
 	VulnerabilityID uuid.UUID
 	Severity        string
-	CVSSScore       float64
-	EPSSScore       float64
-	InKEV           bool
+	// CVSSScore is nil for un-scored CVEs — the bare nullable column is
+	// carried through so CVEImpact / CVEPathsResponse can omit it instead
+	// of presenting a 0.0 sentinel (M46 wave 4).
+	CVSSScore *float64
+	EPSSScore float64
+	InKEV     bool
 }

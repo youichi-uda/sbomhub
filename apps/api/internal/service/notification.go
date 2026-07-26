@@ -121,9 +121,10 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 		return fmt.Errorf("failed to resolve project tenant: %w", err)
 	}
 
+	testCVSS := 9.8
 	testNotif := model.VulnerabilityNotification{
 		CVEID:            "CVE-0000-0000",
-		CVSSScore:        9.8,
+		CVSSScore:        &testCVSS,
 		EPSSScore:        0.95,
 		Severity:         "CRITICAL",
 		ProjectID:        projectID.String(),
@@ -218,7 +219,25 @@ func (s *NotificationService) NotifyVulnerability(ctx context.Context, projectID
 	return nil
 }
 
-func (s *NotificationService) sendSlackNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
+// notifCVSSText renders a notification CVSS value. nil means the CVE has not
+// been scored (NVD "Awaiting Analysis") and renders as 未採点 — NEVER "0.0":
+// CVSS 0.0 is a real "None" score, so a 0-sentinel would present an
+// un-triaged finding as harmless (M46 wave 4). The wording matches the web
+// UI's un-scored rendering (create-ticket-button, ja locale); the
+// notification bodies are Japanese-fixed (新規%s脆弱性検出), so no en variant
+// is needed here.
+func notifCVSSText(score *float64) string {
+	if score == nil {
+		return "未採点"
+	}
+	return fmt.Sprintf("%.1f", *score)
+}
+
+// buildSlackVulnerabilityPayload assembles the Slack Block Kit payload for a
+// vulnerability notification. Pure (no I/O) so the rendered text — in
+// particular the un-scored CVSS contract — is unit-testable without a
+// webhook endpoint.
+func buildSlackVulnerabilityPayload(notif model.VulnerabilityNotification) map[string]interface{} {
 	severityEmoji := map[string]string{
 		"CRITICAL": ":red_circle:",
 		"HIGH":     ":orange_circle:",
@@ -231,7 +250,7 @@ func (s *NotificationService) sendSlackNotification(ctx context.Context, webhook
 		emoji = ":warning:"
 	}
 
-	payload := map[string]interface{}{
+	return map[string]interface{}{
 		"blocks": []map[string]interface{}{
 			{
 				"type": "header",
@@ -244,7 +263,7 @@ func (s *NotificationService) sendSlackNotification(ctx context.Context, webhook
 				"type": "section",
 				"fields": []map[string]interface{}{
 					{"type": "mrkdwn", "text": fmt.Sprintf("*CVE ID:*\n%s", notif.CVEID)},
-					{"type": "mrkdwn", "text": fmt.Sprintf("*CVSS:*\n%.1f (%s)", notif.CVSSScore, notif.Severity)},
+					{"type": "mrkdwn", "text": fmt.Sprintf("*CVSS:*\n%s (%s)", notifCVSSText(notif.CVSSScore), notif.Severity)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*EPSS:*\n%.1f%%", notif.EPSSScore*100)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*Project:*\n%s", notif.ProjectName)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*Component:*\n%s@%s", notif.ComponentName, notif.ComponentVersion)},
@@ -265,11 +284,17 @@ func (s *NotificationService) sendSlackNotification(ctx context.Context, webhook
 			},
 		},
 	}
+}
 
+func (s *NotificationService) sendSlackNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
+	payload := buildSlackVulnerabilityPayload(notif)
 	return s.sendWebhook(ctx, webhookURL, payload, model.NotificationChannelSlack, tenantID, projectID)
 }
 
-func (s *NotificationService) sendDiscordNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
+// buildDiscordVulnerabilityPayload assembles the Discord embed payload for a
+// vulnerability notification. Pure for the same reason as
+// buildSlackVulnerabilityPayload.
+func buildDiscordVulnerabilityPayload(notif model.VulnerabilityNotification) map[string]interface{} {
 	colorMap := map[string]int{
 		"CRITICAL": 15158332, // Red
 		"HIGH":     15105570, // Orange
@@ -282,7 +307,7 @@ func (s *NotificationService) sendDiscordNotification(ctx context.Context, webho
 		color = 3447003 // Blue
 	}
 
-	payload := map[string]interface{}{
+	return map[string]interface{}{
 		"embeds": []map[string]interface{}{
 			{
 				"title":       fmt.Sprintf("新規%s脆弱性検出", notif.Severity),
@@ -290,7 +315,7 @@ func (s *NotificationService) sendDiscordNotification(ctx context.Context, webho
 				"color":       color,
 				"fields": []map[string]interface{}{
 					{"name": "CVE ID", "value": notif.CVEID, "inline": true},
-					{"name": "CVSS", "value": fmt.Sprintf("%.1f", notif.CVSSScore), "inline": true},
+					{"name": "CVSS", "value": notifCVSSText(notif.CVSSScore), "inline": true},
 					{"name": "EPSS", "value": fmt.Sprintf("%.1f%%", notif.EPSSScore*100), "inline": true},
 					{"name": "Project", "value": notif.ProjectName, "inline": true},
 					{"name": "Component", "value": fmt.Sprintf("%s@%s", notif.ComponentName, notif.ComponentVersion), "inline": true},
@@ -299,7 +324,10 @@ func (s *NotificationService) sendDiscordNotification(ctx context.Context, webho
 			},
 		},
 	}
+}
 
+func (s *NotificationService) sendDiscordNotification(ctx context.Context, webhookURL string, notif model.VulnerabilityNotification, tenantID, projectID uuid.UUID) error {
+	payload := buildDiscordVulnerabilityPayload(notif)
 	return s.sendWebhook(ctx, webhookURL, payload, model.NotificationChannelDiscord, tenantID, projectID)
 }
 
@@ -470,7 +498,7 @@ func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotific
         </tr>
         <tr>
           <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>CVSS Score</strong></td>
-          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%.1f (%s)</td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%s (%s)</td>
         </tr>
         <tr>
           <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>EPSS Score</strong></td>
@@ -498,7 +526,7 @@ func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotific
 		color,
 		notif.Severity,
 		notif.CVEID,
-		notif.CVSSScore,
+		notifCVSSText(notif.CVSSScore),
 		notif.Severity,
 		notif.EPSSScore*100,
 		notif.ProjectName,
@@ -515,7 +543,7 @@ func (s *NotificationService) generateEmailText(notif model.VulnerabilityNotific
 	text := fmt.Sprintf(`[SBOMHub] 新規%s脆弱性検出
 
 CVE ID: %s
-CVSS Score: %.1f (%s)
+CVSS Score: %s (%s)
 EPSS Score: %.1f%%
 Project: %s
 Component: %s@%s
@@ -527,7 +555,7 @@ Component: %s@%s
 `,
 		notif.Severity,
 		notif.CVEID,
-		notif.CVSSScore,
+		notifCVSSText(notif.CVSSScore),
 		notif.Severity,
 		notif.EPSSScore*100,
 		notif.ProjectName,

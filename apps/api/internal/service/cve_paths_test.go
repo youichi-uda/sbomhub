@@ -133,7 +133,7 @@ func TestGetCVEPaths_MultiProjectFanout(t *testing.T) {
 	search := &fakeCVEPathsSearchRepo{
 		meta: &model.CVEImpactMeta{
 			VulnerabilityID: uuid.New(),
-			Severity:        "HIGH", CVSSScore: 7.5, EPSSScore: 0, InKEV: true,
+			Severity:        "HIGH", CVSSScore: f64p(7.5), EPSSScore: 0, InKEV: true,
 		},
 		totalProjects: 12,
 		affected: []model.CVEAffectedProject{
@@ -159,7 +159,7 @@ func TestGetCVEPaths_MultiProjectFanout(t *testing.T) {
 	if got.CVEID != "CVE-2024-QS" {
 		t.Errorf("cve_id = %q, want CVE-2024-QS (normalised uppercase)", got.CVEID)
 	}
-	if got.Severity != "HIGH" || got.CVSSScore != 7.5 || !got.InKEV || got.EPSSScore != 0 {
+	if got.Severity != "HIGH" || got.CVSSScore == nil || *got.CVSSScore != 7.5 || !got.InKEV || got.EPSSScore != 0 {
 		t.Errorf("meta rollup mismatch: sev=%q cvss=%v kev=%v epss=%v", got.Severity, got.CVSSScore, got.InKEV, got.EPSSScore)
 	}
 	if got.AffectedProjectCount != 2 {
@@ -244,7 +244,7 @@ func TestGetCVEPaths_ParseOncePerProject(t *testing.T) {
 		},
 	)
 	search := &fakeCVEPathsSearchRepo{
-		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: 7.5},
+		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: f64p(7.5)},
 		totalProjects: 1,
 		affected: []model.CVEAffectedProject{
 			{ProjectID: projA, ProjectName: "app", Components: []model.Component{
@@ -281,7 +281,7 @@ func TestGetCVEPaths_DegradedSPDXProject(t *testing.T) {
 	spdx := []byte(`{"spdxVersion":"SPDX-2.3","packages":[{"name":"qs","versionInfo":"6.2.0"}]}`)
 
 	search := &fakeCVEPathsSearchRepo{
-		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: 7.5},
+		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: f64p(7.5)},
 		totalProjects: 1,
 		affected: []model.CVEAffectedProject{
 			{ProjectID: projX, ProjectName: "spdx-app", Components: []model.Component{affComp("qs", "6.2.0", "pkg:npm/qs@6.2.0")}},
@@ -324,7 +324,7 @@ func TestGetCVEPaths_InGraphFalseOlderSnapshot(t *testing.T) {
 		[]cdxDep{{Ref: "root", DependsOn: []string{"express"}}},
 	)
 	search := &fakeCVEPathsSearchRepo{
-		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: 7.5},
+		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: f64p(7.5)},
 		totalProjects: 1,
 		// oldlib is affected (from an older snapshot) but absent from latest.
 		affected: []model.CVEAffectedProject{
@@ -381,7 +381,7 @@ func TestGetCVEPaths_TruncatedPropagates(t *testing.T) {
 	}
 
 	search := &fakeCVEPathsSearchRepo{
-		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: 7.5},
+		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: f64p(7.5)},
 		totalProjects: 1,
 		affected: []model.CVEAffectedProject{
 			{ProjectID: projX, ProjectName: "fan", Components: []model.Component{affComp("target", "1.0.0", "pkg:npm/target@1.0.0")}},
@@ -410,7 +410,7 @@ func TestGetCVEPaths_TruncatedPropagates(t *testing.T) {
 // empty list (JSON []), NOT nil (which the handler would map to 404).
 func TestGetCVEPaths_ZeroAffected(t *testing.T) {
 	search := &fakeCVEPathsSearchRepo{
-		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: 7.5},
+		meta:          &model.CVEImpactMeta{VulnerabilityID: uuid.New(), Severity: "HIGH", CVSSScore: f64p(7.5)},
 		totalProjects: 5,
 		affected:      []model.CVEAffectedProject{},
 	}

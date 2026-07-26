@@ -762,6 +762,17 @@ func (s *ReportService) getReportTitleI18n(reportType string, t *ReportTranslati
 }
 
 // buildExecutivePDFContent builds content for executive report (summary focused)
+// reportCVSSText renders a Top Risk's CVSS for the PDF report body. nil means
+// the CVE has not been scored (NVD "Awaiting Analysis") and renders as the
+// locale's Unscored label — NEVER "0.0": CVSS 0.0 is a real "None" score, so
+// a 0-sentinel would present an un-triaged CRITICAL as harmless (M46 wave 4).
+func reportCVSSText(score *float64, t *ReportTranslations) string {
+	if score == nil {
+		return t.Unscored
+	}
+	return fmt.Sprintf("%.1f", *score)
+}
+
 func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.ExecutiveReportData, t *ReportTranslations) {
 	// Summary Section
 	m.AddRows(s.buildPDFSectionHeader(t.Summary))
@@ -793,7 +804,7 @@ func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.Exec
 			}
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
-				fmt.Sprintf("%s - CVSS: %.1f", risk.ProjectName, risk.CVSSScore),
+				fmt.Sprintf("%s - CVSS: %s", risk.ProjectName, reportCVSSText(risk.CVSSScore, t)),
 			))
 		}
 	}
@@ -829,7 +840,7 @@ func (s *ReportService) buildTechnicalPDFContent(m core.Maroto, data *model.Exec
 			}
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
-				fmt.Sprintf("CVSS: %.1f, EPSS: %.2f%%", risk.CVSSScore, risk.EPSSScore*100),
+				fmt.Sprintf("CVSS: %s, EPSS: %.2f%%", reportCVSSText(risk.CVSSScore, t), risk.EPSSScore*100),
 			))
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("   %s", t.Project),
@@ -1143,7 +1154,14 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("A%d", row), risk.CVEID))
 			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("B%d", row), risk.ProjectName))
 			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("C%d", row), risk.ComponentName))
-			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), risk.CVSSScore))
+			// M46 wave 4: nil CVSS is "un-scored", not 0.0 — write the label
+			// string for nil and the numeric cell only for a real score, so
+			// an un-triaged CRITICAL never reads as a harmless 0.0.
+			if risk.CVSSScore != nil {
+				ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), *risk.CVSSScore))
+			} else {
+				ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), t.Unscored))
+			}
 			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("E%d", row), fmt.Sprintf("%.2f%%", risk.EPSSScore*100)))
 		}
 	}

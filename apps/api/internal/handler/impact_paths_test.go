@@ -16,6 +16,10 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// f64p builds a *float64 fixture value — CVSSScore is a pointer since M46
+// wave 4 (nil = un-scored, no 0.0 sentinel).
+func f64p(v float64) *float64 { return &v }
+
 // stubCVEPathsService drives CVEPathsHandler down its error / success paths
 // without a database. It satisfies the handler's cvePathsService interface.
 type stubCVEPathsService struct {
@@ -93,7 +97,7 @@ func TestGetCVEPaths_UnknownCVEIs404(t *testing.T) {
 // serialise as [] (F164), never null.
 func TestGetCVEPaths_ZeroAffectedIs200(t *testing.T) {
 	empty := &model.CVEPathsResponse{
-		CVEID: "CVE-2024-0001", Severity: "HIGH", CVSSScore: 7.5,
+		CVEID: "CVE-2024-0001", Severity: "HIGH", CVSSScore: f64p(7.5),
 		AffectedProjectCount: 0, TotalProjectCount: 5,
 		AffectedProjects: []model.AffectedProjectPaths{},
 	}
@@ -146,7 +150,7 @@ func TestGetCVEPaths_MissingCVEIs400(t *testing.T) {
 // round-trips with the affected project + component chain intact.
 func TestGetCVEPaths_HappyPathShape(t *testing.T) {
 	resp := &model.CVEPathsResponse{
-		CVEID: "CVE-2024-0002", Severity: "HIGH", CVSSScore: 7.5, InKEV: true,
+		CVEID: "CVE-2024-0002", Severity: "HIGH", CVSSScore: f64p(7.5), InKEV: true,
 		AffectedProjectCount: 1, TotalProjectCount: 3,
 		AffectedProjects: []model.AffectedProjectPaths{{
 			ProjectID: uuid.New(), ProjectName: "iot-gateway", SbomID: uuid.New(),

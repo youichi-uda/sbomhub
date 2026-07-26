@@ -508,7 +508,10 @@ export interface VulnerabilityCounts {
 export interface TopRisk {
   cve_id: string;
   epss_score: number;
-  cvss_score: number;
+  // M46 W4: absent for un-scored CVEs (NVD "Awaiting Analysis"). No
+  // 0-sentinel — CVSS 0.0 is a real "None" score; render un-scored as
+  // "—", never 0.0 (see Vulnerability.cvss_score).
+  cvss_score?: number;
   severity: string;
   project_id: string;
   project_name: string;
@@ -735,7 +738,8 @@ export interface ImpactAffectedProject {
 export interface CVEImpactResult {
   cve_id: string;
   severity: string;
-  cvss_score: number;
+  // M46 W4: absent for un-scored CVEs (no 0-sentinel; see Vulnerability).
+  cvss_score?: number;
   epss_score: number;
   in_kev: boolean;
   affected_project_count: number;
@@ -805,7 +809,8 @@ export interface AffectedProjectPaths {
 export interface CVEPathsResult {
   cve_id: string;
   severity: string;
-  cvss_score: number;
+  // M46 W4: absent for un-scored CVEs (no 0-sentinel; see Vulnerability).
+  cvss_score?: number;
   epss_score: number;
   in_kev: boolean;
   affected_project_count: number;

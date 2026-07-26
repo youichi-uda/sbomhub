@@ -399,7 +399,7 @@ func TestGatherReportData_PopulatesSummaryAndTopRisksFromTenantScopedDashboard(t
 	if data.TopRisks[0].EPSSScore != 0.75 {
 		t.Errorf("TopRisks[0].EPSSScore = %v, want 0.75", data.TopRisks[0].EPSSScore)
 	}
-	if data.TopRisks[0].CVSSScore != 9.1 {
+	if data.TopRisks[0].CVSSScore == nil || *data.TopRisks[0].CVSSScore != 9.1 {
 		t.Errorf("TopRisks[0].CVSSScore = %v, want 9.1", data.TopRisks[0].CVSSScore)
 	}
 
@@ -533,7 +533,7 @@ func buildFullReportData() *model.ExecutiveReportData {
 		TopRisks: []model.TopRisk{{
 			CVEID:         "CVE-2026-0001",
 			EPSSScore:     0.75,
-			CVSSScore:     9.1,
+			CVSSScore:     f64p(9.1),
 			Severity:      "CRITICAL",
 			ProjectName:   "app-a",
 			ComponentName: "libz",

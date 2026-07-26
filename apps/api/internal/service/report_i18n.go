@@ -91,6 +91,10 @@ type ReportTranslations struct {
 	// Misc
 	Hours        string
 	CriticalHigh string
+	// Unscored renders a nil (un-scored) CVSS in the PDF / Excel reports.
+	// NEVER "0.0": CVSS 0.0 is a real "None" score and a 0-sentinel would
+	// present an un-triaged CRITICAL as harmless (M46 wave 4).
+	Unscored string
 }
 
 // Japanese translations
@@ -162,6 +166,7 @@ var translationsJa = ReportTranslations{
 	Component:   "コンポーネント",
 	CVSS:        "CVSS",
 	EPSS:        "EPSS",
+	Unscored:    "未採点",
 	Date:        "日付",
 	Total:       "合計",
 	Phase:       "フェーズ",
@@ -246,6 +251,7 @@ var translationsEn = ReportTranslations{
 	Component:   "Component",
 	CVSS:        "CVSS",
 	EPSS:        "EPSS",
+	Unscored:    "Unscored",
 	Date:        "Date",
 	Total:       "Total",
 	Phase:       "Phase",

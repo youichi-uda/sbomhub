@@ -164,7 +164,7 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 	if got.Severity != "HIGH" {
 		t.Errorf("severity = %q, want HIGH", got.Severity)
 	}
-	if got.CVSSScore != 7.5 {
+	if got.CVSSScore == nil || *got.CVSSScore != 7.5 {
 		t.Errorf("cvss_score = %v, want 7.5", got.CVSSScore)
 	}
 	if !got.InKEV {
@@ -387,17 +387,24 @@ func TestCVEImpact_MultiSnapshotDedup(t *testing.T) {
 	}
 }
 
-// TestCVEImpact_NullMetaCoalesced pins the F394 fix (M28-D R2b): a KNOWN CVE
-// whose vulnerabilities row has a NULL severity and/or NULL cvss_score (both
-// columns are nullable in 001_init, and real NVD rows do arrive with a missing
-// CVSS) must NOT crash the impact lookup. Before the fix GetVulnerabilityImpactMeta
-// scanned the SQL NULL straight into a Go string/float64, which errors and 500s
-// — and never reaches the sql.ErrNoRows path, so it also breaks the "unknown CVE
-// -> 404" vs "known CVE" distinction. After the COALESCE guard the metadata
-// resolves to severity='UNKNOWN' (UPPERCASE, dashboard convention) and
-// cvss_score=0, and the affected project still aggregates normally.
+// TestCVEImpact_NullMetaCoalesced pins the F394 fix (M28-D R2b) as amended by
+// M46 wave 4: a KNOWN CVE whose vulnerabilities row has a NULL severity and/or
+// NULL cvss_score (both columns are nullable in 001_init, and real NVD rows do
+// arrive with a missing CVSS) must NOT crash the impact lookup. Before F394,
+// GetVulnerabilityImpactMeta scanned the SQL NULL straight into a Go
+// string/float64, which errors and 500s — and never reaches the sql.ErrNoRows
+// path, so it also breaks the "unknown CVE -> 404" vs "known CVE" distinction.
+// severity resolves via COALESCE to 'UNKNOWN' (UPPERCASE, dashboard
+// convention) and the affected project still aggregates normally.
 //
-// The removal of the COALESCE is the F394 mutation: with it gone, runImpact's
+// cvss_score is where M46 wave 4 flips F394's original expectation: the old
+// COALESCE(cvss_score, 0) surfaced the un-scored CVE as "CVSS 0.0" in the
+// blast-radius view — a 0-sentinel that presents an un-triaged CRITICAL as
+// harmless (CVSS 0.0 is a real "None" score). The impact path now reads the
+// bare nullable column into *float64: un-scored is nil (JSON: omitted), same
+// contract as model.Vulnerability (f97c7fa).
+//
+// The removal of the severity COALESCE is the F394 mutation: with it gone, runImpact's
 // GetCVEImpact returns a scan error and t.Fatal fires (the 500 path), and it is
 // reverted afterwards.
 func TestCVEImpact_NullMetaCoalesced(t *testing.T) {
@@ -440,12 +447,23 @@ func TestCVEImpact_NullMetaCoalesced(t *testing.T) {
 		t.Fatalf("expected non-nil impact for known null-meta CVE %s (must not 404)", cveID)
 	}
 
-	// COALESCE defaults surface gracefully instead of crashing.
+	// COALESCE default surfaces gracefully instead of crashing.
 	if got.Severity != "UNKNOWN" {
 		t.Errorf("severity = %q, want UNKNOWN (COALESCE default)", got.Severity)
 	}
-	if got.CVSSScore != 0 {
-		t.Errorf("cvss_score = %v, want 0 (COALESCE default)", got.CVSSScore)
+	// M46 wave 4: un-scored is nil, NOT the old 0-sentinel. Written against
+	// `any` so this file compiles on both the pre-fix (bare float64) and
+	// post-fix (*float64) shapes; the float64 branch is the red diagnosis.
+	switch v := any(got.CVSSScore).(type) {
+	case *float64:
+		if v != nil {
+			t.Errorf("cvss_score = %v, want nil (un-scored is NOT 0.0)", *v)
+		}
+	case float64:
+		t.Errorf("CVEImpact.CVSSScore is a bare float64 (%v): the blast-radius view "+
+			"presents an un-scored CVE as CVSS 0.0 (M46 wave-4 sentinel)", v)
+	default:
+		t.Errorf("unexpected CVSSScore type %T", v)
 	}
 	// The affected project still aggregates normally despite the null metadata.
 	if got.AffectedProjectCount != 1 || len(got.AffectedProjects) != 1 {

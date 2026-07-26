@@ -33,23 +33,28 @@ import (
 // still treats epss_score = 0 as "n/a" and suppresses the EPSS badge (F391) so
 // a KEV/critical CVE never shows a misleading "EPSS 0.0%".
 //
-// Nullable-metadata note (F394): vulnerabilities.severity (VARCHAR(20)) and
-// cvss_score (DECIMAL(3,1)) are both NULLABLE — 001_init declares neither NOT
-// NULL, and real NVD/JVN rows do arrive with a missing CVSS (e.g. a CVE awaiting
-// analysis). Scanning a SQL NULL straight into a Go string / float64 fails, so
-// without a guard a KNOWN CVE with null metadata would error and 500 — worse, it
-// would never reach the sql.ErrNoRows path, collapsing the "unknown CVE -> 404"
-// vs "known CVE, null meta" distinction. We COALESCE at the query: severity
-// defaults to 'UNKNOWN' (UPPERCASE, matching the dashboard's CRITICAL/HIGH/...
-// convention and rendering as a graceful gray badge in the web SeverityBadge,
-// which lowercases and falls back to gray for unknown keys) and cvss_score to 0.
+// Nullable-metadata note (F394, amended M46 wave 4): vulnerabilities.severity
+// (VARCHAR(20)) and cvss_score (DECIMAL(3,1)) are both NULLABLE — 001_init
+// declares neither NOT NULL, and real NVD/JVN rows do arrive with a missing
+// CVSS (e.g. a CVE awaiting analysis). Scanning a SQL NULL straight into a Go
+// string / float64 fails, so without a guard a KNOWN CVE with null metadata
+// would error and 500 — worse, it would never reach the sql.ErrNoRows path,
+// collapsing the "unknown CVE -> 404" vs "known CVE, null meta" distinction.
+// severity COALESCEs to 'UNKNOWN' (UPPERCASE, matching the dashboard's
+// CRITICAL/HIGH/... convention and rendering as a graceful gray badge in the
+// web SeverityBadge, which lowercases and falls back to gray for unknown keys).
+// cvss_score is deliberately NOT COALESCEd any more: F394's COALESCE(cvss_score, 0)
+// turned "un-scored" into a 0.0 sentinel, and CVSS 0.0 is a real "None" score —
+// the blast-radius/paths views showed an un-triaged CVE as harmless. The bare
+// nullable column scans into the *float64 CVEImpactMeta.CVSSScore (nil =
+// un-scored, JSON omits it), the same contract as model.Vulnerability (f97c7fa).
 // in_kev is BOOLEAN NOT NULL DEFAULT false (migration 020) so it needs no guard.
 func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID string) (*model.CVEImpactMeta, error) {
 	const query = `
 		SELECT
 			id,
 			COALESCE(severity, 'UNKNOWN') AS severity,
-			COALESCE(cvss_score, 0)       AS cvss_score,
+			cvss_score,
 			COALESCE(epss_score, 0)       AS epss_score,
 			in_kev
 		FROM vulnerabilities

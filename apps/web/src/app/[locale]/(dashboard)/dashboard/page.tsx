@@ -91,7 +91,9 @@ function TopRisksTable({ risks, noDataMessage, locale }: { risks: TopRisk[]; noD
             </TableCell>
             <TableCell>
               <SeverityBadge severity={risk.severity} />
-              <span className="ml-2">{risk.cvss_score.toFixed(1)}</span>
+              {/* M46 W4: cvss_score is absent for un-scored CVEs — render
+                  "—", never 0.0 (CVSS 0.0 is a real "None" score). */}
+              <span className="ml-2">{risk.cvss_score != null ? risk.cvss_score.toFixed(1) : "—"}</span>
             </TableCell>
             <TableCell>
               <Link href={`/${locale}/projects/${risk.project_id}`} className="text-blue-500 hover:underline">

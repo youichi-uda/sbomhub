@@ -717,6 +717,7 @@
     "noProjectsAffected": "No projects affected",
     "blastPercent": "{pct}% of your projects affected",
     "cvss": "CVSS {score}",
+    "cvssUnscored": "CVSS unscored",
     "epss": "EPSS {pct}%",
     "componentCount": "{count} components"
   },

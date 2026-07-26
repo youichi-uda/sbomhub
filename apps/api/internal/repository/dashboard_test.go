@@ -62,13 +62,15 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 	}
 }
 
-// TestGetTopRisksByTenant_CoalescesCVSSScore asserts cvss_score is COALESCE'd
-// like epss_score (M41). cvss_score is nullable (migration 001, DECIMAL(3,1)) and
-// TopRisk.CVSSScore is a bare float64, so a CVE with no NVD CVSS (e.g. a JVN-only
-// match) would error the scan and empty the whole Top Risks section — the exact
-// "report/dashboard TopRisks is empty" symptom. COALESCE(v.cvss_score, 0) makes
-// such a row read 0. Structural: this fails on the pre-fix bare `v.cvss_score`.
-func TestGetTopRisksByTenant_CoalescesCVSSScore(t *testing.T) {
+// TestGetTopRisksByTenant_NoCVSSZeroSentinel pins the M46 wave-4 flip of the
+// old M41 COALESCE: cvss_score must be read BARE (no COALESCE(v.cvss_score, 0))
+// and scanned into the *float64 TopRisk.CVSSScore. CVSS 0.0 is a real "None"
+// score, so the 0-sentinel made an un-scored (NVD "Awaiting Analysis") CRITICAL
+// render as "CVSS 0.0" on the dashboard and in the PDF/Excel reports — i.e. as
+// harmless. Un-scored must surface as nil (JSON: omitted), and a genuine 0.0
+// must pass through non-nil so the two stay distinguishable. Structural: the
+// negative regex fails on a revert to the COALESCE sentinel.
+func TestGetTopRisksByTenant_NoCVSSZeroSentinel(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -77,34 +79,62 @@ func TestGetTopRisksByTenant_CoalescesCVSSScore(t *testing.T) {
 
 	repo := NewDashboardRepository(db)
 
-	pattern := regexp.MustCompile(`(?is)` + regexp.QuoteMeta("COALESCE(v.cvss_score, 0)") + `\s+as\s+cvss_score`)
-	if pattern.MatchString("v.cvss_score,") {
-		t.Fatalf("pattern is vacuous: it also matches the bare pre-fix column")
+	// The query must carry the bare nullable column, not the 0-sentinel.
+	sentinel := regexp.MustCompile(`(?is)` + regexp.QuoteMeta("COALESCE(v.cvss_score, 0)"))
+	bare := regexp.MustCompile(`(?is)v\.cvss_score\s*,`)
+	if !bare.MatchString("v.cvss_score,") {
+		t.Fatalf("bare pattern is broken: it does not match the fixed column")
 	}
 
 	tenantID := uuid.New()
 	projID := uuid.New()
-	mock.ExpectQuery(pattern.String()).
+	mock.ExpectQuery(bare.String()).
 		WithArgs(tenantID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"cve_id", "epss_score", "cvss_score", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}).
-			// CVE with no NVD CVSS: COALESCE(v.cvss_score, 0) -> 0 (a bare scan errors).
-			AddRow("CVE-2026-0003", float64(0), float64(0), "MEDIUM", projID, "app-a", "libz", "1.2"))
+			// Un-scored CVE: the bare column yields a raw NULL -> nil pointer.
+			AddRow("CVE-2026-0003", float64(0), nil, "CRITICAL", projID, "app-a", "libz", "1.2").
+			// Real "None" score: 0.0 passes through non-nil.
+			AddRow("CVE-2026-0004", float64(0), float64(0), "LOW", projID, "app-a", "libw", "2.0"))
 
 	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "epss")
 	if err != nil {
 		t.Fatalf("GetTopRisksByTenant: %v", err)
 	}
-	if len(risks) != 1 {
-		t.Fatalf("len(risks) = %d, want 1", len(risks))
+	if len(risks) != 2 {
+		t.Fatalf("len(risks) = %d, want 2", len(risks))
 	}
-	if risks[0].CVSSScore != 0 {
-		t.Errorf("risks[0].CVSSScore = %v, want 0 (no-CVSS row COALESCEs to 0)", risks[0].CVSSScore)
+	if risks[0].CVSSScore != nil {
+		t.Errorf("un-scored risk CVSSScore = %v, want nil (un-scored is NOT 0.0)", *risks[0].CVSSScore)
+	}
+	if risks[1].CVSSScore == nil {
+		t.Errorf("real 0.0-scored risk CVSSScore = nil, want *0.0 (0.0 is a real 'None' score)")
+	} else if *risks[1].CVSSScore != 0 {
+		t.Errorf("real 0.0-scored risk CVSSScore = %v, want 0.0", *risks[1].CVSSScore)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+
+	// Structural negative: the emitted SQL must not have reverted to the
+	// sentinel. sqlmock matched `bare` above; assert the sentinel shape is
+	// genuinely absent from the repository's query text by re-running against
+	// an expectation that would ONLY match the sentinel form.
+	db2, mock2, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db2.Close()
+	repo2 := NewDashboardRepository(db2)
+	mock2.ExpectQuery(sentinel.String()).WithArgs(tenantID, 10).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"cve_id", "epss_score", "cvss_score", "severity",
+			"project_id", "project_name", "component_name", "component_version",
+		}))
+	if _, err := repo2.GetTopRisksByTenant(context.Background(), tenantID, 10, "epss"); err == nil {
+		t.Fatalf("query still matches the COALESCE(v.cvss_score, 0) sentinel form — wave-4 revert")
 	}
 }
 

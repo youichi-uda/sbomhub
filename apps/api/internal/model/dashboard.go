@@ -26,9 +26,15 @@ type VulnerabilityCounts struct {
 
 // TopRisk represents a high-priority vulnerability
 type TopRisk struct {
-	CVEID            string    `json:"cve_id"`
-	EPSSScore        float64   `json:"epss_score"`
-	CVSSScore        float64   `json:"cvss_score"`
+	CVEID     string  `json:"cve_id"`
+	EPSSScore float64 `json:"epss_score"`
+	// CVSSScore is nil when the CVE has not been scored (NVD "Awaiting
+	// Analysis", JVN-only matches). Deliberately NOT a 0-sentinel: CVSS 0.0
+	// is a real "None" score, and rendering un-scored as 0.0 would present
+	// an un-triaged CRITICAL as harmless on the dashboard and in the
+	// PDF/Excel reports. Same contract as model.Vulnerability.CVSSScore
+	// (M46 wave 4; f97c7fa established the shape).
+	CVSSScore        *float64  `json:"cvss_score,omitempty"`
 	Severity         string    `json:"severity"`
 	ProjectID        uuid.UUID `json:"project_id"`
 	ProjectName      string    `json:"project_name"`

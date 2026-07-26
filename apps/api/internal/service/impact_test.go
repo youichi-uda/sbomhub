@@ -7,6 +7,10 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// f64p builds a *float64 fixture value — CVSSScore is a pointer since M46
+// wave 4 (nil = un-scored, no 0.0 sentinel).
+func f64p(v float64) *float64 { return &v }
+
 // TestBuildCVEImpact_RollupAndMeta pins the pure assembly step of the
 // blast-radius view (M28-A / F388, #134): affected_project_count derives from
 // the affected list length, total_project_count is passed through, and the
@@ -16,7 +20,7 @@ func TestBuildCVEImpact_RollupAndMeta(t *testing.T) {
 	meta := &model.CVEImpactMeta{
 		VulnerabilityID: uuid.New(),
 		Severity:        "CRITICAL",
-		CVSSScore:       9.8,
+		CVSSScore:       f64p(9.8),
 		EPSSScore:       0, // EPSS fixed at 0 until 006_epss (see repository docstring)
 		InKEV:           true,
 	}
@@ -32,7 +36,7 @@ func TestBuildCVEImpact_RollupAndMeta(t *testing.T) {
 	if got.CVEID != "CVE-2024-1234" {
 		t.Errorf("cve_id = %q, want CVE-2024-1234", got.CVEID)
 	}
-	if got.Severity != "CRITICAL" || got.CVSSScore != 9.8 || !got.InKEV {
+	if got.Severity != "CRITICAL" || got.CVSSScore == nil || *got.CVSSScore != 9.8 || !got.InKEV {
 		t.Errorf("meta rollup mismatch: severity=%q cvss=%v in_kev=%v", got.Severity, got.CVSSScore, got.InKEV)
 	}
 	if got.AffectedProjectCount != 2 {
@@ -53,7 +57,7 @@ func TestBuildCVEImpact_ZeroAffected(t *testing.T) {
 	meta := &model.CVEImpactMeta{
 		VulnerabilityID: uuid.New(),
 		Severity:        "HIGH",
-		CVSSScore:       7.5,
+		CVSSScore:       f64p(7.5),
 	}
 
 	// nil affected must be normalised to an empty (non-nil) slice.

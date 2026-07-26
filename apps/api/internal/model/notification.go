@@ -45,13 +45,17 @@ type NotificationLog struct {
 
 // VulnerabilityNotification represents data for a vulnerability notification
 type VulnerabilityNotification struct {
-	CVEID            string  `json:"cve_id"`
-	CVSSScore        float64 `json:"cvss_score"`
-	EPSSScore        float64 `json:"epss_score"`
-	Severity         string  `json:"severity"`
-	ProjectID        string  `json:"project_id"`
-	ProjectName      string  `json:"project_name"`
-	ComponentName    string  `json:"component_name"`
-	ComponentVersion string  `json:"component_version"`
-	DetailsURL       string  `json:"details_url"`
+	CVEID string `json:"cve_id"`
+	// CVSSScore is nil when the CVE has not been scored (NVD "Awaiting
+	// Analysis"). No 0-sentinel: CVSS 0.0 is a real "None" score, and a
+	// Slack/Discord/email alert saying "CVSS 0.0" presents an un-triaged
+	// finding as harmless. Renderers print 未採点 for nil (M46 wave 4).
+	CVSSScore        *float64 `json:"cvss_score,omitempty"`
+	EPSSScore        float64  `json:"epss_score"`
+	Severity         string   `json:"severity"`
+	ProjectID        string   `json:"project_id"`
+	ProjectName      string   `json:"project_name"`
+	ComponentName    string   `json:"component_name"`
+	ComponentVersion string   `json:"component_version"`
+	DetailsURL       string   `json:"details_url"`
 }
