@@ -1455,7 +1455,7 @@
         "type": "timestamp with time zone"
       },
       "download_count": {
-        "nullable": true,
+        "nullable": false,
         "type": "integer"
       },
       "expires_at": {
@@ -1467,7 +1467,7 @@
         "type": "uuid"
       },
       "is_active": {
-        "nullable": true,
+        "nullable": false,
         "type": "boolean"
       },
       "name": {
@@ -1499,7 +1499,7 @@
         "type": "timestamp with time zone"
       },
       "view_count": {
-        "nullable": true,
+        "nullable": false,
         "type": "integer"
       }
     },

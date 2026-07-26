@@ -346,16 +346,14 @@ func TestF244_ReportGenerationChunkedBatch_HappyPath_RealPG_F244(t *testing.T) {
 	// Small pool so a leak surfaces as a hang / next-test-flake fast.
 	appDB.SetMaxOpenConns(3)
 
-	beforeCount := countAllTenants(t, migDB)
-
 	const N = 1200
 	seededIDs, cleanup := seedSchedIntReportTenants(t, migDB, N, "happy")
 	defer cleanup()
 
-	if got := countAllTenants(t, migDB); got != beforeCount+N {
-		t.Fatalf("fixture size drift: before=%d after=%d, want after=%d",
-			beforeCount, got, beforeCount+N)
-	}
+	// Sanity: every seeded row is really there. See the same assertion in
+	// vulnerability_scan_integration_test.go (M46) for why this is a
+	// containment check and not a whole-table delta.
+	assertTenantsSeeded(t, migDB, seededIDs)
 
 	// Confirm production chunk_size is 500 for this test.
 	prev := reportEligibilityBatchChunkSize

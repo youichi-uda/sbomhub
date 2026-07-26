@@ -391,7 +391,18 @@ type CVEInfo struct {
 	ID          string
 	Description string
 	Severity    string
-	CVSSScore   float64
+	// CVSSScore is nil when NVD published NO CVSS metrics for the CVE
+	// ("Awaiting Analysis" / "Undergoing Analysis"), which is the
+	// majority state for freshly-published CVEs.
+	//
+	// M46 B-1 High-3: this used to be a bare float64, so a metrics-less
+	// CVE was persisted as cvss_score = 0.0. 0.0 is a REAL CVSS score
+	// (severity "None"), so the wave-3 read-side *float64 contract never
+	// saw a NULL for these rows and un-triaged CVEs rendered as scored,
+	// harmless findings. The whole pipeline — extractor, struct, INSERT
+	// and UPDATE — now carries nil, matching what
+	// service/jvn.go::convertJVNItemToVulnerability already did for JVN.
+	CVSSScore   *float64
 	PublishedAt time.Time
 	ModifiedAt  time.Time
 	// Keywords extracted from CVE for matching
@@ -449,6 +460,12 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 						Value string `json:"value"`
 					} `json:"descriptions"`
 					Metrics struct {
+						CvssMetricV40 []struct {
+							CvssData struct {
+								BaseScore    float64 `json:"baseScore"`
+								BaseSeverity string  `json:"baseSeverity"`
+							} `json:"cvssData"`
+						} `json:"cvssMetricV40"`
 						CvssMetricV31 []struct {
 							CvssData struct {
 								BaseScore    float64 `json:"baseScore"`
@@ -528,8 +545,16 @@ func (j *CVESyncJob) fetchModifiedCVEs(ctx context.Context, since time.Time) ([]
 	return allCVEs, nil
 }
 
-// extractCVSSFromMetrics extracts CVSS score and severity from NVD metrics
+// extractCVSSFromMetrics extracts CVSS score and severity from NVD
+// metrics. A nil score means the CVE has no CVSS metrics at all — see
+// CVEInfo.CVSSScore (M46 B-1 High-3); it is NOT the same as a score of 0.
 func extractCVSSFromMetrics(metrics struct {
+	CvssMetricV40 []struct {
+		CvssData struct {
+			BaseScore    float64 `json:"baseScore"`
+			BaseSeverity string  `json:"baseSeverity"`
+		} `json:"cvssData"`
+	} `json:"cvssMetricV40"`
 	CvssMetricV31 []struct {
 		CvssData struct {
 			BaseScore    float64 `json:"baseScore"`
@@ -547,14 +572,27 @@ func extractCVSSFromMetrics(metrics struct {
 			BaseScore float64 `json:"baseScore"`
 		} `json:"cvssData"`
 	} `json:"cvssMetricV2"`
-}) (float64, string) {
+}) (*float64, string) {
+	// CVSS v4.0 first: NVD has published cvssMetricV40 alongside v3.1
+	// since the 2.0 API, and it is the highest-fidelity score available
+	// (M46 B-1 codex round 3). Before this branch existed, a v4-only CVE
+	// fell through every case and was persisted as un-scored — a real,
+	// possibly critical score demoted to NULL and sorted to the tail of
+	// the NULLS LAST vulnerability list.
+	if len(metrics.CvssMetricV40) > 0 {
+		m := metrics.CvssMetricV40[0].CvssData
+		score := m.BaseScore
+		return &score, strings.ToUpper(m.BaseSeverity)
+	}
 	if len(metrics.CvssMetricV31) > 0 {
 		m := metrics.CvssMetricV31[0].CvssData
-		return m.BaseScore, strings.ToUpper(m.BaseSeverity)
+		score := m.BaseScore
+		return &score, strings.ToUpper(m.BaseSeverity)
 	}
 	if len(metrics.CvssMetricV30) > 0 {
 		m := metrics.CvssMetricV30[0].CvssData
-		return m.BaseScore, strings.ToUpper(m.BaseSeverity)
+		score := m.BaseScore
+		return &score, strings.ToUpper(m.BaseSeverity)
 	}
 	if len(metrics.CvssMetricV2) > 0 {
 		score := metrics.CvssMetricV2[0].CvssData.BaseScore
@@ -564,9 +602,11 @@ func extractCVSSFromMetrics(metrics struct {
 		} else if score >= 4.0 {
 			severity = "MEDIUM"
 		}
-		return score, severity
+		return &score, severity
 	}
-	return 0, "UNKNOWN"
+	// No metrics block at all: un-scored, NOT scored 0. The caller
+	// persists nil → SQL NULL.
+	return nil, "UNKNOWN"
 }
 
 // extractKeywordsFromCPE extracts product names from CPE criteria for matching
@@ -1010,11 +1050,32 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 	// `sql: connection is already closed`. Collecting rows first
 	// resolves it while preserving the original semantics (per-match
 	// INSERT, ON CONFLICT DO NOTHING, warn-on-error, continue).
+	//
+	// M46 B-1 Medium-3: a Scan failure returns immediately instead of
+	// `continue`. The post-loop rows.Err() cannot see a per-row decode
+	// error (Next() keeps returning true, Err() stays nil at EOF), so the
+	// old skip meant the component quietly lost its
+	// component_vulnerabilities link while the chunk tx COMMITTED — a
+	// silent, permanently missing vulnerability match.
+	//
+	// What failing here actually buys (codex round 1 / Medium-2 —
+	// corrected from an earlier over-claim in this comment): the chunk's
+	// tx rolls back and matchTenantsChunked logs
+	// "CVE match chunk aborted" at WARN, so the loss is VISIBLE instead of
+	// silent, and the chunk's writes are all-or-nothing instead of
+	// partial. It does NOT trigger an automatic retry: per the F258
+	// design, matchTenantsChunked returns nil, Run still advances
+	// cve_sync_last_run, and the chunk's CVEs are only re-evaluated when
+	// NVD next modifies them. Making a chunk abort hold back the cursor is
+	// a change to F258's tick semantics and is tracked as a follow-up
+	// (see the M46 B-1 report's remaining-work section), not silently
+	// assumed here.
 	componentIDs := make([]uuid.UUID, 0)
 	for rows.Next() {
 		var componentID uuid.UUID
 		if err := rows.Scan(&componentID); err != nil {
-			continue
+			rows.Close()
+			return 0, fmt.Errorf("scan component id: %w", err)
 		}
 		componentIDs = append(componentIDs, componentID)
 	}
@@ -1229,7 +1290,9 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 	).Scan(&vulnID)
 
 	if err == sql.ErrNoRows {
-		// Create new vulnerability
+		// Create new vulnerability. cve.CVSSScore is *float64: a nil
+		// binds as SQL NULL, so an "Awaiting Analysis" CVE is stored as
+		// un-scored rather than as the 0.0 sentinel (M46 B-1 High-3).
 		vulnID = uuid.New()
 		_, err = j.db.ExecContext(ctx, `
 			INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, published_at, updated_at)
@@ -1982,11 +2045,19 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 		}
 		// Drain fully before the next round-trip on this pinned conn.
 		type cvePurl struct{ cveID, purl string }
+		// M46 B-1 Medium-3: a Scan failure fails the whole candidate tx
+		// rather than dropping the pair. The post-loop rows.Err() cannot
+		// observe a per-row decode error, so the old `continue` meant the
+		// CVE silently left the OSV fetch set — its vulnerable symbols
+		// were never fetched and never retried, while the tx committed
+		// as if the enumeration were complete.
 		pairs := make([]cvePurl, 0)
 		for rows.Next() {
 			var p cvePurl
 			if sErr := rows.Scan(&p.cveID, &p.purl); sErr != nil {
-				continue
+				rows.Close()
+				return out, fmt.Errorf("scheduler: chunk %d OSV candidate scan failed for tenant %s: %w",
+					chunkIndex, tenantID, sErr)
 			}
 			pairs = append(pairs, p)
 		}

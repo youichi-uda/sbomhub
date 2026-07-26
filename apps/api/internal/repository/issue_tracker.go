@@ -118,6 +118,11 @@ func (r *IssueTrackerRepository) ListConnections(ctx context.Context, tenantID u
 		}
 		connections = append(connections, conn)
 	}
+	// M46 B-1: a truncated connection list would silently hide a
+	// configured tracker (and the UI would offer to re-create it).
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return connections, nil
 }
@@ -153,6 +158,10 @@ func (r *IssueTrackerRepository) ListConnectionsByType(ctx context.Context, tena
 			return nil, err
 		}
 		connections = append(connections, conn)
+	}
+	// M46 B-1: same fail-closed contract as ListConnections.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return connections, nil
@@ -337,6 +346,11 @@ func (r *IssueTrackerRepository) ListTicketsByVulnerability(ctx context.Context,
 		}
 		tickets = append(tickets, t)
 	}
+	// M46 B-1: a partial ticket list reads as "this CVE has no ticket
+	// yet" and invites a duplicate ticket — fail closed.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return tickets, nil
 }
@@ -405,6 +419,12 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 		}
 		tickets = append(tickets, t)
 	}
+	// M46 B-1: without this the page could be short while `total` (a
+	// separate COUNT) stayed right, silently hiding tickets behind a
+	// consistent-looking pagination footer.
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
 
 	return tickets, total, nil
 }
@@ -459,6 +479,11 @@ func (r *IssueTrackerRepository) GetTicketsToSync(ctx context.Context, olderThan
 			return nil, err
 		}
 		tickets = append(tickets, t)
+	}
+	// M46 B-1: the sync scheduler must not treat a truncated batch as
+	// "everything is synced" — surface the failure and retry next tick.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return tickets, nil

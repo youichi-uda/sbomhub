@@ -589,6 +589,11 @@ func TestPublicLinkReads_M46W2_NullableColumnScan(t *testing.T) {
 
 	tenant := seedIntegrationTenant(t, migDB, "m46w2-plink")
 
+	// M46 B-1: migration 058 made is_active / view_count / download_count
+	// NOT NULL, so the hostile NULL seeds below need the pre-058 shape for
+	// the duration of this test (restored via t.Cleanup).
+	relaxPublicLinksNotNull(t, migDB)
+
 	projectID := uuid.New()
 	if err := execAsTenant(t, migDB, tenant, `
 		INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, 'm46w2-plink-project')
@@ -615,9 +620,9 @@ func TestPublicLinkReads_M46W2_NullableColumnScan(t *testing.T) {
 	`, nullLinkID, tenant, projectID, tokNull); err != nil {
 		t.Fatalf("seed NULL public_links row: %v", err)
 	}
-	// Populated link: distinct value per column. is_active=false is the
-	// column-order pin: a COALESCE regression that flattened it to the
-	// DDL default true would fail loudly here.
+	// Populated link: distinct value per column. is_active=false doubles
+	// as the column-order pin: a regression that flattened it to true
+	// (e.g. a stray COALESCE(is_active, true)) would fail loudly here.
 	popExpires := time.Date(2099, 2, 2, 0, 0, 0, 0, time.UTC)
 	popCreated := time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC)
 	popUpdated := time.Date(2026, 7, 2, 4, 5, 6, 0, time.UTC)
@@ -635,8 +640,12 @@ func TestPublicLinkReads_M46W2_NullableColumnScan(t *testing.T) {
 
 	assertNullLink := func(t *testing.T, l *model.PublicLink, via string) {
 		t.Helper()
-		if !l.IsActive {
-			t.Errorf("%s: IsActive = false, want DDL default true for NULL", via)
+		// M46 B-1 High-1: is_active is AUTHORIZATION state — a NULL must
+		// read as INACTIVE (fail-closed), never as the DDL default true.
+		// The wave-2 revision of this assert pinned the fail-open
+		// COALESCE(is_active, true); the expectation is now inverted.
+		if l.IsActive {
+			t.Errorf("%s: IsActive = true for a NULL is_active row, want fail-closed false (anonymous token holders must not see an active link)", via)
 		}
 		if l.ViewCount != 0 || l.DownloadCount != 0 {
 			t.Errorf("%s: view_count=%d download_count=%d, want DDL default 0 for NULL", via, l.ViewCount, l.DownloadCount)

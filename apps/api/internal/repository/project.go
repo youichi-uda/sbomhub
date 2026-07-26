@@ -46,10 +46,19 @@ func (r *ProjectRepository) Get(ctx context.Context, id uuid.UUID) (*model.Proje
 	// Note: RLS should also enforce this, but we add explicit filter for defense-in-depth
 	query := `SELECT id, tenant_id, name, COALESCE(description, ''), COALESCE(created_at, NOW()), COALESCE(updated_at, NOW()) FROM projects WHERE id = $1`
 	var p model.Project
-	var tenantID uuid.UUID
+	// M46 B-1 Medium-1: projects.tenant_id is DDL-nullable and
+	// uuid.UUID.Scan(nil) silently yields uuid.Nil. model.Project.TenantID
+	// is a *uuid.UUID, so scan through uuid.NullUUID and leave the field
+	// nil for a NULL row — "unknown owner" is representable here, unlike
+	// in the resolvers (project_tenant.go), which must error.
+	var tenantID uuid.NullUUID
 	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&p.ID, &tenantID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if tenantID.Valid {
+		tid := tenantID.UUID
+		p.TenantID = &tid
 	}
 	return &p, nil
 }
@@ -66,11 +75,16 @@ func (r *ProjectRepository) GetByTenant(ctx context.Context, tenantID, projectID
 	return &p, nil
 }
 
+// GetTenantID returns the owning tenant of a project.
+//
+// M46 B-1 Medium-1: delegates to the shared resolver, which fails loudly
+// on a NULL tenant_id instead of silently returning uuid.Nil (see
+// project_tenant.go). This one is the widest blast radius of the four:
+// NotificationService and CLIService use the result as the TENANT SCOPE
+// for subsequent reads/writes, so a silent uuid.Nil produced queries
+// scoped to a tenant that cannot exist.
 func (r *ProjectRepository) GetTenantID(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
-	query := `SELECT tenant_id FROM projects WHERE id = $1`
-	var tenantID uuid.UUID
-	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&tenantID)
-	return tenantID, err
+	return lookupProjectTenantID(ctx, r.q(ctx), id)
 }
 
 // Delete deletes a project (DEPRECATED: use DeleteByTenant instead)

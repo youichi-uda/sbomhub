@@ -50,10 +50,12 @@ func (r *LicensePolicyRepository) Create(ctx context.Context, p *model.LicensePo
 // LicensePolicyService can populate LicensePolicy.TenantID before insert
 // without growing its constructor surface (which would force a
 // cmd/server/main.go change owned by a different wave).
+//
+// M46 B-1 Medium-1: delegates to the shared resolver, which fails loudly
+// on a NULL tenant_id instead of silently returning uuid.Nil (see
+// project_tenant.go).
 func (r *LicensePolicyRepository) LookupProjectTenantID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
-	var tenantID uuid.UUID
-	err := r.q(ctx).QueryRowContext(ctx, `SELECT tenant_id FROM projects WHERE id = $1`, projectID).Scan(&tenantID)
-	return tenantID, err
+	return lookupProjectTenantID(ctx, r.q(ctx), projectID)
 }
 
 func (r *LicensePolicyRepository) Update(ctx context.Context, p *model.LicensePolicy) error {

@@ -161,9 +161,14 @@ func (r *NotificationRepository) CreateLog(ctx context.Context, log *model.Notif
 // notification-log UI was permanently empty. It now reads the real
 // `message` column into the model's Payload field; message is
 // DDL-nullable, hence the COALESCE.
+//
+// M46 B-1 Low-1: tenant_id is selected too. model.NotificationLog carries
+// the field and serializes it as `tenant_id`, so omitting it from the
+// SELECT made the now-working API emit a zero UUID on every row. The
+// column is NOT NULL since migration 045, so it scans bare.
 func (r *NotificationRepository) GetLogs(ctx context.Context, projectID uuid.UUID, limit int) ([]model.NotificationLog, error) {
 	query := `
-		SELECT id, project_id, channel, COALESCE(message, ''), status, error_message, created_at
+		SELECT id, tenant_id, project_id, channel, COALESCE(message, ''), status, error_message, created_at
 		FROM notification_logs
 		WHERE project_id = $1
 		ORDER BY created_at DESC
@@ -182,6 +187,7 @@ func (r *NotificationRepository) GetLogs(ctx context.Context, projectID uuid.UUI
 		var errMsg sql.NullString
 		if err := rows.Scan(
 			&log.ID,
+			&log.TenantID,
 			&log.ProjectID,
 			&log.Channel,
 			&log.Payload,

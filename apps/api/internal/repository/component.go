@@ -68,6 +68,11 @@ func (r *ComponentRepository) ListBySbom(ctx context.Context, sbomID uuid.UUID) 
 		}
 		components = append(components, c)
 	}
+	// M46 B-1: fail closed on a mid-iteration failure instead of
+	// returning the partial component list as if it were complete.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return components, nil
 }
 
@@ -133,6 +138,11 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 			v.EPSSPercentile = &epssPercentile
 		}
 		vulns = append(vulns, v)
+	}
+	// M46 B-1: a truncated vulnerability list must not read as "fewer
+	// findings" — surface the iteration failure.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return vulns, nil
 }
@@ -270,6 +280,11 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 		}
 		vulns = append(vulns, v)
 	}
+	// M46 B-1: same fail-closed contract as GetVulnerabilities — a short
+	// page here also skews the X-Total-Count truncation banner.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return vulns, nil
 }
 
@@ -307,6 +322,11 @@ func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Con
 			return nil, err
 		}
 		results = append(results, item)
+	}
+	// M46 B-1: fail closed rather than reporting a partial
+	// component→vulnerability mapping as complete.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

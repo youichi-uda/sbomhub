@@ -283,6 +283,9 @@ func buildCVEIntegrationFixture(t *testing.T, migDB *sql.DB, m int, tag string) 
 		}
 	}
 
+	// M46 B-1 High-3: CVEInfo.CVSSScore is *float64 (nil = un-scored, not
+	// 0.0). These fixtures are scored HIGH/7.5.
+	fixtureScore := 7.5
 	for i := 0; i < m; i++ {
 		cveID := cveIDs[i]
 		vulnID := uuid.New()
@@ -291,7 +294,7 @@ func buildCVEIntegrationFixture(t *testing.T, migDB *sql.DB, m int, tag string) 
 			ID:          cveID,
 			Description: fmt.Sprintf("F258 integration test CVE %d", i),
 			Severity:    "HIGH",
-			CVSSScore:   7.5,
+			CVSSScore:   &fixtureScore,
 			PublishedAt: time.Now(),
 			Keywords:    []string{"f258-comp"},
 		}
@@ -519,26 +522,45 @@ func TestF258_CVESyncChunkAbort_RealPG_F258(t *testing.T) {
 		tenantToFixture[f.tenantID] = f
 	}
 
-	positions := querySeededTenantPositions(t, migDB, seededIDs)
-
 	// Pick the middle seeded tenant as poison.
-	poisonID := seededIDs[N/2]
+	poisonIdx := N / 2
+	poisonID := seededIDs[poisonIdx]
 
 	prevChunk := cveMatchBatchChunkSize
 	cveMatchBatchChunkSize = 2
 	defer func() { cveMatchBatchChunkSize = prevChunk }()
 	const chunkSize = 2
-	poisonChunkIdx := positions[poisonID] / chunkSize
+
+	// M46 B-1: classify by the tenant's INDEX IN seededIDs, not by its
+	// rank in the whole `tenants` table.
+	//
+	// Unlike F234 / F244 — which call listDueTenantsBatched /
+	// listEnabledSettingsBatched and therefore really do chunk the entire
+	// tenants table, making querySeededTenantPositions the right ruler —
+	// this test hands matchTenantsChunked its OWN 12-element slice below
+	// (`tenantIDs := seededIDs`). Chunk k is therefore
+	// seededIDs[k*2:(k+1)*2], i.e. the slice index is the only thing that
+	// decides chunk membership.
+	//
+	// Using the table-wide rank happened to agree only when the seeded
+	// block started at an even absolute position. On a dev database with
+	// pre-existing tenants — and especially with other packages seeding
+	// and reaping their own tenants concurrently during
+	// `go test ./...` — the parity flips and the before/same/after sets
+	// were computed against chunk boundaries that the code never used,
+	// producing confident but wrong assertions
+	// (measured 2026-07-26: poisonPos=2877 against a 12-element slice).
+	poisonChunkIdx := poisonIdx / chunkSize
 
 	// Classify each non-poison seeded tenant by chunk relative to poison.
 	beforeChunkIDs := make([]uuid.UUID, 0)
 	sameChunkIDs := make([]uuid.UUID, 0)
 	afterChunkIDs := make([]uuid.UUID, 0)
-	for _, id := range seededIDs {
+	for i, id := range seededIDs {
 		if id == poisonID {
 			continue
 		}
-		cIdx := positions[id] / chunkSize
+		cIdx := i / chunkSize
 		switch {
 		case cIdx < poisonChunkIdx:
 			beforeChunkIDs = append(beforeChunkIDs, id)
@@ -550,16 +572,16 @@ func TestF258_CVESyncChunkAbort_RealPG_F258(t *testing.T) {
 	}
 	if len(beforeChunkIDs) == 0 {
 		t.Fatalf("F258 fixture setup: no seeded tenant in a chunk BEFORE poison — "+
-			"cannot pin (c). positions=%v poisonPos=%d poisonChunkIdx=%d",
-			positions, positions[poisonID], poisonChunkIdx)
+			"cannot pin (c). poisonIdx=%d poisonChunkIdx=%d N=%d chunkSize=%d",
+			poisonIdx, poisonChunkIdx, N, chunkSize)
 	}
 	if len(afterChunkIDs) == 0 {
 		t.Fatalf("F258 fixture setup: no seeded tenant in a chunk AFTER poison — "+
-			"cannot pin (d). positions=%v poisonPos=%d poisonChunkIdx=%d",
-			positions, positions[poisonID], poisonChunkIdx)
+			"cannot pin (d). poisonIdx=%d poisonChunkIdx=%d N=%d chunkSize=%d",
+			poisonIdx, poisonChunkIdx, N, chunkSize)
 	}
-	t.Logf("F258 fixture: poison=%s poisonPos=%d poisonChunkIdx=%d before=%d sameChunk=%d after=%d",
-		poisonID, positions[poisonID], poisonChunkIdx, len(beforeChunkIDs), len(sameChunkIDs), len(afterChunkIDs))
+	t.Logf("F258 fixture: poison=%s poisonIdx=%d poisonChunkIdx=%d before=%d sameChunk=%d after=%d",
+		poisonID, poisonIdx, poisonChunkIdx, len(beforeChunkIDs), len(sameChunkIDs), len(afterChunkIDs))
 
 	// Install the temporary poison policy AFTER the fixture is fully
 	// seeded, so seeding is unaffected by the RLS trap. Use defer

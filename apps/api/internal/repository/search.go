@@ -106,6 +106,12 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 		}
 		projectMap[projectID].AffectedComponents = append(projectMap[projectID].AffectedComponents, comp)
 	}
+	// M46 B-1: this loop decides which projects are AFFECTED by a CVE —
+	// a truncated result would report a genuinely affected project as
+	// clean (and the unaffected loop below would then list it as safe).
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	result.AffectedProjects = make([]model.AffectedProject, 0, len(projectMap))
 	for _, project := range projectMap {
@@ -139,6 +145,12 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 			return nil, err
 		}
 		result.UnaffectedProjects = append(result.UnaffectedProjects, project)
+	}
+	// M46 B-1: fail closed on the unaffected list too — silently dropping
+	// entries here understates coverage rather than risk, but the caller
+	// still deserves to know the answer is incomplete.
+	if err := unaffectedRows.Err(); err != nil {
+		return nil, err
 	}
 
 	return &result, nil

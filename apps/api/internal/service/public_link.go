@@ -294,12 +294,34 @@ func (s *PublicLinkService) LogAccess(ctx context.Context, linkID uuid.UUID, act
 	return s.linkRepo.CreateAccessLog(ctx, log)
 }
 
-// IsDownloadLimitReached is invoked from the anonymous public-download
-// flow; the caller passes the tenant id derived from the link returned by
-// GetByToken, so the repository-level tenant filter is satisfied without
-// requiring tenant middleware on the route.
+// IsDownloadLimitReached reports whether the per-link download cap is
+// exhausted WITHOUT consuming anything. The anonymous download route must
+// NOT use it to gate a download — see TryConsumeDownload — because the
+// check and the increment would be two statements and concurrent
+// requests can all pass the check before any of them increments (M46 B-1
+// High-2 TOCTOU). It remains for read-only reporting.
 func (s *PublicLinkService) IsDownloadLimitReached(ctx context.Context, tenantID, linkID uuid.UUID) (bool, error) {
 	return s.linkRepo.IsDownloadLimitReached(ctx, tenantID, linkID)
+}
+
+// TryConsumeDownload is the final gate for the anonymous public-download
+// flow: in ONE conditional UPDATE it re-checks that the link is still
+// active and unexpired and that the cap is not exhausted, and consumes
+// one download. It returns false when any of those fail — the caller must
+// then withhold the SBOM bytes it has already loaded. The caller passes
+// the tenant id derived from the link returned by GetByToken, so the
+// repository-level tenant filter is satisfied without requiring tenant
+// middleware on the route.
+func (s *PublicLinkService) TryConsumeDownload(ctx context.Context, tenantID, linkID uuid.UUID) (bool, error) {
+	return s.linkRepo.TryConsumeDownload(ctx, tenantID, linkID)
+}
+
+// TryRegisterView is the final gate for the anonymous view flow: it
+// re-checks active + not-expired at send time and bumps view_count.
+// Returns false when the link was revoked or expired while the view was
+// being assembled, in which case the caller must withhold the view.
+func (s *PublicLinkService) TryRegisterView(ctx context.Context, tenantID, linkID uuid.UUID) (bool, error) {
+	return s.linkRepo.TryRegisterView(ctx, tenantID, linkID)
 }
 
 // IncrementView / IncrementDownload run after a successful token lookup.

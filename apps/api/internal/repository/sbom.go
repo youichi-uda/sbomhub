@@ -48,10 +48,14 @@ func (r *SbomRepository) Create(ctx context.Context, s *model.Sbom) error {
 // reference to ProjectRepository) can populate sbom.TenantID before insert
 // without growing its constructor surface, which would force changes in
 // cmd/server/main.go owned by a different wave.
+//
+// M46 B-1 Medium-1: delegates to the shared resolver, which fails loudly
+// on a NULL tenant_id instead of silently returning uuid.Nil (see
+// project_tenant.go). sboms.tenant_id is NOT NULL since 027, so the
+// pre-fix uuid.Nil would have been rejected at INSERT — but with an
+// opaque constraint error instead of the real cause.
 func (r *SbomRepository) LookupProjectTenantID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
-	var tenantID uuid.UUID
-	err := r.q(ctx).QueryRowContext(ctx, `SELECT tenant_id FROM projects WHERE id = $1`, projectID).Scan(&tenantID)
-	return tenantID, err
+	return lookupProjectTenantID(ctx, r.q(ctx), projectID)
 }
 
 func (r *SbomRepository) GetLatest(ctx context.Context, projectID uuid.UUID) (*model.Sbom, error) {

@@ -54,13 +54,27 @@ func (r *PublicLinkRepository) Create(ctx context.Context, link *model.PublicLin
 // `tenant_id = $2` filter is load-bearing: migration 030 removed the RLS
 // policy on public_links, so this clause is what isolates tenants from
 // probing each other's project IDs.
-// M46 W2: is_active / view_count / download_count / created_at /
-// updated_at are DDL-nullable with defaults (009: true / 0 / 0 / now() /
-// now()) and 0 real NULL rows measured (42 rows, 2026-07-26 dev DB) — the
-// COALESCEs apply the DDL default at read time (same judgment as wave 1's
-// components.created_at). Create/Update always bind every column, so a
-// NULL can only come from out-of-band SQL.
-const publicLinkSelectColumns = `id, tenant_id, project_id, sbom_id, token, name, expires_at, COALESCE(is_active, true),
+// M46 W2 / B-1: is_active / view_count / download_count / created_at /
+// updated_at were DDL-nullable with defaults (009: true / 0 / 0 / now() /
+// now()); migration 058 made the first three NOT NULL. The COALESCEs
+// survive for pre-058 rows and out-of-band SQL, but is_active does NOT
+// take the DDL default:
+//
+//	is_active is AUTHORIZATION state for the anonymous
+//	/api/v1/public/:token flow. Wave 2 used COALESCE(is_active, true),
+//	which resolved a NULL in the ATTACKER's favour — a token holder
+//	could read the SBOM of a link whose active flag was NULL (B-1
+//	High-1, reproduced end-to-end in
+//	service/m46_b1_public_link_failclosed_integration_test.go). It is
+//	now COALESCE(is_active, false): a link that cannot prove it is
+//	active is inactive. This constant is the single source for ALL read
+//	paths (token, by-id, list) so the rule cannot diverge between the
+//	anonymous and dashboard surfaces.
+//
+// The counters keep COALESCE(..., 0) — "never viewed / downloaded" is the
+// safe reading there, and the cap check no longer depends on it anyway
+// (see TryConsumeDownload).
+const publicLinkSelectColumns = `id, tenant_id, project_id, sbom_id, token, name, expires_at, COALESCE(is_active, false),
 			allowed_downloads, password_hash, COALESCE(view_count, 0), COALESCE(download_count, 0),
 			COALESCE(created_at, NOW()), COALESCE(updated_at, NOW())`
 
@@ -212,16 +226,29 @@ func (r *PublicLinkRepository) Delete(ctx context.Context, tenantID, id uuid.UUI
 // even though the caller has just successfully looked the link up by
 // token, we still scope the UPDATE by (id, tenant_id) so the invariant
 // "no public_links mutation crosses tenant boundaries" holds uniformly.
+//
+// M46 B-1 High-2: COALESCE the counter before incrementing. NULL + 1 =
+// NULL in SQL, so a NULL view_count silently froze the counter forever
+// (pre-058 rows / out-of-band SQL). Cosmetic here, load-bearing for the
+// download counter below.
 func (r *PublicLinkRepository) IncrementView(ctx context.Context, tenantID, id uuid.UUID) error {
-	query := `UPDATE public_links SET view_count = view_count + 1 WHERE id = $1 AND tenant_id = $2`
+	query := `UPDATE public_links SET view_count = COALESCE(view_count, 0) + 1 WHERE id = $1 AND tenant_id = $2`
 	_, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
 	return err
 }
 
 // IncrementDownload bumps the download counter on a single link. Same
 // defense-in-depth as IncrementView.
+//
+// M46 B-1 High-2: the NULL + 1 = NULL freeze was an authorization bug
+// here — a link with allowed_downloads = 1 and download_count = NULL
+// passed `0 < 1` on every request, i.e. unlimited anonymous downloads.
+// The COALESCE fixes the arithmetic; the anonymous download route uses
+// TryConsumeDownload instead, which also closes the check-then-act race.
+// This method remains for callers that only need the counter bumped
+// (no cap semantics).
 func (r *PublicLinkRepository) IncrementDownload(ctx context.Context, tenantID, id uuid.UUID) error {
-	query := `UPDATE public_links SET download_count = download_count + 1 WHERE id = $1 AND tenant_id = $2`
+	query := `UPDATE public_links SET download_count = COALESCE(download_count, 0) + 1 WHERE id = $1 AND tenant_id = $2`
 	_, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
 	return err
 }
@@ -261,6 +288,123 @@ func (r *PublicLinkRepository) IsDownloadLimitReached(ctx context.Context, tenan
 		return false, nil
 	}
 	return downloaded >= int(allowed.Int64), nil
+}
+
+// publicLinkLivePredicate is the SQL form of "this share link is still
+// authorized right now", evaluated server-side at the instant of the
+// admission UPDATE.
+//
+// M46 B-1 codex round 1 / Medium-1: the anonymous flows validate
+// IsActive + ExpiresAt in Go against the row read at the START of the
+// request, then read the SBOM (a tenant-scoped tx, i.e. several more
+// round-trips). An owner who revokes the link — or an expires_at that
+// simply passes — during that window used to have no effect: the already
+// loaded bytes were still sent. Making the final admission UPDATE re-check
+// the same two conditions closes that window, because the UPDATE's WHERE
+// is evaluated against the CURRENT committed row under a row lock.
+//
+// COALESCE(is_active, false) mirrors the read path: NULL is not active
+// (High-1). expires_at is NOT NULL in the 009 DDL, so it needs no COALESCE.
+//
+// clock_timestamp(), NOT NOW() (codex round 2): NOW() is
+// transaction_timestamp() — fixed when the statement's (implicit)
+// transaction begins, and NOT re-read while the statement waits. An
+// admission UPDATE that blocks on a row lock would otherwise evaluate
+// expiry against its OWN pre-wait clock, admitting a request that queued
+// one second before expires_at — exactly the window a burst of requests
+// near expiry lands in. clock_timestamp() is the wall clock at the
+// instant the predicate runs.
+//
+// It is evaluated on the FOR UPDATE-locked row, not inline in the UPDATE
+// (codex round 3): under READ COMMITTED, an UPDATE that blocks on a row
+// lock only re-evaluates its WHERE clause when the blocker COMMITS a
+// modified row (EvalPlanQual). If the blocker ROLLS BACK — or only held
+// SELECT ... FOR UPDATE — the waiting statement proceeds against the row
+// it qualified BEFORE the wait, i.e. against a stale clock again. Locking
+// first in a CTE and testing the locked row's values afterwards makes the
+// order explicit: acquire lock, then read, then decide.
+//
+// COALESCE(is_active, false) mirrors the read path: NULL is not active
+// (High-1). expires_at is NOT NULL in the 009 DDL, so it needs no
+// COALESCE. The lock is always a primary-key lookup, so nothing here
+// costs index usage.
+const publicLinkLivePredicate = `COALESCE(l.is_active, false) = true AND l.expires_at > clock_timestamp()`
+
+// publicLinkLockCTE locks the (id, tenant_id) row and exposes the columns
+// the admission predicates need. FOR UPDATE returns the row as of AFTER
+// the lock is granted, so a concurrent writer's committed change is
+// visible and a rolled-back one is correctly ignored.
+const publicLinkLockCTE = `
+	WITH l AS (
+		SELECT id, is_active, expires_at, allowed_downloads, download_count
+		FROM public_links
+		WHERE id = $1 AND tenant_id = $2
+		FOR UPDATE
+	)`
+
+// TryConsumeDownload atomically re-authorizes the link AND consumes one
+// download in a single statement (M46 B-1 High-2 + codex rounds 1-3).
+//
+// Returns true when the download was admitted (counter advanced), false
+// when the link is inactive, expired, capped out, or does not exist for
+// this tenant. Callers MUST NOT write response bytes when it returns
+// false.
+//
+// Why one statement: the previous handler flow was check
+// (IsDownloadLimitReached) → serve → increment, so N concurrent requests
+// could all pass the check before any increment landed (TOCTOU) — a
+// 1-download link could be downloaded N times. Here the row lock taken by
+// the CTE serialises rivals and the cap is tested against the locked
+// value, so at most allowed_downloads requests can ever succeed.
+// COALESCE(download_count, 0) closes the NULL half of the bug: NULL + 1 =
+// NULL never advanced the counter, making the cap unenforceable (fixed in
+// migration 058 by NOT NULL; the COALESCE keeps pre-058 rows fail-closed
+// too).
+func (r *PublicLinkRepository) TryConsumeDownload(ctx context.Context, tenantID, id uuid.UUID) (bool, error) {
+	query := publicLinkLockCTE + `
+		UPDATE public_links p
+		SET download_count = COALESCE(l.download_count, 0) + 1
+		FROM l
+		WHERE p.id = l.id
+			AND ` + publicLinkLivePredicate + `
+			AND (l.allowed_downloads IS NULL OR COALESCE(l.download_count, 0) < l.allowed_downloads)
+	`
+	result, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+// TryRegisterView is the view-flow counterpart of TryConsumeDownload: it
+// re-checks that the link is still active and unexpired at the moment the
+// response is about to be sent, and bumps view_count in the same
+// statement. Returns false when the link was revoked or expired while the
+// request was assembling its view — the caller must then withhold the
+// project metadata / component list it had already loaded.
+//
+// There is no cap on views, so this never refuses for accounting reasons.
+func (r *PublicLinkRepository) TryRegisterView(ctx context.Context, tenantID, id uuid.UUID) (bool, error) {
+	query := publicLinkLockCTE + `
+		UPDATE public_links p
+		SET view_count = COALESCE(p.view_count, 0) + 1
+		FROM l
+		WHERE p.id = l.id
+			AND ` + publicLinkLivePredicate + `
+	`
+	result, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 // UpdateCounts replaces view/download counters wholesale. Tenant-scoped

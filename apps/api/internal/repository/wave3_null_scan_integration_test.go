@@ -889,6 +889,13 @@ func TestWave3NotificationLogs_BrokenPayloadColumn(t *testing.T) {
 		if logs[1].Payload != "" || logs[1].ErrorMessage != "" {
 			t.Errorf("GetLogs(null): payload=%q error=%q, want \"\"/\"\"", logs[1].Payload, logs[1].ErrorMessage)
 		}
+		// M46 B-1 Low-1: the model carries tenant_id and the API
+		// serializes it — GetLogs must populate it, not emit the zero
+		// UUID (notification_logs.tenant_id is NOT NULL since 045).
+		if logs[0].TenantID != tenant || logs[1].TenantID != tenant {
+			t.Errorf("GetLogs tenant_id = [%s, %s], want both %s (zero UUID means the column is not selected)",
+				logs[0].TenantID, logs[1].TenantID, tenant)
+		}
 	})
 
 	// --- CreateLog (the dead write): drive it inside an app-role tenant tx
@@ -915,6 +922,18 @@ func TestWave3NotificationLogs_BrokenPayloadColumn(t *testing.T) {
 	if err := notifRepo.CreateLog(ctx, created); err != nil {
 		t.Fatalf("CreateLog must not fail (dead `payload` column INSERT), got: %v", err)
 	}
+	// M46 B-1 Low-2: pin the NOT NULL notification_type value CreateLog
+	// writes (the model carries no type field — wave 3 hardcoded the
+	// 'vulnerability' constant in SQL). Without this SELECT the INSERT
+	// assert stays green even if the constant is typo'd.
+	var notifType string
+	if err := tx.QueryRow(
+		`SELECT notification_type FROM notification_logs WHERE id = $1`, created.ID).Scan(&notifType); err != nil {
+		t.Fatalf("read back notification_type: %v", err)
+	}
+	if notifType != "vulnerability" {
+		t.Errorf("CreateLog wrote notification_type = %q, want %q", notifType, "vulnerability")
+	}
 	logs, err := notifRepo.GetLogs(ctx, projectID, 10)
 	if err != nil {
 		t.Fatalf("GetLogs after CreateLog: %v", err)
@@ -924,7 +943,7 @@ func TestWave3NotificationLogs_BrokenPayloadColumn(t *testing.T) {
 		if logs[i].ID == created.ID {
 			found = true
 			if logs[i].Payload != "created payload" || string(logs[i].Channel) != "email" ||
-				logs[i].Status != "sent" {
+				logs[i].Status != "sent" || logs[i].TenantID != tenant {
 				t.Errorf("CreateLog round-trip mismatch: %+v", logs[i])
 			}
 		}

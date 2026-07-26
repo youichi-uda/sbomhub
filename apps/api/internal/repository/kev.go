@@ -125,6 +125,11 @@ func (r *KEVRepository) List(ctx context.Context, limit, offset int) ([]model.KE
 		}
 		entries = append(entries, e)
 	}
+	// M46 B-1: fail closed — a short KEV page next to a correct `total`
+	// looks like a normal (if sparse) catalogue.
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
 
 	return entries, total, nil
 }
@@ -160,6 +165,11 @@ func (r *KEVRepository) GetRecentEntries(ctx context.Context, after time.Time) (
 		}
 		entries = append(entries, e)
 	}
+	// M46 B-1: a truncated "recently added to KEV" feed silently drops
+	// actively-exploited CVEs from the alerting path.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return entries, nil
 }
@@ -181,6 +191,11 @@ func (r *KEVRepository) GetAllCVEIDs(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		cveIDs = append(cveIDs, cveID)
+	}
+	// M46 B-1: callers use this set to decide which vulnerabilities are
+	// KEV-listed — a truncated set silently un-flags exploited CVEs.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return cveIDs, nil
@@ -386,6 +401,11 @@ func (r *KEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uui
 			return nil, err
 		}
 		vulnerabilities = append(vulnerabilities, v)
+	}
+	// M46 B-1: the /projects/:id/kev panel must fail loudly rather than
+	// render a partial "known exploited" list as the whole truth.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return vulnerabilities, nil

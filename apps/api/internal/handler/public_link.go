@@ -198,7 +198,23 @@ func (h *PublicLinkHandler) PublicGet(c echo.Context) error {
 	// link returned by GetByToken (above, application-layer secret) is
 	// what supplies the tenant id for these defense-in-depth scoped
 	// mutations. See PublicLinkRepository.IncrementView for rationale.
-	_ = h.publicLinkService.IncrementView(c.Request().Context(), link.TenantID, link.ID)
+	//
+	// M46 B-1 codex round 1 / Medium-1: TryRegisterView re-checks active +
+	// not-expired server-side at send time, in the same statement that
+	// bumps view_count. GetPublicView validated those in Go against the
+	// row read BEFORE the tenant-scoped content reads, so an owner who
+	// revoked the link mid-request (or an expires_at that passed) had no
+	// effect on the response. Withhold the assembled view when the link is
+	// no longer live.
+	live, err := h.publicLinkService.TryRegisterView(c.Request().Context(), link.TenantID, link.ID)
+	if err != nil {
+		slog.Warn("public_link: view registration failed", "link_id", link.ID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to process request"})
+	}
+	if !live {
+		slog.Warn("public_link: link revoked or expired during the request", "ip", c.RealIP(), "link_id", link.ID)
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "invalid password or the share link is unavailable"})
+	}
 	_ = h.publicLinkService.LogAccess(c.Request().Context(), link.ID, "view", c.RealIP(), c.Request().UserAgent())
 
 	return c.JSON(http.StatusOK, view)
@@ -223,17 +239,25 @@ func (h *PublicLinkHandler) PublicDownload(c echo.Context) error {
 	// Same defense-in-depth tenant scoping as PublicGet: the anonymous
 	// route has no tenant middleware, so link.TenantID (derived from the
 	// token lookup) is what we pass to the counter/log calls.
-	limitReached, err := h.publicLinkService.IsDownloadLimitReached(c.Request().Context(), link.TenantID, link.ID)
+	//
+	// M46 B-1 High-2: check + consume is ONE conditional UPDATE. The old
+	// shape (IsDownloadLimitReached → serve → IncrementDownload) let N
+	// concurrent requests pass the check before any increment committed,
+	// so a 1-download link could be downloaded N times; and because the
+	// increment was `download_count + 1`, a NULL counter never advanced
+	// at all, making the cap permanently unenforceable. The consume
+	// happens BEFORE the bytes are written, so a cap-exhausted request
+	// cannot receive the SBOM.
+	admitted, err := h.publicLinkService.TryConsumeDownload(c.Request().Context(), link.TenantID, link.ID)
 	if err != nil {
 		slog.Warn("public_link: download limit check failed",
 			"link_id", link.ID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to process download"})
 	}
-	if limitReached {
+	if !admitted {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "download limit reached"})
 	}
 
-	_ = h.publicLinkService.IncrementDownload(c.Request().Context(), link.TenantID, link.ID)
 	_ = h.publicLinkService.LogAccess(c.Request().Context(), link.ID, "download", c.RealIP(), c.Request().UserAgent())
 
 	c.Response().Header().Set("Content-Type", "application/json")

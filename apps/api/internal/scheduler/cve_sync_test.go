@@ -148,8 +148,15 @@ func TestCVESyncJob_FetchModifiedCVEs_HTTPMock(t *testing.T) {
 	if cves[0].Description != "Test vuln in libfoo" {
 		t.Errorf("unexpected description: %q", cves[0].Description)
 	}
-	if cves[0].Severity != "HIGH" || cves[0].CVSSScore != 7.5 {
-		t.Errorf("expected HIGH/7.5, got %s/%f", cves[0].Severity, cves[0].CVSSScore)
+	// M46 B-1 High-3: CVSSScore is *float64 so a metrics-less CVE is nil
+	// (un-scored), never the 0.0 sentinel. This fixture HAS a v3.1 score.
+	if cves[0].Severity != "HIGH" {
+		t.Errorf("expected HIGH, got %s", cves[0].Severity)
+	}
+	if cves[0].CVSSScore == nil {
+		t.Errorf("expected CVSS 7.5, got nil (fixture carries cvssMetricV31)")
+	} else if *cves[0].CVSSScore != 7.5 {
+		t.Errorf("expected CVSS 7.5, got %f", *cves[0].CVSSScore)
 	}
 	// Keywords should include the CPE product for downstream matching.
 	found := false

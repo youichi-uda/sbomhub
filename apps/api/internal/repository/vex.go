@@ -57,16 +57,11 @@ func (r *VEXRepository) Create(ctx context.Context, v *model.VEXStatement) error
 // (uuid.Nil, nil) and been written into vex_statements.tenant_id. Scan
 // through uuid.NullUUID and fail loudly instead: a tenant id has no
 // meaningful default, so COALESCE would just re-encode the silent-Nil bug.
+// M46 B-1 Medium-1: the wave-2 body moved verbatim into the shared
+// resolver (project_tenant.go) so license.go / sbom.go / project.go get
+// the identical contract.
 func (r *VEXRepository) LookupProjectTenantID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
-	var tenantID uuid.NullUUID
-	err := r.q(ctx).QueryRowContext(ctx, `SELECT tenant_id FROM projects WHERE id = $1`, projectID).Scan(&tenantID)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	if !tenantID.Valid {
-		return uuid.Nil, fmt.Errorf("project %s has no tenant_id", projectID)
-	}
-	return tenantID.UUID, nil
+	return lookupProjectTenantID(ctx, r.q(ctx), projectID)
 }
 
 // ComponentBelongsToProject reports whether componentID is a component of a
