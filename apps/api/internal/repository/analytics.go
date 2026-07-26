@@ -82,6 +82,9 @@ func (r *AnalyticsRepository) GetMTTR(ctx context.Context, tenantID uuid.UUID, s
 		m.OnTarget = m.MTTRHours <= float64(m.TargetHours)
 		results = append(results, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return results, nil
 }
@@ -117,6 +120,11 @@ func (r *AnalyticsRepository) GetVulnerabilityTrend(ctx context.Context, tenantI
 			return nil, err
 		}
 		results = append(results, p)
+	}
+	// Checked BEFORE the empty-slice fallback: a mid-iteration failure must
+	// surface as an error, not silently reroute to the fallback calculation.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// If no snapshots, calculate from current data
@@ -187,6 +195,9 @@ func (r *AnalyticsRepository) calculateVulnerabilityTrend(ctx context.Context, t
 		}
 		results = append(results, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return results, nil
 }
@@ -221,10 +232,18 @@ func (r *AnalyticsRepository) GetSLOAchievement(ctx context.Context, tenantID uu
 			s.severity,
 			COALESCE(r.total_count, 0) as total_count,
 			COALESCE(r.on_target_count, 0) as on_target_count,
-			CASE
+			-- M46 wave 3: the CASE below can never yield NULL — the WHEN
+			-- guard routes every NULL-side LEFT JOIN row (r.total_count IS
+			-- NULL ⇒ COALESCE = 0) to the literal 100.0, so the ELSE
+			-- division only sees non-NULL, non-zero total_count. nullscan
+			-- cannot prove that cross-branch invariant (known FP shape);
+			-- the COALESCE is belt-and-braces that keeps the analyzer
+			-- green and preserves the same no-data semantics (100 = no
+			-- resolved rows to miss the target).
+			COALESCE(CASE
 				WHEN COALESCE(r.total_count, 0) = 0 THEN 100.0
 				ELSE (COALESCE(r.on_target_count, 0)::float / r.total_count) * 100
-			END as achievement_pct,
+			END, 100.0) as achievement_pct,
 			s.target_hours,
 			COALESCE(r.avg_mttr, 0) as avg_mttr
 		FROM slo s
@@ -253,6 +272,9 @@ func (r *AnalyticsRepository) GetSLOAchievement(ctx context.Context, tenantID uu
 		}
 		results = append(results, s)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return results, nil
 }
@@ -264,7 +286,10 @@ func (r *AnalyticsRepository) GetComplianceTrend(ctx context.Context, tenantID u
 			snapshot_date::text as date,
 			overall_score as score,
 			max_score,
-			(overall_score::float / NULLIF(max_score, 0)) * 100 as percentage,
+			-- M46 wave 3: max_score = 0 (no checklist configured yet) makes
+			-- NULLIF return NULL and the whole ratio NULL — a real snapshot
+			-- shape, not an FP. An empty scorecard reads as 0% compliant.
+			COALESCE((overall_score::float / NULLIF(max_score, 0)) * 100, 0) as percentage,
 			sbom_generation_score,
 			vulnerability_management_score,
 			license_management_score
@@ -288,6 +313,9 @@ func (r *AnalyticsRepository) GetComplianceTrend(ctx context.Context, tenantID u
 			return nil, err
 		}
 		results = append(results, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil
@@ -369,6 +397,9 @@ func (r *AnalyticsRepository) GetSLOTargets(ctx context.Context, tenantID uuid.U
 			return nil, err
 		}
 		targets = append(targets, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return targets, nil

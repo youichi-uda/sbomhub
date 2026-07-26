@@ -121,10 +121,20 @@ func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *m
 // SECURITY (migration 023) with `WITH CHECK (tenant_id = current_setting(
 // 'app.current_tenant_id')::UUID)`. Callers must populate log.TenantID
 // before calling; NotificationService resolves it from the parent project.
+//
+// M46 wave 3: this INSERT used to target a `payload` column that does not
+// exist in the 006 DDL (the real column is `message`) and never supplied
+// the NOT NULL `notification_type`, so EVERY notification send failed to
+// log with `column "payload" does not exist` (0 rows existed on the dev
+// DB despite the sender being live). model.NotificationLog carries no
+// type field (model is frozen this wave — see report), and every current
+// caller (NotificationService.logNotification) records vulnerability
+// alerts or their channel tests, so the type is written as the constant
+// 'vulnerability'.
 func (r *NotificationRepository) CreateLog(ctx context.Context, log *model.NotificationLog) error {
 	query := `
-		INSERT INTO notification_logs (id, tenant_id, project_id, channel, payload, status, error_message, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO notification_logs (id, tenant_id, project_id, notification_type, channel, message, status, error_message, created_at)
+		VALUES ($1, $2, $3, 'vulnerability', $4, $5, $6, $7, $8)
 	`
 	var errMsg sql.NullString
 	if log.ErrorMessage != "" {
@@ -144,9 +154,16 @@ func (r *NotificationRepository) CreateLog(ctx context.Context, log *model.Notif
 	return err
 }
 
+// GetLogs lists a project's notification history, newest first.
+//
+// M46 wave 3: the SELECT used to reference the non-existent `payload`
+// column (see CreateLog), so this read failed on every call and the
+// notification-log UI was permanently empty. It now reads the real
+// `message` column into the model's Payload field; message is
+// DDL-nullable, hence the COALESCE.
 func (r *NotificationRepository) GetLogs(ctx context.Context, projectID uuid.UUID, limit int) ([]model.NotificationLog, error) {
 	query := `
-		SELECT id, project_id, channel, payload, status, error_message, created_at
+		SELECT id, project_id, channel, COALESCE(message, ''), status, error_message, created_at
 		FROM notification_logs
 		WHERE project_id = $1
 		ORDER BY created_at DESC
@@ -178,10 +195,15 @@ func (r *NotificationRepository) GetLogs(ctx context.Context, projectID uuid.UUI
 		logs = append(logs, log)
 	}
 
+	// No partial results (M46 wave 3 normalization): surface a
+	// mid-iteration failure instead of a truncated history.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if logs == nil {
 		logs = []model.NotificationLog{}
 	}
-	return logs, rows.Err()
+	return logs, nil
 }
 
 // GetAllSettingsForSeverity gets all notification settings that match a severity level
@@ -231,8 +253,11 @@ func (r *NotificationRepository) GetAllSettingsForSeverity(ctx context.Context, 
 		settings = append(settings, s)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if settings == nil {
 		settings = []model.NotificationSettings{}
 	}
-	return settings, rows.Err()
+	return settings, nil
 }

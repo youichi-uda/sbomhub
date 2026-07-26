@@ -98,7 +98,7 @@ func (r *AuditRepository) Create(ctx context.Context, a *model.AuditLog) error {
 func (r *AuditRepository) List(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]model.AuditLog, error) {
 	query := `
 		SELECT id, tenant_id, user_id, action, resource_type, resource_id,
-			details, ip_address, user_agent, created_at
+			details, ip_address, COALESCE(user_agent, ''), created_at
 		FROM audit_logs
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -122,12 +122,23 @@ func (r *AuditRepository) List(ctx context.Context, tenantID uuid.UUID, limit, o
 			return nil, err
 		}
 		if len(detailsJSON) > 0 {
-			json.Unmarshal(detailsJSON, &a.Details)
+			// M46 wave 3: a JSONB column can only hold valid JSON, and the
+			// 30 real `null` rows measured on the dev DB unmarshal into a
+			// nil map without error — so a failure here means genuinely
+			// corrupt data and must surface, not be silently dropped.
+			if err := json.Unmarshal(detailsJSON, &a.Details); err != nil {
+				return nil, fmt.Errorf("unmarshal audit_logs.details for %s: %w", a.ID, err)
+			}
 		}
 		if ipStr.Valid {
 			a.IPAddress = net.ParseIP(ipStr.String)
 		}
 		logs = append(logs, a)
+	}
+	// No partial results: a mid-iteration failure returns (nil, err), not a
+	// truncated page presented as complete.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return logs, nil
 }
@@ -135,7 +146,7 @@ func (r *AuditRepository) List(ctx context.Context, tenantID uuid.UUID, limit, o
 func (r *AuditRepository) ListByUser(ctx context.Context, tenantID, userID uuid.UUID, limit, offset int) ([]model.AuditLog, error) {
 	query := `
 		SELECT id, tenant_id, user_id, action, resource_type, resource_id,
-			details, ip_address, user_agent, created_at
+			details, ip_address, COALESCE(user_agent, ''), created_at
 		FROM audit_logs
 		WHERE tenant_id = $1 AND user_id = $2
 		ORDER BY created_at DESC
@@ -159,12 +170,23 @@ func (r *AuditRepository) ListByUser(ctx context.Context, tenantID, userID uuid.
 			return nil, err
 		}
 		if len(detailsJSON) > 0 {
-			json.Unmarshal(detailsJSON, &a.Details)
+			// M46 wave 3: a JSONB column can only hold valid JSON, and the
+			// 30 real `null` rows measured on the dev DB unmarshal into a
+			// nil map without error — so a failure here means genuinely
+			// corrupt data and must surface, not be silently dropped.
+			if err := json.Unmarshal(detailsJSON, &a.Details); err != nil {
+				return nil, fmt.Errorf("unmarshal audit_logs.details for %s: %w", a.ID, err)
+			}
 		}
 		if ipStr.Valid {
 			a.IPAddress = net.ParseIP(ipStr.String)
 		}
 		logs = append(logs, a)
+	}
+	// No partial results: a mid-iteration failure returns (nil, err), not a
+	// truncated page presented as complete.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return logs, nil
 }
@@ -172,7 +194,7 @@ func (r *AuditRepository) ListByUser(ctx context.Context, tenantID, userID uuid.
 func (r *AuditRepository) ListByResource(ctx context.Context, tenantID uuid.UUID, resourceType string, resourceID uuid.UUID, limit, offset int) ([]model.AuditLog, error) {
 	query := `
 		SELECT id, tenant_id, user_id, action, resource_type, resource_id,
-			details, ip_address, user_agent, created_at
+			details, ip_address, COALESCE(user_agent, ''), created_at
 		FROM audit_logs
 		WHERE tenant_id = $1 AND resource_type = $2 AND resource_id = $3
 		ORDER BY created_at DESC
@@ -196,12 +218,23 @@ func (r *AuditRepository) ListByResource(ctx context.Context, tenantID uuid.UUID
 			return nil, err
 		}
 		if len(detailsJSON) > 0 {
-			json.Unmarshal(detailsJSON, &a.Details)
+			// M46 wave 3: a JSONB column can only hold valid JSON, and the
+			// 30 real `null` rows measured on the dev DB unmarshal into a
+			// nil map without error — so a failure here means genuinely
+			// corrupt data and must surface, not be silently dropped.
+			if err := json.Unmarshal(detailsJSON, &a.Details); err != nil {
+				return nil, fmt.Errorf("unmarshal audit_logs.details for %s: %w", a.ID, err)
+			}
 		}
 		if ipStr.Valid {
 			a.IPAddress = net.ParseIP(ipStr.String)
 		}
 		logs = append(logs, a)
+	}
+	// No partial results: a mid-iteration failure returns (nil, err), not a
+	// truncated page presented as complete.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return logs, nil
 }
@@ -315,7 +348,7 @@ func (r *AuditRepository) ListWithFilter(ctx context.Context, tenantID uuid.UUID
 
 	selectQuery := fmt.Sprintf(`
 		SELECT id, tenant_id, user_id, action, resource_type, resource_id,
-			details, ip_address, user_agent, created_at
+			details, ip_address, COALESCE(user_agent, ''), created_at
 	%s
 		ORDER BY created_at DESC
 		LIMIT $%d OFFSET $%d`, baseQuery, argIndex, argIndex+1)
@@ -339,12 +372,19 @@ func (r *AuditRepository) ListWithFilter(ctx context.Context, tenantID uuid.UUID
 			return nil, 0, err
 		}
 		if len(detailsJSON) > 0 {
-			json.Unmarshal(detailsJSON, &a.Details)
+			// See List: JSONB is always valid JSON (incl. `null`); an
+			// unmarshal failure is corrupt data and must surface.
+			if err := json.Unmarshal(detailsJSON, &a.Details); err != nil {
+				return nil, 0, fmt.Errorf("unmarshal audit_logs.details for %s: %w", a.ID, err)
+			}
 		}
 		if ipStr.Valid {
 			a.IPAddress = net.ParseIP(ipStr.String)
 		}
 		logs = append(logs, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	return logs, total, nil
@@ -379,6 +419,9 @@ func (r *AuditRepository) GetActionCounts(ctx context.Context, tenantID uuid.UUI
 		}
 		counts = append(counts, ac)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return counts, nil
 }
 
@@ -410,6 +453,9 @@ func (r *AuditRepository) GetDailyActionCounts(ctx context.Context, tenantID uui
 			"action": action,
 			"count":  count,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

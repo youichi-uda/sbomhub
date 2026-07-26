@@ -607,7 +607,7 @@ func TestGetVulnerabilitiesBySbom_VerifiesProjectMembership(t *testing.T) {
 	now := time.Now()
 
 	t.Run("happy path returns componentRepo vulns scoped to sbom_id", func(t *testing.T) {
-		mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+		mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE id`).
 			WithArgs(sbomID).
 			WillReturnRows(sqlmock.NewRows([]string{
 				"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -638,7 +638,7 @@ func TestGetVulnerabilitiesBySbom_VerifiesProjectMembership(t *testing.T) {
 
 	t.Run("project mismatch returns sql.ErrNoRows without hitting componentRepo", func(t *testing.T) {
 		wrongProject := uuid.New()
-		mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+		mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE id`).
 			WithArgs(sbomID).
 			WillReturnRows(sqlmock.NewRows([]string{
 				"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -655,7 +655,7 @@ func TestGetVulnerabilitiesBySbom_VerifiesProjectMembership(t *testing.T) {
 
 	t.Run("missing sbom returns sql.ErrNoRows", func(t *testing.T) {
 		missing := uuid.New()
-		mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+		mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE id`).
 			WithArgs(missing).
 			WillReturnError(sql.ErrNoRows)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,7 +76,8 @@ func (r *SubscriptionRepository) Create(ctx context.Context, s *model.Subscripti
 
 func (r *SubscriptionRepository) GetByTenantID(ctx context.Context, tenantID uuid.UUID) (*model.Subscription, error) {
 	query := `
-		SELECT id, tenant_id, ls_subscription_id, ls_customer_id, ls_variant_id, ls_product_id,
+		SELECT id, tenant_id, ls_subscription_id, ls_customer_id, ls_variant_id,
+			COALESCE(ls_product_id, ''),
 			status, plan, billing_anchor, current_period_start, current_period_end,
 			trial_ends_at, renews_at, ends_at, cancelled_at, created_at, updated_at
 		FROM subscriptions WHERE tenant_id = $1
@@ -101,7 +103,8 @@ func (r *SubscriptionRepository) GetByTenantID(ctx context.Context, tenantID uui
 // (migration 028).
 func (r *SubscriptionRepository) GetByLSSubscriptionID(ctx context.Context, lsSubID string) (*model.Subscription, error) {
 	query := `
-		SELECT id, tenant_id, ls_subscription_id, ls_customer_id, ls_variant_id, ls_product_id,
+		SELECT id, tenant_id, ls_subscription_id, ls_customer_id, ls_variant_id,
+			COALESCE(ls_product_id, ''),
 			status, plan, billing_anchor, current_period_start, current_period_end,
 			trial_ends_at, renews_at, ends_at, cancelled_at, created_at, updated_at
 		FROM subscriptions WHERE ls_subscription_id = $1
@@ -186,8 +189,9 @@ func (r *SubscriptionRepository) CreateEvent(ctx context.Context, e *model.Subsc
 // GetEvents returns subscription events for a tenant
 func (r *SubscriptionRepository) GetEvents(ctx context.Context, tenantID uuid.UUID, limit int) ([]model.SubscriptionEvent, error) {
 	query := `
-		SELECT id, subscription_id, tenant_id, event_type, ls_event_id,
-			previous_status, new_status, previous_plan, new_plan, metadata, created_at
+		SELECT id, subscription_id, tenant_id, event_type,
+			COALESCE(ls_event_id, ''), COALESCE(previous_status, ''), COALESCE(new_status, ''),
+			COALESCE(previous_plan, ''), COALESCE(new_plan, ''), metadata, created_at
 		FROM subscription_events
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -210,9 +214,18 @@ func (r *SubscriptionRepository) GetEvents(ctx context.Context, tenantID uuid.UU
 			return nil, err
 		}
 		if len(metadataJSON) > 0 {
-			json.Unmarshal(metadataJSON, &e.Metadata)
+			// M46 wave 3: JSONB is always valid JSON (a `null` value
+			// unmarshals into a nil map without error), so a failure here
+			// is corrupt data and must surface instead of yielding an
+			// event with silently-missing metadata.
+			if err := json.Unmarshal(metadataJSON, &e.Metadata); err != nil {
+				return nil, fmt.Errorf("unmarshal subscription_events.metadata for %s: %w", e.ID, err)
+			}
 		}
 		events = append(events, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return events, nil
 }
@@ -238,7 +251,10 @@ func (r *SubscriptionRepository) GetPlanLimits(ctx context.Context, plan string)
 		return nil, err
 	}
 	if len(featuresJSON) > 0 {
-		json.Unmarshal(featuresJSON, &pl.Features)
+		// See GetEvents: JSONB unmarshal failure means corrupt data.
+		if err := json.Unmarshal(featuresJSON, &pl.Features); err != nil {
+			return nil, fmt.Errorf("unmarshal plan_limits.features for plan %q: %w", plan, err)
+		}
 	}
 	return &pl, nil
 }
@@ -277,6 +293,9 @@ func (r *SubscriptionRepository) GetUsage(ctx context.Context, tenantID uuid.UUI
 			return nil, err
 		}
 		records = append(records, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return records, nil
 }

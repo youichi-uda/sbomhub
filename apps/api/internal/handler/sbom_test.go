@@ -386,7 +386,7 @@ func TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26(t *testing.T) {
 
 	// CountVulnerabilities (added by #F28) runs first: GetLatest +
 	// COUNT(*) — both required so the handler can emit X-Total-Count.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -397,7 +397,7 @@ func TestSBOMHandler_GetVulnerabilities_DefaultLimit_F26(t *testing.T) {
 
 	// GetVulnerabilitiesPaginated repeats GetLatest then runs the
 	// page query.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -484,7 +484,7 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 	now := time.Now()
 
 	// CountVulnerabilities (#F28) runs first: GetLatest + COUNT(*).
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -494,7 +494,7 @@ func TestSBOMHandler_GetVulnerabilities_OffsetPagination_F26(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(350))
 
 	// GetVulnerabilitiesPaginated repeats GetLatest then runs the page.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -604,7 +604,7 @@ func driveSortHappyPath(t *testing.T, query, wantOrderBy string) {
 	now := time.Now()
 
 	// CountVulnerabilities (#F28) runs first: GetLatest + COUNT(*).
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -614,7 +614,7 @@ func driveSortHappyPath(t *testing.T, query, wantOrderBy string) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 
 	// GetVulnerabilitiesPaginated repeats GetLatest then runs the page.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -720,7 +720,7 @@ func TestSBOMHandler_GetVulnerabilities_OffsetAtCap_F27(t *testing.T) {
 
 	// GetLatest is called twice: once by CountVulnerabilities (for
 	// the X-Total-Count header) and once by GetVulnerabilitiesPaginated.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -729,7 +729,7 @@ func TestSBOMHandler_GetVulnerabilities_OffsetAtCap_F27(t *testing.T) {
 		WithArgs(sbomID).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -783,7 +783,7 @@ func TestSBOMHandler_GetVulnerabilities_TotalCountHeader_F28(t *testing.T) {
 	now := time.Now()
 
 	// CountVulnerabilities calls GetLatest + COUNT(*).
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -794,7 +794,7 @@ func TestSBOMHandler_GetVulnerabilities_TotalCountHeader_F28(t *testing.T) {
 
 	// GetVulnerabilitiesPaginated repeats GetLatest then runs the
 	// page query.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -867,7 +867,7 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 	now := time.Now()
 
 	// CountVulnerabilities (#F28) — returns the DISTINCT count: 2.
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -880,7 +880,7 @@ func TestSBOMHandler_GetVulnerabilities_DistinctRows_F29(t *testing.T) {
 	// `WHERE EXISTS` pattern (pins #F29 de-duplication strategy). A
 	// regression that reverts to the unfiltered JOIN form would fail to
 	// match this regex and surface as a sqlmock "unexpected query".
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",

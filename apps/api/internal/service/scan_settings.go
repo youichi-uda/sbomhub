@@ -66,10 +66,20 @@ func (s *ScanSettingsService) Get(ctx context.Context, tenantID uuid.UUID) (*Sca
 	var scheduleDay sql.NullInt64
 	var lastScanAt, nextScanAt sql.NullTime
 
+	// M46 wave 3: every defaulted column here is DDL-nullable (enabled,
+	// schedule_type, schedule_hour, the four notify flags, created_at,
+	// updated_at) and was scanned into a bare bool/string/int/time.Time —
+	// one NULL 500'd the whole settings read. COALESCE applies the DDL
+	// defaults at read time (0 NULL rows measured on the dev DB,
+	// 2026-07-26); the fallback values mirror the 048 DDL and the
+	// ErrNoRows default struct below.
 	err := database.Querier(ctx, s.db).QueryRowContext(ctx, `
-		SELECT id, tenant_id, enabled, schedule_type, schedule_hour, schedule_day,
-		       notify_critical, notify_high, notify_medium, notify_low,
-		       last_scan_at, next_scan_at, created_at, updated_at
+		SELECT id, tenant_id, COALESCE(enabled, true),
+		       COALESCE(schedule_type, 'daily'), COALESCE(schedule_hour, 6), schedule_day,
+		       COALESCE(notify_critical, true), COALESCE(notify_high, true),
+		       COALESCE(notify_medium, false), COALESCE(notify_low, false),
+		       last_scan_at, next_scan_at,
+		       COALESCE(created_at, NOW()), COALESCE(updated_at, NOW())
 		FROM scan_settings
 		WHERE tenant_id = $1
 	`, tenantID).Scan(
@@ -208,9 +218,13 @@ func (s *ScanSettingsService) GetLogs(ctx context.Context, tenantID uuid.UUID, l
 		limit = 20
 	}
 
+	// M46 wave 3: projects_scanned / new_vulnerabilities / created_at are
+	// DDL-nullable with defaults 0 / 0 / now() (0 NULL rows measured) —
+	// COALESCE applies them at read time.
 	rows, err := database.Querier(ctx, s.db).QueryContext(ctx, `
 		SELECT id, tenant_id, started_at, completed_at, status,
-		       projects_scanned, new_vulnerabilities, error_message, created_at
+		       COALESCE(projects_scanned, 0), COALESCE(new_vulnerabilities, 0),
+		       error_message, COALESCE(created_at, NOW())
 		FROM scan_logs
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -227,10 +241,13 @@ func (s *ScanSettingsService) GetLogs(ctx context.Context, tenantID uuid.UUID, l
 		var completedAt sql.NullTime
 		var errorMsg sql.NullString
 
+		// M46 wave 3: a scan failure used to `continue`, silently dropping
+		// the log row from the listing (partial results presented as the
+		// complete history). Fail loudly instead.
 		if err := rows.Scan(&log.ID, &log.TenantID, &log.StartedAt, &completedAt,
 			&log.Status, &log.ProjectsScanned, &log.NewVulnerabilities,
 			&errorMsg, &log.CreatedAt); err != nil {
-			continue
+			return nil, err
 		}
 
 		if completedAt.Valid {
@@ -241,6 +258,11 @@ func (s *ScanSettingsService) GetLogs(ctx context.Context, tenantID uuid.UUID, l
 		}
 
 		logs = append(logs, log)
+	}
+	// No partial results: surface a mid-iteration failure instead of a
+	// truncated history presented as complete.
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return logs, nil

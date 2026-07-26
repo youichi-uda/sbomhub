@@ -44,7 +44,7 @@ func (r *ProjectRepository) List(ctx context.Context) ([]model.Project, error) {
 // SECURITY: Always filter by tenant_id to prevent cross-tenant access
 func (r *ProjectRepository) Get(ctx context.Context, id uuid.UUID) (*model.Project, error) {
 	// Note: RLS should also enforce this, but we add explicit filter for defense-in-depth
-	query := `SELECT id, tenant_id, name, description, created_at, updated_at FROM projects WHERE id = $1`
+	query := `SELECT id, tenant_id, name, COALESCE(description, ''), COALESCE(created_at, NOW()), COALESCE(updated_at, NOW()) FROM projects WHERE id = $1`
 	var p model.Project
 	var tenantID uuid.UUID
 	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&p.ID, &tenantID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
@@ -57,7 +57,7 @@ func (r *ProjectRepository) Get(ctx context.Context, id uuid.UUID) (*model.Proje
 // GetByTenant gets a project by ID with explicit tenant check
 // SECURITY: Use this method when you need to verify tenant ownership explicitly
 func (r *ProjectRepository) GetByTenant(ctx context.Context, tenantID, projectID uuid.UUID) (*model.Project, error) {
-	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE id = $1 AND tenant_id = $2`
+	query := `SELECT id, name, COALESCE(description, ''), COALESCE(created_at, NOW()), COALESCE(updated_at, NOW()) FROM projects WHERE id = $1 AND tenant_id = $2`
 	var p model.Project
 	err := r.q(ctx).QueryRowContext(ctx, query, projectID, tenantID).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
@@ -108,7 +108,7 @@ func (r *ProjectRepository) CountByTenant(ctx context.Context, tenantID uuid.UUI
 // GetByName finds a project by name within a tenant.
 // Returns nil, nil if not found.
 func (r *ProjectRepository) GetByName(ctx context.Context, tenantID uuid.UUID, name string) (*model.Project, error) {
-	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = $1 AND name = $2`
+	query := `SELECT id, name, COALESCE(description, ''), COALESCE(created_at, NOW()), COALESCE(updated_at, NOW()) FROM projects WHERE tenant_id = $1 AND name = $2`
 	var p model.Project
 	err := r.q(ctx).QueryRowContext(ctx, query, tenantID, name).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -129,7 +129,7 @@ func (r *ProjectRepository) CreateWithTenant(ctx context.Context, tenantID uuid.
 
 // ListByTenant lists projects for a specific tenant.
 func (r *ProjectRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]model.Project, error) {
-	query := `SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = $1 ORDER BY created_at DESC`
+	query := `SELECT id, name, COALESCE(description, ''), COALESCE(created_at, NOW()), COALESCE(updated_at, NOW()) FROM projects WHERE tenant_id = $1 ORDER BY created_at DESC`
 	rows, err := r.q(ctx).QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
@@ -143,6 +143,9 @@ func (r *ProjectRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID
 			return nil, err
 		}
 		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return projects, nil
 }

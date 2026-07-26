@@ -92,7 +92,7 @@ func TestCLIHandler_Upload_ValidationError_400(t *testing.T) {
 	projectID := uuid.New()
 
 	// GetOrCreateProject → GetByName finds an existing project (no create).
-	mock.ExpectQuery(`SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = \$1 AND name = \$2`).
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(description, ''\), COALESCE\(created_at, NOW\(\)\), COALESCE\(updated_at, NOW\(\)\) FROM projects WHERE tenant_id = \$1 AND name = \$2`).
 		WithArgs(tenantID, "test-project").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
 			AddRow(projectID, "test-project", "", time.Now(), time.Now()))
@@ -134,7 +134,7 @@ func TestCLIHandler_Upload_InternalError_500_NoLeak(t *testing.T) {
 	projectID := uuid.New()
 
 	// GetOrCreateProject → GetByName finds an existing project (no create).
-	mock.ExpectQuery(`SELECT id, name, description, created_at, updated_at FROM projects WHERE tenant_id = \$1 AND name = \$2`).
+	mock.ExpectQuery(`SELECT id, name, COALESCE\(description, ''\), COALESCE\(created_at, NOW\(\)\), COALESCE\(updated_at, NOW\(\)\) FROM projects WHERE tenant_id = \$1 AND name = \$2`).
 		WithArgs(tenantID, "test-project").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
 			AddRow(projectID, "test-project", "", time.Now(), time.Now()))

@@ -120,7 +120,7 @@ func TestSbomRepository_GetLatest(t *testing.T) {
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 					AddRow(sbomID, projectID, "cyclonedx", "1.4", []byte(`{}`), createdAt)
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms`).
 					WithArgs(projectID).
 					WillReturnRows(rows)
 			},
@@ -131,7 +131,7 @@ func TestSbomRepository_GetLatest(t *testing.T) {
 			name:      "no rows found",
 			projectID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(sql.ErrNoRows)
 			},
@@ -142,7 +142,7 @@ func TestSbomRepository_GetLatest(t *testing.T) {
 			name:      "database error",
 			projectID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(errors.New("connection reset"))
 			},
@@ -194,7 +194,7 @@ func TestSbomRepository_GetByID(t *testing.T) {
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 					AddRow(sbomID, projectID, "spdx", "2.3", []byte(`{"spdxVersion":"SPDX-2.3"}`), createdAt)
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE id`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
 			},
@@ -215,7 +215,7 @@ func TestSbomRepository_GetByID(t *testing.T) {
 			name:   "not found",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(sql.ErrNoRows)
 			},
@@ -269,7 +269,7 @@ func TestSbomRepository_ListByProject(t *testing.T) {
 				rows := sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 					AddRow(sbomID1, projectID, "cyclonedx", "1.4", []byte(`{}`), now).
 					AddRow(sbomID2, projectID, "spdx", "2.3", []byte(`{}`), now.Add(-time.Hour))
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id`).
 					WithArgs(projectID).
 					WillReturnRows(rows)
 			},
@@ -281,7 +281,7 @@ func TestSbomRepository_ListByProject(t *testing.T) {
 			projectID: uuid.New(),
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"})
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
 			},
@@ -292,7 +292,7 @@ func TestSbomRepository_ListByProject(t *testing.T) {
 			name:      "database error",
 			projectID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(errors.New("query timeout"))
 			},
@@ -306,7 +306,7 @@ func TestSbomRepository_ListByProject(t *testing.T) {
 				// Use wrong column types to trigger scan error
 				rows := sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 					AddRow("not-a-uuid", projectID, "cyclonedx", "1.4", []byte(`{}`), now)
-				mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id").
+				mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id`).
 					WithArgs(projectID).
 					WillReturnRows(rows)
 			},
@@ -342,7 +342,7 @@ func TestNewSbomRepository(t *testing.T) {
 
 	repo := NewSbomRepository(db)
 	if repo == nil {
-		t.Error("NewSbomRepository returned nil")
+		t.Fatal("NewSbomRepository returned nil")
 	}
 	if repo.db != db {
 		t.Error("NewSbomRepository did not set db correctly")
@@ -395,7 +395,7 @@ func TestSbomRepository_GetLatest_ReturnsCorrectFields(t *testing.T) {
 
 	rows := sqlmock.NewRows([]string{"id", "project_id", "format", "version", "raw_data", "created_at"}).
 		AddRow(sbomID, projectID, "cyclonedx", "1.5", rawData, createdAt)
-	mock.ExpectQuery("SELECT id, project_id, format, version, raw_data, created_at FROM sboms").
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms`).
 		WithArgs(projectID).
 		WillReturnRows(rows)
 

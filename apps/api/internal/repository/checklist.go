@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,7 +68,8 @@ func (r *ChecklistRepository) ListByProject(ctx context.Context, tenantID, proje
 		return nil, fmt.Errorf("ChecklistRepository.ListByProject: project_id is required")
 	}
 	query := `
-		SELECT id, tenant_id, project_id, check_id, response, note, updated_by, updated_at
+		SELECT id, tenant_id, project_id, check_id, response, note,
+			COALESCE(updated_by, ''), COALESCE(updated_at, NOW())
 		FROM compliance_checklist_responses
 		WHERE tenant_id = $1 AND project_id = $2
 		ORDER BY check_id
@@ -93,7 +95,11 @@ func (r *ChecklistRepository) ListByProject(ctx context.Context, tenantID, proje
 		}
 		responses = append(responses, resp)
 	}
-	return responses, rows.Err()
+	// No partial results (M46 wave 3 normalization).
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return responses, nil
 }
 
 // ListByTenant returns all checklist responses for a tenant (aggregated across all projects)
@@ -103,7 +109,8 @@ func (r *ChecklistRepository) ListByTenant(ctx context.Context, tenantID uuid.UU
 		return nil, fmt.Errorf("ChecklistRepository.ListByTenant: tenant_id is required")
 	}
 	query := `
-		SELECT id, tenant_id, project_id, check_id, response, note, updated_by, updated_at
+		SELECT id, tenant_id, project_id, check_id, response, note,
+			COALESCE(updated_by, ''), COALESCE(updated_at, NOW())
 		FROM compliance_checklist_responses
 		WHERE tenant_id = $1
 		ORDER BY check_id, updated_at DESC
@@ -129,7 +136,11 @@ func (r *ChecklistRepository) ListByTenant(ctx context.Context, tenantID uuid.UU
 		}
 		responses = append(responses, resp)
 	}
-	return responses, rows.Err()
+	// No partial results (M46 wave 3 normalization).
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return responses, nil
 }
 
 // GetByCheckID returns a specific checklist response, scoped to the
@@ -142,7 +153,8 @@ func (r *ChecklistRepository) GetByCheckID(ctx context.Context, tenantID, projec
 		return nil, fmt.Errorf("ChecklistRepository.GetByCheckID: project_id is required")
 	}
 	query := `
-		SELECT id, tenant_id, project_id, check_id, response, note, updated_by, updated_at
+		SELECT id, tenant_id, project_id, check_id, response, note,
+			COALESCE(updated_by, ''), COALESCE(updated_at, NOW())
 		FROM compliance_checklist_responses
 		WHERE tenant_id = $1 AND project_id = $2 AND check_id = $3
 	`
@@ -304,7 +316,14 @@ func (r *ChecklistRepository) BulkUpsert(ctx context.Context, responses []model.
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	// After a successful Commit this Rollback returns sql.ErrTxDone by
+	// design; anything else is a real cleanup failure worth logging
+	// (middleware/tx.go precedent).
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			slog.Warn("checklist: bulk upsert rollback failed", "error", rbErr)
+		}
+	}()
 
 	stmt, err := tx.PrepareContext(ctx, stmtSQL)
 	if err != nil {

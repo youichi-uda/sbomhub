@@ -30,7 +30,7 @@ func (r *UserRepository) Create(ctx context.Context, u *model.User) error {
 
 func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.User, error) {
 	query := `
-		SELECT id, clerk_user_id, email, name, avatar_url, created_at, updated_at
+		SELECT id, clerk_user_id, email, COALESCE(name, ''), COALESCE(avatar_url, ''), created_at, updated_at
 		FROM users WHERE id = $1
 	`
 	var u model.User
@@ -44,7 +44,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.User
 
 func (r *UserRepository) GetByClerkUserID(ctx context.Context, clerkUserID string) (*model.User, error) {
 	query := `
-		SELECT id, clerk_user_id, email, name, avatar_url, created_at, updated_at
+		SELECT id, clerk_user_id, email, COALESCE(name, ''), COALESCE(avatar_url, ''), created_at, updated_at
 		FROM users WHERE clerk_user_id = $1
 	`
 	var u model.User
@@ -58,7 +58,7 @@ func (r *UserRepository) GetByClerkUserID(ctx context.Context, clerkUserID strin
 
 func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*model.User, error) {
 	query := `
-		SELECT id, clerk_user_id, email, name, avatar_url, created_at, updated_at
+		SELECT id, clerk_user_id, email, COALESCE(name, ''), COALESCE(avatar_url, ''), created_at, updated_at
 		FROM users WHERE email = $1
 	`
 	var u model.User
@@ -123,7 +123,7 @@ func (r *UserRepository) RemoveFromTenant(ctx context.Context, tenantID, userID 
 // GetTenantUsers returns all users in a tenant
 func (r *UserRepository) GetTenantUsers(ctx context.Context, tenantID uuid.UUID) ([]model.UserWithRole, error) {
 	query := `
-		SELECT u.id, u.clerk_user_id, u.email, u.name, u.avatar_url, u.created_at, u.updated_at, tu.role
+		SELECT u.id, u.clerk_user_id, u.email, COALESCE(u.name, ''), COALESCE(u.avatar_url, ''), u.created_at, u.updated_at, tu.role
 		FROM users u
 		INNER JOIN tenant_users tu ON u.id = tu.user_id
 		WHERE tu.tenant_id = $1
@@ -143,6 +143,9 @@ func (r *UserRepository) GetTenantUsers(ctx context.Context, tenantID uuid.UUID)
 			return nil, err
 		}
 		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return users, nil
 }

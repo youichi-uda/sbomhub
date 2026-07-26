@@ -78,7 +78,7 @@ func (r *LicensePolicyRepository) Update(ctx context.Context, p *model.LicensePo
 
 func (r *LicensePolicyRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.LicensePolicy, error) {
 	query := `
-		SELECT id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at
+		SELECT id, project_id, license_id, license_name, policy_type, COALESCE(reason, ''), created_at, updated_at
 		FROM license_policies
 		WHERE id = $1
 	`
@@ -97,7 +97,7 @@ func (r *LicensePolicyRepository) GetByID(ctx context.Context, id uuid.UUID) (*m
 
 func (r *LicensePolicyRepository) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.LicensePolicy, error) {
 	query := `
-		SELECT id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at
+		SELECT id, project_id, license_id, license_name, policy_type, COALESCE(reason, ''), created_at, updated_at
 		FROM license_policies
 		WHERE project_id = $1
 		ORDER BY license_name
@@ -117,6 +117,9 @@ func (r *LicensePolicyRepository) ListByProject(ctx context.Context, projectID u
 			return nil, err
 		}
 		policies = append(policies, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return policies, nil
 }
@@ -139,7 +142,7 @@ func (r *LicensePolicyRepository) Delete(ctx context.Context, id uuid.UUID) erro
 
 func (r *LicensePolicyRepository) GetByLicenseID(ctx context.Context, projectID uuid.UUID, licenseID string) (*model.LicensePolicy, error) {
 	query := `
-		SELECT id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at
+		SELECT id, project_id, license_id, license_name, policy_type, COALESCE(reason, ''), created_at, updated_at
 		FROM license_policies
 		WHERE project_id = $1 AND license_id = $2
 	`
@@ -163,7 +166,7 @@ func (r *LicensePolicyRepository) GetPoliciesForLicenses(ctx context.Context, pr
 	}
 
 	query := `
-		SELECT id, project_id, license_id, license_name, policy_type, reason, created_at, updated_at
+		SELECT id, project_id, license_id, license_name, policy_type, COALESCE(reason, ''), created_at, updated_at
 		FROM license_policies
 		WHERE project_id = $1 AND license_id = ANY($2)
 	`
@@ -182,6 +185,9 @@ func (r *LicensePolicyRepository) GetPoliciesForLicenses(ctx context.Context, pr
 			return nil, err
 		}
 		result[p.LicenseID] = &p
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

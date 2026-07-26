@@ -161,13 +161,13 @@ func TestPublicLink_GetPublicView_BindsTenantBeforeContentRead(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	// 3) Project, sbom, components reads inside the tx.
-	mock.ExpectQuery(`SELECT id, tenant_id, name, description, created_at, updated_at FROM projects WHERE id = \$1`).
+	mock.ExpectQuery(`SELECT id, tenant_id, name, COALESCE\(description, ''\), COALESCE\(created_at, NOW\(\)\), COALESCE\(updated_at, NOW\(\)\) FROM projects WHERE id = \$1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "tenant_id", "name", "description", "created_at", "updated_at",
 		}).AddRow(projectID, tenantID, "demo project", "", now, now))
 
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE project_id = \$1 ORDER BY created_at DESC LIMIT 1`).
 		WithArgs(projectID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",
@@ -235,7 +235,7 @@ func TestPublicLink_GetPublicSbomRaw_BindsTenantBeforeContentRead(t *testing.T) 
 	mock.ExpectExec(`SELECT set_config\('app.current_tenant_id', \$1, true\)`).
 		WithArgs(tenantID.String()).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(`SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id = \$1`).
+	mock.ExpectQuery(`SELECT id, project_id, format, COALESCE\(version, ''\), raw_data, COALESCE\(created_at, NOW\(\)\) FROM sboms WHERE id = \$1`).
 		WithArgs(sbomID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "project_id", "format", "version", "raw_data", "created_at",

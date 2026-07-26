@@ -57,9 +57,14 @@ func (r *VisualizationRepository) GetByProject(ctx context.Context, tenantID, pr
 		return nil, fmt.Errorf("VisualizationRepository.GetByProject: project_id is required")
 	}
 	query := `
-		SELECT id, tenant_id, project_id, sbom_author_scope, dependency_scope,
-		       generation_method, data_format, utilization_scope, utilization_actor,
-		       created_at, updated_at
+		SELECT id, tenant_id, project_id,
+		       COALESCE(sbom_author_scope, 'self'),
+		       COALESCE(dependency_scope, 'direct_only'),
+		       COALESCE(generation_method, 'tool_no_review'),
+		       COALESCE(data_format, 'standard'),
+		       utilization_scope,
+		       COALESCE(utilization_actor, 'product_vendor'),
+		       COALESCE(created_at, NOW()), COALESCE(updated_at, NOW())
 		FROM sbom_visualization_settings
 		WHERE tenant_id = $1 AND project_id = $2
 	`

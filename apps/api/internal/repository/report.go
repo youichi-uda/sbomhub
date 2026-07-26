@@ -85,6 +85,9 @@ func (r *ReportRepository) GetAllSettings(ctx context.Context, tenantID uuid.UUI
 		}
 		settings = append(settings, s)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return settings, nil
 }
@@ -136,6 +139,9 @@ func (r *ReportRepository) GetEnabledSettings(ctx context.Context) ([]model.Repo
 			return nil, err
 		}
 		settings = append(settings, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return settings, nil
@@ -268,6 +274,9 @@ func (r *ReportRepository) ListReports(ctx context.Context, tenantID uuid.UUID, 
 		}
 		report.EmailRecipients = emailRecipients
 		reports = append(reports, report)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	return reports, total, nil

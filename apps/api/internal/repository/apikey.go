@@ -121,6 +121,9 @@ func (r *APIKeyRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID)
 		}
 		keys = append(keys, k)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return keys, nil
 }
 
@@ -149,6 +152,9 @@ func (r *APIKeyRepository) ListByProject(ctx context.Context, tenantID, projectI
 			return nil, err
 		}
 		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return keys, nil
 }

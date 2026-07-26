@@ -55,7 +55,7 @@ func (r *SbomRepository) LookupProjectTenantID(ctx context.Context, projectID uu
 }
 
 func (r *SbomRepository) GetLatest(ctx context.Context, projectID uuid.UUID) (*model.Sbom, error) {
-	query := `SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1`
+	query := `SELECT id, project_id, format, COALESCE(version, ''), raw_data, COALESCE(created_at, NOW()) FROM sboms WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1`
 	var s model.Sbom
 	err := r.q(ctx).QueryRowContext(ctx, query, projectID).Scan(&s.ID, &s.ProjectID, &s.Format, &s.Version, &s.RawData, &s.CreatedAt)
 	if err != nil {
@@ -65,7 +65,7 @@ func (r *SbomRepository) GetLatest(ctx context.Context, projectID uuid.UUID) (*m
 }
 
 func (r *SbomRepository) GetByID(ctx context.Context, sbomID uuid.UUID) (*model.Sbom, error) {
-	query := `SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE id = $1`
+	query := `SELECT id, project_id, format, COALESCE(version, ''), raw_data, COALESCE(created_at, NOW()) FROM sboms WHERE id = $1`
 	var s model.Sbom
 	err := r.q(ctx).QueryRowContext(ctx, query, sbomID).Scan(&s.ID, &s.ProjectID, &s.Format, &s.Version, &s.RawData, &s.CreatedAt)
 	if err != nil {
@@ -75,7 +75,7 @@ func (r *SbomRepository) GetByID(ctx context.Context, sbomID uuid.UUID) (*model.
 }
 
 func (r *SbomRepository) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.Sbom, error) {
-	query := `SELECT id, project_id, format, version, raw_data, created_at FROM sboms WHERE project_id = $1 ORDER BY created_at DESC`
+	query := `SELECT id, project_id, format, COALESCE(version, ''), raw_data, COALESCE(created_at, NOW()) FROM sboms WHERE project_id = $1 ORDER BY created_at DESC`
 	rows, err := r.q(ctx).QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, err
@@ -89,6 +89,9 @@ func (r *SbomRepository) ListByProject(ctx context.Context, projectID uuid.UUID)
 			return nil, err
 		}
 		sboms = append(sboms, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return sboms, nil
 }
