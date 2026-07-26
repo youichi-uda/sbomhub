@@ -1,0 +1,107 @@
+# SBOMHub - MCP Server CI (typecheck / build)
+#
+# M46 Track D: packages/mcp-server had NO CI coverage — toolchain-lint.yml
+# only mentions it in a comment — so the package silently rotted into a
+# state where `tsc --noEmit` reported 17 errors (the @modelcontextprotocol/sdk
+# ^1.0.0 range drifted to 1.25.x, which hardened tool-argument typing to
+# `unknown`) and the advertised "MCP Server (Claude/Cursor 連携)" could not
+# even be built. Same announced-but-not-shipped class as the Tier 0 D6 CLI
+# finding. This workflow makes install → typecheck → build a HARD GATE.
+#
+# Enforcement policy:
+#   - Typecheck: HARD GATE. `tsc --noEmit` must be zero errors.
+#   - Build:     HARD GATE. `tsc` must emit dist/index.js (the bin entry
+#                Claude Desktop / Cursor point at).
+#   - Boot probe: HARD GATE. `node dist/index.js` without SBOMHUB_API_KEY
+#                must fail fast with the documented message — proves the
+#                emitted entrypoint is actually executable ESM, not just
+#                that tsc succeeded.
+#
+# Versions: Node 22 + pnpm 10.34.3, pinned to match frontend-ci.yml and the
+# root package.json `packageManager` field (see frontend-ci.yml header for
+# the pnpm 10.x hold rationale).
+
+name: MCP Server CI
+
+on:
+  pull_request:
+    paths:
+      - "packages/mcp-server/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - ".github/workflows/mcp-server-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/mcp-server/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - ".github/workflows/mcp-server-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-server:
+    name: typecheck / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Show versions
+        run: |
+          node --version
+          pnpm --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (tsc --noEmit)
+        run: pnpm --filter @sbomhub/mcp-server typecheck
+
+      - name: Build (tsc)
+        run: pnpm --filter @sbomhub/mcp-server build
+
+      - name: Assert dist entrypoint exists
+        run: test -f packages/mcp-server/dist/index.js
+
+      # The server must fail fast (exit 1 + documented stderr message) when
+      # SBOMHUB_API_KEY is missing. This doubles as a smoke test that the
+      # emitted ESM actually loads under Node 22 (import graph, shebang,
+      # NodeNext resolution) without needing a live SBOMHub API.
+      - name: Boot probe (missing API key fails fast)
+        run: |
+          set +e
+          out=$(node packages/mcp-server/dist/index.js 2>&1)
+          status=$?
+          set -e
+          echo "exit=$status output=$out"
+          if [ "$status" -ne 1 ]; then
+            echo "::error::expected exit 1 without SBOMHUB_API_KEY, got $status"
+            exit 1
+          fi
+          case "$out" in
+            *"SBOMHUB_API_KEY is required"*) ;;
+            *)
+              echo "::error::missing expected error message in output"
+              exit 1
+              ;;
+          esac

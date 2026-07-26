@@ -1,6 +1,17 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+#!/usr/bin/env node
+// SBOMHub MCP server (stdio, read-only).
+//
+// Built on the current @modelcontextprotocol/sdk high-level API:
+// McpServer.registerTool with zod raw-shape input schemas. The SDK validates
+// tool arguments against the schema before the callback runs and answers
+// invalid calls with a protocol-level InvalidParams error, so every callback
+// below receives typed, already-validated args. Tool *execution* failures
+// (API errors, missing SBOMs, ...) are returned in-band as
+// `isError: true` results per the MCP tool contract.
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 
 import { ApiClient } from "./client/api.js";
 
@@ -8,152 +19,218 @@ const apiUrl = process.env.SBOMHUB_API_URL || "http://localhost:8080";
 const apiKey = process.env.SBOMHUB_API_KEY || "";
 
 if (!apiKey) {
-  throw new Error("SBOMHUB_API_KEY is required");
+  console.error("SBOMHUB_API_KEY is required");
+  process.exit(1);
 }
 
 const client = new ApiClient(apiUrl, apiKey);
 
-const server = new Server(
+const server = new McpServer({
+  name: "sbomhub-mcp",
+  version: "0.1.0",
+});
+
+function jsonResult(value: unknown): CallToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+  };
+}
+
+function errorResult(err: unknown): CallToolResult {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    content: [{ type: "text", text: `Error: ${message}` }],
+    isError: true,
+  };
+}
+
+const projectIdSchema = z.string().uuid().describe("プロジェクトID (UUID)");
+
+server.registerTool(
+  "sbomhub_list_projects",
   {
-    name: "sbomhub-mcp",
-    version: "0.1.0",
+    description: "プロジェクト一覧を取得",
   },
-  {
-    capabilities: {
-      tools: {},
-    },
+  async () => {
+    try {
+      return jsonResult(await client.listProjects());
+    } catch (err) {
+      return errorResult(err);
+    }
   }
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "sbomhub_list_projects",
-        description: "プロジェクト一覧を取得",
-        inputSchema: { type: "object", properties: {} },
-      },
-      {
-        name: "sbomhub_get_dashboard",
-        description: "ダッシュボード情報を取得",
-        inputSchema: {
-          type: "object",
-          properties: {
-            project_id: { type: "string" },
-          },
-        },
-      },
-      {
-        name: "sbomhub_search_cve",
-        description: "CVE IDで全プロジェクトを横断検索",
-        inputSchema: {
-          type: "object",
-          properties: {
-            cve_id: { type: "string" },
-          },
-          required: ["cve_id"],
-        },
-      },
-      {
-        name: "sbomhub_search_component",
-        description: "コンポーネント名でプロジェクトを検索",
-        inputSchema: {
-          type: "object",
-          properties: {
-            name: { type: "string" },
-            version: { type: "string" },
-          },
-          required: ["name"],
-        },
-      },
-      {
-        name: "sbomhub_diff",
-        description: "2つのSBOMを比較して差分を取得",
-        inputSchema: {
-          type: "object",
-          properties: {
-            project_id: { type: "string" },
-            base_version: { type: "string" },
-            target_version: { type: "string" },
-          },
-          required: ["project_id"],
-        },
-      },
-      {
-        name: "sbomhub_get_vulnerabilities",
-        description: "脆弱性一覧を取得",
-        inputSchema: {
-          type: "object",
-          properties: {
-            project_id: { type: "string" },
-            severity: { type: "string" },
-            status: { type: "string" },
-          },
-          required: ["project_id"],
-        },
-      },
-      {
-        name: "sbomhub_get_compliance",
-        description: "コンプライアンススコアを取得",
-        inputSchema: {
-          type: "object",
-          properties: {
-            project_id: { type: "string" },
-          },
-          required: ["project_id"],
-        },
-      },
-    ],
-  };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  try {
-    switch (name) {
-      case "sbomhub_list_projects": {
-        const result = await client.listProjects();
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      case "sbomhub_get_dashboard": {
-        const result = await client.getDashboard(args?.project_id);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      case "sbomhub_search_cve": {
-        const result = await client.searchCVE(args.cve_id);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      case "sbomhub_search_component": {
-        const result = await client.searchComponent(args.name, args.version);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      case "sbomhub_diff": {
-        const result = await client.diff(args.project_id, args.base_version, args.target_version);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      case "sbomhub_get_vulnerabilities": {
-        const result = await client.getVulnerabilities(args.project_id, args.severity, args.status);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      case "sbomhub_get_compliance": {
-        const result = await client.getCompliance(args.project_id);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+// Tenant summary and per-project dashboard are separate tools on purpose:
+// a single tool with an all-optional raw-shape schema would reject calls
+// that omit `params.arguments` entirely (spec-legal; SDK 1.29 validates
+// `undefined` against the object schema → InvalidParams), and non-raw-shape
+// wrappers (preprocess/default) fall back to an empty inputSchema in
+// tools/list, hiding project_id from clients.
+server.registerTool(
+  "sbomhub_get_dashboard",
+  {
+    description: "テナント全体のダッシュボードサマリーを取得",
+  },
+  async () => {
+    try {
+      return jsonResult(await client.getDashboardSummary());
+    } catch (err) {
+      return errorResult(err);
     }
-  } catch (err: any) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${err?.message || String(err)}`,
-        },
-      ],
-      isError: true,
-    };
   }
-});
+);
+
+server.registerTool(
+  "sbomhub_get_project_dashboard",
+  {
+    description:
+      "プロジェクト別ダッシュボードを取得 (脆弱性サマリー/コンプライアンス/SBOM状況)",
+    inputSchema: {
+      project_id: projectIdSchema,
+    },
+  },
+  async ({ project_id }) => {
+    try {
+      return jsonResult(await client.getProjectDashboard(project_id));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.registerTool(
+  "sbomhub_list_sboms",
+  {
+    description: "プロジェクトのSBOM一覧を取得 (新しい順)",
+    inputSchema: {
+      project_id: projectIdSchema,
+    },
+  },
+  async ({ project_id }) => {
+    try {
+      return jsonResult(await client.listSboms(project_id));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.registerTool(
+  "sbomhub_search_cve",
+  {
+    description: "CVE IDで全プロジェクトを横断検索",
+    inputSchema: {
+      cve_id: z
+        .string()
+        // Flag-free pattern: the SDK's JSON-schema conversion drops regex
+        // flags, so an /i regex would be ADVERTISED as case-sensitive in
+        // tools/list even though the server accepts both. Spell out the
+        // accepted prefixes instead so schema and behavior agree.
+        .regex(/^(?:CVE|cve)-\d{4}-\d{4,}$/, "CVE-YYYY-NNNN 形式で指定してください")
+        .describe("CVE ID (例: CVE-2021-44228)"),
+    },
+  },
+  async ({ cve_id }) => {
+    try {
+      return jsonResult(await client.searchCVE(cve_id));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.registerTool(
+  "sbomhub_search_component",
+  {
+    description: "コンポーネント名でプロジェクトを検索",
+    inputSchema: {
+      name: z.string().min(1).describe("コンポーネント名 (例: log4j)"),
+      version: z.string().optional().describe("バージョン (任意)"),
+    },
+  },
+  async ({ name, version }) => {
+    try {
+      return jsonResult(await client.searchComponent(name, version));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.registerTool(
+  "sbomhub_diff",
+  {
+    description:
+      "2つのSBOMを比較して差分を取得。バージョン省略時は最新2つを比較",
+    inputSchema: {
+      project_id: projectIdSchema,
+      base_version: z.string().optional().describe("比較元SBOMのバージョン (省略時: 2番目に新しいSBOM)"),
+      target_version: z.string().optional().describe("比較先SBOMのバージョン (省略時: 最新SBOM)"),
+    },
+  },
+  async ({ project_id, base_version, target_version }) => {
+    try {
+      return jsonResult(await client.diff(project_id, base_version, target_version));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.registerTool(
+  "sbomhub_get_vulnerabilities",
+  {
+    description:
+      "プロジェクトの脆弱性一覧を取得 (CVSS/EPSS順、最大500件、severityで絞り込み可)",
+    inputSchema: {
+      project_id: projectIdSchema,
+      severity: z
+        .string()
+        // Flag-free pattern (see cve_id note): both canonical spellings are
+        // listed explicitly so the advertised tools/list schema matches the
+        // actually-accepted inputs. Backend severity values are uppercase.
+        .regex(
+          /^(?:critical|high|medium|low|CRITICAL|HIGH|MEDIUM|LOW)$/,
+          "critical / high / medium / low のいずれかを指定してください"
+        )
+        .optional()
+        .describe(
+          "severity で絞り込み (任意): critical / high / medium / low (小文字または大文字)"
+        ),
+      sort: z
+        .enum(["cvss", "epss"])
+        .optional()
+        .describe("並び順 (デフォルト: cvss)"),
+    },
+  },
+  async ({ project_id, severity, sort }) => {
+    try {
+      return jsonResult(
+        await client.getVulnerabilities(project_id, severity, sort ?? "cvss")
+      );
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
+
+server.registerTool(
+  "sbomhub_get_compliance",
+  {
+    description: "コンプライアンススコアを取得 (経産省ガイドライン準拠チェック)",
+    inputSchema: {
+      project_id: projectIdSchema,
+    },
+  },
+  async ({ project_id }) => {
+    try {
+      return jsonResult(await client.getCompliance(project_id));
+    } catch (err) {
+      return errorResult(err);
+    }
+  }
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+console.error(`sbomhub-mcp: connected (API: ${apiUrl})`);

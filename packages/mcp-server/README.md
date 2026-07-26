@@ -11,12 +11,16 @@ Claude Desktop や Cursor から自然言語で SBOMHub の脆弱性情報 / VEX
 | ツール | 説明 | 使用例 |
 |--------|------|--------|
 | `sbomhub_list_projects` | プロジェクト一覧 | 「プロジェクト一覧見せて」 |
-| `sbomhub_get_dashboard` | ダッシュボード情報 | 「全体の脆弱性サマリー教えて」 |
+| `sbomhub_get_dashboard` | テナント全体のダッシュボードサマリー | 「全体の脆弱性サマリー教えて」 |
+| `sbomhub_get_project_dashboard` | プロジェクト別ダッシュボード (脆弱性/コンプライアンス/SBOM) | 「my-app の状況をまとめて」 |
+| `sbomhub_list_sboms` | プロジェクトのSBOM一覧 (新しい順) | 「my-app のSBOM履歴を見せて」 |
 | `sbomhub_search_cve` | CVE横断検索 | 「CVE-2021-44228の影響範囲は？」 |
 | `sbomhub_search_component` | コンポーネント検索 | 「log4jを使ってるプロジェクトは？」 |
 | `sbomhub_diff` | SBOM差分比較 | 「前回と今回のSBOMの差分は？」 |
-| `sbomhub_get_vulnerabilities` | 脆弱性一覧 | 「Criticalの脆弱性だけ見せて」 |
+| `sbomhub_get_vulnerabilities` | 脆弱性一覧 (CVSS/EPSS順・最大500件、`severity` で絞り込み) | 「Criticalの脆弱性だけ見せて」 |
 | `sbomhub_get_compliance` | コンプライアンス | 「経産省ガイドライン準拠度は？」 |
+
+> `sbomhub_get_vulnerabilities` の severity 絞り込みはサーバー側 API には無いためクライアント側で適用されます。内部では 500 件/ページで最大 5,000 件まで走査し (CVSS/EPSS 降順)、レスポンスに含める件数は最大 500 件です。`total_in_project` / `scanned` / `scan_truncated` / `matched` / `returned` で全体件数・走査範囲・打ち切りの有無が分かります。
 
 ## セットアップ
 

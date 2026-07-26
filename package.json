@@ -10,6 +10,8 @@
     "build:api": "cd apps/api && go build -o bin/server ./cmd/server",
     "lint:web": "pnpm --filter web lint",
     "lint:api": "cd apps/api && golangci-lint run",
+    "typecheck:mcp": "pnpm --filter @sbomhub/mcp-server typecheck",
+    "build:mcp": "pnpm --filter @sbomhub/mcp-server build",
     "test:web": "pnpm --filter web test",
     "test:api": "cd apps/api && go test ./...",
     "db:up": "docker compose up -d postgres redis",
