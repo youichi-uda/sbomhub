@@ -54,12 +54,20 @@ func (r *KEVRepository) UpsertEntry(ctx context.Context, e *model.KEVEntry) erro
 	return err
 }
 
-// GetByCVE gets a KEV entry by CVE ID
+// GetByCVE gets a KEV entry by CVE ID.
+//
+// M46 B2: short_description, required_action and notes are the three
+// DDL-nullable string columns of kev_catalog while the model fields are
+// plain strings, so the SELECTs here and in List / GetRecentEntries
+// COALESCE them to ” (” means absent) — a NULL row (the CISA feed's
+// notes field is routinely empty; operator/import SQL can omit the rest)
+// used to abort the scan with "converting NULL to string is unsupported".
 func (r *KEVRepository) GetByCVE(ctx context.Context, cveID string) (*model.KEVEntry, error) {
 	query := `
 		SELECT id, cve_id, vendor_project, product, vulnerability_name,
-			short_description, required_action, date_added, due_date,
-			known_ransomware_use, notes, created_at, updated_at
+			COALESCE(short_description, ''), COALESCE(required_action, ''),
+			date_added, due_date,
+			known_ransomware_use, COALESCE(notes, ''), created_at, updated_at
 		FROM kev_catalog
 		WHERE cve_id = $1
 	`
@@ -88,11 +96,12 @@ func (r *KEVRepository) List(ctx context.Context, limit, offset int) ([]model.KE
 		return nil, 0, err
 	}
 
-	// List query
+	// List query (M46 B2: nullable strings COALESCE'd — see GetByCVE).
 	query := `
 		SELECT id, cve_id, vendor_project, product, vulnerability_name,
-			short_description, required_action, date_added, due_date,
-			known_ransomware_use, notes, created_at, updated_at
+			COALESCE(short_description, ''), COALESCE(required_action, ''),
+			date_added, due_date,
+			known_ransomware_use, COALESCE(notes, ''), created_at, updated_at
 		FROM kev_catalog
 		ORDER BY date_added DESC
 		LIMIT $1 OFFSET $2
@@ -122,10 +131,12 @@ func (r *KEVRepository) List(ctx context.Context, limit, offset int) ([]model.KE
 
 // GetRecentEntries gets entries added after a given date
 func (r *KEVRepository) GetRecentEntries(ctx context.Context, after time.Time) ([]model.KEVEntry, error) {
+	// M46 B2: nullable strings COALESCE'd — see GetByCVE.
 	query := `
 		SELECT id, cve_id, vendor_project, product, vulnerability_name,
-			short_description, required_action, date_added, due_date,
-			known_ransomware_use, notes, created_at, updated_at
+			COALESCE(short_description, ''), COALESCE(required_action, ''),
+			date_added, due_date,
+			known_ransomware_use, COALESCE(notes, ''), created_at, updated_at
 		FROM kev_catalog
 		WHERE date_added > $1
 		ORDER BY date_added DESC
@@ -264,9 +275,14 @@ func (r *KEVRepository) UpdateSyncLog(ctx context.Context, log *model.KEVSyncLog
 
 // GetLatestSyncLog gets the most recent sync log
 func (r *KEVRepository) GetLatestSyncLog(ctx context.Context) (*model.KEVSyncLog, error) {
+	// M46 B2: error_message / catalog_version are DDL-nullable (both are
+	// legitimately absent on a 'running' log row) and the model fields are
+	// plain strings — COALESCE'd to ''. completed_at stays bare: it scans
+	// into *time.Time, where NULL is representable and meaningful.
 	query := `
 		SELECT id, started_at, completed_at, status, new_entries,
-			updated_entries, total_processed, error_message, catalog_version
+			updated_entries, total_processed,
+			COALESCE(error_message, ''), COALESCE(catalog_version, '')
 		FROM kev_sync_logs
 		ORDER BY started_at DESC
 		LIMIT 1
@@ -333,11 +349,14 @@ func (r *KEVRepository) SyncVulnerabilitiesKEVStatus(ctx context.Context) (int, 
 
 // GetKEVVulnerabilities gets all vulnerabilities that are in KEV
 func (r *KEVRepository) GetKEVVulnerabilities(ctx context.Context, projectID uuid.UUID) ([]model.Vulnerability, error) {
+	// M46 B2: description/severity COALESCE'd to '', source to 'NVD'
+	// (existing repo convention); cvss_score/published_at/updated_at scan
+	// into the model's pointer fields (no sentinels).
 	query := `
-		SELECT DISTINCT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
+		SELECT DISTINCT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
 			v.epss_score, v.epss_percentile, v.epss_updated_at,
 			v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
-			v.source, v.published_at, v.updated_at
+			COALESCE(v.source, 'NVD'), v.published_at, v.updated_at
 		FROM vulnerabilities v
 		JOIN component_vulnerabilities cv ON cv.vulnerability_id = v.id
 		JOIN components c ON c.id = cv.component_id

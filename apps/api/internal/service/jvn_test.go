@@ -71,8 +71,8 @@ func TestJVNService_SearchByKeyword_HTTPMock(t *testing.T) {
 	if v.Severity != "HIGH" {
 		t.Errorf("expected HIGH severity, got %s", v.Severity)
 	}
-	if v.CVSSScore != 7.5 {
-		t.Errorf("expected CVSS 7.5, got %f", v.CVSSScore)
+	if v.CVSSScore == nil || *v.CVSSScore != 7.5 {
+		t.Errorf("expected CVSS 7.5, got %v", v.CVSSScore)
 	}
 	if v.Source != "JVN" {
 		t.Errorf("expected source JVN, got %s", v.Source)

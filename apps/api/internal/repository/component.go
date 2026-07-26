@@ -39,8 +39,21 @@ func (r *ComponentRepository) Create(ctx context.Context, c *model.Component) er
 	return err
 }
 
+// ListBySbom reads the components of one SBOM.
+//
+// M46 B2: version / type / purl / license / created_at are DDL-nullable
+// (001) while the model fields are NULL-intolerant, so a NULL row (SBOM
+// imports routinely omit version/license; operator SQL can omit anything)
+// aborted the whole list with "converting NULL to string is unsupported".
+// The nullable strings are COALESCE'd to ” (the model's "empty means
+// absent" contract); created_at — DDL default now(), 0 NULL rows measured
+// on the dev DB — keeps time.Time with COALESCE(created_at, NOW()), i.e.
+// the DDL default applied at read time for anomalous operator-seeded rows.
 func (r *ComponentRepository) ListBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.Component, error) {
-	query := `SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id = $1 ORDER BY name`
+	query := `
+		SELECT id, sbom_id, name, COALESCE(version, ''), COALESCE(type, ''),
+			COALESCE(purl, ''), COALESCE(license, ''), COALESCE(created_at, NOW())
+		FROM components WHERE sbom_id = $1 ORDER BY name`
 	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
 	if err != nil {
 		return nil, err
@@ -81,8 +94,11 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	// the model pointers nil for un-synced rows — same pattern as
 	// SearchRepository.getComponentVulnerabilities so the web EPSS badge
 	// stays suppressed for 0/nil.
+	// M46 B2: description/severity COALESCE'd to '' (both DDL-nullable;
+	// NVD "Awaiting Analysis" rows are real); cvss_score/published_at/
+	// updated_at scan into the model's pointer fields (no sentinels).
 	query := `
-		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
+		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
 		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
@@ -212,8 +228,9 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// F446: epss_score/epss_percentile are added via COALESCE(...,0) with
 	// the `> 0` guard below leaving the model pointers nil for un-synced
 	// rows (mirrors SearchRepository.getComponentVulnerabilities).
+	// M46 B2: same NULL-safe read shape as GetVulnerabilities above.
 	query := `
-		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
+		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
 		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
@@ -257,13 +274,17 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 }
 
 func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Context, sbomID uuid.UUID) ([]model.ComponentVulnerability, error) {
+	// M46 B2: c.version/purl/license and v.severity are DDL-nullable —
+	// COALESCE'd to ''. NULLS LAST keeps un-scored rows at the tail
+	// (Postgres defaults DESC to NULLS FIRST).
 	query := `
-		SELECT c.id, c.name, c.version, c.purl, c.license, v.cve_id, v.severity
+		SELECT c.id, c.name, COALESCE(c.version, ''), COALESCE(c.purl, ''),
+			COALESCE(c.license, ''), v.cve_id, COALESCE(v.severity, '')
 		FROM components c
 		JOIN component_vulnerabilities cv ON cv.component_id = c.id
 		JOIN vulnerabilities v ON v.id = cv.vulnerability_id
 		WHERE c.sbom_id = $1
-		ORDER BY v.cvss_score DESC
+		ORDER BY v.cvss_score DESC NULLS LAST
 	`
 	rows, err := r.q(ctx).QueryContext(ctx, query, sbomID)
 	if err != nil {
@@ -290,9 +311,13 @@ func (r *ComponentRepository) ListComponentVulnerabilitiesBySbom(ctx context.Con
 	return results, nil
 }
 
-// GetByID retrieves a component by its UUID
+// GetByID retrieves a component by its UUID.
+// M46 B2: same NULL-safe column shape as ListBySbom.
 func (r *ComponentRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Component, error) {
-	query := `SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE id = $1`
+	query := `
+		SELECT id, sbom_id, name, COALESCE(version, ''), COALESCE(type, ''),
+			COALESCE(purl, ''), COALESCE(license, ''), COALESCE(created_at, NOW())
+		FROM components WHERE id = $1`
 	var c model.Component
 	err := r.q(ctx).QueryRowContext(ctx, query, id).Scan(&c.ID, &c.SbomID, &c.Name, &c.Version, &c.Type, &c.Purl, &c.License, &c.CreatedAt)
 	if err != nil {

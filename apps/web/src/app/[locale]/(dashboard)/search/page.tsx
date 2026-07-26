@@ -58,7 +58,9 @@ function CVESearchResults({ result, locale }: { result: CVESearchResult; locale:
             <SeverityBadge severity={result.severity} />
           </CardTitle>
           <CardDescription>
-            CVSS: {result.cvss_score.toFixed(1)} | EPSS: {(result.epss_score * 100).toFixed(1)}%
+            {/* M46 B2: cvss_score is absent for un-scored CVEs — render
+                "—", never 0.0 (an un-triaged Critical must not look safe). */}
+            CVSS: {result.cvss_score != null ? result.cvss_score.toFixed(1) : "—"} | EPSS: {(result.epss_score * 100).toFixed(1)}%
           </CardDescription>
         </CardHeader>
         <CardContent>

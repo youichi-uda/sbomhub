@@ -37,8 +37,12 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 	// a SQL NULL into the bare float64 CVESearchResult.EPSSScore would error);
 	// the COALESCE holds the SAME 5th position in the positional SELECT, so the
 	// Scan target order below is unchanged.
+	// M46 B2: description/severity are DDL-nullable and COALESCE'd to ''
+	// (NVD "Awaiting Analysis" rows are real); cvss_score scans into the
+	// *float64 CVESearchResult.CVSSScore — no 0-sentinel, un-scored stays
+	// nil (CVSS 0.0 is a real "None" score).
 	vulnQuery := `
-		SELECT id, cve_id, description, cvss_score, COALESCE(epss_score, 0), severity
+		SELECT id, cve_id, COALESCE(description, ''), cvss_score, COALESCE(epss_score, 0), COALESCE(severity, '')
 		FROM vulnerabilities
 		WHERE cve_id = $1
 		LIMIT 1
@@ -61,13 +65,14 @@ func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*mode
 	}
 
 	// Get affected projects and components
+	// M46 B2: c.version is DDL-nullable — COALESCE'd to ''.
 	affectedQuery := `
 		SELECT
 			p.id as project_id,
 			p.name as project_name,
 			c.id as component_id,
 			c.name as component_name,
-			c.version as component_version
+			COALESCE(c.version, '') as component_version
 		FROM projects p
 		INNER JOIN sboms s ON p.id = s.project_id
 		INNER JOIN components c ON s.id = c.sbom_id
@@ -150,13 +155,14 @@ func (r *SearchRepository) SearchByComponent(ctx context.Context, name string, v
 	}
 
 	// Search for components by name (case-insensitive partial match)
+	// M46 B2: c.version is DDL-nullable — COALESCE'd to '' like license.
 	query := `
 		SELECT
 			p.id as project_id,
 			p.name as project_name,
 			c.id as component_id,
 			c.name as component_name,
-			c.version as component_version,
+			COALESCE(c.version, '') as component_version,
 			COALESCE(c.license, '') as license
 		FROM components c
 		INNER JOIN sboms s ON c.sbom_id = s.id
@@ -172,6 +178,12 @@ func (r *SearchRepository) SearchByComponent(ctx context.Context, name string, v
 	}
 	defer rows.Close()
 
+	// M46 B2: materialize the matches BEFORE fetching their
+	// vulnerabilities. Under the request's TenantTx everything shares one
+	// connection, and lib/pq cannot run getComponentVulnerabilities while
+	// this result set is still open — the nested query de-syncs the
+	// protocol ("pq: unexpected Parse response 'D'") and poisons the tx.
+	// (Previously masked: a NULL component version aborted the scan first.)
 	for rows.Next() {
 		var match model.ComponentSearchMatch
 		if err := rows.Scan(
@@ -190,17 +202,25 @@ func (r *SearchRepository) SearchByComponent(ctx context.Context, name string, v
 			continue
 		}
 
-		// Get vulnerabilities for this component
-		vulns, err := r.getComponentVulnerabilities(ctx, match.Component.ID)
+		result.Matches = append(result.Matches, match)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	// Get vulnerabilities for each match now that the connection is free.
+	for i := range result.Matches {
+		vulns, err := r.getComponentVulnerabilities(ctx, result.Matches[i].Component.ID)
 		if err != nil {
 			return nil, err
 		}
-		match.Vulnerabilities = vulns
-
-		result.Matches = append(result.Matches, match)
+		result.Matches[i].Vulnerabilities = vulns
 	}
 
-	return result, rows.Err()
+	return result, nil
 }
 
 func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, componentID uuid.UUID) ([]model.Vulnerability, error) {
@@ -213,14 +233,18 @@ func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, comp
 	// positions in the positional SELECT, so the Scan target order is unchanged;
 	// the `> 0` guard below still leaves the model pointers nil for an un-synced
 	// (COALESCE-0) row, preserving the web >0 EPSS-badge suppression (F391).
+	// M46 B2: description/severity COALESCE'd to '', source to 'NVD'
+	// (this repo's existing convention); cvss_score/published_at/
+	// updated_at scan into the model's pointer fields. NULLS LAST keeps
+	// un-scored rows at the tail (Postgres defaults DESC to NULLS FIRST).
 	query := `
-		SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score,
+		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
 		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
-		       v.source, v.published_at, v.updated_at
+		       COALESCE(v.source, 'NVD'), v.published_at, v.updated_at
 		FROM vulnerabilities v
 		INNER JOIN component_vulnerabilities cv ON v.id = cv.vulnerability_id
 		WHERE cv.component_id = $1
-		ORDER BY v.cvss_score DESC
+		ORDER BY v.cvss_score DESC NULLS LAST
 	`
 
 	rows, err := r.q(ctx).QueryContext(ctx, query, componentID)

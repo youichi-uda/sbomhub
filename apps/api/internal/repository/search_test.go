@@ -26,7 +26,8 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 
 	repo := NewSearchRepository(db)
 
-	pattern := regexp.MustCompile(`(?is)cvss_score,\s*` + regexp.QuoteMeta("COALESCE(epss_score, 0)") + `,\s*severity`)
+	// M46 B2: severity is now COALESCE'd to '' in the same position.
+	pattern := regexp.MustCompile(`(?is)cvss_score,\s*` + regexp.QuoteMeta("COALESCE(epss_score, 0)") + `,\s*` + regexp.QuoteMeta("COALESCE(severity, '')"))
 	if pattern.MatchString("cvss_score, 0::numeric, severity") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinel")
 	}
@@ -57,7 +58,7 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	if got.EPSSScore != 0 {
 		t.Errorf("EPSSScore = %v, want 0 (un-synced row COALESCEs to 0)", got.EPSSScore)
 	}
-	if got.CVSSScore != 7.5 || got.Severity != "HIGH" {
+	if got.CVSSScore == nil || *got.CVSSScore != 7.5 || got.Severity != "HIGH" {
 		t.Errorf("positional Scan misaligned: cvss=%v severity=%q, want 7.5/HIGH", got.CVSSScore, got.Severity)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

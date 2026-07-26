@@ -22,13 +22,19 @@ type VulnCacheEntry struct {
 	CachedAt        time.Time    `json:"cached_at"`
 }
 
-// CachedVuln represents a cached vulnerability
+// CachedVuln represents a cached vulnerability.
+//
+// M46 B2: CVSSScore / PublishedAt mirror model.Vulnerability's pointer
+// fields so the cache preserves "un-scored" / "no timestamp" fidelity
+// instead of flattening them to 0.0 / zero time. Old Redis entries
+// (numeric 0 / zero-time JSON) still decode — they land as pointers to
+// the old sentinel values, exactly what the old code stored.
 type CachedVuln struct {
-	CVEID       string    `json:"cve_id"`
-	Description string    `json:"description"`
-	Severity    string    `json:"severity"`
-	CVSSScore   float64   `json:"cvss_score"`
-	PublishedAt time.Time `json:"published_at"`
+	CVEID       string     `json:"cve_id"`
+	Description string     `json:"description"`
+	Severity    string     `json:"severity"`
+	CVSSScore   *float64   `json:"cvss_score,omitempty"`
+	PublishedAt *time.Time `json:"published_at,omitempty"`
 }
 
 // NVDCache provides caching for NVD API responses

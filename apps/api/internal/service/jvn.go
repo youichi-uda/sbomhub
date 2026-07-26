@@ -220,13 +220,15 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 		cveID = item.Identifier
 	}
 
-	// Get CVSS score and severity
-	var cvssScore float64
+	// Get CVSS score and severity. M46 B2: an item without any CVSS
+	// entry yields a nil score (NOT 0.0, a real "None" score) so
+	// un-scored JVN advisories are stored as NULL.
+	var cvssScore *float64
 	var severity string
 	for _, cvss := range item.CVSS {
 		if cvss.Version == "3.0" || cvss.Version == "3.1" {
 			score, _ := strconv.ParseFloat(cvss.Score, 64)
-			cvssScore = score
+			cvssScore = &score
 			severity = s.mapCVSSSeverity(cvss.Severity)
 			break
 		}
@@ -234,7 +236,7 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	// Fallback to CVSS v2
 	if severity == "" && len(item.CVSS) > 0 {
 		score, _ := strconv.ParseFloat(item.CVSS[0].Score, 64)
-		cvssScore = score
+		cvssScore = &score
 		severity = s.mapCVSSSeverity(item.CVSS[0].Severity)
 	}
 
@@ -242,13 +244,14 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 		severity = "UNKNOWN"
 	}
 
+	now := time.Now()
 	return &model.Vulnerability{
 		CVEID:       cveID,
 		Description: item.Description,
 		Severity:    severity,
 		CVSSScore:   cvssScore,
 		Source:      "JVN",
-		UpdatedAt:   time.Now(),
+		UpdatedAt:   &now,
 	}
 }
 

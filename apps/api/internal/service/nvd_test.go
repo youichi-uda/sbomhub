@@ -71,8 +71,8 @@ func TestExtractCvss_V31(t *testing.T) {
 	}
 
 	score, severity := extractCvss(metrics)
-	if score != 9.8 {
-		t.Errorf("expected score 9.8, got %f", score)
+	if score == nil || *score != 9.8 {
+		t.Errorf("expected score 9.8, got %v", score)
 	}
 	if severity != "CRITICAL" {
 		t.Errorf("expected severity CRITICAL, got %s", severity)
@@ -87,8 +87,8 @@ func TestExtractCvss_V30(t *testing.T) {
 	}
 
 	score, severity := extractCvss(metrics)
-	if score != 7.5 {
-		t.Errorf("expected score 7.5, got %f", score)
+	if score == nil || *score != 7.5 {
+		t.Errorf("expected score 7.5, got %v", score)
 	}
 	if severity != "HIGH" {
 		t.Errorf("expected severity HIGH, got %s", severity)
@@ -103,8 +103,8 @@ func TestExtractCvss_V2(t *testing.T) {
 	}
 
 	score, severity := extractCvss(metrics)
-	if score != 5.0 {
-		t.Errorf("expected score 5.0, got %f", score)
+	if score == nil || *score != 5.0 {
+		t.Errorf("expected score 5.0, got %v", score)
 	}
 	if severity != "MEDIUM" {
 		t.Errorf("expected severity MEDIUM, got %s", severity)
@@ -114,9 +114,11 @@ func TestExtractCvss_V2(t *testing.T) {
 func TestExtractCvss_NoMetrics(t *testing.T) {
 	metrics := NVDMetrics{}
 
+	// M46 B2: no metrics means un-scored -> nil, NOT a 0.0 sentinel
+	// (CVSS 0.0 is a real "None" score).
 	score, severity := extractCvss(metrics)
-	if score != 0 {
-		t.Errorf("expected score 0, got %f", score)
+	if score != nil {
+		t.Errorf("expected nil score for no metrics, got %v", *score)
 	}
 	if severity != "UNKNOWN" {
 		t.Errorf("expected severity UNKNOWN, got %s", severity)
@@ -134,8 +136,8 @@ func TestExtractCvss_PreferV31OverV30(t *testing.T) {
 	}
 
 	score, severity := extractCvss(metrics)
-	if score != 9.0 {
-		t.Errorf("expected V31 score 9.0, got %f", score)
+	if score == nil || *score != 9.0 {
+		t.Errorf("expected V31 score 9.0, got %v", score)
 	}
 	if severity != "CRITICAL" {
 		t.Errorf("expected CRITICAL from V31, got %s", severity)
@@ -214,8 +216,8 @@ func TestConvertToVulnerabilities(t *testing.T) {
 	if v1.Description != "Test vulnerability description" {
 		t.Errorf("expected English description, got %s", v1.Description)
 	}
-	if v1.CVSSScore != 8.5 {
-		t.Errorf("expected CVSS 8.5, got %f", v1.CVSSScore)
+	if v1.CVSSScore == nil || *v1.CVSSScore != 8.5 {
+		t.Errorf("expected CVSS 8.5, got %v", v1.CVSSScore)
 	}
 	if v1.Severity != "HIGH" {
 		t.Errorf("expected HIGH severity, got %s", v1.Severity)
@@ -234,6 +236,10 @@ func TestConvertToVulnerabilities(t *testing.T) {
 	}
 	if v2.Severity != "UNKNOWN" {
 		t.Errorf("expected UNKNOWN severity (no metrics), got %s", v2.Severity)
+	}
+	// M46 B2: a metrics-less CVE stays un-scored (nil), not 0.0.
+	if v2.CVSSScore != nil {
+		t.Errorf("expected nil CVSSScore (no metrics), got %v", *v2.CVSSScore)
 	}
 }
 
@@ -332,8 +338,8 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 	if vulns[0].CVEID != "CVE-2023-9999" {
 		t.Errorf("expected CVE-2023-9999, got %s", vulns[0].CVEID)
 	}
-	if vulns[0].CVSSScore != 7.5 {
-		t.Errorf("expected CVSS 7.5, got %f", vulns[0].CVSSScore)
+	if vulns[0].CVSSScore == nil || *vulns[0].CVSSScore != 7.5 {
+		t.Errorf("expected CVSS 7.5, got %v", vulns[0].CVSSScore)
 	}
 	if vulns[0].Severity != "HIGH" {
 		t.Errorf("expected HIGH severity, got %s", vulns[0].Severity)
@@ -653,9 +659,10 @@ func TestConvertToVulnerabilities_NonRFC3339Date(t *testing.T) {
 		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
 	}
 
-	// Since the date format doesn't match RFC3339, PublishedAt should be zero
-	if !vulns[0].PublishedAt.IsZero() {
-		t.Errorf("expected zero PublishedAt for non-RFC3339 date, got %v", vulns[0].PublishedAt)
+	// Since the date format doesn't match RFC3339, PublishedAt stays nil
+	// (M46 B2: absent timestamps are nil, not a zero time.Time).
+	if vulns[0].PublishedAt != nil {
+		t.Errorf("expected nil PublishedAt for non-RFC3339 date, got %v", *vulns[0].PublishedAt)
 	}
 }
 
@@ -680,9 +687,10 @@ func TestConvertToVulnerabilities_InvalidDate(t *testing.T) {
 		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
 	}
 
-	// With invalid date, PublishedAt should be zero value
-	if !vulns[0].PublishedAt.IsZero() {
-		t.Errorf("expected zero PublishedAt for invalid date, got %v", vulns[0].PublishedAt)
+	// With an invalid date, PublishedAt stays nil (M46 B2: absent
+	// timestamps are nil, not a zero time.Time).
+	if vulns[0].PublishedAt != nil {
+		t.Errorf("expected nil PublishedAt for invalid date, got %v", *vulns[0].PublishedAt)
 	}
 }
 

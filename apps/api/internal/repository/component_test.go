@@ -144,7 +144,7 @@ func TestComponentRepository_ListBySbom(t *testing.T) {
 				rows := sqlmock.NewRows([]string{"id", "sbom_id", "name", "version", "type", "purl", "license", "created_at"}).
 					AddRow(compID1, sbomID, "axios", "1.4.0", "library", "pkg:npm/axios@1.4.0", "MIT", now).
 					AddRow(compID2, sbomID, "react", "18.2.0", "library", "pkg:npm/react@18.2.0", "MIT", now)
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE sbom_id`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
 			},
@@ -164,7 +164,7 @@ func TestComponentRepository_ListBySbom(t *testing.T) {
 			sbomID: uuid.New(),
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "sbom_id", "name", "version", "type", "purl", "license", "created_at"})
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE sbom_id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
 			},
@@ -176,7 +176,7 @@ func TestComponentRepository_ListBySbom(t *testing.T) {
 			name:   "database query error",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE sbom_id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(errors.New("connection refused"))
 			},
@@ -191,7 +191,7 @@ func TestComponentRepository_ListBySbom(t *testing.T) {
 				// Use wrong column types to trigger scan error
 				rows := sqlmock.NewRows([]string{"id", "sbom_id", "name", "version", "type", "purl", "license", "created_at"}).
 					AddRow("not-a-uuid", sbomID, "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", now)
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE sbom_id`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
 			},
@@ -247,7 +247,7 @@ func TestComponentRepository_GetByID(t *testing.T) {
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "sbom_id", "name", "version", "type", "purl", "license", "created_at"}).
 					AddRow(compID, sbomID, "lodash", "4.17.21", "library", "pkg:npm/lodash@4.17.21", "MIT", now)
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE id`).
 					WithArgs(compID).
 					WillReturnRows(rows)
 			},
@@ -274,7 +274,7 @@ func TestComponentRepository_GetByID(t *testing.T) {
 			name:   "component not found",
 			compID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(sql.ErrNoRows)
 			},
@@ -285,7 +285,7 @@ func TestComponentRepository_GetByID(t *testing.T) {
 			name:   "database error",
 			compID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE id").
+				mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE id`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(errors.New("database unavailable"))
 			},
@@ -340,7 +340,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"}).
 					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, 0.42, 0.88, "NVD", true, now, now, false, now, now).
 					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, 0.0, 0.0, "NVD", false, nil, nil, nil, now, now)
-				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
+				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
 			},
@@ -350,8 +350,8 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 				if vulns[0].CVEID != "CVE-2023-1234" {
 					t.Errorf("expected first vuln CVE-2023-1234, got %s", vulns[0].CVEID)
 				}
-				if vulns[0].CVSSScore != 9.8 {
-					t.Errorf("expected CVSS score 9.8, got %f", vulns[0].CVSSScore)
+				if vulns[0].CVSSScore == nil || *vulns[0].CVSSScore != 9.8 {
+					t.Errorf("expected CVSS score 9.8, got %v", vulns[0].CVSSScore)
 				}
 				if !vulns[0].InKEV {
 					t.Errorf("expected first vuln to be in KEV")
@@ -381,7 +381,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			sbomID: uuid.New(),
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"})
-				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
+				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
 			},
@@ -393,7 +393,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			name:   "database error",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT v.id, v.cve_id, v.description, v.severity, v.cvss_score").
+				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(errors.New("query failed"))
 			},
@@ -450,7 +450,7 @@ func TestComponentRepository_ListComponentVulnerabilitiesBySbom(t *testing.T) {
 				rows := sqlmock.NewRows([]string{"component_id", "component_name", "component_version", "component_purl", "component_license", "cve_id", "severity"}).
 					AddRow(compID, "lodash", "4.17.20", "pkg:npm/lodash@4.17.20", "MIT", "CVE-2021-23337", "HIGH").
 					AddRow(compID, "lodash", "4.17.20", "pkg:npm/lodash@4.17.20", "MIT", "CVE-2020-8203", "HIGH")
-				mock.ExpectQuery("SELECT c.id, c.name, c.version, c.purl, c.license, v.cve_id, v.severity").
+				mock.ExpectQuery(`SELECT c.id, c.name, COALESCE\(c.version, ''\), COALESCE\(c.purl, ''\), COALESCE\(c.license, ''\), v.cve_id, COALESCE\(v.severity, ''\)`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
 			},
@@ -470,7 +470,7 @@ func TestComponentRepository_ListComponentVulnerabilitiesBySbom(t *testing.T) {
 			sbomID: uuid.New(),
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"component_id", "component_name", "component_version", "component_purl", "component_license", "cve_id", "severity"})
-				mock.ExpectQuery("SELECT c.id, c.name, c.version, c.purl, c.license, v.cve_id, v.severity").
+				mock.ExpectQuery(`SELECT c.id, c.name, COALESCE\(c.version, ''\), COALESCE\(c.purl, ''\), COALESCE\(c.license, ''\), v.cve_id, COALESCE\(v.severity, ''\)`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnRows(rows)
 			},
@@ -482,7 +482,7 @@ func TestComponentRepository_ListComponentVulnerabilitiesBySbom(t *testing.T) {
 			name:   "database error",
 			sbomID: uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT c.id, c.name, c.version, c.purl, c.license, v.cve_id, v.severity").
+				mock.ExpectQuery(`SELECT c.id, c.name, COALESCE\(c.version, ''\), COALESCE\(c.purl, ''\), COALESCE\(c.license, ''\), v.cve_id, COALESCE\(v.severity, ''\)`).
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(errors.New("join failed"))
 			},
@@ -596,7 +596,7 @@ func TestComponentRepository_ListBySbom_OrderedByName(t *testing.T) {
 		AddRow(uuid.New(), sbomID, "lodash", "4.17.21", "library", "", "", now).
 		AddRow(uuid.New(), sbomID, "react", "18.2.0", "library", "", "", now)
 
-	mock.ExpectQuery("SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id").
+	mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE sbom_id`).
 		WithArgs(sbomID).
 		WillReturnRows(rows)
 

@@ -113,16 +113,20 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 	// (migration 001, DECIMAL(3,1)) and TopRisk.CVSSScore is a bare float64, so a
 	// CVE without an NVD CVSS (e.g. a JVN-only match) would error the scan and
 	// empty the whole Top Risks section (the report + dashboard symptom).
+	// M46 B2: v.severity and c.version are DDL-nullable (an un-triaged
+	// NVD "Awaiting Analysis" row has NULL severity) and the TopRisk
+	// fields are plain strings — COALESCE'd to '' so one such row no
+	// longer empties the whole Top Risks panel.
 	query := `
 		SELECT DISTINCT ON (v.cve_id)
 			v.cve_id,
 			COALESCE(v.epss_score, 0) as epss_score,
 			COALESCE(v.cvss_score, 0) as cvss_score,
-			v.severity,
+			COALESCE(v.severity, '') as severity,
 			p.id as project_id,
 			p.name as project_name,
 			c.name as component_name,
-			c.version as component_version
+			COALESCE(c.version, '') as component_version
 		FROM vulnerabilities v
 		INNER JOIN component_vulnerabilities cv ON v.id = cv.vulnerability_id
 		INNER JOIN components c ON cv.component_id = c.id

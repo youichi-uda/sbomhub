@@ -4,9 +4,11 @@ import "github.com/google/uuid"
 
 // CVESearchResult represents the result of a CVE search
 type CVESearchResult struct {
-	CVEID              string              `json:"cve_id"`
-	Description        string              `json:"description"`
-	CVSSScore          float64             `json:"cvss_score"`
+	CVEID       string `json:"cve_id"`
+	Description string `json:"description"`
+	// CVSSScore is nil for un-scored CVEs (no 0-sentinel — CVSS 0.0 is a
+	// real "None" score; see model.Vulnerability.CVSSScore, M46 B2).
+	CVSSScore          *float64            `json:"cvss_score,omitempty"`
 	EPSSScore          float64             `json:"epss_score"`
 	Severity           string              `json:"severity"`
 	AffectedProjects   []AffectedProject   `json:"affected_projects"`

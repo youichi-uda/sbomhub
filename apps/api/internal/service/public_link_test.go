@@ -173,7 +173,7 @@ func TestPublicLink_GetPublicView_BindsTenantBeforeContentRead(t *testing.T) {
 			"id", "project_id", "format", "version", "raw_data", "created_at",
 		}).AddRow(sbomID, projectID, "cyclonedx", "1.5", []byte(`{}`), now))
 
-	mock.ExpectQuery(`SELECT id, sbom_id, name, version, type, purl, license, created_at FROM components WHERE sbom_id = \$1 ORDER BY name`).
+	mock.ExpectQuery(`SELECT id, sbom_id, name, COALESCE\(version, ''\), COALESCE\(type, ''\), COALESCE\(purl, ''\), COALESCE\(license, ''\), COALESCE\(created_at, NOW\(\)\) FROM components WHERE sbom_id = \$1 ORDER BY name`).
 		WithArgs(sbomID).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "sbom_id", "name", "version", "type", "purl", "license", "created_at",

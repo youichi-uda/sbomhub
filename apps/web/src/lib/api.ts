@@ -134,7 +134,10 @@ export interface Vulnerability {
   cve_id: string;
   description: string;
   severity: string;
-  cvss_score: number;
+  // M46 B2: absent when the CVE has not been scored (NVD "Awaiting
+  // Analysis", JVN-only matches). Deliberately NOT 0 — CVSS 0.0 is a real
+  // "None" score; render un-scored as "—", never 0.0.
+  cvss_score?: number;
   epss_score?: number;
   epss_percentile?: number;
   // KEV (Known Exploited Vulnerabilities) fields
@@ -143,7 +146,8 @@ export interface Vulnerability {
   kev_due_date?: string;
   kev_ransomware_use?: boolean;
   source: string; // NVD or JVN
-  published_at: string;
+  // M46 B2: absent when the upstream feed carried no timestamp.
+  published_at?: string;
 }
 
 // KEV types
@@ -695,7 +699,8 @@ export interface UnaffectedProject {
 export interface CVESearchResult {
   cve_id: string;
   description: string;
-  cvss_score: number;
+  // M46 B2: absent for un-scored CVEs (no 0-sentinel; see Vulnerability).
+  cvss_score?: number;
   epss_score: number;
   severity: string;
   affected_projects: AffectedProject[];

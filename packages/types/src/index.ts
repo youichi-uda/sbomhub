@@ -32,9 +32,17 @@ export interface Vulnerability {
   cve_id: string;
   description: string;
   severity: Severity;
-  cvss_score: number;
-  published_at: string;
-  updated_at: string;
+  /**
+   * Absent when the CVE has not been scored (NVD "Awaiting Analysis",
+   * JVN-only matches). Deliberately NOT 0 — CVSS 0.0 is a real "None"
+   * score, and rendering un-scored as 0.0 would make an un-triaged
+   * Critical look safe (M46 B2).
+   */
+  cvss_score?: number;
+  /** Absent when the upstream feed carried no timestamp (M46 B2). */
+  published_at?: string;
+  /** Absent when the upstream feed carried no timestamp (M46 B2). */
+  updated_at?: string;
 }
 
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";

@@ -190,9 +190,11 @@ func (s *SSVCService) AutoAssessVulnerability(ctx context.Context, projectID, te
 		}
 	}
 
-	// Determine technical impact from CVSS score
+	// Determine technical impact from CVSS score. M46 B2: CVSSScore is
+	// nil for un-scored CVEs; those keep the Partial default rather than
+	// being treated as 0.0.
 	technicalImpact := model.SSVCTechnicalImpactPartial
-	if vuln != nil && vuln.CVSSScore >= 7.0 {
+	if vuln != nil && vuln.CVSSScore != nil && *vuln.CVSSScore >= 7.0 {
 		technicalImpact = model.SSVCTechnicalImpactTotal
 	}
 

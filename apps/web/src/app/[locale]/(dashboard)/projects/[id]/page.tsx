@@ -778,7 +778,9 @@ export default function ProjectDetailPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-muted-foreground">
-                          CVSS: {vuln.cvss_score}
+                          {/* M46 B2: cvss_score is absent for un-scored
+                              CVEs — render "—", never 0.0. */}
+                          CVSS: {vuln.cvss_score ?? "—"}
                         </span>
                         {/* M38-B (F447 #159): EPSS exploitation
                             probability. Mirrors the dashboard TopRisksTable

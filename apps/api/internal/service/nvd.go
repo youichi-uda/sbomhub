@@ -263,6 +263,9 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 		} else if entry != nil {
 			// Cache hit - convert cached vulns to model
 			vulns := make([]model.Vulnerability, len(entry.Vulnerabilities))
+			// M46 B2: CachedVuln mirrors the model's pointer fields, so
+			// CVSSScore/PublishedAt carry through without sentinels.
+			cachedAt := entry.CachedAt
 			for i, cv := range entry.Vulnerabilities {
 				vulns[i] = model.Vulnerability{
 					ID:          uuid.New(),
@@ -272,7 +275,7 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 					CVSSScore:   cv.CVSSScore,
 					PublishedAt: cv.PublishedAt,
 					Source:      "NVD",
-					UpdatedAt:   entry.CachedAt,
+					UpdatedAt:   &cachedAt,
 				}
 			}
 			return vulns, true, nil
@@ -370,9 +373,10 @@ func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vu
 		vuln.Severity = severity
 
 		if t, err := time.Parse(time.RFC3339, entry.CVE.Published); err == nil {
-			vuln.PublishedAt = t
+			vuln.PublishedAt = &t
 		}
-		vuln.UpdatedAt = time.Now()
+		now := time.Now()
+		vuln.UpdatedAt = &now
 
 		vulns = append(vulns, vuln)
 	}
@@ -380,20 +384,24 @@ func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vu
 	return vulns
 }
 
-func extractCvss(metrics NVDMetrics) (float64, string) {
+// extractCvss returns the CVE's base score and severity. M46 B2: a CVE
+// without any CVSS metrics (NVD "Awaiting Analysis") yields a nil score —
+// NOT 0.0, which is a real "None" score — so un-scored CVEs are stored as
+// NULL and rendered as unscored instead of "safe".
+func extractCvss(metrics NVDMetrics) (*float64, string) {
 	if len(metrics.CvssMetricV31) > 0 {
 		m := metrics.CvssMetricV31[0].CvssData
-		return m.BaseScore, strings.ToUpper(m.BaseSeverity)
+		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
 	}
 	if len(metrics.CvssMetricV30) > 0 {
 		m := metrics.CvssMetricV30[0].CvssData
-		return m.BaseScore, strings.ToUpper(m.BaseSeverity)
+		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
 	}
 	if len(metrics.CvssMetricV2) > 0 {
 		m := metrics.CvssMetricV2[0].CvssData
-		return m.BaseScore, scoreToCvss2Severity(m.BaseScore)
+		return &m.BaseScore, scoreToCvss2Severity(m.BaseScore)
 	}
-	return 0, "UNKNOWN"
+	return nil, "UNKNOWN"
 }
 
 func scoreToCvss2Severity(score float64) string {
