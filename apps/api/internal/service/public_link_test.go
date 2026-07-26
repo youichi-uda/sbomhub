@@ -143,7 +143,7 @@ func TestPublicLink_GetPublicView_BindsTenantBeforeContentRead(t *testing.T) {
 	// 1) GetByToken runs outside the tx — public_links has RLS removed
 	//    in migration 030 so the anonymous lookup works without a
 	//    tenant context.
-	mock.ExpectQuery(`SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, is_active`).
+	mock.ExpectQuery(`SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, COALESCE\(is_active, true\)`).
 		WithArgs(token).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "tenant_id", "project_id", "sbom_id", "token", "name", "expires_at", "is_active",
@@ -221,7 +221,7 @@ func TestPublicLink_GetPublicSbomRaw_BindsTenantBeforeContentRead(t *testing.T) 
 	now := time.Now()
 	raw := []byte(`{"bomFormat":"CycloneDX"}`)
 
-	mock.ExpectQuery(`SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, is_active`).
+	mock.ExpectQuery(`SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, COALESCE\(is_active, true\)`).
 		WithArgs(token).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "tenant_id", "project_id", "sbom_id", "token", "name", "expires_at", "is_active",

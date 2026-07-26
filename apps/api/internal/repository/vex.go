@@ -51,10 +51,22 @@ func (r *VEXRepository) Create(ctx context.Context, v *model.VEXStatement) error
 // VEXService can populate VEXStatement.TenantID before insert without
 // growing its constructor surface (which would force a cmd/server/main.go
 // change owned by a different wave).
+// M46 W2: projects.tenant_id is DDL-nullable (007 added the column without
+// NOT NULL; 0/556 real NULL rows measured 2026-07-26) and uuid.UUID.Scan(nil)
+// SILENTLY leaves uuid.Nil — a NULL-tenant row would have returned
+// (uuid.Nil, nil) and been written into vex_statements.tenant_id. Scan
+// through uuid.NullUUID and fail loudly instead: a tenant id has no
+// meaningful default, so COALESCE would just re-encode the silent-Nil bug.
 func (r *VEXRepository) LookupProjectTenantID(ctx context.Context, projectID uuid.UUID) (uuid.UUID, error) {
-	var tenantID uuid.UUID
+	var tenantID uuid.NullUUID
 	err := r.q(ctx).QueryRowContext(ctx, `SELECT tenant_id FROM projects WHERE id = $1`, projectID).Scan(&tenantID)
-	return tenantID, err
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !tenantID.Valid {
+		return uuid.Nil, fmt.Errorf("project %s has no tenant_id", projectID)
+	}
+	return tenantID.UUID, nil
 }
 
 // ComponentBelongsToProject reports whether componentID is a component of a
@@ -99,8 +111,13 @@ func (r *VEXRepository) ComponentBelongsToProject(ctx context.Context, component
 // rejected here rather than silently trusted. Returns (nil, nil) when the
 // statement does not exist or is not visible to the tenant.
 func (r *VEXRepository) GetStatementForTenant(ctx context.Context, tenantID, id uuid.UUID) (*model.VEXStatement, error) {
+	// M46 W2: justification / action_statement / impact_statement are
+	// DDL-nullable (003) BY DESIGN — only status=not_affected carries a
+	// justification — so a bare scan aborted every read of a legitimate
+	// affected / fixed / under_investigation statement. COALESCE to ”
+	// (” means absent; matches the VEXSuggestionSource omitempty contract).
 	query := `
-		SELECT id, tenant_id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at
+		SELECT id, tenant_id, project_id, vulnerability_id, component_id, status, COALESCE(justification, ''), COALESCE(action_statement, ''), COALESCE(impact_statement, ''), created_by, created_at, updated_at
 		FROM vex_statements
 		WHERE id = $1 AND tenant_id = $2
 	`
@@ -220,8 +237,9 @@ func (r *VEXRepository) Update(ctx context.Context, v *model.VEXStatement) error
 }
 
 func (r *VEXRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.VEXStatement, error) {
+	// M46 W2: nullable statement columns COALESCE'd (see GetStatementForTenant).
 	query := `
-		SELECT id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at
+		SELECT id, project_id, vulnerability_id, component_id, status, COALESCE(justification, ''), COALESCE(action_statement, ''), COALESCE(impact_statement, ''), created_by, created_at, updated_at
 		FROM vex_statements
 		WHERE id = $1
 	`
@@ -241,12 +259,16 @@ func (r *VEXRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.VEXSt
 }
 
 func (r *VEXRepository) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.VEXStatementWithDetails, error) {
+	// M46 W2: nullable statement columns COALESCE'd (see
+	// GetStatementForTenant); v.severity is DDL-nullable too (001, the NVD
+	// "Awaiting Analysis" shape) and COALESCEs to ” like every wave-1
+	// severity read. c.name / c.version scan into *string (LEFT JOIN).
 	query := `
 		SELECT
 			vs.id, vs.project_id, vs.vulnerability_id, vs.component_id,
-			vs.status, vs.justification, vs.action_statement, vs.impact_statement,
+			vs.status, COALESCE(vs.justification, ''), COALESCE(vs.action_statement, ''), COALESCE(vs.impact_statement, ''),
 			vs.created_by, vs.created_at, vs.updated_at,
-			v.cve_id, v.severity,
+			v.cve_id, COALESCE(v.severity, ''),
 			c.name, c.version
 		FROM vex_statements vs
 		JOIN vulnerabilities v ON v.id = vs.vulnerability_id
@@ -274,12 +296,16 @@ func (r *VEXRepository) ListByProject(ctx context.Context, projectID uuid.UUID) 
 		}
 		statements = append(statements, s)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return statements, nil
 }
 
 func (r *VEXRepository) ListByVulnerability(ctx context.Context, vulnerabilityID uuid.UUID) ([]model.VEXStatement, error) {
+	// M46 W2: nullable statement columns COALESCE'd (see GetStatementForTenant).
 	query := `
-		SELECT id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at
+		SELECT id, project_id, vulnerability_id, component_id, status, COALESCE(justification, ''), COALESCE(action_statement, ''), COALESCE(impact_statement, ''), created_by, created_at, updated_at
 		FROM vex_statements
 		WHERE vulnerability_id = $1
 		ORDER BY updated_at DESC
@@ -301,6 +327,9 @@ func (r *VEXRepository) ListByVulnerability(ctx context.Context, vulnerabilityID
 			return nil, err
 		}
 		statements = append(statements, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return statements, nil
 }
@@ -326,16 +355,17 @@ func (r *VEXRepository) GetByProjectAndVulnerability(ctx context.Context, projec
 	var query string
 	var args []interface{}
 
+	// M46 W2: nullable statement columns COALESCE'd (see GetStatementForTenant).
 	if componentID == nil {
 		query = `
-			SELECT id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at
+			SELECT id, project_id, vulnerability_id, component_id, status, COALESCE(justification, ''), COALESCE(action_statement, ''), COALESCE(impact_statement, ''), created_by, created_at, updated_at
 			FROM vex_statements
 			WHERE project_id = $1 AND vulnerability_id = $2 AND component_id IS NULL
 		`
 		args = []interface{}{projectID, vulnerabilityID}
 	} else {
 		query = `
-			SELECT id, project_id, vulnerability_id, component_id, status, justification, action_statement, impact_statement, created_by, created_at, updated_at
+			SELECT id, project_id, vulnerability_id, component_id, status, COALESCE(justification, ''), COALESCE(action_statement, ''), COALESCE(impact_statement, ''), created_by, created_at, updated_at
 			FROM vex_statements
 			WHERE project_id = $1 AND vulnerability_id = $2 AND component_id = $3
 		`

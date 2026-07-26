@@ -134,10 +134,18 @@ type SSVCSummary struct {
 }
 
 // SSVCAssessmentWithVuln represents an assessment with vulnerability details
+//
+// M46 W2: VulnerabilityCVSSScore is *float64 — vulnerabilities.cvss_score
+// is DDL-nullable (001) and NULL rows are real (106 measured on the dev DB,
+// the NVD "Awaiting Analysis" shape). This is the SAME column
+// model.Vulnerability.CVSSScore reads, which wave 1 (f97c7fa) made *float64
+// because CVSS 0.0 is a real "None" score: rendering an un-scored CRITICAL
+// as 0.0 would make it look safe. nil / JSON-omitted means un-scored, same
+// as the VulnerabilityEPSSScore precedent one line below.
 type SSVCAssessmentWithVuln struct {
 	SSVCAssessment
 	VulnerabilitySeverity  string   `json:"vulnerability_severity"`
-	VulnerabilityCVSSScore float64  `json:"vulnerability_cvss_score"`
+	VulnerabilityCVSSScore *float64 `json:"vulnerability_cvss_score,omitempty"`
 	VulnerabilityInKEV     bool     `json:"vulnerability_in_kev"`
 	VulnerabilityEPSSScore *float64 `json:"vulnerability_epss_score,omitempty"`
 }

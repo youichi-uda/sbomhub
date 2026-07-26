@@ -78,13 +78,18 @@ func (r *SSVCRepository) UpsertProjectDefaults(ctx context.Context, d *model.SSV
 	return err
 }
 
-// GetAssessment gets an assessment by project and vulnerability
+// GetAssessment gets an assessment by project and vulnerability.
+//
+// M46 W2: notes is DDL-nullable TEXT (021) and NULL rows are the NORM —
+// 14/14 dev-DB assessments carry NULL notes (measured 2026-07-26), so a
+// bare scan into the NULL-intolerant model string aborted every
+// assessment read. COALESCE to ” per the wave-1 contract (” means absent).
 func (r *SSVCRepository) GetAssessment(ctx context.Context, projectID, vulnerabilityID uuid.UUID) (*model.SSVCAssessment, error) {
 	query := `
 		SELECT id, project_id, tenant_id, vulnerability_id, cve_id,
 			exploitation, automatable, technical_impact, mission_prevalence, safety_impact,
 			decision, exploitation_auto, automatable_auto, assessed_by, assessed_at,
-			notes, created_at, updated_at
+			COALESCE(notes, ''), created_at, updated_at
 		FROM ssvc_assessments
 		WHERE project_id = $1 AND vulnerability_id = $2
 	`
@@ -106,13 +111,14 @@ func (r *SSVCRepository) GetAssessment(ctx context.Context, projectID, vulnerabi
 	return &a, nil
 }
 
-// GetAssessmentByCVE gets an assessment by project and CVE ID
+// GetAssessmentByCVE gets an assessment by project and CVE ID.
+// M46 W2: notes COALESCE'd (see GetAssessment).
 func (r *SSVCRepository) GetAssessmentByCVE(ctx context.Context, projectID uuid.UUID, cveID string) (*model.SSVCAssessment, error) {
 	query := `
 		SELECT id, project_id, tenant_id, vulnerability_id, cve_id,
 			exploitation, automatable, technical_impact, mission_prevalence, safety_impact,
 			decision, exploitation_auto, automatable_auto, assessed_by, assessed_at,
-			notes, created_at, updated_at
+			COALESCE(notes, ''), created_at, updated_at
 		FROM ssvc_assessments
 		WHERE project_id = $1 AND cve_id = $2
 	`
@@ -210,13 +216,19 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 		return nil, 0, err
 	}
 
-	// List query with vulnerability details
+	// List query with vulnerability details.
+	//
+	// M46 W2: a.notes / v.severity COALESCE'd (nullable, ” means absent);
+	// v.cvss_score scans into the model's *float64
+	// (SSVCAssessmentWithVuln.VulnerabilityCVSSScore) — same column and
+	// same no-0.0-sentinel contract as wave 1's model.Vulnerability
+	// (f97c7fa): an un-scored CRITICAL must not render as CVSS 0.0.
 	query := `
 		SELECT a.id, a.project_id, a.tenant_id, a.vulnerability_id, a.cve_id,
 			a.exploitation, a.automatable, a.technical_impact, a.mission_prevalence, a.safety_impact,
 			a.decision, a.exploitation_auto, a.automatable_auto, a.assessed_by, a.assessed_at,
-			a.notes, a.created_at, a.updated_at,
-			v.severity, v.cvss_score, v.in_kev, v.epss_score
+			COALESCE(a.notes, ''), a.created_at, a.updated_at,
+			COALESCE(v.severity, ''), v.cvss_score, v.in_kev, v.epss_score
 		FROM ssvc_assessments a
 		JOIN vulnerabilities v ON v.id = a.vulnerability_id
 		WHERE a.project_id = $1
@@ -260,6 +272,9 @@ func (r *SSVCRepository) ListAssessments(ctx context.Context, projectID uuid.UUI
 			return nil, 0, err
 		}
 		assessments = append(assessments, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	return assessments, total, nil
@@ -324,7 +339,9 @@ func (r *SSVCRepository) UpdateVulnerabilitySSVCDecision(ctx context.Context, vu
 	return err
 }
 
-// GetAssessmentHistory gets history for an assessment
+// GetAssessmentHistory gets history for an assessment.
+// M46 W2: change_reason is nullable TEXT (021) — COALESCE to ” (” means
+// absent). The prev_* columns already scan into pointer types.
 func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
 	query := `
 		SELECT id, assessment_id,
@@ -332,7 +349,7 @@ func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, assessmentID 
 			prev_mission_prevalence, prev_safety_impact, prev_decision,
 			new_exploitation, new_automatable, new_technical_impact,
 			new_mission_prevalence, new_safety_impact, new_decision,
-			changed_by, changed_at, change_reason
+			changed_by, changed_at, COALESCE(change_reason, '')
 		FROM ssvc_assessment_history
 		WHERE assessment_id = $1
 		ORDER BY changed_at DESC
@@ -359,18 +376,23 @@ func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, assessmentID 
 		}
 		history = append(history, h)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return history, nil
 }
 
-// GetImmediateAssessments gets all assessments with immediate decision for a tenant
+// GetImmediateAssessments gets all assessments with immediate decision for a tenant.
+// M46 W2: a.notes / v.severity COALESCE'd, v.cvss_score scans into the
+// model's *float64 (see ListAssessments).
 func (r *SSVCRepository) GetImmediateAssessments(ctx context.Context) ([]model.SSVCAssessmentWithVuln, error) {
 	query := `
 		SELECT a.id, a.project_id, a.tenant_id, a.vulnerability_id, a.cve_id,
 			a.exploitation, a.automatable, a.technical_impact, a.mission_prevalence, a.safety_impact,
 			a.decision, a.exploitation_auto, a.automatable_auto, a.assessed_by, a.assessed_at,
-			a.notes, a.created_at, a.updated_at,
-			v.severity, v.cvss_score, v.in_kev, v.epss_score
+			COALESCE(a.notes, ''), a.created_at, a.updated_at,
+			COALESCE(v.severity, ''), v.cvss_score, v.in_kev, v.epss_score
 		FROM ssvc_assessments a
 		JOIN vulnerabilities v ON v.id = a.vulnerability_id
 		WHERE a.decision = 'immediate'
@@ -396,6 +418,9 @@ func (r *SSVCRepository) GetImmediateAssessments(ctx context.Context) ([]model.S
 			return nil, err
 		}
 		assessments = append(assessments, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return assessments, nil

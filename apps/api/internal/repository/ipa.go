@@ -48,10 +48,16 @@ func (r *IPARepository) CreateAnnouncement(ctx context.Context, a *model.IPAAnno
 	return err
 }
 
-// GetAnnouncementByIPAID gets an announcement by IPA ID
+// GetAnnouncementByIPAID gets an announcement by IPA ID.
+//
+// M46 W2: title_ja / description / category / severity are DDL-nullable
+// (014) — the IPA feed legitimately omits them — so a bare scan into the
+// NULL-intolerant model strings aborted the whole read. COALESCE to ” per
+// the wave-1 contract (” means absent).
 func (r *IPARepository) GetAnnouncementByIPAID(ctx context.Context, ipaID string) (*model.IPAAnnouncement, error) {
 	query := `
-		SELECT id, ipa_id, title, title_ja, description, category, severity,
+		SELECT id, ipa_id, title, COALESCE(title_ja, ''), COALESCE(description, ''),
+			COALESCE(category, ''), COALESCE(severity, ''),
 			source_url, related_cves, published_at, created_at, updated_at
 		FROM ipa_announcements
 		WHERE ipa_id = $1
@@ -87,9 +93,11 @@ func (r *IPARepository) ListAnnouncements(ctx context.Context, category string, 
 		return nil, 0, err
 	}
 
-	// List query
+	// List query. M46 W2: nullable columns COALESCE'd (see
+	// GetAnnouncementByIPAID).
 	query := `
-		SELECT id, ipa_id, title, title_ja, description, category, severity,
+		SELECT id, ipa_id, title, COALESCE(title_ja, ''), COALESCE(description, ''),
+			COALESCE(category, ''), COALESCE(severity, ''),
 			source_url, related_cves, published_at, created_at, updated_at
 		FROM ipa_announcements
 	`
@@ -122,14 +130,19 @@ func (r *IPARepository) ListAnnouncements(ctx context.Context, category string, 
 		}
 		announcements = append(announcements, a)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
 
 	return announcements, total, nil
 }
 
-// GetAnnouncementsByCVE gets announcements related to a CVE
+// GetAnnouncementsByCVE gets announcements related to a CVE.
+// M46 W2: nullable columns COALESCE'd (see GetAnnouncementByIPAID).
 func (r *IPARepository) GetAnnouncementsByCVE(ctx context.Context, cveID string) ([]model.IPAAnnouncement, error) {
 	query := `
-		SELECT id, ipa_id, title, title_ja, description, category, severity,
+		SELECT id, ipa_id, title, COALESCE(title_ja, ''), COALESCE(description, ''),
+			COALESCE(category, ''), COALESCE(severity, ''),
 			source_url, related_cves, published_at, created_at, updated_at
 		FROM ipa_announcements
 		WHERE $1 = ANY(related_cves)
@@ -152,6 +165,9 @@ func (r *IPARepository) GetAnnouncementsByCVE(ctx context.Context, cveID string)
 			return nil, err
 		}
 		announcements = append(announcements, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return announcements, nil
@@ -203,10 +219,12 @@ func (r *IPARepository) UpdateLastSyncAt(ctx context.Context, tenantID uuid.UUID
 	return err
 }
 
-// GetRecentAnnouncements gets announcements published after a given time
+// GetRecentAnnouncements gets announcements published after a given time.
+// M46 W2: nullable columns COALESCE'd (see GetAnnouncementByIPAID).
 func (r *IPARepository) GetRecentAnnouncements(ctx context.Context, after time.Time) ([]model.IPAAnnouncement, error) {
 	query := `
-		SELECT id, ipa_id, title, title_ja, description, category, severity,
+		SELECT id, ipa_id, title, COALESCE(title_ja, ''), COALESCE(description, ''),
+			COALESCE(category, ''), COALESCE(severity, ''),
 			source_url, related_cves, published_at, created_at, updated_at
 		FROM ipa_announcements
 		WHERE published_at > $1
@@ -229,6 +247,9 @@ func (r *IPARepository) GetRecentAnnouncements(ctx context.Context, after time.T
 			return nil, err
 		}
 		announcements = append(announcements, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return announcements, nil

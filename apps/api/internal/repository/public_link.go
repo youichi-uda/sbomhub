@@ -54,10 +54,19 @@ func (r *PublicLinkRepository) Create(ctx context.Context, link *model.PublicLin
 // `tenant_id = $2` filter is load-bearing: migration 030 removed the RLS
 // policy on public_links, so this clause is what isolates tenants from
 // probing each other's project IDs.
+// M46 W2: is_active / view_count / download_count / created_at /
+// updated_at are DDL-nullable with defaults (009: true / 0 / 0 / now() /
+// now()) and 0 real NULL rows measured (42 rows, 2026-07-26 dev DB) — the
+// COALESCEs apply the DDL default at read time (same judgment as wave 1's
+// components.created_at). Create/Update always bind every column, so a
+// NULL can only come from out-of-band SQL.
+const publicLinkSelectColumns = `id, tenant_id, project_id, sbom_id, token, name, expires_at, COALESCE(is_active, true),
+			allowed_downloads, password_hash, COALESCE(view_count, 0), COALESCE(download_count, 0),
+			COALESCE(created_at, NOW()), COALESCE(updated_at, NOW())`
+
 func (r *PublicLinkRepository) ListByProject(ctx context.Context, tenantID, projectID uuid.UUID) ([]model.PublicLink, error) {
 	query := `
-		SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, is_active,
-			allowed_downloads, password_hash, view_count, download_count, created_at, updated_at
+		SELECT ` + publicLinkSelectColumns + `
 		FROM public_links
 		WHERE project_id = $1 AND tenant_id = $2
 		ORDER BY created_at DESC
@@ -83,6 +92,9 @@ func (r *PublicLinkRepository) ListByProject(ctx context.Context, tenantID, proj
 		}
 		links = append(links, link)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return links, nil
 }
 
@@ -95,8 +107,7 @@ func (r *PublicLinkRepository) ListByProject(ctx context.Context, tenantID, proj
 // information-disclosure primitive.
 func (r *PublicLinkRepository) GetByID(ctx context.Context, tenantID, id uuid.UUID) (*model.PublicLink, error) {
 	query := `
-		SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, is_active,
-			allowed_downloads, password_hash, view_count, download_count, created_at, updated_at
+		SELECT ` + publicLinkSelectColumns + `
 		FROM public_links
 		WHERE id = $1 AND tenant_id = $2
 	`
@@ -129,8 +140,7 @@ func (r *PublicLinkRepository) GetByID(ctx context.Context, tenantID, id uuid.UU
 // guessing a 256-bit random string.
 func (r *PublicLinkRepository) GetByToken(ctx context.Context, token string) (*model.PublicLink, error) {
 	query := `
-		SELECT id, tenant_id, project_id, sbom_id, token, name, expires_at, is_active,
-			allowed_downloads, password_hash, view_count, download_count, created_at, updated_at
+		SELECT ` + publicLinkSelectColumns + `
 		FROM public_links
 		WHERE token = $1
 	`
@@ -238,7 +248,10 @@ func (r *PublicLinkRepository) CreateAccessLog(ctx context.Context, log *model.P
 // has been reached. Scoped by (id, tenant_id) so callers cannot use this
 // to probe whether arbitrary link UUIDs exist across tenants.
 func (r *PublicLinkRepository) IsDownloadLimitReached(ctx context.Context, tenantID, id uuid.UUID) (bool, error) {
-	query := `SELECT allowed_downloads, download_count FROM public_links WHERE id = $1 AND tenant_id = $2`
+	// M46 W2: download_count COALESCE'd to its DDL default 0 (see
+	// publicLinkSelectColumns) — a NULL counter means "never downloaded",
+	// so the cap cannot be reached by it.
+	query := `SELECT allowed_downloads, COALESCE(download_count, 0) FROM public_links WHERE id = $1 AND tenant_id = $2`
 	var allowed sql.NullInt64
 	var downloaded int
 	if err := r.q(ctx).QueryRowContext(ctx, query, id, tenantID).Scan(&allowed, &downloaded); err != nil {

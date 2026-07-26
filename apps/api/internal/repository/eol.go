@@ -49,10 +49,16 @@ func (r *EOLRepository) UpsertProduct(ctx context.Context, p *model.EOLProduct) 
 	).Scan(&p.ID)
 }
 
-// GetProductByName gets a product by its name
+// GetProductByName gets a product by its name.
+//
+// M46 W2: category / link are DDL-nullable (022) and NULL rows are real —
+// all 41/41 pre-populated dev-DB products carry NULL link (measured
+// 2026-07-26) — so a bare scan into the NULL-intolerant model strings
+// aborted every product read. COALESCE to ” per the wave-1 contract
+// (” means absent).
 func (r *EOLRepository) GetProductByName(ctx context.Context, name string) (*model.EOLProduct, error) {
 	query := `
-		SELECT id, name, title, category, link, total_cycles, created_at, updated_at
+		SELECT id, name, title, COALESCE(category, ''), COALESCE(link, ''), total_cycles, created_at, updated_at
 		FROM eol_products
 		WHERE name = $1
 	`
@@ -71,10 +77,11 @@ func (r *EOLRepository) GetProductByName(ctx context.Context, name string) (*mod
 	return &p, nil
 }
 
-// GetProductByID gets a product by its ID
+// GetProductByID gets a product by its ID.
+// M46 W2: category / link COALESCE'd (see GetProductByName).
 func (r *EOLRepository) GetProductByID(ctx context.Context, id uuid.UUID) (*model.EOLProduct, error) {
 	query := `
-		SELECT id, name, title, category, link, total_cycles, created_at, updated_at
+		SELECT id, name, title, COALESCE(category, ''), COALESCE(link, ''), total_cycles, created_at, updated_at
 		FROM eol_products
 		WHERE id = $1
 	`
@@ -101,9 +108,9 @@ func (r *EOLRepository) ListProducts(ctx context.Context, limit, offset int) ([]
 		return nil, 0, err
 	}
 
-	// List query
+	// List query. M46 W2: category / link COALESCE'd (see GetProductByName).
 	query := `
-		SELECT id, name, title, category, link, total_cycles, created_at, updated_at
+		SELECT id, name, title, COALESCE(category, ''), COALESCE(link, ''), total_cycles, created_at, updated_at
 		FROM eol_products
 		ORDER BY name
 		LIMIT $1 OFFSET $2
@@ -124,6 +131,9 @@ func (r *EOLRepository) ListProducts(ctx context.Context, limit, offset int) ([]
 			return nil, 0, err
 		}
 		products = append(products, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	return products, total, nil
@@ -149,11 +159,18 @@ func (r *EOLRepository) UpsertCycle(ctx context.Context, c *model.EOLProductCycl
 	).Scan(&c.ID)
 }
 
-// GetCyclesByProduct gets all cycles for a product
+// GetCyclesByProduct gets all cycles for a product.
+//
+// M46 W2: latest_version / link (nullable strings) COALESCE to ”;
+// is_lts / is_eol / discontinued are DDL `BOOLEAN DEFAULT false` (022)
+// with 0 real NULL rows measured (2026-07-26, dev DB) — the COALESCE
+// applies the DDL default at read time (same judgment as wave 1's
+// components.created_at). The date columns already scan into *time.Time.
 func (r *EOLRepository) GetCyclesByProduct(ctx context.Context, productID uuid.UUID) ([]model.EOLProductCycle, error) {
 	query := `
 		SELECT id, product_id, cycle, release_date, eol_date, eos_date,
-			latest_version, is_lts, is_eol, discontinued, link, support_end_date,
+			COALESCE(latest_version, ''), COALESCE(is_lts, false), COALESCE(is_eol, false),
+			COALESCE(discontinued, false), COALESCE(link, ''), support_end_date,
 			created_at, updated_at
 		FROM eol_product_cycles
 		WHERE product_id = $1
@@ -178,16 +195,21 @@ func (r *EOLRepository) GetCyclesByProduct(ctx context.Context, productID uuid.U
 		}
 		cycles = append(cycles, c)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return cycles, nil
 }
 
-// FindMatchingCycle finds the best matching cycle for a version
+// FindMatchingCycle finds the best matching cycle for a version.
+// M46 W2: nullable columns COALESCE'd (see GetCyclesByProduct).
 func (r *EOLRepository) FindMatchingCycle(ctx context.Context, productID uuid.UUID, version string) (*model.EOLProductCycle, error) {
 	// Try exact match first, then prefix match
 	query := `
 		SELECT id, product_id, cycle, release_date, eol_date, eos_date,
-			latest_version, is_lts, is_eol, discontinued, link, support_end_date,
+			COALESCE(latest_version, ''), COALESCE(is_lts, false), COALESCE(is_eol, false),
+			COALESCE(discontinued, false), COALESCE(link, ''), support_end_date,
 			created_at, updated_at
 		FROM eol_product_cycles
 		WHERE product_id = $1 AND (
@@ -217,10 +239,18 @@ func (r *EOLRepository) FindMatchingCycle(ctx context.Context, productID uuid.UU
 	return &c, nil
 }
 
-// GetMappings gets all component mappings
+// GetMappings gets all component mappings.
+//
+// M46 W2: component_type / purl_type (nullable strings) COALESCE to ”;
+// priority / is_active are DDL `DEFAULT 0` / `DEFAULT true` (022) with 0
+// real NULL rows measured (18 rows, 2026-07-26 dev DB) — COALESCE applies
+// the DDL default at read time. The is_active COALESCE is scan-safety
+// only: the `WHERE is_active = true` predicate can never return a NULL
+// is_active row (NULL is not true).
 func (r *EOLRepository) GetMappings(ctx context.Context) ([]model.EOLComponentMapping, error) {
 	query := `
-		SELECT id, product_id, component_pattern, component_type, purl_type, priority, is_active, created_at
+		SELECT id, product_id, component_pattern, COALESCE(component_type, ''), COALESCE(purl_type, ''),
+			COALESCE(priority, 0), COALESCE(is_active, true), created_at
 		FROM eol_component_mappings
 		WHERE is_active = true
 		ORDER BY priority DESC
@@ -241,6 +271,9 @@ func (r *EOLRepository) GetMappings(ctx context.Context) ([]model.EOLComponentMa
 			return nil, err
 		}
 		mappings = append(mappings, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return mappings, nil
@@ -338,11 +371,13 @@ func (r *EOLRepository) UpdateSyncLog(ctx context.Context, log *model.EOLSyncLog
 	return err
 }
 
-// GetLatestSyncLog gets the most recent sync log
+// GetLatestSyncLog gets the most recent sync log.
+// M46 W2: error_message is nullable TEXT (022) — NULL until a sync fails —
+// COALESCE to ” (” means absent). completed_at already scans *time.Time.
 func (r *EOLRepository) GetLatestSyncLog(ctx context.Context) (*model.EOLSyncLog, error) {
 	query := `
 		SELECT id, started_at, completed_at, status, products_synced,
-			cycles_synced, components_updated, error_message
+			cycles_synced, components_updated, COALESCE(error_message, '')
 		FROM eol_sync_logs
 		ORDER BY started_at DESC
 		LIMIT 1
@@ -380,10 +415,17 @@ func (r *EOLRepository) UpdateComponentEOLStatus(ctx context.Context, componentI
 	return err
 }
 
-// GetComponentsForEOLCheck gets components that need EOL checking
+// GetComponentsForEOLCheck gets components that need EOL checking.
+//
+// M46 W2: components.version / type / purl / license are DDL-nullable
+// (001) — COALESCE to ” exactly like wave 1's component.go reads;
+// created_at (DDL default now(), 0 NULL rows measured) keeps time.Time
+// with COALESCE(created_at, NOW()) — read-time application of the DDL
+// default (same judgment as f97c7fa).
 func (r *EOLRepository) GetComponentsForEOLCheck(ctx context.Context, projectID uuid.UUID, limit int) ([]model.Component, error) {
 	query := `
-		SELECT c.id, c.sbom_id, c.name, c.version, c.type, c.purl, c.license, c.created_at
+		SELECT c.id, c.sbom_id, c.name, COALESCE(c.version, ''), COALESCE(c.type, ''),
+			COALESCE(c.purl, ''), COALESCE(c.license, ''), COALESCE(c.created_at, NOW())
 		FROM components c
 		JOIN sboms s ON s.id = c.sbom_id
 		WHERE s.project_id = $1 AND (
@@ -410,6 +452,9 @@ func (r *EOLRepository) GetComponentsForEOLCheck(ctx context.Context, projectID 
 			return nil, err
 		}
 		components = append(components, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return components, nil
@@ -475,9 +520,12 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		return nil, 0, err
 	}
 
-	// List query
+	// List query. M46 W2: nullable component columns COALESCE'd (see
+	// GetComponentsForEOLCheck); the eol_* columns already scan into
+	// sql.NullString.
 	listQuery := fmt.Sprintf(`
-		SELECT c.id, c.sbom_id, c.name, c.version, c.type, c.purl, c.license, c.created_at,
+		SELECT c.id, c.sbom_id, c.name, COALESCE(c.version, ''), COALESCE(c.type, ''),
+			COALESCE(c.purl, ''), COALESCE(c.license, ''), COALESCE(c.created_at, NOW()),
 			c.eol_status, c.eol_product_id, c.eol_cycle_id, c.eol_date, c.eos_date
 		FROM components c
 		JOIN sboms s ON s.id = c.sbom_id
@@ -508,6 +556,9 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		}
 		// Store EOL fields in component (handled by extended model if needed)
 		components = append(components, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	return components, total, nil
@@ -544,6 +595,9 @@ func (r *EOLRepository) GetAllProductNames(ctx context.Context) ([]string, error
 			return nil, err
 		}
 		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return names, nil

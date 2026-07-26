@@ -21,7 +21,8 @@ func TestEOLRepository_New(t *testing.T) {
 
 	repo := NewEOLRepository(db)
 	if repo == nil {
-		t.Error("NewEOLRepository returned nil")
+		// Fatal (not Error): the dereference below would nil-panic (SA5011).
+		t.Fatal("NewEOLRepository returned nil")
 	}
 	if repo.db != db {
 		t.Error("NewEOLRepository did not set db correctly")
@@ -134,7 +135,7 @@ func TestEOLRepository_GetProductByName(t *testing.T) {
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "name", "title", "category", "link", "total_cycles", "created_at", "updated_at"}).
 					AddRow(productID, "python", "Python", "language", "https://python.org", 15, now, now)
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products WHERE name").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products WHERE name").
 					WithArgs("python").
 					WillReturnRows(rows)
 			},
@@ -156,7 +157,7 @@ func TestEOLRepository_GetProductByName(t *testing.T) {
 			name:     "not found",
 			prodName: "nonexistent",
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products WHERE name").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products WHERE name").
 					WithArgs("nonexistent").
 					WillReturnError(sql.ErrNoRows)
 			},
@@ -167,7 +168,7 @@ func TestEOLRepository_GetProductByName(t *testing.T) {
 			name:     "database error",
 			prodName: "error",
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products WHERE name").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products WHERE name").
 					WithArgs("error").
 					WillReturnError(errors.New("connection reset"))
 			},
@@ -221,7 +222,7 @@ func TestEOLRepository_GetProductByID(t *testing.T) {
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "name", "title", "category", "link", "total_cycles", "created_at", "updated_at"}).
 					AddRow(productID, "nodejs", "Node.js", "runtime", "https://nodejs.org", 25, now, now)
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products WHERE id").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products WHERE id").
 					WithArgs(productID).
 					WillReturnRows(rows)
 			},
@@ -232,7 +233,7 @@ func TestEOLRepository_GetProductByID(t *testing.T) {
 			name: "not found",
 			id:   uuid.New(),
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products WHERE id").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products WHERE id").
 					WithArgs(sqlmock.AnyArg()).
 					WillReturnError(sql.ErrNoRows)
 			},
@@ -288,7 +289,7 @@ func TestEOLRepository_ListProducts(t *testing.T) {
 					AddRow(uuid.New(), "python", "Python", "language", "", 10, now, now).
 					AddRow(uuid.New(), "nodejs", "Node.js", "runtime", "", 20, now, now).
 					AddRow(uuid.New(), "django", "Django", "framework", "", 5, now, now)
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products").
 					WithArgs(10, 0).
 					WillReturnRows(rows)
 			},
@@ -303,7 +304,7 @@ func TestEOLRepository_ListProducts(t *testing.T) {
 			setupMock: func() {
 				mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 				rows := sqlmock.NewRows([]string{"id", "name", "title", "category", "link", "total_cycles", "created_at", "updated_at"})
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products").
 					WithArgs(10, 0).
 					WillReturnRows(rows)
 			},
@@ -328,7 +329,7 @@ func TestEOLRepository_ListProducts(t *testing.T) {
 			offset: 0,
 			setupMock: func() {
 				mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(5))
-				mock.ExpectQuery("SELECT id, name, title, category, link, total_cycles, created_at, updated_at FROM eol_products").
+				mock.ExpectQuery("SELECT id, name, title, COALESCE\\(category, ''\\), COALESCE\\(link, ''\\), total_cycles, created_at, updated_at FROM eol_products").
 					WithArgs(10, 0).
 					WillReturnError(errors.New("query failed"))
 			},
@@ -676,7 +677,7 @@ func TestEOLRepository_GetMappings(t *testing.T) {
 				}).
 					AddRow(uuid.New(), productID, "python", "library", "pypi", 100, true, now).
 					AddRow(uuid.New(), productID, "cpython", "runtime", "pypi", 90, true, now)
-				mock.ExpectQuery("SELECT id, product_id, component_pattern, component_type, purl_type, priority, is_active, created_at FROM eol_component_mappings").
+				mock.ExpectQuery("SELECT id, product_id, component_pattern, COALESCE\\(component_type, ''\\), COALESCE\\(purl_type, ''\\), COALESCE\\(priority, 0\\), COALESCE\\(is_active, true\\), created_at FROM eol_component_mappings").
 					WillReturnRows(rows)
 			},
 			wantErr:   false,
@@ -688,7 +689,7 @@ func TestEOLRepository_GetMappings(t *testing.T) {
 				rows := sqlmock.NewRows([]string{
 					"id", "product_id", "component_pattern", "component_type", "purl_type", "priority", "is_active", "created_at",
 				})
-				mock.ExpectQuery("SELECT id, product_id, component_pattern, component_type, purl_type, priority, is_active, created_at FROM eol_component_mappings").
+				mock.ExpectQuery("SELECT id, product_id, component_pattern, COALESCE\\(component_type, ''\\), COALESCE\\(purl_type, ''\\), COALESCE\\(priority, 0\\), COALESCE\\(is_active, true\\), created_at FROM eol_component_mappings").
 					WillReturnRows(rows)
 			},
 			wantErr:   false,
@@ -697,7 +698,7 @@ func TestEOLRepository_GetMappings(t *testing.T) {
 		{
 			name: "database error",
 			setupMock: func() {
-				mock.ExpectQuery("SELECT id, product_id, component_pattern, component_type, purl_type, priority, is_active, created_at FROM eol_component_mappings").
+				mock.ExpectQuery("SELECT id, product_id, component_pattern, COALESCE\\(component_type, ''\\), COALESCE\\(purl_type, ''\\), COALESCE\\(priority, 0\\), COALESCE\\(is_active, true\\), created_at FROM eol_component_mappings").
 					WillReturnError(errors.New("query failed"))
 			},
 			wantErr:   true,

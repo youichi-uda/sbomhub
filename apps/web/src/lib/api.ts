@@ -236,7 +236,12 @@ export interface SSVCAssessment {
 
 export interface SSVCAssessmentWithVuln extends SSVCAssessment {
   vulnerability_severity: string;
-  vulnerability_cvss_score: number;
+  // M46 W2: optional because the Go side is `*float64` with `omitempty` —
+  // vulnerabilities.cvss_score is DDL-nullable and NULL means "not scored
+  // yet" (NVD "Awaiting Analysis"). It is deliberately NOT COALESCEd to 0:
+  // CVSS 0.0 is a real "None" score, so a 0 sentinel would make an
+  // un-triaged CRITICAL look safe. Same shape as vulnerability_epss_score.
+  vulnerability_cvss_score?: number;
   vulnerability_in_kev: boolean;
   vulnerability_epss_score?: number;
 }
