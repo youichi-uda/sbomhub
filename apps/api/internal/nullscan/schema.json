@@ -1,0 +1,2782 @@
+{
+  "generated_by": "go run ./cmd/nullscan -dump-schema (reads MIGRATE_DATABASE_URL or DATABASE_URL)",
+  "tables": {
+    "advisory_excerpts": {
+      "affected_paths": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(30)"
+      },
+      "fetched_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "raw_excerpt": {
+        "nullable": true,
+        "type": "text"
+      },
+      "required_config": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "required_env": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "source": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vuln_funcs": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "vuln_funcs_scoped": {
+        "nullable": false,
+        "type": "jsonb"
+      }
+    },
+    "api_keys": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "expires_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "key_hash": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "key_prefix": {
+        "nullable": false,
+        "type": "character varying(16)"
+      },
+      "last_used_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "permissions": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "project_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "audit_logs": {
+      "action": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "details": {
+        "nullable": true,
+        "type": "jsonb"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "ip_address": {
+        "nullable": true,
+        "type": "inet"
+      },
+      "resource_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "resource_type": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "tenant_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "user_agent": {
+        "nullable": true,
+        "type": "text"
+      },
+      "user_id": {
+        "nullable": true,
+        "type": "uuid"
+      }
+    },
+    "compliance_checklist_responses": {
+      "check_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "note": {
+        "nullable": true,
+        "type": "text"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "response": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "updated_by": {
+        "nullable": true,
+        "type": "character varying(255)"
+      }
+    },
+    "compliance_snapshots": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "license_management_score": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "max_score": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "overall_score": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "project_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "sbom_generation_score": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "snapshot_date": {
+        "nullable": false,
+        "type": "date"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "vulnerability_management_score": {
+        "nullable": false,
+        "type": "integer"
+      }
+    },
+    "component_vulnerabilities": {
+      "component_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "detected_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "components": {
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "eol_checked_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "eol_cycle_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "eol_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "eol_product_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "eol_status": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "eos_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "license": {
+        "nullable": true,
+        "type": "character varying(500)"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(500)"
+      },
+      "purl": {
+        "nullable": true,
+        "type": "character varying(1000)"
+      },
+      "sbom_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "type": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "version": {
+        "nullable": true,
+        "type": "character varying(200)"
+      }
+    },
+    "cra_reports": {
+      "awareness_time": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "created_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(30)"
+      },
+      "decision": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "decision_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "decision_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "decision_note": {
+        "nullable": true,
+        "type": "text"
+      },
+      "draft_text": {
+        "nullable": false,
+        "type": "text"
+      },
+      "evidence": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "lang": {
+        "nullable": false,
+        "type": "character(2)"
+      },
+      "llm_call_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "model": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "prompt_hash": {
+        "nullable": true,
+        "type": "character(64)"
+      },
+      "provider": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "report_type": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "response_hash": {
+        "nullable": true,
+        "type": "character(64)"
+      },
+      "source_vex_draft_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "state": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "cra_submissions": {
+      "authority": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "cra_report_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "notes": {
+        "nullable": true,
+        "type": "text"
+      },
+      "reference_number": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "submitted_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "submitted_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "eol_component_mappings": {
+      "component_pattern": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "component_type": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "is_active": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "priority": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "product_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "purl_type": {
+        "nullable": true,
+        "type": "character varying(100)"
+      }
+    },
+    "eol_product_cycles": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cycle": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "discontinued": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "eol_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "eos_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "is_eol": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "is_lts": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "latest_version": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "link": {
+        "nullable": true,
+        "type": "character varying(500)"
+      },
+      "product_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "release_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "support_end_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "eol_products": {
+      "category": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "link": {
+        "nullable": true,
+        "type": "character varying(500)"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "title": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "total_cycles": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "eol_sync_logs": {
+      "completed_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "components_updated": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "cycles_synced": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "error_message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "products_synced": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "started_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      }
+    },
+    "eol_sync_settings": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "last_sync_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "sync_interval_hours": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "total_cycles": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "total_products": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "generated_reports": {
+      "completed_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "email_recipients": {
+        "nullable": true,
+        "type": "text[]"
+      },
+      "email_sent_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "error_message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "file_content": {
+        "nullable": true,
+        "type": "bytea"
+      },
+      "file_path": {
+        "nullable": true,
+        "type": "text"
+      },
+      "file_size": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "format": {
+        "nullable": false,
+        "type": "character varying(10)"
+      },
+      "generated_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "period_end": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "period_start": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "report_type": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "settings_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "title": {
+        "nullable": false,
+        "type": "character varying(255)"
+      }
+    },
+    "github_connections": {
+      "access_token_encrypted": {
+        "nullable": false,
+        "type": "text"
+      },
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "scopes": {
+        "nullable": true,
+        "type": "text[]"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "token_type": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "username": {
+        "nullable": true,
+        "type": "character varying(255)"
+      }
+    },
+    "github_repositories": {
+      "auto_scan": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "branch": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "connection_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "last_commit_sha": {
+        "nullable": true,
+        "type": "character varying(40)"
+      },
+      "last_scan_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "repo_full_name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "webhook_id": {
+        "nullable": true,
+        "type": "bigint"
+      },
+      "webhook_secret": {
+        "nullable": false,
+        "type": "character varying(255)"
+      }
+    },
+    "ipa_announcements": {
+      "category": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "description": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "ipa_id": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "published_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "related_cves": {
+        "nullable": true,
+        "type": "text[]"
+      },
+      "severity": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "source_url": {
+        "nullable": false,
+        "type": "text"
+      },
+      "title": {
+        "nullable": false,
+        "type": "text"
+      },
+      "title_ja": {
+        "nullable": true,
+        "type": "text"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "ipa_sync_settings": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "last_sync_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "notify_on_new": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "notify_severity": {
+        "nullable": true,
+        "type": "text[]"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "ipa_vulnerability_mapping": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "ipa_announcement_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "issue_tracker_connections": {
+      "auth_email": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "auth_token_encrypted": {
+        "nullable": false,
+        "type": "text"
+      },
+      "auth_type": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "base_url": {
+        "nullable": false,
+        "type": "text"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "default_issue_type": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "default_project_key": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "is_active": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "last_sync_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "tracker_type": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "kev_catalog": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "date_added": {
+        "nullable": false,
+        "type": "date"
+      },
+      "due_date": {
+        "nullable": false,
+        "type": "date"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "known_ransomware_use": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "notes": {
+        "nullable": true,
+        "type": "text"
+      },
+      "product": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "required_action": {
+        "nullable": true,
+        "type": "text"
+      },
+      "short_description": {
+        "nullable": true,
+        "type": "text"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vendor_project": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "vulnerability_name": {
+        "nullable": false,
+        "type": "text"
+      }
+    },
+    "kev_sync_logs": {
+      "catalog_version": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "completed_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "error_message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "new_entries": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "started_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "total_processed": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "updated_entries": {
+        "nullable": false,
+        "type": "integer"
+      }
+    },
+    "kev_sync_settings": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "last_catalog_version": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "last_sync_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "sync_interval_hours": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "total_entries": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "license_policies": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "license_id": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "license_name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "policy_type": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "reason": {
+        "nullable": true,
+        "type": "text"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "llm_calls": {
+      "cost_usd": {
+        "nullable": false,
+        "type": "numeric(10,6)"
+      },
+      "cra_report_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "duration_ms": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "error_message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "finish_reason": {
+        "nullable": true,
+        "type": "character varying(30)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "input_tokens": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "model": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "output_tokens": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "prompt_hash": {
+        "nullable": false,
+        "type": "character(64)"
+      },
+      "prompt_preview": {
+        "nullable": true,
+        "type": "text"
+      },
+      "provider": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "purpose": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "response_body": {
+        "nullable": true,
+        "type": "text"
+      },
+      "response_hash": {
+        "nullable": false,
+        "type": "character(64)"
+      },
+      "response_preview": {
+        "nullable": true,
+        "type": "text"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "triage_target_component_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "triage_target_cve": {
+        "nullable": true,
+        "type": "character varying(30)"
+      },
+      "user_id": {
+        "nullable": true,
+        "type": "uuid"
+      }
+    },
+    "meti_assessments": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "criterion_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "criterion_phase": {
+        "nullable": false,
+        "type": "character varying(30)"
+      },
+      "evaluated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "evaluator_version": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "evidence": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "improvement_action": {
+        "nullable": true,
+        "type": "text"
+      },
+      "override_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "override_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "override_note": {
+        "nullable": true,
+        "type": "text"
+      },
+      "override_status": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "notification_logs": {
+      "channel": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "error_message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "notification_type": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "notification_settings": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "discord_webhook_url": {
+        "nullable": true,
+        "type": "text"
+      },
+      "email_addresses": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "notify_critical": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "notify_high": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "notify_low": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "notify_medium": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "slack_webhook_url": {
+        "nullable": true,
+        "type": "text"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "plan_limits": {
+      "api_rate_limit": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "features": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "max_api_keys": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "max_projects": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "max_sboms_per_project": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "max_users": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "plan": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "projects": {
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "description": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "tenant_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      }
+    },
+    "public_link_access_logs": {
+      "action": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "ip_address": {
+        "nullable": true,
+        "type": "inet"
+      },
+      "public_link_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "user_agent": {
+        "nullable": true,
+        "type": "text"
+      }
+    },
+    "public_links": {
+      "allowed_downloads": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "download_count": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "expires_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "is_active": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "password_hash": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "sbom_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "token": {
+        "nullable": false,
+        "type": "character varying(64)"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "view_count": {
+        "nullable": true,
+        "type": "integer"
+      }
+    },
+    "reachability_results": {
+      "analyzed_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "analyzer_version": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "component_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "confidence": {
+        "nullable": true,
+        "type": "numeric(3,2)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(30)"
+      },
+      "ecosystem": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "evidence": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "report_settings": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "email_enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "email_recipients": {
+        "nullable": true,
+        "type": "text[]"
+      },
+      "enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "format": {
+        "nullable": false,
+        "type": "character varying(10)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "include_sections": {
+        "nullable": true,
+        "type": "text[]"
+      },
+      "report_type": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "schedule_day": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "schedule_hour": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "schedule_type": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "sbom_visualization_settings": {
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "data_format": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "dependency_scope": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "generation_method": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "sbom_author_scope": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "utilization_actor": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "utilization_scope": {
+        "nullable": true,
+        "type": "jsonb"
+      }
+    },
+    "sboms": {
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "format": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "raw_data": {
+        "nullable": true,
+        "type": "jsonb"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "version": {
+        "nullable": true,
+        "type": "character varying(50)"
+      }
+    },
+    "scan_logs": {
+      "completed_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "error_message": {
+        "nullable": true,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "new_vulnerabilities": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "projects_scanned": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "started_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "scan_settings": {
+      "created_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "enabled": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "last_scan_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "next_scan_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "notify_critical": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "notify_high": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "notify_low": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "notify_medium": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "schedule_day": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "schedule_hour": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "schedule_type": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      }
+    },
+    "schema_migrations": {
+      "applied_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "version": {
+        "nullable": false,
+        "type": "character varying(255)"
+      }
+    },
+    "slo_targets": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "severity": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "target_hours": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "tenant_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "ssvc_assessment_history": {
+      "assessment_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "change_reason": {
+        "nullable": true,
+        "type": "text"
+      },
+      "changed_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "changed_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "new_automatable": {
+        "nullable": false,
+        "type": "ssvc_automatable"
+      },
+      "new_decision": {
+        "nullable": false,
+        "type": "ssvc_decision"
+      },
+      "new_exploitation": {
+        "nullable": false,
+        "type": "ssvc_exploitation"
+      },
+      "new_mission_prevalence": {
+        "nullable": false,
+        "type": "ssvc_mission_prevalence"
+      },
+      "new_safety_impact": {
+        "nullable": false,
+        "type": "ssvc_safety_impact"
+      },
+      "new_technical_impact": {
+        "nullable": false,
+        "type": "ssvc_technical_impact"
+      },
+      "prev_automatable": {
+        "nullable": true,
+        "type": "ssvc_automatable"
+      },
+      "prev_decision": {
+        "nullable": true,
+        "type": "ssvc_decision"
+      },
+      "prev_exploitation": {
+        "nullable": true,
+        "type": "ssvc_exploitation"
+      },
+      "prev_mission_prevalence": {
+        "nullable": true,
+        "type": "ssvc_mission_prevalence"
+      },
+      "prev_safety_impact": {
+        "nullable": true,
+        "type": "ssvc_safety_impact"
+      },
+      "prev_technical_impact": {
+        "nullable": true,
+        "type": "ssvc_technical_impact"
+      }
+    },
+    "ssvc_assessments": {
+      "assessed_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "assessed_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "automatable": {
+        "nullable": false,
+        "type": "ssvc_automatable"
+      },
+      "automatable_auto": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "decision": {
+        "nullable": false,
+        "type": "ssvc_decision"
+      },
+      "exploitation": {
+        "nullable": false,
+        "type": "ssvc_exploitation"
+      },
+      "exploitation_auto": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "mission_prevalence": {
+        "nullable": false,
+        "type": "ssvc_mission_prevalence"
+      },
+      "notes": {
+        "nullable": true,
+        "type": "text"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "safety_impact": {
+        "nullable": false,
+        "type": "ssvc_safety_impact"
+      },
+      "technical_impact": {
+        "nullable": false,
+        "type": "ssvc_technical_impact"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "ssvc_project_defaults": {
+      "auto_assess_automatable": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "auto_assess_enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "auto_assess_exploitation": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "mission_prevalence": {
+        "nullable": false,
+        "type": "ssvc_mission_prevalence"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "safety_impact": {
+        "nullable": false,
+        "type": "ssvc_safety_impact"
+      },
+      "system_exposure": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "subscription_events": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "event_type": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "ls_event_id": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "metadata": {
+        "nullable": true,
+        "type": "jsonb"
+      },
+      "new_plan": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "new_status": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "previous_plan": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "previous_status": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "subscription_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "subscriptions": {
+      "billing_anchor": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "cancelled_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "current_period_end": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "current_period_start": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "ends_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "ls_customer_id": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "ls_product_id": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "ls_subscription_id": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "ls_variant_id": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "plan": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "renews_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "trial_ends_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "system_settings": {
+      "description": {
+        "nullable": true,
+        "type": "text"
+      },
+      "key": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "value": {
+        "nullable": false,
+        "type": "text"
+      }
+    },
+    "tenant_diff_webhook_settings": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "critical_threshold": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "enabled": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "format": {
+        "nullable": false,
+        "type": "character varying(16)"
+      },
+      "high_threshold": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "last_error": {
+        "nullable": true,
+        "type": "text"
+      },
+      "last_fired_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "last_response_status": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "license_violation_threshold": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "webhook_secret": {
+        "nullable": true,
+        "type": "bytea"
+      },
+      "webhook_url": {
+        "nullable": true,
+        "type": "text"
+      }
+    },
+    "tenant_llm_config": {
+      "azure_deployment": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "azure_endpoint": {
+        "nullable": true,
+        "type": "text"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "encrypted_api_key": {
+        "nullable": true,
+        "type": "bytea"
+      },
+      "mode": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "model": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "ollama_url": {
+        "nullable": true,
+        "type": "text"
+      },
+      "provider": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "quota_monthly_tokens": {
+        "nullable": true,
+        "type": "bigint"
+      },
+      "quota_monthly_triage_count": {
+        "nullable": true,
+        "type": "integer"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "tenant_users": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "role": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "user_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "tenants": {
+      "clerk_org_id": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "name": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "plan": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "slug": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "usage_records": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "metric": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "period_end": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "period_start": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "quantity": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "users": {
+      "avatar_url": {
+        "nullable": true,
+        "type": "text"
+      },
+      "clerk_user_id": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "email": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "name": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      }
+    },
+    "vex_drafts": {
+      "advisory_excerpt_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "component_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "confidence": {
+        "nullable": true,
+        "type": "numeric(3,2)"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "created_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(30)"
+      },
+      "decision": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "decision_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "decision_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "decision_note": {
+        "nullable": true,
+        "type": "text"
+      },
+      "detail": {
+        "nullable": true,
+        "type": "text"
+      },
+      "evidence": {
+        "nullable": false,
+        "type": "jsonb"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "justification": {
+        "nullable": true,
+        "type": "character varying(40)"
+      },
+      "llm_call_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "model": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "prompt_hash": {
+        "nullable": true,
+        "type": "character(64)"
+      },
+      "provider": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "reachability_result_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "response_hash": {
+        "nullable": true,
+        "type": "character(64)"
+      },
+      "sbom_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "state": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "vex_statement_provenance": {
+      "applied_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "applied_by": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "source_project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "source_statement_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "target_statement_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "vex_statements": {
+      "action_statement": {
+        "nullable": true,
+        "type": "text"
+      },
+      "component_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "created_by": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "impact_statement": {
+        "nullable": true,
+        "type": "text"
+      },
+      "justification": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "status": {
+        "nullable": false,
+        "type": "character varying(30)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "vulnerabilities": {
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "cvss_score": {
+        "nullable": true,
+        "type": "numeric(3,1)"
+      },
+      "description": {
+        "nullable": true,
+        "type": "text"
+      },
+      "epss_percentile": {
+        "nullable": true,
+        "type": "numeric(5,4)"
+      },
+      "epss_score": {
+        "nullable": true,
+        "type": "numeric(5,4)"
+      },
+      "epss_updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "in_kev": {
+        "nullable": false,
+        "type": "boolean"
+      },
+      "kev_date_added": {
+        "nullable": true,
+        "type": "date"
+      },
+      "kev_due_date": {
+        "nullable": true,
+        "type": "date"
+      },
+      "kev_ransomware_use": {
+        "nullable": true,
+        "type": "boolean"
+      },
+      "published_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "severity": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "source": {
+        "nullable": true,
+        "type": "character varying(20)"
+      },
+      "ssvc_decision": {
+        "nullable": true,
+        "type": "ssvc_decision"
+      },
+      "tenant_id": {
+        "nullable": true,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      }
+    },
+    "vulnerability_resolution_events": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "cve_id": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "detected_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "resolution_notes": {
+        "nullable": true,
+        "type": "text"
+      },
+      "resolution_type": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "resolved_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "severity": {
+        "nullable": false,
+        "type": "character varying(20)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    },
+    "vulnerability_snapshots": {
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "critical_count": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "high_count": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "low_count": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "medium_count": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "mttr_hours": {
+        "nullable": true,
+        "type": "numeric(10,2)"
+      },
+      "resolved_count": {
+        "nullable": false,
+        "type": "integer"
+      },
+      "snapshot_date": {
+        "nullable": false,
+        "type": "date"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "total_count": {
+        "nullable": false,
+        "type": "integer"
+      }
+    },
+    "vulnerability_tickets": {
+      "assignee": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "connection_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "external_project_key": {
+        "nullable": true,
+        "type": "character varying(200)"
+      },
+      "external_status": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "external_ticket_id": {
+        "nullable": false,
+        "type": "character varying(100)"
+      },
+      "external_ticket_key": {
+        "nullable": true,
+        "type": "character varying(100)"
+      },
+      "external_ticket_url": {
+        "nullable": false,
+        "type": "text"
+      },
+      "id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "last_synced_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "local_status": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "priority": {
+        "nullable": true,
+        "type": "character varying(50)"
+      },
+      "project_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "summary": {
+        "nullable": true,
+        "type": "text"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "updated_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "vulnerability_id": {
+        "nullable": false,
+        "type": "uuid"
+      }
+    }
+  },
+  "views": {}
+}

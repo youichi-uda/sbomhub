@@ -1,0 +1,175 @@
+# SBOMHub - nullscan (NULL-scan bug class gate)  [M46 W0]
+#
+# Two guards against the B1/B2 bug class ("nullable column scanned into a
+# NULL-intolerant Go type" => `sql: converting NULL to string is
+# unsupported` => whole read 500s):
+#
+#   1. analyze (hermetic, no DB):
+#      apps/api/cmd/nullscan statically analyzes ./internal/... using the
+#      committed pg_attribute snapshot internal/nullscan/schema.json
+#      (go:embed). The gate fails ONLY on findings not covered by
+#      internal/nullscan/baseline.json — pre-existing debt is tracked
+#      there and burned down in fix waves; new code must be clean.
+#      Unit tests for the analyzer itself run here too.
+#
+#   2. schema-drift (real PostgreSQL):
+#      Boots postgres via docker compose (same transient-override pattern
+#      as rls-integration.yml — docker-compose.yml stays frozen), applies
+#      role bootstrap + migrations, then runs the integration-tagged
+#      tests in internal/nullscan/:
+#        - TestSchemaSnapshotDrift: regenerated snapshot must be
+#          byte-identical to the committed schema.json (stale snapshot =
+#          red, with regeneration instructions).
+#        - TestNullToleranceDecisionTable: pins the *measured* NULL
+#          tolerance of every scan-destination class (uuid.UUID
+#          silent-zero, json.RawMessage rejects NULL, pq arrays accept
+#          NULL, ...) against the real lib/pq driver, so a dependency
+#          upgrade that changes runtime behavior flips this job red.
+#
+# Regenerating the snapshot after a migration:
+#   cd apps/api && go run ./cmd/nullscan -dump-schema
+#   git add internal/nullscan/schema.json
+#
+# Shrinking the baseline after a fix wave:
+#   cd apps/api && go run ./cmd/nullscan -baseline internal/nullscan/baseline.json -write-baseline ./internal/...
+
+name: nullscan
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/nullscan.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "docker-compose.yml"
+      - "install.sh"
+      - ".env.example"
+      - ".github/workflows/nullscan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: static gate (hermetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Analyzer unit tests
+        working-directory: apps/api
+        run: go test ./internal/nullscan/... ./cmd/nullscan/...
+
+      - name: nullscan gate (no NEW findings vs baseline)
+        working-directory: apps/api
+        run: |
+          go run ./cmd/nullscan -baseline internal/nullscan/baseline.json ./internal/...
+
+  schema-drift:
+    name: schema snapshot drift + measured tolerance table
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache: true
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Generate .env with per-run secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@localhost:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@localhost:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+            | sed -E 's/=.*/=<redacted>/'
+
+      - name: Write docker-compose.override.yml (expose postgres:5432)
+        # docker-compose.yml is frozen (R8 / #10); transient override only.
+        shell: bash
+        run: |
+          cat > docker-compose.override.yml <<'YML'
+          services:
+            postgres:
+              ports:
+                - "5432:5432"
+          YML
+
+      - name: Start postgres
+        run: docker compose up -d --wait postgres
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Apply migrations
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go run ./cmd/migrate up
+
+      - name: Drift guard + NULL tolerance decision table
+        shell: bash
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          set -a
+          # shellcheck disable=SC1091
+          source ../../.env
+          set +a
+          go test -tags=integration ./internal/nullscan/ \
+            -run 'TestSchemaSnapshotDrift|TestNullToleranceDecisionTable' -v
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true
