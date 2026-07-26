@@ -113,7 +113,7 @@ func TestCVEPaths_CrossProjectAndTenantIsolation(t *testing.T) {
 	tenantT := seedTenantVS(t, migDB, "PATHS-T")
 	tenantF := seedTenantVS(t, migDB, "PATHS-F")
 
-	sfx := strings.ToUpper(uuid.New().String()[:8])
+	sfx := strings.ToUpper(uuidHex(uuid.New())) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cve := func(n string) string { return fmt.Sprintf("CVE-2026-%s-%s", n, sfx) }
 	vHit := seedVulnVS(t, migDB, cve("HIT"))   // affects T's A + B and foreign F
 	vZero := seedVulnVS(t, migDB, cve("ZERO")) // known, affects nothing in T
@@ -270,7 +270,7 @@ func TestCVEPaths_TenantGUCLoadBearing(t *testing.T) {
 
 	tenantT := seedTenantVS(t, migDB, "GUC-T")
 	tenantF := seedTenantVS(t, migDB, "GUC-F")
-	sfx := strings.ToUpper(uuid.New().String()[:8])
+	sfx := strings.ToUpper(uuidHex(uuid.New())) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cveID := fmt.Sprintf("CVE-2026-GUC-%s", sfx)
 	vX := seedVulnVS(t, migDB, cveID)
 	t.Cleanup(func() {

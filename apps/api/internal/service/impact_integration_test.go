@@ -110,7 +110,7 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 	// Uppercase the hex suffix: GetCVEImpact normalises the input cve_id with
 	// strings.ToUpper (correct for real CVE-YYYY-NNNNN ids), so the seeded
 	// cve_id must already be uppercase to round-trip.
-	sfx := strings.ToUpper(uuid.New().String()[:8])
+	sfx := strings.ToUpper(uuidHex(uuid.New())) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cve := func(n string) string { return fmt.Sprintf("CVE-2026-%s-%s", n, sfx) }
 	vHit := seedVulnVS(t, migDB, cve("HIT"))   // affects A + B (and foreign F)
 	vZero := seedVulnVS(t, migDB, cve("ZERO")) // known but affects nothing in T
@@ -264,7 +264,7 @@ func TestCVEImpact_TenantIsolation_BeltAndBraces(t *testing.T) {
 	// Uppercase the hex suffix: GetCVEImpact normalises the input cve_id with
 	// strings.ToUpper (correct for real CVE-YYYY-NNNNN ids), so the seeded
 	// cve_id must already be uppercase to round-trip.
-	sfx := strings.ToUpper(uuid.New().String()[:8])
+	sfx := strings.ToUpper(uuidHex(uuid.New())) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	vX := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-ISO-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX); err != nil {
@@ -330,7 +330,7 @@ func TestCVEImpact_MultiSnapshotDedup(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "SNAP-T")
-	sfx := strings.ToUpper(uuid.New().String()[:8])
+	sfx := strings.ToUpper(uuidHex(uuid.New())) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cveID := fmt.Sprintf("CVE-2026-SNAP-%s", sfx)
 	vID := seedVulnVS(t, migDB, cveID)
 	t.Cleanup(func() {
@@ -409,7 +409,7 @@ func TestCVEImpact_NullMetaCoalesced(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "NULLMETA-T")
-	sfx := strings.ToUpper(uuid.New().String()[:8])
+	sfx := strings.ToUpper(uuidHex(uuid.New())) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cveID := fmt.Sprintf("CVE-2026-NULLMETA-%s", sfx)
 
 	// Insert a global vulnerability row with NULL severity AND NULL cvss_score

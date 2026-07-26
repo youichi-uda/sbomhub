@@ -3,8 +3,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -79,24 +81,53 @@ func NewComplianceServiceFull(
 	}
 }
 
-// CheckCompliance performs all compliance checks for a project
+// CheckCompliance performs all compliance checks for a project.
+//
+// Error policy (M46 Codex round A, reverting a Track C-1 unparam
+// regression): every check helper PROPAGATES repository/infrastructure
+// errors instead of folding them into the check outcome. The Track C-1
+// revision dropped the error returns, which turned query failures into
+// compliance PASSES — a failed vulnerability-count query zero-valued the
+// counts and scored `no_unresolved_critical`, and a failed component list
+// scored `no_violations`. For an audit surface that is the worst failure
+// mode: the report said 合格 while the underlying query never ran.
+//
+// We chose propagation (whole-request error -> HTTP 500 via the handler's
+// existing error path) over a per-check "unknown" state because (a) the
+// JSON contract stays unchanged — no new tri-state field for the UI to
+// interpret, and the handler already maps errors to 500; (b) a partially
+// scored compliance report computed around failed queries is still
+// misleading (Score/MaxScore would silently exclude categories); and
+// (c) it restores symmetry with checkMinimumElements, which always
+// propagated. ABSENCE is still a check outcome, not an error: sql.ErrNoRows
+// from GetLatest means "no SBOM uploaded" and fails the affected checks
+// honestly.
 func (s *ComplianceService) CheckCompliance(ctx context.Context, projectID uuid.UUID) (*model.ComplianceResult, error) {
 	result := &model.ComplianceResult{
 		ProjectID:  projectID,
 		Categories: []model.ComplianceCategory{},
 	}
 
-	// SBOM Generation checks. The three check helpers below never fail:
-	// repository errors are folded into the check outcome (an unreachable
-	// repo simply means the check is "not passed"), so they return the
-	// category directly (M46 Track C, unparam cleanup).
-	result.Categories = append(result.Categories, s.checkSBOMGeneration(ctx, projectID))
+	// SBOM Generation checks
+	sbomCategory, err := s.checkSBOMGeneration(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("sbom generation checks failed: %w", err)
+	}
+	result.Categories = append(result.Categories, sbomCategory)
 
 	// Vulnerability Management checks
-	result.Categories = append(result.Categories, s.checkVulnerabilityManagement(ctx, projectID))
+	vulnCategory, err := s.checkVulnerabilityManagement(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("vulnerability management checks failed: %w", err)
+	}
+	result.Categories = append(result.Categories, vulnCategory)
 
 	// License Management checks
-	result.Categories = append(result.Categories, s.checkLicenseManagement(ctx, projectID))
+	licenseCategory, err := s.checkLicenseManagement(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("license management checks failed: %w", err)
+	}
+	result.Categories = append(result.Categories, licenseCategory)
 
 	// METI Minimum Elements checks
 	minElementsCategory, err := s.checkMinimumElements(ctx, projectID)
@@ -114,7 +145,10 @@ func (s *ComplianceService) CheckCompliance(ctx context.Context, projectID uuid.
 	return result, nil
 }
 
-func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID uuid.UUID) model.ComplianceCategory {
+// checkSBOMGeneration evaluates the SBOM生成 category. Repository errors
+// propagate (see CheckCompliance godoc); sql.ErrNoRows from GetLatest is
+// "no SBOM uploaded" — a check outcome, not an error.
+func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID uuid.UUID) (model.ComplianceCategory, error) {
 	category := model.ComplianceCategory{
 		Name:     string(model.ComplianceCategorySBOM),
 		Label:    "SBOM生成",
@@ -124,6 +158,9 @@ func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID u
 
 	// Check 1: SBOM exists
 	sbom, err := s.sbomRepo.GetLatest(ctx, projectID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return category, fmt.Errorf("failed to get latest SBOM: %w", err)
+	}
 	sbomExists := err == nil && sbom != nil
 	check1 := model.ComplianceCheck{
 		ID:     "sbom_exists",
@@ -147,7 +184,10 @@ func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID u
 	if sbomExists {
 		// Check if components have required fields (name, version)
 		components, err := s.componentRepo.ListBySbom(ctx, sbom.ID)
-		if err == nil && len(components) > 0 {
+		if err != nil {
+			return category, fmt.Errorf("failed to list components: %w", err)
+		}
+		if len(components) > 0 {
 			hasRequiredFields := true
 			for _, c := range components {
 				if c.Name == "" || c.Version == "" {
@@ -190,10 +230,14 @@ func (s *ComplianceService) checkSBOMGeneration(ctx context.Context, projectID u
 	}
 	category.Checks = append(category.Checks, check3)
 
-	return category
+	return category, nil
 }
 
-func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, projectID uuid.UUID) model.ComplianceCategory {
+// checkVulnerabilityManagement evaluates the 脆弱性管理 category.
+// Repository errors propagate (see CheckCompliance godoc): pre-M46 a
+// failed counts query zero-valued vulnCounts and scored
+// no_unresolved_critical as passed.
+func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, projectID uuid.UUID) (model.ComplianceCategory, error) {
 	category := model.ComplianceCategory{
 		Name:     string(model.ComplianceCategoryVulnerability),
 		Label:    "脆弱性管理",
@@ -201,20 +245,20 @@ func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, pr
 		Checks:   []model.ComplianceCheck{},
 	}
 
-	// Check 1: Vulnerability scan performed
+	// Check 1: Vulnerability scan performed. The counts query aggregates
+	// with COALESCE, so it errors only on infrastructure failure — which
+	// must not masquerade as either "scan not performed" or, worse, as
+	// zero critical findings below.
 	vulnCounts, err := s.dashboardRepo.GetProjectVulnerabilityCounts(ctx, projectID)
-	scanPerformed := err == nil
+	if err != nil {
+		return category, fmt.Errorf("failed to get vulnerability counts: %w", err)
+	}
 	check1 := model.ComplianceCheck{
 		ID:     "scan_performed",
 		Label:  "脆弱性スキャンを実施している",
-		Passed: scanPerformed,
+		Passed: true,
 	}
-	if scanPerformed {
-		category.Score++
-	} else {
-		detail := "脆弱性スキャンが実行されていません"
-		check1.Details = &detail
-	}
+	category.Score++
 	category.Checks = append(category.Checks, check1)
 
 	// Check 2: No unresolved critical vulnerabilities
@@ -225,7 +269,10 @@ func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, pr
 	}
 
 	// Get VEX statements to check resolved status
-	vexStatements, _ := s.vexRepo.ListByProject(ctx, projectID)
+	vexStatements, err := s.vexRepo.ListByProject(ctx, projectID)
+	if err != nil {
+		return category, fmt.Errorf("failed to list VEX statements: %w", err)
+	}
 	resolvedCritical := 0
 	for _, vex := range vexStatements {
 		if vex.VulnerabilitySeverity == "CRITICAL" &&
@@ -262,10 +309,14 @@ func (s *ComplianceService) checkVulnerabilityManagement(ctx context.Context, pr
 	}
 	category.Checks = append(category.Checks, check3)
 
-	return category
+	return category, nil
 }
 
-func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectID uuid.UUID) model.ComplianceCategory {
+// checkLicenseManagement evaluates the ライセンス管理 category.
+// Repository errors propagate (see CheckCompliance godoc): pre-M46 a
+// failed component list query counted zero violations and scored
+// no_violations as passed.
+func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectID uuid.UUID) (model.ComplianceCategory, error) {
 	category := model.ComplianceCategory{
 		Name:     string(model.ComplianceCategoryLicense),
 		Label:    "ライセンス管理",
@@ -275,7 +326,10 @@ func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectI
 
 	// Check 1: License policy configured
 	policies, err := s.licensePolicyRepo.ListByProject(ctx, projectID)
-	policyConfigured := err == nil && len(policies) > 0
+	if err != nil {
+		return category, fmt.Errorf("failed to list license policies: %w", err)
+	}
+	policyConfigured := len(policies) > 0
 	check1 := model.ComplianceCheck{
 		ID:     "policy_configured",
 		Label:  "ライセンスポリシーを設定している",
@@ -297,11 +351,18 @@ func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectI
 	}
 
 	if policyConfigured {
-		// Get latest SBOM
+		// Get latest SBOM. sql.ErrNoRows = no SBOM uploaded, so there is
+		// nothing to evaluate violations against (check keeps its default).
 		sbom, err := s.sbomRepo.GetLatest(ctx, projectID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return category, fmt.Errorf("failed to get latest SBOM: %w", err)
+		}
 		if err == nil && sbom != nil {
 			// Get components
-			components, _ := s.componentRepo.ListBySbom(ctx, sbom.ID)
+			components, err := s.componentRepo.ListBySbom(ctx, sbom.ID)
+			if err != nil {
+				return category, fmt.Errorf("failed to list components: %w", err)
+			}
 
 			// Check for denied licenses
 			violationCount := 0
@@ -330,7 +391,7 @@ func (s *ComplianceService) checkLicenseManagement(ctx context.Context, projectI
 	}
 	category.Checks = append(category.Checks, check2)
 
-	return category
+	return category, nil
 }
 
 // checkMinimumElements checks METI guideline ver2.0 minimum elements (7 items)

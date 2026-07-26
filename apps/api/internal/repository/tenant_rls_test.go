@@ -153,19 +153,17 @@ func TestTenantCreate_LandsBothTenantAndScanSettings_RLS(t *testing.T) {
 
 	now := time.Now().UTC()
 	tenantID := uuid.New()
-	// Disambiguate parallel test runs and CI re-runs without UNIQUE
-	// collisions on clerk_org_id / slug. Both have UNIQUE indexes
-	// (migration 001 / 002) so we suffix with the uuid head.
-	suffix := tenantID.String()[:12]
 
 	// C27: this tenant is created through the production repo.Create path
 	// (not seedIntegrationTenant), so it registers its own error-visible
-	// cleanup and carries the marker prefix for the leak gate.
+	// cleanup and carries the run-scoped marker (c27Org) for the leak gate.
+	// Full UUID in the UNIQUE clerk_org_id / slug: an 8-12 hex suffix is
+	// 32-48 bits and collides probabilistically (M46 Codex round A, Low).
 	tenant := &model.Tenant{
 		ID:         tenantID,
-		ClerkOrgID: c27TenantOrgPrefix + "f187-" + suffix,
-		Name:       "F187 Test Tenant " + suffix,
-		Slug:       c27TenantOrgPrefix + "f187-" + suffix,
+		ClerkOrgID: c27Org("f187-" + tenantID.String()),
+		Name:       "F187 Test Tenant " + tenantID.String()[:12],
+		Slug:       c27TenantOrgPrefix + "f187-" + tenantID.String(),
 		Plan:       model.PlanEnterprise,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -258,6 +256,21 @@ func TestTenantCreate_LandsBothTenantAndScanSettings_RLS(t *testing.T) {
 	})
 }
 
+// defaultTenantExists reports whether ANY tenants row with slug='default'
+// exists right now (migrator role sees everything — tenants is not under
+// RLS). Used as a safety guard: a pre-existing default tenant on a shared
+// or self-host database is production data this package does not own.
+func defaultTenantExists(t *testing.T, migDB *sql.DB) bool {
+	t.Helper()
+	var n int
+	if err := migDB.QueryRow(
+		`SELECT COUNT(*) FROM tenants WHERE slug = 'default'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("default-tenant existence check: %v", err)
+	}
+	return n > 0
+}
+
 // TestTenantCreate_GetOrCreateDefault_RoundTrips guards the
 // GetOrCreateDefault path specifically — this is what self-host
 // first-boot and middleware/auth.go:78 hit. Pre-F187, the first call
@@ -265,6 +278,23 @@ func TestTenantCreate_LandsBothTenantAndScanSettings_RLS(t *testing.T) {
 // subsequent boot kept failing on the same path. The test runs the
 // helper twice and asserts both calls return the same tenant id (the
 // second call is a GetBySlug hit on the row the first call persisted).
+//
+// Shared-DB safety (M46 Codex round A, High): GetOrCreateDefault uses the
+// fixed slug 'default', which is exactly what a real self-host deployment
+// uses. An earlier revision pre-cleaned and cleaned up with
+// `DELETE FROM tenants WHERE slug = 'default'` — on a shared or self-host
+// database that deletes a production tenant plus, via ON DELETE CASCADE,
+// every child row (projects, sboms, components, ...). The test therefore
+// now SKIPS when a default tenant it does not own already exists, and its
+// cleanup deletes only the row this run created, by id.
+//
+// Residual race (documented, not hidden): between the guard check and
+// repo.GetOrCreateDefault, an external process could create the default
+// tenant first; GetOrCreateDefault would then adopt (and cleanup would
+// delete) that foreign row. The window is milliseconds and requires an
+// active deployment writing to the same DB mid-test-run — the guard
+// closes the realistic hazard (running the suite against a DB where a
+// default tenant already exists).
 func TestTenantCreate_GetOrCreateDefault_RoundTrips(t *testing.T) {
 	appURL, migURL := tenantCreateTestEnv(t)
 
@@ -274,20 +304,11 @@ func TestTenantCreate_GetOrCreateDefault_RoundTrips(t *testing.T) {
 	}
 	appDB := openOrSkipTenantCreate(t, appURL)
 
-	// GetOrCreateDefault uses a fixed slug "default" which collides
-	// with whatever previous test run / actual app has done. Reset
-	// before/after under the migrator role (which sees everything).
-	// C27 gate blind spot (documented in rls_test_helpers): the default
-	// tenant is created by production code with clerk_org_id='self-hosted',
-	// so it cannot carry the marker prefix; this error-visible cleanup is
-	// its only reaper.
-	t.Cleanup(func() {
-		if _, err := migDB.Exec(`DELETE FROM tenants WHERE slug = 'default'`); err != nil {
-			t.Errorf("C27 cleanup: delete default tenant: %v", err)
-		}
-	})
-	if _, err := migDB.Exec(`DELETE FROM tenants WHERE slug = 'default'`); err != nil {
-		t.Fatalf("pre-clean default tenant: %v", err)
+	if defaultTenantExists(t, migDB) {
+		t.Skip("a tenants row with slug='default' already exists on this database; " +
+			"refusing to touch data this test does not own (ON DELETE CASCADE would " +
+			"reap every child row). Run against a disposable database to exercise " +
+			"this path. (M46 Codex round A, High)")
 	}
 
 	repo := NewTenantRepository(appDB)
@@ -302,6 +323,20 @@ func TestTenantCreate_GetOrCreateDefault_RoundTrips(t *testing.T) {
 	if first == nil || first.ID == uuid.Nil {
 		t.Fatal("GetOrCreateDefault returned nil/empty tenant on first call")
 	}
+
+	// C27 gate blind spot (documented in rls_test_helpers): the default
+	// tenant is created by production code with clerk_org_id='self-hosted',
+	// so it cannot carry the marker prefix; this error-visible, ID-SCOPED
+	// cleanup is its only reaper. Never delete by slug here — the guard
+	// above proved no foreign default existed, so first.ID is ours.
+	firstID := first.ID
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(
+			`DELETE FROM tenants WHERE id = $1 AND slug = 'default'`, firstID,
+		); err != nil {
+			t.Errorf("C27 cleanup: delete default tenant %s: %v", firstID, err)
+		}
+	})
 
 	second, err := repo.GetOrCreateDefault(ctx)
 	if err != nil {
@@ -342,4 +377,87 @@ func TestTenantCreate_GetOrCreateDefault_RoundTrips(t *testing.T) {
 		t.Fatalf("F187 regression: default tenant has %d scan_settings rows; "+
 			"expected exactly 1 from Create's auto-provision.", seen)
 	}
+}
+
+// TestTenantCreate_DefaultTenantGuard_PreservesForeignRow pins the M46
+// Codex round A High finding: when a tenants row with slug='default' that
+// this test run does NOT own already exists (self-host production data on
+// a shared DB), TestTenantCreate_GetOrCreateDefault_RoundTrips must SKIP
+// instead of deleting it.
+//
+// Reproduction of the pre-fix behavior (2026-07-25, local docker PG15):
+// planting a default tenant + child project and running the old RoundTrips
+// deleted both rows (slug-based pre-clean + cleanup, CASCADE took the
+// project) while the run stayed green. This test automates that scenario:
+// it plants a "foreign" default tenant with a child project, runs the real
+// RoundTrips test as a subtest, and asserts both rows survived. Against
+// the pre-fix code this test FAILS (rows gone); post-fix the subtest skips
+// and the rows remain.
+func TestTenantCreate_DefaultTenantGuard_PreservesForeignRow(t *testing.T) {
+	_, migURL := tenantCreateTestEnv(t)
+	migDB := openOrSkipTenantCreate(t, migURL)
+	if !schemaReadyTenantCreate(t, migDB) {
+		return
+	}
+	if defaultTenantExists(t, migDB) {
+		t.Skip("a real default tenant already exists on this database; cannot " +
+			"plant the foreign-row fixture without colliding on the UNIQUE slug")
+	}
+
+	// Plant the "foreign" default tenant. The clerk_org_id carries the
+	// run-scoped marker so the C27 leak gate stays accurate; the slug is
+	// the production value 'default', which is what the guard keys on.
+	foreignID := uuid.New()
+	if _, err := migDB.Exec(
+		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, 'default')`,
+		foreignID, c27Org("foreign-default-"+foreignID.String()), "Foreign SelfHost Tenant",
+	); err != nil {
+		t.Fatalf("plant foreign default tenant: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, foreignID); err != nil {
+			t.Errorf("C27 cleanup: delete planted default tenant %s: %v", foreignID, err)
+		}
+	})
+
+	// Child project — the CASCADE victim in the pre-fix behavior.
+	projectID := uuid.New()
+	if err := execAsTenant(t, migDB, foreignID,
+		`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, 'foreign-production-project')`,
+		projectID, foreignID,
+	); err != nil {
+		t.Fatalf("plant foreign child project: %v", err)
+	}
+
+	// Run the REAL test against the planted state. Post-fix it must skip
+	// (t.Run returns true for skipped subtests); pre-fix it deleted the
+	// planted rows and passed.
+	t.Run("RoundTrips_under_foreign_default", TestTenantCreate_GetOrCreateDefault_RoundTrips)
+
+	var tenantSurvived int
+	if err := migDB.QueryRow(
+		`SELECT COUNT(*) FROM tenants WHERE id = $1`, foreignID,
+	).Scan(&tenantSurvived); err != nil {
+		t.Fatalf("count planted tenant: %v", err)
+	}
+	if tenantSurvived != 1 {
+		t.Fatalf("M46 High regression: the pre-existing (foreign) default tenant %s "+
+			"was deleted by GetOrCreateDefault_RoundTrips — a shared/self-host DB "+
+			"would have just lost a production tenant and all CASCADE children",
+			foreignID)
+	}
+	// projects is under FORCE RLS, so count it from a GUC-bound tx.
+	withTenantGUC(t, migDB, foreignID, func(tx *sql.Tx) {
+		var projectSurvived int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM projects WHERE id = $1`, projectID,
+		).Scan(&projectSurvived); err != nil {
+			t.Fatalf("count planted project: %v", err)
+		}
+		if projectSurvived != 1 {
+			t.Fatalf("M46 High regression: the foreign default tenant's child "+
+				"project %s was CASCADE-deleted by GetOrCreateDefault_RoundTrips",
+				projectID)
+		}
+	})
 }

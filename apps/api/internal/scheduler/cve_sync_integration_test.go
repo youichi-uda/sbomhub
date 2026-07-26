@@ -176,11 +176,12 @@ func seedSchedIntCVETenants(t *testing.T, migDB *sql.DB, n int, tag string) ([]f
 	cleanup()
 
 	for i, f := range fixtures {
-		slug := fmt.Sprintf(c27TenantOrgPrefix+"f258-%s-%s", tag, f.tenantID.String()[:8])
+		// Full UUID in the UNIQUE slug (M46 Codex round A, Low).
+		slug := fmt.Sprintf(c27TenantOrgPrefix+"f258-%s-%s", tag, f.tenantID.String())
 		if _, err := migDB.Exec(
 			`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
 			f.tenantID,
-			c27TenantOrgPrefix+"f258-"+tag+"-"+f.tenantID.String(),
+			c27Org("f258-"+tag+"-"+f.tenantID.String()),
 			fmt.Sprintf("F258 %s %d", tag, i),
 			slug,
 		); err != nil {

@@ -118,10 +118,11 @@ func seedOSVCandBase(t *testing.T, migDB *sql.DB, tag string) osvCandFixture {
 		}
 	})
 
+	// Full UUID in the UNIQUE slug (M46 Codex round A, Low).
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		fx.tenantID, c27TenantOrgPrefix+"osvc-"+tag+"-"+fx.tenantID.String(),
-		"OSVCand "+tag, c27TenantOrgPrefix+"osvc-"+tag+"-"+fx.tenantID.String()[:8],
+		fx.tenantID, c27Org("osvc-"+tag+"-"+fx.tenantID.String()),
+		"OSVCand "+tag, c27TenantOrgPrefix+"osvc-"+tag+"-"+fx.tenantID.String(),
 	); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
@@ -259,7 +260,10 @@ func TestOSVVulnFuncs_ListOSVCandidatesChunk_FreshnessBoundary_RealPG(t *testing
 	appDB := schedOpenOrSkip(t, appURL)
 
 	fx := seedOSVCandBase(t, migDB, "boundary")
-	tok := uuid.New().String()[:8]
+	// 12 hex = 48 bits (vs the old 32-bit [:8], M46 Low). Full 32 hex does
+	// NOT fit here: these CVE ids also land in advisory_excerpts.cve_id
+	// VARCHAR(30), and "CVE-OSVC-"(9) + tok + "-BDNOTYET"(9) must stay <= 30.
+	tok := uuidHex(uuid.New())[:12]
 	cveFresh := "CVE-OSVC-" + tok + "-FRESH"
 	cveBound := "CVE-OSVC-" + tok + "-BOUND"
 	cveStale := "CVE-OSVC-" + tok + "-STALE"
@@ -366,7 +370,10 @@ func TestOSVVulnFuncs_ListOSVCandidates_BackdateRecandidacy_RealPG(t *testing.T)
 	appDB := schedOpenOrSkip(t, appURL)
 
 	fx := seedOSVCandBase(t, migDB, "backdate")
-	tok := uuid.New().String()[:8]
+	// 12 hex = 48 bits (vs the old 32-bit [:8], M46 Low). Full 32 hex does
+	// NOT fit here: these CVE ids also land in advisory_excerpts.cve_id
+	// VARCHAR(30), and "CVE-OSVC-"(9) + tok + "-BDNOTYET"(9) must stay <= 30.
+	tok := uuidHex(uuid.New())[:12]
 	cveNormalFresh := "CVE-OSVC-" + tok + "-NFRESH"
 	cveBackWritten := "CVE-OSVC-" + tok + "-BDWRIT"
 	cveBackNotYet := "CVE-OSVC-" + tok + "-BDNOTYET"

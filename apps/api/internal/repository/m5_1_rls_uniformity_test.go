@@ -203,7 +203,7 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, severity, source, updated_at)
 		VALUES ($1, $2, 'HIGH', 'NVD', NOW())
-	`, vulnID, "CVE-M5-1-VRE-"+vulnID.String()[:8]); err != nil {
+	`, vulnID, "CVE-M5-1-VRE-"+uuidHex(vulnID)); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
 	registerCleanupExec(t, migDB, "M5-1 vulnerabilities row",
@@ -222,7 +222,7 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 			id, tenant_id, vulnerability_id, project_id, cve_id, severity,
 			detected_at, resolved_at, resolution_type, resolution_notes
 		) VALUES ($1, $2, $3, $4, $5, 'HIGH', NOW(), NOW(), 'fixed', 'tenant-A-private-resolution')
-	`, rowA, tenantA, vulnID, projectA, "CVE-M5-1-VRE-"+vulnID.String()[:8]); err != nil {
+	`, rowA, tenantA, vulnID, projectA, "CVE-M5-1-VRE-"+uuidHex(vulnID)); err != nil {
 		_ = txA.Rollback()
 		t.Fatalf("tenantA insert: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 			id, tenant_id, vulnerability_id, project_id, cve_id, severity,
 			detected_at, resolution_type
 		) VALUES ($1, $2, $3, $4, $5, 'HIGH', NOW(), 'fixed')
-	`, uuid.New(), tenantA, vulnID, projectA, "CVE-M5-1-VRE-"+vulnID.String()[:8])
+	`, uuid.New(), tenantA, vulnID, projectA, "CVE-M5-1-VRE-"+uuidHex(vulnID))
 	if forgeErr == nil {
 		t.Fatalf("RLS WITH CHECK broken (M5-1 regression): tenantB session inserted a "+
 			"vulnerability_resolution_events row with tenant_id=%s (tenantA).", tenantA)
@@ -274,7 +274,7 @@ func TestM5_1_TenantIsolation_VulnerabilityResolutionEvents(t *testing.T) {
 			id, tenant_id, vulnerability_id, project_id, cve_id, severity,
 			detected_at, resolution_type
 		) VALUES ($1, $2, $3, $4, $5, 'HIGH', NOW(), 'fixed')
-	`, uuid.New(), tenantA, vulnID, projectB, "CVE-M5-1-VRE-"+vulnID.String()[:8])
+	`, uuid.New(), tenantA, vulnID, projectB, "CVE-M5-1-VRE-"+uuidHex(vulnID))
 	if polluteErr == nil {
 		t.Fatalf("F75 regression (M5-1 composite FK): tenantA session was able to attach "+
 			"a vulnerability_resolution_event to tenantB's project (id=%s). "+
@@ -599,7 +599,7 @@ func TestM5_1_TenantIsolation_SSVCAssessmentHistory(t *testing.T) {
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, severity, source, updated_at)
 		VALUES ($1, $2, 'HIGH', 'NVD', NOW())
-	`, vulnID, "CVE-M5-1-SAH-"+vulnID.String()[:8]); err != nil {
+	`, vulnID, "CVE-M5-1-SAH-"+uuidHex(vulnID)); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
 	registerCleanupExec(t, migDB, "M5-1 vulnerabilities row",
@@ -623,7 +623,7 @@ func TestM5_1_TenantIsolation_SSVCAssessmentHistory(t *testing.T) {
 			'active', 'yes', 'total',
 			'essential', 'significant', 'immediate'
 		)
-	`, assessA, projectA, tenantA, vulnID, "CVE-M5-1-SAH-"+vulnID.String()[:8]); err != nil {
+	`, assessA, projectA, tenantA, vulnID, "CVE-M5-1-SAH-"+uuidHex(vulnID)); err != nil {
 		_ = txA.Rollback()
 		t.Fatalf("tenantA insert assessment: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, severity, source, updated_at)
 		VALUES ($1, $2, 'HIGH', 'NVD', NOW())
-	`, vulnID, "CVE-M5-1-SSACFK-"+vulnID.String()[:8]); err != nil {
+	`, vulnID, "CVE-M5-1-SSACFK-"+uuidHex(vulnID)); err != nil {
 		t.Fatalf("seed vulnerabilities: %v", err)
 	}
 	registerCleanupExec(t, migDB, "M5-1 vulnerabilities row",
@@ -755,7 +755,7 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 			'none', 'no', 'partial',
 			'minimal', 'minimal', 'defer'
 		)
-	`, uuid.New(), projectB, tenantA, vulnID, "CVE-M5-1-SSACFK-"+vulnID.String()[:8])
+	`, uuid.New(), projectB, tenantA, vulnID, "CVE-M5-1-SSACFK-"+uuidHex(vulnID))
 	if polluteErr == nil {
 		t.Fatalf("F75 regression (M5-1 composite FK): tenantA attached a ssvc_assessment "+
 			"to tenantB's project (id=%s). Migration 044 composite FK is supposed to reject.",
@@ -777,7 +777,7 @@ func TestM5_1_TenantIsolation_SSVCAssessments_CompositeFK(t *testing.T) {
 			'none', 'no', 'partial',
 			'minimal', 'minimal', 'defer'
 		)
-	`, uuid.New(), projectA, tenantA, vulnID, "CVE-M5-1-SSACFK-"+vulnID.String()[:8]); err != nil {
+	`, uuid.New(), projectA, tenantA, vulnID, "CVE-M5-1-SSACFK-"+uuidHex(vulnID)); err != nil {
 		t.Fatalf("M5-1 regression: same-tenant ssvc_assessment insert failed: %v -- "+
 			"the composite FK should NOT reject in-tenant project_id targeting.", err)
 	}

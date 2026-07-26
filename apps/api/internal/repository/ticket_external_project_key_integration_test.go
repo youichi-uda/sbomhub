@@ -151,7 +151,7 @@ func TestVulnerabilityTickets_ExternalProjectKey_F366(t *testing.T) {
 	// vulnerabilities is a global (RLS-exempt) table — plain insert.
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, severity) VALUES ($1, $2, 'HIGH')
-	`, vulnID, "CVE-2026-F366-"+tenant.String()[:8]); err != nil {
+	`, vulnID, "CVE-2026-F366-"+uuidHex(tenant)); err != nil {
 		t.Fatalf("seed vulnerability: %v", err)
 	}
 	if err := execAsTenant(t, migDB, tenant, `

@@ -24,13 +24,17 @@ import (
 
 // ----------------------------------------------------------------------------
 // M46 Track C regression — billing-event / audit-log write failures inside the
-// Lemon Squeezy webhook MUST NOT change the HTTP response. Lemon Squeezy
-// retries any non-2xx response indefinitely, so a flaky audit INSERT that
-// bubbled into a 500 would make the provider re-deliver the event and could
-// corrupt billing state. The pre-fix code guaranteed the 200 by silently
-// DISCARDING the errors (errcheck findings) — losing the subscription-event
-// history and the audit trail without a trace. The contract pinned here is:
-// keep the 200, but surface every failed write through slog.
+// Lemon Squeezy webhook MUST NOT change the HTTP response. Retry facts
+// (verified against docs.lemonsqueezy.com/help/webhooks/webhook-requests,
+// 2026-07-25 — an earlier revision of this comment wrongly claimed
+// "indefinitely"): a non-2xx is retried at most 3 more times (5s/25s/125s
+// exponential backoff) and then permanently dropped. A 500 after the
+// subscription row committed would therefore re-deliver the whole event up
+// to 3 times and could DUPLICATE event/audit history rows, while a 200
+// irreversibly loses the failed row once the (finite) retry budget cannot
+// be tapped again. The pinned contract: keep the 200, surface every failed
+// write through slog; durable inbox is the M46 residual. The pre-fix code
+// guaranteed the 200 by silently DISCARDING the errors (errcheck findings).
 // ----------------------------------------------------------------------------
 
 const lsTestWebhookSecret = "ls-test-webhook-secret"
@@ -143,7 +147,7 @@ func TestLSWebhook_SubscriptionCreated_EventAndAuditFailuresStillReturn200(t *te
 	rec := driveLSWebhook(t, h, body)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (non-200 makes Lemon Squeezy retry forever); body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 200 (non-2xx triggers up to 3 redeliveries that could duplicate history rows); body=%s", rec.Code, rec.Body.String())
 	}
 	out := logs.String()
 	if !bytes.Contains([]byte(out), []byte("failed to record subscription event")) {
@@ -246,6 +250,58 @@ func TestLSWebhook_SubscriptionCancelled_EventFailureStillReturns200(t *testing.
 	}
 	if !bytes.Contains([]byte(out), []byte("failed to write subscription audit log")) {
 		t.Fatalf("audit log write failure was not logged; logs:\n%s", out)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestLSWebhook_SubscriptionCreated_LookupFailureIs500WithoutInsert pins the
+// M46 Codex round A finding at webhook_lemonsqueezy.go:187: the
+// subscription lookup error used to be discarded with `_`, so a TRANSIENT
+// SELECT failure was misread as "subscription does not exist" and the
+// handler fell through to Create — colliding with the ls_subscription_id
+// UNIQUE index on every redelivery (500 loop) and misclassifying infra
+// trouble as a new subscription. The pinned contract: only sql.ErrNoRows
+// takes the create branch; any other lookup error is logged and answered
+// with an explicit 500 (Lemon Squeezy retries up to 3 more times, so a
+// recovered DB gets a clean second attempt) and NO insert is attempted.
+func TestLSWebhook_SubscriptionCreated_LookupFailureIs500WithoutInsert(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	tenantID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM tenants WHERE id = $1`)).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "clerk_org_id", "name", "slug", "plan", "created_at", "updated_at"}).
+			AddRow(tenantID, "org_1", "Acme", "acme", model.PlanFree, now, now))
+	// Transient failure — NOT sql.ErrNoRows. No INSERT expectation follows:
+	// attempting one is itself a violation of the pinned contract.
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE ls_subscription_id = $1`)).
+		WithArgs("ls-sub-5").
+		WillReturnError(errors.New("transient: connection reset by peer"))
+
+	body := `{
+		"meta": {"event_name": "subscription_created", "custom_data": {"tenant_id": "` + tenantID.String() + `"}},
+		"data": {"id": "ls-sub-5", "type": "subscriptions", "attributes": {
+			"customer_id": 1, "variant_id": 2, "product_id": 3,
+			"product_name": "SBOMHub Pro", "status": "active"
+		}}
+	}`
+	rec := driveLSWebhook(t, h, body)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (lookup failure must be an explicit error, "+
+			"not a fall-through to Create); body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("failed to look up subscription")) {
+		t.Fatalf("response must name the lookup failure (not a create failure); body=%s",
+			rec.Body.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("subscription lookup failed")) {
+		t.Fatalf("lookup failure was not logged; logs:\n%s", logs.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)

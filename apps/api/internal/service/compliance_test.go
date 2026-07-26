@@ -3,13 +3,18 @@ package service
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -41,6 +46,122 @@ func testComplianceResult() *model.ComplianceResult {
 				},
 			},
 		},
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M46 Codex round A regression — the Track C-1 unparam cleanup removed the
+// error returns from the CheckCompliance check helpers, which turned
+// repository FAILURES into compliance PASSES: a failed vulnerability-count
+// query zero-valued the counts and scored `no_unresolved_critical`, and a
+// failed component-list query scored `no_violations`. For a compliance
+// product that is the worst possible failure mode (the audit surface says
+// 合格 while the underlying query never ran). The contract pinned here:
+// an infrastructure error propagates to the caller (HTTP 500 via the
+// handler's existing error path) and NEVER yields a scored result.
+// ----------------------------------------------------------------------------
+
+func newSqlmockComplianceService(t *testing.T) (*ComplianceService, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return NewComplianceService(
+		repository.NewSbomRepository(db),
+		repository.NewComponentRepository(db),
+		repository.NewVulnerabilityRepository(db),
+		repository.NewVEXRepository(db),
+		repository.NewLicensePolicyRepository(db),
+		repository.NewDashboardRepository(db),
+	), mock
+}
+
+func timeNowForTest() time.Time { return time.Now() }
+
+func sbomRow(sbomID, projectID uuid.UUID) *sqlmock.Rows {
+	return sqlmock.NewRows(
+		[]string{"id", "project_id", "format", "version", "raw_data", "created_at"},
+	).AddRow(sbomID, projectID, string(model.FormatCycloneDX), "1.4", []byte(`{}`), timeNowForTest())
+}
+
+func TestCheckCompliance_VulnCountQueryFailure_IsAnErrorNotAPass(t *testing.T) {
+	s, mock := newSqlmockComplianceService(t)
+	projectID := uuid.New()
+
+	// SBOM generation: no SBOM at all. sql.ErrNoRows is ABSENCE, not an
+	// infrastructure error — the category must still be computed (fails
+	// its checks honestly) and CheckCompliance must keep going.
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM sboms WHERE project_id = $1`)).
+		WillReturnError(sql.ErrNoRows)
+	// Vulnerability management: the counts query fails (infrastructure).
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM vulnerabilities v`)).
+		WillReturnError(errors.New("connection reset by peer"))
+
+	res, err := s.CheckCompliance(context.Background(), projectID)
+	if err == nil {
+		t.Fatalf("CheckCompliance must FAIL when the vulnerability count query "+
+			"fails; got nil error with result %+v — pre-M46-fix this zero-valued "+
+			"the counts and scored no_unresolved_critical as 合格", res)
+	}
+	if res != nil {
+		t.Fatalf("CheckCompliance must not return a partial result alongside an error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "vulnerability management") {
+		t.Fatalf("error must name the failing check group, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestCheckCompliance_ComponentListFailure_IsAnErrorNotNoViolations(t *testing.T) {
+	s, mock := newSqlmockComplianceService(t)
+	projectID := uuid.New()
+	sbomID := uuid.New()
+
+	// checkSBOMGeneration: SBOM + one well-formed component (all green).
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM sboms WHERE project_id = $1`)).
+		WillReturnRows(sbomRow(sbomID, projectID))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM components WHERE sbom_id = $1`)).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "sbom_id", "name", "version", "type", "purl", "license", "created_at"},
+		).AddRow(uuid.New(), sbomID, "left-pad", "1.0.0", "library", "pkg:npm/left-pad@1.0.0", "MIT", timeNowForTest()))
+	// checkVulnerabilityManagement: counts fine, no VEX statements.
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM vulnerabilities v`)).
+		WillReturnRows(sqlmock.NewRows([]string{"critical", "high", "medium", "low"}).AddRow(0, 0, 0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM vex_statements vs`)).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "project_id", "vulnerability_id", "component_id",
+			"status", "justification", "action_statement", "impact_statement",
+			"created_by", "created_at", "updated_at", "cve_id", "severity", "name", "version",
+		}))
+	// checkLicenseManagement: a policy exists, the SBOM re-read succeeds,
+	// but the component list needed to evaluate violations FAILS.
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM license_policies`)).
+		WillReturnRows(sqlmock.NewRows(
+			[]string{"id", "project_id", "license_id", "license_name", "policy_type", "reason", "created_at", "updated_at"},
+		).AddRow(uuid.New(), projectID, "GPL-3.0", "GPL 3.0", string(model.LicensePolicyDenied), "", timeNowForTest(), timeNowForTest()))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM sboms WHERE project_id = $1`)).
+		WillReturnRows(sbomRow(sbomID, projectID))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM components WHERE sbom_id = $1`)).
+		WillReturnError(errors.New("storage failure"))
+
+	res, err := s.CheckCompliance(context.Background(), projectID)
+	if err == nil {
+		t.Fatalf("CheckCompliance must FAIL when the component list query fails "+
+			"during license violation evaluation; got nil error with result %+v — "+
+			"pre-M46-fix this counted zero violations and scored no_violations as 合格", res)
+	}
+	if res != nil {
+		t.Fatalf("CheckCompliance must not return a partial result alongside an error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "license management") {
+		t.Fatalf("error must name the failing check group, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
 	}
 }
 

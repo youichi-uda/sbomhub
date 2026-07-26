@@ -173,10 +173,12 @@ func seedSchedIntReportTenants(t *testing.T, migDB *sql.DB, n int, tag string) (
 		args := make([]any, 0, 4*(end-start))
 		argIdx := 1
 		for _, id := range ids[start:end] {
-			slug := fmt.Sprintf(c27TenantOrgPrefix+"f244-%s-%s", tag, id.String()[:8])
+			// Full UUID in the UNIQUE slug: 8 hex chars are only 32 bits
+			// (M46 Codex round A, Low).
+			slug := fmt.Sprintf(c27TenantOrgPrefix+"f244-%s-%s", tag, id.String())
 			values = append(values,
 				fmt.Sprintf("($%d, $%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2, argIdx+3))
-			args = append(args, id, c27TenantOrgPrefix+"f244-"+tag+"-"+id.String(), "F244 "+tag+" "+id.String()[:8], slug)
+			args = append(args, id, c27Org("f244-"+tag+"-"+id.String()), "F244 "+tag+" "+id.String()[:8], slug)
 			argIdx += 4
 		}
 		if _, err := migDB.Exec(
@@ -218,10 +220,11 @@ func seedSchedIntReportTenantsSequential(t *testing.T, migDB *sql.DB, n int, tag
 	cleanup()
 
 	for i, id := range ids {
-		slug := fmt.Sprintf(c27TenantOrgPrefix+"f244-%s-%s", tag, id.String()[:8])
+		// Full UUID in the UNIQUE slug (M46 Codex round A, Low).
+		slug := fmt.Sprintf(c27TenantOrgPrefix+"f244-%s-%s", tag, id.String())
 		if _, err := migDB.Exec(
 			`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-			id, c27TenantOrgPrefix+"f244-"+tag+"-"+id.String(), fmt.Sprintf("F244 %s %d", tag, i), slug,
+			id, c27Org("f244-"+tag+"-"+id.String()), fmt.Sprintf("F244 %s %d", tag, i), slug,
 		); err != nil {
 			cleanup()
 			t.Fatalf("seed tenant %d: %v", i, err)

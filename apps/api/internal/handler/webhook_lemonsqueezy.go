@@ -3,8 +3,10 @@ package handler
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -183,8 +185,20 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 
 	now := time.Now()
 
-	// Check if subscription already exists (upsert logic)
-	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, payload.Data.ID)
+	// Check if subscription already exists (upsert logic). Only
+	// sql.ErrNoRows means "not found"; any other error is a transient
+	// lookup failure that must NOT fall through to Create — that would
+	// collide with the ls_subscription_id UNIQUE index on redelivery
+	// (500 loop) and misread infra trouble as a brand-new subscription
+	// (M46 Codex round A). Lemon Squeezy retries a non-2xx delivery up
+	// to 3 more times (5s/25s/125s backoff), so an explicit 500 gets a
+	// clean re-attempt once the DB recovers.
+	existingSub, err := h.subRepo.GetByLSSubscriptionID(ctx, payload.Data.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		slog.Error("subscription_created: subscription lookup failed",
+			"error", err, "ls_subscription_id", payload.Data.ID, "tenant_id", tenantID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up subscription"})
+	}
 
 	var sub *model.Subscription
 	if existingSub != nil {
@@ -240,11 +254,26 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 		// The GetSubscription API now uses subscription.plan as source of truth
 	}
 
-	// Log event. Failures must not change the HTTP response: a non-2xx
-	// makes Lemon Squeezy re-deliver the webhook forever, which can corrupt
-	// billing state. The subscription row is already committed above, so
-	// losing the event/audit row only loses history — surface it via slog
-	// so operators can reconcile, and keep the 200.
+	// Log event. Failures must not change the HTTP response.
+	//
+	// Retry facts (M46: verified against the official docs on 2026-07-25,
+	// docs.lemonsqueezy.com/help/webhooks/webhook-requests — an earlier
+	// comment here wrongly claimed "re-delivers forever"): Lemon Squeezy
+	// retries a non-2xx delivery "up to three more times using an
+	// exponential backoff strategy (e.g. 5 secs, 25 secs, 125 secs)" and
+	// then marks the webhook permanently failed.
+	//
+	// Why still 200 on event/audit write failure: the subscription row is
+	// already committed above, so a 5xx would re-deliver the WHOLE event —
+	// the redelivery re-runs the upsert (safe) but can DUPLICATE
+	// subscription_events/audit_logs rows when only one of the two writes
+	// failed. Neither duplicated nor lost history is clean; we keep the 200
+	// so billing state stays consistent, and surface the loss via slog.
+	// TRADE-OFF (doc'd because the retry budget is finite): once we answer
+	// 200, this event's history row is irreversibly lost — there is no
+	// further redelivery to recover it from. Durable fix (M46 residual,
+	// out of scope this wave): persist the raw payload into an inbox table
+	// BEFORE processing and replay event/audit writes from there.
 	if err := h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,
@@ -308,9 +337,12 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, p
 		}
 	}
 
-	// Log event. Same contract as subscription_created: keep the 200 on
-	// event/audit write failure (provider retries on non-2xx), but make the
-	// loss visible via slog.
+	// Log event. Same contract as subscription_created (see the retry-facts
+	// comment there: Lemon Squeezy retries non-2xx at most 3 more times,
+	// then drops the event): keep the 200 on event/audit write failure so a
+	// redelivery cannot duplicate history rows, but make the — then
+	// irreversible — loss visible via slog. Durable inbox is the M46
+	// residual.
 	if err := h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,
@@ -362,8 +394,10 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCancelled(c echo.Context,
 
 	// Note: Don't downgrade plan immediately - subscription is still active until ends_at
 
-	// Keep the 200 on event/audit write failure (provider retries on
-	// non-2xx), but make the loss visible via slog.
+	// Keep the 200 on event/audit write failure (same contract as
+	// subscription_created — provider retries non-2xx at most 3 more
+	// times, then drops the event; see the retry-facts comment there),
+	// but make the — then irreversible — loss visible via slog.
 	if err := h.subRepo.CreateEvent(ctx, &model.SubscriptionEvent{
 		ID:             uuid.New(),
 		SubscriptionID: sub.ID,

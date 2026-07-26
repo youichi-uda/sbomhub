@@ -144,10 +144,11 @@ func withTenantTxVS(t *testing.T, db *sql.DB, tenantID uuid.UUID, fn func(*sql.T
 func seedTenantVS(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	// Full UUID in the UNIQUE slug (M46 Codex round A, Low).
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1,$2,$3,$4)`,
-		id, c27TenantOrgPrefix+label+"-"+id.String(), "VEXSugg "+label,
-		c27TenantOrgPrefix+label+"-"+id.String()[:8],
+		id, c27Org(label+"-"+id.String()), "VEXSugg "+label,
+		c27TenantOrgPrefix+label+"-"+id.String(),
 	); err != nil {
 		t.Fatalf("seed tenant %s: %v", label, err)
 	}
@@ -287,7 +288,7 @@ func TestVEXSuggestions_CrossProjectAggregation(t *testing.T) {
 	tenantF := seedTenantVS(t, migDB, "F")
 
 	// Unique CVE ids per run (cve_id is globally UNIQUE, not tenant-scoped).
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cve := func(n string) string { return fmt.Sprintf("CVE-2026-%s-%s", n, sfx) }
 	v1 := seedVulnVS(t, migDB, cve("0001")) // purl cross-project
 	v2 := seedVulnVS(t, migDB, cve("0002")) // vulnerability_only
@@ -489,7 +490,7 @@ func TestVEXSuggestions_TenantIsolation_BeltAndBraces(t *testing.T) {
 
 	tenantT := seedTenantVS(t, migDB, "IT")
 	tenantF := seedTenantVS(t, migDB, "IF")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	vX := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-ISO-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, vX); err != nil {
@@ -541,7 +542,7 @@ func TestVEXSuggestions_SourceComponentProjectAttribution(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "ATTR")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	cveMis := fmt.Sprintf("CVE-2026-MIS-%s", sfx)
 	cveOK := fmt.Sprintf("CVE-2026-OKK-%s", sfx)
 	vMis := seedVulnVS(t, migDB, cveMis) // mis-attributed source
@@ -645,7 +646,7 @@ func TestVEXCreateStatement_RejectsForeignProjectComponent(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "WD")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	v := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-WD-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v); err != nil {

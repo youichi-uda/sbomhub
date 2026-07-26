@@ -19,6 +19,7 @@ package repository
 
 import (
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"testing"
@@ -26,6 +27,15 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
+
+// uuidHex returns the 32-hex (dash-free) form of id, for suffixing UNIQUE
+// columns too narrow for the 36-char canonical form (e.g.
+// vulnerabilities.cve_id VARCHAR(50)). Full 128-bit entropy — 8-hex
+// truncations are only 32 bits and collide probabilistically (M46 Codex
+// round A, Low).
+func uuidHex(id uuid.UUID) string {
+	return hex.EncodeToString(id[:])
+}
 
 // ---------------------------------------------------------------------------
 // C27: cleanup-trap eradication + tenant-leak gate (M46).
@@ -61,13 +71,14 @@ import (
 //   - Rows created without the marker prefix are invisible to the gate.
 //     The only such row today is the slug='default' tenant created through
 //     the production GetOrCreateDefault path in tenant_rls_test.go; that
-//     test deletes it in its own (now un-trapped) cleanup.
+//     test skips when a foreign default tenant pre-exists and otherwise
+//     deletes only the row it created (by id) in its own cleanup.
 //   - Non-tenant global rows (vulnerabilities CVE-M5-1-*, audit_logs with
 //     tenant_id NULL) are reaped by their own error-visible cleanups but
 //     not counted by this gate.
 //   - Two concurrent `go test` invocations of the SAME package against the
-//     same DB can trip the gate spuriously (each package has its own prefix,
-//     so cross-package parallelism inside one `go test ./...` run is safe).
+//     same DB can still trip the GROWTH check spuriously; the run-id
+//     residue check (primary signal, M46 round A) is exact per run.
 // ---------------------------------------------------------------------------
 
 // c27TenantOrgPrefix marks every tenant row created by this package's
@@ -75,6 +86,23 @@ import (
 // repository=itest-repo-, scheduler=itest-sched-, service=itest-svc-,
 // middleware=itest-mw-.
 const c27TenantOrgPrefix = "itest-repo-"
+
+// c27RunID identifies THIS test-process run and is embedded in every marker
+// clerk_org_id (see c27Org). The leak gate checks that rows carrying this
+// run's id are gone after m.Run — a direct residue check that two
+// concurrent runs of the same package cannot cancel out, unlike a bare
+// before/after count diff (run A's "before" may include run B's live temp
+// rows; if B cleans up while A leaks one row, the totals balance and a
+// diff-only gate stays silent — Codex M46 round A).
+var c27RunID = uuid.NewString()
+
+// c27Org builds the canonical marker clerk_org_id for a tenant seeded by
+// this run: <package prefix><run id>-<label>. Every test-created tenant
+// MUST route its clerk_org_id through this helper so the run-scoped gate
+// can see it.
+func c27Org(label string) string {
+	return c27TenantOrgPrefix + c27RunID + "-" + label
+}
 
 // openIntegrationDB opens url, skips the test when the DB is unreachable,
 // and registers Close via t.Cleanup so it runs AFTER (LIFO) any cleanup
@@ -100,13 +128,16 @@ func openIntegrationDB(t *testing.T, url string) *sql.DB {
 // seedIntegrationTenant inserts a canonical marker-prefixed tenant as the
 // migrator role and registers an error-visible DELETE cleanup immediately.
 // ON DELETE CASCADE on the tenants FKs reaps all tenant-scoped child rows.
+// The slug carries the FULL uuid: slug is UNIQUE and an 8-hex suffix is
+// only 32 bits, which collides probabilistically across runs / residue
+// (M46 Codex round A, Low).
 func seedIntegrationTenant(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	org := c27TenantOrgPrefix + label + "-" + id.String()
+	org := c27Org(label + "-" + id.String())
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		id, org, "itest "+label, c27TenantOrgPrefix+label+"-"+id.String()[:8],
+		id, org, "itest "+label, c27TenantOrgPrefix+label+"-"+id.String(),
 	); err != nil {
 		t.Fatalf("seed tenant %s: %v", label, err)
 	}
@@ -130,61 +161,115 @@ func registerCleanupExec(t *testing.T, db *sql.DB, what, query string, args ...a
 	})
 }
 
-// countC27Tenants returns the number of marker rows, or -1 on error.
-func countC27Tenants(db *sql.DB) int64 {
+// countC27Tenants returns the number of marker rows (any run).
+func countC27Tenants(db *sql.DB) (int64, error) {
 	var n int64
-	if err := db.QueryRow(
+	err := db.QueryRow(
 		`SELECT COUNT(*) FROM tenants WHERE clerk_org_id LIKE $1`,
 		c27TenantOrgPrefix+"%",
-	).Scan(&n); err != nil {
-		return -1
-	}
-	return n
+	).Scan(&n)
+	return n, err
 }
 
-// TestMain is the leak gate: it counts marker tenants before and after the
-// package's tests and fails the run when the count grew. Only active under
-// -tags=integration (this file's build tag); the unit-test build keeps the
-// default TestMain.
+// listC27RunResidue returns the clerk_org_id of every tenants row created
+// by THIS run (marker prefix + run id) that still exists.
+func listC27RunResidue(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT clerk_org_id FROM tenants WHERE clerk_org_id LIKE $1 ORDER BY clerk_org_id`,
+		c27TenantOrgPrefix+c27RunID+"-%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var orgs []string
+	for rows.Next() {
+		var org string
+		if err := rows.Scan(&org); err != nil {
+			return nil, err
+		}
+		orgs = append(orgs, org)
+	}
+	return orgs, rows.Err()
+}
+
+// TestMain is the leak gate. Only active under -tags=integration (this
+// file's build tag); the unit-test build keeps the default TestMain.
+//
+// Fail-closed contract (M46 Codex round A): when an integration URL IS
+// configured, any failure to stand the gate up — open, ping, or a count
+// query — fails the package run instead of silently disabling leak
+// detection. The ONLY silent path is "no URL configured" (plain local
+// dev), where every test skips itself and there is nothing to leak.
+//
+// Leak detection is two signals:
+//  1. run-id residue (primary, exact): rows whose clerk_org_id carries
+//     THIS run's c27RunID must all be gone after m.Run.
+//  2. marker growth (secondary, kept from the original gate): total
+//     marker rows must not grow. Concurrent runs of the same package can
+//     still trip this one spuriously (documented limitation), but it
+//     catches rows seeded with the prefix while bypassing c27Org.
 func TestMain(m *testing.M) {
 	url := os.Getenv("MIGRATE_DATABASE_URL")
 	if url == "" {
 		url = os.Getenv("DATABASE_URL")
 	}
-	var gateDB *sql.DB
-	before := int64(-1)
-	if url != "" {
-		if db, err := sql.Open("postgres", url); err == nil {
-			if db.Ping() == nil {
-				gateDB = db
-				before = countC27Tenants(db)
-			} else {
-				_ = db.Close()
-			}
-		}
+	if url == "" {
+		os.Exit(m.Run())
+	}
+	gateDB, err := sql.Open("postgres", url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: sql.Open failed: %v — integration URL is set, failing closed\n", err)
+		os.Exit(1)
+	}
+	if err := gateDB.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: integration DB unreachable: %v — failing closed "+
+				"(unset DATABASE_URL/MIGRATE_DATABASE_URL to run without the integration DB)\n", err)
+		os.Exit(1)
+	}
+	before, err := countC27Tenants(gateDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: pre-run marker count failed: %v — failing closed\n", err)
+		os.Exit(1)
 	}
 	code := m.Run()
-	if gateDB != nil {
-		after := countC27Tenants(gateDB)
-		switch {
-		case before < 0 || after < 0:
-			fmt.Fprintf(os.Stderr,
-				"C27 leak gate: tenant count query failed (before=%d after=%d) — gate inconclusive\n",
-				before, after)
-		case after > before:
-			fmt.Fprintf(os.Stderr,
-				"C27 LEAK GATE FAILED: %q tenants grew %d -> %d during this run — a test leaked rows\n",
-				c27TenantOrgPrefix, before, after)
-			if code == 0 {
-				code = 1
-			}
-		case after > 0:
-			fmt.Fprintf(os.Stderr,
-				"C27 leak gate: no growth this run, but %d pre-existing %q rows remain (residue from older runs)\n",
-				after, c27TenantOrgPrefix)
-		}
-		_ = gateDB.Close()
+	residue, err := listC27RunResidue(gateDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: post-run residue query failed: %v — failing closed\n", err)
+		os.Exit(1)
 	}
+	after, err := countC27Tenants(gateDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: post-run marker count failed: %v — failing closed\n", err)
+		os.Exit(1)
+	}
+	if len(residue) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"C27 LEAK GATE FAILED: %d tenant row(s) created by this run (run id %s) survived m.Run: %v\n",
+			len(residue), c27RunID, residue)
+		if code == 0 {
+			code = 1
+		}
+	}
+	switch {
+	case after > before:
+		fmt.Fprintf(os.Stderr,
+			"C27 LEAK GATE FAILED: %q tenants grew %d -> %d during this run — a test leaked rows\n",
+			c27TenantOrgPrefix, before, after)
+		if code == 0 {
+			code = 1
+		}
+	case after > 0:
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: no growth this run, but %d pre-existing %q rows remain (residue from older runs)\n",
+			after, c27TenantOrgPrefix)
+	}
+	_ = gateDB.Close()
 	os.Exit(code)
 }
 

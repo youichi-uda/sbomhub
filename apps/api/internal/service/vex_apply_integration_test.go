@@ -116,7 +116,7 @@ func TestVEXApply_PurlMatch_CreatesStatementAndProvenance(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "AP")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-AP1-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
@@ -203,7 +203,7 @@ func TestVEXApply_ForeignTenantSource_Rejected(t *testing.T) {
 
 	tenantT := seedTenantVS(t, migDB, "APT")
 	tenantF := seedTenantVS(t, migDB, "APF")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APX-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
@@ -265,7 +265,7 @@ func TestVEXApply_MatchReverification_Injection(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "APM")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APM1-%s", sfx))
 	v2 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APM2-%s", sfx))
 	t.Cleanup(func() {
@@ -331,7 +331,7 @@ func TestVEXApply_ExistingTarget_409(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "APC")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APC1-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {
@@ -394,7 +394,7 @@ func TestVEXApply_TargetNotLinkedToVuln_Rejected(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "APL")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	vAgn := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APL-AGN-%s", sfx))
 	vPurl := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APL-PURL-%s", sfx))
 	t.Cleanup(func() {
@@ -502,7 +502,7 @@ func TestVEXApply_ProjectWideExisting_409(t *testing.T) {
 	appDB := openOrSkipVS(t, appURL)
 
 	tenantT := seedTenantVS(t, migDB, "APW")
-	sfx := uuid.New().String()[:8]
+	sfx := uuidHex(uuid.New()) // full 128-bit; [:8] was 32-bit collision-prone (M46 Low)
 	v1 := seedVulnVS(t, migDB, fmt.Sprintf("CVE-2026-APW1-%s", sfx))
 	t.Cleanup(func() {
 		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE id = $1`, v1); err != nil {

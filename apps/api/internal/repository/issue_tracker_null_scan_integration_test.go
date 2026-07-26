@@ -346,12 +346,14 @@ func TestVulnerabilityTickets_NullableColumnScan(t *testing.T) {
 	// severity omitted => NULL (the JOIN-source NULL-scan case).
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id) VALUES ($1, $2)
-	`, vulnID, "CVE-2026-NULLSCAN-"+tenant.String()[:8]); err != nil {
+	`, vulnID, "CVE-2026-NULLSCAN-"+uuidHex(tenant)); err != nil { // 18+32 = 50 = cve_id cap
 		t.Fatalf("seed NULL-severity vulnerability: %v", err)
 	}
+	// cve_id is VARCHAR(50): 22-char prefix leaves room for 28 hex chars
+	// (112 bits — the M46 fix only requires more than the old 32-bit [:8]).
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, severity) VALUES ($1, $2, 'HIGH')
-	`, vulnSevID, "CVE-2026-NULLSCAN-SEV-"+tenant.String()[:8]); err != nil {
+	`, vulnSevID, "CVE-2026-NULLSCAN-SEV-"+uuidHex(tenant)[:28]); err != nil {
 		t.Fatalf("seed populated-severity vulnerability: %v", err)
 	}
 	// Two connections so both tickets satisfy UNIQUE(vulnerability_id,

@@ -47,6 +47,21 @@ func txEnv(t *testing.T) (appURL, migURL string) {
 // C27 cleanup-trap rationale (defer Close vs t.Cleanup LIFO ordering).
 const c27TenantOrgPrefix = "itest-mw-"
 
+// c27RunID identifies THIS test-process run and is embedded in every marker
+// clerk_org_id (see c27Org). The leak gate checks that rows carrying this
+// run's id are gone after m.Run — a direct residue check that two
+// concurrent runs of the same package cannot cancel out, unlike a bare
+// before/after count diff (Codex M46 round A).
+var c27RunID = uuid.NewString()
+
+// c27Org builds the canonical marker clerk_org_id for a tenant seeded by
+// this run: <package prefix><run id>-<label>. Every test-created tenant
+// MUST route its clerk_org_id through this helper so the run-scoped gate
+// can see it.
+func c27Org(label string) string {
+	return c27TenantOrgPrefix + c27RunID + "-" + label
+}
+
 func openOrSkipTx(t *testing.T, url string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("postgres", url)
@@ -63,59 +78,111 @@ func openOrSkipTx(t *testing.T, url string) *sql.DB {
 	return db
 }
 
-// countC27Tenants returns the number of marker rows, or -1 on error.
-func countC27Tenants(db *sql.DB) int64 {
+// countC27Tenants returns the number of marker rows (any run).
+func countC27Tenants(db *sql.DB) (int64, error) {
 	var n int64
-	if err := db.QueryRow(
+	err := db.QueryRow(
 		`SELECT COUNT(*) FROM tenants WHERE clerk_org_id LIKE $1`,
 		c27TenantOrgPrefix+"%",
-	).Scan(&n); err != nil {
-		return -1
-	}
-	return n
+	).Scan(&n)
+	return n, err
 }
 
-// TestMain is the C27 leak gate: fails the package run when the number of
-// marker tenants grew during the run. Integration builds only.
+// listC27RunResidue returns the clerk_org_id of every tenants row created
+// by THIS run (marker prefix + run id) that still exists.
+func listC27RunResidue(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT clerk_org_id FROM tenants WHERE clerk_org_id LIKE $1 ORDER BY clerk_org_id`,
+		c27TenantOrgPrefix+c27RunID+"-%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var orgs []string
+	for rows.Next() {
+		var org string
+		if err := rows.Scan(&org); err != nil {
+			return nil, err
+		}
+		orgs = append(orgs, org)
+	}
+	return orgs, rows.Err()
+}
+
+// TestMain is the C27 leak gate. Integration builds only.
+//
+// Fail-closed contract (M46 Codex round A): when an integration URL IS
+// configured, any failure to stand the gate up — open, ping, or a count
+// query — fails the package run instead of silently disabling leak
+// detection. The ONLY silent path is "no URL configured" (plain local
+// dev), where every test skips itself and there is nothing to leak.
+//
+// Leak detection is two signals: (1) run-id residue — exact, primary;
+// (2) marker growth — kept from the original gate, still spurious-trippable
+// by concurrent runs of the same package (documented limitation) but it
+// catches rows seeded with the prefix while bypassing c27Org.
 func TestMain(m *testing.M) {
 	url := os.Getenv("MIGRATE_DATABASE_URL")
 	if url == "" {
 		url = os.Getenv("DATABASE_URL")
 	}
-	var gateDB *sql.DB
-	before := int64(-1)
-	if url != "" {
-		if db, err := sql.Open("postgres", url); err == nil {
-			if db.Ping() == nil {
-				gateDB = db
-				before = countC27Tenants(db)
-			} else {
-				_ = db.Close()
-			}
-		}
+	if url == "" {
+		os.Exit(m.Run())
+	}
+	gateDB, err := sql.Open("postgres", url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: sql.Open failed: %v — integration URL is set, failing closed\n", err)
+		os.Exit(1)
+	}
+	if err := gateDB.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: integration DB unreachable: %v — failing closed "+
+				"(unset DATABASE_URL/MIGRATE_DATABASE_URL to run without the integration DB)\n", err)
+		os.Exit(1)
+	}
+	before, err := countC27Tenants(gateDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: pre-run marker count failed: %v — failing closed\n", err)
+		os.Exit(1)
 	}
 	code := m.Run()
-	if gateDB != nil {
-		after := countC27Tenants(gateDB)
-		switch {
-		case before < 0 || after < 0:
-			fmt.Fprintf(os.Stderr,
-				"C27 leak gate: tenant count query failed (before=%d after=%d) — gate inconclusive\n",
-				before, after)
-		case after > before:
-			fmt.Fprintf(os.Stderr,
-				"C27 LEAK GATE FAILED: %q tenants grew %d -> %d during this run — a test leaked rows\n",
-				c27TenantOrgPrefix, before, after)
-			if code == 0 {
-				code = 1
-			}
-		case after > 0:
-			fmt.Fprintf(os.Stderr,
-				"C27 leak gate: no growth this run, but %d pre-existing %q rows remain (residue from older runs)\n",
-				after, c27TenantOrgPrefix)
-		}
-		_ = gateDB.Close()
+	residue, err := listC27RunResidue(gateDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: post-run residue query failed: %v — failing closed\n", err)
+		os.Exit(1)
 	}
+	after, err := countC27Tenants(gateDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: post-run marker count failed: %v — failing closed\n", err)
+		os.Exit(1)
+	}
+	if len(residue) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"C27 LEAK GATE FAILED: %d tenant row(s) created by this run (run id %s) survived m.Run: %v\n",
+			len(residue), c27RunID, residue)
+		if code == 0 {
+			code = 1
+		}
+	}
+	switch {
+	case after > before:
+		fmt.Fprintf(os.Stderr,
+			"C27 LEAK GATE FAILED: %q tenants grew %d -> %d during this run — a test leaked rows\n",
+			c27TenantOrgPrefix, before, after)
+		if code == 0 {
+			code = 1
+		}
+	case after > 0:
+		fmt.Fprintf(os.Stderr,
+			"C27 leak gate: no growth this run, but %d pre-existing %q rows remain (residue from older runs)\n",
+			after, c27TenantOrgPrefix)
+	}
+	_ = gateDB.Close()
 	os.Exit(code)
 }
 
@@ -143,14 +210,12 @@ func seedTenantProject(t *testing.T, migDB *sql.DB, label string) (tenantID, pro
 	t.Helper()
 	tenantID = uuid.New()
 	projectID = uuid.New()
-	slugSuffix := tenantID.String()
-	if len(slugSuffix) > 8 {
-		slugSuffix = slugSuffix[:8]
-	}
+	// Full UUID in the slug: slug is UNIQUE and an 8-hex suffix is only 32
+	// bits, which collides probabilistically (M46 Codex round A, Low).
 	if _, err := migDB.Exec(
 		`INSERT INTO tenants (id, clerk_org_id, name, slug) VALUES ($1, $2, $3, $4)`,
-		tenantID, c27TenantOrgPrefix+label+"-"+tenantID.String(),
-		"TenantTx "+label, c27TenantOrgPrefix+label+"-"+slugSuffix,
+		tenantID, c27Org(label+"-"+tenantID.String()),
+		"TenantTx "+label, c27TenantOrgPrefix+label+"-"+tenantID.String(),
 	); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
