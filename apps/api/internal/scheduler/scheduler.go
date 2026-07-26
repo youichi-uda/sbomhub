@@ -149,7 +149,7 @@ func shouldRun(schedule string, now time.Time) bool {
 		return now.Hour() == 6 && now.Minute() == 0
 	default:
 		// Try to parse cron-like format
-		n, _ := parseSchedule(schedule, &minute, &hour, &dayOfWeek)
+		n := parseSchedule(schedule, &minute, &hour, &dayOfWeek)
 		if n < 2 {
 			return false
 		}
@@ -167,18 +167,30 @@ func shouldRun(schedule string, now time.Time) bool {
 	}
 }
 
-func parseSchedule(schedule string, minute, hour, dayOfWeek *int) (int, error) {
+// parseSchedule reads a cron-like "M H dom mon dow" string into its outputs
+// and reports how many fields were assigned. It is infallible by design (see
+// scanScheduleFields), so it has no error result; the caller's n<2 gate is
+// the only failure signal — same behavior the previous always-nil error
+// version had, made explicit in the signature.
+func parseSchedule(schedule string, minute, hour, dayOfWeek *int) int {
 	var day, month, dow string
-	n, _ := sscanf(schedule, "%d %d %s %s %s", minute, hour, &day, &month, &dow)
+	n := scanScheduleFields(schedule, minute, hour, &day, &month, &dow)
 	if dow != "" && dow != "*" {
 		*dayOfWeek = parseInt(dow)
 	}
-	return n, nil
+	return n
 }
 
-func sscanf(s string, format string, args ...interface{}) (int, error) {
-	// Simplified scanf implementation
-	var count int
+// scanScheduleFields assigns whitespace-separated fields of s positionally
+// into args (*int via parseInt, *string verbatim) and reports how many were
+// assigned. Deliberately simplified stand-in for fmt.Sscanf("%d %d %s %s %s"):
+// no format string (assignment is purely positional/typed) and no error
+// result, because nothing in it can fail — parseInt skips non-digit runes by
+// design, so "*" parses as 0, preserving the scheduler's long-standing
+// wildcard semantics. If parsing ever becomes fallible, reintroduce an error
+// result instead of swallowing.
+func scanScheduleFields(s string, args ...interface{}) int {
+	count := 0
 	parts := splitWhitespace(s)
 
 	for i, arg := range args {
@@ -194,7 +206,7 @@ func sscanf(s string, format string, args ...interface{}) (int, error) {
 			count++
 		}
 	}
-	return count, nil
+	return count
 }
 
 func splitWhitespace(s string) []string {

@@ -6,7 +6,7 @@
 // F277 (M19-1): promoted from the F269 alternative (b) ADR (ticket_sync HTTP
 // under-tx defer). Prior to F277 the Jira/Backlog clients had zero backoff and
 // zero rate-limit awareness — a 429 status was surfaced verbatim as
-// "Jira API error: 429 - ..." with no retry attempt. The ticket_sync scheduler
+// "jira API error: 429 - ..." with no retry attempt. The ticket_sync scheduler
 // runs every 15 minutes across all tenant connections; without client-side
 // hardening any provider-side rate-limit event cascades into a burst of
 // permanent failures.

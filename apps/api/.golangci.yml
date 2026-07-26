@@ -1,59 +1,98 @@
-# SBOMHub apps/api - golangci-lint configuration
+# SBOMHub apps/api - golangci-lint configuration (v2 format)
 #
-# Trust Rescue P1 #17-followup / docs/ci-inventory.md §4 Action items.
+# M46 Track C-3c: lint hard gate for the backend (final flip of the
+# Trust Rescue P1 #17-followup warning-mode landing).
 #
-# Until this file landed, `apps/api` had `go build ./...` + `go test ./...`
-# (see go-test.yml) but no static-analysis quality gate. CLAUDE.md mandates
-# `golangci-lint run` as part of the Go style policy.
+# Config format is v2 because golangci-lint v1 CANNOT lint this module at
+# all: every official v1 binary (last release v1.64.8, built with go1.24.1)
+# hard-errors on the go.mod `go 1.26.0` directive with "the Go language
+# version (go1.24) used to build golangci-lint is lower than the targeted
+# Go version (1.26)" and exits 3 (measured 2026-07-25 with the v1.62 the CI
+# used to pin, and with v1.64.8). CI pins golangci-lint v2.12.2 via
+# golangci/golangci-lint-action@v9 (.github/workflows/golangci-lint.yml,
+# hard gate — no continue-on-error).
 #
-# This is the initial enforcement baseline. The companion workflow
-# (.github/workflows/golangci-lint.yml) currently runs in **warning mode**
-# (continue-on-error: true) so the first lint pass surfaces violations
-# without blocking merges. Once the existing-code violations are cleaned up
-# in a follow-up wave, the workflow will be flipped to strict mode.
+# v1 → v2 mapping notes (kept aligned with sbomhub-cli/.golangci.yml):
+#   - gosimple no longer listed: merged into staticcheck in golangci v2.
+#   - gofmt / goimports moved to the v2 `formatters` section (same checks).
+#   - `exclusions.presets` reproduces the v1 default exclude set the old
+#     config ran under (EXC0001-class errcheck/gosec relaxations etc.).
+#   - Everything else from the v1 linter set is kept, including
+#     rowserrcheck / sqlclosecheck (this module is database/sql-heavy).
+#
+# NOTE: `run.go` is intentionally NOT set — golangci-lint follows the
+# go.mod `go` directive automatically, the same source of truth the CI
+# setup-go step uses via go-version-file. A hardcoded copy here is
+# exactly the kind of drift the old CI `version: v1.62` pin had.
 
-run:
-  timeout: 5m
-  go: '1.26'
+version: "2"
 
 linters:
-  disable-all: true
+  default: none
   enable:
+    - bodyclose      # http.Response.Body close 忘れ
     - errcheck       # error 戻り値の無視検知
-    - gosimple       # コード簡素化
+    - gosec          # security issues
     - govet          # go vet
     - ineffassign    # 未使用 assign
-    - staticcheck    # 静的解析
-    - unused         # 未使用 symbol
-    - gofmt          # gofmt 違反
-    - goimports      # import 順序
     - misspell       # spell check
-    - bodyclose      # http.Response.Body close 忘れ
+    - revive         # style (golint replacement)
     - rowserrcheck   # rows.Err() check
     - sqlclosecheck  # sql resource close
-    - gosec          # security issues
-    - revive         # style (golint replacement)
+    - staticcheck    # 静的解析 (v2 では gosimple の S* checks も包含)
     - unparam        # unused parameters
-
-linters-settings:
-  gosec:
-    excludes:
-      - G104  # error 無視 (errcheck で別に検知)
-      - G304  # file path inclusion (false positive 多い)
-  revive:
+    - unused         # 未使用 symbol
+  settings:
+    gosec:
+      excludes:
+        - G104  # error 無視 (errcheck で別に検知)
+        - G304  # file path inclusion (false positive 多い)
+    revive:
+      rules:
+        - name: exported
+          arguments: ["disableStutteringCheck"]
+        - name: unused-parameter
+          disabled: true  # unparam で検知
+  exclusions:
+    generated: lax
+    # v1 の default exclude (EXC0001 等: fmt.Fprint* / Close の errcheck 緩和
+    # など) と同等の集合。v1 時代からこの基準で運用してきたものを明示化。
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: exported
-        arguments: ["disableStutteringCheck"]
-      - name: unused-parameter
-        disabled: true  # unparam で検知
+      # test ファイルの厳密性緩和 (v1 config 以来の方針)
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - errcheck
+          - gosec
+      # F272 (audit resource_type の compile-time 化) の解説コメントは、
+      # その規律が防ぐ typo「unkown」を例として敢えて原文引用している。
+      # typo 自体がコメントの内容なので「修正」すると文意が壊れ、misspell の
+      # 行内 nolint はコメント行では効かない。word + file で最小スコープに
+      # 絞って除外する (この 2 file 内の将来の本物の "unkown" typo も
+      # 素通りする点は既知のトレードオフ)。
+      - path: internal/(middleware|model)/audit\.go$
+        linters:
+          - misspell
+        text: "unkown"
+      # 同種: meti criteria の registry test は DB CHECK が弾く typo の
+      # 実例として「achived」をコメントで引用している。
+      - path: internal/service/meti/criteria/criteria_test\.go$
+        linters:
+          - misspell
+        text: "achived"
 
 issues:
-  exclude-rules:
-    # test ファイルの厳密性緩和
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - bodyclose
   max-issues-per-linter: 0
   max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt          # gofmt 違反
+    - goimports      # import 順序
+  exclusions:
+    generated: lax

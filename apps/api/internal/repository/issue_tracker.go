@@ -365,7 +365,8 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 	if status != "" {
 		countQuery += fmt.Sprintf(` AND local_status = $%d`, argIndex)
 		countArgs = append(countArgs, status)
-		argIndex++
+		// argIndex deliberately not incremented here: the list query below
+		// resets it to 2 (re-add the increment if a count filter is added).
 	}
 
 	var total int

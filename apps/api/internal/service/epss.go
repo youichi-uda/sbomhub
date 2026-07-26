@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -163,9 +164,18 @@ func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map
 
 	scores := make(map[string]repository.EPSSData)
 	for _, item := range epssResp.Data {
-		var score, percentile float64
-		fmt.Sscanf(item.EPSS, "%f", &score)
-		fmt.Sscanf(item.Percentile, "%f", &percentile)
+		// FIRST serves scores as decimal strings. A malformed value must NOT
+		// be stored as a fabricated 0.0 (EPSS feeds SSVC auto-assessment, so
+		// a silent zero downgrades real risk); skip the item and leave the
+		// CVE without a score, which callers already treat as "no data".
+		score, sErr := strconv.ParseFloat(item.EPSS, 64)
+		percentile, pErr := strconv.ParseFloat(item.Percentile, 64)
+		if sErr != nil || pErr != nil {
+			slog.Warn("epss: skipping unparseable score from FIRST API",
+				"cve_id", item.CVE, "epss", item.EPSS, "percentile", item.Percentile,
+				"score_err", sErr, "percentile_err", pErr)
+			continue
+		}
 		scores[item.CVE] = repository.EPSSData{
 			Score:      score,
 			Percentile: percentile,

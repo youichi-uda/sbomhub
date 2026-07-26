@@ -345,14 +345,14 @@ func (r *resolver) resolveVar(v *types.Var, fn *ast.FuncDecl, usePos token.Pos, 
 // non-constant verbs become DynMarker.
 func (r *resolver) resolveSprintf(call *ast.CallExpr, fn *ast.FuncDecl, usePos token.Pos, depth int, env map[*types.Var][]string) ([]string, error) {
 	if len(call.Args) == 0 {
-		return nil, fmt.Errorf("Sprintf with no arguments")
+		return nil, fmt.Errorf("fmt.Sprintf with no arguments")
 	}
 	formats, err := r.resolveExpr(call.Args[0], fn, usePos, depth+1, env)
 	if err != nil {
-		return nil, fmt.Errorf("Sprintf format string: %w", err)
+		return nil, fmt.Errorf("fmt.Sprintf format string: %w", err)
 	}
 	if call.Ellipsis.IsValid() {
-		return nil, fmt.Errorf("Sprintf with spread arguments")
+		return nil, fmt.Errorf("fmt.Sprintf with spread arguments")
 	}
 
 	// resolve each arg to candidate strings (DynMarker when unresolvable)

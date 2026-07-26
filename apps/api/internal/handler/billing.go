@@ -448,7 +448,7 @@ func (h *BillingHandler) fetchLemonSqueezySubscriptionByID(subID string) (*LSAPI
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Lemon Squeezy API error: %d - %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("lemon squeezy API error: %d - %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -474,51 +474,6 @@ type LSAPISubscription struct {
 		VariantName string `json:"variant_name"`
 		ProductName string `json:"product_name"`
 	} `json:"attributes"`
-}
-
-// LSAPIResponse represents the Lemon Squeezy API response
-type LSAPIResponse struct {
-	Data  []LSAPISubscription `json:"data"`
-	Meta  json.RawMessage     `json:"meta"`
-	Links json.RawMessage     `json:"links"`
-}
-
-// fetchLemonSqueezySubscriptions fetches all subscriptions from Lemon Squeezy API
-func (h *BillingHandler) fetchLemonSqueezySubscriptions() ([]LSAPISubscription, error) {
-	req, err := http.NewRequest("GET", "https://api.lemonsqueezy.com/v1/subscriptions", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+h.cfg.LemonSqueezyAPIKey)
-	req.Header.Set("Accept", "application/vnd.api+json")
-	req.Header.Set("Content-Type", "application/vnd.api+json")
-
-	// Filter by store if configured
-	if h.cfg.LemonSqueezyStoreID != "" {
-		q := req.URL.Query()
-		q.Add("filter[store_id]", h.cfg.LemonSqueezyStoreID)
-		req.URL.RawQuery = q.Encode()
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Lemon Squeezy API error: %d - %s", resp.StatusCode, string(body))
-	}
-
-	var apiResp LSAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, err
-	}
-
-	return apiResp.Data, nil
 }
 
 // productNameToPlan maps Lemon Squeezy product name to plan name

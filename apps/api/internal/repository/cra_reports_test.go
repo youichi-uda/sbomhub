@@ -63,8 +63,8 @@ func TestCRAReportsRepository_Insert_PassesTenantID(t *testing.T) {
 			"draft body here", // $9  draft_text
 			"openai",          // $10 provider
 			"gpt-4o",          // $11 model
-			"p"+repeatHex(63), // $12 prompt_hash
-			"r"+repeatHex(63), // $13 response_hash
+			"p"+repeatHex63(), // $12 prompt_hash
+			"r"+repeatHex63(), // $13 response_hash
 			[]byte(ev),        // $14 evidence
 			sourceVEX,         // $15 source_vex_draft_id
 			llmID,             // $16 llm_call_id
@@ -89,8 +89,8 @@ func TestCRAReportsRepository_Insert_PassesTenantID(t *testing.T) {
 		DraftText:        "draft body here",
 		Provider:         "openai",
 		Model:            "gpt-4o",
-		PromptHash:       "p" + repeatHex(63),
-		ResponseHash:     "r" + repeatHex(63),
+		PromptHash:       "p" + repeatHex63(),
+		ResponseHash:     "r" + repeatHex63(),
 		Evidence:         ev,
 		SourceVEXDraftID: &sourceVEX,
 		LLMCallID:        &llmID,

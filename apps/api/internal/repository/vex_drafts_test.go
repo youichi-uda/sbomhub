@@ -65,8 +65,8 @@ func TestVEXDraftsRepository_Insert_PassesTenantID(t *testing.T) {
 			conf,                 // $11 confidence
 			"openai",             // $12 provider
 			"gpt-4o",             // $13 model
-			"p"+repeatHex(63),    // $14 prompt_hash (64 hex chars)
-			"r"+repeatHex(63),    // $15 response_hash
+			"p"+repeatHex63(),    // $14 prompt_hash (64 hex chars)
+			"r"+repeatHex63(),    // $15 response_hash
 			[]byte(ev),           // $16 evidence
 			excerptID,            // $17 advisory_excerpt_id
 			reachID,              // $18 reachability_result_id
@@ -94,8 +94,8 @@ func TestVEXDraftsRepository_Insert_PassesTenantID(t *testing.T) {
 		Confidence:           &conf,
 		Provider:             "openai",
 		Model:                "gpt-4o",
-		PromptHash:           "p" + repeatHex(63),
-		ResponseHash:         "r" + repeatHex(63),
+		PromptHash:           "p" + repeatHex63(),
+		ResponseHash:         "r" + repeatHex63(),
 		Evidence:             ev,
 		AdvisoryExcerptID:    &excerptID,
 		ReachabilityResultID: &reachID,
@@ -796,11 +796,11 @@ func TestVEXDraftsRepository_UpdateDecision_NoRowsErrors(t *testing.T) {
 	}
 }
 
-// repeatHex returns a string of n hex characters built from 'a'.
-// Useful to fill the CHAR(64) prompt_hash / response_hash columns
-// in tests without computing a real SHA-256.
-func repeatHex(n int) string {
-	out := make([]byte, n)
+// repeatHex63 returns 63 'a' hex characters — callers prepend one
+// distinguishing byte to fill the CHAR(64) prompt_hash / response_hash
+// columns in tests without computing a real SHA-256.
+func repeatHex63() string {
+	out := make([]byte, 63)
 	for i := range out {
 		out[i] = 'a'
 	}

@@ -44,7 +44,7 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 |---|---|---|
 | `go build ./...` (apps/api) | 新規 `go-test.yml` で実装 | OK (本 wave) |
 | `go test ./...` (apps/api、 unit のみ) | 新規 `go-test.yml` で実装 | OK (本 wave) |
-| `golangci-lint` (apps/api) | `golangci-lint.yml` + `apps/api/.golangci.yml` で実装、 `continue-on-error: true` の warn-only で初回 landing | (P2) 既存 lint 違反 fix 後に strict 化 (continue-on-error 削除 + Required status checks 追加) |
+| `golangci-lint` (apps/api) | `golangci-lint.yml` + `apps/api/.golangci.yml` (v2 schema) で実装、 M46 Track C-3c で **hard gate** 化 (continue-on-error 削除)。 注: 初回 landing の warn-only 期間は実際には一度も lint していなかった — 当時 pin していた v1.62 (および v1 最終の v1.64.8) は go1.23/1.24 build のため go.mod `go 1.26` directive に対し exit 3 で config error になり、 continue-on-error がそれを飲み込んで green に見えていた (2026-07-25 実測)。 M46 の各 wave で 277 → 0 件まで消化した上で golangci-lint **v2.12.2** (action@v9) に pin して strict 化 | OK (M46 Track C-3c で strict 化完了。 Required status checks 追加は §2.3 / USER action item で promote) |
 | migration test (up/down/up roundtrip) | `migration-roundtrip.yml` (#17-followup) で docker compose postgres + role bootstrap + `cmd/migrate up && down 999 && up` を実行。 up/down/up が success することを block、 schema diff は warn-only で初回 landing | OK (本 wave、 strict 化は P2) |
 | RLS integration test | `apps/api/internal/repository/*_rls_test.go` (rls / apikey / audit / public_link / subscription) + `internal/middleware/tx_test.go` に `//go:build integration` で実装済、 `rls-integration.yml` (#17-followup) で CI 実行 | OK (本 wave) |
 | frontend build (`pnpm build`) | `frontend-ci.yml` (#17-followup) で Node 22 / pnpm 10.34.3 + dummy env で `pnpm --filter web build` を実行、 M12-5 #86 で `continue-on-error` を解除し **hard gate** 化 (M11-1 F164 production-build hydration-crash isolation の教訓: `next dev` は RSC full-SSR-hydration regression を捕まえられない) | OK (M12-5 #86 で strict 化完了。 Required status checks 追加は §2.3 / USER action item で promote) |
@@ -74,6 +74,7 @@ Settings → Branches → Branch protection rules → `main`:
     - `install.sh smoke / install.sh must succeed on ubuntu-latest`
     - `install.sh smoke / install.sh must succeed on macos-latest`
     - `Go test / build-and-test` (本 wave で追加)
+    - `golangci-lint / lint` (M46 Track C-3c で hard gate 化に伴い追加 — USER action: GitHub UI で required に promote)
 - **Require linear history**: ON (rebase only、 merge commit 禁止)
 - **Require conversation resolution before merging**: ON
 - **Do not allow bypassing the above settings**: ON (管理者も bypass 不可、 ただし solo maintainer なら判断)

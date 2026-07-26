@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,7 +45,14 @@ func (r *TenantRepository) Create(ctx context.Context, t *model.Tenant) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	// After a successful Commit this Rollback returns sql.ErrTxDone by
+	// design; anything else is a real cleanup failure worth logging
+	// (middleware/tx.go / repository/checklist.go precedent).
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			slog.Warn("tenant create: tx rollback failed", "error", rbErr)
+		}
+	}()
 
 	// Create tenant
 	query := `

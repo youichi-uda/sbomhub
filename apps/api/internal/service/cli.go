@@ -403,8 +403,16 @@ func cliExtractSeverity(v osvVuln) string {
 }
 
 func cliParseCVSSScore(score string) float64 {
+	// OSV severity "score" strings are only sometimes plain numbers (they can
+	// be full CVSS vectors, handled elsewhere). A failed parse deliberately
+	// yields 0 → the caller classifies it as UNKNOWN rather than inventing a
+	// severity. Sscanf (prefix parse) is kept over strconv.ParseFloat so
+	// values like "7.5 " keep parsing exactly as before; the error is checked
+	// to make that fallback explicit.
 	var f float64
-	fmt.Sscanf(score, "%f", &f)
+	if _, err := fmt.Sscanf(score, "%f", &f); err != nil {
+		return 0
+	}
 	return f
 }
 

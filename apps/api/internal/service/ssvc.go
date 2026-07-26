@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,7 +97,11 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 			ChangedAt:             now,
 		}
 		if err := s.ssvcRepo.CreateAssessmentHistory(ctx, history); err != nil {
-			// Log but don't fail
+			// Don't fail the assessment over the auxiliary audit trail, but
+			// never swallow it silently: a lost history row means the
+			// decision-change audit trail has a hole operators should see.
+			slog.Error("ssvc: failed to record assessment history; decision-change audit trail is incomplete",
+				"vulnerability_id", vulnerabilityID, "cve_id", cveID, "error", err)
 		}
 
 		// Update existing assessment
@@ -115,8 +121,14 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 			return nil, err
 		}
 
-		// Update vulnerability SSVC decision
-		s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision)
+		// Update vulnerability SSVC decision. The denormalized decision on
+		// the vulnerabilities row drives list views and triage; swallowing a
+		// failure here would leave it silently drifting from the saved
+		// assessment. Both writes are idempotent, so surfacing the error and
+		// letting the caller retry converges.
+		if err := s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision); err != nil {
+			return nil, fmt.Errorf("assessment saved but updating vulnerability ssvc_decision failed: %w", err)
+		}
 
 		return existing, nil
 	}
@@ -145,8 +157,11 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 		return nil, err
 	}
 
-	// Update vulnerability SSVC decision
-	s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision)
+	// Update vulnerability SSVC decision (same rationale as the update path
+	// above: denormalized decision must not drift silently).
+	if err := s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision); err != nil {
+		return nil, fmt.Errorf("assessment saved but updating vulnerability ssvc_decision failed: %w", err)
+	}
 
 	return assessment, nil
 }
@@ -241,8 +256,11 @@ func (s *SSVCService) AutoAssessVulnerability(ctx context.Context, projectID, te
 		}
 	}
 
-	// Update vulnerability SSVC decision
-	s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision)
+	// Update vulnerability SSVC decision (same rationale as AssessVulnerability:
+	// denormalized decision must not drift silently; retry converges).
+	if err := s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision); err != nil {
+		return nil, fmt.Errorf("assessment saved but updating vulnerability ssvc_decision failed: %w", err)
+	}
 
 	return assessment, nil
 }

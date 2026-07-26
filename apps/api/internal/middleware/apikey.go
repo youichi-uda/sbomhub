@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	APIKeyHeader  = "X-API-Key"
+	APIKeyHeader  = "X-API-Key" //nolint:gosec // G101 false positive: this is the HTTP header *name* clients send keys in, not a credential value
 	BearerPrefix  = "Bearer "
 	ContextKeyAPI = "api_key"
 )

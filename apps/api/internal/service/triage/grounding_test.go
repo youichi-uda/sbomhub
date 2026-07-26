@@ -24,10 +24,12 @@ import (
 
 // groundingResp is a small builder for an LLM triage response whose evidence
 // we fully control (so a test can fabricate or ground pointers at will).
-func groundingResp(t *testing.T, state, just string, conf float64, evidence []map[string]interface{}) string {
+// state is always the confident "not_affected" — the grounding guard under
+// test only clamps confident verdicts, so every scenario starts from one.
+func groundingResp(t *testing.T, just string, conf float64, evidence []map[string]interface{}) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]interface{}{
-		"state":         state,
+		"state":         "not_affected",
 		"justification": just,
 		"confidence":    conf,
 		"detail":        "grounding-guard test rationale",
@@ -55,7 +57,7 @@ func decodeEvidence(t *testing.T, raw json.RawMessage) []EvidencePointer {
 func TestRunner_Run_ZeroGrounding_ClampsToUnderInvestigation(t *testing.T) {
 	componentID := uuid.New()
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_reachable", 0.95,
+		"code_not_reachable", 0.95,
 		[]map[string]interface{}{
 			{
 				"kind":        "advisory_excerpt",
@@ -128,7 +130,7 @@ func TestRunner_Run_ZeroGrounding_ClampsToUnderInvestigation(t *testing.T) {
 func TestRunner_Run_GroundedEvidence_NotClamped(t *testing.T) {
 	componentID := uuid.New()
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_reachable", 0.9,
+		"code_not_reachable", 0.9,
 		[]map[string]interface{}{
 			{"kind": "advisory_excerpt", "raw_snippet": "func Parse mishandles nested anchors", "source": "advisory_parser"},
 			{"kind": "symbol_ref", "symbol": "yaml.Parse", "source": "reachability"},
@@ -195,7 +197,7 @@ func TestRunner_Run_GroundedEvidence_NotClamped(t *testing.T) {
 func TestRunner_Run_FabricatedAdvisoryExcerpt_FlaggedAndClamped(t *testing.T) {
 	componentID := uuid.New()
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_present", 0.92,
+		"code_not_present", 0.92,
 		[]map[string]interface{}{
 			{
 				"kind":        "advisory_excerpt",
@@ -260,7 +262,7 @@ func TestRunner_Run_FabricatedAdvisoryExcerpt_FlaggedAndClamped(t *testing.T) {
 func TestRunner_Run_PartialGrounding_KeepsStateClampsConfidence(t *testing.T) {
 	componentID := uuid.New()
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_reachable", 0.9,
+		"code_not_reachable", 0.9,
 		[]map[string]interface{}{
 			// Grounded: matches the reachability Evidence below.
 			{"kind": "symbol_ref", "symbol": "pkg.DoWork", "source": "reachability"},
@@ -538,7 +540,7 @@ func TestUngroundedNote_PreservesProposal(t *testing.T) {
 func TestRunner_Run_TrivialSubstringCitation_FlaggedAndClamped(t *testing.T) {
 	componentID := uuid.New()
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_reachable", 0.95,
+		"code_not_reachable", 0.95,
 		[]map[string]interface{}{
 			{"kind": "advisory_excerpt", "raw_snippet": "a", "source": "advisory_parser"},
 		},
@@ -599,7 +601,7 @@ func TestRunner_Run_StrongVerdictNoGroundedCite_Clamped(t *testing.T) {
 	// Confident not_affected, but the ONLY evidence pointer is an
 	// llm_rationale (exempt kind) — zero grounded-kind pointers cited.
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_reachable", 0.9,
+		"code_not_reachable", 0.9,
 		[]map[string]interface{}{
 			{"kind": "llm_rationale", "description": "The model is confident based on general knowledge.", "source": "llm"},
 		},

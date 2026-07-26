@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -709,6 +710,20 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 	seenSymbol := make(map[string]struct{}) // file + selector + pos dedupe
 	memberRegexCache := make(map[string]*regexp.Regexp)
 
+	// TOCTOU hardening (gosec G122): every candidate file is read through an
+	// os.Root handle opened once on the scan root, never via its raw walk
+	// path. The d.Type() gate below already refuses symlinks as WalkDir saw
+	// them, but a concurrent writer could swap a checked regular file for a
+	// symlink between that lstat and the read; os.Root re-checks every path
+	// component at open time (O_NOFOLLOW semantics), so a swapped link fails
+	// the open and the file is skipped — the analyzer's false-negative-only
+	// error budget direction, same as any other unreadable file.
+	rootHandle, rootErr := os.OpenRoot(root)
+	if rootErr != nil {
+		return nil, fmt.Errorf("open scan root: %w", rootErr)
+	}
+	defer rootHandle.Close()
+
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
@@ -767,9 +782,13 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 		}
 		filesScanned++
 
-		data, rerr := os.ReadFile(path)
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil // outside root (should not happen under WalkDir): skip
+		}
+		data, rerr := readFileInRoot(rootHandle, rel, npmMaxFileSizeBytes)
 		if rerr != nil {
-			return nil // unreadable file: skip
+			return nil // unreadable / vanished / symlink-swapped file: skip
 		}
 		scanNpmFile(relPath(root, path), string(data), pkgByLower, selectors,
 			res, seenImport, seenSymbol, memberRegexCache)
@@ -779,6 +798,28 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 		return nil, walkErr
 	}
 	return res, nil
+}
+
+// readFileInRoot reads name (relative to r) fully, refusing to return more
+// than limit bytes. It is the TOCTOU-safe counterpart of os.ReadFile for the
+// walk above: opening through the os.Root handle means no path component may
+// traverse a symlink, and the read itself is capped so a file grown (or
+// swapped for something unbounded) after the walker's size gate cannot turn
+// into an unbounded read.
+func readFileInRoot(r *os.Root, name string, limit int64) ([]byte, error) {
+	f, err := r.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file exceeds %d bytes", limit)
+	}
+	return data, nil
 }
 
 // npmFileBindings tracks, within one file, how a vulnerable package is
@@ -1467,8 +1508,8 @@ func stripJSCode(src string) (stripped, codeOnly string) {
 			if state == stDouble {
 				quote = '"'
 			}
-			switch {
-			case c == '\\':
+			switch c {
+			case '\\':
 				code[i] = ' '
 				if i+1 < len(src) {
 					if src[i+1] != '\n' {
@@ -1476,9 +1517,9 @@ func stripJSCode(src string) (stripped, codeOnly string) {
 					}
 					i++ // skip escaped char
 				}
-			case c == quote:
+			case quote:
 				state = stCode
-			case c == '\n':
+			case '\n':
 				state = stCode // unterminated string literal: resync
 			default:
 				code[i] = ' '
@@ -1534,9 +1575,10 @@ func stripJSCode(src string) (stripped, codeOnly string) {
 				state = stCode
 				regexInClass = false
 			default:
-				if c == '[' {
+				switch c {
+				case '[':
 					regexInClass = true
-				} else if c == ']' {
+				case ']':
 					regexInClass = false
 				}
 				code[i] = ' '
@@ -1578,7 +1620,7 @@ func npmRegexLiteralStarts(code []byte, off int) bool {
 	case '+', '-':
 		// `x++ / y` and `x-- / y`: postfix inc/dec ends an expression;
 		// a single binary "+"/"-" does not ("s" + /re/.source).
-		return !(i > 0 && code[i-1] == code[i])
+		return i <= 0 || code[i-1] != code[i]
 	}
 	r, _ := utf8.DecodeLastRune(code[:i+1])
 	if !isNpmIdentRune(r) {

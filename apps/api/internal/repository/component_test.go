@@ -522,7 +522,7 @@ func TestNewComponentRepository(t *testing.T) {
 
 	repo := NewComponentRepository(db)
 	if repo == nil {
-		t.Error("NewComponentRepository returned nil")
+		t.Fatal("NewComponentRepository returned nil")
 	}
 	if repo.db != db {
 		t.Error("NewComponentRepository did not set db correctly")

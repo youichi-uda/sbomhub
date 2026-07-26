@@ -192,7 +192,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 
 			for work := range workChan {
@@ -239,7 +239,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					}
 				}
 			}
-		}(i)
+		}()
 	}
 
 	wg.Wait()

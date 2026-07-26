@@ -77,7 +77,7 @@ func (f *fakeReachabilityProjectReader) GetByTenant(_ context.Context, _, projec
 // doReachabilityUpload drives ReachabilityHandler.Upload with a JSON body
 // and a bound tenant / user context, mirroring the TenantTx-wrapped route
 // the endpoint lives under in main.go.
-func doReachabilityUpload(h *ReachabilityHandler, tenantID, userID, projectID uuid.UUID, body string) (echo.Context, *httptest.ResponseRecorder, error) {
+func doReachabilityUpload(h *ReachabilityHandler, tenantID, userID, projectID uuid.UUID, body string) (*httptest.ResponseRecorder, error) {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/projects/"+projectID.String()+"/reachability",
@@ -91,7 +91,7 @@ func doReachabilityUpload(h *ReachabilityHandler, tenantID, userID, projectID uu
 	c.Set(middleware.ContextKeyUserID, userID)
 	c.Set(middleware.ContextKeyRole, model.RoleMember)
 	err := h.Upload(c)
-	return c, rec, err
+	return rec, err
 }
 
 func newTestReachabilityHandler(up *fakeReachabilityUpserter, audit *fakeReachabilityAudit, proj *fakeReachabilityProjectReader) *ReachabilityHandler {
@@ -143,7 +143,7 @@ func TestReachabilityHandler_Upload_HappyPath(t *testing.T) {
 	}}
 	h := &ReachabilityHandler{upserter: up, audit: audit, projects: proj, targets: tr}
 
-	_, rec, err := doReachabilityUpload(h, tenantID, userID, projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, userID, projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestReachabilityHandler_Upload_StatusEnumViolation(t *testing.T) {
 	audit := &fakeReachabilityAudit{}
 	h := newTestReachabilityHandler(up, audit, &fakeReachabilityProjectReader{})
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestReachabilityHandler_Upload_MissingComponentID(t *testing.T) {
 	audit := &fakeReachabilityAudit{}
 	h := newTestReachabilityHandler(up, audit, &fakeReachabilityProjectReader{})
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestReachabilityHandler_Upload_MissingCVEID(t *testing.T) {
 	audit := &fakeReachabilityAudit{}
 	h := newTestReachabilityHandler(up, audit, &fakeReachabilityProjectReader{})
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestReachabilityHandler_Upload_ConfidenceOutOfRange(t *testing.T) {
 	up := &fakeReachabilityUpserter{}
 	h := newTestReachabilityHandler(up, &fakeReachabilityAudit{}, &fakeReachabilityProjectReader{})
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestReachabilityHandler_Upload_ProjectNotFound(t *testing.T) {
 	proj := &fakeReachabilityProjectReader{err: sql.ErrNoRows}
 	h := newTestReachabilityHandler(up, audit, proj)
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestReachabilityHandler_Upload_EmptyResults(t *testing.T) {
 	audit := &fakeReachabilityAudit{}
 	h := newTestReachabilityHandler(up, audit, &fakeReachabilityProjectReader{})
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, body)
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, body)
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestReachabilityHandler_Upload_ForgedTargetRejected(t *testing.T) {
 	}}
 	h := &ReachabilityHandler{upserter: up, audit: audit, projects: &fakeReachabilityProjectReader{}, targets: tr}
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestReachabilityHandler_Upload_MixedForgedRejectsAll(t *testing.T) {
 	}}
 	h := &ReachabilityHandler{upserter: up, audit: audit, projects: &fakeReachabilityProjectReader{}, targets: tr}
 
-	_, rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
+	rec, err := doReachabilityUpload(h, tenantID, uuid.New(), projectID, string(body))
 	if err != nil {
 		t.Fatalf("Upload returned error: %v", err)
 	}

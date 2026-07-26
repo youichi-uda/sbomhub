@@ -288,7 +288,7 @@ func (c *JiraClient) doRequest(ctx context.Context, method, path string, body in
 		}
 
 		if status >= 400 {
-			return fmt.Errorf("Jira API error: %d - %s", status, string(respBody))
+			return fmt.Errorf("jira API error: %d - %s", status, string(respBody))
 		}
 
 		if result != nil && len(respBody) > 0 {

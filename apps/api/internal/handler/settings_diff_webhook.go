@@ -158,7 +158,7 @@ func (h *SettingsDiffWebhookHandler) Update(c echo.Context) error {
 			"error": "webhook_url is required when enabled=true",
 		})
 	}
-	if url != "" && !(strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://")) {
+	if url != "" && !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
 		return c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "webhook_url must start with http:// or https://",
 		})

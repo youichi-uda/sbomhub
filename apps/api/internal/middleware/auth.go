@@ -67,7 +67,7 @@ func Auth(cfg *config.Config, tenantRepo *repository.TenantRepository, userRepo 
 				return handleSelfHostedAuth(c, ctx, tenantRepo, userRepo, next)
 			}
 
-			return handleClerkAuth(c, ctx, cfg, tenantRepo, userRepo, next)
+			return handleClerkAuth(c, ctx, tenantRepo, userRepo, next)
 		}
 	}
 }
@@ -109,8 +109,10 @@ func handleSelfHostedAuth(c echo.Context, ctx context.Context, tenantRepo *repos
 	return next(c)
 }
 
-// handleClerkAuth validates Clerk JWT and sets up tenant/user context
-func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, tenantRepo *repository.TenantRepository, userRepo *repository.UserRepository, next echo.HandlerFunc) error {
+// handleClerkAuth validates Clerk JWT and sets up tenant/user context.
+// No config parameter: Clerk verification uses the process-global key
+// (clerk.SetKey at startup — see verifyClerkJWT).
+func handleClerkAuth(c echo.Context, ctx context.Context, tenantRepo *repository.TenantRepository, userRepo *repository.UserRepository, next echo.HandlerFunc) error {
 	// Get token from Authorization header
 	authHeader := c.Request().Header.Get("Authorization")
 	if authHeader == "" {
@@ -131,7 +133,7 @@ func handleClerkAuth(c echo.Context, ctx context.Context, cfg *config.Config, te
 	slog.Debug("Verifying Clerk JWT", "token_length", len(token), "token_prefix", token[:min(20, len(token))])
 
 	// Verify JWT with Clerk using official HTTP middleware
-	claims, err := verifyClerkJWT(c, cfg)
+	claims, err := verifyClerkJWT(c)
 	if err != nil {
 		slog.Error("Clerk JWT verification failed", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -256,8 +258,10 @@ type ClerkClaims struct {
 	OrgRole string
 }
 
-// verifyClerkJWT verifies a Clerk JWT token using the official Clerk HTTP middleware
-func verifyClerkJWT(c echo.Context, cfg *config.Config) (*ClerkClaims, error) {
+// verifyClerkJWT verifies a Clerk JWT token using the official Clerk HTTP
+// middleware. Verification relies on the process-global Clerk key
+// (clerk.SetKey at startup), so no per-request config is needed.
+func verifyClerkJWT(c echo.Context) (*ClerkClaims, error) {
 	// Use Clerk's official HTTP middleware to verify the token
 	var claims *ClerkClaims
 	var verifyErr error

@@ -1013,27 +1013,12 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 		return 0, nil
 	}
 
-	query := `
-		SELECT DISTINCT c.id
-		FROM components c
-		WHERE LOWER(c.name) = ANY($1)
-		   OR LOWER(c.name) LIKE ANY($2)
-	`
-
 	exactMatches := cve.Keywords
 	likePatterns := make([]string, len(cve.Keywords))
 	for i, kw := range cve.Keywords {
 		likePatterns[i] = "%" + kw + "%"
 	}
 
-	// pq.Array wraps the []string args in the pq array-marshalling driver
-	// value — without this, database/sql rejects `[]string` at runtime
-	// with "unsupported type []string, a slice of string" (both against
-	// real PG via lib/pq and against sqlmock in the F258 perf test).
-	rows, err := q.QueryContext(ctx, query, pq.Array(exactMatches), pq.Array(likePatterns))
-	if err != nil {
-		return 0, fmt.Errorf("query components: %w", err)
-	}
 	// F258 (M17-3 orchestrator recovery post-Phase A CI failure):
 	// collect componentIDs into an in-memory slice BEFORE closing the
 	// rows and issuing the INSERTs. lib/pq (`github.com/lib/pq`)
@@ -1049,7 +1034,10 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 	// cascades through every subsequent BEGIN in the chunk with
 	// `sql: connection is already closed`. Collecting rows first
 	// resolves it while preserving the original semantics (per-match
-	// INSERT, ON CONFLICT DO NOTHING, warn-on-error, continue).
+	// INSERT, ON CONFLICT DO NOTHING, warn-on-error, continue). The
+	// query + drain live in queryMatchingComponentIDs so the Rows is
+	// closed (via defer, sqlclosecheck) before this function's next
+	// round-trip on the same pinned conn.
 	//
 	// M46 B-1 Medium-3: a Scan failure returns immediately instead of
 	// `continue`. The post-loop rows.Err() cannot see a per-row decode
@@ -1070,20 +1058,10 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 	// a change to F258's tick semantics and is tracked as a follow-up
 	// (see the M46 B-1 report's remaining-work section), not silently
 	// assumed here.
-	componentIDs := make([]uuid.UUID, 0)
-	for rows.Next() {
-		var componentID uuid.UUID
-		if err := rows.Scan(&componentID); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("scan component id: %w", err)
-		}
-		componentIDs = append(componentIDs, componentID)
+	componentIDs, err := queryMatchingComponentIDs(ctx, q, exactMatches, likePatterns)
+	if err != nil {
+		return 0, err
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, fmt.Errorf("iterate components: %w", err)
-	}
-	rows.Close()
 
 	linkedCount := 0
 	for _, componentID := range componentIDs {
@@ -1103,6 +1081,46 @@ func (j *CVESyncJob) linkCVEToTenantComponents(
 		linkedCount++
 	}
 	return linkedCount, nil
+}
+
+// queryMatchingComponentIDs runs the component-match query and drains the
+// result fully, closing the Rows via defer before returning (sqlclosecheck).
+// Keeping query + drain in one helper guarantees the F258 invariant: the
+// caller never issues another round-trip on the same pinned conn while a
+// Rows is still open.
+//
+// pq.Array wraps the []string args in the pq array-marshalling driver
+// value — without this, database/sql rejects `[]string` at runtime
+// with "unsupported type []string, a slice of string" (both against
+// real PG via lib/pq and against sqlmock in the F258 perf test).
+//
+// The SQL literal lives inside this helper (not a parameter) so the
+// nullscan static gate can resolve the statement at the QueryContext
+// call site.
+func queryMatchingComponentIDs(ctx context.Context, q database.Queryable, exactMatches, likePatterns []string) ([]uuid.UUID, error) {
+	const query = `
+		SELECT DISTINCT c.id
+		FROM components c
+		WHERE LOWER(c.name) = ANY($1)
+		   OR LOWER(c.name) LIKE ANY($2)
+	`
+	rows, err := q.QueryContext(ctx, query, pq.Array(exactMatches), pq.Array(likePatterns))
+	if err != nil {
+		return nil, fmt.Errorf("query components: %w", err)
+	}
+	defer rows.Close()
+	componentIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var componentID uuid.UUID
+		if err := rows.Scan(&componentID); err != nil {
+			return nil, fmt.Errorf("scan component id: %w", err)
+		}
+		componentIDs = append(componentIDs, componentID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate components: %w", err)
+	}
+	return componentIDs, nil
 }
 
 // excerptCandidate is one {tenant, CVE} pair collected during a chunk's link
@@ -1570,7 +1588,7 @@ const osvMass404WarnMsg = "scheduler: OSV lookups this tick reached the mass-404
 // pass is skipped up front — no candidate enumeration, no fetches, no
 // tombstones. A const so the test contract pins operators' grep target
 // verbatim.
-const osvOfflineDriftSkipWarnMsg = "scheduler: OSV client is offline but the CVE sync job is online; skipping OSV vuln_funcs pass (M43 Phase D R4 offline-drift guard)"
+const osvOfflineDriftSkipWarnMsg = "scheduler: OSV client is offline but the CVE sync job is online; skipping OSV vuln_funcs pass (M43 Phase D R4 offline-drift guard)" //nolint:gosec // G101 false positive: operator log message (the word "pass" here means a sync pass, not a password)
 
 // osvTombstonePreserveInfoMsg is the exact Info line emitted when a
 // NON-AUTHORITATIVE empty outcome (goID == "" — a true 404, an alias 404, a
@@ -2038,35 +2056,13 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 				chunkIndex, tenantID, sErr)
 		}
 
-		rows, qErr := tx.QueryContext(ctx, osvCVECandidateQuery, tenantID, cutoff)
-		if qErr != nil {
-			return out, fmt.Errorf("scheduler: chunk %d OSV candidate query failed for tenant %s: %w",
-				chunkIndex, tenantID, qErr)
+		// Query + drain live in queryOSVCandidatePairs: the Rows is closed
+		// (via defer, sqlclosecheck) before the next round-trip on this
+		// pinned conn.
+		pairs, pErr := queryOSVCandidatePairs(ctx, tx, chunkIndex, tenantID, cutoff)
+		if pErr != nil {
+			return out, pErr
 		}
-		// Drain fully before the next round-trip on this pinned conn.
-		type cvePurl struct{ cveID, purl string }
-		// M46 B-1 Medium-3: a Scan failure fails the whole candidate tx
-		// rather than dropping the pair. The post-loop rows.Err() cannot
-		// observe a per-row decode error, so the old `continue` meant the
-		// CVE silently left the OSV fetch set — its vulnerable symbols
-		// were never fetched and never retried, while the tx committed
-		// as if the enumeration were complete.
-		pairs := make([]cvePurl, 0)
-		for rows.Next() {
-			var p cvePurl
-			if sErr := rows.Scan(&p.cveID, &p.purl); sErr != nil {
-				rows.Close()
-				return out, fmt.Errorf("scheduler: chunk %d OSV candidate scan failed for tenant %s: %w",
-					chunkIndex, tenantID, sErr)
-			}
-			pairs = append(pairs, p)
-		}
-		if iErr := rows.Err(); iErr != nil {
-			rows.Close()
-			return out, fmt.Errorf("scheduler: chunk %d OSV candidate rows failed for tenant %s: %w",
-				chunkIndex, tenantID, iErr)
-		}
-		rows.Close()
 
 		// Go-side authoritative ecosystem check + per-tenant CVE dedupe
 		// (a CVE can hit several Go/npm purls; the SELECT is DISTINCT on the
@@ -2102,6 +2098,43 @@ func (j *CVESyncJob) listOSVCandidatesChunk(
 	}
 	committed = true
 	return out, nil
+}
+
+// cvePurl is one (cve_id, purl) candidate pair drained from the OSV
+// candidate query.
+type cvePurl struct{ cveID, purl string }
+
+// queryOSVCandidatePairs runs the OSV candidate query for one tenant and
+// drains it fully — the Rows is closed via defer (sqlclosecheck) before the
+// caller's next round-trip on the same pinned conn.
+//
+// M46 B-1 Medium-3: a Scan failure fails the whole candidate tx
+// rather than dropping the pair. The post-loop rows.Err() cannot
+// observe a per-row decode error, so the old `continue` meant the
+// CVE silently left the OSV fetch set — its vulnerable symbols
+// were never fetched and never retried, while the tx committed
+// as if the enumeration were complete.
+func queryOSVCandidatePairs(ctx context.Context, tx *sql.Tx, chunkIndex int, tenantID uuid.UUID, cutoff time.Time) ([]cvePurl, error) {
+	rows, qErr := tx.QueryContext(ctx, osvCVECandidateQuery, tenantID, cutoff)
+	if qErr != nil {
+		return nil, fmt.Errorf("scheduler: chunk %d OSV candidate query failed for tenant %s: %w",
+			chunkIndex, tenantID, qErr)
+	}
+	defer rows.Close()
+	pairs := make([]cvePurl, 0)
+	for rows.Next() {
+		var p cvePurl
+		if sErr := rows.Scan(&p.cveID, &p.purl); sErr != nil {
+			return nil, fmt.Errorf("scheduler: chunk %d OSV candidate scan failed for tenant %s: %w",
+				chunkIndex, tenantID, sErr)
+		}
+		pairs = append(pairs, p)
+	}
+	if iErr := rows.Err(); iErr != nil {
+		return nil, fmt.Errorf("scheduler: chunk %d OSV candidate rows failed for tenant %s: %w",
+			chunkIndex, tenantID, iErr)
+	}
+	return pairs, nil
 }
 
 // fetchOSVVulnFuncs resolves each candidate CVE against the OSV API exactly

@@ -156,7 +156,10 @@ func doDumpSchema(dir, out string) error {
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(dir, out)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// G703: `out` is the operator-supplied -out flag of this developer CLI;
+	// writing the schema dump to exactly the path the operator asked for is
+	// the tool's contract (same rationale as the CLI-repo G304 exclusion).
+	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // G703: dev-CLI output path is operator-chosen by design
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	fmt.Fprintf(os.Stderr, "nullscan: wrote %s (%d tables, %d views)\n", path, len(schema.Tables), len(schema.Views))

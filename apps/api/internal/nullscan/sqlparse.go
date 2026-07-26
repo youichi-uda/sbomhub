@@ -1179,8 +1179,8 @@ func renderTokens(toks []sqltok) string {
 		if i > 0 {
 			prev := toks[i-1]
 			// compact rendering: no space around '.', '(', ')', '::'
-			if !(prev.isOp(".") || t.isOp(".") || prev.isOp("::") || t.isOp("::") ||
-				prev.isOp("(") || t.isOp(")") || t.isOp("(") || t.isOp(",")) {
+			if !prev.isOp(".") && !t.isOp(".") && !prev.isOp("::") && !t.isOp("::") &&
+				!prev.isOp("(") && !t.isOp(")") && !t.isOp("(") && !t.isOp(",") {
 				sb.WriteByte(' ')
 			}
 		}

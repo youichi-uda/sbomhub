@@ -560,7 +560,7 @@ func TestBuilder_Build_OrdersRowsDeterministically(t *testing.T) {
 	iNew := strings.Index(body, "CVE-NEW")
 	iMid := strings.Index(body, "CVE-MID")
 	iOld := strings.Index(body, "CVE-OLD")
-	if !(iNew >= 0 && iMid >= 0 && iOld >= 0 && iNew < iMid && iMid < iOld) {
+	if iNew < 0 || iMid < 0 || iOld < 0 || iNew >= iMid || iMid >= iOld {
 		t.Errorf("ordering wrong: NEW=%d MID=%d OLD=%d", iNew, iMid, iOld)
 	}
 }
@@ -620,7 +620,7 @@ func TestBuilder_Build_METISection_PhaseGroupingAndOrder(t *testing.T) {
 	iEnv := strings.Index(body, "### 3.1 Phase: env\\_setup")
 	iCre := strings.Index(body, "### 3.2 Phase: sbom\\_creation")
 	iOpe := strings.Index(body, "### 3.3 Phase: sbom\\_operation")
-	if !(iEnv >= 0 && iCre >= 0 && iOpe >= 0 && iEnv < iCre && iCre < iOpe) {
+	if iEnv < 0 || iCre < 0 || iOpe < 0 || iEnv >= iCre || iCre >= iOpe {
 		t.Errorf("phase order wrong: env=%d cre=%d ope=%d (body=...%s...)", iEnv, iCre, iOpe, body[:min(len(body), 400)])
 	}
 

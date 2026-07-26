@@ -2451,7 +2451,7 @@ func TestRunner_Run_TombstonePlusRealAdvisory_PromptAndFKUseRealRow(t *testing.T
 	realID := uuid.New()
 	tombID := uuid.New()
 	stub := &stubProvider{resp: &llm.CompleteResponse{Content: groundingResp(t,
-		"not_affected", "code_not_reachable", 0.9,
+		"code_not_reachable", 0.9,
 		[]map[string]interface{}{
 			{"kind": "advisory_excerpt", "raw_snippet": "func Parse mishandles nested anchors", "source": "advisory_parser"},
 		},

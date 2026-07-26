@@ -247,7 +247,7 @@ func TestConvertToVulnerabilities_EmptyEntries(t *testing.T) {
 	svc := &NVDService{}
 	vulns := svc.convertToVulnerabilities([]NVDVulnEntry{})
 
-	if vulns != nil && len(vulns) != 0 {
+	if len(vulns) != 0 {
 		t.Errorf("expected empty or nil slice, got %d items", len(vulns))
 	}
 }

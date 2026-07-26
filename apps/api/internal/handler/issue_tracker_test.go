@@ -262,8 +262,10 @@ func TestCreateConnection_GitHubBaseURLDefault(t *testing.T) {
 
 // doCreateConnectionGitHub drives CreateConnection with a fully-valid GitHub
 // body so control passes every handler-side check and reaches the service
-// call, where the recording stub injects the error under test.
-func doCreateConnectionGitHub(h *IssueTrackerHandler) (*httptest.ResponseRecorder, error) {
+// call, where the recording stub injects the error under test. Callers only
+// assert on the returned error (the HTTPError carries status + message), so
+// the recorder is not returned.
+func doCreateConnectionGitHub(h *IssueTrackerHandler) error {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations", strings.NewReader(
 		`{"tracker_type":"github","name":"n","base_url":"https://api.github.com","api_token":"t","default_project_key":"octocat/hello-world"}`))
@@ -271,7 +273,7 @@ func doCreateConnectionGitHub(h *IssueTrackerHandler) (*httptest.ResponseRecorde
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	c.Set(middleware.ContextKeyTenantID, uuid.New())
-	return rec, h.CreateConnection(c)
+	return h.CreateConnection(c)
 }
 
 // itRawDriverLeak is a representative raw internal error string that must never
@@ -288,7 +290,7 @@ func TestCreateConnection_ValidationError_400(t *testing.T) {
 	}
 	h := NewIssueTrackerHandler(stub)
 
-	_, err := doCreateConnectionGitHub(h)
+	err := doCreateConnectionGitHub(h)
 	he, ok := err.(*echo.HTTPError)
 	if !ok {
 		t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)
@@ -315,7 +317,7 @@ func TestCreateConnection_InternalError_500_NoLeak(t *testing.T) {
 	}
 	h := NewIssueTrackerHandler(stub)
 
-	_, err := doCreateConnectionGitHub(h)
+	err := doCreateConnectionGitHub(h)
 	he, ok := err.(*echo.HTTPError)
 	if !ok {
 		t.Fatalf("expected *echo.HTTPError, got %T: %v", err, err)

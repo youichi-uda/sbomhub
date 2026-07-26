@@ -272,7 +272,6 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 
 	goFiles := craParityScanTree(t, apiRoot, map[string]bool{".go": true}, thisFile)
 
-	const templatesRel = "internal/service/cra/templates.go"
 	templatesSrc, ok := goFiles[templatesRel]
 	if !ok {
 		t.Fatalf("F341 setup: %s not found under %s — the engine file "+
@@ -485,7 +484,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 	// (4a) "templatesFS embeds the six Markdown templates" — the word
 	// must track the actual embedded-file count.
 	embedsClaim := craParityExactlyOne(t, craParityEmbedsDocRe, templatesSrc,
-		templatesRel, "templatesFS 'embeds the <N> Markdown templates' claim")
+		"templatesFS 'embeds the <N> Markdown templates' claim")
 	if n := craParityNumber(t, embedsClaim[1],
 		templatesRel+" templatesFS docstring"); n != len(gotTmplFiles) {
 		t.Errorf("F341 direction 4a: templates.go claims templatesFS embeds "+
@@ -497,7 +496,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 	// (4b) "(3 report types x 2 languages)" — both factors must track
 	// the const universe.
 	dimsClaim := craParityExactlyOne(t, craParityDimsDocRe, templatesSrc,
-		templatesRel, "'(<N> report types x <M> languages)' claim")
+		"'(<N> report types x <M> languages)' claim")
 	if n, _ := strconv.Atoi(dimsClaim[1]); n != len(reportTypeValues) {
 		t.Errorf("F341 direction 4b: templates.go claims %s report types "+
 			"but %d ReportType consts are declared — update the docstring "+
@@ -511,7 +510,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 
 	// (4c) "ReportType enumerates the three CRA Article 14 report types".
 	enumClaim := craParityExactlyOne(t, craParityEnumDocRe, templatesSrc,
-		templatesRel, "'ReportType enumerates the <N> ... report types' claim")
+		"'ReportType enumerates the <N> ... report types' claim")
 	if n := craParityNumber(t, enumClaim[1],
 		templatesRel+" ReportType docstring"); n != len(reportTypeValues) {
 		t.Errorf("F341 direction 4c: templates.go claims ReportType "+
@@ -526,7 +525,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 	rtOrderWindow := craParityWindow(t, templatesSrc, templatesRel,
 		"// SupportedReportTypes returns", "func SupportedReportTypes(")
 	rtOrder := craParityExactlyOne(t, craParityStableOrderRe, rtOrderWindow,
-		templatesRel, "SupportedReportTypes 'Stable order (...)' claim")
+		"SupportedReportTypes 'Stable order (...)' claim")
 	rtRuntime := make([]string, len(supportedRT))
 	for i, v := range supportedRT {
 		rtRuntime[i] = string(v)
@@ -538,7 +537,7 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 	langOrderWindow := craParityWindow(t, templatesSrc, templatesRel,
 		"// SupportedLangs returns", "func SupportedLangs(")
 	langOrder := craParityExactlyOne(t, craParityStableOrderRe, langOrderWindow,
-		templatesRel, "SupportedLangs 'Stable order (...)' claim")
+		"SupportedLangs 'Stable order (...)' claim")
 	langRuntime := make([]string, len(supportedLangs))
 	for i, v := range supportedLangs {
 		langRuntime[i] = string(v)
@@ -1046,14 +1045,19 @@ func craParityJoinPath(base, key string) string {
 	return base + "." + key
 }
 
+// templatesRel is the repo-relative path of the CRA template engine file
+// every F341 parity probe anchors into.
+const templatesRel = "internal/service/cra/templates.go"
+
 // craParityExactlyOne runs re over src and requires exactly one match,
 // returning its submatches. Zero matches means the anchored doc claim
 // was reworded (probe must be re-anchored deliberately); two or more
-// means the window is ambiguous.
+// means the window is ambiguous. All probes anchor into templates.go,
+// so the failure message references templatesRel directly.
 func craParityExactlyOne(
 	t *testing.T,
 	re *regexp.Regexp,
-	src, rel, label string,
+	src, label string,
 ) []string {
 	t.Helper()
 	ms := re.FindAllStringSubmatch(src, -1)
@@ -1061,7 +1065,7 @@ func craParityExactlyOne(
 		t.Fatalf("F341 setup: expected exactly one match for the %s "+
 			"(regexp %q) in %s, found %d — the docstring was reworded; "+
 			"update this probe deliberately rather than letting it pass "+
-			"vacuously.", label, re.String(), rel, len(ms))
+			"vacuously.", label, re.String(), templatesRel, len(ms))
 	}
 	return ms[0]
 }

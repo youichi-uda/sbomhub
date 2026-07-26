@@ -475,7 +475,8 @@ func (r *CRAReportsRepository) CountByProject(ctx context.Context, tenantID, pro
 	if filter.Decision != "" {
 		where += fmt.Sprintf(" AND decision = $%d", argIdx)
 		args = append(args, filter.Decision)
-		argIdx++
+		// argIdx deliberately not incremented: last dynamic parameter of the
+		// COUNT query (re-add the increment if a filter is appended below).
 	}
 
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM cra_reports %s`, where)

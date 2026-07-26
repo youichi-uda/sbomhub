@@ -74,7 +74,10 @@ func fakeAzureServer(
 	}))
 }
 
-func makeOpenAIChoice(content, finishReason string) openaiChatResponse {
+// makeOpenAIChoice builds a single-choice chat response with the standard
+// "stop" finish reason (the provider copies finish_reason through verbatim,
+// so no test needs to vary it).
+func makeOpenAIChoice(content string) openaiChatResponse {
 	resp := openaiChatResponse{}
 	resp.Choices = append(resp.Choices, struct {
 		Index   int `json:"index"`
@@ -83,7 +86,7 @@ func makeOpenAIChoice(content, finishReason string) openaiChatResponse {
 			Content string `json:"content"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
-	}{Index: 0, FinishReason: finishReason})
+	}{Index: 0, FinishReason: "stop"})
 	resp.Choices[0].Message.Role = "assistant"
 	resp.Choices[0].Message.Content = content
 	return resp
@@ -98,7 +101,7 @@ func TestAzureOpenAI_Complete_Success(t *testing.T) {
 		if len(req.Messages) != 2 || req.Messages[0].Role != "system" || req.Messages[1].Role != "user" {
 			t.Errorf("messages = %+v, want [system, user]", req.Messages)
 		}
-		resp := makeOpenAIChoice("hello azure", "stop")
+		resp := makeOpenAIChoice("hello azure")
 		// Azure returns the underlying model name in the response.
 		resp.Model = "gpt-4o-2024-11-20"
 		resp.Usage.PromptTokens = 11
@@ -140,7 +143,7 @@ func TestAzureOpenAI_Complete_DefaultAPIVersion(t *testing.T) {
 	// expectation so a future bump only requires touching one place.
 	const deployment = "legal-vex-triage"
 	srv := fakeAzureServer(t, deployment, defaultAzureAPIVersion, func(t *testing.T, _ openaiChatRequest) (int, openaiChatResponse, []byte) {
-		return http.StatusOK, makeOpenAIChoice("ok", "stop"), nil
+		return http.StatusOK, makeOpenAIChoice("ok"), nil
 	})
 	defer srv.Close()
 
@@ -161,7 +164,7 @@ func TestAzureOpenAI_Complete_JSONMode(t *testing.T) {
 		if req.ResponseFormat == nil || req.ResponseFormat.Type != "json_object" {
 			t.Errorf("response_format = %+v, want json_object", req.ResponseFormat)
 		}
-		resp := makeOpenAIChoice("{}", "stop")
+		resp := makeOpenAIChoice("{}")
 		return http.StatusOK, resp, nil
 	})
 	defer srv.Close()
@@ -445,7 +448,7 @@ func TestAzureOpenAI_NewWithClient_Customizable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(makeOpenAIChoice("ok", "stop"))
+		_ = json.NewEncoder(w).Encode(makeOpenAIChoice("ok"))
 	}))
 	defer srv.Close()
 

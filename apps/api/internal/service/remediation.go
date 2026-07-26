@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/client"
-	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
@@ -229,25 +228,6 @@ func (s *RemediationService) GetRemediationByCVE(ctx context.Context, cveID stri
 	response.Workarounds = getKnownWorkarounds(cveID)
 
 	return response, nil
-}
-
-func (s *RemediationService) buildBasicResponse(vuln *model.Vulnerability, component *model.Component) *RemediationResponse {
-	ecosystem := detectEcosystem(component.Purl, component.Type)
-	return &RemediationResponse{
-		CVEID:    vuln.CVEID,
-		Summary:  vuln.Description,
-		Severity: vuln.Severity,
-		AffectedComponent: AffectedComponent{
-			Name:           component.Name,
-			Ecosystem:      ecosystem,
-			CurrentVersion: component.Version,
-		},
-		Remediation: RemediationDetails{
-			Type:     "manual",
-			Commands: map[string]string{},
-		},
-		Workarounds: getKnownWorkarounds(vuln.CVEID),
-	}
 }
 
 func detectEcosystem(purl, componentType string) string {

@@ -305,7 +305,7 @@ func (h *craHarness) seedReport(reportID, projectID uuid.UUID) repository.CRARep
 // awareness instant so the F424 deadline-enrichment tests can drive each
 // DeadlineStatus branch (M34-B). awareness == nil exercises the
 // not_applicable path.
-func (h *craHarness) seedReportWith(reportID, projectID uuid.UUID, reportType string, awareness *time.Time) repository.CRAReport {
+func (h *craHarness) seedReportWith(reportID, projectID uuid.UUID, reportType string, awareness *time.Time) {
 	r := repository.CRAReport{
 		ID:              reportID,
 		TenantID:        h.tenantID,
@@ -324,7 +324,6 @@ func (h *craHarness) seedReportWith(reportID, projectID uuid.UUID, reportType st
 	}
 	h.store.byID[reportID] = r
 	h.store.byProject[projectID] = append(h.store.byProject[projectID], r)
-	return r
 }
 
 func (h *craHarness) ctxWithRole(c echo.Context, role string) {

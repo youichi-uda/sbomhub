@@ -30,4 +30,4 @@
 # prints the expected vs actual hashes to paste back in).
 9ac0b6d03cc3176de7f3b2e8a7e178f127c2f52171be708b51d8b368a33b2b0e  types.go
 2e15a80375250356c56f8003c7da72a20ff4d9b040aeec8f6f891c80f0acdd26  go_analyzer.go
-edf036df2f10982de82d2c136a2d1e82e51f205c40e8ec2dbd3f7accecedef26  npm_analyzer.go
+94265005ae26930c1a92d6c4e2cea24ba192ceace26da8f9c7fcbe7bb7b59833  npm_analyzer.go

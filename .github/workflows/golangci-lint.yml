@@ -6,17 +6,26 @@
 # workflow runs the static-analysis quality gate (`golangci-lint run`)
 # against apps/api per the linter set declared in apps/api/.golangci.yml.
 #
-# Enforcement policy (initial landing):
-#   The lint job runs with `continue-on-error: true`. This is intentional.
-#   This is the first time `golangci-lint` is wired against the existing
-#   apps/api codebase, so the very first run will most likely surface
-#   pre-existing violations (errcheck / gosec / revive). Blocking merges
-#   on those before they are triaged would force every unrelated PR to fix
-#   them, which is hostile to small bug-fix / docs PRs.
+# M46 Track C-3c: lint is a HARD GATE (continue-on-error removed).
 #
-#   Once existing violations are cleaned up in a follow-up wave, this flag
-#   will be removed and the workflow becomes a hard gate (and gets added
-#   to the Required status checks list in docs/ci-inventory.md §2.3).
+# History, corrected to what actually happened: the job landed with
+# `continue-on-error: true` pinned to golangci-lint v1.62 as a
+# "warning mode" first pass. In reality it never linted anything —
+# every official v1 binary is built with go <= 1.24 and hard-errors on
+# apps/api's go.mod directive ("the Go language version (go1.23) used
+# to build golangci-lint is lower than the targeted Go version (1.26)",
+# exit 3; measured 2026-07-25 with v1.62 and with the final v1 release
+# v1.64.8). continue-on-error then swallowed that config error, so the
+# green checkmark was a no-op, not a lint pass. The M46 waves cleaned
+# the backlog (277 → 0 issues) against golangci-lint v2 and the config
+# was migrated to the v2 schema, so the gate is now real and strict.
+#
+# version is PINNED (not `latest`) for reproducibility: a floating
+# `latest` can flip the gate red on unrelated PRs when a new golangci
+# release adds/changes checks. Bump deliberately, together with any new
+# findings it surfaces. v2.12.2 = latest stable at pin time and the
+# exact binary the config was verified against (0 issues, 2026-07-26).
+# Same pin + rationale as sbomhub-cli/.github/workflows/ci.yml `lint`.
 
 name: golangci-lint
 
@@ -44,8 +53,6 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # First-landing enforcement policy: warn-only. See header comment.
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -68,11 +75,9 @@ jobs:
           go env GOVERSION GOMOD GOFLAGS
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # action v9 line is required for golangci-lint v2 binaries
+        # (v6 predates the v2 CLI surface).
+        uses: golangci/golangci-lint-action@v9
         with:
-          # Pin a known-good v1.x release. golangci-lint v2.x uses a
-          # different config schema; switching to v2 will be a separate
-          # migration wave.
-          version: v1.62
+          version: v2.12.2
           working-directory: apps/api
-          args: --timeout=5m

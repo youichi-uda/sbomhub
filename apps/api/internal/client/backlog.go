@@ -270,7 +270,7 @@ func (c *BacklogClient) doRequest(ctx context.Context, method, path string, para
 		}
 
 		if status >= 400 {
-			return fmt.Errorf("Backlog API error: %d - %s", status, string(respBody))
+			return fmt.Errorf("backlog API error: %d - %s", status, string(respBody))
 		}
 
 		if result != nil && len(respBody) > 0 {

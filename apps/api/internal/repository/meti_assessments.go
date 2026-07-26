@@ -589,7 +589,9 @@ func buildMetiAssessmentWhere(tenantID, projectID uuid.UUID, filter MetiAssessme
 	if filter.Status != "" {
 		where += fmt.Sprintf(" AND status = $%d", argIdx)
 		args = append(args, filter.Status)
-		argIdx++
+		// argIdx deliberately not incremented: last parameterised filter
+		// (HasOverride below adds no placeholder; re-add the increment if a
+		// parameterised filter is appended).
 	}
 	if filter.HasOverride != nil {
 		if *filter.HasOverride {

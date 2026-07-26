@@ -226,7 +226,7 @@ func (p *AzureOpenAIProvider) Complete(ctx context.Context, req CompleteRequest)
 		msgs = append(msgs, openaiMessage{Role: "system", Content: req.System})
 	}
 	for _, m := range req.Messages {
-		msgs = append(msgs, openaiMessage{Role: m.Role, Content: m.Content})
+		msgs = append(msgs, openaiMessage(m))
 	}
 
 	maxTok := req.MaxTokens

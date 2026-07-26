@@ -65,7 +65,7 @@ var (
 	// variable in sight (e.g. "in a sandboxed env"), which produced false
 	// positives in fixtures.
 	reEnvKeywordContext = regexp.MustCompile(
-		"(?i)(?:environment|env)\\s+variable",
+		`(?i)(?:environment|env)\s+variable`,
 	)
 )
 

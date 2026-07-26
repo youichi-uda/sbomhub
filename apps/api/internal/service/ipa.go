@@ -239,7 +239,10 @@ func (s *IPAService) SyncForTenant(ctx context.Context, tenantID uuid.UUID) (*Sy
 	// data freshness (M40 Phase D).
 	if !s.offline {
 		if err := s.ipaRepo.UpdateLastSyncAt(ctx, tenantID); err != nil {
-			// Log but don't fail
+			// Don't fail the sync (the announcements themselves landed), but
+			// surface it: a stale last_sync_at misrepresents data freshness.
+			slog.Warn("ipa: failed to update tenant last_sync_at after sync",
+				"tenant_id", tenantID, "error", err)
 		}
 	}
 

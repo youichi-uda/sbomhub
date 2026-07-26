@@ -531,7 +531,8 @@ func writeTOC(buf *bytes.Buffer, r renderInput) {
 	}
 	if r.IncludeMETIAssessment {
 		fmt.Fprintf(buf, "%d. [METI 自己評価 / METI Self-Assessment](#%d-meti-self-assessment) — %d entries\n", idx, idx, len(r.METIRows))
-		idx++
+		// idx deliberately not incremented: last TOC section (re-add the
+		// increment if a section is appended below).
 	}
 	buf.WriteString("\n---\n\n")
 }
