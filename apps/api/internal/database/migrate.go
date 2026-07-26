@@ -66,12 +66,12 @@ func Migrate(db *sql.DB, migrationsFS embed.FS) error {
 		}
 
 		if _, err := tx.Exec(string(content)); err != nil {
-			tx.Rollback()
+			rollbackMigrationTx(tx, version)
 			return fmt.Errorf("failed to apply migration %s: %w", version, err)
 		}
 
 		if _, err := tx.Exec("INSERT INTO schema_migrations (version) VALUES ($1)", version); err != nil {
-			tx.Rollback()
+			rollbackMigrationTx(tx, version)
 			return fmt.Errorf("failed to record migration %s: %w", version, err)
 		}
 
@@ -107,8 +107,26 @@ func getAppliedMigrations(db *sql.DB) (map[string]bool, error) {
 		}
 		applied[version] = true
 	}
+	// No-partial-results contract (M46 Track C-3b): a truncated applied-set
+	// would make startup auto-migration re-apply migrations that already
+	// ran — usually a hard SQL failure (duplicate table / column) that
+	// aborts boot with a much more confusing error than this one.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to enumerate applied migrations: %w", err)
+	}
 
 	return applied, nil
+}
+
+// rollbackMigrationTx rolls back a migration transaction after a failed
+// statement. The rollback error is secondary (the primary failure is
+// already being returned) but must not be silently discarded (errcheck,
+// M46 Track C-3b): a failed ROLLBACK usually means the connection is
+// broken, which the operator should see alongside the migration error.
+func rollbackMigrationTx(tx *sql.Tx, version string) {
+	if err := tx.Rollback(); err != nil {
+		slog.Warn("rollback of migration transaction failed", "version", version, "error", err)
+	}
 }
 
 func extractVersion(filename string) string {

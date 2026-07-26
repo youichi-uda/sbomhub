@@ -3,8 +3,10 @@ package handler
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +19,47 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
+
+// Error contract (M46 Track C-3b). Retry facts, verified 2026-07-26 against
+// the official docs: Clerk delegates webhook delivery to Svix
+// (clerk.com/docs/webhooks/overview → docs.svix.com/retries). A non-2xx
+// response (3xx included) is retried on a FINITE schedule of 8 total
+// attempts — "Immediately, 5 seconds, 5 minutes, 30 minutes, 2 hours,
+// 5 hours, 10 hours, 10 hours" — after which the message is marked Failed
+// and can still be replayed manually from the Clerk Dashboard. Automatic
+// endpoint disabling only kicks in after ~5 days of CONTINUOUS failure, so
+// answering 500 on a transient error is safe and buys a clean redelivery
+// once the dependency recovers. Conversely, a 2xx is never retried: any
+// event answered 200 without its writes committed is lost forever.
+//
+// Contract per failure class (mirrors webhook_lemonsqueezy.go, 3a7d483):
+//   - Lookup errors: only sql.ErrNoRows means "not found". Any other error
+//     answers 500 — misreading infra trouble as not-found either drops a
+//     deletion forever or falls through to Create and collides with the
+//     clerk_org_id UNIQUE index on redelivery.
+//   - State-changing writes (Upsert / Create / Update / Delete /
+//     Add|RemoveFromTenant): failure answers 500. All of them are
+//     idempotent, so the Svix redelivery is a clean re-run.
+//   - Audit-log failure after a committed UPSERT: answers 500. The audit
+//     row is the ONLY history write on those paths and the upsert is
+//     idempotent, so redelivery recovers the audit trail with no
+//     duplication risk (unlike Lemon Squeezy's two history writes, where a
+//     redelivery could duplicate rows — hence its 200-and-slog contract).
+//   - Audit-log failure after a committed DELETE: keeps the 200 and logs
+//     via slog. A 5xx could never recover the row: the redelivery's lookup
+//     hits ErrNoRows (the row is already gone) and answers 200 without
+//     writing the audit row, so the 5xx would be pure retry noise.
+//
+// KNOWN LIMIT (M46 residual, out of scope this wave): Svix regular
+// endpoints deliver on a BEST-EFFORT order (svix.com/blog/
+// guaranteeing-webhook-ordering; only FIFO endpoints guarantee order), so
+// a stale lifecycle event can arrive — or be redelivered after a 500 —
+// AFTER a newer event already applied: e.g. a late user.updated after
+// user.deleted re-creates the row via Upsert. This handler predates any
+// event bookkeeping and cannot reject superseded events; the durable fix
+// is the same inbox design already flagged in webhook_lemonsqueezy.go
+// (persist svix-id + event timestamp, dedupe replays, drop events older
+// than the row they touch) and needs schema + repository changes.
 
 // ClerkWebhookHandler handles Clerk webhook events
 type ClerkWebhookHandler struct {
@@ -119,16 +162,41 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 		if err := json.Unmarshal(payload.Data, &userData); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid user data"})
 		}
-		// Delete user
+		// Delete user. Only sql.ErrNoRows means "already gone" (idempotent
+		// success); a transient lookup error must NOT be misread as
+		// not-found — that would answer 200 and drop the deletion forever
+		// (Svix never retries a 2xx; see the contract comment above).
 		user, err := h.userRepo.GetByClerkUserID(ctx, userData.ID)
-		if err == nil {
-			h.userRepo.Delete(ctx, user.ID)
-			h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
-				UserID:       &user.ID,
-				Action:       model.ActionUserDeleted,
-				ResourceType: model.ResourceUser,
-				ResourceID:   &user.ID,
-			})
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "user not found"})
+			}
+			slog.Error("user.deleted: user lookup failed", "error", err, "clerk_user_id", userData.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up user"})
+		}
+		if err := h.userRepo.Delete(ctx, user.ID); err != nil {
+			slog.Error("user.deleted: failed to delete user", "error", err, "user_id", user.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete user"})
+		}
+		// UserID is deliberately ABSENT (NULL): audit_logs.user_id is FK'd
+		// to users(id) and the row was just deleted, so a non-NULL value
+		// can never insert — which is exactly why deletion audit rows were
+		// silently lost forever pre-fix (M46 Codex C-3b round 1). NULL
+		// user_id/tenant_id is the documented convention for system-level
+		// webhook events (see AuditRepository.List); the deleted id stays
+		// queryable via resource_id, which carries no FK.
+		//
+		// Keep the 200 on audit failure: the user row is already deleted,
+		// so a 5xx redelivery would hit the ErrNoRows branch above and
+		// answer 200 without ever writing the audit row — the loss is
+		// irreversible either way; surface it via slog.
+		if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+			Action:       model.ActionUserDeleted,
+			ResourceType: model.ResourceUser,
+			ResourceID:   &user.ID,
+		}); err != nil {
+			slog.Error("failed to write user deletion audit log",
+				"error", err, "action", model.ActionUserDeleted, "user_id", user.ID)
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 
@@ -144,16 +212,33 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 		if err := json.Unmarshal(payload.Data, &orgData); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid org data"})
 		}
-		// Delete tenant
+		// Delete tenant. Same lookup / delete / audit contract as
+		// user.deleted above.
 		tenant, err := h.tenantRepo.GetByClerkOrgID(ctx, orgData.ID)
-		if err == nil {
-			h.tenantRepo.Delete(ctx, tenant.ID)
-			h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
-				TenantID:     &tenant.ID,
-				Action:       model.ActionTenantDeleted,
-				ResourceType: model.ResourceTenant,
-				ResourceID:   &tenant.ID,
-			})
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "tenant not found"})
+			}
+			slog.Error("organization.deleted: tenant lookup failed", "error", err, "clerk_org_id", orgData.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up tenant"})
+		}
+		if err := h.tenantRepo.Delete(ctx, tenant.ID); err != nil {
+			slog.Error("organization.deleted: failed to delete tenant", "error", err, "tenant_id", tenant.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete tenant"})
+		}
+		// TenantID is deliberately ABSENT (NULL): audit_logs.tenant_id is
+		// FK'd to tenants(id) ON DELETE CASCADE, so a non-NULL value is
+		// doubly impossible here — the post-delete INSERT violates the FK,
+		// and even a row written BEFORE the delete would be cascaded away
+		// with the tenant (M46 Codex C-3b round 1). Same NULL system-event
+		// convention and 200-on-audit-failure rationale as user.deleted.
+		if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+			Action:       model.ActionTenantDeleted,
+			ResourceType: model.ResourceTenant,
+			ResourceID:   &tenant.ID,
+		}); err != nil {
+			slog.Error("failed to write tenant deletion audit log",
+				"error", err, "action", model.ActionTenantDeleted, "tenant_id", tenant.ID)
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 
@@ -162,23 +247,38 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 		if err := json.Unmarshal(payload.Data, &memberData); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid membership data"})
 		}
-		return h.handleMembershipEvent(c, payload.Type, &memberData)
+		return h.handleMembershipEvent(c, &memberData)
 
 	case "organizationMembership.deleted":
 		var memberData ClerkOrgMembershipData
 		if err := json.Unmarshal(payload.Data, &memberData); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid membership data"})
 		}
-		// Remove user from tenant
+		// Remove user from tenant. Only sql.ErrNoRows means "not found";
+		// transient lookup errors answer 500 so Svix redelivers.
 		tenant, err := h.tenantRepo.GetByClerkOrgID(ctx, memberData.Organization.ID)
 		if err != nil {
-			return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "tenant not found"})
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "tenant not found"})
+			}
+			slog.Error("organizationMembership.deleted: tenant lookup failed",
+				"error", err, "clerk_org_id", memberData.Organization.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up tenant"})
 		}
 		user, err := h.userRepo.GetByClerkUserID(ctx, memberData.PublicUserData.UserID)
 		if err != nil {
-			return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "user not found"})
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "user not found"})
+			}
+			slog.Error("organizationMembership.deleted: user lookup failed",
+				"error", err, "clerk_user_id", memberData.PublicUserData.UserID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up user"})
 		}
-		h.userRepo.RemoveFromTenant(ctx, tenant.ID, user.ID)
+		if err := h.userRepo.RemoveFromTenant(ctx, tenant.ID, user.ID); err != nil {
+			slog.Error("organizationMembership.deleted: failed to remove user from tenant",
+				"error", err, "tenant_id", tenant.ID, "user_id", user.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to remove user from tenant"})
+		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 
 	default:
@@ -217,16 +317,39 @@ func (h *ClerkWebhookHandler) handleUserEvent(c echo.Context, eventType string, 
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to upsert user"})
 	}
 
+	// Re-read the persisted row: Upsert is ON CONFLICT (clerk_user_id)
+	// DO UPDATE and the conflict branch KEEPS the original row id, so for
+	// an existing user the uuid.New() above never hits the table. Logging
+	// that discarded id violated the audit_logs.user_id → users.id FK on
+	// EVERY user.updated — update audit rows were silently lost forever
+	// pre-fix (M46 Codex C-3b round 1). One extra SELECT per user event is
+	// the price of a correct audit reference without widening the
+	// repository contract (Upsert ... RETURNING id is the follow-up).
+	persisted, err := h.userRepo.GetByClerkUserID(ctx, userData.ID)
+	if err != nil {
+		slog.Error("clerk user event: post-upsert lookup failed",
+			"error", err, "event", eventType, "clerk_user_id", userData.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up user"})
+	}
+
 	action := model.ActionUserCreated
 	if eventType == "user.updated" {
 		action = model.ActionUserUpdated
 	}
-	h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
-		UserID:       &user.ID,
+	// 500 on audit failure: the upsert above is idempotent and this audit
+	// row is the only history write, so the finite Svix redelivery (see the
+	// contract comment at the top) recovers the audit trail with no
+	// duplication risk. A 200 here would lose the row forever.
+	if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+		UserID:       &persisted.ID,
 		Action:       action,
 		ResourceType: model.ResourceUser,
-		ResourceID:   &user.ID,
-	})
+		ResourceID:   &persisted.ID,
+	}); err != nil {
+		slog.Error("failed to write user audit log",
+			"error", err, "action", action, "user_id", persisted.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write audit log"})
+	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -235,9 +358,24 @@ func (h *ClerkWebhookHandler) handleOrgEvent(c echo.Context, eventType string, o
 	ctx := c.Request().Context()
 	now := time.Now()
 
-	// Check if tenant exists
+	// The audit action follows the DELIVERED EVENT (like handleUserEvent),
+	// not the branch taken. This is load-bearing for audit recovery: when
+	// an organization.created delivery commits the tenant row but fails the
+	// audit write (500 below), the redelivery finds the row, takes the
+	// update branch — and must still log tenant.created, because that is
+	// what happened per the IdP.
+	action := model.ActionTenantCreated
+	if eventType == "organization.updated" {
+		action = model.ActionTenantUpdated
+	}
+
+	// Check if tenant exists. Only sql.ErrNoRows takes the create branch:
+	// falling through on a transient lookup error would collide with the
+	// clerk_org_id UNIQUE index on redelivery (same class as the Lemon
+	// Squeezy lookup finding, M46 Codex round A).
 	existing, err := h.tenantRepo.GetByClerkOrgID(ctx, orgData.ID)
-	if err == nil {
+	switch {
+	case err == nil:
 		// Update existing tenant
 		existing.Name = orgData.Name
 		existing.Slug = orgData.Slug
@@ -245,13 +383,24 @@ func (h *ClerkWebhookHandler) handleOrgEvent(c echo.Context, eventType string, o
 		if err := h.tenantRepo.Update(ctx, existing); err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update tenant"})
 		}
-		h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+		// 500 on audit failure: update is idempotent, single history
+		// write — redelivery recovers the row (contract comment on top).
+		if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
 			TenantID:     &existing.ID,
-			Action:       model.ActionTenantUpdated,
+			Action:       action,
 			ResourceType: model.ResourceTenant,
 			ResourceID:   &existing.ID,
-		})
+		}); err != nil {
+			slog.Error("failed to write tenant audit log",
+				"error", err, "action", action, "tenant_id", existing.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write audit log"})
+		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+
+	case !errors.Is(err, sql.ErrNoRows):
+		slog.Error("clerk org event: tenant lookup failed",
+			"error", err, "event", eventType, "clerk_org_id", orgData.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up tenant"})
 	}
 
 	// Create new tenant
@@ -269,21 +418,33 @@ func (h *ClerkWebhookHandler) handleOrgEvent(c echo.Context, eventType string, o
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create tenant"})
 	}
 
-	h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
+	// 500 on audit failure — same recovery contract as the update branch;
+	// the redelivery takes the update branch and logs the same action.
+	if err := h.auditRepo.Log(ctx, &model.CreateAuditLogInput{
 		TenantID:     &tenant.ID,
-		Action:       model.ActionTenantCreated,
+		Action:       action,
 		ResourceType: model.ResourceTenant,
 		ResourceID:   &tenant.ID,
-	})
+	}); err != nil {
+		slog.Error("failed to write tenant audit log",
+			"error", err, "action", action, "tenant_id", tenant.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write audit log"})
+	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *ClerkWebhookHandler) handleMembershipEvent(c echo.Context, eventType string, memberData *ClerkOrgMembershipData) error {
+func (h *ClerkWebhookHandler) handleMembershipEvent(c echo.Context, memberData *ClerkOrgMembershipData) error {
 	ctx := c.Request().Context()
 
-	// Get or create tenant
+	// Get or create tenant. Only sql.ErrNoRows takes the create branch
+	// (same rationale as handleOrgEvent).
 	tenant, err := h.tenantRepo.GetByClerkOrgID(ctx, memberData.Organization.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		slog.Error("clerk membership event: tenant lookup failed",
+			"error", err, "clerk_org_id", memberData.Organization.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up tenant"})
+	}
 	if err != nil {
 		// Create tenant if not exists
 		now := time.Now()
@@ -301,10 +462,18 @@ func (h *ClerkWebhookHandler) handleMembershipEvent(c echo.Context, eventType st
 		}
 	}
 
-	// Get user
+	// Get user. ErrNoRows means the user.created event has not arrived yet
+	// (event ordering is not guaranteed) — answer 200 so Svix does not
+	// burn its retry budget on an event we cannot apply; the membership is
+	// re-synced by the next membership event. Transient errors answer 500.
 	user, err := h.userRepo.GetByClerkUserID(ctx, memberData.PublicUserData.UserID)
 	if err != nil {
-		return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "user not found"})
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "user not found"})
+		}
+		slog.Error("clerk membership event: user lookup failed",
+			"error", err, "clerk_user_id", memberData.PublicUserData.UserID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up user"})
 	}
 
 	// Map Clerk role to our role
@@ -353,10 +522,7 @@ func (h *ClerkWebhookHandler) verifySignature(r *http.Request, body []byte) bool
 
 	// Decode the webhook secret
 	// Clerk webhook secret format: "whsec_<base64-encoded-key>"
-	secret := h.cfg.ClerkWebhookSecret
-	if strings.HasPrefix(secret, "whsec_") {
-		secret = strings.TrimPrefix(secret, "whsec_")
-	}
+	secret := strings.TrimPrefix(h.cfg.ClerkWebhookSecret, "whsec_")
 
 	secretBytes, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {
@@ -386,11 +552,7 @@ func (h *ClerkWebhookHandler) verifySignature(r *http.Request, body []byte) bool
 }
 
 func splitSignatures(header string) []string {
-	var sigs []string
-	for _, part := range splitBySpace(header) {
-		sigs = append(sigs, part)
-	}
-	return sigs
+	return splitBySpace(header)
 }
 
 func splitBySpace(s string) []string {

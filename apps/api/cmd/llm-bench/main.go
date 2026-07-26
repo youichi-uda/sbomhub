@@ -554,7 +554,7 @@ func realMain(args []string, stdout, stderr io.Writer) *exitError {
 
 	// Decide JSONL sink. We default to stdout so the operator can pipe
 	// directly into jq; --out overrides for repeatable runs.
-	var jsonlSink io.Writer = stdout
+	jsonlSink := stdout
 	if flags.out != "" {
 		f, err := os.Create(flags.out)
 		if err != nil {

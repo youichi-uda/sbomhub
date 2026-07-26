@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -35,7 +36,11 @@ func main() {
 		}
 	}
 	if dbURL == "" {
-		dbURL = "postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable"
+		// G101 is a false positive here: this is the well-known local-dev
+		// placeholder DSN (identical to the config.go DATABASE_URL
+		// default), not a real credential, and the fallback is announced
+		// with the loud warning below.
+		dbURL = "postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable" //nolint:gosec // G101: documented local-dev default DSN, not a secret
 		log.Println("warning: neither MIGRATE_DATABASE_URL nor DATABASE_URL is set; using legacy default sbomhub:sbomhub@localhost.")
 	}
 
@@ -65,7 +70,15 @@ func main() {
 	case "down":
 		steps := 1
 		if len(os.Args) > 2 {
-			fmt.Sscanf(os.Args[2], "%d", &steps)
+			var perr error
+			steps, perr = parseSteps(os.Args[2])
+			if perr != nil {
+				// `down` is destructive: refuse to guess. The pre-fix
+				// fmt.Sscanf silently ran with steps=1 on garbage input.
+				// perr already carries the offending value quoted by
+				// strconv, so the raw os.Args value is not echoed (G706).
+				log.Fatalf("Invalid steps argument: %v", perr)
+			}
 		}
 		if err := migrateDown(db, steps); err != nil {
 			log.Fatalf("Migration rollback failed: %v", err)
@@ -113,12 +126,12 @@ func migrateUp(db *sql.DB) error {
 		}
 
 		if _, err := tx.Exec(string(content)); err != nil {
-			tx.Rollback()
+			rollbackTx(tx, version)
 			return fmt.Errorf("failed to apply %s: %w", file, err)
 		}
 
 		if _, err := tx.Exec("INSERT INTO schema_migrations (version) VALUES ($1)", version); err != nil {
-			tx.Rollback()
+			rollbackTx(tx, version)
 			return err
 		}
 
@@ -149,6 +162,13 @@ func migrateDown(db *sql.DB, steps int) error {
 		}
 		versions = append(versions, version)
 	}
+	// No-partial-results contract (M46 Track C-3b): an iteration error must
+	// abort the rollback run — silently rolling back only the versions read
+	// before the failure would desync the operator's mental model of how
+	// many steps actually ran.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to enumerate applied migrations: %w", err)
+	}
 
 	for _, version := range versions {
 		downFile := fmt.Sprintf("migrations/%s.down.sql", version)
@@ -169,12 +189,12 @@ func migrateDown(db *sql.DB, steps int) error {
 		}
 
 		if _, err := tx.Exec(string(content)); err != nil {
-			tx.Rollback()
+			rollbackTx(tx, version)
 			return fmt.Errorf("failed to rollback %s: %w", version, err)
 		}
 
 		if _, err := tx.Exec("DELETE FROM schema_migrations WHERE version = $1", version); err != nil {
-			tx.Rollback()
+			rollbackTx(tx, version)
 			return err
 		}
 
@@ -230,8 +250,40 @@ func getAppliedMigrations(db *sql.DB) (map[string]bool, error) {
 		}
 		applied[version] = true
 	}
+	// No-partial-results contract (M46 Track C-3b): a truncated applied-set
+	// would make `up` re-apply migrations that already ran (usually a hard
+	// SQL failure, e.g. duplicate table) and make `status` lie.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to enumerate applied migrations: %w", err)
+	}
 
 	return applied, nil
+}
+
+// parseSteps parses the `migrate down <steps>` argument. It replaces a
+// fmt.Sscanf call whose error was discarded (errcheck, M46 Track C-3b) —
+// garbage input used to silently run with steps=1, and "2abc" used to parse
+// as 2. Destructive commands fail loudly instead of guessing.
+func parseSteps(arg string) (int, error) {
+	steps, err := strconv.Atoi(arg)
+	if err != nil {
+		return 0, fmt.Errorf("steps must be a positive integer: %w", err)
+	}
+	if steps < 1 {
+		return 0, fmt.Errorf("steps must be >= 1, got %d", steps)
+	}
+	return steps, nil
+}
+
+// rollbackTx rolls back a migration transaction after a failed statement.
+// The rollback error is secondary (the primary failure is already being
+// returned) but must not be silently discarded (errcheck, M46 Track C-3b):
+// a failed ROLLBACK usually means the connection is broken and the operator
+// should know before retrying.
+func rollbackTx(tx *sql.Tx, version string) {
+	if err := tx.Rollback(); err != nil {
+		log.Printf("warning: rollback of migration %s failed: %v", version, err)
+	}
 }
 
 func extractVersion(filename string) string {

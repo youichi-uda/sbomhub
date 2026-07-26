@@ -560,15 +560,15 @@ func (j *ReportGenerationJob) sendEmailWithAttachment(to, subject, htmlBody, tex
 	var buf bytes.Buffer
 
 	// Headers
-	buf.WriteString(fmt.Sprintf("From: %s\r\n", from))
-	buf.WriteString(fmt.Sprintf("To: %s\r\n", to))
-	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	fmt.Fprintf(&buf, "From: %s\r\n", from)
+	fmt.Fprintf(&buf, "To: %s\r\n", to)
+	fmt.Fprintf(&buf, "Subject: %s\r\n", subject)
 	buf.WriteString("MIME-Version: 1.0\r\n")
-	buf.WriteString(fmt.Sprintf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary))
+	fmt.Fprintf(&buf, "Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary)
 	buf.WriteString("\r\n")
 
 	// Text part
-	buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+	fmt.Fprintf(&buf, "--%s\r\n", boundary)
 	buf.WriteString("Content-Type: multipart/alternative; boundary=\"alt-boundary\"\r\n\r\n")
 
 	buf.WriteString("--alt-boundary\r\n")
@@ -584,10 +584,10 @@ func (j *ReportGenerationJob) sendEmailWithAttachment(to, subject, htmlBody, tex
 	buf.WriteString("--alt-boundary--\r\n")
 
 	// Attachment
-	buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-	buf.WriteString(fmt.Sprintf("Content-Type: %s; name=\"%s\"\r\n", contentType, filename))
+	fmt.Fprintf(&buf, "--%s\r\n", boundary)
+	fmt.Fprintf(&buf, "Content-Type: %s; name=\"%s\"\r\n", contentType, filename)
 	buf.WriteString("Content-Transfer-Encoding: base64\r\n")
-	buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n\r\n", filename))
+	fmt.Fprintf(&buf, "Content-Disposition: attachment; filename=\"%s\"\r\n\r\n", filename)
 
 	// Base64 encode attachment
 	encoded := make([]byte, base64StdEncoding.EncodedLen(len(attachment)))
@@ -603,7 +603,7 @@ func (j *ReportGenerationJob) sendEmailWithAttachment(to, subject, htmlBody, tex
 		buf.WriteString("\r\n")
 	}
 
-	buf.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
+	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 

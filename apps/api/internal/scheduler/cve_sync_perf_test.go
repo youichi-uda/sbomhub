@@ -219,7 +219,7 @@ func TestCVESyncChunkPerf_F258_N100_M50_SingleChunk(t *testing.T) {
 	// modest (~3.7% at N=100 M=50) so we cannot use F213 / F234 / F244's
 	// 60% cushion — reverting to per-tenant runWithTenantTx would land
 	// at exactly old, and this strict-less catches that.
-	if !(wantNewRT < wantOldRT) {
+	if wantNewRT >= wantOldRT {
 		t.Errorf("F258 round-trip reduction target failed: new=%d, old=%d, want new < old",
 			wantNewRT, wantOldRT)
 	}
@@ -351,7 +351,7 @@ func TestCVESyncChunkPerf_F258_N500_M50_MultiChunk(t *testing.T) {
 	}
 
 	// F258 must still be strictly less than pre-F258 per-tenant.
-	if !(wantRT < wantOldRT) {
+	if wantRT >= wantOldRT {
 		t.Errorf("F258 scale-ceiling target: new=%d, old=%d, want new < old",
 			wantRT, wantOldRT)
 	}
@@ -472,26 +472,11 @@ func simulateOldPerTenantCVEMatch(
 			if !ok {
 				continue
 			}
-			// Match the pre-F258 SELECT shape.
-			rows, qErr := tx.QueryContext(ctx, `
-				SELECT DISTINCT c.id
-				FROM components c
-				WHERE LOWER(c.name) = ANY($1)
-				   OR LOWER(c.name) LIKE ANY($2)
-			`, pq.Array(cve.Keywords), pq.Array(cve.Keywords))
-			if qErr != nil {
+			linked, lErr := countOldMatchedComponents(ctx, tx, cve.Keywords)
+			if lErr != nil {
 				_ = tx.Rollback()
-				return 0, 0, qErr
+				return 0, 0, lErr
 			}
-			linked := 0
-			for rows.Next() {
-				var cid uuid.UUID
-				if scanErr := rows.Scan(&cid); scanErr != nil {
-					continue
-				}
-				linked++
-			}
-			rows.Close()
 			if linked > 0 {
 				matched++
 				if entry.isNew {
@@ -504,4 +489,37 @@ func simulateOldPerTenantCVEMatch(
 		}
 	}
 	return matched, newVulns, nil
+}
+
+// countOldMatchedComponents issues the pre-F258 per-CVE components SELECT
+// and counts the returned rows under the deferred-Close + rows.Err()
+// partial-result contract (sqlclosecheck / rowserrcheck, M46 Track C-3b):
+// a scan or iteration error surfaces as an error instead of a silent
+// undercount (the pre-normalization code `continue`d on scan errors and
+// never checked rows.Err()). Wire shape is unchanged — exactly one SELECT
+// round-trip per CVE — so the 1 + N*(3+M) accounting in the package
+// docstring still holds.
+func countOldMatchedComponents(ctx context.Context, tx *sql.Tx, keywords []string) (linked int, err error) {
+	// Match the pre-F258 SELECT shape.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT c.id
+		FROM components c
+		WHERE LOWER(c.name) = ANY($1)
+		   OR LOWER(c.name) LIKE ANY($2)
+	`, pq.Array(keywords), pq.Array(keywords))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid uuid.UUID
+		if scanErr := rows.Scan(&cid); scanErr != nil {
+			return 0, scanErr
+		}
+		linked++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return linked, nil
 }

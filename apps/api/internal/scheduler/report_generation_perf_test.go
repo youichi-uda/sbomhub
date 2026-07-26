@@ -215,7 +215,7 @@ func TestReportGenerationChunkPerf_F244_N100_SingleChunk(t *testing.T) {
 	t.Logf("  reduction:                           %.1f%%", 100.0*float64(wantOldRT-wantNewRT)/float64(wantOldRT))
 
 	// CI hard pin: new must be strictly less than 60% of old.
-	if !(wantNewRT*100 < wantOldRT*60) {
+	if wantNewRT*100 >= wantOldRT*60 {
 		t.Errorf("F244 round-trip target failed: new=%d, old=%d, target new*100 < old*60 (= %d)",
 			wantNewRT, wantOldRT, wantOldRT*60)
 	}
@@ -328,7 +328,7 @@ func TestReportGenerationChunkPerf_F244_N1200_MultiChunk(t *testing.T) {
 
 	// F244 must still be < 60% of pre-F244 (same F193 scale-ceiling
 	// target as F213 / F234). At N=1200 the ratio is 2407 / 4801 ≈ 50.1%.
-	if !(wantRT*100 < wantOldRT*60) {
+	if wantRT*100 >= wantOldRT*60 {
 		t.Errorf("F244 scale-ceiling target: new=%d, old=%d, target new*100 < old*60 (= %d)",
 			wantRT, wantOldRT, wantOldRT*60)
 	}
@@ -429,21 +429,8 @@ func reportSettingsMockRows(tenantID uuid.UUID) *sqlmock.Rows {
 // it, also update the round-trip accounting in the package docstring at
 // the top of this file.
 func simulateOldPerTenantReportEnabled(ctx context.Context, db *sql.DB) ([]uuid.UUID, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id FROM tenants ORDER BY created_at`)
+	ids, err := drainOldTenantIDRows(ctx, db)
 	if err != nil {
-		return nil, err
-	}
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if scanErr := rows.Scan(&id); scanErr != nil {
-			rows.Close()
-			return nil, scanErr
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -462,45 +449,84 @@ func simulateOldPerTenantReportEnabled(ctx context.Context, db *sql.DB) ([]uuid.
 			_ = tx.Rollback()
 			return nil, err
 		}
-		// Match the mock's report_settings shape (13 columns). We only
-		// read the tenant_id column to confirm the row exists; the rest
-		// of the columns are consumed by rows.Scan implicitly through
-		// the underlying driver so sqlmock's expectation stays satisfied.
-		rows, err := tx.QueryContext(ctx, `
-			SELECT id, tenant_id, enabled, report_type, schedule_type, schedule_day, schedule_hour,
-				format, email_enabled, email_recipients, include_sections, created_at, updated_at
-			FROM report_settings
-			WHERE enabled = true
-		`)
+		tenantIDs, err := queryOldReportSettingsTenants(ctx, tx)
 		if err != nil {
 			_ = tx.Rollback()
 			return nil, err
 		}
-		for rows.Next() {
-			var (
-				rid, tid                         uuid.UUID
-				enabledCol                       bool
-				reportType, scheduleType, format string
-				scheduleDay, scheduleHour        int
-				emailEnabled                     bool
-				emailRecipients, includeSections string
-				createdAt, updatedAt             time.Time
-			)
-			if scanErr := rows.Scan(
-				&rid, &tid, &enabledCol, &reportType, &scheduleType, &scheduleDay, &scheduleHour,
-				&format, &emailEnabled, &emailRecipients, &includeSections,
-				&createdAt, &updatedAt,
-			); scanErr != nil {
-				rows.Close()
-				_ = tx.Rollback()
-				return nil, scanErr
-			}
-			enabled = append(enabled, tid)
-		}
-		rows.Close()
+		enabled = append(enabled, tenantIDs...)
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
 	}
 	return enabled, nil
+}
+
+// drainOldTenantIDRows issues the pre-F244 listAllTenantIDs SELECT and
+// drains it under the deferred-Close + rows.Err() partial-result contract
+// (sqlclosecheck / rowserrcheck, M46 Track C-3b): an iteration error
+// surfaces as an error, never as a silently truncated tenant list. Wire
+// shape is unchanged — exactly one SELECT round-trip — so the 4N+1
+// accounting in the package docstring still holds.
+func drainOldTenantIDRows(ctx context.Context, db *sql.DB) (ids []uuid.UUID, err error) {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM tenants ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return nil, scanErr
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// queryOldReportSettingsTenants issues the pre-F244 per-tenant
+// report_settings SELECT and returns the tenant_id of every enabled row.
+// It matches the mock's report_settings shape (13 columns); only tenant_id
+// is kept, the rest are consumed so sqlmock's expectation stays satisfied.
+// Same deferred-Close + rows.Err() partial-result contract as
+// drainOldTenantIDRows; the cursor is closed (via defer, on return) before
+// the caller commits, exactly like the pre-extraction code closed it before
+// tx.Commit. Wire shape unchanged — one SELECT round-trip.
+func queryOldReportSettingsTenants(ctx context.Context, tx *sql.Tx) (tenantIDs []uuid.UUID, err error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, tenant_id, enabled, report_type, schedule_type, schedule_day, schedule_hour,
+			format, email_enabled, email_recipients, include_sections, created_at, updated_at
+		FROM report_settings
+		WHERE enabled = true
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			rid, tid                         uuid.UUID
+			enabledCol                       bool
+			reportType, scheduleType, format string
+			scheduleDay, scheduleHour        int
+			emailEnabled                     bool
+			emailRecipients, includeSections string
+			createdAt, updatedAt             time.Time
+		)
+		if scanErr := rows.Scan(
+			&rid, &tid, &enabledCol, &reportType, &scheduleType, &scheduleDay, &scheduleHour,
+			&format, &emailEnabled, &emailRecipients, &includeSections,
+			&createdAt, &updatedAt,
+		); scanErr != nil {
+			return nil, scanErr
+		}
+		tenantIDs = append(tenantIDs, tid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tenantIDs, nil
 }
