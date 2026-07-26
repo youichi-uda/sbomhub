@@ -73,8 +73,16 @@ func NewReportService(
 	visualizationRepo *repository.VisualizationRepository,
 	reportDir string,
 ) *ReportService {
-	// Ensure report directory exists
-	os.MkdirAll(reportDir, 0755)
+	// Ensure report directory exists. The constructor deliberately cannot
+	// return an error (its signature is settled — see doc comment above), so
+	// a mkdir failure is logged loudly instead of silently discarded
+	// (errcheck, M46 Track C-3a). Report bytes are persisted in the DB
+	// (GeneratedReport.FileContent); the directory only backs the legacy
+	// filesystem fallback in GetReportFile, so failing to create it must not
+	// prevent service construction.
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		slog.Error("failed to create report directory", "dir", reportDir, "error", err)
+	}
 
 	return &ReportService{
 		reportRepo:        reportRepo,
@@ -357,14 +365,14 @@ func (s *ReportService) generateReportAsync(tenantID uuid.UUID, report *model.Ge
 // connection for the full render duration.
 func (s *ReportService) runReportGeneration(txCtx context.Context, tenantID uuid.UUID, report *model.GeneratedReport, locale string) error {
 	// Gather report data (RLS-bound reads via repos that pick up the tx
-	// through database.Querier).
-	data, err := s.gatherReportData(txCtx, tenantID, report.PeriodStart, report.PeriodEnd)
-	if err != nil {
-		return fmt.Errorf("gather report data: %w", err)
-	}
+	// through database.Querier). gatherReportData never fails by design —
+	// see its doc comment — so there is no error branch here (unparam,
+	// M46 Track C-3a).
+	data := s.gatherReportData(txCtx, tenantID, report.PeriodStart, report.PeriodEnd)
 
 	// Generate file
 	var fileData []byte
+	var err error
 	switch report.Format {
 	case model.ReportFormatPDF:
 		fileData, err = s.generatePDF(data, report.ReportType, locale)
@@ -447,8 +455,19 @@ func (s *ReportService) runWithTenantTx(ctx context.Context, tenantID uuid.UUID,
 	})
 }
 
-// gatherReportData collects all data needed for the report
-func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID, start, end time.Time) (*model.ExecutiveReportData, error) {
+// gatherReportData collects all data needed for the report.
+//
+// It is deliberately infallible (M46 Track C-3a, unparam): per the M41 (F461)
+// design below, every failing section read is logged at WARN and leaves its
+// section empty rather than failing the whole report, so the previous
+// `(*model.ExecutiveReportData, error)` signature returned a literally
+// always-nil error and the caller's error branch was dead code. Removing the
+// return changes NO behavior — failures were already folded into
+// warn-and-degrade before this cleanup. If a hard-fail semantic is ever
+// wanted (e.g. "no report is better than a zero-filled report"), reintroduce
+// the error return and make each section read propagate instead of degrade —
+// do not bolt error handling onto this signature piecemeal.
+func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID, start, end time.Time) *model.ExecutiveReportData {
 	data := &model.ExecutiveReportData{
 		PeriodStart: start,
 		PeriodEnd:   end,
@@ -552,13 +571,13 @@ func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID
 
 	// Get visualization data (use first project's settings as representative)
 	if s.visualizationRepo != nil {
-		vizData := s.gatherVisualizationData(ctx, tenantID)
+		vizData := s.gatherVisualizationData()
 		if vizData != nil {
 			data.VisualizationData = vizData
 		}
 	}
 
-	return data, nil
+	return data
 }
 
 // gatherChecklistData collects checklist data for the report
@@ -643,8 +662,14 @@ func (s *ReportService) gatherChecklistData(ctx context.Context, tenantID uuid.U
 	return data
 }
 
-// gatherVisualizationData collects visualization settings for the report
-func (s *ReportService) gatherVisualizationData(ctx context.Context, tenantID uuid.UUID) *model.VisualizationReportData {
+// gatherVisualizationData collects visualization settings for the report.
+//
+// This is still a static-defaults stub: it does not read anything from
+// visualizationRepo (the caller only gates on the repo being non-nil), so it
+// takes no ctx/tenantID (unparam, M46 Track C-3a). When per-project
+// visualization settings are actually wired up, reintroduce
+// (ctx, tenantID) together with the repo read.
+func (s *ReportService) gatherVisualizationData() *model.VisualizationReportData {
 	// Return default visualization settings for reports
 	// In a real implementation, you'd get this from project settings
 	return &model.VisualizationReportData{
@@ -720,11 +745,6 @@ func (s *ReportService) generatePDF(data *model.ExecutiveReportData, reportType 
 	}
 
 	return doc.GetBytes(), nil
-}
-
-// getReportTitle returns the title for a report type (deprecated, use getReportTitleI18n)
-func (s *ReportService) getReportTitle(reportType string) string {
-	return s.getReportTitleI18n(reportType, GetTranslations("ja"))
 }
 
 // getReportTitleI18n returns the localized title for a report type
@@ -1014,7 +1034,15 @@ func (s *ReportService) buildPDFKeyValue(key, value string) core.Row {
 	)
 }
 
-// generateExcel generates an Excel report using excelize
+// generateExcel generates an Excel report using excelize.
+//
+// M46 Track C-3a: every excelize write below is routed through the shared
+// first-error collector (reportErrs, defined next to GenerateComplianceExcel
+// which established the pattern in Track C-1). Before this, ~97 error returns
+// were silently discarded, so a failed cell/sheet/style write still yielded a
+// "successful" — but incomplete — workbook. The collector keeps the FIRST
+// failure and generateExcel checks it once before serialization, propagating
+// the error to runReportGeneration, which flips the report row to "failed".
 func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportType string, locale string) ([]byte, error) {
 	// Get translations
 	t := GetTranslations(locale)
@@ -1022,35 +1050,38 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 	f := excelize.NewFile()
 	defer f.Close()
 
+	ec := &reportErrs{}
+
 	// Create Summary sheet with title based on report type
 	sheetName := t.SheetSummary
-	f.SetSheetName("Sheet1", sheetName)
+	ec.collect(f.SetSheetName("Sheet1", sheetName))
 
 	// Set column widths
-	f.SetColWidth(sheetName, "A", "A", 25)
-	f.SetColWidth(sheetName, "B", "B", 30)
+	ec.collect(f.SetColWidth(sheetName, "A", "A", 25))
+	ec.collect(f.SetColWidth(sheetName, "B", "B", 30))
 
 	// Header style
-	headerStyle, _ := f.NewStyle(&excelize.Style{
+	headerStyle, err := f.NewStyle(&excelize.Style{
 		Font:      &excelize.Font{Bold: true, Size: 14, Color: "#FFFFFF"},
 		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#4472C4"}, Pattern: 1},
 		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
 	})
+	ec.collect(err)
 
 	// Title based on report type
 	title := s.getReportTitleI18n(reportType, t)
-	f.MergeCell(sheetName, "A1", "B1")
-	f.SetCellValue(sheetName, "A1", title)
-	f.SetCellStyle(sheetName, "A1", "B1", headerStyle)
-	f.SetRowHeight(sheetName, 1, 30)
+	ec.collect(f.MergeCell(sheetName, "A1", "B1"))
+	ec.collect(f.SetCellValue(sheetName, "A1", title))
+	ec.collect(f.SetCellStyle(sheetName, "A1", "B1", headerStyle))
+	ec.collect(f.SetRowHeight(sheetName, 1, 30))
 
 	// Period info
-	f.SetCellValue(sheetName, "A2", t.Period)
-	f.SetCellValue(sheetName, "B2", fmt.Sprintf("%s - %s",
+	ec.collect(f.SetCellValue(sheetName, "A2", t.Period))
+	ec.collect(f.SetCellValue(sheetName, "B2", fmt.Sprintf("%s - %s",
 		data.PeriodStart.Format("2006-01-02"),
-		data.PeriodEnd.Format("2006-01-02")))
-	f.SetCellValue(sheetName, "A3", t.GeneratedAt)
-	f.SetCellValue(sheetName, "B3", data.GeneratedAt.Format("2006-01-02 15:04"))
+		data.PeriodEnd.Format("2006-01-02"))))
+	ec.collect(f.SetCellValue(sheetName, "A3", t.GeneratedAt))
+	ec.collect(f.SetCellValue(sheetName, "B3", data.GeneratedAt.Format("2006-01-02 15:04")))
 
 	// Summary data
 	row := 5
@@ -1065,15 +1096,15 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 	}
 
 	for _, d := range summaryData {
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), d[0])
-		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), d[1])
+		ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), d[0]))
+		ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), d[1]))
 		row++
 	}
 
 	// Vulnerability breakdown
 	row += 2
-	f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), t.VulnerabilityBreakdown)
-	f.SetCellStyle(sheetName, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), headerStyle)
+	ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), t.VulnerabilityBreakdown))
+	ec.collect(f.SetCellStyle(sheetName, fmt.Sprintf("A%d", row), fmt.Sprintf("A%d", row), headerStyle))
 	row++
 
 	vulnData := [][]interface{}{
@@ -1084,119 +1115,122 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 	}
 
 	for _, d := range vulnData {
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), d[0])
-		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), d[1])
+		ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), d[0]))
+		ec.collect(f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), d[1]))
 		row++
 	}
 
 	// Create Top Risks sheet for Executive and Technical reports
 	if len(data.TopRisks) > 0 && (reportType == model.ReportTypeExecutive || reportType == model.ReportTypeTechnical) {
 		riskSheet := t.SheetTopRisks
-		f.NewSheet(riskSheet)
-		f.SetColWidth(riskSheet, "A", "A", 20)
-		f.SetColWidth(riskSheet, "B", "B", 25)
-		f.SetColWidth(riskSheet, "C", "C", 15)
-		f.SetColWidth(riskSheet, "D", "D", 12)
-		f.SetColWidth(riskSheet, "E", "E", 12)
+		_, err = f.NewSheet(riskSheet)
+		ec.collect(err)
+		ec.collect(f.SetColWidth(riskSheet, "A", "A", 20))
+		ec.collect(f.SetColWidth(riskSheet, "B", "B", 25))
+		ec.collect(f.SetColWidth(riskSheet, "C", "C", 15))
+		ec.collect(f.SetColWidth(riskSheet, "D", "D", 12))
+		ec.collect(f.SetColWidth(riskSheet, "E", "E", 12))
 
 		// Headers
-		f.SetCellValue(riskSheet, "A1", t.CVEID)
-		f.SetCellValue(riskSheet, "B1", t.Project)
-		f.SetCellValue(riskSheet, "C1", t.Component)
-		f.SetCellValue(riskSheet, "D1", t.CVSS)
-		f.SetCellValue(riskSheet, "E1", t.EPSS)
+		ec.collect(f.SetCellValue(riskSheet, "A1", t.CVEID))
+		ec.collect(f.SetCellValue(riskSheet, "B1", t.Project))
+		ec.collect(f.SetCellValue(riskSheet, "C1", t.Component))
+		ec.collect(f.SetCellValue(riskSheet, "D1", t.CVSS))
+		ec.collect(f.SetCellValue(riskSheet, "E1", t.EPSS))
 
 		for i, risk := range data.TopRisks {
 			row := i + 2
-			f.SetCellValue(riskSheet, fmt.Sprintf("A%d", row), risk.CVEID)
-			f.SetCellValue(riskSheet, fmt.Sprintf("B%d", row), risk.ProjectName)
-			f.SetCellValue(riskSheet, fmt.Sprintf("C%d", row), risk.ComponentName)
-			f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), risk.CVSSScore)
-			f.SetCellValue(riskSheet, fmt.Sprintf("E%d", row), fmt.Sprintf("%.2f%%", risk.EPSSScore*100))
+			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("A%d", row), risk.CVEID))
+			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("B%d", row), risk.ProjectName))
+			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("C%d", row), risk.ComponentName))
+			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), risk.CVSSScore))
+			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("E%d", row), fmt.Sprintf("%.2f%%", risk.EPSSScore*100)))
 		}
 	}
 
 	// Create Trend sheet for Technical reports only
 	if len(data.VulnerabilityData.TrendData) > 0 && reportType == model.ReportTypeTechnical {
 		trendSheet := t.SheetTrend
-		f.NewSheet(trendSheet)
-		f.SetColWidth(trendSheet, "A", "A", 15)
-		f.SetColWidth(trendSheet, "B", "E", 12)
+		_, err = f.NewSheet(trendSheet)
+		ec.collect(err)
+		ec.collect(f.SetColWidth(trendSheet, "A", "A", 15))
+		ec.collect(f.SetColWidth(trendSheet, "B", "E", 12))
 
 		// Headers
-		f.SetCellValue(trendSheet, "A1", t.Date)
-		f.SetCellValue(trendSheet, "B1", t.Critical)
-		f.SetCellValue(trendSheet, "C1", t.High)
-		f.SetCellValue(trendSheet, "D1", t.Medium)
-		f.SetCellValue(trendSheet, "E1", t.Low)
+		ec.collect(f.SetCellValue(trendSheet, "A1", t.Date))
+		ec.collect(f.SetCellValue(trendSheet, "B1", t.Critical))
+		ec.collect(f.SetCellValue(trendSheet, "C1", t.High))
+		ec.collect(f.SetCellValue(trendSheet, "D1", t.Medium))
+		ec.collect(f.SetCellValue(trendSheet, "E1", t.Low))
 
 		for i, trend := range data.VulnerabilityData.TrendData {
 			row := i + 2
-			f.SetCellValue(trendSheet, fmt.Sprintf("A%d", row), trend.Date)
-			f.SetCellValue(trendSheet, fmt.Sprintf("B%d", row), trend.Critical)
-			f.SetCellValue(trendSheet, fmt.Sprintf("C%d", row), trend.High)
-			f.SetCellValue(trendSheet, fmt.Sprintf("D%d", row), trend.Medium)
-			f.SetCellValue(trendSheet, fmt.Sprintf("E%d", row), trend.Low)
+			ec.collect(f.SetCellValue(trendSheet, fmt.Sprintf("A%d", row), trend.Date))
+			ec.collect(f.SetCellValue(trendSheet, fmt.Sprintf("B%d", row), trend.Critical))
+			ec.collect(f.SetCellValue(trendSheet, fmt.Sprintf("C%d", row), trend.High))
+			ec.collect(f.SetCellValue(trendSheet, fmt.Sprintf("D%d", row), trend.Medium))
+			ec.collect(f.SetCellValue(trendSheet, fmt.Sprintf("E%d", row), trend.Low))
 		}
 	}
 
 	// Create METI Checklist sheet for Compliance reports only
 	if data.ChecklistData != nil && reportType == model.ReportTypeCompliance {
 		checklistSheet := t.SheetChecklist
-		f.NewSheet(checklistSheet)
-		f.SetColWidth(checklistSheet, "A", "A", 15)
-		f.SetColWidth(checklistSheet, "B", "B", 40)
-		f.SetColWidth(checklistSheet, "C", "C", 12)
-		f.SetColWidth(checklistSheet, "D", "D", 12)
-		f.SetColWidth(checklistSheet, "E", "E", 30)
+		_, err = f.NewSheet(checklistSheet)
+		ec.collect(err)
+		ec.collect(f.SetColWidth(checklistSheet, "A", "A", 15))
+		ec.collect(f.SetColWidth(checklistSheet, "B", "B", 40))
+		ec.collect(f.SetColWidth(checklistSheet, "C", "C", 12))
+		ec.collect(f.SetColWidth(checklistSheet, "D", "D", 12))
+		ec.collect(f.SetColWidth(checklistSheet, "E", "E", 30))
 
 		// Title
-		f.MergeCell(checklistSheet, "A1", "E1")
-		f.SetCellValue(checklistSheet, "A1", t.METIChecklist)
-		f.SetCellStyle(checklistSheet, "A1", "E1", headerStyle)
-		f.SetRowHeight(checklistSheet, 1, 25)
+		ec.collect(f.MergeCell(checklistSheet, "A1", "E1"))
+		ec.collect(f.SetCellValue(checklistSheet, "A1", t.METIChecklist))
+		ec.collect(f.SetCellStyle(checklistSheet, "A1", "E1", headerStyle))
+		ec.collect(f.SetRowHeight(checklistSheet, 1, 25))
 
 		// Summary
 		checklistPct := 0.0
 		if data.ChecklistData.MaxScore > 0 {
 			checklistPct = float64(data.ChecklistData.Score) / float64(data.ChecklistData.MaxScore) * 100
 		}
-		f.SetCellValue(checklistSheet, "A2", t.TotalProgress)
-		f.SetCellValue(checklistSheet, "B2", fmt.Sprintf("%d / %d (%.0f%%)",
-			data.ChecklistData.Score, data.ChecklistData.MaxScore, checklistPct))
+		ec.collect(f.SetCellValue(checklistSheet, "A2", t.TotalProgress))
+		ec.collect(f.SetCellValue(checklistSheet, "B2", fmt.Sprintf("%d / %d (%.0f%%)",
+			data.ChecklistData.Score, data.ChecklistData.MaxScore, checklistPct)))
 
 		// Headers
 		row := 4
-		f.SetCellValue(checklistSheet, fmt.Sprintf("A%d", row), t.Phase)
-		f.SetCellValue(checklistSheet, fmt.Sprintf("B%d", row), t.Item)
-		f.SetCellValue(checklistSheet, fmt.Sprintf("C%d", row), t.AutoVerify)
-		f.SetCellValue(checklistSheet, fmt.Sprintf("D%d", row), t.Status)
-		f.SetCellValue(checklistSheet, fmt.Sprintf("E%d", row), t.Notes)
+		ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("A%d", row), t.Phase))
+		ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("B%d", row), t.Item))
+		ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("C%d", row), t.AutoVerify))
+		ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("D%d", row), t.Status))
+		ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("E%d", row), t.Notes))
 		row++
 
 		// Checklist items by phase
 		for _, phase := range data.ChecklistData.Phases {
 			for i, item := range phase.Items {
-				f.SetCellValue(checklistSheet, fmt.Sprintf("A%d", row), func() string {
+				ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("A%d", row), func() string {
 					if i == 0 {
 						return phase.LabelJa
 					}
 					return ""
-				}())
-				f.SetCellValue(checklistSheet, fmt.Sprintf("B%d", row), item.LabelJa)
-				f.SetCellValue(checklistSheet, fmt.Sprintf("C%d", row), func() string {
+				}()))
+				ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("B%d", row), item.LabelJa))
+				ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("C%d", row), func() string {
 					if item.AutoVerify {
 						return "○"
 					}
 					return "-"
-				}())
-				f.SetCellValue(checklistSheet, fmt.Sprintf("D%d", row), func() string {
+				}()))
+				ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("D%d", row), func() string {
 					if item.Passed {
 						return t.Completed
 					}
 					return t.NotCompleted
-				}())
-				f.SetCellValue(checklistSheet, fmt.Sprintf("E%d", row), item.Note)
+				}()))
+				ec.collect(f.SetCellValue(checklistSheet, fmt.Sprintf("E%d", row), item.Note))
 				row++
 			}
 		}
@@ -1205,65 +1239,73 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 	// Create Visualization Framework sheet for Compliance reports only
 	if data.VisualizationData != nil && reportType == model.ReportTypeCompliance {
 		vizSheet := t.SheetVisualization
-		f.NewSheet(vizSheet)
-		f.SetColWidth(vizSheet, "A", "A", 25)
-		f.SetColWidth(vizSheet, "B", "B", 35)
-		f.SetColWidth(vizSheet, "C", "C", 35)
+		_, err = f.NewSheet(vizSheet)
+		ec.collect(err)
+		ec.collect(f.SetColWidth(vizSheet, "A", "A", 25))
+		ec.collect(f.SetColWidth(vizSheet, "B", "B", 35))
+		ec.collect(f.SetColWidth(vizSheet, "C", "C", 35))
 
 		// Title
-		f.MergeCell(vizSheet, "A1", "C1")
-		f.SetCellValue(vizSheet, "A1", t.VisualizationFramework)
-		f.SetCellStyle(vizSheet, "A1", "C1", headerStyle)
-		f.SetRowHeight(vizSheet, 1, 25)
+		ec.collect(f.MergeCell(vizSheet, "A1", "C1"))
+		ec.collect(f.SetCellValue(vizSheet, "A1", t.VisualizationFramework))
+		ec.collect(f.SetCellStyle(vizSheet, "A1", "C1", headerStyle))
+		ec.collect(f.SetRowHeight(vizSheet, 1, 25))
 
 		// Headers
-		f.SetCellValue(vizSheet, "A3", t.Perspective)
-		f.SetCellValue(vizSheet, "B3", t.Setting)
-		f.SetCellValue(vizSheet, "C3", t.Description)
+		ec.collect(f.SetCellValue(vizSheet, "A3", t.Perspective))
+		ec.collect(f.SetCellValue(vizSheet, "B3", t.Setting))
+		ec.collect(f.SetCellValue(vizSheet, "C3", t.Description))
 
 		vizOptions := model.GetVisualizationOptions()
 
 		// (a) SBOM Author
 		row := 4
-		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizSBOMAuthor)
-		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
-			s.getVisualizationOptionLabel(vizOptions.SBOMAuthorScope, data.VisualizationData.SBOMAuthorScope))
-		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizSBOMAuthorDesc)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizSBOMAuthor))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
+			s.getVisualizationOptionLabel(vizOptions.SBOMAuthorScope, data.VisualizationData.SBOMAuthorScope)))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizSBOMAuthorDesc))
 		row++
 
 		// (b) Dependencies
-		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizDependency)
-		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
-			s.getVisualizationOptionLabel(vizOptions.DependencyScope, data.VisualizationData.DependencyScope))
-		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizDependencyDesc)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizDependency))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
+			s.getVisualizationOptionLabel(vizOptions.DependencyScope, data.VisualizationData.DependencyScope)))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizDependencyDesc))
 		row++
 
 		// (c) Generation Method
-		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizGeneration)
-		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
-			s.getVisualizationOptionLabel(vizOptions.GenerationMethod, data.VisualizationData.GenerationMethod))
-		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizGenerationDesc)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizGeneration))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
+			s.getVisualizationOptionLabel(vizOptions.GenerationMethod, data.VisualizationData.GenerationMethod)))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizGenerationDesc))
 		row++
 
 		// (d) Data Format
-		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizDataFormat)
-		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
-			s.getVisualizationOptionLabel(vizOptions.DataFormat, data.VisualizationData.DataFormat))
-		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizDataFormatDesc)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizDataFormat))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
+			s.getVisualizationOptionLabel(vizOptions.DataFormat, data.VisualizationData.DataFormat)))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizDataFormatDesc))
 		row++
 
 		// (e) Utilization Scope
-		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizUtilizationScope)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizUtilizationScope))
 		scopeLabels := s.getUtilizationScopeLabels(vizOptions.UtilizationScope, data.VisualizationData.UtilizationScope)
-		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row), scopeLabels)
-		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizUtilizationScopeDesc)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row), scopeLabels))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizUtilizationScopeDesc))
 		row++
 
 		// (f) Utilization Actor
-		f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizUtilization)
-		f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
-			s.getVisualizationOptionLabel(vizOptions.UtilizationActor, data.VisualizationData.UtilizationActor))
-		f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizUtilizationDesc)
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("A%d", row), t.VizUtilization))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("B%d", row),
+			s.getVisualizationOptionLabel(vizOptions.UtilizationActor, data.VisualizationData.UtilizationActor)))
+		ec.collect(f.SetCellValue(vizSheet, fmt.Sprintf("C%d", row), t.VizUtilizationDesc))
+	}
+
+	// A corrupt workbook must not be reported as success — fail before
+	// serializing if any cell/sheet/style write above failed (same contract
+	// as GenerateComplianceExcel, M46 Track C).
+	if ec.err != nil {
+		return nil, fmt.Errorf("failed to build Excel report: %w", ec.err)
 	}
 
 	// Write to buffer
