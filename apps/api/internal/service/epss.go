@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,6 +15,30 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/validation"
 )
+
+// parseEPSSValue parses one FIRST-served decimal string as an EPSS
+// probability. strconv.ParseFloat alone is NOT a sufficient validity check
+// (M46 Codex final round, Medium #2): it accepts "NaN", "Inf"/"-Inf" and
+// out-of-range decimals like "1.1" / "-0.1", which pre-fix flowed into the
+// DB as real values — 110% probabilities in the UI, NaN breaking JSON
+// marshalling of any response embedding the score (and NaN is a VALID
+// Postgres numeric, so it round-trips), and |v| >= 10 aborting the
+// DECIMAL(5,4) UPDATE mid-sync so stale values kept being served. EPSS
+// scores and percentiles are probabilities: finite and within [0,1], or
+// they are no data at all.
+func parseEPSSValue(raw string) (float64, error) {
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, err
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("non-finite EPSS value %q", raw)
+	}
+	if v < 0 || v > 1 {
+		return 0, fmt.Errorf("EPSS value %q outside [0,1]", raw)
+	}
+	return v, nil
+}
 
 const (
 	epssAPIURL    = "https://api.first.org/data/v1/epss"
@@ -162,37 +187,64 @@ func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map
 		return nil, fmt.Errorf("failed to decode EPSS response: %w", err)
 	}
 
+	// The map that reaches UpdateEPSSScores is keyed ONLY by normalized CVE
+	// ids that are members of THIS request's batch (M46 Codex final round,
+	// Low #1). Pre-fix it was keyed by the raw response item.CVE with no
+	// membership check — and because a tombstone entry CLEARS the global
+	// vulnerabilities row's EPSS columns for every tenant, a FIRST 200
+	// response carrying a malformed item for an unrequested CVE could reach
+	// into rows this sync was never asked about. Unsolicited or unparseable
+	// response ids are logged and dropped; requested ids answered in a
+	// non-canonical case are normalized (ValidateCVEID upper-cases) so a
+	// legitimate answer is never lost over casing.
+	requested := make(map[string]struct{}, len(validIDs))
+	for _, id := range validIDs {
+		requested[id] = struct{}{}
+	}
+
 	scores := make(map[string]repository.EPSSData)
 	for _, item := range epssResp.Data {
-		// FIRST serves scores as decimal strings. A malformed value must NOT
-		// be stored as a fabricated 0.0 (EPSS feeds SSVC auto-assessment, so
-		// a silent zero downgrades real risk) — and it must NOT be skipped
-		// either (M46 Codex round C, Medium): this sync may be refreshing a
-		// CVE that already has a value in the DB, and a skip leaves that
-		// previous, no-longer-authoritative value being served as current
-		// with no freshness signal. Every answered CVE therefore gets an
-		// explicit entry:
-		//   - score OK, percentile malformed -> keep the score, clear only
+		cveID, err := validation.ValidateCVEID(item.CVE)
+		if err != nil {
+			slog.Warn("epss: dropping response item with malformed CVE id", "cve", item.CVE)
+			continue
+		}
+		if _, ok := requested[cveID]; !ok {
+			slog.Warn("epss: dropping unrequested CVE from FIRST response", "cve_id", cveID)
+			continue
+		}
+		// FIRST serves scores as decimal strings. A malformed OR out-of-range
+		// value must NOT be stored as a fabricated 0.0 (EPSS feeds SSVC
+		// auto-assessment, so a silent zero downgrades real risk) — and it
+		// must NOT be skipped either (M46 Codex round C, Medium): this sync
+		// may be refreshing a CVE that already has a value in the DB, and a
+		// skip leaves that previous, no-longer-authoritative value being
+		// served as current with no freshness signal. Every answered CVE
+		// therefore gets an explicit entry:
+		//   - score OK, percentile invalid -> keep the score, clear only
 		//     the percentile (a valid score must not be discarded);
-		//   - score malformed -> clear BOTH columns to NULL ("no data", the
+		//   - score invalid -> clear BOTH columns to NULL ("no data", the
 		//     state all readers already handle); a percentile without a
 		//     score would read as fabricated "score 0 at high percentile"
 		//     through the COALESCE readers.
-		score, sErr := strconv.ParseFloat(item.EPSS, 64)
-		percentile, pErr := strconv.ParseFloat(item.Percentile, 64)
+		// "Invalid" covers both unparseable strings and parseable-but-
+		// nonsensical probabilities (NaN / Inf / outside [0,1]) — see
+		// parseEPSSValue (M46 Codex final round, Medium #2).
+		score, sErr := parseEPSSValue(item.EPSS)
+		percentile, pErr := parseEPSSValue(item.Percentile)
 		switch {
 		case sErr != nil:
-			slog.Warn("epss: unparseable score from FIRST API; clearing stored EPSS for CVE",
-				"cve_id", item.CVE, "epss", item.EPSS, "percentile", item.Percentile,
+			slog.Warn("epss: invalid score from FIRST API; clearing stored EPSS for CVE",
+				"cve_id", cveID, "epss", item.EPSS, "percentile", item.Percentile,
 				"score_err", sErr)
-			scores[item.CVE] = repository.EPSSData{}
+			scores[cveID] = repository.EPSSData{}
 		case pErr != nil:
-			slog.Warn("epss: unparseable percentile from FIRST API; keeping score, clearing percentile",
-				"cve_id", item.CVE, "epss", item.EPSS, "percentile", item.Percentile,
+			slog.Warn("epss: invalid percentile from FIRST API; keeping score, clearing percentile",
+				"cve_id", cveID, "epss", item.EPSS, "percentile", item.Percentile,
 				"percentile_err", pErr)
-			scores[item.CVE] = repository.EPSSData{Score: &score}
+			scores[cveID] = repository.EPSSData{Score: &score}
 		default:
-			scores[item.CVE] = repository.EPSSData{
+			scores[cveID] = repository.EPSSData{
 				Score:      &score,
 				Percentile: &percentile,
 			}

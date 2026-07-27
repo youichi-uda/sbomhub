@@ -1,0 +1,92 @@
+-- ============================================
+-- Split "when did we last get an EPSS score" from "when did we last ask"
+-- (M46 Codex final round, Low #2).
+--
+-- The conflict this resolves:
+--   Migration 055 defines vulnerabilities.epss_updated_at as the "last
+--   successful EPSS sync for this CVE", explicitly "NULL until the scheduled
+--   epss_sync writes a score" (its DDL COMMENT, promoted verbatim from the
+--   orphan packages/db 006_epss.sql). Commit def6a46 then made the writer
+--   (repository.UpdateEPSSScores) bump epss_updated_at = NOW() on CLEARS too
+--   -- the tombstone path where FIRST answered with an unusable value and
+--   both epss_score and epss_percentile go to NULL.
+--
+--   def6a46 had a good reason: without SOME timestamp movement, a row that a
+--   sync deliberately cleared is indistinguishable from a row that was never
+--   synced at all (both would be all-NULL), and that distinction is what
+--   proves the stale-value fix actually ran. But overloading
+--   epss_updated_at to carry it broke 055's stated contract and produced a
+--   genuinely misleading state: `epss_updated_at` is published straight
+--   through the JSON API (model.Vulnerability.EPSSUpdatedAt ->
+--   "epss_updated_at"), so an external consumer could see a timestamp from
+--   minutes ago next to an absent score and reasonably conclude a fresh
+--   score had just been written.
+--
+-- The decision (why a NEW column instead of redefining the old one):
+--   The alternative was to keep one column and restate its meaning as "last
+--   fetch attempt" in the COMMENT + API docs. That was rejected because
+--   `epss_updated_at` is ALREADY a published API field: silently changing
+--   what a shipped field means is a worse failure mode than adding one, as
+--   existing consumers would keep reading it under the old contract with no
+--   signal that anything changed. Renaming it instead would be an outright
+--   breaking change to the JSON surface for a Low-severity clarity issue.
+--
+--   Adding epss_checked_at is purely ADDITIVE and restores the invariant
+--   055 promised, for every write performed from this migration onward
+--   (it is a WRITER discipline, not a CHECK constraint -- see "Backfill"
+--   below for the pre-existing rows it does not retroactively repair):
+--
+--       epss_updated_at IS NOT NULL  <=>  epss_score IS NOT NULL
+--
+--   so every existing reader of epss_updated_at keeps its ORIGINAL meaning
+--   with no code change, and the three states stay distinguishable:
+--
+--       never synced      : score NULL, updated_at NULL, checked_at NULL
+--       cleared by a sync : score NULL, updated_at NULL, checked_at set
+--       scored            : score set,  updated_at set,  checked_at set
+--
+--   Because that invariant holds, epss_checked_at is an OPERATIONAL /audit
+--   signal only -- it is never needed to interpret a score. List projections
+--   that select epss_score + epss_updated_at (repository/kev.go's
+--   GetKEVVulnerabilities, the dashboard/search/report readers) therefore
+--   stay correct untouched; only the canonical single-vulnerability reads
+--   (VulnerabilityRepository.GetByID / GetByCVE) surface the new column.
+--
+-- Writer change that accompanies this migration (UpdateEPSSScores):
+--   SET epss_score      = $1,
+--       epss_percentile = $2,
+--       epss_updated_at = CASE WHEN $1 IS NULL THEN NULL ELSE NOW() END,
+--       epss_checked_at = NOW()
+--   NOW() stays the DB's clock (the authority for both columns), and the
+--   CASE keeps it a single statement per CVE. A tombstone therefore also
+--   CLEARS a previously-stored epss_updated_at, which is correct: the score
+--   it referred to no longer exists on the row.
+--
+-- RLS:
+--   vulnerabilities is a GLOBAL, non-tenant table (001_init declares no
+--   tenant_id; it is a shared NVD/JVN/EPSS cache identical for every tenant
+--   and a recorded structural exemption in the lint-migration-rls tool).
+--   ALTER TABLE ... ADD COLUMN touches neither the table's RLS state nor any
+--   policy, exactly as 020 (KEV) and 055 (EPSS) added columns here with no
+--   RLS statements. The lint-migration-rls gate is a no-op for this
+--   migration (no tenant_id declared or ALTER-promoted).
+--
+-- Backfill:
+--   None, deliberately. epss_checked_at starts NULL on every existing row.
+--   Backfilling it from epss_updated_at would be a guess: for rows written
+--   between def6a46 and this migration, epss_updated_at may record a CLEAR
+--   rather than a score write, and there is no stored evidence of which.
+--   The next epss_sync populates checked_at authoritatively for every CVE it
+--   touches. Note the mirror-image caveat: rows cleared during that window
+--   carry an epss_updated_at that this migration does NOT retroactively
+--   NULL, so the invariant above holds for all writes FROM here on, and is
+--   reconciled for pre-existing rows on their next sync.
+-- ============================================
+
+ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS epss_checked_at TIMESTAMP WITH TIME ZONE;
+
+COMMENT ON COLUMN vulnerabilities.epss_checked_at IS
+    'M46 Codex final round (Low #2): timestamp of the last EPSS fetch ATTEMPT for this CVE -- i.e. the last time FIRST.org answered for it at all, whether or not a usable score came back (TIMESTAMPTZ, DB clock). Global non-tenant attribute. Distinguishes a row a sync deliberately CLEARED (epss_checked_at set, epss_score/epss_updated_at NULL) from a row never synced (all NULL). Operational/freshness signal only: it is never required to interpret epss_score, so list projections may omit it. Compare epss_updated_at, which moves ONLY when a score is actually written.';
+
+COMMENT ON COLUMN vulnerabilities.epss_updated_at IS
+    'M36-A / F432 (#154), clarified by M46 Low #2 (059): timestamp of the last SUCCESSFUL EPSS sync for this CVE -- the last time a score was actually WRITTEN (TIMESTAMPTZ). Global non-tenant attribute. NULL until the scheduled epss_sync writes a score, and cleared back to NULL when a sync tombstones the row, so that `epss_updated_at IS NOT NULL <=> epss_score IS NOT NULL` holds for every write performed FROM 059 ONWARD. That invariant is NOT database-enforced and is NOT retroactive: rows last written between def6a46 and 059 may still carry a timestamp beside a NULL score, and are reconciled on their next sync (059 does no backfill -- see its header). For "when did we last ASK FIRST", including attempts that yielded no usable value, see epss_checked_at. Promoted verbatim from orphan packages/db 006_epss.sql; semantics unchanged from 055 (059 only restores them in the writer and states the invariant).';

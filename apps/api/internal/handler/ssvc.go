@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -172,14 +173,18 @@ func (h *SSVCHandler) AutoAssessVulnerability(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusUnauthorized, "tenant ID not found")
 	}
 
-	// Get CVE ID from query
-	cveID := c.QueryParam("cve_id")
-	if cveID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "cve_id is required")
-	}
-
-	assessment, err := h.ssvcService.AutoAssessVulnerability(c.Request().Context(), projectID, tenantID, vulnID, cveID)
+	// M46 Codex final round (Medium #1): the cve_id query parameter is
+	// intentionally NOT read. It used to be forwarded verbatim as the
+	// KEV/EPSS/CVSS evidence key, letting a caller assess vulnerability
+	// :vuln_id on a DIFFERENT CVE's data. The service now derives the CVE
+	// server-side from :vuln_id and verifies project/tenant membership;
+	// legacy clients still sending ?cve_id= keep working — the parameter
+	// is simply inert.
+	assessment, err := h.ssvcService.AutoAssessVulnerability(c.Request().Context(), projectID, tenantID, vulnID)
 	if err != nil {
+		if errors.Is(err, service.ErrSSVCVulnerabilityNotInProject) {
+			return echo.NewHTTPError(http.StatusNotFound, "vulnerability not found in project")
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 

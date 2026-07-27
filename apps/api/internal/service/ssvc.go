@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +12,13 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
+
+// ErrSSVCVulnerabilityNotInProject is returned by AutoAssessVulnerability
+// when the requested vulnerability does not exist or is not linked to any
+// component of the caller's (tenant, project) — deliberately one sentinel
+// for both cases so the handler's 404 cannot be used to probe for the
+// existence of vulnerabilities outside the caller's scope.
+var ErrSSVCVulnerabilityNotInProject = errors.New("vulnerability not found in project scope")
 
 // SSVCService handles SSVC assessment operations
 type SSVCService struct {
@@ -166,8 +175,35 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 	return assessment, nil
 }
 
-// AutoAssessVulnerability automatically assesses a vulnerability using KEV/EPSS data
-func (s *SSVCService) AutoAssessVulnerability(ctx context.Context, projectID, tenantID, vulnerabilityID uuid.UUID, cveID string) (*model.SSVCAssessment, error) {
+// AutoAssessVulnerability automatically assesses a vulnerability using KEV/EPSS data.
+//
+// M46 Codex final round (Medium #1): the CVE id is derived SERVER-SIDE from
+// vulnerabilityID — never accepted from the caller. The pre-fix signature
+// took a caller-supplied cveID (the handler forwarded ?cve_id= verbatim)
+// and keyed every piece of evidence on it (KEV GetByCVE, EPSS/CVSS via
+// vulnRepo.GetByCVE) while writing the assessment and the denormalized
+// vulnerabilities.ssvc_decision under vulnerabilityID — so a caller could
+// have vulnerability A assessed on vulnerability B's KEV/EPSS/CVSS. The
+// EPSS branch was dead code (EPSSScore always nil through GetByCVE) until
+// def6a46 added the epss_* columns to that read, which is what made this
+// path actually exploitable. GetCVEIDByIDInProject resolves the
+// authoritative CVE and verifies (tenant, project, vulnerability)
+// membership through the RLS-protected components/sboms join in one
+// statement; out-of-scope or unknown ids surface as
+// ErrSSVCVulnerabilityNotInProject (handler: 404) before anything is
+// read or written. The binding lives here in the service (not the
+// handler) so every future caller of auto-assess inherits it, mirroring
+// the triage runner's resolveAuthoritativeCVEID / resolveComponentIDs
+// posture (#F12 / #F3).
+func (s *SSVCService) AutoAssessVulnerability(ctx context.Context, projectID, tenantID, vulnerabilityID uuid.UUID) (*model.SSVCAssessment, error) {
+	cveID, err := s.vulnRepo.GetCVEIDByIDInProject(ctx, tenantID, projectID, vulnerabilityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSSVCVulnerabilityNotInProject
+		}
+		return nil, fmt.Errorf("resolve cve for vulnerability %s: %w", vulnerabilityID, err)
+	}
+
 	// Get project defaults
 	defaults, err := s.ssvcRepo.GetProjectDefaults(ctx, projectID)
 	if err != nil {

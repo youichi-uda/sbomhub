@@ -266,6 +266,158 @@ func TestEPSSService_MalformedValues_PartialKeepAndTombstone(t *testing.T) {
 	}
 }
 
+// TestEPSSService_NonFiniteAndOutOfRangeValues pins the M46 Codex final round
+// (Medium #2) contract: strconv.ParseFloat SUCCESS is not the same as a valid
+// EPSS value. ParseFloat happily accepts "NaN", "Inf"/"-Inf" and out-of-range
+// decimals like "1.1" / "-0.1" — pre-fix those flowed through as *real*
+// scores: 110% probabilities in the UI, NaN breaking JSON marshalling of any
+// response embedding the score, and values > 9.9999 aborting the DECIMAL(5,4)
+// UPDATE mid-sync (leaving stale values served as current). An EPSS
+// score/percentile is a probability: it must be finite AND within [0,1].
+// Anything else is treated exactly like an unparseable string under the
+// def6a46 contract — score invalid => tombstone both columns; percentile
+// invalid => keep score, clear percentile.
+func TestEPSSService_NonFiniteAndOutOfRangeValues(t *testing.T) {
+	const body = `{
+		"status": "OK", "status-code": 200, "version": "1.0", "total": 8,
+		"data": [
+			{"cve": "CVE-2021-0001", "epss": "1.1",  "percentile": "0.5", "date": "2026-07-27"},
+			{"cve": "CVE-2021-0002", "epss": "-0.1", "percentile": "0.5", "date": "2026-07-27"},
+			{"cve": "CVE-2021-0003", "epss": "NaN",  "percentile": "0.5", "date": "2026-07-27"},
+			{"cve": "CVE-2021-0004", "epss": "Inf",  "percentile": "0.5", "date": "2026-07-27"},
+			{"cve": "CVE-2021-0005", "epss": "0.4",  "percentile": "1.5", "date": "2026-07-27"},
+			{"cve": "CVE-2021-0006", "epss": "0.4",  "percentile": "NaN", "date": "2026-07-27"},
+			{"cve": "CVE-2021-0007", "epss": "0",    "percentile": "1",   "date": "2026-07-27"},
+			{"cve": "CVE-2021-0008", "epss": "1",    "percentile": "0",   "date": "2026-07-27"}
+		]
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	svc := NewEPSSService(nil, server.URL, false)
+
+	scores, err := svc.fetchEPSSScores(context.Background(), []string{
+		"CVE-2021-0001", "CVE-2021-0002", "CVE-2021-0003", "CVE-2021-0004",
+		"CVE-2021-0005", "CVE-2021-0006", "CVE-2021-0007", "CVE-2021-0008",
+	})
+	if err != nil {
+		t.Fatalf("fetchEPSSScores returned error: %v", err)
+	}
+	if len(scores) != 8 {
+		t.Errorf("len(scores) = %d, want 8 (every answered CVE gets an explicit entry)", len(scores))
+	}
+
+	// Invalid score (out-of-range or non-finite) => tombstone (both nil).
+	for _, cve := range []string{"CVE-2021-0001", "CVE-2021-0002", "CVE-2021-0003", "CVE-2021-0004"} {
+		entry, ok := scores[cve]
+		if !ok {
+			t.Errorf("%s: missing entry, want explicit tombstone", cve)
+			continue
+		}
+		if entry.Score != nil {
+			t.Errorf("%s: Score = %v, want nil (out-of-range/non-finite score must not be stored)", cve, *entry.Score)
+		}
+		if entry.Percentile != nil {
+			t.Errorf("%s: Percentile = %v, want nil (no percentile without a score)", cve, *entry.Percentile)
+		}
+	}
+
+	// Invalid percentile with valid score => score kept, percentile nil.
+	for _, cve := range []string{"CVE-2021-0005", "CVE-2021-0006"} {
+		entry, ok := scores[cve]
+		if !ok {
+			t.Errorf("%s: missing entry, want score-only entry", cve)
+			continue
+		}
+		if entry.Score == nil || *entry.Score != 0.4 {
+			t.Errorf("%s: Score = %v, want 0.4 (valid score survives an invalid percentile)", cve, entry.Score)
+		}
+		if entry.Percentile != nil {
+			t.Errorf("%s: Percentile = %v, want nil", cve, *entry.Percentile)
+		}
+	}
+
+	// The [0,1] boundaries themselves are legal values, not violations.
+	if entry, ok := scores["CVE-2021-0007"]; !ok || entry.Score == nil || *entry.Score != 0 ||
+		entry.Percentile == nil || *entry.Percentile != 1 {
+		t.Errorf("CVE-2021-0007 = %+v, want Score=0 Percentile=1 (boundary values are valid)", entry)
+	}
+	if entry, ok := scores["CVE-2021-0008"]; !ok || entry.Score == nil || *entry.Score != 1 ||
+		entry.Percentile == nil || *entry.Percentile != 0 {
+		t.Errorf("CVE-2021-0008 = %+v, want Score=1 Percentile=0 (boundary values are valid)", entry)
+	}
+}
+
+// TestEPSSService_UnrequestedOrMalformedResponseCVEs pins the M46 Codex final
+// round (Low #1) contract: the persisted map is keyed ONLY by normalized CVE
+// ids that were actually part of THIS request's batch. Pre-fix the map was
+// keyed by the raw response `item.CVE` with no membership check, so a FIRST
+// 200 response containing a malformed item for an UNREQUESTED CVE would
+// tombstone that global vulnerabilities row's EPSS for every tenant — the
+// upstream response body could reach into rows this sync was never asked
+// about. A response id in non-canonical case for a REQUESTED CVE is still
+// accepted (normalized), so legitimate answers cannot be dropped over casing.
+func TestEPSSService_UnrequestedOrMalformedResponseCVEs(t *testing.T) {
+	const body = `{
+		"status": "OK", "status-code": 200, "version": "1.0", "total": 4,
+		"data": [
+			{"cve": "cve-2021-44228",   "epss": "0.9",    "percentile": "0.99", "date": "2026-07-27"},
+			{"cve": "CVE-2020-7777777", "epss": "broken", "percentile": "0.5",  "date": "2026-07-27"},
+			{"cve": "CVE-2020-8888888", "epss": "0.8",    "percentile": "0.5",  "date": "2026-07-27"},
+			{"cve": "not-a-cve at all", "epss": "broken", "percentile": "0.5",  "date": "2026-07-27"}
+		]
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	svc := NewEPSSService(nil, server.URL, false)
+
+	// Only CVE-2021-44228 is requested. The response also carries: a
+	// malformed item for unrequested CVE-2020-7777777 (would be a global
+	// tombstone pre-fix), a well-formed item for unrequested
+	// CVE-2020-8888888 (would be a write pre-fix), and a garbage id.
+	scores, err := svc.fetchEPSSScores(context.Background(), []string{"CVE-2021-44228"})
+	if err != nil {
+		t.Fatalf("fetchEPSSScores returned error: %v", err)
+	}
+
+	if len(scores) != 1 {
+		t.Errorf("len(scores) = %d, want 1 (only the requested CVE may be persisted)", len(scores))
+	}
+	if _, ok := scores["CVE-2020-7777777"]; ok {
+		t.Error("unrequested CVE-2020-7777777 present: its malformed item would tombstone a global row this sync never asked about")
+	}
+	if _, ok := scores["CVE-2020-8888888"]; ok {
+		t.Error("unrequested CVE-2020-8888888 present: unsolicited response items must not be persisted")
+	}
+	for k := range scores {
+		if k == "not-a-cve at all" || k == "cve-2021-44228" {
+			t.Errorf("scores map carries raw/unnormalized key %q", k)
+		}
+	}
+
+	// The requested CVE, answered in lowercase, must still land under its
+	// normalized key with its values intact.
+	entry, ok := scores["CVE-2021-44228"]
+	if !ok {
+		t.Fatal("requested CVE-2021-44228 missing: a case-variant answer for a requested id must be normalized and kept, not dropped")
+	}
+	if entry.Score == nil || *entry.Score != 0.9 {
+		t.Errorf("Score = %v, want 0.9", entry.Score)
+	}
+	if entry.Percentile == nil || *entry.Percentile != 0.99 {
+		t.Errorf("Percentile = %v, want 0.99", entry.Percentile)
+	}
+}
+
 // TestEPSSService_Offline asserts that offline mode short-circuits BEFORE any
 // HTTP call is made. The server handler fails the test if it is ever reached.
 func TestEPSSService_Offline(t *testing.T) {

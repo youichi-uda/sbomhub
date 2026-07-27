@@ -83,13 +83,36 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-              | grep -qE '^(apps/api/|\.github/workflows/golangci-lint\.yml$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-            echo "No apps/api changes in this PR — lint is a no-op, check reports green."
-          fi
+          # `git diff --quiet` exit status, NOT a pipe into grep:
+          #   * `grep -q` exits at the first match, so `git diff | grep -q`
+          #     hands git a SIGPIPE on a large diff; under `pipefail` that
+          #     turns the whole condition FALSE and the lint would be
+          #     skipped while the required check still reports green.
+          #   * `--no-renames` keeps a file moved OUT of apps/api visible
+          #     as a deletion under the pathspec (rename detection would
+          #     only show the destination).
+          #   * three-dot: compare against the merge base, not the tip of
+          #     the base branch.
+          # exit 0 = no differences, 1 = differences, >1 = real error.
+          set +e
+          git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- \
+            apps/api .github/workflows/golangci-lint.yml
+          probe_status=$?
+          set -e
+          case "$probe_status" in
+            0)
+              echo "relevant=false" >> "$GITHUB_OUTPUT"
+              echo "No apps/api changes in this PR — lint is a no-op, check reports green."
+              ;;
+            1)
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # Never silently skip on a probe failure: fall back to linting.
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::relevance probe failed (git diff exit $probe_status) — linting anyway"
+              ;;
+          esac
 
       - name: Set up Go
         if: steps.probe.outputs.relevant != 'false'

@@ -2554,6 +2554,10 @@
         "nullable": true,
         "type": "text"
       },
+      "epss_checked_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
       "epss_percentile": {
         "nullable": true,
         "type": "numeric(5,4)"
