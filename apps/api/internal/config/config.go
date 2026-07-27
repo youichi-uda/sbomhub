@@ -45,6 +45,23 @@ type Config struct {
 	ClerkSecretKey     string
 	ClerkWebhookSecret string
 
+	// AllowUnsignedWebhooks (SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS) is the explicit,
+	// operator-named opt-in that lets the Clerk / Lemon Squeezy receivers accept
+	// webhooks WITHOUT verifying their signature — and only while no secret is
+	// configured for that receiver at all.
+	//
+	// M47: it replaces the inferred bypass those receivers used to apply
+	// (`if secret == "" { return !IsProduction() }`), which turned every
+	// deployment that had simply not set the secret — APP_ENV defaults to
+	// "development" when unset — into an open webhook endpoint. The flag is
+	// refused at startup in production (see cmd/server/main.go
+	// validateWebhookVerification) AND re-checked at request time, so the
+	// bypass cannot be reached there by any combination of env vars.
+	//
+	// A configured secret always wins: the flag never disables verification
+	// for a receiver whose secret is set.
+	AllowUnsignedWebhooks bool
+
 	// Lemon Squeezy billing (SaaS mode)
 	LemonSqueezyAPIKey         string
 	LemonSqueezyWebhookSecret  string
@@ -104,6 +121,9 @@ func Load() *Config {
 		// Clerk
 		ClerkSecretKey:     getEnv("CLERK_SECRET_KEY", ""),
 		ClerkWebhookSecret: getEnv("CLERK_WEBHOOK_SECRET", ""),
+
+		// Webhook signature verification (M47). Default false = fail-closed.
+		AllowUnsignedWebhooks: getEnvBool("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS", false),
 
 		// Lemon Squeezy
 		LemonSqueezyAPIKey:         getEnv("LEMONSQUEEZY_API_KEY", ""),
@@ -171,6 +191,31 @@ func (c *Config) IsProduction() bool {
 // (validateEncryptionKey / assertAppRoleNotBypassRLS in cmd/server/main.go).
 func (c *Config) IsDevelopment() bool {
 	return c.Environment == "development"
+}
+
+// UnsignedWebhooksAllowed reports whether a webhook receiver with NO secret
+// configured may skip signature verification. It is the single source of
+// truth shared by the Clerk and Lemon Squeezy receivers.
+//
+// Both conditions are required: the operator asked for it by name
+// (SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS) AND the process is running in
+// DEVELOPMENT specifically.
+//
+// It checks IsDevelopment(), not !IsProduction() (Codex round 3, Low): the
+// latter also admits staging and every typo of "production", which is the
+// opposite of the fail-closed posture this flag exists inside. APP_ENV unset
+// still resolves to "development" (config.Load's fallback), so the local flow
+// that needs the bypass keeps working without setting anything.
+//
+// The environment term is deliberately redundant with the startup guard in
+// cmd/server/main.go, so the runtime decision does not depend on that guard
+// having run (tests construct a Config directly; so could a future embedding
+// of this package).
+//
+// Callers must consult this ONLY when their secret is empty. A configured
+// secret is always verified.
+func (c *Config) UnsignedWebhooksAllowed() bool {
+	return c.AllowUnsignedWebhooks && c.IsDevelopment()
 }
 
 // IsEmailEnabled returns true if email notifications are configured

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -111,16 +113,29 @@ func (h *LemonSqueezyWebhookHandler) Handle(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
 	}
 
-	// Parse payload
+	// Parse payload.
+	//
+	// M47 (Codex round 2, Medium): the raw body is NOT logged. It used to log
+	// its first 500 bytes, which since the checkout rework is enough to leak a
+	// live `claim_token` — a signed delivery whose JSON goes wrong AFTER the
+	// custom_data object (a later field with the wrong type, a truncated tail)
+	// reaches this branch with the token already inside those 500 bytes.
+	// Length plus the decoder's error is what an operator actually needs; the
+	// payload itself is retrievable from the provider's own delivery log.
 	var payload LSWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		slog.Error("webhook failed to parse payload", "error", err, "body", string(body[:min(len(body), 500)]))
+		slog.Error("webhook failed to parse payload", "error", err, "body_length", len(body))
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 	}
 
+	// M47 (Codex round 1, Medium): log the custom_data KEYS, never the values.
+	// Since the checkout rework, `claim_token` lives in there — a live bearer
+	// secret that binds a purchase to a tenant. Logging the map put it in
+	// plaintext in the log of every delivery, including failed first
+	// deliveries whose claim is still unconsumed.
 	slog.Info("received Lemon Squeezy webhook",
 		"event", payload.Meta.EventName,
-		"custom_data", payload.Meta.CustomData,
+		"custom_data_keys", customDataKeys(payload.Meta.CustomData),
 		"subscription_id", payload.Data.ID,
 		"status", payload.Data.Attributes.Status)
 
@@ -145,25 +160,80 @@ func (h *LemonSqueezyWebhookHandler) Handle(c echo.Context) error {
 	}
 }
 
+// resolveCheckoutClaim maps the delivered custom data to the tenant that
+// started the checkout (M47 W3 #2).
+//
+// It reads exactly one field — `claim_token` — and deliberately ignores
+// `tenant_id`, which is what this handler used to trust. That value made a
+// round trip through the buyer's browser inside an editable URL parameter, so
+// honouring it let anyone who completed a purchase attach it to another
+// tenant. See BillingHandler.CreateCheckout for the issuing half.
+//
+// A delivery we cannot resolve is refused with 400: there is nothing to
+// retry into (Lemon Squeezy will re-attempt up to three more times and then
+// drop it), and the purchase needs the manual operator linking documented in
+// docs/SAAS_SETUP.md §2.5. A legacy `tenant_id` is named in the log because
+// that is the single most useful thing an operator can see when a checkout
+// created before this change lands.
+func (h *LemonSqueezyWebhookHandler) resolveCheckoutClaim(
+	ctx context.Context, payload *LSWebhookPayload,
+) (uuid.UUID, error) {
+	token := payload.Meta.CustomData["claim_token"]
+	if token == "" {
+		_, hadLegacyTenantID := payload.Meta.CustomData["tenant_id"]
+		slog.Error("subscription_created: no claim_token in custom data",
+			"ls_subscription_id", payload.Data.ID,
+			"has_legacy_tenant_id", hadLegacyTenantID,
+			"custom_data_keys", customDataKeys(payload.Meta.CustomData))
+		return uuid.Nil, errNoCheckoutClaim
+	}
+
+	claim, err := h.subRepo.ConsumeCheckoutClaim(
+		ctx, hashCheckoutClaimToken(token), payload.Data.ID, time.Now())
+	if err != nil {
+		if errors.Is(err, repository.ErrCheckoutClaimNotFound) {
+			// Unknown / expired / already spent by a different subscription —
+			// one refusal for all three, see ErrCheckoutClaimNotFound.
+			slog.Warn("subscription_created: claim token did not resolve",
+				"ls_subscription_id", payload.Data.ID)
+			return uuid.Nil, errNoCheckoutClaim
+		}
+		return uuid.Nil, err
+	}
+	slog.Info("subscription_created: claim resolved",
+		"tenant_id", claim.TenantID, "ls_subscription_id", payload.Data.ID,
+		"claim_plan", claim.Plan)
+	return claim.TenantID, nil
+}
+
+// errNoCheckoutClaim marks "this delivery cannot be bound to a tenant" —
+// answered with 400, as distinct from an infrastructure failure (500).
+var errNoCheckoutClaim = errors.New("subscription_created: no resolvable checkout claim")
+
+// customDataKeys lists the keys present without echoing their values, which
+// may carry buyer-controlled content.
+func customDataKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, payload *LSWebhookPayload) error {
 	ctx := c.Request().Context()
 
-	slog.Info("handleSubscriptionCreated started", "custom_data", payload.Meta.CustomData)
-
-	// Get tenant ID from custom data
-	tenantIDStr := payload.Meta.CustomData["tenant_id"]
-	if tenantIDStr == "" {
-		slog.Error("subscription_created: missing tenant_id in custom data", "custom_data", payload.Meta.CustomData)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing tenant_id in custom data"})
-	}
-
-	tenantID, err := uuid.Parse(tenantIDStr)
+	// Resolve the tenant from the server-held claim, NOT from custom_data.
+	tenantID, err := h.resolveCheckoutClaim(ctx, payload)
 	if err != nil {
-		slog.Error("subscription_created: invalid tenant_id", "tenant_id_str", tenantIDStr, "error", err)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid tenant_id"})
+		if errors.Is(err, errNoCheckoutClaim) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "unresolvable checkout claim"})
+		}
+		slog.Error("subscription_created: claim lookup failed",
+			"error", err, "ls_subscription_id", payload.Data.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to resolve checkout claim"})
 	}
-
-	slog.Info("subscription_created: parsed tenant_id", "tenant_id", tenantID)
 
 	// Get tenant
 	tenant, err := h.tenantRepo.GetByID(ctx, tenantID)
@@ -202,8 +272,36 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 
 	var sub *model.Subscription
 	if existingSub != nil {
+		// M47: the row belongs to whoever it already belongs to. Reaching
+		// here with a different tenant means the claim resolved to A while
+		// the subscription is B's — which the claim rules should make
+		// impossible (a claim binds to one ls_subscription_id) — so treat it
+		// as a state we do not understand and refuse rather than re-parent.
+		// Pre-M47 this line read `existingSub.TenantID = tenantID`, i.e. it
+		// re-parented on request; the repository's `AND tenant_id` guard was
+		// the only thing that stopped it, and it stopped it silently until
+		// M46 made 0-row updates audible.
+		if existingSub.TenantID != tenantID {
+			slog.Error("subscription_created: claim tenant does not own the existing subscription",
+				"ls_subscription_id", payload.Data.ID,
+				"claim_tenant_id", tenantID, "row_tenant_id", existingSub.TenantID)
+			return c.JSON(http.StatusConflict, map[string]string{"error": "subscription is linked to another tenant"})
+		}
+
+		// Ordering gate — see acceptRevision. A redelivery carries the same
+		// revision and is applied again (idempotent); a genuinely older one
+		// is discarded.
+		apply, err := h.acceptRevision(ctx, existingSub, payload)
+		if err != nil {
+			slog.Error("subscription_created: revision claim failed",
+				"error", err, "ls_subscription_id", payload.Data.ID)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to order delivery"})
+		}
+		if !apply {
+			return staleDelivery(c, "subscription_created", payload)
+		}
+
 		// Update existing subscription
-		existingSub.TenantID = tenantID
 		existingSub.LSCustomerID = intToString(payload.Data.Attributes.CustomerID)
 		existingSub.LSVariantID = intToString(payload.Data.Attributes.VariantID)
 		existingSub.LSProductID = intToString(payload.Data.Attributes.ProductID)
@@ -243,6 +341,16 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 		if err := h.subRepo.Create(ctx, sub); err != nil {
 			slog.Error("failed to create subscription", "error", err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
+		}
+		// Stamp the watermark on the brand-new row so a delivery that is
+		// already older than this one cannot be applied next. Best-effort:
+		// SubscriptionRepository.Create does not write the column (it
+		// predates it), and failing the whole webhook over a missing
+		// watermark would be worse than starting the row at NULL — which
+		// simply accepts the next delivery, the pre-M47 behaviour.
+		if _, err := h.acceptRevision(ctx, sub, payload); err != nil {
+			slog.Error("subscription_created: failed to stamp the initial provider revision",
+				"error", err, "subscription_id", sub.ID)
 		}
 		slog.Info("subscription_created: created new subscription", "subscription_id", sub.ID)
 	}
@@ -305,6 +413,62 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCreated(c echo.Context, p
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// acceptRevision is the ordering gate for every subscription write driven by
+// a webhook (M47 W3 #4).
+//
+// Webhook delivery order is best-effort. Lemon Squeezy retries a non-2xx
+// delivery up to three more times (5s/25s/125s,
+// docs.lemonsqueezy.com/help/webhooks/webhook-requests) and any delivery can
+// be replayed from the dashboard later, so a DELAYED OLD event used to
+// overwrite newer state — downgrade Team → Starter, then the retried Team
+// `subscription_updated` lands and the tenant is back on Team, unpaid.
+//
+// The gate is a compare-and-swap on the provider's own revision
+// (`data.attributes.updated_at`); see
+// SubscriptionRepository.ClaimProviderRevision for why equal revisions are
+// accepted (Lemon Squeezy emits several events per transition sharing one
+// updated_at, and dropping a terminal event would grant entitlement).
+//
+// Two deliberate limits, both stated in docs/SAAS_SETUP.md §2.5:
+//
+//   - A delivery with no parseable updated_at cannot be ordered and is
+//     APPLIED, with a warning. Refusing it instead would mean a
+//     provider-side change to that field silently freezes all billing
+//     updates — a worse failure than the ordering hole it would close.
+//   - Two deliveries sharing one revision are still applied in arrival
+//     order, whatever that is.
+//
+// The claim happens BEFORE the write it guards, so a write that fails after
+// a successful claim leaves the watermark advanced. That is safe precisely
+// because equal revisions are accepted: the redelivery re-claims its own
+// revision and re-applies.
+func (h *LemonSqueezyWebhookHandler) acceptRevision(
+	ctx context.Context, sub *model.Subscription, payload *LSWebhookPayload,
+) (bool, error) {
+	rev := parseTime(payload.Data.Attributes.UpdatedAt)
+	if rev == nil {
+		slog.Warn("lemon squeezy webhook carries no parseable updated_at; applying without ordering",
+			"event", payload.Meta.EventName, "ls_subscription_id", payload.Data.ID,
+			"raw_updated_at", payload.Data.Attributes.UpdatedAt)
+		return true, nil
+	}
+	return h.subRepo.ClaimProviderRevision(ctx, sub.ID, *rev)
+}
+
+// staleDelivery is the answer to a superseded event: 200, because there is
+// nothing to retry — the event is genuinely obsolete and a redelivery would
+// be discarded the same way.
+func staleDelivery(c echo.Context, event string, payload *LSWebhookPayload) error {
+	slog.Warn("lemon squeezy webhook discarded: older than the state already applied",
+		"event", event, "ls_subscription_id", payload.Data.ID,
+		"delivery_updated_at", payload.Data.Attributes.UpdatedAt)
+	return c.JSON(http.StatusOK, map[string]string{
+		"status": "skipped",
+		"reason": "stale revision",
+		"event":  event,
+	})
+}
+
 func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, payload *LSWebhookPayload) error {
 	ctx := c.Request().Context()
 
@@ -312,6 +476,15 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUpdated(c echo.Context, p
 	sub, err := h.subRepo.GetByLSSubscriptionID(ctx, payload.Data.ID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "subscription not found"})
+	}
+
+	apply, err := h.acceptRevision(ctx, sub, payload)
+	if err != nil {
+		slog.Error("subscription_updated: revision claim failed", "error", err, "ls_subscription_id", payload.Data.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to order delivery"})
+	}
+	if !apply {
+		return staleDelivery(c, "subscription_updated", payload)
 	}
 
 	previousStatus := sub.Status
@@ -381,6 +554,15 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionCancelled(c echo.Context,
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "subscription not found"})
 	}
 
+	apply, err := h.acceptRevision(ctx, sub, payload)
+	if err != nil {
+		slog.Error("subscription_cancelled: revision claim failed", "error", err, "ls_subscription_id", payload.Data.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to order delivery"})
+	}
+	if !apply {
+		return staleDelivery(c, "subscription_cancelled", payload)
+	}
+
 	now := time.Now()
 	previousStatus := sub.Status
 	sub.Status = model.StatusCancelled
@@ -434,6 +616,17 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionResumed(c echo.Context, p
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "subscription not found"})
 	}
 
+	// handleSubscriptionUnpaused delegates here, so the log line names the
+	// delivered event rather than a hardcoded one.
+	apply, err := h.acceptRevision(ctx, sub, payload)
+	if err != nil {
+		slog.Error("subscription_resumed: revision claim failed", "error", err, "ls_subscription_id", payload.Data.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to order delivery"})
+	}
+	if !apply {
+		return staleDelivery(c, payload.Meta.EventName, payload)
+	}
+
 	sub.Status = model.StatusActive
 	sub.CancelledAt = nil
 	sub.UpdatedAt = time.Now()
@@ -451,6 +644,15 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionExpired(c echo.Context, p
 	sub, err := h.subRepo.GetByLSSubscriptionID(ctx, payload.Data.ID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "subscription not found"})
+	}
+
+	apply, err := h.acceptRevision(ctx, sub, payload)
+	if err != nil {
+		slog.Error("subscription_expired: revision claim failed", "error", err, "ls_subscription_id", payload.Data.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to order delivery"})
+	}
+	if !apply {
+		return staleDelivery(c, "subscription_expired", payload)
 	}
 
 	sub.Status = model.StatusExpired
@@ -476,6 +678,15 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionPaused(c echo.Context, pa
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "subscription not found"})
 	}
 
+	apply, err := h.acceptRevision(ctx, sub, payload)
+	if err != nil {
+		slog.Error("subscription_paused: revision claim failed", "error", err, "ls_subscription_id", payload.Data.ID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to order delivery"})
+	}
+	if !apply {
+		return staleDelivery(c, "subscription_paused", payload)
+	}
+
 	sub.Status = model.StatusPaused
 	sub.UpdatedAt = time.Now()
 
@@ -490,10 +701,40 @@ func (h *LemonSqueezyWebhookHandler) handleSubscriptionUnpaused(c echo.Context, 
 	return h.handleSubscriptionResumed(c, payload)
 }
 
-// verifySignature verifies the Lemon Squeezy HMAC signature
+// verifySignature verifies the Lemon Squeezy HMAC signature.
+//
+// M47 (High) — this used to be FAIL-OPEN. With LEMONSQUEEZY_WEBHOOK_SECRET
+// unset it returned `!IsProduction()`, and config.Load falls back to
+// "development" when neither APP_ENV nor ENVIRONMENT is set, so the default
+// posture of an unconfigured deployment was "accept unsigned webhooks from
+// anyone". That is enough on its own to move another tenant's plan: the
+// lifecycle events key off `data.id` (a short sequential Lemon Squeezy
+// subscription id) and need no custom_data, so posting subscription_expired
+// for a guessed id downgrades whoever owns it. Pinned by
+// TestLSWebhook_NoSecret_UnsignedPayloadIsRejected.
+//
+// Now: no secret means no verification is possible, so the delivery is
+// refused — unless an operator has named the bypass explicitly via
+// SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS outside production (see
+// config.UnsignedWebhooksAllowed), in which case every accepted delivery
+// says so in the log.
+//
+// cmd/server/main.go's validateWebhookVerification covers a SUBSET of this at
+// startup: it refuses to boot a PRODUCTION SaaS process that would reject
+// everything here (or that asked for the bypass), so that misconfiguration
+// surfaces before traffic. A non-production process with no secret still
+// boots and rejects each delivery individually — this function is the
+// decision, that guard is only an early warning.
 func (h *LemonSqueezyWebhookHandler) verifySignature(r *http.Request, body []byte) bool {
 	if h.cfg.LemonSqueezyWebhookSecret == "" {
-		return !h.cfg.IsProduction()
+		if !h.cfg.UnsignedWebhooksAllowed() {
+			return false
+		}
+		slog.Warn("Lemon Squeezy webhook signature verification BYPASSED — "+
+			"SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS is set and no LEMONSQUEEZY_WEBHOOK_SECRET is configured. "+
+			"Anyone who can reach this endpoint can change billing state. Development only.",
+			"app_env", h.cfg.Environment, "ip", r.RemoteAddr)
+		return true
 	}
 
 	signature := r.Header.Get("X-Signature")

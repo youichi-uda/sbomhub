@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -272,5 +274,196 @@ func TestBillingSync_WithLemonSqueezyBaseURL(t *testing.T) {
 	h.WithLemonSqueezyBaseURL("http://127.0.0.1:1234/")
 	if h.lsBaseURL != "http://127.0.0.1:1234" {
 		t.Errorf("trailing slash not trimmed: lsBaseURL = %q", h.lsBaseURL)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M47 W3 #3 — POST /api/v1/plan/select-free.
+//
+// Pre-fix the route sat on the bare `auth` group and the handler wrote
+// tenants.plan = free unconditionally. Two separate holes:
+//
+//  1. No role gate: any Viewer or Member of a tenant could downgrade it. The
+//     plan is what the limit/feature gates read (middleware/tenant.go), so
+//     this is a self-service denial of the tenant's own paid features.
+//  2. No subscription check: the downgrade ran even with a LIVE Lemon Squeezy
+//     subscription. Nothing in it touches the provider, so the tenant keeps
+//     being charged while losing the entitlement, and the local state now
+//     disagrees with `subscriptions` until the next webhook.
+//
+// Both halves are pinned below. The refusal is the deliberately safest
+// product answer (see docs/SAAS_SETUP.md §2.5): cancel at the provider
+// first, and the existing subscription_expired webhook performs the
+// downgrade at period end.
+// ----------------------------------------------------------------------------
+
+// selectFreeRouteRe matches the production wiring with its admin gate.
+var selectFreeRouteRe = regexp.MustCompile(
+	`auth\.POST\(\s*"/plan/select-free"\s*,\s*billingHandler\.SelectFreePlan\s*,\s*appmw\.RequireAdmin\(\)\s*\)`)
+
+// checkoutRouteRe matches the checkout route with its admin gate. Completing
+// a checkout occupies the tenant's single subscription slot
+// (UNIQUE(tenant_id)) and moves its plan, so it is an administrative act for
+// the same reason /subscription/sync is — this closes the residual flagged
+// as #7 in docs/SAAS_SETUP.md §2.5.
+var checkoutRouteRe = regexp.MustCompile(
+	`auth\.POST\(\s*"/subscription/checkout"\s*,\s*billingHandler\.CreateCheckout\s*,\s*appmw\.RequireAdmin\(\)\s*\)`)
+
+func TestBillingRoutes_PlanMutatorsAreAdminGatedInMain(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	mainPath := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", "cmd", "server", "main.go"))
+	raw, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", mainPath, err)
+	}
+	if !selectFreeRouteRe.Match(raw) {
+		t.Errorf("POST /plan/select-free is not wired with appmw.RequireAdmin() in %s.\n"+
+			"M47: it rewrites tenants.plan — the value every limit/feature gate reads — "+
+			"and must stay Owner/Admin only.", mainPath)
+	}
+	if !checkoutRouteRe.Match(raw) {
+		t.Errorf("POST /subscription/checkout is not wired with appmw.RequireAdmin() in %s.\n"+
+			"M47: completing the checkout it creates occupies the tenant's single "+
+			"subscription slot and changes its plan.", mainPath)
+	}
+}
+
+// selectFreeHandler builds a BillingHandler in SaaS mode over sqlmock.
+func selectFreeHandler(t *testing.T) (*BillingHandler, sqlmock.Sqlmock) {
+	t.Helper()
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_select_free") // SaaS mode
+	t.Setenv("LEMONSQUEEZY_API_KEY", "ls-test-api-key")
+	t.Setenv("APP_ENV", "development")
+
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	return NewBillingHandler(
+		config.Load(),
+		repository.NewTenantRepository(db),
+		repository.NewSubscriptionRepository(db),
+	), mock
+}
+
+func driveSelectFree(t *testing.T, h *BillingHandler) *httptest.ResponseRecorder {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/plan/select-free", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	tenantID := uuid.New()
+	c.Set(middleware.ContextKeyTenantID, tenantID)
+	c.Set(middleware.ContextKeyTenant, &model.Tenant{ID: tenantID, Plan: model.PlanTeam})
+	c.Set(middleware.ContextKeyRole, model.RoleOwner)
+	if err := h.SelectFreePlan(c); err != nil {
+		t.Fatalf("SelectFreePlan: %v", err)
+	}
+	return rec
+}
+
+// TestSelectFreePlan_LiveSubscriptionIsRefused drives the statuses that mean
+// "this tenant is still on a paid contract". The guard is a SINGLE conditional
+// UPDATE (Codex round 1, Medium: a read-then-write left a window in which the
+// webhook could create a subscription between the two), so the assertion is
+// that the statement matched no row and the handler answered 409 — not that
+// no statement ran.
+func TestSelectFreePlan_LiveSubscriptionIsRefused(t *testing.T) {
+	for _, status := range []string{
+		model.StatusActive,
+		model.StatusOnTrial,
+		model.StatusPastDue,
+		model.StatusUnpaid,
+		model.StatusPaused,
+		// cancelled != ended: handleSubscriptionCancelled deliberately keeps
+		// the plan until ends_at, so the tenant is still entitled here.
+		model.StatusCancelled,
+	} {
+		t.Run(status, func(t *testing.T) {
+			h, mock := selectFreeHandler(t)
+			now := time.Now()
+			// The guarded UPDATE matches nothing: a live subscription exists.
+			mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
+				WithArgs(model.PlanFree, sqlmock.AnyArg(), model.StatusExpired).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+			// Diagnostic re-read that names the blocking status in the 409.
+			mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1`)).
+				WillReturnRows(sqlmock.NewRows(lsSubscriptionColumns()).
+					AddRow(uuid.New(), uuid.New(), "ls-sub-live", "10", "2", "3",
+						status, model.PlanTeam, nil, nil, nil,
+						nil, nil, nil, nil, now, now))
+
+			rec := driveSelectFree(t, h)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409 — a tenant with a %s subscription must not be "+
+					"able to drop itself to free while it is still being charged; body=%s",
+					rec.Code, status, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), status) {
+				t.Errorf("body = %s, want the blocking status named", rec.Body.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestSelectFreePlan_AllowedWhenNothingIsLive is the positive control: the
+// guarded UPDATE matches, so the endpoint keeps working as the onboarding
+// "stay on free" action.
+func TestSelectFreePlan_AllowedWhenNothingIsLive(t *testing.T) {
+	h, mock := selectFreeHandler(t)
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
+		WithArgs(model.PlanFree, sqlmock.AnyArg(), model.StatusExpired).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	rec := driveSelectFree(t, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSelectFreePlan_UpdateFailureIsNotADowngrade: a transient failure on the
+// guarded write must surface as 500, not as a silent success.
+func TestSelectFreePlan_UpdateFailureIsNotADowngrade(t *testing.T) {
+	h, mock := selectFreeHandler(t)
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
+		WillReturnError(errors.New("transient: connection reset by peer"))
+
+	rec := driveSelectFree(t, h)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestSelectFreePlan_DiagnosticReadFailureStillRefuses: the refusal is decided
+// by the guarded UPDATE alone. If the follow-up read that names the blocking
+// status fails, the answer must still be 409 — never a 500 that suggests the
+// caller should retry into a downgrade.
+func TestSelectFreePlan_DiagnosticReadFailureStillRefuses(t *testing.T) {
+	h, mock := selectFreeHandler(t)
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1`)).
+		WillReturnError(errors.New("transient: connection reset by peer"))
+
+	rec := driveSelectFree(t, h)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
 }

@@ -127,6 +127,99 @@ func validateEncryptionKey(cfg *config.Config) error {
 	)
 }
 
+// validateWebhookVerification enforces the M47 fail-closed webhook contract
+// at startup, so an operator finds out from a refusal to boot rather than
+// from silently-unverified billing traffic (or, after this wave, from a pile
+// of 401s).
+//
+// The receivers themselves are already fail-closed
+// (handler/webhook_{clerk,lemonsqueezy}.go verifySignature): with no secret
+// configured they refuse every delivery unless SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS
+// is set outside production. This guard adds the deployment-time half:
+//
+//   - production + SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS  -> refuse to start. The
+//     flag can never be honoured there, and a deployment that sets it is
+//     asking for something we will not do. (Outside production it is honoured
+//     in DEVELOPMENT only — staging gets a "set but IGNORED" warning.)
+//   - production + no CLERK_WEBHOOK_SECRET -> refuse to start. Reaching this
+//     line already means SaaS mode (self-hosted returned above). Clerk
+//     webhooks are how users and tenants come into existence there; a
+//     production deployment that cannot verify them is misconfigured, and
+//     pre-M47 that misconfiguration was indistinguishable from an open
+//     endpoint. Same shape as validateEncryptionKey's production refusal.
+//   - production + billing enabled + no LEMONSQUEEZY_WEBHOOK_SECRET -> refuse.
+//   - everything else -> warn, naming exactly what will happen to deliveries.
+//
+// Note what it does NOT do: a NON-production process with no secret and no
+// opt-in still starts. It only warns, because the request-time check already
+// refuses every delivery — the guard exists to catch production
+// misconfiguration early, not to duplicate the runtime decision.
+func validateWebhookVerification(cfg *config.Config) error {
+	// Self-hosted (no CLERK_SECRET_KEY) is exempt in full, including from
+	// the production refusals: BOTH receivers short-circuit to a 200
+	// "skipped" on cfg.IsSelfHosted() before any signature work, so no
+	// secret is ever consulted and none is demanded — even if the operator
+	// happens to have LEMONSQUEEZY_API_KEY or the unsigned-webhook flag set.
+	if cfg.IsSelfHosted() {
+		return nil
+	}
+
+	if cfg.IsProduction() {
+		if cfg.AllowUnsignedWebhooks {
+			return fmt.Errorf(
+				"SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS は production では使用できません " +
+					"(未署名 Webhook の受け入れは開発環境専用です)。 " +
+					"CLERK_WEBHOOK_SECRET / LEMONSQUEEZY_WEBHOOK_SECRET を設定してください")
+		}
+		if cfg.ClerkWebhookSecret == "" {
+			return fmt.Errorf(
+				"CLERK_WEBHOOK_SECRET must be set in production when Clerk is configured " +
+					"(Clerk Dashboard → Webhooks → Signing Secret)")
+		}
+		if cfg.IsBillingEnabled() && cfg.LemonSqueezyWebhookSecret == "" {
+			return fmt.Errorf(
+				"LEMONSQUEEZY_WEBHOOK_SECRET must be set in production when billing is enabled " +
+					"(Lemon Squeezy → Settings → Webhooks → Signing secret)")
+		}
+		return nil
+	}
+
+	if cfg.AllowUnsignedWebhooks {
+		if !cfg.IsDevelopment() {
+			// Staging, or any other non-production spelling. The flag is
+			// honoured in DEVELOPMENT only (config.UnsignedWebhooksAllowed),
+			// so say so rather than let the operator believe deliveries are
+			// being accepted.
+			slog.Warn("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS is set but IGNORED: the bypass is "+
+				"honoured only when APP_ENV=development. Unsigned deliveries will be "+
+				"rejected with 401.",
+				"app_env", cfg.Environment)
+		} else {
+			slog.Warn("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS is set: webhook signature verification is "+
+				"DISABLED for any receiver without a configured secret. Anyone who can reach "+
+				"/api/webhooks/* can change tenants, users and billing state. DO NOT deploy this way.",
+				"app_env", cfg.Environment,
+				"clerk_secret_set", cfg.ClerkWebhookSecret != "",
+				"lemonsqueezy_secret_set", cfg.LemonSqueezyWebhookSecret != "")
+			return nil
+		}
+	}
+
+	if cfg.ClerkWebhookSecret == "" {
+		slog.Warn("CLERK_WEBHOOK_SECRET is not set: every Clerk webhook delivery will be "+
+			"rejected with 401. Set the secret, or set SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true "+
+			"to accept unsigned deliveries in local development.",
+			"app_env", cfg.Environment)
+	}
+	if cfg.IsBillingEnabled() && cfg.LemonSqueezyWebhookSecret == "" {
+		slog.Warn("LEMONSQUEEZY_WEBHOOK_SECRET is not set: every Lemon Squeezy webhook delivery "+
+			"will be rejected with 401. Set the secret, or set "+
+			"SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true to accept unsigned deliveries in local development.",
+			"app_env", cfg.Environment)
+	}
+	return nil
+}
+
 // assertAppRoleNotBypassRLS verifies that the runtime DB role does not
 // bypass Row-Level Security. RLS is bypassed by *two* PostgreSQL role
 // attributes, and the original guard only checked one of them (M4 Codex
@@ -210,6 +303,14 @@ func main() {
 	// fallback after this guard runs), and cfg.Environment honours the codex-r18
 	// APP_ENV → ENVIRONMENT precedence so the gate agrees with cfg.IsProduction.
 	if err := validateEncryptionKey(cfg); err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+
+	// SECURITY (M47): webhook signature verification is fail-closed. Refuse to
+	// start on the production combinations that would silently accept — or,
+	// post-fix, silently reject — every delivery.
+	if err := validateWebhookVerification(cfg); err != nil {
 		slog.Error("Refusing to start", "error", err)
 		os.Exit(1)
 	}
@@ -377,7 +478,7 @@ func main() {
 	jvnService := service.NewJVNService(vulnRepo, componentRepo, cfg.JVNURL, cfg.Offline)
 	statsService := service.NewStatsService(statsRepo)
 	vexService := service.NewVEXService(vexRepo, vulnRepo)
-	licensePolicyService := service.NewLicensePolicyService(licensePolicyRepo, componentRepo)
+	licensePolicyService := service.NewLicensePolicyService(licensePolicyRepo, componentRepo, sbomRepo)
 	apiKeyService := service.NewAPIKeyService(apiKeyRepo)
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	searchService := service.NewSearchServiceWithNVD(searchRepo, nvdService)
@@ -578,7 +679,13 @@ func main() {
 		WithSummary(projectDiffSummaryService).
 		WithExport(projectDiffExportService).
 		WithAudit(auditRepo)
-	vulnHandler := handler.NewVulnerabilityHandler(nvdService, jvnService)
+	// M47 W1: NewVulnerabilityHandler now needs `db` and the SBOM service.
+	// `db` lets the background scan goroutine bind its own
+	// app.current_tenant_id (the old context.Background() path made the
+	// scan a silent no-op — RLS filtered every component); sbomService
+	// binds the caller-supplied ?sbom_id= to the route's project before
+	// the scan is started at all.
+	vulnHandler := handler.NewVulnerabilityHandler(db, sbomService, nvdService, jvnService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	// auditRepo is wired for the M27-A (#132 / F381) cross-project VEX
 	// apply endpoint's vex_statement_reused_cross_project domain audit row
@@ -835,16 +942,26 @@ func main() {
 	// Member and Viewer of every tenant could reach it. The handler-side
 	// ownership check is the actual fix for the cross-tenant escalation;
 	// this gate is the defence-in-depth half that keeps a plan change an
-	// administrative act. The remaining billing routes are unchanged: the
-	// two GETs are reads, /checkout only builds a URL, and gating
-	// /plan/select-free would change the self-serve onboarding flow (see
-	// the report's residuals).
+	// administrative act.
+	//
+	// M47: the same gate now covers the other two plan-affecting routes,
+	// closing residuals #3 and #7 of docs/SAAS_SETUP.md §2.5.
+	//   - /plan/select-free rewrote tenants.plan — the value every
+	//     limit/feature gate reads — from ANY role, so a Viewer could strip
+	//     their own tenant of the features it is paying for.
+	//   - /subscription/checkout creates a checkout at the provider; the
+	//     purchase that follows occupies the tenant's single subscription
+	//     slot (UNIQUE(tenant_id)) and changes its plan.
+	// Both are Owner/Admin now. This narrows self-serve onboarding for
+	// below-admin members by design; the web billing page does not call
+	// either endpoint today (its handlers were removed for the sunset).
+	// The two GETs stay open — they are reads.
 	auth.GET("/subscription", billingHandler.GetSubscription)
-	auth.POST("/subscription/checkout", billingHandler.CreateCheckout)
+	auth.POST("/subscription/checkout", billingHandler.CreateCheckout, appmw.RequireAdmin())
 	auth.GET("/subscription/portal", billingHandler.GetPortalURL)
 	auth.POST("/subscription/sync", billingHandler.SyncSubscription, appmw.RequireAdmin())
 	auth.GET("/plan/usage", billingHandler.GetUsage)
-	auth.POST("/plan/select-free", billingHandler.SelectFreePlan)
+	auth.POST("/plan/select-free", billingHandler.SelectFreePlan, appmw.RequireAdmin())
 
 	// Me endpoint
 	auth.GET("/me", func(c echo.Context) error {
@@ -869,8 +986,20 @@ func main() {
 	auth.GET("/search/cve", searchHandler.SearchByCVE)
 	auth.GET("/search/component", searchHandler.SearchByComponent)
 
+	// M47 W1: the four "sync a global catalog now" endpoints are
+	// Admin-only. They take no caller-supplied resource id, so there is
+	// nothing to scope — but each one writes GLOBAL, RLS-free tables
+	// (vulnerabilities / kev_* / eol_* / ipa_*) that every tenant in the
+	// installation reads, and each one drives an unbounded outbound fetch
+	// (FIRST / CISA / endoflife.date / IPA). Any authenticated Viewer could
+	// therefore poison or stall shared data for every other tenant, and
+	// repeat it at will. `adminOnly` is declared here (it was previously
+	// created just before the API-key routes further down) so all five
+	// admin-gated groups share one instance.
+	adminOnly := appmw.RequireAdmin()
+
 	// EPSS endpoints
-	auth.POST("/vulnerabilities/sync-epss", epssHandler.SyncScores)
+	auth.POST("/vulnerabilities/sync-epss", epssHandler.SyncScores, adminOnly)
 	auth.GET("/vulnerabilities/epss/:cve_id", epssHandler.GetScore)
 
 	// Project endpoints
@@ -1019,7 +1148,19 @@ func main() {
 		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
 		appmw.TenantTx(db),
 		auditMiddleware)
-	auth.POST("/projects/:id/scan", vulnHandler.Scan)
+	// M47 W1 (Codex round 1, High): RequireWrite is mandatory here, and it
+	// became mandatory BECAUSE of this wave. Until now the handler spawned
+	// its scan on context.Background(), so RLS filtered every component and
+	// the endpoint did nothing at all for anybody — the missing role gate
+	// was unreachable in practice. Binding the goroutine to the tenant made
+	// the route functional, which simultaneously made the gap live: on the
+	// bare `auth` group a read-scoped Viewer could kick off unbounded
+	// outbound NVD/JVN fetches that write the GLOBAL, RLS-free
+	// `vulnerabilities` / `component_vulnerabilities` tables every tenant
+	// reads. RequireWrite (not RequireAdmin) is the right level — this is a
+	// project mutation, the same class as SBOM upload and triage/run, which
+	// both sit behind it.
+	auth.POST("/projects/:id/scan", vulnHandler.Scan, appmw.RequireWrite())
 
 	// SBOM Diff endpoints
 	auth.POST("/sbom/diff", sbomDiffHandler.Diff)
@@ -1387,7 +1528,6 @@ func main() {
 	// can target social-engineering attacks at those specific people.
 	// The audit log of key creation events stays on the audit-logs
 	// endpoint group (which has its own subscription gate).
-	adminOnly := appmw.RequireAdmin()
 	auth.GET("/apikeys", apiKeyHandler.ListTenant, adminOnly)
 	auth.POST("/apikeys", apiKeyHandler.CreateTenant, adminOnly)
 	auth.DELETE("/apikeys/:key_id", apiKeyHandler.DeleteTenant, adminOnly)
@@ -1453,7 +1593,7 @@ func main() {
 
 	// IPA integration endpoints
 	auth.GET("/ipa/announcements", ipaHandler.ListAnnouncements)
-	auth.POST("/ipa/sync", ipaHandler.SyncAnnouncements)
+	auth.POST("/ipa/sync", ipaHandler.SyncAnnouncements, adminOnly)
 	auth.GET("/vulnerabilities/:cve_id/ipa", ipaHandler.GetAnnouncementsByCVE)
 	auth.GET("/settings/ipa", ipaHandler.GetSyncSettings)
 	auth.PUT("/settings/ipa", ipaHandler.UpdateSyncSettings)
@@ -1531,7 +1671,7 @@ func main() {
 	})
 
 	// KEV (Known Exploited Vulnerabilities) integration endpoints
-	auth.POST("/kev/sync", kevHandler.SyncCatalog)
+	auth.POST("/kev/sync", kevHandler.SyncCatalog, adminOnly)
 	auth.GET("/kev/catalog", kevHandler.ListCatalog)
 	auth.GET("/kev/stats", kevHandler.GetStats)
 	auth.GET("/kev/settings", kevHandler.GetSyncSettings)
@@ -1553,7 +1693,7 @@ func main() {
 	auth.GET("/vulnerabilities/:cve_id/paths", cvePathsHandler.GetCVEPaths)
 
 	// EOL (End of Life) integration endpoints
-	auth.POST("/eol/sync", eolHandler.SyncCatalog)
+	auth.POST("/eol/sync", eolHandler.SyncCatalog, adminOnly)
 	auth.GET("/eol/products", eolHandler.ListProducts)
 	auth.GET("/eol/products/:name", eolHandler.GetProduct)
 	auth.GET("/eol/stats", eolHandler.GetStats)

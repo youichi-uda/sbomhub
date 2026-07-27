@@ -119,6 +119,10 @@ func billingSyncSeedSubscription(t *testing.T, migDB *sql.DB,
 type billingSyncLSSub struct {
 	product string
 	status  string
+	// updatedAt is the provider's revision (RFC3339). Empty means the stub
+	// omits the field entirely, which is the pre-M47 shape and exercises the
+	// "cannot be ordered, apply anyway" branch of the sync path.
+	updatedAt string
 }
 
 // billingSyncStub is an httptest stand-in for
@@ -176,10 +180,18 @@ func billingSyncStubLS(t *testing.T, known map[string]billingSyncLSSub) *billing
 		// subscription object has no custom_data — store_id/customer_id/
 		// product_id/variant_id/status/product_name/user_email and nothing
 		// that names OUR tenant. This stub mirrors that shape exactly.
+		//
+		// M47: it DOES carry updated_at (the provider's revision), which the
+		// sync path claims so that re-syncing cannot leave the watermark
+		// behind the state it just wrote.
+		updatedAt := ""
+		if got.updatedAt != "" {
+			updatedAt = fmt.Sprintf(`,"updated_at":%q`, got.updatedAt)
+		}
 		fmt.Fprintf(w, `{"data":{"id":%q,"type":"subscriptions","attributes":{
 			"store_id":1,"customer_id":9001,"product_id":9003,"variant_id":9002,
 			"status":%q,"variant_name":"Default","product_name":%q,
-			"user_email":"buyer@example.com"}}}`, subID, got.status, got.product)
+			"user_email":"buyer@example.com"%s}}}`, subID, got.status, got.product, updatedAt)
 	}))
 	t.Cleanup(stub.Server.Close)
 	return stub

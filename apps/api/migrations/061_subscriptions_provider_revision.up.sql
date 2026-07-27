@@ -1,0 +1,69 @@
+-- ============================================
+-- Provider revision watermark for subscription writes (M47 W3 #4).
+--
+-- The hole this closes:
+--   Every Lemon Squeezy lifecycle handler applied whatever it was handed,
+--   with no reference to the provider's own revision of the object. Webhook
+--   delivery order is best-effort at both providers we use (Lemon Squeezy
+--   retries a non-2xx up to three more times on a 5s/25s/125s backoff, and a
+--   dashboard replay can arrive at any time; Svix -- Clerk's transport --
+--   guarantees order only on FIFO endpoints,
+--   svix.com/blog/guaranteeing-webhook-ordering). So a DELAYED OLD delivery
+--   overwrote newer state: downgrade Team -> Starter, then the retried Team
+--   `subscription_updated` lands and the tenant is back on Team, for free.
+--   The manual sync endpoint could be overwritten the same way.
+--
+-- What this column is:
+--   The highest `data.attributes.updated_at` (the provider's clock, not
+--   ours) that has been APPLIED to this row. The applying statement is a
+--   compare-and-swap --
+--
+--     UPDATE subscriptions SET provider_updated_at = $rev
+--      WHERE id = $1 AND (provider_updated_at IS NULL OR provider_updated_at <= $rev)
+--
+--   -- and a delivery whose revision loses the comparison is discarded with
+--   a 200 (it is genuinely obsolete; retrying it would change nothing).
+--
+--   Scope of the guarantee: a delivery that LOSES the comparison never writes.
+--   It is NOT "the newest delivery always wins a concurrent race" — the claim
+--   and the state write are separate statements on a path that has no
+--   transaction, so two deliveries genuinely in flight can still interleave as
+--   claim(R1), claim(R2), write(R2), write(R1). That needs the webhook path to
+--   become transactional; see docs/SAAS_SETUP.md 2.5 residuals.
+--
+-- Why `<=` and not `<`:
+--   Lemon Squeezy emits several events for one state transition sharing a
+--   single updated_at -- `subscription_updated` accompanies
+--   `subscription_expired`, for instance. Requiring a STRICTLY newer
+--   revision would drop whichever of them arrived second, and dropping a
+--   terminal event (expiry) is a failure in the direction that grants
+--   entitlement. Equal revisions are therefore all applied, in whatever
+--   order they arrive -- exactly the pre-existing behaviour. This migration
+--   buys the discard of STRICTLY OLDER deliveries and nothing more; the
+--   same-revision ordering limit is stated in docs/SAAS_SETUP.md §2.5.
+--
+-- Nullable, no backfill:
+--   NULL means "no revision recorded yet" and accepts the next delivery
+--   unconditionally, which is the only safe reading for rows written before
+--   this migration -- we have no idea which provider revision they reflect,
+--   and inventing one from `updated_at` (OUR write clock, not the
+--   provider's) would silently reject legitimate events for rows we touched
+--   most recently.
+--
+-- Separate column rather than reusing updated_at:
+--   `subscriptions.updated_at` is our own write timestamp, set by
+--   SubscriptionRepository.Update on every write including ones with no
+--   provider event behind them. It is not comparable with the provider's
+--   revision on any shared clock.
+--
+-- RLS: untouched. `subscriptions` has carried no policy since migration 031
+-- (the webhook path runs outside TenantTx); ADD COLUMN changes neither the
+-- table's RLS state nor any policy. The lint-migration-rls gate treats an
+-- ALTER that adds a non-`tenant_id` column as a no-op.
+-- ============================================
+
+ALTER TABLE subscriptions
+    ADD COLUMN IF NOT EXISTS provider_updated_at TIMESTAMP WITH TIME ZONE;
+
+COMMENT ON COLUMN subscriptions.provider_updated_at IS
+    'M47 W3 #4: highest Lemon Squeezy `data.attributes.updated_at` applied to this row (the PROVIDER''s clock -- compare updated_at, which is our write clock). Advanced by SubscriptionRepository.ClaimProviderRevision, a compare-and-swap that accepts a revision >= the stored one and rejects strictly older ones, so a delayed or replayed delivery cannot overwrite newer state. NULL = no revision recorded (pre-061 rows and freshly created ones), which accepts the next delivery unconditionally. Equal revisions are accepted because Lemon Squeezy emits several events per transition sharing one updated_at (subscription_updated alongside subscription_expired) and dropping a terminal event would grant entitlement.';

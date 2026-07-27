@@ -1,0 +1,25 @@
+-- ============================================
+-- Reverse of 061_subscriptions_provider_revision.up.sql (M47 W3 #4).
+--
+-- ROLLBACK SEQUENCING -- read before running this down:
+--   Roll the API binary back to a pre-061 build FIRST.
+--   SubscriptionRepository.ClaimProviderRevision names this column directly
+--   and runs on every Lemon Squeezy lifecycle event and on the manual sync
+--   path, so with the column dropped both fail with
+--   `column "provider_updated_at" does not exist` -- every webhook 500s
+--   (Lemon Squeezy retries at most three more times, then drops the event)
+--   and /subscription/sync 500s.
+--
+-- SECURITY ROLLBACK -- not merely structural: the pre-061 binary applies
+-- whatever it is handed, so rolling back REOPENS the finding. A delayed or
+-- replayed older delivery can again overwrite newer billing state (the
+-- worked example: downgrade Team -> Starter, then a retried Team
+-- `subscription_updated` restores Team for free).
+--
+-- Data loss: only the watermark. Re-applying 061 starts every row back at
+-- NULL, which accepts the next delivery unconditionally and re-establishes
+-- the watermark from it -- the same position a fresh install is in. Nothing
+-- else reads this column.
+-- ============================================
+
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS provider_updated_at;

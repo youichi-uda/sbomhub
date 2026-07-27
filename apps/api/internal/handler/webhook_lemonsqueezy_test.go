@@ -94,6 +94,41 @@ func driveLSWebhook(t *testing.T, h *LemonSqueezyWebhookHandler, body string) *h
 	return rec
 }
 
+// lsClaimColumns mirrors the RETURNING list of
+// SubscriptionRepository.ConsumeCheckoutClaim.
+func lsClaimColumns() []string {
+	return []string{
+		"token_hash", "tenant_id", "plan", "ls_variant_id", "ls_checkout_id",
+		"created_at", "expires_at", "consumed_at", "ls_subscription_id",
+	}
+}
+
+// expectClaimResolves registers the M47 claim consumption that now precedes
+// every subscription_created. `token` is the raw token the payload carries;
+// the repository looks it up by SHA-256, which is what this asserts.
+func expectClaimResolves(mock sqlmock.Sqlmock, token string, tenantID uuid.UUID, lsSubID string) {
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`UPDATE subscription_checkout_claims`)).
+		WithArgs(hashCheckoutClaimToken(token), lsSubID, sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows(lsClaimColumns()).
+			AddRow(hashCheckoutClaimToken(token), tenantID, model.PlanPro, "2", "",
+				now, now.Add(time.Hour), nil, lsSubID))
+}
+
+// lsCreatedBody builds a subscription_created delivery carrying a claim
+// token — the only tenant binding this handler accepts since M47. The status
+// is fixed at "active" because that is what Lemon Squeezy sends with this
+// event; the status-dependent paths live on the other lifecycle events.
+func lsCreatedBody(token, lsSubID, product string) string {
+	return `{
+		"meta": {"event_name": "subscription_created", "custom_data": {"claim_token": "` + token + `"}},
+		"data": {"id": "` + lsSubID + `", "type": "subscriptions", "attributes": {
+			"customer_id": 1, "variant_id": 2, "product_id": 3,
+			"product_name": "` + product + `", "status": "active"
+		}}
+	}`
+}
+
 func lsSubscriptionColumns() []string {
 	return []string{
 		"id", "tenant_id", "ls_subscription_id", "ls_customer_id", "ls_variant_id", "ls_product_id",
@@ -114,6 +149,8 @@ func TestLSWebhook_SubscriptionCreated_EventAndAuditFailuresStillReturn200(t *te
 	tenantID := uuid.New()
 	now := time.Now()
 
+	// M47: the claim resolves the tenant before anything else happens.
+	expectClaimResolves(mock, "tok-1", tenantID, "ls-sub-1")
 	// tenantRepo.GetByID
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, clerk_org_id, name, slug, plan, created_at, updated_at
 		FROM tenants WHERE id = $1`)).
@@ -137,14 +174,7 @@ func TestLSWebhook_SubscriptionCreated_EventAndAuditFailuresStillReturn200(t *te
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO audit_logs`)).
 		WillReturnError(errors.New("audit_logs insert boom"))
 
-	body := `{
-		"meta": {"event_name": "subscription_created", "custom_data": {"tenant_id": "` + tenantID.String() + `"}},
-		"data": {"id": "ls-sub-1", "type": "subscriptions", "attributes": {
-			"customer_id": 1, "variant_id": 2, "product_id": 3,
-			"product_name": "SBOMHub Pro", "status": "active"
-		}}
-	}`
-	rec := driveLSWebhook(t, h, body)
+	rec := driveLSWebhook(t, h, lsCreatedBody("tok-1", "ls-sub-1", "SBOMHub Pro"))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (non-2xx triggers up to 3 redeliveries that could duplicate history rows); body=%s", rec.Code, rec.Body.String())
@@ -273,6 +303,7 @@ func TestLSWebhook_SubscriptionCreated_LookupFailureIs500WithoutInsert(t *testin
 	tenantID := uuid.New()
 	now := time.Now()
 
+	expectClaimResolves(mock, "tok-5", tenantID, "ls-sub-5")
 	mock.ExpectQuery(regexp.QuoteMeta(`FROM tenants WHERE id = $1`)).
 		WithArgs(tenantID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "clerk_org_id", "name", "slug", "plan", "created_at", "updated_at"}).
@@ -283,14 +314,7 @@ func TestLSWebhook_SubscriptionCreated_LookupFailureIs500WithoutInsert(t *testin
 		WithArgs("ls-sub-5").
 		WillReturnError(errors.New("transient: connection reset by peer"))
 
-	body := `{
-		"meta": {"event_name": "subscription_created", "custom_data": {"tenant_id": "` + tenantID.String() + `"}},
-		"data": {"id": "ls-sub-5", "type": "subscriptions", "attributes": {
-			"customer_id": 1, "variant_id": 2, "product_id": 3,
-			"product_name": "SBOMHub Pro", "status": "active"
-		}}
-	}`
-	rec := driveLSWebhook(t, h, body)
+	rec := driveLSWebhook(t, h, lsCreatedBody("tok-5", "ls-sub-5", "SBOMHub Pro"))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (lookup failure must be an explicit error, "+
@@ -317,6 +341,7 @@ func TestLSWebhook_SubscriptionCreated_HappyPath(t *testing.T) {
 	tenantID := uuid.New()
 	now := time.Now()
 
+	expectClaimResolves(mock, "tok-4", tenantID, "ls-sub-4")
 	mock.ExpectQuery(regexp.QuoteMeta(`FROM tenants WHERE id = $1`)).
 		WithArgs(tenantID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "clerk_org_id", "name", "slug", "plan", "created_at", "updated_at"}).
@@ -333,19 +358,243 @@ func TestLSWebhook_SubscriptionCreated_HappyPath(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO audit_logs`)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	body := `{
-		"meta": {"event_name": "subscription_created", "custom_data": {"tenant_id": "` + tenantID.String() + `"}},
-		"data": {"id": "ls-sub-4", "type": "subscriptions", "attributes": {
-			"customer_id": 1, "variant_id": 2, "product_id": 3,
-			"product_name": "SBOMHub Pro", "status": "active"
-		}}
-	}`
-	rec := driveLSWebhook(t, h, body)
+	rec := driveLSWebhook(t, h, lsCreatedBody("tok-4", "ls-sub-4", "SBOMHub Pro"))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// M47 W3 — unit-level mirrors of the contracts pinned end-to-end in
+// m47_billing_webhook_hardening_integration_test.go. They exist because the
+// integration file is tag-gated and skips without a live Postgres, so CI
+// would otherwise carry no regression net for either finding.
+// ----------------------------------------------------------------------------
+
+// TestLSWebhook_SubscriptionCreated_TenantIDCustomDataIsRejected: the value
+// that used to bind the subscription travelled through the buyer's browser.
+// It is no longer read at all, and a delivery carrying only it is refused
+// WITHOUT touching the database (the sqlmock DB has no expectations).
+func TestLSWebhook_SubscriptionCreated_TenantIDCustomDataIsRejected(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+	logs := captureSlog(t)
+	tenantID := uuid.New()
+
+	body := `{
+		"meta": {"event_name": "subscription_created", "custom_data": {"tenant_id": "` + tenantID.String() + `"}},
+		"data": {"id": "ls-sub-legacy", "type": "subscriptions", "attributes": {
+			"customer_id": 1, "variant_id": 2, "product_id": 3,
+			"product_name": "SBOMHub Team", "status": "active"
+		}}
+	}`
+	rec := driveLSWebhook(t, h, body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — custom_data.tenant_id is buyer-editable and must not "+
+			"bind a subscription; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("has_legacy_tenant_id=true")) {
+		t.Errorf("the refusal must name the legacy tenant_id so an operator can link the "+
+			"purchase by hand; logs:\n%s", logs.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("an unbindable delivery must not touch the database: %v", err)
+	}
+}
+
+// TestLSWebhook_SubscriptionCreated_UnresolvableClaimIsRejected covers the
+// other half: a token that does not resolve (unknown / expired / spent by a
+// different subscription — one refusal for all three) stops the delivery
+// before any subscription write.
+func TestLSWebhook_SubscriptionCreated_UnresolvableClaimIsRejected(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+
+	mock.ExpectQuery(regexp.QuoteMeta(`UPDATE subscription_checkout_claims`)).
+		WithArgs(hashCheckoutClaimToken("nope"), "ls-sub-x", sqlmock.AnyArg()).
+		WillReturnError(sql.ErrNoRows)
+
+	rec := driveLSWebhook(t, h, lsCreatedBody("nope", "ls-sub-x", "SBOMHub Team"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestLSWebhook_StaleDeliveryIsDiscarded pins the ordering gate: the
+// compare-and-swap matches no row (the stored revision is newer), so the
+// handler must answer 200 "skipped" and issue NO further statement — no
+// subscription UPDATE, no tenants UPDATE, no history rows.
+func TestLSWebhook_StaleDeliveryIsDiscarded(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	subID := uuid.New()
+	tenantID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE ls_subscription_id = $1`)).
+		WithArgs("ls-sub-stale").
+		WillReturnRows(sqlmock.NewRows(lsSubscriptionColumns()).
+			AddRow(subID, tenantID, "ls-sub-stale", "10", "2", "3",
+				model.StatusActive, model.PlanStarter, nil, nil, nil,
+				nil, nil, nil, nil, now, now))
+	// The CAS matches nothing: the delivery is older than what was applied.
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE subscriptions
+		SET provider_updated_at = $2`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	body := `{
+		"meta": {"event_name": "subscription_updated", "custom_data": {}},
+		"data": {"id": "ls-sub-stale", "type": "subscriptions", "attributes": {
+			"customer_id": 10, "variant_id": 2, "product_id": 3,
+			"product_name": "SBOMHub Team", "status": "active",
+			"updated_at": "2020-01-01T00:00:00Z"
+		}}
+	}`
+	rec := driveLSWebhook(t, h, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — an obsolete delivery must not be retried; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("stale revision")) {
+		t.Errorf("body = %s, want the stale-revision skip", rec.Body.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("older than the state already applied")) {
+		t.Errorf("a discarded delivery must be visible in the log; logs:\n%s", logs.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a discarded delivery must write nothing further: %v", err)
+	}
+}
+
+// TestLSWebhook_FreshDeliveryPassesTheGate is the positive control for the
+// same path: the CAS matches, so the delivery is applied as before.
+func TestLSWebhook_FreshDeliveryPassesTheGate(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+
+	subID := uuid.New()
+	tenantID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE ls_subscription_id = $1`)).
+		WithArgs("ls-sub-fresh").
+		WillReturnRows(sqlmock.NewRows(lsSubscriptionColumns()).
+			AddRow(subID, tenantID, "ls-sub-fresh", "10", "2", "3",
+				model.StatusActive, model.PlanPro, nil, nil, nil,
+				nil, nil, nil, nil, now, now))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE subscriptions
+		SET provider_updated_at = $2`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE subscriptions SET`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO subscription_events`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO audit_logs`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	body := `{
+		"meta": {"event_name": "subscription_updated", "custom_data": {}},
+		"data": {"id": "ls-sub-fresh", "type": "subscriptions", "attributes": {
+			"customer_id": 10, "variant_id": 2, "product_id": 3,
+			"product_name": "SBOMHub Pro", "status": "active",
+			"updated_at": "2026-07-28T00:00:00Z"
+		}}
+	}`
+	if rec := driveLSWebhook(t, h, body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestLSWebhook_SubscriptionCreated_RefusesToReparent: the claim resolved to
+// tenant A but the subscription row belongs to B. The old code assigned the
+// caller's tenant onto the row and relied on the repository's `AND tenant_id`
+// guard to silently block the write; now it is an explicit refusal.
+func TestLSWebhook_SubscriptionCreated_RefusesToReparent(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+
+	claimTenant := uuid.New()
+	rowTenant := uuid.New()
+	now := time.Now()
+
+	expectClaimResolves(mock, "tok-reparent", claimTenant, "ls-sub-owned")
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM tenants WHERE id = $1`)).
+		WithArgs(claimTenant).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "clerk_org_id", "name", "slug", "plan", "created_at", "updated_at"}).
+			AddRow(claimTenant, "org_a", "A", "a", model.PlanFree, now, now))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE ls_subscription_id = $1`)).
+		WithArgs("ls-sub-owned").
+		WillReturnRows(sqlmock.NewRows(lsSubscriptionColumns()).
+			AddRow(uuid.New(), rowTenant, "ls-sub-owned", "10", "2", "3",
+				model.StatusActive, model.PlanTeam, nil, nil, nil,
+				nil, nil, nil, nil, now, now))
+
+	rec := driveLSWebhook(t, h, lsCreatedBody("tok-reparent", "ls-sub-owned", "SBOMHub Team"))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("a refused re-parent must write nothing: %v", err)
+	}
+}
+
+// TestLSWebhook_ClaimTokenIsNeverLogged pins the M47 round-1 (Codex, Medium)
+// fix: since the checkout rework, `meta.custom_data` carries `claim_token` —
+// a live bearer secret that binds a purchase to a tenant. The receive log used
+// to print the whole map, so a failed FIRST delivery left a still-unconsumed
+// token in plaintext in the log. Keys may be logged; values must not.
+func TestLSWebhook_ClaimTokenIsNeverLogged(t *testing.T) {
+	h, mock := newLSWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	const token = "unmistakable-claim-token-value"
+	mock.ExpectQuery(regexp.QuoteMeta(`UPDATE subscription_checkout_claims`)).
+		WithArgs(hashCheckoutClaimToken(token), "ls-sub-log", sqlmock.AnyArg()).
+		WillReturnError(sql.ErrNoRows)
+
+	driveLSWebhook(t, h, lsCreatedBody(token, "ls-sub-log", "SBOMHub Team"))
+
+	if bytes.Contains(logs.Bytes(), []byte(token)) {
+		t.Fatalf("the raw claim token appears in the log:\n%s", logs.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("custom_data_keys")) {
+		t.Errorf("the key list should still be logged for diagnostics; logs:\n%s", logs.String())
+	}
+}
+
+// TestLSWebhook_MalformedPayloadDoesNotLogTheBody is the Codex round-2
+// (Medium) regression: the parse-failure branch used to log the first 500
+// bytes of the raw body. Since M47 those bytes can contain a live
+// `claim_token`, and a delivery that is correctly SIGNED but malformed after
+// the custom_data object reaches exactly that branch.
+func TestLSWebhook_MalformedPayloadDoesNotLogTheBody(t *testing.T) {
+	h, _ := newLSWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	const token = "live-token-that-must-not-be-logged"
+	// Valid JSON up to and including custom_data, then a type error.
+	body := `{"meta":{"event_name":"subscription_created","custom_data":{"claim_token":"` +
+		token + `"}},"data":{"id":42}}`
+
+	rec := driveLSWebhook(t, h, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(logs.Bytes(), []byte(token)) {
+		t.Fatalf("the raw claim token leaked through the parse-failure log:\n%s", logs.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("body_length")) {
+		t.Errorf("the parse failure should still record the body length; logs:\n%s", logs.String())
 	}
 }

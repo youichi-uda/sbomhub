@@ -314,3 +314,130 @@ func TestEvaluateAppRoleRLS(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateWebhookVerification is the startup half of the M47 fail-closed
+// webhook contract (the request-time half lives in
+// internal/handler/webhook_signature_failopen_test.go).
+//
+// The refusals are deliberately production-only: a self-hoster never
+// configures Clerk or Lemon Squeezy at all, and a developer running the SaaS
+// stack locally must be able to boot without either secret — they just get a
+// 401 on every delivery until they set one or opt in explicitly.
+func TestValidateWebhookVerification(t *testing.T) {
+	cases := []struct {
+		name          string
+		appEnv        string
+		clerkKey      string // CLERK_SECRET_KEY — non-empty selects SaaS mode
+		clerkSecret   string
+		lsAPIKey      string // LEMONSQUEEZY_API_KEY — non-empty enables billing
+		lsSecret      string
+		allowUnsigned bool
+		wantErr       bool
+		errSubstr     string
+	}{
+		{
+			name:          "production + opt-in is refused",
+			appEnv:        "production",
+			clerkKey:      "sk_live_x",
+			clerkSecret:   "whsec_x",
+			lsAPIKey:      "ls_x",
+			lsSecret:      "ls_secret",
+			allowUnsigned: true,
+			wantErr:       true,
+			errSubstr:     "SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS",
+		},
+		{
+			name:      "production SaaS without a Clerk webhook secret is refused",
+			appEnv:    "production",
+			clerkKey:  "sk_live_x",
+			wantErr:   true,
+			errSubstr: "CLERK_WEBHOOK_SECRET",
+		},
+		{
+			name:        "production billing without a Lemon Squeezy webhook secret is refused",
+			appEnv:      "production",
+			clerkKey:    "sk_live_x",
+			clerkSecret: "whsec_x",
+			lsAPIKey:    "ls_x",
+			wantErr:     true,
+			errSubstr:   "LEMONSQUEEZY_WEBHOOK_SECRET",
+		},
+		{
+			name:        "production fully configured passes",
+			appEnv:      "production",
+			clerkKey:    "sk_live_x",
+			clerkSecret: "whsec_x",
+			lsAPIKey:    "ls_x",
+			lsSecret:    "ls_secret",
+		},
+		{
+			// Self-hosted: no Clerk key at all, so neither receiver ever runs.
+			name:   "production self-hosted needs no webhook secret",
+			appEnv: "production",
+		},
+		{
+			// Codex round 1 (Low): the exemption must hold even when a
+			// self-hoster happens to have the billing key or the unsigned
+			// flag set — both receivers short-circuit on IsSelfHosted before
+			// any signature work, so demanding a secret would be a refusal
+			// for something that cannot happen.
+			name:          "production self-hosted with billing key and opt-in still starts",
+			appEnv:        "production",
+			lsAPIKey:      "ls_x",
+			allowUnsigned: true,
+		},
+		{
+			name:          "development opt-in warns but starts",
+			appEnv:        "development",
+			clerkKey:      "sk_test_x",
+			allowUnsigned: true,
+		},
+		{
+			name:     "development without secrets warns but starts",
+			appEnv:   "development",
+			clerkKey: "sk_test_x",
+			lsAPIKey: "ls_x",
+		},
+		{
+			// APP_ENV unset is NOT production, so the refusals do not fire —
+			// the request-time guard is what protects this deployment.
+			name:          "unset app env with opt-in starts",
+			appEnv:        "",
+			clerkKey:      "sk_test_x",
+			allowUnsigned: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("APP_ENV", tc.appEnv)
+			t.Setenv("ENVIRONMENT", "")
+			t.Setenv("CLERK_SECRET_KEY", tc.clerkKey)
+			t.Setenv("CLERK_WEBHOOK_SECRET", tc.clerkSecret)
+			t.Setenv("LEMONSQUEEZY_API_KEY", tc.lsAPIKey)
+			t.Setenv("LEMONSQUEEZY_WEBHOOK_SECRET", tc.lsSecret)
+			if tc.allowUnsigned {
+				t.Setenv("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS", "true")
+			} else {
+				t.Setenv("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS", "")
+			}
+
+			// config.Load is used rather than a hand-built Config so the
+			// guard is exercised against the same env→mode derivation the
+			// server performs (cfg.mode is unexported).
+			err := validateWebhookVerification(config.Load())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected a refusal, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("error %q does not name %q", err.Error(), tc.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+		})
+	}
+}

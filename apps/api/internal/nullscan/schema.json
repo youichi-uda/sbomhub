@@ -2009,6 +2009,44 @@
         "type": "timestamp with time zone"
       }
     },
+    "subscription_checkout_claims": {
+      "consumed_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
+      "created_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "expires_at": {
+        "nullable": false,
+        "type": "timestamp with time zone"
+      },
+      "ls_checkout_id": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "ls_subscription_id": {
+        "nullable": true,
+        "type": "character varying(255)"
+      },
+      "ls_variant_id": {
+        "nullable": false,
+        "type": "character varying(255)"
+      },
+      "plan": {
+        "nullable": false,
+        "type": "character varying(50)"
+      },
+      "tenant_id": {
+        "nullable": false,
+        "type": "uuid"
+      },
+      "token_hash": {
+        "nullable": false,
+        "type": "character varying(64)"
+      }
+    },
     "subscription_events": {
       "created_at": {
         "nullable": false,
@@ -2103,6 +2141,10 @@
       "plan": {
         "nullable": false,
         "type": "character varying(50)"
+      },
+      "provider_updated_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
       },
       "renews_at": {
         "nullable": true,
