@@ -178,15 +178,37 @@ func unknownResult(r *ReachabilityResult, reason string) *ReachabilityResult {
 //     sufficient. False negatives from missing tidy can occur but the
 //     LLM stage compensates.
 //
+// go.mod is read through readManifestInRoot, the npm analyzer's stage-1
+// helper (both analyzers live in this package): root-confined,
+// symlink-refusing and size-capped (before this, a bare os.ReadFile
+// followed a symlinked go.mod wherever it pointed — including out of the
+// project root — with no size bound). "go.mod" is a pure basename, so the
+// lstat refusal covers the whole path within the root here, as in the npm
+// stage 1. The npm manifest cap (64 MiB) is reused unchanged: the cap is
+// there to bound the read, it sits far above any legitimate go.mod we are
+// aware of, and a separate go-specific value would only add a second knob
+// for the two stage-1 readers to diverge on. A refused go.mod is an
+// error, so Analyze downgrades to unknown loudly rather than deciding
+// from bytes the project directory does not actually contain; an absent
+// go.mod stays an error as before (fs.ErrNotExist survives the wrap —
+// unlike npm there is no lockfile fallback to continue on).
+//
 // ※要確認: if false-negative rate is high in real-world projects, switch
 // to `go mod graph` (offline-safe) for transitive closure. Out of M1 scope.
 func loadModuleGraph(projectPath string) (map[string]struct{}, error) {
-	modPath := filepath.Join(projectPath, "go.mod")
-	data, err := os.ReadFile(modPath)
+	rootHandle, err := os.OpenRoot(projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("open project root: %w", err)
+	}
+	defer rootHandle.Close()
+
+	data, err := readManifestInRoot(rootHandle, "go.mod")
 	if err != nil {
 		return nil, fmt.Errorf("read go.mod: %w", err)
 	}
-	mf, err := modfile.Parse(modPath, data, nil)
+	// filepath.Join only labels parse errors; the read above never uses
+	// this path.
+	mf, err := modfile.Parse(filepath.Join(projectPath, "go.mod"), data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("parse go.mod: %w", err)
 	}

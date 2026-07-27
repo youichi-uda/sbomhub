@@ -29,5 +29,5 @@
 # copies, then regenerate this file in BOTH repos (the test failure message
 # prints the expected vs actual hashes to paste back in).
 9ac0b6d03cc3176de7f3b2e8a7e178f127c2f52171be708b51d8b368a33b2b0e  types.go
-2e15a80375250356c56f8003c7da72a20ff4d9b040aeec8f6f891c80f0acdd26  go_analyzer.go
+36668017240873b3bf3a1531ff4acded0d20720d0078894134d6aa50e72d13d8  go_analyzer.go
 4ca120c84e2bd19fdd0cf0b2493792a22011a6578105a2a56b8ce477d02c7096  npm_analyzer.go

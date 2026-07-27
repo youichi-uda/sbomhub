@@ -5,6 +5,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -135,6 +137,91 @@ func TestLoadModuleGraph_MissingFile(t *testing.T) {
 	t.Parallel()
 	_, err := loadModuleGraph("testdata/__no_such_dir__")
 	require.Error(t, err)
+}
+
+// TestLoadModuleGraph_ReadsConfined guards the go.mod twin of the npm
+// round-3 High finding (TestNpmDependencyGraph_ManifestReadsConfined):
+// stage 1 read go.mod with a bare os.ReadFile — following a symlinked
+// go.mod wherever it pointed (including OUT of the project root) with no
+// size bound. go.mod is now read through readManifestInRoot, the same
+// root-confined, symlink-refusing, size-capped read as the npm stage-1
+// files ("go.mod" is a pure basename, so the lstat refusal covers the
+// whole path within the root here too). A refused go.mod fails the
+// module-graph load, and Analyze downgrades to unknown (loud) rather than
+// producing a verdict from bytes the project directory does not actually
+// contain.
+func TestLoadModuleGraph_ReadsConfined(t *testing.T) {
+	t.Parallel()
+
+	input := ReachabilityInput{
+		Ecosystem:         "go",
+		VulnerableModules: []string{"example.test/vulnpkg"},
+	}
+	const goModBody = "module example.test/confined\n\nrequire example.test/vulnpkg v1.0.0\n"
+
+	t.Run("out-of-root go.mod symlink refused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		outside := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "go.mod"), []byte(goModBody), 0o600))
+		if err := os.Symlink(filepath.Join(outside, "go.mod"),
+			filepath.Join(root, "go.mod")); err != nil {
+			t.Skipf("cannot create symlinks on this platform: %v", err)
+		}
+
+		res, err := (&GoAnalyzer{SkipPackagesLoad: true}).Analyze(context.Background(), root, input)
+		require.NoError(t, err)
+		assert.Equal(t, StatusUnknown, res.Status,
+			"out-of-root go.mod content must not enter the module graph")
+		assert.True(t, npmHasDescription(res, "module graph load failed"),
+			"expected a loud load failure, got %+v", res.Evidence)
+	})
+
+	t.Run("in-root go.mod symlink refused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(root, "real_go.mod"), []byte(goModBody), 0o600))
+		if err := os.Symlink("real_go.mod", filepath.Join(root, "go.mod")); err != nil {
+			t.Skipf("cannot create symlinks on this platform: %v", err)
+		}
+
+		res, err := (&GoAnalyzer{SkipPackagesLoad: true}).Analyze(context.Background(), root, input)
+		require.NoError(t, err)
+		assert.Equal(t, StatusUnknown, res.Status,
+			"symlinked go.mod is refused even when the target stays in-root")
+		assert.True(t, npmHasDescription(res, "module graph load failed"),
+			"expected a loud load failure, got %+v", res.Evidence)
+	})
+
+	t.Run("oversized go.mod refused at the cap", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		// Sparse file over the cap: fast to create. Unlike the npm
+		// lockfile case, 64 MiB of NULs would not have parsed as a valid
+		// go.mod anyway, so the discriminating assertion is the error
+		// text: the read must be refused AT the cap, not performed
+		// unboundedly and then rejected by the parser.
+		f, err := os.Create(filepath.Join(root, "go.mod"))
+		require.NoError(t, err)
+		require.NoError(t, f.Truncate(npmMaxManifestSizeBytes+1))
+		require.NoError(t, f.Close())
+
+		_, gerr := loadModuleGraph(root)
+		require.Error(t, gerr)
+		assert.Contains(t, gerr.Error(), "-byte cap",
+			"expected the size-cap refusal, not a parse failure after an unbounded read")
+	})
+
+	// Contract pin, green before and after the confinement change: an
+	// absent go.mod must still surface as fs.ErrNotExist through the
+	// wrapped error, matching the npm stage-1 absent-file handling.
+	t.Run("absent go.mod still reports fs.ErrNotExist", func(t *testing.T) {
+		t.Parallel()
+		_, gerr := loadModuleGraph(t.TempDir())
+		require.Error(t, gerr)
+		assert.ErrorIs(t, gerr, fs.ErrNotExist,
+			"absent-file detection must survive the read-path change")
+	})
 }
 
 func TestMatchModules(t *testing.T) {
