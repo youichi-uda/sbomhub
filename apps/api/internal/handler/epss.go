@@ -42,6 +42,11 @@ func (h *EPSSHandler) GetScore(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "EPSS score not found"})
 	}
 
+	// GetScore's contract: a returned entry always has Score != nil (a CVE
+	// whose score FIRST served malformed answers 404 above, same as one
+	// FIRST did not return at all). Percentile may be nil — FIRST served a
+	// malformed percentile alongside a valid score — and marshals as JSON
+	// null rather than a fabricated 0.
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"cve_id":     cveID,
 		"score":      score.Score,

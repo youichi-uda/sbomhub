@@ -2058,8 +2058,11 @@ export const api = {
   // EPSS
   epss: {
     sync: () => request<{ status: string }>("/api/v1/vulnerabilities/sync-epss", { method: "POST" }),
+    // percentile is null when FIRST served a malformed percentile alongside a
+    // valid score (the backend keeps the score and clears the percentile
+    // rather than fabricating 0 — M46 Codex round C).
     getScore: (cveId: string) =>
-      request<{ cve_id: string; score: number; percentile: number }>(`/api/v1/vulnerabilities/epss/${cveId}`),
+      request<{ cve_id: string; score: number; percentile: number | null }>(`/api/v1/vulnerabilities/epss/${cveId}`),
   },
 
   projects: {

@@ -50,10 +50,10 @@ func TestEPSSService_FetchScores_InjectedURL(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected score for CVE-2021-44228 to be present")
 	}
-	if got.Score != 0.97565 {
+	if got.Score == nil || *got.Score != 0.97565 {
 		t.Errorf("Score = %v, want 0.97565", got.Score)
 	}
-	if got.Percentile != 0.99998 {
+	if got.Percentile == nil || *got.Percentile != 0.99998 {
 		t.Errorf("Percentile = %v, want 0.99998", got.Percentile)
 	}
 
@@ -65,7 +65,7 @@ func TestEPSSService_FetchScores_InjectedURL(t *testing.T) {
 	if single == nil {
 		t.Fatal("GetScore returned nil for a present CVE")
 	}
-	if single.Score != 0.12345 {
+	if single.Score == nil || *single.Score != 0.12345 {
 		t.Errorf("GetScore Score = %v, want 0.12345", single.Score)
 	}
 }
@@ -162,6 +162,107 @@ func TestEPSSService_EscapeMechanism(t *testing.T) {
 	got := url.QueryEscape("CVE-2021-4 &x")
 	if strings.ContainsAny(got, " &") {
 		t.Errorf("QueryEscape(hostile) = %q, want no raw space/ampersand", got)
+	}
+}
+
+// TestEPSSService_MalformedValues_PartialKeepAndTombstone pins the M46 Codex
+// round C (Medium) contract for malformed FIRST values. ca94806 correctly
+// stopped fabricating 0.0 for unparseable strings but skipped the whole item
+// (`continue`), which (a) left any previously-synced DB value in place being
+// served as current — SSVC auto-assessment reads it with no freshness signal —
+// and (b) threw away a perfectly good score when only the percentile was
+// malformed. The required behaviour:
+//
+//   - score OK, percentile malformed -> entry present with the score KEPT and
+//     the percentile explicitly absent (persisted as NULL);
+//   - score malformed -> entry present as an explicit clear/tombstone (both
+//     values absent -> both columns persisted as NULL), never a silent skip;
+//   - fully well-formed items are unaffected.
+func TestEPSSService_MalformedValues_PartialKeepAndTombstone(t *testing.T) {
+	const body = `{
+		"status": "OK", "status-code": 200, "version": "1.0", "total": 3,
+		"data": [
+			{"cve": "CVE-2021-44228", "epss": "0.97565", "percentile": "0.99998", "date": "2026-07-27"},
+			{"cve": "CVE-2021-45046", "epss": "0.7", "percentile": "broken", "date": "2026-07-27"},
+			{"cve": "CVE-2020-1938", "epss": "broken", "percentile": "0.95", "date": "2026-07-27"}
+		]
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	svc := NewEPSSService(nil, server.URL, false)
+
+	scores, err := svc.fetchEPSSScores(context.Background(),
+		[]string{"CVE-2021-44228", "CVE-2021-45046", "CVE-2020-1938"})
+	if err != nil {
+		t.Fatalf("fetchEPSSScores returned error: %v", err)
+	}
+	if len(scores) != 3 {
+		t.Errorf("len(scores) = %d, want 3: every answered CVE needs an explicit entry (skipping leaves stale DB values being served as current)", len(scores))
+	}
+
+	// Fully well-formed item: both values set.
+	if good, ok := scores["CVE-2021-44228"]; !ok {
+		t.Error("well-formed item missing from scores")
+	} else {
+		if good.Score == nil || *good.Score != 0.97565 {
+			t.Errorf("well-formed Score = %v, want 0.97565", good.Score)
+		}
+		if good.Percentile == nil || *good.Percentile != 0.99998 {
+			t.Errorf("well-formed Percentile = %v, want 0.99998", good.Percentile)
+		}
+	}
+
+	// Percentile-only failure: score kept, percentile explicitly absent.
+	if part, ok := scores["CVE-2021-45046"]; !ok {
+		t.Error("percentile-only parse failure must not discard the item (the valid score was being thrown away)")
+	} else {
+		if part.Score == nil || *part.Score != 0.7 {
+			t.Errorf("partial Score = %v, want 0.7 (kept despite broken percentile)", part.Score)
+		}
+		if part.Percentile != nil {
+			t.Errorf("partial Percentile = %v, want nil (persisted as NULL, not fabricated)", *part.Percentile)
+		}
+	}
+
+	// Score failure: explicit tombstone — both values absent so the
+	// repository clears both columns to NULL.
+	if tombEntry, ok := scores["CVE-2020-1938"]; !ok {
+		t.Error("score parse failure must yield an explicit clear entry, not a skip (skip keeps the previous sync's stale value)")
+	} else {
+		if tombEntry.Score != nil {
+			t.Errorf("tombstone Score = %v, want nil", *tombEntry.Score)
+		}
+		if tombEntry.Percentile != nil {
+			t.Errorf("tombstone Percentile = %v, want nil (percentile without score is fabricated junk)", *tombEntry.Percentile)
+		}
+	}
+
+	// GetScore must surface the kept score for the percentile-broken CVE
+	// (pre-fix it returned nil / handler 404 despite FIRST serving a score).
+	partial, err := svc.GetScore(context.Background(), "CVE-2021-45046")
+	if err != nil {
+		t.Fatalf("GetScore returned error: %v", err)
+	}
+	if partial == nil {
+		t.Error("GetScore(CVE-2021-45046) = nil, want the parsed score 0.7 (percentile failure must not hide the score)")
+	} else if partial.Score == nil || *partial.Score != 0.7 {
+		t.Errorf("GetScore(CVE-2021-45046).Score = %v, want 0.7", partial.Score)
+	}
+
+	// A tombstone has no presentable score: GetScore keeps answering nil
+	// (handler 404) — same externally visible result as pre-fix, pinned so
+	// the tombstone entry never leaks a fabricated zero through this path.
+	tomb, err := svc.GetScore(context.Background(), "CVE-2020-1938")
+	if err != nil {
+		t.Fatalf("GetScore returned error: %v", err)
+	}
+	if tomb != nil {
+		t.Errorf("GetScore(CVE-2020-1938) = %+v, want nil (malformed score has no presentable value)", tomb)
 	}
 }
 

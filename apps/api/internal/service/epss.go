@@ -166,19 +166,36 @@ func (s *EPSSService) fetchEPSSScores(ctx context.Context, cveIDs []string) (map
 	for _, item := range epssResp.Data {
 		// FIRST serves scores as decimal strings. A malformed value must NOT
 		// be stored as a fabricated 0.0 (EPSS feeds SSVC auto-assessment, so
-		// a silent zero downgrades real risk); skip the item and leave the
-		// CVE without a score, which callers already treat as "no data".
+		// a silent zero downgrades real risk) — and it must NOT be skipped
+		// either (M46 Codex round C, Medium): this sync may be refreshing a
+		// CVE that already has a value in the DB, and a skip leaves that
+		// previous, no-longer-authoritative value being served as current
+		// with no freshness signal. Every answered CVE therefore gets an
+		// explicit entry:
+		//   - score OK, percentile malformed -> keep the score, clear only
+		//     the percentile (a valid score must not be discarded);
+		//   - score malformed -> clear BOTH columns to NULL ("no data", the
+		//     state all readers already handle); a percentile without a
+		//     score would read as fabricated "score 0 at high percentile"
+		//     through the COALESCE readers.
 		score, sErr := strconv.ParseFloat(item.EPSS, 64)
 		percentile, pErr := strconv.ParseFloat(item.Percentile, 64)
-		if sErr != nil || pErr != nil {
-			slog.Warn("epss: skipping unparseable score from FIRST API",
+		switch {
+		case sErr != nil:
+			slog.Warn("epss: unparseable score from FIRST API; clearing stored EPSS for CVE",
 				"cve_id", item.CVE, "epss", item.EPSS, "percentile", item.Percentile,
-				"score_err", sErr, "percentile_err", pErr)
-			continue
-		}
-		scores[item.CVE] = repository.EPSSData{
-			Score:      score,
-			Percentile: percentile,
+				"score_err", sErr)
+			scores[item.CVE] = repository.EPSSData{}
+		case pErr != nil:
+			slog.Warn("epss: unparseable percentile from FIRST API; keeping score, clearing percentile",
+				"cve_id", item.CVE, "epss", item.EPSS, "percentile", item.Percentile,
+				"percentile_err", pErr)
+			scores[item.CVE] = repository.EPSSData{Score: &score}
+		default:
+			scores[item.CVE] = repository.EPSSData{
+				Score:      &score,
+				Percentile: &percentile,
+			}
 		}
 	}
 
@@ -203,7 +220,12 @@ func (s *EPSSService) GetScore(ctx context.Context, cveID string) (*repository.E
 		return nil, err
 	}
 
-	if data, ok := scores[normalized]; ok {
+	// A clear/tombstone entry (Score == nil) carries no presentable score:
+	// answer "not found" exactly like a CVE FIRST did not return, so this
+	// path can never leak a fabricated zero. Returned data always has
+	// Score != nil; Percentile may still be nil (percentile-only parse
+	// failure keeps the score).
+	if data, ok := scores[normalized]; ok && data.Score != nil {
 		return &data, nil
 	}
 	return nil, nil
