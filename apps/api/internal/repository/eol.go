@@ -11,6 +11,24 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// M47 W2 sentinels for this repository. Both wrap sql.ErrNoRows (see
+// ErrTenantUserNotFound in repository/user.go).
+var (
+	// ErrEOLSyncRowNotFound is returned by UpdateSyncSettings /
+	// UpdateSyncLog when the statement matched no row. Those tables are
+	// global singletons/logs with no tenant column, so this only ever means
+	// "the row I just read is gone" — still a sync whose bookkeeping was
+	// silently lost.
+	ErrEOLSyncRowNotFound = fmt.Errorf("eol sync tables: no row matched: %w", sql.ErrNoRows)
+
+	// ErrComponentRowNotFound is returned by UpdateComponentEOLStatus when
+	// the statement matched no `components` row. components is ENABLE +
+	// FORCE RLS, so 0 rows also covers "this statement ran outside the
+	// tenant tx and the policy hid every row" — the exact hazard the
+	// method's own comment warns about.
+	ErrComponentRowNotFound = fmt.Errorf("components: no row matched: %w", sql.ErrNoRows)
+)
+
 // EOLRepository handles EOL data access
 type EOLRepository struct {
 	db *sql.DB
@@ -280,6 +298,10 @@ func (r *EOLRepository) GetMappings(ctx context.Context) ([]model.EOLComponentMa
 }
 
 // CreateMapping creates a new component mapping
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *EOLRepository) CreateMapping(ctx context.Context, m *model.EOLComponentMapping) error {
 	if m.ID == uuid.Nil {
 		m.ID = uuid.New()
@@ -321,7 +343,13 @@ func (r *EOLRepository) GetSyncSettings(ctx context.Context) (*model.EOLSyncSett
 	return &s, nil
 }
 
-// UpdateSyncSettings updates the sync settings
+// UpdateSyncSettings updates the sync settings.
+//
+// M47 W2: `eol_sync_settings` is a global (tenant-less) singleton, so there
+// is no tenant predicate to add — but 0 rows still means the row the caller
+// just read has vanished, and the sync then reported success while its own
+// bookkeeping (last_sync_at, totals) never landed. 0 rows returns
+// ErrEOLSyncRowNotFound.
 func (r *EOLRepository) UpdateSyncSettings(ctx context.Context, s *model.EOLSyncSettings) error {
 	query := `
 		UPDATE eol_sync_settings SET
@@ -329,11 +357,21 @@ func (r *EOLRepository) UpdateSyncSettings(ctx context.Context, s *model.EOLSync
 			total_products = $4, total_cycles = $5, updated_at = NOW()
 		WHERE id = $6
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	res, err := r.db.ExecContext(ctx, query,
 		s.Enabled, s.SyncIntervalHours, s.LastSyncAt,
 		s.TotalProducts, s.TotalCycles, s.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update eol_sync_settings (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update eol sync settings %s: %w", s.ID, ErrEOLSyncRowNotFound)
+	}
+	return nil
 }
 
 // CreateSyncLog creates a new sync log entry
@@ -356,7 +394,11 @@ func (r *EOLRepository) CreateSyncLog(ctx context.Context) (*model.EOLSyncLog, e
 	return log, nil
 }
 
-// UpdateSyncLog updates a sync log entry
+// UpdateSyncLog updates a sync log entry.
+//
+// M47 W2: same contract as UpdateSyncSettings — 0 rows means the terminal
+// state of a sync run was never recorded, which leaves the log row stuck
+// on 'running' forever with nobody the wiser.
 func (r *EOLRepository) UpdateSyncLog(ctx context.Context, log *model.EOLSyncLog) error {
 	query := `
 		UPDATE eol_sync_logs SET
@@ -364,11 +406,21 @@ func (r *EOLRepository) UpdateSyncLog(ctx context.Context, log *model.EOLSyncLog
 			cycles_synced = $4, components_updated = $5, error_message = $6
 		WHERE id = $7
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	res, err := r.db.ExecContext(ctx, query,
 		log.CompletedAt, log.Status, log.ProductsSynced,
 		log.CyclesSynced, log.ComponentsUpdated, log.ErrorMessage, log.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update eol_sync_logs (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update eol sync log %s: %w", log.ID, ErrEOLSyncRowNotFound)
+	}
+	return nil
 }
 
 // GetLatestSyncLog gets the most recent sync log.
@@ -408,11 +460,27 @@ func (r *EOLRepository) UpdateComponentEOLStatus(ctx context.Context, componentI
 	`
 	// `components` is RLS-enforced — route through the tenant tx so the
 	// UPDATE is visible to the policy (otherwise affected-row count is 0).
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	//
+	// M47 W2: "otherwise affected-row count is 0" was written here as a
+	// known hazard, yet the count was discarded — so the very failure this
+	// comment describes (running outside the tenant tx, every component
+	// silently skipped, the EOL sweep reporting success) could not be
+	// detected. 0 rows now returns ErrComponentRowNotFound.
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		info.Status, info.ProductID, info.CycleID,
 		info.EOLDate, info.EOSDate, componentID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update components eol status (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update eol status of component %s: %w", componentID, ErrComponentRowNotFound)
+	}
+	return nil
 }
 
 // GetComponentsForEOLCheck gets components that need EOL checking.

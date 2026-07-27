@@ -246,6 +246,10 @@ func (r *AuditRepository) Count(ctx context.Context, tenantID uuid.UUID) (int, e
 	return count, err
 }
 
+// M47 W2 classification: BENIGN. This is a retention sweep, so matching 0
+// rows means "nothing had aged out yet", and the affected count is
+// returned to the caller rather than discarded.
+//
 // DeleteOlderThan deletes audit logs older than the specified duration
 func (r *AuditRepository) DeleteOlderThan(ctx context.Context, tenantID uuid.UUID, before time.Time) (int64, error) {
 	query := `DELETE FROM audit_logs WHERE tenant_id = $1 AND created_at < $2`

@@ -10,6 +10,24 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// M47 W2 — sentinels for the 0-row mutation contract on this repository.
+// Both wrap sql.ErrNoRows; see ErrTenantUserNotFound (repository/user.go)
+// for why.
+var (
+	// ErrSSVCAssessmentNotFound is returned by UpdateAssessment when the
+	// statement matched no `ssvc_assessments` row for the caller's
+	// (tenant, project).
+	ErrSSVCAssessmentNotFound = fmt.Errorf("ssvc_assessments: no row matched for this tenant/project: %w", sql.ErrNoRows)
+
+	// ErrVulnerabilityRowNotFound is returned by
+	// UpdateVulnerabilitySSVCDecision when the statement matched no
+	// `vulnerabilities` row. That table is the global CVE catalogue (no
+	// tenant column), so this only ever means "no such vulnerability id" —
+	// but a denormalised decision that silently failed to land is exactly
+	// the drift the service comment promises not to allow.
+	ErrVulnerabilityRowNotFound = fmt.Errorf("vulnerabilities: no row matched: %w", sql.ErrNoRows)
+)
+
 // SSVCRepository handles SSVC data access
 type SSVCRepository struct {
 	db *sql.DB
@@ -57,6 +75,10 @@ func (r *SSVCRepository) GetProjectDefaults(ctx context.Context, projectID uuid.
 }
 
 // UpsertProjectDefaults creates or updates project defaults
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *SSVCRepository) UpsertProjectDefaults(ctx context.Context, d *model.SSVCProjectDefaults) error {
 	query := `
 		INSERT INTO ssvc_project_defaults (
@@ -179,6 +201,17 @@ func (r *SSVCRepository) CreateAssessment(ctx context.Context, a *model.SSVCAsse
 // vulnerability_id itself is deliberately NOT updatable here: it is the
 // identity half of the (project_id, vulnerability_id) key the caller looked
 // the row up by.
+//
+// M47 W2: the statement was `WHERE id = $13` with its result discarded —
+// the only tenant guard was migration 042's FORCE RLS, and when that guard
+// fired the UPDATE matched 0 rows and returned nil, so a refused write was
+// reported as a saved assessment (and the service then went on to stamp
+// the denormalised vulnerabilities.ssvc_decision from it). The statement
+// now carries the same explicit `AND tenant_id AND project_id` belt its
+// sibling DeleteAssessment already had — the asymmetry between the two was
+// the finding — and 0 rows returns ErrSSVCAssessmentNotFound.
+// a.TenantID / a.ProjectID are set by both service entry points from the
+// session tenant and the route's project id, never from a request body.
 func (r *SSVCRepository) UpdateAssessment(ctx context.Context, a *model.SSVCAssessment) error {
 	query := `
 		UPDATE ssvc_assessments SET
@@ -187,16 +220,27 @@ func (r *SSVCRepository) UpdateAssessment(ctx context.Context, a *model.SSVCAsse
 			mission_prevalence = $5, safety_impact = $6, decision = $7,
 			exploitation_auto = $8, automatable_auto = $9, assessed_by = $10,
 			assessed_at = $11, notes = $12, updated_at = NOW()
-		WHERE id = $13
+		WHERE id = $13 AND tenant_id = $14 AND project_id = $15
 	`
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		a.CVEID,
 		a.Exploitation, a.Automatable, a.TechnicalImpact,
 		a.MissionPrevalence, a.SafetyImpact, a.Decision,
 		a.ExploitationAuto, a.AutomatableAuto, a.AssessedBy,
-		a.AssessedAt, a.Notes, a.ID,
+		a.AssessedAt, a.Notes, a.ID, a.TenantID, a.ProjectID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update ssvc_assessments (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update assessment %s for tenant %s / project %s: %w",
+			a.ID, a.TenantID, a.ProjectID, ErrSSVCAssessmentNotFound)
+	}
+	return nil
 }
 
 // CreateAssessmentHistory creates a history entry
@@ -370,11 +414,29 @@ func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenant
 	return n > 0, nil
 }
 
-// UpdateVulnerabilitySSVCDecision updates the SSVC decision on the vulnerability record
+// UpdateVulnerabilitySSVCDecision updates the denormalised SSVC decision on
+// the (global, tenant-less) vulnerabilities row.
+//
+// M47 W2: 0 rows returns ErrVulnerabilityRowNotFound. `vulnerabilities` is
+// the shared CVE catalogue and carries no tenant column, so there is no
+// tenant predicate to add here — but a 0-row UPDATE still means the
+// vulnerability id does not exist, and the service's own comment says this
+// denormalised column "must not drift silently" from the saved assessment.
+// Reporting the drift is the only way that promise can be kept.
 func (r *SSVCRepository) UpdateVulnerabilitySSVCDecision(ctx context.Context, vulnerabilityID uuid.UUID, decision model.SSVCDecision) error {
 	query := `UPDATE vulnerabilities SET ssvc_decision = $1, updated_at = NOW() WHERE id = $2`
-	_, err := r.q(ctx).ExecContext(ctx, query, decision, vulnerabilityID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, decision, vulnerabilityID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update vulnerabilities ssvc_decision (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update ssvc_decision of vulnerability %s: %w", vulnerabilityID, ErrVulnerabilityRowNotFound)
+	}
+	return nil
 }
 
 // GetAssessmentHistory gets history for an assessment that belongs to the

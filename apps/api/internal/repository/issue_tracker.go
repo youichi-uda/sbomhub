@@ -11,6 +11,31 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// M47 W2 — sentinels for the 0-row mutation contract on this repository.
+//
+// `issue_tracker_connections` and `vulnerability_tickets` are both ENABLE +
+// FORCE ROW LEVEL SECURITY (migration 042, verified against pg_class), so
+// RLS is the braces that stops a cross-tenant write. What was missing was
+// the belt AND the ability to notice: every mutation below ran
+// `WHERE id = $1` with no tenant predicate and discarded its result, so a
+// blocked cross-tenant statement matched 0 rows and returned nil.
+// `DELETE /api/v1/integrations/:id` therefore answered 204 for a connection
+// that still exists (carried over from M47 W1).
+//
+// Both sentinels wrap sql.ErrNoRows — see ErrTenantUserNotFound
+// (repository/user.go) for the rationale.
+var (
+	// ErrIssueTrackerConnectionNotFound is returned by UpdateConnection /
+	// DeleteConnection / UpdateConnectionSyncTime when the statement matched
+	// no `issue_tracker_connections` row for the calling tenant.
+	ErrIssueTrackerConnectionNotFound = fmt.Errorf("issue_tracker_connections: no row matched for this tenant: %w", sql.ErrNoRows)
+
+	// ErrVulnerabilityTicketNotFound is returned by UpdateTicket when the
+	// statement matched no `vulnerability_tickets` row for the calling
+	// tenant.
+	ErrVulnerabilityTicketNotFound = fmt.Errorf("vulnerability_tickets: no row matched for this tenant: %w", sql.ErrNoRows)
+)
+
 // IssueTrackerRepository handles issue tracker data access
 type IssueTrackerRepository struct {
 	db *sql.DB
@@ -167,35 +192,82 @@ func (r *IssueTrackerRepository) ListConnectionsByType(ctx context.Context, tena
 	return connections, nil
 }
 
-// UpdateConnection updates a connection
+// UpdateConnection updates a connection, restricted to the tenant that owns
+// the supplied struct.
+//
+// M47 W2: `AND tenant_id = $10` is the explicit belt to migration 042's
+// FORCE RLS braces (the M47 W1 pattern), and 0 rows returns
+// ErrIssueTrackerConnectionNotFound so a refused write cannot be reported
+// as a completed one. conn.TenantID must come from a trusted lookup
+// (GetConnection / ListConnections), never from a request body.
 func (r *IssueTrackerRepository) UpdateConnection(ctx context.Context, conn *model.IssueTrackerConnection) error {
 	query := `
 		UPDATE issue_tracker_connections SET
 			name = $2, base_url = $3, auth_type = $4, auth_email = $5,
 			auth_token_encrypted = $6, default_project_key = $7, default_issue_type = $8,
 			is_active = $9, updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND tenant_id = $10
 	`
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		conn.ID, conn.Name, conn.BaseURL, conn.AuthType, conn.AuthEmail,
 		conn.AuthTokenEncrypted, conn.DefaultProjectKey, conn.DefaultIssueType,
-		conn.IsActive,
+		conn.IsActive, conn.TenantID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update issue_tracker_connections (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update connection %s for tenant %s: %w", conn.ID, conn.TenantID, ErrIssueTrackerConnectionNotFound)
+	}
+	return nil
 }
 
-// DeleteConnection deletes a connection
-func (r *IssueTrackerRepository) DeleteConnection(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM issue_tracker_connections WHERE id = $1`
-	_, err := r.q(ctx).ExecContext(ctx, query, id)
-	return err
+// DeleteConnection deletes a connection, restricted to the calling tenant.
+//
+// M47 W2 (the M47 W1 carry-over): the pre-fix statement was a bare
+// `DELETE FROM issue_tracker_connections WHERE id = $1` whose result was
+// discarded. RLS blocked the cross-tenant row, the statement matched 0
+// rows, and `DELETE /api/v1/integrations/:id` returned 204 for a
+// connection that still existed — the caller could not tell "deleted" from
+// "someone else's id". tenantID MUST come from the authenticated session.
+func (r *IssueTrackerRepository) DeleteConnection(ctx context.Context, tenantID, id uuid.UUID) error {
+	query := `DELETE FROM issue_tracker_connections WHERE id = $1 AND tenant_id = $2`
+	res, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete issue_tracker_connections (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete connection %s for tenant %s: %w", id, tenantID, ErrIssueTrackerConnectionNotFound)
+	}
+	return nil
 }
 
-// UpdateConnectionSyncTime updates the last sync time for a connection
-func (r *IssueTrackerRepository) UpdateConnectionSyncTime(ctx context.Context, id uuid.UUID) error {
-	query := `UPDATE issue_tracker_connections SET last_sync_at = NOW(), updated_at = NOW() WHERE id = $1`
-	_, err := r.q(ctx).ExecContext(ctx, query, id)
-	return err
+// UpdateConnectionSyncTime updates the last sync time for a connection,
+// restricted to the calling tenant (same belt + audible-0-rows contract as
+// its siblings — the asymmetry between the three connection mutations was
+// itself the M47 W2 finding).
+func (r *IssueTrackerRepository) UpdateConnectionSyncTime(ctx context.Context, tenantID, id uuid.UUID) error {
+	query := `UPDATE issue_tracker_connections SET last_sync_at = NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2`
+	res, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update issue_tracker_connections sync time (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update sync time of connection %s for tenant %s: %w", id, tenantID, ErrIssueTrackerConnectionNotFound)
+	}
+	return nil
 }
 
 // CreateTicket creates a new vulnerability ticket
@@ -430,19 +502,39 @@ func (r *IssueTrackerRepository) ListTickets(ctx context.Context, tenantID uuid.
 	return tickets, total, nil
 }
 
-// UpdateTicket updates a ticket
+// UpdateTicket updates a ticket, restricted to the tenant that owns the
+// supplied struct.
+//
+// M47 W2: `AND tenant_id = $8` is the explicit belt to migration 042's
+// FORCE RLS braces, and 0 rows returns ErrVulnerabilityTicketNotFound.
+// Pre-fix this was the ticket-sync write path's blind spot: SyncTicket
+// pulls the external tracker's state and then persists it here, so a
+// silently-0-row UPDATE meant the local mirror stayed stale forever while
+// every sync reported success. ticket.TenantID comes from GetTicket (the
+// re-fetch SyncTicket performs), never from a request body.
 func (r *IssueTrackerRepository) UpdateTicket(ctx context.Context, ticket *model.VulnerabilityTicket) error {
 	query := `
 		UPDATE vulnerability_tickets SET
 			local_status = $2, external_status = $3, priority = $4,
 			assignee = $5, summary = $6, last_synced_at = $7, updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND tenant_id = $8
 	`
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		ticket.ID, ticket.LocalStatus, ticket.ExternalStatus,
 		ticket.Priority, ticket.Assignee, ticket.Summary, ticket.LastSyncedAt,
+		ticket.TenantID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update vulnerability_tickets (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update ticket %s for tenant %s: %w", ticket.ID, ticket.TenantID, ErrVulnerabilityTicketNotFound)
+	}
+	return nil
 }
 
 // GetTicketsToSync gets tickets that need to be synced

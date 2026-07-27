@@ -118,7 +118,7 @@ func (s *recordingIssueTrackerService) GetConnection(context.Context, uuid.UUID)
 	return nil, nil
 }
 
-func (s *recordingIssueTrackerService) DeleteConnection(context.Context, uuid.UUID) error {
+func (s *recordingIssueTrackerService) DeleteConnection(context.Context, uuid.UUID, uuid.UUID) error {
 	s.t.Fatal("unexpected DeleteConnection call")
 	return nil
 }

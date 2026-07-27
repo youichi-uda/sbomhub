@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -27,9 +28,15 @@ func NewDiffWebhookRepository(db *sql.DB) *DiffWebhookRepository {
 }
 
 // ErrDiffWebhookNotFound is returned by Get when no row exists for the
-// given tenant. The handler translates this to "webhook disabled, no
-// config" rather than a 404 so the UI can render the empty form.
-var ErrDiffWebhookNotFound = errors.New("tenant_diff_webhook_settings: not found")
+// given tenant, and by UpdateFireResult when the UPDATE matched no row.
+// The handler translates the Get case to "webhook disabled, no config"
+// rather than a 404 so the UI can render the empty form.
+//
+// M47 W2: now WRAPS sql.ErrNoRows for the same reason as
+// ErrTenantLLMConfigNotFound — every existing caller matches the named
+// sentinel and is unaffected; wrapping only ADDS
+// errors.Is(err, sql.ErrNoRows).
+var ErrDiffWebhookNotFound = fmt.Errorf("tenant_diff_webhook_settings: not found: %w", sql.ErrNoRows)
 
 func (r *DiffWebhookRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
@@ -100,6 +107,10 @@ type UpsertDiffWebhookParams struct {
 }
 
 // Upsert inserts or updates the tenant row.
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *DiffWebhookRepository) Upsert(ctx context.Context, params UpsertDiffWebhookParams) (*model.DiffWebhookSettings, error) {
 	if params.Format == "" {
 		params.Format = model.DiffWebhookFormatJSON
@@ -162,6 +173,21 @@ func (r *DiffWebhookRepository) UpdateFireResult(
 		    updated_at = NOW()
 		WHERE tenant_id = $1
 	`
-	_, err := r.q(ctx).ExecContext(ctx, query, tenantID, status, errMsg)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, tenantID, status, errMsg)
+	if err != nil {
+		return err
+	}
+	// M47 W2: 0 rows means this tenant has no settings row at all — the
+	// delivery-attempt bookkeeping went nowhere. The caller
+	// (service/diff_webhook) deliberately ignores this error so a webhook
+	// send is never failed by its own telemetry, but it can only make that
+	// choice knowingly if the error exists.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update tenant_diff_webhook_settings fire result (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update fire result for tenant %s: %w", tenantID, ErrDiffWebhookNotFound)
+	}
+	return nil
 }

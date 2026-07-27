@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,6 +11,13 @@ import (
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
+
+// ErrGeneratedReportNotFound is returned by UpdateReport when the statement
+// matched no `generated_reports` row for the report's tenant.
+//
+// M47 W2: wraps sql.ErrNoRows (see ErrTenantUserNotFound in
+// repository/user.go for the rationale).
+var ErrGeneratedReportNotFound = fmt.Errorf("generated_reports: no row matched for this tenant: %w", sql.ErrNoRows)
 
 // ReportRepository handles report data access
 type ReportRepository struct {
@@ -93,6 +101,10 @@ func (r *ReportRepository) GetAllSettings(ctx context.Context, tenantID uuid.UUI
 }
 
 // UpsertSettings creates or updates report settings
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *ReportRepository) UpsertSettings(ctx context.Context, s *model.ReportSettings) error {
 	query := `
 		INSERT INTO report_settings (
@@ -164,20 +176,42 @@ func (r *ReportRepository) CreateReport(ctx context.Context, report *model.Gener
 	return err
 }
 
-// UpdateReport updates a generated report
+// UpdateReport writes the terminal state of a generated report, restricted
+// to the tenant that owns the supplied struct.
+//
+// M47 W2: this is the one site in the sweep whose consequence was already
+// written down in prose before it was fixed — service/report.go says the
+// terminal UPDATE could match 0 rows and that "ReportRepository.UpdateReport
+// does not check rows affected, so the failure was silent — the report
+// stuck at 'generating' with the UI showing 'generating now...' forever".
+// 0 rows now returns ErrGeneratedReportNotFound, which the generation and
+// email paths already surface (they wrap and log any error). The
+// `AND tenant_id = $10` belt is added at the same time so migration 023's
+// FORCE RLS is not the only thing scoping the write; report.TenantID is
+// set by the service from the session tenant, never from a request body.
 func (r *ReportRepository) UpdateReport(ctx context.Context, report *model.GeneratedReport) error {
 	query := `
 		UPDATE generated_reports SET
 			file_path = $2, file_size = $3, file_content = $4, status = $5, error_message = $6,
 			email_sent_at = $7, email_recipients = $8, completed_at = $9
-		WHERE id = $1
+		WHERE id = $1 AND tenant_id = $10
 	`
 
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		report.ID, report.FilePath, report.FileSize, report.FileContent, report.Status, report.ErrorMessage,
-		report.EmailSentAt, pq.Array(report.EmailRecipients), report.CompletedAt,
+		report.EmailSentAt, pq.Array(report.EmailRecipients), report.CompletedAt, report.TenantID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update generated_reports (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update report %s for tenant %s: %w", report.ID, report.TenantID, ErrGeneratedReportNotFound)
+	}
+	return nil
 }
 
 // GetReportWithContent returns a generated report with file content by ID

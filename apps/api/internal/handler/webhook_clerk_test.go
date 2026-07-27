@@ -603,6 +603,52 @@ func TestClerkWebhook_MembershipDeleted_RemoveFailureIs500(t *testing.T) {
 	}
 }
 
+// TestClerkWebhook_MembershipDeleted_AlreadyAbsentIs200 pins the idempotency
+// half of the removal contract, which M47 W2 put at risk.
+//
+// W2 made RemoveFromTenant report a 0-row DELETE (previously swallowed) so the
+// API paths stop claiming "member removed" when nobody was removed. For THIS
+// event the opposite reading is required: Svix redelivers, the event IS a
+// delete, so "already not a member" is the desired end state. Answering 5xx
+// there would burn the finite retry budget on work that is already done — the
+// same reasoning the tenant/user lookups apply to sql.ErrNoRows just above.
+//
+// Sibling test TestClerkWebhook_MembershipDeleted_RemoveFailureIs500 keeps the
+// other half honest: a genuine DB error still answers 500.
+func TestClerkWebhook_MembershipDeleted_AlreadyAbsentIs200(t *testing.T) {
+	h, mock := newClerkWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	tenantID := uuid.New()
+	userID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM tenants WHERE clerk_org_id = $1`)).
+		WithArgs("org_mem_absent").
+		WillReturnRows(clerkTenantRow(tenantID, "org_mem_absent"))
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM users WHERE clerk_user_id = $1`)).
+		WithArgs("user_mem_absent").
+		WillReturnRows(clerkUserRow(userID, "user_mem_absent"))
+	// 0 rows affected: the membership is already gone (redelivery).
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM tenant_users WHERE tenant_id = $1 AND user_id = $2`)).
+		WithArgs(tenantID, userID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	body := `{"type":"organizationMembership.deleted","data":{"id":"mem_absent",
+		"organization":{"id":"org_mem_absent","name":"Acme","slug":"acme"},
+		"public_user_data":{"user_id":"user_mem_absent"},"role":"org:member"}}`
+	rec := driveClerkWebhook(t, h, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a redelivered delete whose row is already gone is the desired end state, not a failure); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(logs.Bytes(), []byte("failed to remove user from tenant")) {
+		t.Fatalf("an already-absent membership must not be logged as a failure; logs:\n%s", logs.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 // TestClerkWebhook_MembershipDeleted_TenantLookupTransientIs500 pins that a
 // transient tenant lookup error on the membership-removal path is not
 // misread as "tenant not found" (pre-fix: 200 + note, event dropped).

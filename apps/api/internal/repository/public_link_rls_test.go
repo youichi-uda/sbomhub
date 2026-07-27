@@ -33,6 +33,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -351,15 +352,20 @@ func TestPublicLink_ApplicationLayerTenantIsolation(t *testing.T) {
 		t.Fatalf("tenant B's link disappeared after a cross-tenant Delete from tenant A")
 	}
 
-	// 6. Cross-tenant IncrementView / IncrementDownload must be silent
-	//    no-ops (UPDATE matches 0 rows) and leave the counters intact.
-	//    UPDATE returns no error when 0 rows match, so we check the
-	//    counters after to confirm no mutation occurred.
-	if err := repo.IncrementView(ctx, tenantA, linkB.ID); err != nil {
-		t.Fatalf("IncrementView(A, linkB) errored: %v", err)
+	// 6. Cross-tenant IncrementView / IncrementDownload must be REFUSED
+	//    AUDIBLY and leave the counters intact.
+	//
+	//    M47 W2 contract change: these two used to be silent no-ops — the
+	//    UPDATE matched 0 rows and ExecContext returned nil, so a caller
+	//    could not distinguish "counter bumped" from "the tenant predicate
+	//    refused me". That is the defect class this wave removes; the
+	//    counters-intact assertion below is unchanged, and a named
+	//    sentinel is now also required.
+	if err := repo.IncrementView(ctx, tenantA, linkB.ID); !errors.Is(err, ErrPublicLinkRowNotFound) {
+		t.Fatalf("IncrementView(A, linkB) error = %v, want ErrPublicLinkRowNotFound", err)
 	}
-	if err := repo.IncrementDownload(ctx, tenantA, linkB.ID); err != nil {
-		t.Fatalf("IncrementDownload(A, linkB) errored: %v", err)
+	if err := repo.IncrementDownload(ctx, tenantA, linkB.ID); !errors.Is(err, ErrPublicLinkRowNotFound) {
+		t.Fatalf("IncrementDownload(A, linkB) error = %v, want ErrPublicLinkRowNotFound", err)
 	}
 	after, err := repo.GetByID(ctx, tenantB, linkB.ID)
 	if err != nil {

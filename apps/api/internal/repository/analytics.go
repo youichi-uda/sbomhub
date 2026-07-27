@@ -406,6 +406,10 @@ func (r *AnalyticsRepository) GetSLOTargets(ctx context.Context, tenantID uuid.U
 }
 
 // UpsertSLOTarget creates or updates an SLO target
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *AnalyticsRepository) UpsertSLOTarget(ctx context.Context, tenantID uuid.UUID, severity string, targetHours int) error {
 	query := `
 		INSERT INTO slo_targets (id, tenant_id, severity, target_hours, created_at, updated_at)
@@ -418,6 +422,10 @@ func (r *AnalyticsRepository) UpsertSLOTarget(ctx context.Context, tenantID uuid
 }
 
 // CreateVulnerabilitySnapshot stores a daily snapshot
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *AnalyticsRepository) CreateVulnerabilitySnapshot(ctx context.Context, snapshot *model.VulnerabilitySnapshot) error {
 	query := `
 		INSERT INTO vulnerability_snapshots (
@@ -438,6 +446,10 @@ func (r *AnalyticsRepository) CreateVulnerabilitySnapshot(ctx context.Context, s
 }
 
 // CreateComplianceSnapshot stores a daily compliance snapshot
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *AnalyticsRepository) CreateComplianceSnapshot(ctx context.Context, snapshot *model.ComplianceSnapshot) error {
 	query := `
 		INSERT INTO compliance_snapshots (
@@ -458,6 +470,10 @@ func (r *AnalyticsRepository) CreateComplianceSnapshot(ctx context.Context, snap
 }
 
 // RecordVulnerabilityResolution records a vulnerability resolution event
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *AnalyticsRepository) RecordVulnerabilityResolution(ctx context.Context, event *model.VulnerabilityResolutionEvent) error {
 	query := `
 		INSERT INTO vulnerability_resolution_events (

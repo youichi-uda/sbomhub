@@ -12,6 +12,18 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// ErrVisualizationSettingsNotFound is returned by Upsert / Delete when the
+// statement matched no `sbom_visualization_settings` row for the caller's
+// tenant.
+//
+// M47 W2: Upsert carries `ON CONFLICT (project_id) DO UPDATE ... WHERE
+// sbom_visualization_settings.tenant_id = EXCLUDED.tenant_id`, a real
+// cross-tenant refusal that affects ZERO rows when it fires, and both
+// methods discarded their result — a refused save and a delete that
+// removed nothing were both reported as done. Wraps sql.ErrNoRows; see
+// ErrTenantUserNotFound (repository/user.go).
+var ErrVisualizationSettingsNotFound = fmt.Errorf("sbom_visualization_settings: no row matched for this tenant: %w", sql.ErrNoRows)
+
 // VisualizationRepository persists per-project METI visualization
 // framework settings (the (a)-(f) classification: who made the SBOM,
 // dependency scope, generation method, data format, utilization scope
@@ -140,14 +152,27 @@ func (r *VisualizationRepository) Upsert(ctx context.Context, settings *model.Vi
 		settings.ID = uuid.New()
 		settings.CreatedAt = now
 	}
-	_, err = r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		settings.ID, settings.TenantID, settings.ProjectID,
 		settings.SBOMAuthorScope, settings.DependencyScope,
 		settings.GenerationMethod, settings.DataFormat,
 		utilizationScopeJSON, settings.UtilizationActor,
 		settings.CreatedAt, settings.UpdatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// M47 W2: 0 rows means the DO UPDATE WHERE refused to overwrite another
+	// tenant's settings row for this project_id.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("upsert sbom_visualization_settings (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("upsert visualization settings for project %s / tenant %s: %w",
+			settings.ProjectID, settings.TenantID, ErrVisualizationSettingsNotFound)
+	}
+	return nil
 }
 
 // Delete removes visualization settings for a project, scoped to the
@@ -161,6 +186,20 @@ func (r *VisualizationRepository) Delete(ctx context.Context, tenantID, projectI
 		return fmt.Errorf("VisualizationRepository.Delete: project_id is required")
 	}
 	query := `DELETE FROM sbom_visualization_settings WHERE tenant_id = $1 AND project_id = $2`
-	_, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID)
+	if err != nil {
+		return err
+	}
+	// M47 W2: the service already pre-checks project ownership (M47 W1), so
+	// 0 rows means this project simply has no settings row — a 404, not the
+	// 204 the pre-fix code returned for a delete that removed nothing.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete sbom_visualization_settings (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete visualization settings for project %s / tenant %s: %w",
+			projectID, tenantID, ErrVisualizationSettingsNotFound)
+	}
+	return nil
 }

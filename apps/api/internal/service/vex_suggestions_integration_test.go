@@ -668,6 +668,9 @@ func TestVEXCreateStatement_RejectsForeignProjectComponent(t *testing.T) {
 
 	// Reject: a statement in project A that references project C's component.
 	if err := createStatementVS(t, appDB, tenantT, CreateVEXStatementInput{
+		// M47 W1: TenantID is now mandatory and is cross-checked against
+		// the project's owner.
+		TenantID:        tenantT,
 		ProjectID:       projA,
 		VulnerabilityID: v,
 		ComponentID:     &compC,
@@ -680,6 +683,7 @@ func TestVEXCreateStatement_RejectsForeignProjectComponent(t *testing.T) {
 
 	// Accept: A's own component.
 	if err := createStatementVS(t, appDB, tenantT, CreateVEXStatementInput{
+		TenantID:        tenantT,
 		ProjectID:       projA,
 		VulnerabilityID: v,
 		ComponentID:     &compA,

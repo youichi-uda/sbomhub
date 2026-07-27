@@ -12,6 +12,19 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// ErrChecklistResponseNotFound is returned by Upsert / BulkUpsert / Delete
+// when the statement matched no `compliance_checklist_responses` row for
+// the caller's tenant.
+//
+// M47 W2: the upserts carry `ON CONFLICT (project_id, check_id) DO UPDATE
+// ... WHERE compliance_checklist_responses.tenant_id = EXCLUDED.tenant_id`.
+// That WHERE is a real cross-tenant refusal — when it fires the statement
+// affects ZERO rows — and the result was discarded, so an answer that was
+// refused because the (project, check) pair already belongs to another
+// tenant was reported as saved. Wraps sql.ErrNoRows; see
+// ErrTenantUserNotFound (repository/user.go).
+var ErrChecklistResponseNotFound = fmt.Errorf("compliance_checklist_responses: no row matched for this tenant: %w", sql.ErrNoRows)
+
 // ChecklistRepository persists per-project METI checklist responses
 // (manual yes/no answers for items that cannot be auto-verified).
 //
@@ -206,11 +219,25 @@ func (r *ChecklistRepository) Upsert(ctx context.Context, resp *model.ChecklistR
 		              updated_at = EXCLUDED.updated_at
 		WHERE compliance_checklist_responses.tenant_id = EXCLUDED.tenant_id
 	`
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
 		resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// M47 W2: 0 rows is NOT "nothing to do" here — it is the DO UPDATE
+	// WHERE clause refusing to overwrite another tenant's row for the same
+	// (project_id, check_id).
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("upsert compliance_checklist_responses (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("upsert checklist response %s/%s for tenant %s: %w",
+			resp.ProjectID, resp.CheckID, resp.TenantID, ErrChecklistResponseNotFound)
+	}
+	return nil
 }
 
 // Delete removes a checklist response, scoped to the caller's tenant.
@@ -224,12 +251,34 @@ func (r *ChecklistRepository) Delete(ctx context.Context, tenantID, projectID uu
 		return fmt.Errorf("ChecklistRepository.Delete: project_id is required")
 	}
 	query := `DELETE FROM compliance_checklist_responses WHERE tenant_id = $1 AND project_id = $2 AND check_id = $3`
-	_, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID, checkID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, tenantID, projectID, checkID)
+	if err != nil {
+		return err
+	}
+	// M47 W2: the service already pre-checks that the project belongs to
+	// the tenant (M47 W1), so 0 rows here means the response itself does
+	// not exist — the handler turns that into a 404 instead of the 204 the
+	// pre-fix code returned for a delete that removed nothing.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete compliance_checklist_responses (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete checklist response %s/%s for tenant %s: %w",
+			projectID, checkID, tenantID, ErrChecklistResponseNotFound)
+	}
+	return nil
 }
 
 // DeleteByProject removes all checklist responses for a project,
 // scoped to the caller's tenant. F73 regression class.
+//
+// M47 W2 classification: BENIGN — and it is the one DELETE in this file
+// that is. This is a set-wide clear, not a named-resource delete: a project
+// whose operator has answered nothing legitimately has zero response rows,
+// so "0 rows removed" is a correct outcome rather than a refused write. Its
+// sibling Delete names ONE (project, check_id) resource and therefore does
+// adjudicate the count.
 func (r *ChecklistRepository) DeleteByProject(ctx context.Context, tenantID, projectID uuid.UUID) error {
 	if tenantID == uuid.Nil {
 		return fmt.Errorf("ChecklistRepository.DeleteByProject: tenant_id is required")
@@ -298,10 +347,7 @@ func (r *ChecklistRepository) BulkUpsert(ctx context.Context, responses []model.
 				resp.ID = uuid.New()
 			}
 			resp.UpdatedAt = now
-			if _, err := stmt.ExecContext(ctx,
-				resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
-				resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
-			); err != nil {
+			if err := execBulkChecklistUpsert(ctx, stmt, resp); err != nil {
 				return err
 			}
 		}
@@ -336,13 +382,39 @@ func (r *ChecklistRepository) BulkUpsert(ctx context.Context, responses []model.
 			resp.ID = uuid.New()
 		}
 		resp.UpdatedAt = now
-		if _, err := stmt.ExecContext(ctx,
-			resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
-			resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
-		); err != nil {
+		if err := execBulkChecklistUpsert(ctx, stmt, resp); err != nil {
 			return err
 		}
 	}
 
 	return tx.Commit()
+}
+
+// execBulkChecklistUpsert runs one prepared BulkUpsert statement and
+// applies the same 0-row contract as Upsert.
+//
+// M47 W2: BulkUpsert shares Upsert's `DO UPDATE ... WHERE
+// compliance_checklist_responses.tenant_id = EXCLUDED.tenant_id` guard, so
+// a row whose (project_id, check_id) already belongs to a different tenant
+// is refused and affects 0 rows. Pre-fix both loops discarded every result,
+// so a bulk import could silently drop an arbitrary subset of its rows and
+// still report success. Shared by both branches (request tx / own tx) so
+// the two cannot drift apart.
+func execBulkChecklistUpsert(ctx context.Context, stmt *sql.Stmt, resp model.ChecklistResponse) error {
+	res, err := stmt.ExecContext(ctx,
+		resp.ID, resp.TenantID, resp.ProjectID, resp.CheckID,
+		resp.Response, resp.Note, resp.UpdatedBy, resp.UpdatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("bulk upsert compliance_checklist_responses (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("bulk upsert checklist response %s/%s for tenant %s: %w",
+			resp.ProjectID, resp.CheckID, resp.TenantID, ErrChecklistResponseNotFound)
+	}
+	return nil
 }

@@ -11,6 +11,14 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// ErrKEVSyncRowNotFound is returned by UpdateSyncSettings / UpdateSyncLog
+// when the statement matched no row. Those tables are global
+// singletons/logs with no tenant column, so this only ever means "the row
+// I just read is gone" — still a sync whose bookkeeping was silently lost.
+// M47 W2; wraps sql.ErrNoRows (see ErrTenantUserNotFound in
+// repository/user.go).
+var ErrKEVSyncRowNotFound = fmt.Errorf("kev sync tables: no row matched: %w", sql.ErrNoRows)
+
 // KEVRepository handles KEV data access
 type KEVRepository struct {
 	db *sql.DB
@@ -34,6 +42,10 @@ func (r *KEVRepository) q(ctx context.Context) database.Queryable {
 }
 
 // UpsertEntry creates or updates a KEV catalog entry
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *KEVRepository) UpsertEntry(ctx context.Context, e *model.KEVEntry) error {
 	query := `
 		INSERT INTO kev_catalog (
@@ -237,6 +249,11 @@ func (r *KEVRepository) GetSyncSettings(ctx context.Context) (*model.KEVSyncSett
 }
 
 // UpdateSyncSettings updates the sync settings
+//
+// M47 W2: `kev_sync_settings` is a global (tenant-less) singleton, so there
+// is no tenant predicate to add — but 0 rows means the settings row the
+// caller just read is gone and the sync's bookkeeping never landed while
+// the run reported success. Mirrors EOLRepository.UpdateSyncSettings.
 func (r *KEVRepository) UpdateSyncSettings(ctx context.Context, s *model.KEVSyncSettings) error {
 	query := `
 		UPDATE kev_sync_settings SET
@@ -244,11 +261,21 @@ func (r *KEVRepository) UpdateSyncSettings(ctx context.Context, s *model.KEVSync
 			last_catalog_version = $4, total_entries = $5, updated_at = NOW()
 		WHERE id = $6
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	res, err := r.db.ExecContext(ctx, query,
 		s.Enabled, s.SyncIntervalHours, s.LastSyncAt,
 		s.LastCatalogVersion, s.TotalEntries, s.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update kev_sync_settings (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update kev sync settings %s: %w", s.ID, ErrKEVSyncRowNotFound)
+	}
+	return nil
 }
 
 // CreateSyncLog creates a new sync log entry
@@ -271,7 +298,11 @@ func (r *KEVRepository) CreateSyncLog(ctx context.Context) (*model.KEVSyncLog, e
 	return log, nil
 }
 
-// UpdateSyncLog updates a sync log entry
+// UpdateSyncLog updates a sync log entry.
+//
+// M47 W2: 0 rows means the terminal state of a sync run was never
+// recorded, leaving the log row stuck on 'running'. Mirrors
+// EOLRepository.UpdateSyncLog.
 func (r *KEVRepository) UpdateSyncLog(ctx context.Context, log *model.KEVSyncLog) error {
 	query := `
 		UPDATE kev_sync_logs SET
@@ -280,12 +311,22 @@ func (r *KEVRepository) UpdateSyncLog(ctx context.Context, log *model.KEVSyncLog
 			catalog_version = $7
 		WHERE id = $8
 	`
-	_, err := r.db.ExecContext(ctx, query,
+	res, err := r.db.ExecContext(ctx, query,
 		log.CompletedAt, log.Status, log.NewEntries,
 		log.UpdatedEntries, log.TotalProcessed, log.ErrorMessage,
 		log.CatalogVersion, log.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update kev_sync_logs (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update kev sync log %s: %w", log.ID, ErrKEVSyncRowNotFound)
+	}
+	return nil
 }
 
 // GetLatestSyncLog gets the most recent sync log
@@ -319,7 +360,16 @@ func (r *KEVRepository) GetLatestSyncLog(ctx context.Context) (*model.KEVSyncLog
 	return &log, nil
 }
 
-// UpdateVulnerabilityKEVStatus updates KEV fields for a vulnerability
+// UpdateVulnerabilityKEVStatus updates KEV fields for a vulnerability.
+//
+// M47 W2 classification: BENIGN, and deliberately so. The KEV catalogue is
+// CISA's, not ours: it names CVEs this installation may never have
+// ingested, so `WHERE cve_id = $5` matching nothing is the NORMAL and
+// correct outcome for a catalogue entry we do not track — not a failure.
+// (Contrast SyncVulnerabilitiesKEVStatus, which reports its affected count
+// because there the number is the sync's result.) The RowsAffected read is
+// still performed so a driver-side error surfaces; the count itself is
+// intentionally not adjudicated.
 func (r *KEVRepository) UpdateVulnerabilityKEVStatus(ctx context.Context, cveID string, inKEV bool, dateAdded, dueDate *time.Time, ransomwareUse *bool) error {
 	query := `
 		UPDATE vulnerabilities SET
@@ -327,12 +377,24 @@ func (r *KEVRepository) UpdateVulnerabilityKEVStatus(ctx context.Context, cveID 
 			kev_ransomware_use = $4, updated_at = NOW()
 		WHERE cve_id = $5
 	`
-	_, err := r.db.ExecContext(ctx, query, inKEV, dateAdded, dueDate, ransomwareUse, cveID)
-	return err
+	res, err := r.db.ExecContext(ctx, query, inKEV, dateAdded, dueDate, ransomwareUse, cveID)
+	if err != nil {
+		return err
+	}
+	if _, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("update vulnerabilities kev status (RowsAffected): %w", err)
+	}
+	return nil
 }
 
 // SyncVulnerabilitiesKEVStatus syncs KEV status for all vulnerabilities
 func (r *KEVRepository) SyncVulnerabilitiesKEVStatus(ctx context.Context) (int, error) {
+	// M47 W2 classification: BENIGN. The reset below legitimately matches
+	// 0 rows when nothing is currently flagged (a fresh install, or a
+	// catalogue that shrank to empty), and the second statement's affected
+	// count IS the return value — this method already adjudicates what
+	// matters.
+	//
 	// First, reset all vulnerabilities to not in KEV
 	resetQuery := `
 		UPDATE vulnerabilities SET

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -10,6 +11,23 @@ import (
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
+
+// ErrTenantNotFound is returned by Update / UpdatePlan / Delete when the
+// statement matched no `tenants` row.
+//
+// M47 W2: `tenants` has no RLS (migration 007 deliberately protects only
+// the per-tenant resource tables), so `WHERE id = $N` is the only guard
+// these three writes have — and all three discarded their result, so a
+// plan change or deletion aimed at a non-existent / already-deleted tenant
+// returned nil and was reported as done. UpdatePlan is the write the M46
+// cross-tenant escalation actually landed on, which is why the whole
+// `tenants` group is brought under one contract here rather than just the
+// method that happened to be exploited.
+//
+// Wraps sql.ErrNoRows for the reason documented on ErrTenantUserNotFound
+// (repository/user.go): existing sql.ErrNoRows handler branches keep
+// working, named errors.Is stays available.
+var ErrTenantNotFound = fmt.Errorf("tenants: no row matched: %w", sql.ErrNoRows)
 
 type TenantRepository struct {
 	db *sql.DB
@@ -138,26 +156,70 @@ func (r *TenantRepository) GetBySlug(ctx context.Context, slug string) (*model.T
 	return &t, nil
 }
 
+// Update rewrites a tenant's name / slug / plan. 0 rows returns
+// ErrTenantNotFound (M47 W2 — see the sentinel's doc comment).
 func (r *TenantRepository) Update(ctx context.Context, t *model.Tenant) error {
 	query := `
 		UPDATE tenants SET name = $1, slug = $2, plan = $3, updated_at = $4
 		WHERE id = $5
 	`
 	t.UpdatedAt = time.Now()
-	_, err := r.q(ctx).ExecContext(ctx, query, t.Name, t.Slug, t.Plan, t.UpdatedAt, t.ID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, t.Name, t.Slug, t.Plan, t.UpdatedAt, t.ID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update tenants (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update tenant %s: %w", t.ID, ErrTenantNotFound)
+	}
+	return nil
 }
 
+// UpdatePlan sets a tenant's entitlement plan. 0 rows returns
+// ErrTenantNotFound.
+//
+// M47 W2: this is the statement the M46 cross-tenant plan escalation
+// terminated in, and it was the one link in that chain that could not
+// report failure at all. Every billing caller already answers 5xx on
+// error, so a plan grant against a tenant that does not exist now surfaces
+// instead of being logged as a successful entitlement change.
 func (r *TenantRepository) UpdatePlan(ctx context.Context, id uuid.UUID, plan string) error {
 	query := `UPDATE tenants SET plan = $1, updated_at = $2 WHERE id = $3`
-	_, err := r.q(ctx).ExecContext(ctx, query, plan, time.Now(), id)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, plan, time.Now(), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update tenants plan (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update plan of tenant %s: %w", id, ErrTenantNotFound)
+	}
+	return nil
 }
 
+// Delete removes a tenant (cascading every tenant-scoped child row).
+// 0 rows returns ErrTenantNotFound so a deletion that never happened
+// cannot be reported as one — the Clerk organization.deleted path
+// pre-checks with GetByClerkOrgID, so this only fires on a genuine race.
 func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM tenants WHERE id = $1`
-	_, err := r.q(ctx).ExecContext(ctx, query, id)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete tenants (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete tenant %s: %w", id, ErrTenantNotFound)
+	}
+	return nil
 }
 
 func (r *TenantRepository) GetWithStats(ctx context.Context, id uuid.UUID) (*model.TenantWithStats, error) {

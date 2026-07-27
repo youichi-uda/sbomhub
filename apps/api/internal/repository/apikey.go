@@ -11,6 +11,17 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// ErrAPIKeyNotFound is returned by Delete / DeleteByTenant / UpdateLastUsed
+// when the statement matched no `api_keys` row for the calling tenant.
+//
+// M47 W2: `api_keys` has no RLS (migration 028 removed it so the key-hash
+// lookup can find the row that REVEALS the tenant), so `AND tenant_id = $N`
+// is the whole boundary. Delete / DeleteByTenant already checked
+// RowsAffected but answered with bare fmt.Errorf strings that no caller
+// could errors.Is; they now share this sentinel with UpdateLastUsed.
+// Wraps sql.ErrNoRows — see ErrTenantUserNotFound (repository/user.go).
+var ErrAPIKeyNotFound = fmt.Errorf("api_keys: no row matched for this tenant: %w", sql.ErrNoRows)
+
 type APIKeyRepository struct {
 	db *sql.DB
 }
@@ -174,7 +185,7 @@ func (r *APIKeyRepository) Delete(ctx context.Context, tenantID, id uuid.UUID) e
 		return err
 	}
 	if rows == 0 {
-		return fmt.Errorf("api key not found")
+		return fmt.Errorf("delete api key %s for tenant %s: %w", id, tenantID, ErrAPIKeyNotFound)
 	}
 	return nil
 }
@@ -193,7 +204,7 @@ func (r *APIKeyRepository) DeleteByTenant(ctx context.Context, id uuid.UUID, ten
 		return err
 	}
 	if rows == 0 {
-		return fmt.Errorf("api key not found or not authorized")
+		return fmt.Errorf("delete api key %s for tenant %s: %w", id, tenantID, ErrAPIKeyNotFound)
 	}
 	return nil
 }
@@ -202,8 +213,27 @@ func (r *APIKeyRepository) DeleteByTenant(ctx context.Context, id uuid.UUID, ten
 // to (id, tenant_id) as defense-in-depth even though the caller has just
 // verified the key via GetByKeyHash and already knows the tenant — keeps
 // the invariant "no api_keys mutation crosses tenant boundaries" uniform.
+//
+// M47 W2: 0 rows returns ErrAPIKeyNotFound. `api_keys` lost its RLS in
+// migration 028, so the `AND tenant_id = $3` clause is the only tenant
+// guard — and it fired silently, because the result was discarded. Its two
+// siblings (Delete / DeleteByTenant) already verified RowsAffected; this
+// method was the odd one out, which is exactly the asymmetry this wave
+// exists to close. The auth path deliberately ignores the returned error
+// (a last-used timestamp must not fail a request), but it can only make
+// that choice knowingly if the error exists.
 func (r *APIKeyRepository) UpdateLastUsed(ctx context.Context, tenantID, id uuid.UUID) error {
 	query := `UPDATE api_keys SET last_used_at = $1 WHERE id = $2 AND tenant_id = $3`
-	_, err := r.q(ctx).ExecContext(ctx, query, time.Now(), id, tenantID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, time.Now(), id, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update api_keys last_used_at (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update last_used_at of api key %s for tenant %s: %w", id, tenantID, ErrAPIKeyNotFound)
+	}
+	return nil
 }

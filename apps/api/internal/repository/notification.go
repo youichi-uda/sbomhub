@@ -68,6 +68,10 @@ func (r *NotificationRepository) GetSettings(ctx context.Context, projectID uuid
 // immutable per project, so the ON CONFLICT branch does not touch it.
 // Callers must populate settings.TenantID before calling; NotificationService
 // resolves it from the parent project.
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *NotificationRepository) UpsertSettings(ctx context.Context, settings *model.NotificationSettings) error {
 	query := `
 		INSERT INTO notification_settings (

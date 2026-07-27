@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,6 +11,12 @@ import (
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
+
+// ErrIPASyncSettingsNotFound is returned by UpdateLastSyncAt when the
+// statement matched no `ipa_sync_settings` row for the calling tenant.
+// M47 W2; wraps sql.ErrNoRows (see ErrTenantUserNotFound in
+// repository/user.go).
+var ErrIPASyncSettingsNotFound = fmt.Errorf("ipa_sync_settings: no row matched for this tenant: %w", sql.ErrNoRows)
 
 // IPARepository handles IPA data access
 type IPARepository struct {
@@ -32,6 +39,10 @@ func (r *IPARepository) q(ctx context.Context) database.Queryable {
 }
 
 // CreateAnnouncement creates a new IPA announcement
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *IPARepository) CreateAnnouncement(ctx context.Context, a *model.IPAAnnouncement) error {
 	query := `
 		INSERT INTO ipa_announcements (
@@ -197,6 +208,10 @@ func (r *IPARepository) GetSyncSettings(ctx context.Context, tenantID uuid.UUID)
 }
 
 // UpsertSyncSettings creates or updates IPA sync settings
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *IPARepository) UpsertSyncSettings(ctx context.Context, s *model.IPASyncSettings) error {
 	query := `
 		INSERT INTO ipa_sync_settings (
@@ -212,11 +227,28 @@ func (r *IPARepository) UpsertSyncSettings(ctx context.Context, s *model.IPASync
 	return err
 }
 
-// UpdateLastSyncAt updates the last sync timestamp
+// UpdateLastSyncAt updates the last sync timestamp.
+//
+// M47 W2: 0 rows returns ErrIPASyncSettingsNotFound. The tenant may simply
+// have no ipa_sync_settings row yet, and the caller already logs-and-
+// continues on error — but a silent nil made "last_sync_at is stale"
+// indistinguishable from "last_sync_at was updated", which is precisely
+// the freshness claim the service's own comment says must not be
+// misrepresented.
 func (r *IPARepository) UpdateLastSyncAt(ctx context.Context, tenantID uuid.UUID) error {
 	query := `UPDATE ipa_sync_settings SET last_sync_at = NOW(), updated_at = NOW() WHERE tenant_id = $1`
-	_, err := r.q(ctx).ExecContext(ctx, query, tenantID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update ipa_sync_settings last_sync_at (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update last_sync_at for tenant %s: %w", tenantID, ErrIPASyncSettingsNotFound)
+	}
+	return nil
 }
 
 // GetRecentAnnouncements gets announcements published after a given time.

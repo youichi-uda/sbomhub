@@ -11,6 +11,18 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
+// ErrPublicLinkRowNotFound is returned by the counter/touch mutations when
+// the statement matched no `public_links` row for the calling tenant.
+//
+// M47 W2: `public_links` lost its RLS in migration 030, so `AND
+// tenant_id = $N` is the whole boundary. Update / Delete /
+// TryConsumeDownload / TryRegisterView already adjudicated their row count;
+// IncrementView / IncrementDownload / UpdateCounts / Touch discarded it —
+// the same table, the same predicate, four different contracts. They now
+// share this one. Wraps sql.ErrNoRows — see ErrTenantUserNotFound
+// (repository/user.go).
+var ErrPublicLinkRowNotFound = fmt.Errorf("public_links: no row matched for this tenant: %w", sql.ErrNoRows)
+
 type PublicLinkRepository struct {
 	db *sql.DB
 }
@@ -233,8 +245,7 @@ func (r *PublicLinkRepository) Delete(ctx context.Context, tenantID, id uuid.UUI
 // download counter below.
 func (r *PublicLinkRepository) IncrementView(ctx context.Context, tenantID, id uuid.UUID) error {
 	query := `UPDATE public_links SET view_count = COALESCE(view_count, 0) + 1 WHERE id = $1 AND tenant_id = $2`
-	_, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
-	return err
+	return execPublicLinkMutation(ctx, r.q(ctx), "increment view_count", query, id, tenantID)
 }
 
 // IncrementDownload bumps the download counter on a single link. Same
@@ -249,8 +260,7 @@ func (r *PublicLinkRepository) IncrementView(ctx context.Context, tenantID, id u
 // (no cap semantics).
 func (r *PublicLinkRepository) IncrementDownload(ctx context.Context, tenantID, id uuid.UUID) error {
 	query := `UPDATE public_links SET download_count = COALESCE(download_count, 0) + 1 WHERE id = $1 AND tenant_id = $2`
-	_, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
-	return err
+	return execPublicLinkMutation(ctx, r.q(ctx), "increment download_count", query, id, tenantID)
 }
 
 // CreateAccessLog inserts a row into public_link_access_logs. The table's
@@ -411,13 +421,34 @@ func (r *PublicLinkRepository) TryRegisterView(ctx context.Context, tenantID, id
 // for consistency with the rest of the mutating API.
 func (r *PublicLinkRepository) UpdateCounts(ctx context.Context, tenantID, id uuid.UUID, viewCount, downloadCount int) error {
 	query := `UPDATE public_links SET view_count = $1, download_count = $2 WHERE id = $3 AND tenant_id = $4`
-	_, err := r.q(ctx).ExecContext(ctx, query, viewCount, downloadCount, id, tenantID)
-	return err
+	return execPublicLinkMutation(ctx, r.q(ctx), "replace counters", query, viewCount, downloadCount, id, tenantID)
 }
 
 // Touch bumps updated_at for the link. Tenant-scoped for consistency.
 func (r *PublicLinkRepository) Touch(ctx context.Context, tenantID, id uuid.UUID, updatedAt time.Time) error {
 	query := `UPDATE public_links SET updated_at = $1 WHERE id = $2 AND tenant_id = $3`
-	_, err := r.q(ctx).ExecContext(ctx, query, updatedAt, id, tenantID)
-	return err
+	return execPublicLinkMutation(ctx, r.q(ctx), "touch updated_at", query, updatedAt, id, tenantID)
+}
+
+// execPublicLinkMutation runs one tenant-scoped public_links UPDATE and
+// applies the shared 0-row contract (M47 W2).
+//
+// Factored out rather than inlined four times so the counter/touch group
+// cannot drift back into per-method contracts — drift is what produced the
+// finding: four statements against the same table with the same
+// `AND tenant_id = $N` predicate, none of which could report that the
+// predicate had refused them.
+func execPublicLinkMutation(ctx context.Context, q database.Queryable, what, query string, args ...any) error {
+	res, err := q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("public_links %s (RowsAffected): %w", what, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("public_links %s: %w", what, ErrPublicLinkRowNotFound)
+	}
+	return nil
 }

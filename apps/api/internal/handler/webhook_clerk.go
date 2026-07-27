@@ -134,8 +134,13 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to read body"})
 	}
 
-	// Verify Svix signature
+	// Verify Svix signature. M47: `has_secret=false` in this log is the
+	// operator's cue that the endpoint is refusing everything because
+	// CLERK_WEBHOOK_SECRET was never set — the pre-fix code accepted those
+	// deliveries instead (see verifySignature).
 	if !h.verifySignature(c.Request(), body) {
+		slog.Warn("clerk webhook signature verification failed",
+			"has_secret", h.cfg.ClerkWebhookSecret != "", "ip", c.RealIP())
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
 	}
 
@@ -275,6 +280,19 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up user"})
 		}
 		if err := h.userRepo.RemoveFromTenant(ctx, tenant.ID, user.ID); err != nil {
+			// M47 W2 made RemoveFromTenant report a 0-row DELETE instead of
+			// swallowing it, which is right for the API paths (a silent
+			// "member removed" that removed nobody is a lie). Here it needs
+			// the opposite reading: this event is a DELETE and Svix
+			// redelivers it, so "already not a member" is the DESIRED end
+			// state, not a failure. Answering 5xx would burn the retry
+			// budget on work that is already done — the same reasoning the
+			// lookup path above applies to sql.ErrNoRows.
+			if errors.Is(err, sql.ErrNoRows) {
+				slog.Info("organizationMembership.deleted: membership already absent (idempotent redelivery)",
+					"tenant_id", tenant.ID, "user_id", user.ID)
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "membership not found"})
+			}
 			slog.Error("organizationMembership.deleted: failed to remove user from tenant",
 				"error", err, "tenant_id", tenant.ID, "user_id", user.ID)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to remove user from tenant"})
@@ -501,11 +519,31 @@ func (h *ClerkWebhookHandler) handleMembershipEvent(c echo.Context, memberData *
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// verifySignature verifies the Svix webhook signature
+// verifySignature verifies the Svix webhook signature.
+//
+// M47 (High) — FAIL-CLOSED since this wave. It previously returned
+// `!IsProduction()` when CLERK_WEBHOOK_SECRET was unset, and APP_ENV
+// defaults to "development", so an unconfigured deployment accepted
+// unsigned Clerk events from anyone: organization.deleted removes a tenant
+// (and cascades its projects/SBOMs), organizationMembership.created adds an
+// arbitrary Clerk user to an arbitrary org, user.updated rewrites a user
+// row. Pinned by TestClerkWebhook_NoSecret_UnsignedPayloadIsRejected.
+//
+// The bypass now requires the explicit SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS
+// opt-in outside production (config.UnsignedWebhooksAllowed) and announces
+// itself on every accepted delivery. See the same change in
+// webhook_lemonsqueezy.go and the startup guard in cmd/server/main.go.
 func (h *ClerkWebhookHandler) verifySignature(r *http.Request, body []byte) bool {
 	if h.cfg.ClerkWebhookSecret == "" {
-		// No secret configured - skip verification in development
-		return !h.cfg.IsProduction()
+		if !h.cfg.UnsignedWebhooksAllowed() {
+			return false
+		}
+		slog.Warn("Clerk webhook signature verification BYPASSED — "+
+			"SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS is set and no CLERK_WEBHOOK_SECRET is configured. "+
+			"Anyone who can reach this endpoint can create, rename or delete tenants and users. "+
+			"Development only.",
+			"app_env", h.cfg.Environment, "ip", r.RemoteAddr)
+		return true
 	}
 
 	svixID := r.Header.Get("svix-id")

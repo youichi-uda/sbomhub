@@ -4,10 +4,44 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
+)
+
+// M47 W2 — sentinels for the 0-row mutation contract on this repository.
+//
+// `ExecContext` returns a nil error for an UPDATE/DELETE that matched no
+// row, so every mutation below that discarded its result reported a
+// BLOCKED write as a completed one. That is the exact mechanism behind the
+// M46 cross-tenant plan escalation (see repository/subscription.go and
+// commit 08f98ae), and it bites hardest here: `users` and `tenant_users`
+// carry NO row-level security at all (verified against pg_class), so the
+// `WHERE tenant_id = $N AND user_id = $M` predicate is the ENTIRE tenant
+// boundary for membership writes. A silently-0-row DELETE meant
+// "remove this member" succeeded while the membership survived.
+//
+// Both sentinels WRAP sql.ErrNoRows. That is deliberate and follows the
+// dominant shape already in this package (ProjectRepository.DeleteByTenant,
+// CRAReportsRepository.UpdateDecision, MetiAssessmentsRepository.
+// OverrideStatus, VEXDraftsRepository.UpdateDecision all answer a 0-row
+// mutation with sql.ErrNoRows): callers that already map sql.ErrNoRows to
+// 404 / idempotent-success keep working unchanged, while callers that need
+// to distinguish WHICH resource was missing can errors.Is the named
+// sentinel. Callers that legitimately tolerate a no-op must say so
+// explicitly with errors.Is rather than by not looking.
+var (
+	// ErrUserNotFound is returned by Update / Delete when the statement
+	// matched no `users` row.
+	ErrUserNotFound = fmt.Errorf("users: no row matched: %w", sql.ErrNoRows)
+
+	// ErrTenantUserNotFound is returned by RemoveFromTenant / UpdateRole
+	// when the statement matched no `tenant_users` row — i.e. that user is
+	// not a member of that tenant. Because `tenant_users` has no RLS, this
+	// is also what a cross-tenant membership write looks like.
+	ErrTenantUserNotFound = fmt.Errorf("tenant_users: no membership row matched for this tenant: %w", sql.ErrNoRows)
 )
 
 type UserRepository struct {
@@ -70,23 +104,56 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*model.U
 	return &u, nil
 }
 
+// Update rewrites a user's profile. 0 rows returns ErrUserNotFound (M47
+// W2): the pre-fix statement discarded its result, so an update aimed at a
+// stale / deleted user id was indistinguishable from a completed write and
+// the caller went on to report success.
 func (r *UserRepository) Update(ctx context.Context, u *model.User) error {
 	query := `
 		UPDATE users SET email = $1, name = $2, avatar_url = $3, updated_at = $4
 		WHERE id = $5
 	`
 	u.UpdatedAt = time.Now()
-	_, err := r.db.ExecContext(ctx, query, u.Email, u.Name, u.AvatarURL, u.UpdatedAt, u.ID)
-	return err
+	res, err := r.db.ExecContext(ctx, query, u.Email, u.Name, u.AvatarURL, u.UpdatedAt, u.ID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update users (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update user %s: %w", u.ID, ErrUserNotFound)
+	}
+	return nil
 }
 
+// Delete removes a user row. 0 rows returns ErrUserNotFound so a deletion
+// that never happened cannot be reported as one (M47 W2). The Clerk
+// user.deleted path pre-checks existence with GetByClerkUserID, so this
+// only fires on a genuine race — which is exactly the case that must be
+// redelivered rather than swallowed.
 func (r *UserRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `DELETE FROM users WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
-	return err
+	res, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete users (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete user %s: %w", id, ErrUserNotFound)
+	}
+	return nil
 }
 
-// Upsert creates or updates a user (used by Clerk webhook)
+// Upsert creates or updates a user (used by Clerk webhook).
+//
+// M47 W2 classification: BENIGN. `ON CONFLICT (clerk_user_id) DO UPDATE`
+// carries no WHERE, so the statement always affects exactly one row —
+// there is no 0-row outcome to check.
 func (r *UserRepository) Upsert(ctx context.Context, u *model.User) error {
 	query := `
 		INSERT INTO users (id, clerk_user_id, email, name, avatar_url, created_at, updated_at)
@@ -102,7 +169,10 @@ func (r *UserRepository) Upsert(ctx context.Context, u *model.User) error {
 	return err
 }
 
-// AddToTenant adds a user to a tenant
+// AddToTenant adds a user to a tenant.
+//
+// M47 W2 classification: BENIGN. `ON CONFLICT (tenant_id, user_id) DO
+// UPDATE` has no WHERE guard, so it always affects exactly one row.
 func (r *UserRepository) AddToTenant(ctx context.Context, tu *model.TenantUser) error {
 	query := `
 		INSERT INTO tenant_users (tenant_id, user_id, role, created_at)
@@ -113,11 +183,44 @@ func (r *UserRepository) AddToTenant(ctx context.Context, tu *model.TenantUser) 
 	return err
 }
 
-// RemoveFromTenant removes a user from a tenant
+// RemoveFromTenant removes a user from a tenant.
+//
+// M47 W2 (highest-impact case of the wave): `tenant_users` has no RLS, so
+// `WHERE tenant_id = $1 AND user_id = $2` is the whole tenant boundary —
+// and the result was discarded, so naming ANOTHER tenant's member returned
+// nil. Member removal reported success while the membership survived
+// untouched (pinned by TestM47W2_RemoveFromTenant_CrossTenantIsNotSuccess).
+// 0 rows now returns ErrTenantUserNotFound.
+//
+// CALLER CONTRACT CHANGE: the only current caller is the Clerk
+// organizationMembership.deleted webhook, whose semantics ARE idempotent
+// (it mirrors the IdP's state, and Svix redelivers on 5xx). That caller
+// must now tolerate the no-op EXPLICITLY —
+//
+//	if err := h.userRepo.RemoveFromTenant(ctx, tenant.ID, user.ID); err != nil {
+//	    if errors.Is(err, sql.ErrNoRows) {   // already not a member
+//	        return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "membership not found"})
+//	    }
+//	    ...500...
+//	}
+//
+// — matching the sql.ErrNoRows branches the same handler already uses for
+// its tenant/user lookups. Until that branch lands, a redelivered
+// membership deletion answers 500 instead of 200. See the M47 W2 report.
 func (r *UserRepository) RemoveFromTenant(ctx context.Context, tenantID, userID uuid.UUID) error {
 	query := `DELETE FROM tenant_users WHERE tenant_id = $1 AND user_id = $2`
-	_, err := r.db.ExecContext(ctx, query, tenantID, userID)
-	return err
+	res, err := r.db.ExecContext(ctx, query, tenantID, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete tenant_users (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("remove user %s from tenant %s: %w", userID, tenantID, ErrTenantUserNotFound)
+	}
+	return nil
 }
 
 // GetTenantUsers returns all users in a tenant
@@ -165,11 +268,27 @@ func (r *UserRepository) GetUserRole(ctx context.Context, tenantID, userID uuid.
 	return &tu, nil
 }
 
-// UpdateRole updates a user's role in a tenant
+// UpdateRole updates a user's role in a tenant.
+//
+// M47 W2: the sibling of RemoveFromTenant on the same RLS-less table and
+// with the same defect — a role change aimed at another tenant's member
+// matched 0 rows and returned nil, so a privilege change that never
+// happened looked like one that did. Both methods now share one contract
+// (0 rows -> ErrTenantUserNotFound); the asymmetry was the bug.
 func (r *UserRepository) UpdateRole(ctx context.Context, tenantID, userID uuid.UUID, role string) error {
 	query := `UPDATE tenant_users SET role = $1 WHERE tenant_id = $2 AND user_id = $3`
-	_, err := r.db.ExecContext(ctx, query, role, tenantID, userID)
-	return err
+	res, err := r.db.ExecContext(ctx, query, role, tenantID, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update tenant_users role (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update role of user %s in tenant %s: %w", userID, tenantID, ErrTenantUserNotFound)
+	}
+	return nil
 }
 
 // CountByTenant returns the number of users in a tenant

@@ -224,6 +224,10 @@ type LLMCallRecord struct {
 // VEXStatementSyncInput is the payload the runner hands to
 // VEXStatementSync.CreateStatement when a draft is approved.
 type VEXStatementSyncInput struct {
+	// TenantID is the authenticated session's tenant, carried through so
+	// VEXService.CreateStatement can check the project's ownership against
+	// the caller rather than derive it from the project (M47 W1).
+	TenantID        uuid.UUID
 	ProjectID       uuid.UUID
 	VulnerabilityID uuid.UUID
 	ComponentID     *uuid.UUID
@@ -1426,6 +1430,7 @@ func (r *Runner) syncToVEXStatements(ctx context.Context, draft *repository.VEXD
 	}
 	compID := draft.ComponentID
 	input := VEXStatementSyncInput{
+		TenantID:        draft.TenantID,
 		ProjectID:       draft.ProjectID,
 		VulnerabilityID: draft.VulnerabilityID,
 		ComponentID:     &compID,

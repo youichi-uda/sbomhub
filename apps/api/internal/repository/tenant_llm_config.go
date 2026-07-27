@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,10 +61,16 @@ func NewTenantLLMConfigRepository(db *sql.DB) *TenantLLMConfigRepository {
 }
 
 // ErrTenantLLMConfigNotFound is returned by Get when no row exists for the
-// given tenant. The handler translates this to "AI disabled, no config" in
-// the API response (rather than a 404) so the UI can render the empty
-// form.
-var ErrTenantLLMConfigNotFound = errors.New("tenant_llm_config: not found")
+// given tenant, and by Delete when the DELETE matched no row. The handler
+// translates the Get case to "AI disabled, no config" in the API response
+// (rather than a 404) so the UI can render the empty form.
+//
+// M47 W2: now WRAPS sql.ErrNoRows so it satisfies the same generic
+// "no row matched" check as every other 0-row mutation sentinel added in
+// this wave (see ErrTenantUserNotFound in repository/user.go). Every
+// existing caller matches on the named sentinel, which is unaffected;
+// wrapping only ADDS errors.Is(err, sql.ErrNoRows).
+var ErrTenantLLMConfigNotFound = fmt.Errorf("tenant_llm_config: not found: %w", sql.ErrNoRows)
 
 // q routes the statement through the request-scoped tx (Trust Rescue 9.1.2 /
 // #3) when one is attached to ctx; falls back to r.db otherwise. Same
@@ -151,6 +157,10 @@ type UpsertParams struct {
 //   - To clear the key explicitly the caller should Delete or pass a marker
 //     value; we deliberately do NOT expose a "clear" knob here so accidental
 //     UI bugs cannot wipe an operator's key.
+//
+// M47 W2 classification: BENIGN — `ON CONFLICT ... DO UPDATE` with no
+// WHERE guard always affects exactly one row, so there is no 0-row
+// outcome for the caller to adjudicate.
 func (r *TenantLLMConfigRepository) Upsert(ctx context.Context, params UpsertParams) (*TenantLLMConfig, error) {
 	const query = `
 		INSERT INTO tenant_llm_config (
@@ -206,8 +216,23 @@ func (r *TenantLLMConfigRepository) Upsert(ctx context.Context, params UpsertPar
 
 // Delete removes the row entirely. Used by key-rotation flows that want to
 // reset the config to "AI disabled".
+//
+// M47 W2: 0 rows returns ErrTenantLLMConfigNotFound (the sentinel Get
+// already uses), so "reset the config" cannot report success for a tenant
+// that never had one — the caller decides whether that is a 404 or a
+// tolerated no-op, which is a decision the pre-fix nil return took away.
 func (r *TenantLLMConfigRepository) Delete(ctx context.Context, tenantID uuid.UUID) error {
-	_, err := r.q(ctx).ExecContext(ctx,
+	res, err := r.q(ctx).ExecContext(ctx,
 		`DELETE FROM tenant_llm_config WHERE tenant_id = $1`, tenantID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete tenant_llm_config (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete llm config for tenant %s: %w", tenantID, ErrTenantLLMConfigNotFound)
+	}
+	return nil
 }

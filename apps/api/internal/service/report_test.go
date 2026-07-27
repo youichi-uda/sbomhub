@@ -150,8 +150,9 @@ func TestMarkReportFailed_OpensFreshTenantTxForFailureUpdate(t *testing.T) {
 	// UpdateReport SQL — match the UPDATE prefix; arg order is fixed by
 	// repository.ReportRepository.UpdateReport (id, file_path, file_size,
 	// file_content, status, error_message, email_sent_at, email_recipients,
-	// completed_at). We assert the status field flipped to "failed" and the
-	// error message landed in error_message.
+	// completed_at, tenant_id). We assert the status field flipped to
+	// "failed" and the error message landed in error_message. tenant_id is
+	// the M47 W2 belt (`WHERE id = $1 AND tenant_id = $10`).
 	mock.ExpectExec("UPDATE generated_reports").
 		WithArgs(
 			reportID,
@@ -163,6 +164,7 @@ func TestMarkReportFailed_OpensFreshTenantTxForFailureUpdate(t *testing.T) {
 			(*sql.NullTime)(nil), // email_sent_at = nil
 			sqlmock.AnyArg(),     // pq.Array(email_recipients)
 			(*sql.NullTime)(nil), // completed_at = nil
+			tenantID,             // M47 W2 tenant belt
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -827,6 +829,7 @@ func TestRunReportGeneration_SuccessFlipsRowToCompletedWithRealWorkbook(t *testi
 			sqlmock.AnyArg(), // email_sent_at
 			sqlmock.AnyArg(), // email_recipients
 			sqlmock.AnyArg(), // completed_at (stamped inside)
+			tenantID,         // M47 W2 tenant belt
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
