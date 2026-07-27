@@ -1216,7 +1216,7 @@ func TestSSVCReads_M46W2_NullableColumnScan(t *testing.T) {
 		// --- GetAssessmentHistory: change_reason NULL + populated,
 		// changed_at DESC → pop first. Prev pointers stay nil on the NULL
 		// row and round-trip on the populated one.
-		history, err := repo.GetAssessmentHistory(ctx, assessPopID)
+		history, err := repo.GetAssessmentHistory(ctx, projectID, tenant, assessPopID)
 		if err != nil {
 			t.Errorf("GetAssessmentHistory with a NULL change_reason must not fail, got: %v", err)
 		} else if len(history) != 2 {

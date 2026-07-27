@@ -159,17 +159,38 @@ func (r *SSVCRepository) CreateAssessment(ctx context.Context, a *model.SSVCAsse
 	return err
 }
 
-// UpdateAssessment updates an existing assessment
+// UpdateAssessment updates an existing assessment.
+//
+// M46 Codex final round (Medium #1, second route): cve_id is part of the SET
+// list. Both service entry points derive the CVE server-side from the
+// vulnerability id (SSVCService.AssessVulnerability /
+// AutoAssessVulnerability -> GetCVEIDByIDInProject), so any call that
+// actually reaches this UPDATE re-stamps the authoritative value and REPAIRS
+// a cve_id a pre-fix caller mispaired via ?cve_id=. Leaving the column out of
+// the UPDATE — the pre-fix shape — meant a spoofed pairing survived every
+// subsequent legitimate assessment of that vulnerability.
+//
+// The repair is NOT universal, and the limit is deliberate: auto-assess
+// returns an existing MANUAL assessment (both *_auto flags false) untouched
+// rather than overwriting a human's judgement, so it never reaches this
+// statement and never repairs such a row. A mispaired manual assessment is
+// repaired by the manual route — the same route that could have created the
+// mispairing — and by nothing else.
+// vulnerability_id itself is deliberately NOT updatable here: it is the
+// identity half of the (project_id, vulnerability_id) key the caller looked
+// the row up by.
 func (r *SSVCRepository) UpdateAssessment(ctx context.Context, a *model.SSVCAssessment) error {
 	query := `
 		UPDATE ssvc_assessments SET
-			exploitation = $1, automatable = $2, technical_impact = $3,
-			mission_prevalence = $4, safety_impact = $5, decision = $6,
-			exploitation_auto = $7, automatable_auto = $8, assessed_by = $9,
-			assessed_at = $10, notes = $11, updated_at = NOW()
-		WHERE id = $12
+			cve_id = $1,
+			exploitation = $2, automatable = $3, technical_impact = $4,
+			mission_prevalence = $5, safety_impact = $6, decision = $7,
+			exploitation_auto = $8, automatable_auto = $9, assessed_by = $10,
+			assessed_at = $11, notes = $12, updated_at = NOW()
+		WHERE id = $13
 	`
 	_, err := r.q(ctx).ExecContext(ctx, query,
+		a.CVEID,
 		a.Exploitation, a.Automatable, a.TechnicalImpact,
 		a.MissionPrevalence, a.SafetyImpact, a.Decision,
 		a.ExploitationAuto, a.AutomatableAuto, a.AssessedBy,
@@ -325,11 +346,28 @@ func (r *SSVCRepository) GetSummary(ctx context.Context, projectID uuid.UUID) (*
 	return &summary, nil
 }
 
-// DeleteAssessment deletes an assessment
-func (r *SSVCRepository) DeleteAssessment(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM ssvc_assessments WHERE id = $1`
-	_, err := r.q(ctx).ExecContext(ctx, query, id)
-	return err
+// DeleteAssessment deletes one assessment, scoped to the caller's (tenant,
+// project), and reports whether a row was actually removed.
+//
+// M46 Codex final round (Medium #1, route sweep): the pre-fix statement was a
+// bare `DELETE FROM ssvc_assessments WHERE id = $1` whose result was
+// discarded. ssvc_assessments carries FORCE RLS so cross-TENANT deletion was
+// blocked, but nothing scoped the delete to the :id project the route names,
+// and no application-layer tenant predicate backed the policy up — the same
+// belt-and-braces the sibling meti_assessments.ClearOverride already uses
+// (`WHERE tenant_id = $1 AND project_id = $2`). The discarded result is the
+// other half: without it the handler returned 204 for a row it never touched.
+func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenantID, id uuid.UUID) (bool, error) {
+	query := `DELETE FROM ssvc_assessments WHERE id = $1 AND project_id = $2 AND tenant_id = $3`
+	res, err := r.q(ctx).ExecContext(ctx, query, id, projectID, tenantID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // UpdateVulnerabilitySSVCDecision updates the SSVC decision on the vulnerability record
@@ -339,23 +377,43 @@ func (r *SSVCRepository) UpdateVulnerabilitySSVCDecision(ctx context.Context, vu
 	return err
 }
 
-// GetAssessmentHistory gets history for an assessment.
+// GetAssessmentHistory gets history for an assessment that belongs to the
+// caller's (tenant, project).
+//
 // M46 W2: change_reason is nullable TEXT (021) — COALESCE to ” (” means
 // absent). The prev_* columns already scan into pointer types.
-func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
+//
+// M46 Codex final round (route sweep, round 2): ssvc_assessment_history has
+// no tenant_id or project_id of its own — it hangs off assessment_id — and
+// the pre-fix statement filtered on that alone. The route's :id project
+// segment was therefore decorative here exactly as it was on
+// DeleteAssessment: a caller could read any assessment's decision-change
+// history through any of its projects' URLs. The parent row is now joined and
+// constrained, which also makes the read tenant-safe through
+// ssvc_assessments' FORCE RLS (belt) on top of the explicit predicate
+// (braces). An out-of-scope id yields an EMPTY history rather than an error.
+// That is a deliberate trade-off, not a strictly better answer: it cannot be
+// used to probe for assessments the caller cannot see, but it also cannot
+// tell a client "no such assessment" apart from "this assessment has never
+// changed", which the sibling GetAssessment (404 when absent) can. A scoped
+// existence check plus a shared unknown/out-of-scope sentinel would be
+// equally probe-proof and more informative; it is left for a follow-up
+// because it adds a round trip to a read this wave only touched to scope.
+func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
 	query := `
-		SELECT id, assessment_id,
-			prev_exploitation, prev_automatable, prev_technical_impact,
-			prev_mission_prevalence, prev_safety_impact, prev_decision,
-			new_exploitation, new_automatable, new_technical_impact,
-			new_mission_prevalence, new_safety_impact, new_decision,
-			changed_by, changed_at, COALESCE(change_reason, '')
-		FROM ssvc_assessment_history
-		WHERE assessment_id = $1
-		ORDER BY changed_at DESC
+		SELECT h.id, h.assessment_id,
+			h.prev_exploitation, h.prev_automatable, h.prev_technical_impact,
+			h.prev_mission_prevalence, h.prev_safety_impact, h.prev_decision,
+			h.new_exploitation, h.new_automatable, h.new_technical_impact,
+			h.new_mission_prevalence, h.new_safety_impact, h.new_decision,
+			h.changed_by, h.changed_at, COALESCE(h.change_reason, '')
+		FROM ssvc_assessment_history h
+		JOIN ssvc_assessments a ON a.id = h.assessment_id
+		WHERE h.assessment_id = $1 AND a.project_id = $2 AND a.tenant_id = $3
+		ORDER BY h.changed_at DESC
 	`
 
-	rows, err := r.q(ctx).QueryContext(ctx, query, assessmentID)
+	rows, err := r.q(ctx).QueryContext(ctx, query, assessmentID, projectID, tenantID)
 	if err != nil {
 		return nil, err
 	}

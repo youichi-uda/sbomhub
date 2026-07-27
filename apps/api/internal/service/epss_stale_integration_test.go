@@ -173,7 +173,7 @@ func TestEPSSSync_MalformedItem_ClearsStaleValuesInsteadOfKeepingThem(t *testing
 	// The two steps SyncScores performs per batch, guard included: pre-fix,
 	// both items were skipped, scores came back empty and the UPDATE never
 	// ran — which is exactly how the stale values survived.
-	scores, err := svc.fetchEPSSScores(ctx, []string{cvePartial, cveTombstone})
+	scores, unanswered, err := svc.fetchEPSSScores(ctx, []string{cvePartial, cveTombstone})
 	if err != nil {
 		t.Fatalf("fetchEPSSScores: %v", err)
 	}
@@ -184,6 +184,12 @@ func TestEPSSSync_MalformedItem_ClearsStaleValuesInsteadOfKeepingThem(t *testing
 	}
 	if len(scores) != 2 {
 		t.Errorf("scores map covers %d of 2 answered CVEs; a malformed item must yield an explicit entry (partial keep or clear), not a skip", len(scores))
+	}
+	// Both CVEs are present in the canned response — a malformed VALUE is
+	// still an ANSWER, so neither belongs to the "FIRST said nothing" set
+	// (M46 Codex final round, Medium #3 — that path only timestamps).
+	if len(unanswered) != 0 {
+		t.Errorf("unanswered = %v, want empty (both CVEs were answered, however badly)", unanswered)
 	}
 
 	// --- Raw column state (reader-independent proof).

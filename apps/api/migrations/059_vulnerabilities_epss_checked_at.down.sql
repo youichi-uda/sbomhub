@@ -21,9 +21,33 @@
 --   reverse order (down first) takes the detail endpoints out of service
 --   until the binary follows.
 --
---   The writer's OTHER 059 behaviour -- epss_updated_at moving only when a
---   score is actually written -- needs no rollback: it is exactly what
---   migration 055's COMMENT (restored below) already specified.
+--   SEMANTIC ROLLBACK -- this down is NOT purely structural (M46 Codex final
+--   round, Low #3). An earlier draft of this note claimed the writer's OTHER
+--   059 behaviour (epss_updated_at moving only when a score is actually
+--   written) "needs no rollback: it is exactly what 055 already specified".
+--   That is true of the 055 CONTRACT but false of the pre-059 BINARY this
+--   file instructs you to roll back to. The parent commit's
+--   UpdateEPSSScores is def6a46's:
+--
+--       SET epss_score = $1, epss_percentile = $2, epss_updated_at = NOW()
+--
+--   -- an unconditional NOW(), so it stamps epss_updated_at on TOMBSTONE
+--   writes too (score cleared to NULL). Running this down therefore restores
+--   055's COMMENT and then immediately hands the column to a writer that
+--   breaks it again: the first post-rollback epss_sync that clears any CVE
+--   reintroduces "fresh epss_updated_at beside a NULL epss_score", the exact
+--   misleading state 059 existed to remove, and it is published straight
+--   through the JSON API as `epss_updated_at`.
+--
+--   Nothing here can prevent that -- it is a property of the older binary --
+--   so treat it as an accepted cost of the rollback, not as an oversight.
+--   Rows so written are reconciled the next time a sync ANSWERS for that CVE
+--   after 059 is re-applied -- not merely the next sync run. A CVE that FIRST
+--   does not cover is only touched by MarkEPSSChecked, which moves
+--   epss_checked_at and nothing else, so a stale epss_updated_at beside a
+--   NULL epss_score can persist indefinitely on such a row. 059 does no
+--   backfill in either direction. If the rollback is expected to last,
+--   disable the epss_sync scheduler job while it does.
 --
 -- RLS is untouched (vulnerabilities is a global, non-tenant structural
 -- exemption; 059 declared no RLS).

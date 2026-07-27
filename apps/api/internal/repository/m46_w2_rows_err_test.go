@@ -383,6 +383,8 @@ func TestSSVCRepository_GetAssessmentHistory_RowsErrSurfaced(t *testing.T) {
 	db, mock := newMockDB(t)
 	repo := NewSSVCRepository(db)
 	assessmentID := uuid.New()
+	projectID := uuid.New()
+	tenantID := uuid.New()
 	now := time.Now()
 
 	rows := sqlmock.NewRows([]string{
@@ -403,10 +405,10 @@ func TestSSVCRepository_GetAssessmentHistory_RowsErrSurfaced(t *testing.T) {
 			nil, now, "r2").
 		RowError(1, errMidIteration)
 	mock.ExpectQuery(`FROM ssvc_assessment_history`).
-		WithArgs(assessmentID).
+		WithArgs(assessmentID, projectID, tenantID).
 		WillReturnRows(rows)
 
-	_, err := repo.GetAssessmentHistory(context.Background(), assessmentID)
+	_, err := repo.GetAssessmentHistory(context.Background(), projectID, tenantID, assessmentID)
 	requireIterationError(t, "SSVCRepository.GetAssessmentHistory", err)
 }
 

@@ -20,6 +20,11 @@ import (
 // existence of vulnerabilities outside the caller's scope.
 var ErrSSVCVulnerabilityNotInProject = errors.New("vulnerability not found in project scope")
 
+// ErrSSVCAssessmentNotInProject is the same one-sentinel-for-both-cases
+// treatment for an assessment id: the row does not exist, or it belongs to a
+// different (tenant, project) than the caller's. Handler maps it to 404.
+var ErrSSVCAssessmentNotInProject = errors.New("assessment not found in project scope")
+
 // SSVCService handles SSVC assessment operations
 type SSVCService struct {
 	ssvcRepo *repository.SSVCRepository
@@ -72,8 +77,36 @@ type UpdateSSVCDefaultsInput struct {
 	AutoAssessAutomatable  bool                        `json:"auto_assess_automatable"`
 }
 
-// AssessVulnerability creates or updates an SSVC assessment
-func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenantID, vulnerabilityID uuid.UUID, cveID string, input model.SSVCAssessmentInput, assessedBy *uuid.UUID) (*model.SSVCAssessment, error) {
+// AssessVulnerability creates or updates an SSVC assessment.
+//
+// M46 Codex final round (Medium #1, second route): like
+// AutoAssessVulnerability below, the CVE id is derived SERVER-SIDE from
+// vulnerabilityID and never accepted from the caller. 9704eb9 closed only
+// the auto-assess route; this one still took a caller-supplied cveID (the
+// handler forwarded ?cve_id= verbatim) and never checked that
+// vulnerabilityID belonged to the caller's (tenant, project) at all, so an
+// authenticated tenant could POST a known vulnerability UUID that is not
+// linked to any of its components together with an arbitrary CVE and get a
+// 200 that (a) minted an ssvc_assessments row pairing the vulnerability with
+// the WRONG cve_id — the key GetAssessmentByCVE, the VEX/report joins and
+// every operator reading the row rely on — and (b) wrote the GLOBAL
+// vulnerabilities.ssvc_decision column for a vulnerability outside its
+// scope. GetCVEIDByIDInProject re-resolves the authoritative CVE and
+// verifies (tenant, project, vulnerability) membership in one statement;
+// unknown and out-of-scope ids collapse into the same
+// ErrSSVCVulnerabilityNotInProject sentinel (handler: 404) before anything
+// is read or written, so the response cannot be used to probe for
+// vulnerabilities the caller cannot see. Identical posture to auto-assess,
+// and it lives in the service so every future caller inherits it.
+func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenantID, vulnerabilityID uuid.UUID, input model.SSVCAssessmentInput, assessedBy *uuid.UUID) (*model.SSVCAssessment, error) {
+	cveID, err := s.vulnRepo.GetCVEIDByIDInProject(ctx, tenantID, projectID, vulnerabilityID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSSVCVulnerabilityNotInProject
+		}
+		return nil, fmt.Errorf("resolve cve for vulnerability %s: %w", vulnerabilityID, err)
+	}
+
 	// Calculate decision using SSVC decision tree
 	decision := s.CalculateDecision(input.Exploitation, input.Automatable, input.TechnicalImpact, input.MissionPrevalence, input.SafetyImpact)
 
@@ -113,7 +146,12 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 				"vulnerability_id", vulnerabilityID, "cve_id", cveID, "error", err)
 		}
 
-		// Update existing assessment
+		// Update existing assessment. CVEID is re-stamped from the
+		// server-derived value so a row minted before the Medium #1 fix (or
+		// by any writer that trusted a caller-supplied cve_id) is REPAIRED on
+		// the next assessment instead of keeping a mispaired CVE forever —
+		// UpdateAssessment persists the column for exactly this reason.
+		existing.CVEID = cveID
 		existing.Exploitation = input.Exploitation
 		existing.Automatable = input.Automatable
 		existing.TechnicalImpact = input.TechnicalImpact
@@ -398,14 +436,29 @@ func (s *SSVCService) GetSummary(ctx context.Context, projectID uuid.UUID) (*mod
 	return s.ssvcRepo.GetSummary(ctx, projectID)
 }
 
-// DeleteAssessment deletes an assessment
-func (s *SSVCService) DeleteAssessment(ctx context.Context, id uuid.UUID) error {
-	return s.ssvcRepo.DeleteAssessment(ctx, id)
+// DeleteAssessment deletes an assessment that belongs to the caller's
+// (tenant, project). M46 Codex final round (Medium #1, route sweep): the
+// pre-fix signature took only the assessment id and forwarded it to an
+// unscoped DELETE, so the project segment of the route was decorative and a
+// miss was indistinguishable from a success. Unknown and out-of-scope ids
+// collapse into one sentinel (handler: 404) for the same anti-probing reason
+// as ErrSSVCVulnerabilityNotInProject.
+func (s *SSVCService) DeleteAssessment(ctx context.Context, projectID, tenantID, id uuid.UUID) error {
+	deleted, err := s.ssvcRepo.DeleteAssessment(ctx, projectID, tenantID, id)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrSSVCAssessmentNotInProject
+	}
+	return nil
 }
 
-// GetAssessmentHistory gets history for an assessment
-func (s *SSVCService) GetAssessmentHistory(ctx context.Context, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
-	return s.ssvcRepo.GetAssessmentHistory(ctx, assessmentID)
+// GetAssessmentHistory gets history for an assessment in the caller's
+// (tenant, project). Out-of-scope ids yield an empty history — see the
+// repository method for why that, and not a 404, is the right answer here.
+func (s *SSVCService) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
+	return s.ssvcRepo.GetAssessmentHistory(ctx, projectID, tenantID, assessmentID)
 }
 
 // GetImmediateAssessments gets all assessments requiring immediate action

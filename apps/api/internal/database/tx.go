@@ -38,6 +38,32 @@ func WithTx(ctx context.Context, tx *sql.Tx) context.Context {
 	return context.WithValue(ctx, txKey{}, tx)
 }
 
+// WithoutTx returns a copy of ctx with any attached *sql.Tx REMOVED, so
+// repositories called with it fall back to the pooled *sql.DB (autocommit).
+//
+// This exists for the handful of endpoints that trigger a GLOBAL, non-tenant
+// background job on demand (M46 Codex final round, round 2 Medium): those jobs
+// write shared caches like `vulnerabilities` in many independent statements
+// over tens of seconds, and running them inside the request's TenantTx is
+// wrong twice over — a late failure rolls back every earlier statement that
+// had already succeeded, and one failed statement poisons the transaction so
+// every subsequent one fails with "current transaction is aborted". The
+// scheduler already runs these jobs on a bare context; this makes the manual
+// HTTP trigger behave identically.
+//
+// Do NOT use it to escape RLS: a context without a tx has no
+// app.current_tenant_id bound, so any RLS-protected table read through it
+// yields nothing. It is only appropriate for globally-scoped, non-tenant work.
+func WithoutTx(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	if _, ok := TxFromContext(ctx); !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, txKey{}, (*sql.Tx)(nil))
+}
+
 // TxFromContext returns the *sql.Tx attached to ctx (or nil + false). Used by
 // the middleware's diagnostics and by Querier below.
 func TxFromContext(ctx context.Context) (*sql.Tx, bool) {

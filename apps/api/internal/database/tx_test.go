@@ -133,3 +133,54 @@ func TestWithTxFunc_RollsBackOnPanic(t *testing.T) {
 		panic("kaboom")
 	})
 }
+
+// TestWithoutTx_DetachesTxAndQuerierFallsBack pins the contract the manual
+// EPSS sync trigger depends on (M46 Codex final round, round 2 Medium): a
+// globally-scoped background job invoked from an HTTP handler must NOT run
+// inside the request's TenantTx, because one failed statement aborts the
+// whole transaction and a late error rolls back every earlier success.
+func TestWithoutTx_DetachesTxAndQuerierFallsBack(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("db.Begin: %v", err)
+	}
+
+	ctx := WithTx(context.Background(), tx)
+	if _, ok := TxFromContext(ctx); !ok {
+		t.Fatal("precondition: WithTx did not attach the tx")
+	}
+	if Querier(ctx, db) != Queryable(tx) {
+		t.Fatal("precondition: Querier did not pick up the attached tx")
+	}
+
+	bare := WithoutTx(ctx)
+	if _, ok := TxFromContext(bare); ok {
+		t.Error("WithoutTx left a tx attached")
+	}
+	if Querier(bare, db) != Queryable(db) {
+		t.Error("Querier(WithoutTx(ctx)) did not fall back to the pooled *sql.DB")
+	}
+
+	// The original context is untouched — WithoutTx returns a copy.
+	if _, ok := TxFromContext(ctx); !ok {
+		t.Error("WithoutTx mutated the parent context")
+	}
+
+	// Idempotent, and a no-op on a context that never had a tx.
+	if got := WithoutTx(bare); got != bare {
+		t.Error("WithoutTx on a tx-free context should return it unchanged")
+	}
+	if _, ok := TxFromContext(WithoutTx(context.Background())); ok {
+		t.Error("WithoutTx(Background) reported a tx")
+	}
+
+	mock.ExpectRollback()
+	_ = tx.Rollback()
+}

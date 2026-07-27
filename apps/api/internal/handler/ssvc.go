@@ -119,12 +119,16 @@ func (h *SSVCHandler) AssessVulnerability(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
 
-	// Get CVE ID from query or body
-	cveID := c.QueryParam("cve_id")
-	if cveID == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "cve_id is required")
-	}
-
+	// M46 Codex final round (Medium #1, second route): the cve_id query
+	// parameter is intentionally NOT read — same posture as
+	// AutoAssessVulnerability below. It used to be REQUIRED here and stored
+	// verbatim as the assessment's cve_id, so a caller could pair :vuln_id
+	// with any CVE it liked; :vuln_id itself was never checked against the
+	// project either. The service now derives the CVE server-side from
+	// :vuln_id and verifies (tenant, project, vulnerability) membership.
+	// Legacy clients still sending ?cve_id= keep working — the parameter is
+	// simply inert, and its former "400 when absent" is gone because the
+	// server no longer needs it.
 	input := model.SSVCAssessmentInput{
 		Exploitation:      req.Exploitation,
 		Automatable:       req.Automatable,
@@ -134,8 +138,11 @@ func (h *SSVCHandler) AssessVulnerability(c echo.Context) error {
 		Notes:             req.Notes,
 	}
 
-	assessment, err := h.ssvcService.AssessVulnerability(c.Request().Context(), projectID, tenantID, vulnID, cveID, input, assessedBy)
+	assessment, err := h.ssvcService.AssessVulnerability(c.Request().Context(), projectID, tenantID, vulnID, input, assessedBy)
 	if err != nil {
+		if errors.Is(err, service.ErrSSVCVulnerabilityNotInProject) {
+			return echo.NewHTTPError(http.StatusNotFound, "vulnerability not found in project")
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
@@ -326,13 +333,36 @@ func (h *SSVCHandler) GetSummary(c echo.Context) error {
 
 // DeleteAssessment deletes an SSVC assessment
 // DELETE /api/v1/projects/:id/ssvc/assessments/:assessment_id
+//
+// M46 Codex final round (Medium #1, route sweep): :id was PARSED NOWHERE and
+// the repository ran a bare `DELETE FROM ssvc_assessments WHERE id = $1`, so
+// the route's project segment was decorative — any assessment in the tenant
+// could be deleted through any project's URL, and the endpoint always
+// answered 204 whether or not it hit anything. Cross-tenant was held only by
+// the FORCE RLS policy, with no application-layer predicate as
+// defence-in-depth (the posture the rest of this file and
+// repository/meti_assessments.go's ClearOverride use). Now both ids are bound
+// and a miss is a 404 instead of a lying 204.
 func (h *SSVCHandler) DeleteAssessment(c echo.Context) error {
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid project ID")
+	}
+
 	assessmentID, err := uuid.Parse(c.Param("assessment_id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid assessment ID")
 	}
 
-	if err := h.ssvcService.DeleteAssessment(c.Request().Context(), assessmentID); err != nil {
+	tenantID, ok := c.Get("tenant_id").(uuid.UUID)
+	if !ok {
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant ID not found")
+	}
+
+	if err := h.ssvcService.DeleteAssessment(c.Request().Context(), projectID, tenantID, assessmentID); err != nil {
+		if errors.Is(err, service.ErrSSVCAssessmentNotInProject) {
+			return echo.NewHTTPError(http.StatusNotFound, "assessment not found in project")
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
@@ -341,13 +371,28 @@ func (h *SSVCHandler) DeleteAssessment(c echo.Context) error {
 
 // GetAssessmentHistory gets history for an assessment
 // GET /api/v1/projects/:id/ssvc/assessments/:assessment_id/history
+//
+// M46 Codex final round (route sweep, round 2): :id used to be parsed
+// nowhere here either, so any assessment's decision-change history was
+// readable through any project's URL. Both ids are now bound and the
+// repository constrains the parent assessment row.
 func (h *SSVCHandler) GetAssessmentHistory(c echo.Context) error {
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid project ID")
+	}
+
 	assessmentID, err := uuid.Parse(c.Param("assessment_id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid assessment ID")
 	}
 
-	history, err := h.ssvcService.GetAssessmentHistory(c.Request().Context(), assessmentID)
+	tenantID, ok := c.Get("tenant_id").(uuid.UUID)
+	if !ok {
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant ID not found")
+	}
+
+	history, err := h.ssvcService.GetAssessmentHistory(c.Request().Context(), projectID, tenantID, assessmentID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
