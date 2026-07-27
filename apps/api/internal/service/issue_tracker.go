@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -164,9 +165,17 @@ func (s *IssueTrackerService) ListConnections(ctx context.Context, tenantID uuid
 	return s.issueTrackerRepo.ListConnections(ctx, tenantID)
 }
 
-// DeleteConnection deletes a connection
-func (s *IssueTrackerService) DeleteConnection(ctx context.Context, id uuid.UUID) error {
-	return s.issueTrackerRepo.DeleteConnection(ctx, id)
+// DeleteConnection deletes a connection belonging to tenantID.
+//
+// M47 W2: tenantID was added because the repository DELETE ran
+// `WHERE id = $1` and discarded its result — a foreign connection id was
+// blocked by RLS, matched 0 rows, and the endpoint still answered 204.
+// tenantID MUST come from the authenticated session; the repository maps a
+// 0-row DELETE to repository.ErrIssueTrackerConnectionNotFound (which
+// wraps sql.ErrNoRows) and the handler answers 404, so "no such
+// connection" and "someone else's connection" stay indistinguishable.
+func (s *IssueTrackerService) DeleteConnection(ctx context.Context, tenantID, id uuid.UUID) error {
+	return s.issueTrackerRepo.DeleteConnection(ctx, tenantID, id)
 }
 
 // CreateTicketInput represents input for creating a ticket
@@ -182,8 +191,45 @@ type CreateTicketInput struct {
 	Labels          []string
 }
 
+// ErrTicketTargetNotInProject is the M47 W1 one-sentinel answer for
+// POST /api/v1/vulnerabilities/:vuln_id/ticket when the (vulnerability_id,
+// project_id) pair the caller supplied is not real.
+//
+// This route is the worst-shaped of the M47 set because the side effect is
+// EXTERNAL: it took :vuln_id from the path and project_id from the BODY,
+// verified neither against the caller's tenant nor against each other, and
+// went straight on to create an issue in Jira / Backlog / GitHub. The local
+// row was only written afterwards, so the DB-layer defences (the
+// vulnerability_tickets composite (tenant_id, project_id) FK, RLS) could at
+// best fail AFTER an unauthorised issue already existed in a third-party
+// system — an effect no rollback can undo. Concretely, a caller could file
+// tickets attributing arbitrary global CVE UUIDs to any project, including
+// vulnerabilities that do not affect it at all, and spend the tenant's
+// tracker quota doing it.
+//
+// The check therefore runs FIRST, before the connection is decrypted and
+// before any outbound call. Handler maps it to 404.
+var ErrTicketTargetNotInProject = errors.New("vulnerability not found in this project")
+
 // CreateTicket creates a new ticket for a vulnerability
 func (s *IssueTrackerService) CreateTicket(ctx context.Context, tenantID uuid.UUID, input CreateTicketInput) (*model.VulnerabilityTicket, error) {
+	// M47 W1: bind (vulnerability, project) to the caller's tenant BEFORE
+	// anything is decrypted, called or written. See
+	// ErrTicketTargetNotInProject. The membership join runs through the
+	// RLS-protected components / sboms tables with explicit tenant/project
+	// predicates, so another tenant's linkage can never vouch for scope.
+	if s.vulnRepo == nil {
+		return nil, fmt.Errorf("issue tracker: vulnerability repository is required for scope checks")
+	}
+	affects, err := s.vulnRepo.VulnerabilityInProject(ctx, tenantID, input.ProjectID, input.VulnerabilityID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify vulnerability %s affects project %s: %w",
+			input.VulnerabilityID, input.ProjectID, err)
+	}
+	if !affects {
+		return nil, ErrTicketTargetNotInProject
+	}
+
 	// Get connection.
 	// INTERNAL (F44x): raw repository/DB error — not echoed.
 	conn, err := s.issueTrackerRepo.GetConnection(ctx, input.ConnectionID)

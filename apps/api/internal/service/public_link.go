@@ -17,6 +17,45 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
+// ErrPublicLinkSbomNotInProject is returned by Create / Update when the
+// caller-supplied `sbom_id` does not name an SBOM of the link's own
+// (tenant, project) — M47 W1.
+//
+// Why this is a real hole and not a formality: `public_links.sbom_id` is a
+// bare single-column FK to `sboms(id)` and `public_links` itself has NO row
+// level security (migration 030 removed it so the anonymous /public/:token
+// route can resolve a token without tenant middleware). Nothing anywhere
+// bound the pinned SBOM to the project the link claims to publish. A member
+// of the tenant could therefore create — or silently repoint, via
+// PUT /public-links/:id — a share link whose header names project Y while the
+// bytes it serves anonymously (and the component inventory it renders) come
+// from project X. GetPublicView/GetPublicSbomRaw re-open the tx as
+// link.TenantID, so RLS on `sboms` stopped the CROSS-TENANT variant from
+// rendering, but (a) it never stopped the row from being written and (b) it
+// does nothing at all for the cross-project-within-tenant variant, which is
+// the one that actually leaks an unrelated project's SBOM to the public
+// internet.
+//
+// Unknown / foreign / other-project sbom ids all collapse into this ONE
+// sentinel, which the handler maps to 404 — the one-sentinel discipline, so a
+// share-link form cannot be used to probe for SBOM UUIDs.
+var ErrPublicLinkSbomNotInProject = errors.New("sbom does not belong to this project")
+
+// ErrPublicLinkNotFound is returned by Update when the link id does not
+// resolve inside the caller's tenant (M47 W1, Codex round 1 Medium). It used
+// to be an untyped errors.New that the handler could not tell apart from a
+// bcrypt or repository failure, so every one of them came back as 400 —
+// which both hid genuine faults and left this route outside the wave's
+// one-sentinel/404 contract.
+var ErrPublicLinkNotFound = errors.New("public link not found")
+
+// ErrPublicLinkScopeCheckFailed wraps an infrastructure failure of the M47
+// W1 sbom-ownership query (Codex round 1, Medium). It exists so the handler
+// can tell "the DB is unwell" (500) apart from "that sbom is not yours"
+// (404) and from the service's own caller-facing validation (400). Without
+// it every one of the three came back as a 400.
+var ErrPublicLinkScopeCheckFailed = errors.New("failed to verify sbom ownership")
+
 type PublicLinkService struct {
 	linkRepo      *repository.PublicLinkRepository
 	projectRepo   *repository.ProjectRepository
@@ -75,8 +114,33 @@ type UpdatePublicLinkInput struct {
 }
 
 func (s *PublicLinkService) Create(ctx context.Context, input CreatePublicLinkInput) (*model.PublicLink, error) {
+	// M47 W1: typed so the handler can keep this — the ONLY caller-fixable
+	// error on this route — as a 400 while everything else (token gen,
+	// bcrypt, repository) becomes a 500. Previously all of them shared one
+	// 400 bucket, which told a caller "your request was bad" during an
+	// outage.
 	if input.Name == "" {
-		return nil, errors.New("name is required")
+		return nil, ValidationErrorf("name is required")
+	}
+	// M47 W1: bind BOTH the project and the pinned SBOM to the caller's
+	// tenant BEFORE anything is persisted. The checks live here rather than
+	// in the handler so every future caller of Create inherits them.
+	//
+	// Codex round 2 (Low): the project check used to be skipped, on the
+	// grounds that `public_links` carries the composite
+	// (tenant_id, project_id) -> projects(tenant_id, id) FK (migration 044)
+	// and a hard constraint beats an application predicate. That reasoning
+	// holds for INTEGRITY but not for the WIRE CONTRACT: the FK rejects a
+	// foreign project as an opaque INSERT error, which this route renders as
+	// a generic 400 — a status a prober can tell apart from the 404 every
+	// other out-of-scope target returns. And with `sbom_id` omitted (the
+	// legitimate "always latest" form) no scope query ran at all. Checking
+	// explicitly makes the answer the same 404 in every case.
+	if err := s.requireProjectInTenant(ctx, input.TenantID, input.ProjectID); err != nil {
+		return nil, err
+	}
+	if err := s.requireSbomInProject(ctx, input.TenantID, input.ProjectID, input.SbomID); err != nil {
+		return nil, err
 	}
 	token, err := generateToken(32)
 	if err != nil {
@@ -129,10 +193,21 @@ func (s *PublicLinkService) ListByProject(ctx context.Context, tenantID, project
 func (s *PublicLinkService) Update(ctx context.Context, tenantID, id uuid.UUID, input UpdatePublicLinkInput) (*model.PublicLink, error) {
 	link, err := s.linkRepo.GetByID(ctx, tenantID, id)
 	if err != nil {
-		return nil, err
+		// Codex round 2 (Low): a driver failure here used to escape raw and
+		// land in the handler's generic bucket. It is an infrastructure
+		// fault, not a caller error — wrap it so the handler renders 500.
+		return nil, fmt.Errorf("%w: link %s: %v", ErrPublicLinkScopeCheckFailed, id, err)
 	}
 	if link == nil {
-		return nil, errors.New("public link not found")
+		return nil, ErrPublicLinkNotFound
+	}
+
+	// M47 W1: the update path can REPOINT an existing link at another
+	// SBOM, so it needs the same binding as Create. The project is the
+	// link's own (the route has no :project_id), read back from the
+	// tenant-scoped GetByID above — never from the request body.
+	if err := s.requireSbomInProject(ctx, tenantID, link.ProjectID, input.SbomID); err != nil {
+		return nil, err
 	}
 
 	link.Name = input.Name
@@ -164,6 +239,75 @@ func (s *PublicLinkService) Update(ctx context.Context, tenantID, id uuid.UUID, 
 // Delete removes a public link restricted to the authenticated tenant.
 func (s *PublicLinkService) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 	return s.linkRepo.Delete(ctx, tenantID, id)
+}
+
+// assertSbomServesLink is the M47 W1 read-side half of the share-link
+// binding: the SBOM the anonymous route is about to publish must belong to
+// the project the link names.
+//
+// The write-side guard (requireSbomInProject) stops NEW mis-pinned links.
+// This one refuses to serve rows that were written before it existed, which
+// is what makes the fix retroactive rather than merely forward-looking — no
+// data migration, no operator action. The refusal is a plain error: both
+// anonymous handlers already collapse every failure into one generic 403
+// ("invalid password or the share link is unavailable"), so a probe learns
+// nothing from it either way.
+func assertSbomServesLink(sbom *model.Sbom, link *model.PublicLink) error {
+	if sbom == nil {
+		return errors.New("share link resolves to no SBOM")
+	}
+	if sbom.ProjectID != link.ProjectID {
+		return fmt.Errorf("share link %s is pinned to an SBOM of a different project", link.ID)
+	}
+	return nil
+}
+
+// requireProjectInTenant is the M47 W1 project half of Create's binding
+// (Codex round 2, Low). `projects` is FORCE RLS, so under the request's
+// TenantTx a foreign project is invisible and this reads as "not in tenant";
+// the explicit tenant_id predicate inside the query is the belt that still
+// holds if RLS is ever disabled. Out-of-scope collapses into the SAME
+// sentinel the sbom check uses, so both render as one 404.
+func (s *PublicLinkService) requireProjectInTenant(ctx context.Context, tenantID, projectID uuid.UUID) error {
+	if s.linkRepo == nil {
+		return fmt.Errorf("%w: public link repository is not wired", ErrPublicLinkScopeCheckFailed)
+	}
+	inTenant, err := s.linkRepo.ProjectInTenant(ctx, tenantID, projectID)
+	if err != nil {
+		return fmt.Errorf("%w: project %s: %v", ErrPublicLinkScopeCheckFailed, projectID, err)
+	}
+	if !inTenant {
+		return ErrPublicLinkSbomNotInProject
+	}
+	return nil
+}
+
+// requireSbomInProject is the shared M47 W1 guard for Create / Update.
+//
+// A nil sbomID is legitimate and means "always publish the project's latest
+// SBOM" (GetPublicView falls back to GetLatest), so it is accepted without a
+// lookup — the latest SBOM of the link's own project is in scope by
+// construction. A non-nil id must resolve inside (tenant, project) or the
+// whole request is rejected with the single ErrPublicLinkSbomNotInProject
+// sentinel.
+func (s *PublicLinkService) requireSbomInProject(ctx context.Context, tenantID, projectID uuid.UUID, sbomID *uuid.UUID) error {
+	if sbomID == nil {
+		return nil
+	}
+	if s.sbomRepo == nil {
+		// Fail closed on a misconfigured wiring rather than dereference nil
+		// (and rather than silently accept an unverified sbom_id).
+		return fmt.Errorf("%w: sbom repository is not wired", ErrPublicLinkScopeCheckFailed)
+	}
+	ok, err := s.sbomRepo.SbomInProject(ctx, tenantID, projectID, *sbomID)
+	if err != nil {
+		return fmt.Errorf("%w: sbom %s in project %s: %v",
+			ErrPublicLinkScopeCheckFailed, *sbomID, projectID, err)
+	}
+	if !ok {
+		return ErrPublicLinkSbomNotInProject
+	}
+	return nil
 }
 
 // GetPublicView resolves the share token anonymously, then loads the
@@ -208,6 +352,16 @@ func (s *PublicLinkService) GetPublicView(ctx context.Context, token string, pas
 			sbom, err = s.sbomRepo.GetLatest(txCtx, link.ProjectID)
 		}
 		if err != nil {
+			return err
+		}
+		// M47 W1 read-side guard. Create / Update now refuse a cross-project
+		// sbom_id, but that only protects rows written from here on: a
+		// deployment that already carries a mis-pinned link would keep
+		// serving another project's SBOM anonymously forever. Re-checking the
+		// resolved row's own project_id neutralises those legacy rows without
+		// a data migration, and costs nothing (project_id is already on the
+		// row we just read).
+		if err := assertSbomServesLink(sbom, link); err != nil {
 			return err
 		}
 
@@ -272,6 +426,12 @@ func (s *PublicLinkService) GetPublicSbomRaw(ctx context.Context, token string, 
 		}
 		if ferr != nil {
 			return ferr
+		}
+		// M47 W1 read-side guard — see GetPublicView. This is the path that
+		// hands over the raw SBOM bytes, so it needs the check at least as
+		// much as the view does.
+		if err := assertSbomServesLink(sbom, link); err != nil {
+			return err
 		}
 		raw = sbom.RawData
 		return nil

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -33,7 +34,7 @@ func (f *fakeVEXWriter) CreateStatement(_ context.Context, _ service.CreateVEXSt
 	return f.stmt, f.createErr
 }
 
-func (f *fakeVEXWriter) UpdateStatement(_ context.Context, _ uuid.UUID, _ service.UpdateVEXStatementInput) (*model.VEXStatement, error) {
+func (f *fakeVEXWriter) UpdateStatement(_ context.Context, _, _, _ uuid.UUID, _ service.UpdateVEXStatementInput) (*model.VEXStatement, error) {
 	return f.stmt, f.updateErr
 }
 
@@ -54,6 +55,10 @@ func doCreate(h *VEXHandler, projectID, vulnID uuid.UUID, status string) (*httpt
 	c := e.NewContext(req, rec)
 	c.SetParamNames("id")
 	c.SetParamValues(projectID.String())
+	// M47 W1: Create now requires the session tenant (it is checked against
+	// the project's owner), so without it the handler fails closed at 401
+	// and these F443 status-split cases would be vacuous.
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
 	return rec, h.Create(c)
 }
 
@@ -61,14 +66,19 @@ func doCreate(h *VEXHandler, projectID, vulnID uuid.UUID, status string) (*httpt
 func doUpdate(h *VEXHandler, vexID uuid.UUID, status string) (*httptest.ResponseRecorder, error) {
 	e := echo.New()
 	body, _ := json.Marshal(map[string]string{"status": status})
+	projectID := uuid.New()
 	req := httptest.NewRequest(http.MethodPut,
-		"/api/v1/projects/vex/"+vexID.String(),
+		"/api/v1/projects/"+projectID.String()+"/vex/"+vexID.String(),
 		strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
-	c.SetParamNames("vex_id")
-	c.SetParamValues(vexID.String())
+	// M47 W1: Update is now scoped by (tenant, project) — both must be
+	// present or the handler fails closed before the writer is consulted,
+	// which would make these F443 status-split cases vacuous.
+	c.SetParamNames("id", "vex_id")
+	c.SetParamValues(projectID.String(), vexID.String())
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
 	return rec, h.Update(c)
 }
 

@@ -1078,6 +1078,7 @@ func (h *CRAReportsHandler) loadReportScoped(
 //   - cra.ErrCVEIDMismatch                           → 400 (#F12, generic body)
 //   - cra.ErrSourceVEXDraftNotFound                  → 404 (generic body)
 //   - cra.ErrSourceVEXDraftCrossProject              → 404 (#F7/F8/F9, generic body)
+//   - cra.ErrVulnerabilityNotInProject               → 404 (M47 W1, generic body)
 //   - cra.ErrSourceVEXDraftCVEMismatch               → 409 (#F30, operator must
 //     attach a VEX draft for the
 //     correct CVE)
@@ -1118,6 +1119,18 @@ func mapCRARunnerError(err error) (int, map[string]string, bool) {
 		)
 		return http.StatusNotFound, map[string]string{
 			"error": "cra report source not found",
+		}, true
+	}
+	// M47 W1: the target vulnerability is not in this (tenant, project) —
+	// or does not exist. One sentinel, one generic 404 body, same posture as
+	// the source-draft 404 above so the endpoint cannot be used to probe the
+	// global (RLS-free) vulnerabilities cache for ids.
+	if errors.Is(err, cra.ErrVulnerabilityNotInProject) {
+		slog.Warn("cra_reports: vulnerability not in target project",
+			"sentinel", err.Error(),
+		)
+		return http.StatusNotFound, map[string]string{
+			"error": "cra report target not found",
 		}, true
 	}
 	// 409: operator must approve a VEX draft before drafting a CRA

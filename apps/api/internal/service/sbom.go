@@ -30,6 +30,18 @@ func NewSbomService(sr *repository.SbomRepository, cr *repository.ComponentRepos
 	return &SbomService{sbomRepo: sr, componentRepo: cr}
 }
 
+// SbomInProject reports whether sbomID is an SBOM of the given
+// (tenant, project). It is the service-level entry point to the M47 W1
+// ownership predicate so callers outside this package never have to reach
+// for the repository directly.
+//
+// The one consumer today is POST /api/v1/projects/:id/scan, whose
+// `?sbom_id=` parameter was previously handed straight to the NVD / JVN
+// scanners; see handler.VulnerabilityHandler.Scan for what that enabled.
+func (s *SbomService) SbomInProject(ctx context.Context, tenantID, projectID, sbomID uuid.UUID) (bool, error) {
+	return s.sbomRepo.SbomInProject(ctx, tenantID, projectID, sbomID)
+}
+
 func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, error) {
 	info, err := detectFormatAndVersion(data)
 	if err != nil {

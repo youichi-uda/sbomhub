@@ -34,6 +34,30 @@ var errInvalidPermissionsBody = map[string]string{"error": "invalid permissions"
 // err.Error() here would only leak internal/DB error strings. The full
 // error is preserved in the server log for operator diagnostics.
 func mapCreateKeyError(c echo.Context, err error) error {
+	// M47 W1: a project outside the caller's tenant (or one that does not
+	// exist) is 404 — one sentinel, so POST /projects/:id/apikeys stops
+	// being an existence oracle for project UUIDs. Must precede the generic
+	// 400 fallback below.
+	if errors.Is(err, service.ErrAPIKeyProjectNotInTenant) {
+		slog.Warn("apikey: rejected create for a project outside the tenant",
+			"path", c.Path(),
+			"tenant_id", middleware.NewTenantContext(c).TenantID(),
+		)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+	}
+	// M47 W1 (Codex round 1, Low): a %w-wrapped repository failure from the
+	// new ProjectInTenant query is an infrastructure fault. Returning it as
+	// 400 told the caller their request was malformed while the real problem
+	// was server-side, and it made a DB outage indistinguishable from a bad
+	// permissions string.
+	if errors.Is(err, service.ErrAPIKeyScopeCheckFailed) {
+		slog.Error("apikey: project scope check failed",
+			"path", c.Path(),
+			"tenant_id", middleware.NewTenantContext(c).TenantID(),
+			"error", err,
+		)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create API key"})
+	}
 	if errors.Is(err, service.ErrInvalidPermissions) {
 		slog.Warn("apikey: rejected create with invalid permissions",
 			"path", c.Path(),
@@ -149,8 +173,9 @@ func (h *APIKeyHandler) DeleteTenant(c echo.Context) error {
 	}
 
 	if err := h.keyService.DeleteKeyByTenant(c.Request().Context(), keyID, tenantID); err != nil {
-		// Raw repository error (static "not found or not authorized" for
-		// rows==0, or a raw driver error otherwise); never echo it (F442).
+		// Raw repository error (repository.ErrAPIKeyNotFound for rows==0
+		// since M47 W2, or a raw driver error otherwise); never echo it
+		// (F442).
 		slog.Warn("apikey: delete key failed", "key_id", keyID, "tenant_id", tenantID, "error", err)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
 	}
@@ -256,14 +281,30 @@ func (h *APIKeyHandler) Delete(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid key ID"})
 	}
 
+	// M47 W1: the route's :id now scopes the delete — see
+	// service.APIKeyService.DeleteKey.
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+	}
+
 	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
 	}
 
-	if err := h.keyService.DeleteKey(c.Request().Context(), tenantID, keyID); err != nil {
-		// Raw repository error (static "not found" for rows==0, or a raw
-		// driver error otherwise); never echo it (F442).
+	if err := h.keyService.DeleteKey(c.Request().Context(), tenantID, projectID, keyID); err != nil {
+		// M47 W1 (Codex round 1, Low): a failure of the scope query itself
+		// is a 500. Only the scope sentinel — which covers unknown key,
+		// another project's key and another tenant's key alike — is a 404.
+		// M47 W1 (Codex round 2, Low): one conditional DELETE, so zero rows
+		// (404) and an infrastructure fault (500) are cleanly separated.
+		// Never echo the error (F442).
+		if errors.Is(err, service.ErrAPIKeyScopeCheckFailed) {
+			slog.Error("apikey: delete failed",
+				"key_id", keyID, "tenant_id", tenantID, "project_id", projectID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete API key"})
+		}
 		slog.Warn("apikey: delete key failed", "key_id", keyID, "tenant_id", tenantID, "error", err)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
 	}

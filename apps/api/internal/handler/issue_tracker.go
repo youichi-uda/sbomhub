@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -26,7 +27,7 @@ type IssueTrackerServiceAPI interface {
 	CreateConnection(ctx context.Context, tenantID uuid.UUID, input service.CreateConnectionInput) (*model.IssueTrackerConnection, error)
 	ListConnections(ctx context.Context, tenantID uuid.UUID) ([]model.IssueTrackerConnection, error)
 	GetConnection(ctx context.Context, id uuid.UUID) (*model.IssueTrackerConnection, error)
-	DeleteConnection(ctx context.Context, id uuid.UUID) error
+	DeleteConnection(ctx context.Context, tenantID, id uuid.UUID) error
 	CreateTicket(ctx context.Context, tenantID uuid.UUID, input service.CreateTicketInput) (*model.VulnerabilityTicket, error)
 	GetTicketByVulnerability(ctx context.Context, vulnID uuid.UUID) ([]model.VulnerabilityTicketWithDetails, error)
 	ListTickets(ctx context.Context, tenantID uuid.UUID, status string, limit, offset int) ([]model.VulnerabilityTicketWithDetails, int, error)
@@ -201,15 +202,36 @@ func (h *IssueTrackerHandler) GetConnection(c echo.Context) error {
 }
 
 // DeleteConnection handles DELETE /api/v1/integrations/:id
+//
+// M47 W2: the route used to answer 204 unconditionally. The repository
+// DELETE was `WHERE id = $1` with its result discarded, so a foreign
+// connection id (blocked by migration 042's FORCE RLS) matched 0 rows and
+// looked exactly like a successful deletion — the operator saw "deleted"
+// for a connection that is still live in another tenant, and the caller
+// could enumerate nothing but also learn nothing. The session tenant is
+// now passed down as the explicit belt and a 0-row DELETE surfaces as
+// repository.ErrIssueTrackerConnectionNotFound → 404, the same
+// one-sentinel answer the rest of the M47 routes use ("no such connection"
+// and "not yours" are indistinguishable).
 func (h *IssueTrackerHandler) DeleteConnection(c echo.Context) error {
 	ctx := c.Request().Context()
+
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok {
+		return echo.NewHTTPError(http.StatusUnauthorized, "tenant context required")
+	}
 
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "Invalid connection ID")
 	}
 
-	if err := h.issueTrackerService.DeleteConnection(ctx, id); err != nil {
+	if err := h.issueTrackerService.DeleteConnection(ctx, tenantID, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusNotFound, "Connection not found")
+		}
+		slog.Warn("issue tracker: delete connection failed",
+			"tenant_id", tenantID, "connection_id", id, "error", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to delete connection")
 	}
 
@@ -272,6 +294,14 @@ func (h *IssueTrackerHandler) CreateTicket(c echo.Context) error {
 
 	ticket, err := h.issueTrackerService.CreateTicket(ctx, tenantID, input)
 	if err != nil {
+		// M47 W1: the (vulnerability, project) pair is not in the caller's
+		// scope — 404, and (load-bearing) NO external issue was created,
+		// because the check runs before any outbound call.
+		if errors.Is(err, service.ErrTicketTargetNotInProject) {
+			slog.Warn("issue tracker: create ticket rejected, target not in project",
+				"tenant_id", tenantID, "vuln_id", vulnID, "project_id", projectID)
+			return echo.NewHTTPError(http.StatusNotFound, "vulnerability not found")
+		}
 		// F44x: split the former blanket 400 (see CreateConnection).
 		// CreateTicket mixes validation feedback (connection not found,
 		// duplicate ticket — safe to echo) with %w-wrapped internal errors

@@ -1473,6 +1473,18 @@ func (s *ComplianceService) UpdateChecklistResponse(ctx context.Context, tenantI
 		return fmt.Errorf("checklist repository not configured")
 	}
 
+	// M47 W1: bind the route's :id to the session tenant. The repository
+	// already filters on tenant_id (F73) and migration 041 added the
+	// composite (tenant_id, project_id) FK, so a foreign project_id was
+	// already REJECTED — but by the FK, i.e. as an opaque 500 at write time,
+	// and only for the write paths. Checking it here makes the answer the
+	// same 404 every other out-of-scope target gets, and stops a probe from
+	// telling "another tenant's project" (constraint error) apart from
+	// "unknown project" (silent success writing an orphan-free row).
+	if err := s.requireProjectInTenant(ctx, s.checklistRepo.ProjectInTenant, tenantID, projectID); err != nil {
+		return err
+	}
+
 	// Validate checkID
 	allItems := model.GetAllChecklistItems()
 	valid := false
@@ -1508,6 +1520,14 @@ func (s *ComplianceService) DeleteChecklistResponse(ctx context.Context, tenantI
 	if s.checklistRepo == nil {
 		return fmt.Errorf("checklist repository not configured")
 	}
+	// M47 W1: see UpdateChecklistResponse. DELETE has no FK to lean on at
+	// all — `DELETE ... WHERE tenant_id=$1 AND project_id=$2 AND check_id=$3`
+	// simply affects 0 rows for a foreign project and reports 204, so the
+	// explicit check is the only thing that can distinguish "deleted" from
+	// "aimed at someone else's project and silently did nothing".
+	if err := s.requireProjectInTenant(ctx, s.checklistRepo.ProjectInTenant, tenantID, projectID); err != nil {
+		return err
+	}
 	return s.checklistRepo.Delete(ctx, tenantID, projectID, checkID)
 }
 
@@ -1539,6 +1559,12 @@ func (s *ComplianceService) GetVisualizationSettings(ctx context.Context, tenant
 func (s *ComplianceService) UpdateVisualizationSettings(ctx context.Context, tenantID, projectID uuid.UUID, input *model.VisualizationSettingsInput) (*model.VisualizationSettings, error) {
 	if s.visualizationRepo == nil {
 		return nil, fmt.Errorf("visualization repository not configured")
+	}
+
+	// M47 W1: bind the route's :id to the session tenant — twin of
+	// UpdateChecklistResponse, same rationale.
+	if err := s.requireProjectInTenant(ctx, s.visualizationRepo.ProjectInTenant, tenantID, projectID); err != nil {
+		return nil, err
 	}
 
 	// Get existing settings or create new. tenantID is required --
@@ -1584,5 +1610,37 @@ func (s *ComplianceService) DeleteVisualizationSettings(ctx context.Context, ten
 	if s.visualizationRepo == nil {
 		return fmt.Errorf("visualization repository not configured")
 	}
+	// M47 W1: see DeleteChecklistResponse — a DELETE against a foreign
+	// project silently affects 0 rows and reports 204 without this.
+	if err := s.requireProjectInTenant(ctx, s.visualizationRepo.ProjectInTenant, tenantID, projectID); err != nil {
+		return err
+	}
 	return s.visualizationRepo.Delete(ctx, tenantID, projectID)
+}
+
+// ErrComplianceProjectNotInTenant is the M47 W1 one-sentinel answer for the
+// project-scoped compliance routes (checklist + visualization) when the
+// route's :id does not name a project of the session tenant. The handler
+// maps it to 404 so "another tenant's project" and "no such project" are
+// indistinguishable.
+var ErrComplianceProjectNotInTenant = errors.New("project not found in this tenant")
+
+// requireProjectInTenant runs one of the repository ProjectInTenant
+// predicates and folds "false" into the shared sentinel. The predicate is
+// passed in rather than picked here because the checklist and visualization
+// halves of this service are wired independently (NewComplianceService leaves
+// both repos nil) — each caller supplies the repo it has already nil-checked.
+func (s *ComplianceService) requireProjectInTenant(
+	ctx context.Context,
+	check func(ctx context.Context, tenantID, projectID uuid.UUID) (bool, error),
+	tenantID, projectID uuid.UUID,
+) error {
+	inTenant, err := check(ctx, tenantID, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to verify project %s belongs to tenant: %w", projectID, err)
+	}
+	if !inTenant {
+		return ErrComplianceProjectNotInTenant
+	}
+	return nil
 }

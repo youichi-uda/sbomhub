@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,15 +13,42 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
+// ErrLicensePolicyNotInProject is the M47 W1 one-sentinel answer for the
+// :policy_id-addressed license routes.
+//
+// GET / PUT / DELETE /projects/:id/licenses/:policy_id parsed :policy_id and
+// ignored :id entirely; the repository statements are `WHERE id = $N`. Inside
+// a tenant that meant any project's URL could read, rewrite or delete any
+// other project's license policy — and license policies are what
+// CheckViolations and the compliance evidence pack are computed from, so a
+// cross-project edit silently changes another product's compliance verdict.
+// The tenant boundary itself rested on the license_policies RLS policy alone;
+// the explicit tenant_id predicate added here is the belt.
+//
+// Unknown, other-project and other-tenant ids all map to THIS error, which
+// the handler renders as 404.
+var ErrLicensePolicyNotInProject = errors.New("license policy not found in this project")
+
+// ErrLicensePolicyScopeCheckFailed wraps an infrastructure failure of the
+// M47 W1 ownership queries (Codex round 1, Low). Delete's handler renders
+// every error as 404, so without a way to tell a broken scope query apart
+// from a genuine out-of-scope target, a DB outage looked exactly like
+// "no such policy".
+var ErrLicensePolicyScopeCheckFailed = errors.New("failed to verify license policy scope")
+
 type LicensePolicyService struct {
 	policyRepo    *repository.LicensePolicyRepository
 	componentRepo *repository.ComponentRepository
+	// sbomRepo is used only by CheckViolations, to bind the caller-supplied
+	// `?sbom_id=` to the route's project (M47 W1).
+	sbomRepo *repository.SbomRepository
 }
 
-func NewLicensePolicyService(policyRepo *repository.LicensePolicyRepository, componentRepo *repository.ComponentRepository) *LicensePolicyService {
+func NewLicensePolicyService(policyRepo *repository.LicensePolicyRepository, componentRepo *repository.ComponentRepository, sbomRepo *repository.SbomRepository) *LicensePolicyService {
 	return &LicensePolicyService{
 		policyRepo:    policyRepo,
 		componentRepo: componentRepo,
+		sbomRepo:      sbomRepo,
 	}
 }
 
@@ -61,6 +90,13 @@ func (s *LicensePolicyService) CreatePolicy(ctx context.Context, input CreateLic
 	// 023).
 	tenantID, err := s.policyRepo.LookupProjectTenantID(ctx, input.ProjectID)
 	if err != nil {
+		// M47 W1: `projects` is FORCE RLS, so a project the caller cannot see
+		// (another tenant's, or simply unknown) reads as sql.ErrNoRows here.
+		// That used to surface as a 500; it is an out-of-scope target and
+		// gets the same 404 sentinel as every other one.
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrLicensePolicyNotInProject
+		}
 		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
 	}
 
@@ -89,13 +125,22 @@ type UpdateLicensePolicyInput struct {
 	Reason     string                  `json:"reason,omitempty"`
 }
 
-func (s *LicensePolicyService) UpdatePolicy(ctx context.Context, id uuid.UUID, input UpdateLicensePolicyInput) (*model.LicensePolicy, error) {
+// UpdatePolicy rewrites a license policy, scoped to (tenantID, projectID).
+// M47 W1: tenantID / projectID are new parameters — see
+// ErrLicensePolicyNotInProject.
+func (s *LicensePolicyService) UpdatePolicy(ctx context.Context, tenantID, projectID, id uuid.UUID, input UpdateLicensePolicyInput) (*model.LicensePolicy, error) {
+	if err := s.requirePolicyInProject(ctx, tenantID, projectID, id); err != nil {
+		return nil, err
+	}
+
 	policy, err := s.policyRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get license policy: %w", err)
 	}
 	if policy == nil {
-		return nil, ValidationErrorf("license policy not found")
+		// Raced with a concurrent delete; same sentinel keeps the wire
+		// contract one-sentinel.
+		return nil, ErrLicensePolicyNotInProject
 	}
 
 	// Validate policy type
@@ -114,7 +159,12 @@ func (s *LicensePolicyService) UpdatePolicy(ctx context.Context, id uuid.UUID, i
 	return policy, nil
 }
 
-func (s *LicensePolicyService) GetPolicy(ctx context.Context, id uuid.UUID) (*model.LicensePolicy, error) {
+// GetPolicy reads one license policy, scoped to (tenantID, projectID).
+// M47 W1: see ErrLicensePolicyNotInProject.
+func (s *LicensePolicyService) GetPolicy(ctx context.Context, tenantID, projectID, id uuid.UUID) (*model.LicensePolicy, error) {
+	if err := s.requirePolicyInProject(ctx, tenantID, projectID, id); err != nil {
+		return nil, err
+	}
 	return s.policyRepo.GetByID(ctx, id)
 }
 
@@ -122,12 +172,57 @@ func (s *LicensePolicyService) ListByProject(ctx context.Context, projectID uuid
 	return s.policyRepo.ListByProject(ctx, projectID)
 }
 
-func (s *LicensePolicyService) DeletePolicy(ctx context.Context, id uuid.UUID) error {
-	return s.policyRepo.Delete(ctx, id)
+// DeletePolicy removes a license policy, scoped to (tenantID, projectID).
+// M47 W1: see ErrLicensePolicyNotInProject.
+func (s *LicensePolicyService) DeletePolicy(ctx context.Context, tenantID, projectID, id uuid.UUID) error {
+	// Codex round 2 (Low): one conditional DELETE — see
+	// VEXService.DeleteStatement for the rationale.
+	err := s.policyRepo.DeletePolicyInProject(ctx, tenantID, projectID, id)
+	if errors.Is(err, repository.ErrScopedDeleteNoRows) {
+		return ErrLicensePolicyNotInProject
+	}
+	if err != nil {
+		return fmt.Errorf("%w: policy %s: %v", ErrLicensePolicyScopeCheckFailed, id, err)
+	}
+	return nil
 }
 
-// CheckViolations checks components in an SBOM against license policies
-func (s *LicensePolicyService) CheckViolations(ctx context.Context, projectID uuid.UUID, sbomID uuid.UUID) ([]model.LicenseViolation, error) {
+// requirePolicyInProject is the shared M47 W1 guard for the
+// :policy_id-addressed routes. Explicit (tenant_id, project_id) predicates
+// are the belt; the FORCE RLS policy on license_policies is the braces.
+func (s *LicensePolicyService) requirePolicyInProject(ctx context.Context, tenantID, projectID, id uuid.UUID) error {
+	inScope, err := s.policyRepo.PolicyInProject(ctx, tenantID, projectID, id)
+	if err != nil {
+		return fmt.Errorf("%w: policy %s: %v", ErrLicensePolicyScopeCheckFailed, id, err)
+	}
+	if !inScope {
+		return ErrLicensePolicyNotInProject
+	}
+	return nil
+}
+
+// CheckViolations checks components in an SBOM against license policies.
+//
+// M47 W1 (found by the same-shape re-scan, not in the original finding
+// list): `?sbom_id=` was never bound to the route's project. The component
+// listing runs `WHERE sbom_id = $1`, so aiming project A's URL at project
+// B's SBOM id enumerated B's ENTIRE component inventory — name, version and
+// license — through A's violations report. RLS held the tenant boundary;
+// nothing held the project boundary. Every sibling SBOM-id-taking route
+// (diff, scan-status) already had this check.
+func (s *LicensePolicyService) CheckViolations(ctx context.Context, tenantID, projectID uuid.UUID, sbomID uuid.UUID) ([]model.LicenseViolation, error) {
+	if s.sbomRepo == nil {
+		return nil, fmt.Errorf("%w: sbom repository is not wired", ErrLicensePolicyScopeCheckFailed)
+	}
+	inScope, err := s.sbomRepo.SbomInProject(ctx, tenantID, projectID, sbomID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sbom %s in project %s: %v",
+			ErrLicensePolicyScopeCheckFailed, sbomID, projectID, err)
+	}
+	if !inScope {
+		return nil, ErrLicensePolicyNotInProject
+	}
+
 	// Get all components for the SBOM
 	components, err := s.componentRepo.ListBySbom(ctx, sbomID)
 	if err != nil {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,34 @@ var (
 	// holds a statement for (project, vulnerability, component). The apply
 	// endpoint never overwrites an existing decision — 409, not 200.
 	ErrVEXApplyAlreadyTriaged = errors.New("target project already has a VEX statement for this vulnerability and component")
+
+	// ErrVEXNotInProject is the M47 W1 one-sentinel answer for every VEX
+	// route whose target is not in the caller's (tenant, project):
+	//
+	//   - POST /projects/:id/vex with a `vulnerability_id` that does not
+	//     affect this project. The sibling `component_id` had the F379
+	//     ComponentBelongsToProject write defence since M26; the
+	//     vulnerability id — which is the OTHER half of the compliance
+	//     record and the join key every CRA report / VEX export reads —
+	//     had nothing. `vulnerabilities` is a global RLS-free NVD cache, so
+	//     any UUID in it was accepted and a "not_affected" verdict could be
+	//     minted for a CVE the project has no exposure to at all.
+	//   - PUT / DELETE / GET /projects/:id/vex/:vex_id, where the :id
+	//     segment was parsed and then never used: the repository statements
+	//     are `WHERE id = $1`. Within a tenant, any project's URL could
+	//     therefore rewrite or delete any other project's verdict, and the
+	//     audit row would attribute it to the wrong project.
+	//
+	// Unknown ids, ids belonging to another project of the same tenant, and
+	// ids belonging to another tenant entirely all produce THIS error, which
+	// the handler maps to 404 — indistinguishable by design.
+	ErrVEXNotInProject = errors.New("VEX target not found in this project")
+
+	// ErrVEXScopeCheckFailed wraps an infrastructure failure of the M47 W1
+	// ownership queries (Codex round 1, Low). Delete's handler renders every
+	// error as 404, so without this a broken scope query was reported to the
+	// caller as "no such statement".
+	ErrVEXScopeCheckFailed = errors.New("failed to verify VEX statement scope")
 )
 
 // ApplySuggestionInput is the resolved input to ApplySuggestion. The
@@ -138,6 +167,7 @@ func (s *VEXService) ApplySuggestion(ctx context.Context, in ApplySuggestionInpu
 	//    CreateStatement re-applies status validation + the F379
 	//    ComponentBelongsToProject write defence + its own duplicate check.
 	statement, err := s.CreateStatement(ctx, CreateVEXStatementInput{
+		TenantID:        in.TenantID,
 		ProjectID:       in.ProjectID,
 		VulnerabilityID: in.VulnerabilityID,
 		ComponentID:     &in.TargetComponentID,
@@ -275,6 +305,14 @@ func NewVEXService(vexRepo *repository.VEXRepository, vulnRepo *repository.Vulne
 }
 
 type CreateVEXStatementInput struct {
+	// TenantID is the AUTHENTICATED session's tenant (M47 W1). It is
+	// mandatory and it is NOT the same thing as "the tenant that owns
+	// ProjectID": CreateStatement resolves the latter separately and
+	// requires the two to agree. Deriving the tenant from the resource
+	// alone would mean that if the request ever ran outside a TenantTx
+	// (so `projects` RLS could not fail closed), a foreign project id
+	// would vouch for itself.
+	TenantID        uuid.UUID              `json:"tenant_id"`
 	ProjectID       uuid.UUID              `json:"project_id"`
 	VulnerabilityID uuid.UUID              `json:"vulnerability_id"`
 	ComponentID     *uuid.UUID             `json:"component_id,omitempty"`
@@ -296,21 +334,88 @@ func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStateme
 		return nil, ValidationErrorf("justification is required when status is not_affected")
 	}
 
-	// F379 write defence (issue #131): a component-specific statement must
-	// reference a component that actually belongs to input.ProjectID. Nothing
-	// in the schema enforces this (components have no project_id; migration
-	// 045), so without this guard a statement could be linked to a component
-	// from another project of the same tenant — which the cross-project VEX
-	// suggestion feature would then mis-attribute as "this project decided
-	// it". The normal triage-sync flow always resolves the project's own
-	// components, so this rejects only genuinely mis-linked writes.
-	if input.ComponentID != nil {
-		belongs, err := s.vexRepo.ComponentBelongsToProject(ctx, *input.ComponentID, input.ProjectID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to verify component ownership: %w", err)
+	// M47 W1: the session tenant is required. Every production caller has
+	// one (the handler reads it from the TenantTx-populated context; the
+	// triage sync adapter carries the draft's tenant), so a zero value means
+	// a caller that never established scope — refuse rather than fall back
+	// to trusting the project.
+	if input.TenantID == uuid.Nil {
+		return nil, ErrVEXNotInProject
+	}
+
+	// Resolve the tenant_id of the parent project (M47 W1 — moved ahead of
+	// the component / duplicate checks). It is needed both as the scope for
+	// the vulnerability membership check below and, as before, to satisfy
+	// the FORCE RLS WITH CHECK on vex_statements (migration 023).
+	// `projects` is FORCE RLS, so under the request's TenantTx this lookup
+	// already fails for a project the caller cannot see — sql.ErrNoRows
+	// there is folded into the same ErrVEXNotInProject sentinel as every
+	// other out-of-scope answer.
+	tenantID, err := s.vexRepo.LookupProjectTenantID(ctx, input.ProjectID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrVEXNotInProject
 		}
-		if !belongs {
-			return nil, ValidationErrorf("component does not belong to project")
+		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
+	}
+	// belt: the project's owner must BE the session tenant. RLS on
+	// `projects` is the braces; this predicate is what still holds if the
+	// route is ever registered outside a TenantTx.
+	if tenantID != input.TenantID {
+		return nil, ErrVEXNotInProject
+	}
+
+	if s.vulnRepo == nil {
+		return nil, fmt.Errorf("vex service: vulnerability repository is required for scope checks")
+	}
+
+	// M47 W1: the vulnerability must actually affect this project. See
+	// ErrVEXNotInProject. This is the vulnerability-side twin of the F379
+	// component defence below, and it lives here (not in the handler) so the
+	// triage sync adapter and the cross-project apply flow inherit it too —
+	// both already establish the same linkage upstream, so this rejects only
+	// writes that were never legitimate.
+	affects, err := s.vulnRepo.VulnerabilityInProject(ctx, tenantID, input.ProjectID, input.VulnerabilityID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify vulnerability affects project: %w", err)
+	}
+	if !affects {
+		return nil, ErrVEXNotInProject
+	}
+
+	// F379 write defence (issue #131) + M47 W1 (Codex round 2, Medium): a
+	// component-specific statement must reference a component that belongs
+	// to input.ProjectID AND that this vulnerability actually affects.
+	//
+	// The two facts are NOT interchangeable, and checking them separately is
+	// weaker than checking them together: VulnerabilityInProject above proves
+	// the vulnerability affects SOME component of the project, and
+	// ComponentBelongsToProject proves the component is IN the project — but
+	// their conjunction still admits a pair that has no linkage between them,
+	// i.e. a "not_affected" verdict recorded against a component the CVE does
+	// not touch. Nothing in the schema forbids it (components carry no
+	// project_id, migration 045; vex_statements.component_id is a bare FK).
+	//
+	// ComponentLinkedToVulnInProject is exactly the join that closes it, and
+	// it is the same predicate the cross-project apply flow already uses as
+	// its F383 injection guard — so the two write paths into vex_statements
+	// now agree on what a legitimate (project, vulnerability, component)
+	// triple is. The normal triage-sync flow resolves its component FROM
+	// component_vulnerabilities, so this rejects only writes that were never
+	// legitimate.
+	//
+	// Codex round 1 (Low) note: the refusal is ErrVEXNotInProject, not an
+	// echoed ValidationError. It used to be a 400 while every sibling check
+	// answered 404, which was the one distinguishable channel left on this
+	// route.
+	if input.ComponentID != nil {
+		linked, err := s.vexRepo.ComponentLinkedToVulnInProject(
+			ctx, *input.ComponentID, input.ProjectID, input.VulnerabilityID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to verify component/vulnerability linkage: %w", err)
+		}
+		if !linked {
+			return nil, ErrVEXNotInProject
 		}
 	}
 
@@ -321,13 +426,6 @@ func (s *VEXService) CreateStatement(ctx context.Context, input CreateVEXStateme
 	}
 	if existing != nil {
 		return nil, ValidationErrorf("VEX statement already exists for this vulnerability")
-	}
-
-	// Resolve the tenant_id of the parent project so the INSERT satisfies
-	// the FORCE RLS WITH CHECK clause on vex_statements (see migration 023).
-	tenantID, err := s.vexRepo.LookupProjectTenantID(ctx, input.ProjectID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
 	}
 
 	now := time.Now()
@@ -360,13 +458,26 @@ type UpdateVEXStatementInput struct {
 	ImpactStatement string                 `json:"impact_statement,omitempty"`
 }
 
-func (s *VEXService) UpdateStatement(ctx context.Context, id uuid.UUID, input UpdateVEXStatementInput) (*model.VEXStatement, error) {
+// UpdateStatement rewrites a VEX verdict, scoped to (tenantID, projectID).
+//
+// M47 W1: tenantID / projectID are new parameters. PUT
+// /projects/:id/vex/:vex_id parsed :id and threw it away, and the repository
+// UPDATE is `WHERE id = $6` — so the project segment was decoration and the
+// tenant boundary rested on RLS alone. The scope check runs BEFORE the read,
+// so an out-of-scope id never even loads the row it is not allowed to see.
+func (s *VEXService) UpdateStatement(ctx context.Context, tenantID, projectID, id uuid.UUID, input UpdateVEXStatementInput) (*model.VEXStatement, error) {
+	if err := s.requireStatementInProject(ctx, tenantID, projectID, id); err != nil {
+		return nil, err
+	}
+
 	statement, err := s.vexRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VEX statement: %w", err)
 	}
 	if statement == nil {
-		return nil, ValidationErrorf("VEX statement not found")
+		// Raced with a concurrent delete inside the same tx window; answer
+		// with the same sentinel so the wire contract stays one-sentinel.
+		return nil, ErrVEXNotInProject
 	}
 
 	// Validate status
@@ -392,8 +503,32 @@ func (s *VEXService) UpdateStatement(ctx context.Context, id uuid.UUID, input Up
 	return statement, nil
 }
 
-func (s *VEXService) GetStatement(ctx context.Context, id uuid.UUID) (*model.VEXStatement, error) {
+// GetStatement reads one VEX verdict, scoped to (tenantID, projectID).
+//
+// M47 W1: same treatment as UpdateStatement — GET /projects/:id/vex/:vex_id
+// ran `WHERE id = $1`, so any project's URL read any other project's verdict
+// within the tenant. Returns ErrVEXNotInProject (→ 404) rather than
+// (nil, nil) for out-of-scope ids so "unknown" and "not yours" are the same
+// answer.
+func (s *VEXService) GetStatement(ctx context.Context, tenantID, projectID, id uuid.UUID) (*model.VEXStatement, error) {
+	if err := s.requireStatementInProject(ctx, tenantID, projectID, id); err != nil {
+		return nil, err
+	}
 	return s.vexRepo.GetByID(ctx, id)
+}
+
+// requireStatementInProject is the shared M47 W1 guard for the
+// :vex_id-addressed routes. Explicit (tenant_id, project_id) predicates are
+// the belt; the FORCE RLS policy on vex_statements is the braces.
+func (s *VEXService) requireStatementInProject(ctx context.Context, tenantID, projectID, id uuid.UUID) error {
+	inScope, err := s.vexRepo.StatementInProject(ctx, tenantID, projectID, id)
+	if err != nil {
+		return fmt.Errorf("%w: statement %s: %v", ErrVEXScopeCheckFailed, id, err)
+	}
+	if !inScope {
+		return ErrVEXNotInProject
+	}
+	return nil
 }
 
 func (s *VEXService) ListByProject(ctx context.Context, projectID uuid.UUID) ([]model.VEXStatementWithDetails, error) {
@@ -482,8 +617,23 @@ func assembleSuggestions(candidates []model.VEXSuggestionCandidate, targetProjec
 	return out
 }
 
-func (s *VEXService) DeleteStatement(ctx context.Context, id uuid.UUID) error {
-	return s.vexRepo.Delete(ctx, id)
+// DeleteStatement removes a VEX verdict, scoped to (tenantID, projectID).
+// M47 W1: see UpdateStatement — the repository DELETE is `WHERE id = $1`.
+func (s *VEXService) DeleteStatement(ctx context.Context, tenantID, projectID, id uuid.UUID) error {
+	// Codex round 2 (Low): ONE conditional DELETE, not a scope check
+	// followed by an unscoped delete. Zero rows IS the out-of-scope answer
+	// (unknown / other project / other tenant, indistinguishable), and any
+	// other error is unambiguously infrastructure — which is what lets the
+	// handler stop rendering driver failures as 404. It also removes the
+	// check-then-act window.
+	err := s.vexRepo.DeleteStatementInProject(ctx, tenantID, projectID, id)
+	if errors.Is(err, repository.ErrScopedDeleteNoRows) {
+		return ErrVEXNotInProject
+	}
+	if err != nil {
+		return fmt.Errorf("%w: statement %s: %v", ErrVEXScopeCheckFailed, id, err)
+	}
+	return nil
 }
 
 // ExportCycloneDXVEX exports VEX statements in CycloneDX VEX format,

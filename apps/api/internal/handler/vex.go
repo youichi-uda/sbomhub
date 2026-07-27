@@ -39,7 +39,7 @@ type vexApplyService interface {
 // *service.VEXService held in vexService.
 type vexWriteService interface {
 	CreateStatement(ctx context.Context, input service.CreateVEXStatementInput) (*model.VEXStatement, error)
-	UpdateStatement(ctx context.Context, id uuid.UUID, input service.UpdateVEXStatementInput) (*model.VEXStatement, error)
+	UpdateStatement(ctx context.Context, tenantID, projectID, id uuid.UUID, input service.UpdateVEXStatementInput) (*model.VEXStatement, error)
 }
 
 type VEXHandler struct {
@@ -73,6 +73,14 @@ type CreateVEXRequest struct {
 
 // Create creates a new VEX statement
 func (h *VEXHandler) Create(c echo.Context) error {
+	// M47 W1: the session tenant is threaded into the service so the
+	// project's ownership is checked against the CALLER, not derived from
+	// the project itself.
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok || tenantID == uuid.Nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
@@ -113,6 +121,7 @@ func (h *VEXHandler) Create(c echo.Context) error {
 	}
 
 	input := service.CreateVEXStatementInput{
+		TenantID:        tenantID,
 		ProjectID:       projectID,
 		VulnerabilityID: vulnID,
 		ComponentID:     compID,
@@ -125,6 +134,14 @@ func (h *VEXHandler) Create(c echo.Context) error {
 
 	statement, err := h.writer.CreateStatement(c.Request().Context(), input)
 	if err != nil {
+		// M47 W1: a vulnerability that does not affect this project (or a
+		// project the caller cannot see) is 404, not 400 — one sentinel, so
+		// the response cannot confirm that a vulnerability UUID exists.
+		if errors.Is(err, service.ErrVEXNotInProject) {
+			slog.Warn("vex: create rejected, target not in project",
+				"project_id", projectID, "vulnerability_id", vulnID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "VEX target not found"})
+		}
 		// F443: split the blanket 400. CreateStatement mixes self-authored
 		// validation feedback (bad status, missing justification, duplicate,
 		// non-owned component) with %w-wrapped DB errors. Only the former is
@@ -157,8 +174,24 @@ type UpdateVEXRequest struct {
 	ImpactStatement string `json:"impact_statement,omitempty"`
 }
 
-// Update updates a VEX statement
+// Update updates a VEX statement.
+//
+// M47 W1: the route is PUT /projects/:id/vex/:vex_id and :id is now actually
+// used — it, together with the session tenant, scopes the statement lookup.
+// Before this, the project segment was parsed nowhere and the repository ran
+// `UPDATE vex_statements ... WHERE id = $6`, so one project's URL could
+// rewrite another project's compliance verdict.
 func (h *VEXHandler) Update(c echo.Context) error {
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok || tenantID == uuid.Nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+	}
+
 	vexID, err := uuid.Parse(c.Param("vex_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid VEX statement ID"})
@@ -176,11 +209,18 @@ func (h *VEXHandler) Update(c echo.Context) error {
 		ImpactStatement: req.ImpactStatement,
 	}
 
-	statement, err := h.writer.UpdateStatement(c.Request().Context(), vexID, input)
+	statement, err := h.writer.UpdateStatement(c.Request().Context(), tenantID, projectID, vexID, input)
 	if err != nil {
+		// M47 W1: out-of-scope (unknown / other project / other tenant) is
+		// one 404 — see service.ErrVEXNotInProject.
+		if errors.Is(err, service.ErrVEXNotInProject) {
+			slog.Warn("vex: update rejected, statement not in project",
+				"tenant_id", tenantID, "project_id", projectID, "vex_id", vexID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "VEX statement not found"})
+		}
 		// F443: split the blanket 400 (see Create). UpdateStatement mixes
-		// validation feedback (not found, bad status, missing justification)
-		// with %w-wrapped DB errors; only validation is echoed at 400, a DB
+		// validation feedback (bad status, missing justification) with
+		// %w-wrapped DB errors; only validation is echoed at 400, a DB
 		// fault is a generic 500 with the raw error in the server log.
 		if errors.Is(err, service.ErrValidation) {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -428,15 +468,31 @@ func (h *VEXHandler) Apply(c echo.Context) error {
 	})
 }
 
-// Get returns a specific VEX statement
+// Get returns a specific VEX statement, scoped to the route's project.
+// M47 W1: see Update — the read had the same "the :id segment is decoration"
+// shape, which leaked another project's verdict within the tenant.
 func (h *VEXHandler) Get(c echo.Context) error {
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok || tenantID == uuid.Nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+	}
+
 	vexID, err := uuid.Parse(c.Param("vex_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid VEX statement ID"})
 	}
 
-	statement, err := h.vexService.GetStatement(c.Request().Context(), vexID)
+	statement, err := h.vexService.GetStatement(c.Request().Context(), tenantID, projectID, vexID)
 	if err != nil {
+		if errors.Is(err, service.ErrVEXNotInProject) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "VEX statement not found"})
+		}
+		slog.Warn("vex: get statement failed", "vex_id", vexID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to get VEX statement"})
 	}
 	if statement == nil {
@@ -446,18 +502,41 @@ func (h *VEXHandler) Get(c echo.Context) error {
 	return c.JSON(http.StatusOK, statement)
 }
 
-// Delete removes a VEX statement
+// Delete removes a VEX statement, scoped to the route's project.
+// M47 W1: see Update — the repository DELETE was `WHERE id = $1`.
 func (h *VEXHandler) Delete(c echo.Context) error {
+	tenantID, ok := c.Get(middleware.ContextKeyTenantID).(uuid.UUID)
+	if !ok || tenantID == uuid.Nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
+	}
+
+	projectID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+	}
+
 	vexID, err := uuid.Parse(c.Param("vex_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid VEX statement ID"})
 	}
 
-	if err := h.vexService.DeleteStatement(c.Request().Context(), vexID); err != nil {
-		// DeleteStatement returns the raw repository error (static "not found"
-		// for rows==0, or a raw driver error otherwise); never echo it to the
-		// client (F442). Generic 404 body + full error to the server log.
-		slog.Warn("vex: delete statement failed", "vex_id", vexID, "error", err)
+	if err := h.vexService.DeleteStatement(c.Request().Context(), tenantID, projectID, vexID); err != nil {
+		// M47 W1 (Codex round 1, Low): a failure of the scope query itself
+		// is a 500. Everything else stays a 404 — the scope sentinel and a
+		// rows==0 DELETE (lost race inside the same tx) are both honestly
+		// "not there".
+		// M47 W1 (Codex round 2, Low): the delete is now ONE conditional
+		// statement, so the two outcomes are cleanly separated — zero rows
+		// (unknown / other project / other tenant, all one answer) is 404,
+		// and anything else is an infrastructure fault that must not keep
+		// masquerading as "not found". Neither body echoes the error (F442).
+		if errors.Is(err, service.ErrVEXScopeCheckFailed) {
+			slog.Error("vex: delete failed",
+				"tenant_id", tenantID, "project_id", projectID, "vex_id", vexID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete VEX statement"})
+		}
+		slog.Warn("vex: delete found no statement in scope",
+			"tenant_id", tenantID, "project_id", projectID, "vex_id", vexID, "error", err)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "VEX statement not found"})
 	}
 

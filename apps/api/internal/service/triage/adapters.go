@@ -155,6 +155,7 @@ type VEXServiceAdapter struct {
 // duplicate sentinel; until then the error propagates unclassified.
 func (a *VEXServiceAdapter) CreateStatement(ctx context.Context, in VEXStatementSyncInput) error {
 	_, err := a.Service.CreateStatement(ctx, service.CreateVEXStatementInput{
+		TenantID:        in.TenantID,
 		ProjectID:       in.ProjectID,
 		VulnerabilityID: in.VulnerabilityID,
 		ComponentID:     in.ComponentID,

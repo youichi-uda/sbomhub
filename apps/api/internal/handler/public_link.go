@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -70,12 +71,38 @@ func (h *PublicLinkHandler) Create(c echo.Context) error {
 		Password:         req.Password,
 	})
 	if err != nil {
-		// F442: the service error can wrap a raw repo/bcrypt/token-gen
-		// failure (info disclosure for a security product). Log the detail
-		// server-side; return a generic message. Status unchanged (400).
-		slog.Warn("public_link: create failed",
+		// M47 W1: an sbom_id outside this (tenant, project) is 404, not
+		// 400 — unknown / foreign / other-project collapse into one
+		// answer so the form cannot be used to probe for SBOM UUIDs.
+		if errors.Is(err, service.ErrPublicLinkSbomNotInProject) {
+			slog.Warn("public_link: create rejected, sbom is not in the project",
+				"tenant_id", middleware.GetTenantID(c), "project_id", projectID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "sbom not found"})
+		}
+		// M47 W1 (Codex round 1, Medium): a %w-wrapped repository failure
+		// from the new scope query is an INFRASTRUCTURE fault and must not
+		// keep masquerading as a client 400 — that hid real outages behind
+		// "your request was bad". Only the service's own caller-facing
+		// validation ("name is required") stays a 400.
+		if errors.Is(err, service.ErrPublicLinkScopeCheckFailed) {
+			slog.Error("public_link: create failed on the scope check",
+				"tenant_id", middleware.GetTenantID(c), "project_id", projectID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create public link"})
+		}
+		// F442 + M47 W1: the remaining errors split two ways. Only the
+		// service's own caller-fixable validation ("name is required")
+		// deserves a 400; token generation, bcrypt and the repository
+		// INSERT are all server faults and must not be reported to the
+		// caller as a bad request. Either way the detail stays in the log
+		// and the body is generic (info disclosure for a security product).
+		if errors.Is(err, service.ErrValidation) {
+			slog.Warn("public_link: create rejected by validation",
+				"tenant_id", middleware.GetTenantID(c), "project_id", projectID, "error", err)
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to create public link"})
+		}
+		slog.Error("public_link: create failed",
 			"tenant_id", middleware.GetTenantID(c), "project_id", projectID, "error", err)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to create public link"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create public link"})
 	}
 
 	// F208 / M14-1: publish the newly-minted public-link UUID so the
@@ -149,12 +176,31 @@ func (h *PublicLinkHandler) Update(c echo.Context) error {
 		Password:         req.Password,
 	})
 	if err != nil {
-		// F442: the service error can wrap a raw repo/bcrypt failure or the
-		// "public link not found" sentinel (info disclosure for a security
-		// product). Log the detail; return a generic message. Status 400.
-		slog.Warn("public_link: update failed",
+		// M47 W1: same 404 mapping as Create — an update must not be able
+		// to repoint a live share link at an SBOM outside its project. A
+		// link id that does not resolve inside the caller's tenant answers
+		// with the SAME 404 (Codex round 1, Medium): it used to be a 400
+		// that a prober could tell apart from every other rejection.
+		if errors.Is(err, service.ErrPublicLinkSbomNotInProject) ||
+			errors.Is(err, service.ErrPublicLinkNotFound) {
+			slog.Warn("public_link: update rejected, target not in scope",
+				"tenant_id", middleware.GetTenantID(c), "link_id", linkID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "public link not found"})
+		}
+		// M47 W1 (Codex round 1, Medium): infrastructure faults from the
+		// scope query are 500, not 400 — see Create.
+		if errors.Is(err, service.ErrPublicLinkScopeCheckFailed) {
+			slog.Error("public_link: update failed on the scope check",
+				"tenant_id", middleware.GetTenantID(c), "link_id", linkID, "error", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update public link"})
+		}
+		// F442 + M47 W1: nothing left in this bucket is caller-fixable —
+		// the link lookup, bcrypt and the repository UPDATE are all server
+		// faults, so they are 500 with a generic body and the detail in the
+		// log. (Update takes no `name is required` path; Create does.)
+		slog.Error("public_link: update failed",
 			"tenant_id", middleware.GetTenantID(c), "link_id", linkID, "error", err)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to update public link"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update public link"})
 	}
 
 	return c.JSON(http.StatusOK, link)

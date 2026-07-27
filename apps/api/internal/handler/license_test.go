@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
@@ -40,14 +41,14 @@ func (s *stubLicensePolicyService) CreatePolicy(_ context.Context, _ service.Cre
 	return s.policy, nil
 }
 
-func (s *stubLicensePolicyService) UpdatePolicy(_ context.Context, _ uuid.UUID, _ service.UpdateLicensePolicyInput) (*model.LicensePolicy, error) {
+func (s *stubLicensePolicyService) UpdatePolicy(_ context.Context, _, _, _ uuid.UUID, _ service.UpdateLicensePolicyInput) (*model.LicensePolicy, error) {
 	if s.updateErr != nil {
 		return nil, s.updateErr
 	}
 	return s.policy, nil
 }
 
-func (s *stubLicensePolicyService) GetPolicy(_ context.Context, _ uuid.UUID) (*model.LicensePolicy, error) {
+func (s *stubLicensePolicyService) GetPolicy(_ context.Context, _, _, _ uuid.UUID) (*model.LicensePolicy, error) {
 	return s.policy, nil
 }
 
@@ -55,9 +56,11 @@ func (s *stubLicensePolicyService) ListByProject(_ context.Context, _ uuid.UUID)
 	return nil, nil
 }
 
-func (s *stubLicensePolicyService) DeletePolicy(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubLicensePolicyService) DeletePolicy(_ context.Context, _, _, _ uuid.UUID) error {
+	return nil
+}
 
-func (s *stubLicensePolicyService) CheckViolations(_ context.Context, _, _ uuid.UUID) ([]model.LicenseViolation, error) {
+func (s *stubLicensePolicyService) CheckViolations(_ context.Context, _, _, _ uuid.UUID) ([]model.LicenseViolation, error) {
 	return nil, nil
 }
 
@@ -85,14 +88,18 @@ func driveUpdateLicensePolicy(t *testing.T, h *LicensePolicyHandler, policyID uu
 	t.Helper()
 	raw, _ := json.Marshal(map[string]string{"policy_type": "denied"})
 	e := echo.New()
+	projectID := uuid.New()
 	req := httptest.NewRequest(http.MethodPut,
-		"/api/v1/projects/"+uuid.New().String()+"/licenses/"+policyID.String(),
+		"/api/v1/projects/"+projectID.String()+"/licenses/"+policyID.String(),
 		strings.NewReader(string(raw)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
-	c.SetParamNames("policy_id")
-	c.SetParamValues(policyID.String())
+	// M47 W1: Update is now scoped by (tenant, project) — both must be
+	// present or the handler fails closed before the stub is consulted.
+	c.SetParamNames("id", "policy_id")
+	c.SetParamValues(projectID.String(), policyID.String())
+	c.Set(middleware.ContextKeyTenantID, uuid.New())
 	if err := h.Update(c); err != nil {
 		t.Fatalf("Update returned unexpected error: %v", err)
 	}

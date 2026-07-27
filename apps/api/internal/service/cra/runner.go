@@ -54,6 +54,7 @@ package cra
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -149,6 +150,20 @@ var (
 	// be drafted without an approved triage decision per
 	// PRODUCT_REBOOT_PLAN §7.2, so only the status code is in question.
 	ErrNoApprovedVEXDraft = errors.New("cra: no approved vex_draft available for this (project, cve)")
+
+	// ErrVulnerabilityNotInProject is the M47 W1 scope sentinel: the
+	// supplied vulnerability_id is not linked to any component of
+	// (TenantID, ProjectID) — or does not exist at all. The two are
+	// deliberately indistinguishable (one sentinel → one 404 body), so the
+	// endpoint cannot be used to probe the global `vulnerabilities` cache.
+	//
+	// Before M47 the runner only re-resolved the CVE (F12) via the UNSCOPED
+	// GetCVEIDByID: the (tenant, project, vulnerability) membership check
+	// that triage.Runner gets from resolveComponentIDs had no counterpart
+	// here, so ANY vulnerabilities.id plus its own (public) cve_id was
+	// accepted and produced a real cra_reports row, an llm_calls row and an
+	// audit entry for a CVE the project has no exposure to.
+	ErrVulnerabilityNotInProject = errors.New("cra: vulnerability is not in the target project")
 )
 
 // ----------------------------------------------------------------------------
@@ -197,11 +212,31 @@ type LLMCallWriter interface {
 	Insert(ctx context.Context, c *repository.LLMCall) error
 }
 
-// VulnerabilityCVELookup mirrors triage.VulnerabilityCVELookup so the
-// production wiring can pass *repository.VulnerabilityRepository to
-// both runners. F12 server-side cve_id re-resolve.
+// VulnerabilityCVELookup is the F12 server-side cve_id re-resolve surface.
+// Satisfied by *repository.VulnerabilityRepository.
+//
+// M47 W1: the method is GetCVEIDByIDInProject, not the unscoped
+// GetCVEIDByID that triage.VulnerabilityCVELookup still declares. The two
+// runners are NOT symmetric on this point:
+//
+//   - triage.Runner calls resolveComponentIDs BEFORE its CVE re-resolve, and
+//     that resolver already proves (tenant, project, vulnerability)
+//     membership through the RLS-protected components/sboms join. Its
+//     unscoped lookup is safe because scope was established one line earlier.
+//   - cra.Runner has no such predecessor. Its Stage 1 went straight to
+//     GetCVEIDByID, so `vulnerability_id` was only ever checked for
+//     existence in the GLOBAL, RLS-free `vulnerabilities` cache. A caller
+//     could therefore drive a CRA report — a regulatory submission draft,
+//     with an LLM call and an audit trail behind it — for a CVE that does
+//     not affect the project at all, as long as it supplied the matching
+//     cve_id (which is public data). ErrCVEIDMismatch caught mismatched
+//     PAIRS; it never caught an out-of-scope pair that agreed with itself.
+//
+// The scoped lookup collapses "unknown vulnerability" and "vulnerability
+// outside this (tenant, project)" into the same sql.ErrNoRows, which the
+// runner folds into ErrVulnerabilityNotInProject → 404 at the handler.
 type VulnerabilityCVELookup interface {
-	GetCVEIDByID(ctx context.Context, vulnerabilityID uuid.UUID) (string, error)
+	GetCVEIDByIDInProject(ctx context.Context, tenantID, projectID, vulnerabilityID uuid.UUID) (string, error)
 }
 
 // AuditLogWriter mirrors triage.AuditLogWriter; satisfied by
@@ -506,7 +541,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		}
 
 		// F12: server-side cve_id re-resolve.
-		resolvedCVE, err := r.resolveAuthoritativeCVEID(ctx, in.VulnerabilityID, in.CVEID)
+		resolvedCVE, err := r.resolveAuthoritativeCVEID(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID, in.CVEID)
 		if err != nil {
 			return err
 		}
@@ -679,7 +714,7 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		// If the vulnerability disappeared (resolver returns sql.ErrNoRows)
 		// or its cve_id changed during Stage 2, surface the error so we
 		// never persist a CRA report pointing at a stale target.
-		resolvedCVE, err := r.resolveAuthoritativeCVEID(ctx, in.VulnerabilityID, in.CVEID)
+		resolvedCVE, err := r.resolveAuthoritativeCVEID(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID, in.CVEID)
 		if err != nil {
 			return err
 		}
@@ -814,7 +849,7 @@ func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Pr
 
 	if err := r.txManager.RunWrite(ctx, in.TenantID, func(ctx context.Context) error {
 		// TOCTOU re-validate (cve_id) — same defence as the LLM-enabled path.
-		resolvedCVE, err := r.resolveAuthoritativeCVEID(ctx, in.VulnerabilityID, in.CVEID)
+		resolvedCVE, err := r.resolveAuthoritativeCVEID(ctx, in.TenantID, in.ProjectID, in.VulnerabilityID, in.CVEID)
 		if err != nil {
 			return err
 		}
@@ -873,16 +908,36 @@ func (r *Runner) resolveProvider(ctx context.Context, tenantID uuid.UUID) (llm.P
 }
 
 // resolveAuthoritativeCVEID re-resolves the canonical cve_id for the
-// supplied vulnerability_id and rejects requests where the caller's
-// CVEID disagrees (F12). Fail-closed when the lookup is not wired so a
-// production misconfig surfaces loudly as a 400 instead of letting an
-// unscoped draft persist.
-func (r *Runner) resolveAuthoritativeCVEID(ctx context.Context, vulnID uuid.UUID, suppliedCVEID string) (string, error) {
+// supplied vulnerability_id WITHIN (tenantID, projectID) and rejects
+// requests where the caller's CVEID disagrees (F12) or where the
+// vulnerability is not in scope at all (M47 W1).
+//
+// Fail-closed when the lookup is not wired: the misconfig surfaces as a 500
+// (mapCRARunnerError's "everything else" branch) rather than letting an
+// unscoped draft persist. Codex round 3 (Low): this said "400" — inherited
+// verbatim from triage.Runner's identical guard, where it IS a 400 because
+// handler/vex_drafts.go maps runner errors with a string heuristic that
+// matches the "is required" marker. handler/cra_reports.go has no such
+// branch, so the two runners really do answer differently here. Either
+// status surfaces the misconfig loudly; what mattered was that the comment
+// described a mapping this package does not have.
+//
+// Called from all three stages (read, write, AI-disabled write) so the
+// membership is re-proved inside the write tx too — the same TOCTOU posture
+// the CVE re-resolve already had.
+func (r *Runner) resolveAuthoritativeCVEID(ctx context.Context, tenantID, projectID, vulnID uuid.UUID, suppliedCVEID string) (string, error) {
 	if r.vulnCVE == nil {
 		return "", errors.New("cra.Run: vulnerability cve lookup is required (no VulnerabilityCVELookup wired)")
 	}
-	resolved, err := r.vulnCVE.GetCVEIDByID(ctx, vulnID)
+	resolved, err := r.vulnCVE.GetCVEIDByIDInProject(ctx, tenantID, projectID, vulnID)
 	if err != nil {
+		// M47 W1: sql.ErrNoRows now means "unknown OR not in this
+		// (tenant, project)" — one sentinel, deliberately indistinguishable,
+		// mapped to 404 by the handler. Everything else stays a server-side
+		// fault on the 5xx path.
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("cra.Run: %w", ErrVulnerabilityNotInProject)
+		}
 		// Caller maps this to 5xx via mapRunnerError's default branch.
 		// We deliberately do NOT fold this into ErrCVEIDMismatch: the
 		// failure mode is server-side (data integrity / TOCTOU), not

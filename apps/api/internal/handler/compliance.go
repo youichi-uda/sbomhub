@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -150,6 +152,13 @@ func (h *ComplianceHandler) UpdateChecklistResponse(c echo.Context) error {
 
 	err = h.complianceService.UpdateChecklistResponse(c.Request().Context(), tenantID, projectID, checkID, req.Response, req.Note, userID)
 	if err != nil {
+		// M47 W1: a project that is not this tenant's answers 404 — the
+		// same answer as an unknown project id.
+		if errors.Is(err, service.ErrComplianceProjectNotInTenant) {
+			slog.Warn("compliance: update checklist rejected, project not in tenant",
+				"tenant_id", tenantID, "project_id", projectID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		}
 		slog.Warn("compliance: update checklist response failed", "tenant_id", tenantID, "project_id", projectID, "check_id", checkID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update checklist response"})
 	}
@@ -174,6 +183,20 @@ func (h *ComplianceHandler) DeleteChecklistResponse(c echo.Context) error {
 	tenantID := getTenantID(c)
 	err = h.complianceService.DeleteChecklistResponse(c.Request().Context(), tenantID, projectID, checkID)
 	if err != nil {
+		// M47 W1: see UpdateChecklistResponse.
+		if errors.Is(err, service.ErrComplianceProjectNotInTenant) {
+			slog.Warn("compliance: delete checklist rejected, project not in tenant",
+				"tenant_id", tenantID, "project_id", projectID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		}
+		// M47 W2: the repository now reports a 0-row DELETE (wrapped
+		// sql.ErrNoRows) instead of discarding it. Project ownership was
+		// already adjudicated above, so this can only mean "no such
+		// response" — 404, not the 204 the pre-fix code returned for a
+		// delete that removed nothing.
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "checklist response not found"})
+		}
 		slog.Warn("compliance: delete checklist response failed", "tenant_id", tenantID, "project_id", projectID, "check_id", checkID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete checklist response"})
 	}
@@ -220,6 +243,12 @@ func (h *ComplianceHandler) UpdateVisualizationSettings(c echo.Context) error {
 	tenantID := getTenantID(c)
 	settings, err := h.complianceService.UpdateVisualizationSettings(c.Request().Context(), tenantID, projectID, &input)
 	if err != nil {
+		// M47 W1: see UpdateChecklistResponse.
+		if errors.Is(err, service.ErrComplianceProjectNotInTenant) {
+			slog.Warn("compliance: update visualization rejected, project not in tenant",
+				"tenant_id", tenantID, "project_id", projectID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		}
 		slog.Warn("compliance: update visualization settings failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update visualization settings"})
 	}
@@ -239,6 +268,18 @@ func (h *ComplianceHandler) DeleteVisualizationSettings(c echo.Context) error {
 	tenantID := getTenantID(c)
 	err = h.complianceService.DeleteVisualizationSettings(c.Request().Context(), tenantID, projectID)
 	if err != nil {
+		// M47 W1: see UpdateChecklistResponse.
+		if errors.Is(err, service.ErrComplianceProjectNotInTenant) {
+			slog.Warn("compliance: delete visualization rejected, project not in tenant",
+				"tenant_id", tenantID, "project_id", projectID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		}
+		// M47 W2: see DeleteChecklistResponse — a 0-row DELETE means this
+		// project has no settings row, which is a 404 rather than a 204
+		// reporting a deletion that did not happen.
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "visualization settings not found"})
+		}
 		slog.Warn("compliance: delete visualization settings failed", "tenant_id", tenantID, "project_id", projectID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete visualization settings"})
 	}

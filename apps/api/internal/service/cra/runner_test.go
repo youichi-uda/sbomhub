@@ -200,7 +200,11 @@ type vulnCVEResult struct {
 	err   error
 }
 
-func (f *fakeVulnCVE) GetCVEIDByID(_ context.Context, vulnID uuid.UUID) (string, error) {
+// GetCVEIDByIDInProject satisfies the M47 W1 VulnerabilityCVELookup
+// surface. The fake ignores (tenantID, projectID) — the SCOPE half is
+// exercised in the live-PG integration test (cra_run_vuln_scope), not here;
+// what these unit tests pin is the CVE re-resolve / mismatch behaviour.
+func (f *fakeVulnCVE) GetCVEIDByIDInProject(_ context.Context, _, _, vulnID uuid.UUID) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.called++
@@ -673,11 +677,20 @@ func TestRunner_Run_Stage3_TOCTOU_RevalidatesCVE(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when vulnerability disappears between Stage 1 and Stage 3")
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		// resolveAuthoritativeCVEID wraps sql.ErrNoRows with fmt.Errorf
-		// %w, so errors.Is should still find it. If the wrap chain
-		// changes, the test will surface that explicitly.
-		t.Errorf("error chain should include sql.ErrNoRows; got %v", err)
+	// M47 W1 contract change: resolveAuthoritativeCVEID no longer surfaces
+	// sql.ErrNoRows. The scoped lookup (GetCVEIDByIDInProject) returns
+	// ErrNoRows for BOTH "the row is gone" and "it is not in this
+	// (tenant, project)", so re-exporting it would re-open exactly the
+	// probe channel the one-sentinel rule closes. It is folded into
+	// ErrVulnerabilityNotInProject → 404, which is also the honest answer
+	// for this TOCTOU: by commit time the target genuinely is not there,
+	// and nothing is broken server-side to justify a 5xx.
+	if !errors.Is(err, ErrVulnerabilityNotInProject) {
+		t.Errorf("error chain should include ErrVulnerabilityNotInProject; got %v", err)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("raw sql.ErrNoRows must NOT escape the scoped lookup (it would let a caller "+
+			"distinguish 'deleted' from 'never yours'); got %v", err)
 	}
 	if got := len(h.craReports.inserted); got != 0 {
 		t.Errorf("expected no cra_reports insert on TOCTOU rejection, got %d", got)

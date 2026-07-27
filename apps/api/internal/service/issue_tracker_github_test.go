@@ -287,7 +287,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_ClosedIssue(t *testing.T) {
 	// Backlog "完了": local_status = closed, external_status = raw "closed".
 	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
 		ticketID, string(model.TicketStatusClosed), "closed", "", "",
-		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(), tenantID,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
@@ -352,7 +352,10 @@ func TestIssueTrackerService_SyncTicket_GitHub_NonNumericKey(t *testing.T) {
 // is "octocat/hello-world" and whose base URL is baseURL. Guard tests point
 // baseURL at a server that fails the test on ANY request (the guards must
 // reject before HTTP); the happy-path tests point it at a normal mock.
-func githubSyncGuardFixture(t *testing.T, svc *IssueTrackerService, mock sqlmock.Sqlmock, baseURL, ticketURL, externalProjectKey string) uuid.UUID {
+// M47 W2: the tenant id is returned as well because UpdateTicket now
+// carries an explicit `AND tenant_id = $8` belt, so every UPDATE
+// expectation has to bind the same tenant the fixture seeded.
+func githubSyncGuardFixture(t *testing.T, svc *IssueTrackerService, mock sqlmock.Sqlmock, baseURL, ticketURL, externalProjectKey string) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 
 	encToken, err := svc.encrypt("gh-token")
@@ -378,7 +381,7 @@ func githubSyncGuardFixture(t *testing.T, svc *IssueTrackerService, mock sqlmock
 			string(model.AuthTypeAPIToken), "", encToken, "octocat/hello-world", "",
 			true, nil, now, now))
 
-	return ticketID
+	return ticketID, tenantID
 }
 
 // TestIssueTrackerService_SyncTicket_GitHub_LegacyNULLRowURLFallback pins the
@@ -409,12 +412,12 @@ func TestIssueTrackerService_SyncTicket_GitHub_LegacyNULLRowURLFallback(t *testi
 	defer db.Close()
 
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/other-org/other-repo/issues/42", "")
 
 	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
 		ticketID, string(model.TicketStatusClosed), "closed", "", "",
-		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(), tenantID,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
@@ -451,12 +454,12 @@ func TestIssueTrackerService_SyncTicket_GitHub_PersistedRepoOverride(t *testing.
 	defer db.Close()
 
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/octocat/other-repo/issues/42", "octocat/other-repo")
 
 	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
 		ticketID, string(model.TicketStatusClosed), "closed", "", "",
-		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(), tenantID,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
@@ -485,7 +488,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_PersistedRepoURLMismatch(t *testi
 	defer db.Close()
 
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+	ticketID, _ := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/other-org/other-repo/issues/42", "octocat/hello-world")
 
 	err = svc.SyncTicket(context.Background(), ticketID)
@@ -533,7 +536,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_UnparseableURL(t *testing.T) {
 			defer db.Close()
 
 			svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-			ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL, tc.url, "")
+			ticketID, _ := githubSyncGuardFixture(t, svc, mock, ts.URL, tc.url, "")
 
 			err = svc.SyncTicket(context.Background(), ticketID)
 			if err == nil {
@@ -578,12 +581,12 @@ func TestIssueTrackerService_SyncTicket_GitHub_CaseVariantRepoURL(t *testing.T) 
 	defer db.Close()
 
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/Octocat/Hello-World/issues/42", "octocat/hello-world")
 
 	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
 		ticketID, string(model.TicketStatusClosed), "closed", "", "",
-		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(), tenantID,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
@@ -621,7 +624,11 @@ func TestIssueTrackerService_CreateTicket_GitHub_PersistsExternalProjectKey(t *t
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	// M47 W1: CreateTicket now verifies (tenant, project, vulnerability)
+	// membership before anything else, so the service needs a real
+	// vulnerability repository and the mock needs that EXISTS probe first.
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db),
+		repository.NewVulnerabilityRepository(db), testEncryptionKey, nil)
 
 	encToken, err := svc.encrypt("gh-token")
 	if err != nil {
@@ -633,6 +640,12 @@ func TestIssueTrackerService_CreateTicket_GitHub_PersistsExternalProjectKey(t *t
 	vulnID := uuid.New()
 	projectID := uuid.New()
 	now := time.Now()
+
+	// M47 W1 scope probe — must be the FIRST statement (before the
+	// connection is even resolved, let alone the tracker contacted).
+	mock.ExpectQuery("FROM component_vulnerabilities").
+		WithArgs(tenantID, projectID, vulnID).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
 	mock.ExpectQuery("FROM issue_tracker_connections").WithArgs(connID).WillReturnRows(
 		sqlmock.NewRows(githubSyncConnCols).AddRow(
@@ -702,15 +715,16 @@ func TestIssueTrackerService_SyncTicket_GitHub_AssigneeSync(t *testing.T) {
 	defer db.Close()
 
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/octocat/hello-world/issues/42", "octocat/hello-world")
 
 	// UPDATE args: (id, local_status, external_status, priority, assignee,
-	// summary, last_synced_at) — assignee = the issue's assignee login, and
-	// external_status = the ToLower-normalised state.
+	// summary, last_synced_at, tenant_id) — assignee = the issue's assignee
+	// login, external_status = the ToLower-normalised state, and tenant_id
+	// is the M47 W2 belt.
 	mock.ExpectExec("UPDATE vulnerability_tickets").WithArgs(
 		ticketID, string(model.TicketStatusClosed), "closed", "", "octocat",
-		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(),
+		"[HIGH] CVE-2026-0001", sqlmock.AnyArg(), tenantID,
 	).WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := svc.SyncTicket(context.Background(), ticketID); err != nil {
@@ -744,7 +758,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_MissingState(t *testing.T) {
 	defer db.Close()
 
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
-	ticketID := githubSyncGuardFixture(t, svc, mock, ts.URL,
+	ticketID, _ := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/octocat/hello-world/issues/42", "octocat/hello-world")
 
 	err = svc.SyncTicket(context.Background(), ticketID)
