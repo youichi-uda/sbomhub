@@ -10,8 +10,10 @@ package reachability
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1217,24 +1219,32 @@ func TestStripJSCode_RegexLiterals(t *testing.T) {
 	assert.Equal(t, strings.Count(src, "\n"), strings.Count(codeOnly, "\n"))
 }
 
+// npmFailReadOf returns a readFileInRoot replacement that fails for the
+// file with basename base and behaves normally for everything else. The
+// degradation tests inject read failures through the analyzer's test seam
+// instead of chmod 0o000, so they exercise the accounting path even when
+// permission bits cannot deny reads (running as root, Windows CI).
+func npmFailReadOf(base string) func(*os.Root, string, fs.FileInfo, int64) ([]byte, error) {
+	return func(r *os.Root, name string, walkInfo fs.FileInfo, limit int64) ([]byte, error) {
+		if filepath.Base(name) == base {
+			return nil, errors.New("injected read failure (test seam)")
+		}
+		return readFileInRoot(r, name, walkInfo, limit)
+	}
+}
+
 // TestNpmAnalyze_ReadFailureDegradesConfidence guards the final-round Medium
 // finding: a candidate source file that cannot be read (vanished, permission
-// denied, or swapped mid-scan — see readFileInRoot) must never be skipped
-// SILENTLY. Before the fix, making the single file that imports the
-// vulnerable package unreadable produced a verdict indistinguishable from a
-// clean negative (import_only at 0.60 plus the "no first-party source file
-// imports" note): an attacker racing the scanner could yank the one file
-// proving reachability and forge a clean result. Now the lost candidate is
-// counted, surfaced as analyzer_error evidence, and import_only confidence
-// drops to the degraded 0.50 tier (same as a failed source scan).
+// denied, or changed mid-scan — see readFileInRoot) must never be skipped
+// SILENTLY. Before the fix, losing the single file that imports the
+// vulnerable package produced a verdict indistinguishable from a clean
+// negative (import_only at 0.60 plus the "no first-party source file
+// imports" note): whoever raced the scanner could yank the one file proving
+// reachability and end up with a clean-looking result. Now the lost
+// candidate is counted, surfaced as analyzer_error evidence, and import_only
+// confidence drops to the degraded 0.50 tier (same as a failed source scan).
 func TestNpmAnalyze_ReadFailureDegradesConfidence(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("0o000 file modes do not deny reads on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission bits are not enforced")
-	}
 	root := t.TempDir()
 	npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
 	npmWriteFile(t, root, "package-lock.json", `{
@@ -1242,15 +1252,14 @@ func TestNpmAnalyze_ReadFailureDegradesConfidence(t *testing.T) {
 		"packages": {"node_modules/acme-lodash": {"version": "4.17.21"}}
 	}`)
 	// The ONLY file that imports the vulnerable package: would be reachable
-	// if readable. Made unreadable to simulate the mid-scan loss.
+	// if readable. Its read failure is injected via the test seam so the
+	// test runs everywhere (chmod 0o000 is ineffective as root / on Windows
+	// — Low finding of this round: the degradation path had no coverage in
+	// exactly those CI environments).
 	npmWriteFile(t, root, "src/only_consumer.js",
 		"const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n")
-	require.NoError(t, os.Chmod(filepath.Join(root, "src", "only_consumer.js"), 0o000))
-	t.Cleanup(func() {
-		_ = os.Chmod(filepath.Join(root, "src", "only_consumer.js"), 0o644)
-	})
 
-	a := &NpmAnalyzer{}
+	a := &NpmAnalyzer{readFileInRootHook: npmFailReadOf("only_consumer.js")}
 	res, err := a.Analyze(context.Background(), root,
 		ReachabilityInput{
 			Ecosystem:         "npm",
@@ -1262,7 +1271,7 @@ func TestNpmAnalyze_ReadFailureDegradesConfidence(t *testing.T) {
 		"stage-1 graph hit stands; the unreadable file cannot prove more")
 	assert.InDelta(t, 0.50, res.Confidence, 0.001,
 		"a scan that LOST a candidate file must be degraded, not a clean 0.60")
-	assert.True(t, npmHasDescription(res, "could not be securely read"),
+	assert.True(t, npmHasDescription(res, "could not be read during the source scan"),
 		"expected a read-failure evidence note, got %+v", res.Evidence)
 }
 
@@ -1272,12 +1281,6 @@ func TestNpmAnalyze_ReadFailureDegradesConfidence(t *testing.T) {
 // note is added.
 func TestNpmAnalyze_ReadFailureKeepsReachableConfidence(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("0o000 file modes do not deny reads on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission bits are not enforced")
-	}
 	root := t.TempDir()
 	npmWriteFile(t, root, "package.json", `{"dependencies": {"acme-lodash": "^4.17.0"}}`)
 	npmWriteFile(t, root, "package-lock.json", `{
@@ -1288,12 +1291,8 @@ func TestNpmAnalyze_ReadFailureKeepsReachableConfidence(t *testing.T) {
 		"const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n")
 	npmWriteFile(t, root, "src/lost.js",
 		"const _ = require('acme-lodash');\n_.defaultsDeep({}, {});\n")
-	require.NoError(t, os.Chmod(filepath.Join(root, "src", "lost.js"), 0o000))
-	t.Cleanup(func() {
-		_ = os.Chmod(filepath.Join(root, "src", "lost.js"), 0o644)
-	})
 
-	a := &NpmAnalyzer{}
+	a := &NpmAnalyzer{readFileInRootHook: npmFailReadOf("lost.js")}
 	res, err := a.Analyze(context.Background(), root,
 		ReachabilityInput{
 			Ecosystem:         "npm",
@@ -1304,8 +1303,86 @@ func TestNpmAnalyze_ReadFailureKeepsReachableConfidence(t *testing.T) {
 	assert.Equal(t, StatusReachable, res.Status)
 	assert.InDelta(t, 0.70, res.Confidence, 0.001,
 		"found evidence stands on its own; lost files must not weaken it")
-	assert.True(t, npmHasDescription(res, "could not be securely read"),
+	assert.True(t, npmHasDescription(res, "could not be read during the source scan"),
 		"the incompleteness must still be recorded, got %+v", res.Evidence)
+}
+
+// TestNpmDependencyGraph_ManifestReadsConfined guards the round-3 High
+// finding: stage 1 read package.json and the lockfiles with a bare
+// os.ReadFile — following symlinks anywhere (including OUT of the project
+// root) with no size bound (a package.json symlinked at /dev/zero was read
+// without limit). Stage-1 reads now go through the same root-confined,
+// symlink-refusing, size-capped read as the source scan — and since stage-1
+// names are pure basenames under the project root, the lstat refusal covers
+// the whole path within the root here. A refused manifest downgrades the
+// analysis to unknown (loud), never to a verdict built from bytes the
+// project directory does not actually contain.
+func TestNpmDependencyGraph_ManifestReadsConfined(t *testing.T) {
+	t.Parallel()
+
+	input := ReachabilityInput{
+		Ecosystem:         "npm",
+		VulnerableModules: []string{"acme-lodash"},
+		VulnerableSymbols: []string{"defaultsDeep"},
+	}
+
+	t.Run("out-of-root manifest symlink refused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		outside := t.TempDir()
+		npmWriteFile(t, outside, "package.json",
+			`{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+		if err := os.Symlink(filepath.Join(outside, "package.json"),
+			filepath.Join(root, "package.json")); err != nil {
+			t.Skipf("cannot create symlinks on this platform: %v", err)
+		}
+
+		res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root, input)
+		require.NoError(t, err)
+		assert.Equal(t, StatusUnknown, res.Status,
+			"out-of-root manifest content must not enter the dependency graph")
+		assert.True(t, npmHasDescription(res, "dependency graph load failed"),
+			"expected a loud load failure, got %+v", res.Evidence)
+	})
+
+	t.Run("in-root manifest symlink refused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		npmWriteFile(t, root, "real_manifest.json",
+			`{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+		if err := os.Symlink("real_manifest.json",
+			filepath.Join(root, "package.json")); err != nil {
+			t.Skipf("cannot create symlinks on this platform: %v", err)
+		}
+
+		res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root, input)
+		require.NoError(t, err)
+		assert.Equal(t, StatusUnknown, res.Status,
+			"symlinked manifests are refused even when the target stays in-root")
+		assert.True(t, npmHasDescription(res, "dependency graph load failed"),
+			"expected a loud load failure, got %+v", res.Evidence)
+	})
+
+	t.Run("oversized lockfile refused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		npmWriteFile(t, root, "package.json",
+			`{"dependencies": {"acme-lodash": "^4.17.0"}}`)
+		// Sparse file over the cap: fast to create, and before the fix its
+		// 64 MiB of NULs parsed as an empty-but-valid yarn.lock, so the
+		// analysis proceeded as if the read were fine.
+		f, err := os.Create(filepath.Join(root, "yarn.lock"))
+		require.NoError(t, err)
+		require.NoError(t, f.Truncate(npmMaxManifestSizeBytes+1))
+		require.NoError(t, f.Close())
+
+		res, err := (&NpmAnalyzer{}).Analyze(context.Background(), root, input)
+		require.NoError(t, err)
+		assert.Equal(t, StatusUnknown, res.Status,
+			"a lockfile over the size cap must fail the graph load loudly")
+		assert.True(t, npmHasDescription(res, "dependency graph load failed"),
+			"expected a loud load failure, got %+v", res.Evidence)
+	})
 }
 
 // TestReadFileInRoot_SwapDetected guards the final-round High finding
@@ -1383,10 +1460,17 @@ func TestReadFileInRoot_SwapDetected(t *testing.T) {
 
 	t.Run("swap to different regular file rejected", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
-			// Documented residual: on Windows os.SameFile resolves the
-			// walk-side file ID lazily from the PATH, so a regular→regular
-			// replacement is content-change-equivalent and passes.
-			t.Skip("regular-file replacement detection is Unix-only (see readFileInRoot)")
+			// This test builds walkInfo with os.Lstat, which on Windows
+			// stats regular files via GetFileAttributesEx and defers the
+			// file ID to a path lookup at os.SameFile time — after the
+			// swap both sides resolve to the replacement and the mismatch
+			// is invisible. The production walk side (ReadDir) captures
+			// file IDs eagerly on file-ID filesystems per the go1.26.4
+			// sources, but that path is not what this test exercises, and
+			// none of this is verified on a Windows machine here (see
+			// readFileInRoot).
+			t.Skip("os.Lstat-sourced identity is loaded lazily on Windows; " +
+				"replacement detection not testable this way there")
 		}
 		npmWriteFile(t, root, "src/c.js", "FIRST_PARTY")
 		target := filepath.Join(root, "src", "c.js")

@@ -60,6 +60,15 @@ type NpmAnalyzer struct {
 	// dependency graph (mirrors GoAnalyzer.SkipPackagesLoad). Intended for
 	// unit tests; production callers should leave this false.
 	SkipSourceScan bool
+
+	// readFileInRootHook, when non-nil, replaces readFileInRoot for
+	// candidate source files during the walk. Test seam only: the
+	// read-failure degradation tests inject deterministic errors through
+	// it, because the natural triggers are either racy (mid-scan swaps) or
+	// unavailable in some CI environments (permission bits are ignored
+	// when running as root and do not deny reads on Windows). Production
+	// callers must leave it nil.
+	readFileInRootHook func(r *os.Root, name string, walkInfo fs.FileInfo, limit int64) ([]byte, error)
 }
 
 // npmAnalyzerName is recorded in ReachabilityResult.AnalyzerName so audit
@@ -87,6 +96,12 @@ const (
 
 	// npmMaxGraphEvidence caps stage-1 dependency-graph evidence entries.
 	npmMaxGraphEvidence = 20
+
+	// npmMaxManifestSizeBytes caps stage-1 package.json / lockfile reads.
+	// Lockfiles in large monorepos reach a few MB; 64 MiB is far above any
+	// legitimate manifest while still bounding the read (before this cap a
+	// package.json symlinked at /dev/zero was read without limit).
+	npmMaxManifestSizeBytes = 64 << 20 // 64 MiB
 )
 
 // Analyze runs the npm reachability heuristic. The error contract matches
@@ -213,15 +228,15 @@ func (a *NpmAnalyzer) Analyze(ctx context.Context, projectPath string, input Rea
 		result.Evidence = append(result.Evidence, EvidencePointer{
 			Kind: EvidenceKindAnalyzerError,
 			Description: fmt.Sprintf("%d symlink(s) with source-file extensions skipped during the source walk "+
-				"(symlinks are never followed: the link's lstat size would bypass the %d-byte file cap while os.ReadFile reads the target)",
-				scan.symlinksSkipped, npmMaxFileSizeBytes),
+				"(symlinks are never followed; their targets' content must not influence the verdict)",
+				scan.symlinksSkipped),
 		})
 	}
 	if scan.readFailures > 0 {
 		result.Evidence = append(result.Evidence, EvidencePointer{
 			Kind: EvidenceKindAnalyzerError,
-			Description: fmt.Sprintf("%d path(s) could not be securely read during the source scan "+
-				"(vanished, permission denied, or swapped mid-scan); the scan is incomplete and "+
+			Description: fmt.Sprintf("%d path(s) could not be read during the source scan "+
+				"(vanished, permission denied, or changed mid-scan); the scan is incomplete and "+
 				"hidden imports or symbol references cannot be ruled out", scan.readFailures),
 		})
 	}
@@ -327,17 +342,31 @@ func (g *npmDependencyGraph) add(name string, src npmGraphSource) {
 // appear in root lockfiles for npm/pnpm, so transitive coverage is usually
 // retained).
 //
+// All manifest/lockfile reads go through readManifestInRoot: root-confined,
+// symlink-refusing and size-capped, like the source scan (round-3 High
+// finding: bare os.ReadFile here followed symlinks anywhere — including out
+// of the project root — with no size bound). A refused file is an error,
+// so Analyze downgrades to unknown loudly rather than deciding from bytes
+// the project directory does not actually contain.
+//
 // Errors:
 //   - package.json present but unparsable → error (user-actionable, like a
 //     broken go.mod).
+//   - package.json / lockfile symlinked, oversized, or otherwise unreadable
+//     → error (replace the symlink with a regular file to analyze).
 //   - package.json absent → fine if at least one lockfile parses.
 //   - nothing parsable at all → error ("not an npm project").
 func loadNpmDependencyGraph(projectPath string) (*npmDependencyGraph, error) {
 	g := &npmDependencyGraph{packages: make(map[string]npmGraphSource)}
 
+	rootHandle, err := os.OpenRoot(projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("open project root: %w", err)
+	}
+	defer rootHandle.Close()
+
 	manifestFound := false
-	manifestPath := filepath.Join(projectPath, "package.json")
-	if data, err := os.ReadFile(manifestPath); err == nil {
+	if data, err := readManifestInRoot(rootHandle, "package.json"); err == nil {
 		if perr := parseNpmManifest(data, g); perr != nil {
 			return nil, fmt.Errorf("parse package.json: %w", perr)
 		}
@@ -357,7 +386,7 @@ func loadNpmDependencyGraph(projectPath string) (*npmDependencyGraph, error) {
 		{"yarn.lock", parseYarnLockPackages},
 	}
 	for _, lf := range lockfiles {
-		data, err := os.ReadFile(filepath.Join(projectPath, lf.name))
+		data, err := readManifestInRoot(rootHandle, lf.name)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -382,6 +411,27 @@ func loadNpmDependencyGraph(projectPath string) (*npmDependencyGraph, error) {
 		return nil, errors.New("no package.json or supported lockfile (package-lock.json / npm-shrinkwrap.json / pnpm-lock.yaml / yarn.lock) found — not an npm project?")
 	}
 	return g, nil
+}
+
+// readManifestInRoot reads one stage-1 file (package.json or a lockfile
+// basename) with the same discipline as source files: lstat first —
+// symlinks, in-root or out, are refused rather than followed — then a
+// size-capped read through readFileInRoot, so the open is root-confined and
+// cross-checked against that lstat. Errors satisfying
+// errors.Is(err, fs.ErrNotExist) mean "file absent", preserving the
+// caller's absent-file handling.
+func readManifestInRoot(rootHandle *os.Root, name string) ([]byte, error) {
+	info, err := rootHandle.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file (mode %v); symlinked manifests and lockfiles are not analyzed", name, info.Mode())
+	}
+	if info.Size() > npmMaxManifestSizeBytes {
+		return nil, fmt.Errorf("%s is %d bytes, above the %d-byte cap; refusing to load it", name, info.Size(), npmMaxManifestSizeBytes)
+	}
+	return readFileInRoot(rootHandle, name, info, npmMaxManifestSizeBytes)
 }
 
 // parseNpmManifest collects direct dependency names from package.json.
@@ -711,14 +761,14 @@ type npmScanResult struct {
 	noteEvidence    []EvidencePointer
 	truncated       bool // npmMaxSourceFiles budget exhausted
 	symlinksSkipped int  // symlinks with source-file extensions skipped by the walk
-	// readFailures counts paths that could not be securely read: unreadable
+	// readFailures counts paths that could not be read: unreadable
 	// directories (their whole subtree is invisible), lstat failures, and
-	// secure-open failures (vanished, permission denied, or swapped mid-scan
-	// — see readFileInRoot). Zero on a clean scan. Analyze surfaces any
-	// non-zero count as analyzer_error evidence and degrades import_only
-	// confidence: a scan that LOST candidates must stay distinguishable from
-	// a clean negative, otherwise deleting / chmod-ing / swapping the one
-	// source file that proves reachability mid-scan would forge a clean
+	// reads that failed readFileInRoot's checks (vanished, permission
+	// denied, or changed mid-scan). Zero on a clean scan. Analyze surfaces
+	// any non-zero count as analyzer_error evidence and degrades
+	// import_only confidence: a scan that LOST candidates must stay
+	// distinguishable from a clean negative, otherwise losing the one
+	// source file that proves reachability mid-scan would look like a clean
 	// import_only verdict.
 	readFailures int
 }
@@ -738,26 +788,35 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 	seenSymbol := make(map[string]struct{}) // file + selector + pos dedupe
 	memberRegexCache := make(map[string]*regexp.Regexp)
 
-	// TOCTOU hardening (gosec G122): every candidate file is read through an
-	// os.Root handle opened once on the scan root, never via its raw walk
-	// path, and every open is identity-verified against the walker's lstat
-	// before the content is analyzed (see readFileInRoot for the exact
-	// guarantees and residual gaps). os.Root alone is NOT sufficient: it
-	// only prevents resolution from ESCAPING the root — symlinks whose
-	// targets stay inside the root ARE followed, in the final component and
-	// in intermediate directories alike, and passing O_NOFOLLOW to
-	// Root.OpenFile does not change that (all measured on go1.26.4). So a
-	// checked regular file swapped for an in-root symlink after the walker's
-	// lstat would still open fine and smuggle third-party content (e.g.
-	// node_modules code the walk deliberately skips) into the first-party
-	// scan. Any file that fails the secure open is skipped AND counted in
-	// readFailures — false-negative direction, but never silent (Analyze
-	// turns the count into evidence and degrades import_only confidence).
+	// Every candidate file is read through an os.Root handle opened once on
+	// the scan root, never via its raw walk path (gosec G122), and each
+	// open is cross-checked against the walker's lstat before the content
+	// is analyzed. Scope: these are best-effort consistency checks for a
+	// tree that changes mid-scan — see readFileInRoot for the short list of
+	// what they detect — NOT a defence boundary against whoever can write
+	// inside the scanned tree (such a writer can already put arbitrary
+	// bytes in the files being scanned). The one hard guarantee is the
+	// root handle's: path resolution cannot ESCAPE the root. It is only
+	// that — symlinks whose targets stay inside the root ARE followed, in
+	// the final component and in intermediate directories alike, and
+	// passing O_NOFOLLOW to Root.OpenFile does not change that (all
+	// measured on go1.26.4); the lstat cross-check exists because without
+	// it a regular file swapped for an in-root symlink between walk and
+	// open would put content from a deliberately skipped subtree (e.g.
+	// node_modules) into the first-party scan. Any file that fails the
+	// checks is skipped AND counted in readFailures — false-negative
+	// direction, but never silent (Analyze turns the count into evidence
+	// and degrades import_only confidence).
 	rootHandle, rootErr := os.OpenRoot(root)
 	if rootErr != nil {
 		return nil, fmt.Errorf("open scan root: %w", rootErr)
 	}
 	defer rootHandle.Close()
+
+	readFile := readFileInRoot
+	if a.readFileInRootHook != nil {
+		readFile = a.readFileInRootHook // test seam, see the field doc
+	}
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
@@ -787,13 +846,13 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 			return nil
 		}
 		if t := d.Type(); !t.IsRegular() {
-			// Never follow symlinks (file OR directory links): d.Info()
-			// reports the LINK's own lstat size, not the target's, so a
-			// tiny link to a huge file or an unbounded device node
-			// (/dev/zero) would pass the npmMaxFileSizeBytes gate below
-			// and os.ReadFile would read the TARGET — an unbounded-read
-			// DoS and a way to smuggle out-of-tree content into the
-			// verdict. Skipping is false-negative direction. Only symlinks
+			// Never follow symlinks (file OR directory links): only
+			// regular first-party files may feed the verdict, and a
+			// link's own lstat size says nothing about its target (before
+			// the round-1 fix, a tiny link to a huge file or /dev/zero
+			// passed the npmMaxFileSizeBytes gate below and the read hit
+			// the TARGET — an unbounded read plus out-of-tree content in
+			// the verdict). Skipping is false-negative direction. Only symlinks
 			// whose basename carries a source extension are counted for
 			// the informational evidence note: those are the ones that
 			// would have been scan candidates as regular files, so
@@ -838,11 +897,12 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 			res.readFailures++ // cannot address the file inside the root handle
 			return nil
 		}
-		data, rerr := readFileInRoot(rootHandle, rel, info, npmMaxFileSizeBytes)
+		data, rerr := readFile(rootHandle, rel, info, npmMaxFileSizeBytes)
 		if rerr != nil {
-			// Secure open/read failed: vanished, permission denied, or
-			// swapped after the walker's lstat (see readFileInRoot). Skipping
-			// is the false-negative direction, but never silent.
+			// Read failed or a consistency check tripped: vanished,
+			// permission denied, or changed after the walker's lstat (see
+			// readFileInRoot). Skipping is the false-negative direction,
+			// but never silent.
 			res.readFailures++
 			return nil
 		}
@@ -857,53 +917,74 @@ func (a *NpmAnalyzer) scanNpmSource(ctx context.Context, root string, hits []npm
 }
 
 // readFileInRoot reads name (relative to r, rooted at the scan root) fully,
-// refusing to return more than limit bytes and refusing any file that is not
-// verifiably the SAME regular file the walker classified (walkInfo is the
-// walker's lstat result for the path).
+// refusing to return more than limit bytes and refusing files that visibly
+// changed between the walker's lstat (walkInfo) and the open.
 //
-// What each layer actually guarantees (measured on go1.26.4; an earlier
-// revision claimed os.Root gives "O_NOFOLLOW semantics on every path
-// component" — it does NOT, do not restate that):
+// Scope, stated narrowly: these are best-effort consistency checks for a
+// tree that changes while it is being scanned (package managers, builds,
+// editors, or deliberate interference) — they are NOT a security boundary.
+// Anyone who can write inside the scanned tree can put arbitrary bytes into
+// the files being scanned, which no identity check can see; results for a
+// tree are only as trustworthy as the tree itself. Every failed check ends
+// in "skip + count as read failure" (false-negative direction: the bytes
+// are never analyzed, and Analyze surfaces the count as evidence and
+// degrades import_only confidence).
 //
-//   - r.Open confines path RESOLUTION to the root: symlinks with absolute
-//     or out-of-root targets fail with "path escapes from parent". Symlinks
-//     whose targets stay INSIDE the root ARE followed — final component and
+// What IS checked — and all that is claimed:
+//
+//   - r.Open confines path RESOLUTION to the root: a resolution that would
+//     escape the root fails ("path escapes from parent"). Symlinks whose
+//     targets stay INSIDE the root ARE followed — final component and
 //     intermediate directories alike — and passing O_NOFOLLOW to r.OpenFile
-//     does not prevent that (the resolution loop follows the link itself).
-//     os.Root alone therefore does NOT close the walk→open TOCTOU window.
+//     does not prevent that (measured on go1.26.4).
 //   - f.Stat() (fstat on the opened handle, race-free) must report a
 //     regular file no larger than limit: a file grown or replaced after the
 //     walker's size gate cannot become an unbounded or non-regular read
 //     (io.LimitReader bounds the read regardless, defence in depth).
-//   - os.SameFile(walkInfo, f.Stat()) must hold. On Unix-like systems both
-//     sides carry device/inode numbers captured independently (walk-time
-//     lstat vs handle fstat), so ANY swap — file→in-root symlink,
-//     file→other file, parent directory→symlink — is detected: when the
-//     identity matches, the bytes read belong to the exact file object the
-//     walker classified as a regular in-root source file.
-//   - r.Lstat(name) after the open must still name that same regular file.
-//     Belt-and-braces on Unix; on Windows it is the effective symlink-swap
-//     check, because os.SameFile there loads the walk-side file ID lazily
-//     by re-opening the PATH at comparison time, which would follow a
-//     swapped-in link and erase the evidence — the post-open lstat sees the
-//     link itself (ModeSymlink) and rejects it.
+//   - os.SameFile(walkInfo, f.Stat()) must hold. On Unix both sides carry
+//     dev/inode numbers captured independently (walk-time lstat vs handle
+//     fstat), so the read is refused when the path resolves to a DIFFERENT
+//     file object than the walker classified — e.g. the final component
+//     replaced by another file, or by an in-root symlink, inside the
+//     walk→open window.
+//   - r.Lstat(name) after the open must still name that same regular file
+//     (belt and braces around the open itself).
 //
-// Residual gaps, accepted and documented honestly (every detection above
-// ends in "skip + count as read failure" — false-negative direction, never
-// analysing unverified content):
+// On Windows the mechanics differ. The following is from READING the
+// go1.26.4 sources (os/dir_windows.go, os/types_windows.go,
+// os/stat_windows.go) — it has NOT been verified on a Windows machine: the
+// walk side of os.SameFile comes from ReadDir, which on filesystems that
+// support opening by file ID (e.g. NTFS) captures each entry's 64-bit file
+// ID at enumeration time, giving the same two-point comparison as the Unix
+// dev/inode check. On filesystems without that support, the walk side's ID
+// is loaded from the PATH at os.SameFile call time; that lookup opens the
+// path with FILE_FLAG_OPEN_REPARSE_POINT — the link itself, not its target
+// — so a swapped-in symlink still compares unequal, but a regular file
+// replaced by another regular file resolves both loads to the replacement
+// and passes there (no detection). On filesystems reporting no file IDs at
+// all, os.SameFile is in practice always false and every candidate counts
+// as a read failure — loud degradation, not a silent pass.
 //
+// NOT detected (known, accepted):
+//
+//   - content edits in place: the identity check pins WHICH file object was
+//     read, never what it says;
+//   - identity reuse over time: if the original file is unlinked and the
+//     kernel/filesystem later hands the same identity (dev/inode pair,
+//     volume/file ID) to a replacement the path is pointed at, the
+//     comparison passes — it compares identity at two points in time, it
+//     does not pin content;
+//   - an intermediate directory replaced by an in-root symlink BEFORE the
+//     walker lstats the leaf: walk and open then both resolve through the
+//     link to the same file object, identities agree, and content from a
+//     deliberately skipped subtree (e.g. node_modules) can enter the scan
+//     as first-party. Closing this would take a handle-relative
+//     (openat-per-component) directory walk, which neither filepath.WalkDir
+//     nor os.Root provides — out of proportion for a best-effort
+//     consistency check, so it stays undetected by design;
 //   - hardlinks: a hardlink inside the root to a regular file IS that file
 //     (same identity), indistinguishable from the original by any of the
-//     checks above; os.Root documents the same limitation. On Linux,
-//     fs.protected_hardlinks (default on) stops linking to files the
-//     attacker cannot write.
-//   - Windows: an attacker who swaps file→symlink between walk and open AND
-//     symlink→hardlink-of-the-target between open and the post-open lstat
-//     defeats the identity check (the lazy re-resolution above). Root
-//     confinement and the size cap still hold there.
-//   - a writer with access to the tree can always change file CONTENTS in
-//     place; identity verification pins WHICH file is read, not what it
-//     says. That is inherent to scanning a live tree, not a symlink issue.
+//     checks above; os.Root documents the same limitation.
 func readFileInRoot(r *os.Root, name string, walkInfo fs.FileInfo, limit int64) ([]byte, error) {
 	f, err := r.Open(name)
 	if err != nil {
