@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,18 @@ import (
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
+
+// ErrSubscriptionNotFound is returned by the tenant-scoped mutations
+// (Update / UpdateStatus / Delete) when the statement matched no row.
+//
+// M46: this exists because `ExecContext` reports a nil error for a 0-row
+// UPDATE, so the `AND tenant_id = $N` guard added in migration 031 was
+// silently indistinguishable from a successful write. `handler/billing.go`
+// depended on that `err != nil` check to notice a cross-tenant mutation
+// attempt, did not, and went on to grant the caller the victim's plan.
+// Callers that legitimately tolerate a no-op must say so explicitly with
+// errors.Is rather than by not looking.
+var ErrSubscriptionNotFound = errors.New("subscriptions: no row matched for this tenant")
 
 type SubscriptionRepository struct {
 	db *sql.DB
@@ -40,11 +53,17 @@ func NewSubscriptionRepository(db *sql.DB) *SubscriptionRepository {
 //   - GetByLSSubscriptionID is intentionally tenant-unscoped (it is the
 //     webhook lookup that REVEALS which tenant an event belongs to —
 //     the equivalent of GetByKeyHash on api_keys, see migration 028).
+//     M46: because it is unscoped, EVERY caller outside the webhook must
+//     compare the returned row's TenantID against its own tenant before
+//     acting on it. `handler/billing.go` did not, and that was a
+//     cross-tenant plan escalation.
 //   - GetByTenantID / GetEvents / GetUsage are tenant-scoped by
 //     parameter and always carry `WHERE tenant_id = $1`.
 //   - Update / UpdateStatus / Delete add an explicit `AND tenant_id = $N`
 //     guard so a buggy handler can't cross tenant boundaries even though
-//     RLS is no longer the backstop.
+//     RLS is no longer the backstop. M46: they also verify RowsAffected
+//     and return ErrSubscriptionNotFound on 0 rows, because a guard that
+//     fires silently is a guard the calling handler cannot honour.
 //   - Create / CreateEvent / RecordUsage write the caller-supplied
 //     TenantID; the FK to `tenants(id) ON DELETE CASCADE` still enforces
 //     referential integrity.
@@ -127,6 +146,12 @@ func (r *SubscriptionRepository) GetByLSSubscriptionID(ctx context.Context, lsSu
 // B's id could rewrite tenant A's billing state. Callers MUST set
 // s.TenantID from the trusted lookup (GetByLSSubscriptionID or
 // GetByTenantID) and not from user input.
+//
+// M46: the guard is now AUDIBLE. It previously fired silently — a 0-row
+// UPDATE yields a nil error from ExecContext and the result was
+// discarded, so `handler/billing.go`'s `if err != nil` check saw a
+// blocked cross-tenant mutation as a success and proceeded to grant the
+// caller the victim's plan. 0 rows now returns ErrSubscriptionNotFound.
 func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscription) error {
 	query := `
 		UPDATE subscriptions SET
@@ -138,33 +163,66 @@ func (r *SubscriptionRepository) Update(ctx context.Context, s *model.Subscripti
 		WHERE id = $14 AND tenant_id = $15
 	`
 	s.UpdatedAt = time.Now()
-	_, err := r.q(ctx).ExecContext(ctx, query,
+	res, err := r.q(ctx).ExecContext(ctx, query,
 		s.LSCustomerID, s.LSVariantID, s.LSProductID,
 		s.Status, s.Plan, s.BillingAnchor,
 		s.CurrentPeriodStart, s.CurrentPeriodEnd,
 		s.TrialEndsAt, s.RenewsAt, s.EndsAt, s.CancelledAt,
 		s.UpdatedAt, s.ID, s.TenantID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update subscriptions (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update subscription %s for tenant %s: %w", s.ID, s.TenantID, ErrSubscriptionNotFound)
+	}
+	return nil
 }
 
 // UpdateStatus narrowly updates the status of a subscription, restricted
 // to the calling tenant. The `tenant_id = $3` guard is defense-in-depth
 // against cross-tenant mutation now that RLS is no longer enforcing it
-// (migration 031).
+// (migration 031). 0 rows returns ErrSubscriptionNotFound (M46: see
+// Update — a silently-firing guard is what made the sync endpoint
+// exploitable).
 func (r *SubscriptionRepository) UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, status string) error {
 	query := `UPDATE subscriptions SET status = $1, updated_at = $2 WHERE id = $3 AND tenant_id = $4`
-	_, err := r.q(ctx).ExecContext(ctx, query, status, time.Now(), id, tenantID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, status, time.Now(), id, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update subscriptions status (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update status of subscription %s for tenant %s: %w", id, tenantID, ErrSubscriptionNotFound)
+	}
+	return nil
 }
 
 // Delete removes a subscription row, restricted to the calling tenant.
 // With RLS off (migration 031) the `tenant_id = $2` clause is what
 // stops any authenticated session from deleting another tenant's
-// subscription by ID.
+// subscription by ID. 0 rows returns ErrSubscriptionNotFound so a
+// blocked cross-tenant delete cannot be reported as a completed one.
 func (r *SubscriptionRepository) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 	query := `DELETE FROM subscriptions WHERE id = $1 AND tenant_id = $2`
-	_, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
-	return err
+	res, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete subscriptions (RowsAffected): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("delete subscription %s for tenant %s: %w", id, tenantID, ErrSubscriptionNotFound)
+	}
+	return nil
 }
 
 // CreateEvent logs a subscription event

@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,11 +20,25 @@ import (
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
+// lemonSqueezyDefaultBaseURL is the production Lemon Squeezy REST API root.
+// It is the single source of truth for the default; BillingHandler.lsBaseURL
+// only ever deviates from it when a test injects a stub (see
+// WithLemonSqueezyBaseURL). Mirrors the client.DefaultOSVBaseURL /
+// githubDefaultBaseURL convention used elsewhere in this package.
+const lemonSqueezyDefaultBaseURL = "https://api.lemonsqueezy.com"
+
 // BillingHandler handles billing-related endpoints
 type BillingHandler struct {
 	cfg        *config.Config
 	tenantRepo *repository.TenantRepository
 	subRepo    *repository.SubscriptionRepository
+
+	// lsBaseURL is the Lemon Squeezy REST API root used by
+	// fetchLemonSqueezySubscriptionByID. Defaults to
+	// lemonSqueezyDefaultBaseURL; overridden only by tests via
+	// WithLemonSqueezyBaseURL so the sync endpoint can be driven end-to-end
+	// against an httptest stub instead of the live billing provider.
+	lsBaseURL string
 }
 
 // NewBillingHandler creates a new BillingHandler
@@ -35,7 +51,20 @@ func NewBillingHandler(
 		cfg:        cfg,
 		tenantRepo: tenantRepo,
 		subRepo:    subRepo,
+		lsBaseURL:  lemonSqueezyDefaultBaseURL,
 	}
+}
+
+// WithLemonSqueezyBaseURL overrides the Lemon Squeezy REST API root. An empty
+// string resets the handler to lemonSqueezyDefaultBaseURL, so a misconfigured
+// caller can never end up issuing requests to a relative URL.
+func (h *BillingHandler) WithLemonSqueezyBaseURL(base string) *BillingHandler {
+	if base == "" {
+		h.lsBaseURL = lemonSqueezyDefaultBaseURL
+		return h
+	}
+	h.lsBaseURL = strings.TrimRight(base, "/")
+	return h
 }
 
 // SubscriptionResponse represents the subscription info returned to clients
@@ -285,79 +314,140 @@ func (h *BillingHandler) SyncSubscription(c echo.Context) error {
 
 	tenantID := tc.TenantID()
 
-	// Check if request body contains ls_subscription_id for manual sync
+	// Check if request body contains ls_subscription_id for manual sync.
+	// This is the ONLY sync path: without an id there is nothing to look up
+	// (Lemon Squeezy has no "which subscription belongs to this tenant?"
+	// query — the link is created at checkout time via
+	// checkout[custom][tenant_id] and delivered back only over the webhook).
+	//
+	// M46: the code that used to live below this point carried a second copy
+	// of the cross-tenant escalation fixed in syncBySubscriptionID. For any
+	// well-formed request it was unreachable — the old guard was
+	// `Bind(&req) == nil && id != ""`, so the fall-through always ran
+	// fetchLemonSqueezySubscriptionByID("") which returns "subscription ID is
+	// required" and produced `manual_required`. It was NOT unreachable for
+	// malformed input, though (Codex round 1, Low): Go's JSON decoder can
+	// populate a field and then fail on a later token — e.g. a duplicate
+	// `ls_subscription_id` whose second occurrence has the wrong type — which
+	// left `err != nil` with a NON-empty id and dropped straight into the
+	// escalating branch. Hence the explicit Bind error below (matching
+	// CreateCheckout's 400) rather than a silent fall-through, and the
+	// deletion of the duplicate branch rather than fixing it twice.
+	//
+	// The `manual_required` response shape is preserved because the billing
+	// page keys off it to reveal the manual subscription-id input
+	// (apps/web/src/app/[locale]/(dashboard)/billing/page.tsx).
 	var req SyncSubscriptionRequest
-	if err := c.Bind(&req); err == nil && req.LSSubscriptionID != "" {
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	}
+	if req.LSSubscriptionID != "" {
 		return h.syncBySubscriptionID(c, ctx, tenantID, req.LSSubscriptionID)
 	}
 
-	// Try to fetch subscription directly from Lemon Squeezy API
-	sub, err := h.fetchLemonSqueezySubscriptionByID(req.LSSubscriptionID)
-	if err != nil {
-		slog.Error("failed to fetch subscription from Lemon Squeezy", "error", err)
-		// Return helpful error message
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"status":  "manual_required",
-			"message": "自動同期に失敗しました。Lemon SqueezyダッシュボードからサブスクリプションIDを入力してください。",
-			"help":    "https://app.lemonsqueezy.com → Subscriptions から ID を確認できます",
-		})
-	}
-
-	if sub == nil {
-		return c.JSON(http.StatusOK, map[string]string{
-			"status":  "no_subscription",
-			"message": "サブスクリプションが見つかりませんでした",
-		})
-	}
-
-	// Determine plan from product name (variant_name is often "Default")
-	plan := h.productNameToPlan(sub.Attributes.ProductName)
-
-	// Check if subscription already exists
-	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
-	if existingSub != nil {
-		// Update existing subscription
-		existingSub.Status = sub.Attributes.Status
-		existingSub.Plan = plan
-		existingSub.UpdatedAt = time.Now()
-		if err := h.subRepo.Update(ctx, existingSub); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update subscription"})
-		}
-	} else {
-		// Create new subscription
-		now := time.Now()
-		newSub := &model.Subscription{
-			ID:               uuid.New(),
-			TenantID:         tenantID,
-			LSSubscriptionID: sub.ID,
-			LSCustomerID:     fmt.Sprintf("%d", sub.Attributes.CustomerID),
-			LSVariantID:      fmt.Sprintf("%d", sub.Attributes.VariantID),
-			LSProductID:      fmt.Sprintf("%d", sub.Attributes.ProductID),
-			Status:           sub.Attributes.Status,
-			Plan:             plan,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		}
-		if err := h.subRepo.Create(ctx, newSub); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
-		}
-	}
-
-	// Update tenant plan
-	if err := h.tenantRepo.UpdatePlan(ctx, tenantID, plan); err != nil {
-		slog.Error("failed to update tenant plan during sync", "error", err)
-	}
-
-	slog.Info("subscription synced successfully", "tenant_id", tenantID, "plan", plan)
-
-	return c.JSON(http.StatusOK, map[string]string{
-		"status": "synced",
-		"plan":   plan,
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"status":  "manual_required",
+		"message": "自動同期に失敗しました。Lemon SqueezyダッシュボードからサブスクリプションIDを入力してください。",
+		"help":    "https://app.lemonsqueezy.com → Subscriptions から ID を確認できます",
 	})
 }
 
-// syncBySubscriptionID syncs a specific subscription by its Lemon Squeezy ID
+// syncNotLinkedSentinel is the single refusal answer of the manual sync
+// endpoint. "no such subscription in Lemon Squeezy", "this subscription
+// belongs to another tenant" and "this subscription has never been linked
+// here" all collapse into it.
+//
+// Why one sentinel (M46): Lemon Squeezy subscription ids are short
+// sequential integers and the store-scoped API key means a caller can only
+// name ids belonging to OUR store. Distinguishable answers would therefore
+// turn this endpoint into an enumerator for "which of the store's
+// subscriptions are already claimed, and by implication how many paying
+// tenants exist" — a cross-tenant leak that costs nothing to avoid. Same
+// discipline as the triage/SSVC 404 sentinels (#F10).
+func syncNotLinkedSentinel(c echo.Context) error {
+	return c.JSON(http.StatusNotFound, map[string]string{
+		"error":   "subscription not found",
+		"message": "このサブスクリプションはこのテナントに紐付いていません。Lemon Squeezy の購入時に発行された紐付けが見つからない場合は、サポートにお問い合わせください。",
+	})
+}
+
+// syncBySubscriptionID re-syncs a subscription that is ALREADY linked to the
+// calling tenant. It is a recovery mechanism for a dropped
+// `subscription_created` / `subscription_updated` webhook — not a way to
+// claim a subscription.
+//
+// M46 — why this cannot create or re-parent links:
+//
+// The tenant⇄subscription link is established exactly once, at checkout,
+// through `checkout[custom][tenant_id]` (see CreateCheckout), and Lemon
+// Squeezy hands that value back ONLY in the webhook envelope's
+// `meta.custom_data`. The REST subscription object this handler fetches has
+// no custom_data field at all — verified against
+// docs.lemonsqueezy.com/api/subscriptions/the-subscription-object on
+// 2026-07-27, whose complete attribute list is store_id, customer_id,
+// order_id, order_item_id, product_id, variant_id, product_name,
+// variant_name, user_name, user_email, status, status_formatted, card_brand,
+// card_last_four, payment_processor, pause, cancelled, trial_ends_at,
+// billing_anchor, first_subscription_item, urls, renews_at, ends_at,
+// created_at, updated_at, test_mode. The order object (reachable via
+// order_id) has no custom_data either, and the provider's own "Passing
+// custom data" page states custom data is returned in the `meta` field of
+// webhooks. `user_email` is the only identity-ish attribute, and it names a
+// Lemon Squeezy CUSTOMER, not a tenant: `tenants` carries no billing email
+// column, a user may belong to several tenants, and the address is not
+// verified against anything we control.
+//
+// So an API answer can prove "this subscription exists in our store"; it can
+// never prove "it belongs to the caller". Rather than invent a weaker proof,
+// the endpoint refuses everything it cannot verify against a link the
+// webhook already made. See docs/SAAS_SETUP.md for the operator-facing
+// consequence.
 func (h *BillingHandler) syncBySubscriptionID(c echo.Context, ctx context.Context, tenantID uuid.UUID, lsSubID string) error {
+	// Step 1 — resolve the caller's OWN link with a TENANT-SCOPED read, and
+	// refuse anything that is not it, before the provider is contacted.
+	//
+	// Ordering is load-bearing (M46 Codex round 1, Medium). Doing the
+	// provider fetch first and the ownership check second made the identical
+	// 404 an execution-path oracle: a subscription id unknown to Lemon
+	// Squeezy short-circuited after one outbound call, while a known one
+	// went on to hit the database — observable in latency, and divergent
+	// again during a database outage (500 for a known id, 404 for an unknown
+	// one). Resolving locally first means every refusal executes exactly the
+	// same statements, whatever id was supplied.
+	//
+	// It also shrinks the surface in two further ways: this handler no
+	// longer calls the tenant-UNSCOPED GetByLSSubscriptionID at all (that
+	// lookup exists for the webhook, which has no tenant context), and an
+	// unauthorised caller can no longer make the server issue an outbound
+	// request to Lemon Squeezy for an id of their choosing.
+	//
+	// `subscriptions` carries UNIQUE(tenant_id) (migration 008), so a tenant
+	// has at most one subscription and this single read is the whole
+	// ownership question. Only sql.ErrNoRows means "no subscription"; any
+	// other error is a transient failure that must not be misread as one.
+	own, err := h.subRepo.GetByTenantID(ctx, tenantID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		slog.Error("billing: subscription lookup failed during sync",
+			"error", err, "tenant_id", tenantID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up subscription"})
+	}
+
+	if own == nil || own.LSSubscriptionID != lsSubID {
+		// Either the caller has no subscription at all, or it named one that
+		// is not theirs — another tenant's, or one that has never been linked
+		// here. All of it is refused with the one sentinel, and none of it
+		// reaches the provider. Ownership of an unlinked subscription is
+		// unprovable (see the doc comment), so there is nothing to fall back
+		// on; the caller's own id is the only thing this endpoint accepts.
+		slog.Warn("billing: manual sync refused, subscription is not the caller's",
+			"tenant_id", tenantID,
+			"requested_ls_subscription_id", lsSubID,
+			"has_own_subscription", own != nil,
+			"ip", c.RealIP())
+		return syncNotLinkedSentinel(c)
+	}
+
+	// Step 2 — the id is the caller's own; refresh it from the provider.
 	sub, err := h.fetchLemonSqueezySubscriptionByID(lsSubID)
 	if err != nil {
 		// F44x: the Lemon Squeezy API error (which can carry the raw upstream
@@ -369,46 +459,94 @@ func (h *BillingHandler) syncBySubscriptionID(c echo.Context, ctx context.Contex
 	}
 
 	if sub == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "Subscription not found in Lemon Squeezy"})
+		// Our link points at a subscription Lemon Squeezy no longer knows.
+		// That is an operator-facing data anomaly, not something the caller
+		// can act on — same sentinel, loud log.
+		slog.Warn("billing: linked subscription is unknown to Lemon Squeezy",
+			"tenant_id", tenantID, "ls_subscription_id", lsSubID)
+		return syncNotLinkedSentinel(c)
 	}
 
-	// Determine plan from product name (variant_name is often "Default")
-	plan := h.productNameToPlan(sub.Attributes.ProductName)
+	// Step 2b — re-read the row before writing (M46 Codex round 6).
+	//
+	// The provider call above can take up to 30s, and the webhook route runs
+	// OUTSIDE this transaction, so a subscription_cancelled / _expired /
+	// _paused delivery can land while we wait. `own` was read BEFORE that
+	// call and Update writes the WHOLE row, so writing it back would silently
+	// revert whatever the webhook just recorded (renews_at, ends_at,
+	// cancelled_at, periods). Checking ownership before the fetch — which is
+	// what removes the enumeration oracle and the unauthorised outbound call
+	// — is what widened that window, so it is closed here rather than by
+	// going back to fetch-first.
+	//
+	// This is not a full fix for the sync/webhook race (that needs the
+	// provider's revision timestamp persisted and compared — see
+	// docs/SAAS_SETUP.md residuals); it narrows the window back to the
+	// ordinary read-then-write gap instead of the length of an HTTP call.
+	fresh, err := h.subRepo.GetByTenantID(ctx, tenantID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		slog.Error("billing: subscription re-read failed during sync",
+			"error", err, "tenant_id", tenantID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up subscription"})
+	}
+	if fresh == nil || fresh.LSSubscriptionID != lsSubID {
+		// The link was deleted or re-pointed while we were talking to the
+		// provider. The ownership proof no longer holds — refuse rather than
+		// write against a row we never verified.
+		slog.Warn("billing: subscription link changed during the provider call, sync abandoned",
+			"tenant_id", tenantID, "ls_subscription_id", lsSubID, "still_linked", fresh != nil)
+		return syncNotLinkedSentinel(c)
+	}
+	own = fresh
 
-	// Check if subscription already exists in our DB
-	existingSub, _ := h.subRepo.GetByLSSubscriptionID(ctx, sub.ID)
-	if existingSub != nil {
-		// Update existing
-		existingSub.Status = sub.Attributes.Status
-		existingSub.Plan = plan
-		existingSub.TenantID = tenantID // Link to current tenant
-		existingSub.UpdatedAt = time.Now()
-		if err := h.subRepo.Update(ctx, existingSub); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update subscription"})
-		}
-	} else {
-		// Create new
-		now := time.Now()
-		newSub := &model.Subscription{
-			ID:               uuid.New(),
-			TenantID:         tenantID,
-			LSSubscriptionID: sub.ID,
-			LSCustomerID:     fmt.Sprintf("%d", sub.Attributes.CustomerID),
-			LSVariantID:      fmt.Sprintf("%d", sub.Attributes.VariantID),
-			LSProductID:      fmt.Sprintf("%d", sub.Attributes.ProductID),
-			Status:           sub.Attributes.Status,
-			Plan:             plan,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		}
-		if err := h.subRepo.Create(ctx, newSub); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create subscription"})
-		}
+	// Step 3 — ownership confirmed. TenantID is NOT reassigned: the stored
+	// link is authoritative and this endpoint only refreshes provider-side
+	// state.
+	//
+	// Two DIFFERENT plan values, deliberately (M46 Codex round 4):
+	//
+	//   - subscriptions.plan records WHAT WAS BOUGHT. Every webhook handler
+	//     writes productNameToPlan(product) there and nothing else, so sync
+	//     must too. The first cut of the expiry fix wrote the entitlement
+	//     (free) into this column instead, and that desynchronised it from
+	//     the webhook with a nasty consequence: handleSubscriptionUpdated
+	//     upgrades the tenant whenever `newPlan != previousPlan`, reading
+	//     previousPlan out of this very column. Lemon Squeezy emits
+	//     subscription_updated alongside subscription_expired, so a caller
+	//     who synced in between saw free != team and got Team back for
+	//     nothing. Pinned by
+	//     TestBillingSync_ExpiredSyncThenUpdatedWebhookStaysFree.
+	//   - tenants.plan is the ENTITLEMENT — the field the limit/feature
+	//     gates read (middleware/tenant.go) and the one
+	//     handleSubscriptionExpired sets to free. This is where the
+	//     status-aware value belongs, and what the response reports.
+	productPlan := h.productNameToPlan(sub.Attributes.ProductName)
+	plan := h.entitlementPlan(sub.Attributes.ProductName, sub.Attributes.Status)
+	own.Status = sub.Attributes.Status
+	own.Plan = productPlan
+	own.UpdatedAt = time.Now()
+	if err := h.subRepo.Update(ctx, own); err != nil {
+		// Includes repository.ErrSubscriptionNotFound: the row moved or was
+		// deleted between the read above and this write. Fail the request —
+		// the tenant plan update below must not run on an unwritten row.
+		slog.Error("billing: failed to update subscription during sync",
+			"error", err, "tenant_id", tenantID, "ls_subscription_id", lsSubID)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update subscription"})
 	}
 
-	// Update tenant plan
+	// Update tenant plan. Only reachable once the subscription row is proven
+	// to belong to this tenant AND the write above actually landed.
+	//
+	// M46 (Codex round 3): a failure here used to be logged and then
+	// answered with `{"status":"synced"}`, which is a lie — the subscription
+	// row moved but tenants.plan (what the limit/feature gates read) did
+	// not. Returning 500 makes TenantTx roll BOTH writes back (it treats any
+	// >=400 response as a rollback signal, see middleware/tx.go), so the two
+	// halves of the billing state can no longer diverge on this path.
 	if err := h.tenantRepo.UpdatePlan(ctx, tenantID, plan); err != nil {
-		slog.Error("failed to update tenant plan", "error", err)
+		slog.Error("billing: failed to update tenant plan during sync",
+			"error", err, "tenant_id", tenantID, "plan", plan)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update plan"})
 	}
 
 	slog.Info("subscription synced by ID", "tenant_id", tenantID, "ls_subscription_id", lsSubID, "plan", plan)
@@ -425,7 +563,11 @@ func (h *BillingHandler) fetchLemonSqueezySubscriptionByID(subID string) (*LSAPI
 		return nil, fmt.Errorf("subscription ID is required")
 	}
 
-	url := fmt.Sprintf("https://api.lemonsqueezy.com/v1/subscriptions/%s", subID)
+	base := h.lsBaseURL
+	if base == "" {
+		base = lemonSqueezyDefaultBaseURL
+	}
+	url := fmt.Sprintf("%s/v1/subscriptions/%s", base, subID)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -474,6 +616,41 @@ type LSAPISubscription struct {
 		VariantName string `json:"variant_name"`
 		ProductName string `json:"product_name"`
 	} `json:"attributes"`
+}
+
+// entitlementPlan maps a Lemon Squeezy subscription to the plan the tenant is
+// actually entitled to, from BOTH the product name and the subscription
+// status. Its result belongs in tenants.plan ONLY — subscriptions.plan keeps
+// recording the purchased product, see the two-values comment in
+// syncBySubscriptionID.
+//
+// M46 (Codex round 3, High): the manual sync path used productNameToPlan
+// alone and ignored status entirely. A tenant whose Team subscription had
+// EXPIRED — and had therefore already been downgraded to free by
+// handleSubscriptionExpired — could POST its own stored ls_subscription_id
+// and get Team back, for free, as often as it liked. The stale row is no
+// guard either: handleSubscriptionExpired writes only `status`, so
+// subscriptions.plan stays "team" through expiry.
+//
+// The policy below is NOT invented here; it is the policy the webhook
+// handlers already implement, which is what a recovery endpoint must
+// reproduce:
+//
+//   - expired  → free. handleSubscriptionExpired calls UpdatePlan(PlanFree).
+//   - cancelled → keep the product plan. handleSubscriptionCancelled
+//     deliberately does not downgrade ("still active until ends_at").
+//   - paused / past_due / unpaid / on_trial / active → keep the product
+//     plan. No webhook handler downgrades for these today.
+//
+// Tightening cancelled/paused/past_due/unpaid is a product decision, not a
+// bug fix, and is deliberately left alone here: doing it in one path only
+// would make sync and webhook disagree, which is the exact class of bug this
+// function exists to close. See docs/SAAS_SETUP.md residuals.
+func (h *BillingHandler) entitlementPlan(productName, status string) string {
+	if status == model.StatusExpired {
+		return model.PlanFree
+	}
+	return h.productNameToPlan(productName)
 }
 
 // productNameToPlan maps Lemon Squeezy product name to plan name

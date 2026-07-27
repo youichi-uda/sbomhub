@@ -44,6 +44,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -241,6 +242,13 @@ func TestSubscription_WebhookLookupSucceedsWithoutTenantContext(t *testing.T) {
 // must only see its own rows; cross-tenant Update / UpdateStatus /
 // Delete probes must not touch other tenants' rows even when the caller
 // supplies a model struct whose TenantID has been swapped.
+//
+// M46 contract change: those probes previously had to be silent no-ops
+// (nil error). That was exactly the hole — `handler/billing.go` read the
+// nil error as "the write succeeded", skipped past its own error branch
+// and granted the caller the victim's plan. The guard must now be
+// AUDIBLE: a blocked probe returns ErrSubscriptionNotFound while still
+// leaving the victim's row untouched. Both halves are asserted below.
 func TestSubscription_ApplicationLayerTenantIsolation(t *testing.T) {
 	appURL, migURL := subscriptionTestEnv(t)
 
@@ -312,8 +320,12 @@ func TestSubscription_ApplicationLayerTenantIsolation(t *testing.T) {
 	probe.TenantID = tenantB // hostile or buggy reassignment
 	probe.Status = model.StatusCancelled
 	probe.Plan = model.PlanFree
-	if err := repo.Update(ctx, &probe); err != nil {
-		t.Fatalf("Update probe: %v (should be a no-op, not an error)", err)
+	err = repo.Update(ctx, &probe)
+	if err == nil {
+		t.Fatal("Update probe returned nil error; a blocked cross-tenant write MUST NOT read as success (M46)")
+	}
+	if !errors.Is(err, ErrSubscriptionNotFound) {
+		t.Fatalf("Update probe error = %v, want ErrSubscriptionNotFound", err)
 	}
 
 	stillA, err := repo.GetByTenantID(ctx, tenantA)
@@ -328,8 +340,8 @@ func TestSubscription_ApplicationLayerTenantIsolation(t *testing.T) {
 
 	// 3. UpdateStatus(tenantB, subA.ID, "cancelled") MUST NOT cancel
 	//    tenantA's subscription. (Cross-tenant by-ID probe.)
-	if err := repo.UpdateStatus(ctx, tenantB, subA.ID, model.StatusCancelled); err != nil {
-		t.Fatalf("UpdateStatus cross-tenant probe: %v (should be a no-op, not an error)", err)
+	if err := repo.UpdateStatus(ctx, tenantB, subA.ID, model.StatusCancelled); !errors.Is(err, ErrSubscriptionNotFound) {
+		t.Fatalf("UpdateStatus cross-tenant probe error = %v, want ErrSubscriptionNotFound (M46: the guard must be audible)", err)
 	}
 	stillA2, err := repo.GetByTenantID(ctx, tenantA)
 	if err != nil {
@@ -342,8 +354,8 @@ func TestSubscription_ApplicationLayerTenantIsolation(t *testing.T) {
 	}
 
 	// 4. Delete(tenantB, subA.ID) MUST NOT delete tenantA's subscription.
-	if err := repo.Delete(ctx, tenantB, subA.ID); err != nil {
-		t.Fatalf("Delete cross-tenant probe: %v (should be a no-op, not an error)", err)
+	if err := repo.Delete(ctx, tenantB, subA.ID); !errors.Is(err, ErrSubscriptionNotFound) {
+		t.Fatalf("Delete cross-tenant probe error = %v, want ErrSubscriptionNotFound (M46: the guard must be audible)", err)
 	}
 	if _, err := repo.GetByTenantID(ctx, tenantA); err != nil {
 		t.Fatalf("tenantA subscription disappeared after cross-tenant Delete probe: %v "+

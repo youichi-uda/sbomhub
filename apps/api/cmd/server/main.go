@@ -827,10 +827,22 @@ func main() {
 	auth.GET("/stats", statsHandler.Get)
 
 	// Billing endpoints
+	//
+	// M46: /subscription/sync mutates the tenant's billing plan from a
+	// caller-supplied Lemon Squeezy subscription id, so it is gated to
+	// Owner/Admin with the same appmw.RequireAdmin() used by API-key
+	// management (F16). It previously had no role gate at all — every
+	// Member and Viewer of every tenant could reach it. The handler-side
+	// ownership check is the actual fix for the cross-tenant escalation;
+	// this gate is the defence-in-depth half that keeps a plan change an
+	// administrative act. The remaining billing routes are unchanged: the
+	// two GETs are reads, /checkout only builds a URL, and gating
+	// /plan/select-free would change the self-serve onboarding flow (see
+	// the report's residuals).
 	auth.GET("/subscription", billingHandler.GetSubscription)
 	auth.POST("/subscription/checkout", billingHandler.CreateCheckout)
 	auth.GET("/subscription/portal", billingHandler.GetPortalURL)
-	auth.POST("/subscription/sync", billingHandler.SyncSubscription)
+	auth.POST("/subscription/sync", billingHandler.SyncSubscription, appmw.RequireAdmin())
 	auth.GET("/plan/usage", billingHandler.GetUsage)
 	auth.POST("/plan/select-free", billingHandler.SelectFreePlan)
 
