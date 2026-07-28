@@ -133,7 +133,8 @@ func TestGetCVEPaths_MultiProjectFanout(t *testing.T) {
 	search := &fakeCVEPathsSearchRepo{
 		meta: &model.CVEImpactMeta{
 			VulnerabilityID: uuid.New(),
-			Severity:        "HIGH", CVSSScore: f64p(7.5), EPSSScore: 0, InKEV: true,
+			// M47 W4: nil = FIRST.org has no score for this CVE.
+			Severity: "HIGH", CVSSScore: f64p(7.5), EPSSScore: nil, InKEV: true,
 		},
 		totalProjects: 12,
 		affected: []model.CVEAffectedProject{
@@ -159,7 +160,7 @@ func TestGetCVEPaths_MultiProjectFanout(t *testing.T) {
 	if got.CVEID != "CVE-2024-QS" {
 		t.Errorf("cve_id = %q, want CVE-2024-QS (normalised uppercase)", got.CVEID)
 	}
-	if got.Severity != "HIGH" || got.CVSSScore == nil || *got.CVSSScore != 7.5 || !got.InKEV || got.EPSSScore != 0 {
+	if got.Severity != "HIGH" || got.CVSSScore == nil || *got.CVSSScore != 7.5 || !got.InKEV || got.EPSSScore != nil {
 		t.Errorf("meta rollup mismatch: sev=%q cvss=%v kev=%v epss=%v", got.Severity, got.CVSSScore, got.InKEV, got.EPSSScore)
 	}
 	if got.AffectedProjectCount != 2 {

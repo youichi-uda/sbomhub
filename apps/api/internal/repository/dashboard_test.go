@@ -10,13 +10,15 @@ import (
 )
 
 // TestGetTopRisksByTenant_ReadsRealEPSSColumn pins the M36-A / F432 flip:
-// GetTopRisksByTenant must SELECT the real epss_score column wrapped in
-// COALESCE(v.epss_score, 0), NOT the old fixed 0::numeric sentinel (which could
-// never surface a synced score). The assertion is structural on the SQL, so a
-// revert to 0::numeric fails the regex even if the scanned value happened to be
-// 0. Two rows are returned: an un-synced one (the DB's COALESCE turns its NULL
-// into 0) and a synced one whose real score passes through unchanged — proving
-// the read is the live column, not a constant.
+// GetTopRisksByTenant must SELECT the real epss_score column, NOT the old
+// fixed 0::numeric sentinel (which could never surface a synced score).
+//
+// M47 W4 inverted the shape this test pins. It previously required
+// COALESCE(v.epss_score, 0) and asserted that an un-synced row reads 0 —
+// i.e. it pinned the sentinel contract as correct. The column is now read
+// BARE and an un-synced row must surface as nil; a synced score still passes
+// through unchanged, which is what proves the read is the live column and not
+// a constant. The structural negative below fails a revert to 0::numeric.
 func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -26,9 +28,16 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 
 	repo := NewDashboardRepository(db)
 
-	pattern := regexp.MustCompile(`(?is)` + regexp.QuoteMeta("COALESCE(v.epss_score, 0)") + `\s+as\s+epss_score`)
-	if pattern.MatchString("0::numeric as epss_score") {
+	// sqlmock normalises the statement to a single spaced line, so the
+	// discriminator anchors on the preceding column: the bare form emits
+	// "v.cve_id, v.epss_score," while both sentinel forms interpose either
+	// 0::numeric or a COALESCE wrapper.
+	pattern := regexp.MustCompile(`(?is)v\.cve_id,\s*v\.epss_score,`)
+	if pattern.MatchString("v.cve_id, 0::numeric as epss_score,") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinel")
+	}
+	if pattern.MatchString("v.cve_id, COALESCE(v.epss_score, 0) as epss_score,") {
+		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
 	tenantID := uuid.New()
@@ -39,8 +48,8 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 			"cve_id", "epss_score", "cvss_score", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}).
-			// Un-synced CVE: COALESCE(v.epss_score, 0) -> 0.
-			AddRow("CVE-2026-0001", float64(0), 9.8, "CRITICAL", projID, "app-a", "libx", "1.0").
+			// Un-synced CVE: the bare column yields a raw NULL -> nil pointer.
+			AddRow("CVE-2026-0001", nil, 9.8, "CRITICAL", projID, "app-a", "libx", "1.0").
 			// Synced CVE: the real score passes through.
 			AddRow("CVE-2026-0002", 0.4237, 7.5, "HIGH", projID, "app-a", "liby", "2.0"))
 
@@ -51,11 +60,14 @@ func TestGetTopRisksByTenant_ReadsRealEPSSColumn(t *testing.T) {
 	if len(risks) != 2 {
 		t.Fatalf("len(risks) = %d, want 2", len(risks))
 	}
-	if risks[0].EPSSScore != 0 {
-		t.Errorf("risks[0].EPSSScore = %v, want 0 (un-synced row COALESCEs to 0)", risks[0].EPSSScore)
+	if risks[0].EPSSScore != nil {
+		t.Errorf("un-synced risk EPSSScore = %v, want nil (un-scored is NOT 0%%)", *risks[0].EPSSScore)
 	}
-	if risks[1].EPSSScore != 0.4237 {
-		t.Errorf("risks[1].EPSSScore = %v, want 0.4237 (real synced score passes through)", risks[1].EPSSScore)
+	if risks[1].EPSSScore == nil {
+		t.Fatalf("synced risk EPSSScore = nil, want 0.4237 (real synced score passes through)")
+	}
+	if *risks[1].EPSSScore != 0.4237 {
+		t.Errorf("risks[1].EPSSScore = %v, want 0.4237 (real synced score passes through)", *risks[1].EPSSScore)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
@@ -138,14 +150,18 @@ func TestGetTopRisksByTenant_NoCVSSZeroSentinel(t *testing.T) {
 	}
 }
 
-// TestGetTopRisksByTenant_NullEPSSWithoutCoalesceErrors documents WHY the
-// COALESCE is load-bearing (M36-A / F432): TopRisk.EPSSScore is a bare float64,
-// so a raw SQL NULL scanned into it errors. The 055 column is nullable and stays
-// NULL until epss_sync runs, so a bare `v.epss_score` read would 500 on an
-// un-synced top-risk row. COALESCE(v.epss_score, 0) makes the DB return 0
-// instead. Here we feed the raw NULL a bare column would yield and confirm it is
-// the error path.
-func TestGetTopRisksByTenant_NullEPSSWithoutCoalesceErrors(t *testing.T) {
+// TestGetTopRisksByTenant_NullEPSSScansCleanly is the M47 W4 inversion of the
+// old TestGetTopRisksByTenant_NullEPSSWithoutCoalesceErrors, which asserted
+// that a raw NULL epss_score MUST error and therefore justified the COALESCE.
+// That justification only held while TopRisk.EPSSScore was a bare float64.
+// The field is now *float64, so the 055 column's NULL — which is the normal
+// state until epss_sync runs, and the state migration 059's tombstone
+// deliberately restores — must scan cleanly to nil instead of 500-ing.
+//
+// A real 0.0 is asserted alongside it: epss_score is DECIMAL(5,4), so a
+// FIRST score below 0.00005 rounds to exactly 0.0000 on insert. That value
+// must stay non-nil and distinguishable from "no score".
+func TestGetTopRisksByTenant_NullEPSSScansCleanly(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -162,10 +178,24 @@ func TestGetTopRisksByTenant_NullEPSSWithoutCoalesceErrors(t *testing.T) {
 			"cve_id", "epss_score", "cvss_score", "severity",
 			"project_id", "project_name", "component_name", "component_version",
 		}).
-			AddRow("CVE-2026-0003", nil, 9.8, "CRITICAL", projID, "app-a", "libx", "1.0"))
+			AddRow("CVE-2026-0003", nil, 9.8, "CRITICAL", projID, "app-a", "libx", "1.0").
+			AddRow("CVE-2026-0004", float64(0), 9.8, "CRITICAL", projID, "app-a", "libx", "1.0"))
 
-	if _, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "cvss"); err == nil {
-		t.Fatalf("expected a scan error when a raw NULL epss_score reaches the bare float64 target (the 500 path COALESCE prevents)")
+	risks, err := repo.GetTopRisksByTenant(context.Background(), tenantID, 10, "cvss")
+	if err != nil {
+		t.Fatalf("a raw NULL epss_score must scan cleanly into *float64, got: %v", err)
+	}
+	if len(risks) != 2 {
+		t.Fatalf("len(risks) = %d, want 2", len(risks))
+	}
+	if risks[0].EPSSScore != nil {
+		t.Errorf("NULL epss_score = %v, want nil", *risks[0].EPSSScore)
+	}
+	if risks[1].EPSSScore == nil {
+		t.Fatalf("real 0.0 epss_score = nil, want *0.0 (a rounded-to-zero FIRST score is a measurement)")
+	}
+	if *risks[1].EPSSScore != 0 {
+		t.Errorf("real 0.0 epss_score = %v, want 0.0", *risks[1].EPSSScore)
 	}
 }
 

@@ -30,19 +30,22 @@ func (r *SearchRepository) q(ctx context.Context) database.Queryable {
 // SearchByCVE searches for all projects affected by a specific CVE
 func (r *SearchRepository) SearchByCVE(ctx context.Context, cveID string) (*model.CVESearchResult, error) {
 	// First, get the vulnerability info.
-	// M36-A / F432: epss_score is now in the canonical migration chain
-	// (055_vulnerabilities_epss), so this reads the real column instead of the
-	// old 0::numeric sentinel. COALESCE(epss_score, 0) keeps it NULL-safe (the
-	// column stays NULL until the scheduled epss_sync populates it, and scanning
-	// a SQL NULL into the bare float64 CVESearchResult.EPSSScore would error);
-	// the COALESCE holds the SAME 5th position in the positional SELECT, so the
-	// Scan target order below is unchanged.
+	// M36-A / F432: epss_score is in the canonical migration chain
+	// (055_vulnerabilities_epss), so this reads the real column instead of
+	// the old 0::numeric sentinel.
+	//
+	// M47 W4 (supersedes M36-A's COALESCE): epss_score is read BARE into the
+	// *float64 CVESearchResult.EPSSScore. COALESCE(epss_score, 0) made an
+	// un-scored CVE indistinguishable from one FIRST scores at ~0%, and the
+	// search result is the surface an operator uses to triage a single CVE.
+	// The bare column holds the SAME 5th position in the positional SELECT,
+	// so the Scan target order below is unchanged.
 	// M46 B2: description/severity are DDL-nullable and COALESCE'd to ''
 	// (NVD "Awaiting Analysis" rows are real); cvss_score scans into the
 	// *float64 CVESearchResult.CVSSScore — no 0-sentinel, un-scored stays
 	// nil (CVSS 0.0 is a real "None" score).
 	vulnQuery := `
-		SELECT id, cve_id, COALESCE(description, ''), cvss_score, COALESCE(epss_score, 0), COALESCE(severity, '')
+		SELECT id, cve_id, COALESCE(description, ''), cvss_score, epss_score, COALESCE(severity, '')
 		FROM vulnerabilities
 		WHERE cve_id = $1
 		LIMIT 1
@@ -236,22 +239,23 @@ func (r *SearchRepository) SearchByComponent(ctx context.Context, name string, v
 }
 
 func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, componentID uuid.UUID) ([]model.Vulnerability, error) {
-	// M36-A / F432: epss_score/epss_percentile are now in the canonical migration
-	// chain (055_vulnerabilities_epss), so this reads the real columns instead of
-	// the old 0::numeric sentinels. COALESCE(v.epss_score, 0) /
-	// COALESCE(v.epss_percentile, 0) keep it NULL-safe (both columns stay NULL
-	// until the scheduled epss_sync populates them, and scanning a SQL NULL into
-	// the bare float64 locals below would error). They hold the SAME 6th/7th
-	// positions in the positional SELECT, so the Scan target order is unchanged;
-	// the `> 0` guard below still leaves the model pointers nil for an un-synced
-	// (COALESCE-0) row, preserving the web >0 EPSS-badge suppression (F391).
+	// M36-A / F432: epss_score/epss_percentile are in the canonical migration
+	// chain (055_vulnerabilities_epss), so this reads the real columns
+	// instead of the old 0::numeric sentinels.
+	//
+	// M47 W4 (supersedes M36-A's COALESCE): both columns are read BARE into
+	// sql.NullFloat64 and only a NULL leaves the model pointer nil. The
+	// previous form was COALESCE(...,0) followed by a `> 0` guard, which
+	// mapped BOTH a NULL and a real 0.0000 to nil — so a CVE FIRST actually
+	// scores at ~0% was reported to the caller as un-scored. NULL and 0 are
+	// now distinct: nil = no score, non-nil 0.0 = a measured ~0% score.
 	// M46 B2: description/severity COALESCE'd to '', source to 'NVD'
 	// (this repo's existing convention); cvss_score/published_at/
 	// updated_at scan into the model's pointer fields. NULLS LAST keeps
 	// un-scored rows at the tail (Postgres defaults DESC to NULLS FIRST).
 	query := `
 		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
-		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
+		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'), v.published_at, v.updated_at
 		FROM vulnerabilities v
 		INNER JOIN component_vulnerabilities cv ON v.id = cv.vulnerability_id
@@ -268,7 +272,7 @@ func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, comp
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		var epssScore, epssPercentile float64
+		var epssScore, epssPercentile sql.NullFloat64
 		if err := rows.Scan(
 			&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
@@ -276,11 +280,11 @@ func (r *SearchRepository) getComponentVulnerabilities(ctx context.Context, comp
 		); err != nil {
 			return nil, err
 		}
-		if epssScore > 0 {
-			v.EPSSScore = &epssScore
+		if epssScore.Valid {
+			v.EPSSScore = &epssScore.Float64
 		}
-		if epssPercentile > 0 {
-			v.EPSSPercentile = &epssPercentile
+		if epssPercentile.Valid {
+			v.EPSSPercentile = &epssPercentile.Float64
 		}
 		vulns = append(vulns, v)
 	}

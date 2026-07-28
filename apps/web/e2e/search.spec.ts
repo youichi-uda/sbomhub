@@ -407,11 +407,11 @@ test.describe('Search Functionality', () => {
             cve_id: 'CVE-2021-44228',
             severity: 'critical',
             cvss_score: 10.0,
-            // F391 (#135): the backend emits a fixed epss_score = 0 until the
-            // optional 006_epss migration lands, so the mock reflects the real
-            // backend behaviour (0), not a value it can never produce. The web
-            // suppresses the EPSS badge on a sentinel 0 — asserted below.
-            epss_score: 0,
+            // M47 W4 retires F391 (#135): the backend now OMITS epss_score
+            // when FIRST.org has no score for the CVE, and emits a real 0
+            // only as a genuine "~0%" prediction. This mock takes the
+            // un-scored shape (field absent); the web renders the dedicated
+            // unscored badge — asserted below.
             in_kev: true,
             affected_project_count: 2,
             total_project_count: 5,
@@ -468,11 +468,12 @@ test.describe('Search Functionality', () => {
         await expect(summary).toHaveAttribute('data-affected-count', '2');
         await expect(summary).toHaveAttribute('data-total-count', '5');
         await expect(summary).toContainText('2 of 5 projects affected');
-        // Rollup badges. CVSS is always present; the EPSS badge is suppressed
-        // while the backend emits a sentinel epss_score = 0 (F391) — never a
-        // misleading "EPSS 0.0%".
+        // Rollup badges. CVSS is always present; an omitted epss_score means
+        // FIRST.org has no score, which renders as the dedicated unscored
+        // badge — never a misleading "EPSS 0.0%" (M47 W4, retiring F391's
+        // suppress-on-0 rule).
         await expect(summary.getByTestId('blast-radius-cvss')).toContainText('CVSS 10.0');
-        await expect(summary.getByTestId('blast-radius-epss')).toHaveCount(0);
+        await expect(summary.getByTestId('blast-radius-epss')).toContainText('EPSS unscored');
         // Per-project rollup (name + component_count).
         const projects = summary.getByTestId('blast-radius-project');
         await expect(projects).toHaveCount(2);
@@ -489,8 +490,7 @@ test.describe('Search Functionality', () => {
             cve_id: 'CVE-2021-44228',
             severity: 'high',
             cvss_score: 7.5,
-            // F391 (#135): mirror the backend's fixed epss_score = 0 sentinel.
-            epss_score: 0,
+            // M47 W4: un-scored CVEs arrive with epss_score omitted.
             in_kev: false,
             affected_project_count: 0,
             total_project_count: 5,

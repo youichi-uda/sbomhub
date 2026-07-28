@@ -719,6 +719,7 @@
     "cvss": "CVSS {score}",
     "cvssUnscored": "CVSS 未採点",
     "epss": "EPSS {pct}%",
+    "epssUnscored": "EPSS 未採点",
     "componentCount": "{count} コンポーネント"
   },
   "Audit": {

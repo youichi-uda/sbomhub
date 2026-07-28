@@ -773,6 +773,19 @@ func reportCVSSText(score *float64, t *ReportTranslations) string {
 	return fmt.Sprintf("%.1f", *score)
 }
 
+// reportEPSSText renders a Top Risk's EPSS for the PDF / Excel report body.
+// nil means FIRST.org has no score for this CVE and renders as the locale's
+// Unscored label — NEVER "0.00%": epss_score is DECIMAL(5,4), so a stored
+// 0.0000 is a real prediction of a ~0% exploitation chance, and a report
+// that prints both as "0.00%" tells an auditor a measurement exists that
+// does not (M47 W4, mirrors reportCVSSText above).
+func reportEPSSText(score *float64, t *ReportTranslations) string {
+	if score == nil {
+		return t.Unscored
+	}
+	return fmt.Sprintf("%.2f%%", *score*100)
+}
+
 func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.ExecutiveReportData, t *ReportTranslations) {
 	// Summary Section
 	m.AddRows(s.buildPDFSectionHeader(t.Summary))
@@ -840,7 +853,7 @@ func (s *ReportService) buildTechnicalPDFContent(m core.Maroto, data *model.Exec
 			}
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("%d. %s", i+1, risk.CVEID),
-				fmt.Sprintf("CVSS: %s, EPSS: %.2f%%", reportCVSSText(risk.CVSSScore, t), risk.EPSSScore*100),
+				fmt.Sprintf("CVSS: %s, EPSS: %s", reportCVSSText(risk.CVSSScore, t), reportEPSSText(risk.EPSSScore, t)),
 			))
 			m.AddRows(s.buildPDFKeyValue(
 				fmt.Sprintf("   %s", t.Project),
@@ -1162,7 +1175,7 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 			} else {
 				ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("D%d", row), t.Unscored))
 			}
-			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("E%d", row), fmt.Sprintf("%.2f%%", risk.EPSSScore*100)))
+			ec.collect(f.SetCellValue(riskSheet, fmt.Sprintf("E%d", row), reportEPSSText(risk.EPSSScore, t)))
 		}
 	}
 

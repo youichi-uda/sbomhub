@@ -719,6 +719,7 @@
     "cvss": "CVSS {score}",
     "cvssUnscored": "CVSS unscored",
     "epss": "EPSS {pct}%",
+    "epssUnscored": "EPSS unscored",
     "componentCount": "{count} components"
   },
   "Audit": {

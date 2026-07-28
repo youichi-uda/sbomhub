@@ -507,7 +507,11 @@ export interface VulnerabilityCounts {
 
 export interface TopRisk {
   cve_id: string;
-  epss_score: number;
+  // M47 W4: absent when FIRST.org has no score for this CVE (never synced,
+  // or cleared by the epss tombstone). No 0-sentinel — epss_score is
+  // DECIMAL(5,4) server-side, so a present 0 is a real "~0% chance of
+  // exploitation" prediction. Render absent as "未採点"/"—", never 0.0%.
+  epss_score?: number;
   // M46 W4: absent for un-scored CVEs (NVD "Awaiting Analysis"). No
   // 0-sentinel — CVSS 0.0 is a real "None" score; render un-scored as
   // "—", never 0.0 (see Vulnerability.cvss_score).
@@ -709,7 +713,8 @@ export interface CVESearchResult {
   description: string;
   // M46 B2: absent for un-scored CVEs (no 0-sentinel; see Vulnerability).
   cvss_score?: number;
-  epss_score: number;
+  // M47 W4: absent when un-scored (see TopRisk.epss_score).
+  epss_score?: number;
   severity: string;
   affected_projects: AffectedProject[];
   unaffected_projects: UnaffectedProject[];
@@ -740,7 +745,8 @@ export interface CVEImpactResult {
   severity: string;
   // M46 W4: absent for un-scored CVEs (no 0-sentinel; see Vulnerability).
   cvss_score?: number;
-  epss_score: number;
+  // M47 W4: absent when un-scored (see TopRisk.epss_score).
+  epss_score?: number;
   in_kev: boolean;
   affected_project_count: number;
   total_project_count: number;
@@ -811,7 +817,8 @@ export interface CVEPathsResult {
   severity: string;
   // M46 W4: absent for un-scored CVEs (no 0-sentinel; see Vulnerability).
   cvss_score?: number;
-  epss_score: number;
+  // M47 W4: absent when un-scored (see TopRisk.epss_score).
+  epss_score?: number;
   in_kev: boolean;
   affected_project_count: number;
   total_project_count: number;

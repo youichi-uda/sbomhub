@@ -27,7 +27,7 @@ func wave4Notif(score *float64) model.VulnerabilityNotification {
 	return model.VulnerabilityNotification{
 		CVEID:            "CVE-2026-4444",
 		CVSSScore:        score,
-		EPSSScore:        0.42,
+		EPSSScore:        f64p(0.42),
 		Severity:         "CRITICAL",
 		ProjectID:        "11111111-1111-1111-1111-111111111111",
 		ProjectName:      "app-a",

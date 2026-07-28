@@ -371,7 +371,8 @@ func TestM47W2_UpdateReport_CrossTenantIsNotSuccess(t *testing.T) {
 // and migration 042's FORCE RLS was the sole guard. When RLS fired the
 // statement matched 0 rows and returned nil, so the service reported a
 // saved assessment and went on to stamp the denormalised
-// vulnerabilities.ssvc_decision from it. The explicit
+// vulnerabilities.ssvc_decision from it (that second write was removed in
+// M47 W4; migration 062 dropped the column). The explicit
 // `AND tenant_id AND project_id` belt added here mirrors the belt its
 // sibling DeleteAssessment already carried.
 func TestM47W2_SSVCUpdateAssessment_CrossTenantIsNotSuccess(t *testing.T) {

@@ -94,17 +94,18 @@ func vulnListOrderBy(sortBy string) string {
 }
 
 func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uuid.UUID, sortBy string) ([]model.Vulnerability, error) {
-	// F446: epss_score/epss_percentile are read via COALESCE(...,0) (NULL
-	// until epss_sync populates them) with the `> 0` guard below leaving
-	// the model pointers nil for un-synced rows — same pattern as
-	// SearchRepository.getComponentVulnerabilities so the web EPSS badge
-	// stays suppressed for 0/nil.
+	// M47 W4 (supersedes F446's COALESCE): epss_score/epss_percentile are
+	// read BARE into sql.NullFloat64 and only a NULL leaves the model
+	// pointer nil. The previous COALESCE(...,0) + `> 0` guard mapped both a
+	// NULL and a real 0.0000 to nil, so a CVE FIRST scores at ~0% was
+	// indistinguishable from one it has never scored. Same change as
+	// SearchRepository.getComponentVulnerabilities.
 	// M46 B2: description/severity COALESCE'd to '' (both DDL-nullable;
 	// NVD "Awaiting Analysis" rows are real); cvss_score/published_at/
 	// updated_at scan into the model's pointer fields (no sentinels).
 	query := `
 		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
-		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
+		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at
@@ -123,7 +124,7 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		var epssScore, epssPercentile float64
+		var epssScore, epssPercentile sql.NullFloat64
 		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
 			&v.Source,
@@ -131,11 +132,11 @@ func (r *ComponentRepository) GetVulnerabilities(ctx context.Context, sbomID uui
 			&v.PublishedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
-		if epssScore > 0 {
-			v.EPSSScore = &epssScore
+		if epssScore.Valid {
+			v.EPSSScore = &epssScore.Float64
 		}
-		if epssPercentile > 0 {
-			v.EPSSPercentile = &epssPercentile
+		if epssPercentile.Valid {
+			v.EPSSPercentile = &epssPercentile.Float64
 		}
 		vulns = append(vulns, v)
 	}
@@ -235,13 +236,13 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	// linkages per vulnerability and silently hide later CVEs behind
 	// duplicates within a page.
 	//
-	// F446: epss_score/epss_percentile are added via COALESCE(...,0) with
-	// the `> 0` guard below leaving the model pointers nil for un-synced
-	// rows (mirrors SearchRepository.getComponentVulnerabilities).
+	// M47 W4 (supersedes F446's COALESCE): epss_score/epss_percentile are
+	// read bare into sql.NullFloat64 so NULL (no score) and a real 0.0000
+	// stay distinct — same change as GetVulnerabilities above.
 	// M46 B2: same NULL-safe read shape as GetVulnerabilities above.
 	query := `
 		SELECT v.id, v.cve_id, COALESCE(v.description, ''), COALESCE(v.severity, ''), v.cvss_score,
-		       COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),
+		       v.epss_score, v.epss_percentile,
 		       COALESCE(v.source, 'NVD'),
 		       v.in_kev, v.kev_date_added, v.kev_due_date, v.kev_ransomware_use,
 		       v.published_at, v.updated_at
@@ -264,7 +265,7 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		var epssScore, epssPercentile float64
+		var epssScore, epssPercentile sql.NullFloat64
 		if err := rows.Scan(&v.ID, &v.CVEID, &v.Description, &v.Severity, &v.CVSSScore,
 			&epssScore, &epssPercentile,
 			&v.Source,
@@ -272,11 +273,11 @@ func (r *ComponentRepository) GetVulnerabilitiesPaginated(ctx context.Context, s
 			&v.PublishedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
-		if epssScore > 0 {
-			v.EPSSScore = &epssScore
+		if epssScore.Valid {
+			v.EPSSScore = &epssScore.Float64
 		}
-		if epssPercentile > 0 {
-			v.EPSSPercentile = &epssPercentile
+		if epssPercentile.Valid {
+			v.EPSSPercentile = &epssPercentile.Float64
 		}
 		vulns = append(vulns, v)
 	}

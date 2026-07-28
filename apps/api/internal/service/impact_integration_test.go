@@ -62,9 +62,10 @@ import (
 // setVulnKEVEPSS marks a seeded global vulnerability as KEV-listed. The
 // vulnerabilities table is global (no RLS), so the migrator pool updates it
 // directly. epss_score is intentionally left alone: this seed never syncs an
-// EPSS score, so the row's epss_score stays NULL and the impact view's
-// COALESCE(epss_score, 0) (M36-A / F432) surfaces EPSS as 0 (mirroring
-// SearchByCVE / GetTopRisksByTenant) — see repository/impact.go.
+// EPSS score, so the row's epss_score stays NULL and — since M47 W4 removed
+// the COALESCE(epss_score, 0) that M36-A / F432 had introduced — the impact
+// view surfaces EPSS as ABSENT rather than 0 (mirroring SearchByCVE /
+// GetTopRisksByTenant) — see repository/impact.go.
 func setVulnKEVEPSS(t *testing.T, migDB *sql.DB, vulnID uuid.UUID, inKEV bool) {
 	t.Helper()
 	if _, err := migDB.Exec(`UPDATE vulnerabilities SET in_kev = $1 WHERE id = $2`, inKEV, vulnID); err != nil {
@@ -170,8 +171,10 @@ func TestCVEImpact_BlastRadius(t *testing.T) {
 	if !got.InKEV {
 		t.Errorf("in_kev = false, want true (KEV rollup)")
 	}
-	if got.EPSSScore != 0 {
-		t.Errorf("epss_score = %v, want 0 (no EPSS synced for this seed row)", got.EPSSScore)
+	// M47 W4: no EPSS synced for this seed row means FIRST has no score for
+	// it, which must surface as nil — not as a measured ~0% probability.
+	if got.EPSSScore != nil {
+		t.Errorf("epss_score = %v, want nil (no EPSS synced for this seed row)", *got.EPSSScore)
 	}
 
 	// Case 1: exactly A and B affected; C never appears.

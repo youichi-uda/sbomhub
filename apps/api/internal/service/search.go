@@ -102,13 +102,19 @@ func (s *SearchService) SearchByCVE(ctx context.Context, cveID string) (*model.C
 			slog.Warn("failed to cache CVE in local DB", "cve_id", cveID, "error", err)
 		}
 
-		// Return CVE info (no affected projects since we just fetched it)
+		// Return CVE info (no affected projects since we just fetched it).
+		//
+		// M47 W4: EPSSScore is left nil rather than set to 0. This row was
+		// just fetched from NVD, which carries no EPSS at all — the score
+		// arrives later from FIRST.org via the scheduled epss_sync. The
+		// previous literal 0 asserted a ~0% exploitation probability the
+		// caller had never measured; nil is omitted from the JSON and
+		// renders as 未採点.
 		return &model.CVESearchResult{
 			CVEID:              vuln.CVEID,
 			Description:        vuln.Description,
 			Severity:           vuln.Severity,
 			CVSSScore:          vuln.CVSSScore,
-			EPSSScore:          0,
 			AffectedProjects:   []model.AffectedProject{},
 			UnaffectedProjects: []model.UnaffectedProject{},
 		}, nil

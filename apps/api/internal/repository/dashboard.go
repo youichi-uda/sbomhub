@@ -102,12 +102,18 @@ func topRisksOrderBy(sortBy string) string {
 // GetTopRisksByTenant returns the top vulnerabilities for a tenant's projects,
 // ordered by sortBy ("epss" or, for any other value, cvss — see topRisksOrderBy).
 func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID uuid.UUID, limit int, sortBy string) ([]model.TopRisk, error) {
-	// M36-A / F432: epss_score is now in the canonical migration chain
-	// (055_vulnerabilities_epss), so this reads the real column instead of the
-	// old 0::numeric sentinel. COALESCE(v.epss_score, 0) keeps it NULL-safe: the
-	// column stays NULL until the scheduled epss_sync (M36-B) populates it, and
-	// scanning a SQL NULL into the bare float64 TopRisk.EPSSScore would error.
-	// An un-synced row therefore still reads 0, exactly as before.
+	// M36-A / F432: epss_score is in the canonical migration chain
+	// (055_vulnerabilities_epss), so this reads the real column instead of
+	// the old 0::numeric sentinel.
+	//
+	// M47 W4 (supersedes M36-A's COALESCE): epss_score is read BARE into the
+	// *float64 TopRisk.EPSSScore, the same treatment cvss_score got below.
+	// COALESCE(v.epss_score, 0) collapsed "FIRST has no score for this CVE"
+	// into "FIRST predicts a ~0% chance of exploitation" — 252 of the dev
+	// DB's 10,899 rows are NULL here, and any of them this tenant-filtered,
+	// LIMITed query returned rendered as "EPSS 0.0%" on the dashboard. The
+	// outer ORDER BY already carries NULLS LAST (topRisksOrderBy), which
+	// only starts doing anything now that NULLs actually flow through.
 	//
 	// M46 wave 4 (supersedes M41's COALESCE): cvss_score is read BARE into
 	// the *float64 TopRisk.CVSSScore. The old COALESCE(v.cvss_score, 0)
@@ -124,7 +130,7 @@ func (r *DashboardRepository) GetTopRisksByTenant(ctx context.Context, tenantID 
 	query := `
 		SELECT DISTINCT ON (v.cve_id)
 			v.cve_id,
-			COALESCE(v.epss_score, 0) as epss_score,
+			v.epss_score,
 			v.cvss_score,
 			COALESCE(v.severity, '') as severity,
 			p.id as project_id,

@@ -10,23 +10,18 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
-// M47 W2 — sentinels for the 0-row mutation contract on this repository.
-// Both wrap sql.ErrNoRows; see ErrTenantUserNotFound (repository/user.go)
+// M47 W2 — sentinel for the 0-row mutation contract on this repository.
+// Wraps sql.ErrNoRows; see ErrTenantUserNotFound (repository/user.go)
 // for why.
 var (
 	// ErrSSVCAssessmentNotFound is returned by UpdateAssessment when the
 	// statement matched no `ssvc_assessments` row for the caller's
 	// (tenant, project).
 	ErrSSVCAssessmentNotFound = fmt.Errorf("ssvc_assessments: no row matched for this tenant/project: %w", sql.ErrNoRows)
-
-	// ErrVulnerabilityRowNotFound is returned by
-	// UpdateVulnerabilitySSVCDecision when the statement matched no
-	// `vulnerabilities` row. That table is the global CVE catalogue (no
-	// tenant column), so this only ever means "no such vulnerability id" —
-	// but a denormalised decision that silently failed to land is exactly
-	// the drift the service comment promises not to allow.
-	ErrVulnerabilityRowNotFound = fmt.Errorf("vulnerabilities: no row matched: %w", sql.ErrNoRows)
 )
+
+// M47 W4 removed ErrVulnerabilityRowNotFound alongside
+// UpdateVulnerabilitySSVCDecision, its only producer.
 
 // SSVCRepository handles SSVC data access
 type SSVCRepository struct {
@@ -414,30 +409,15 @@ func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenant
 	return n > 0, nil
 }
 
-// UpdateVulnerabilitySSVCDecision updates the denormalised SSVC decision on
-// the (global, tenant-less) vulnerabilities row.
-//
-// M47 W2: 0 rows returns ErrVulnerabilityRowNotFound. `vulnerabilities` is
-// the shared CVE catalogue and carries no tenant column, so there is no
-// tenant predicate to add here — but a 0-row UPDATE still means the
-// vulnerability id does not exist, and the service's own comment says this
-// denormalised column "must not drift silently" from the saved assessment.
-// Reporting the drift is the only way that promise can be kept.
-func (r *SSVCRepository) UpdateVulnerabilitySSVCDecision(ctx context.Context, vulnerabilityID uuid.UUID, decision model.SSVCDecision) error {
-	query := `UPDATE vulnerabilities SET ssvc_decision = $1, updated_at = NOW() WHERE id = $2`
-	res, err := r.q(ctx).ExecContext(ctx, query, decision, vulnerabilityID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update vulnerabilities ssvc_decision (RowsAffected): %w", err)
-	}
-	if n == 0 {
-		return fmt.Errorf("update ssvc_decision of vulnerability %s: %w", vulnerabilityID, ErrVulnerabilityRowNotFound)
-	}
-	return nil
-}
+// M47 W4 removed UpdateVulnerabilitySSVCDecision. It ran
+// `UPDATE vulnerabilities SET ssvc_decision = $1, updated_at = NOW()
+// WHERE id = $2` — a per-(tenant, project) decision written to the shared,
+// tenant-less CVE catalogue, so the last tenant to assess a CVE overwrote
+// every other tenant's decision on that row. Nothing read the column (no Go
+// reader, no SELECT, no model field, no TS consumer), so the write was
+// pure cross-tenant clobber with no consumer to serve. Migration 062 drops
+// the column and its index. The authoritative record is the
+// ssvc_assessments row — see the SSVCService doc comment.
 
 // GetAssessmentHistory gets history for an assessment that belongs to the
 // caller's (tenant, project).

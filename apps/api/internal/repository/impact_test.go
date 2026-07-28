@@ -87,13 +87,15 @@ func TestGroupImpactRows_Empty(t *testing.T) {
 	}
 }
 
-// TestGetVulnerabilityImpactMeta_ReadsRealEPSSColumn pins the M36-A / F432 flip:
-// GetVulnerabilityImpactMeta must SELECT the real epss_score column wrapped in
-// COALESCE(epss_score, 0), NOT the old fixed 0::numeric sentinel. The assertion
-// is structural on the SQL — a revert to 0::numeric (which can never surface a
-// synced score) would fail the regex even if the scanned value happened to be 0.
-// The row here is an un-synced CVE (the DB's COALESCE turns its NULL epss_score
-// into 0), so the scan yields EPSSScore == 0 without error.
+// TestGetVulnerabilityImpactMeta_ReadsRealEPSSColumn pins the M36-A / F432
+// flip: GetVulnerabilityImpactMeta must SELECT the real epss_score column,
+// NOT the old fixed 0::numeric sentinel.
+//
+// M47 W4 inverted the shape this test pins. It previously required
+// COALESCE(epss_score, 0) and asserted an un-synced row reads 0 — pinning the
+// sentinel contract as correct. The column is now read BARE: an un-synced row
+// must surface as nil, and a real 0.0000 (a FIRST score rounded down by the
+// DECIMAL(5,4) column) must stay non-nil so the two remain distinguishable.
 func TestGetVulnerabilityImpactMeta_ReadsRealEPSSColumn(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -103,19 +105,26 @@ func TestGetVulnerabilityImpactMeta_ReadsRealEPSSColumn(t *testing.T) {
 
 	repo := NewSearchRepository(db)
 
-	// Requires the real column read through COALESCE; the bare 0::numeric
-	// sentinel would not match and neither would an un-guarded bare column.
-	pattern := regexp.MustCompile(`(?is)` + regexp.QuoteMeta("COALESCE(epss_score, 0)") + `\s+AS\s+epss_score`)
-	if pattern.MatchString("0::numeric AS epss_score") {
+	// Requires the real column read bare; neither the 0::numeric sentinel
+	// nor the retired COALESCE form may match.
+	// sqlmock normalises the statement to a single spaced line, so the
+	// discriminator anchors on the surrounding columns: the bare form emits
+	// "cvss_score, epss_score, in_kev" while both sentinel forms interpose
+	// either 0::numeric or a COALESCE wrapper.
+	pattern := regexp.MustCompile(`(?is)cvss_score,\s*epss_score,\s*in_kev`)
+	if pattern.MatchString("cvss_score, 0::numeric AS epss_score, in_kev") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinel")
+	}
+	if pattern.MatchString("cvss_score, COALESCE(epss_score, 0) AS epss_score, in_kev") {
+		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
 	vulnID := uuid.New()
 	mock.ExpectQuery(pattern.String()).
 		WithArgs("CVE-2026-0001").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "severity", "cvss_score", "epss_score", "in_kev"}).
-			// Un-synced row: the real DB's COALESCE(epss_score, 0) turns the
-			// underlying NULL into 0 before it reaches Scan.
+			// Real 0.0000: a FIRST score below 0.00005 rounded down by the
+			// DECIMAL(5,4) column. Must stay non-nil.
 			AddRow(vulnID, "HIGH", 7.5, float64(0), false))
 
 	got, err := repo.GetVulnerabilityImpactMeta(context.Background(), "CVE-2026-0001")
@@ -125,23 +134,24 @@ func TestGetVulnerabilityImpactMeta_ReadsRealEPSSColumn(t *testing.T) {
 	if got == nil {
 		t.Fatalf("expected non-nil meta for a known CVE")
 	}
-	if got.EPSSScore != 0 {
-		t.Fatalf("EPSSScore = %v, want 0 (un-synced row COALESCEs to 0)", got.EPSSScore)
+	if got.EPSSScore == nil {
+		t.Fatalf("EPSSScore = nil, want *0.0 (a rounded-to-zero FIRST score is a measurement)")
+	}
+	if *got.EPSSScore != 0 {
+		t.Fatalf("EPSSScore = %v, want 0.0", *got.EPSSScore)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
 
-// TestGetVulnerabilityImpactMeta_NullEPSSWithoutCoalesceErrors documents WHY the
-// COALESCE is load-bearing (M36-A / F432): CVEImpactMeta.EPSSScore is a bare
-// float64, so a raw SQL NULL scanned into it errors — which for a KNOWN CVE
-// (no ErrNoRows fallback) would 500. The 055 migration adds the column nullable
-// and it stays NULL until epss_sync runs, so a bare `epss_score` read would hit
-// exactly this. COALESCE(epss_score, 0) makes the DB return 0 instead, which is
-// why the flip uses COALESCE rather than the bare column. Here we feed the raw
-// NULL a bare column would have yielded and confirm it is the error path.
-func TestGetVulnerabilityImpactMeta_NullEPSSWithoutCoalesceErrors(t *testing.T) {
+// TestGetVulnerabilityImpactMeta_NullEPSSScansCleanly is the M47 W4 inversion
+// of the old ..._NullEPSSWithoutCoalesceErrors, which asserted that a raw NULL
+// epss_score MUST error and used that to justify the COALESCE. That only held
+// while CVEImpactMeta.EPSSScore was a bare float64. It is now *float64, so the
+// NULL an un-synced (or 059-tombstoned) row carries must scan cleanly to nil
+// rather than 500 on a KNOWN CVE.
+func TestGetVulnerabilityImpactMeta_NullEPSSScansCleanly(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -158,8 +168,14 @@ func TestGetVulnerabilityImpactMeta_NullEPSSWithoutCoalesceErrors(t *testing.T) 
 			// return for an un-synced row.
 			AddRow(vulnID, "HIGH", 7.5, nil, false))
 
-	_, err = repo.GetVulnerabilityImpactMeta(context.Background(), "CVE-2026-0002")
-	if err == nil {
-		t.Fatalf("expected a scan error when a raw NULL epss_score reaches the bare float64 target (the 500 path COALESCE prevents)")
+	got, err := repo.GetVulnerabilityImpactMeta(context.Background(), "CVE-2026-0002")
+	if err != nil {
+		t.Fatalf("a raw NULL epss_score must scan cleanly into *float64, got: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("expected non-nil meta for a known CVE")
+	}
+	if got.EPSSScore != nil {
+		t.Fatalf("EPSSScore = %v, want nil (un-scored is NOT 0%%)", *got.EPSSScore)
 	}
 }

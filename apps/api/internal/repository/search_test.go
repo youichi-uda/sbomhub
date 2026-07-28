@@ -12,11 +12,14 @@ import (
 
 // TestSearchByCVE_ReadsRealEPSSColumn pins the M36-A / F432 flip of the
 // SearchByCVE vulnerability lookup: the positional SELECT must read the real
-// epss_score column via COALESCE(epss_score, 0) in the SAME 5th position it
-// previously held as the 0::numeric sentinel, so the Scan target order
-// (id, cve_id, description, cvss_score, EPSSScore, severity) still aligns. The
-// COALESCE assertion is structural; a revert to 0::numeric fails it. The seeded
-// row is un-synced, so the DB's COALESCE yields EPSSScore == 0.
+// epss_score column in the SAME 5th position it previously held as the
+// 0::numeric sentinel, so the Scan target order (id, cve_id, description,
+// cvss_score, EPSSScore, severity) still aligns.
+//
+// M47 W4 inverted the shape this test pins: the column is now read BARE
+// (no COALESCE) into *float64, so a NULL surfaces as nil and a real 0.0000
+// stays non-nil. Both the 0::numeric and the COALESCE forms must fail the
+// structural regex.
 func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -26,10 +29,13 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 
 	repo := NewSearchRepository(db)
 
-	// M46 B2: severity is now COALESCE'd to '' in the same position.
-	pattern := regexp.MustCompile(`(?is)cvss_score,\s*` + regexp.QuoteMeta("COALESCE(epss_score, 0)") + `,\s*` + regexp.QuoteMeta("COALESCE(severity, '')"))
-	if pattern.MatchString("cvss_score, 0::numeric, severity") {
+	// M46 B2: severity is COALESCE'd to '' in the same position.
+	pattern := regexp.MustCompile(`(?is)cvss_score,\s*epss_score,\s*` + regexp.QuoteMeta("COALESCE(severity, '')"))
+	if pattern.MatchString("cvss_score, 0::numeric, COALESCE(severity, '')") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinel")
+	}
+	if pattern.MatchString("cvss_score, COALESCE(epss_score, 0), COALESCE(severity, '')") {
+		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
 	vulnID := uuid.New()
@@ -37,8 +43,9 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	mock.ExpectQuery(pattern.String()).
 		WithArgs("CVE-2026-0007").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "cve_id", "description", "cvss_score", "epss_score", "severity"}).
-			// Un-synced row: COALESCE(epss_score, 0) -> 0, held in the 5th position.
-			AddRow(vulnID, "CVE-2026-0007", "desc", 7.5, float64(0), "HIGH"))
+			// Un-synced row: the bare column yields a raw NULL in the 5th
+			// position -> nil pointer.
+			AddRow(vulnID, "CVE-2026-0007", "desc", 7.5, nil, "HIGH"))
 	// Query 2: affected projects (empty result is fine for this assertion).
 	mock.ExpectQuery(`(?is)FROM\s+projects\s+p`).
 		WithArgs(vulnID).
@@ -55,8 +62,8 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	if got == nil {
 		t.Fatalf("expected non-nil result for a known CVE")
 	}
-	if got.EPSSScore != 0 {
-		t.Errorf("EPSSScore = %v, want 0 (un-synced row COALESCEs to 0)", got.EPSSScore)
+	if got.EPSSScore != nil {
+		t.Errorf("EPSSScore = %v, want nil (un-scored is NOT 0%%)", *got.EPSSScore)
 	}
 	if got.CVSSScore == nil || *got.CVSSScore != 7.5 || got.Severity != "HIGH" {
 		t.Errorf("positional Scan misaligned: cvss=%v severity=%q, want 7.5/HIGH", got.CVSSScore, got.Severity)
@@ -66,12 +73,15 @@ func TestSearchByCVE_ReadsRealEPSSColumn(t *testing.T) {
 	}
 }
 
-// TestGetComponentVulnerabilities_ReadsRealEPSSColumns pins the M36-A / F432 flip
-// of the two-sentinel site: both epss_score and epss_percentile must read the
-// real columns via COALESCE in their SAME 6th/7th positions, so the Scan targets
-// (…cvss_score, epssScore, epssPercentile, source…) still align. It also pins the
-// preserved `> 0` guard: an un-synced (COALESCE-0) row leaves the model pointers
-// nil (web >0 badge suppression, F391), while a synced row sets them.
+// TestGetComponentVulnerabilities_ReadsRealEPSSColumns pins the M36-A / F432
+// flip of the two-sentinel site: both epss_score and epss_percentile must read
+// the real columns in their SAME 6th/7th positions, so the Scan targets
+// (…cvss_score, epssScore, epssPercentile, source…) still align.
+//
+// M47 W4 inverted the value contract. The old form was COALESCE(...,0) plus a
+// `> 0` guard, which left the model pointers nil for BOTH a NULL and a real
+// 0.0000 — so a CVE FIRST scores at ~0% was reported as un-scored. The columns
+// are now read bare into sql.NullFloat64 and only a NULL yields nil.
 func TestGetComponentVulnerabilities_ReadsRealEPSSColumns(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -81,9 +91,12 @@ func TestGetComponentVulnerabilities_ReadsRealEPSSColumns(t *testing.T) {
 
 	repo := NewSearchRepository(db)
 
-	pattern := regexp.MustCompile(`(?is)` + regexp.QuoteMeta("COALESCE(v.epss_score, 0)") + `,\s*` + regexp.QuoteMeta("COALESCE(v.epss_percentile, 0)"))
+	pattern := regexp.MustCompile(`(?is)v\.epss_score,\s*v\.epss_percentile,`)
 	if pattern.MatchString("0::numeric, 0::numeric,") {
 		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinels")
+	}
+	if pattern.MatchString("COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),") {
+		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
 	}
 
 	compID := uuid.New()
@@ -94,8 +107,8 @@ func TestGetComponentVulnerabilities_ReadsRealEPSSColumns(t *testing.T) {
 			"id", "cve_id", "description", "severity", "cvss_score",
 			"epss_score", "epss_percentile", "source", "published_at", "updated_at",
 		}).
-			// Un-synced row: both COALESCE to 0 -> pointers stay nil (> 0 guard).
-			AddRow(uuid.New(), "CVE-2026-0010", "d1", "HIGH", 7.5, float64(0), float64(0), "NVD", now, now).
+			// Un-synced row: both columns are raw NULL -> pointers stay nil.
+			AddRow(uuid.New(), "CVE-2026-0010", "d1", "HIGH", 7.5, nil, nil, "NVD", now, now).
 			// Synced row: real score/percentile -> pointers set.
 			AddRow(uuid.New(), "CVE-2026-0011", "d2", "CRITICAL", 9.8, 0.5, 0.9, "NVD", now, now))
 
@@ -106,12 +119,12 @@ func TestGetComponentVulnerabilities_ReadsRealEPSSColumns(t *testing.T) {
 	if len(vulns) != 2 {
 		t.Fatalf("len(vulns) = %d, want 2", len(vulns))
 	}
-	// Un-synced row: > 0 guard leaves both pointers nil.
+	// Un-synced row: NULL leaves both pointers nil.
 	if vulns[0].EPSSScore != nil {
-		t.Errorf("vulns[0].EPSSScore = %v, want nil (un-synced COALESCE-0 leaves pointer nil)", *vulns[0].EPSSScore)
+		t.Errorf("vulns[0].EPSSScore = %v, want nil (NULL means un-scored)", *vulns[0].EPSSScore)
 	}
 	if vulns[0].EPSSPercentile != nil {
-		t.Errorf("vulns[0].EPSSPercentile = %v, want nil (un-synced COALESCE-0 leaves pointer nil)", *vulns[0].EPSSPercentile)
+		t.Errorf("vulns[0].EPSSPercentile = %v, want nil (NULL means un-scored)", *vulns[0].EPSSPercentile)
 	}
 	// Synced row: pointers set to the real values, and positional Scan aligns.
 	if vulns[1].EPSSScore == nil || *vulns[1].EPSSScore != 0.5 {

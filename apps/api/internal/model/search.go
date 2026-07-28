@@ -8,8 +8,12 @@ type CVESearchResult struct {
 	Description string `json:"description"`
 	// CVSSScore is nil for un-scored CVEs (no 0-sentinel — CVSS 0.0 is a
 	// real "None" score; see model.Vulnerability.CVSSScore, M46 B2).
-	CVSSScore          *float64            `json:"cvss_score,omitempty"`
-	EPSSScore          float64             `json:"epss_score"`
+	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	// EPSSScore is nil when FIRST.org has no score for this CVE (never
+	// synced, or cleared by the 059 tombstone). No 0-sentinel — see
+	// model.TopRisk.EPSSScore for why a stored 0.0000 is a real value
+	// (M47 W4).
+	EPSSScore          *float64            `json:"epss_score,omitempty"`
 	Severity           string              `json:"severity"`
 	AffectedProjects   []AffectedProject   `json:"affected_projects"`
 	UnaffectedProjects []UnaffectedProject `json:"unaffected_projects"`

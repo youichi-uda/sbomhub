@@ -302,16 +302,12 @@ func TestSSVCAutoAssessBinding_SpoofedCVEQueryCannotDriveAssessment(t *testing.T
 		t.Errorf("decision = %q, want %q (A's own evidence is weak)", decision, "defer")
 	}
 
-	// The denormalized vulnerabilities.ssvc_decision write must also key on
-	// A's honest verdict, not the spoof-inflated one.
-	var vulnDecision sql.NullString
-	if err := migDB.QueryRow(`SELECT ssvc_decision FROM vulnerabilities WHERE id = $1`, seed.vulnA).
-		Scan(&vulnDecision); err != nil {
-		t.Fatalf("read vulnerabilities.ssvc_decision for A: %v", err)
-	}
-	if !vulnDecision.Valid || vulnDecision.String != "defer" {
-		t.Errorf("vulnerabilities.ssvc_decision for A = %+v, want 'defer'", vulnDecision)
-	}
+	// M47 W4: this used to also assert the denormalized
+	// vulnerabilities.ssvc_decision write. That write is gone and migration
+	// 062 dropped the column — the ssvc_assessments assertions above are now
+	// the whole record. assertNoGlobalSSVCDecisionColumn pins that the
+	// per-project decision has no home on the shared CVE row.
+	assertNoGlobalSSVCDecisionColumn(t, migDB, seed.vulnA)
 }
 
 // TestSSVCAutoAssessBinding_VulnOutsideProjectIs404NoWrites: :vuln_id = B,
@@ -344,15 +340,9 @@ func TestSSVCAutoAssessBinding_VulnOutsideProjectIs404NoWrites(t *testing.T) {
 		t.Errorf("ssvc_assessments rows for out-of-project vuln B = %d, want 0", assessments)
 	}
 
-	var vulnDecision sql.NullString
-	if err := migDB.QueryRow(`SELECT ssvc_decision FROM vulnerabilities WHERE id = $1`, seed.vulnB).
-		Scan(&vulnDecision); err != nil {
-		t.Fatalf("read vulnerabilities.ssvc_decision for B: %v", err)
-	}
-	if vulnDecision.Valid {
-		t.Errorf("global vulnerabilities.ssvc_decision for out-of-project B was written (%q), want NULL",
-			vulnDecision.String)
-	}
+	// M47 W4: the "did the global row get flipped for B" check is now
+	// structural — the column the leak used no longer exists.
+	assertNoGlobalSSVCDecisionColumn(t, migDB, seed.vulnB)
 }
 
 // TestSSVCAutoAssessBinding_ForeignTenantVulnIs404: vuln C IS linked to a

@@ -122,10 +122,11 @@ func (s *NotificationService) SendTestNotification(ctx context.Context, projectI
 	}
 
 	testCVSS := 9.8
+	testEPSS := 0.95
 	testNotif := model.VulnerabilityNotification{
 		CVEID:            "CVE-0000-0000",
 		CVSSScore:        &testCVSS,
-		EPSSScore:        0.95,
+		EPSSScore:        &testEPSS,
 		Severity:         "CRITICAL",
 		ProjectID:        projectID.String(),
 		ProjectName:      project.Name,
@@ -233,6 +234,19 @@ func notifCVSSText(score *float64) string {
 	return fmt.Sprintf("%.1f", *score)
 }
 
+// notifEPSSText renders a notification's EPSS for Slack / Discord / email.
+// nil means FIRST.org has no score for this CVE — render 未採点, never
+// "0.0%": epss_score is DECIMAL(5,4), so a stored 0.0000 is a real
+// prediction of a ~0% exploitation chance, and printing an unknown as 0.0%
+// tells the reader a measurement was made that never was (M47 W4, same
+// contract as notifCVSSText above).
+func notifEPSSText(score *float64) string {
+	if score == nil {
+		return "未採点"
+	}
+	return fmt.Sprintf("%.1f%%", *score*100)
+}
+
 // buildSlackVulnerabilityPayload assembles the Slack Block Kit payload for a
 // vulnerability notification. Pure (no I/O) so the rendered text — in
 // particular the un-scored CVSS contract — is unit-testable without a
@@ -264,7 +278,7 @@ func buildSlackVulnerabilityPayload(notif model.VulnerabilityNotification) map[s
 				"fields": []map[string]interface{}{
 					{"type": "mrkdwn", "text": fmt.Sprintf("*CVE ID:*\n%s", notif.CVEID)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*CVSS:*\n%s (%s)", notifCVSSText(notif.CVSSScore), notif.Severity)},
-					{"type": "mrkdwn", "text": fmt.Sprintf("*EPSS:*\n%.1f%%", notif.EPSSScore*100)},
+					{"type": "mrkdwn", "text": fmt.Sprintf("*EPSS:*\n%s", notifEPSSText(notif.EPSSScore))},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*Project:*\n%s", notif.ProjectName)},
 					{"type": "mrkdwn", "text": fmt.Sprintf("*Component:*\n%s@%s", notif.ComponentName, notif.ComponentVersion)},
 				},
@@ -316,7 +330,7 @@ func buildDiscordVulnerabilityPayload(notif model.VulnerabilityNotification) map
 				"fields": []map[string]interface{}{
 					{"name": "CVE ID", "value": notif.CVEID, "inline": true},
 					{"name": "CVSS", "value": notifCVSSText(notif.CVSSScore), "inline": true},
-					{"name": "EPSS", "value": fmt.Sprintf("%.1f%%", notif.EPSSScore*100), "inline": true},
+					{"name": "EPSS", "value": notifEPSSText(notif.EPSSScore), "inline": true},
 					{"name": "Project", "value": notif.ProjectName, "inline": true},
 					{"name": "Component", "value": fmt.Sprintf("%s@%s", notif.ComponentName, notif.ComponentVersion), "inline": true},
 				},
@@ -502,7 +516,7 @@ func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotific
         </tr>
         <tr>
           <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>EPSS Score</strong></td>
-          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%.1f%%</td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">%s</td>
         </tr>
         <tr>
           <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;"><strong>Project</strong></td>
@@ -528,7 +542,7 @@ func (s *NotificationService) generateEmailHTML(notif model.VulnerabilityNotific
 		notif.CVEID,
 		notifCVSSText(notif.CVSSScore),
 		notif.Severity,
-		notif.EPSSScore*100,
+		notifEPSSText(notif.EPSSScore),
 		notif.ProjectName,
 		notif.ComponentName,
 		notif.ComponentVersion,
@@ -544,7 +558,7 @@ func (s *NotificationService) generateEmailText(notif model.VulnerabilityNotific
 
 CVE ID: %s
 CVSS Score: %s (%s)
-EPSS Score: %.1f%%
+EPSS Score: %s
 Project: %s
 Component: %s@%s
 
@@ -557,7 +571,7 @@ Component: %s@%s
 		notif.CVEID,
 		notifCVSSText(notif.CVSSScore),
 		notif.Severity,
-		notif.EPSSScore*100,
+		notifEPSSText(notif.EPSSScore),
 		notif.ProjectName,
 		notif.ComponentName,
 		notif.ComponentVersion,

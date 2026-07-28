@@ -2644,10 +2644,6 @@
         "nullable": true,
         "type": "character varying(20)"
       },
-      "ssvc_decision": {
-        "nullable": true,
-        "type": "ssvc_decision"
-      },
       "tenant_id": {
         "nullable": true,
         "type": "uuid"

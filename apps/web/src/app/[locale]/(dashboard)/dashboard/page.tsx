@@ -85,9 +85,16 @@ function TopRisksTable({ risks, noDataMessage, locale }: { risks: TopRisk[]; noD
             <TableCell>{index + 1}</TableCell>
             <TableCell className="font-mono">{risk.cve_id}</TableCell>
             <TableCell>
-              <span className={risk.epss_score > 0.5 ? "text-red-500 font-bold" : ""}>
-                {(risk.epss_score * 100).toFixed(1)}%
-              </span>
+              {/* M47 W4: epss_score is absent when FIRST.org has no score —
+                  render "—", never 0.0% (that would read as a measured
+                  near-zero exploitation probability). */}
+              {risk.epss_score != null ? (
+                <span className={risk.epss_score > 0.5 ? "text-red-500 font-bold" : ""}>
+                  {(risk.epss_score * 100).toFixed(1)}%
+                </span>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              )}
             </TableCell>
             <TableCell>
               <SeverityBadge severity={risk.severity} />

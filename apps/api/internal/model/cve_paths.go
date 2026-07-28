@@ -15,10 +15,11 @@ import "github.com/google/uuid"
 // counters — grafted with M29's per-component path chains. Like CVEImpact it
 // is a read-only aggregation with no new table and no new audit action; the
 // per-SBOM traversal is computed on demand (no migration / ingest change /
-// backfill in M30-lite). epss_score now reflects the real FIRST.org value
-// (M36 / migration 055 promoted the column into the active chain and
-// CVEImpact's GetVulnerabilityImpactMeta reads it NULL-safely via COALESCE),
-// exactly as CVEImpact.
+// backfill in M30-lite). epss_score reflects the real FIRST.org value
+// (M36 / migration 055 promoted the column into the active chain); since
+// M47 W4, CVEImpact's GetVulnerabilityImpactMeta reads it as a bare nullable
+// column rather than through a COALESCE, so an un-scored CVE arrives here as
+// nil rather than 0. Same as CVEImpact.
 //
 // Tenant isolation is structural and identical to CVEImpact: RLS is the
 // authoritative boundary (braces) and every tenant-scoped join also carries
@@ -30,7 +31,9 @@ type CVEPathsResponse struct {
 	// CVSSScore is nil for un-scored CVEs (no 0-sentinel — CVSS 0.0 is a
 	// real "None" score; see model.Vulnerability.CVSSScore, M46 wave 4).
 	CVSSScore *float64 `json:"cvss_score,omitempty"`
-	EPSSScore float64  `json:"epss_score"`
+	// EPSSScore is nil when FIRST.org has no score for this CVE. No
+	// 0-sentinel — see model.TopRisk.EPSSScore (M47 W4).
+	EPSSScore *float64 `json:"epss_score,omitempty"`
 	InKEV     bool     `json:"in_kev"`
 	// AffectedProjectCount is len(AffectedProjects); mirrors CVEImpact.
 	AffectedProjectCount int `json:"affected_project_count"`

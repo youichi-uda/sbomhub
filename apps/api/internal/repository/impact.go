@@ -24,14 +24,16 @@ import (
 // migration chain (055_vulnerabilities_epss promotes the orphan packages/db
 // 006_epss.sql), so — exactly like SearchByCVE and
 // DashboardRepository.GetTopRisksByTenant — this reads the real column instead
-// of the old fixed 0::numeric sentinel. It reads it NULL-safely with
-// COALESCE(epss_score, 0): the column is nullable and stays NULL until the
-// scheduled epss_sync (M36-B) populates it, and scanning a SQL NULL into the
-// bare float64 CVEImpactMeta.EPSSScore would error (there is no ErrNoRows
-// fallback for a KNOWN CVE, so it would 500). COALESCE reproduces the old
-// sentinel-0 exactly for an un-synced row, and the web blast-radius summary
-// still treats epss_score = 0 as "n/a" and suppresses the EPSS badge (F391) so
-// a KEV/critical CVE never shows a misleading "EPSS 0.0%".
+// of the old fixed 0::numeric sentinel.
+//
+// M47 W4 (supersedes M36-A's COALESCE, and retires F391): epss_score is read
+// BARE into the *float64 CVEImpactMeta.EPSSScore, exactly as cvss_score was
+// in M46 wave 4. COALESCE(epss_score, 0) made "never synced / cleared by the
+// 059 tombstone" indistinguishable from "FIRST predicts ~0%", and the web
+// worked around that by suppressing the badge whenever epss_score was 0
+// (F391) — which also hid genuinely low real scores. With NULL preserved the
+// two states are distinguishable at the type level: nil is omitted from the
+// JSON and the web renders 未採点, while a real 0.0 renders as "EPSS 0.0%".
 //
 // Nullable-metadata note (F394, amended M46 wave 4): vulnerabilities.severity
 // (VARCHAR(20)) and cvss_score (DECIMAL(3,1)) are both NULLABLE — 001_init
@@ -55,7 +57,7 @@ func (r *SearchRepository) GetVulnerabilityImpactMeta(ctx context.Context, cveID
 			id,
 			COALESCE(severity, 'UNKNOWN') AS severity,
 			cvss_score,
-			COALESCE(epss_score, 0)       AS epss_score,
+			epss_score,
 			in_kev
 		FROM vulnerabilities
 		WHERE cve_id = $1

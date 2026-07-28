@@ -26,8 +26,19 @@ type VulnerabilityCounts struct {
 
 // TopRisk represents a high-priority vulnerability
 type TopRisk struct {
-	CVEID     string  `json:"cve_id"`
-	EPSSScore float64 `json:"epss_score"`
+	CVEID string `json:"cve_id"`
+	// EPSSScore is nil when FIRST.org has no score for this CVE — either it
+	// was never synced, or a sync deliberately cleared an unusable value
+	// (migration 059's tombstone). Deliberately NOT a 0-sentinel, for the
+	// same reason as CVSSScore below: epss_score is DECIMAL(5,4), so a real
+	// FIRST score below 0.00005 rounds to exactly 0.0000 on insert, and a
+	// 0 in this field would therefore be ambiguous between "≈0% chance of
+	// exploitation" and "we have no idea". M47 W4 measured 252 of 10,899
+	// dev-DB rows carrying a NULL epss_score; any such row that a tenant's
+	// Top Risks / report / alert query selected previously rendered as
+	// "EPSS 0.0%" (the measurement is of the rows that exist, not of which
+	// ones a given tenant-filtered, LIMITed query returned).
+	EPSSScore *float64 `json:"epss_score,omitempty"`
 	// CVSSScore is nil when the CVE has not been scored (NVD "Awaiting
 	// Analysis", JVN-only matches). Deliberately NOT a 0-sentinel: CVSS 0.0
 	// is a real "None" score, and rendering un-scored as 0.0 would present

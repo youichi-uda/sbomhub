@@ -1,0 +1,99 @@
+-- ============================================
+-- Drop vulnerabilities.ssvc_decision — a per-(tenant, project) triage
+-- decision that was stored on the GLOBAL CVE catalogue (M47 W4).
+--
+-- The bug this removes:
+--   `vulnerabilities` is the shared, tenant-less NVD/JVN/EPSS/KEV cache.
+--   001_init declares no tenant_id on it, and it is a recorded structural
+--   exemption in the lint-migration-rls tool (no ENABLE / FORCE / POLICY) —
+--   every tenant reads the same rows.
+--
+--   Migration 021 added `ssvc_decision` to that table "for quick filtering",
+--   and SSVCService.AssessVulnerability / AutoAssessVulnerability stamped
+--   each computed decision onto it via
+--   SSVCRepository.UpdateVulnerabilitySSVCDecision.
+--
+--   An SSVC decision is not a property of a CVE. The decision tree is
+--   evaluated from the assessing PROJECT's mission prevalence, safety impact
+--   and system exposure (021's ssvc_project_defaults), so two projects can
+--   correctly reach different decisions for the same CVE. Writing that
+--   project-specific answer to the shared row meant the last tenant to assess
+--   a CVE silently overwrote every other tenant's decision for it, and bumped
+--   the shared row's updated_at while doing so.
+--
+-- Why DROP rather than keep-and-stop-writing:
+--   The column has no reader. As of this migration there is no SELECT of
+--   `ssvc_decision` from `vulnerabilities` anywhere in internal/**, no field
+--   for it on model.Vulnerability, no `SELECT *` over the table, and no
+--   TypeScript consumer — it was write-only for its entire life. So there is
+--   nothing to redirect to a project-scoped projection and no read path
+--   changes with this migration.
+--
+--   Leaving a dormant column would keep a loaded gun on the table: a future
+--   author adding the obvious `SELECT ... ssvc_decision FROM vulnerabilities`
+--   would publish one tenant's triage decision to every other tenant, with no
+--   RLS backstop to catch it (the table has none by design). Dropping it makes
+--   that mistake impossible to make silently.
+--
+-- The authoritative record (unchanged by this migration):
+--   ssvc_assessments, added by the same migration 021, already IS the
+--   project-scoped record — UNIQUE(project_id, vulnerability_id), a NOT NULL
+--   tenant_id, RLS tenant isolation (FORCE harmonised by 042, composite
+--   tenant/project FK by 044) and idx_ssvc_assessments_decision for filtering.
+--   No assessment data is lost here: 062 does not touch ssvc_assessments. What
+--   it discards is the non-authoritative projection only. That projection is
+--   not even a faithful mirror of the assessments: SSVCService.DeleteAssessment
+--   removes an ssvc_assessments row without clearing the column, so a value
+--   here can outlive the assessment it came from -- another reason it cannot
+--   be treated as a source of truth.
+--
+-- Existing data:
+--   Whatever values the column holds are, by construction, the arbitrary
+--   winner of a cross-tenant race — not a source of truth for anything. They
+--   are discarded. (Measured on the 2026-07-29 dev DB before writing this:
+--   0 of 10,899 vulnerabilities rows had a non-NULL ssvc_decision, and
+--   ssvc_assessments was empty, so this drop is a no-op there. That is a
+--   statement about the dev DB only — a production instance that has used
+--   the SSVC feature will have non-NULL values, and those are exactly the
+--   last-write-wins values described above.)
+--
+-- RLS:
+--   `vulnerabilities` is a global, non-tenant table with no RLS state and no
+--   policies. Dropping a non-tenant column touches neither, exactly as 021
+--   added it without any RLS statements. The lint-migration-rls gate is a
+--   no-op for this migration (no tenant_id declared or ALTER-promoted).
+--
+-- The `ssvc_decision` ENUM TYPE itself is NOT dropped: ssvc_assessments.decision
+-- and ssvc_assessment_history.prev_decision / new_decision still use it.
+--
+-- DEPLOY SEQUENCING -- read before applying this up:
+--   Deploy the API build that REMOVES the writer BEFORE applying this
+--   migration, and drain the old instances first. This is a contract step,
+--   not an expand step: a pre-M47-W4 binary still executes
+--   `UPDATE vulnerabilities SET ssvc_decision = $1 ... WHERE id = $2` at the
+--   end of both SSVC assess paths, and once the column is gone that statement
+--   fails with `column "ssvc_decision" does not exist`. The service surfaces
+--   it as `assessment saved but updating vulnerability ssvc_decision failed`,
+--   so during any overlap window an old instance answers 500 to
+--   POST .../vulnerabilities/:vuln_id/ssvc (manual) and, when it actually
+--   reaches the write, .../ssvc/auto-assess. Auto-assess is only partly
+--   affected: it returns the stored row early (200) when a MANUAL assessment
+--   already exists for the (project, vulnerability), so it never reaches the
+--   writer in that case.
+--
+--   The assessment is NOT left half-written: middleware.TenantTx rolls the
+--   request transaction back on any handler error or >=400 status, and both
+--   the ssvc_assessments write and the ssvc_decision write run inside it, so
+--   the caller loses the assessment entirely and must retry after the
+--   upgrade.
+--
+--   Only the two SSVC assess endpoints are affected -- no read path in any
+--   build touches this column -- but the failure is user-visible, so on a
+--   rolling deploy apply this migration only once every instance is on the
+--   writer-removal build. A single-instance self-host upgrade (stop, migrate,
+--   start) has no overlap window and needs nothing special.
+-- ============================================
+
+DROP INDEX IF EXISTS idx_vulnerabilities_ssvc_decision;
+
+ALTER TABLE vulnerabilities DROP COLUMN IF EXISTS ssvc_decision;

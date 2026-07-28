@@ -21,8 +21,12 @@ func TestBuildCVEImpact_RollupAndMeta(t *testing.T) {
 		VulnerabilityID: uuid.New(),
 		Severity:        "CRITICAL",
 		CVSSScore:       f64p(9.8),
-		EPSSScore:       0, // EPSS fixed at 0 until 006_epss (see repository docstring)
-		InKEV:           true,
+		// M47 W4: nil means FIRST.org has no score. The old literal 0 here
+		// dated from when 006_epss was unapplied and the repository could
+		// only ever emit 0; the column is live now, so an un-scored CVE
+		// must propagate as nil rather than a measured ~0%.
+		EPSSScore: nil,
+		InKEV:     true,
 	}
 	affected := []model.ImpactProject{
 		{ProjectID: uuid.New(), ProjectName: "app-a", ComponentCount: 3,
@@ -38,6 +42,11 @@ func TestBuildCVEImpact_RollupAndMeta(t *testing.T) {
 	}
 	if got.Severity != "CRITICAL" || got.CVSSScore == nil || *got.CVSSScore != 9.8 || !got.InKEV {
 		t.Errorf("meta rollup mismatch: severity=%q cvss=%v in_kev=%v", got.Severity, got.CVSSScore, got.InKEV)
+	}
+	// M47 W4: an un-scored EPSS must stay nil through the rollup, never
+	// become a 0 that reads as "≈0% chance of exploitation".
+	if got.EPSSScore != nil {
+		t.Errorf("epss_score = %v, want nil (un-scored is NOT 0%%)", *got.EPSSScore)
 	}
 	if got.AffectedProjectCount != 2 {
 		t.Errorf("affected_project_count = %d, want 2", got.AffectedProjectCount)

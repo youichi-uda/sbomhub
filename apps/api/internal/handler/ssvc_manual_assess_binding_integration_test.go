@@ -226,15 +226,9 @@ func TestSSVCManualAssessBinding_VulnOutsideProjectIs404NoWrites(t *testing.T) {
 		t.Errorf("ssvc_assessments rows for out-of-project vuln B = %d, want 0", assessments)
 	}
 
-	var vulnDecision sql.NullString
-	if err := migDB.QueryRow(`SELECT ssvc_decision FROM vulnerabilities WHERE id = $1`, seed.vulnB).
-		Scan(&vulnDecision); err != nil {
-		t.Fatalf("read vulnerabilities.ssvc_decision for B: %v", err)
-	}
-	if vulnDecision.Valid {
-		t.Errorf("global vulnerabilities.ssvc_decision for out-of-project B was written (%q), want NULL",
-			vulnDecision.String)
-	}
+	// M47 W4: the "did the global row get flipped for B" check is now
+	// structural — the column the leak used no longer exists (migration 062).
+	assertNoGlobalSSVCDecisionColumn(t, migDB, seed.vulnB)
 }
 
 // TestSSVCManualAssessBinding_ForeignTenantVulnIs404: vuln C IS linked to a

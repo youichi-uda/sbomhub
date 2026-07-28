@@ -25,7 +25,25 @@ var ErrSSVCVulnerabilityNotInProject = errors.New("vulnerability not found in pr
 // different (tenant, project) than the caller's. Handler maps it to 404.
 var ErrSSVCAssessmentNotInProject = errors.New("assessment not found in project scope")
 
-// SSVCService handles SSVC assessment operations
+// SSVCService handles SSVC assessment operations.
+//
+// Where a decision lives (M47 W4). The authoritative record of an SSVC
+// decision is the ssvc_assessments row keyed by (tenant_id, project_id,
+// vulnerability_id) — migration 021 gives it UNIQUE(project_id,
+// vulnerability_id), a tenant_id column, RLS tenant isolation and an index on
+// `decision`. An SSVC decision is inherently project-specific: the tree is
+// evaluated from that project's mission prevalence, safety impact and system
+// exposure, so two projects can legitimately reach different decisions for
+// the same CVE.
+//
+// Until M47 W4 both entry points ALSO stamped the computed decision onto
+// `vulnerabilities.ssvc_decision`. `vulnerabilities` is the shared, tenant-less
+// CVE catalogue (001_init declares no tenant_id; it is a recorded RLS
+// exemption), so that column held whichever tenant assessed the CVE most
+// recently — every subsequent assessment silently overwrote every other
+// tenant's, and bumped the shared row's updated_at while doing it. Migration
+// 062 drops the column; nothing reads it any more, so there is no projection
+// to maintain and no read path changed.
 type SSVCService struct {
 	ssvcRepo *repository.SSVCRepository
 	vulnRepo *repository.VulnerabilityRepository
@@ -91,7 +109,9 @@ type UpdateSSVCDefaultsInput struct {
 // the WRONG cve_id — the key GetAssessmentByCVE, the VEX/report joins and
 // every operator reading the row rely on — and (b) wrote the GLOBAL
 // vulnerabilities.ssvc_decision column for a vulnerability outside its
-// scope. GetCVEIDByIDInProject re-resolves the authoritative CVE and
+// scope (that second write no longer exists: M47 W4 removed it and
+// migration 062 dropped the column). GetCVEIDByIDInProject re-resolves the
+// authoritative CVE and
 // verifies (tenant, project, vulnerability) membership in one statement;
 // unknown and out-of-scope ids collapse into the same
 // ErrSSVCVulnerabilityNotInProject sentinel (handler: 404) before anything
@@ -168,15 +188,6 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 			return nil, err
 		}
 
-		// Update vulnerability SSVC decision. The denormalized decision on
-		// the vulnerabilities row drives list views and triage; swallowing a
-		// failure here would leave it silently drifting from the saved
-		// assessment. Both writes are idempotent, so surfacing the error and
-		// letting the caller retry converges.
-		if err := s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision); err != nil {
-			return nil, fmt.Errorf("assessment saved but updating vulnerability ssvc_decision failed: %w", err)
-		}
-
 		return existing, nil
 	}
 
@@ -204,12 +215,6 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 		return nil, err
 	}
 
-	// Update vulnerability SSVC decision (same rationale as the update path
-	// above: denormalized decision must not drift silently).
-	if err := s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision); err != nil {
-		return nil, fmt.Errorf("assessment saved but updating vulnerability ssvc_decision failed: %w", err)
-	}
-
 	return assessment, nil
 }
 
@@ -219,9 +224,10 @@ func (s *SSVCService) AssessVulnerability(ctx context.Context, projectID, tenant
 // vulnerabilityID — never accepted from the caller. The pre-fix signature
 // took a caller-supplied cveID (the handler forwarded ?cve_id= verbatim)
 // and keyed every piece of evidence on it (KEV GetByCVE, EPSS/CVSS via
-// vulnRepo.GetByCVE) while writing the assessment and the denormalized
-// vulnerabilities.ssvc_decision under vulnerabilityID — so a caller could
-// have vulnerability A assessed on vulnerability B's KEV/EPSS/CVSS. The
+// vulnRepo.GetByCVE) while writing the assessment (and, until M47 W4, the
+// denormalized vulnerabilities.ssvc_decision) under vulnerabilityID — so a
+// caller could have vulnerability A assessed on vulnerability B's
+// KEV/EPSS/CVSS. The
 // EPSS branch was dead code (EPSSScore always nil through GetByCVE) until
 // def6a46 added the epss_* columns to that read, which is what made this
 // path actually exploitable. GetCVEIDByIDInProject resolves the
@@ -328,12 +334,6 @@ func (s *SSVCService) AutoAssessVulnerability(ctx context.Context, projectID, te
 		if err := s.ssvcRepo.CreateAssessment(ctx, assessment); err != nil {
 			return nil, err
 		}
-	}
-
-	// Update vulnerability SSVC decision (same rationale as AssessVulnerability:
-	// denormalized decision must not drift silently; retry converges).
-	if err := s.ssvcRepo.UpdateVulnerabilitySSVCDecision(ctx, vulnerabilityID, decision); err != nil {
-		return nil, fmt.Errorf("assessment saved but updating vulnerability ssvc_decision failed: %w", err)
 	}
 
 	return assessment, nil

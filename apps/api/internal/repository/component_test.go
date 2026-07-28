@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
@@ -339,7 +340,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 			setupMock: func() {
 				rows := sqlmock.NewRows([]string{"id", "cve_id", "description", "severity", "cvss_score", "epss_score", "epss_percentile", "source", "in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use", "published_at", "updated_at"}).
 					AddRow(vulnID1, "CVE-2023-1234", "Critical vulnerability in lodash", "CRITICAL", 9.8, 0.42, 0.88, "NVD", true, now, now, false, now, now).
-					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, 0.0, 0.0, "NVD", false, nil, nil, nil, now, now)
+					AddRow(vulnID2, "CVE-2023-5678", "High severity XSS vulnerability", "HIGH", 7.5, nil, nil, "NVD", false, nil, nil, nil, now, now)
 				mock.ExpectQuery(`SELECT v.id, v.cve_id, COALESCE\(v.description, ''\), COALESCE\(v.severity, ''\), v.cvss_score`).
 					WithArgs(sbomID).
 					WillReturnRows(rows)
@@ -362,9 +363,10 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 				if vulns[1].InKEV {
 					t.Errorf("expected second vuln to not be in KEV")
 				}
-				// F446: epss_score/epss_percentile are scanned into the
-				// model — a synced row (>0) sets the pointer, an un-synced
-				// (0) row leaves it nil so the web badge stays suppressed.
+				// M47 W4 (supersedes F446's `> 0` guard):
+				// epss_score/epss_percentile are scanned bare, so only a
+				// SQL NULL leaves the pointer nil. The second row's NULL
+				// means "no score"; a real 0.0 would stay non-nil.
 				if vulns[0].EPSSScore == nil || *vulns[0].EPSSScore != 0.42 {
 					t.Errorf("expected first vuln EPSSScore 0.42, got %v", vulns[0].EPSSScore)
 				}
@@ -372,7 +374,7 @@ func TestComponentRepository_GetVulnerabilities(t *testing.T) {
 					t.Errorf("expected first vuln EPSSPercentile 0.88, got %v", vulns[0].EPSSPercentile)
 				}
 				if vulns[1].EPSSScore != nil {
-					t.Errorf("expected second vuln EPSSScore nil (un-synced), got %v", *vulns[1].EPSSScore)
+					t.Errorf("expected second vuln EPSSScore nil (NULL = un-scored), got %v", *vulns[1].EPSSScore)
 				}
 			},
 		},
@@ -720,8 +722,9 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_DistinctByVulnID_F29(t 
 // ORDER BY, because a regression that always sorted by cvss would fail the
 // epss case (the epss ORDER BY regex would not match the cvss query and
 // sqlmock returns "unexpected query"), and vice versa. The epss case also
-// pins that epss_score/epss_percentile are scanned into the model (>0 sets
-// the pointer, un-synced 0 leaves it nil).
+// pins that epss_score/epss_percentile are scanned into the model. M47 W4:
+// the old `> 0` guard is gone — a scanned value populates the pointer and
+// only a SQL NULL leaves it nil.
 func TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446(t *testing.T) {
 	sbomID := uuid.New()
 	now := time.Now()
@@ -784,10 +787,12 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_SortOrderBy_F446(t *tes
 	}
 }
 
-// TestComponentRepository_GetVulnerabilitiesPaginated_UnsyncedEPSSNil_F446 pins
-// the `> 0` guard: a row whose COALESCE'd epss columns are 0 (un-synced) must
-// leave the model pointers nil so the web EPSS badge stays suppressed.
-func TestComponentRepository_GetVulnerabilitiesPaginated_UnsyncedEPSSNil_F446(t *testing.T) {
+// TestComponentRepository_GetVulnerabilitiesPaginated_UnscoredEPSSNil is the
+// M47 W4 inversion of the old ..._UnsyncedEPSSNil_F446, which pinned the `> 0`
+// guard by asserting that an epss_score of 0 must scan to nil. That guard
+// conflated "FIRST has no score" with "FIRST predicts ~0%". Only a SQL NULL
+// may now yield nil; a real 0.0 must survive as a non-nil measurement.
+func TestComponentRepository_GetVulnerabilitiesPaginated_UnscoredEPSSNil(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -804,25 +809,102 @@ func TestComponentRepository_GetVulnerabilitiesPaginated_UnsyncedEPSSNil_F446(t 
 			"epss_score", "epss_percentile", "source",
 			"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
 			"published_at", "updated_at",
-		}).AddRow(uuid.New(), "CVE-2024-NULL", "un-synced vuln", "LOW", 3.1,
-			0.0, 0.0, "NVD", false, nil, nil, nil, now, now))
+		}).AddRow(uuid.New(), "CVE-2024-NULL", "un-scored vuln", "LOW", 3.1,
+			nil, nil, "NVD", false, nil, nil, nil, now, now).
+			AddRow(uuid.New(), "CVE-2024-ZERO", "really ~0% vuln", "LOW", 3.1,
+				0.0, 0.0, "NVD", false, nil, nil, nil, now, now))
 
 	got, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "epss")
 	if err != nil {
 		t.Fatalf("GetVulnerabilitiesPaginated: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 vuln, got %d", len(got))
+	if len(got) != 2 {
+		t.Fatalf("expected 2 vulns, got %d", len(got))
 	}
 	if got[0].EPSSScore != nil {
-		t.Errorf("un-synced (0) epss_score must scan to nil, got %v", *got[0].EPSSScore)
+		t.Errorf("NULL epss_score must scan to nil, got %v", *got[0].EPSSScore)
 	}
 	if got[0].EPSSPercentile != nil {
-		t.Errorf("un-synced (0) epss_percentile must scan to nil, got %v", *got[0].EPSSPercentile)
+		t.Errorf("NULL epss_percentile must scan to nil, got %v", *got[0].EPSSPercentile)
+	}
+	if got[1].EPSSScore == nil {
+		t.Errorf("real 0.0 epss_score must stay non-nil, got nil")
+	} else if *got[1].EPSSScore != 0 {
+		t.Errorf("real 0.0 epss_score = %v, want 0.0", *got[1].EPSSScore)
+	}
+	if got[1].EPSSPercentile == nil {
+		t.Errorf("real 0.0 epss_percentile must stay non-nil, got nil")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
+}
+
+// TestComponentRepository_EPSSColumnsAreBare is the M47 W4 structural guard
+// for BOTH ComponentRepository read paths.
+//
+// It is needed because every other assertion in this file is value-based, and
+// sqlmock supplies row values directly — so a revert of the SQL alone (back to
+// COALESCE(v.epss_score, 0) / COALESCE(v.epss_percentile, 0)) would change no
+// scanned value here and pass silently, while in production it would once
+// again report an un-scored CVE as a measured ~0% exploitation probability.
+//
+// The regex anchors on the surrounding columns because sqlmock normalises the
+// statement to a single spaced line, and it is checked against both retired
+// sentinel spellings so it cannot be vacuous.
+func TestComponentRepository_EPSSColumnsAreBare(t *testing.T) {
+	bare := regexp.MustCompile(`(?is)v\.cvss_score,\s*v\.epss_score,\s*v\.epss_percentile,`)
+	if bare.MatchString("v.cvss_score, 0::numeric, 0::numeric,") {
+		t.Fatalf("pattern is vacuous: it also matches the old 0::numeric sentinels")
+	}
+	if bare.MatchString("v.cvss_score, COALESCE(v.epss_score, 0), COALESCE(v.epss_percentile, 0),") {
+		t.Fatalf("pattern is vacuous: it also matches the COALESCE sentinel form")
+	}
+
+	cols := []string{
+		"id", "cve_id", "description", "severity", "cvss_score",
+		"epss_score", "epss_percentile", "source",
+		"in_kev", "kev_date_added", "kev_due_date", "kev_ransomware_use",
+		"published_at", "updated_at",
+	}
+
+	t.Run("GetVulnerabilities", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		repo := NewComponentRepository(db)
+
+		sbomID := uuid.New()
+		mock.ExpectQuery(bare.String()).WithArgs(sbomID).
+			WillReturnRows(sqlmock.NewRows(cols))
+		if _, err := repo.GetVulnerabilities(context.Background(), sbomID, "epss"); err != nil {
+			t.Fatalf("GetVulnerabilities: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("GetVulnerabilitiesPaginated", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		repo := NewComponentRepository(db)
+
+		sbomID := uuid.New()
+		mock.ExpectQuery(bare.String()).WithArgs(sbomID, 50, 0).
+			WillReturnRows(sqlmock.NewRows(cols))
+		if _, err := repo.GetVulnerabilitiesPaginated(context.Background(), sbomID, 50, 0, "epss"); err != nil {
+			t.Fatalf("GetVulnerabilitiesPaginated: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
 }
 
 // TestComponentRepository_Create_PassesTenantID locks the tenant_id column to

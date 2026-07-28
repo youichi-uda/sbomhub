@@ -40,9 +40,9 @@ func TestGenerateExcel_UnscoredCVSSCellIsLabelNotZero(t *testing.T) {
 	data := buildFullReportData()
 	// Row 2: scored 9.1 (fixture). Row 3: un-scored CRITICAL. Row 4: real 0.0.
 	data.TopRisks = append(data.TopRisks,
-		model.TopRisk{CVEID: "CVE-2026-0002", EPSSScore: 0.5, CVSSScore: nil,
+		model.TopRisk{CVEID: "CVE-2026-0002", EPSSScore: f64p(0.5), CVSSScore: nil,
 			Severity: "CRITICAL", ProjectName: "app-b", ComponentName: "libq"},
-		model.TopRisk{CVEID: "CVE-2026-0003", EPSSScore: 0.1, CVSSScore: f64p(0),
+		model.TopRisk{CVEID: "CVE-2026-0003", EPSSScore: f64p(0.1), CVSSScore: f64p(0),
 			Severity: "LOW", ProjectName: "app-c", ComponentName: "libr"},
 	)
 

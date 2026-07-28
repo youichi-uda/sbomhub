@@ -50,8 +50,13 @@ type VulnerabilityNotification struct {
 	// Analysis"). No 0-sentinel: CVSS 0.0 is a real "None" score, and a
 	// Slack/Discord/email alert saying "CVSS 0.0" presents an un-triaged
 	// finding as harmless. Renderers print 未採点 for nil (M46 wave 4).
-	CVSSScore        *float64 `json:"cvss_score,omitempty"`
-	EPSSScore        float64  `json:"epss_score"`
+	CVSSScore *float64 `json:"cvss_score,omitempty"`
+	// EPSSScore is nil when FIRST.org has no score for this CVE. Same
+	// no-0-sentinel contract as CVSSScore above: an alert reading
+	// "EPSS 0.0%" next to an un-triaged CRITICAL presents an unknown
+	// exploitation probability as a measured near-zero one. Renderers
+	// print 未採点 for nil (M47 W4).
+	EPSSScore        *float64 `json:"epss_score,omitempty"`
 	Severity         string   `json:"severity"`
 	ProjectID        string   `json:"project_id"`
 	ProjectName      string   `json:"project_name"`

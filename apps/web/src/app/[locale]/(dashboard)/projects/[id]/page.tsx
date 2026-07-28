@@ -785,12 +785,14 @@ export default function ProjectDetailPage() {
                         {/* M38-B (F447 #159): EPSS exploitation
                             probability. Mirrors the dashboard TopRisksTable
                             format ((epss*100).toFixed(1)% + red/bold above
-                            0.5). Un-synced rows arrive with epss_score
-                            absent / 0 (backend `>0` guard) — render a muted
-                            "—" rather than a misleading 0.0%. */}
+                            0.5). M47 W4: the backend omits epss_score only
+                            when FIRST.org has no score, so the guard is
+                            `!= null` — a real 0.0 is a measurement and must
+                            render as 0.0%, while absent renders a muted "—"
+                            (the old `> 0` guard hid both). */}
                         <span className="text-sm text-muted-foreground">
                           {t("Vulnerabilities.epss")}:{" "}
-                          {typeof vuln.epss_score === "number" && vuln.epss_score > 0 ? (
+                          {vuln.epss_score != null ? (
                             <span
                               className={
                                 vuln.epss_score > 0.5 ? "text-red-500 font-bold" : ""
