@@ -116,7 +116,16 @@ jobs:
           set -euo pipefail
           test -f .env || { echo "::error::.env was not generated"; exit 1; }
 
-          for key in ENCRYPTION_KEY MIGRATOR_PASSWORD APP_PASSWORD; do
+          # M48 (6bcc1f4) made APP_ENV and SBOMHUB_AUTH_MODE required with no
+          # default, and docker-compose.yml guards SBOMHUB_AUTH_MODE with
+          # `${...:?}`. install.sh seeds .env from .env.example, so a .env
+          # that loses either line makes `docker compose up` abort during
+          # interpolation on an operator's very first run. The Ubuntu leg
+          # would also catch that indirectly (--start runs docker compose
+          # up); the macOS leg only generates .env and has no compose step
+          # at all, so both legs assert on the file directly. These two are
+          # not secrets — presence and non-emptiness is the whole contract.
+          for key in ENCRYPTION_KEY MIGRATOR_PASSWORD APP_PASSWORD APP_ENV SBOMHUB_AUTH_MODE; do
             line="$(grep -E "^${key}=" .env || true)"
             if [ -z "$line" ]; then
               echo "::error::${key} missing from .env"
@@ -225,7 +234,16 @@ jobs:
           set -euo pipefail
           test -f .env || { echo "::error::.env was not generated"; exit 1; }
 
-          for key in ENCRYPTION_KEY MIGRATOR_PASSWORD APP_PASSWORD; do
+          # M48 (6bcc1f4) made APP_ENV and SBOMHUB_AUTH_MODE required with no
+          # default, and docker-compose.yml guards SBOMHUB_AUTH_MODE with
+          # `${...:?}`. install.sh seeds .env from .env.example, so a .env
+          # that loses either line makes `docker compose up` abort during
+          # interpolation on an operator's very first run. The Ubuntu leg
+          # would also catch that indirectly (--start runs docker compose
+          # up); the macOS leg only generates .env and has no compose step
+          # at all, so both legs assert on the file directly. These two are
+          # not secrets — presence and non-emptiness is the whole contract.
+          for key in ENCRYPTION_KEY MIGRATOR_PASSWORD APP_PASSWORD APP_ENV SBOMHUB_AUTH_MODE; do
             line="$(grep -E "^${key}=" .env || true)"
             if [ -z "$line" ]; then
               echo "::error::${key} missing from .env"

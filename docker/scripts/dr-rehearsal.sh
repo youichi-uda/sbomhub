@@ -50,6 +50,22 @@ OLD_ENCRYPTION_KEY="0123456789abcdef0123456789abcdef"
 NEW_ENCRYPTION_KEY="abcdef0123456789abcdef0123456789"
 APP_PASSWORD="sbomhub_app_dev"
 MIGRATOR_PASSWORD="sbomhub_migrator_dev"
+# M48 (6bcc1f4) made SBOMHUB_AUTH_MODE a required declaration in
+# docker-compose.yml with a `${...:?}` guard and deliberately no default, so
+# every `docker compose` invocation against that file — including the plain
+# `config` render below — has to supply it or abort during interpolation.
+#
+# It has to be a shell/environment variable, not an `environment:` entry in
+# COMPOSE_OVERRIDE: compose interpolates each -f file BEFORE merging them, so
+# an override cannot satisfy a `:?` in the base file. Verified 2026-07-29 with
+# Docker Compose v2.40.3 (override-only -> still "required variable
+# SBOMHUB_AUTH_MODE is missing a value").
+#
+# `anonymous` is the honest value for this rehearsal: it boots postgres +
+# redis + api from docker-compose.yml with no CLERK_SECRET_KEY, so the api
+# does serve the Clerk-fronted routes as Owner with no credential. The stack
+# is ephemeral, bound to a per-PID compose project, and torn down at the end.
+DR_AUTH_MODE="anonymous"
 DATABASE_URL=""
 VERIFY_DB_URL=""
 BACKUP_TARBALL=""
@@ -172,6 +188,7 @@ compose() {
     ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
     APP_PASSWORD="$APP_PASSWORD" \
     MIGRATOR_PASSWORD="$MIGRATOR_PASSWORD" \
+    SBOMHUB_AUTH_MODE="$DR_AUTH_MODE" \
         docker compose -p "$REHEARSAL_PROJECT" -f "$COMPOSE_RENDERED" "$@"
 }
 
@@ -190,10 +207,12 @@ services:
     image: ${API_IMAGE}
     environment:
       - APP_ENV=development
+      - SBOMHUB_AUTH_MODE=${DR_AUTH_MODE}
 YAML
     ENCRYPTION_KEY="$NEW_ENCRYPTION_KEY" \
     APP_PASSWORD="$APP_PASSWORD" \
     MIGRATOR_PASSWORD="$MIGRATOR_PASSWORD" \
+    SBOMHUB_AUTH_MODE="$DR_AUTH_MODE" \
         docker compose -p "$REHEARSAL_PROJECT" \
             -f "$COMPOSE_BASE" -f "$COMPOSE_OVERRIDE" config >"$COMPOSE_RENDERED"
 }

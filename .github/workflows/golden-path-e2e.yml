@@ -77,8 +77,24 @@ jobs:
         # step. The real per-run ENCRYPTION_KEY is generated in the
         # next step and written to .env so the actual `up` sees its
         # own value.
+        #
+        # M48 (6bcc1f4) added a second `:?` guard, SBOMHUB_AUTH_MODE, with
+        # deliberately no default — the whole point of FO-3 is that the mode
+        # is declared, never inferred. This step runs BEFORE .env is
+        # generated, so it is the one place in this workflow that has to
+        # supply the declaration from the step env, exactly like
+        # ENCRYPTION_KEY above.
+        #
+        # `anonymous` is the truthful value for this job and not a
+        # placeholder: the header of this workflow says "Auth: self-host
+        # mode (no Clerk secret)", the stack sets no CLERK_SECRET_KEY, and
+        # the Golden Path drives every endpoint through the API-key path.
+        # Declaring `clerk` here would make the api refuse to start two
+        # steps later. .env (from .env.example) carries the same
+        # `SBOMHUB_AUTH_MODE=anonymous` for the actual `up`.
         env:
           ENCRYPTION_KEY: "ci-syntax-check-placeholder-32-bytes-long"
+          SBOMHUB_AUTH_MODE: "anonymous"
         run: |
           docker compose config >/dev/null
           echo "OK: docker-compose.yml syntax valid."
@@ -107,6 +123,11 @@ jobs:
           sed -i '/^APP_ENV=/d'               .env
           sed -i '/^DATABASE_URL=/d'          .env
           sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+          # NOTE: SBOMHUB_AUTH_MODE is deliberately NOT stripped/rewritten
+          # here. .env.example ships `anonymous`, which is what this job
+          # wants (see the syntax-check step above), so the copy is already
+          # correct. If .env.example ever ships `clerk`, the api will refuse
+          # to start here with no CLERK_SECRET_KEY — loudly, by design.
           {
             echo "ENCRYPTION_KEY=${ENC_KEY}"
             echo "MIGRATOR_PASSWORD=${MIG_PW}"
@@ -240,5 +261,12 @@ jobs:
           docker compose logs --tail=100 redis || true
 
       - name: Tear down
+        # `|| true` matches rls-integration.yml / nullscan.yml /
+        # migration-roundtrip.yml. Without it a job that dies before the
+        # .env generation step also reports a second, misleading failure
+        # here: `down` still interpolates docker-compose.yml, so it aborts
+        # on the same missing ENCRYPTION_KEY / SBOMHUB_AUTH_MODE and buries
+        # the real error under a teardown annotation. Teardown is
+        # best-effort cleanup, not a product assertion.
         if: always()
-        run: docker compose down -v
+        run: docker compose down -v || true

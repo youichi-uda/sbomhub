@@ -89,12 +89,27 @@ jobs:
           sed -i '/^APP_ENV=/d'               .env
           sed -i '/^DATABASE_URL=/d'          .env
           sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+          sed -i '/^REDIS_URL=/d'             .env
 
           # The Go test process runs on the runner host (not inside a
-          # compose container), so DATABASE_URL / MIGRATE_DATABASE_URL
-          # must point at the postgres port published to the host by
+          # compose container), so DATABASE_URL / MIGRATE_DATABASE_URL /
+          # REDIS_URL must point at the ports published to the host by
           # the override (see "Write docker-compose.override.yml" step
           # below). Hostname is localhost; password is per-run.
+          #
+          # REDIS_URL is pinned for symmetry with the DB URLs, not because
+          # it was wrong: .env.example already ships
+          # redis://localhost:6379, and that inherited value is what the
+          # failing run actually used. The failure was that no redis was
+          # running for it to reach. Pinning it here keeps the host-vs-
+          # container distinction stated in one place, next to the two
+          # URLs that DO have to be rewritten (.env.example points those at
+          # the compose hostname).
+          #
+          # SBOMHUB_AUTH_MODE is NOT rewritten: this job never boots the
+          # api service, only postgres + redis, so the copied
+          # .env.example value (anonymous) is only ever consumed by
+          # compose interpolation of docker-compose.yml.
           {
             echo "ENCRYPTION_KEY=${ENC_KEY}"
             echo "MIGRATOR_PASSWORD=${MIG_PW}"
@@ -102,17 +117,33 @@ jobs:
             echo "APP_ENV=development"
             echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@localhost:5432/sbomhub?sslmode=disable"
             echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@localhost:5432/sbomhub?sslmode=disable"
+            echo "REDIS_URL=redis://localhost:6379"
           } >> .env
 
           # Sanity log (do NOT echo the secrets themselves).
-          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL)=' .env \
+          grep -E '^(ENCRYPTION_KEY|MIGRATOR_PASSWORD|APP_PASSWORD|APP_ENV|DATABASE_URL|MIGRATE_DATABASE_URL|REDIS_URL|SBOMHUB_AUTH_MODE)=' .env \
             | sed -E 's/=.*/=<redacted>/'
 
-      - name: Write docker-compose.override.yml (expose postgres:5432)
+      - name: Write docker-compose.override.yml (expose postgres:5432, redis:6379)
         # docker-compose.yml is frozen (R8 / #10) and does not publish
-        # postgres:5432 to the host. The override is a transient,
-        # workflow-local file that adds the port publish so the Go test
-        # process on the runner host can dial localhost:5432.
+        # postgres:5432 or redis:6379 to the host. The override is a
+        # transient, workflow-local file that adds the port publishes so
+        # the Go test process on the runner host can dial localhost.
+        #
+        # NOTE this step OVERWRITES the docker-compose.override.yml that is
+        # committed at the repo root (which already publishes both ports).
+        # That is why redis has to be listed here explicitly: dropping it
+        # from this heredoc silently un-publishes 6379 for this job even
+        # though the checked-in file has it.
+        #
+        # redis is required as of M48 (6bcc1f4), which added
+        # internal/middleware/m48_public_link_ratelimit_integration_test.go
+        # — a `//go:build integration` file that asserts on real Redis
+        # bookkeeping (the public-link brute-force budget is implemented in
+        # Lua on Redis, so a fake would only be asserting on our own mock).
+        # It t.Fatal()s rather than skips when Redis is unreachable, on
+        # purpose: a silently-skipped brute-force gate is the bug it exists
+        # to prevent.
         shell: bash
         run: |
           cat > docker-compose.override.yml <<'YML'
@@ -120,11 +151,39 @@ jobs:
             postgres:
               ports:
                 - "5432:5432"
+            redis:
+              ports:
+                - "6379:6379"
           YML
           docker compose config | grep -A2 '^  postgres:' | head -n 20 || true
 
-      - name: Start postgres
-        run: docker compose up -d --wait postgres
+      - name: Start postgres + redis
+        # redis has no healthcheck in docker-compose.yml, so `--wait`
+        # resolves it as soon as the container is running; the explicit
+        # PING below is the real readiness gate.
+        run: docker compose up -d --wait postgres redis
+
+      - name: Assert redis is reachable from the runner host
+        # Fail here, with one clear line, instead of ten identical
+        # "redis unreachable" test failures 90 seconds later.
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if [ "$(docker compose exec -T redis redis-cli ping 2>/dev/null | tr -d '\r')" = "PONG" ]; then
+              echo "redis answered PONG on attempt ${i}"
+              break
+            fi
+            sleep 1
+          done
+          # The tests dial the published port from the host, not from
+          # inside the compose network, so check that specifically.
+          if ! (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null; then
+            echo "::error::redis is not reachable on the host at 127.0.0.1:6379 — the docker-compose.override.yml port publish did not take effect. The M48 public-link rate-limit integration tests assert on real Redis and will fail."
+            docker compose ps || true
+            exit 1
+          fi
+          echo "OK: redis reachable on 127.0.0.1:6379."
 
       - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
         # install.sh --bootstrap-roles reads MIGRATOR_PASSWORD /
@@ -156,8 +215,12 @@ jobs:
         #   - internal/repository/public_link_rls_test.go      (R5-5a)
         #   - internal/repository/subscription_rls_test.go     (R15-15a)
         #   - internal/middleware/tx_test.go                   (Wave 3)
+        #   - internal/middleware/m48_public_link_ratelimit_integration_test.go (M48 FO-6)
         #   - internal/service/vex_suggestions_integration_test.go (M26-A #130)
         #   - internal/service/vex_apply_integration_test.go       (M27-A/D #132)
+        # The M48 file needs live Redis (REDIS_URL, sourced from .env
+        # below) in addition to postgres — see the redis reachability
+        # assertion above.
         # ./internal/service/... is required so the cross-project VEX apply
         # security tests — injection guard (F381/F383), tenant-crossed source
         # rejection, and 409 idempotency — become a CI gate, not a local-only
@@ -177,11 +240,12 @@ jobs:
             ./internal/middleware/... \
             ./internal/service/...
 
-      - name: Dump postgres logs on failure
+      - name: Dump postgres / redis logs on failure
         if: failure()
         run: |
           docker compose ps || true
           docker compose logs --tail=200 postgres || true
+          docker compose logs --tail=100 redis || true
 
       - name: Tear down
         if: always()

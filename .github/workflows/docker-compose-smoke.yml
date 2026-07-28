@@ -47,6 +47,31 @@ jobs:
           # Intentionally unset ENCRYPTION_KEY — make sure no inherited value
           # masks the regression we are trying to catch.
           ENCRYPTION_KEY: ""
+          # M48 (6bcc1f4) added a second `:?` guard. Set it to a valid value
+          # so ENCRYPTION_KEY is the ONLY unresolvable variable and this step
+          # tests what its name says.
+          #
+          # This is a strengthening, not a workaround. `docker compose
+          # config` reports only the FIRST unresolvable variable, in file
+          # order, so with both unset the assertion below was matching on
+          # whichever line happened to come first. Measured 2026-07-29,
+          # Docker Compose v2.40.3, three runs against mutated copies of
+          # docker-compose.yml:
+          #   - both unset, current order -> error names ENCRYPTION_KEY, so
+          #     the grep matched (green, by luck of ordering)
+          #   - both unset, the two lines swapped, file otherwise healthy ->
+          #     error names SBOMHUB_AUTH_MODE, grep misses, step exits 1:
+          #     a FALSE RED on a correct compose file
+          #   - ENCRYPTION_KEY's `:?` replaced by a bundled `:-` default
+          #     (the exact regression this job exists to catch) -> still red,
+          #     but reported as "the error message does not mention
+          #     ENCRYPTION_KEY" instead of "bundled default key may have been
+          #     re-introduced" — the right alarm, the wrong diagnosis
+          # With SBOMHUB_AUTH_MODE supplied, all three cases report
+          # correctly (re-measured after this change).
+          #
+          # SBOMHUB_AUTH_MODE has its own dedicated negative test below.
+          SBOMHUB_AUTH_MODE: "anonymous"
         run: |
           set +e
           # We expect this to FAIL because of ${ENCRYPTION_KEY:?...} expansion.
@@ -70,10 +95,60 @@ jobs:
 
           echo "OK: docker compose refused to start without ENCRYPTION_KEY."
 
-      - name: docker compose config must succeed when ENCRYPTION_KEY is provided
+      - name: docker compose config must fail when SBOMHUB_AUTH_MODE is unset
+        # Same gate, for the guard M48 (6bcc1f4) added. FO-3: the auth mode
+        # used to be inferred from whether CLERK_SECRET_KEY arrived, which
+        # made a Clerk deployment with a totally failed secret injection
+        # byte-identical to a self-hosted one — and it served every request
+        # as Owner of the default tenant, unauthenticated. The declaration
+        # is required precisely so that failure mode becomes a refusal to
+        # start instead of a silent downgrade.
+        #
+        # A `${SBOMHUB_AUTH_MODE:-anonymous}` added back to
+        # docker-compose.yml would restore exactly the inference M48
+        # removed, one layer up, and nothing else in CI would notice: every
+        # other workflow supplies the variable. This step is the thing that
+        # notices.
+        shell: bash
+        env:
+          # Only SBOMHUB_AUTH_MODE is missing here.
+          SBOMHUB_AUTH_MODE: ""
+        run: |
+          set +e
+          # Split declare/assign (shellcheck SC2155).
+          ENCRYPTION_KEY="$(openssl rand -base64 32)"
+          export ENCRYPTION_KEY
+          # We expect this to FAIL because of ${SBOMHUB_AUTH_MODE:?...}.
+          out=$(docker compose config 2>&1)
+          rc=$?
+          set -e
+
+          echo "--- docker compose config exit: $rc ---"
+          echo "$out"
+          echo "--- end ---"
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::docker compose config succeeded without SBOMHUB_AUTH_MODE — a default may have been re-introduced, which re-opens M48 FO-3 (auth mode inferred instead of declared)."
+            exit 1
+          fi
+
+          if ! grep -q 'SBOMHUB_AUTH_MODE' <<<"$out"; then
+            echo "::error::docker compose failed but the error message does not mention SBOMHUB_AUTH_MODE (expected our :? guard, got something else)."
+            exit 1
+          fi
+
+          echo "OK: docker compose refused to start without SBOMHUB_AUTH_MODE."
+
+      - name: docker compose config must succeed when both guards are satisfied
         shell: bash
         run: |
           # Use a fresh random key; do not rely on the .env file.
-          export ENCRYPTION_KEY="$(openssl rand -base64 32)"
+          # Split declare/assign (shellcheck SC2155).
+          ENCRYPTION_KEY="$(openssl rand -base64 32)"
+          export ENCRYPTION_KEY
+          # M48: required declaration, no default. `anonymous` is the value
+          # .env.example ships and the honest one for a stack with no
+          # CLERK_SECRET_KEY, which is what this repo's compose file is.
+          export SBOMHUB_AUTH_MODE="anonymous"
           docker compose config >/dev/null
-          echo "OK: docker compose accepted an operator-provided ENCRYPTION_KEY."
+          echo "OK: docker compose accepted an operator-provided ENCRYPTION_KEY + SBOMHUB_AUTH_MODE."
