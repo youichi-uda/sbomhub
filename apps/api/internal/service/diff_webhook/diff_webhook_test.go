@@ -29,6 +29,7 @@ type stubSettings struct {
 
 	lastFireStatus int
 	lastFireErr    string
+	called         bool
 }
 
 func (s *stubSettings) Get(_ context.Context, _ uuid.UUID) (*model.DiffWebhookSettings, error) {
@@ -179,6 +180,15 @@ func TestFireIfThreshold_CriticalAboveThreshold_PostsWithSignature(t *testing.T)
 }
 
 func TestFireIfThreshold_5xxRetried_4xxNotRetried(t *testing.T) {
+	// M48 (FO-5): this test is about the retry schedule, not about signing,
+	// but a json-format delivery now requires a secret before any request is
+	// issued — without one the service refuses and `attempts` stays 0. The
+	// secret is supplied so the subject under test is still reachable.
+	enc, err := llm.Encrypt([]byte("retry-test-secret"), testKey)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
 	var attempts int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts++
@@ -188,6 +198,7 @@ func TestFireIfThreshold_5xxRetried_4xxNotRetried(t *testing.T) {
 
 	settings := &stubSettings{row: &model.DiffWebhookSettings{
 		Enabled: true, WebhookURL: srv.URL,
+		EncryptedSecret:   enc,
 		CriticalThreshold: 1, HighThreshold: 5, LicenseViolationThreshold: 1,
 		Format: model.DiffWebhookFormatJSON,
 	}}
@@ -198,7 +209,7 @@ func TestFireIfThreshold_5xxRetried_4xxNotRetried(t *testing.T) {
 		Retries:    []time.Duration{0, 0, 0}, // zero-delay so the test is fast
 	})
 
-	_, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0))
+	_, err = svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

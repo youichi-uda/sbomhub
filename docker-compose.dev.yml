@@ -13,6 +13,16 @@ services:
       - REDIS_URL=redis://redis:6379
       - ENCRYPTION_KEY=UW2Z6oGWIQxDBFBmqczk+XyD6RSySxtv0rCs74lDZXA=
       - NVD_API_KEY=${NVD_API_KEY:-}
+      # M48: APP_ENV is required (no default in the api). This stack points at
+      # the postgres superuser and carries a checked-in key, so "development"
+      # is the truthful answer — it is also what keeps the RLS and
+      # ENCRYPTION_KEY guards at warning level for this stack specifically.
+      # Do not copy this file into a real deployment.
+      - APP_ENV=development
+      # Required in every environment, development included: no CLERK_SECRET_KEY
+      # is set here, so the api serves the Clerk-fronted routes as Owner with no
+      # credential, and it must say so.
+      - SBOMHUB_AUTH_MODE=anonymous
     depends_on:
       postgres:
         condition: service_healthy

@@ -78,8 +78,21 @@ func TestLoad_DefaultValues(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port 8080, got %s", cfg.Port)
 	}
-	if cfg.Environment != "development" {
-		t.Errorf("expected default environment development, got %s", cfg.Environment)
+	// M48 (FO-4): Environment deliberately has NO default. This assertion used
+	// to read `!= "development"`, which is exactly the property the finding was
+	// about — "the operator configured nothing" resolved to the weakest posture
+	// the process has, so validateEncryptionKey accepted a missing key,
+	// evaluateAppRoleRLS accepted a BYPASSRLS role, and UnsignedWebhooksAllowed
+	// became reachable. Unset is now a startup refusal (ValidateEnvironment),
+	// not a value.
+	if cfg.Environment != "" {
+		t.Errorf("expected no default environment, got %q", cfg.Environment)
+	}
+	if err := cfg.ValidateEnvironment(); err == nil {
+		t.Error("ValidateEnvironment accepted an unset APP_ENV")
+	}
+	if cfg.IsDevelopment() {
+		t.Error("IsDevelopment() is true with nothing set — every startup guard would relax")
 	}
 }
 
@@ -130,10 +143,14 @@ func TestLoad_AppEnvPreferredOverEnvironment(t *testing.T) {
 			wantProduction: true,
 		},
 		{
-			name:           "Both unset defaults to development",
+			// M48 (FO-4): was "Both unset defaults to development". The
+			// default is gone — unset stays unset and is refused at startup
+			// by ValidateEnvironment, so no guard can read it as a
+			// deliberate "this is a laptop".
+			name:           "Both unset resolves to no environment at all",
 			appEnv:         "",
 			environment:    "",
-			wantEnv:        "development",
+			wantEnv:        "",
 			wantProduction: false,
 		},
 		{

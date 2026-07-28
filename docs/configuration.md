@@ -15,7 +15,19 @@ SBOMHub can be configured through environment variables.
 | `DATABASE_URL` | `postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable` | PostgreSQL connection string |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
 | `BASE_URL` | `http://localhost:3000` | Base URL for the web application |
-| `APP_ENV` | `development` | Environment: `development`, `staging`, `production`. The legacy name `ENVIRONMENT` is still read as a fallback when `APP_ENV` is unset (M0 Trust Rescue, codex-r18). |
+| `APP_ENV` | (none — required) | Environment: `development`, `staging`, `production`. **No default.** The server refuses to start when it is unset or is not one of those three values (M48). Every startup guard downgrades itself to a warning only under `development`, so an unset value used to select the weakest posture silently. The legacy name `ENVIRONMENT` is still read as a fallback when `APP_ENV` is unset (M0 Trust Rescue, codex-r18); the value it yields is validated the same way. |
+| `ENCRYPTION_KEY` | (none — required unless `APP_ENV=development`) | AES-256 key for secrets stored in the database (BYOK LLM API keys, issue-tracker tokens, diff-webhook signing secrets). Must be at least 32 bytes and must not be a known placeholder value; the server refuses to start otherwise, and downgrades that refusal to a warning only under `APP_ENV=development`. Generate with `openssl rand -base64 32`. Rotation runbook: [`encryption-key-rotation.md`](./encryption-key-rotation.md). |
+
+### Authentication and Startup Guards
+
+`SBOMHUB_AUTH_MODE` is a required declaration of which authentication mode this deployment intends; `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` is an opt-in that weakens webhook signature verification in development. Declaring `anonymous` is an acknowledgement, not a mitigation: it records that the operator meant to run without user authentication, it does not make the deployment safer.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SBOMHUB_AUTH_MODE` | (none — required) | `clerk` or `anonymous`. Declares the deployment's authentication mode; there is no default, and nothing is inferred from whether `CLERK_SECRET_KEY` arrived. `clerk`: users authenticate through Clerk. `anonymous`: the self-host posture, in which the Clerk-fronted API route groups serve requests as Owner of the default tenant with no credential of any kind (see the Deployment Mode section below). The server refuses to start when the declaration is unset (in every environment, `development` included), is not one of the two values, says `clerk` while `CLERK_SECRET_KEY` is empty, says `anonymous` while `CLERK_SECRET_KEY` is set, or says `anonymous` while a SaaS-only variable (`CLERK_WEBHOOK_SECRET`, any `LEMONSQUEEZY_*`) is set — the half-configured case where the Clerk key specifically is the piece that went missing. `docker compose` also fails at variable substitution when it is unset, before the container starts. |
+| `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` | `false` | Pre-existing (M47). Lets the Clerk / Lemon Squeezy webhook *receivers* accept deliveries that carry no signature when no signing secret is configured. Honoured only when `APP_ENV=development`; set under any other value it is ignored, and in SaaS mode with `APP_ENV=production` the server refuses to start. |
+
+Why a required declaration rather than an inferred mode: a Clerk deployment whose secret store injects nothing at all is byte-for-byte identical to a self-hosted one — no Clerk key, no webhook secret, no billing key — so there is nothing left to contradict, and any durable "anonymous is fine" artefact from an earlier phase would authorise serving with no authentication. Refusing such an artefact only when a Clerk key is present does not close that, because it says nothing about a first boot, a crash-loop, or a rollout where the key never arrived. A declaration lives in the deployment manifest rather than the secret store, so it survives the injection failure and turns it into a refusal to boot. Staleness then fails in the safe direction: a stale `clerk` is a boot failure, and no state a Clerk deployment can carry permits anonymous mode. Keep the declaration outside the secret store for that reason. The boolean `SBOMHUB_ALLOW_ANONYMOUS_AUTH` used by intermediate drafts of this guard was removed rather than kept as an alias; setting it is itself refused at startup, with a message pointing at `SBOMHUB_AUTH_MODE=anonymous`.
 
 ### NVD Integration
 
@@ -109,6 +121,15 @@ DATABASE_URL=postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable
 REDIS_URL=redis://localhost:6379
 APP_ENV=production
 
+# Required unless APP_ENV=development. Generate with: openssl rand -base64 32
+ENCRYPTION_KEY=
+
+# Declares this deployment's authentication mode: anonymous (self-host, which
+# has no user authentication — see "Deployment Mode") or clerk. Required in
+# every environment, development included; the server refuses to start without
+# it, and docker compose fails before the container starts.
+SBOMHUB_AUTH_MODE=anonymous
+
 # NVD
 NVD_API_KEY=your-nvd-api-key
 
@@ -142,16 +163,29 @@ SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL=text-embedding-3-small       # optional; defa
 
 Only self-host (Docker Compose) is supported. The SaaS instance at `sbomhub.app` was sunset in 2026-06.
 
-- User authentication is handled by API keys (and a simple in-product account flow planned)
-- Multi-tenancy is enforced via PostgreSQL Row-Level Security
+**Self-host has no user authentication.** Self-hosted mode is selected by `CLERK_SECRET_KEY` being empty, which is the only configuration the OSS distribution uses. In that mode `handleSelfHostedAuth` in `internal/middleware/auth.go` reads no header and checks no credential: it sets the request role to Owner on the default tenant. That is the behaviour of the Clerk-fronted route groups — everything behind the `Auth` / `MultiAuth` middleware, which is where projects, SBOMs, VEX, settings and API-key issuance live. `/api/v1/cli/*` and `/api/v1/mcp/*` authenticate by API key and still require one; `/api/v1/health` and `/api/v1/public/:token` are anonymous by design in both modes. Measured against a real database on 2026-07-29, with no `Authorization` header at all, `POST /api/v1/projects` returned 201, `GET /api/v1/me` returned `role=owner plan=enterprise`, and `POST /api/v1/apikeys` — an admin-gated route — returned 201 with a live API key in the response body. That minted key kept working against `/api/v1/cli/*` and `/api/v1/mcp/*` after `CLERK_SECRET_KEY` was later set and the server restarted in SaaS mode (verified: HTTP 200 on both), so supplying the variable afterwards does not revoke what was issued while it was absent.
+
+The control is therefore network reachability, and nothing else: anyone who can reach the API port can take Owner access to all data in the deployment through those route groups. Put the API behind a VPN, a private subnet, or an authenticating reverse proxy before it holds real data — see [`security/self-host-deployment.md`](./security/self-host-deployment.md) §7 (firewall / network segmentation).
+
+API keys (`POST /api/v1/apikeys`, used by the CLI, GitHub Actions and the MCP server) are an *additional* way for machine clients to authenticate. They are not an access boundary for a self-hosted deployment, because minting one requires no credential in the first place.
+
+- Authentication: none on the Clerk-fronted route groups in self-hosted mode, as above. `SBOMHUB_AUTH_MODE=anonymous` is required to declare that this is intended, in every environment including `development`; the server refuses to start without it.
+- Multi-tenancy is enforced via PostgreSQL Row-Level Security, provided `DATABASE_URL` names a `NOSUPERUSER NOBYPASSRLS` role. It separates tenants from each other; it does not authenticate the caller.
 - AI features are enabled / disabled gracefully via BYOK env vars
 
 ```bash
-# Minimal configuration for self-host
-export DATABASE_URL="postgres://..."
+# Minimal configuration for self-host.
+# The first three are startup requirements, in every environment: the server
+# refuses to boot without APP_ENV, ENCRYPTION_KEY or SBOMHUB_AUTH_MODE.
+export APP_ENV=production
+export ENCRYPTION_KEY="$(openssl rand -base64 32)"   # store this; it decrypts existing rows
+export SBOMHUB_AUTH_MODE=anonymous                   # declares: no user authentication (see above)
+export DATABASE_URL="postgres://..."                 # use a NOSUPERUSER NOBYPASSRLS role
 export REDIS_URL="redis://..."
 docker compose up -d
 ```
+
+`./install.sh` generates a `.env` containing these values (random `ENCRYPTION_KEY`, database roles) if you would rather not assemble them by hand.
 
 ## Database Configuration
 
@@ -185,7 +219,12 @@ maxmemory-policy allkeys-lru
 - [ ] Use strong database passwords
 - [ ] Enable SSL for database connections (`sslmode=require`)
 - [ ] Configure HTTPS with valid certificates
-- [ ] Set `APP_ENV=production`
+- [ ] Set `APP_ENV=production` (the server refuses to start when it is unset or misspelled)
+- [ ] Set a real `ENCRYPTION_KEY` (`openssl rand -base64 32`), kept outside the repository
+- [ ] Point `DATABASE_URL` at a `NOSUPERUSER NOBYPASSRLS` role, so Row-Level Security is enforced against the application connection
+- [ ] Self-host: declare `SBOMHUB_AUTH_MODE=anonymous` (required in every environment, not only production), and put a network boundary (VPN, private subnet, or authenticating reverse proxy) in front of the API — the declaration records that the Clerk-fronted routes have no authentication, it does not add any
+- [ ] SaaS / Clerk: declare `SBOMHUB_AUTH_MODE=clerk`, and keep that line in the deployment manifest rather than the secret store, so a total failure of secret injection is refused at boot instead of starting unauthenticated
+- [ ] Leave `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` unset
 - [ ] Restrict database access to application servers
 - [ ] Regular backup of PostgreSQL data
 - [ ] Monitor logs for security issues

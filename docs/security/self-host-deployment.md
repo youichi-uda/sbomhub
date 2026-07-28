@@ -55,6 +55,75 @@ SBOMHub OSS は 3 種類の配布形態に対応する。 製造業現場では 
   [`../../docker/README.enterprise.md`](../../docker/README.enterprise.md) を参照。
   本ガイド §11.4 にも本書側からの起動例を整理してある。
 
+### 2.1.1 認証モデル — セルフホストに「ユーザー認証」は存在しない (M48)
+
+**本ガイドで最も重要な節。** 本書はこれまで認証について一切記述していなかったが、
+`docs/configuration.md` は「認証は API キーで運用」と書いており、それは**事実ではなかった**。
+
+セルフホスト構成 (= `CLERK_SECRET_KEY` を設定しない構成。ルート `.env.example` は Clerk 変数を
+1 つも含まないので、標準インストールは常にこれ) では、API は次のように動作する:
+
+- `internal/middleware/auth.go` の `handleSelfHostedAuth` は **ヘッダを一切読まず、資格情報を
+  一切検証しない**。 リクエストは既定テナントの **Owner** として処理される。
+- したがって **8080 に到達できる者は全員が管理者**。 プロジェクト・SBOM・VEX・監査ログの
+  読み書き、テナント設定の変更、そして **API キーの発行**まで実行できる。
+- 正確な範囲: これが当てはまるのは **Clerk を前提とする route group** (`Auth` /
+  `MultiAuth` の背後 — projects / SBOM / VEX / settings / API キー発行) である。
+  `/api/v1/cli/*` と `/api/v1/mcp/*` は API キー認証なのでキーは依然必要、
+  `/api/v1/health` と `/api/v1/public/:token` は両モードとも設計上匿名。
+  ただし上記のとおり **API キーは無認証で発行できる**ので、実質的な境界にはならない。
+
+2026-07-29 に実 PostgreSQL に対して実測した挙動 (`Authorization` ヘッダ無し、`APP_ENV=production`):
+
+| リクエスト | 結果 |
+|---|---|
+| `POST /api/v1/projects` | `201 Created` |
+| `GET /api/v1/me` | `200` / `role=owner` / `plan=enterprise` |
+| `POST /api/v1/apikeys` (Admin ゲート付き route) | `201` + **有効な API キーが応答本文に含まれる** |
+
+さらに、この窓の間に発行された API キーは、後から `CLERK_SECRET_KEY` を設定して SaaS モードで
+再起動しても **`/api/v1/cli/*` と `/api/v1/mcp/*` に対して有効なまま**だった (実測: 両方 200)。
+**環境変数を後から直しても、開いていた間に配られた資格情報は取り消されない。**
+
+#### これは設計であり、事故であってはならない
+
+「セルフホストは認証なし」自体は本製品の意図した設計 (self-host first)。 M48 で変更したのは
+**その状態に到達する経路**だけで、posture は変えていない。
+
+**中心にあるのは 1 つの必須変数 `SBOMHUB_AUTH_MODE` (`clerk` | `anonymous`)**。 未設定・綴り誤り・
+実構成との不一致はいずれも**起動拒否**。 既定値はなく、推論も行わない。
+
+1. **推論を廃止した理由**: M48 は最初、boolean の opt-in (`SBOMHUB_ALLOW_ANONYMOUS_AUTH`)、
+   次にそれ + 任意の宣言、という順で設計したが、Codex レビュー 3 ラウンドがいずれも同じ穴で崩した。
+   モードを「`CLERK_SECRET_KEY` が届いたか」から**推論**する限り、
+   **シークレット注入が丸ごと失敗した SaaS デプロイ**は自己ホスト構成とバイト単位で区別が付かない —
+   矛盾を示す変数が 1 つも残らない — ので、以前の自己ホスト期から残った「匿名でよい」という痕跡が
+   それを承認してしまう。 「Clerk キーがある起動でだけ古い痕跡を拒否する」対症療法も、
+   初回起動・crash-loop・キーが一度も届かなかった rollout については何も言えない。
+   **宣言はシークレットストアではなく deployment manifest 側に置かれる**ので、
+   注入障害を生き延び、それを「無認証 API」ではなく「起動失敗」に変える。
+   古い宣言も安全側に倒れる — 古い `clerk` は起動失敗になるだけで、
+   **Clerk 構成が持ち得る状態のうち匿名モードを許すものは存在しない**。
+2. **矛盾した構成は無条件で拒否**: `anonymous` と宣言しているのに `CLERK_WEBHOOK_SECRET` や
+   `LEMONSQUEEZY_*` が設定されている場合、**どの環境でも**起動を拒否する。 1 は
+   `CLERK_SECRET_KEY` 自体がある場合を捕まえるが、こちらは**キーだけが欠けた**半端な構成
+   — 「SaaS のつもりで Clerk キーだけが渡っていない」事故そのものの形 — を捕まえる。
+3. **development も免除しない**: 初版はしていたが、M48 以前の `.env.example` が
+   `APP_ENV=development` を出荷しており `install.sh` は既存 `.env` を温存するため、
+   免除すると**既存の全 self-host 環境が何も問われずに M48 へ上がってしまう**。
+4. **`SBOMHUB_ALLOW_ANONYMOUS_AUTH` は廃止**: リリースには入っていないが、
+   中間ドラフトに従った運用者が「宣言したつもり」で無宣言になることを避けるため、
+   設定されていたら**無視ではなく拒否**して置き換えを促す。
+5. **起動 log で明言**: 旧 log は原因 (`Clerk secret key not set`) だけを述べて結果を述べていなかった。
+   現在は `AUTHENTICATION IS DISABLED ...` として、無資格情報のリクエストが Owner 扱いになることを
+   明示的に WARN で出す。
+
+#### 運用上の要求
+
+**API への到達性そのものが唯一の実効的な制御**である。 §7 の network 分離を必ず実施すること:
+VPN / プライベートサブネット / 認証付き reverse proxy のいずれかを API の前段に置く。
+TLS 終端だけでは**何も保護されない** (暗号化されるだけで、誰でも Owner として通る)。
+
 ### 2.2 Kubernetes
 
 - 公式 manifest / Helm chart は **未提供**。 OSS image (`y1uda/sbomhub-api:latest`,
@@ -856,7 +925,7 @@ SBOMHub を構成する service の listen ポートと、 外部公開すべき
 | Service | デフォルト port | 公開可否 | 備考 |
 |---|---|---|---|
 | web (Next.js) | 3000 | **TLS 終端後の 443 経由のみ可** | reverse proxy 越しに公開、 直接 3000 は閉じる |
-| api (Go / Echo) | 8080 | **TLS 終端後の 443 経由のみ可** | CLI / GitHub Actions / MCP からも叩く |
+| api (Go / Echo) | 8080 | **TLS 終端 + 到達性制限の両方が必須** | セルフホストでは**この port に届く者が全員 Owner** (§2.1.1)。 TLS だけでは保護されない。 CLI / GitHub Actions / MCP からも叩く |
 | postgres | 5432 | **絶対に公開禁止** | 同 compose project 内 internal network のみ |
 | redis | 6379 | **絶対に公開禁止** | 同上 |
 | ollama ([enterprise compose](../../docker/docker-compose.enterprise.yml)) | 11434 | **localhost-only bind 推奨** | 外部からの prompt 投入 / model abuse 防止 |
@@ -1248,21 +1317,79 @@ sbomhub doctor --verbose
 
 ### 10.2 API server 側のセルフチェック
 
-API server (`apps/api/cmd/server`) は起動時に以下を行う:
+API server (`apps/api/cmd/server`) は起動時に以下を **この順で** 行う:
 
-- `validateEncryptionKey` (§4.3)
-- `assertAppRoleNotBypassRLS` (§3.1)
-- DB migration の整合性確認 (`MIGRATE_DATABASE_URL` で migration 適用後、 runtime URL に切替)
+1. `validateAppEnv` (M48) — `APP_ENV` が `development | staging | production` のいずれかであること。
+   **未設定・綴り誤りは全環境で起動拒否**。 他のすべてのガードは `development` のとき警告に
+   降格するので、「どの環境か」が既定値ではなく運用者の宣言であることが前提条件になる。
+2. `validateAuthMode` (M48、§2.1.1) — 必須の `SBOMHUB_AUTH_MODE` 宣言と、その整合性。
+3. `validateEncryptionKey` (§4.3)
+4. `assertAppRoleNotBypassRLS` (§3.1)
+5. DB migration の整合性確認 (`MIGRATE_DATABASE_URL` で migration 適用後、 runtime URL に切替)
 
-production / staging でこれらが fail すると **起動を拒否** する。 起動 log を確認:
+1 と 2 は全環境で拒否する (2 の後段「明示の宣言」のみ development が免除)。 3 と 4 は
+development 以外で拒否する。 起動 log を確認:
 
 ```bash
-docker compose logs api | grep -E "ENCRYPTION_KEY check|DB role check|Refusing to start"
-# 期待:
+docker compose logs api | grep -E "APP_ENV check|AUTHENTICATION IS DISABLED|Authentication: Clerk|ENCRYPTION_KEY check|DB role check|Refusing to start"
+# セルフホストでの期待値:
+#   APP_ENV check passed app_env=production
+#   AUTHENTICATION IS DISABLED (self-hosted mode, no CLERK_SECRET_KEY). ... declared_mode=anonymous
 #   ENCRYPTION_KEY check passed length=44 app_env=production
 #   DB role check passed role=sbomhub_app bypass_rls=false superuser=false
 # (M4 Codex review #F72 以降、 superuser フィールドも合わせて出力される)
 ```
+
+`AUTHENTICATION IS DISABLED` は **正常なセルフホスト構成でも毎回出る**。 これは異常の通知では
+なく posture の宣言なので、抑止せずそのまま残すこと。 出ていない場合は SaaS モード
+(`Authentication: Clerk (SaaS mode)`) で動いている。
+
+#### 匿名共有リンクの brute-force 予算 (M48 FO-6)
+
+`GET /api/v1/public/:token` は本製品で唯一の (webhook を除く) 無認証 route で、パスワード付き
+リンクは毎回 bcrypt 検証を行う。 M48 で **失敗した試行のみ**を数える予算を入れた:
+
+| 制限 | 既定値 | 単位 |
+|---|---|---|
+| 失敗回数 / トークン | 10 | 1 時間 (固定窓) |
+| 失敗回数 / 送信元 IP | 60 | 1 時間 (固定窓) |
+| 同時実行数 / トークン | 16 | in-flight (窓ではない) |
+| 同時実行数 / 送信元 IP | 64 | in-flight (窓ではない) |
+
+成功 (200) は失敗カウンタに一切計上しないので、正常に閲覧されている共有リンクが自分の閲覧量で
+絞られることはない。
+
+**同時実行数の制限が別枠なのは、失敗カウンタだけでは並行バーストを止められないため。** 失敗
+カウンタは handler の前で読み、後で書くので、同時に到着したリクエストは全て同じ「バースト前の値」
+を読む。 実測 (2026-07-29, 本リポジトリの Redis): 予算 10 に対して **300 並行で 101 件が
+handler に到達**した。 同時実行数の予約は Lua で atomic に行う。
+
+保証されること / されないこと:
+
+- **保証される**: 1 トークンについて handler の中に同時に居るリクエストは同時実行上限 (16) 以下。
+  したがって bcrypt の**瞬間負荷は接続数によらず定数で頭打ち**になる。
+- **保証されない**: 累積回数の厳密な上限。 予約は完了したリクエストから順に返却されるので
+  バーストは波状に流れ、後の波が「前の波の計上が反映される前の値」を読み得る。
+  同種の測定を `-race` (スケジューリングが遅くなり窓が広がる) で行うと **28 件**になり、
+  「`失敗予算 + 同時実行上限` = 26 が上限」という当初の記述は**偽**だった。
+  正直に言えるのは「超過は攻撃者の接続数の関数ではなく、同時実行上限の小さい倍数に収まる」
+  ということ (実測 17-28 件)。
+
+カウンタは Redis に置く。 **Redis が読めない場合は 503 を返して拒否する (fail-closed)** —
+共有リンクは Redis 障害中は使えなくなる。 これは「カウンタが読めないから無制限に bcrypt を
+実行させる」よりは安全側という判断。
+
+既知の限界:
+
+- 送信元 IP は `X-Forwarded-For` 由来なので、header を書き換えられる位置からは IP 側の制限を
+  回避できる (トークン側は回避不能 — トークンこそが攻撃対象なので)。
+- あるリンクが総当たりされている間は **正規の閲覧者もその窓の間 429 になる**。 復旧は共有リンクの再発行。
+- 1 つのリンクに **16 を超える同時リクエスト**が来ると、成功するはずのリクエストも 429 になる。
+  監査人や顧客に送る共有リンクの想定利用量からは遠いが、上限は上限。
+- 窓は固定 (sliding ではない)。 時間境界をまたげば 2 窓分を続けて使える。
+- handler 内で panic した場合、失敗の計上は行われない (Echo の Recover は本 middleware の外側)。
+  in-flight の解放は defer なので実行される。 panic は 403 ではなく 500 になるため計上対象では
+  そもそもないが、panic を誘発できるリクエストは「無料」になる。
 
 ### 10.3 nightly health check の cron 例
 

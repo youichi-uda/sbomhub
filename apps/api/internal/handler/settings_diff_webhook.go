@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service/diff_webhook"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
 
@@ -158,10 +160,21 @@ func (h *SettingsDiffWebhookHandler) Update(c echo.Context) error {
 			"error": "webhook_url is required when enabled=true",
 		})
 	}
-	if url != "" && !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "webhook_url must start with http:// or https://",
-		})
+	// Codex round 2 (Low): the prefix test alone accepted "https://" with no
+	// host at all, while diff_webhook.SignatureRequired's comment claimed this
+	// handler rejects malformed URLs. Parse it, so that claim is true and so
+	// the Slack-host comparison downstream has something well-formed to work
+	// with.
+	if url != "" {
+		// Codex round 3 (Low): Hostname(), not Host. "http://:80/path" has a
+		// non-empty Host and no hostname at all, and would have satisfied a
+		// check that claimed to require one.
+		parsed, perr := neturl.Parse(url)
+		if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "webhook_url must be a valid absolute http:// or https:// URL with a host",
+			})
+		}
 	}
 
 	format := strings.ToLower(strings.TrimSpace(req.Format))
@@ -191,11 +204,46 @@ func (h *SettingsDiffWebhookHandler) Update(c echo.Context) error {
 		})
 	}
 
+	// M48 (FO-5): a webhook that will fire must be able to be verified by the
+	// thing receiving it.
+	//
+	// The sender used to omit X-SBOMHub-Signature whenever no secret was
+	// configured and POST anyway, which is the mirror image of the fail-open
+	// M47 closed on the receiving side. Refusing here is the half that keeps
+	// new rows out of that state; diff_webhook.FireIfThreshold refuses at send
+	// time for rows that predate this check.
+	//
+	// Scoped by diff_webhook.SignatureRequired, which exempts ONLY
+	// format=slack delivered over https to hooks.slack.com — Slack does not
+	// read our signature header and that URL is itself the credential.
+	//
+	// The condition asks whether a secret will EXIST after this write, not
+	// whether the request carried one — re-submitting the "***" placeholder
+	// preserves the stored secret (repository.Upsert COALESCEs a nil
+	// EncryptedSecret onto the stored column) and must keep working.
+	raw := req.WebhookSecret
+	secretWillExist := (raw != "" && raw != webhookSecretPlaceholder) ||
+		(existing != nil && existing.HasSecret())
+	if req.Enabled && diff_webhook.SignatureRequired(format, url) && !secretWillExist {
+		// Codex round 2 (Low): the message used to say the requirement applied
+		// to format='json' and suggest switching to 'slack'. Since the slack
+		// exemption also checks the host, that advice was wrong for the
+		// commonest way to hit this — format='slack' pointed at a
+		// Slack-compatible relay — and would have sent the operator round in a
+		// circle.
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "webhook_secret is required when enabled=true: without it the payload is " +
+				"delivered unsigned and the receiver cannot verify it came from this SBOMHub " +
+				"installation. The only exception is format='slack' sent to " +
+				"https://hooks.slack.com/... , where the webhook URL is itself the credential; " +
+				"any other destination — including a Slack-compatible relay — needs a shared secret.",
+		})
+	}
+
 	// Encrypt secret if provided + not placeholder.
 	var encryptedSecret []byte
-	raw := req.WebhookSecret
 	secretTouched := raw != "" && raw != webhookSecretPlaceholder
-	if secretTouched {
+	if secretTouched { //nolint:nestif // unchanged pre-M48 shape
 		masterKey, gerr := h.cfg.GetEncryptionKey()
 		if gerr != nil {
 			slog.Error("settings_diff_webhook: master key unavailable", "error", gerr)

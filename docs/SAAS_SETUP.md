@@ -19,27 +19,40 @@ SBOMHubは **AGPL-3.0** ライセンスで提供されています。
 
 | モード | 条件 | 認証 | 課金 | マルチテナント |
 |--------|------|------|------|---------------|
-| **セルフホスト** | 環境変数なし | なし（全機能開放） | なし | シングルテナント |
-| **SaaS** | `CLERK_SECRET_KEY` 設定 | Clerk | Lemon Squeezy | マルチテナント |
+| **セルフホスト** | `SBOMHUB_AUTH_MODE=anonymous` + `CLERK_SECRET_KEY` 未設定 | **なし**（Clerk 前提の route group は資格情報なしで Owner 扱い） | なし | シングルテナント |
+| **SaaS** | `SBOMHUB_AUTH_MODE=clerk` + `CLERK_SECRET_KEY` 設定 | Clerk | Lemon Squeezy | マルチテナント |
+
+> **M48**: セルフホスト = 認証なし、は本製品で唯一この表が正しく述べていた事実でしたが、
+> `docs/configuration.md` は「認証は API キーで運用」と**誤って**書いており、
+> `docs/security/self-host-deployment.md` には認証の記述が**一切ありませんでした**。
+> 両方を修正済みです。 また、この状態に**無警告で落ちる**ことがないよう
+> `SBOMHUB_AUTH_MODE` の明示宣言が全環境で必須になりました (推論は廃止)。
+> 詳細と運用上の要求は [`security/self-host-deployment.md`](./security/self-host-deployment.md) §2.1.1。
 
 ---
 
 ## セルフホストモード
 
-環境変数を設定せずに起動すると、セルフホストモードで動作します。
+`CLERK_SECRET_KEY` を設定しなければセルフホストモードで動作します。 M48 以降は
+`APP_ENV` と `SBOMHUB_AUTH_MODE` の 2 つが**必須**です
+(`apps/api/.env.example` が両方を出荷しているので、そこから `.env` を作れば追加作業はありません)。
 
 ```bash
 # 最小構成で起動
 docker compose up -d postgres redis
-cd apps/api && go run ./cmd/server
+cd apps/api && APP_ENV=development SBOMHUB_AUTH_MODE=anonymous go run ./cmd/server
 cd apps/web && npm run dev
 ```
 
 **特徴:**
-- 認証不要（全ユーザーが管理者権限）
+- 認証不要（Clerk 前提の route group に到達した全員が Owner 権限）
 - 全機能が利用可能（Enterprise相当）
 - デフォルトテナントを自動作成
 - プラン制限なし
+
+`SBOMHUB_AUTH_MODE` を設定しないと**起動を拒否**します。 これは機能ではなく、
+「SaaS のつもりで `CLERK_SECRET_KEY` を取り違えた」構成がこのモードに無警告で落ちるのを
+防ぐためのものです。
 
 ---
 
@@ -246,14 +259,23 @@ Lemon Squeezy Dashboard → Settings → Webhooks
 |------|------|
 | シークレット設定済み | 常に検証（`SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` を無視） |
 | シークレット未設定 | **401 で拒否**（`APP_ENV` に関係なく） |
-| シークレット未設定 + `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true` + **`APP_ENV=development`**（未設定時の既定値） | 検証をスキップ。**受理のたびに `signature verification BYPASSED` を WARN 出力** |
+| シークレット未設定 + `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true` + **`APP_ENV=development`** | 検証をスキップ。**受理のたびに `signature verification BYPASSED` を WARN 出力** |
 | シークレット未設定 + `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true` + **staging 等の development 以外**（production を除く） | **401**（フラグは無視。起動時に「set but IGNORED」を WARN） |
 | シークレット未設定 + `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true` + production | **起動を拒否**（`validateWebhookVerification`）。仮に起動できても request 時に 401 |
 | production + SaaS モードで `CLERK_WEBHOOK_SECRET` 未設定 | **起動を拒否** |
 | production + billing 有効で `LEMONSQUEEZY_WEBHOOK_SECRET` 未設定 | **起動を拒否** |
 
-- セルフホスト（`CLERK_SECRET_KEY` 未設定）は上記の拒否に一切該当しません。両 Webhook は署名検証の手前で
+- セルフホスト（`CLERK_SECRET_KEY` 未設定）は上記 **Webhook 関連の**拒否に一切該当しません。両 Webhook は署名検証の手前で
   200 `skipped` を返すため、シークレットを要求されることはありません。
+- **M48 で追加された別系統の拒否**（`validateWebhookVerification` ではなく `validateAuthMode`）:
+  `SBOMHUB_AUTH_MODE` が**必須**になり、未設定・実構成との不一致はいずれも**全環境で起動を拒否**します。
+  上の表は「Clerk キーが設定されている SaaS デプロイ」の話で、この新しい拒否は
+  「SaaS のつもりだったが `CLERK_SECRET_KEY` だけが渡っていない」構成 — つまり匿名 Owner モードに落ちる事故 — を
+  対象にしています。`SBOMHUB_AUTH_MODE=clerk` を宣言していれば、シークレット注入が**丸ごと**失敗した場合でも
+  匿名モードへ降格せず起動を拒否します。詳細は
+  [`security/self-host-deployment.md`](./security/self-host-deployment.md) §2.1.1。
+- **M48 で `APP_ENV` 未設定は起動拒否になりました**。上の表の development 行は、`APP_ENV=development` を
+  明示的に設定したときにのみ到達します（未設定を development として扱う既定は廃止）。
 - **開発フローへの影響**: ngrok で本物の Clerk / Lemon Squeezy を繋ぐ場合はシークレットを設定してください（従来から推奨）。
   `curl` で手作りペイロードを投げるローカル検証をしていた場合は、`SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS=true` を明示的に
   設定するか、テストのように HMAC を自分で計算してください（`webhook_signature_failopen_test.go` の

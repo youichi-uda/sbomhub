@@ -50,7 +50,46 @@ services:
       # bytes. Generate one with: openssl rand -base64 32
       - "ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is not set. Copy .env.example to .env and generate one with openssl rand -base64 32}"
       - NVD_API_KEY=${NVD_API_KEY:-}
-      - APP_ENV=${APP_ENV:-development}
+      # SECURITY (M48 FO-4): no `:-development` fallback. Supplying one here
+      # would launder an unset APP_ENV into the weakest posture the api has,
+      # one level above the api's own refusal to start on an unset value —
+      # which is the same fail-open the api-side guard exists to close. Same
+      # `:?` shape as ENCRYPTION_KEY above.
+      #
+      # KNOWN, and true of every `${VAR}` in this block including
+      # ENCRYPTION_KEY and DATABASE_URL: compose interpolates from the
+      # invoking shell FIRST and .env second, so `export APP_ENV=development`
+      # in the shell that runs `docker compose up` wins over the .env this
+      # repository ships. That is standard compose precedence rather than
+      # something introduced here, and it takes a deliberate export — but it
+      # does silently relax the guards, so the startup log prints the value it
+      # actually resolved (`APP_ENV check passed app_env=...`). Check it after
+      # a deploy.
+      # The legacy ENVIRONMENT variable is the documented fallback (config.go
+      # reads it when APP_ENV is absent), so this has to accept either one.
+      #
+      # NOTE the shape. An earlier attempt at this wrote
+      # `${APP_ENV:-${ENVIRONMENT:?...}}` to keep a compose-time assertion, and
+      # that is WRONG: compose evaluates the inner `:?` eagerly, so
+      # `APP_ENV=production` with ENVIRONMENT unset — the normal configuration,
+      # and the one .env.example ships — failed with "required variable
+      # ENVIRONMENT is missing a value". Codex round 5 caught it; my own check
+      # had only covered ENVIRONMENT-only and neither-set.
+      #
+      # So: plain fallback, no assertion here. Passing an empty value through is
+      # safe because config.ValidateEnvironment refuses it at startup with a
+      # message naming both variables. The container starts and exits rather
+      # than failing at `docker compose config`, which is a worse error surface
+      # but a correct one — and it is the only shape that does not break the
+      # primary configuration.
+      - "APP_ENV=${APP_ENV:-${ENVIRONMENT:-}}"
+      # SECURITY (M48 FO-3): REQUIRED declaration, clerk | anonymous. The api
+      # refuses to start without it, in every environment, and refuses if it
+      # disagrees with whether CLERK_SECRET_KEY arrived. Nothing is inferred:
+      # a Clerk deployment whose secret injection fails entirely is otherwise
+      # indistinguishable from a self-hosted one. .env.example ships
+      # `anonymous`.
+      - "SBOMHUB_AUTH_MODE=${SBOMHUB_AUTH_MODE:?SBOMHUB_AUTH_MODE is not set. UPGRADING? install.sh preserves your existing .env, so a pre-M48 .env will not have this line - add it by hand. Use anonymous for a self-host deployment (no user authentication - see docs/UPGRADE.md section 2b) or clerk when CLERK_SECRET_KEY is configured. There is deliberately no default: the mode used to be inferred from whether CLERK_SECRET_KEY arrived, and a Clerk deployment whose secret injection failed entirely was indistinguishable from a self-hosted one}"
     depends_on:
       postgres:
         condition: service_healthy

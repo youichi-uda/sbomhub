@@ -15,7 +15,19 @@ SBOMHub は環境変数で設定できます。
 | `DATABASE_URL` | `postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable` | PostgreSQL接続文字列 |
 | `REDIS_URL` | `redis://localhost:6379` | Redis接続文字列 |
 | `BASE_URL` | `http://localhost:3000` | WebアプリケーションのベースURL |
-| `APP_ENV` | `development` | 環境: `development`, `staging`, `production`。旧名 `ENVIRONMENT` は `APP_ENV` 未設定時のフォールバックとして引き続き読まれます (M0 Trust Rescue, codex-r18)。 |
+| `APP_ENV` | (なし・必須) | 環境: `development`, `staging`, `production`。**デフォルトはありません。** 未設定、またはこの 3 値以外の場合、サーバーは起動を拒否します (M48)。起動時ガードはいずれも `development` のときだけ警告に格下げされるため、未設定が最も弱い構成を暗黙に選ぶ状態になっていました。旧名 `ENVIRONMENT` は `APP_ENV` 未設定時のフォールバックとして引き続き読まれます (M0 Trust Rescue, codex-r18)。フォールバックで得た値も同じ検証を受けます。 |
+| `ENCRYPTION_KEY` | (なし・`APP_ENV=development` 以外では必須) | DB に保存する秘密情報 (BYOK の LLM API キー、Issue tracker 連携トークン、diff webhook の署名シークレット) を暗号化する AES-256 鍵。32 バイト以上で、既知のプレースホルダ値でないことが必要です。満たさない場合サーバーは起動を拒否し、`APP_ENV=development` のときのみ警告に格下げされます。`openssl rand -base64 32` で生成してください。ローテーション手順: [`encryption-key-rotation.md`](./encryption-key-rotation.md)。 |
+
+### 認証と起動時ガード
+
+`SBOMHUB_AUTH_MODE` は、この deployment がどちらの認証モードを意図しているかを宣言する必須の変数です。`SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` は、開発環境で webhook の署名検証を弱める opt-in です。`anonymous` の宣言は「運用者がそれを意図した」という表明であって、緩和策ではありません。宣言しても deployment が安全になるわけではありません。
+
+| 変数 | デフォルト | 説明 |
+|------|---------|------|
+| `SBOMHUB_AUTH_MODE` | (なし・必須) | `clerk` または `anonymous`。この deployment の認証モードを宣言します。デフォルトはなく、`CLERK_SECRET_KEY` が届いたかどうかからの推論も行いません。`clerk`: ユーザー認証を Clerk で行う構成。`anonymous`: self-host 構成。Clerk 認証を前提とする API route group が、資格情報なしのリクエストを既定テナントの Owner として処理します (下記「デプロイモード」参照)。次のいずれの場合もサーバーは起動を拒否します: 未設定 (`development` を含む全環境)、この 2 値以外の値、`clerk` と宣言しているが `CLERK_SECRET_KEY` が空、`anonymous` と宣言しているが `CLERK_SECRET_KEY` が設定されている、`anonymous` と宣言しているが SaaS 専用の変数 (`CLERK_WEBHOOK_SECRET`、いずれかの `LEMONSQUEEZY_*`) が設定されている (Clerk のキーだけが欠けた中途半端な構成)。未設定の場合、`docker compose` もコンテナ起動前の変数展開の時点で失敗します。 |
+| `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` | `false` | M47 で導入済み。署名シークレットが未設定の Clerk / Lemon Squeezy webhook *受信側* が、署名のない配信を受け入れることを許可します。`APP_ENV=development` のときのみ有効で、それ以外の値では設定されていても無視されます。SaaS モードで `APP_ENV=production` の場合はサーバーが起動を拒否します。 |
+
+推論をやめて宣言を必須にした理由: シークレット注入がまるごと失敗した Clerk deployment は、self-host deployment とバイト単位で同一です (Clerk キーも webhook シークレットも billing キーも残りません)。矛盾を検出する材料が何も残らないため、以前のフェーズから残った「anonymous でよい」という永続的な痕跡があれば、それが認証なしでの起動を承認してしまいます。そうした痕跡を「Clerk キーが存在するときだけ」拒否しても塞げません。初回起動、crash-loop、キーが最初から届かなかったロールアウトについては何も言えないからです。宣言はシークレットストアではなく deployment manifest 側に置かれるため、注入の失敗を生き延び、それを起動拒否に変えます。古くなった場合も安全側に倒れます。古い `clerk` は起動失敗であり、Clerk deployment が持ち得るどの状態も anonymous モードを許可しません。この理由から、宣言はシークレットストアの外に置いてください。なお、このガードの中間ドラフトで使っていた boolean の `SBOMHUB_ALLOW_ANONYMOUS_AUTH` は、alias として残さず削除されました。設定されていること自体が起動拒否になり、メッセージが `SBOMHUB_AUTH_MODE=anonymous` を案内します。
 
 ### NVD連携
 
@@ -109,6 +121,15 @@ DATABASE_URL=postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable
 REDIS_URL=redis://localhost:6379
 APP_ENV=production
 
+# APP_ENV=development 以外では必須。openssl rand -base64 32 で生成
+ENCRYPTION_KEY=
+
+# この deployment の認証モードの宣言: anonymous (self-host。ユーザー認証は
+# ありません。「デプロイモード」参照) または clerk。development を含む全環境で
+# 必須で、未設定ならサーバーは起動を拒否し、docker compose もコンテナ起動前に
+# 失敗します。
+SBOMHUB_AUTH_MODE=anonymous
+
 # NVD
 NVD_API_KEY=your-nvd-api-key
 
@@ -142,16 +163,29 @@ SBOMHUB_LLM_OPENAI_EMBEDDING_MODEL=text-embedding-3-small       # 任意; defaul
 
 self-host (Docker Compose) のみがサポート対象です。SaaS 版 (`sbomhub.app`) は 2026-06 にサンセットされました。
 
-- ユーザー認証は self-host 内のシンプルなアカウント管理 (将来) / API キーで運用
-- マルチテナントは PostgreSQL Row-Level Security で実現
+**self-host にユーザー認証はありません。** self-host モードは `CLERK_SECRET_KEY` が空であることだけで選択され、OSS 版が使う構成はこれのみです。このモードでは `internal/middleware/auth.go` の `handleSelfHostedAuth` がヘッダを一切読まず、資格情報を一切検証せず、リクエストのロールを既定テナントの Owner に設定します。これは Clerk 認証を前提とする route group、つまり `Auth` / `MultiAuth` ミドルウェアの背後にあるすべて (プロジェクト、SBOM、VEX、設定、API キー発行) の挙動です。`/api/v1/cli/*` と `/api/v1/mcp/*` は API キーで認証しており、引き続きキーを要求します。`/api/v1/health` と `/api/v1/public/:token` は、どちらのモードでも設計上 anonymous です。2026-07-29 に実 DB に対して測定した挙動は次のとおりです。`Authorization` ヘッダを一切付けずに `POST /api/v1/projects` が 201、`GET /api/v1/me` が `role=owner plan=enterprise`、admin 権限が必要な `POST /api/v1/apikeys` が 201 を返し、レスポンスボディに実際に使える API キーが含まれていました。そこで発行された API キーは、その後 `CLERK_SECRET_KEY` を設定して SaaS モードで再起動した後も `/api/v1/cli/*` と `/api/v1/mcp/*` に対して有効なままでした (どちらも HTTP 200 を確認)。つまり、後から変数を設定しても、未設定だった間に発行されたキーは無効になりません。
+
+したがって、self-host インスタンスを守っているのはネットワーク到達性だけです。API ポートに到達できる者は誰でも、上記の route group 経由でその deployment の全データに Owner 権限でアクセスできます。実データを扱う前に、VPN / プライベートサブネット / 認証付きリバースプロキシの内側に API を配置してください。[`security/self-host-deployment.md`](./security/self-host-deployment.md) §7 (firewall / network 分離) を参照。
+
+API キー (`POST /api/v1/apikeys`。CLI / GitHub Actions / MCP サーバーが使用) は、機械クライアント向けの*追加*の認証手段です。self-host deployment のアクセス境界ではありません。発行そのものに資格情報が要らないためです。
+
+- 認証: self-host モードでは Clerk 認証を前提とする route group に認証がありません (上記のとおり)。これが意図した構成であることを宣言する `SBOMHUB_AUTH_MODE=anonymous` が `development` を含む全環境で必須で、未設定ならサーバーは起動を拒否します
+- マルチテナントは PostgreSQL Row-Level Security で実現 (`DATABASE_URL` が `NOSUPERUSER NOBYPASSRLS` のロールである場合)。これはテナント同士の分離であり、呼び出し元の認証ではありません
 - AI 機能は BYOK で graceful に有効化 / 無効化
 
 ```bash
-# self-host の最小限の設定
-export DATABASE_URL="postgres://..."
+# self-host の最小限の設定。
+# 先頭 3 つは全環境での起動要件: APP_ENV / ENCRYPTION_KEY / SBOMHUB_AUTH_MODE
+# のいずれかが欠けているとサーバーは起動しません。
+export APP_ENV=production
+export ENCRYPTION_KEY="$(openssl rand -base64 32)"   # 保管必須 (既存行の復号に使う)
+export SBOMHUB_AUTH_MODE=anonymous                   # ユーザー認証なしであることの宣言 (上記参照)
+export DATABASE_URL="postgres://..."                 # NOSUPERUSER NOBYPASSRLS のロールを使用
 export REDIS_URL="redis://..."
 docker compose up -d
 ```
+
+手作業で組み立てたくない場合は `./install.sh` が `.env` を生成します (ランダムな `ENCRYPTION_KEY`、DB ロール等)。
 
 ## データベース設定
 
@@ -185,7 +219,12 @@ maxmemory-policy allkeys-lru
 - [ ] 強力なデータベースパスワードを使用
 - [ ] データベース接続でSSLを有効化（`sslmode=require`）
 - [ ] 有効な証明書でHTTPSを設定
-- [ ] `APP_ENV=production`を設定
+- [ ] `APP_ENV=production`を設定 (未設定・綴り違いの場合サーバーは起動を拒否)
+- [ ] 実運用用の `ENCRYPTION_KEY` を設定 (`openssl rand -base64 32`)。リポジトリ外で保管
+- [ ] `DATABASE_URL` に `NOSUPERUSER NOBYPASSRLS` のロールを指定し、アプリ接続に対して Row-Level Security が効く状態にする
+- [ ] self-host の場合: `SBOMHUB_AUTH_MODE=anonymous` を宣言し (production に限らず全環境で必須)、API の前段にネットワーク境界 (VPN / プライベートサブネット / 認証付きリバースプロキシ) を置く — この宣言は Clerk 認証を前提とする route group に認証がないことを記録するものであり、認証を追加するものではありません
+- [ ] SaaS / Clerk の場合: `SBOMHUB_AUTH_MODE=clerk` を宣言し、その行をシークレットストアではなく deployment manifest 側に置く (シークレット注入がまるごと失敗しても、認証なしで起動せずに起動拒否になる)
+- [ ] `SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS` は設定しない
 - [ ] データベースアクセスをアプリケーションサーバーに制限
 - [ ] PostgreSQLデータの定期バックアップ
 - [ ] セキュリティ問題のログ監視

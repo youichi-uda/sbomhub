@@ -36,6 +36,15 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 8080
       ENCRYPTION_KEY: dev-encryption-key-32-bytes-ok!!
+      # M48: APP_ENV is required (no default in the api). This is the local
+      # dev stack — postgres superuser, checked-in key — so "development" is
+      # the truthful answer. docs/security/self-host-deployment.md §7 is
+      # explicit that this file must never reach production.
+      APP_ENV: "development"
+      # Required in every environment, development included: no CLERK_SECRET_KEY
+      # is set here, so the api serves the Clerk-fronted routes as Owner with no
+      # credential, and it must say so.
+      SBOMHUB_AUTH_MODE: "anonymous"
     ports:
       - "18080:8080"
     depends_on:

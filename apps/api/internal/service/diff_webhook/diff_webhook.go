@@ -49,6 +49,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,6 +60,64 @@ import (
 	"github.com/sbomhub/sbomhub/internal/service/diff"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
+
+// ErrMsgMissingSecret is the FireDecision.ErrorMessage / audit-detail marker
+// for a delivery refused because the tenant configured no signing secret
+// (M48 FO-5). It is a fixed string for the same F445 reason the other
+// messages in this package are: it reaches the tenant through
+// GET /audit-logs and the diff-webhook test route.
+const ErrMsgMissingSecret = "missing signing secret"
+
+// SlackWebhookHost is the only host for which the signing-secret requirement
+// is waived. Slack's incoming-webhook endpoints all live under
+// https://hooks.slack.com/services/... .
+const SlackWebhookHost = "hooks.slack.com"
+
+// SignatureRequired reports whether a delivery must carry an
+// X-SBOMHub-Signature header, i.e. whether the tenant must configure a shared
+// secret before the webhook can fire.
+//
+// M48 (FO-5). The answer is not uniform, and the exemption is narrower than it
+// first looks:
+//
+//   - Anything not addressed to Slack — a generic consumer endpoint we do not
+//     control — requires a secret. The HMAC is the only thing that makes the
+//     payload attributable to this installation.
+//   - format "slack" delivered to https://hooks.slack.com does not. Slack does
+//     not read X-SBOMHub-Signature and never will; that URL is itself the
+//     credential, and https is enforced here rather than assumed.
+//
+// Codex round 1 (Medium) is why the URL is a parameter. The first version
+// keyed the exemption on the format alone — a value the caller supplies in the
+// request body — so an admin could label any endpoint, over plain HTTP,
+// "slack" and post unsigned payloads to it indefinitely. The comment claimed
+// "the delivery target is known" while the code checked nothing of the kind,
+// and the accompanying test proved the point by exempting an
+// httptest.Server on http://127.0.0.1.
+//
+// Both terms are required, so a Slack-compatible endpoint hosted elsewhere
+// (Mattermost, a corporate relay) is treated as what it is: a generic
+// consumer, which needs a secret.
+func SignatureRequired(format, webhookURL string) bool {
+	if format != model.DiffWebhookFormatSlack {
+		return true
+	}
+	u, err := url.Parse(webhookURL)
+	if err != nil {
+		// Unparseable: fail closed. The settings handler parses and rejects
+		// malformed URLs before they are stored (Codex round 2 made that
+		// true — it used to be a prefix test only), so this is the defensive
+		// arm for rows written before that check existed.
+		return true
+	}
+	// Codex round 4 (Low): DNS names are case-insensitive and a terminal root
+	// dot is equivalent, but url.Hostname() normalises neither. Comparing
+	// verbatim rejected the perfectly ordinary "https://HOOKS.SLACK.COM/..."
+	// and forced a secret onto a genuine Slack integration — a false denial,
+	// not a false exemption, but wrong either way.
+	host := strings.TrimSuffix(u.Hostname(), ".")
+	return u.Scheme != "https" || !strings.EqualFold(host, SlackWebhookHost)
+}
 
 // SignatureHeader is the HTTP header carrying the HMAC-SHA256 hex
 // digest of the request body. Downstream consumers verify by
@@ -92,8 +152,16 @@ type AuditWriter interface {
 }
 
 // HTTPDoer is the minimum http.Client surface this package needs.
-// Production wiring passes &http.Client{Timeout: DefaultHTTPTimeout};
-// unit tests substitute a fake recording the outgoing request.
+//
+// Production wiring passes NOTHING (Config.HTTPClient is nil), so NewService
+// builds the client itself — which is what makes the redirect policy below
+// effective. Codex round 4 (Low) noted the previous comment here claimed
+// production supplied its own client; it does not, and if it ever did, the
+// CheckRedirect that keeps an unsigned Slack-exempt delivery from being
+// redirected off hooks.slack.com would be silently lost. A caller that does
+// supply one owns that policy.
+//
+// Unit tests substitute a fake recording the outgoing request.
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -131,10 +199,36 @@ func NewService(cfg Config) *Service {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: DefaultHTTPTimeout}
+		client = &http.Client{
+			Timeout: DefaultHTTPTimeout,
+			// M48, Codex round 2 (Low): do not follow redirects.
+			//
+			// SignatureRequired waives the signing-secret requirement for
+			// format=slack sent to https://hooks.slack.com. That check is
+			// applied to the CONFIGURED url; a 307/308 preserves the method
+			// and body, so a redirect could carry an unsigned payload off that
+			// host and out from under the exemption. No exploitable Slack open
+			// redirect was identified, so this is precautionary rather than a
+			// fix for a demonstrated bypass.
+			//
+			// Refusing redirects outright is also the right policy for a
+			// webhook independently of that: the destination is an operator-
+			// configured endpoint, not a browsable resource, and a 3xx now
+			// surfaces as a non-2xx delivery failure the operator can see on
+			// the settings screen instead of silently retargeting.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	retries := cfg.Retries
-	if retries == nil {
+	if len(retries) == 0 {
+		// len, not nil (Codex round 5, Low): an explicitly EMPTY slice used to
+		// skip the delivery loop entirely and return (0, ""), which
+		// FireIfThreshold then recorded as a failed delivery with no reason —
+		// a violation of the ErrorMessage contract for a supported
+		// constructor input. Production passes nil and is unaffected; this
+		// makes the empty case mean the same thing as the nil case.
 		retries = DefaultRetryBackoffs
 	}
 	clock := cfg.Clock
@@ -154,7 +248,14 @@ func NewService(cfg Config) *Service {
 // FireDecision summarises what FireIfThreshold did, so the caller
 // (SBOM ingest pipeline / handler / tests) can log + assert.
 type FireDecision struct {
-	Triggered    bool   // true → webhook was attempted
+	// Triggered reports that the thresholds SELECTED this delivery — not that
+	// an HTTP request was issued. Two paths set it without reaching the
+	// network: a secret that will not decrypt, and (M48) a missing signing
+	// secret. Both are configuration failures the operator needs to see as
+	// "your webhook tried and failed", not as a quiet period. (Codex round 2,
+	// Low: the previous wording, "webhook was attempted", was narrower than
+	// the code.)
+	Triggered    bool
 	Reason       string // empty when Triggered; reason ("no config", "disabled", "below thresholds", ...) when not
 	Status       int    // HTTP status of the final attempt (0 if not triggered)
 	ErrorMessage string // populated on delivery failure
@@ -235,6 +336,52 @@ func (s *Service) FireIfThreshold(
 		}()
 	}
 
+	// M48 (FO-5): refuse to send an unsigned delivery that the receiver was
+	// meant to be able to verify.
+	//
+	// The receiving half of this product was made fail-closed in M47 — with no
+	// secret configured, /api/webhooks/* rejects every delivery. The SENDING
+	// half still did the opposite: it dropped the X-SBOMHub-Signature header
+	// and posted anyway, so a consumer following our own documented
+	// verification step had nothing to verify and a consumer that trusted the
+	// payload could not tell ours from anyone else's POST to the same URL.
+	//
+	// This check lives here as well as in the settings handler
+	// (handler/settings_diff_webhook.go) because rows written before M48 are
+	// already persisted with no secret; the handler-side refusal only governs
+	// writes from here on.
+	if len(secret) == 0 && SignatureRequired(settings.Format, settings.WebhookURL) {
+		slog.Warn("diff_webhook: refusing to send an unsigned delivery",
+			"tenant_id", tenantID, "project_id", projectID, "format", settings.Format)
+		// Codex round 1 (Low): the settings screen reads last_error, and a
+		// pre-M48 secret-less row that silently stops firing is exactly the
+		// case where the operator goes looking there first. Without this the
+		// screen would keep showing the last delivery from before the upgrade.
+		// Status 0 matches the "never reached the network" convention the
+		// decrypt-failure path above uses.
+		//
+		// Codex round 2 (Low): the error is handled rather than discarded. It
+		// is logged rather than returned, because the audit row below is the
+		// durable record this package promises (F168) and this write is the
+		// convenience mirror for the settings screen — failing the whole
+		// decision because the mirror could not be updated would trade a
+		// visibility gap for a louder one. The gap is named in the log.
+		if uErr := s.settings.UpdateFireResult(ctx, tenantID, 0, ErrMsgMissingSecret); uErr != nil {
+			slog.Warn("diff_webhook: could not record the missing-secret refusal on the "+
+				"settings row; the audit log is still authoritative",
+				"tenant_id", tenantID, "project_id", projectID, "error", uErr)
+		}
+		if aErr := s.writeAudit(ctx, tenantID, projectID, model.AuditActionDiffWebhookFailed, 0, ErrMsgMissingSecret, counts); aErr != nil {
+			return nil, fmt.Errorf("missing signing secret + audit log: %w", aErr)
+		}
+		// Triggered=true: the thresholds selected this delivery. Reporting it
+		// as not-triggered would make a configuration failure indistinguishable
+		// from a quiet period on the settings screen and in the caller's logs.
+		// See FireDecision.Triggered, whose meaning is "selected by the
+		// thresholds", not "an HTTP request was issued".
+		return &FireDecision{Triggered: true, ErrorMessage: ErrMsgMissingSecret}, nil
+	}
+
 	signature := ""
 	if len(secret) > 0 {
 		signature = computeSignature(body, secret)
@@ -261,7 +408,18 @@ func (s *Service) FireIfThreshold(
 	}
 
 	// Persist operational visibility.
-	_ = s.settings.UpdateFireResult(ctx, tenantID, status, errMsg)
+	//
+	// Codex round 3 (Low): handled, not discarded — the same treatment the
+	// missing-secret path already got in round 2. A silent failure here leaves
+	// last_fired_at / last_response_status / last_error showing the PREVIOUS
+	// delivery, which is worse than showing nothing: the settings screen reads
+	// as "the webhook is fine" while it is not. The audit row below remains
+	// the authoritative record, so this is logged rather than returned.
+	if uErr := s.settings.UpdateFireResult(ctx, tenantID, status, errMsg); uErr != nil {
+		slog.Warn("diff_webhook: could not persist the delivery outcome to the settings row; "+
+			"the settings screen may show a stale result. The audit log is authoritative",
+			"tenant_id", tenantID, "project_id", projectID, "status", status, "error", uErr)
+	}
 
 	if status >= 200 && status < 300 && errMsg == "" {
 		// F168: a 2xx webhook delivery that cannot audit MUST report
@@ -493,8 +651,12 @@ func buildPayload(format string, tenantID, projectID uuid.UUID, d *diff.Response
 				"ts": time.Now().Unix(),
 			},
 		},
-		// canonical envelope embedded so the consumer can still verify
-		// signature against the full payload.
+		// The canonical envelope is embedded so a consumer that DOES verify
+		// has the same fields the json format carries, and the signature (when
+		// one is computed) covers the whole body. M48: for the slack format
+		// delivered to hooks.slack.com there is normally no signature at all —
+		// Slack does not read the header — so this is about payload parity,
+		// not about verifiability.
 		"sbomhub": base,
 	}
 }
@@ -549,11 +711,28 @@ func (s *Service) deliver(ctx context.Context, url string, body []byte, signatur
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return lastStatus, ""
 		}
+		// 3xx → no retry. The client is configured with
+		// CheckRedirect: ErrUseLastResponse (see NewService), so a redirect
+		// arrives here as an ordinary response rather than being followed.
+		//
+		// Codex round 3 (Low): without this arm a 3xx fell through to the
+		// "retry" tail, was retried on every attempt, and returned an empty
+		// ErrorMessage — so the operator saw a failed delivery with no reason,
+		// contradicting FireDecision.ErrorMessage's contract. A redirect is a
+		// consumer-side configuration problem exactly like a 4xx: the operator
+		// should configure the final URL.
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return lastStatus, fmt.Sprintf("HTTP %d (redirect not followed)", resp.StatusCode)
+		}
 		// 4xx → no retry (config error on the consumer side).
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			return lastStatus, fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}
-		// 5xx → retry with the next backoff.
+		// Anything else (5xx, and any status outside 1xx-5xx such as a
+		// stray 101) → retry with the next backoff. Codex round 4 (Low):
+		// this arm is the catch-all precisely so no status can reach the
+		// return below with lastErr empty, which would produce a failed
+		// FireDecision carrying no reason.
 		lastErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 	return lastStatus, lastErr

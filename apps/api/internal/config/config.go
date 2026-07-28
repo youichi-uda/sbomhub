@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -52,7 +53,7 @@ type Config struct {
 	//
 	// M47: it replaces the inferred bypass those receivers used to apply
 	// (`if secret == "" { return !IsProduction() }`), which turned every
-	// deployment that had simply not set the secret — APP_ENV defaults to
+	// deployment that had simply not set the secret — APP_ENV resolved to
 	// "development" when unset — into an open webhook endpoint. The flag is
 	// refused at startup in production (see cmd/server/main.go
 	// validateWebhookVerification) AND re-checked at request time, so the
@@ -61,6 +62,52 @@ type Config struct {
 	// A configured secret always wins: the flag never disables verification
 	// for a receiver whose secret is set.
 	AllowUnsignedWebhooks bool
+
+	// AuthMode (SBOMHUB_AUTH_MODE) is the REQUIRED declaration of which
+	// authentication mode this deployment intends. It is the whole of M48's
+	// FO-3 answer, and it took three review rounds to arrive at.
+	//
+	// Values: "clerk" | "anonymous". There is no default and no inference.
+	//
+	//   - "clerk"     -> CLERK_SECRET_KEY must be present, or refuse to start.
+	//   - "anonymous" -> the acknowledged self-host posture: the Clerk-fronted
+	//     route groups serve every request as Owner of the default tenant with
+	//     no credential of any kind (middleware.handleSelfHostedAuth). Refused
+	//     if a Clerk key IS present, because then the declaration is false.
+	//     (The API-key groups /api/v1/cli/* and /api/v1/mcp/* still require a
+	//     key; /api/v1/health and /api/v1/public/:token are anonymous in both
+	//     modes.)
+	//
+	// # Why a required declaration, and not a flag
+	//
+	// The anonymous posture used to be reached purely by INFERENCE from an
+	// empty CLERK_SECRET_KEY, so a SaaS deployment whose key was missing or
+	// misspelled landed in it silently. M48 first tried to separate intent
+	// from accident with a boolean opt-in (SBOMHUB_ALLOW_ANONYMOUS_AUTH), then
+	// with that boolean plus an OPTIONAL declaration. Codex rounds 1-3 took
+	// both apart, and the reason both failed is the same: as long as the mode
+	// is INFERRED from whether a secret arrived, a deployment whose secret
+	// injection fails ENTIRELY is indistinguishable from a self-hosted one —
+	// there is nothing left to contradict — and any durable "anonymous is
+	// fine" artefact left over from an earlier phase then authorises it.
+	// Refusing a stale flag at boot does not help, because it only fires on a
+	// boot where the key IS present; it says nothing about a first boot, a
+	// crash-loop, or a rollout where the key never arrived (round 3, High).
+	//
+	// A required declaration removes the inference instead of patching it. A
+	// Clerk deployment says "clerk" in its (non-secret) manifest, so when the
+	// secret store injects nothing, the surviving declaration REFUSES rather
+	// than authorising. Staleness now fails in the safe direction: a stale
+	// "clerk" is a boot failure, and there is no state a Clerk deployment can
+	// carry that permits anonymous mode.
+	//
+	// SBOMHUB_ALLOW_ANONYMOUS_AUTH, which the first two attempts introduced,
+	// is deleted rather than deprecated: it never shipped in a release, and
+	// keeping it as an accepted alias would reinstate exactly the hole above.
+	// ValidateRetiredEnv refuses it explicitly — called from
+	// cmd/server/main.go, not from Load — so an operator who followed an
+	// intermediate draft gets told, rather than silently losing the setting.
+	AuthMode string
 
 	// Lemon Squeezy billing (SaaS mode)
 	LemonSqueezyAPIKey         string
@@ -93,9 +140,20 @@ func Load() *Config {
 	// agrees with the startup gate, so webhook handlers that fall back to
 	// "skip signature verification when not production" cannot be tricked into
 	// skipping in a production deployment that only sets APP_ENV.
+	//
+	// M48 (FO-4): NO default is substituted here any more. This used to fall
+	// back to "development", which made "operator set nothing" the single
+	// weakest configuration the process can hold — validateEncryptionKey
+	// accepted a missing key, evaluateAppRoleRLS accepted a BYPASSRLS role,
+	// and UnsignedWebhooksAllowed became reachable. Environment stays exactly
+	// as the operator spelled it (possibly ""), and ValidateEnvironment below
+	// is what turns an unset or unrecognised value into a refusal to start.
+	//
+	// Every predicate on this type is written so that an unrecognised value is
+	// the STRICT side: IsDevelopment() is false, so no guard downgrades.
 	env := getEnv("APP_ENV", "")
 	if env == "" {
-		env = getEnv("ENVIRONMENT", "development")
+		env = getEnv("ENVIRONMENT", "")
 	}
 
 	cfg := &Config{
@@ -125,6 +183,10 @@ func Load() *Config {
 		// Webhook signature verification (M47). Default false = fail-closed.
 		AllowUnsignedWebhooks: getEnvBool("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS", false),
 
+		// Declared auth mode (M48). Required; empty is a startup refusal, not
+		// an inference. See the AuthMode field comment.
+		AuthMode: strings.ToLower(strings.TrimSpace(getEnv("SBOMHUB_AUTH_MODE", ""))),
+
 		// Lemon Squeezy
 		LemonSqueezyAPIKey:         getEnv("LEMONSQUEEZY_API_KEY", ""),
 		LemonSqueezyWebhookSecret:  getEnv("LEMONSQUEEZY_WEBHOOK_SECRET", ""),
@@ -145,7 +207,24 @@ func Load() *Config {
 		SMTPFrom:     getEnv("SMTP_FROM", "noreply@sbomhub.app"),
 	}
 
-	// Determine mode based on configuration
+	// Determine mode based on configuration.
+	//
+	// NOTE (Codex round 4, Low): this is still derived from CLERK_SECRET_KEY,
+	// and that is fine for what Mode()/IsSaaS()/IsSelfHosted() are used for —
+	// whether billing and the provider webhooks are active. It is NOT the
+	// authentication decision. AnonymousAuthAllowed() reads only
+	// SBOMHUB_AUTH_MODE, and ValidateAuthMode() is what refuses a declaration
+	// that disagrees with this derivation.
+	//
+	// Load() therefore does NOT by itself establish a safe ENVIRONMENT AND
+	// AUTHENTICATION decision: it returns whatever the environment says.
+	// cmd/server/main.go calls ValidateRetiredEnv, ValidateEnvironment and
+	// ValidateAuthMode before anything is wired, and any other consumer must
+	// do the same. Those three settle the environment and the auth mode only —
+	// a deployment is additionally subject to Config.Validate (encryption key)
+	// and to the guards that live in cmd/server/main.go
+	// (validateEncryptionKey, validateWebhookVerification,
+	// assertAppRoleNotBypassRLS), which this package cannot enforce.
 	if cfg.ClerkSecretKey != "" {
 		cfg.mode = ModeSaaS
 	} else {
@@ -180,6 +259,199 @@ func (c *Config) IsBillingEnabled() bool {
 	return c.LemonSqueezyAPIKey != ""
 }
 
+// KnownEnvironments is the closed set of values APP_ENV (or the legacy
+// ENVIRONMENT) may hold. It is closed on purpose: every guard in this codebase
+// branches on IsDevelopment() or IsProduction(), so a value that is neither —
+// "prod", "Production", "dev", "" — used to land the process in a state no
+// guard was written for. See ValidateEnvironment.
+var KnownEnvironments = []string{"development", "staging", "production"}
+
+// ValidateEnvironment reports whether APP_ENV names an environment this
+// codebase actually has rules for.
+//
+// M48 (FO-4). Two things were wrong before, and they are the same thing:
+//
+//   - UNSET resolved to "development", the weakest setting the process has.
+//     "The operator configured nothing" is the one case where we know least
+//     about the deployment, and it was being read as a positive assertion
+//     that this is a laptop.
+//   - A TYPO ("prod", "PRODUCTION") satisfied neither IsProduction() nor
+//     IsDevelopment(). That direction is mostly strict — the main.go guards
+//     hard-fail — but it is strict by accident rather than by decision, and
+//     Validate()'s IsProduction()-only checks did not fire, so an all-zeros
+//     ENCRYPTION_KEY was accepted under APP_ENV=prod.
+//
+// Rejecting both is what lets every other guard read IsDevelopment() as a
+// deliberate operator statement rather than as a default.
+//
+// This is a startup-time check (cmd/server/main.go validateAppEnv), not a
+// request-time one; nothing in the request path consults it.
+func (c *Config) ValidateEnvironment() error {
+	for _, known := range KnownEnvironments {
+		if c.Environment == known {
+			return nil
+		}
+	}
+	if c.Environment == "" {
+		return fmt.Errorf(
+			"APP_ENV が未設定です。 デプロイ環境を明示してください: %s "+
+				"(例: 開発マシンでは APP_ENV=development)。 "+
+				"未設定を development として扱う既定は M48 で廃止しました — "+
+				"設定漏れと「開発環境である」という宣言は区別されます",
+			strings.Join(KnownEnvironments, " | "))
+	}
+	return fmt.Errorf(
+		"APP_ENV=%q は未知の値です。 使用できるのは %s のみです "+
+			"(起動ガードはこの 3 値でしか分岐しないため、それ以外は "+
+			"どのルールが適用されるか定義されていません)",
+		c.Environment, strings.Join(KnownEnvironments, " | "))
+}
+
+// SaaSSignals returns the names of the environment variables that are set and
+// only make sense in SaaS mode. It is the evidence used by
+// cmd/server/main.go validateAuthMode to tell "this operator meant to run
+// self-hosted" apart from "this operator meant to run SaaS and CLERK_SECRET_KEY
+// did not arrive".
+//
+// CLERK_SECRET_KEY itself is deliberately absent: it is the variable whose
+// absence selects self-hosted mode, so it can never be a signal here.
+//
+// The returned names are variable names only — never values — because callers
+// log them.
+func (c *Config) SaaSSignals() []string {
+	var set []string
+	for _, s := range []struct {
+		name  string
+		value string
+	}{
+		{"CLERK_WEBHOOK_SECRET", c.ClerkWebhookSecret},
+		{"LEMONSQUEEZY_API_KEY", c.LemonSqueezyAPIKey},
+		{"LEMONSQUEEZY_WEBHOOK_SECRET", c.LemonSqueezyWebhookSecret},
+		{"LEMONSQUEEZY_STORE_ID", c.LemonSqueezyStoreID},
+		{"LEMONSQUEEZY_STARTER_VARIANT_ID", c.LemonSqueezyStarterVariant},
+		{"LEMONSQUEEZY_PRO_VARIANT_ID", c.LemonSqueezyProVariant},
+		{"LEMONSQUEEZY_TEAM_VARIANT_ID", c.LemonSqueezyTeamVariant},
+	} {
+		if s.value != "" {
+			set = append(set, s.name)
+		}
+	}
+	return set
+}
+
+// AuthMode values for SBOMHUB_AUTH_MODE.
+const (
+	AuthModeClerk     = "clerk"
+	AuthModeAnonymous = "anonymous"
+)
+
+// KnownAuthModes is the closed set SBOMHUB_AUTH_MODE may hold. Like
+// KnownEnvironments it is closed on purpose: an unrecognised value must be a
+// refusal, never a fall-through to the more permissive arm.
+var KnownAuthModes = []string{AuthModeClerk, AuthModeAnonymous}
+
+// retiredAnonymousAuthFlag is the boolean opt-in M48 used before settling on a
+// required declaration. It is refused rather than ignored so an operator who
+// followed an intermediate draft is told their setting no longer applies,
+// instead of silently ending up with an unconfigured deployment.
+const retiredAnonymousAuthFlag = "SBOMHUB_ALLOW_ANONYMOUS_AUTH"
+
+// AnonymousAuthAllowed reports whether this process may serve requests with no
+// credential at all — the self-host posture in which every caller on the
+// Clerk-fronted route groups is Owner of the default tenant
+// (middleware.handleSelfHostedAuth).
+//
+// It reads ONLY the declaration. Nothing is inferred from the presence or
+// absence of a secret, which is the entire point of M48's third iteration:
+// inference is what made a SaaS deployment with a failed secret injection
+// indistinguishable from a self-hosted one. See the AuthMode field comment.
+//
+// It says nothing about whether the process SHOULD start — that decision, and
+// the refusal, live in ValidateAuthMode / cmd/server/main.go. This predicate
+// exists so the rule has one spelling that tests and the guard share.
+func (c *Config) AnonymousAuthAllowed() bool {
+	return c.AuthMode == AuthModeAnonymous
+}
+
+// ValidateAuthMode checks the REQUIRED SBOMHUB_AUTH_MODE declaration against
+// the mode actually derived from CLERK_SECRET_KEY. Both directions are
+// refusals, and so is an absent or unrecognised declaration.
+//
+// The `clerk` arm is the one that earns the whole variable. Nothing else in
+// this codebase can distinguish "self-hosted" from "SaaS whose secret
+// injection failed entirely", because in the second case there is nothing left
+// to notice — no Clerk key, no webhook secret, no billing key. A declaration
+// lives in the deployment manifest rather than the secret store, so it
+// survives the failure that removed them, and turns it into a boot failure
+// instead of an unauthenticated API.
+func (c *Config) ValidateAuthMode() error {
+	switch c.AuthMode {
+	case AuthModeClerk:
+		if c.ClerkSecretKey == "" {
+			return fmt.Errorf(
+				"SBOMHUB_AUTH_MODE=clerk と宣言されていますが CLERK_SECRET_KEY が空です。 " +
+					"シークレット注入が失敗している可能性があります。 " +
+					"このまま起動すると認証なし (Clerk 前提の route group が Owner 扱い) に " +
+					"なるため拒否します")
+		}
+		return nil
+	case AuthModeAnonymous:
+		if c.ClerkSecretKey != "" {
+			return fmt.Errorf(
+				"SBOMHUB_AUTH_MODE=anonymous と宣言されていますが CLERK_SECRET_KEY が設定されています。 " +
+					"宣言と実際の構成が矛盾しています。 Clerk 認証で運用するなら " +
+					"SBOMHUB_AUTH_MODE=clerk に変更してください")
+		}
+		return nil
+	case "":
+		return fmt.Errorf(
+			"SBOMHUB_AUTH_MODE が未設定です。 認証モードを明示してください: %s。 "+
+				"CLERK_SECRET_KEY の有無からの推論は M48 で廃止しました — "+
+				"シークレット注入が完全に失敗した SaaS デプロイと、 意図した自己ホスト構成は、 "+
+				"推論では区別できないためです "+
+				"(自己ホスト = 認証なしなら SBOMHUB_AUTH_MODE=anonymous)",
+			strings.Join(KnownAuthModes, " | "))
+	default:
+		return fmt.Errorf(
+			"SBOMHUB_AUTH_MODE=%q は未知の値です。 使用できるのは %s のみです",
+			c.AuthMode, strings.Join(KnownAuthModes, " | "))
+	}
+}
+
+// ValidateRetiredEnv refuses environment variables that an intermediate draft
+// of M48 introduced and the final design removed. Ignoring them silently would
+// leave an operator believing a setting is in force when it is not — and in
+// this particular case, believing they had acknowledged the anonymous posture
+// when the deployment had in fact declared nothing.
+func (c *Config) ValidateRetiredEnv() error {
+	// Codex round 4 (Low) proposed refusing PRESENCE, i.e. LookupEnv, on the
+	// grounds that `SBOMHUB_ALLOW_ANONYMOUS_AUTH=` is still an operator
+	// believing they configured something. Refusing an empty value outright is
+	// too blunt: this repository's own .env.example carries several empty
+	// placeholders (NVD_API_KEY=, CLERK_SECRET_KEY=, ...), so an empty
+	// leftover is far more likely to be a harmless remnant than a belief — and
+	// an EMPTY value never expressed the acknowledgement anyway, since only
+	// `true` did.
+	//
+	// So: a non-empty value is a refusal, and a present-but-empty one is a
+	// warning that names the replacement. The operator is told either way,
+	// which was the point, without a boot failure for a blank line.
+	if raw, present := os.LookupEnv(retiredAnonymousAuthFlag); present && raw == "" {
+		slog.Warn("SBOMHUB_ALLOW_ANONYMOUS_AUTH is present but empty. The variable was retired "+
+			"before release and is no longer read; SBOMHUB_AUTH_MODE is what declares the "+
+			"authentication mode now. The line can be deleted.",
+			"replacement", "SBOMHUB_AUTH_MODE")
+	}
+	if os.Getenv(retiredAnonymousAuthFlag) != "" {
+		return fmt.Errorf(
+			"%s は廃止されました。 SBOMHUB_AUTH_MODE=anonymous に置き換えてください "+
+				"(boolean のフラグでは、 Clerk 構成でシークレット注入が完全に失敗した際に "+
+				"匿名モードを承認してしまう経路を塞げなかったため)",
+			retiredAnonymousAuthFlag)
+	}
+	return nil
+}
+
 // IsProduction returns true if running in production environment
 func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
@@ -189,6 +461,15 @@ func (c *Config) IsProduction() bool {
 // This is the single source of truth for the "warn instead of hard-fail"
 // downgrade applied to Trust Rescue startup guards
 // (validateEncryptionKey / assertAppRoleNotBypassRLS in cmd/server/main.go).
+//
+// It is deliberately NOT consulted by AnonymousAuthAllowed: the anonymous-auth
+// acknowledgement is required in every environment (Codex round 2, High).
+//
+// M48 (FO-4): this is now true only when the operator SPELLED
+// APP_ENV=development. It is no longer reachable by leaving APP_ENV unset —
+// config.Load substitutes nothing, and ValidateEnvironment refuses an unset
+// or unrecognised value at startup. Every downgrade keyed on this predicate
+// therefore requires a positive statement from the deployment.
 func (c *Config) IsDevelopment() bool {
 	return c.Environment == "development"
 }
@@ -203,9 +484,14 @@ func (c *Config) IsDevelopment() bool {
 //
 // It checks IsDevelopment(), not !IsProduction() (Codex round 3, Low): the
 // latter also admits staging and every typo of "production", which is the
-// opposite of the fail-closed posture this flag exists inside. APP_ENV unset
-// still resolves to "development" (config.Load's fallback), so the local flow
-// that needs the bypass keeps working without setting anything.
+// opposite of the fail-closed posture this flag exists inside.
+//
+// M48 (FO-4) narrowed this further without touching the expression: APP_ENV
+// unset no longer resolves to "development", so the bypass now requires the
+// local flow to spell APP_ENV=development as well as setting the flag. That
+// is the same statement the server already demands to boot at all
+// (ValidateEnvironment), so it costs a local developer nothing beyond the
+// .env line that .env.example already ships.
 //
 // The environment term is deliberately redundant with the startup guard in
 // cmd/server/main.go, so the runtime decision does not depend on that guard
@@ -225,11 +511,26 @@ func (c *Config) IsEmailEnabled() bool {
 
 // Validate checks for security-critical configuration errors
 // Returns an error if the configuration is insecure for the current environment
+//
+// M48 (FO-4): the three checks below used to fire only under IsProduction(),
+// while the equivalent startup guard in cmd/server/main.go
+// (validateEncryptionKey) downgrades only under IsDevelopment(). The gap
+// between the two predicates is staging — and, before ValidateEnvironment, any
+// typo of "production". The observed consequence: main.go's denylist does not
+// contain "00000000000000000000000000000000", so under APP_ENV=staging that
+// key passed validateEncryptionKey and then passed here too, because this
+// function only objects in production. The predicate is now IsDevelopment(),
+// matching main.go, so development is the only environment that relaxes
+// anything.
+//
+// The two denylists are still separate (main.go's covers placeholder strings
+// and previously-bundled defaults; this one covers degenerate keys). Neither
+// is a superset of the other, which is why both run.
 func (c *Config) Validate() error {
 	// SECURITY: Encryption key validation
 	if c.EncryptionKey == "" {
-		if c.IsProduction() {
-			return fmt.Errorf("ENCRYPTION_KEY must be set in production environment")
+		if !c.IsDevelopment() {
+			return fmt.Errorf("ENCRYPTION_KEY must be set outside development (APP_ENV=%q)", c.Environment)
 		}
 		// Use a development-only default key (this is logged as a warning)
 		c.EncryptionKey = "dev-only-insecure-key-32bytes!!"
@@ -237,7 +538,7 @@ func (c *Config) Validate() error {
 
 	// SECURITY: Key length validation - AES-256 requires exactly 32 bytes
 	if len(c.EncryptionKey) < 32 {
-		if c.IsProduction() {
+		if !c.IsDevelopment() {
 			return fmt.Errorf("ENCRYPTION_KEY must be at least 32 bytes for AES-256 (got %d bytes)", len(c.EncryptionKey))
 		}
 	}
@@ -250,8 +551,8 @@ func (c *Config) Validate() error {
 		"11111111111111111111111111111111",
 	}
 	for _, weak := range weakKeys {
-		if c.EncryptionKey == weak && c.IsProduction() {
-			return fmt.Errorf("ENCRYPTION_KEY appears to be a default/weak key - please use a cryptographically random key in production")
+		if c.EncryptionKey == weak && !c.IsDevelopment() {
+			return fmt.Errorf("ENCRYPTION_KEY appears to be a default/weak key - please use a cryptographically random key outside development (APP_ENV=%q)", c.Environment)
 		}
 	}
 

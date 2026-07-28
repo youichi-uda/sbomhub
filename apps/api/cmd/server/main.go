@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
@@ -75,6 +76,173 @@ var knownDefaultEncryptionKeys = []string{
 	"V5jgaCSCV/Mdf8JbVX42aWYAB6dG1Dp9G9Bo0Nw+qjY=",
 	"sbomhub-default-encryption-key-32",
 	"dev-only-insecure-key-32bytes!!",
+}
+
+// validateAppEnv refuses to start unless APP_ENV names one of the three
+// environments this codebase has rules for (config.KnownEnvironments).
+//
+// M48 (FO-4). It runs FIRST, before every other guard, because those guards'
+// severity is a function of its answer: validateEncryptionKey,
+// evaluateAppRoleRLS and validateWebhookVerification all downgrade to a
+// warning under cfg.IsDevelopment(). Until now "the operator set nothing"
+// produced that downgrade, so the weakest posture the process has was also its
+// default.
+//
+// validateAuthMode is deliberately NOT in that list — it refuses in every
+// environment (Codex round 2, High) — but it still runs after this one so its
+// message can quote a validated APP_ENV.
+//
+// Observed, not inferred (2026-07-29, this repo's dev Postgres): with APP_ENV
+// unset, a 32-byte all-zeros ENCRYPTION_KEY and DATABASE_URL pointed at the
+// compose superuser, the server logged
+//
+//	WARN "DB role bypasses Row-Level Security — tenant isolation is NOT enforced."
+//
+// and then served traffic (GET /api/v1/health -> 200). Under APP_ENV=production
+// or =staging each of those warnings is a refusal.
+//
+// This is the "explicitly reject unset" arm of the FO-4 choice rather than the
+// "default to production" arm. Defaulting would have replaced one implicit
+// answer with another; there would still be no way to tell a deployment that
+// MEANT production from one that merely never mentioned it, which is the same
+// defect one notch safer. Rejecting leaves no default to be wrong about.
+func validateAppEnv(cfg *config.Config) error {
+	if err := cfg.ValidateEnvironment(); err != nil {
+		return err
+	}
+	slog.Info("APP_ENV check passed", "app_env", cfg.Environment)
+	return nil
+}
+
+// validateAuthMode is the startup half of the M48 FO-3 contract: a deployment
+// must not arrive at "no authentication" by accident.
+//
+// # What the downgrade is
+//
+// With CLERK_SECRET_KEY empty, config.Load selects ModeSelfHosted and the Auth
+// middleware routes every request to middleware.handleSelfHostedAuth, which
+// reads no header, checks no credential, and sets Role=Owner on the default
+// tenant. That is the product's intended self-host posture — "Self-host first"
+// — and this guard does not change it.
+//
+// # What was wrong with it
+//
+// It was reached purely by INFERENCE from an absent variable, so the intended
+// posture and a SaaS deployment whose Clerk key failed to arrive were the same
+// state, announced by one line among thirty:
+//
+//	WARN "Clerk secret key not set - running in self-hosted mode"
+//
+// Measured on this repo's dev Postgres (2026-07-29) with APP_ENV=production and
+// CLERK_SECRET_KEY removed: POST /api/v1/projects with no Authorization header
+// returned 201; GET /api/v1/me returned role=owner, plan=enterprise; and
+// POST /api/v1/apikeys — an authAdmin route — returned 201 with a live key.
+// That last one is why a startup refusal is the right instrument and a
+// request-time one would not have been enough: the key minted during the
+// misconfigured window kept working against /api/v1/cli/* and /api/v1/mcp/*
+// after CLERK_SECRET_KEY was supplied and the server restarted in SaaS mode
+// (verified: HTTP 200 on both). Setting the missing variable does not undo the
+// window.
+//
+// # The three refusals
+//
+//  1. RETIRED VARIABLE — SBOMHUB_ALLOW_ANONYMOUS_AUTH is set. That boolean was
+//     M48's first two attempts at this guard; the final design replaced it
+//     with a required declaration. Refusing rather than ignoring means an
+//     operator who followed an intermediate draft is told, instead of
+//     believing they had acknowledged something.
+//
+//  2. FALSE OR ABSENT DECLARATION — config.ValidateAuthMode. SBOMHUB_AUTH_MODE
+//     must be present and must agree with whether CLERK_SECRET_KEY actually
+//     arrived. This is the load-bearing refusal, and the one the first two
+//     iterations kept failing to reach.
+//
+//     Rounds 1-3 each broke a version that INFERRED the mode from the secret.
+//     The reason is structural: a SaaS deployment whose secret injection fails
+//     ENTIRELY leaves nothing behind to contradict — no Clerk key, no webhook
+//     secret, no billing key — so it is byte-for-byte a self-hosted
+//     deployment, and any durable "anonymous is fine" artefact then authorises
+//     it. Round 2 tried refusing a stale artefact whenever a Clerk key WAS
+//     present; round 3 pointed out that this proves nothing about a first
+//     boot, a crash-loop, or a rollout where the key never arrived.
+//
+//     A required declaration lives in the deployment manifest rather than the
+//     secret store, so it outlives the injection failure and turns it into a
+//     boot failure. Staleness now fails safe: a stale `clerk` refuses.
+//
+//  3. CONTRADICTION — a deployment declaring `anonymous` while carrying
+//     variables that only mean anything in SaaS mode (config.SaaSSignals: the
+//     Clerk webhook secret, any LEMONSQUEEZY_*). Refusal 2 already catches the
+//     case where CLERK_SECRET_KEY itself is present; this catches the
+//     half-configured one, where the key is the piece that went missing. It
+//     costs a real self-hoster nothing, because they set none of them.
+//
+// All three apply in every environment. There is no development exemption:
+// round 1 established that one would have made the whole guard inert for the
+// installed base, since the pre-M48 .env.example shipped APP_ENV=development
+// and install.sh preserves an existing .env across an upgrade.
+//
+// # What it does not do
+//
+// It does not weaken anything when the declaration IS `anonymous`: the process
+// starts with authentication disabled and announceAuthMode says so. The
+// declaration is an acknowledgement, not a mitigation.
+func validateAuthMode(cfg *config.Config) error {
+	if err := cfg.ValidateRetiredEnv(); err != nil {
+		return err
+	}
+	if err := cfg.ValidateAuthMode(); err != nil {
+		return err
+	}
+
+	if !cfg.AnonymousAuthAllowed() {
+		return nil
+	}
+
+	if signals := cfg.SaaSSignals(); len(signals) > 0 {
+		return fmt.Errorf(
+			"SBOMHUB_AUTH_MODE=anonymous (認証なし) と宣言されていますが、 "+
+				"この deployment には SaaS モードでしか意味を持たない環境変数が設定されています: %s。 "+
+				"SaaS のつもりなら CLERK_SECRET_KEY が渡っていません — 注入経路を確認し、 "+
+				"SBOMHUB_AUTH_MODE=clerk に変更してください。 "+
+				"自己ホストのつもりなら上記の変数を削除してください。 "+
+				"この組み合わせのまま起動すると、 Clerk 認証を前提とする API route group が "+
+				"資格情報なしで Owner 権限として通ります",
+			strings.Join(signals, ", "))
+	}
+
+	return nil
+}
+
+// announceAuthMode states, at startup and in one place, what the process will
+// do with an unauthenticated request.
+//
+// M48 (FO-3): the line this replaces — WARN "Clerk secret key not set -
+// running in self-hosted mode" — named the CAUSE and left the CONSEQUENCE to
+// the reader, which is how an operator scanning boot logs for a SaaS
+// deployment missed it. The survey behind this wave found the consequence
+// stated in exactly one line of docs/SAAS_SETUP.md and contradicted by
+// docs/configuration.md ("User authentication is handled by API keys"), so the
+// log is the only place many operators will ever learn it.
+func announceAuthMode(cfg *config.Config) {
+	if !cfg.AnonymousAuthAllowed() {
+		slog.Info("Authentication: Clerk (SaaS mode)", "app_env", cfg.Environment)
+		return
+	}
+	// Deliberately scoped: this is true of the Clerk-fronted route groups
+	// (everything behind appmw.Auth / appmw.MultiAuth's Clerk fallback), which
+	// is where projects, SBOMs, VEX, settings and API-key issuance live. The
+	// /api/v1/cli/* and /api/v1/mcp/* groups authenticate by API key and still
+	// require one; /api/v1/health and /api/v1/public/:token are anonymous by
+	// design in both modes. Saying "every request" would be stronger than the
+	// implementation (Codex round 1, Low).
+	slog.Warn("AUTHENTICATION IS DISABLED (self-hosted mode, no CLERK_SECRET_KEY). "+
+		"Requests to the Clerk-fronted API route groups — with no credential of any kind — are "+
+		"served as OWNER of the default tenant: they can read and write all data and mint API "+
+		"keys that keep working after this process is reconfigured. Restrict network "+
+		"reachability to this port.",
+		"app_env", cfg.Environment,
+		"declared_mode", cfg.AuthMode)
 }
 
 // validateEncryptionKey enforces P0 #7 / Trust Rescue 9.2.3: refuse to start
@@ -296,6 +464,21 @@ func main() {
 
 	cfg := config.Load()
 
+	// SECURITY (M48 FO-4): APP_ENV first. Every guard below downgrades to a
+	// warning under IsDevelopment(), so "which environment is this" has to be
+	// a statement the operator made, not a default this process picked.
+	if err := validateAppEnv(cfg); err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+
+	// SECURITY (M48 FO-3): refuse the two ways a deployment reaches
+	// "no authentication" without meaning to.
+	if err := validateAuthMode(cfg); err != nil {
+		slog.Error("Refusing to start", "error", err)
+		os.Exit(1)
+	}
+
 	// SECURITY (P0 #7 / Trust Rescue 9.2.3): refuse to start when
 	// ENCRYPTION_KEY is unset, a known default placeholder, or under 32 bytes.
 	// cfg.EncryptionKey is the raw value loaded from ENCRYPTION_KEY (no default
@@ -371,9 +554,12 @@ func main() {
 	if cfg.ClerkSecretKey != "" {
 		clerk.SetKey(cfg.ClerkSecretKey)
 		slog.Info("Clerk SDK initialized")
-	} else {
-		slog.Warn("Clerk secret key not set - running in self-hosted mode")
 	}
+	// M48 (FO-3): say what this means for a request, not just which variable
+	// is absent. validateAuthMode above has already refused the accidental
+	// spellings, so anything reaching here is a deployment that either set a
+	// Clerk key or named the anonymous downgrade.
+	announceAuthMode(cfg)
 
 	// Log startup mode
 	slog.Info("Starting SBOMHub", "mode", cfg.Mode(), "auth_enabled", cfg.IsAuthEnabled(), "billing_enabled", cfg.IsBillingEnabled())
@@ -856,8 +1042,25 @@ func main() {
 			"mode":   string(cfg.Mode()),
 		})
 	})
-	api.GET("/public/:token", publicLinkHandler.PublicGet)
-	api.GET("/public/:token/download", publicLinkHandler.PublicDownload)
+	// M48 (FO-6): these two are the only unauthenticated routes that take a
+	// caller-supplied credential and do real work with it — /health above is
+	// anonymous too but is a constant, and the /api/webhooks/* pair verifies
+	// an HMAC. A password-protected share link runs bcrypt on every attempt,
+	// and nothing bounded how many attempts an anonymous caller could make:
+	// unlimited password guesses AND an unlimited supply of
+	// deliberately-expensive hashes pointed at the API's CPU.
+	//
+	// RateLimitPublicLink charges only REJECTED attempts to the cumulative
+	// budget, so a popular share link is not throttled by its own success; a
+	// separate, looser cap on ADMISSIONS HOLDING A LIVE LEASE is what bounds a
+	// parallel burst. It CAN reject a successful request once more than
+	// PublicLinkInFlightPerToken hold live leases for one link — see the doc
+	// comment for that trade, and for why "admissions" is not the same claim
+	// as "executing handlers".
+	publicLinkLimit := appmw.RateLimitPublicLink(rdb,
+		appmw.PublicLinkFailuresPerToken, appmw.PublicLinkFailuresPerIP, appmw.PublicLinkWindow)
+	api.GET("/public/:token", publicLinkHandler.PublicGet, publicLinkLimit)
+	api.GET("/public/:token/download", publicLinkHandler.PublicDownload, publicLinkLimit)
 
 	// MCP endpoints (API key auth)
 	// Trust Rescue 9.1.2 (#3): TenantTx is wedged in between the auth pair

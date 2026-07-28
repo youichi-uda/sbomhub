@@ -453,6 +453,19 @@ services:
       - postgres_migrator_password
     environment:
       APP_ENV: "production"
+      # SECURITY (M48 FO-3): this stack sets no CLERK_SECRET_KEY, so the api
+      # runs self-hosted — requests reaching port 8080 on the Clerk-fronted
+      # route groups are served as OWNER of the default tenant with no
+      # credential at all. The api refuses to start unless that is stated here.
+      #
+      # This line does not enable anything that was not already happening; it
+      # records that it is deliberate, and it is REQUIRED — the api refuses to
+      # start without a declaration. It also refuses if a CLERK_WEBHOOK_SECRET
+      # or any LEMONSQUEEZY_* is added while this still says anonymous.
+      #
+      # Reachability to this port is the actual control. See
+      # docs/security/self-host-deployment.md §7.
+      SBOMHUB_AUTH_MODE: "anonymous"
       PORT: "8080"
       # DB 接続情報は wrapper script で組み立てる (password を secret から
       # 差し込むため)。 wrapper script に渡す host / db / user は env で受ける。

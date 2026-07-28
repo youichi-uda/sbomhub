@@ -47,6 +47,49 @@ README quick start.
 
 ---
 
+## 2b. Breaking changes — M48 (fail-open sweep)
+
+These require operator action on top of `docker compose pull && docker compose up -d`.
+Several will stop an existing deployment from starting until the `.env` is
+updated; that is deliberate, and each refusal names the variable to set.
+
+> **Do this before you pull.** `install.sh` preserves an existing `.env`, so
+> updating the template does not update yours. `SBOMHUB_AUTH_MODE` is the line
+> that is universally new — `docker compose` fails at variable-substitution
+> time, before any container starts, without it. A pre-M48 `.env` generated
+> from the old template does carry `APP_ENV=development`; leaving that in place
+> keeps every startup guard at warning level, which is the other half of this
+> release, so set it deliberately rather than by omission. Add or correct both:
+>
+> ```bash
+> # Self-host (the OSS default: no user authentication — read the row below)
+> printf 'APP_ENV=production\nSBOMHUB_AUTH_MODE=anonymous\n' >> .env
+> ```
+>
+> Use `SBOMHUB_AUTH_MODE=clerk` instead if you run Clerk, and `APP_ENV=development`
+> only on a machine where you want the startup guards relaxed. Nothing is
+> inferred and there is no default — see the `SBOMHUB_AUTH_MODE` row for why.
+
+| Area | Pre-M48 behaviour | M48 behaviour | What you must do |
+|---|---|---|---|
+| **`APP_ENV`** | Optional. Unset resolved to `development`, which is the setting under which *every* startup guard downgrades itself to a warning — a missing `ENCRYPTION_KEY`, and a database role that **bypasses Row-Level Security** (i.e. tenant isolation not enforced), both became warnings rather than refusals. Note the supported install path was affected in practice: `install.sh` copies `.env.example` verbatim and `.env.example` shipped `APP_ENV=development`, so production self-host deployments ran with the guards disarmed. | **Required, no default.** Must be exactly one of `development`, `staging`, `production`. The api refuses to start on an unset or misspelled value, and `docker compose` now fails at variable-substitution time before the container starts. `.env.example` ships `APP_ENV=production`. | Add `APP_ENV=production` to your `.env` (or `development` on a machine where you want the guards relaxed). If you were relying on the old default, expect the `ENCRYPTION_KEY` and DB-role guards to become **refusals** — that is the point; see sections 3 and 5 if either now fails. |
+| **`SBOMHUB_AUTH_MODE`** | Did not exist. The authentication mode was inferred entirely from whether `CLERK_SECRET_KEY` happened to arrive, so self-hosted mode (which serves the Clerk-fronted route groups as Owner with no credential) was reached by the *absence* of a variable, announced by one `WARN` line naming only the cause. | **Required. `clerk` or `anonymous`, no default, nothing inferred.** The api refuses to start when it is unset, misspelled, or disagrees with whether `CLERK_SECRET_KEY` actually arrived — in every environment, `development` included. `docker compose` fails at variable-substitution time before the container starts. The posture itself is unchanged; the startup log now states the consequence rather than the cause. | Add `SBOMHUB_AUTH_MODE=anonymous` for a self-host deployment, or `SBOMHUB_AUTH_MODE=clerk` if you run Clerk. Then read `docs/security/self-host-deployment.md` §2.1.1 and put a network boundary in front of the api if you have not. **Why a required declaration rather than an opt-in flag:** as long as the mode was inferred from a secret, a Clerk deployment whose secret store failed to inject *anything at all* was byte-for-byte identical to a self-hosted one and started with authentication off. A declaration lives in the deployment manifest, not the secret store, so it survives that failure and turns it into a refusal to boot. There is no development exemption: the pre-M48 `.env.example` shipped `APP_ENV=development` and `install.sh` preserves an existing `.env`, so an exemption would have let every already-installed deployment upgrade without being asked anything. |
+| **Contradictory Clerk config** | A deployment with `CLERK_WEBHOOK_SECRET` or any `LEMONSQUEEZY_*` set but `CLERK_SECRET_KEY` missing started silently in anonymous-Owner mode. | **Refused in every environment** when the declaration says `anonymous`. That combination means the Clerk key was meant to be present and did not arrive. | If you hit this: either supply `CLERK_SECRET_KEY` (you meant SaaS) or remove the leftover SaaS variables (you meant self-host). Note that any API key minted while the deployment was accidentally anonymous **keeps working** — audit `/api/v1/apikeys` and revoke anything you do not recognise. |
+| **Diff webhook signing** | A per-tenant SBOM diff webhook with no shared secret was delivered **unsigned** — the `X-SBOMHub-Signature` header was simply omitted. | A `format=json` webhook now requires a secret: `PUT /api/v1/tenant/settings/diff-webhook` rejects enabling one without it (400), and deliveries for existing secret-less rows are refused and recorded as `diff_webhook_failed` in the audit log instead of being sent. `format=slack` is exempt — a Slack incoming-webhook URL is itself the credential and Slack does not read our signature header. | **Functional reduction.** If you have a `json`-format diff webhook with no secret it stops firing. Set a shared secret in the diff-webhook settings screen and configure your receiver to verify `X-SBOMHub-Signature`. Switching the format to `slack` only avoids the requirement when the destination really is `https://hooks.slack.com/...` — a Slack-*compatible* relay on another host still needs a secret. Check the audit log for `diff_webhook_failed` with `missing signing secret`. |
+
+One further M48 change needs no operator action: the anonymous public share
+links (`GET /api/v1/public/:token`) now have a brute-force budget — 10 failed
+attempts per token and 60 per source IP, per hour, counting **failures only**,
+so normal viewing is not throttled by its own volume. A separate cap on
+admissions holding a live lease (16 per token, 64 per IP, leases expiring after
+two minutes) bounds parallel bursts, and it can reject a *successful* request
+once that many hold live leases for one link. It bounds admissions, not
+executing handlers: one that outlives its lease keeps running while the next
+wave is admitted. Both are backed by Redis, and the endpoint denies (503) when
+Redis is unreachable. See `docs/security/self-host-deployment.md` §10.2.
+
+---
+
 ## 3. Before you start
 
 1. **Pin a maintenance window of ~15 minutes** of api downtime. Postgres
