@@ -73,9 +73,12 @@ func (r *SubscriptionRepository) CreateCheckoutClaim(ctx context.Context, c *mod
 // the audit trail records when the binding was actually established rather
 // than when it was last re-confirmed.
 //
-// Runs on the webhook path, which has no transaction and no
-// app.current_tenant_id; the table carries no RLS for exactly that reason
-// (migration 060, same constraint as `subscriptions` in 031).
+// Runs on the webhook path. Since M47R it joins the delivery transaction
+// handler.applyDelivery opens — so a delivery that is refused or fails later
+// does not spend the claim — but it still runs BEFORE any
+// app.current_tenant_id is bound, because this is the statement that reveals
+// which tenant to bind. The table therefore carries no RLS (migration 060,
+// same constraint as `subscriptions` in 031).
 func (r *SubscriptionRepository) ConsumeCheckoutClaim(
 	ctx context.Context, tokenHash, lsSubscriptionID string, now time.Time,
 ) (*model.CheckoutClaim, error) {

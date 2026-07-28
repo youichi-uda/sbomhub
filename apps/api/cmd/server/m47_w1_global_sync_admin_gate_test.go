@@ -21,15 +21,24 @@ import (
 // integrity and availability primitive handed out to the lowest role in the
 // system.
 //
-// Why this test reads the source instead of driving a request: the gate is a
-// middleware argument at the registration site in main.go, and Echo exposes
-// no way to enumerate a route's middleware after the fact (e.Routes() returns
+// Why this test reads the source instead of driving a request: the gate is
+// middleware at the registration site in main.go, and Echo exposes no way to
+// enumerate a route's middleware after the fact (e.Routes() returns
 // method/path/handler-name only). The behaviour of the middleware itself is
 // already pinned by middleware.TestRequireAdmin_RoleMatrix and
 // handler.TestAPIKeyRoutesAreAdminOnly; what is NOT otherwise pinned — and
-// what actually regressed here — is that the registration site passes it. A
+// what actually regressed here — is that the registration site applies it. A
 // source assertion is the honest instrument for that: it cannot prove the
 // middleware works, only that it is wired, which is exactly the claim.
+//
+// M47R: the gate moved from a per-route ARGUMENT to the `authAdmin` GROUP, so
+// that it runs before TenantTx rather than inside it (see the group
+// declarations in main.go). This test therefore accepts either form. The
+// group's own declaration is pinned by
+// TestM47RGatedGroupsAreDeclaredCorrectly, and
+// TestM47RMutatingRoutesCarryARoleGate now sweeps EVERY mutating route rather
+// than the four named here — this test survives as the targeted guard for the
+// highest-blast-radius ones.
 func TestM47W1GlobalSyncRoutesAreAdminGated(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
@@ -58,10 +67,12 @@ func TestM47W1GlobalSyncRoutesAreAdminGated(t *testing.T) {
 					"(then remove it from this list) or renamed (then this guard is now blind)", route)
 			}
 			for _, line := range matches {
-				if !strings.Contains(line, "adminOnly") && !strings.Contains(line, "RequireAdmin()") {
+				if !strings.Contains(line, "adminOnly") &&
+					!strings.Contains(line, "RequireAdmin()") &&
+					!strings.HasPrefix(strings.TrimSpace(line), "authAdmin.") {
 					t.Errorf("POST %s is registered without an admin gate:\n\t%s\n"+
 						"This endpoint writes a GLOBAL, RLS-free catalog that every tenant reads. "+
-						"Add `adminOnly` to the registration.", route, strings.TrimSpace(line))
+						"Register it on the `authAdmin` group.", route, strings.TrimSpace(line))
 				}
 			}
 		})
@@ -80,6 +91,9 @@ func TestM47W1GlobalSyncRoutesAreAdminGated(t *testing.T) {
 //
 // RequireWrite, not RequireAdmin: this is a project mutation of the same
 // class as SBOM upload and triage/run, both of which use RequireWrite.
+//
+// M47R: accepts the `authWrite` group as well as the per-route argument, for
+// the same reason as the admin guard above.
 func TestM47W1ManualScanRequiresWrite(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
@@ -91,7 +105,8 @@ func TestM47W1ManualScanRequiresWrite(t *testing.T) {
 		t.Fatal("no POST registration found for /projects/:id/scan — this guard is now blind")
 	}
 	for _, line := range matches {
-		if !strings.Contains(line, "RequireWrite()") {
+		if !strings.Contains(line, "RequireWrite()") &&
+			!strings.HasPrefix(strings.TrimSpace(line), "authWrite.") {
 			t.Errorf("POST /projects/:id/scan is registered without a write gate:\n\t%s\n"+
 				"A read-scoped Viewer must not be able to drive outbound scans that write "+
 				"the global vulnerability tables.", strings.TrimSpace(line))

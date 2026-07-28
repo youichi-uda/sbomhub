@@ -11,8 +11,14 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
-// ErrPublicLinkRowNotFound is returned by the counter/touch mutations when
-// the statement matched no `public_links` row for the calling tenant.
+// ErrPublicLinkRowNotFound is returned by every `public_links` mutation that
+// goes through execPublicLinkMutation when the statement matched no row for
+// the calling tenant.
+//
+// The two exceptions are TryConsumeDownload and TryRegisterView, which report
+// the same condition as `(false, nil)` — they are admission decisions on the
+// anonymous share route, where "no row matched" is an expected answer the
+// caller must branch on rather than an error it must inspect.
 //
 // M47 W2: `public_links` lost its RLS in migration 030, so `AND
 // tenant_id = $N` is the whole boundary. Update / Delete /
@@ -21,6 +27,13 @@ import (
 // the same table, the same predicate, four different contracts. They now
 // share this one. Wraps sql.ErrNoRows — see ErrTenantUserNotFound
 // (repository/user.go).
+//
+// M47R (Codex cross-wave review, Low): Update and Delete now use it too.
+// They DID adjudicate the row count, but reported it as
+// `fmt.Errorf("public link not found")` — an untyped string no caller could
+// errors.Is, so PublicLinkHandler.Delete answered 500 for a link that simply
+// was not there while Update answered 404 for the same condition on the same
+// resource. One sentinel, one contract.
 var ErrPublicLinkRowNotFound = fmt.Errorf("public_links: no row matched for this tenant: %w", sql.ErrNoRows)
 
 type PublicLinkRepository struct {
@@ -198,21 +211,10 @@ func (r *PublicLinkRepository) Update(ctx context.Context, tenantID uuid.UUID, l
 			updated_at = $7
 		WHERE id = $8 AND tenant_id = $9
 	`
-	result, err := r.q(ctx).ExecContext(ctx, query,
+	return execPublicLinkMutation(ctx, r.q(ctx), "update link", query,
 		link.Name, link.SbomID, link.ExpiresAt, link.IsActive, link.AllowedDownloads, link.PasswordHash, link.UpdatedAt,
 		link.ID, tenantID,
 	)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return fmt.Errorf("public link not found")
-	}
-	return nil
 }
 
 // Delete removes a public link restricted to the calling tenant. With RLS
@@ -220,18 +222,7 @@ func (r *PublicLinkRepository) Update(ctx context.Context, tenantID uuid.UUID, l
 // session from deleting other tenants' links by UUID.
 func (r *PublicLinkRepository) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
 	query := `DELETE FROM public_links WHERE id = $1 AND tenant_id = $2`
-	result, err := r.q(ctx).ExecContext(ctx, query, id, tenantID)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return fmt.Errorf("public link not found")
-	}
-	return nil
+	return execPublicLinkMutation(ctx, r.q(ctx), "delete link", query, id, tenantID)
 }
 
 // IncrementView bumps the view counter on a single link. Defense-in-depth:

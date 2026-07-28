@@ -213,7 +213,19 @@ func (h *PublicLinkHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.publicLinkService.Delete(c.Request().Context(), middleware.GetTenantID(c), linkID); err != nil {
-		slog.Warn("public_link: delete failed",
+		// M47R (Codex cross-wave review, Low): a link that is not in the
+		// caller's tenant is 404, exactly as on Update — until now the two
+		// verbs disagreed about the same resource, and a link that simply did
+		// not exist came back as a server error. Everything else (driver
+		// faults) stays 500, so "the link is gone" and "we could not tell"
+		// remain different answers. No existence oracle is created: see
+		// PublicLinkService.Delete.
+		if errors.Is(err, service.ErrPublicLinkNotFound) {
+			slog.Warn("public_link: delete matched no link in this tenant",
+				"tenant_id", middleware.GetTenantID(c), "link_id", linkID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "public link not found"})
+		}
+		slog.Error("public_link: delete failed",
 			"tenant_id", middleware.GetTenantID(c), "link_id", linkID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete public link"})
 	}

@@ -34,19 +34,23 @@ import (
 // DIFFERENT revisions. Two events sharing one revision are still applied in
 // arrival order, whatever that is.
 //
-// AND ONE MORE LIMIT (Codex round 3, Medium): the claim and the state write
-// are SEPARATE statements, and the webhook path has no transaction, so with
-// two deliveries genuinely in flight at once the interleaving
+// THAT LIMIT IS CLOSED FOR THE WEBHOOK (M47R). It used to read: the claim and
+// the state write are separate statements and the webhook path has no
+// transaction, so two in-flight deliveries could interleave as
 //
 //	old claims R1 -> new claims R2 -> new writes state -> old writes state
 //
-// leaves the watermark at R2 beside R1's state. What this guarantees is
-// therefore "a delivery that LOSES the comparison never writes", not "the
-// newest delivery always wins a concurrent race". Closing that needs the
-// claim, the subscription write and the tenant-plan write inside one
-// transaction holding the subscription row — the same restructuring the
-// non-atomic-webhook-writes residual already calls for. See
-// docs/SAAS_SETUP.md §2.5.
+// leaving the watermark at R2 beside R1's state. Since M47R the webhook runs
+// each delivery inside one transaction (handler.applyDelivery) and the row
+// lock this UPDATE takes is held until it commits, so the second delivery
+// cannot even claim until the first has finished writing. The caller also
+// re-reads the row after a successful claim, so it compares against committed
+// state rather than its pre-claim snapshot.
+//
+// The guarantee for any FUTURE caller that runs this outside a transaction is
+// still only "a delivery that LOSES the comparison never writes". There is no
+// such caller today: handler.applyDelivery and BillingHandler.SyncSubscription
+// (inside TenantTx) are both transactional.
 //
 // A NULL watermark (pre-061 rows, and rows just created) always accepts:
 // there is no recorded revision to be older than.

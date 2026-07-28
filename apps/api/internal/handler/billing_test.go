@@ -87,10 +87,16 @@ func TestBillingSyncRoute_NonAdmin_Rejected(t *testing.T) {
 }
 
 // billingSyncRouteRe matches the production wiring of the manual-sync route
-// with its admin gate attached. Anchored on `auth.POST` so a route moved to
-// a different (ungated) group also fails.
+// with its admin gate attached.
+//
+// M47R: the gate moved from a per-route argument onto the `authAdmin` group
+// (declared with appmw.RequireAdmin() ahead of TenantTx, so a denial costs no
+// transaction — see cmd/server/main.go). The anchor is now the group name,
+// which keeps the original property: a route moved to a different (ungated)
+// group still fails. TestM47RGatedGroupsAreDeclaredCorrectly pins that
+// `authAdmin` really carries RequireAdmin.
 var billingSyncRouteRe = regexp.MustCompile(
-	`auth\.POST\(\s*"/subscription/sync"\s*,\s*billingHandler\.SyncSubscription\s*,\s*appmw\.RequireAdmin\(\)\s*\)`)
+	`authAdmin\.POST\(\s*"/subscription/sync"\s*,\s*billingHandler\.SyncSubscription\s*\)`)
 
 // TestBillingSyncRoute_IsAdminGatedInMain closes the gap the guard-in-
 // isolation test above cannot: that test drives middleware.RequireAdmin
@@ -299,7 +305,7 @@ func TestBillingSync_WithLemonSqueezyBaseURL(t *testing.T) {
 
 // selectFreeRouteRe matches the production wiring with its admin gate.
 var selectFreeRouteRe = regexp.MustCompile(
-	`auth\.POST\(\s*"/plan/select-free"\s*,\s*billingHandler\.SelectFreePlan\s*,\s*appmw\.RequireAdmin\(\)\s*\)`)
+	`authAdmin\.POST\(\s*"/plan/select-free"\s*,\s*billingHandler\.SelectFreePlan\s*\)`)
 
 // checkoutRouteRe matches the checkout route with its admin gate. Completing
 // a checkout occupies the tenant's single subscription slot
@@ -307,7 +313,7 @@ var selectFreeRouteRe = regexp.MustCompile(
 // the same reason /subscription/sync is — this closes the residual flagged
 // as #7 in docs/SAAS_SETUP.md §2.5.
 var checkoutRouteRe = regexp.MustCompile(
-	`auth\.POST\(\s*"/subscription/checkout"\s*,\s*billingHandler\.CreateCheckout\s*,\s*appmw\.RequireAdmin\(\)\s*\)`)
+	`authAdmin\.POST\(\s*"/subscription/checkout"\s*,\s*billingHandler\.CreateCheckout\s*\)`)
 
 func TestBillingRoutes_PlanMutatorsAreAdminGatedInMain(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -322,7 +328,7 @@ func TestBillingRoutes_PlanMutatorsAreAdminGatedInMain(t *testing.T) {
 	if !selectFreeRouteRe.Match(raw) {
 		t.Errorf("POST /plan/select-free is not wired with appmw.RequireAdmin() in %s.\n"+
 			"M47: it rewrites tenants.plan — the value every limit/feature gate reads — "+
-			"and must stay Owner/Admin only.", mainPath)
+			"and must stay Owner/Admin only (M47R: on the authAdmin group).", mainPath)
 	}
 	if !checkoutRouteRe.Match(raw) {
 		t.Errorf("POST /subscription/checkout is not wired with appmw.RequireAdmin() in %s.\n"+
@@ -387,6 +393,13 @@ func TestSelectFreePlan_LiveSubscriptionIsRefused(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			h, mock := selectFreeHandler(t)
 			now := time.Now()
+			// M47R: the guard takes the subscriptions and tenants row locks in
+			// their own statements first, so a concurrent billing transaction
+			// has to commit before the conditional UPDATE takes its snapshot.
+			mock.ExpectExec(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1 FOR UPDATE`)).
+				WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(regexp.QuoteMeta(`FROM tenants WHERE id = $1 FOR UPDATE`)).
+				WillReturnResult(sqlmock.NewResult(0, 1))
 			// The guarded UPDATE matches nothing: a live subscription exists.
 			mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
 				WithArgs(model.PlanFree, sqlmock.AnyArg(), model.StatusExpired).
@@ -419,6 +432,12 @@ func TestSelectFreePlan_LiveSubscriptionIsRefused(t *testing.T) {
 // "stay on free" action.
 func TestSelectFreePlan_AllowedWhenNothingIsLive(t *testing.T) {
 	h, mock := selectFreeHandler(t)
+	// M47R: the guard's subscriptions + tenants row locks
+	// (see UpdatePlanUnlessSubscriptionLive).
+	mock.ExpectExec(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1 FOR UPDATE`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`FROM tenants WHERE id = $1 FOR UPDATE`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
 		WithArgs(model.PlanFree, sqlmock.AnyArg(), model.StatusExpired).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -436,6 +455,12 @@ func TestSelectFreePlan_AllowedWhenNothingIsLive(t *testing.T) {
 // guarded write must surface as 500, not as a silent success.
 func TestSelectFreePlan_UpdateFailureIsNotADowngrade(t *testing.T) {
 	h, mock := selectFreeHandler(t)
+	// M47R: the guard's subscriptions + tenants row locks
+	// (see UpdatePlanUnlessSubscriptionLive).
+	mock.ExpectExec(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1 FOR UPDATE`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`FROM tenants WHERE id = $1 FOR UPDATE`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
 		WillReturnError(errors.New("transient: connection reset by peer"))
 
@@ -454,6 +479,12 @@ func TestSelectFreePlan_UpdateFailureIsNotADowngrade(t *testing.T) {
 // caller should retry into a downgrade.
 func TestSelectFreePlan_DiagnosticReadFailureStillRefuses(t *testing.T) {
 	h, mock := selectFreeHandler(t)
+	// M47R: the guard's subscriptions + tenants row locks
+	// (see UpdatePlanUnlessSubscriptionLive).
+	mock.ExpectExec(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1 FOR UPDATE`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`FROM tenants WHERE id = $1 FOR UPDATE`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE tenants SET plan = $1`)).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(regexp.QuoteMeta(`FROM subscriptions WHERE tenant_id = $1`)).

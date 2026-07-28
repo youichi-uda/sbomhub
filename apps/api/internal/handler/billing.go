@@ -554,16 +554,22 @@ func (h *BillingHandler) SelectFreePlan(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "tenant not found"})
 	}
 
-	// Check and write in ONE statement. Reading `subscriptions` first and
-	// updating after left a window in which the Lemon Squeezy webhook — which
-	// runs outside this request's TenantTx — creates or reactivates a
+	// Check and write under a tenant row lock. Reading `subscriptions` first
+	// and updating after left a window in which the Lemon Squeezy webhook —
+	// which runs outside this request's TenantTx — creates or reactivates a
 	// subscription, and the request would answer 200 while the tenant keeps
 	// being charged on a free entitlement (Codex round 1, Medium).
 	//
-	// This NARROWS that window rather than closing it: under READ COMMITTED an
-	// INSERT that has not committed yet is invisible to the guard's subquery
-	// too. See UpdatePlanUnlessSubscriptionLive for the measured behaviour of
-	// both interleavings.
+	// M47 W3 made it one conditional UPDATE, which narrowed the window without
+	// closing it: under READ COMMITTED an INSERT that has not committed yet is
+	// invisible to the guard's subquery too. M47R closes THAT interleaving by
+	// locking the tenant row in a separate earlier statement, so the guard is
+	// evaluated on a snapshot taken after any in-flight billing transaction
+	// has committed. See UpdatePlanUnlessSubscriptionLive for the measurement
+	// and the lock-ordering argument.
+	//
+	// The lock is held for the rest of this request's TenantTx, which is why
+	// the diagnostic re-read below must stay cheap and local.
 	//
 	// The endedStatus argument keeps the policy here, next to
 	// endedSubscriptionStatus, rather than in the repository.

@@ -180,6 +180,33 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up user"})
 		}
 		if err := h.userRepo.Delete(ctx, user.ID); err != nil {
+			// M47R (Codex cross-wave review, Low): a 0-row DELETE is the
+			// DESIRED end state for a delete event, not a failure.
+			// UserRepository.Delete reports it as ErrUserNotFound (wrapping
+			// sql.ErrNoRows); without this branch, two concurrent deliveries
+			// of one Svix event — both pass the lookup, one deletes the row,
+			// the other's DELETE matches nothing — made the second answer 500
+			// and burn retry budget on work that was already done. This is the
+			// same branch organizationMembership.deleted got in M47 W2 and the
+			// same reading the lookup above already applies to sql.ErrNoRows.
+			//
+			// 0 rows is unambiguous here, which is what makes the 200 safe:
+			// the statement is `DELETE FROM users WHERE id = $1` — primary key
+			// only, and `users` carries no RLS (migration 007 never covered it)
+			// — so there is no predicate that could have filtered a row that
+			// still exists.
+			//
+			// No audit row is written here: writing one is the job of the
+			// delivery that actually removed the user. That delivery only
+			// ATTEMPTS it — the audit write on the path below is tolerated on
+			// failure (see the comment there) — so this branch is not a
+			// guarantee that an audit row exists, only a refusal to write a
+			// second one.
+			if errors.Is(err, sql.ErrNoRows) {
+				slog.Info("user.deleted: user already deleted (idempotent redelivery)",
+					"user_id", user.ID, "clerk_user_id", userData.ID)
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "user already deleted"})
+			}
 			slog.Error("user.deleted: failed to delete user", "error", err, "user_id", user.ID)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete user"})
 		}
@@ -228,6 +255,16 @@ func (h *ClerkWebhookHandler) Handle(c echo.Context) error {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to look up tenant"})
 		}
 		if err := h.tenantRepo.Delete(ctx, tenant.ID); err != nil {
+			// M47R: same idempotency branch as user.deleted above, and 0 rows
+			// is unambiguous for the same reason (`DELETE FROM tenants WHERE
+			// id = $1`, primary key only, no RLS on `tenants`).
+			// TenantRepository.Delete reports 0 rows as ErrTenantNotFound,
+			// which likewise wraps sql.ErrNoRows.
+			if errors.Is(err, sql.ErrNoRows) {
+				slog.Info("organization.deleted: tenant already deleted (idempotent redelivery)",
+					"tenant_id", tenant.ID, "clerk_org_id", orgData.ID)
+				return c.JSON(http.StatusOK, map[string]string{"status": "ok", "note": "tenant already deleted"})
+			}
 			slog.Error("organization.deleted: failed to delete tenant", "error", err, "tenant_id", tenant.ID)
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete tenant"})
 		}

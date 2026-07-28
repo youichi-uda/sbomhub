@@ -219,6 +219,7 @@ func m47Webhook(t *testing.T, cfg *config.Config, appDB *sql.DB) *LemonSqueezyWe
 	t.Helper()
 	return NewLemonSqueezyWebhookHandler(
 		cfg,
+		appDB,
 		repository.NewTenantRepository(appDB),
 		repository.NewSubscriptionRepository(appDB),
 		repository.NewAuditRepository(appDB),

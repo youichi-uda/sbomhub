@@ -20,20 +20,57 @@ import (
 // (F15), and any tenant member could mint a write-capable API key (F16,
 // privilege escalation).
 //
-// Middleware chain order on every MultiAuth-fronted write route is:
+// Middleware chain order. There are three registration shapes in
+// cmd/server/main.go, and in all of them the guard sits IMMEDIATELY AFTER the
+// middleware that establishes the tenant context and BEFORE RateLimitByAPIKey
+// and TenantTx (Codex round 4, Low: "before anything that costs a resource"
+// was too strong — the auth middleware ahead of it already did database work):
 //
-//	MultiAuth -> RequireWrite/RequireAdmin -> RateLimitByAPIKey -> TenantTx -> Audit -> handler
+//	MultiAuth-fronted routes (registered on the Echo instance):
+//	  MultiAuth -> RequireWrite/RequireAdmin -> RateLimitByAPIKey -> TenantTx -> Audit -> handler
 //
-// The role guard runs BEFORE RateLimitByAPIKey and TenantTx so a
+//	Clerk / self-hosted routes (the authWrite / authAdmin groups):
+//	  Auth -> RequireWrite/RequireAdmin -> TenantTx -> Audit -> handler
+//
+//	Legacy CLI API-key routes (the cliWrite group):
+//	  APIKeyAuth -> APIKeyTenant -> RequireWrite -> TenantTx -> RateLimitByAPIKey -> MCPAudit -> handler
+//
+// The guard runs BEFORE RateLimitByAPIKey and TenantTx so a
 // permission-denied request never pins a rate-limit token (a read-scoped
 // key probing write endpoints would otherwise consume its 60 req/min
 // budget on rejections) and never opens a Postgres transaction
-// (SET LOCAL app.current_tenant_id, BEGIN). Audit still runs after the
-// guard, but because the guard handler short-circuits with c.JSON(...)
-// the audit middleware sees the 403 response and logs it — which is the
-// behaviour we want for forensic visibility into privilege probes. See
-// the route-wiring callsites in cmd/server/main.go for the exact order
-// applied per endpoint.
+// (BEGIN, SET LOCAL app.current_tenant_id).
+//
+// The property, stated exactly: a denial never ENTERS TenantTx, so it never
+// opens or holds the request transaction. It is NOT independent of the
+// database, and it is not "one query instead of two" — the auth middleware
+// ahead of this issues several queries of its own (tenant + user lookup;
+// APIKeyTenant additionally calls SetCurrentTenant on the CLI groups), so an
+// outage during authentication is still answered 500 before this guard is
+// consulted. Pinned by
+// TestM47RRoleGuardRefusesWithoutTheRequestTransaction, which asserts exactly
+// that: 403, and BeginTx never reached.
+//
+// M47R — WHAT A DENIAL DOES NOT DO. An earlier version of this comment
+// claimed that "the audit middleware sees the 403 response and logs it",
+// giving forensic visibility into privilege probes. That was never true
+// and is not true now:
+//
+//   - the Clerk / self-hosted group routes used to pass the guard as a
+//     PER-ROUTE argument to a group that already carried TenantTx, so the
+//     real order was Auth -> TenantTx -> Audit -> guard. The audit row was
+//     written — and then rolled back, because TenantTx rolls back on any
+//     status >= 400. A DB outage also answered 500 instead of 403, since
+//     BeginTx failed before the guard was ever consulted;
+//   - with the M47R group split above, the guard short-circuits before the
+//     Audit middleware is entered at all, so no audit row is attempted.
+//
+// Either way there is NO audit_logs row for a denial. The only ROLE-SPECIFIC
+// record of a privilege probe is the slog.Warn below (path, method, tenant,
+// user, role, IP); Echo's global request logger also records the 403, but with
+// no role or tenant, so it cannot answer "who probed what". Persisting
+// denials would require an audit write outside the request transaction; that
+// is an open residual, not a property this middleware provides.
 //
 // Response body policy (F10 regulatory carry-over): a forbidden response
 // returns a generic `{"error":"forbidden"}` JSON body. The precise
@@ -48,9 +85,10 @@ import (
 // (POST /api/v1/projects/:id/sbom, the triage / vex-drafts write routes,
 // etc.).
 //
-// Authorisation source: TenantContext (Role from ContextKeyRole, set by
-// either Auth (Clerk JWT / self-hosted) or MultiAuth's API-key path via
-// roleFromAPIKeyPermissions).
+// Authorisation source: TenantContext (Role from ContextKeyRole, set by Auth
+// (Clerk JWT / self-hosted), by MultiAuth's API-key path, or by APIKeyTenant
+// on the legacy CLI group — the latter two both map api_keys.permissions
+// through roleFromAPIKeyPermissions).
 //
 // Failure modes:
 //   - No tenant context (ContextKeyTenantID is unset) → 401 unauthorized.
@@ -93,8 +131,10 @@ func RequireWrite() echo.MiddlewareFunc {
 
 // RequireAdmin returns an Echo middleware that rejects requests whose
 // caller does not have admin privileges on the current tenant. It is the
-// canonical guard for tenant-administration routes — currently API-key
-// management (CRUD on /apikeys and /projects/:id/apikeys).
+// canonical guard for tenant administration: API-key management (CRUD on
+// /apikeys and /projects/:id/apikeys), billing, the global-catalog sync
+// triggers, and — since M47R — the tenant settings that hold a secret
+// (/settings/llm, /tenant/settings/diff-webhook and its test fire).
 //
 // The handler-side allowlist (TenantContext.CanAdmin) is Owner or Admin
 // only. Member, Viewer, and an unset role all fail the check. This is

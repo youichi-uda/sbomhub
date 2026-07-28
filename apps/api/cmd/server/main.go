@@ -795,7 +795,10 @@ func main() {
 
 	// SaaS Handlers
 	clerkWebhookHandler := handler.NewClerkWebhookHandler(cfg, tenantRepo, userRepo, auditRepo)
-	lsWebhookHandler := handler.NewLemonSqueezyWebhookHandler(cfg, tenantRepo, subscriptionRepo, auditRepo)
+	// M47R: `db` is required — the webhook route is mounted outside TenantTx,
+	// so the handler owns the transaction that keeps the subscription row and
+	// `tenants.plan` from disagreeing (see handler.applyDelivery).
+	lsWebhookHandler := handler.NewLemonSqueezyWebhookHandler(cfg, db, tenantRepo, subscriptionRepo, auditRepo)
 	billingHandler := handler.NewBillingHandler(cfg, tenantRepo, subscriptionRepo)
 	auditHandler := handler.NewAuditHandler(auditService)
 	analyticsHandler := handler.NewAnalyticsHandler(analyticsService)
@@ -901,18 +904,39 @@ func main() {
 	// key gets the same 403 it would receive on the canonical endpoint.
 	// Read-only routes (GET /projects, GET /projects/:id) intentionally
 	// remain reachable by every tier including RoleViewer.
-	cli := api.Group("/cli",
+	//
+	// M47R (Codex round 1, Medium): the write gate is GROUP middleware on
+	// `cliWrite`, not a per-route argument on `cli`. It used to be the latter,
+	// which put it INSIDE the group's TenantTx / RateLimitByAPIKey / audit —
+	// the very ordering defect this wave fixed on the Clerk-facing groups, and
+	// it survived here because the first version of the guard test only looked
+	// at the `auth` group. A read-scoped key calling /cli/upload consumed a
+	// rate-limit token and opened a Postgres transaction before being told 403,
+	// and during a DB outage was told 500 instead.
+	//
+	// Same declaration-order rule as the `auth` family: the ungated `cli` group
+	// is declared LAST so it owns the /api/v1/cli RouteNotFound catch-all that
+	// echo.Group.Use installs per prefix.
+	cliBase := api.Group("/cli",
 		appmw.APIKeyAuth(apiKeyService),
 		appmw.APIKeyTenant(projectRepo, tenantRepo),
+	)
+	cliWrite := cliBase.Group("",
+		appmw.RequireWrite(),
 		appmw.TenantTx(db),
 		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
 		appmw.MCPAudit(auditRepo),
 	)
-	cli.POST("/upload", cliHandler.Upload, appmw.RequireWrite())
+	cli := cliBase.Group("",
+		appmw.TenantTx(db),
+		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.MCPAudit(auditRepo),
+	)
+	cliWrite.POST("/upload", cliHandler.Upload)
 	cli.POST("/check", cliHandler.Check)
 	cli.GET("/projects", cliHandler.ListProjects)
 	cli.GET("/projects/:id", cliHandler.GetProject)
-	cli.POST("/projects", cliHandler.CreateProject, appmw.RequireWrite())
+	cliWrite.POST("/projects", cliHandler.CreateProject)
 
 	// Auth middleware - applies to most endpoints
 	authMiddleware := appmw.Auth(cfg, tenantRepo, userRepo)
@@ -929,7 +953,68 @@ func main() {
 	// 023). The trade-off — audit records for failed/4xx requests get
 	// rolled back along with the rest of the request — is documented in
 	// TenantTx's godoc and flagged in the Trust Rescue follow-up list.
-	auth := api.Group("", authMiddleware, appmw.TenantTx(db), auditMiddleware)
+	//
+	// M47R (Codex cross-wave review): THREE groups, not one, because a role
+	// gate has to be OUTSIDE the transaction it guards.
+	//
+	// Echo composes a route's chain as groupMiddleware ++ routeMiddleware,
+	// outermost first. So the old shape — `auth.POST(p, h, RequireWrite())` —
+	// ran Auth -> TenantTx -> Audit -> RequireWrite -> handler: BEGIN and
+	// `SET LOCAL app.current_tenant_id` were already issued when the guard
+	// finally said no. A Postgres outage therefore turned a 403 into a 500
+	// (TenantTx fails before the guard is consulted), and because TenantTx
+	// rolls back on any status >= 400, the audit row written for the 403 was
+	// rolled back with it — role_guard.go's comment claimed that row as
+	// forensic evidence and it never survived.
+	//
+	// Declaring the gate as GROUP middleware ahead of TenantTx gives the
+	// documented order, Auth -> role guard -> TenantTx -> Audit. The property
+	// that buys, stated exactly (Codex rounds 2 and 3 both trimmed earlier,
+	// larger versions of this claim): a denied request never enters TenantTx,
+	// so it never opens or holds the request transaction and never pins a
+	// rate-limit token.
+	//
+	// It does NOT make the 403 independent of Postgres, and it is not "one
+	// database interaction instead of two": `authMiddleware` runs first and
+	// issues several queries of its own (tenant + user lookup, and on the CLI
+	// groups APIKeyTenant additionally calls SetCurrentTenant), so an outage
+	// during authentication is still answered 500 before the guard is
+	// reached.
+	//
+	// Denials remain visible through role_guard.go's slog.Warn — there is
+	// still no audit_logs ROW for them, which is what was already true (see
+	// docs/SAAS_SETUP.md §2.5 residual).
+	//
+	// Declaration order is load-bearing: echo.Group.Use installs a
+	// RouteNotFound catch-all pair for the group's PREFIX. Four declarations
+	// below share "/api/v1" (authBase plus the three below it), so the LAST
+	// registration wins. `auth` is declared last so an unmatched /api/v1 path
+	// keeps the chain it has always had (Auth -> TenantTx -> Audit -> 404)
+	// instead of answering 403 from behind a role gate.
+	// TestM47RUngatedGroupOwnsTheCatchAll pins this for every prefix.
+	authBase := api.Group("", authMiddleware)
+
+	// adminOnly is the RequireAdmin instance `authAdmin` is built from. It is
+	// declared once and kept that way by
+	// TestM47W1AdminOnlyIsDeclaredBeforeItsFirstUse: a second `adminOnly :=`
+	// further down would shadow this one, and a reader checking "is this route
+	// admin-gated?" by name would be reading about a different guard.
+	adminOnly := appmw.RequireAdmin()
+
+	// authAdmin: Owner/Admin only. Tenant administration, anything that
+	// writes a GLOBAL RLS-free catalog every tenant reads, and anything that
+	// handles a tenant-level secret (LLM BYOK key, diff-webhook secret).
+	authAdmin := authBase.Group("", adminOnly, appmw.TenantTx(db), auditMiddleware)
+
+	// authWrite: Owner/Admin/Member. Ordinary tenant-data mutations. The
+	// role it excludes is Viewer, whose entire definition is read-only
+	// access — see middleware.TenantContext.CanWrite.
+	authWrite := authBase.Group("", appmw.RequireWrite(), appmw.TenantTx(db), auditMiddleware)
+
+	// auth: reads, and the handful of POSTs that compute rather than write
+	// (see ungatedByDesign in m47r_route_role_gate_test.go). Declared LAST —
+	// see the catch-all note above.
+	auth := authBase.Group("", appmw.TenantTx(db), auditMiddleware)
 
 	auth.GET("/stats", statsHandler.Get)
 
@@ -957,11 +1042,11 @@ func main() {
 	// either endpoint today (its handlers were removed for the sunset).
 	// The two GETs stay open — they are reads.
 	auth.GET("/subscription", billingHandler.GetSubscription)
-	auth.POST("/subscription/checkout", billingHandler.CreateCheckout, appmw.RequireAdmin())
+	authAdmin.POST("/subscription/checkout", billingHandler.CreateCheckout)
 	auth.GET("/subscription/portal", billingHandler.GetPortalURL)
-	auth.POST("/subscription/sync", billingHandler.SyncSubscription, appmw.RequireAdmin())
+	authAdmin.POST("/subscription/sync", billingHandler.SyncSubscription)
 	auth.GET("/plan/usage", billingHandler.GetUsage)
-	auth.POST("/plan/select-free", billingHandler.SelectFreePlan, appmw.RequireAdmin())
+	authAdmin.POST("/plan/select-free", billingHandler.SelectFreePlan)
 
 	// Me endpoint
 	auth.GET("/me", func(c echo.Context) error {
@@ -993,20 +1078,19 @@ func main() {
 	// installation reads, and each one drives an unbounded outbound fetch
 	// (FIRST / CISA / endoflife.date / IPA). Any authenticated Viewer could
 	// therefore poison or stall shared data for every other tenant, and
-	// repeat it at will. `adminOnly` is declared here (it was previously
-	// created just before the API-key routes further down) so all five
-	// admin-gated groups share one instance.
-	adminOnly := appmw.RequireAdmin()
+	// repeat it at will. M47R moved the gate from a per-route argument onto
+	// the `authAdmin` group so it runs before TenantTx; `adminOnly` is now
+	// declared with the groups above.
 
 	// EPSS endpoints
-	auth.POST("/vulnerabilities/sync-epss", epssHandler.SyncScores, adminOnly)
+	authAdmin.POST("/vulnerabilities/sync-epss", epssHandler.SyncScores)
 	auth.GET("/vulnerabilities/epss/:cve_id", epssHandler.GetScore)
 
 	// Project endpoints
-	auth.POST("/projects", projectHandler.Create)
+	authWrite.POST("/projects", projectHandler.Create)
 	auth.GET("/projects", projectHandler.List)
 	auth.GET("/projects/:id", projectHandler.Get)
-	auth.DELETE("/projects/:id", projectHandler.Delete)
+	authWrite.DELETE("/projects/:id", projectHandler.Delete)
 
 	// SBOM endpoints
 	// SBOM upload is the canonical endpoint that both the web UI (Clerk JWT)
@@ -1160,7 +1244,7 @@ func main() {
 	// reads. RequireWrite (not RequireAdmin) is the right level — this is a
 	// project mutation, the same class as SBOM upload and triage/run, which
 	// both sit behind it.
-	auth.POST("/projects/:id/scan", vulnHandler.Scan, appmw.RequireWrite())
+	authWrite.POST("/projects/:id/scan", vulnHandler.Scan)
 
 	// SBOM Diff endpoints
 	auth.POST("/sbom/diff", sbomDiffHandler.Diff)
@@ -1178,7 +1262,7 @@ func main() {
 	// are GET because they're deterministic projections of the diff
 	// envelope (no LLM, no extra persistence) — the audit row written
 	// by the auditMiddleware path+method+latency record is sufficient.
-	auth.POST("/projects/:id/diff/summary", projectDiffHandler.ProjectDiffSummary)
+	authWrite.POST("/projects/:id/diff/summary", projectDiffHandler.ProjectDiffSummary)
 	auth.GET("/projects/:id/diff.csv", projectDiffHandler.ProjectDiffCSV)
 	auth.GET("/projects/:id/diff.pdf", projectDiffHandler.ProjectDiffPDF)
 	// M12-3 (#84) — dependency-graph view that complements the M10-6
@@ -1189,7 +1273,7 @@ func main() {
 
 	// VEX endpoints
 	auth.GET("/projects/:id/vex", vexHandler.List)
-	auth.POST("/projects/:id/vex", vexHandler.Create)
+	authWrite.POST("/projects/:id/vex", vexHandler.Create)
 	auth.GET("/projects/:id/vex/export", vexHandler.Export)
 	// M26-A (#130 / F375): read-only cross-project VEX reuse suggestions.
 	// Static "/suggestions" segment; Echo prefers it over the :vex_id param
@@ -1203,10 +1287,10 @@ func main() {
 	// atomicity (statement + provenance + audit_logs commit-or-rollback
 	// together). Static "suggestions/apply" segments; Echo prefers them
 	// over the :vex_id param route below.
-	auth.POST("/projects/:id/vex/suggestions/apply", vexHandler.Apply)
+	authWrite.POST("/projects/:id/vex/suggestions/apply", vexHandler.Apply)
 	auth.GET("/projects/:id/vex/:vex_id", vexHandler.Get)
-	auth.PUT("/projects/:id/vex/:vex_id", vexHandler.Update)
-	auth.DELETE("/projects/:id/vex/:vex_id", vexHandler.Delete)
+	authWrite.PUT("/projects/:id/vex/:vex_id", vexHandler.Update)
+	authWrite.DELETE("/projects/:id/vex/:vex_id", vexHandler.Delete)
 
 	// AI VEX triage endpoints (issue #30 / Wave M1-5).
 	//
@@ -1505,11 +1589,11 @@ func main() {
 	// License policy endpoints
 	auth.GET("/licenses/common", licensePolicyHandler.GetCommonLicenses)
 	auth.GET("/projects/:id/licenses", licensePolicyHandler.List)
-	auth.POST("/projects/:id/licenses", licensePolicyHandler.Create)
+	authWrite.POST("/projects/:id/licenses", licensePolicyHandler.Create)
 	auth.GET("/projects/:id/licenses/violations", licensePolicyHandler.CheckViolations)
 	auth.GET("/projects/:id/licenses/:policy_id", licensePolicyHandler.Get)
-	auth.PUT("/projects/:id/licenses/:policy_id", licensePolicyHandler.Update)
-	auth.DELETE("/projects/:id/licenses/:policy_id", licensePolicyHandler.Delete)
+	authWrite.PUT("/projects/:id/licenses/:policy_id", licensePolicyHandler.Update)
+	authWrite.DELETE("/projects/:id/licenses/:policy_id", licensePolicyHandler.Delete)
 
 	// M1 Codex review #F16: API-key management is admin-only across
 	// every CRUD verb (LIST included). Previously the routes sat on
@@ -1528,22 +1612,22 @@ func main() {
 	// can target social-engineering attacks at those specific people.
 	// The audit log of key creation events stays on the audit-logs
 	// endpoint group (which has its own subscription gate).
-	auth.GET("/apikeys", apiKeyHandler.ListTenant, adminOnly)
-	auth.POST("/apikeys", apiKeyHandler.CreateTenant, adminOnly)
-	auth.DELETE("/apikeys/:key_id", apiKeyHandler.DeleteTenant, adminOnly)
+	authAdmin.GET("/apikeys", apiKeyHandler.ListTenant)
+	authAdmin.POST("/apikeys", apiKeyHandler.CreateTenant)
+	authAdmin.DELETE("/apikeys/:key_id", apiKeyHandler.DeleteTenant)
 
 	// API key endpoints (project-level - deprecated, for backwards compatibility).
 	// Same #F16 admin gate — the legacy path is not exempt: it issues
 	// keys with the same TenantContext role mapping and the same
 	// escalation vector once F14 made permissions live.
-	auth.GET("/projects/:id/apikeys", apiKeyHandler.List, adminOnly)
-	auth.POST("/projects/:id/apikeys", apiKeyHandler.Create, adminOnly)
-	auth.DELETE("/projects/:id/apikeys/:key_id", apiKeyHandler.Delete, adminOnly)
+	authAdmin.GET("/projects/:id/apikeys", apiKeyHandler.List)
+	authAdmin.POST("/projects/:id/apikeys", apiKeyHandler.Create)
+	authAdmin.DELETE("/projects/:id/apikeys/:key_id", apiKeyHandler.Delete)
 
 	// Notification endpoints
 	auth.GET("/projects/:id/notifications", notificationHandler.GetSettings)
-	auth.PUT("/projects/:id/notifications", notificationHandler.UpdateSettings)
-	auth.POST("/projects/:id/notifications/test", notificationHandler.TestNotification)
+	authWrite.PUT("/projects/:id/notifications", notificationHandler.UpdateSettings)
+	authWrite.POST("/projects/:id/notifications/test", notificationHandler.TestNotification)
 	auth.GET("/projects/:id/notifications/logs", notificationHandler.GetLogs)
 
 	// Compliance endpoints
@@ -1552,19 +1636,19 @@ func main() {
 
 	// METI Checklist endpoints (18 items)
 	auth.GET("/projects/:id/checklist", complianceHandler.GetChecklist)
-	auth.PUT("/projects/:id/checklist/:checkId", complianceHandler.UpdateChecklistResponse)
-	auth.DELETE("/projects/:id/checklist/:checkId", complianceHandler.DeleteChecklistResponse)
+	authWrite.PUT("/projects/:id/checklist/:checkId", complianceHandler.UpdateChecklistResponse)
+	authWrite.DELETE("/projects/:id/checklist/:checkId", complianceHandler.DeleteChecklistResponse)
 
 	// Visualization Framework endpoints
 	auth.GET("/projects/:id/visualization", complianceHandler.GetVisualizationSettings)
-	auth.PUT("/projects/:id/visualization", complianceHandler.UpdateVisualizationSettings)
-	auth.DELETE("/projects/:id/visualization", complianceHandler.DeleteVisualizationSettings)
+	authWrite.PUT("/projects/:id/visualization", complianceHandler.UpdateVisualizationSettings)
+	authWrite.DELETE("/projects/:id/visualization", complianceHandler.DeleteVisualizationSettings)
 
 	// Public link endpoints
-	auth.POST("/projects/:id/public-links", publicLinkHandler.Create)
+	authWrite.POST("/projects/:id/public-links", publicLinkHandler.Create)
 	auth.GET("/projects/:id/public-links", publicLinkHandler.List)
-	auth.PUT("/public-links/:id", publicLinkHandler.Update)
-	auth.DELETE("/public-links/:id", publicLinkHandler.Delete)
+	authWrite.PUT("/public-links/:id", publicLinkHandler.Update)
+	authWrite.DELETE("/public-links/:id", publicLinkHandler.Delete)
 
 	// Audit log endpoints (Pro plan and above)
 	auditFeatureCheck := appmw.CheckFeature("audit_logs", subscriptionRepo)
@@ -1581,28 +1665,28 @@ func main() {
 	auth.GET("/analytics/slo-achievement", analyticsHandler.GetSLOAchievement)
 	auth.GET("/analytics/compliance-trend", analyticsHandler.GetComplianceTrend)
 	auth.GET("/analytics/slo-targets", analyticsHandler.GetSLOTargets)
-	auth.PUT("/analytics/slo-targets", analyticsHandler.UpdateSLOTarget)
+	authAdmin.PUT("/analytics/slo-targets", analyticsHandler.UpdateSLOTarget)
 
 	// Report endpoints
 	auth.GET("/reports/settings", reportHandler.GetSettings)
-	auth.PUT("/reports/settings", reportHandler.UpdateSettings)
-	auth.POST("/reports/generate", reportHandler.Generate)
+	authAdmin.PUT("/reports/settings", reportHandler.UpdateSettings)
+	authWrite.POST("/reports/generate", reportHandler.Generate)
 	auth.GET("/reports", reportHandler.List)
 	auth.GET("/reports/:id", reportHandler.Get)
 	auth.GET("/reports/:id/download", reportHandler.Download)
 
 	// IPA integration endpoints
 	auth.GET("/ipa/announcements", ipaHandler.ListAnnouncements)
-	auth.POST("/ipa/sync", ipaHandler.SyncAnnouncements, adminOnly)
+	authAdmin.POST("/ipa/sync", ipaHandler.SyncAnnouncements)
 	auth.GET("/vulnerabilities/:cve_id/ipa", ipaHandler.GetAnnouncementsByCVE)
 	auth.GET("/settings/ipa", ipaHandler.GetSyncSettings)
-	auth.PUT("/settings/ipa", ipaHandler.UpdateSyncSettings)
+	authWrite.PUT("/settings/ipa", ipaHandler.UpdateSyncSettings)
 
 	// Scan settings endpoints
 	scanSettingsService := service.NewScanSettingsService(db)
 	scanSettingsHandler := handler.NewScanSettingsHandler(scanSettingsService)
 	auth.GET("/settings/scan", scanSettingsHandler.Get)
-	auth.PUT("/settings/scan", scanSettingsHandler.Update)
+	authAdmin.PUT("/settings/scan", scanSettingsHandler.Update)
 	auth.GET("/settings/scan/logs", scanSettingsHandler.GetLogs)
 
 	// BYOK LLM provider configuration (issue #22). The handler encrypts the
@@ -1611,7 +1695,7 @@ func main() {
 	// process. Admin-only on PUT (enforced inside the handler).
 	settingsLLMHandler := handler.NewSettingsLLMHandler(tenantLLMConfigRepo, auditRepo, cfg)
 	auth.GET("/settings/llm", settingsLLMHandler.Get)
-	auth.PUT("/settings/llm", settingsLLMHandler.Update)
+	authAdmin.PUT("/settings/llm", settingsLLMHandler.Update)
 
 	// M11-4 (#79) — diff webhook settings. Same auth+TenantTx chain as
 	// /settings/llm; handler-side CanAdmin() check refuses writes from
@@ -1622,12 +1706,12 @@ func main() {
 	// preserves the existing ciphertext).
 	settingsDiffWebhookHandler := handler.NewSettingsDiffWebhookHandler(diffWebhookRepo, auditRepo, cfg)
 	auth.GET("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Get)
-	auth.PUT("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Update)
+	authAdmin.PUT("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Update)
 	// Manual fire test: builds a synthetic diff envelope and fires the
 	// configured webhook. Lets the operator verify URL + secret +
 	// downstream Slack channel without waiting for a real SBOM ingest
 	// to clear the threshold. Audit-logged like a normal fire.
-	auth.POST("/tenant/settings/diff-webhook/test", func(c echo.Context) error {
+	authAdmin.POST("/tenant/settings/diff-webhook/test", func(c echo.Context) error {
 		tenantID, ok := c.Get(appmw.ContextKeyTenantID).(uuid.UUID)
 		if !ok {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "tenant context required"})
@@ -1671,7 +1755,7 @@ func main() {
 	})
 
 	// KEV (Known Exploited Vulnerabilities) integration endpoints
-	auth.POST("/kev/sync", kevHandler.SyncCatalog, adminOnly)
+	authAdmin.POST("/kev/sync", kevHandler.SyncCatalog)
 	auth.GET("/kev/catalog", kevHandler.ListCatalog)
 	auth.GET("/kev/stats", kevHandler.GetStats)
 	auth.GET("/kev/settings", kevHandler.GetSyncSettings)
@@ -1693,7 +1777,7 @@ func main() {
 	auth.GET("/vulnerabilities/:cve_id/paths", cvePathsHandler.GetCVEPaths)
 
 	// EOL (End of Life) integration endpoints
-	auth.POST("/eol/sync", eolHandler.SyncCatalog, adminOnly)
+	authAdmin.POST("/eol/sync", eolHandler.SyncCatalog)
 	auth.GET("/eol/products", eolHandler.ListProducts)
 	auth.GET("/eol/products/:name", eolHandler.GetProduct)
 	auth.GET("/eol/stats", eolHandler.GetStats)
@@ -1701,31 +1785,31 @@ func main() {
 	auth.GET("/eol/sync/latest", eolHandler.GetLatestSync)
 	auth.GET("/eol/check", eolHandler.CheckComponentEOL)
 	auth.GET("/projects/:id/eol-summary", eolHandler.GetProjectEOLSummary)
-	auth.POST("/projects/:id/eol-check", eolHandler.UpdateProjectComponentsEOL)
+	authWrite.POST("/projects/:id/eol-check", eolHandler.UpdateProjectComponentsEOL)
 
 	// SSVC (Stakeholder-Specific Vulnerability Categorization) endpoints
 	auth.GET("/projects/:id/ssvc/defaults", ssvcHandler.GetProjectDefaults)
-	auth.PUT("/projects/:id/ssvc/defaults", ssvcHandler.UpdateProjectDefaults)
+	authWrite.PUT("/projects/:id/ssvc/defaults", ssvcHandler.UpdateProjectDefaults)
 	auth.GET("/projects/:id/ssvc/summary", ssvcHandler.GetSummary)
 	auth.GET("/projects/:id/ssvc/assessments", ssvcHandler.ListAssessments)
-	auth.DELETE("/projects/:id/ssvc/assessments/:assessment_id", ssvcHandler.DeleteAssessment)
+	authWrite.DELETE("/projects/:id/ssvc/assessments/:assessment_id", ssvcHandler.DeleteAssessment)
 	auth.GET("/projects/:id/ssvc/assessments/:assessment_id/history", ssvcHandler.GetAssessmentHistory)
 	auth.GET("/projects/:id/ssvc/cve/:cve_id", ssvcHandler.GetAssessmentByCVE)
 	auth.GET("/projects/:id/vulnerabilities/:vuln_id/ssvc", ssvcHandler.GetAssessment)
-	auth.POST("/projects/:id/vulnerabilities/:vuln_id/ssvc", ssvcHandler.AssessVulnerability)
-	auth.POST("/projects/:id/vulnerabilities/:vuln_id/ssvc/auto", ssvcHandler.AutoAssessVulnerability)
+	authWrite.POST("/projects/:id/vulnerabilities/:vuln_id/ssvc", ssvcHandler.AssessVulnerability)
+	authWrite.POST("/projects/:id/vulnerabilities/:vuln_id/ssvc/auto", ssvcHandler.AutoAssessVulnerability)
 	auth.POST("/ssvc/calculate", ssvcHandler.CalculateDecision)
 	auth.GET("/ssvc/immediate", ssvcHandler.GetImmediateAssessments)
 
 	// Issue tracker integration endpoints
-	auth.POST("/integrations", issueTrackerHandler.CreateConnection)
+	authWrite.POST("/integrations", issueTrackerHandler.CreateConnection)
 	auth.GET("/integrations", issueTrackerHandler.ListConnections)
 	auth.GET("/integrations/:id", issueTrackerHandler.GetConnection)
-	auth.DELETE("/integrations/:id", issueTrackerHandler.DeleteConnection)
-	auth.POST("/vulnerabilities/:vuln_id/ticket", issueTrackerHandler.CreateTicket)
+	authWrite.DELETE("/integrations/:id", issueTrackerHandler.DeleteConnection)
+	authWrite.POST("/vulnerabilities/:vuln_id/ticket", issueTrackerHandler.CreateTicket)
 	auth.GET("/vulnerabilities/:vuln_id/tickets", issueTrackerHandler.GetTicketsByVulnerability)
 	auth.GET("/tickets", issueTrackerHandler.ListTickets)
-	auth.POST("/tickets/:id/sync", issueTrackerHandler.SyncTicket)
+	authWrite.POST("/tickets/:id/sync", issueTrackerHandler.SyncTicket)
 
 	// Remediation guidance endpoints
 	auth.GET("/remediation/:cve_id", remediationHandler.GetRemediationByCVE)
@@ -1797,7 +1881,7 @@ func main() {
 	slog.Info("Vulnerability scan job started", "interval", "1h")
 
 	// Force scan endpoint (admin only) - triggers immediate vulnerability scan
-	auth.POST("/settings/scan/force", func(c echo.Context) error {
+	authAdmin.POST("/settings/scan/force", func(c echo.Context) error {
 		tenantCtx := appmw.NewTenantContext(c)
 		if tenantCtx == nil {
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})

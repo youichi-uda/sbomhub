@@ -10,6 +10,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service"
 )
 
@@ -173,11 +174,24 @@ func (h *APIKeyHandler) DeleteTenant(c echo.Context) error {
 	}
 
 	if err := h.keyService.DeleteKeyByTenant(c.Request().Context(), keyID, tenantID); err != nil {
-		// Raw repository error (repository.ErrAPIKeyNotFound for rows==0
-		// since M47 W2, or a raw driver error otherwise); never echo it
-		// (F442).
-		slog.Warn("apikey: delete key failed", "key_id", keyID, "tenant_id", tenantID, "error", err)
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
+		// M47R (Codex cross-wave review, Medium): only the 0-row sentinel is
+		// a 404. This used to map EVERY repository error to 404, including a
+		// timeout or a dropped connection — so an admin revoking a suspected
+		// leaked key was told "API key not found", concluded it was already
+		// gone, and stopped. The key was still valid.
+		//
+		// The project-level sibling (Delete, below) has separated the two
+		// since M47 W1; this is the same resource, so it gets the same
+		// contract. ErrAPIKeyNotFound covers unknown key AND another
+		// tenant's key alike (one conditional DELETE, M47 W2), so the 404 is
+		// still not an existence oracle. Never echo the error (F442).
+		if errors.Is(err, repository.ErrAPIKeyNotFound) {
+			slog.Warn("apikey: delete matched no key in this tenant",
+				"key_id", keyID, "tenant_id", tenantID)
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "API key not found"})
+		}
+		slog.Error("apikey: delete key failed", "key_id", keyID, "tenant_id", tenantID, "error", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete API key"})
 	}
 
 	return c.NoContent(http.StatusNoContent)

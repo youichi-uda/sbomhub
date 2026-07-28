@@ -290,7 +290,7 @@ compare-and-swap します。
 |------------------|------|
 | 保存値より新しい / 等しい | 適用（watermark を更新） |
 | 保存値より**古い** | **破棄**。`200 {"status":"skipped","reason":"stale revision"}` + WARN ログ |
-| （同一 subscription への配信が**同時に 2 本**走った場合） | CAS と本体書き込みが別文のため `claim(R1) → claim(R2) → write(R2) → write(R1)` の順序があり得ます。保証しているのは「比較に負けた配信は書かない」であって「常に最新が勝つ」ではありません（残件 6 と同じトランザクション化が必要） |
+| （同一 subscription への配信が**同時に 2 本**走った場合） | **M47R で解消**。CAS と本体書き込みが同一トランザクションになったため、CAS が取る行ロックが 2 本目をコミットまでブロックします（従来は別文だったため `claim(R1) → claim(R2) → write(R2) → write(R1)` があり得た）。ただし**同一リビジョン**同士は依然として到着順です（残件 8） |
 | `updated_at` が空 / パース不能 | **適用**（順序判定不能）。WARN ログ |
 | watermark が NULL（061 以前の行 / 新規作成直後） | 適用 |
 
@@ -329,27 +329,71 @@ compare-and-swap します。
 >    checkout 作成側にも「有効な契約がある場合は拒否」「保留中 checkout は 1 件まで」といったガードはありません。
 >    恒久対策には「期限切れ行を置換／再有効化する原子的な経路」の設計判断が必要です（M47 では触れていません）。
 >    現状の復旧は運用対応（DB での手動紐付け）です。
-> 6. **Webhook の 2 つの書き込みが非アトミック**（未修正）。`handleSubscriptionCreated` 等は TenantTx の外で動くため
->    subscriptions の更新と `tenants.plan` の更新が別コミットになり、後者が失敗しても 200 を返して再送も止まります
->    （downgrade/expire が反映されないまま高い plan が残る）。`TenantRepository.UpdatePlan` の `RowsAffected` 未検証も
->    同根です（`subscriptions` 側は M46 で検証済み）。**claim の消し込みも同じ性質**で、消し込み後に subscription の
->    作成が失敗した場合は再配信で復旧します（同一 subscription なら再消し込みできる設計）。
+> 6. ~~**Webhook の 2 つの書き込みが非アトミック**~~ — **M47R で解消**。
+>    `handleSubscriptionCreated` 等は TenantTx の外で動きますが、ハンドラ自身が
+>    `database.WithTxFunc` で**配信 1 件 = 1 トランザクション**を開くようになりました
+>    （`handler.applyDelivery`）。claim の消し込み・リビジョン CAS・`subscriptions` の書き込み・
+>    `tenants.plan`・`subscription_events`・`audit_logs` がまとめてコミット / ロールバックし、
+>    **2xx はコミット成功後にしか返しません**。
+>
+>    | 変更点 | 旧 | 現在 |
+>    |---|---|---|
+>    | `tenants.plan` の書き込み失敗 | `slog.Error` して **200**（再送されないので分裂が恒久化） | **500** + 全ロールバック。Lemon Squeezy が再送 |
+>    | `subscription_events` / `audit_logs` の失敗 | 200（再送で履歴が重複するのを避けるため） | **500** + 全ロールバック（ロールバックされた試行は履歴行を 1 つも残さないので、F5/F32 の audit-or-nothing に揃えた） |
+>    | claim の消し込み後に後続が失敗 | 消し込み済みのまま残る | ロールバックされ、再配信で再解決できる |
+>    | リビジョン CAS 後の read-modify-write | CAS の**前**に読んだ値で比較していたため、並行配信で古い `previousPlan` を見て `tenants.plan` の更新を**スキップ**し得た | CAS 成功後に行を**再読込**してから比較（Codex round 2 High、`TestM47RWebhook_ReloadsTheSubscriptionAfterClaimingTheRevision`） |
+>
+>    実測（2026-07-28、実 PG。`tenants` に BEFORE UPDATE トリガを仕掛けて plan 更新だけを落とす）:
+>    修正前は `subscriptions.status = "expired"` と `tenants.plan = "team"` が併存して 200、
+>    修正後は 500 で `status` も `plan` も元のまま。
+>    `TenantRepository.UpdatePlan` の `RowsAffected` は M47 W2 で検証済み（0 行は `ErrTenantNotFound`）です。
+>
+>    **残る限界**: 再送予算は有限（非 2xx は最大 3 回）なので、履歴テーブルが長時間落ちている場合は
+>    **課金更新そのものが止まります**（分裂させるよりは安全側だが、可用性は落ちる）。
+>    これを両立させるのが下記の Webhook inbox 化です。
 > 7. **sync と Webhook の競合（TOCTOU）**（M47 で大幅に緩和・完全解決ではない）。M46 の「書き込み直前の再読み込み」に加え、
 >    M47 で **リビジョン CAS** が入ったため（sync も同じ CAS を通し、適用したリビジョンを watermark に記録します）、
 >    外部 API 待ちの間に届いた**より新しい** Webhook の書き込みを sync が巻き戻すことはなくなりました。
 >    残るのは**同一リビジョン同士の競合**（下記 8）と、CAS 通過後〜行書き込みまでの通常の read-then-write ウィンドウです。
 >    完全な直列化には購読単位のロック（`SELECT ... FOR UPDATE` 等）が要ります。
->    **`/plan/select-free` の check→write は M47 で単一の条件付き UPDATE になりました**（`UPDATE tenants ... WHERE NOT EXISTS
->    (live subscription)`）。ただしこれは窓を**狭める**だけで、閉じてはいません（2026-07-28 に dev PostgreSQL で実測）:
+>    **`/plan/select-free` の check→write は M47 で単一の条件付き UPDATE になり、M47R でテナント行ロックが
+>    加わって塞がりました**。M47 時点の実測（2026-07-28、dev PostgreSQL）:
 >
->    | 競合 subscription の INSERT | guard の結果 | 最終状態 |
+>    | 競合 subscription の INSERT | M47 の guard | M47R の guard |
 >    |---|---|---|
->    | 実行時点で **commit 済み** | 0 行（拒否） | 正しく 409 |
->    | 実行時点で **未 commit** | 1 行（適用） | `tenants.plan = free` と `status = active` が併存 |
+>    | 実行時点で **commit 済み** | 0 行（拒否）→ 409 | 同じ |
+>    | 実行時点で **未 commit** | 1 行（適用）→ `tenants.plan = free` と `status = active` が併存 | **0 行（拒否）→ 409** |
 >
->    READ COMMITTED では他トランザクションの未コミット行はサブクエリからも見えないため、SQL を工夫しても解決しません。
->    本番の Webhook は autocommit（明示トランザクション無し）で書くため、後者の窓は INSERT 1 文の実行時間分です。
->    完全に閉じるには **Webhook 側にも同じテナント行ロックを取らせる**必要があります。
+>    READ COMMITTED では、条件付き UPDATE のサブクエリは**文の開始時点のスナップショット**で評価され、
+>    その後で行ロック待ちに入り、解放後も再評価されません（再チェックされるのは対象行だけ）。
+>    そこで M47R は行ロックを**別文として 2 つ先に**実行します:
+>    `SELECT 1 FROM subscriptions WHERE tenant_id = $1 FOR UPDATE` →
+>    `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`。
+>    ロック待ちがこの時点で起きるため、続く UPDATE は**新しいスナップショット**を取り、commit 済みの
+>    subscription が見えて guard が正しく発火します。**2 つとも必要**です:
+>
+>    | 競合 | どちらのロックが効くか |
+>    |---|---|
+>    | subscription の **新規作成** | `tenants` — INSERT の FK チェックが親行に FOR KEY SHARE を取り、FOR UPDATE と競合する（新しい行自体は不可視）。red→green: `TestM47RPlanGuard_LosesToAConcurrentUncommittedSubscription` |
+>    | subscription の **再有効化**（expired → active、plan 据え置き） | `subscriptions` — Webhook は plan 不変なら `tenants` に触らないので tenants ロックだけでは待たない。red→green: `TestM47RPlanGuard_LosesToAConcurrentReactivation`（Codex round 2 が tenants のみ版に対して指摘） |
+
+>    M47R でこれが必須になった理由でもあります — Webhook が配信 1 件を明示トランザクションで処理するように
+>    なったため（残件 6 参照）、未コミット期間が「INSERT 1 文」から「配信 1 件」に伸びていました。
+>    ロック順序は安全です: この経路も Webhook も sync も **`subscriptions` → `tenants`** の順で取るため
+>    循環しません。
+>
+>    **ロックは直列化するだけで、どちらが先かは決めません**（Codex round 3 の指摘）。残る 2 ケース:
+>
+>    - select-free が先に commit → その後 `subscription_created` が届く: **無害**。
+>      `subscription_created` は無条件に plan を書くため最終状態は整合します。
+>    - select-free が先に commit → その後 **plan 据え置きの再有効化**（expired → active）が適用される:
+>      **未解決**。Webhook は plan 不変なら `tenants.plan` に触らないため、active な subscription と
+>      free の entitlement が併存したままになります。これはロックの問題ではなく
+>      「`subscription_updated` は plan が変わった時だけ `tenants.plan` を書く」という M47 W3 の
+>      entitlement ポリシーの帰結です（無条件に書くと残件 8 の「expired と同リビジョンの updated で
+>      有料 plan が復活する」を招くため、W3 が意図的にそう決めた）。閉じるには
+>      「ended → live の遷移すべてに明示的な entitlement 書き込みを持たせる」という
+>      ポリシー変更が必要で、M47R では行っていません。復旧は Admin による `/subscription/sync` 再実行。
 >    なお「free に落とした直後に checkout が完了する」順序は無害です（`subscription_created` が無条件に plan を書くため
 >    最終状態は有料 plan で整合）。危険なのは上表の 2 行目、Webhook が先に plan を書いた後に select-free が上書きする順序です。
 > 8. **同一リビジョンの配信は順序保証されない**（M47 の意図的な限界）。CAS は「等しいリビジョン」を受理するため、
@@ -416,6 +460,33 @@ POST /api/v1/plan/select-free      # free プラン選択（Owner/Admin のみ�
 POST /api/webhooks/clerk           # Clerk Webhook（署名必須、2.5 参照）
 POST /api/webhooks/lemonsqueezy    # Lemon Squeezy Webhook（署名必須、2.5 参照）
 ```
+
+### ロールゲート（M47R で全面適用）
+
+書き込みを行う API は**すべて**ロールゲートの後ろに置かれました（`cmd/server/main.go` の
+`authWrite` / `authAdmin` グループ）。以前は `POST /projects/:id/scan` など一部だけがゲートされ、
+**Viewer が 37 本の書き込み系エンドポイントを実行できました**（プロジェクト削除、VEX の作成・改変、
+公開リンクの発行、外部チケット起票、LLM を消費する diff summary、テナント設定の書き換えなど）。
+
+| グループ | ロール | 対象 |
+|---|---|---|
+| `authAdmin` | Owner / Admin | API キー管理、課金、グローバルカタログ同期（KEV / EOL / IPA / EPSS）、シークレットを扱うテナント設定（`/settings/llm`、`/tenant/settings/diff-webhook` とそのテスト送信）、`/settings/scan` と強制スキャン、レポート設定、SLO ターゲット |
+| `authWrite` | Owner / Admin / Member | 通常のテナントデータ変更（プロジェクト、VEX、ライセンスポリシー、公開リンク、通知設定、チェックリスト、SSVC、EOL 再判定、issue tracker 連携、レポート生成 ほか） |
+| `auth` | 全ロール（Viewer 含む） | 読み取り、および書き込みを伴わない POST（`/sbom/diff`、`/ssvc/calculate`、`/cli/check`） |
+
+CLI（API キー認証）側も同様に `cliWrite`（`RequireWrite` → `TenantTx` → レート制限 → 監査）と
+`cli`（読み取り）に分割されています。
+
+- ゲートは **`TenantTx` より外側**で動きます。拒否されたリクエストはリクエスト
+  トランザクションもコネクションもレート制限トークンも消費しません。
+  **ただし「DB 障害中でも 403」ではありません** — 認証ミドルウェア（`Auth` / `APIKeyAuth`）が
+  先に走り、それ自体が tenants / users を読むため、認証時点の障害は従来どおり 500 になります。
+  無くなったのは *2 回目の* DB アクセスです。
+- 拒否は `slog.Warn` にのみ記録されます（**`audit_logs` の行は残りません**）。監査行を残すには
+  リクエストトランザクションの外で audit を書く設計が必要で、これは未実装の残件です。
+- 回帰防止: `cmd/server/m47r_route_role_gate_test.go` が main.go の全ルート登録を機械的に走査し、
+  ゲートの無い書き込みルートと「TenantTx より内側のゲート」を検出します。書き込みを伴わない POST は
+  同ファイルの `ungatedByDesign` に理由付きで明示登録します。
 
 ---
 

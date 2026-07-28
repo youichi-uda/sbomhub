@@ -68,12 +68,14 @@ func NewSubscriptionRepository(db *sql.DB) *SubscriptionRepository {
 //     TenantID; the FK to `tenants(id) ON DELETE CASCADE` still enforces
 //     referential integrity.
 //
-// The q(ctx) indirection still matters for the billing endpoints that
-// DO run inside a TenantTx — they should still join the request tx so
-// reads/writes commit atomically with the rest of the request. Webhook
-// callers have no tx and fall through to r.db, which is fine now that
-// RLS is off. plan_limits has no RLS (it is a shared catalog) and reads
-// gracefully through the fallback as before.
+// The q(ctx) indirection carries every caller's transaction: the billing
+// endpoints join the request's TenantTx, and since M47R the WEBHOOK joins the
+// per-delivery transaction handler.applyDelivery opens (it used to fall
+// through to r.db one autocommit statement at a time, which is what let a
+// subscription write and its tenant-plan write disagree). The fallback to
+// r.db remains for callers with no transaction at all — background jobs and
+// tests. plan_limits has no RLS (it is a shared catalog) and reads gracefully
+// through the fallback as before.
 func (r *SubscriptionRepository) q(ctx context.Context) database.Queryable {
 	return database.Querier(ctx, r.db)
 }

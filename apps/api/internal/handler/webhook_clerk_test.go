@@ -199,6 +199,77 @@ func TestClerkWebhook_UserDeleted_DeleteFailureIs500(t *testing.T) {
 	}
 }
 
+// TestClerkWebhook_UserDeleted_AlreadyDeletedIs200 pins the M47R Low: the
+// DELETE matched no row, which is the DESIRED end state for a delete event.
+//
+// The asymmetry this closes: the same handler already answers 200 when the
+// LOOKUP reports the user is gone (sql.ErrNoRows above), and M47 W2 gave
+// organizationMembership.deleted exactly this branch after RemoveFromTenant
+// started reporting 0-row deletes. user.deleted did not get it, so the race
+// between two concurrent deliveries of one Svix event — both find the row,
+// one deletes it, the other's DELETE matches nothing — answered 500 and
+// burned the retry budget on work that was already done.
+//
+// Note that the 200 is returned WITHOUT writing an audit row: the delivery
+// that actually removed the user wrote it. Sibling test
+// TestClerkWebhook_UserDeleted_DeleteFailureIs500 keeps the other half
+// honest — a genuine driver error is still a 500.
+func TestClerkWebhook_UserDeleted_AlreadyDeletedIs200(t *testing.T) {
+	h, mock := newClerkWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	userID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM users WHERE clerk_user_id = $1`)).
+		WithArgs("user_del_race").
+		WillReturnRows(clerkUserRow(userID, "user_del_race"))
+	// 0 rows: a concurrent delivery won the race between the lookup above
+	// and this statement.
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM users WHERE id = $1`)).
+		WithArgs(userID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	rec := driveClerkWebhook(t, h, `{"type":"user.deleted","data":{"id":"user_del_race"}}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the user is gone, which is what this event asked for); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(logs.Bytes(), []byte("failed to delete user")) {
+		t.Fatalf("an already-deleted user must not be logged as a failure; logs:\n%s", logs.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// TestClerkWebhook_OrgDeleted_AlreadyDeletedIs200 is the tenant twin of the
+// pin above; tenantRepo.Delete reports 0 rows as ErrTenantNotFound, which
+// likewise wraps sql.ErrNoRows.
+func TestClerkWebhook_OrgDeleted_AlreadyDeletedIs200(t *testing.T) {
+	h, mock := newClerkWebhookTestHandler(t)
+	logs := captureSlog(t)
+
+	tenantID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM tenants WHERE clerk_org_id = $1`)).
+		WithArgs("org_del_race").
+		WillReturnRows(clerkTenantRow(tenantID, "org_del_race"))
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM tenants WHERE id = $1`)).
+		WithArgs(tenantID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	rec := driveClerkWebhook(t, h, `{"type":"organization.deleted","data":{"id":"org_del_race"}}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(logs.Bytes(), []byte("failed to delete tenant")) {
+		t.Fatalf("an already-deleted tenant must not be logged as a failure; logs:\n%s", logs.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
 // TestClerkWebhook_UserDeleted_AuditFailureStillReturns200 pins the
 // delete-path audit contract: the user row is already gone, so a 5xx could
 // never recover the audit row (the redelivery's lookup hits ErrNoRows and

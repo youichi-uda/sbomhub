@@ -69,6 +69,7 @@ func unsignedLSWebhookHandler(t *testing.T, appEnv string, allowUnsigned bool) *
 
 	return NewLemonSqueezyWebhookHandler(
 		config.Load(),
+		db,
 		repository.NewTenantRepository(db),
 		repository.NewSubscriptionRepository(db),
 		repository.NewAuditRepository(db),
@@ -268,7 +269,7 @@ func TestWebhookSecretConfigured_OptInIsIgnored(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := config.Load()
 
-	ls := NewLemonSqueezyWebhookHandler(cfg,
+	ls := NewLemonSqueezyWebhookHandler(cfg, db,
 		repository.NewTenantRepository(db),
 		repository.NewSubscriptionRepository(db),
 		repository.NewAuditRepository(db))

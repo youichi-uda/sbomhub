@@ -611,6 +611,7 @@ func TestBillingSync_ExpiredSyncThenUpdatedWebhookStaysFree(t *testing.T) {
 	// here on the raw app DB — the same way production does.
 	wh := NewLemonSqueezyWebhookHandler(
 		h.cfg,
+		appDB,
 		repository.NewTenantRepository(appDB),
 		repository.NewSubscriptionRepository(appDB),
 		repository.NewAuditRepository(appDB),

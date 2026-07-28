@@ -231,14 +231,36 @@ func (s *PublicLinkService) Update(ctx context.Context, tenantID, id uuid.UUID, 
 
 	link.UpdatedAt = time.Now()
 	if err := s.linkRepo.Update(ctx, tenantID, link); err != nil {
+		// The GetByID above already established the link is in scope, so a
+		// 0-row UPDATE here means it was deleted in between. Same answer as
+		// "it was never there" — see Delete.
+		if errors.Is(err, repository.ErrPublicLinkRowNotFound) {
+			return nil, ErrPublicLinkNotFound
+		}
 		return nil, err
 	}
 	return link, nil
 }
 
 // Delete removes a public link restricted to the authenticated tenant.
+//
+// M47R (Codex cross-wave review, Low): the repository's 0-row sentinel is
+// translated to the service-level ErrPublicLinkNotFound that Update already
+// returns, so the handler has ONE thing to test for on both verbs. Everything
+// else stays a raw error and the handler renders it as 500.
+//
+// The 404 this produces is not an existence oracle: the DELETE's predicate is
+// `id = $1 AND tenant_id = $2`, so an unknown link and another tenant's link
+// are indistinguishable in the answer — the same sentinel Update collapses
+// them into (M47 W1).
 func (s *PublicLinkService) Delete(ctx context.Context, tenantID, id uuid.UUID) error {
-	return s.linkRepo.Delete(ctx, tenantID, id)
+	if err := s.linkRepo.Delete(ctx, tenantID, id); err != nil {
+		if errors.Is(err, repository.ErrPublicLinkRowNotFound) {
+			return ErrPublicLinkNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 // assertSbomServesLink is the M47 W1 read-side half of the share-link
