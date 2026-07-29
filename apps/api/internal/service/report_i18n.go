@@ -95,6 +95,13 @@ type ReportTranslations struct {
 	// NEVER "0.0": CVSS 0.0 is a real "None" score and a 0-sentinel would
 	// present an un-triaged CRITICAL as harmless (M46 wave 4).
 	Unscored string
+	// NotMeasured renders a nil aggregate metric (average MTTR, SLO
+	// achievement) in the PDF / Excel reports. Distinct from Unscored, which
+	// is about a single CVE's missing score: this one is about a statistic
+	// with an empty sample. NEVER "0.0 hours" / "100.0%" — for MTTR and SLO
+	// achievement those are the BEST possible values, so a sentinel turns
+	// "we resolved nothing" into evidence of exemplary remediation (M49).
+	NotMeasured string
 }
 
 // Japanese translations
@@ -167,6 +174,7 @@ var translationsJa = ReportTranslations{
 	CVSS:        "CVSS",
 	EPSS:        "EPSS",
 	Unscored:    "未採点",
+	NotMeasured: "未計測",
 	Date:        "日付",
 	Total:       "合計",
 	Phase:       "フェーズ",
@@ -252,6 +260,7 @@ var translationsEn = ReportTranslations{
 	CVSS:        "CVSS",
 	EPSS:        "EPSS",
 	Unscored:    "Unscored",
+	NotMeasured: "Not measured",
 	Date:        "Date",
 	Total:       "Total",
 	Phase:       "Phase",

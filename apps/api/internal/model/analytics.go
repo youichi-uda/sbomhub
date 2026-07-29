@@ -61,13 +61,23 @@ type ComplianceSnapshot struct {
 	CreatedAt                    time.Time  `json:"created_at" db:"created_at"`
 }
 
-// MTTRResult represents Mean Time To Remediate for a severity
+// MTTRResult represents Mean Time To Remediate for a severity.
+//
+// M49: MTTRHours and OnTarget are POINTERS because "not measured" is a real,
+// common state (a tenant that has never resolved a vulnerability of this
+// severity — i.e. every fresh installation) and MTTR is a metric where LOW
+// IS GOOD. A bare float64 makes "we have no measurement" indistinguishable
+// from "we remediate instantly", and the derived OnTarget verdict then reads
+// 0 <= target = true, certifying an SLO nobody has ever met. nil = not
+// measured (JSON null); a non-nil 0 is a genuine sub-rounding remediation
+// time. Every renderer must branch on nil — see reportMTTRText (PDF/Excel)
+// and the analytics page's formatMetricHours (web).
 type MTTRResult struct {
-	Severity    string  `json:"severity"`
-	MTTRHours   float64 `json:"mttr_hours"`
-	Count       int     `json:"count"`
-	TargetHours int     `json:"target_hours"`
-	OnTarget    bool    `json:"on_target"`
+	Severity    string   `json:"severity"`
+	MTTRHours   *float64 `json:"mttr_hours"`
+	Count       int      `json:"count"`
+	TargetHours int      `json:"target_hours"`
+	OnTarget    *bool    `json:"on_target"`
 }
 
 // VulnerabilityTrendPoint represents a point in the vulnerability trend chart
@@ -81,25 +91,41 @@ type VulnerabilityTrendPoint struct {
 	Resolved int    `json:"resolved"`
 }
 
-// SLOAchievement represents SLO achievement metrics
+// SLOAchievement represents SLO achievement metrics.
+//
+// M49: AchievementPct and AverageMTTR are POINTERS for the same reason as
+// MTTRResult above. TotalCount == 0 means the severity contributed no
+// resolved vulnerability to the window, so there is no ratio to compute —
+// the old query answered a literal 100.0 there, i.e. "perfect compliance"
+// for a severity nobody has remediated. nil = not measured (JSON null).
+// TotalCount / OnTargetCount stay plain ints: those really are counts, and 0
+// resolved is a true 0.
 type SLOAchievement struct {
-	Severity       string  `json:"severity"`
-	TotalCount     int     `json:"total_count"`
-	OnTargetCount  int     `json:"on_target_count"`
-	AchievementPct float64 `json:"achievement_pct"`
-	TargetHours    int     `json:"target_hours"`
-	AverageMTTR    float64 `json:"average_mttr_hours"`
+	Severity       string   `json:"severity"`
+	TotalCount     int      `json:"total_count"`
+	OnTargetCount  int      `json:"on_target_count"`
+	AchievementPct *float64 `json:"achievement_pct"`
+	TargetHours    int      `json:"target_hours"`
+	AverageMTTR    *float64 `json:"average_mttr_hours"`
 }
 
-// ComplianceTrendPoint represents a point in the compliance score trend
+// ComplianceTrendPoint represents a point in the compliance score trend.
+//
+// M49 (Codex round 3): Percentage is a POINTER. max_score = 0 means no
+// checklist has been configured for that snapshot, so score/max_score is
+// undefined — COALESCE'ing the NULL ratio to 0 rendered "0% compliant" for a
+// tenant that has not been assessed at all. That is the same unmeasured-as-a-
+// value defect as the MTTR sentinel (pointing at the other end of the scale),
+// and leaving it in place would contradict the headline tile, which now says
+// "not measured" for exactly this state. nil = not measured.
 type ComplianceTrendPoint struct {
-	Date               string  `json:"date"`
-	Score              int     `json:"score"`
-	MaxScore           int     `json:"max_score"`
-	Percentage         float64 `json:"percentage"`
-	SBOMScore          int     `json:"sbom_score,omitempty"`
-	VulnerabilityScore int     `json:"vulnerability_score,omitempty"`
-	LicenseScore       int     `json:"license_score,omitempty"`
+	Date               string   `json:"date"`
+	Score              int      `json:"score"`
+	MaxScore           int      `json:"max_score"`
+	Percentage         *float64 `json:"percentage"`
+	SBOMScore          int      `json:"sbom_score,omitempty"`
+	VulnerabilityScore int      `json:"vulnerability_score,omitempty"`
+	LicenseScore       int      `json:"license_score,omitempty"`
 }
 
 // AnalyticsSummary is the main analytics dashboard response
@@ -112,14 +138,19 @@ type AnalyticsSummary struct {
 	Summary            AnalyticsQuickStats       `json:"summary"`
 }
 
-// AnalyticsQuickStats provides quick summary statistics
+// AnalyticsQuickStats provides quick summary statistics.
+//
+// M49: AverageMTTRHours and OverallSLOAchievementPct are POINTERS — these
+// two feed the dashboard's headline tiles AND the executive report summary
+// (ReportSummary), so a manufactured 0 / 100 here is what an auditor reads
+// off a PDF. nil = not measured.
 type AnalyticsQuickStats struct {
-	TotalOpenVulnerabilities int     `json:"total_open_vulnerabilities"`
-	ResolvedLast30Days       int     `json:"resolved_last_30_days"`
-	AverageMTTRHours         float64 `json:"average_mttr_hours"`
-	OverallSLOAchievementPct float64 `json:"overall_slo_achievement_pct"`
-	CurrentComplianceScore   int     `json:"current_compliance_score"`
-	ComplianceMaxScore       int     `json:"compliance_max_score"`
+	TotalOpenVulnerabilities int      `json:"total_open_vulnerabilities"`
+	ResolvedLast30Days       int      `json:"resolved_last_30_days"`
+	AverageMTTRHours         *float64 `json:"average_mttr_hours"`
+	OverallSLOAchievementPct *float64 `json:"overall_slo_achievement_pct"`
+	CurrentComplianceScore   int      `json:"current_compliance_score"`
+	ComplianceMaxScore       int      `json:"compliance_max_score"`
 }
 
 // Resolution type constants

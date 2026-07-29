@@ -549,15 +549,48 @@ func (s *ReportService) gatherReportData(ctx context.Context, tenantID uuid.UUID
 		}
 	}
 
-	// Get analytics data
+	// Get analytics data.
+	//
+	// M49 (Codex round 1, High-1 / High-2): the three PERIOD-DEPENDENT numbers
+	// below no longer come from GetQuickStats.
+	//
+	//   - OverallSLOAchievementPct is never populated by GetQuickStats — only
+	//     AnalyticsService.GetSummary computes it — so this line copied a zero
+	//     value into every report ever generated. Pre-M49 that printed
+	//     "SLO achievement: 0.0%"; post-M49 it would have printed
+	//     "Not measured" even for a tenant with a perfect record. Both are
+	//     wrong; the value is computable and is now computed.
+	//   - GetQuickStats' MTTR / resolved-count queries are hard-coded to "the
+	//     last 30 days", while a report covers an arbitrary [start, end]. A
+	//     90-day report whose remediations all landed 31–90 days ago reported
+	//     none of them; a backdated report mixed in unrelated recent ones.
+	//     Presenting one window's number as another window's measurement is
+	//     the same misrepresentation family M49 exists to remove.
+	//
+	// GetMTTR / GetSLOAchievement are already parameterised by (start, end),
+	// so they answer for the window the report claims to cover. GetQuickStats
+	// is still the source for the compliance score, which is a "latest
+	// snapshot" value and period-independent by construction.
 	if s.analyticsRepo != nil {
-		stats, err := s.analyticsRepo.GetQuickStats(ctx, tenantID)
-		if err == nil && stats != nil {
-			data.Summary.ResolvedInPeriod = stats.ResolvedLast30Days
-			data.Summary.AverageMTTRHours = stats.AverageMTTRHours
-			data.Summary.SLOAchievementPct = stats.OverallSLOAchievementPct
+		if stats, err := s.analyticsRepo.GetQuickStats(ctx, tenantID); err == nil && stats != nil {
 			data.Summary.ComplianceScore = stats.CurrentComplianceScore
 			data.Summary.ComplianceMaxScore = stats.ComplianceMaxScore
+		} else if err != nil {
+			slog.Warn("report: quick stats unavailable", "tenant_id", tenantID, "error", err)
+		}
+
+		if mttr, err := s.analyticsRepo.GetMTTR(ctx, tenantID, start, end); err == nil {
+			resolved, avg := aggregatePeriodMTTR(mttr)
+			data.Summary.ResolvedInPeriod = resolved
+			data.Summary.AverageMTTRHours = avg
+		} else {
+			slog.Warn("report: period MTTR unavailable", "tenant_id", tenantID, "error", err)
+		}
+
+		if slo, err := s.analyticsRepo.GetSLOAchievement(ctx, tenantID, start, end); err == nil {
+			data.Summary.SLOAchievementPct = overallSLOAchievement(slo)
+		} else {
+			slog.Warn("report: period SLO achievement unavailable", "tenant_id", tenantID, "error", err)
 		}
 	}
 
@@ -786,6 +819,60 @@ func reportEPSSText(score *float64, t *ReportTranslations) string {
 	return fmt.Sprintf("%.2f%%", *score*100)
 }
 
+// reportMTTRText renders an average remediation time for the PDF / Excel
+// report body. nil means no vulnerability was resolved in the period and
+// renders as the locale's NotMeasured label — NEVER "0.0": MTTR is a metric
+// where low is good, so a report that prints 0.0 hours for "we have not
+// remediated anything" hands an auditor the best possible number as
+// evidence (M49, mirrors reportCVSSText / reportEPSSText above).
+func reportMTTRText(hours *float64, t *ReportTranslations) string {
+	if hours == nil {
+		return t.NotMeasured
+	}
+	return fmt.Sprintf("%.1f %s", *hours, t.Hours)
+}
+
+// reportMTTRValue renders the same value for the Excel summary column, which
+// carries its unit in the row label instead of the cell (M49).
+func reportMTTRValue(hours *float64, t *ReportTranslations) string {
+	if hours == nil {
+		return t.NotMeasured
+	}
+	return fmt.Sprintf("%.1f", *hours)
+}
+
+// reportPercentText renders an SLO achievement percentage. nil means the
+// window contained no resolved vulnerability to hold against the target, so
+// there is no achievement rate — printing "100.0%" there certifies
+// compliance that was never measured (M49).
+func reportPercentText(pct *float64, t *ReportTranslations) string {
+	if pct == nil {
+		return t.NotMeasured
+	}
+	return fmt.Sprintf("%.1f%%", *pct)
+}
+
+// reportPercentValue is reportPercentText without the sign, for the Excel
+// summary column whose row label already carries the "(%)" suffix (M49).
+func reportPercentValue(pct *float64, t *ReportTranslations) string {
+	if pct == nil {
+		return t.NotMeasured
+	}
+	return fmt.Sprintf("%.1f", *pct)
+}
+
+// reportComplianceScoreText renders the compliance scorecard line. maxScore
+// 0 means no checklist has been configured, so "0 / 0" is not a score of
+// zero — it is the absence of an assessment, and a report that prints it as
+// a number invites an auditor to read it as one (M49, Codex round 4). The
+// dashboard already says "not measured" for exactly this state.
+func reportComplianceScoreText(score, maxScore int, t *ReportTranslations) string {
+	if maxScore <= 0 {
+		return t.NotMeasured
+	}
+	return fmt.Sprintf("%d / %d", score, maxScore)
+}
+
 func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.ExecutiveReportData, t *ReportTranslations) {
 	// Summary Section
 	m.AddRows(s.buildPDFSectionHeader(t.Summary))
@@ -793,8 +880,8 @@ func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.Exec
 	m.AddRows(s.buildPDFKeyValue(t.Components, fmt.Sprintf("%d", data.Summary.TotalComponents)))
 	m.AddRows(s.buildPDFKeyValue(t.TotalVulnerabilities, fmt.Sprintf("%d", data.Summary.TotalVulnerabilities)))
 	m.AddRows(s.buildPDFKeyValue(t.ResolvedInPeriod, fmt.Sprintf("%d", data.Summary.ResolvedInPeriod)))
-	m.AddRows(s.buildPDFKeyValue(t.AverageMTTR, fmt.Sprintf("%.1f %s", data.Summary.AverageMTTRHours, t.Hours)))
-	m.AddRows(s.buildPDFKeyValue(t.SLOAchievement, fmt.Sprintf("%.1f%%", data.Summary.SLOAchievementPct)))
+	m.AddRows(s.buildPDFKeyValue(t.AverageMTTR, reportMTTRText(data.Summary.AverageMTTRHours, t)))
+	m.AddRows(s.buildPDFKeyValue(t.SLOAchievement, reportPercentText(data.Summary.SLOAchievementPct, t)))
 
 	// Vulnerability Summary
 	m.AddRows(s.buildPDFSectionHeader(t.VulnerabilityBreakdown))
@@ -805,8 +892,8 @@ func (s *ReportService) buildExecutivePDFContent(m core.Maroto, data *model.Exec
 
 	// Compliance Score
 	m.AddRows(s.buildPDFSectionHeader(t.Compliance))
-	m.AddRows(s.buildPDFKeyValue(t.Score, fmt.Sprintf("%d / %d",
-		data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore)))
+	m.AddRows(s.buildPDFKeyValue(t.Score,
+		reportComplianceScoreText(data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore, t)))
 
 	// Top Risks (limited)
 	if len(data.TopRisks) > 0 {
@@ -841,8 +928,8 @@ func (s *ReportService) buildTechnicalPDFContent(m core.Maroto, data *model.Exec
 	// Metrics
 	m.AddRows(s.buildPDFSectionHeader(t.SecurityMetrics))
 	m.AddRows(s.buildPDFKeyValue(t.ResolvedInPeriod, fmt.Sprintf("%d", data.Summary.ResolvedInPeriod)))
-	m.AddRows(s.buildPDFKeyValue(t.AverageMTTR, fmt.Sprintf("%.1f %s", data.Summary.AverageMTTRHours, t.Hours)))
-	m.AddRows(s.buildPDFKeyValue(t.SLOAchievement, fmt.Sprintf("%.1f%%", data.Summary.SLOAchievementPct)))
+	m.AddRows(s.buildPDFKeyValue(t.AverageMTTR, reportMTTRText(data.Summary.AverageMTTRHours, t)))
+	m.AddRows(s.buildPDFKeyValue(t.SLOAchievement, reportPercentText(data.Summary.SLOAchievementPct, t)))
 
 	// Extended Top Risks (more details)
 	if len(data.TopRisks) > 0 {
@@ -890,8 +977,8 @@ func (s *ReportService) buildTechnicalPDFContent(m core.Maroto, data *model.Exec
 func (s *ReportService) buildCompliancePDFContent(m core.Maroto, data *model.ExecutiveReportData, t *ReportTranslations) {
 	// Compliance Score Summary
 	m.AddRows(s.buildPDFSectionHeader(t.ComplianceScore))
-	m.AddRows(s.buildPDFKeyValue(t.Score, fmt.Sprintf("%d / %d",
-		data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore)))
+	m.AddRows(s.buildPDFKeyValue(t.Score,
+		reportComplianceScoreText(data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore, t)))
 	if data.Summary.ComplianceMaxScore > 0 {
 		pct := float64(data.Summary.ComplianceScore) / float64(data.Summary.ComplianceMaxScore) * 100
 		m.AddRows(s.buildPDFKeyValue(t.AchievementRate, fmt.Sprintf("%.1f%%", pct)))
@@ -1114,9 +1201,9 @@ func (s *ReportService) generateExcel(data *model.ExecutiveReportData, reportTyp
 		{t.Components, data.Summary.TotalComponents},
 		{t.TotalVulnerabilities, data.Summary.TotalVulnerabilities},
 		{t.ResolvedInPeriod, data.Summary.ResolvedInPeriod},
-		{fmt.Sprintf("%s (%s)", t.AverageMTTR, t.Hours), fmt.Sprintf("%.1f", data.Summary.AverageMTTRHours)},
-		{fmt.Sprintf("%s (%%)", t.SLOAchievement), fmt.Sprintf("%.1f", data.Summary.SLOAchievementPct)},
-		{t.ComplianceScore, fmt.Sprintf("%d / %d", data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore)},
+		{fmt.Sprintf("%s (%s)", t.AverageMTTR, t.Hours), reportMTTRValue(data.Summary.AverageMTTRHours, t)},
+		{fmt.Sprintf("%s (%%)", t.SLOAchievement), reportPercentValue(data.Summary.SLOAchievementPct, t)},
+		{t.ComplianceScore, reportComplianceScoreText(data.Summary.ComplianceScore, data.Summary.ComplianceMaxScore, t)},
 	}
 
 	for _, d := range summaryData {

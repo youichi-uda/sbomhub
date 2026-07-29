@@ -1024,12 +1024,18 @@ export interface AuditStatistics {
 }
 
 // Analytics types
+// M49: mttr_hours / on_target are NULLABLE because "not measured" is a real
+// state (no vulnerability of this severity has ever been resolved — the
+// normal state of a fresh installation). MTTR is a metric where low is good,
+// so a 0 stand-in reports the BEST possible value and makes on_target read
+// true. null = not measured; render the notMeasured label, never a number,
+// and keep null out of any progress-bar arithmetic.
 export interface MTTRResult {
   severity: string;
-  mttr_hours: number;
+  mttr_hours: number | null;
   count: number;
   target_hours: number;
-  on_target: boolean;
+  on_target: boolean | null;
 }
 
 export interface VulnerabilityTrendPoint {
@@ -1042,30 +1048,36 @@ export interface VulnerabilityTrendPoint {
   resolved: number;
 }
 
+// M49: achievement_pct / average_mttr_hours are NULLABLE — with total_count
+// 0 there is no ratio to compute, and the API used to answer a literal 100.0
+// there (perfect compliance for a severity nobody has remediated).
 export interface SLOAchievement {
   severity: string;
   total_count: number;
   on_target_count: number;
-  achievement_pct: number;
+  achievement_pct: number | null;
   target_hours: number;
-  average_mttr_hours: number;
+  average_mttr_hours: number | null;
 }
 
+// M49: percentage is NULLABLE — max_score 0 means no checklist has been
+// configured for that snapshot, so the ratio is undefined rather than 0%.
 export interface ComplianceTrendPoint {
   date: string;
   score: number;
   max_score: number;
-  percentage: number;
+  percentage: number | null;
   sbom_score?: number;
   vulnerability_score?: number;
   license_score?: number;
 }
 
+// M49: the two headline metric tiles are NULLABLE for the same reason.
 export interface AnalyticsQuickStats {
   total_open_vulnerabilities: number;
   resolved_last_30_days: number;
-  average_mttr_hours: number;
-  overall_slo_achievement_pct: number;
+  average_mttr_hours: number | null;
+  overall_slo_achievement_pct: number | null;
   current_compliance_score: number;
   compliance_max_score: number;
 }
@@ -3257,8 +3269,11 @@ export const api = {
         summary: {
           total_open_vulnerabilities: 0,
           resolved_last_30_days: 0,
-          average_mttr_hours: 0,
-          overall_slo_achievement_pct: 0,
+          // M49: null, not 0 — a missing response body is the definition of
+          // "not measured", and a 0 MTTR / 0% SLO here would be rendered as
+          // a measurement the server never sent.
+          average_mttr_hours: null,
+          overall_slo_achievement_pct: null,
           current_compliance_score: 0,
           compliance_max_score: 0,
         },

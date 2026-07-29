@@ -645,7 +645,10 @@
     "vulnerabilityTrend": "Vulnerability Trend",
     "complianceScoreTrend": "Compliance Score Trend",
     "noData": "No data available",
-    "noDataDescription": "Trend analysis will be displayed as vulnerability detection and resolution data accumulates."
+    "noDataDescription": "Trend analysis will be displayed as vulnerability detection and resolution data accumulates.",
+    "notMeasured": "Not measured",
+    "notMeasuredHint": "No vulnerabilities were resolved in the selected period, so this cannot be measured",
+    "notMeasuredComplianceHint": "No checklist has been configured, so this cannot be measured"
   },
   "Reports": {
     "title": "Reports",

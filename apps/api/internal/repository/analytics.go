@@ -43,15 +43,30 @@ func (r *AnalyticsRepository) GetMTTR(ctx context.Context, tenantID uuid.UUID, s
 				AND resolved_at >= $2
 				AND resolved_at <= $3
 		),
+		-- M49: DISTINCT ON (severity) — this CTE used to return BOTH the
+		-- tenant's override and the global (tenant_id IS NULL) default for the
+		-- same severity, and the bare ORDER BY did nothing to collapse them.
+		-- The LEFT JOIN below then fanned every resolved row out across both
+		-- rows, so a tenant that had customised even one SLO target saw that
+		-- severity listed TWICE in the MTTR panel and every COUNT(*) for it
+		-- doubled. GetSLOAchievement already had the DISTINCT ON; this is the
+		-- same de-duplication, with the same "tenant row wins over the global
+		-- default" ordering. (Found by the M49 report-period test, which read
+		-- back 2 resolutions from a 1-event fixture.)
 		slo AS (
-			SELECT severity, target_hours
+			SELECT DISTINCT ON (severity) severity, target_hours
 			FROM slo_targets
 			WHERE tenant_id = $1 OR tenant_id IS NULL
-			ORDER BY tenant_id NULLS LAST
+			ORDER BY severity, tenant_id NULLS LAST
 		)
 		SELECT
 			m.severity,
-			COALESCE(AVG(m.hours), 0) as mttr_hours,
+			-- M49: NOT COALESCE'd to 0. AVG over an all-NULL / empty group is
+			-- SQL NULL = "nothing measured", and MTTR is a metric where LOW IS
+			-- GOOD: a 0 here is the BEST possible value and makes the
+			-- on-target verdict below unconditionally true. Scans into
+			-- sql.NullFloat64 → *float64 (nil = not measured).
+			AVG(m.hours) as mttr_hours,
 			COUNT(*) as count,
 			COALESCE(s.target_hours, 168) as target_hours
 		FROM mttr_data m
@@ -76,10 +91,21 @@ func (r *AnalyticsRepository) GetMTTR(ctx context.Context, tenantID uuid.UUID, s
 	var results []model.MTTRResult
 	for rows.Next() {
 		var m model.MTTRResult
-		if err := rows.Scan(&m.Severity, &m.MTTRHours, &m.Count, &m.TargetHours); err != nil {
+		var mttrHours sql.NullFloat64
+		if err := rows.Scan(&m.Severity, &mttrHours, &m.Count, &m.TargetHours); err != nil {
 			return nil, err
 		}
-		m.OnTarget = m.MTTRHours <= float64(m.TargetHours)
+		// M49: the on-target verdict is DERIVED, so it can only exist where
+		// the measurement does. Pre-fix `m.MTTRHours <= float64(...)` was
+		// evaluated on the 0 sentinel, so a severity with no remediation at
+		// all was flagged on-target (0 <= every target) and rendered with a
+		// green check. nil now means "no verdict".
+		if mttrHours.Valid {
+			hours := mttrHours.Float64
+			m.MTTRHours = &hours
+			onTarget := hours <= float64(m.TargetHours)
+			m.OnTarget = &onTarget
+		}
 		results = append(results, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -230,22 +256,28 @@ func (r *AnalyticsRepository) GetSLOAchievement(ctx context.Context, tenantID uu
 		)
 		SELECT
 			s.severity,
+			-- total_count / on_target_count keep COALESCE(..., 0): these are
+			-- COUNTs over the LEFT JOIN's NULL side, and "0 vulnerabilities
+			-- of this severity were resolved in the window" is a TRUE count,
+			-- not a stand-in for a missing measurement.
 			COALESCE(r.total_count, 0) as total_count,
 			COALESCE(r.on_target_count, 0) as on_target_count,
-			-- M46 wave 3: the CASE below can never yield NULL — the WHEN
-			-- guard routes every NULL-side LEFT JOIN row (r.total_count IS
-			-- NULL ⇒ COALESCE = 0) to the literal 100.0, so the ELSE
-			-- division only sees non-NULL, non-zero total_count. nullscan
-			-- cannot prove that cross-branch invariant (known FP shape);
-			-- the COALESCE is belt-and-braces that keeps the analyzer
-			-- green and preserves the same no-data semantics (100 = no
-			-- resolved rows to miss the target).
-			COALESCE(CASE
-				WHEN COALESCE(r.total_count, 0) = 0 THEN 100.0
+			-- M49 (supersedes M46 wave 3's belt-and-braces COALESCE): the
+			-- zero-resolved arm now yields SQL NULL instead of a literal
+			-- 100.0. A ratio over an empty denominator is not 100% — it is
+			-- undefined, and answering "100% SLO achievement" for a severity
+			-- nobody has ever remediated is the same 0-sentinel species as
+			-- the MTTR below, just pointing at the other end of the scale.
+			-- Scans into sql.NullFloat64 → *float64 (nil = not measured).
+			CASE
+				WHEN COALESCE(r.total_count, 0) = 0 THEN NULL
 				ELSE (COALESCE(r.on_target_count, 0)::float / r.total_count) * 100
-			END, 100.0) as achievement_pct,
+			END as achievement_pct,
 			s.target_hours,
-			COALESCE(r.avg_mttr, 0) as avg_mttr
+			-- M49: NOT COALESCE'd to 0 — see GetMTTR. On the NULL side of the
+			-- LEFT JOIN (severity with no resolved rows) avg_mttr is SQL NULL
+			-- and must stay NULL, not become a 0-hour remediation.
+			r.avg_mttr as avg_mttr
 		FROM slo s
 		LEFT JOIN resolved r ON s.severity = r.severity
 		ORDER BY
@@ -267,8 +299,17 @@ func (r *AnalyticsRepository) GetSLOAchievement(ctx context.Context, tenantID uu
 	var results []model.SLOAchievement
 	for rows.Next() {
 		var s model.SLOAchievement
-		if err := rows.Scan(&s.Severity, &s.TotalCount, &s.OnTargetCount, &s.AchievementPct, &s.TargetHours, &s.AverageMTTR); err != nil {
+		var achievementPct, avgMTTR sql.NullFloat64
+		if err := rows.Scan(&s.Severity, &s.TotalCount, &s.OnTargetCount, &achievementPct, &s.TargetHours, &avgMTTR); err != nil {
 			return nil, err
+		}
+		if achievementPct.Valid {
+			pct := achievementPct.Float64
+			s.AchievementPct = &pct
+		}
+		if avgMTTR.Valid {
+			mttr := avgMTTR.Float64
+			s.AverageMTTR = &mttr
 		}
 		results = append(results, s)
 	}
@@ -286,10 +327,14 @@ func (r *AnalyticsRepository) GetComplianceTrend(ctx context.Context, tenantID u
 			snapshot_date::text as date,
 			overall_score as score,
 			max_score,
-			-- M46 wave 3: max_score = 0 (no checklist configured yet) makes
-			-- NULLIF return NULL and the whole ratio NULL — a real snapshot
-			-- shape, not an FP. An empty scorecard reads as 0% compliant.
-			COALESCE((overall_score::float / NULLIF(max_score, 0)) * 100, 0) as percentage,
+			-- M49 (supersedes M46 wave 3's COALESCE): max_score = 0 (no
+			-- checklist configured yet) makes NULLIF return NULL and the whole
+			-- ratio NULL — a real snapshot shape, not an FP. The old
+			-- COALESCE(..., 0) then reported an unassessed tenant as "0%
+			-- compliant", a measurement it never made. The NULL now flows into
+			-- the *float64 ComplianceTrendPoint.Percentage (nil = not
+			-- measured), matching the headline tile.
+			(overall_score::float / NULLIF(max_score, 0)) * 100 as percentage,
 			sbom_generation_score,
 			vulnerability_management_score,
 			license_management_score
@@ -309,8 +354,13 @@ func (r *AnalyticsRepository) GetComplianceTrend(ctx context.Context, tenantID u
 	var results []model.ComplianceTrendPoint
 	for rows.Next() {
 		var p model.ComplianceTrendPoint
-		if err := rows.Scan(&p.Date, &p.Score, &p.MaxScore, &p.Percentage, &p.SBOMScore, &p.VulnerabilityScore, &p.LicenseScore); err != nil {
+		var percentage sql.NullFloat64
+		if err := rows.Scan(&p.Date, &p.Score, &p.MaxScore, &percentage, &p.SBOMScore, &p.VulnerabilityScore, &p.LicenseScore); err != nil {
 			return nil, err
+		}
+		if percentage.Valid {
+			pct := percentage.Float64
+			p.Percentage = &pct
 		}
 		results = append(results, p)
 	}
@@ -347,16 +397,27 @@ func (r *AnalyticsRepository) GetQuickStats(ctx context.Context, tenantID uuid.U
 		return nil, err
 	}
 
-	// Get average MTTR
+	// Get average MTTR.
+	//
+	// M49: NOT COALESCE'd to 0. This single value drives the dashboard's
+	// "average MTTR" headline tile and the executive report's summary line;
+	// with no resolution in the last 30 days the AVG is SQL NULL, and the
+	// old 0 told an operator (and an auditor reading the PDF) that this
+	// tenant remediates instantly.
+	var avgMTTRHours sql.NullFloat64
 	err = r.q(ctx).QueryRowContext(ctx, `
-		SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (resolved_at - detected_at)) / 3600), 0)
+		SELECT AVG(EXTRACT(EPOCH FROM (resolved_at - detected_at)) / 3600)
 		FROM vulnerability_resolution_events
 		WHERE tenant_id = $1
 			AND resolved_at IS NOT NULL
 			AND resolved_at >= CURRENT_DATE - 30
-	`, tenantID).Scan(&stats.AverageMTTRHours)
+	`, tenantID).Scan(&avgMTTRHours)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
+	}
+	if avgMTTRHours.Valid {
+		hours := avgMTTRHours.Float64
+		stats.AverageMTTRHours = &hours
 	}
 
 	// Get latest compliance score

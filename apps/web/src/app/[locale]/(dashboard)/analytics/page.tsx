@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslations } from 'next-intl';
-import { Loader2, Clock, Target, TrendingUp, ShieldCheck, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Loader2, Clock, Target, TrendingUp, ShieldCheck, AlertTriangle, CheckCircle2, MinusCircle } from 'lucide-react';
 import { api, AnalyticsSummary, MTTRResult, SLOAchievement } from '@/lib/api';
 
 export default function AnalyticsPage() {
@@ -37,6 +37,17 @@ export default function AnalyticsPage() {
         const h = hours % 24;
         return `${d} ${d === 1 ? t("day") : t("days")}${h > 0 ? ` ${h.toFixed(0)} ${t("hours")}` : ''}`;
     };
+
+    // M49: null means the API measured nothing (no vulnerability of this
+    // severity has ever been resolved). It must render as the "not measured"
+    // label, never as "0.0 hours" / "0.0%" — for MTTR and SLO achievement a
+    // zero/hundred is the BEST value, so a sentinel here reads as excellent
+    // performance instead of missing data.
+    const formatMetricHours = (hours: number | null | undefined) =>
+        hours === null || hours === undefined ? t("notMeasured") : formatHours(hours);
+
+    const formatMetricPct = (pct: number | null | undefined) =>
+        pct === null || pct === undefined ? t("notMeasured") : `${pct.toFixed(1)}%`;
 
     const getSeverityColor = (severity: string) => {
         switch (severity.toUpperCase()) {
@@ -131,7 +142,12 @@ export default function AnalyticsPage() {
                             </div>
                             <div>
                                 <p className="text-sm text-muted-foreground">{t("averageMttr")}</p>
-                                <p className="text-2xl font-bold">{formatHours(summary.summary.average_mttr_hours)}</p>
+                                <p
+                                    className={`text-2xl font-bold${summary.summary.average_mttr_hours === null ? ' text-muted-foreground' : ''}`}
+                                    title={summary.summary.average_mttr_hours === null ? t("notMeasuredHint") : undefined}
+                                >
+                                    {formatMetricHours(summary.summary.average_mttr_hours)}
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -143,7 +159,12 @@ export default function AnalyticsPage() {
                             </div>
                             <div>
                                 <p className="text-sm text-muted-foreground">{t("sloAchievementRate")}</p>
-                                <p className="text-2xl font-bold">{summary.summary.overall_slo_achievement_pct.toFixed(1)}%</p>
+                                <p
+                                    className={`text-2xl font-bold${summary.summary.overall_slo_achievement_pct === null ? ' text-muted-foreground' : ''}`}
+                                    title={summary.summary.overall_slo_achievement_pct === null ? t("notMeasuredHint") : undefined}
+                                >
+                                    {formatMetricPct(summary.summary.overall_slo_achievement_pct)}
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -159,39 +180,51 @@ export default function AnalyticsPage() {
                             {t("mttrTitle")}
                         </h2>
                         <div className="space-y-4">
-                            {summary.mttr.map((m: MTTRResult) => (
-                                <div key={m.severity} className="flex items-center gap-4">
-                                    <div className={`w-20 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(m.severity)} ${getSeverityColor(m.severity)}`}>
-                                        {m.severity}
-                                    </div>
-                                    <div className="flex-1">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <span className="text-sm">
-                                                {formatHours(m.mttr_hours)}
-                                                <span className="text-muted-foreground ml-1">
-                                                    ({m.count} {t("cases")})
+                            {summary.mttr.map((m: MTTRResult) => {
+                                // M49: an unmeasured severity gets no bar and no
+                                // verdict icon. Feeding null into
+                                // (mttr_hours / target_hours) would coerce to 0
+                                // and paint a full-width green "on target" bar
+                                // for a severity nobody has ever remediated.
+                                const measured = m.mttr_hours !== null && m.mttr_hours !== undefined;
+                                return (
+                                    <div key={m.severity} className="flex items-center gap-4">
+                                        <div className={`w-20 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(m.severity)} ${getSeverityColor(m.severity)}`}>
+                                            {m.severity}
+                                        </div>
+                                        <div className="flex-1">
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className={`text-sm${measured ? '' : ' text-muted-foreground'}`}>
+                                                    {formatMetricHours(m.mttr_hours)}
+                                                    <span className="text-muted-foreground ml-1">
+                                                        ({m.count} {t("cases")})
+                                                    </span>
                                                 </span>
-                                            </span>
-                                            <span className="text-sm text-muted-foreground">
-                                                {t("target")}: {formatHours(m.target_hours)}
-                                            </span>
+                                                <span className="text-sm text-muted-foreground">
+                                                    {t("target")}: {formatHours(m.target_hours)}
+                                                </span>
+                                            </div>
+                                            <div className="h-2 bg-muted rounded-full overflow-hidden">
+                                                {measured && (
+                                                    <div
+                                                        className={`h-full rounded-full transition-all ${m.on_target ? 'bg-green-500' : 'bg-red-500'}`}
+                                                        style={{
+                                                            width: `${Math.min(100, (m.mttr_hours! / m.target_hours) * 100)}%`
+                                                        }}
+                                                    />
+                                                )}
+                                            </div>
                                         </div>
-                                        <div className="h-2 bg-muted rounded-full overflow-hidden">
-                                            <div
-                                                className={`h-full rounded-full transition-all ${m.on_target ? 'bg-green-500' : 'bg-red-500'}`}
-                                                style={{
-                                                    width: `${Math.min(100, (m.mttr_hours / m.target_hours) * 100)}%`
-                                                }}
-                                            />
-                                        </div>
+                                        {m.on_target === null || m.on_target === undefined ? (
+                                            <MinusCircle className="w-5 h-5 text-muted-foreground" aria-label={t("notMeasured")} />
+                                        ) : m.on_target ? (
+                                            <CheckCircle2 className="w-5 h-5 text-green-500" />
+                                        ) : (
+                                            <AlertTriangle className="w-5 h-5 text-red-500" />
+                                        )}
                                     </div>
-                                    {m.on_target ? (
-                                        <CheckCircle2 className="w-5 h-5 text-green-500" />
-                                    ) : (
-                                        <AlertTriangle className="w-5 h-5 text-red-500" />
-                                    )}
-                                </div>
-                            ))}
+                                );
+                            })}
                         </div>
                     </div>
                 )}
@@ -204,29 +237,38 @@ export default function AnalyticsPage() {
                             {t("sloTitle")}
                         </h2>
                         <div className="space-y-4">
-                            {summary.slo_achievement.map((slo: SLOAchievement) => (
-                                <div key={slo.severity} className="flex items-center gap-4">
-                                    <div className={`w-20 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(slo.severity)} ${getSeverityColor(slo.severity)}`}>
-                                        {slo.severity}
-                                    </div>
-                                    <div className="flex-1">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <span className="text-sm font-medium">
-                                                {slo.achievement_pct.toFixed(1)}%
-                                            </span>
-                                            <span className="text-sm text-muted-foreground">
-                                                {slo.on_target_count}/{slo.total_count} {t("cases")}
-                                            </span>
+                            {summary.slo_achievement.map((slo: SLOAchievement) => {
+                                // M49: null achievement_pct means the window
+                                // contained no resolved vulnerability of this
+                                // severity — there is no ratio, so no bar.
+                                const pct = slo.achievement_pct;
+                                const measured = pct !== null && pct !== undefined;
+                                return (
+                                    <div key={slo.severity} className="flex items-center gap-4">
+                                        <div className={`w-20 px-2 py-1 rounded text-center text-sm font-medium ${getSeverityBgColor(slo.severity)} ${getSeverityColor(slo.severity)}`}>
+                                            {slo.severity}
                                         </div>
-                                        <div className="h-2 bg-muted rounded-full overflow-hidden">
-                                            <div
-                                                className={`h-full rounded-full transition-all ${slo.achievement_pct >= 80 ? 'bg-green-500' : slo.achievement_pct >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`}
-                                                style={{ width: `${slo.achievement_pct}%` }}
-                                            />
+                                        <div className="flex-1">
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className={`text-sm font-medium${measured ? '' : ' text-muted-foreground'}`}>
+                                                    {formatMetricPct(pct)}
+                                                </span>
+                                                <span className="text-sm text-muted-foreground">
+                                                    {slo.on_target_count}/{slo.total_count} {t("cases")}
+                                                </span>
+                                            </div>
+                                            <div className="h-2 bg-muted rounded-full overflow-hidden">
+                                                {measured && (
+                                                    <div
+                                                        className={`h-full rounded-full transition-all ${pct! >= 80 ? 'bg-green-500' : pct! >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                                                        style={{ width: `${pct}%` }}
+                                                    />
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                            ))}
+                                );
+                            })}
                         </div>
                         <div className="mt-4 pt-4 border-t border-border">
                             <p className="text-sm text-muted-foreground">
@@ -299,27 +341,54 @@ export default function AnalyticsPage() {
                         <ShieldCheck className="w-5 h-5" />
                         {t("complianceScoreTrend")}
                     </h2>
+                    {/* M49: compliance_max_score is 0 until a checklist exists.
+                        "0/0" is the ABSENCE of an assessment, not a score of
+                        zero, and the ratio would render literally as "NaN%".
+                        The whole headline becomes the not-measured label rather
+                        than half a number and half a label. */}
                     <div className="flex items-center gap-4 mb-4">
-                        <div className="text-3xl font-bold">
-                            {summary.summary.current_compliance_score}/{summary.summary.compliance_max_score}
-                        </div>
-                        <div className="text-muted-foreground">
-                            ({((summary.summary.current_compliance_score / summary.summary.compliance_max_score) * 100).toFixed(1)}%)
-                        </div>
+                        {summary.summary.compliance_max_score > 0 ? (
+                            <>
+                                <div className="text-3xl font-bold">
+                                    {summary.summary.current_compliance_score}/{summary.summary.compliance_max_score}
+                                </div>
+                                <div className="text-muted-foreground">
+                                    ({((summary.summary.current_compliance_score / summary.summary.compliance_max_score) * 100).toFixed(1)}%)
+                                </div>
+                            </>
+                        ) : (
+                            <div
+                                className="text-3xl font-bold text-muted-foreground"
+                                title={t("notMeasuredComplianceHint")}
+                            >
+                                {t("notMeasured")}
+                            </div>
+                        )}
                     </div>
                     <div className="space-y-2">
-                        {summary.compliance_trend.slice(-7).map((point, index) => (
-                            <div key={index} className="flex items-center gap-4">
-                                <span className="w-24 text-sm text-muted-foreground">{point.date}</span>
-                                <div className="flex-1 h-4 bg-muted rounded-full overflow-hidden">
-                                    <div
-                                        className="h-full bg-primary rounded-full"
-                                        style={{ width: `${point.percentage}%` }}
-                                    />
+                        {summary.compliance_trend.slice(-7).map((point, index) => {
+                            // M49: a snapshot with max_score 0 has no checklist
+                            // configured, so its ratio is undefined. Rendering a
+                            // 0%-wide bar would claim a measured 0% compliance
+                            // and contradict the headline tile above.
+                            const measured = point.percentage !== null && point.percentage !== undefined;
+                            return (
+                                <div key={index} className="flex items-center gap-4">
+                                    <span className="w-24 text-sm text-muted-foreground">{point.date}</span>
+                                    <div className="flex-1 h-4 bg-muted rounded-full overflow-hidden">
+                                        {measured && (
+                                            <div
+                                                className="h-full bg-primary rounded-full"
+                                                style={{ width: `${point.percentage}%` }}
+                                            />
+                                        )}
+                                    </div>
+                                    <span className={`w-12 text-sm text-right${measured ? '' : ' text-muted-foreground'}`}>
+                                        {measured ? `${point.percentage!.toFixed(0)}%` : '—'}
+                                    </span>
                                 </div>
-                                <span className="w-12 text-sm text-right">{point.percentage.toFixed(0)}%</span>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             )}

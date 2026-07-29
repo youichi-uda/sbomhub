@@ -1045,15 +1045,21 @@ func TestWave3AnalyticsReads_NullableExpressions(t *testing.T) {
 		} else {
 			// snapshot_date ASC: populated (yesterday) first, zero-max today.
 			pop, zero := points[0], points[1]
-			if pop.Score != 80 || pop.MaxScore != 100 || pop.Percentage != 80.0 ||
+			if pop.Score != 80 || pop.MaxScore != 100 ||
+				pop.Percentage == nil || *pop.Percentage != 80.0 ||
 				pop.SBOMScore != 30 || pop.VulnerabilityScore != 40 || pop.LicenseScore != 10 {
 				t.Errorf("GetComplianceTrend(pop) round-trip mismatch: %+v", pop)
 			}
 			if zero.MaxScore != 0 {
 				t.Errorf("GetComplianceTrend(zero): MaxScore = %d, want 0", zero.MaxScore)
 			}
-			if zero.Percentage != 0 {
-				t.Errorf("GetComplianceTrend(zero): Percentage = %v, want 0 (NULL ratio reads as 0%%)", zero.Percentage)
+			// M49 (inverted from the pre-fix contract): this assertion used to
+			// require Percentage == 0, pinning "an unassessed tenant is 0%
+			// compliant". max_score = 0 means no checklist exists, so the
+			// ratio is undefined, not zero.
+			if zero.Percentage != nil {
+				t.Errorf("GetComplianceTrend(zero): Percentage = %v, want nil (max_score 0 = no "+
+					"checklist configured, not 0%% compliance)", *zero.Percentage)
 			}
 		}
 
@@ -1068,14 +1074,18 @@ func TestWave3AnalyticsReads_NullableExpressions(t *testing.T) {
 		for _, a := range achievements {
 			bySev[a.Severity] = a
 		}
+		// M49: the guard path now yields NULL, not 100.0 — "no resolved rows"
+		// is not "perfect SLO compliance". (This assertion previously pinned
+		// the sentinel; see m49_mttr_unmeasured_integration_test.go.)
 		if crit, ok := bySev["CRITICAL"]; !ok {
 			t.Errorf("GetSLOAchievement missing CRITICAL row")
-		} else if crit.TotalCount != 0 || crit.AchievementPct != 100.0 {
-			t.Errorf("GetSLOAchievement CRITICAL = %+v, want total 0 / pct 100 (guard path)", crit)
+		} else if crit.TotalCount != 0 || crit.AchievementPct != nil || crit.AverageMTTR != nil {
+			t.Errorf("GetSLOAchievement CRITICAL = %+v, want total 0 / pct nil / avg nil (unmeasured guard path)", crit)
 		}
 		if high, ok := bySev["HIGH"]; !ok {
 			t.Errorf("GetSLOAchievement missing HIGH row")
-		} else if high.TotalCount != 1 || high.OnTargetCount != 0 || high.AchievementPct != 0.0 {
+		} else if high.TotalCount != 1 || high.OnTargetCount != 0 ||
+			high.AchievementPct == nil || *high.AchievementPct != 0.0 {
 			t.Errorf("GetSLOAchievement HIGH = %+v, want total 1 / on-target 0 / pct 0 (ELSE path)", high)
 		}
 	})

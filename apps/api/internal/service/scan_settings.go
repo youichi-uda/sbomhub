@@ -276,6 +276,64 @@ func isValidScheduleType(t string) bool {
 	return false
 }
 
+// DefaultWeeklyScanDay is the weekday a weekly scan runs on when
+// scan_settings.schedule_day carries no choice.
+//
+// M49: schedule_day is the one column in scan_settings that is DDL-nullable
+// with NO default (measured 2026-07-30, dev DB: 31 rows, 31 NULL), so "the
+// operator never picked a weekday" is a genuine NULL rather than a stored
+// number. Two independent readers used to answer that NULL differently —
+// this service defaulted to 1 (Monday), while scheduler.updateNextScan read
+// sql.NullInt64 and used .Int64 without checking .Valid, yielding 0
+// (Sunday). The two answers disagreed by a day for every weekly tenant that
+// never touched the weekday selector.
+//
+// Monday (time.Monday == 1) is the value kept, not 0, because it is the one
+// the persisted data and the UI already assume:
+//
+//   - ScanSettingsService.Update is the WRITER: it computes next_scan_at via
+//     calculateNextScan, so every next_scan_at already stored for a
+//     NULL-day weekly tenant is a Monday. Switching the default to Sunday
+//     would silently move those tenants.
+//   - The settings page renders `settings.schedule_day ?? 1`
+//     (apps/web/src/app/[locale]/(dashboard)/settings/scan/page.tsx), so an
+//     operator who never opened the weekday selector was shown "Monday" and
+//     expects Monday.
+//
+// 0 (Sunday) remains a perfectly legal STORED value — Update validates the
+// input range as 0..6 — it is simply not what "unset" means.
+const DefaultWeeklyScanDay = int(time.Monday)
+
+// WeeklyScanDay resolves a stored scan_settings.schedule_day to the weekday
+// a weekly scan should run on. nil (SQL NULL) means "never chosen" and maps
+// to DefaultWeeklyScanDay; so does an out-of-range value, which the API
+// validation rejects on the way in but which nothing in the schema prevents
+// from already sitting in the table (scan_settings carries no CHECK
+// constraint on the column — verified 2026-07-30).
+//
+// This is the single source of truth for that decision: both
+// calculateNextScan (writer, this package) and
+// scheduler.VulnerabilityScanJob.updateNextScan (reader) go through it.
+func WeeklyScanDay(day *int) int {
+	if day == nil || *day < int(time.Sunday) || *day > int(time.Saturday) {
+		return DefaultWeeklyScanDay
+	}
+	return *day
+}
+
+// NextWeeklyScan returns the next instant a weekly scan scheduled for
+// weekday `day` at `hour` should run, relative to now. A nil day is resolved
+// through WeeklyScanDay. When today already IS the target weekday and the
+// hour has passed, the next occurrence is a full week out.
+func NextWeeklyScan(now time.Time, hour int, day *int) time.Time {
+	targetDay := WeeklyScanDay(day)
+	daysUntil := (7 + targetDay - int(now.Weekday())) % 7
+	if daysUntil == 0 && now.Hour() >= hour {
+		daysUntil = 7
+	}
+	return time.Date(now.Year(), now.Month(), now.Day()+daysUntil, hour, 0, 0, 0, now.Location())
+}
+
 func calculateNextScan(scheduleType string, hour int, day *int) time.Time {
 	now := time.Now()
 
@@ -289,15 +347,7 @@ func calculateNextScan(scheduleType string, hour int, day *int) time.Time {
 		}
 		return next
 	case "weekly":
-		targetDay := 1 // Monday by default
-		if day != nil {
-			targetDay = *day
-		}
-		daysUntil := (7 + targetDay - int(now.Weekday())) % 7
-		if daysUntil == 0 && now.Hour() >= hour {
-			daysUntil = 7
-		}
-		return time.Date(now.Year(), now.Month(), now.Day()+daysUntil, hour, 0, 0, 0, now.Location())
+		return NextWeeklyScan(now, hour, day)
 	}
 
 	return now.Add(24 * time.Hour)

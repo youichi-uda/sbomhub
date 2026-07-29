@@ -88,17 +88,24 @@ type ExecutiveReportData struct {
 	TopRisks          []TopRisk                `json:"top_risks"`
 }
 
-// ReportSummary contains summary statistics for a report
+// ReportSummary contains summary statistics for a report.
+//
+// M49: AverageMTTRHours / SLOAchievementPct are POINTERS, mirroring
+// AnalyticsQuickStats which is where they are copied from. A report is
+// evidence handed to an auditor, so "0.0 hours" and "100.0%" must never
+// stand in for "we have no measurement" — nil renders as the locale's
+// NotMeasured label (see reportMTTRText / reportPercentText), never as a
+// number.
 type ReportSummary struct {
-	TotalProjects        int     `json:"total_projects"`
-	TotalComponents      int     `json:"total_components"`
-	TotalVulnerabilities int     `json:"total_vulnerabilities"`
-	ResolvedInPeriod     int     `json:"resolved_in_period"`
-	NewInPeriod          int     `json:"new_in_period"`
-	AverageMTTRHours     float64 `json:"average_mttr_hours"`
-	SLOAchievementPct    float64 `json:"slo_achievement_pct"`
-	ComplianceScore      int     `json:"compliance_score"`
-	ComplianceMaxScore   int     `json:"compliance_max_score"`
+	TotalProjects        int      `json:"total_projects"`
+	TotalComponents      int      `json:"total_components"`
+	TotalVulnerabilities int      `json:"total_vulnerabilities"`
+	ResolvedInPeriod     int      `json:"resolved_in_period"`
+	NewInPeriod          int      `json:"new_in_period"`
+	AverageMTTRHours     *float64 `json:"average_mttr_hours"`
+	SLOAchievementPct    *float64 `json:"slo_achievement_pct"`
+	ComplianceScore      int      `json:"compliance_score"`
+	ComplianceMaxScore   int      `json:"compliance_max_score"`
 }
 
 // VulnReportData contains vulnerability statistics

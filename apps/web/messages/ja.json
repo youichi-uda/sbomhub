@@ -645,7 +645,10 @@
     "vulnerabilityTrend": "脆弱性トレンド",
     "complianceScoreTrend": "コンプライアンススコア推移",
     "noData": "データがありません",
-    "noDataDescription": "脆弱性の検出・解決データが蓄積されると、トレンド分析が表示されます。"
+    "noDataDescription": "脆弱性の検出・解決データが蓄積されると、トレンド分析が表示されます。",
+    "notMeasured": "未計測",
+    "notMeasuredHint": "選択期間内に解決済みの脆弱性がないため計測できません",
+    "notMeasuredComplianceHint": "チェックリストが未設定のため計測できません"
   },
   "Reports": {
     "title": "レポート",
