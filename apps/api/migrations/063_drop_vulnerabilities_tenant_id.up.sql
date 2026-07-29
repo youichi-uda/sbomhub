@@ -91,16 +91,22 @@
 --   The values are discarded. Their provenance is UNSUPPORTED — we cannot say
 --   what a non-NULL value meant, and that is precisely the point (Codex round
 --   2, #7: round 1 asserted it recorded "the tenant that created the CVE row
---   first", which contradicts this file's own writer analysis — no product
---   INSERT has ever supplied the column, so no product path could have
---   recorded a first-requester).
+--   first", which contradicts this file's own writer analysis).
 --
---   The only writers we can identify are the two E2E fixtures named above; a
---   non-NULL value on any other instance could only have come from operator
---   SQL or some historical path not present in this tree, and nothing else in
---   the schema recorded it, so it cannot be reconstructed or attributed. The
---   column was never read, so nothing depended on whatever it held. On the dev
---   DB this drop is a no-op (0 non-NULL rows measured 2026-07-30); an instance
+--   What IS established: no product path IN THIS TREE OR ITS REACHABLE GIT
+--   HISTORY supplies or reads the column (`git log --all -G 'INSERT INTO
+--   vulnerabilities[^;]*tenant_id'` finds only the two E2E fixtures named
+--   above). What is NOT established, and cannot be: what every historical
+--   deployed build did. The scope qualifier matters — round 2 wrote "ever",
+--   which the search cannot support and which contradicts the very
+--   possibility this paragraph goes on to allow (Codex round 3, #4).
+--
+--   So a non-NULL value on some other instance could have come from operator
+--   SQL or a path not present here; nothing else in the schema recorded it,
+--   so it cannot be reconstructed or attributed, and after the drop the
+--   database cannot identify its writer either. No reader in this tree
+--   consumed it, so nothing here depended on whatever it held. On the dev DB
+--   this drop is a no-op (0 non-NULL rows measured 2026-07-30); an instance
 --   seeded through docker/seed/web-e2e.sql will have a handful of rows
 --   carrying the fixture tenant id.
 --

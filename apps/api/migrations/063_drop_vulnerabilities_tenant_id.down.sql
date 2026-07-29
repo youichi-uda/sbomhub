@@ -12,14 +12,16 @@
 -- DATA IS NOT RESTORED, and cannot be. 063 discards the column's contents;
 -- nothing else in the schema recorded them, so after this down every row has
 -- tenant_id NULL. That loss is intentional. What the values MEANT is
--- unsupported — no product INSERT ever supplied the column, so the only
--- writers we can name are E2E fixtures, and any other non-NULL value could
--- only have come from operator SQL or a historical path not in this tree
--- (Codex round 2, #7 — the earlier wording here claimed they recorded the
--- tenant that created the row first, which the writer analysis contradicts).
--- Nothing ever read the column, so nothing depended on whatever it held, and
--- there is no correct value to reconstruct for a row shared by every tenant —
--- which is the finding 063 fixes.
+-- unsupported: no product INSERT in this tree or its reachable git history
+-- supplies the column, so the only writers we can name are E2E fixtures, and
+-- any other non-NULL value could only have come from operator SQL or a
+-- historical path not present here (Codex round 2 #7 — the earlier wording
+-- claimed they recorded the tenant that created the row first, which the
+-- writer analysis contradicts; round 3 #4 — and "ever" overreached what the
+-- search can establish, so the claim is scoped to this tree and its reachable
+-- history). No reader in this tree consumed the column, so nothing here
+-- depended on whatever it held, and there is no correct value to reconstruct
+-- for a row shared by every tenant — which is the finding 063 fixes.
 --
 -- What this down does NOT restore is the property that made the column
 -- dangerous: it comes back as a column that still has no reader, no writer,
@@ -44,15 +46,28 @@
 --   column, so this down is what makes replaying one of them possible again.
 -- ============================================
 
--- LOCK BUDGET (Codex round 2, Medium): same reasoning as the up migration —
--- `ALTER TABLE ... ADD COLUMN` takes ACCESS EXCLUSIVE and `CREATE INDEX`
--- (non-CONCURRENTLY) takes SHARE, both of which queue behind a live reader and
--- then block everything queued behind them. Round 1 added the budget to the up
--- migration only; round 2 measured this file still waiting indefinitely (held
--- ACCESS SHARE for 8s, ran the real `migrate down 1`, observed it block until
--- the holder committed, with no timeout). The runner wraps a down migration in
--- one transaction too, so a timeout rolls back the DDL and restores the
--- schema_migrations row together.
+-- LOCK BUDGET (Codex round 2, Medium): the two statements below do NOT have
+-- the same lock profile, and round 2's wording that they did was wrong
+-- (corrected in round 3, #2 — measured via pg_locks):
+--
+--   * `ALTER TABLE ... ADD COLUMN ... REFERENCES` takes ACCESS EXCLUSIVE on
+--     `vulnerabilities`. It conflicts with READERS, so a live SELECT holding
+--     ACCESS SHARE blocks it — and every request queued behind it.
+--   * non-CONCURRENT `CREATE INDEX` takes SHARE, which is COMPATIBLE with a
+--     reader's ACCESS SHARE (both were observed granted simultaneously). It
+--     conflicts with WRITERS (ROW EXCLUSIVE), so it waits behind INSERT /
+--     UPDATE / DELETE on the table instead.
+--
+-- Either way the wait is unbounded without a budget: round 2 held ACCESS SHARE
+-- for 8s, ran the real `migrate down 1`, and observed it block until the
+-- holder committed with no timeout; round 3 re-ran it with this budget in
+-- place and measured failure at 5.034s with `canceling statement due to lock
+-- timeout`, after which a catalog fingerprint (24 objects: columns, defaults,
+-- indexes, constraints, RLS flags) was byte-identical to the pre-run state and
+-- the 063 schema_migrations row still carried its original timestamp.
+--
+-- The runner wraps a down migration in one transaction, which is what makes
+-- that clean rollback possible.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE vulnerabilities
