@@ -70,8 +70,11 @@ records each with a one-line justification (see
 `tools/lint-migration-rls/main.go::structuralExemptions`):
 
   - `tenant_users` — membership join table; RLS would be self-referential.
-  - `vulnerabilities` — global CVE / advisory data shared across tenants;
-    `tenant_id` is a soft-join hint with `ON DELETE SET NULL`.
+  - `vulnerabilities` — global CVE / advisory data shared across tenants.
+    007 added a `tenant_id` column here; **063 dropped it** (dead column,
+    no reader, and its presence made the shared catalogue look scoped).
+    The exemption stays only because the lint scans migration files and
+    007's additive DDL is still one of them.
   - `public_links`, `public_link_access_logs` — RLS removed in 030 to
     allow the anonymous `/api/v1/public/:token` flow; tenant scope
     enforced application-side.

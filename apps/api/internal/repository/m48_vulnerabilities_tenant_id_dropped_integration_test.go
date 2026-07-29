@@ -99,10 +99,16 @@ func TestM48_VulnerabilitiesTenantIDDropped_NoColumn(t *testing.T) {
 }
 
 // TestM48_VulnerabilitiesTenantIDDropped_NoIndexOrFK pins the two objects the
-// column owned. They are asserted separately from the column because
-// `DROP COLUMN` removes both implicitly: a hand-rolled restore that re-added
-// only the column would pass the probe above while leaving the schema
-// asymmetric with 063's own down migration, which restores all three.
+// column owned, with a diagnostic that names which one came back.
+//
+// The probe above already fails if the column reappears at all — including a
+// hand-rolled restore that re-added ONLY the column (Codex round 1, #4: the
+// original comment here claimed such a restore would pass it, which is wrong;
+// that test detects the column via information_schema and t.Fatalf's either
+// way). What this test adds is coverage of the reverse asymmetry — an index or
+// FK left behind or restored without the column — and a failure message that
+// says which object is present, instead of leaving both to be inferred from a
+// column-level diagnostic.
 func TestM48_VulnerabilitiesTenantIDDropped_NoIndexOrFK(t *testing.T) {
 	migDB := openVulnSchemaProbeDB(t)
 

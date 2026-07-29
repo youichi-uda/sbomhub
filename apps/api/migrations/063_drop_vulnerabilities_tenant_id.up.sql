@@ -17,10 +17,16 @@
 --   ever behaved as if it were.
 --
 -- Why it is safe to drop — the column has no reader and no product writer:
---   * No SELECT, WHERE, JOIN or ORDER BY anywhere in apps/api/internal/**
---     references it. `vulnerabilities` is aliased `v` in 43 places and `kev`
---     in one; `v.tenant_id` / `kev.tenant_id` occur nowhere (the `v.tenant_id`
---     hits in migration 045 bind `v` to vex_statements, a different table).
+--   * No SELECT, WHERE, JOIN or ORDER BY in any DEPLOYED code path references
+--     it. `vulnerabilities` is aliased `v` in 43 places and `v.tenant_id`
+--     occurs nowhere (the `v.tenant_id` hits in migration 045 bind `v` to
+--     vex_statements, a different table).
+--     The one exception is deliberate and is not a deployed reader: this
+--     change's own regression test issues `SELECT COUNT(tenant_id) FROM
+--     vulnerabilities` as a negative control, and only after
+--     information_schema has proved the column came back (Codex round 1, #5 —
+--     the original wording here said "anywhere in apps/api/internal/**", which
+--     that test contradicts).
 --   * There is no `SELECT * FROM vulnerabilities` anywhere, so no query pulls
 --     the column in implicitly.
 --   * model.Vulnerability (Go) has no TenantID field and the TypeScript
@@ -114,6 +120,26 @@
 --   docker/seed/web-e2e.sql or scripts/golden-path-e2e.sh will fail with
 --   `column "tenant_id" of relation "vulnerabilities" does not exist`.
 -- ============================================
+
+-- LOCK BUDGET (Codex round 1, Medium):
+--   Both statements below need ACCESS EXCLUSIVE on `vulnerabilities`. The work
+--   itself is metadata-only and finishes in milliseconds regardless of row
+--   count — the risk is not the drop, it is WAITING for the lock. The migrator
+--   role runs with lock_timeout = 0, so on a live instance a single
+--   long-running reader holding ACCESS SHARE would make this migration block
+--   indefinitely, and (because it also queues ahead of subsequent lock
+--   requests) stall every other query against the table behind it.
+--
+--   A bounded timeout turns that from an outage into a retry: the runner wraps
+--   each migration file in one transaction (cmd/migrate/main.go — DDL and the
+--   schema_migrations row commit together), so a timeout rolls back the DDL
+--   AND the version record, leaving the database exactly as it was. Re-run
+--   `migrate up` when the table is quiet.
+--
+--   NOTE: 063 is the FIRST migration in this directory to set a lock budget;
+--   the other 62 all inherit lock_timeout = 0. That repo-wide gap is a real
+--   residual, not something this migration fixes.
+SET LOCAL lock_timeout = '5s';
 
 DROP INDEX IF EXISTS idx_vulnerabilities_tenant_id;
 

@@ -27,13 +27,13 @@
 // A table is treated as **tenant-scoped** and therefore subject to the RLS
 // check if EITHER:
 //
-//   (a) its name matches the project convention `tenant_*` (the post-036
-//       pattern, where every new tenant-scoped table carries the prefix
-//       precisely so a textual scan can pick it up), OR
-//   (b) its `CREATE TABLE` body declares a `tenant_id` column, OR
-//   (c) a later migration runs `ALTER TABLE <name> ADD COLUMN tenant_id`
-//       on it (the 007 multitenancy retrofit pattern — promoting an
-//       existing table to tenant-scoped after the fact).
+//	(a) its name matches the project convention `tenant_*` (the post-036
+//	    pattern, where every new tenant-scoped table carries the prefix
+//	    precisely so a textual scan can pick it up), OR
+//	(b) its `CREATE TABLE` body declares a `tenant_id` column, OR
+//	(c) a later migration runs `ALTER TABLE <name> ADD COLUMN tenant_id`
+//	    on it (the 007 multitenancy retrofit pattern — promoting an
+//	    existing table to tenant-scoped after the fact).
 //
 // (b) and (c) are F183 (M13-5 #91): the original 007/023 legacy schema
 // added `tenant_id` to existing tables (`projects`, `sboms`, …) and
@@ -732,15 +732,25 @@ var structuralExemptions = map[string]string{
 	// F183 (M13-5 #91) — legacy 007 schema, intentional design.
 	//
 	// CVE / vulnerability metadata is shared across tenants. Migration 007
-	// added a `tenant_id UUID … ON DELETE SET NULL` column for join
-	// convenience (a vulnerability "owned" by a tenant that has since
-	// deleted itself drops the link, the row stays as global advisory
-	// data) but never enabled RLS. See 007_multitenancy.up.sql, the
-	// trailing comment "vulnerabilities table doesn't have RLS as
-	// vulnerabilities are shared across tenants".
+	// added a `tenant_id UUID … ON DELETE SET NULL` column to this table
+	// but never enabled RLS. See 007_multitenancy.up.sql, the trailing
+	// comment "vulnerabilities table doesn't have RLS as vulnerabilities
+	// are shared across tenants".
+	//
+	// THE COLUMN IS GONE — migration 063 dropped it (it had no reader and
+	// no product writer, and its only effect was to make the shared
+	// catalogue look tenant-scoped). This exemption still has to exist
+	// because the linter scans migration FILES, and 007's additive
+	// `ALTER TABLE vulnerabilities ADD COLUMN tenant_id` is still in the
+	// directory and still trips detection. So this entry is now a
+	// statement about a historical DDL line, not about a live column
+	// (Codex round 1, #6 — the previous wording described the dropped
+	// column in the present tense as a "soft-join hint", preserving
+	// exactly the reading 063 set out to remove).
 	"vulnerabilities": "global CVE / advisory data shared across tenants. " +
-		"tenant_id is a soft-join hint (ON DELETE SET NULL), not an isolation boundary. " +
-		"Legacy 007 schema; intentionally not RLS-protected.",
+		"Migration 007 added a tenant_id column; migration 063 dropped it as a dead, " +
+		"misleading column. This exemption remains only because the linter still sees " +
+		"007's additive DDL. Legacy 007 schema; intentionally not RLS-protected.",
 
 	// F183 — RLS deliberately removed in 030 (Trust Rescue codex-r5 P1 #19).
 	//
