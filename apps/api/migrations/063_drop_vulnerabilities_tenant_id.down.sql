@@ -11,11 +11,15 @@
 --
 -- DATA IS NOT RESTORED, and cannot be. 063 discards the column's contents;
 -- nothing else in the schema recorded them, so after this down every row has
--- tenant_id NULL. That loss is intentional and is not a loss of anything
--- meaningful: the values were "whichever tenant's request happened to create
--- this shared CVE row first", never maintained afterwards and never read by
--- any code path. There is no correct value to reconstruct for a row that is
--- shared by every tenant — which is the finding 063 fixes.
+-- tenant_id NULL. That loss is intentional. What the values MEANT is
+-- unsupported — no product INSERT ever supplied the column, so the only
+-- writers we can name are E2E fixtures, and any other non-NULL value could
+-- only have come from operator SQL or a historical path not in this tree
+-- (Codex round 2, #7 — the earlier wording here claimed they recorded the
+-- tenant that created the row first, which the writer analysis contradicts).
+-- Nothing ever read the column, so nothing depended on whatever it held, and
+-- there is no correct value to reconstruct for a row shared by every tenant —
+-- which is the finding 063 fixes.
 --
 -- What this down does NOT restore is the property that made the column
 -- dangerous: it comes back as a column that still has no reader, no writer,
@@ -39,6 +43,17 @@
 --   default beyond NULL). A pre-M48 checkout of those fixtures requires the
 --   column, so this down is what makes replaying one of them possible again.
 -- ============================================
+
+-- LOCK BUDGET (Codex round 2, Medium): same reasoning as the up migration —
+-- `ALTER TABLE ... ADD COLUMN` takes ACCESS EXCLUSIVE and `CREATE INDEX`
+-- (non-CONCURRENTLY) takes SHARE, both of which queue behind a live reader and
+-- then block everything queued behind them. Round 1 added the budget to the up
+-- migration only; round 2 measured this file still waiting indefinitely (held
+-- ACCESS SHARE for 8s, ran the real `migrate down 1`, observed it block until
+-- the holder committed, with no timeout). The runner wraps a down migration in
+-- one transaction too, so a timeout rolls back the DDL and restores the
+-- schema_migrations row together.
+SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE vulnerabilities
     ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL;

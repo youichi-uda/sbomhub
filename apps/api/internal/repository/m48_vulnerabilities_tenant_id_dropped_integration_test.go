@@ -98,17 +98,25 @@ func TestM48_VulnerabilitiesTenantIDDropped_NoColumn(t *testing.T) {
 		"mistake made with ssvc_decision)", nonNull)
 }
 
-// TestM48_VulnerabilitiesTenantIDDropped_NoIndexOrFK pins the two objects the
-// column owned, with a diagnostic that names which one came back.
+// TestM48_VulnerabilitiesTenantIDDropped_NoIndexOrFK asserts the broader
+// invariant: `vulnerabilities` carries no tenant-shaped object at all, not
+// just no tenant_id column.
 //
-// The probe above already fails if the column reappears at all — including a
-// hand-rolled restore that re-added ONLY the column (Codex round 1, #4: the
-// original comment here claimed such a restore would pass it, which is wrong;
-// that test detects the column via information_schema and t.Fatalf's either
-// way). What this test adds is coverage of the reverse asymmetry — an index or
-// FK left behind or restored without the column — and a failure message that
-// says which object is present, instead of leaving both to be inferred from a
-// column-level diagnostic.
+// It is NOT the case that this test catches something the column probe above
+// misses via the column being restored on its own — that probe detects the
+// column through information_schema and fails either way (Codex round 1 #4),
+// and an index or FK cannot exist without the column in the first place:
+// PostgreSQL rejects `CREATE INDEX … (tenant_id)` and the FK clause with
+// `column "tenant_id" does not exist`, and DROP COLUMN removes both dependents
+// atomically (Codex round 2 #4 — round 1 replaced one wrong rationale with
+// another, inventing a "reverse asymmetry" that the database makes
+// unreachable).
+//
+// What it does buy: it catches a same-named index built over a DIFFERENT
+// column, or any other vulnerabilities → tenants foreign key introduced later
+// under a different column name — neither of which the column probe sees — and
+// it names which object is present instead of leaving that to be inferred from
+// a column-level diagnostic.
 func TestM48_VulnerabilitiesTenantIDDropped_NoIndexOrFK(t *testing.T) {
 	migDB := openVulnSchemaProbeDB(t)
 

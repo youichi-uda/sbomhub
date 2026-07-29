@@ -18,9 +18,13 @@
 --
 -- Why it is safe to drop — the column has no reader and no product writer:
 --   * No SELECT, WHERE, JOIN or ORDER BY in any DEPLOYED code path references
---     it. `vulnerabilities` is aliased `v` in 43 places and `v.tenant_id`
---     occurs nowhere (the `v.tenant_id` hits in migration 045 bind `v` to
---     vex_statements, a different table).
+--     it. `vulnerabilities` is most often aliased `v`, and `v.tenant_id`
+--     occurs in no deployed query (the `v.tenant_id` hits in migration 045
+--     bind `v` to vex_statements, a different table). No alias count is
+--     quoted here on purpose: round 1 carried a "43 places" figure that does
+--     not reproduce under any defensible scope (44 textual / 42 excluding
+--     comments), and a brittle number invites the next reader to trust it
+--     rather than re-run the search (Codex round 2, #5).
 --     The one exception is deliberate and is not a deployed reader: this
 --     change's own regression test issues `SELECT COUNT(tenant_id) FROM
 --     vulnerabilities` as a negative control, and only after
@@ -32,11 +36,12 @@
 --   * model.Vulnerability (Go) has no TenantID field and the TypeScript
 --     `Vulnerability` interface in apps/web/src/lib/api.ts has no tenant_id —
 --     the column has never crossed the API boundary in either direction.
---   * VulnerabilityRepository.Upsert's INSERT column list is
---     (id, cve_id, description, severity, cvss_score, source, published_at,
---     updated_at) and the CVE-sync scheduler's insert is the same shape:
---     neither names tenant_id, so every row the product creates leaves it
---     NULL. No UPDATE statement in the tree sets it.
+--   * VulnerabilityRepository.Create (the upsert — INSERT … ON CONFLICT DO
+--     UPDATE; there is no method named Upsert, Codex round 2 #6) has the
+--     INSERT column list (id, cve_id, description, severity, cvss_score,
+--     source, published_at, updated_at) and the CVE-sync scheduler's insert is
+--     the same shape: neither names tenant_id, so every row the product
+--     creates leaves it NULL. No UPDATE statement in the tree sets it.
 --   * The only writers in the repository were two E2E fixtures —
 --     docker/seed/web-e2e.sql (4 rows, tenant …0001) and
 --     scripts/golden-path-e2e.sh (1 row, explicit NULL). Both are updated in
@@ -83,15 +88,21 @@
 --   about a historical DDL line rather than about a live column.
 --
 -- Existing data:
---   Any non-NULL value here recorded "the tenant on whose behalf this CVE row
---   happened to be created first", which was never used for anything and was
---   never maintained: a CVE seen by ten tenants keeps whichever tenant's id
---   landed first, and ON DELETE SET NULL erases even that when the tenant
---   goes away. It is not a source of truth for any question, so the values
---   are discarded. On the dev DB this drop is a no-op (0 non-NULL rows); an
---   instance seeded through docker/seed/web-e2e.sql will have a handful of
---   rows carrying the fixture tenant id, and those are the arbitrary-first-
---   writer values described above.
+--   The values are discarded. Their provenance is UNSUPPORTED — we cannot say
+--   what a non-NULL value meant, and that is precisely the point (Codex round
+--   2, #7: round 1 asserted it recorded "the tenant that created the CVE row
+--   first", which contradicts this file's own writer analysis — no product
+--   INSERT has ever supplied the column, so no product path could have
+--   recorded a first-requester).
+--
+--   The only writers we can identify are the two E2E fixtures named above; a
+--   non-NULL value on any other instance could only have come from operator
+--   SQL or some historical path not present in this tree, and nothing else in
+--   the schema recorded it, so it cannot be reconstructed or attributed. The
+--   column was never read, so nothing depended on whatever it held. On the dev
+--   DB this drop is a no-op (0 non-NULL rows measured 2026-07-30); an instance
+--   seeded through docker/seed/web-e2e.sql will have a handful of rows
+--   carrying the fixture tenant id.
 --
 -- RLS:
 --   `vulnerabilities` has relrowsecurity = false, relforcerowsecurity = false
