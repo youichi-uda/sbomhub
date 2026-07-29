@@ -94,6 +94,23 @@ func (s *AnalyticsService) GetSummary(ctx context.Context, tenantID uuid.UUID, d
 	// invented.
 	stats.OverallSLOAchievementPct = overallSLOAchievement(sloAchievement)
 
+	// M49 follow-up (Codex): AverageMTTRHours has to be re-derived here for
+	// the same reason OverallSLOAchievementPct is, and M49 fixed only the
+	// report path's copy of this defect.
+	//
+	// GetQuickStats takes no date arguments — its MTTR query is hard-wired to
+	// the last 30 days. Every other field of the response (MTTR, SLOAchievement,
+	// VulnerabilityTrend, ComplianceTrend) is computed over [start, now] from
+	// the caller's `days`. So on a 90-day view whose only remediation was 45
+	// days ago, the panel listed that remediation while the headline above it
+	// read "not measured", and the headline's tooltip claimed nothing had been
+	// resolved in the selected period. Two numbers on one screen, disagreeing,
+	// with the smaller-scoped one presented as the summary of the larger.
+	//
+	// aggregatePeriodMTTR is the same count-weighted collapse the report path
+	// uses, over the period-scoped rows already fetched above.
+	_, stats.AverageMTTRHours = aggregatePeriodMTTR(mttr)
+
 	return &model.AnalyticsSummary{
 		Period:             days,
 		MTTR:               mttr,

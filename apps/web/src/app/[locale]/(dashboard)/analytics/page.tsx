@@ -383,8 +383,11 @@ export default function AnalyticsPage() {
                                             />
                                         )}
                                     </div>
-                                    <span className={`w-12 text-sm text-right${measured ? '' : ' text-muted-foreground'}`}>
-                                        {measured ? `${point.percentage!.toFixed(0)}%` : '—'}
+                                    <span
+                                        className={`w-24 text-sm text-right${measured ? '' : ' text-muted-foreground'}`}
+                                        title={measured ? undefined : t("notMeasuredComplianceHint")}
+                                    >
+                                        {measured ? `${point.percentage!.toFixed(0)}%` : t("notMeasured")}
                                     </span>
                                 </div>
                             );

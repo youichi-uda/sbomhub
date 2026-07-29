@@ -312,3 +312,77 @@ func TestM49MTTR_GetSummary_PartiallyMeasuredKeepsEverySeverity(t *testing.T) {
 		}
 	}
 }
+
+// TestM49MTTR_GetSummary_HeadlineUsesTheSelectedPeriodNotLast30Days pins the
+// dashboard-side twin of TestM49MTTR_GatherReportData_UsesTheReportPeriodNotLast30Days.
+//
+// M49 fixed the report path's copy of this defect and left the summary path's.
+// GetSummary computes MTTR, SLOAchievement, VulnerabilityTrend and
+// ComplianceTrend over [now-days, now], but took the headline
+// AverageMTTRHours straight from GetQuickStats, whose MTTR query takes no date
+// arguments and is hard-wired to the last 30 days.
+//
+// The visible result on a 90-day view whose only remediation was 60 days ago:
+// the MTTR panel listed that remediation while the headline directly above it
+// read "not measured", and the headline's tooltip told the operator nothing had
+// been resolved in the selected period. Two numbers on one screen contradicting
+// each other, with the narrower-scoped one presented as the summary of the
+// wider (found by Codex on the frontend review, which traced the tooltip's
+// claim back to its source).
+//
+// OverallSLOAchievementPct was already re-derived from the period-scoped rows,
+// so this also pins the two headline fields to the SAME window as each other.
+func TestM49MTTR_GetSummary_HeadlineUsesTheSelectedPeriodNotLast30Days(t *testing.T) {
+	appURL, migURL := wave3SvcEnv(t)
+
+	migDB := wave3SvcOpenOrSkip(t, migURL)
+	appDB := wave3SvcOpenOrSkip(t, appURL)
+
+	tenant := wave3SvcSeedTenant(t, migDB, "m49-summary-period")
+	// Resolved 60 days ago, having taken 48h: inside a 90-day view, outside a
+	// 30-day one.
+	seedM49ReportEvents(t, migDB, tenant, "CRITICAL", 60, 48)
+
+	svc := NewAnalyticsService(repository.NewAnalyticsRepository(appDB), nil)
+
+	summarize := func(days int) *model.AnalyticsSummary {
+		t.Helper()
+		tx, err := appDB.Begin()
+		if err != nil {
+			t.Fatalf("begin tenant tx: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(`SET LOCAL app.current_tenant_id = '` + tenant.String() + `'`); err != nil {
+			t.Fatalf("SET LOCAL: %v", err)
+		}
+		s, err := svc.GetSummary(database.WithTx(context.Background(), tx), tenant, days)
+		if err != nil {
+			t.Fatalf("GetSummary(%d): %v", days, err)
+		}
+		return s
+	}
+
+	wide := summarize(90)
+	if wide.Summary.AverageMTTRHours == nil {
+		t.Errorf("90d summary average_mttr_hours = nil, want ~48 — GetQuickStats' hard-coded " +
+			"30-day window hid a remediation the selected period covers, so the headline " +
+			"read \"not measured\" above a panel that listed it")
+	} else if *wide.Summary.AverageMTTRHours < 47 || *wide.Summary.AverageMTTRHours > 49 {
+		t.Errorf("90d summary average_mttr_hours = %v, want ~48", *wide.Summary.AverageMTTRHours)
+	}
+	// The panel below the headline must agree with it.
+	var panelCount int
+	for _, m := range wide.MTTR {
+		panelCount += m.Count
+	}
+	if panelCount != 1 {
+		t.Errorf("90d MTTR panel total count = %d, want 1 — headline and panel must be "+
+			"computed over the same window", panelCount)
+	}
+
+	narrow := summarize(30)
+	if narrow.Summary.AverageMTTRHours != nil {
+		t.Errorf("30d summary average_mttr_hours = %v, want nil (nothing resolved in that window)",
+			*narrow.Summary.AverageMTTRHours)
+	}
+}
