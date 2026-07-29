@@ -161,9 +161,13 @@ echo "  OK sbom_id = ${SBOM_ID}"
 echo "=== Step 3: seed Log4Shell vulnerability + component link ==="
 VULN_ID="11111111-2222-4333-8444-555555555555"
 psql_exec <<SQL
+-- vulnerabilities is the GLOBAL CVE catalogue: no tenant column, no RLS.
+-- The row is made visible to this run's tenant purely by the
+-- component_vulnerabilities link created below. (Migration 063 dropped the
+-- vestigial vulnerabilities.tenant_id this insert used to set to NULL.)
 INSERT INTO vulnerabilities (
     id, cve_id, description, severity, cvss_score,
-    source, published_at, updated_at, tenant_id
+    source, published_at, updated_at
 ) VALUES (
     '${VULN_ID}',
     'CVE-2021-44228',
@@ -172,8 +176,7 @@ INSERT INTO vulnerabilities (
     10.0,
     'NVD',
     NOW(),
-    NOW(),
-    NULL
+    NOW()
 )
 ON CONFLICT (cve_id) DO UPDATE SET updated_at = NOW();
 

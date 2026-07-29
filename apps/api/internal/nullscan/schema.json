@@ -2644,10 +2644,6 @@
         "nullable": true,
         "type": "character varying(20)"
       },
-      "tenant_id": {
-        "nullable": true,
-        "type": "uuid"
-      },
       "updated_at": {
         "nullable": true,
         "type": "timestamp with time zone"

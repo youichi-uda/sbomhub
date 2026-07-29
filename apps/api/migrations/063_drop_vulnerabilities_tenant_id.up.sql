@@ -1,0 +1,120 @@
+-- ============================================
+-- Drop vulnerabilities.tenant_id — a dead column whose only effect was to
+-- make the shared CVE catalogue LOOK tenant-scoped (M48 follow-up).
+--
+-- What this removes:
+--   Migration 007 added `tenant_id UUID REFERENCES tenants(id) ON DELETE SET
+--   NULL` to `vulnerabilities` in the same sweep that promoted projects /
+--   sboms / components / vex_statements / api_keys, and gave it the matching
+--   `idx_vulnerabilities_tenant_id`. Unlike every other table in that list,
+--   `vulnerabilities` never got RLS — 007's own trailing comment says so
+--   ("vulnerabilities table doesn't have RLS as vulnerabilities are shared
+--   across tenants"), and the lint-migration-rls tool records the table as a
+--   structural exemption for exactly that reason.
+--
+--   So the column was a tenant_id on a table that is deliberately NOT
+--   tenant-scoped. It has never been an isolation boundary and nothing has
+--   ever behaved as if it were.
+--
+-- Why it is safe to drop — the column has no reader and no product writer:
+--   * No SELECT, WHERE, JOIN or ORDER BY anywhere in apps/api/internal/**
+--     references it. `vulnerabilities` is aliased `v` in 43 places and `kev`
+--     in one; `v.tenant_id` / `kev.tenant_id` occur nowhere (the `v.tenant_id`
+--     hits in migration 045 bind `v` to vex_statements, a different table).
+--   * There is no `SELECT * FROM vulnerabilities` anywhere, so no query pulls
+--     the column in implicitly.
+--   * model.Vulnerability (Go) has no TenantID field and the TypeScript
+--     `Vulnerability` interface in apps/web/src/lib/api.ts has no tenant_id —
+--     the column has never crossed the API boundary in either direction.
+--   * VulnerabilityRepository.Upsert's INSERT column list is
+--     (id, cve_id, description, severity, cvss_score, source, published_at,
+--     updated_at) and the CVE-sync scheduler's insert is the same shape:
+--     neither names tenant_id, so every row the product creates leaves it
+--     NULL. No UPDATE statement in the tree sets it.
+--   * The only writers in the repository were two E2E fixtures —
+--     docker/seed/web-e2e.sql (4 rows, tenant …0001) and
+--     scripts/golden-path-e2e.sh (1 row, explicit NULL). Both are updated in
+--     the same change as this migration to stop naming the column; neither
+--     ever read it back.
+--   * packages/mcp-server has zero tenant_id references of any kind.
+--
+--   Measured on the 2026-07-30 dev DB before writing this: 10,899 rows,
+--   0 of them with a non-NULL tenant_id. That is a statement about the dev DB
+--   only — see "Existing data" below for what a production instance may hold.
+--
+-- DB-side dependencies, enumerated (pg_depend on the column's attnum):
+--   Exactly two objects depend on this column, and both are owned BY it:
+--     * vulnerabilities_tenant_id_fkey — the column's own FK to tenants(id).
+--     * idx_vulnerabilities_tenant_id  — the column's own btree index.
+--   No view, no materialised view, no rule, no trigger, no RLS policy (the
+--   table has none, and no policy on any OTHER table mentions
+--   `vulnerabilities` in its USING / WITH CHECK expression), and no stored
+--   function body references the table. Every inbound FK from
+--   component_vulnerabilities / vex_statements / vulnerability_tickets /
+--   vulnerability_resolution_events / ssvc_assessments targets
+--   `vulnerabilities(id)`, never tenant_id.
+--
+--   DROP COLUMN would remove both dependents implicitly; the index is dropped
+--   explicitly first so the change reads as deliberate (the 062 precedent).
+--
+-- Why DROP rather than leave it NULL forever:
+--   A `tenant_id` column is the single strongest signal in this schema that a
+--   table is tenant-scoped, and this codebase has already shipped
+--   cross-tenant bugs founded on exactly that inference. Migration 062 is the
+--   nearest example: `ssvc_decision` was stamped onto these same shared rows
+--   because the row looked tenant-owned. A dormant tenant_id invites the next
+--   author to write `WHERE tenant_id = $1` here and believe they are scoped —
+--   which would silently return one tenant's rows to nobody and hide the
+--   whole global catalogue, or worse, to write a tenant's data onto a shared
+--   row. There is no RLS backstop on this table by design, so nothing would
+--   catch it. Removing the column makes that mistake impossible to make
+--   silently: the query fails to compile at the database.
+--
+--   `vulnerabilities` remains a structural exemption in lint-migration-rls
+--   after this migration — the detector still sees 007's `ALTER TABLE
+--   vulnerabilities ADD COLUMN tenant_id` (that file is not modified) and the
+--   exemption keeps it from being flagged. The exemption is now a statement
+--   about a historical DDL line rather than about a live column.
+--
+-- Existing data:
+--   Any non-NULL value here recorded "the tenant on whose behalf this CVE row
+--   happened to be created first", which was never used for anything and was
+--   never maintained: a CVE seen by ten tenants keeps whichever tenant's id
+--   landed first, and ON DELETE SET NULL erases even that when the tenant
+--   goes away. It is not a source of truth for any question, so the values
+--   are discarded. On the dev DB this drop is a no-op (0 non-NULL rows); an
+--   instance seeded through docker/seed/web-e2e.sql will have a handful of
+--   rows carrying the fixture tenant id, and those are the arbitrary-first-
+--   writer values described above.
+--
+-- RLS:
+--   `vulnerabilities` has relrowsecurity = false, relforcerowsecurity = false
+--   and zero policies (verified on the dev DB). Dropping a column touches
+--   neither, exactly as 007 added it without any RLS statements for this
+--   table. The lint-migration-rls gate is a no-op for this migration: it
+--   scans `*.up.sql` only, and this file declares no tenant_id column and
+--   ALTER-promotes nothing.
+--
+-- Migrator role:
+--   Runs as sbomhub_migrator (MIGRATE_DATABASE_URL), the table owner. No
+--   grants change; the runtime role sbomhub_app keeps its existing
+--   table-level privileges, which are not column-scoped for this table.
+--
+-- DEPLOY SEQUENCING — read before applying this up:
+--   Safe in either order for the API binary. No API build, past or present,
+--   reads or writes this column, so an old instance running against the
+--   post-063 schema behaves identically to one running against the pre-063
+--   schema. This is not the 062 situation, where a stale writer would have
+--   500'd; there is no writer to drain.
+--
+--   The two things that DO break on the post-063 schema are the E2E fixtures
+--   that name the column in their INSERT lists. Both are updated in the same
+--   commit, so a checkout that has this migration also has the fixed
+--   fixtures. A CI run that applies 063 while replaying an OLDER checkout of
+--   docker/seed/web-e2e.sql or scripts/golden-path-e2e.sh will fail with
+--   `column "tenant_id" of relation "vulnerabilities" does not exist`.
+-- ============================================
+
+DROP INDEX IF EXISTS idx_vulnerabilities_tenant_id;
+
+ALTER TABLE vulnerabilities DROP COLUMN IF EXISTS tenant_id;

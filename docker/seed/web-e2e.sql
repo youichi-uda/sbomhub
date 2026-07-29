@@ -250,11 +250,16 @@ ON CONFLICT (id) DO NOTHING;
 -- ---------------------------------------------------------------------
 -- 3. Vulnerability + component-vulnerability link
 -- ---------------------------------------------------------------------
--- The vulnerabilities table is tenant-soft (tenant_id ON DELETE SET
--- NULL) so the seed pins one CVE row that the vex_draft / cra_report
--- below FK-reference. cve_id is UNIQUE so the ON CONFLICT clause keys
--- on that column.
-INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+-- The vulnerabilities table is the GLOBAL CVE catalogue: it is shared by
+-- every tenant, carries no tenant column and no RLS (a recorded structural
+-- exemption in tools/lint-migration-rls). The seed pins CVE rows by their
+-- fixed uuid so the vex_draft / cra_report below can FK-reference them;
+-- what makes those rows visible to the seeded tenant is the
+-- component_vulnerabilities link to that tenant's components, not any
+-- property of the row itself. cve_id is UNIQUE so ON CONFLICT keys on it.
+-- (Migration 063 dropped the vestigial vulnerabilities.tenant_id this seed
+-- used to populate; nothing ever read it.)
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, in_kev, published_at, updated_at)
 VALUES (
     '00000000-0000-0000-0000-000000000040'::uuid,
     'CVE-2021-44228',
@@ -262,7 +267,6 @@ VALUES (
     'CRITICAL',
     10.0,
     'NVD',
-    '00000000-0000-0000-0000-000000000001'::uuid,
     TRUE,
     '2021-12-10T00:00:00Z',
     NOW()
@@ -280,7 +284,7 @@ ON CONFLICT (component_id, vulnerability_id) DO NOTHING;
 -- Additional CVEs so cross-tenant CVE search (e2e/search.spec.ts) and
 -- the vulnerabilities list (e2e/vulnerabilities.spec.ts) return more
 -- than a single Log4Shell row.
-INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, in_kev, published_at, updated_at)
 VALUES (
     '00000000-0000-0000-0000-000000000041'::uuid,
     'CVE-2021-45046',
@@ -288,14 +292,13 @@ VALUES (
     'CRITICAL',
     9.0,
     'NVD',
-    '00000000-0000-0000-0000-000000000001'::uuid,
     TRUE,
     '2021-12-14T00:00:00Z',
     NOW()
 )
 ON CONFLICT (cve_id) DO NOTHING;
 
-INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, in_kev, published_at, updated_at)
 VALUES (
     '00000000-0000-0000-0000-000000000042'::uuid,
     'CVE-2021-23337',
@@ -303,14 +306,13 @@ VALUES (
     'HIGH',
     7.2,
     'NVD',
-    '00000000-0000-0000-0000-000000000001'::uuid,
     FALSE,
     '2021-02-15T00:00:00Z',
     NOW()
 )
 ON CONFLICT (cve_id) DO NOTHING;
 
-INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, tenant_id, in_kev, published_at, updated_at)
+INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, in_kev, published_at, updated_at)
 VALUES (
     '00000000-0000-0000-0000-000000000043'::uuid,
     'CVE-2020-8203',
@@ -318,7 +320,6 @@ VALUES (
     'HIGH',
     7.4,
     'NVD',
-    '00000000-0000-0000-0000-000000000001'::uuid,
     FALSE,
     '2020-07-15T00:00:00Z',
     NOW()
