@@ -111,7 +111,7 @@ type VEXStatementSync interface {
 //	        return defaultProvider, nil // env-configured fallback
 //	    }
 //	    plaintext, _ := llm.Decrypt(cfg.EncryptedAPIKey, masterKey)
-//	    return llm.NewProviderFromConfig(cfg.Provider, cfg.Model, string(plaintext))
+//	    return llm.NewProviderFromConfig(egressGuard, cfg.Provider, cfg.Model, string(plaintext))
 //	}
 //
 // The resolver MUST run inside the request-scoped TenantTx so the

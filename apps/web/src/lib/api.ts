@@ -478,7 +478,13 @@ export interface LicenseViolation {
 export interface APIKey {
   id: string;
   tenant_id: string;
-  project_id?: string; // Deprecated: project-level keys
+  // M50 W2: set for a key minted at POST /projects/:id/apikeys, and now
+  // ENFORCED — such a key reaches only that project (403 elsewhere). Absent
+  // for a tenant-level key, which reaches the whole tenant. Previously the
+  // column was written and ignored at authentication, so a "project-scoped"
+  // key acted tenant-wide; the old `// Deprecated` note here described that
+  // state and is no longer true.
+  project_id?: string;
   name: string;
   key_prefix: string;
   permissions: string;
