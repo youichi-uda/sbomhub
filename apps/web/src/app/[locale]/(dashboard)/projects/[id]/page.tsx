@@ -16,16 +16,21 @@ import { DependencyPathPanel } from "@/components/component/dependency-path";
 import Link from "next/link";
 
 // M13-1 #87 / F174: "apikeys" rejoined the Tab union so the project
-// detail page surfaces project-scoped API key CRUD again. The wider
-// product direction is tenant-scoped keys (see
-// /settings/apikeys/page.tsx and apps/api/cmd/server/main.go L1256 —
-// the project-level route is flagged "deprecated, for backwards
-// compatibility"). We keep the project-level tab live for now because:
-//   1. api-keys.spec.ts (M12-1 #82 carryover) was written for in-tab
-//      CRUD and expects a project-scoped flow.
-//   2. The backend route still validates + audit-logs identically, so
-//      no behavioural drift vs the tenant route.
-//   3. Removing the deprecated route + UI is its own dedicated wave.
+// detail page surfaces project-scoped API key CRUD again.
+//
+// M50 W2: the keys this tab mints are now ACTUALLY limited to this project.
+// Until M50 W2 the tab created rows with api_keys.project_id set and the API
+// read that column nowhere, so a key created here carried the whole tenant
+// while the copy called it "project-scoped". The enforcement now lives in
+// apps/api/internal/middleware/project_scope.go. The notice rendered in the
+// tab below states the resulting limits, because handing someone a key is
+// the moment the scope matters and the only place the operator sees it.
+//
+// Reason the project-level tab stays live now that it means something:
+//   1. per-repository CI and contractor access is exactly the use case a
+//      project-limited credential exists for;
+//   2. api-keys.spec.ts (M12-1 #82 carryover) was written for in-tab CRUD;
+//   3. the tenant-wide alternative remains at /settings/apikeys.
 type Tab = "upload" | "components" | "vulnerabilities" | "vex" | "licenses" | "notifications" | "apikeys";
 
 export default function ProjectDetailPage() {
@@ -1087,6 +1092,22 @@ export default function ProjectDetailPage() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* M50 W2: the scope notice. The i18n strings existed since the
+                tab was reinstated but were rendered nowhere, so the only
+                statement of scope an operator saw was the one-line
+                description above — and until M50 W2 that line was false.
+                Rendered unconditionally (not behind a dismiss) because it
+                is a property of every key in this list, not an
+                announcement. */}
+            <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-4">
+              <p className="flex items-center gap-2 text-sm font-medium text-amber-900">
+                <Key className="h-4 w-4" />
+                {tp("apiKeyMigrationNotice")}
+              </p>
+              <p className="mt-1 text-sm text-amber-800">
+                {tp("apiKeyMigrationDescription")}
+              </p>
+            </div>
             {/* F204 (M13 Phase D round 3): top-level error banner that
                 surfaces failures from delete (and any future non-form
                 action) on this tab. The create form has its own inline

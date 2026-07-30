@@ -52,6 +52,16 @@ func APIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 			// Store key info in context for handlers to use
 			c.Set(ContextKeyAPI, key)
 
+			// M50 W2: a key with api_keys.project_id set may only act on that
+			// project. Checked here — the moment the raw string becomes an
+			// authenticated identity — rather than per route, so no route on
+			// this middleware can be reached without the check. Tenant-level
+			// keys (project_id IS NULL) return immediately and are unaffected.
+			// See project_scope.go for the route table and the 403 rationale.
+			if ok, err := apiKeyProjectScopeAllowed(c, key); !ok {
+				return err
+			}
+
 			return next(c)
 		}
 	}
@@ -83,6 +93,17 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 					})
 				}
 				c.Set(ContextKeyAPI, key)
+
+				// M50 W2: same project-scope filter as APIKeyAuth. This
+				// middleware is currently registered on no route in
+				// cmd/server/main.go (pinned by
+				// TestM50W2OptionalAPIKeyAuthIsUnwired), but it is exported and
+				// it is one of the three ValidateKey call sites, so it carries
+				// the check too — a route wired to it later inherits
+				// default-deny instead of a bypass.
+				if ok, err := apiKeyProjectScopeAllowed(c, key); !ok {
+					return err
+				}
 			}
 
 			return next(c)
@@ -90,8 +111,16 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 	}
 }
 
-// APIKeyTenant sets tenant context based on API key's tenant_id (direct)
-// Falls back to project->tenant lookup for legacy project-level keys.
+// APIKeyTenant sets tenant context from the API key's own tenant_id.
+//
+// It sets exactly two context values and issues one statement:
+// ContextKeyTenantID and ContextKeyRole, after SetCurrentTenant binds
+// `app.current_tenant_id` for RLS. It does NOT look at api_keys.project_id —
+// M50 W2 moved that check into APIKeyAuth, which runs ahead of this middleware on
+// every group that uses the pair (see project_scope.go). An earlier version of
+// this comment claimed a "fallback to project->tenant lookup for legacy
+// project-level keys"; no such lookup was in the code, and there is none now:
+// tenant_id is NOT NULL on api_keys, so there is nothing to fall back from.
 //
 // M1 Codex review #F18: in addition to ContextKeyTenantID, this middleware
 // now also populates ContextKeyRole by mapping api_keys.permissions through

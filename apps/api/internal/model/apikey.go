@@ -35,9 +35,18 @@ func IsKnownAPIKeyPermission(perm string) bool {
 
 // APIKey represents an API key for tenant access
 type APIKey struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	TenantID    uuid.UUID  `json:"tenant_id" db:"tenant_id"`             // Required: tenant this key belongs to
-	ProjectID   *uuid.UUID `json:"project_id,omitempty" db:"project_id"` // Deprecated: legacy project-level keys only
+	ID       uuid.UUID `json:"id" db:"id"`
+	TenantID uuid.UUID `json:"tenant_id" db:"tenant_id"` // Required: tenant this key belongs to
+	// ProjectID limits the key to a single project when non-NULL. NULL means
+	// the whole tenant.
+	//
+	// M50 W2: this column is now ENFORCED on every request — see
+	// middleware/project_scope.go. Until then it was written by
+	// POST /api/v1/projects/:id/apikeys and read by no authentication path, so
+	// a key with it set carried the whole tenant anyway; an earlier version of
+	// this comment described the column as "Deprecated: legacy project-level
+	// keys only", which is what made that gap look intentional.
+	ProjectID   *uuid.UUID `json:"project_id,omitempty" db:"project_id"`
 	Name        string     `json:"name" db:"name"`
 	KeyHash     string     `json:"-" db:"key_hash"`              // Never exposed in JSON
 	KeyPrefix   string     `json:"key_prefix" db:"key_prefix"`   // First 8 chars for identification

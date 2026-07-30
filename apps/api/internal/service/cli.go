@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -75,7 +76,54 @@ func (s *CLIService) WithOffline(offline bool) *CLIService {
 	return s
 }
 
+// ErrCLIProjectOutOfScope is returned by ResolveProjectForScopedKey when the
+// caller-supplied project NAME does not resolve to the project the caller's
+// API key is limited to — including when it resolves to nothing at all.
+//
+// M50 W2: the two branches are ONE sentinel on purpose. /cli/upload and
+// /cli/projects take the project by name, so distinguishing "no project of your
+// tenant has that name" from "that name is another project of your tenant"
+// would hand the holder of a project-scoped key a probe for the tenant's
+// project names. Handlers map this to the same 403 as a path-param scope
+// violation (middleware.RespondProjectScopeDenied).
+var ErrCLIProjectOutOfScope = errors.New("project is outside the api key's scope")
+
+// ResolveProjectForScopedKey resolves the project a caller named by NAME, for a
+// caller whose API key is limited to keyProjectID.
+//
+// It is the scoped counterpart of GetOrCreateProject and differs in exactly two
+// ways, both required:
+//
+//   - it NEVER creates. GetOrCreateProject mints a project when the name is
+//     unknown, which let a project-scoped key create a project its scope did
+//     not name and then own it outright — the M50 W2 escape, reproduced in
+//     handler/m50w2_cli_project_scope_integration_test.go.
+//   - it compares the RESOLVED project's id against keyProjectID. Comparing the
+//     name against anything the key carries would not do: names are mutable and
+//     the key stores a UUID, so the id is the only comparison that means what
+//     the scope means.
+//
+// The lookup is tenant-scoped (ProjectRepository.GetByName filters on
+// tenant_id, under RLS), so the name can only ever resolve inside the caller's
+// own tenant before the project comparison narrows it further.
+func (s *CLIService) ResolveProjectForScopedKey(
+	ctx context.Context, tenantID, keyProjectID uuid.UUID, name string,
+) (*model.Project, error) {
+	existing, err := s.projectRepo.GetByName(ctx, tenantID, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search project: %w", err)
+	}
+	if existing == nil || existing.ID != keyProjectID {
+		return nil, ErrCLIProjectOutOfScope
+	}
+	return existing, nil
+}
+
 // GetOrCreateProject finds a project by name within a tenant, or creates it if not found.
+//
+// M50 W2: callers behind an API key MUST NOT use this when the key carries a
+// project_id — the create-on-unknown-name half is the escape hatch out of the
+// key's scope. Use ResolveProjectForScopedKey for those callers.
 func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID, name, description string) (*model.Project, bool, error) {
 	// Try to find existing project
 	existing, err := s.projectRepo.GetByName(ctx, tenantID, name)
@@ -344,10 +392,17 @@ func (s *CLIService) CheckVulnerabilities(ctx context.Context, components []CLIC
 
 	seenVulns := make(map[string]bool)
 
-	for i, r := range osvResp.Results {
-		if i >= len(components) {
-			break
-		}
+	// OSV returns one result per query in submission order, so result i belongs
+	// to component i. Both bounds are in the loop condition rather than in a
+	// `break` inside the body: identical behaviour (stop at whichever runs out
+	// first), but the index is now provably within both slices at the point of
+	// use, which is what gosec's G602 bounds analysis needs to see. The previous
+	// shape only became reachable to that analysis once a caller with a
+	// concretely-sized slice existed (M50 W2 added one in
+	// TestM50W2CheckVulnerabilitiesTouchesNoRepository), which is when the
+	// warning appeared.
+	for i := 0; i < len(osvResp.Results) && i < len(components); i++ {
+		r := osvResp.Results[i]
 		comp := components[i]
 
 		for _, v := range r.Vulns {

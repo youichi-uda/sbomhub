@@ -78,7 +78,9 @@ type CreateAPIKeyInput struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
-// CreateProjectAPIKeyInput is used for legacy project-level API keys (deprecated)
+// CreateProjectAPIKeyInput is used for project-scoped API keys — keys limited
+// to one project (M50 W2 made api_keys.project_id load-bearing; see
+// middleware/project_scope.go for what the limit covers).
 type CreateProjectAPIKeyInput struct {
 	TenantID    uuid.UUID  `json:"tenant_id"`
 	ProjectID   uuid.UUID  `json:"project_id"`
@@ -151,11 +153,21 @@ func (s *APIKeyService) CreateKey(ctx context.Context, input CreateAPIKeyInput) 
 	}, nil
 }
 
-// CreateProjectKey creates a legacy project-level API key (deprecated,
-// for backwards compatibility). The same F17 permissions validation as
-// CreateKey applies — the legacy path is not exempt because, after the
-// F14 MultiAuth integration, both tenant- and project-level keys land
-// on the same TenantContext role allowlist via roleFromAPIKeyPermissions.
+// CreateProjectKey creates a project-scoped API key: one limited to the project
+// named by the route.
+//
+// M50 W2: this is no longer a backwards-compatibility path. Until M50 W2 the
+// project_id it writes was read by no authentication path, so the key it minted
+// was indistinguishable from a tenant-level one at request time; it is now
+// enforced by middleware.apiKeyProjectScopeAllowed and by CLIHandler's
+// body-resolved routes. What the limit does and does not cover is enumerated in
+// middleware/project_scope.go and docs/UPGRADE.md §2d.
+//
+// The same F17 permissions validation as CreateKey applies — this path is not
+// exempt because, after the F14 MultiAuth integration, both tenant- and
+// project-scoped keys land on the same TenantContext role allowlist via
+// roleFromAPIKeyPermissions. Scope and role are independent: a project-scoped
+// key still needs permissions=write to drive a write route.
 func (s *APIKeyService) CreateProjectKey(ctx context.Context, input CreateProjectAPIKeyInput) (*model.APIKeyWithSecret, error) {
 	if input.Name == "" {
 		return nil, fmt.Errorf("name is required")
@@ -234,7 +246,7 @@ func (s *APIKeyService) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([
 	return s.keyRepo.ListByTenant(ctx, tenantID)
 }
 
-// ListByProject returns API keys for a specific project (legacy, deprecated).
+// ListByProject returns the project-scoped API keys of one project.
 // tenantID restricts the query to the caller's own tenant; without it a
 // caller could enumerate API keys on another tenant's project by guessing
 // the project UUID (RLS no longer enforces this — see migration 028).

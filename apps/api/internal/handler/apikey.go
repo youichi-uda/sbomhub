@@ -198,10 +198,19 @@ func (h *APIKeyHandler) DeleteTenant(c echo.Context) error {
 }
 
 // ============================================
-// Project-level API key endpoints (LEGACY, deprecated)
+// Project-scoped API key endpoints
 // ============================================
+//
+// M50 W2: these three routes are no longer a deprecated compatibility shim.
+// They mint / list / revoke keys that are ENFORCED to one project — the
+// api_keys.project_id these write is read on every request by
+// middleware.apiKeyProjectScopeAllowed. Before M50 W2 nothing read it, so the
+// keys were tenant-wide in effect while the UI called them project-scoped; the
+// "LEGACY, deprecated" banner this comment replaces is what made that look
+// deliberate. The tenant-wide alternative is the /api/v1/apikeys trio above.
 
-// Create creates a new project-level API key (deprecated)
+// Create mints a project-scoped API key: one limited to the project named by
+// :id. See middleware/project_scope.go for exactly what the limit covers.
 // POST /api/v1/projects/:id/apikeys
 func (h *APIKeyHandler) Create(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
@@ -255,7 +264,7 @@ func (h *APIKeyHandler) Create(c echo.Context) error {
 	return c.JSON(http.StatusCreated, key)
 }
 
-// List returns all API keys for a project (deprecated)
+// List returns the project-scoped API keys of one project.
 // GET /api/v1/projects/:id/apikeys
 //
 // The tenant_id from middleware context is required because RLS no longer
@@ -284,7 +293,7 @@ func (h *APIKeyHandler) List(c echo.Context) error {
 	return c.JSON(http.StatusOK, keys)
 }
 
-// Delete removes an API key (deprecated)
+// Delete revokes a project-scoped API key.
 // DELETE /api/v1/projects/:id/apikeys/:key_id
 //
 // Mirrors List: tenant context is mandatory now that the api_keys RLS

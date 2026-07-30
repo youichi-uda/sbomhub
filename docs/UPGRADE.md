@@ -228,6 +228,182 @@ time — that is why the enforcement point is the connection, not the form.
 
 ---
 
+## 2d. Breaking change — M50 W2 (project-scoped API keys are enforced)
+
+**This one can stop a CI pipeline that uses a key created from a project's "API
+Keys" tab.** It needs no `.env` change and there is no startup refusal: the
+change is that a credential which previously carried more authority than its
+label now carries exactly what the label says.
+
+### What changed
+
+`api_keys` has always had a `project_id` column, and
+`POST /api/v1/projects/:id/apikeys` (a project's **API Keys** tab) has always
+filled it in. Nothing read it. Every authentication path derived the request's
+authority from `api_keys.tenant_id` alone, so a key the UI described as
+"Project-scoped" could act on **every project of the tenant** — upload SBOMs into
+them, read their vulnerabilities, approve their VEX drafts, build their evidence
+packs — and could create new projects.
+
+Keys created from **Settings → API Keys** (`POST /api/v1/apikeys`, `project_id`
+NULL) were, and remain, tenant-wide. They are unaffected by this change.
+
+The consequence was not that a key holder gained more than the administrator who
+issued it — issuing requires Owner/Admin. It was that the administrator could not
+give away *less*. Handing a "project-scoped" key to a contractor, an auditor, or
+a per-repository CI job handed over the tenant.
+
+### New behaviour
+
+A key with `project_id` set is now answered **`403 {"error":"forbidden"}`** unless
+the request names that project — or is `POST /api/v1/cli/check`, which names no
+project and touches none. Specifically:
+
+| Request | Before | Now |
+|---|---|---|
+| Any `/api/v1/projects/<the key's project>/…` endpoint that accepts an API key | works | **works, unchanged** |
+| The same endpoint with any other project id | works | **403** |
+| `POST /api/v1/cli/upload` / `POST /api/v1/cli/projects` naming the key's own project by name | works | **works**, idempotently — `/cli/projects` answers 200 with `"created":false` (never 201), `/cli/upload` answers 200 with `"project_created":false` |
+| The same two naming any other project, or a name that does not exist | works — **and created the project when the name was unknown** | **403**, and nothing is created |
+| `GET /api/v1/cli/projects`, `GET /api/v1/mcp/projects` (project lists) | works | **403** |
+| `GET /api/v1/mcp/dashboard/summary`, `/mcp/search/cve`, `/mcp/search/component` | works | **403** |
+| `POST /api/v1/mcp/sbom/diff` | works | **403** — see residual below |
+| `POST /api/v1/cli/check` (stateless OSV lookup, touches no project) | works | **works** |
+| Any future endpoint mounted behind API-key auth | — | **403 until it is explicitly classified** (default-deny) |
+| A mistyped URL under `/api/v1/cli` or `/api/v1/mcp` | 404 | **403** — unmatched paths are unclassified, so a typo reads as a scope refusal (see residuals) |
+
+A project-scoped key can reach 32 of the 38. Twenty-nine of them name the project
+in the path, and require that `:id` to be the key's own project — in full:
+
+```
+POST   /api/v1/projects/:id/sbom
+GET    /api/v1/projects/:id/sbom
+GET    /api/v1/projects/:id/vulnerabilities
+GET    /api/v1/projects/:id/sboms/:sbom_id/scan-status
+POST   /api/v1/projects/:id/reachability
+GET    /api/v1/projects/:id/reachability/targets
+POST   /api/v1/projects/:id/triage/run
+GET    /api/v1/projects/:id/vex-drafts
+GET    /api/v1/projects/:id/vex-drafts/:draft_id
+PUT    /api/v1/projects/:id/vex-drafts/:draft_id/decision
+POST   /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse
+POST   /api/v1/projects/:id/cra-reports/run
+GET    /api/v1/projects/:id/cra-reports
+GET    /api/v1/projects/:id/cra-reports/:report_id
+PUT    /api/v1/projects/:id/cra-reports/:report_id/decision
+PATCH  /api/v1/projects/:id/cra-reports/:report_id/awareness
+POST   /api/v1/projects/:id/cra-reports/:report_id/submissions
+GET    /api/v1/projects/:id/cra-reports/:report_id/submissions
+POST   /api/v1/projects/:id/cra-reports/:report_id/reanalyse
+GET    /api/v1/projects/:id/meti/assessment
+POST   /api/v1/projects/:id/meti/assessment/refresh
+PUT    /api/v1/projects/:id/meti/assessment/:criterion_id/override
+DELETE /api/v1/projects/:id/meti/assessment/:criterion_id/override
+GET    /api/v1/projects/:id/meti/improvement-actions
+POST   /api/v1/projects/:id/evidence-pack/build
+GET    /api/v1/cli/projects/:id
+GET    /api/v1/mcp/projects/:id/vulnerabilities
+GET    /api/v1/mcp/projects/:id/compliance
+GET    /api/v1/mcp/projects/:id/sboms
+```
+
+The other three name no project in the path: `POST /api/v1/cli/upload` and
+`POST /api/v1/cli/projects` (allowed only when the body names the key's own project),
+and `POST /api/v1/cli/check` (no project at all). The six that remain are the
+tenant-wide ones refused in the table above — 29 + 3 + 6 = the 38 endpoints that
+accept an API key.
+This list is checked against the code on every test run:
+`TestM50W2UpgradeDocEndpointListMatchesTheRouteTable` parses the block above and
+compares it to the enforcement table, and
+`TestM50W2APIKeyReachableRoutesAreAllClassified` re-derives that table from the
+route registrations. A route added or removed without updating this list fails
+the build.
+
+Two properties worth knowing:
+
+- **The refusal carries no information.** It is a comparison of two UUIDs the
+  request already holds, made before any database access, so a project that
+  exists, a project of another tenant, and a UUID that was never allocated all
+  produce the identical response. The same is true of the two by-name CLI routes:
+  an unknown project name and a sibling project's name are indistinguishable.
+- **403, not 404.** The repository's convention for "resource you cannot address"
+  is a 404 sentinel, deliberately indistinguishable from "does not exist". This
+  refusal is about the *credential*, not the resource — the key is valid and the
+  project may well exist — so it answers 403 like the existing role guards
+  (`RequireWrite` / `RequireAdmin`) do. A 404 here would make a mis-scoped CI job
+  indistinguishable from a deleted project. The failure is visible either way — a
+  404 is not a silent success — but an operator debugging a CI job that stopped
+  uploading would be looking for a deleted project instead of a mis-scoped key.
+
+### What you must do
+
+1. **Find out whether you have any project-scoped keys.** They are the only rows
+   affected:
+   ```bash
+   docker compose exec -T postgres psql -U sbomhub -d sbomhub -c \
+     "SELECT k.id, k.key_prefix, k.name, p.name AS project
+        FROM api_keys k JOIN projects p ON p.id = k.project_id
+       WHERE k.project_id IS NOT NULL;"
+   ```
+   An empty result means nothing changes for your deployment. (For reference: the
+   development database this change was built against had 96 keys, **0** of them
+   project-scoped — measured 2026-07-30.)
+2. **For each row, decide which authority you actually meant.** If the consumer
+   only ever touches that one project, nothing to do — it now does exactly that.
+   If it needs more (it lists projects, reads the dashboard summary, or uploads to
+   several projects), replace it with a tenant-level key from
+   **Settings → API Keys** and revoke the old one.
+3. **Watch for the refusal in your logs.** Every denial is recorded as
+   `apikey: project scope violation` at WARN with `path`, `method`, `api_key_id`,
+   `tenant_id` and `key_project_id`. There is no `audit_logs` row — the refusal
+   happens before the audit middleware is entered, the same residual the role
+   guards have.
+
+### Residuals
+
+- **`sbomhub doctor` reports `auth-verify` as FAIL with a project-scoped key.**
+  It probes `GET /api/v1/cli/projects`, which is one of the refused tenant-wide
+  routes, and treats 403 as a hard failure. The key is fine —
+  `sbomhub scan --project <that project>` works. `sbomhub projects list` is
+  refused for the same reason. Narrowing both project-list endpoints to the key's
+  own project is the intended follow-up; it is not done here because the MCP twin
+  of that route is served by a different handler, and narrowing only the CLI copy
+  would leave two identical routes disagreeing.
+- **`sbomhub scan` needs an explicit `--project` with a project-scoped key.**
+  Without the flag the CLI falls back to the working-directory basename, which is
+  refused unless the directory happens to be named exactly like the project.
+  Both forms of the flag work, by different routes: `--project <exact project
+  name>` goes through `POST /api/v1/cli/projects` (name resolved and compared),
+  and `--project <project uuid>` is short-circuited by the CLI straight to
+  `POST /api/v1/projects/<uuid>/sbom` (path parameter compared). The name must
+  match exactly — there is no fuzzy or case-insensitive matching.
+- **`POST /api/v1/mcp/sbom/diff` is refused for project-scoped keys, including
+  for their own SBOMs.** The route selects two SBOMs by UUID in the body, so the
+  project is only known after both rows are loaded, and no comparison against the
+  key's project exists there yet. Refusing was chosen over half-checking. Use a
+  tenant-level key, or the web UI's project diff view.
+- **A key whose `project_id` points at another tenant's project can no longer
+  reach any project data.** Such rows were possible before M47 W1 added an
+  ownership check to the mint route (`api_keys` has no RLS and no composite
+  foreign key). The key still authenticates as its own tenant, so the one project
+  id it will accept in a path resolves to nothing under that tenant's RLS: every
+  project-scoped route answers 403 (wrong project) or 404 (its own project id,
+  invisible under its own tenant), and every tenant-wide route answers 403. The
+  one exception is `POST /api/v1/cli/check`, which reads no tenant data at all and
+  still works. Revoke and reissue if you find one; the query in step 1 joins on
+  `projects`, so a cross-tenant row does not appear in its output.
+- **A mistyped URL under `/api/v1/cli` or `/api/v1/mcp` answers 403 rather than
+  404** for a project-scoped key, because Echo runs the group middleware for
+  unmatched paths and an unmatched path is (correctly) unclassified.
+- **Self-hosted mode is unchanged in what it is.** With
+  `SBOMHUB_AUTH_MODE=anonymous` the Clerk-fronted route groups grant Owner on the
+  default tenant to a request with **no** credential at all (see §2b and
+  `docs/configuration.md`). A caller who can reach the API can therefore ignore
+  API keys entirely. Project scope narrows what a *key* can do; it is not a
+  network boundary and does not make one unnecessary.
+
+---
+
 ## 3. Before you start
 
 1. **Pin a maintenance window of ~15 minutes** of api downtime. Postgres

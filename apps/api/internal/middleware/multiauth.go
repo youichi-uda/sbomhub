@@ -103,6 +103,16 @@ func handleAPIKeyAuth(
 	}
 	c.Set(ContextKeyAPI, key)
 
+	// M50 W2: a key with api_keys.project_id set may only act on that project.
+	// This runs before SetCurrentTenant / GetOrCreateAPIKeyUser so a refusal
+	// issues no SQL of its own, and before `next` so no MultiAuth-fronted
+	// route can be reached without it. Tenant-level keys (project_id IS NULL)
+	// return immediately and are unaffected. See project_scope.go for the
+	// route table and the 403 rationale.
+	if ok, err := apiKeyProjectScopeAllowed(c, key); !ok {
+		return err
+	}
+
 	// API keys are tenant-scoped — every key carries a tenant_id by schema,
 	// which is what enforces tenant isolation through Postgres RLS.
 	if err := tenantRepo.SetCurrentTenant(ctx, key.TenantID); err != nil {

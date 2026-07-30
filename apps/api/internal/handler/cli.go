@@ -23,6 +23,45 @@ func NewCLIHandler(cs *service.CLIService) *CLIHandler {
 	return &CLIHandler{cliService: cs}
 }
 
+// resolveCLIProject turns a caller-supplied project NAME into a project, under
+// whatever scope the request's credential carries.
+//
+// It is the single place both body-resolved CLI routes (POST /cli/upload and
+// POST /cli/projects) decide which project they act on, so the M50 W2 scope check
+// cannot be present on one and missing on the other.
+//
+// Two paths, and the split is the whole point:
+//
+//   - project-scoped API key (api_keys.project_id IS NOT NULL): resolve the name
+//     and require the resolved project to BE the key's project. Never create.
+//     Returns service.ErrCLIProjectOutOfScope for both "no such name" and
+//     "that name is a different project" — one sentinel, so the caller cannot
+//     use the answer to enumerate the tenant's project names.
+//   - everything else (tenant-level API key, Clerk session, self-hosted
+//     default): unchanged GetOrCreateProject, including create-on-unknown-name,
+//     which is what `sbomhub scan --project <new-name>` depends on.
+//
+// It takes only the echo context, deriving the request context here rather than
+// accepting one, so a caller cannot hand it a context whose transaction differs
+// from the one the request is running in.
+//
+// The second return value is the pre-existing `created` flag. It is always
+// false on the scoped path, which is what makes "a project-scoped key never
+// creates" observable in the response body as well as in the database.
+func (h *CLIHandler) resolveCLIProject(
+	c echo.Context, tenantID uuid.UUID, name, description string,
+) (*model.Project, bool, error) {
+	ctx := c.Request().Context()
+	if keyProjectID, scoped := middleware.APIKeyProjectID(c); scoped {
+		project, err := h.cliService.ResolveProjectForScopedKey(ctx, tenantID, keyProjectID, name)
+		if err != nil {
+			return nil, false, err
+		}
+		return project, false, nil
+	}
+	return h.cliService.GetOrCreateProject(ctx, tenantID, name, description)
+}
+
 // UploadRequest represents the request for uploading SBOM via CLI.
 type UploadRequest struct {
 	ProjectName string `json:"project_name" form:"project_name"`
@@ -106,12 +145,24 @@ func (h *CLIHandler) Upload(c echo.Context) error {
 
 	ctx := c.Request().Context()
 
-	// Get or create project
-	project, created, err := h.cliService.GetOrCreateProject(ctx, tenantID, projectName, description)
+	// Get or create project.
+	//
+	// M50 W2: `project_name` is caller-supplied, so this is one of the two routes
+	// where the project is chosen by the BODY and the middleware's :id
+	// comparison has nothing to look at (see middleware/project_scope.go,
+	// scopeHandlerChecked). resolveCLIProject performs the comparison here
+	// instead: for a project-scoped key it resolves the name and refuses unless
+	// the resolved project IS the key's, and it never creates.
+	project, created, err := h.resolveCLIProject(c, tenantID, projectName, description)
 	if err != nil {
-		// GetOrCreateProject only ever returns %w-wrapped DB errors
-		// (search / create) — none are caller-fixable, so log the raw
-		// error server-side and return a generic body.
+		if errors.Is(err, service.ErrCLIProjectOutOfScope) {
+			return middleware.RespondProjectScopeDenied(c,
+				"upload names a project outside the key's scope")
+		}
+		// GetOrCreateProject / ResolveProjectForScopedKey otherwise only ever
+		// return %w-wrapped DB errors (search / create) — none are
+		// caller-fixable, so log the raw error server-side and return a
+		// generic body.
 		slog.Warn("cli: get or create project failed", "tenant_id", tenantID, "project_name", projectName, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to resolve project",
@@ -285,8 +336,16 @@ func (h *CLIHandler) CreateProject(c echo.Context) error {
 		})
 	}
 
-	project, created, err := h.cliService.GetOrCreateProject(c.Request().Context(), tenantID, req.Name, req.Description)
+	// M50 W2: same body-resolved project as Upload — see resolveCLIProject. A
+	// project-scoped key gets its own project back idempotently and nothing
+	// else; in particular it cannot create, which is what made this route the
+	// escape hatch out of its own scope.
+	project, created, err := h.resolveCLIProject(c, tenantID, req.Name, req.Description)
 	if err != nil {
+		if errors.Is(err, service.ErrCLIProjectOutOfScope) {
+			return middleware.RespondProjectScopeDenied(c,
+				"create names a project outside the key's scope")
+		}
 		slog.Warn("cli: get or create project failed", "tenant_id", tenantID, "project_name", req.Name, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to create project",

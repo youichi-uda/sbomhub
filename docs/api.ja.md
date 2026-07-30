@@ -14,14 +14,45 @@
 
 ### APIキー認証
 
-CI/CD 連携には API キーを使用します：
+CI/CD 連携には API キーを使用します。`Authorization: Bearer <key>` で送信してください
+(`/api/v1/cli/*` と `/api/v1/mcp/*` では `X-API-Key` ヘッダも受け付けます)：
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
-  http://localhost:8080/api/v1/projects
+  http://localhost:8080/api/v1/cli/projects
 ```
 
-APIキーはプロジェクト設定ページで作成できます。
+API キーには 2 種類あり、その違いは毎リクエストで強制されます。
+
+| 種別 | 作成方法 | 権限範囲 |
+|---|---|---|
+| **テナント単位** | `POST /api/v1/apikeys` (設定 → API キー) | テナント配下の全プロジェクト + テナント横断エンドポイント (プロジェクト一覧、ダッシュボード集計、横断検索) |
+| **プロジェクト限定** | `POST /api/v1/projects/:id/apikeys` (プロジェクトの API Keys タブ) | そのプロジェクトのみ |
+
+発行 route 2 本と一覧/失効 route 4 本は、いずれも **Owner または Admin の Web UI
+セッション**が必要です。API キーで別の API キーを発行・一覧・失効させることは、
+どちらの種別でもできません。
+
+プロジェクト限定キーは、他のプロジェクトを指定した場合、テナント横断エンドポイントを
+呼んだ場合、プロジェクトを新規作成しようとした場合に
+**`403 {"error":"forbidden"}`** を返します。この拒否応答は「存在するプロジェクト」
+「他テナントのプロジェクト」「未割り当ての UUID」で完全に同一なので、
+存在確認のプローブには使えません。プロジェクト限定キーが使える 32 エンドポイント
+(パスでプロジェクトを指定する 29 + 指定しない 3) と使えない 6 エンドポイントの
+完全な一覧は `docs/UPGRADE.md` §2d にあります。
+
+**すべてのエンドポイントが API キーを受け付けるわけではありません。** API の大部分は
+Web UI セッション (Clerk JWT) でのみ到達できます。self-host モード
+(`SBOMHUB_AUTH_MODE=anonymous`、OSS の既定) では、同じ route group が**資格情報を
+一切持たないリクエストに既定テナントの Owner 権限を与えます**。したがって self-host
+deployment において API キーのスコープは「キーで何ができるか」の制限であって、
+ネットワーク境界の代わりにはなりません。`docs/configuration.md` を参照。
+`Bearer sbh_...` を受け付けるのは `/api/v1/cli/*`、`/api/v1/mcp/*`、および以下に記載する
+プロジェクト単位の SBOM / 脆弱性 / トリアージ / CRA / METI / エビデンスパック route です。
+`GET /api/v1/projects` は**含まれません**。**テナント単位**キーを持つ機械クライアントは
+代わりに `GET /api/v1/cli/projects` を使用してください。プロジェクト限定キーは
+この route では拒否されます — 自分のプロジェクトは `GET /api/v1/cli/projects/:id`
+で参照できます。
 
 ## エンドポイント
 
@@ -302,10 +333,44 @@ GET /api/v1/projects/:id/vex
 
 ### APIキー
 
-#### APIキー作成
+以下 6 route はすべて **Owner または Admin の Web UI セッション**が必要です
+(`appmw.RequireAdmin`)。API キーで別の API キーを発行・失効させることはできません。
+
+#### テナント単位 API キーの作成
+
+テナント配下の全プロジェクトで有効です。
 
 ```
-POST /api/v1/projects/:id/api-keys
+POST /api/v1/apikeys
+```
+
+**リクエストボディ:**
+```json
+{
+  "name": "GitHub Actions",
+  "permissions": "write",
+  "expires_in_days": 365
+}
+```
+
+`permissions` は `read` / `write` / `admin` のいずれか (省略時は `write`)。
+それ以外の値は `400` で拒否されます。同じ検証と同じ既定値が、下記のプロジェクト限定
+発行 route にも適用されます。permissions とプロジェクトスコープは独立なので、
+プロジェクト限定キーであっても書き込み endpoint を叩くには `write` が必要です。
+
+#### テナント単位 API キーの一覧 / 失効
+
+```
+GET    /api/v1/apikeys
+DELETE /api/v1/apikeys/:key_id
+```
+
+#### プロジェクト限定 API キーの作成
+
+**このプロジェクトのみ**で有効です。範囲は[認証](#apiキー認証)の表を参照。
+
+```
+POST /api/v1/projects/:id/apikeys
 ```
 
 **リクエストボディ:**
@@ -330,16 +395,19 @@ POST /api/v1/projects/:id/api-keys
 
 > **注意:** `key` は作成時に一度だけ返されます。安全に保管してください。
 
-#### APIキー一覧
+#### プロジェクト限定 API キーの一覧
 
 ```
-GET /api/v1/projects/:id/api-keys
+GET /api/v1/projects/:id/apikeys
 ```
 
-#### APIキー失効
+#### プロジェクト限定 API キーの失効
+
+`:id` はそのキーを作成したプロジェクトである必要があります。
+兄弟プロジェクトのキーを指定した場合は `404` を返します。
 
 ```
-DELETE /api/v1/projects/:id/api-keys/:key_id
+DELETE /api/v1/projects/:id/apikeys/:key_id
 ```
 
 ---

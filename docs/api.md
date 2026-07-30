@@ -14,14 +14,42 @@ This document describes the SBOMHub REST API.
 
 ### API Key Authentication
 
-For CI/CD integration, use API keys:
+For CI/CD integration, use API keys. Send them as `Authorization: Bearer <key>`
+(the `X-API-Key` header is accepted on `/api/v1/cli/*` and `/api/v1/mcp/*`):
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
-  http://localhost:8080/api/v1/projects
+  http://localhost:8080/api/v1/cli/projects
 ```
 
-API keys can be created in the project settings page.
+Two kinds of key exist, and the difference is enforced on every request:
+
+| Kind | Created by | Authority |
+|---|---|---|
+| **Tenant-level** | `POST /api/v1/apikeys` (Settings → API Keys) | Every project of the tenant, plus the tenant-wide endpoints (project list, dashboard summary, cross-project search) |
+| **Project-scoped** | `POST /api/v1/projects/:id/apikeys` (a project's API Keys tab) | That one project only |
+
+Both mint routes — and the four list/revoke routes — require an **Owner or Admin web-UI
+session**. An API key cannot mint, list, or revoke another API key, of either kind.
+
+A project-scoped key is answered **`403 {"error":"forbidden"}`** when the request
+names any other project, when the endpoint is tenant-wide, and when it would
+create a project. The refusal is identical for a project that exists, a project
+of another tenant, and a UUID that was never allocated, so it cannot be used to
+discover what exists. `docs/UPGRADE.md` §2d enumerates all 32 endpoints a
+project-scoped key can use — the 29 that name the project in the path, plus the
+three that do not — and the six it cannot.
+
+**Not every endpoint accepts an API key.** Most of the API is reachable only with a
+web-UI session (Clerk JWT). In self-hosted mode (`SBOMHUB_AUTH_MODE=anonymous`, the
+OSS default) those same route groups grant **Owner on the default tenant to a request
+carrying no credential at all** — so on a self-hosted deployment API-key scoping is a
+limit on what a key can do, not a network boundary. See `docs/configuration.md`. The endpoints that accept `Bearer sbh_...` are `/api/v1/cli/*`,
+`/api/v1/mcp/*`, and the per-project SBOM / vulnerability / triage / CRA / METI /
+evidence-pack routes documented below. `GET /api/v1/projects` is **not** one of
+them; a machine client with a **tenant-level** key uses `GET /api/v1/cli/projects`
+instead. A project-scoped key is refused there — it reads its own project through
+`GET /api/v1/cli/projects/:id`.
 
 ## Endpoints
 
@@ -305,10 +333,46 @@ GET /api/v1/projects/:id/vex
 
 ### API Keys
 
-#### Create API Key
+All six routes below require an **Owner or Admin** web-UI session
+(`appmw.RequireAdmin`); an API key cannot mint or revoke another API key.
+
+#### Create a tenant-level API key
+
+Valid for every project of the tenant.
 
 ```
-POST /api/v1/projects/:id/api-keys
+POST /api/v1/apikeys
+```
+
+**Request Body:**
+```json
+{
+  "name": "GitHub Actions",
+  "permissions": "write",
+  "expires_in_days": 365
+}
+```
+
+`permissions` must be one of `read`, `write`, `admin` (omitted defaults to
+`write`). Anything else is rejected with `400`. The same validation and the same
+default apply to the project-scoped mint route below — permissions and project
+scope are independent, so a project-scoped key still needs `write` to drive a
+write endpoint.
+
+#### List / revoke tenant-level API keys
+
+```
+GET    /api/v1/apikeys
+DELETE /api/v1/apikeys/:key_id
+```
+
+#### Create a project-scoped API key
+
+Valid for **this project only** — see the scope table under
+[Authentication](#api-key-authentication).
+
+```
+POST /api/v1/projects/:id/apikeys
 ```
 
 **Request Body:**
@@ -333,16 +397,19 @@ POST /api/v1/projects/:id/api-keys
 
 > **Note:** The `key` is only returned once at creation time. Store it securely.
 
-#### List API Keys
+#### List project-scoped API keys
 
 ```
-GET /api/v1/projects/:id/api-keys
+GET /api/v1/projects/:id/apikeys
 ```
 
-#### Revoke API Key
+#### Revoke a project-scoped API key
+
+`:id` must be the project the key was created under; a key of a sibling project
+answers `404`.
 
 ```
-DELETE /api/v1/projects/:id/api-keys/:key_id
+DELETE /api/v1/projects/:id/apikeys/:key_id
 ```
 
 ---
