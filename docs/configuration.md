@@ -90,6 +90,30 @@ OpenAI, Gemini, and Ollama also implement `Embed`. Anthropic remains unsupported
 | Ollama | `POST {OLLAMA_HOST}/api/embed` | `nomic-embed-text` | 768 | 2,048 inputs/request sbomhub cap; 16,384 inputs/call safety cap; partial chunk failure discards all vectors. |
 | Anthropic | N/A | N/A | N/A | `Embed` returns `ErrNotImplemented`; use Voyage AI or another embedding provider separately. |
 
+### Outbound Egress Policy (Tenant-Configured Destinations)
+
+Four settings screens let a tenant administrator name a URL the server then
+connects to: the issue tracker base URL, the Slack / Discord notification
+webhooks, the SBOM diff webhook, and the per-tenant Azure OpenAI endpoint. Those
+URLs are untrusted input, so internal destinations are refused by default.
+
+Destinations **you** configure — the `SBOMHUB_*_URL` feed mirrors, the Ollama
+base URL (`SBOMHUB_LLM_OLLAMA_URL` / `OLLAMA_HOST`, default
+`http://localhost:11434`), the billing provider API — are not affected.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SBOMHUB_EGRESS_ALLOW_PRIVATE` | `false` | Permit RFC1918 / loopback / CGNAT / IPv6 unique-local destinations for the four purposes above. |
+| `SBOMHUB_EGRESS_ALLOWED_INTERNAL` | (empty) | Narrow alternative: comma- or space-separated hostnames, IP addresses and CIDRs whose internal destinations are permitted. A hostname also matches its subdomains. A malformed entry refuses startup. |
+| `SBOMHUB_EGRESS_ALLOW_PROXY` | `false` | Honour `HTTP_PROXY` / `HTTPS_PROXY` for the four purposes above. Off by default: with a proxy in the path only the proxy's address is inspected, and the proxy chooses the real destination. Turning it on delegates the destination policy to the proxy. |
+| `SBOMHUB_EGRESS_NAT64_PREFIXES` | (empty) | RFC 6052 NAT64 translation prefixes this network uses, when not the well-known `64:ff9b::/96`. Addresses reached through a declared prefix are judged by the IPv4 address they embed. A bad value refuses startup. |
+
+Cloud instance metadata (`169.254.169.254` and the rest of link-local, Azure's
+`168.63.129.16`, and the IPv6 tunnel forms that embed them) is refused even when
+these are set. See [docs/security/egress.md](./security/egress.md) for the full
+policy and its documented limits, and [UPGRADE.md §2c](./UPGRADE.md) for the
+migration path if your tenants point at internal services.
+
 ### Frontend Settings
 
 | Variable | Default | Description |

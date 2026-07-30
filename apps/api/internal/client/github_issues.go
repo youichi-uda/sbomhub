@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // GitHubIssuesClient is a client for the GitHub Issues REST API, used by the
@@ -154,9 +153,7 @@ func NewGitHubIssuesClient(baseURL, token string) *GitHubIssuesClient {
 		baseURL = githubIssuesAPIBase
 	}
 	return &GitHubIssuesClient{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpClient:    guardedIssueTrackerClient(nil),
 		baseURL:       strings.TrimRight(baseURL, "/"),
 		token:         token,
 		backoffPolicy: DefaultBackoffPolicy(),

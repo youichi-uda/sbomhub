@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
@@ -43,11 +44,20 @@ type tenantLLMConfigGetter interface {
 // SECURITY: the decrypted plaintext API key is zeroed in its backing
 // buffer before this function returns, matching the original closure
 // implementation in main.go.
+// M50: guard is the outbound destination policy applied to the tenant's
+// azure_endpoint. It is threaded in rather than defaulted inside because this
+// resolver is the one production path that turns tenant-supplied config into a
+// live HTTP client, and the deployment's SBOMHUB_EGRESS_* settings are what
+// decide the policy.
 func newTenantLLMProviderResolver(
 	repo tenantLLMConfigGetter,
 	defaultProvider llm.Provider,
 	encryptionKey []byte,
+	guard *egress.Guard,
 ) func(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error) {
+	if guard == nil {
+		guard = egress.NewSet(egress.Settings{}).TenantLLM
+	}
 	return func(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error) {
 		cfg, err := repo.Get(ctx, tenantID)
 		if errors.Is(err, repository.ErrTenantLLMConfigNotFound) {
@@ -90,6 +100,7 @@ func newTenantLLMProviderResolver(
 		// so we pass "" and let azure_openai.go fall back to its
 		// defaultAzureAPIVersion ("2024-10-21").
 		p, perr := llm.NewProviderFromConfigWithAzure(
+			guard,
 			cfg.Provider,
 			cfg.Model,
 			apiKey,

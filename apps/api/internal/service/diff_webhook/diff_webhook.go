@@ -55,6 +55,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/diff"
@@ -153,15 +154,15 @@ type AuditWriter interface {
 
 // HTTPDoer is the minimum http.Client surface this package needs.
 //
-// Production wiring passes NOTHING (Config.HTTPClient is nil), so NewService
-// builds the client itself — which is what makes the redirect policy below
-// effective. Codex round 4 (Low) noted the previous comment here claimed
-// production supplied its own client; it does not, and if it ever did, the
-// CheckRedirect that keeps an unsigned Slack-exempt delivery from being
-// redirected off hooks.slack.com would be silently lost. A caller that does
-// supply one owns that policy.
+// Production wiring passes NOTHING (Config.httpClient is unexported and nil),
+// so NewService builds the client itself from the egress guard — which is what
+// makes both the redirect policy below and the destination policy effective.
+// Codex round 4 (Low) noted an earlier comment here claimed production supplied
+// its own client; it does not, and M50 removed the ability for any external
+// caller to do so, because supplying one silently discarded the whole guard.
 //
-// Unit tests substitute a fake recording the outgoing request.
+// Unit tests (in this package) substitute a fake recording the outgoing
+// request.
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -178,12 +179,26 @@ type Service struct {
 
 // Config bundles construction inputs.
 type Config struct {
-	Settings      WebhookSettingsReader
-	Audit         AuditWriter
-	HTTPClient    HTTPDoer // nil → &http.Client{Timeout: DefaultHTTPTimeout}
+	Settings WebhookSettingsReader
+	Audit    AuditWriter
+	// Egress is the outbound destination policy the delivery client is built
+	// from. Nil means "the caller did not say", which resolves to the strictest
+	// policy rather than to none — tenant_diff_webhook_settings.webhook_url is
+	// tenant-supplied input.
+	Egress        *egress.Guard
 	EncryptionKey []byte
 	Retries       []time.Duration // nil → DefaultRetryBackoffs
 	Clock         func() time.Time
+
+	// httpClient replaces the guard-built delivery client outright.
+	//
+	// Codex round 2 (Low): this was an exported field, which meant any caller
+	// could hand this tenant-controlled sink an arbitrary HTTPDoer and the
+	// Egress policy would simply be ignored — an opt-out of the whole guard
+	// available to anyone importing the package. It is unexported now, so the
+	// seam exists only for this package's own tests (they are in-package) and
+	// cannot be reached from wiring code by accident.
+	httpClient HTTPDoer
 }
 
 // NewService constructs the service. Required fields panic when nil.
@@ -197,29 +212,34 @@ func NewService(cfg Config) *Service {
 	if len(cfg.EncryptionKey) != 32 {
 		panic("diff_webhook.NewService: EncryptionKey must be 32 bytes")
 	}
-	client := cfg.HTTPClient
+	client := cfg.httpClient
 	if client == nil {
-		client = &http.Client{
-			Timeout: DefaultHTTPTimeout,
-			// M48, Codex round 2 (Low): do not follow redirects.
-			//
-			// SignatureRequired waives the signing-secret requirement for
-			// format=slack sent to https://hooks.slack.com. That check is
-			// applied to the CONFIGURED url; a 307/308 preserves the method
-			// and body, so a redirect could carry an unsigned payload off that
-			// host and out from under the exemption. No exploitable Slack open
-			// redirect was identified, so this is precautionary rather than a
-			// fix for a demonstrated bypass.
-			//
-			// Refusing redirects outright is also the right policy for a
-			// webhook independently of that: the destination is an operator-
-			// configured endpoint, not a browsable resource, and a 3xx now
-			// surfaces as a non-2xx delivery failure the operator can see on
-			// the settings screen instead of silently retargeting.
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+		guard := cfg.Egress
+		if guard == nil {
+			guard = egress.NewSet(egress.Settings{}).DiffWebhook
 		}
+		// M50: the client is built by the egress guard, so the destination is
+		// checked at connect time against the address actually being dialed —
+		// which is what a validation-time DNS check cannot do. The guard's
+		// diff_webhook policy carries MaxRedirects=0, preserving the M48
+		// behaviour below.
+		//
+		// M48, Codex round 2 (Low): do not follow redirects.
+		//
+		// SignatureRequired waives the signing-secret requirement for
+		// format=slack sent to https://hooks.slack.com. That check is
+		// applied to the CONFIGURED url; a 307/308 preserves the method
+		// and body, so a redirect could carry an unsigned payload off that
+		// host and out from under the exemption. No exploitable Slack open
+		// redirect was identified, so this is precautionary rather than a
+		// fix for a demonstrated bypass.
+		//
+		// Refusing redirects outright is also the right policy for a
+		// webhook independently of that: the destination is an operator-
+		// configured endpoint, not a browsable resource, and a 3xx now
+		// surfaces as a non-2xx delivery failure the operator can see on
+		// the settings screen instead of silently retargeting.
+		client = guard.Client(DefaultHTTPTimeout)
 	}
 	retries := cfg.Retries
 	if len(retries) == 0 {

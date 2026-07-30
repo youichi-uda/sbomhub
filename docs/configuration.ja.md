@@ -90,6 +90,30 @@ OpenAI / Gemini / Ollama も `Embed` を実装しています。Anthropic は、
 | Ollama | `POST {OLLAMA_HOST}/api/embed` | `nomic-embed-text` | 768 | sbomhub 側 cap 2,048 inputs/request、16,384 inputs/call safety cap。途中 chunk 失敗時は全 vector 破棄。 |
 | Anthropic | N/A | N/A | N/A | `Embed` は `ErrNotImplemented`。Voyage AI 等を別途利用。 |
 
+### 外向き接続ポリシー (テナントが指定する宛先)
+
+テナント管理者が URL を入力し、サーバーがそこへ接続する設定画面が 4 つあります
+(イシュートラッカーのベース URL、Slack / Discord 通知 Webhook、SBOM 差分 Webhook、
+テナント別 Azure OpenAI エンドポイント)。これらは信頼できない入力なので、内部
+アドレスへの接続は既定で拒否されます。
+
+**運用者が設定する宛先** — `SBOMHUB_*_URL` のフィードミラー、Ollama のベース URL
+(`SBOMHUB_LLM_OLLAMA_URL` / `OLLAMA_HOST`、既定 `http://localhost:11434`)、課金
+プロバイダ API — は対象外です。
+
+| 変数 | 既定値 | 説明 |
+|------|--------|------|
+| `SBOMHUB_EGRESS_ALLOW_PRIVATE` | `false` | 上記 4 用途で RFC1918 / ループバック / CGNAT / IPv6 ULA 宛を許可する |
+| `SBOMHUB_EGRESS_ALLOWED_INTERNAL` | (空) | 限定的な代替手段。内部宛を許可するホスト名・IP アドレス・CIDR をカンマまたは空白区切りで列挙する。ホスト名はサブドメインにも一致する。書式が不正な場合は起動を拒否する |
+| `SBOMHUB_EGRESS_ALLOW_PROXY` | `false` | 上記 4 用途で `HTTP_PROXY` / `HTTPS_PROXY` を有効にする。既定で無効。プロキシ経由ではプロキシのアドレスしか検査できず、実際の宛先はプロキシが決めるため、有効化は宛先ポリシーをプロキシ側に委譲することを意味する |
+| `SBOMHUB_EGRESS_NAT64_PREFIXES` | (空) | このネットワークが使う RFC 6052 NAT64 変換プレフィックス (well-known な `64:ff9b::/96` 以外を使う場合)。宣言されたプレフィックス経由の宛先は、内包する IPv4 アドレスで判定される。不正な値は起動を拒否する |
+
+クラウドのインスタンスメタデータ (`169.254.169.254` を含むリンクローカル全体、
+Azure の `168.63.129.16`、およびそれらを内包する IPv6 トンネル形式) は、上記を
+設定しても拒否されます。ポリシーの詳細と既知の限界は
+[docs/security/egress.md](./security/egress.md)、内部サービスを指しているテナントが
+いる場合の移行手順は [UPGRADE.md §2c](./UPGRADE.md) を参照してください。
+
 ### フロントエンド設定
 
 | 変数 | デフォルト | 説明 |

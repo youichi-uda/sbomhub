@@ -27,12 +27,13 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/client"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
 func TestIssueTrackerService_TestConnection_GitHub(t *testing.T) {
-	svc := NewIssueTrackerService(nil, nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(nil, nil, testEncryptionKey, egress.OperatorControlled())
 
 	t.Run("success probes the repo-scoped endpoint with Bearer auth", func(t *testing.T) {
 		var gotPath, gotAuth string
@@ -100,7 +101,7 @@ func TestIssueTrackerService_TestConnection_GitHub(t *testing.T) {
 }
 
 func TestIssueTrackerService_CreateGitHubTicket(t *testing.T) {
-	svc := NewIssueTrackerService(nil, nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(nil, nil, testEncryptionKey, egress.OperatorControlled())
 
 	t.Run("maps issue number to ID/Key and html_url to URL", func(t *testing.T) {
 		var gotPath string
@@ -257,7 +258,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_ClosedIssue(t *testing.T) {
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 
 	encToken, err := svc.encrypt("gh-token")
 	if err != nil {
@@ -305,7 +306,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_NonNumericKey(t *testing.T) {
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 
 	encToken, err := svc.encrypt("gh-token")
 	if err != nil {
@@ -411,7 +412,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_LegacyNULLRowURLFallback(t *testi
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/other-org/other-repo/issues/42", "")
 
@@ -453,7 +454,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_PersistedRepoOverride(t *testing.
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/octocat/other-repo/issues/42", "octocat/other-repo")
 
@@ -487,7 +488,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_PersistedRepoURLMismatch(t *testi
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 	ticketID, _ := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/other-org/other-repo/issues/42", "octocat/hello-world")
 
@@ -535,7 +536,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_UnparseableURL(t *testing.T) {
 			}
 			defer db.Close()
 
-			svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+			svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 			ticketID, _ := githubSyncGuardFixture(t, svc, mock, ts.URL, tc.url, "")
 
 			err = svc.SyncTicket(context.Background(), ticketID)
@@ -580,7 +581,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_CaseVariantRepoURL(t *testing.T) 
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/Octocat/Hello-World/issues/42", "octocat/hello-world")
 
@@ -628,7 +629,7 @@ func TestIssueTrackerService_CreateTicket_GitHub_PersistsExternalProjectKey(t *t
 	// membership before anything else, so the service needs a real
 	// vulnerability repository and the mock needs that EXISTS probe first.
 	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db),
-		repository.NewVulnerabilityRepository(db), testEncryptionKey, nil)
+		repository.NewVulnerabilityRepository(db), testEncryptionKey, egress.OperatorControlled())
 
 	encToken, err := svc.encrypt("gh-token")
 	if err != nil {
@@ -714,7 +715,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_AssigneeSync(t *testing.T) {
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 	ticketID, tenantID := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/octocat/hello-world/issues/42", "octocat/hello-world")
 
@@ -757,7 +758,7 @@ func TestIssueTrackerService_SyncTicket_GitHub_MissingState(t *testing.T) {
 	}
 	defer db.Close()
 
-	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, nil)
+	svc := NewIssueTrackerService(repository.NewIssueTrackerRepository(db), nil, testEncryptionKey, egress.OperatorControlled())
 	ticketID, _ := githubSyncGuardFixture(t, svc, mock, ts.URL,
 		"https://github.com/octocat/hello-world/issues/42", "octocat/hello-world")
 

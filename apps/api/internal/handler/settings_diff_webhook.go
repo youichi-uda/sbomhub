@@ -25,6 +25,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/sbomhub/sbomhub/internal/config"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -41,18 +42,30 @@ type SettingsDiffWebhookHandler struct {
 	repo      *repository.DiffWebhookRepository
 	auditRepo *repository.AuditRepository
 	cfg       *config.Config
+	// egress mirrors the policy diff_webhook.Service delivers under, so the
+	// settings screen rejects a destination the deliverer would refuse instead
+	// of accepting it and failing silently at fire time.
+	egress *egress.Guard
 }
 
 // NewSettingsDiffWebhookHandler wires the handler.
+//
+// SECURITY: guard is the outbound destination policy (internal/egress). Nil
+// resolves to the strictest policy, matching diff_webhook.NewService.
 func NewSettingsDiffWebhookHandler(
 	repo *repository.DiffWebhookRepository,
 	auditRepo *repository.AuditRepository,
 	cfg *config.Config,
+	guard *egress.Guard,
 ) *SettingsDiffWebhookHandler {
+	if guard == nil {
+		guard = egress.NewSet(egress.Settings{}).DiffWebhook
+	}
 	return &SettingsDiffWebhookHandler{
 		repo:      repo,
 		auditRepo: auditRepo,
 		cfg:       cfg,
+		egress:    guard,
 	}
 }
 
@@ -173,6 +186,17 @@ func (h *SettingsDiffWebhookHandler) Update(c echo.Context) error {
 		if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 			return c.JSON(http.StatusBadRequest, map[string]string{
 				"error": "webhook_url must be a valid absolute http:// or https:// URL with a host",
+			})
+		}
+		// M50: reject destinations this deployment will not deliver to. This is
+		// an early rejection for the admin's benefit, NOT the defence — the
+		// address behind a hostname can change between here and delivery, so
+		// what actually holds is the guard on the deliverer's HTTP client
+		// (internal/egress). The messages are self-authored and leak-free, so
+		// echoing them at 400 is safe and tells the admin what to change.
+		if verr := h.egress.ValidateURL(url); verr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "webhook_url is not an allowed destination: " + verr.Error(),
 			})
 		}
 	}

@@ -37,6 +37,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/sbomhub/sbomhub/internal/database"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
@@ -144,7 +145,10 @@ func m47TicketService(appDB *sql.DB) *IssueTrackerService {
 		repository.NewIssueTrackerRepository(appDB),
 		repository.NewVulnerabilityRepository(appDB),
 		key,
-		nil, // self-host mode: no SSRF allowlist, so a 127.0.0.1 test server is usable
+		// The test server is on 127.0.0.1, which the tenant-egress policy
+		// refuses by default (M50). The destination here is chosen by the
+		// test, not by a tenant, so it declares that explicitly.
+		egress.OperatorControlled(),
 	)
 }
 

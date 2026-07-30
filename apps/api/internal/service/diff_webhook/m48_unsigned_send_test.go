@@ -62,8 +62,9 @@ func TestM48UnsignedJSONDeliveryIsRefused(t *testing.T) {
 	}}
 	audit := &stubAudit{}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: audit, EncryptionKey: testKey,
-		HTTPClient: cs.srv.Client(),
+		httpClient: cs.srv.Client(),
 	})
 
 	dec, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0))
@@ -105,8 +106,9 @@ func TestM48SignedJSONDeliveryStillFires(t *testing.T) {
 		Format: model.DiffWebhookFormatJSON,
 	}}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: &stubAudit{}, EncryptionKey: testKey,
-		HTTPClient: cs.srv.Client(),
+		httpClient: cs.srv.Client(),
 	})
 
 	if _, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0)); err != nil {
@@ -141,8 +143,9 @@ func TestM48SlackFormatAloneIsNotAnExemption(t *testing.T) {
 	}}
 	audit := &stubAudit{}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: audit, EncryptionKey: testKey,
-		HTTPClient: cs.srv.Client(),
+		httpClient: cs.srv.Client(),
 	})
 
 	dec, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0))
@@ -253,8 +256,9 @@ func TestM48RefusalIsVisibleOnTheSettingsScreen(t *testing.T) {
 		Format: model.DiffWebhookFormatJSON,
 	}}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: &stubAudit{}, EncryptionKey: testKey,
-		HTTPClient: cs.srv.Client(),
+		httpClient: cs.srv.Client(),
 	})
 
 	if _, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0)); err != nil {
@@ -306,7 +310,7 @@ func TestM48NonRetryableStatuses(t *testing.T) {
 				CriticalThreshold: 1, HighThreshold: 5, LicenseViolationThreshold: 1,
 				Format: model.DiffWebhookFormatJSON,
 			}}
-			// HTTPClient is deliberately NOT supplied, so NewService builds
+			// httpClient is deliberately NOT supplied, so NewService builds
 			// the production client — the one carrying CheckRedirect. Codex
 			// round 4 (Low) is exactly this: the redirect policy lives on the
 			// internally-created client, so a test that passes srv.Client()
@@ -315,6 +319,7 @@ func TestM48NonRetryableStatuses(t *testing.T) {
 			// server is plain HTTP on 127.0.0.1, so the default client reaches
 			// it without srv.Client().
 			svc := NewService(Config{
+				Egress:   testEgress(),
 				Settings: settings, Audit: &stubAudit{}, EncryptionKey: testKey,
 				Retries: []time.Duration{0, 0, 0},
 			})
@@ -362,6 +367,7 @@ func TestM48UpdateFireResultFailureIsNotSilent(t *testing.T) {
 		Format: model.DiffWebhookFormatJSON,
 	}}}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: &stubAudit{}, EncryptionKey: testKey,
 	})
 

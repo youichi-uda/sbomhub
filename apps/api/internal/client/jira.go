@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 )
 
 // JiraClient is a client for the Jira REST API
@@ -32,9 +31,7 @@ type JiraClient struct {
 // WithBackoffPolicy to override for tests or aggressive callers.
 func NewJiraClient(baseURL, email, apiToken string) *JiraClient {
 	return &JiraClient{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpClient:    guardedIssueTrackerClient(nil),
 		baseURL:       baseURL,
 		email:         email,
 		apiToken:      apiToken,

@@ -45,7 +45,7 @@ func testJiraBackoff(maxRetries int) BackoffPolicy {
 }
 
 func TestNewJiraClient(t *testing.T) {
-	client := NewJiraClient("https://example.atlassian.net", "user@example.com", "token123")
+	client := testJiraClient("https://example.atlassian.net", "user@example.com", "token123")
 
 	if client == nil {
 		t.Fatal("expected client to be created")
@@ -94,7 +94,7 @@ func TestJiraClient_TestConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123")
+	client := testJiraClient(server.URL, "user@example.com", "token123")
 
 	err := client.TestConnection(context.Background())
 	if err != nil {
@@ -109,7 +109,7 @@ func TestJiraClient_TestConnection_Unauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "wrong-token")
+	client := testJiraClient(server.URL, "user@example.com", "wrong-token")
 
 	err := client.TestConnection(context.Background())
 	if err == nil {
@@ -133,7 +133,7 @@ func TestJiraClient_GetProjects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123")
+	client := testJiraClient(server.URL, "user@example.com", "token123")
 
 	projects, err := client.GetProjects(context.Background())
 	if err != nil {
@@ -176,7 +176,7 @@ func TestJiraClient_GetIssue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123")
+	client := testJiraClient(server.URL, "user@example.com", "token123")
 
 	issue, err := client.GetIssue(context.Background(), "PROJ-123")
 	if err != nil {
@@ -246,7 +246,7 @@ func TestJiraClient_CreateIssue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123")
+	client := testJiraClient(server.URL, "user@example.com", "token123")
 
 	input := CreateIssueInput{
 		ProjectKey:  "PROJ",
@@ -288,7 +288,7 @@ func TestJiraClient_GetIssueTypes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123")
+	client := testJiraClient(server.URL, "user@example.com", "token123")
 
 	issueTypes, err := client.GetIssueTypes(context.Background(), "PROJ")
 	if err != nil {
@@ -373,7 +373,7 @@ func TestJiraClient_RateLimit_429_Retry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123").
+	client := testJiraClient(server.URL, "user@example.com", "token123").
 		WithBackoffPolicy(testJiraBackoff(3))
 
 	if err := client.TestConnection(context.Background()); err != nil {
@@ -404,7 +404,7 @@ func TestJiraClient_RateLimit_ExponentialBackoff(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123").
+	client := testJiraClient(server.URL, "user@example.com", "token123").
 		WithBackoffPolicy(testJiraBackoff(3))
 
 	start := time.Now()
@@ -435,7 +435,7 @@ func TestJiraClient_RateLimit_Exhausted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123").
+	client := testJiraClient(server.URL, "user@example.com", "token123").
 		WithBackoffPolicy(testJiraBackoff(2))
 
 	err := client.TestConnection(context.Background())
@@ -463,7 +463,7 @@ func TestJiraClient_RateLimit_ContextCancel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123").
+	client := testJiraClient(server.URL, "user@example.com", "token123").
 		WithBackoffPolicy(testJiraBackoff(3))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -590,7 +590,7 @@ func TestJiraClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 		}))
 		defer server.Close()
 
-		client := NewJiraClient(server.URL, "user@example.com", "token123").
+		client := testJiraClient(server.URL, "user@example.com", "token123").
 			WithBackoffPolicy(testJiraBackoff(3))
 
 		issue, err := client.CreateIssue(context.Background(), input)
@@ -784,7 +784,7 @@ func TestJiraClient_RateLimit_RetryAfterHTTPDate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJiraClient(server.URL, "user@example.com", "token123").
+	client := testJiraClient(server.URL, "user@example.com", "token123").
 		WithBackoffPolicy(testJiraBackoff(3))
 
 	if err := client.TestConnection(context.Background()); err != nil {

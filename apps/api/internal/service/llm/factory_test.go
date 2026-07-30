@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/sbomhub/sbomhub/internal/egress"
 )
 
 // withEnv sets the named env vars for the test's lifetime via t.Setenv (so
@@ -234,7 +236,7 @@ func TestNewProviderFromConfig_DisabledWhenEmpty(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, err := NewProviderFromConfig(tc.provider, "", tc.apiKey)
+			p, err := NewProviderFromConfig(egress.OperatorControlled(), tc.provider, "", tc.apiKey)
 			if err != nil {
 				t.Fatalf("err = %v, want nil (DisabledProvider should be returned in-band)", err)
 			}
@@ -257,7 +259,7 @@ func TestNewProviderFromConfig_HappyPaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.provider, func(t *testing.T) {
-			p, err := NewProviderFromConfig(tc.provider, "", "dummy-key")
+			p, err := NewProviderFromConfig(egress.OperatorControlled(), tc.provider, "", "dummy-key")
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
@@ -269,7 +271,7 @@ func TestNewProviderFromConfig_HappyPaths(t *testing.T) {
 }
 
 func TestNewProviderFromConfig_UnknownProviderIsError(t *testing.T) {
-	_, err := NewProviderFromConfig("vertex_ai", "", "dummy")
+	_, err := NewProviderFromConfig(egress.OperatorControlled(), "vertex_ai", "", "dummy")
 	if err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
@@ -354,7 +356,7 @@ func TestNewProviderFromEnv_OllamaRespectsURL(t *testing.T) {
 // TestNewProviderFromConfig_OllamaHappyPath mirrors the env-side test for
 // the per-tenant resolver (M1 #F2). Ollama does not require an API key.
 func TestNewProviderFromConfig_OllamaHappyPath(t *testing.T) {
-	p, err := NewProviderFromConfig("ollama", "qwen2.5-coder:7b", "")
+	p, err := NewProviderFromConfig(egress.OperatorControlled(), "ollama", "qwen2.5-coder:7b", "")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -367,7 +369,7 @@ func TestNewProviderFromConfig_OllamaHappyPath(t *testing.T) {
 // model-required guard: tenant_llm_config.model empty + provider ollama
 // must return DisabledProvider rather than an error.
 func TestNewProviderFromConfig_OllamaRequiresModel(t *testing.T) {
-	p, err := NewProviderFromConfig("ollama", "", "")
+	p, err := NewProviderFromConfig(egress.OperatorControlled(), "ollama", "", "")
 	if err != nil {
 		t.Fatalf("err = %v, want nil (DisabledProvider returned in-band)", err)
 	}
@@ -1174,7 +1176,7 @@ func TestNewProviderFromConfigWithAzure_EmbeddingFallsBackToEnv(t *testing.T) {
 		EnvAzureEmbeddingDeployment: "shared-embed-dep",
 		EnvAzureEmbeddingModel:      "text-embedding-3-small",
 	})
-	p, err := NewProviderFromConfigWithAzure(
+	p, err := NewProviderFromConfigWithAzure(egress.OperatorControlled(),
 		"azure_openai", "gpt-4o", "tenant-api-key",
 		"https://tenant.openai.azure.com", "tenant-chat-dep", "2024-10-21",
 	)

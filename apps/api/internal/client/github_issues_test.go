@@ -31,7 +31,7 @@ func testGitHubBackoff(maxRetries int) BackoffPolicy {
 }
 
 func TestNewGitHubIssuesClient(t *testing.T) {
-	c := NewGitHubIssuesClient("https://api.github.com", "token123")
+	c := testGitHubIssuesClient("https://api.github.com", "token123")
 	if c == nil {
 		t.Fatal("expected client to be created")
 	}
@@ -44,13 +44,13 @@ func TestNewGitHubIssuesClient(t *testing.T) {
 
 	// Empty baseURL falls back to the public API root (GitHub Enterprise
 	// callers pass their own API root explicitly).
-	c = NewGitHubIssuesClient("", "token123")
+	c = testGitHubIssuesClient("", "token123")
 	if c.baseURL != "https://api.github.com" {
 		t.Errorf("expected default baseURL, got: %s", c.baseURL)
 	}
 
 	// Trailing slashes are trimmed so path joining cannot produce "//repos".
-	c = NewGitHubIssuesClient("https://ghe.example.com/api/v3/", "token123")
+	c = testGitHubIssuesClient("https://ghe.example.com/api/v3/", "token123")
 	if c.baseURL != "https://ghe.example.com/api/v3" {
 		t.Errorf("expected trailing slash trimmed, got: %s", c.baseURL)
 	}
@@ -89,7 +89,7 @@ func TestGitHubIssuesClient_TestConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 	if err := client.TestConnection(context.Background(), "acme/widget"); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestGitHubIssuesClient_TestConnection_ErrorStatuses(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewGitHubIssuesClient(server.URL, "secret-token-value").
+			client := testGitHubIssuesClient(server.URL, "secret-token-value").
 				WithBackoffPolicy(testGitHubBackoff(3))
 
 			err := client.TestConnection(context.Background(), "acme/widget")
@@ -183,7 +183,7 @@ func TestGitHubIssuesClient_CreateIssue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 
 	issue, err := client.CreateIssue(context.Background(), CreateGitHubIssueInput{
 		Repo:   "acme/widget",
@@ -215,7 +215,7 @@ func TestGitHubIssuesClient_CreateIssue_EmptyTitle(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 	_, err := client.CreateIssue(context.Background(), CreateGitHubIssueInput{
 		Repo:  "acme/widget",
 		Title: "   ",
@@ -238,7 +238,7 @@ func TestGitHubIssuesClient_CreateIssue_MissingNumber(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 	_, err := client.CreateIssue(context.Background(), CreateGitHubIssueInput{
 		Repo:  "acme/widget",
 		Title: "valid title",
@@ -274,7 +274,7 @@ func TestGitHubIssuesClient_GetIssue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 
 	issue, err := client.GetIssue(context.Background(), "acme/widget", 42)
 	if err != nil {
@@ -295,7 +295,7 @@ func TestGitHubIssuesClient_GetIssue(t *testing.T) {
 	}))
 	defer unassigned.Close()
 
-	issue, err = NewGitHubIssuesClient(unassigned.URL, "token123").GetIssue(context.Background(), "acme/widget", 42)
+	issue, err = testGitHubIssuesClient(unassigned.URL, "token123").GetIssue(context.Background(), "acme/widget", 42)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestGitHubIssuesClient_GetIssue_Defensive(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 
 	if _, err := client.GetIssue(context.Background(), "acme/widget", 0); err == nil {
 		t.Error("expected error for non-positive issue number, got nil")
@@ -356,7 +356,7 @@ func TestGitHubIssuesClient_RepoValidation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 	ctx := context.Background()
 
 	for _, tc := range invalid {
@@ -419,7 +419,7 @@ func TestGitHubIssuesClient_RateLimit_SecondaryRetryAfter(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123").
+	client := testGitHubIssuesClient(server.URL, "token123").
 		WithBackoffPolicy(testGitHubBackoff(3))
 
 	if err := client.TestConnection(context.Background(), "acme/widget"); err != nil {
@@ -451,7 +451,7 @@ func TestGitHubIssuesClient_RateLimit_SecondaryBodySniff(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123").
+	client := testGitHubIssuesClient(server.URL, "token123").
 		WithBackoffPolicy(testGitHubBackoff(3))
 
 	if err := client.TestConnection(context.Background(), "acme/widget"); err != nil {
@@ -482,7 +482,7 @@ func TestGitHubIssuesClient_RateLimit_PrimaryResetEpoch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123").
+	client := testGitHubIssuesClient(server.URL, "token123").
 		WithBackoffPolicy(testGitHubBackoff(3))
 
 	if err := client.TestConnection(context.Background(), "acme/widget"); err != nil {
@@ -511,7 +511,7 @@ func TestGitHubIssuesClient_RateLimit_429_Backoff(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123").
+	client := testGitHubIssuesClient(server.URL, "token123").
 		WithBackoffPolicy(testGitHubBackoff(3))
 
 	start := time.Now()
@@ -539,7 +539,7 @@ func TestGitHubIssuesClient_RateLimit_Exhausted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "secret-token-value").
+	client := testGitHubIssuesClient(server.URL, "secret-token-value").
 		WithBackoffPolicy(testGitHubBackoff(2))
 
 	err := client.TestConnection(context.Background(), "acme/widget")
@@ -568,7 +568,7 @@ func TestGitHubIssuesClient_RateLimit_ContextCancel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123").
+	client := testGitHubIssuesClient(server.URL, "token123").
 		WithBackoffPolicy(testGitHubBackoff(3))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -623,7 +623,7 @@ func TestGitHubIssuesClient_RateLimit_POST_BodyReuse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123").
+	client := testGitHubIssuesClient(server.URL, "token123").
 		WithBackoffPolicy(testGitHubBackoff(3))
 
 	issue, err := client.CreateIssue(context.Background(), CreateGitHubIssueInput{
@@ -667,7 +667,7 @@ func TestGitHubIssuesClient_BodyCap_8MiB(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 
 	_, err := client.GetIssue(context.Background(), "acme/widget", 42)
 	if err == nil {
@@ -687,7 +687,7 @@ func TestGitHubIssuesClient_MalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGitHubIssuesClient(server.URL, "token123")
+	client := testGitHubIssuesClient(server.URL, "token123")
 
 	if _, err := client.GetIssue(context.Background(), "acme/widget", 42); err == nil {
 		t.Error("expected error for malformed JSON, got nil")

@@ -68,6 +68,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
 
@@ -414,7 +415,11 @@ func buildProvider(spec providerSpec) (llm.Provider, error) {
 	if spec.name == "ollama" && spec.ollamaURL != "" {
 		_ = os.Setenv(llm.EnvOllamaURL, spec.ollamaURL)
 	}
+	// The destination here comes from the operator's own flags, not from a
+	// tenant, so this call site says so explicitly rather than inheriting a
+	// tenant policy that would refuse a local Azure mock.
 	return llm.NewProviderFromConfigWithAzure(
+		egress.OperatorControlled(),
 		spec.name, spec.model, spec.apiKey,
 		spec.azureEndpoint, spec.azureDeployment, spec.azureAPIVersion,
 	)

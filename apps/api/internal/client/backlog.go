@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"time"
 )
 
 // BacklogClient is a client for the Backlog API
@@ -33,9 +32,7 @@ type BacklogClient struct {
 // Use WithBackoffPolicy to override for tests or aggressive callers.
 func NewBacklogClient(baseURL, apiKey string) *BacklogClient {
 	return &BacklogClient{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpClient:    guardedIssueTrackerClient(nil),
 		baseURL:       baseURL,
 		apiKey:        apiKey,
 		backoffPolicy: DefaultBackoffPolicy(),

@@ -660,6 +660,17 @@ func main() {
 	// as GET /diff so a UI download button can pass through whatever
 	// the user has selected on the diff detail page.
 	projectDiffExportService := diff_export.NewService(projectDiffService)
+
+	// M50: outbound destination policy for every sink whose URL a tenant can
+	// choose. Built before the services that consume it so a malformed
+	// SBOMHUB_EGRESS_ALLOWED_INTERNAL is a startup refusal, not a path that is
+	// silently still closed at 3am.
+	egressGuards, egressErr := buildEgressGuards(cfg)
+	if egressErr != nil {
+		slog.Error("Invalid outbound egress configuration", "error", egressErr)
+		os.Exit(1)
+	}
+
 	nvdService := service.NewNVDServiceWithCache(vulnRepo, componentRepo, cfg.NVDAPIKey, nvdCache, cfg.NVDURL, cfg.Offline)
 	jvnService := service.NewJVNService(vulnRepo, componentRepo, cfg.JVNURL, cfg.Offline)
 	statsService := service.NewStatsService(statsRepo)
@@ -677,7 +688,7 @@ func main() {
 	// affected project's latest SBOM once for traversal).
 	cvePathsService := service.NewCVEPathsService(searchRepo, sbomRepo)
 	epssService := service.NewEPSSService(vulnRepo, cfg.EPSSURL, cfg.Offline)
-	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg)
+	notificationService := service.NewNotificationService(notificationRepo, projectRepo, cfg, egressGuards.NotificationWebhook)
 	complianceService := service.NewComplianceServiceFull(sbomRepo, componentRepo, vulnRepo, vexRepo, licensePolicyRepo, dashboardRepo, checklistRepo, visualizationRepo, publicLinkRepo)
 	publicLinkService := service.NewPublicLinkService(db, publicLinkRepo, projectRepo, sbomRepo, componentRepo)
 	auditService := service.NewAuditService(auditRepo, userRepo)
@@ -689,13 +700,12 @@ func main() {
 		slog.Error("Failed to get encryption key", "error", err)
 		os.Exit(1)
 	}
-	// SECURITY: In SaaS mode, restrict issue tracker URLs to known domains to prevent SSRF
-	var issueTrackerAllowedDomains []string
-	if cfg.IsSaaS() {
-		issueTrackerAllowedDomains = service.AllowedIssueTrackerDomains
-		slog.Info("Issue tracker SSRF protection enabled", "allowed_domains", issueTrackerAllowedDomains)
-	}
-	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, encryptionKey, issueTrackerAllowedDomains)
+	// SECURITY: the issue tracker destination policy — including the SaaS
+	// hostname allowlist that used to be assembled here — now comes from
+	// buildEgressGuards, which is also what logs it. Keeping a second copy of
+	// the cfg.IsSaaS() branch at this call site would be two sources of truth
+	// for one decision.
+	issueTrackerService := service.NewIssueTrackerService(issueTrackerRepo, vulnRepo, encryptionKey, egressGuards.IssueTracker)
 	remediationService := service.NewRemediationService(vulnRepo, componentRepo, cfg.OSVURL, cfg.Offline)
 	kevService := service.NewKEVService(kevRepo, cfg.KEVURL, cfg.Offline)
 	ssvcService := service.NewSSVCService(ssvcRepo, vulnRepo, kevRepo)
@@ -726,7 +736,7 @@ func main() {
 	// that threads tenant_llm_config.azure_endpoint / azure_deployment into
 	// NewProviderFromConfigWithAzure — is unit-testable without standing up
 	// Postgres or hitting any LLM upstream.
-	triageProviderResolver := newTenantLLMProviderResolver(tenantLLMConfigRepo, triageDefaultProvider, encryptionKey)
+	triageProviderResolver := newTenantLLMProviderResolver(tenantLLMConfigRepo, triageDefaultProvider, encryptionKey, egressGuards.TenantLLM)
 	// M1 Codex review #F19: TxManager drives the runner's Stage 1 / Stage
 	// 3 transactions so the slow Provider.Complete (Stage 2) runs with
 	// NO Postgres tx held — fixing the DB connection pool exhaustion DoS
@@ -830,6 +840,7 @@ func main() {
 	projectDiffWebhookService := diff_webhook.NewService(diff_webhook.Config{
 		Settings:      diffWebhookRepo,
 		Audit:         auditRepo,
+		Egress:        egressGuards.DiffWebhook,
 		EncryptionKey: encryptionKeyForWebhook,
 	})
 	slog.Info("Diff webhook firing service initialised",
@@ -1896,7 +1907,7 @@ func main() {
 	// supplied API key with internal/service/llm.Encrypt before persisting;
 	// GET returns "***" as a placeholder so plaintext never leaves the
 	// process. Admin-only on PUT (enforced inside the handler).
-	settingsLLMHandler := handler.NewSettingsLLMHandler(tenantLLMConfigRepo, auditRepo, cfg)
+	settingsLLMHandler := handler.NewSettingsLLMHandler(tenantLLMConfigRepo, auditRepo, cfg, egressGuards.TenantLLM)
 	auth.GET("/settings/llm", settingsLLMHandler.Get)
 	authAdmin.PUT("/settings/llm", settingsLLMHandler.Update)
 
@@ -1907,7 +1918,7 @@ func main() {
 	// on GET and refuses to overwrite an existing secret unless the
 	// caller explicitly supplies a new plaintext (re-submitting "***"
 	// preserves the existing ciphertext).
-	settingsDiffWebhookHandler := handler.NewSettingsDiffWebhookHandler(diffWebhookRepo, auditRepo, cfg)
+	settingsDiffWebhookHandler := handler.NewSettingsDiffWebhookHandler(diffWebhookRepo, auditRepo, cfg, egressGuards.DiffWebhook)
 	auth.GET("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Get)
 	authAdmin.PUT("/tenant/settings/diff-webhook", settingsDiffWebhookHandler.Update)
 	// Manual fire test: builds a synthetic diff envelope and fires the

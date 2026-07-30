@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/sbomhub/sbomhub/internal/egress"
 )
 
 // Env var names. Centralised so misspellings are caught at compile time and
@@ -485,14 +487,15 @@ func ollamaBaseURLFromEnv() string {
 // buffer after this returns. We deliberately do NOT log apiKey here (provider
 // implementations honour the slog.LogValuer contract from provider.go).
 //
-// This wraps NewProviderFromConfigWithAzure with empty Azure fields to
-// preserve the existing call signature for triage / cra / meti callers
-// that have not yet been updated to pass the per-tenant Azure
-// endpoint/deployment from tenant_llm_config. ※要確認: M4 follow-up to
-// thread tenant_llm_config.azure_endpoint/azure_deployment through the
-// resolver in cmd/server/main.go so Azure BYOK works at the tenant level.
-func NewProviderFromConfig(provider, model, apiKey string) (Provider, error) {
-	return NewProviderFromConfigWithAzure(provider, model, apiKey, "", "", "")
+// This wraps NewProviderFromConfigWithAzure with empty Azure fields. It is
+// retained for callers that have no Azure endpoint to pass; it is NOT a
+// signature-compatibility shim any more — Codex round 5 (Low) caught this
+// comment still claiming so. Both this function and the Azure variant now take
+// an *egress.Guard as their first argument, and cmd/server/llm_resolver.go
+// already threads tenant_llm_config.azure_endpoint / azure_deployment through
+// the Azure variant (the M4 #F40 follow-up the old note asked for is done).
+func NewProviderFromConfig(guard *egress.Guard, provider, model, apiKey string) (Provider, error) {
+	return NewProviderFromConfigWithAzure(guard, provider, model, apiKey, "", "", "")
 }
 
 // NewProviderFromConfigWithAzure is the extended variant that accepts
@@ -510,7 +513,27 @@ func NewProviderFromConfig(provider, model, apiKey string) (Provider, error) {
 // SECURITY: apiKey, azureEndpoint, and azureDeployment can carry
 // tenant-scoped metadata; we do NOT log them here (provider impl
 // honours slog.LogValuer).
-func NewProviderFromConfigWithAzure(provider, model, apiKey, azureEndpoint, azureDeployment, azureAPIVersion string) (Provider, error) {
+// M50: guard is the outbound destination policy applied to the
+// TENANT-SUPPLIED azure_endpoint. It is a required positional argument rather
+// than an optional field so that a new call site cannot reach this function
+// without deciding what policy applies; callers whose destination comes from
+// the operator rather than a tenant (cmd/llm-bench) pass
+// egress.OperatorControlled() and say so at the call site.
+//
+// The guard is deliberately NOT applied to the ollama arm below: that arm's
+// base URL comes from SBOMHUB_LLM_OLLAMA_URL / OLLAMA_HOST, i.e. from the
+// operator, and its documented default is http://localhost:11434. Applying a
+// tenant policy to an operator value would break the deployment shape the
+// product recommends to manufacturers, for no security gain.
+func NewProviderFromConfigWithAzure(guard *egress.Guard, provider, model, apiKey, azureEndpoint, azureDeployment, azureAPIVersion string) (Provider, error) {
+	if guard == nil {
+		// Codex round 2 (Medium): a nil here used to mean "no policy", so this
+		// per-tenant constructor fail-OPENED for any caller that forgot the
+		// argument. Production always passes one (cmd/server/llm_resolver.go),
+		// but the constructor's own contract has to be the safe one — a caller
+		// who did not say which policy applies gets the strictest, not none.
+		guard = egress.NewSet(egress.Settings{}).TenantLLM
+	}
 	name := strings.ToLower(strings.TrimSpace(provider))
 	if name == "" {
 		return &DisabledProvider{Reason: "tenant_llm_config.provider is empty (BYOK required)"}, nil
@@ -545,10 +568,18 @@ func NewProviderFromConfigWithAzure(provider, model, apiKey, azureEndpoint, azur
 		// (tenant_llm_config schema does not yet carry embedding
 		// columns). See azureEmbeddingFromEnv for the rationale.
 		embedDep, embedAPIVer, embedModel := azureEmbeddingFromEnv()
+		// M50: refuse up front when the persisted endpoint is one the policy
+		// will not dial, so the caller gets a named reason instead of a
+		// connect-time failure buried in a triage run. The guard is also
+		// attached to the provider's HTTP client below, which is what actually
+		// enforces the policy at connect time and across redirects.
+		if verr := guard.ValidateURL(endpoint); verr != nil {
+			return &DisabledProvider{Reason: "tenant_llm_config.azure_endpoint is not an allowed destination: " + verr.Error()}, nil
+		}
 		return NewAzureOpenAIWithEmbedding(
 			apiKey, endpoint, deployment, strings.TrimSpace(azureAPIVersion), model,
 			embedDep, embedAPIVer, embedModel,
-		), nil
+		).WithEgress(guard), nil
 	case "ollama":
 		// M4 Wave M4-1: Per-tenant Ollama. The model is required (no
 		// auto-detect — see NewProviderFromEnv comment). The base URL

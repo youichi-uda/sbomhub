@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sbomhub/sbomhub/internal/egress"
 )
 
 // defaultAzureAPIVersion is the api-version query string parameter used when
@@ -73,6 +75,10 @@ type AzureOpenAIProvider struct {
 	embeddingModelName  string // canonical embedding model identifier (text-embedding-3-small etc.)
 }
 
+// azureHTTPTimeout is the per-request budget, matching openai.go /
+// anthropic.go.
+const azureHTTPTimeout = 60 * time.Second
+
 // Compile-time interface conformance.
 var _ Provider = (*AzureOpenAIProvider)(nil)
 
@@ -98,7 +104,7 @@ func NewAzureOpenAI(apiKey, endpoint, deployment, apiVersion, modelName string) 
 		deployment:       deployment,
 		apiVersion:       apiVersion,
 		modelName:        modelName,
-		client:           &http.Client{Timeout: 60 * time.Second},
+		client:           &http.Client{Timeout: azureHTTPTimeout},
 		defaultMaxTokens: 0, // 0 == provider default (no explicit cap)
 	}
 }
@@ -149,6 +155,24 @@ func NewAzureOpenAIWithEmbedding(
 	p.embeddingDeployment = strings.TrimSpace(embeddingDeployment)
 	p.embeddingAPIVersion = strings.TrimSpace(embeddingAPIVersion)
 	p.embeddingModelName = strings.TrimSpace(embeddingModelName)
+	return p
+}
+
+// WithEgress routes this provider's requests through the supplied egress
+// guard.
+//
+// Only the per-TENANT construction path uses it: tenant_llm_config
+// .azure_endpoint is a URL a tenant administrator types into a settings screen,
+// so it is untrusted input and gets the tenant destination policy. The
+// env-configured path (NewProviderFromEnv, SBOMHUB_LLM_AZURE_ENDPOINT) does
+// not — that endpoint is the operator's own configuration, and filtering it
+// against the operator's own policy would buy nothing.
+//
+// Nil is a no-op so the test seams above keep working unchanged.
+func (p *AzureOpenAIProvider) WithEgress(g *egress.Guard) *AzureOpenAIProvider {
+	if g != nil {
+		p.client = g.Client(azureHTTPTimeout)
+	}
 	return p
 }
 

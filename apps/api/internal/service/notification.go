@@ -13,25 +13,64 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/config"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
+// notificationStore is the repository surface NotificationService needs. It
+// exists as an interface so the webhook delivery path can be exercised without
+// a database — the SSRF regression in ssrf_notification_test.go asserts on what
+// the HTTP client did, and standing up Postgres to reach that assertion would
+// have meant the assertion was never written.
+// *repository.NotificationRepository satisfies it.
+type notificationStore interface {
+	GetSettings(ctx context.Context, projectID uuid.UUID) (*model.NotificationSettings, error)
+	UpsertSettings(ctx context.Context, settings *model.NotificationSettings) error
+	CreateLog(ctx context.Context, log *model.NotificationLog) error
+	GetLogs(ctx context.Context, projectID uuid.UUID, limit int) ([]model.NotificationLog, error)
+}
+
+// notificationHTTPTimeout is the per-delivery budget. Unchanged from the value
+// the service used before the egress guard was introduced.
+const notificationHTTPTimeout = 10 * time.Second
+
 type NotificationService struct {
-	notifRepo   *repository.NotificationRepository
+	notifRepo   notificationStore
 	projectRepo *repository.ProjectRepository
 	client      *http.Client
 	cfg         *config.Config
+	// egress is the destination policy for Slack / Discord webhook delivery.
+	// notification_settings.slack_webhook_url and .discord_webhook_url are
+	// written straight from the API body, so the delivery target is
+	// tenant-supplied input.
+	egress *egress.Guard
 }
 
-func NewNotificationService(notifRepo *repository.NotificationRepository, projectRepo *repository.ProjectRepository, cfg *config.Config) *NotificationService {
+// NewNotificationService constructs the service.
+//
+// SECURITY: guard is the outbound destination policy (internal/egress). Nil
+// means "the caller did not say", which resolves to the strictest policy
+// rather than to none — before M50 this sink had NO destination validation
+// anywhere between the API body and http.Client.Do, and no redirect policy.
+func NewNotificationService(notifRepo *repository.NotificationRepository, projectRepo *repository.ProjectRepository, cfg *config.Config, guard *egress.Guard) *NotificationService {
+	var store notificationStore
+	if notifRepo != nil {
+		store = notifRepo
+	}
+	return newNotificationService(store, projectRepo, cfg, guard)
+}
+
+func newNotificationService(notifRepo notificationStore, projectRepo *repository.ProjectRepository, cfg *config.Config, guard *egress.Guard) *NotificationService {
+	if guard == nil {
+		guard = egress.NewSet(egress.Settings{}).NotificationWebhook
+	}
 	return &NotificationService{
 		notifRepo:   notifRepo,
 		projectRepo: projectRepo,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		cfg: cfg,
+		client:      guard.Client(notificationHTTPTimeout),
+		cfg:         cfg,
+		egress:      guard,
 	}
 }
 
@@ -64,13 +103,34 @@ func (s *NotificationService) UpdateSettings(ctx context.Context, projectID uuid
 		return nil, fmt.Errorf("failed to resolve project tenant: %w", err)
 	}
 
+	// Early rejection so a bad URL surfaces on the settings screen instead of
+	// as a silent delivery failure hours later. This is NOT the defence — the
+	// guard on s.client is (see internal/egress) — but it is the difference
+	// between a 400 the admin can act on and a webhook that never fires.
+	//
+	// The normalised values are what get persisted below, so the string that is
+	// checked here is the string that is later dialed. See normaliseEgressURL.
+	slackURL := normaliseEgressURL(input.SlackWebhookURL)
+	discordURL := normaliseEgressURL(input.DiscordWebhookURL)
+	for label, raw := range map[string]string{
+		"slack_webhook_url":   slackURL,
+		"discord_webhook_url": discordURL,
+	} {
+		if raw == "" {
+			continue
+		}
+		if verr := s.egress.ValidateURL(raw); verr != nil {
+			return nil, ValidationErrorf("invalid %s: %v", label, verr)
+		}
+	}
+
 	now := time.Now()
 	settings := &model.NotificationSettings{
 		ID:                uuid.New(),
 		TenantID:          tenantID,
 		ProjectID:         projectID,
-		SlackWebhookURL:   input.SlackWebhookURL,
-		DiscordWebhookURL: input.DiscordWebhookURL,
+		SlackWebhookURL:   slackURL,
+		DiscordWebhookURL: discordURL,
 		EmailAddresses:    input.EmailAddresses,
 		NotifyCritical:    input.NotifyCritical,
 		NotifyHigh:        input.NotifyHigh,
@@ -390,6 +450,12 @@ func (s *NotificationService) logNotification(ctx context.Context, tenantID, pro
 		Status:       status,
 		ErrorMessage: errMsg,
 		CreatedAt:    time.Now(),
+	}
+	if s.notifRepo == nil {
+		// No store wired. Production always wires one; this keeps the
+		// best-effort audit path from panicking a delivery that otherwise
+		// succeeded.
+		return
 	}
 	if err := s.notifRepo.CreateLog(ctx, log); err != nil {
 		slog.Error("Failed to create notification log", "error", err)

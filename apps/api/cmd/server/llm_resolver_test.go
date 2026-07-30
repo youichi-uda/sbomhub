@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/repository"
 	"github.com/sbomhub/sbomhub/internal/service/llm"
 )
@@ -64,7 +65,7 @@ func TestNewProviderFromConfigWithAzure_TenantScoped(t *testing.T) {
 		},
 	}
 
-	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey)
+	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey, egress.OperatorControlled())
 	p, err := resolver(context.Background(), repo.cfg.TenantID)
 	if err != nil {
 		t.Fatalf("resolver err = %v, want nil", err)
@@ -116,7 +117,7 @@ func TestNewProviderFromConfigWithAzure_TenantScoped_AzureFieldsMissing(t *testi
 					AzureDeployment: tc.deployment,
 				},
 			}
-			resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey)
+			resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey, egress.OperatorControlled())
 			p, err := resolver(context.Background(), repo.cfg.TenantID)
 			if err != nil {
 				t.Fatalf("resolver err = %v, want nil (DisabledProvider returned in-band)", err)
@@ -135,7 +136,7 @@ func TestNewProviderFromConfigWithAzure_TenantScoped_AzureFieldsMissing(t *testi
 // against the operator-configured env default.
 func TestNewTenantLLMProviderResolver_NotFoundFallsBackToDefault(t *testing.T) {
 	repo := &fakeTenantLLMConfigRepo{notFound: true}
-	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey)
+	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey, egress.OperatorControlled())
 	p, err := resolver(context.Background(), uuid.New())
 	if err != nil {
 		t.Fatalf("resolver err = %v, want nil", err)
@@ -160,7 +161,7 @@ func TestNewTenantLLMProviderResolver_NonOllamaMissingKeyFallsBack(t *testing.T)
 			Model:           "gpt-4o",
 		},
 	}
-	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey)
+	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey, egress.OperatorControlled())
 	p, err := resolver(context.Background(), repo.cfg.TenantID)
 	if err != nil {
 		t.Fatalf("resolver err = %v, want nil", err)
@@ -184,7 +185,7 @@ func TestNewTenantLLMProviderResolver_OllamaTenantBuildsProvider(t *testing.T) {
 			Model:    "qwen2.5-coder:7b",
 		},
 	}
-	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey)
+	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey, egress.OperatorControlled())
 	p, err := resolver(context.Background(), repo.cfg.TenantID)
 	if err != nil {
 		t.Fatalf("resolver err = %v, want nil", err)
@@ -201,7 +202,7 @@ func TestNewTenantLLMProviderResolver_OllamaTenantBuildsProvider(t *testing.T) {
 func TestNewTenantLLMProviderResolver_RepoErrorPropagates(t *testing.T) {
 	boom := errors.New("rls: permission denied for table tenant_llm_config")
 	repo := &fakeTenantLLMConfigRepo{err: boom}
-	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey)
+	resolver := newTenantLLMProviderResolver(repo, disabledSentinel, testEncryptionKey, egress.OperatorControlled())
 	_, err := resolver(context.Background(), uuid.New())
 	if err == nil {
 		t.Fatal("resolver returned nil error, want repo error wrapped")

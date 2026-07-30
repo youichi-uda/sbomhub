@@ -4,11 +4,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/config"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -61,18 +63,30 @@ type SettingsLLMHandler struct {
 	repo      *repository.TenantLLMConfigRepository
 	auditRepo *repository.AuditRepository
 	cfg       *config.Config
+	// egress mirrors the policy the per-tenant provider will dial under, so a
+	// rejected endpoint is reported on the settings screen rather than as an
+	// opaque triage failure later.
+	egress *egress.Guard
 }
 
 // NewSettingsLLMHandler wires the handler.
+//
+// SECURITY: guard is the outbound destination policy (internal/egress) applied
+// to azure_endpoint. Nil resolves to the strictest policy.
 func NewSettingsLLMHandler(
 	repo *repository.TenantLLMConfigRepository,
 	auditRepo *repository.AuditRepository,
 	cfg *config.Config,
+	guard *egress.Guard,
 ) *SettingsLLMHandler {
+	if guard == nil {
+		guard = egress.NewSet(egress.Settings{}).TenantLLM
+	}
 	return &SettingsLLMHandler{
 		repo:      repo,
 		auditRepo: auditRepo,
 		cfg:       cfg,
+		egress:    guard,
 	}
 }
 
@@ -180,6 +194,39 @@ func (h *SettingsLLMHandler) Update(c echo.Context) error {
 		}
 	}
 
+	// M50: validate the tenant-supplied endpoints.
+	//
+	// azure_endpoint IS an egress sink — cmd/server/llm_resolver.go threads it
+	// into NewProviderFromConfigWithAzure, which dials it — so it gets the full
+	// destination policy.
+	//
+	// ollama_url is persisted here but the factory does NOT read it: the Ollama
+	// provider's base URL comes from SBOMHUB_LLM_OLLAMA_URL / OLLAMA_HOST (see
+	// llm.ollamaBaseURLFromEnv, and llm.TestOllamaBaseURLIgnoresTenantColumn
+	// which pins that). It is therefore not a destination today, and applying
+	// the destination policy to it would reject "http://localhost:11434" — the
+	// value the product documentation tells self-hosted operators to use — for
+	// no security benefit. It gets a shape check only. If a future milestone
+	// wires this column through to a provider, it MUST move to the branch
+	// above.
+	azureEndpoint := strings.TrimSpace(req.AzureEndpoint)
+	if azureEndpoint != "" {
+		if verr := h.egress.ValidateURL(azureEndpoint); verr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "azure_endpoint is not an allowed destination: " + verr.Error(),
+			})
+		}
+	}
+	ollamaURL := strings.TrimSpace(req.OllamaURL)
+	if ollamaURL != "" {
+		parsed, perr := neturl.Parse(ollamaURL)
+		if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "ollama_url must be a valid absolute http:// or https:// URL with a host",
+			})
+		}
+	}
+
 	// Look up the existing row so we can (a) decide if this is a new key vs
 	// a rotation for the audit log, and (b) preserve the existing
 	// ciphertext when the request body re-submits the placeholder.
@@ -237,9 +284,9 @@ func (h *SettingsLLMHandler) Update(c echo.Context) error {
 		Provider:        provider,
 		EncryptedAPIKey: encryptedKey, // nil → preserve existing
 		Model:           strings.TrimSpace(req.Model),
-		AzureEndpoint:   strings.TrimSpace(req.AzureEndpoint),
+		AzureEndpoint:   azureEndpoint,
 		AzureDeployment: strings.TrimSpace(req.AzureDeployment),
-		OllamaURL:       strings.TrimSpace(req.OllamaURL),
+		OllamaURL:       ollamaURL,
 	})
 	if err != nil {
 		slog.Error("settings_llm: upsert failed",

@@ -90,6 +90,144 @@ Redis is unreachable. See `docs/security/self-host-deployment.md` §10.2.
 
 ---
 
+## 2c. Breaking change — M50 (outbound egress policy)
+
+**This one can silently stop a webhook or an issue tracker from working after
+the upgrade, without any startup refusal.** Read it if any tenant in your
+deployment points a settings screen at an address inside your network.
+
+### What changed
+
+Four settings screens let a tenant administrator type a URL that the server then
+connects to:
+
+| Setting | Column |
+|---|---|
+| Issue tracker base URL | `issue_tracker_connections.base_url` |
+| Slack / Discord notification webhook | `notification_settings.slack_webhook_url` / `.discord_webhook_url` |
+| SBOM diff webhook | `tenant_diff_webhook_settings.webhook_url` |
+| Per-tenant Azure OpenAI endpoint | `tenant_llm_config.azure_endpoint` |
+
+Before M50 these had inconsistent, and in places absent, destination checks. The
+notification webhooks had none at all; the diff webhook checked only that the
+string parsed as `http(s)://host`; the issue tracker resolved the hostname once,
+at creation time, and allowed anything it could not resolve.
+
+From M50 all four go through one policy (`internal/egress`), enforced when the
+connection is opened rather than when the row is written:
+
+- **Internal addresses are refused by default** — RFC1918, loopback, carrier-grade
+  NAT (`100.64.0.0/10`), IPv6 unique-local. This is the change that can break an
+  existing deployment.
+- **Cloud instance metadata is refused always** — `169.254.0.0/16` (which carries
+  `169.254.169.254`), Azure's `168.63.129.16`, IPv6 link-local, and the NAT64 /
+  6to4 / IPv4-compatible forms that embed those addresses. No setting re-enables
+  this.
+- Redirects are re-checked hop by hop instead of followed blindly.
+- **`HTTP_PROXY` / `HTTPS_PROXY` are ignored for these four purposes** unless
+  `SBOMHUB_EGRESS_ALLOW_PROXY=true`. A proxy defeats the mechanism — the server
+  would only ever inspect the proxy's address while the proxy chose the real
+  destination — so honouring one is an explicit delegation. **If your only route
+  out is a proxy, these four integrations stop working until you set that flag.**
+
+### What is NOT affected
+
+Destinations **you** configure as the operator are untouched:
+
+- `SBOMHUB_NVD_URL` / `_JVN_URL` / `_EPSS_URL` / `_KEV_URL` / `_EOL_URL` /
+  `_OSV_URL` air-gapped mirrors.
+- The Ollama base URL from `SBOMHUB_LLM_OLLAMA_URL` / `OLLAMA_HOST`, **including
+  its default `http://localhost:11434`**. The recommended local-LLM deployment
+  for manufacturers needs no change.
+- The billing provider API.
+
+`tenant_llm_config.ollama_url` is persisted by the settings screen but is not
+read by the provider factory (the base URL comes from the env vars above), so it
+is not a destination and is not subject to the policy.
+
+### Do I need to act?
+
+Check whether any tenant has stored an internal address. Run this against your
+database **before** upgrading:
+
+```sql
+SELECT 'issue_tracker' AS setting, base_url AS value
+  FROM issue_tracker_connections
+ WHERE base_url ~* '(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)'
+UNION ALL
+SELECT 'slack_webhook', slack_webhook_url FROM notification_settings
+ WHERE slack_webhook_url ~* '(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)'
+UNION ALL
+SELECT 'discord_webhook', discord_webhook_url FROM notification_settings
+ WHERE discord_webhook_url ~* '(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)'
+UNION ALL
+SELECT 'diff_webhook', webhook_url FROM tenant_diff_webhook_settings
+ WHERE webhook_url ~* '(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)'
+UNION ALL
+SELECT 'azure_endpoint', azure_endpoint FROM tenant_llm_config
+ WHERE azure_endpoint ~* '(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)';
+```
+
+Note what this query does **not** catch: a value like
+`https://jira.corp.example` whose *hostname* resolves to an internal address.
+That is the more common shape in a self-hosted deployment, and the query cannot
+see it. If your tenants reach internal services by name, assume you are
+affected and read the next section.
+
+### How to restore internal destinations
+
+Prefer the narrow form. List only the hosts and networks you actually need:
+
+```bash
+SBOMHUB_EGRESS_ALLOWED_INTERNAL=jira.corp.example,hooks.corp.example,10.20.0.0/24
+```
+
+Entries may be hostnames, bare IP addresses, or CIDRs. A hostname entry also
+matches its subdomains (`corp.example` matches `jira.corp.example`). A malformed
+entry is a startup refusal rather than a silently dropped one — an exemption you
+believe is in place but is not is worse than a loud failure.
+
+The blunt form opens every internal address for all four purposes:
+
+```bash
+SBOMHUB_EGRESS_ALLOW_PRIVATE=true
+```
+
+Use it only if you accept that any tenant administrator can then direct the
+server at any internal HTTP service it can route to. Neither setting re-enables
+the cloud metadata endpoint.
+
+### If you run an outbound HTTP proxy
+
+```bash
+SBOMHUB_EGRESS_ALLOW_PROXY=true
+```
+
+Without it, these four integrations bypass the proxy and will fail in a network
+that has no direct route out. With it, the destination policy has to be enforced
+on the proxy — SBOMHub can no longer see the final destination. The startup log
+carries a WARN when it is set.
+
+### How a refusal looks
+
+There is no startup error — the deployment boots normally and the refusal
+appears at delivery time:
+
+```
+egress (diff_webhook): destination hooks.corp.example -> 10.20.0.5 is not permitted:
+RFC 1918 private range — internal destinations are disabled
+(set SBOMHUB_EGRESS_ALLOW_PRIVATE=true, or list this host in
+SBOMHUB_EGRESS_ALLOWED_INTERNAL, to permit it)
+```
+
+The same message is surfaced on the settings screen when an administrator saves
+a URL that is refusable on its face (a literal internal address, `localhost`, a
+non-http scheme). A hostname that only *resolves* internally saves successfully
+and fails at delivery, because the address behind a name is not knowable at save
+time — that is why the enforcement point is the connection, not the form.
+
+---
+
 ## 3. Before you start
 
 1. **Pin a maintenance window of ~15 minutes** of api downtime. Postgres

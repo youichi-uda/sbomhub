@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/client"
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
@@ -26,9 +26,13 @@ type IssueTrackerService struct {
 	issueTrackerRepo *repository.IssueTrackerRepository
 	vulnRepo         *repository.VulnerabilityRepository
 	encryptionKey    []byte
-	// SECURITY: Allowed domains for issue tracker connections (SaaS mode)
-	// Empty list means all domains allowed (self-hosted mode)
-	allowedDomains []string
+	// egress is the destination policy for every outbound call this service
+	// makes. It carries the SaaS hostname allowlist (previously the
+	// allowedDomains field) AND the address rules, and — unlike the
+	// validation-only predecessor — it is attached to the HTTP clients, so it
+	// applies at connect time and on every redirect hop rather than only when
+	// a connection row is created.
+	egress *egress.Guard
 }
 
 // AllowedIssueTrackerDomains contains the default allowed domains for SaaS mode
@@ -51,22 +55,28 @@ var AllowedIssueTrackerDomains = []string{
 
 // NewIssueTrackerService creates a new IssueTrackerService
 // SECURITY: encryptionKey must be exactly 32 bytes for AES-256
-// SECURITY: allowedDomains restricts which domains can be used (nil = allow all for self-hosted)
+// SECURITY: guard is the outbound destination policy (see internal/egress).
+// A nil guard is treated as "the caller did not say", which resolves to the
+// strictest policy available rather than to no policy — the base URL this
+// service dials is tenant-supplied input in every deployment mode.
 func NewIssueTrackerService(
 	issueTrackerRepo *repository.IssueTrackerRepository,
 	vulnRepo *repository.VulnerabilityRepository,
 	encryptionKey []byte,
-	allowedDomains []string,
+	guard *egress.Guard,
 ) *IssueTrackerService {
 	if len(encryptionKey) != 32 {
 		panic(fmt.Sprintf("encryption key must be exactly 32 bytes, got %d", len(encryptionKey)))
+	}
+	if guard == nil {
+		guard = egress.NewSet(egress.Settings{}).IssueTracker
 	}
 
 	return &IssueTrackerService{
 		issueTrackerRepo: issueTrackerRepo,
 		vulnRepo:         vulnRepo,
 		encryptionKey:    encryptionKey,
-		allowedDomains:   allowedDomains,
+		egress:           guard,
 	}
 }
 
@@ -89,7 +99,8 @@ func (s *IssueTrackerService) CreateConnection(ctx context.Context, tenantID uui
 	// blocked internal host, domain not in the SaaS allowlist), so it is SAFE
 	// to echo at 400. ValidationErrorf makes errors.Is(err, ErrValidation) true
 	// while preserving the exact message.
-	if err := s.validateBaseURL(input.BaseURL); err != nil {
+	baseURL := normaliseEgressURL(input.BaseURL)
+	if err := s.validateBaseURL(baseURL); err != nil {
 		return nil, ValidationErrorf("invalid base URL: %v", err)
 	}
 
@@ -107,7 +118,7 @@ func (s *IssueTrackerService) CreateConnection(ctx context.Context, tenantID uui
 		TenantID:           tenantID,
 		TrackerType:        input.TrackerType,
 		Name:               input.Name,
-		BaseURL:            input.BaseURL,
+		BaseURL:            baseURL,
 		AuthType:           model.AuthTypeAPIToken,
 		AuthEmail:          input.AuthEmail,
 		AuthTokenEncrypted: encryptedToken,
@@ -136,10 +147,10 @@ func (s *IssueTrackerService) CreateConnection(ctx context.Context, tenantID uui
 func (s *IssueTrackerService) testConnection(ctx context.Context, conn *model.IssueTrackerConnection, apiToken string) error {
 	switch conn.TrackerType {
 	case model.TrackerTypeJira:
-		jiraClient := client.NewJiraClient(conn.BaseURL, conn.AuthEmail, apiToken)
+		jiraClient := client.NewJiraClient(conn.BaseURL, conn.AuthEmail, apiToken).WithEgress(s.egress)
 		return jiraClient.TestConnection(ctx)
 	case model.TrackerTypeBacklog:
-		backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken)
+		backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken).WithEgress(s.egress)
 		return backlogClient.TestConnection(ctx)
 	case model.TrackerTypeGitHub:
 		// Unlike Jira/Backlog, GitHub's connection test is repository-scoped
@@ -148,7 +159,7 @@ func (s *IssueTrackerService) testConnection(ctx context.Context, conn *model.Is
 		if conn.DefaultProjectKey == "" {
 			return fmt.Errorf("github: default project key (\"owner/repo\" repository) is required to test the connection")
 		}
-		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
+		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken).WithEgress(s.egress)
 		return githubClient.TestConnection(ctx, conn.DefaultProjectKey)
 	default:
 		return fmt.Errorf("unsupported tracker type: %s", conn.TrackerType)
@@ -329,7 +340,7 @@ func (s *IssueTrackerService) CreateTicket(ctx context.Context, tenantID uuid.UU
 }
 
 func (s *IssueTrackerService) createJiraTicket(ctx context.Context, conn *model.IssueTrackerConnection, apiToken, projectKey, issueType string, input CreateTicketInput) (*model.ExternalTicket, error) {
-	jiraClient := client.NewJiraClient(conn.BaseURL, conn.AuthEmail, apiToken)
+	jiraClient := client.NewJiraClient(conn.BaseURL, conn.AuthEmail, apiToken).WithEgress(s.egress)
 
 	jiraInput := client.CreateIssueInput{
 		ProjectKey:  projectKey,
@@ -356,7 +367,7 @@ func (s *IssueTrackerService) createJiraTicket(ctx context.Context, conn *model.
 }
 
 func (s *IssueTrackerService) createBacklogTicket(ctx context.Context, conn *model.IssueTrackerConnection, apiToken, projectKey string, input CreateTicketInput) (*model.ExternalTicket, error) {
-	backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken)
+	backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken).WithEgress(s.egress)
 
 	// Get project ID from project key
 	projects, err := backlogClient.GetProjects(ctx)
@@ -432,7 +443,7 @@ func (s *IssueTrackerService) createGitHubTicket(ctx context.Context, conn *mode
 	// arrives already defaulted (CreateTicket substitutes
 	// conn.DefaultProjectKey when the request carries no override); its
 	// "owner/repo" shape is validated by the client (ErrGitHubInvalidRepo).
-	githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
+	githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken).WithEgress(s.egress)
 
 	githubInput := client.CreateGitHubIssueInput{
 		Repo:   projectKey, // "owner/repo"; validated by the client (ErrGitHubInvalidRepo)
@@ -546,7 +557,7 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 
 	switch conn.TrackerType {
 	case model.TrackerTypeJira:
-		jiraClient := client.NewJiraClient(conn.BaseURL, conn.AuthEmail, apiToken)
+		jiraClient := client.NewJiraClient(conn.BaseURL, conn.AuthEmail, apiToken).WithEgress(s.egress)
 		issue, err := jiraClient.GetIssue(ctx, ticket.ExternalTicketKey)
 		if err != nil {
 			return err
@@ -562,7 +573,7 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 		}
 
 	case model.TrackerTypeBacklog:
-		backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken)
+		backlogClient := client.NewBacklogClient(conn.BaseURL, apiToken).WithEgress(s.egress)
 		issue, err := backlogClient.GetIssue(ctx, ticket.ExternalTicketKey)
 		if err != nil {
 			return err
@@ -612,7 +623,7 @@ func (s *IssueTrackerService) SyncTicket(ctx context.Context, ticketID uuid.UUID
 			return fmt.Errorf("github: ticket %s persists repository %q but its stored URL names %q; refusing to sync — issue #%d may be an unrelated issue with the same number in either repository",
 				ticket.ID, repo, urlRepo, issueNumber)
 		}
-		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken)
+		githubClient := client.NewGitHubIssuesClient(conn.BaseURL, apiToken).WithEgress(s.egress)
 		issue, gerr := githubClient.GetIssue(ctx, repo, issueNumber)
 		if gerr != nil {
 			return gerr
@@ -731,113 +742,33 @@ func (s *IssueTrackerService) decrypt(ciphertext string) (string, error) {
 	return string(plaintext), nil
 }
 
-// validateBaseURL validates the issue tracker base URL to prevent SSRF attacks
-// SECURITY: This is critical for SaaS mode to prevent attackers from making
-// the server connect to internal services or arbitrary external hosts
+// validateBaseURL rejects an issue-tracker base URL that is wrong on its face:
+// a non-https scheme, a missing host, a hostname outside the SaaS allowlist, or
+// a literal address in a range this deployment does not permit.
+//
+// It runs when a connection is created so the admin gets an immediate 400 with
+// a readable reason. It is NOT what keeps the process off internal addresses:
+// a hostname's addresses can differ between this call and the connection, and
+// a permitted host can redirect. That job belongs to the guard attached to the
+// HTTP clients (see internal/egress), which inspects the address it is about to
+// connect to and re-checks every redirect hop.
+//
+// Note that this therefore does NOT re-validate rows written before the guard
+// existed, and cannot: it is only reached on create. Those rows are covered by
+// the client-side guard instead, which is the point of moving enforcement there.
 func (s *IssueTrackerService) validateBaseURL(baseURL string) error {
-	// Parse the URL
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return fmt.Errorf("invalid URL format: %w", err)
-	}
-
-	// Must be HTTPS (security requirement)
-	if parsed.Scheme != "https" {
-		return fmt.Errorf("URL must use HTTPS scheme")
-	}
-
-	// Must have a valid host
-	host := parsed.Hostname()
-	if host == "" {
-		return fmt.Errorf("URL must have a valid host")
-	}
-
-	// Block localhost and loopback addresses
-	if isBlockedHost(host) {
-		return fmt.Errorf("localhost and internal addresses are not allowed")
-	}
-
-	// If allowedDomains is configured (SaaS mode), check against allowlist
-	if len(s.allowedDomains) > 0 {
-		if !isDomainAllowed(host, s.allowedDomains) {
-			return fmt.Errorf("domain not in allowed list: %s", host)
-		}
-	}
-
-	return nil
+	return s.egress.ValidateURL(baseURL)
 }
 
-// isBlockedHost checks if a host should be blocked (internal/localhost)
-func isBlockedHost(host string) bool {
-	// Block localhost variations
-	lowercaseHost := strings.ToLower(host)
-	if lowercaseHost == "localhost" || lowercaseHost == "127.0.0.1" || lowercaseHost == "::1" {
-		return true
-	}
-
-	// Try to resolve and check for internal IPs
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		// If we can't resolve, allow it (will fail on actual connection)
-		return false
-	}
-
-	for _, ip := range ips {
-		if isPrivateIP(ip) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isPrivateIP checks if an IP is in a private/reserved range
-func isPrivateIP(ip net.IP) bool {
-	// Private IPv4 ranges
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",    // Loopback
-		"169.254.0.0/16", // Link-local
-		"0.0.0.0/8",      // Current network
-	}
-
-	// Private IPv6 ranges
-	privateRangesV6 := []string{
-		"::1/128",   // Loopback
-		"fc00::/7",  // Unique local
-		"fe80::/10", // Link-local
-	}
-
-	for _, cidr := range privateRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err == nil && network.Contains(ip) {
-			return true
-		}
-	}
-
-	for _, cidr := range privateRangesV6 {
-		_, network, err := net.ParseCIDR(cidr)
-		if err == nil && network.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isDomainAllowed checks if a host matches any allowed domain
-func isDomainAllowed(host string, allowedDomains []string) bool {
-	lowercaseHost := strings.ToLower(host)
-
-	for _, domain := range allowedDomains {
-		lowerDomain := strings.ToLower(domain)
-		// Exact match or subdomain match
-		if lowercaseHost == lowerDomain || strings.HasSuffix(lowercaseHost, "."+lowerDomain) {
-			return true
-		}
-	}
-
-	return false
+// normaliseEgressURL is the single normalisation applied to a tenant-supplied
+// URL before it is BOTH validated and persisted.
+//
+// Codex round 2 (Low): egress.Guard.ValidateURL trims surrounding whitespace,
+// so " https://tracker.example " validated cleanly — and then the untrimmed
+// string was stored and handed to http.NewRequestWithContext, which does not
+// trim and fails to parse it. The setting passed validation and could never
+// deliver. Normalising once, before the check, makes the string that was
+// validated the same string that is used.
+func normaliseEgressURL(raw string) string {
+	return strings.TrimSpace(raw)
 }

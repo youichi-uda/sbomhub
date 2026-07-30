@@ -75,7 +75,7 @@ func newDiffResponse(critical, high, licenseViolations int) *diff.Response {
 func TestFireIfThreshold_NoConfig_ReturnsNoConfig(t *testing.T) {
 	settings := &stubSettings{err: repository.ErrDiffWebhookNotFound}
 	audit := &stubAudit{}
-	svc := NewService(Config{Settings: settings, Audit: audit, EncryptionKey: testKey})
+	svc := NewService(Config{Settings: settings, Audit: audit, EncryptionKey: testKey, Egress: testEgress()})
 	dec, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(0, 0, 0))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -91,7 +91,7 @@ func TestFireIfThreshold_NoConfig_ReturnsNoConfig(t *testing.T) {
 func TestFireIfThreshold_Disabled_SkipsWithoutFiring(t *testing.T) {
 	settings := &stubSettings{row: &model.DiffWebhookSettings{Enabled: false, WebhookURL: "https://example.com/hook"}}
 	audit := &stubAudit{}
-	svc := NewService(Config{Settings: settings, Audit: audit, EncryptionKey: testKey})
+	svc := NewService(Config{Settings: settings, Audit: audit, EncryptionKey: testKey, Egress: testEgress()})
 	dec, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(10, 10, 10))
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestFireIfThreshold_BelowThresholds_SkipsWithoutFiring(t *testing.T) {
 		CriticalThreshold: 5, HighThreshold: 5, LicenseViolationThreshold: 5,
 	}}
 	audit := &stubAudit{}
-	svc := NewService(Config{Settings: settings, Audit: audit, EncryptionKey: testKey})
+	svc := NewService(Config{Settings: settings, Audit: audit, EncryptionKey: testKey, Egress: testEgress()})
 	dec, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(1, 1, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -146,8 +146,9 @@ func TestFireIfThreshold_CriticalAboveThreshold_PostsWithSignature(t *testing.T)
 	}}
 	audit := &stubAudit{}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: audit, EncryptionKey: testKey,
-		HTTPClient: srv.Client(),
+		httpClient: srv.Client(),
 	})
 
 	dec, err := svc.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0))
@@ -204,8 +205,9 @@ func TestFireIfThreshold_5xxRetried_4xxNotRetried(t *testing.T) {
 	}}
 	audit := &stubAudit{}
 	svc := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: audit, EncryptionKey: testKey,
-		HTTPClient: srv.Client(),
+		httpClient: srv.Client(),
 		Retries:    []time.Duration{0, 0, 0}, // zero-delay so the test is fast
 	})
 
@@ -229,8 +231,9 @@ func TestFireIfThreshold_5xxRetried_4xxNotRetried(t *testing.T) {
 	defer srv2.Close()
 	settings.row.WebhookURL = srv2.URL
 	svc2 := NewService(Config{
+		Egress:   testEgress(),
 		Settings: settings, Audit: &stubAudit{}, EncryptionKey: testKey,
-		HTTPClient: srv2.Client(),
+		httpClient: srv2.Client(),
 		Retries:    []time.Duration{0, 0, 0},
 	})
 	_, err = svc2.FireIfThreshold(context.Background(), uuid.New(), uuid.New(), newDiffResponse(2, 0, 0))
@@ -291,6 +294,7 @@ func TestService_PanicsOnBadKey(t *testing.T) {
 		}
 	}()
 	NewService(Config{
+		Egress:        testEgress(),
 		Settings:      &stubSettings{},
 		Audit:         &stubAudit{},
 		EncryptionKey: []byte("too short"),

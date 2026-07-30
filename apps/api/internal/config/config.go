@@ -120,6 +120,53 @@ type Config struct {
 	// Security
 	EncryptionKey string // For encrypting sensitive data like API tokens
 
+	// Outbound egress policy (M50). Governs the destinations a TENANT may
+	// configure: issue tracker base URLs, Slack/Discord notification webhooks,
+	// the diff webhook, and the per-tenant Azure OpenAI endpoint. It does NOT
+	// govern operator-supplied destinations (SBOMHUB_*_URL feed mirrors, the
+	// Ollama base URL from SBOMHUB_LLM_OLLAMA_URL / OLLAMA_HOST, the billing
+	// provider API) — the operator already controls those.
+	//
+	// EgressAllowPrivate (SBOMHUB_EGRESS_ALLOW_PRIVATE) opens RFC1918 /
+	// loopback / CGNAT / IPv6-ULA destinations. It defaults to FALSE in every
+	// deployment mode, self-hosted included: a tenant-supplied URL is untrusted
+	// input wherever it is entered. Self-hosted operators who point tenants at
+	// an internal Jira or an internal webhook receiver must opt in here, or use
+	// the narrower EgressAllowedInternal below. See docs/UPGRADE.md.
+	//
+	// Cloud metadata (169.254.169.254 and the rest of link-local, Azure's
+	// 168.63.129.16, and the IPv6 tunnel forms that embed them) is refused even
+	// when this is true — see internal/egress.ClassBlocked.
+	EgressAllowPrivate bool
+
+	// EgressAllowedInternal (SBOMHUB_EGRESS_ALLOWED_INTERNAL) is the narrow
+	// form of the same opt-in: a comma/space separated list of hostnames, IP
+	// addresses and CIDRs whose internal destinations are permitted while the
+	// rest of the internal network stays closed. Raw string; parsed by
+	// egress.ParseExemptions at wiring time so a typo is a startup refusal
+	// rather than a silently-closed path.
+	EgressAllowedInternal string
+
+	// EgressNAT64Prefixes (SBOMHUB_EGRESS_NAT64_PREFIXES) declares the RFC 6052
+	// IPv4/IPv6 translation prefixes this deployment's network uses, so that a
+	// destination reached through one is judged by the IPv4 address it embeds
+	// rather than treated as opaque public IPv6.
+	//
+	// Only needed on IPv6-only networks that reach IPv4 through a NAT64 with a
+	// prefix other than the well-known 64:ff9b::/96 (which is always decoded).
+	// Raw string; parsed and validated at wiring time.
+	EgressNAT64Prefixes string
+
+	// EgressAllowProxy (SBOMHUB_EGRESS_ALLOW_PROXY) honours HTTP_PROXY /
+	// HTTPS_PROXY for tenant-configured egress. Default false.
+	//
+	// With a proxy in play, Go hands the guarded dialer the PROXY's address —
+	// the proxy is the one that resolves and connects to the real destination.
+	// The dial-time guarantee the egress guard exists to provide therefore does
+	// not hold, so honouring a proxy is an explicit delegation rather than a
+	// default. Set it only when the destination policy is enforced on the proxy.
+	EgressAllowProxy bool
+
 	// SMTP settings (for email notifications)
 	SMTPHost     string
 	SMTPPort     string
@@ -198,6 +245,12 @@ func Load() *Config {
 		// Security
 		// SECURITY: Default key is only for development. Production requires explicit key.
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
+
+		// Outbound egress policy (M50). Fail-closed default in every mode.
+		EgressAllowPrivate:    getEnvBool("SBOMHUB_EGRESS_ALLOW_PRIVATE", false),
+		EgressAllowedInternal: getEnv("SBOMHUB_EGRESS_ALLOWED_INTERNAL", ""),
+		EgressAllowProxy:      getEnvBool("SBOMHUB_EGRESS_ALLOW_PROXY", false),
+		EgressNAT64Prefixes:   getEnv("SBOMHUB_EGRESS_NAT64_PREFIXES", ""),
 
 		// SMTP
 		SMTPHost:     getEnv("SMTP_HOST", ""),
@@ -579,6 +632,16 @@ func getEnv(key, defaultValue string) string {
 // getEnvBool reads a boolean env var. Accepts 1/true/yes/on (case-insensitive)
 // as true and 0/false/no/off as false; any other value (including unset/empty)
 // falls back to defaultValue.
+//
+// Every caller currently passes false, which unparam flags once there are
+// enough call sites to be confident about (M50 added the third and tripped it).
+// The parameter stays: for a security-relevant switch, the point of writing the
+// default at the CALL SITE is that a reviewer reading
+// `getEnvBool("SBOMHUB_EGRESS_ALLOW_PRIVATE", false)` can see the fail-closed
+// default without navigating to this function. Collapsing it into the helper
+// name would move that fact away from where it is read.
+//
+//nolint:unparam // the explicit default is the reviewable part; see above
 func getEnvBool(key string, defaultValue bool) bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	switch v {

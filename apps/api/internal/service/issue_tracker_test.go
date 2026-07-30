@@ -1,10 +1,10 @@
 package service
 
 import (
-	"net"
 	"strings"
 	"testing"
 
+	"github.com/sbomhub/sbomhub/internal/egress"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -267,11 +267,19 @@ func TestListTickets_LimitValidation(t *testing.T) {
 }
 
 func TestIssueTrackerService_ValidateBaseURL(t *testing.T) {
-	// Service with allowed domains (SaaS mode)
-	svcWithAllowlist := NewIssueTrackerService(nil, nil, testEncryptionKey, AllowedIssueTrackerDomains)
+	// SaaS shape: hostname allowlist configured.
+	svcWithAllowlist := NewIssueTrackerService(nil, nil, testEncryptionKey,
+		egress.NewSet(egress.Settings{IssueTrackerAllowedHosts: AllowedIssueTrackerDomains}).IssueTracker)
 
-	// Service without allowed domains (self-hosted mode)
+	// Self-hosted shape: no hostname allowlist. Note that "no allowlist" is NOT
+	// "no policy" any more — internal addresses stay closed until the operator
+	// opts in with SBOMHUB_EGRESS_ALLOW_PRIVATE / _ALLOWED_INTERNAL. That is the
+	// M50 behaviour change; see docs/UPGRADE.md.
 	svcNoAllowlist := NewIssueTrackerService(nil, nil, testEncryptionKey, nil)
+
+	// Self-hosted operator who opted in.
+	svcAllowPrivate := NewIssueTrackerService(nil, nil, testEncryptionKey,
+		egress.NewSet(egress.Settings{AllowPrivate: true}).IssueTracker)
 
 	tests := []struct {
 		name          string
@@ -289,19 +297,28 @@ func TestIssueTrackerService_ValidateBaseURL(t *testing.T) {
 		{"subdomain allowed", "https://company.team.atlassian.net", svcWithAllowlist, false, ""},
 
 		// Invalid URLs - blocked for all
-		{"http not https", "http://example.atlassian.net", svcWithAllowlist, true, "HTTPS"},
+		{"http not https", "http://example.atlassian.net", svcWithAllowlist, true, "https"},
 		{"localhost blocked", "https://localhost/api", svcWithAllowlist, true, "localhost"},
-		{"127.0.0.1 blocked", "https://127.0.0.1/api", svcWithAllowlist, true, "localhost"},
-		{"invalid url (no scheme)", "not-a-url", svcWithAllowlist, true, "HTTPS"},
-		{"empty host", "https:///path", svcWithAllowlist, true, "valid host"},
+		{"127.0.0.1 blocked", "https://127.0.0.1/api", svcNoAllowlist, true, "loopback"},
+		{"invalid url (no scheme)", "not-a-url", svcWithAllowlist, true, "not supported"},
+		{"empty host", "https:///path", svcWithAllowlist, true, "no host"},
 
 		// Domain allowlist checks (SaaS mode)
-		{"unlisted domain blocked in saas", "https://evil.com/api", svcWithAllowlist, true, "not in allowed list"},
-		{"arbitrary domain blocked in saas", "https://internal.company.local", svcWithAllowlist, true, "not in allowed list"},
+		{"unlisted domain blocked in saas", "https://evil.com/api", svcWithAllowlist, true, "not in the allowed domain list"},
+		{"arbitrary domain blocked in saas", "https://internal.company.local", svcWithAllowlist, true, "not in the allowed domain list"},
 
-		// Self-hosted mode allows more
+		// Self-hosted mode still allows arbitrary NAMES; the address behind the
+		// name is judged when the connection is made, not here.
 		{"arbitrary domain allowed in selfhosted", "https://internal.company.local", svcNoAllowlist, false, ""},
 		{"custom jira allowed in selfhosted", "https://jira.mycompany.com", svcNoAllowlist, false, ""},
+
+		// M50: literal internal addresses are refused by default even without an
+		// allowlist, and permitted once the operator opts in.
+		{"rfc1918 literal blocked by default", "https://10.0.0.5/api", svcNoAllowlist, true, "RFC 1918"},
+		{"metadata literal blocked by default", "https://169.254.169.254/api", svcNoAllowlist, true, "metadata"},
+		{"rfc1918 literal allowed with opt-in", "https://10.0.0.5/api", svcAllowPrivate, false, ""},
+		{"localhost allowed with opt-in", "https://localhost/api", svcAllowPrivate, false, ""},
+		{"metadata literal refused even with opt-in", "https://169.254.169.254/api", svcAllowPrivate, true, "metadata"},
 	}
 
 	for _, tt := range tests {
@@ -323,72 +340,16 @@ func TestIssueTrackerService_ValidateBaseURL(t *testing.T) {
 	}
 }
 
-func TestIsPrivateIP(t *testing.T) {
-	tests := []struct {
-		ip        string
-		isPrivate bool
-	}{
-		{"10.0.0.1", true},
-		{"10.255.255.255", true},
-		{"172.16.0.1", true},
-		{"172.31.255.255", true},
-		{"192.168.1.1", true},
-		{"127.0.0.1", true},
-		{"169.254.1.1", true},
-		{"8.8.8.8", false},
-		{"1.1.1.1", false},
-		{"203.0.113.1", false},
-		{"::1", true},
-		{"fe80::1", true},
-		{"2001:4860:4860::8888", false},
+// TestIssueTrackerService_NilGuardIsStrict pins the fail-closed constructor
+// default: a caller that passes no guard gets the strict policy, not none.
+func TestIssueTrackerService_NilGuardIsStrict(t *testing.T) {
+	svc := NewIssueTrackerService(nil, nil, testEncryptionKey, nil)
+	if svc.egress == nil {
+		t.Fatal("expected a guard to be installed for a nil argument")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.ip, func(t *testing.T) {
-			ip := parseIP(tt.ip)
-			if ip == nil {
-				t.Fatalf("failed to parse IP: %s", tt.ip)
-			}
-			result := isPrivateIP(ip)
-			if result != tt.isPrivate {
-				t.Errorf("isPrivateIP(%s) = %v, want %v", tt.ip, result, tt.isPrivate)
-			}
-		})
+	if err := svc.validateBaseURL("https://127.0.0.1/api"); err == nil {
+		t.Error("nil guard must not permit a loopback base URL")
 	}
-}
-
-func TestIsDomainAllowed(t *testing.T) {
-	allowedDomains := []string{"atlassian.net", "backlog.com", "example.org"}
-
-	tests := []struct {
-		host    string
-		allowed bool
-	}{
-		{"atlassian.net", true},
-		{"company.atlassian.net", true},
-		{"deep.sub.atlassian.net", true},
-		{"backlog.com", true},
-		{"myteam.backlog.com", true},
-		{"example.org", true},
-		{"sub.example.org", true},
-		{"notallowed.com", false},
-		{"atlassian.net.evil.com", false}, // Should not match
-		{"fakeatlassian.net", false},      // Should not match
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.host, func(t *testing.T) {
-			result := isDomainAllowed(tt.host, allowedDomains)
-			if result != tt.allowed {
-				t.Errorf("isDomainAllowed(%q) = %v, want %v", tt.host, result, tt.allowed)
-			}
-		})
-	}
-}
-
-// Helper function for tests
-func parseIP(s string) net.IP {
-	return net.ParseIP(s)
 }
 
 func strContains(s, substr string) bool {

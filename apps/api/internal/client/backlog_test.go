@@ -42,7 +42,7 @@ func testBacklogBackoff(maxRetries int) BackoffPolicy {
 }
 
 func TestNewBacklogClient(t *testing.T) {
-	client := NewBacklogClient("https://example.backlog.com", "apikey123")
+	client := testBacklogClient("https://example.backlog.com", "apikey123")
 
 	if client == nil {
 		t.Fatal("expected client to be created")
@@ -82,7 +82,7 @@ func TestBacklogClient_TestConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123")
+	client := testBacklogClient(server.URL, "apikey123")
 
 	err := client.TestConnection(context.Background())
 	if err != nil {
@@ -97,7 +97,7 @@ func TestBacklogClient_TestConnection_Unauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "wrong-key")
+	client := testBacklogClient(server.URL, "wrong-key")
 
 	err := client.TestConnection(context.Background())
 	if err == nil {
@@ -121,7 +121,7 @@ func TestBacklogClient_GetProjects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123")
+	client := testBacklogClient(server.URL, "apikey123")
 
 	projects, err := client.GetProjects(context.Background())
 	if err != nil {
@@ -162,7 +162,7 @@ func TestBacklogClient_GetIssue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123")
+	client := testBacklogClient(server.URL, "apikey123")
 
 	issue, err := client.GetIssue(context.Background(), "PROJ-123")
 	if err != nil {
@@ -217,7 +217,7 @@ func TestBacklogClient_CreateIssue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123")
+	client := testBacklogClient(server.URL, "apikey123")
 
 	input := CreateBacklogIssueInput{
 		ProjectID:   1,
@@ -254,7 +254,7 @@ func TestBacklogClient_GetIssueTypes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123")
+	client := testBacklogClient(server.URL, "apikey123")
 
 	issueTypes, err := client.GetIssueTypes(context.Background(), "PROJ")
 	if err != nil {
@@ -287,7 +287,7 @@ func TestBacklogClient_GetPriorities(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123")
+	client := testBacklogClient(server.URL, "apikey123")
 
 	priorities, err := client.GetPriorities(context.Background())
 	if err != nil {
@@ -300,7 +300,7 @@ func TestBacklogClient_GetPriorities(t *testing.T) {
 }
 
 func TestBacklogClient_GetIssueURL(t *testing.T) {
-	client := NewBacklogClient("https://example.backlog.com", "apikey123")
+	client := testBacklogClient("https://example.backlog.com", "apikey123")
 
 	tests := []struct {
 		issueKey    string
@@ -384,7 +384,7 @@ func TestBacklogClient_RateLimit_429_Retry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123").
+	client := testBacklogClient(server.URL, "apikey123").
 		WithBackoffPolicy(testBacklogBackoff(3))
 
 	if err := client.TestConnection(context.Background()); err != nil {
@@ -413,7 +413,7 @@ func TestBacklogClient_RateLimit_RetryAfterFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123").
+	client := testBacklogClient(server.URL, "apikey123").
 		WithBackoffPolicy(testBacklogBackoff(3))
 
 	if err := client.TestConnection(context.Background()); err != nil {
@@ -435,7 +435,7 @@ func TestBacklogClient_RateLimit_Exhausted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123").
+	client := testBacklogClient(server.URL, "apikey123").
 		WithBackoffPolicy(testBacklogBackoff(2))
 
 	err := client.TestConnection(context.Background())
@@ -501,7 +501,7 @@ func TestBacklogClient_RateLimit_POST_BodyReuse_F301(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123").
+	client := testBacklogClient(server.URL, "apikey123").
 		WithBackoffPolicy(testBacklogBackoff(3))
 
 	input := CreateBacklogIssueInput{
@@ -547,7 +547,7 @@ func TestBacklogClient_RateLimit_ContextCancel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewBacklogClient(server.URL, "apikey123").
+	client := testBacklogClient(server.URL, "apikey123").
 		WithBackoffPolicy(testBacklogBackoff(3))
 
 	ctx, cancel := context.WithCancel(context.Background())
