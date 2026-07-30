@@ -7,7 +7,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -157,56 +161,89 @@ func TestM50_UpdateComponentEOLStatus_ZeroRowsStillReported(t *testing.T) {
 	}
 }
 
-// declaredEOLStatuses returns the value of every `EOLStatusX EOLStatus = "..."`
-// constant declared in internal/model/eol.go, parsed from source.
+// declaredEOLStatuses returns every `EOLStatus*` string constant declared
+// anywhere in internal/model, parsed from source.
 //
-// Parsing beats reflection here because Go constants are not enumerable at
-// runtime: there is no way to ask the model package "what EOLStatus values
-// exist". The alternative — a hand-maintained list — is exactly what this
-// avoids, since it stays green while drifting out of date.
+// Parsing beats reflection because Go constants are not enumerable at runtime:
+// there is no way to ask the model package "what EOLStatus values exist". A
+// hand-maintained list is what this avoids — it stays green while drifting.
 //
-// The parser is deliberately narrow: same file, same type name, string literal
-// values only. If model/eol.go moves or the constants change shape, the
-// len(declared) < 4 guard above turns that into a loud failure rather than a
-// silently empty set.
+// Collection rule, and why it is by NAME and not only by declared type
+// (Codex round 2 #2): the first version matched only specs whose type was the
+// explicit identifier `EOLStatus`, in eol.go alone. Measured misses:
+//
+//	const ( ... EOLStatusRetired = "retired" )   // untyped, same block  → missed
+//	// an explicitly typed constant in another model file                → missed
+//
+// The untyped form is the realistic one — an untyped string constant is still
+// assignable to a model.EOLStatus parameter, so it reaches the allowlist check
+// exactly like a typed one. Matching on the `EOLStatus` name prefix over every
+// file in the package catches both, at the cost of also catching a constant
+// that merely shares the prefix without being a status. That trade is
+// deliberate: a false positive here is a loud test failure asking a human to
+// look, whereas a false negative is the silent drift this test exists to stop.
 func declaredEOLStatuses(t *testing.T) []model.EOLStatus {
 	t.Helper()
 
-	const src = "../model/eol.go"
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, src, nil, 0)
+	// os.ReadDir + ParseFile rather than parser.ParseDir, which is deprecated
+	// as of Go 1.25. Neither considers build tags; that is fine here because
+	// internal/model has no build-tagged files, and a future one would show up
+	// as a count change rather than a silent miss.
+	const dir = "../model"
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("parse %s: %v", src, err)
+		t.Fatalf("read %s: %v", dir, err)
 	}
 
+	fset := token.NewFileSet()
+	seen := map[string]struct{}{}
 	var out []model.EOLStatus
-	for _, decl := range f.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
+	{
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
-			// Only constants explicitly typed EOLStatus.
-			ident, ok := vs.Type.(*ast.Ident)
-			if !ok || ident.Name != "EOLStatus" {
-				continue
+			f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", name, err)
 			}
-			for _, v := range vs.Values {
-				lit, ok := v.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
+			for _, decl := range f.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || gen.Tok != token.CONST {
 					continue
 				}
-				val, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					t.Fatalf("unquote %s in %s: %v", lit.Value, src, err)
+				for _, spec := range gen.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, ident := range vs.Names {
+						if !strings.HasPrefix(ident.Name, "EOLStatus") {
+							continue
+						}
+						if i >= len(vs.Values) {
+							continue
+						}
+						lit, ok := vs.Values[i].(*ast.BasicLit)
+						if !ok || lit.Kind != token.STRING {
+							continue
+						}
+						val, err := strconv.Unquote(lit.Value)
+						if err != nil {
+							t.Fatalf("unquote %s (%s in %s): %v",
+								lit.Value, ident.Name, name, err)
+						}
+						if _, dup := seen[val]; dup {
+							continue
+						}
+						seen[val] = struct{}{}
+						out = append(out, model.EOLStatus(val))
+					}
 				}
-				out = append(out, model.EOLStatus(val))
 			}
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }

@@ -12,20 +12,29 @@
 -- conflict with reads or ordinary writes. It does conflict with other DDL and
 -- with VACUUM.
 --
--- IF THIS MIGRATION FAILS, the database contains a row whose eol_status is
--- neither NULL nor one of 'unknown' / 'active' / 'eol' / 'eos'. The whole
--- transaction rolls back — the constraint stays NOT VALID and the 065 row is
--- not written — so the deployment is safe to retry after remediation. This is
--- the same "abort loudly rather than silently coerce" posture migration 027
--- takes for orphaned tenant_id rows.
---
--- FINDING THE OFFENDING ROWS — read this before running the query:
---   PostgreSQL will only tell you
+-- IF THIS MIGRATION FAILS WITH
 --
 --     ERROR: check constraint "components_eol_status_check" of relation
 --            "components" is violated by some row
 --
---   It does not name the row. You have to look, and the obvious query DOES NOT
+-- then the database contains a row whose eol_status is neither NULL nor one of
+-- 'unknown' / 'active' / 'eol' / 'eos'. Follow the remediation below.
+--
+-- It can also fail for reasons that have nothing to do with data — lock
+-- acquisition (the budget below), a missing constraint because 064 was rolled
+-- back, insufficient privilege, or plain infrastructure. Codex round 2 #3
+-- produced a `canceling statement due to lock timeout` failure of this exact
+-- migration with no invalid row present, which is why this paragraph now names
+-- the message instead of assuming bad data. Read the error before remediating.
+--
+-- In every case the whole transaction rolls back — the constraint stays NOT
+-- VALID and the 065 row is not written — so the deployment is safe to retry.
+-- Aborting loudly rather than silently coercing is the same posture migration
+-- 027 takes for orphaned tenant_id rows.
+--
+-- FINDING THE OFFENDING ROWS — read this before running the query:
+--   The error above does not name the row. You have to look, and the obvious
+--   query DOES NOT
 --   WORK as the migrator: `components` is ENABLE + FORCE ROW LEVEL SECURITY,
 --   and sbomhub_migrator is subject to the policy like any other role.
 --   Measured 2026-07-30: `SELECT count(*) FROM components` as sbomhub_migrator
@@ -46,16 +55,32 @@
 --   `SET LOCAL app.current_tenant_id = '<uuid>'`.
 --
 --   Remediation is to set the offending rows to 'unknown' (the DDL default,
---   meaning "not determined") and re-run the EOL sweep, which recomputes the
---   real status from endoflife.date. 'unknown' is chosen over guessing because
---   an EOL status that is wrong in the safe-looking direction ('active') would
---   hide a component that is actually end-of-life.
+--   meaning "not determined") AND clear eol_checked_at, then re-run the EOL
+--   sweep:
+--
+--     UPDATE components
+--        SET eol_status = 'unknown', eol_checked_at = NULL
+--      WHERE eol_status IS NOT NULL
+--        AND eol_status NOT IN ('unknown','active','eol','eos');
+--
+--   eol_checked_at MUST be cleared (Codex round 2 #1). The old writer stamped
+--   eol_checked_at = NOW() alongside the bad status, and
+--   GetComponentsForEOLCheck only picks up rows never checked or checked more
+--   than seven days ago — so setting the status alone leaves the row outside
+--   the next sweep for up to a week, sitting at 'unknown' while real EOL data
+--   exists upstream.
+--
+--   'unknown' is chosen over guessing because a status wrong in the
+--   safe-looking direction ('active') would hide a component that is actually
+--   end-of-life.
 --
 -- LOCK BUDGET: SHARE UPDATE EXCLUSIVE still has to be acquired, and it
 --   conflicts with concurrent DDL and VACUUM, so it can queue. Bounded for the
 --   same reason as 064. Note what the budget does NOT bound: once acquired,
 --   the validation scan itself runs to completion. lock_timeout limits
---   acquisition, not execution.
+--   acquisition, not execution — and it applies to EVERY statement in the
+--   transaction, including the runner's own INSERT into schema_migrations,
+--   which is how round 2 induced a non-data failure of this migration.
 -- ============================================
 
 SET LOCAL lock_timeout = '5s';

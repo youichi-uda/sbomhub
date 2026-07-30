@@ -694,16 +694,22 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		//   What HAS changed is that "" can no longer be WRITTEN. Migrations
 		//   064/065 constrain eol_status to NULL or one of the four defined
 		//   statuses, and UpdateComponentEOLStatus rejects anything outside
-		//   validEOLStatuses before issuing its UPDATE. So the remaining ""
-		//   readings all come from NULL, and NULL means "never assessed" —
-		//   there is no second producer of "" to confuse it with.
+		//   validEOLStatuses before issuing its UPDATE. So while that
+		//   constraint is applied, every "" read here comes from SQL NULL:
+		//   there is no second producer to confuse it with.
 		//
-		//   Two things would still be needed to make that a guarantee rather
-		//   than a property of the current schema: making the field a pointer
-		//   (which changes the Go/JSON API shape, unlike the CHECK, which
-		//   changes only the database write contract), and NOT NULL on the
-		//   column. Neither is done; the collision is closed at the write side
-		//   only.
+		//   NULL means "no stored status" — NOT "never assessed" (Codex round
+		//   2 #5). Those are different: `UPDATE components SET eol_status =
+		//   NULL, eol_checked_at = NOW()` is accepted by the constraint, so a
+		//   row can be both NULL-status and checked. eol_checked_at is what
+		//   records whether an assessment happened.
+		//
+		//   Either of two changes would remove the read collision outright,
+		//   and they are alternatives rather than a pair: making the field a
+		//   pointer preserves NULL distinctly in Go (and changes the Go/JSON
+		//   API shape, unlike the CHECK, which changes only the database write
+		//   contract), or NOT NULL on the column eliminates NULL altogether.
+		//   Neither is done; the collision is closed at the write side only.
 		c.EOLStatus = eolStatus.String
 		if eolProductID.Valid {
 			id := eolProductID.UUID

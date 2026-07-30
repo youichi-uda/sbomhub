@@ -59,16 +59,24 @@
 --   pg_locks showed only ShareUpdateExclusiveLock and the concurrent read
 --   succeeded.
 --
---   So: this file adds the constraint (catalogue-only, ACCESS EXCLUSIVE held
---   just long enough to update the catalogue) and COMMITS. 065 validates it in
---   its own transaction. Between the two, the constraint is enforced for NEW
---   rows and not yet proven for old ones — which is the correct intermediate
---   state, not a gap: new bad writes are already refused.
+--   So: this file adds the constraint and COMMITS; 065 validates it in its own
+--   transaction. "Brief" here means SCAN-FREE, not short-lived: the ADD itself
+--   is catalogue-only, but the ACCESS EXCLUSIVE lock is held until this
+--   transaction commits — which includes the runner's INSERT into
+--   schema_migrations (Codex round 2 #4 held that table in SHARE mode and
+--   observed the lock still granted on `components` while the runner blocked).
+--   The window is bounded by the runner's own work, not by the DDL alone.
 --
--- LOCK BUDGET: see 063. ACCESS EXCLUSIVE here is brief but can still queue
---   behind a live reader; a bounded wait turns an indefinite stall into a
---   retry, and the runner's transaction rolls back the DDL and the
---   schema_migrations row together.
+--   Between 064 and 065 the constraint is enforced for NEW rows and not yet
+--   proven for old ones — the correct intermediate state, not a gap: bad
+--   writes are already refused.
+--
+-- LOCK BUDGET: see 063. This ADD does no table scan, but as above the lock it
+--   takes lives until COMMIT, and acquiring it can queue behind a live reader.
+--   A bounded wait turns an indefinite stall into a retry; the runner's
+--   transaction rolls back the DDL and the schema_migrations row together.
+--   lock_timeout bounds ACQUISITION of each statement's locks, not how long
+--   they are then held.
 -- ============================================
 
 SET LOCAL lock_timeout = '5s';
