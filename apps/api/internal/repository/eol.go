@@ -589,8 +589,11 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 	}
 
 	// List query. M46 W2: nullable component columns COALESCE'd (see
-	// GetComponentsForEOLCheck); the eol_* columns already scan into
-	// sql.NullString.
+	// GetComponentsForEOLCheck). The five eol_* columns are scanned into
+	// null-tolerant targets matched to each column's own database type, not
+	// all into sql.NullString — see the scan loop below. (M50: this sentence
+	// used to say they "already scan into sql.NullString", which the scan
+	// rewrite made false. Codex round 1, #3.)
 	listQuery := fmt.Sprintf(`
 		SELECT c.id, c.sbom_id, c.name, COALESCE(c.version, ''), COALESCE(c.type, ''),
 			COALESCE(c.purl, ''), COALESCE(c.license, ''), COALESCE(c.created_at, NOW()),
@@ -638,9 +641,22 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		// produced silently empty EOL data, which is the shape this repo has
 		// repeatedly been bitten by (dead code springing to life).
 		//
-		// NULL stays NULL: eol_status is a plain string where "" already means
-		// "not assessed", and the other four are pointers so "no EOL date on
-		// record" cannot be confused with a zero date.
+		// What the NULL handling here does and does not guarantee
+		// (Codex round 1, #1 — the earlier wording claimed more):
+		//
+		//   The four pointer fields DO keep NULL distinguishable: "no EOL date
+		//   on record" stays nil and cannot be read as a zero date, and an
+		//   absent product/cycle cannot be read as the zero UUID.
+		//
+		//   EOLStatus does NOT. model.Component types it as a plain string, so
+		//   SQL NULL and a stored empty string both arrive as "". eol_status is
+		//   nullable varchar with DDL default 'unknown' and NO CHECK
+		//   constraint, so '' is insertable — nothing at the schema level
+		//   prevents the collision. Measured 2026-07-30 on the dev DB: 2 rows,
+		//   both 'unknown', zero NULL and zero empty-string. So the collision
+		//   is currently unreachable by data rather than by construction.
+		//   Closing it properly means either a CHECK excluding '' or making the
+		//   field a pointer; both change the API shape and neither is done here.
 		c.EOLStatus = eolStatus.String
 		if eolProductID.Valid {
 			id := eolProductID.UUID

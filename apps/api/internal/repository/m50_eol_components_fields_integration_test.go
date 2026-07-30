@@ -28,9 +28,11 @@ import (
 // showing every component as "not assessed" while the database held the
 // assessment, with no error anywhere to notice.
 //
-// Both shapes are asserted in one call, so the test also covers the NULL side:
-// "no EOL data on record" must stay distinguishable from a real assessment, not
-// collapse to a zero date or a zero UUID.
+// Three components are read in one call: two assessed with DIFFERENT values
+// (which is what makes per-row pointer independence observable — see the second
+// fixture) and one with all five columns NULL, so "no EOL data on record" is
+// shown to stay distinguishable from a real assessment rather than collapsing to
+// a zero date or a zero UUID.
 func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 	appURL, migURL := llmCallsTestEnv(t)
 
@@ -53,10 +55,16 @@ func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 	// `violates foreign key constraint "components_eol_product_id_fkey"` —
 	// observed while writing this test, which is why the ordering is spelled out
 	// rather than left to the next author to rediscover.
+	// BOTH products are registered here, before the tenant, for the same LIFO
+	// reason. Registering the second one later (next to its INSERT, where it
+	// reads better) puts it after the tenant cleanup and therefore runs it
+	// FIRST — straight back into the same FK violation.
 	prodID := uuid.New()
 	cycleID := uuid.New()
+	prod2ID := uuid.New()
+	cycle2ID := uuid.New()
 	registerCleanupExec(t, migDB, "m50 eol_products",
-		`DELETE FROM eol_products WHERE id = $1`, prodID)
+		`DELETE FROM eol_products WHERE id IN ($1, $2)`, prodID, prod2ID)
 
 	tenant := seedIntegrationTenant(t, migDB, "m50-eol-fields")
 
@@ -106,6 +114,40 @@ func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 		t.Fatalf("seed assessed component: %v", err)
 	}
 
+	// Second assessed component, with DIFFERENT product / cycle / dates.
+	//
+	// This row exists to prove per-row pointer independence, which two rows
+	// cannot (Codex round 1, #2). With one assessed row and one NULL row, a
+	// genuine last-row aliasing bug — backing variables hoisted out of the
+	// `for rows.Next()` loop and re-pointed every iteration — would still pass:
+	// the NULL row leaves those variables untouched, so the assessed row keeps
+	// the right values by accident. Two rows that BOTH carry values, with
+	// distinct values, is what makes sharing observable.
+	assessed2ID := uuid.New()
+	if _, err := migDB.Exec(`
+		INSERT INTO eol_products (id, name, title, category, link, total_cycles)
+		VALUES ($1, $2, 'm50 eol fields product 2', 'os', NULL, 1)
+	`, prod2ID, "m50-eol-fields-2-"+prod2ID.String()); err != nil {
+		t.Fatalf("seed second eol_products row: %v", err)
+	}
+	if _, err := migDB.Exec(`
+		INSERT INTO eol_product_cycles (id, product_id, cycle)
+		VALUES ($1, $2, '4.2')
+	`, cycle2ID, prod2ID); err != nil {
+		t.Fatalf("seed second eol_product_cycles row: %v", err)
+	}
+	wantEOL2 := time.Date(2030, 8, 9, 0, 0, 0, 0, time.UTC)
+	wantEOS2 := time.Date(2031, 10, 11, 0, 0, 0, 0, time.UTC)
+	if err := execAsTenant(t, migDB, tenant, `
+		INSERT INTO components (id, tenant_id, sbom_id, name, version, type, purl, license,
+			eol_status, eol_product_id, eol_cycle_id, eol_date, eos_date)
+		VALUES ($1, $2, $3, 'm50-eol-assessed-2', '4.2', 'library',
+			'pkg:generic/m50-eol-assessed-2@4.2', 'BSD-3-Clause',
+			'eos', $4, $5, $6, $7)
+	`, assessed2ID, tenant, sbomID, prod2ID, cycle2ID, wantEOL2, wantEOS2); err != nil {
+		t.Fatalf("seed second assessed component: %v", err)
+	}
+
 	// Unassessed component: all five NULL.
 	unassessedID := uuid.New()
 	if err := execAsTenant(t, migDB, tenant, `
@@ -125,11 +167,11 @@ func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetComponentsWithEOL: %v", err)
 		}
-		if total != 2 {
-			t.Errorf("total = %d, want 2", total)
+		if total != 3 {
+			t.Errorf("total = %d, want 3", total)
 		}
 
-		var sawAssessed, sawUnassessed bool
+		var sawAssessed, sawAssessed2, sawUnassessed bool
 		for i := range comps {
 			c := &comps[i]
 			switch c.ID {
@@ -157,6 +199,36 @@ func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 					t.Errorf("assessed: EOSDate = %v, want %v", c.EOSDate.UTC(), wantEOS)
 				}
 
+			case assessed2ID:
+				sawAssessed2 = true
+				// Same assertions, DIFFERENT expected values. If the four
+				// pointers were shared across loop iterations, one of these two
+				// assessed rows would carry the other's product / cycle / dates
+				// and this branch (or the one above) would fail.
+				if c.EOLStatus != "eos" {
+					t.Errorf("assessed2: EOLStatus = %q, want \"eos\"", c.EOLStatus)
+				}
+				if c.EOLProductID == nil || *c.EOLProductID != prod2ID {
+					t.Errorf("assessed2: EOLProductID = %v, want %v (pointer shared with "+
+						"the other assessed row?)", c.EOLProductID, prod2ID)
+				}
+				if c.EOLCycleID == nil || *c.EOLCycleID != cycle2ID {
+					t.Errorf("assessed2: EOLCycleID = %v, want %v (pointer shared with "+
+						"the other assessed row?)", c.EOLCycleID, cycle2ID)
+				}
+				if c.EOLDate == nil {
+					t.Errorf("assessed2: EOLDate = nil, want %v", wantEOL2)
+				} else if !c.EOLDate.UTC().Equal(wantEOL2) {
+					t.Errorf("assessed2: EOLDate = %v, want %v (pointer shared?)",
+						c.EOLDate.UTC(), wantEOL2)
+				}
+				if c.EOSDate == nil {
+					t.Errorf("assessed2: EOSDate = nil, want %v", wantEOS2)
+				} else if !c.EOSDate.UTC().Equal(wantEOS2) {
+					t.Errorf("assessed2: EOSDate = %v, want %v (pointer shared?)",
+						c.EOSDate.UTC(), wantEOS2)
+				}
+
 			case unassessedID:
 				sawUnassessed = true
 				// "Never assessed" must not become a value. An empty
@@ -179,9 +251,9 @@ func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 				t.Errorf("unexpected component %s", c.ID)
 			}
 		}
-		if !sawAssessed || !sawUnassessed {
-			t.Errorf("missing seeded components (assessed=%v unassessed=%v)",
-				sawAssessed, sawUnassessed)
+		if !sawAssessed || !sawAssessed2 || !sawUnassessed {
+			t.Errorf("missing seeded components (assessed=%v assessed2=%v unassessed=%v)",
+				sawAssessed, sawAssessed2, sawUnassessed)
 		}
 	})
 }
