@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,7 +28,33 @@ var (
 	// tenant tx and the policy hid every row" — the exact hazard the
 	// method's own comment warns about.
 	ErrComponentRowNotFound = fmt.Errorf("components: no row matched: %w", sql.ErrNoRows)
+
+	// ErrInvalidEOLStatus is returned by UpdateComponentEOLStatus when the
+	// caller-supplied status is not one of the four model.EOLStatus* values.
+	//
+	// M50 (Codex round 2): the method bound info.Status straight into the
+	// UPDATE. model.EOLStatus is a string type whose zero value is "", and
+	// neither the repository nor the column rejected it, so a writer could
+	// store "" — which GetComponentsWithEOL then cannot distinguish from SQL
+	// NULL, because model.Component types EOLStatus as a plain string. Every
+	// live caller sets one of the constants, so nothing shipped wrong; this
+	// closes the path rather than relying on that continuing to be true.
+	// Mirrors the allowlist discipline used for api_keys.permissions.
+	ErrInvalidEOLStatus = errors.New("components: eol_status is not a known EOL status")
 )
+
+// validEOLStatuses is the closed set writable to components.eol_status.
+// Migration 064 enforces the same set as a CHECK constraint — this is the
+// application-side half of the pair, and it is the half that produces a
+// useful error message. Keep the two in step: adding a status here without
+// the migration makes the write fail at the database with a constraint
+// violation instead.
+var validEOLStatuses = map[model.EOLStatus]struct{}{
+	model.EOLStatusActive:  {},
+	model.EOLStatusEOL:     {},
+	model.EOLStatusEOS:     {},
+	model.EOLStatusUnknown: {},
+}
 
 // EOLRepository handles EOL data access
 type EOLRepository struct {
@@ -452,6 +479,14 @@ func (r *EOLRepository) GetLatestSyncLog(ctx context.Context) (*model.EOLSyncLog
 
 // UpdateComponentEOLStatus updates EOL fields for a component
 func (r *EOLRepository) UpdateComponentEOLStatus(ctx context.Context, componentID uuid.UUID, info *model.ComponentEOLInfo) error {
+	// Reject before the UPDATE, not after: a bad value here is a programming
+	// error in the caller, and letting it reach the database would surface as
+	// a CHECK violation whose message names the constraint rather than the
+	// field. See ErrInvalidEOLStatus for why "" in particular matters.
+	if _, ok := validEOLStatuses[info.Status]; !ok {
+		return fmt.Errorf("%w: %q", ErrInvalidEOLStatus, info.Status)
+	}
+
 	query := `
 		UPDATE components SET
 			eol_status = $1, eol_product_id = $2, eol_cycle_id = $3,
