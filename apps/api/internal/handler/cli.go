@@ -255,8 +255,16 @@ type ProjectsListResponse struct {
 	Total    int             `json:"total"`
 }
 
-// ListProjects lists projects for the current tenant (API key's tenant).
+// ListProjects lists the projects the request's API key may enumerate.
 // GET /cli/projects
+//
+// M50 W3: a project-scoped key (`api_keys.project_id IS NOT NULL`) gets its own
+// project and only that one — `{"projects":[<it>],"total":1}`, or an empty array
+// when that project is not visible under the key's tenant. A tenant-level key
+// still gets the whole tenant. The decision lives in listProjectsForCredential
+// (project.go) so this route and its GET /api/v1/mcp/projects twin cannot
+// disagree; the classification and its justification are in
+// middleware.scopeProjectListNarrowed.
 func (h *CLIHandler) ListProjects(c echo.Context) error {
 	tenantID := middleware.GetTenantID(c)
 	if tenantID == uuid.Nil {
@@ -265,8 +273,8 @@ func (h *CLIHandler) ListProjects(c echo.Context) error {
 		})
 	}
 
-	// Use existing repository method via service
-	projects, err := h.cliService.ListProjects(c.Request().Context(), tenantID)
+	projects, err := listProjectsForCredential(c, tenantID,
+		h.cliService.ListProjects, h.cliService.ListForKeyProject)
 	if err != nil {
 		slog.Warn("cli: list projects failed", "tenant_id", tenantID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{

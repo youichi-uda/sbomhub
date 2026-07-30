@@ -18,8 +18,9 @@ import (
 // contractor is sufficient, so a list that drifts is worse than no list: it
 // reads as authoritative. This test compares the fenced block against
 // middleware.APIKeyRouteScopeKeys() and requires the difference to be exactly
-// the nine routes §2d describes in prose instead (the six tenant-wide refusals,
-// the two body-resolved CLI routes, and the stateless /cli/check).
+// the nine routes §2d describes in prose instead (the four tenant-wide refusals,
+// the two narrowed project lists, the two body-resolved CLI routes, and the
+// stateless /cli/check).
 //
 // It does NOT check the prose around the list, only the fenced block.
 func TestM50W2UpgradeDocEndpointListMatchesTheRouteTable(t *testing.T) {

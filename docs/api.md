@@ -36,9 +36,12 @@ A project-scoped key is answered **`403 {"error":"forbidden"}`** when the reques
 names any other project, when the endpoint is tenant-wide, and when it would
 create a project. The refusal is identical for a project that exists, a project
 of another tenant, and a UUID that was never allocated, so it cannot be used to
-discover what exists. `docs/UPGRADE.md` §2d enumerates all 32 endpoints a
+discover what exists. The two project-list endpoints are the exception: they are
+**narrowed rather than refused**, returning the key's own project as a one-element
+list, because there the response *is* the set being narrowed and no field of it
+changes meaning. `docs/UPGRADE.md` §2d enumerates all 34 endpoints a
 project-scoped key can use — the 29 that name the project in the path, plus the
-three that do not — and the six it cannot.
+five that do not — and the four it cannot.
 
 **Not every endpoint accepts an API key.** Most of the API is reachable only with a
 web-UI session (Clerk JWT). In self-hosted mode (`SBOMHUB_AUTH_MODE=anonymous`, the
@@ -47,9 +50,8 @@ carrying no credential at all** — so on a self-hosted deployment API-key scopi
 limit on what a key can do, not a network boundary. See `docs/configuration.md`. The endpoints that accept `Bearer sbh_...` are `/api/v1/cli/*`,
 `/api/v1/mcp/*`, and the per-project SBOM / vulnerability / triage / CRA / METI /
 evidence-pack routes documented below. `GET /api/v1/projects` is **not** one of
-them; a machine client with a **tenant-level** key uses `GET /api/v1/cli/projects`
-instead. A project-scoped key is refused there — it reads its own project through
-`GET /api/v1/cli/projects/:id`.
+them; a machine client uses `GET /api/v1/cli/projects` instead — a tenant-level key
+gets the whole tenant there, a project-scoped key gets its own project.
 
 ## Endpoints
 

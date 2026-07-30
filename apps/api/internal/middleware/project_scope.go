@@ -97,7 +97,73 @@ const (
 	// compliance product a silently-narrowed answer is a worse failure than
 	// a refusal, and it would recreate — in the response body — exactly the
 	// confused deputy this wave is closing.
+	//
+	// M50 W3 carved out the one family of tenant-wide route where that
+	// argument does not apply — see scopeProjectListNarrowed.
 	scopeTenantWide
+
+	// scopeProjectListNarrowed (M50 W3): the route's entire response is an
+	// ENUMERATION OF PROJECTS. The middleware admits the request; the handler
+	// then answers with the key's own project instead of the tenant's list —
+	// one element, or zero when that project is not visible under the
+	// request's tenant.
+	//
+	// # Why this is an exception to scopeTenantWide and not a hole in it
+	//
+	// scopeTenantWide refuses because narrowing changes what a field MEANS
+	// without the consumer being able to tell. That is a property of DERIVED
+	// answers: `/mcp/dashboard/summary`'s counters and `/mcp/search/cve`'s
+	// "not present" are computed over a population, and the body does not
+	// carry the population, so a narrowed answer is byte-shaped exactly like a
+	// tenant-wide one and reads as a tenant-level fact.
+	//
+	// A project list has no such field. The population IS the body: the caller
+	// receives the set element by element, every element is a project the
+	// credential can in fact address, and nothing in the response is computed
+	// over a wider set than the one shown. `total` on the CLI shape is the
+	// length of the array beside it, not a tenant-wide count
+	// (TestM50W3ScopedKeySeesOnlyItsOwnProject's decoder asserts that).
+	//
+	// The line is "the WHOLE body is the enumeration", not "the body mentions
+	// projects". Three of the four routes still classified scopeTenantWide
+	// below also enumerate projects — `/mcp/dashboard/summary` carries a
+	// `project_scores` array, `/mcp/search/cve` carries `affected_projects`
+	// AND `unaffected_projects` (which is every remaining project of the
+	// tenant), `/mcp/search/component` carries a `matches` row per project —
+	// and none of them qualifies, because in each case the enumeration is one
+	// FIELD of an answer whose other fields are computed over the tenant.
+	// Narrowing those would leave `total_vulnerabilities`, `risk_score` and
+	// "this CVE is not present" saying something they no longer measure.
+	// (Route-by-route sweep of all 181 registrations in cmd/server/main.go,
+	// 2026-07-30: those three plus the two below are the only routes an API
+	// key can reach whose body carries more than one project.)
+	//
+	// It also discloses nothing new. The same key may already read that
+	// project through GET /api/v1/cli/projects/:id (scopeProjectPathParam),
+	// so the narrowed list adds no field the credential could not fetch
+	// already — and it is read with the same PROJECTION as the tenant-wide
+	// list (a different statement, same five columns, neither selecting
+	// tenant_id), so it cannot add one by accident
+	// (TestM50W3NarrowedRowIsTheSameRowAsTheTenantWideOne compares the
+	// serialised rows against a live database).
+	//
+	// What refusing cost, measured on a live server on 2026-07-30: `sbomhub
+	// doctor` reported `[FAIL] 認証失敗 (403)` and exited 1, because
+	// GET /api/v1/cli/projects is its auth probe; `sbomhub projects list`
+	// exited 1. A project-scoped key also had no way to learn its own project
+	// id, which every scopeProjectPathParam route requires it to supply.
+	//
+	// # What this classification does NOT do
+	//
+	// Like scopeHandlerChecked it is a promise about code elsewhere — here
+	// handler.CLIHandler.ListProjects and handler.ProjectHandler.List, both of
+	// which branch on APIKeyProjectID. The middleware performs no comparison
+	// for these routes, so a handler that forgot to branch would serve the
+	// whole tenant. That is why the set is pinned by name
+	// (TestM50W3NarrowedListRoutesAreExactlyTheKnownTwo) and the handler
+	// behaviour against a live database
+	// (internal/handler/m50w3_project_list_scope_integration_test.go).
+	scopeProjectListNarrowed
 
 	// scopeHandlerChecked: the route resolves its project from the request
 	// BODY, so `:id` does not exist and this middleware has nothing to
@@ -109,7 +175,9 @@ const (
 	// transaction, spends a rate-limit token, and reaches handler-side project
 	// resolution before refusing. See apiKeyProjectScopeAllowed's doc comment.
 	//
-	// This is the one classification the middleware cannot enforce. It is
+	// This is one of the two classifications the middleware cannot enforce —
+	// scopeProjectListNarrowed above is the other, and defers the NARROWING
+	// rather than the refusal. It is
 	// deliberately limited to the two routes listed in apiKeyRouteScope, and
 	// their handler-side refusal is pinned by the integration tests in
 	// internal/handler/m50w2_cli_project_scope_integration_test.go (which
@@ -180,20 +248,28 @@ var apiKeyRouteScope = map[string]projectScopeRule{
 	"GET /api/v1/projects/:id/vulnerabilities":                           {scopeProjectPathParam, ":id is the project"},
 
 	// -----------------------------------------------------------------
+	// The response IS the project enumeration — the HANDLER narrows it.
+	// -----------------------------------------------------------------
+	"GET /api/v1/cli/projects": {scopeProjectListNarrowed,
+		"the body is the enumeration itself, so returning the key's own project " +
+			"narrows the SET without redefining any field — unlike the aggregates " +
+			"and searches below. Served by CLIHandler.ListProjects as " +
+			"`{\"projects\":[<the key's project>],\"total\":1}`, or an empty array " +
+			"when that project is not visible under the key's own tenant. M50 W2 " +
+			"refused it, which made `sbomhub doctor` report FAIL (it probes this " +
+			"route) and `sbomhub projects list` fail outright"},
+	"GET /api/v1/mcp/projects": {scopeProjectListNarrowed,
+		"the same enumeration mounted for the MCP server, served by " +
+			"ProjectHandler.List as a bare array. Narrowed identically to the /cli " +
+			"twin so the two cannot disagree about what a project-scoped key sees " +
+			"(TestM50W3TheTwoProjectListRoutesAgree). ProjectHandler.List ALSO " +
+			"serves the Clerk-fronted auth.GET(\"/api/v1/projects\"), which no API " +
+			"key can reach and which must keep listing the whole tenant — hence the " +
+			"narrowing keys off the credential, not the route"},
+
+	// -----------------------------------------------------------------
 	// Tenant-wide: no project in the request, so nothing to scope to.
 	// -----------------------------------------------------------------
-	"GET /api/v1/cli/projects": {scopeTenantWide,
-		"lists every project of the tenant. Narrowing it to the key's one project " +
-			"is defensible (that IS the set the credential can address) and would " +
-			"keep `sbomhub projects list` and `sbomhub doctor` working — doctor uses " +
-			"this route as its auth probe and reports FAIL on 403. It is refused " +
-			"anyway, for symmetry with GET /api/v1/mcp/projects: that twin is served " +
-			"by ProjectHandler.List, and narrowing only the CLI copy would leave two " +
-			"structurally identical routes disagreeing about what a project-scoped " +
-			"key sees. Narrowing BOTH is the follow-up; refusing is the fail-closed " +
-			"state to be in until then (docs/UPGRADE.md §2d residuals)"},
-	"GET /api/v1/mcp/projects": {scopeTenantWide,
-		"same tenant-wide listing, mounted for the MCP server; see the /cli twin"},
 	"GET /api/v1/mcp/dashboard/summary": {scopeTenantWide,
 		"tenant aggregate; narrowing it would silently redefine every counter"},
 	"GET /api/v1/mcp/search/cve": {scopeTenantWide,
@@ -239,6 +315,30 @@ func APIKeyRouteScopeKeys() []string {
 	out := make([]string, 0, len(apiKeyRouteScope))
 	for k := range apiKeyRouteScope {
 		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// APIKeyProjectListNarrowedRoutes returns the "<METHOD> <echo route path>" keys
+// classified scopeProjectListNarrowed, sorted.
+//
+// It exists so the handler package can check that it actually narrows every
+// route this table promises will be narrowed — see
+// TestM50W3EveryNarrowedRouteHasAHandlerUnderTest in
+// internal/handler/m50w3_project_list_scope_integration_test.go. Without that
+// cross-check the classification would be fail-open with only a procedural
+// guard: adding a route here and adding the same string to the middleware test's
+// expected set would satisfy every test in this package while the route's
+// handler still served the whole tenant (Codex R2, Medium). With it, the new
+// route has to be driven through a real handler against a live database before
+// the suite is green. Nothing in the request path calls this.
+func APIKeyProjectListNarrowedRoutes() []string {
+	out := []string{}
+	for k, rule := range apiKeyRouteScope {
+		if rule.kind == scopeProjectListNarrowed {
+			out = append(out, k)
+		}
 	}
 	sort.Strings(out)
 	return out
@@ -416,12 +516,18 @@ func apiKeyProjectScopeAllowed(c echo.Context, key *model.APIKey) (bool, error) 
 	case scopeTenantWide:
 		return false, RespondProjectScopeDenied(c, "route is tenant-wide: "+rule.why)
 
-	case scopeHandlerChecked, scopeNoProjectResource:
+	case scopeHandlerChecked, scopeProjectListNarrowed, scopeNoProjectResource:
+		// Admitted here, and for three different reasons — see each
+		// constant's doc comment. scopeHandlerChecked and
+		// scopeProjectListNarrowed are promises about a handler (refuse the
+		// request / narrow the answer, respectively); only
+		// scopeNoProjectResource is a route where admitting is the whole
+		// answer.
 		return true, nil
 
 	default:
-		// Unreachable while projectScopeKind has exactly the four values
-		// above; kept fail-closed so adding a fifth without a case here
+		// Unreachable while projectScopeKind has exactly the five values
+		// above; kept fail-closed so adding a sixth without a case here
 		// denies rather than admits.
 		return false, RespondProjectScopeDenied(c, "unhandled project scope classification")
 	}

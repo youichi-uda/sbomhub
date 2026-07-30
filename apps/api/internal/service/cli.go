@@ -499,6 +499,17 @@ func (s *CLIService) ListProjects(ctx context.Context, tenantID uuid.UUID) ([]mo
 	return s.projectRepo.ListByTenant(ctx, tenantID)
 }
 
+// ListForKeyProject lists the projects a project-scoped API key may enumerate:
+// its own project, and only that one.
+//
+// It delegates to the same helper as ProjectService.ListForKeyProject — see
+// listProjectsForKeyProject in project.go for the guarantees — so
+// GET /api/v1/cli/projects and GET /api/v1/mcp/projects cannot answer a given
+// key differently (TestM50W3TheTwoProjectListRoutesAgree).
+func (s *CLIService) ListForKeyProject(ctx context.Context, tenantID, keyProjectID uuid.UUID) ([]model.Project, error) {
+	return listProjectsForKeyProject(ctx, s.projectRepo, tenantID, keyProjectID)
+}
+
 // GetProject gets a project by ID, verifying it belongs to the tenant.
 func (s *CLIService) GetProject(ctx context.Context, tenantID uuid.UUID, projectID uuid.UUID) (*model.Project, error) {
 	// Get project

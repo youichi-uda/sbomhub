@@ -256,8 +256,9 @@ a per-repository CI job handed over the tenant.
 ### New behaviour
 
 A key with `project_id` set is now answered **`403 {"error":"forbidden"}`** unless
-the request names that project — or is `POST /api/v1/cli/check`, which names no
-project and touches none. Specifically:
+the request names that project — or is one of the two project **lists**, which
+answer with that one project instead of the tenant's, or `POST /api/v1/cli/check`,
+which names no project and touches none. Specifically:
 
 | Request | Before | Now |
 |---|---|---|
@@ -265,14 +266,14 @@ project and touches none. Specifically:
 | The same endpoint with any other project id | works | **403** |
 | `POST /api/v1/cli/upload` / `POST /api/v1/cli/projects` naming the key's own project by name | works | **works**, idempotently — `/cli/projects` answers 200 with `"created":false` (never 201), `/cli/upload` answers 200 with `"project_created":false` |
 | The same two naming any other project, or a name that does not exist | works — **and created the project when the name was unknown** | **403**, and nothing is created |
-| `GET /api/v1/cli/projects`, `GET /api/v1/mcp/projects` (project lists) | works | **403** |
+| `GET /api/v1/cli/projects`, `GET /api/v1/mcp/projects` (project lists) | works, lists every project of the tenant | **200, narrowed** to the key's own project — a one-element list |
 | `GET /api/v1/mcp/dashboard/summary`, `/mcp/search/cve`, `/mcp/search/component` | works | **403** |
 | `POST /api/v1/mcp/sbom/diff` | works | **403** — see residual below |
 | `POST /api/v1/cli/check` (stateless OSV lookup, touches no project) | works | **works** |
 | Any future endpoint mounted behind API-key auth | — | **403 until it is explicitly classified** (default-deny) |
 | A mistyped URL under `/api/v1/cli` or `/api/v1/mcp` | 404 | **403** — unmatched paths are unclassified, so a typo reads as a scope refusal (see residuals) |
 
-A project-scoped key can reach 32 of the 38. Twenty-nine of them name the project
+A project-scoped key can reach 34 of the 38. Twenty-nine of them name the project
 in the path, and require that `:id` to be the key's own project — in full:
 
 ```
@@ -307,11 +308,35 @@ GET    /api/v1/mcp/projects/:id/compliance
 GET    /api/v1/mcp/projects/:id/sboms
 ```
 
-The other three name no project in the path: `POST /api/v1/cli/upload` and
-`POST /api/v1/cli/projects` (allowed only when the body names the key's own project),
-and `POST /api/v1/cli/check` (no project at all). The six that remain are the
-tenant-wide ones refused in the table above — 29 + 3 + 6 = the 38 endpoints that
-accept an API key.
+The other five name no project in the path:
+
+- `GET /api/v1/cli/projects` and `GET /api/v1/mcp/projects` — the project lists,
+  **narrowed** to the key's own project rather than refused (see below);
+- `POST /api/v1/cli/upload` and `POST /api/v1/cli/projects` — allowed only when
+  the body names the key's own project;
+- `POST /api/v1/cli/check` — no project at all.
+
+The four that remain are the tenant-wide ones refused in the table above —
+29 + 5 + 4 = the 38 endpoints that accept an API key.
+
+**Why the project lists are narrowed and the other tenant-wide endpoints are
+not.** Narrowing an answer is safe exactly when the response *is* the set being
+narrowed. A project list is: you receive the projects one by one, every one of
+them is a project the key can address, and nothing else in the body is computed
+over a wider set. The dashboard summary and the two searches are not: their
+counters, risk scores and "this CVE is not present" verdicts are derived from a
+population the response does not name, so a narrowed answer would be shaped
+exactly like a tenant-wide one and would be read — by an operator or by an LLM
+through the MCP server — as a statement about the whole tenant. `/mcp/search/cve`
+would report a CVE as absent while it is present in a sibling project. Those stay
+refused. (`/mcp/dashboard/summary` and both searches do carry project ids in their
+bodies; that is not the same thing as being a project list, and it is why they are
+not narrowed.)
+
+The narrowed lists disclose nothing the key could not already read: the same
+project is readable through `GET /api/v1/cli/projects/:id`, and the narrowed row
+is produced by the same query as the tenant-wide one, so it carries the same
+fields.
 This list is checked against the code on every test run:
 `TestM50W2UpgradeDocEndpointListMatchesTheRouteTable` parses the block above and
 compares it to the enforcement table, and
@@ -361,14 +386,16 @@ Two properties worth knowing:
 
 ### Residuals
 
-- **`sbomhub doctor` reports `auth-verify` as FAIL with a project-scoped key.**
-  It probes `GET /api/v1/cli/projects`, which is one of the refused tenant-wide
-  routes, and treats 403 as a hard failure. The key is fine —
-  `sbomhub scan --project <that project>` works. `sbomhub projects list` is
-  refused for the same reason. Narrowing both project-list endpoints to the key's
-  own project is the intended follow-up; it is not done here because the MCP twin
-  of that route is served by a different handler, and narrowing only the CLI copy
-  would leave two identical routes disagreeing.
+- **`sbomhub doctor` and `sbomhub projects list` work with a project-scoped key —
+  no CLI upgrade required.** The first cut of this change refused both project
+  lists, which made `doctor` report `[FAIL] 認証失敗 (403)` and exit 1 (it probes
+  `GET /api/v1/cli/projects` as its authentication check) and made
+  `sbomhub projects list` fail outright. Narrowing the lists instead of refusing
+  them fixed both without touching the CLI: `doctor` reports `[OK] 認証 OK` and
+  `projects list` prints the one project the key can address. Any released
+  `sbomhub` binary behaves this way — the change is entirely server-side.
+  A project-scoped key can therefore now discover its own project id, which every
+  `/api/v1/projects/:id/…` endpoint requires it to supply.
 - **`sbomhub scan` needs an explicit `--project` with a project-scoped key.**
   Without the flag the CLI falls back to the working-directory basename, which is
   refused unless the directory happens to be named exactly like the project.
@@ -384,14 +411,23 @@ Two properties worth knowing:
   tenant-level key, or the web UI's project diff view.
 - **A key whose `project_id` points at another tenant's project can no longer
   reach any project data.** Such rows were possible before M47 W1 added an
-  ownership check to the mint route (`api_keys` has no RLS and no composite
-  foreign key). The key still authenticates as its own tenant, so the one project
-  id it will accept in a path resolves to nothing under that tenant's RLS: every
-  project-scoped route answers 403 (wrong project) or 404 (its own project id,
-  invisible under its own tenant), and every tenant-wide route answers 403. The
-  one exception is `POST /api/v1/cli/check`, which reads no tenant data at all and
-  still works. Revoke and reissue if you find one; the query in step 1 joins on
-  `projects`, so a cross-tenant row does not appear in its output.
+  ownership check to the mint route (`api_keys` has no RLS, and its foreign key is
+  on `projects(id)` alone, not on `(tenant_id, id)`). The key still authenticates
+  as its own tenant, so the one project id it will accept in a path resolves to
+  nothing under that tenant's RLS: every project-scoped route answers 403 (wrong
+  project) or 404 (its own project id, invisible under its own tenant), the two
+  project lists answer **`200` with an empty list**, and the remaining tenant-wide
+  routes answer 403. The one exception is `POST /api/v1/cli/check`, which reads no
+  tenant data at all and still works. Revoke and reissue if you find one; the
+  query in step 1 joins on `projects`, so a cross-tenant row does not appear in
+  its output.
+
+  This is the only way a project-scoped key sees an empty project list. Deleting
+  the project does **not** produce one: `api_keys.project_id` is
+  `REFERENCES projects(id) ON DELETE CASCADE`, so deleting a project deletes its
+  project-scoped keys, and the key is then answered `401 {"error":"invalid API
+  key"}` — which `sbomhub doctor` correctly reports as
+  `認証失敗 (401) — api_key が無効・失効しています`.
 - **A mistyped URL under `/api/v1/cli` or `/api/v1/mcp` answers 403 rather than
   404** for a project-scoped key, because Echo runs the group middleware for
   unmatched paths and an unmatched path is (correctly) unclassified.

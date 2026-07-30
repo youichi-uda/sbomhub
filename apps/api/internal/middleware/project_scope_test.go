@@ -295,8 +295,9 @@ func TestM50W2UnclassifiedRouteIsDenied(t *testing.T) {
 	}
 }
 
-// TestM50W2HandlerCheckedRoutesAreExactlyTheKnownTwo fences the one
-// classification the middleware cannot enforce.
+// TestM50W2HandlerCheckedRoutesAreExactlyTheKnownTwo fences one of the two
+// classifications the middleware cannot enforce — the refusing one.
+// TestM50W3NarrowedListRoutesAreExactlyTheKnownTwo fences the narrowing one.
 //
 // scopeHandlerChecked means "this middleware waves the request through and the
 // HANDLER performs the comparison". That is a promise made in a table about code
@@ -327,6 +328,103 @@ func TestM50W2HandlerCheckedRoutesAreExactlyTheKnownTwo(t *testing.T) {
 		if !got[key] {
 			t.Errorf("%s is no longer classified scopeHandlerChecked — if its project is "+
 				"no longer body-resolved, drop it from this test too", key)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M50 W3 — the two project-LIST routes are narrowed rather than refused.
+// ---------------------------------------------------------------------------
+
+// m50w3NarrowedListRoutes is the set of routes whose response is an enumeration
+// of projects and nothing else, and which therefore answer a project-scoped key
+// with that key's own project instead of the tenant's list.
+//
+// Written out here rather than derived from the table so that the table and the
+// tests cannot drift together: TestM50W3NarrowedListRoutesAreExactlyTheKnownTwo
+// compares the two in both directions.
+var m50w3NarrowedListRoutes = []string{
+	"GET /api/v1/cli/projects",
+	"GET /api/v1/mcp/projects",
+}
+
+// TestM50W3NarrowedListRoutesAreAdmitted is the behavioural half: the middleware
+// must let a project-scoped key REACH these two handlers, because the narrowing
+// happens in the handler and a middleware refusal would pre-empt it.
+//
+// Observed before this change (2026-07-30, live server on :8099, a key with
+// api_keys.project_id set): both routes answered `403 {"error":"forbidden"}`,
+// `sbomhub projects list` exited 1, and `sbomhub doctor` reported
+// `[FAIL] 認証失敗 (403)` and exited 1.
+func TestM50W3NarrowedListRoutesAreAdmitted(t *testing.T) {
+	for _, key := range m50w3NarrowedListRoutes {
+		method, routePath, ok := strings.Cut(key, " ")
+		if !ok {
+			t.Fatalf("malformed route key %q", key)
+		}
+		c, rec := m50w2Ctx(method, routePath, nil)
+		allowed, err := apiKeyProjectScopeAllowed(c, m50w2ProjectKey(uuid.New()))
+		if !allowed {
+			t.Errorf("%s: refused for a project-scoped key (err=%v, status=%d, body=%s). "+
+				"The response of this route IS the project enumeration, so it is narrowed "+
+				"by the handler, not refused here.",
+				key, err, rec.Code, rec.Body.String())
+		}
+		if rec.Code != http.StatusOK {
+			// httptest.ResponseRecorder starts at 200 and is only written to
+			// by RespondProjectScopeDenied on this path, so a non-200 here
+			// means the middleware wrote a refusal.
+			t.Errorf("%s: middleware wrote status %d; it must write nothing", key, rec.Code)
+		}
+	}
+}
+
+// TestM50W3NarrowedListRoutesAreExactlyTheKnownTwo fences the second
+// classification the middleware cannot enforce.
+//
+// scopeProjectListNarrowed means "this middleware waves the request through and
+// the HANDLER replaces the tenant's list with the key's own project". A route
+// given that classification whose handler does not branch on APIKeyProjectID
+// would serve the whole tenant to a project-scoped key — the exact defect M50 W2
+// closed. So the set is pinned by name: the two below are the two whose handler
+// behaviour is asserted against a live database in
+// internal/handler/m50w3_project_list_scope_integration_test.go.
+func TestM50W3NarrowedListRoutesAreExactlyTheKnownTwo(t *testing.T) {
+	want := map[string]bool{}
+	for _, key := range m50w3NarrowedListRoutes {
+		want[key] = true
+	}
+	got := map[string]bool{}
+	for key, rule := range apiKeyRouteScope {
+		if rule.kind == scopeProjectListNarrowed {
+			got[key] = true
+		}
+	}
+	for key := range got {
+		if !want[key] {
+			t.Errorf("%s is classified scopeProjectListNarrowed, but only %v have their "+
+				"handler-side narrowing pinned by an integration test. A route whose "+
+				"handler does not narrow serves the whole tenant to a project-scoped key. "+
+				"Either add the handler branch plus its test, or classify the route "+
+				"differently.", key, keysOf(want))
+		}
+	}
+	for key := range want {
+		if !got[key] {
+			t.Errorf("%s is no longer classified scopeProjectListNarrowed — if its "+
+				"response is no longer a bare project enumeration, drop it from "+
+				"m50w3NarrowedListRoutes too", key)
+		}
+	}
+}
+
+// TestM50W3NarrowedRoutesCarryAReason mirrors the other per-kind reason checks:
+// "the whole body is the enumeration" is a claim about a handler's response
+// shape, not about a path, so it has to be stated.
+func TestM50W3NarrowedRoutesCarryAReason(t *testing.T) {
+	for key, rule := range apiKeyRouteScope {
+		if rule.kind == scopeProjectListNarrowed && strings.TrimSpace(rule.why) == "" {
+			t.Errorf("%s is narrowed with no stated reason", key)
 		}
 	}
 }
@@ -454,11 +552,19 @@ func TestM50W2ScopeCheckCoversEveryValidateKeyCallSite(t *testing.T) {
 	}
 }
 
-// TestM50W2ScopeDenialShortCircuitsBeforeNext drives the real APIKeyAuth
-// middleware and asserts the denial never reaches the next handler. The
-// tenant-context middleware that normally follows would issue SQL, so "next was
-// not called" is also the claim that a refusal costs no database work of its
-// own beyond the ValidateKey lookup that produced the key.
+// TestM50W2ScopeDenialShortCircuitsBeforeNext asserts that a refusal from
+// apiKeyProjectScopeAllowed never reaches the next handler. The tenant-context
+// middleware that normally follows would issue SQL, so "next was not called" is
+// also the claim that a refusal costs no database work of its own beyond the
+// ValidateKey lookup that produced the key.
+//
+// It drives a LOCAL guard shaped like APIKeyAuth's call site, not APIKeyAuth
+// itself — the comment used to say "the real APIKeyAuth middleware", which was
+// never true (Codex R3, Low). What that reimplementation cannot catch is
+// apikey.go dropping the decision on the floor; that is what
+// TestM50W3APIKeyAuthStillRefusesWhatItRefusedBefore in
+// m50w3_apikey_auth_integration_test.go covers, by constructing the real
+// middleware over a live database.
 func TestM50W2ScopeDenialShortCircuitsBeforeNext(t *testing.T) {
 	own := uuid.New()
 	nextCalled := false
