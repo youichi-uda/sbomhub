@@ -615,14 +615,49 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 	var components []model.Component
 	for rows.Next() {
 		var c model.Component
-		var eolStatus, eolProductID, eolCycleID, eolDate, eosDate sql.NullString
+		// The five eol_* columns are all DDL-nullable, so each needs a
+		// null-tolerant scan target, matched to the column's actual type
+		// (uuid / date / varchar — verified against information_schema
+		// 2026-07-30) rather than scanning everything as text and re-parsing.
+		var eolStatus sql.NullString
+		var eolProductID, eolCycleID uuid.NullUUID
+		var eolDate, eosDate sql.NullTime
 		if err := rows.Scan(
 			&c.ID, &c.SbomID, &c.Name, &c.Version, &c.Type, &c.Purl, &c.License, &c.CreatedAt,
 			&eolStatus, &eolProductID, &eolCycleID, &eolDate, &eosDate,
 		); err != nil {
 			return nil, 0, err
 		}
-		// Store EOL fields in component (handled by extended model if needed)
+		// M50 follow-up: these five values used to be scanned and then
+		// DISCARDED, under a comment claiming the model handled them
+		// "if needed". model.Component has carried EOLStatus / EOLProductID /
+		// EOLCycleID / EOLDate / EOSDate the whole time, so every caller got
+		// a zero-valued EOL block from a query that selects those columns AND
+		// orders by eol_status. The method has no production caller yet, so
+		// nothing shipped wrong — the defect is that wiring it up would have
+		// produced silently empty EOL data, which is the shape this repo has
+		// repeatedly been bitten by (dead code springing to life).
+		//
+		// NULL stays NULL: eol_status is a plain string where "" already means
+		// "not assessed", and the other four are pointers so "no EOL date on
+		// record" cannot be confused with a zero date.
+		c.EOLStatus = eolStatus.String
+		if eolProductID.Valid {
+			id := eolProductID.UUID
+			c.EOLProductID = &id
+		}
+		if eolCycleID.Valid {
+			id := eolCycleID.UUID
+			c.EOLCycleID = &id
+		}
+		if eolDate.Valid {
+			t := eolDate.Time
+			c.EOLDate = &t
+		}
+		if eosDate.Valid {
+			t := eosDate.Time
+			c.EOSDate = &t
+		}
 		components = append(components, c)
 	}
 	if err := rows.Err(); err != nil {
