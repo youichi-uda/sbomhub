@@ -5,6 +5,11 @@
 -- nullable varchar. No data changes: the constraint only ever rejected writes,
 -- it never rewrote a row, so there is nothing to restore.
 --
+-- Runs after 065's down (the runner rolls back in descending version order),
+-- by which point the constraint is already back to NOT VALID. DROP CONSTRAINT
+-- removes it in either state, so this file is correct whether or not 065 ever
+-- ran.
+--
 -- What rolling back re-opens: the '' / NULL collision described in the up
 -- migration. model.Component types EOLStatus as a plain string, so a row
 -- written with an empty status reads back identically to a row that was never

@@ -36,9 +36,14 @@ var (
 	// UPDATE. model.EOLStatus is a string type whose zero value is "", and
 	// neither the repository nor the column rejected it, so a writer could
 	// store "" — which GetComponentsWithEOL then cannot distinguish from SQL
-	// NULL, because model.Component types EOLStatus as a plain string. Every
-	// live caller sets one of the constants, so nothing shipped wrong; this
-	// closes the path rather than relying on that continuing to be true.
+	// NULL, because model.Component types EOLStatus as a plain string.
+	//
+	// Scope of the evidence, precisely: no current-tree production caller
+	// supplies another value, and the measured dev DB contains none. That says
+	// nothing about historical deployed builds or operator SQL, so it is a
+	// reason to close the path rather than a reason to call the column already
+	// safe (Codex round 1 #7 — an earlier draft here said "nothing shipped
+	// wrong", which the available evidence cannot support).
 	// Mirrors the allowlist discipline used for api_keys.permissions.
 	ErrInvalidEOLStatus = errors.New("components: eol_status is not a known EOL status")
 )
@@ -676,32 +681,29 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		// produced silently empty EOL data, which is the shape this repo has
 		// repeatedly been bitten by (dead code springing to life).
 		//
-		// What the NULL handling here does and does not guarantee
-		// (Codex round 1, #1 — the earlier wording claimed more):
+		// What the NULL handling here does and does not guarantee:
 		//
-		//   The four pointer fields DO keep NULL distinguishable: "no EOL date
-		//   on record" stays nil and cannot be read as a zero date, and an
-		//   absent product/cycle cannot be read as the zero UUID.
+		//   The four pointer fields keep NULL distinguishable: "no EOL date on
+		//   record" stays nil and cannot be read as a zero date, and an absent
+		//   product/cycle cannot be read as the zero UUID.
 		//
-		//   EOLStatus does NOT. model.Component types it as a plain string, so
-		//   SQL NULL and a stored empty string both arrive as "". eol_status is
-		//   nullable varchar with DDL default 'unknown' and NO CHECK
-		//   constraint, so '' is storable — nothing at the schema level
-		//   prevents the collision, and it is REACHABLE THROUGH THE REPOSITORY
-		//   WRITER: UpdateComponentEOLStatus binds info.Status straight into
-		//   the UPDATE, model.EOLStatus permits its zero value, and neither the
-		//   repository nor the database rejects it (Codex round 2 #1 wrote ''
-		//   successfully in a rolled-back UPDATE; round 1's "unreachable by
-		//   data" was too strong). What is true is narrower: the measured dev
-		//   data does not contain the collision — 2026-07-30, 2 rows, both
-		//   'unknown', zero NULL and zero empty-string — because the live
-		//   writers all set one of the four model.EOLStatus* constants.
+		//   EOLStatus is a plain string in model.Component, so SQL NULL still
+		//   arrives here as "". That mapping is unchanged and is not something
+		//   this method can fix — the field's type is the API shape.
 		//
-		//   Closing it properly is two independent changes, not one: a CHECK
-		//   (eol_status IS NULL OR eol_status IN ('unknown','active','eol','eos'))
-		//   tightens the DATABASE WRITE CONTRACT, while making the field a
-		//   pointer changes the GO/JSON API SHAPE. Round 1 said "both change
-		//   the API shape", which is false of the CHECK. Neither is done here.
+		//   What HAS changed is that "" can no longer be WRITTEN. Migrations
+		//   064/065 constrain eol_status to NULL or one of the four defined
+		//   statuses, and UpdateComponentEOLStatus rejects anything outside
+		//   validEOLStatuses before issuing its UPDATE. So the remaining ""
+		//   readings all come from NULL, and NULL means "never assessed" —
+		//   there is no second producer of "" to confuse it with.
+		//
+		//   Two things would still be needed to make that a guarantee rather
+		//   than a property of the current schema: making the field a pointer
+		//   (which changes the Go/JSON API shape, unlike the CHECK, which
+		//   changes only the database write contract), and NOT NULL on the
+		//   column. Neither is done; the collision is closed at the write side
+		//   only.
 		c.EOLStatus = eolStatus.String
 		if eolProductID.Valid {
 			id := eolProductID.UUID

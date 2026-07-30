@@ -1,0 +1,64 @@
+-- ============================================
+-- Verify the CHECK that 064 added NOT VALID.
+--
+-- This is a separate migration FILE, not a second statement in 064, because
+-- cmd/migrate/main.go wraps each file in one transaction and PostgreSQL holds
+-- locks until the transaction ends. Keeping them together would hold 064's
+-- ACCESS EXCLUSIVE across this scan and block every reader and writer of
+-- `components` for its duration — see 064's header for the pg_locks
+-- measurement that proved it.
+--
+-- Split this way, VALIDATE takes only SHARE UPDATE EXCLUSIVE, which does not
+-- conflict with reads or ordinary writes. It does conflict with other DDL and
+-- with VACUUM.
+--
+-- IF THIS MIGRATION FAILS, the database contains a row whose eol_status is
+-- neither NULL nor one of 'unknown' / 'active' / 'eol' / 'eos'. The whole
+-- transaction rolls back — the constraint stays NOT VALID and the 065 row is
+-- not written — so the deployment is safe to retry after remediation. This is
+-- the same "abort loudly rather than silently coerce" posture migration 027
+-- takes for orphaned tenant_id rows.
+--
+-- FINDING THE OFFENDING ROWS — read this before running the query:
+--   PostgreSQL will only tell you
+--
+--     ERROR: check constraint "components_eol_status_check" of relation
+--            "components" is violated by some row
+--
+--   It does not name the row. You have to look, and the obvious query DOES NOT
+--   WORK as the migrator: `components` is ENABLE + FORCE ROW LEVEL SECURITY,
+--   and sbomhub_migrator is subject to the policy like any other role.
+--   Measured 2026-07-30: `SELECT count(*) FROM components` as sbomhub_migrator
+--   returns 0 while the table holds rows. A remediation query run as that role
+--   silently reports "no offending rows" and leaves you stuck.
+--
+--   Run it as a BYPASSRLS or superuser role (the same role the compose file
+--   uses to bootstrap, e.g. `psql -U sbomhub`):
+--
+--     SELECT id, tenant_id, sbom_id, name, eol_status
+--       FROM components
+--      WHERE eol_status IS NOT NULL
+--        AND eol_status NOT IN ('unknown','active','eol','eos');
+--
+--   tenant_id is included because the rows may span tenants and you will need
+--   it to decide who to tell. If you cannot use such a role, run the same
+--   predicate once per tenant inside a transaction that does
+--   `SET LOCAL app.current_tenant_id = '<uuid>'`.
+--
+--   Remediation is to set the offending rows to 'unknown' (the DDL default,
+--   meaning "not determined") and re-run the EOL sweep, which recomputes the
+--   real status from endoflife.date. 'unknown' is chosen over guessing because
+--   an EOL status that is wrong in the safe-looking direction ('active') would
+--   hide a component that is actually end-of-life.
+--
+-- LOCK BUDGET: SHARE UPDATE EXCLUSIVE still has to be acquired, and it
+--   conflicts with concurrent DDL and VACUUM, so it can queue. Bounded for the
+--   same reason as 064. Note what the budget does NOT bound: once acquired,
+--   the validation scan itself runs to completion. lock_timeout limits
+--   acquisition, not execution.
+-- ============================================
+
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE components
+    VALIDATE CONSTRAINT components_eol_status_check;

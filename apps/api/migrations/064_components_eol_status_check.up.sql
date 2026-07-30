@@ -1,6 +1,6 @@
 -- ============================================
--- Constrain components.eol_status to the four statuses the product defines
--- (M50 follow-up, Codex round 2 #1).
+-- Add (but do not yet verify) a CHECK constraining components.eol_status to
+-- the four statuses the product defines. Migration 065 verifies it.
 --
 -- What this closes:
 --   `eol_status` is a nullable varchar with DDL default 'unknown' and, until
@@ -13,12 +13,12 @@
 --   to "". A row written with '' becomes indistinguishable from a row that was
 --   never assessed.
 --
---   Round 1 of the review called that collision "unreachable by data".
---   Round 2 disproved it by writing '' through the repository path in a
---   rolled-back UPDATE. Nothing shipped wrong — every live caller passes one
---   of the four model.EOLStatus* constants — but "no caller does this today"
---   is not a constraint, and this table has no RLS-style backstop that would
---   catch it later.
+--   No current-tree production caller supplies another value (the single
+--   caller initialises Status to 'unknown' and only ever reassigns 'active',
+--   'eol' or 'eos'), and the measured dev DB contains none. That is the whole
+--   of the evidence: it says nothing about historical deployed builds or about
+--   operator SQL, so it is a reason to constrain the column, not a reason to
+--   consider it already safe.
 --
 -- Belt and braces, matching how this repository treats authorisation input:
 --   belt   — repository/eol.go validates against validEOLStatuses and returns
@@ -32,43 +32,43 @@
 --   application error to a constraint violation at write time.
 --
 -- NULL is still allowed:
---   The column is nullable and 063-era rows may hold NULL. This migration is
---   about excluding meaningless values, not about making the column
---   mandatory; `eol_status IS NULL` short-circuits the IN test.
+--   The column is nullable and rows may hold NULL. This migration excludes
+--   meaningless values; it does not make the column mandatory.
+--   `eol_status IS NULL` short-circuits the IN test.
 --
--- Existing data:
---   Verified on the dev DB before writing this (2026-07-30): 2 rows, both
---   'unknown', zero NULL, zero empty-string, zero out-of-set values. A
---   production instance carrying a value outside the set will fail at
---   VALIDATE CONSTRAINT below, loudly, with the offending row reported by
---   PostgreSQL — the same "abort rather than silently coerce" posture
---   migration 027 takes for orphaned tenant_id rows. To find such rows before
---   upgrading:
+-- WHY THIS IS SPLIT ACROSS 064 AND 065 — and why the split has to be across
+-- MIGRATION FILES rather than across statements:
+--   A plain `ADD CONSTRAINT ... CHECK` verifies every existing row while
+--   holding ACCESS EXCLUSIVE, blocking all readers and writers of `components`
+--   for the scan. Splitting into NOT VALID + VALIDATE is the standard remedy,
+--   because VALIDATE takes only SHARE UPDATE EXCLUSIVE, which does not
+--   conflict with reads or ordinary writes.
 --
---     SELECT id, eol_status FROM components
---      WHERE eol_status IS NOT NULL
---        AND eol_status NOT IN ('unknown','active','eol','eos');
+--   That remedy only works if the two statements are in SEPARATE
+--   TRANSACTIONS. PostgreSQL holds a lock until the transaction ends, and
+--   cmd/migrate/main.go wraps each migration FILE in one transaction — so
+--   putting both statements in one file keeps the ACCESS EXCLUSIVE lock from
+--   the first statement held across the validation scan and achieves nothing.
 --
---   Remediation is to set them to 'unknown' (the DDL default, meaning "not
---   determined") and re-run the EOL sweep, which recomputes the real status.
+--   Measured on PostgreSQL 15.18 (Codex round 1, Medium #1 — the first version
+--   of this migration made exactly that mistake while citing 063's lock
+--   lesson): with both statements in one transaction, pg_locks showed
+--   AccessExclusiveLock still held during VALIDATE and a concurrent
+--   `SET lock_timeout='750ms'; SELECT count(*) FROM components` timed out.
+--   With the ADD committed first and VALIDATE run in a new transaction,
+--   pg_locks showed only ShareUpdateExclusiveLock and the concurrent read
+--   succeeded.
 --
--- Why NOT VALID then VALIDATE, rather than one ALTER:
---   A plain `ADD CONSTRAINT ... CHECK` holds ACCESS EXCLUSIVE on `components`
---   for the whole verification scan, blocking every reader and writer for the
---   duration. `components` is the largest tenant table in this schema.
---   Splitting it takes ACCESS EXCLUSIVE only for the catalogue update (the
---   NOT VALID step, metadata-only) and then verifies under SHARE UPDATE
---   EXCLUSIVE, which does NOT conflict with reads or ordinary writes.
+--   So: this file adds the constraint (catalogue-only, ACCESS EXCLUSIVE held
+--   just long enough to update the catalogue) and COMMITS. 065 validates it in
+--   its own transaction. Between the two, the constraint is enforced for NEW
+--   rows and not yet proven for old ones — which is the correct intermediate
+--   state, not a gap: new bad writes are already refused.
 --
---   The trade: between the two statements the constraint is enforced for NEW
---   rows but not yet proven for old ones. Both run inside the runner's single
---   transaction, so that window does not outlive the migration.
---
--- LOCK BUDGET: see 063 for the reasoning. The NOT VALID step still needs
---   ACCESS EXCLUSIVE briefly, so it can queue behind a live reader; a bounded
---   wait turns an indefinite stall into a retry. 063 was the first migration
---   in this directory to set one; the other 62 still inherit lock_timeout = 0,
---   which remains a repo-wide gap.
+-- LOCK BUDGET: see 063. ACCESS EXCLUSIVE here is brief but can still queue
+--   behind a live reader; a bounded wait turns an indefinite stall into a
+--   retry, and the runner's transaction rolls back the DDL and the
+--   schema_migrations row together.
 -- ============================================
 
 SET LOCAL lock_timeout = '5s';
@@ -77,6 +77,3 @@ ALTER TABLE components
     ADD CONSTRAINT components_eol_status_check
     CHECK (eol_status IS NULL OR eol_status IN ('unknown', 'active', 'eol', 'eos'))
     NOT VALID;
-
-ALTER TABLE components
-    VALIDATE CONSTRAINT components_eol_status_check;
