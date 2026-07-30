@@ -231,11 +231,24 @@ func TestM50_GetComponentsWithEOL_PopulatesTheEOLBlock(t *testing.T) {
 
 			case unassessedID:
 				sawUnassessed = true
-				// "Never assessed" must not become a value. An empty
-				// EOLStatus is the intended representation; a zero date or a
-				// zero UUID would read as real data downstream.
+				// This is a NULL-status row, which is NOT how a
+				// never-assessed component normally looks (Codex round 2 #3 —
+				// round 1's comment called "" the "intended representation",
+				// which overstates it). ComponentRepository.Create omits
+				// eol_status and takes the DDL default 'unknown', and
+				// MatchComponentToEOL also starts from 'unknown'; the live dev
+				// DB had zero NULL and zero empty rows. The row is seeded with
+				// explicit NULLs to exercise the nullable scan path.
+				//
+				// "" here is a CONSEQUENCE of model.Component typing EOLStatus
+				// as a plain string, not a designed sentinel — see the scan
+				// loop's note on the collision this leaves open. The four
+				// pointer fields are the ones that genuinely keep "absent"
+				// distinct: a zero date or a zero UUID would read as real data
+				// downstream.
 				if c.EOLStatus != "" {
-					t.Errorf("unassessed: EOLStatus = %q, want \"\"", c.EOLStatus)
+					t.Errorf("unassessed: EOLStatus = %q, want \"\" (SQL NULL maps to the "+
+						"empty string because the model field is a plain string)", c.EOLStatus)
 				}
 				if c.EOLProductID != nil || c.EOLCycleID != nil {
 					t.Errorf("unassessed: EOLProductID = %v EOLCycleID = %v, want both nil",

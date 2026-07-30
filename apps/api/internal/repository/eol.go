@@ -651,12 +651,22 @@ func (r *EOLRepository) GetComponentsWithEOL(ctx context.Context, projectID uuid
 		//   EOLStatus does NOT. model.Component types it as a plain string, so
 		//   SQL NULL and a stored empty string both arrive as "". eol_status is
 		//   nullable varchar with DDL default 'unknown' and NO CHECK
-		//   constraint, so '' is insertable — nothing at the schema level
-		//   prevents the collision. Measured 2026-07-30 on the dev DB: 2 rows,
-		//   both 'unknown', zero NULL and zero empty-string. So the collision
-		//   is currently unreachable by data rather than by construction.
-		//   Closing it properly means either a CHECK excluding '' or making the
-		//   field a pointer; both change the API shape and neither is done here.
+		//   constraint, so '' is storable — nothing at the schema level
+		//   prevents the collision, and it is REACHABLE THROUGH THE REPOSITORY
+		//   WRITER: UpdateComponentEOLStatus binds info.Status straight into
+		//   the UPDATE, model.EOLStatus permits its zero value, and neither the
+		//   repository nor the database rejects it (Codex round 2 #1 wrote ''
+		//   successfully in a rolled-back UPDATE; round 1's "unreachable by
+		//   data" was too strong). What is true is narrower: the measured dev
+		//   data does not contain the collision — 2026-07-30, 2 rows, both
+		//   'unknown', zero NULL and zero empty-string — because the live
+		//   writers all set one of the four model.EOLStatus* constants.
+		//
+		//   Closing it properly is two independent changes, not one: a CHECK
+		//   (eol_status IS NULL OR eol_status IN ('unknown','active','eol','eos'))
+		//   tightens the DATABASE WRITE CONTRACT, while making the field a
+		//   pointer changes the GO/JSON API SHAPE. Round 1 said "both change
+		//   the API shape", which is false of the CHECK. Neither is done here.
 		c.EOLStatus = eolStatus.String
 		if eolProductID.Valid {
 			id := eolProductID.UUID
