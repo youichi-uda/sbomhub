@@ -1,0 +1,183 @@
+# SBOMHub - Migration lock-discipline lint
+#
+# CI check that runs `tools/lint-migration-locks` against
+# `apps/api/migrations/` on every PR or push to `main` that touches a
+# migration file, either migration runner, or the lint tool itself.
+# See "Gate posture" below for what "gate" does and does not mean here.
+#
+# Why this exists
+# ===============
+#
+# `cmd/migrate/main.go` and `internal/database/migrate.go` both wrap each
+# migration FILE in a single transaction and neither sets `lock_timeout`,
+# so the migrator role inherits the server default of 0 — wait forever.
+# Measured on PostgreSQL 15.18 (2026-07-30): with one session holding
+# ACCESS SHARE on a table, an `ALTER TABLE … ADD COLUMN` against it never
+# completes, and because PostgreSQL queues later lock requests behind the
+# blocked stronger request, the whole table goes dark rather than just the
+# migration. A `SET LOCAL lock_timeout` turns that outage into a retry:
+# the runner's per-file transaction rolls the DDL and the
+# `schema_migrations` row back together.
+#
+# Migrations 063 / 064 / 065 introduced the budget. 063's own header
+# records the residual it left behind — "063 is the FIRST migration in
+# this directory to set a lock budget; the other 62 all inherit
+# lock_timeout = 0". This workflow is the follow-up that stops the gap
+# from growing.
+#
+# Across all 65 files the lint's own scan reports 5 that take no
+# contending lock (001 / 024 / 025 / 049 / 065), 2 that take a contending
+# lock and declare a budget (063 / 064) and 58 that need a waiver. Three files
+# actually contain a `SET LOCAL lock_timeout`: 065 declares one for a
+# SHARE UPDATE EXCLUSIVE statement the lint does not require it for, which
+# is why these counts are about locks, not about budget lines. Of the 62 files that predate 063,
+# that is 4 clean (001 / 024 / 025 / 049 — 065 is post-063) and 58 waived.
+#
+# The 58 are grandfathered by an explicit baseline inside the tool, keyed
+# by filename and constrained by a fingerprint — the number of WAIVED
+# statements, their strongest lock class, and a digest over that ordered
+# sequence —
+# so the waiver cannot silently stretch to cover statements added later.
+# Every NEW migration is enforced.
+#
+# "Enforced" has a deliberately narrow meaning. This lint catches an
+# HONEST AUTHOR'S OVERSIGHT — a new migration that adds DDL without
+# thinking about locks at all. It is not a boundary against an author
+# working around it, and that is structural rather than a gap to close:
+# the rule is "declare a budget", and the VALUE is the author's to pick.
+# Measured on PostgreSQL 15.18, `SET LOCAL lock_timeout = '24h'` is
+# accepted by PostgreSQL and passes this lint. Every subtler evasion is
+# harder than that one line, so hardening against them buys nothing.
+#
+# The package comment of tools/lint-migration-locks/main.go carries the
+# authoritative list under "What this lint deliberately does NOT detect".
+#
+# What it does NOT replace
+# ========================
+#
+#   * `migration-lint.yml` — the RLS gate. Different question entirely
+#     (does a tenant-scoped table carry ENABLE + FORCE + POLICY), and it
+#     aggregates evidence across the whole directory rather than reading
+#     one file's statements in order.
+#   * `migration-roundtrip.yml` — checks that up→down→up sequences
+#     terminate cleanly.
+#   * `rls-integration.yml` — exercises the schema at runtime against a
+#     real PostgreSQL instance.
+#
+# This lint is static and needs no database, so it finishes in seconds and
+# is the first signal a reviewer sees.
+#
+# Gate posture — and its honest limit
+# ===================================
+#
+# `continue-on-error` is intentionally absent, so a finding turns this job
+# RED. That is the same posture as `migration-lint.yml`,
+# `toolchain-lint.yml` and `golangci-lint.yml`.
+#
+# A red job is not the same thing as a blocked merge. At the time this
+# workflow was added the repository had no branch protection and no
+# ruleset on `main` (`gh api repos/…/branches/main/protection` → 404,
+# `gh api repos/…/rulesets` → []), so GitHub will still let an authorised
+# user merge over a red check. Every other lint in this repository shares
+# that gap; making the check genuinely blocking is a repository-settings
+# change — add `lint-migration-locks` to a required-status-check ruleset
+# on `main` — not something this file can do.
+
+name: Migration lock lint
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/migrations/**"
+      - "tools/lint-migration-locks/**"
+      - ".github/workflows/migration-lock-lint.yml"
+      # The lint's whole contract rests on both runners wrapping each
+      # migration FILE in one transaction — that is what makes `SET LOCAL`
+      # the right scope and what makes a lock timeout roll the DDL and the
+      # schema_migrations row back together. A change to either runner can
+      # invalidate the certification this job hands out, so it has to run
+      # on those files too (Codex round 2, #4).
+      - "apps/api/cmd/migrate/main.go"
+      - "apps/api/internal/database/migrate.go"
+  pull_request:
+    paths:
+      - "apps/api/migrations/**"
+      - "tools/lint-migration-locks/**"
+      - ".github/workflows/migration-lock-lint.yml"
+      # The lint's whole contract rests on both runners wrapping each
+      # migration FILE in one transaction — that is what makes `SET LOCAL`
+      # the right scope and what makes a lock timeout roll the DDL and the
+      # schema_migrations row back together. A change to either runner can
+      # invalidate the certification this job hands out, so it has to run
+      # on those files too (Codex round 2, #4).
+      - "apps/api/cmd/migrate/main.go"
+      - "apps/api/internal/database/migrate.go"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint-migration-locks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        # Pin via the standalone tools module's go.mod so the lint runs on
+        # exactly the toolchain version it was developed against, and so
+        # `tools/lint-toolchain-alignment` records this step as
+        # auto-following rather than as a hardcoded pin to keep in sync.
+        #
+        # Caching is disabled: the lint depends only on the Go stdlib, so
+        # there is no `go.sum`, and a build cache for a single-file
+        # stdlib-only program adds no measurable savings while introducing
+        # a "file not found" failure mode when `cache-dependency-path` is
+        # wired up without a real lockfile. Same reasoning as the other
+        # two lint workflows.
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/lint-migration-locks/go.mod
+          cache: false
+
+      - name: Show tool version
+        run: go version
+
+      # Run the lint's own unit tests first. This guards against the
+      # "loosen the lint until my migration passes" antipattern — the
+      # fixtures pin the threshold (SHARE and above needs a budget,
+      # SHARE UPDATE EXCLUSIVE does not), the same-file exemption, the
+      # SET-vs-SET-LOCAL distinction and the CONCURRENTLY rejection.
+      #
+      # If the tests are red, the cause is a change to the lint itself
+      # that broke its contract, and the diff needs to update the fixture
+      # in the same PR. If the tests are green but the real-directory scan
+      # below is red, the cause is in the migrations: a missing budget, a
+      # statement that cannot run in the runner's transaction, a statement
+      # shape the lint has not been taught, a file it could not lex, or a
+      # baseline entry that has drifted, gone stale, or names a file that
+      # no longer exists. The failing job names which.
+      - name: Run lint tool unit tests
+        working-directory: tools/lint-migration-locks
+        run: go test ./...
+
+      # The lint must succeed against the real migrations directory.
+      # `--verbose` prints the per-file classification table (statement
+      # count, strongest lock taken on a pre-existing relation, budget
+      # status) so a reviewer can audit the baseline straight from the CI
+      # log without re-running the scan.
+      #
+      # We `cd` into the module dir because the lint lives in its own
+      # module (see its go.mod header); `go run ./tools/lint-migration-locks`
+      # from the repo root would need a wrapping workspace, which we
+      # deliberately omit to keep the standalone module isolated. Same
+      # posture as `migration-lint.yml` and `toolchain-lint.yml`.
+      - name: Run lock lint against apps/api/migrations
+        working-directory: tools/lint-migration-locks
+        run: go run . --dir ../../apps/api/migrations --verbose
