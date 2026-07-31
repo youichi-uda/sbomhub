@@ -227,6 +227,36 @@ jobs:
         # check (F385). Each file t.Skip()s when DATABASE_URL /
         # MIGRATE_DATABASE_URL is unset; sourcing .env into the environment
         # here makes them actually run instead of skipping.
+        #
+        # M50 W3: ./internal/handler/... and ./internal/model/... were added
+        # after an audit of which packages carry `//go:build integration` files
+        # versus which any workflow actually runs. Eight packages carry them;
+        # scheduler is covered by scheduler-integration.yml and nullscan by
+        # nullscan.yml, which left handler (81 test functions) and model (1)
+        # running NOWHERE.
+        #
+        # That gap was not cosmetic. The unrun handler files are the regression
+        # tests for the cross-tenant defects fixed in M46-M50 — route ownership
+        # (m47_w1_route_scope), the project-key escape reproduction
+        # (m50w2_cli_project_scope), webhook atomicity (m47r_webhook_atomicity),
+        # the public-download cap (m46_b1_public_download_cap), and the billing
+        # and SSVC tenant-binding tests. The tests existed; nothing enforced
+        # them, so any of those fixes could have been reverted without CI
+        # noticing.
+        #
+        # Cost measured before adding (2026-08-01, dev DB): handler + model
+        # complete in 3s against the 15s the existing three packages take.
+        #
+        # `-p 1` is REQUIRED, and is new here. Four test files across three of
+        # these packages temporarily ALTER shared tables (2 in repository, 1 in
+        # service, 1 in handler — e.g. dropping a NOT NULL on public_links to
+        # exercise the nullable-scan contract). M46 recorded this as a known
+        # flake class with the note "-p 1 では green". Until now the job ran
+        # three packages in parallel and got away with it; adding handler's
+        # mutator widens the collision surface, and a flaky SECURITY gate is
+        # worse than a slow one — flaky gates get disabled. Serialised cost
+        # measured the same day: 18s for all five packages against a 5m
+        # timeout, so this buys determinism for ~3s.
         shell: bash
         working-directory: apps/api
         run: |
@@ -235,10 +265,12 @@ jobs:
           # shellcheck disable=SC1091
           source ../../.env
           set +a
-          go test -count=1 -tags=integration -timeout 5m \
+          go test -count=1 -p 1 -tags=integration -timeout 5m \
             ./internal/repository/... \
             ./internal/middleware/... \
-            ./internal/service/...
+            ./internal/service/... \
+            ./internal/handler/... \
+            ./internal/model/...
 
       - name: Dump postgres / redis logs on failure
         if: failure()
