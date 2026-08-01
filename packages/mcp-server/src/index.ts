@@ -1,6 +1,27 @@
 #!/usr/bin/env node
 // SBOMHub MCP server (stdio, read-only).
 //
+// WHAT THE CONFIGURED API KEY CAN REACH (M50 W2/W3)
+// -------------------------------------------------
+// An API key minted at POST /api/v1/projects/:id/apikeys is PROJECT-SCOPED and
+// the server enforces that. A key minted at POST /api/v1/apikeys is
+// tenant-level and reaches everything below. The difference is visible to the
+// model only through these tool descriptions, so they state it — an LLM that
+// believes "list projects" returned the whole tenant when it returned one
+// project will draw wrong conclusions and report them as fact.
+//
+// With a project-scoped key:
+//   - sbomhub_list_projects returns exactly that one project.
+//   - sbomhub_get_dashboard / sbomhub_search_cve / sbomhub_search_component /
+//     sbomhub_diff are REFUSED with 403. They are tenant-wide by construction:
+//     narrowing them would silently redefine what their fields mean (a
+//     per-project count reported as a tenant posture, or "this CVE is not
+//     present" when it is present in a project the key cannot see), so the
+//     server refuses instead of answering narrowly. The refusal surfaces here
+//     as an isError result.
+//   - The per-project tools answer for the key's own project and 404 for any
+//     other.
+//
 // Built on the current @modelcontextprotocol/sdk high-level API:
 // McpServer.registerTool with zod raw-shape input schemas. The SDK validates
 // tool arguments against the schema before the callback runs and answers
@@ -49,7 +70,11 @@ const projectIdSchema = z.string().uuid().describe("プロジェクトID (UUID)"
 server.registerTool(
   "sbomhub_list_projects",
   {
-    description: "プロジェクト一覧を取得",
+    description:
+      "この資格情報が参照できるプロジェクトの一覧を取得。" +
+      "テナント単位のAPIキーではテナントの全プロジェクト、" +
+      "プロジェクトスコープのAPIキーではそのプロジェクト1件のみが返る。" +
+      "件数からテナントの規模を推測しないこと",
   },
   async () => {
     try {
@@ -69,7 +94,11 @@ server.registerTool(
 server.registerTool(
   "sbomhub_get_dashboard",
   {
-    description: "テナント全体のダッシュボードサマリーを取得",
+    description:
+      "テナント全体のダッシュボードサマリーを取得。" +
+      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
+      "403で拒否される (絞り込むと集計値の意味が変わるため、" +
+      "サーバーは狭い答えを返さず拒否する)",
   },
   async () => {
     try {
@@ -118,7 +147,11 @@ server.registerTool(
 server.registerTool(
   "sbomhub_search_cve",
   {
-    description: "CVE IDで全プロジェクトを横断検索",
+    description:
+      "CVE IDでテナントの全プロジェクトを横断検索。" +
+      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
+      "403で拒否される。「見つからない」と「見る権限が無い」を" +
+      "区別できなくなるため、絞り込みではなく拒否する",
     inputSchema: {
       cve_id: z
         .string()
@@ -142,7 +175,10 @@ server.registerTool(
 server.registerTool(
   "sbomhub_search_component",
   {
-    description: "コンポーネント名でプロジェクトを検索",
+    description:
+      "コンポーネント名でテナントの全プロジェクトを横断検索。" +
+      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
+      "403で拒否される (理由は sbomhub_search_cve と同じ)",
     inputSchema: {
       name: z.string().min(1).describe("コンポーネント名 (例: log4j)"),
       version: z.string().optional().describe("バージョン (任意)"),
@@ -161,7 +197,11 @@ server.registerTool(
   "sbomhub_diff",
   {
     description:
-      "2つのSBOMを比較して差分を取得。バージョン省略時は最新2つを比較",
+      "2つのSBOMを比較して差分を取得。バージョン省略時は最新2つを比較。" +
+      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
+      "自分のプロジェクトのSBOMであっても403で拒否される " +
+      "(対象SBOMをbodyのUUIDで選ぶため、どのプロジェクトのものかが" +
+      "判明するのが両行の読み込み後になる)",
     inputSchema: {
       project_id: projectIdSchema,
       base_version: z.string().optional().describe("比較元SBOMのバージョン (省略時: 2番目に新しいSBOM)"),
