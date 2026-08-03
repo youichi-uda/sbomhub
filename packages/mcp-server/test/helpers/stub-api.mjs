@@ -154,11 +154,18 @@ export async function startStubApi() {
      * open. Used after each tool call: it makes "exactly these requests" mean
      * exactly, by giving an unexpected extra request time to show up, and
      * guarantees no straggler can leak past the next reset().
+     *
+     * The window is measured from the LATER of the last arrival and this call,
+     * so it always waits at least `idleMs`. Without that, a test asserting
+     * that NO request was sent would return instantly (nothing has arrived, so
+     * the log has been "idle" since the epoch) and would pass even if the
+     * request it forbids were about to land.
      */
     async quiet(idleMs = 25, timeoutMs = 5000) {
-      const deadline = Date.now() + timeoutMs;
+      const calledAt = Date.now();
+      const deadline = calledAt + timeoutMs;
       for (;;) {
-        const idleFor = Date.now() - lastArrivalAt;
+        const idleFor = Date.now() - Math.max(lastArrivalAt, calledAt);
         if (inFlight === 0 && idleFor >= idleMs) return;
         if (Date.now() > deadline) {
           throw new Error(

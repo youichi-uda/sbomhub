@@ -261,6 +261,8 @@ test("the API key is never followed to a redirect target", async () => {
 
     const result = await mcp.callTool("sbomhub_list_projects", {});
     await stub.quiet();
+    // Give a followed redirect time to land before declaring it never happened.
+    await attacker.quiet();
     assert.equal(result.isError, true, textOf(result));
     assert.deepEqual(
       attacker.requests,
