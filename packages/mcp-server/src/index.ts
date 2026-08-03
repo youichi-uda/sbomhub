@@ -145,7 +145,11 @@ server.registerTool(
   "sbomhub_get_project_dashboard",
   {
     description:
-      "プロジェクト別ダッシュボードを取得 (脆弱性サマリー/コンプライアンス/SBOM状況)",
+      "プロジェクト別ダッシュボードを取得 (脆弱性サマリー/コンプライアンス/SBOM状況)。" +
+      "脆弱性は最大5000件まで走査し、超える場合は" +
+      "vulnerabilities.scan_truncated=true になる。そのとき by_severity と" +
+      "top_by_cvss は走査した analyzed 件の集計であって、" +
+      "プロジェクトの全件を数えた値ではない",
     inputSchema: {
       project_id: projectIdSchema,
     },

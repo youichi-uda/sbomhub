@@ -12,7 +12,7 @@ Claude Desktop や Cursor から自然言語で SBOMHub の脆弱性情報 / VEX
 |--------|------|--------|
 | `sbomhub_list_projects` | 資格情報が参照できるプロジェクト一覧 (テナント単位キー: 全件 / プロジェクトスコープキー: そのプロジェクト1件のみ) | 「プロジェクト一覧見せて」 |
 | `sbomhub_get_dashboard` | テナント全体のダッシュボードサマリー (テナント単位キー必須。プロジェクトスコープキーは403で拒否) | 「全体の脆弱性サマリー教えて」 |
-| `sbomhub_get_project_dashboard` | プロジェクト別ダッシュボード (脆弱性/コンプライアンス/SBOM) | 「my-app の状況をまとめて」 |
+| `sbomhub_get_project_dashboard` | プロジェクト別ダッシュボード (脆弱性/コンプライアンス/SBOM)。脆弱性は最大5,000件まで走査、超過時は `vulnerabilities.scan_truncated=true` で `by_severity` / `top_by_cvss` は走査範囲の値 | 「my-app の状況をまとめて」 |
 | `sbomhub_list_sboms` | プロジェクトのSBOM一覧 (新しい順) | 「my-app のSBOM履歴を見せて」 |
 | `sbomhub_search_cve` | CVE横断検索 (テナント単位キー必須。プロジェクトスコープキーは403で拒否) | 「CVE-2021-44228の影響範囲は？」 |
 | `sbomhub_search_component` | コンポーネント横断検索 (テナント単位キー必須。プロジェクトスコープキーは403で拒否) | 「log4jを使ってるプロジェクトは？」 |

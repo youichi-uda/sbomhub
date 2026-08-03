@@ -178,6 +178,42 @@ export const CONTRACT_CASES = [
   },
 
   {
+    tool: "sbomhub_get_project_dashboard",
+    title: "a project too large to walk fully reports the truncation it inherits",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      // The dashboard runs the SAME capped walk as sbomhub_get_vulnerabilities,
+      // and surfaces the flag one level down (vulnerabilities.scan_truncated).
+      // A truncation that is only visible at a nested path is still a partial
+      // answer shaped like a whole one (Codex R2, High).
+      [K.vulns]: pagedVulns(6000, (i) => (i % 3 === 0 ? "CRITICAL" : "HIGH")),
+      [K.compliance]: ok(COMPLIANCE),
+      [K.sboms]: ok(SBOMS),
+    },
+    unordered: true,
+    expect: [
+      ...Array.from({ length: 10 }, (_, i) => ({
+        method: "GET",
+        path: P.vulns,
+        query: vulnsQuery(i * 500),
+      })),
+      { method: "GET", path: P.compliance, query: {} },
+      { method: "GET", path: P.sboms, query: {} },
+    ],
+    check({ payload }) {
+      assert.equal(payload.vulnerabilities.total, 6000);
+      assert.equal(payload.vulnerabilities.analyzed, 5000);
+      assert.equal(payload.vulnerabilities.scan_truncated, true);
+      // by_severity counts the ANALYZED rows, not the project.
+      const counted = Object.values(payload.vulnerabilities.by_severity).reduce(
+        (a, b) => a + b,
+        0
+      );
+      assert.equal(counted, 5000);
+    },
+  },
+
+  {
     tool: "sbomhub_list_sboms",
     title: "returns the project's SBOMs in the order the API served them",
     args: { project_id: PROJECT_ID },

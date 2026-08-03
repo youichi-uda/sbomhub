@@ -52,6 +52,16 @@ after(async () => {
   await stub?.close();
 });
 
+// `scan_truncated` is not always at the root: sbomhub_get_project_dashboard
+// nests the same flag under `vulnerabilities`. Looking only at the top level
+// let a truncated dashboard pass the disclosure rule below (Codex R2, High),
+// so the whole payload is searched.
+function declaresTruncation(value) {
+  if (value === null || typeof value !== "object") return false;
+  if (value.scan_truncated === true) return true;
+  return Object.values(value).some(declaresTruncation);
+}
+
 const shape = (r) => ({ method: r.method, path: r.path, query: r.query });
 const sortKey = (r) => JSON.stringify([r.method, r.path, r.query]);
 
@@ -111,7 +121,7 @@ for (const testCase of CONTRACT_CASES) {
     for (const r of requests) observed.add(r.routeKey);
     observedRouteKeysByTool.set(testCase.tool, observed);
 
-    if (!testCase.expectError && jsonOf(result)?.scan_truncated === true) {
+    if (!testCase.expectError && declaresTruncation(jsonOf(result))) {
       toolsObservedTruncating.add(testCase.tool);
     }
 
