@@ -82,3 +82,27 @@ temp/
 # GoReleaser output (M5-2 / #54): llm-bench release archives + checksums.
 # CI uploads these to the GitHub Release; nothing in /dist/ belongs in git.
 /dist/
+
+# Standalone lint tools under tools/ — `go build ./...` inside a module
+# drops a binary named after the module directory next to its main.go.
+# CI always invokes them with `go run .`, so the binary is never wanted in
+# git; left unignored, a `git add -A` after a local build sweeps a ~4 MB
+# host-arch executable into the commit (the same class of accident as the
+# node_modules commit that once produced 421K insertions).
+#
+# Measured before this entry existed: `go build ./...` in each module left
+#   ?? tools/lint-migration-locks/lint-migration-locks
+#   ?? tools/lint-migration-rls/lint-migration-rls
+# untracked and unignored. tools/lint-toolchain-alignment already carries
+# its own module-local .gitignore for the same reason, which is why it did
+# not show up.
+#
+# Listed explicitly, one line per module, rather than as a `/tools/*/lint-*`
+# wildcard: that wildcard would also swallow a future tracked source file
+# whose name happens to start with `lint-`. When a new tool lands under
+# tools/, add its line here — .github/workflows/repo-hygiene.yml fails the
+# build if a tools module's `go build` leaves the worktree dirty, so the
+# omission is caught at PR time rather than in a stray commit.
+/tools/lint-ci-inventory/lint-ci-inventory
+/tools/lint-migration-locks/lint-migration-locks
+/tools/lint-migration-rls/lint-migration-rls
