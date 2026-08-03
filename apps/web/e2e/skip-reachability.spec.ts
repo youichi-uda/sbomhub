@@ -329,6 +329,23 @@ function envIsPristine(sf: ts.SourceFile): boolean {
     let mutated = false;
     const visit = (n: ts.Node): void => {
         if (mutated) return;
+        // Same inversion one level up: the only pristine use of the
+        // `process` identifier is as the object of an `env` read. A bare
+        // `const p = process; delete p.env.CI;` mutates the environment
+        // without `process.env` ever appearing as a unit. (Review
+        // finding, High.)
+        if (ts.isIdentifier(n) && n.text === 'process' && !ts.isPropertyAssignment(n.parent)) {
+            const [child, parent] = skipParens(n);
+            const isEnvRead =
+                parent !== undefined &&
+                (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+                parent.expression === child &&
+                isProcessEnv(parent);
+            if (!isEnvRead) {
+                mutated = true;
+                return;
+            }
+        }
         if (isProcessEnv(n)) {
             const [child, parent] = skipParens(n);
             const isMemberRead =
@@ -869,6 +886,17 @@ test.describe('gate', () => {
 });
 `;
 
+/** ...and one level further out, through a `process` alias. */
+const FIXTURE_ALIASED_PROCESS = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const p = process;
+delete p.env.CI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
 /** ...and spelled with brackets. */
 const FIXTURE_BRACKETED_ENV = `
 import { test } from '@playwright/test';
@@ -979,6 +1007,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['deleted-env-ci', FIXTURE_DELETED_ENV_CI],
             ['assigned-env-ci', FIXTURE_ASSIGNED_ENV_CI],
             ['aliased-env', FIXTURE_ALIASED_ENV],
+            ['aliased-process', FIXTURE_ALIASED_PROCESS],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
         ] as const) {

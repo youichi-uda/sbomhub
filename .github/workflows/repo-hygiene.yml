@@ -126,12 +126,14 @@ jobs:
       # into the module directory; if .gitignore does not cover it, it
       # shows up here as an untracked file.
       #
-      # BOTH `go build ./...` and `go build .` are run. `go build ./...`
-      # DISCARDS the executable as soon as the pattern matches more than
-      # one package, so a future tool module that grows an `internal/`
-      # package would stop producing a binary here and this job would go
-      # green while a plain `go build .` in that directory still dropped
-      # an unignored executable. (Review finding, High.)
+      # `go build ./...` DISCARDS the executable as soon as the pattern
+      # matches more than one package, so it alone would stop producing a
+      # binary the moment a tool module grew an `internal/` package or a
+      # `cmd/` layout — and this job would go green while an operator's
+      # plain `go build .` or `go build ./cmd/x` still dropped an
+      # unignored executable. So every `main` package is enumerated with
+      # `go list` and built individually, which is exactly what an
+      # operator's build leaves on disk. (Review findings, High.)
       #
       # `git status --porcelain` is the assertion rather than a filename
       # allowlist on purpose: it also catches a `go build` that rewrites a
@@ -160,8 +162,19 @@ jobs:
           fi
           for gomod in "${modules[@]}"; do
             dir="$(dirname "$gomod")"
-            echo "--- go build ./... && go build . in $dir"
-            (cd "$dir" && go build ./... && go build .)
+            echo "--- $dir"
+            (
+              cd "$dir"
+              go build ./...
+              mains="$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)"
+              if [ -z "$mains" ]; then
+                echo "    (no main package)"
+              fi
+              for m in $mains; do
+                echo "    go build $m"
+                go build "$m"
+              done
+            )
           done
 
           dirty="$(git status --porcelain)"

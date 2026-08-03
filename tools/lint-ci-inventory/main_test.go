@@ -217,6 +217,47 @@ jobs:
 	}
 }
 
+// GitHub shows `Security gate`; keeping the raw line would record the
+// comment as part of the check name.
+func TestParseWorkflow_StripsInlineComment(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  j:
+    name: Security gate # required check
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if jobs[0].checkName != "Security gate" {
+		t.Fatalf("got %q, want %q", jobs[0].checkName, "Security gate")
+	}
+}
+
+// A quoted value keeps everything inside the quotes, including a `#`.
+func TestParseWorkflow_QuotedNameKeepsHash(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  j:
+    name: 'gate #3' # a comment
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if jobs[0].checkName != "gate #3" {
+		t.Fatalf("got %q, want %q", jobs[0].checkName, "gate #3")
+	}
+}
+
 func TestParseWorkflow_UnquotesName(t *testing.T) {
 	const body = `name: X
 on:

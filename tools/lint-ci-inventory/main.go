@@ -186,7 +186,7 @@ func parseWorkflow(base, body string) ([]job, error) {
 							"give it a plain single-line name or teach the lint",
 						base, cur.id)
 				}
-				cur.checkName = unquote(v)
+				cur.checkName = scalarValue(v)
 			}
 		}
 	}
@@ -201,13 +201,26 @@ func parseWorkflow(base, body string) ([]job, error) {
 	return jobs, nil
 }
 
-func unquote(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
-			return s[1 : len(s)-1]
+// scalarValue reads a single-line YAML scalar: strips the quotes of a
+// quoted value, and cuts a trailing ` #` comment off a plain one.
+//
+// Keeping the raw text recorded `name: Security gate # required check` as
+// the check name, while GitHub reports `Security gate` — a mismatch that
+// would then be "fixed" by writing the wrong name into the inventory.
+// (Review finding, High.)
+func scalarValue(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') {
+		q := s[0]
+		if i := strings.IndexByte(s[1:], q); i >= 0 {
+			return s[1 : 1+i]
 		}
+		return s
 	}
-	return s
+	if i := strings.Index(s, " #"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 // collectJobs scans every workflow file under .github/workflows.
