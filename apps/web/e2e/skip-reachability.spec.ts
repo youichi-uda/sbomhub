@@ -219,7 +219,11 @@ const CHECKED_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
 ] as const);
 
 const CALLEE_SKIP = /^test\.(skip|fixme)$/;
-const CALLEE_DESCRIBE = /^(test\.describe(\.(only|serial|parallel|skip|fixme))*|describe)$/;
+// Only `test.describe*`. A bare `describe` is not Playwright's — this
+// file has no name resolution, so a local helper called `describe` was
+// being treated as a suite and its per-test skips reported. The rule says
+// `test.describe`. (Review finding: false positive.)
+const CALLEE_DESCRIBE = /^test\.describe(\.(only|serial|parallel|skip|fixme))*$/;
 const CALLEE_TEST = /^test(\.(only|skip|fixme|fail|slow))?$/;
 const CALLEE_BEFORE_ALL = /^test\.beforeAll$/;
 // `afterAll` runs AFTER the group, so nothing in it can affect a
@@ -242,6 +246,8 @@ function unwrap(node: ts.Expression): ts.Expression {
         else if (ts.isNonNullExpression(cur)) cur = cur.expression;
         else if (ts.isAsExpression(cur)) cur = cur.expression;
         else if (ts.isSatisfiesExpression(cur)) cur = cur.expression;
+        // `<any>(() => {…})` — the older assertion syntax.
+        else if (ts.isTypeAssertionExpression(cur)) cur = cur.expression;
         else return cur;
     }
 }
@@ -449,7 +455,26 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         return found;
     };
 
-    /** Detects `process.env.CI = …`, `delete process.env.CI`, `++`/`--`. */
+    /**
+     * A literal that is falsy, so assigning it really does defeat
+     * `!process.env.CI`. `process.env.CI = 'true'` does the opposite —
+     * counting it invalidated a CORRECT guard. Anything non-literal is
+     * unknown and therefore not counted: fail toward a miss, not toward a
+     * red `main`. (Review finding: false positive.)
+     */
+    const isFalsyLiteral = (e: ts.Expression): boolean => {
+        const cur = unwrap(e);
+        if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) {
+            return cur.text === '';
+        }
+        if (ts.isNumericLiteral(cur)) return cur.text === '0';
+        if (cur.kind === ts.SyntaxKind.FalseKeyword || cur.kind === ts.SyntaxKind.NullKeyword) {
+            return true;
+        }
+        return ts.isIdentifier(cur) && cur.text === 'undefined';
+    };
+
+    /** Detects `delete process.env.CI` and `process.env.CI = <falsy literal>`. */
     const noteEnvWrite = (n: ts.Node): void => {
         if (!isProcessEnvCI(n)) return;
         let child: ts.Node = n;
@@ -461,21 +486,18 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         if (parent === undefined) return;
         const isAssign =
             ts.isBinaryExpression(parent) &&
-            parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-            parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
-            parent.left === child;
+            parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            parent.left === child &&
+            isFalsyLiteral(parent.right);
         const isDelete = ts.isDeleteExpression(parent);
-        const isIncDec =
-            (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
-            (parent.operator === ts.SyntaxKind.PlusPlusToken ||
-                parent.operator === ts.SyntaxKind.MinusMinusToken);
+        const isIncDec = false;
         // Only file and describe scope run DURING collection. A write in
         // `beforeAll` happens after the group is already collected, so it
         // cannot have affected a collection-time skip — counting it
         // invalidated correct guards in the same file. (Review finding:
         // false positive.)
         const at = scopeNow();
-        if ((isAssign || isDelete || isIncDec) && (at === 'file' || at === 'describe')) {
+        if ((isAssign || isDelete) && (at === 'file' || at === 'describe')) {
             envWrittenAtCollectionTime = true;
         }
     };
@@ -774,6 +796,21 @@ const HAS_TOOL = false;
 test.describe('gate', () => {
     test(\`\${(test.skip(!HAS_TOOL, 'tool missing'), 'probe')}\`, async () => {});
 });
+`,
+    ],
+    [
+        // The rule covers inline callbacks; a type-assertion wrapper does
+        // not make one stop being inline.
+        'an unguarded skip inside an angle-bracket-wrapped callback',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe(
+    'gate',
+    <() => void>(() => {
+        test.skip(!HAS_TOOL, 'tool missing');
+    }),
+);
 `,
     ],
     [
@@ -1214,6 +1251,19 @@ test.describe('gate', () => {
     [
         // A wrapped inline callback IS inline; the rule covers it, so the
         // skip inside is checked — and here it is correctly CI-guarded.
+        'a describe callback wrapped in an angle-bracket assertion',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe(
+    'gate',
+    <() => void>(() => {
+        test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+    }),
+);
+`,
+    ],
+    [
         'a describe callback wrapped in `satisfies`',
         `
 import { test } from '@playwright/test';
@@ -1224,6 +1274,42 @@ test.describe(
         test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
     }) satisfies () => void,
 );
+`,
+    ],
+    [
+        // A local helper that happens to be called `describe` is not
+        // Playwright's suite. The skip inside is a per-test skip.
+        'a local function named describe',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const describe = (body: () => void) => test('case', body);
+describe(() => {
+    test.skip(!HAS_TOOL, 'per-test prerequisite');
+});
+`,
+    ],
+    [
+        // Setting CI TRUTHY makes the guard fire less, not more.
+        'setting process.env.CI to a truthy value',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+process.env.CI = 'true';
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        'a self-assignment of process.env.CI',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+process.env.CI = process.env.CI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
 `,
     ],
     [

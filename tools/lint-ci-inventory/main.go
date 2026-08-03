@@ -325,7 +325,7 @@ func expandNames(j job) ([]string, bool) {
 		return nil, false
 	}
 	if len(refs) == 0 {
-		if j.namedExplicitly || len(j.matrix) == 0 {
+		if j.namedExplicitly || (len(j.matrix) == 0 && !j.matrixIsPartial) {
 			return []string{j.checkName}, true
 		}
 		// No `name:` and a matrix: GitHub reports `<id> (<leg>, …)`.
@@ -373,6 +373,15 @@ func expandNames(j job) ([]string, bool) {
 		}
 		names = next
 	}
+	for _, n := range names {
+		if strings.Contains(n, "${{") {
+			// A non-matrix expression survived the expansion
+			// (`gate ${{ matrix.os }} / ${{ github.event_name }}`).
+			// GitHub resolves it at run time; comparing the raw text
+			// would call a live check stale.
+			return nil, false
+		}
+	}
 	return names, true
 }
 
@@ -398,15 +407,30 @@ func matchesJob(required string, j job) bool {
 	// expression has an empty literal prefix, and HasPrefix(x, "") is true
 	// for every x, so such a job would vouch for every required check in
 	// the snapshot and hide all of them.
-	if i := strings.Index(j.checkName, "${{"); i > 0 {
-		return strings.HasPrefix(required, j.checkName[:i])
+	// Unresolved expressions: anchor on the literal text around them.
+	// Using only the prefix rejected `${{ github.event_name }} gate`
+	// outright (empty prefix), and an empty prefix alone would match
+	// everything — so require BOTH ends, and at least one of them to be
+	// non-empty. (Review findings: false positives.)
+	if i := strings.Index(j.checkName, "${{"); i >= 0 {
+		prefix := j.checkName[:i]
+		suffix := ""
+		if k := strings.LastIndex(j.checkName, "}}"); k >= 0 {
+			suffix = j.checkName[k+2:]
+		}
+		if prefix == "" && suffix == "" {
+			return false
+		}
+		return strings.HasPrefix(required, prefix) &&
+			strings.HasSuffix(required, suffix) &&
+			len(required) >= len(prefix)+len(suffix)
 	}
 	// A NAMELESS job whose matrix could not be expanded (an `include:` /
 	// `exclude:`, say) reports as `<id> (<leg>)`, and its check name
 	// carries no expression to take a prefix from. Accept the leg form
 	// rather than call a live check stale. (Review finding: false
 	// positive.)
-	if !j.namedExplicitly && len(j.matrix) > 0 {
+	if !j.namedExplicitly && (len(j.matrix) > 0 || j.matrixIsPartial) {
 		return required == j.id || strings.HasPrefix(required, j.id+" (")
 	}
 	return false

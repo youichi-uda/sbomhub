@@ -814,3 +814,72 @@ jobs:
 		t.Error("the literal prefix must still be required")
 	}
 }
+
+// An `include:`-only matrix stores no axes but is still a matrix job:
+// its checks are `id (leg)`.
+func TestIncludeOnlyNamelessMatrixAcceptsLegForm(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("build (ubuntu-latest)", jobs[0]) {
+		t.Error("a live leg check must be accepted")
+	}
+}
+
+// A non-matrix expression surviving the expansion is resolved at run time.
+func TestMixedMatrixAndRuntimeExpressionIsLenient(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  gate:
+    name: gate ${{ matrix.os }} / ${{ github.event_name }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("gate ubuntu-latest / pull_request", jobs[0]) {
+		t.Error("the run-time-resolved check name must be accepted")
+	}
+}
+
+// A name that STARTS with an expression still has a literal suffix.
+func TestLeadingExpressionNameAnchorsOnSuffix(t *testing.T) {
+	const body = `name: X
+'on':
+  pull_request:
+
+jobs:
+  gate:
+    name: ${{ github.event_name }} gate
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("pull_request gate", jobs[0]) {
+		t.Error("the live check must be accepted via the literal suffix")
+	}
+	if matchesJob("pull_request build", jobs[0]) {
+		t.Error("the literal suffix must still be required")
+	}
+}
