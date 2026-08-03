@@ -299,6 +299,41 @@ func rewriteBlock(doc string, jobs []job) (string, error) {
 	return b.String(), nil
 }
 
+// writeFileAtomic replaces path via a same-directory temp file + rename.
+//
+// `--fix` rewrites the WHOLE of docs/ci-inventory.md, a hand-written
+// document. A plain os.WriteFile truncates first, so an interrupted or
+// failing write leaves a truncated doc with no copy of what was there.
+// rename(2) within a directory is atomic, so a reader sees either the old
+// document or the new one. (Review finding, Medium.)
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// No-op once the rename has succeeded.
+		_ = os.Remove(tmpName)
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 // run performs the whole check. Returns the findings (empty == clean).
 func run(root string, fix bool, verbose bool, stdout *strings.Builder) ([]string, error) {
 	jobs, err := collectJobs(root)
@@ -323,7 +358,7 @@ func run(root string, fix bool, verbose bool, stdout *strings.Builder) ([]string
 			return nil, err
 		}
 		if updated != doc {
-			if err := os.WriteFile(docPath, []byte(updated), 0o644); err != nil {
+			if err := writeFileAtomic(docPath, []byte(updated)); err != nil {
 				return nil, fmt.Errorf("write %s: %w", docPath, err)
 			}
 			fmt.Fprintf(stdout, "rewrote the generated block in %s (%d jobs)\n", docRel, len(jobs))

@@ -268,6 +268,26 @@ function isCiNeutral(cond: ts.Expression, consts: Map<string, ts.Expression>): b
     return false;
 }
 
+/**
+ * True when a `ci-skip-ok:` marker appears in a COMMENT attached to the
+ * statement — never merely somewhere in its source text.
+ *
+ * Scanning the raw statement text instead let the marker be smuggled into
+ * the skip's own description string:
+ *
+ *     test.skip(!HAS_TOOL, 'ci-skip-ok: tool missing');
+ *
+ * which reads to a human as an ordinary skip message and silently bought
+ * the exemption. Found by review; pinned by FIXTURE_MARKER_IN_STRING.
+ */
+function hasAllowMarker(text: string, stmt: ts.Node): boolean {
+    const ranges = [
+        ...(ts.getLeadingCommentRanges(text, stmt.getFullStart()) ?? []),
+        ...(ts.getTrailingCommentRanges(text, stmt.getEnd()) ?? []),
+    ];
+    return ranges.some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
+}
+
 function bodyCanThrow(fn: ts.Node): boolean {
     let found = false;
     const visit = (n: ts.Node): void => {
@@ -346,10 +366,8 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
                 const scope = stack.length ? stack[stack.length - 1] : 'file';
 
-                // Leading trivia of the enclosing statement + the call's own text.
                 let stmt: ts.Node = node;
                 while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent;
-                const withTrivia = text.slice(stmt.getFullStart(), stmt.getEnd());
 
                 sites.push({
                     file: fileName,
@@ -359,7 +377,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     scope,
                     condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
                     ciNeutral: form === 'conditional' ? isCiNeutral(args[0], consts) : true,
-                    allowMarker: ALLOW_MARKER.test(withTrivia),
+                    allowMarker: hasAllowMarker(text, stmt),
                     guardedByThrowingBeforeAll:
                         describeStack.length > 0 &&
                         describeHasThrowingBeforeAll(describeStack[describeStack.length - 1]),
@@ -518,6 +536,29 @@ test.describe('gate', () => {
 });
 `;
 
+/** Same, as a trailing comment. */
+const FIXTURE_MARKER_TRAILING = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL, 'tool missing'); // ci-skip-ok: covered elsewhere
+    test('asserts something', async () => {});
+});
+`;
+
+/**
+ * The escape hatch smuggled into the skip's DESCRIPTION rather than a
+ * comment. It reads as an ordinary message; it must not buy an exemption.
+ */
+const FIXTURE_MARKER_IN_STRING = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL, 'ci-skip-ok: tool missing');
+    test('asserts something', async () => {});
+});
+`;
+
 // ---------------------------------------------------------------------
 // Spec bodies
 // ---------------------------------------------------------------------
@@ -576,6 +617,14 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             'a shadowed const must not be resolved to the outer CI-guarded one',
         ).toHaveLength(1);
 
+        // The escape hatch must be a COMMENT. Putting `ci-skip-ok:` in the
+        // skip's own description reads like an ordinary message and must
+        // not buy the exemption.
+        expect(
+            violations(analyzeSource('marker-in-string.spec.ts', FIXTURE_MARKER_IN_STRING)),
+            'the marker inside a string literal must not exempt anything',
+        ).toHaveLength(1);
+
         // Negative controls — none of these may be reported.
         for (const [name, source] of [
             ['guarded', FIXTURE_GUARDED],
@@ -583,6 +632,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['runtime-soft-gate', FIXTURE_RUNTIME_SOFT_GATE],
             ['before-each', FIXTURE_BEFORE_EACH],
             ['marker', FIXTURE_MARKER],
+            ['marker-trailing', FIXTURE_MARKER_TRAILING],
         ] as const) {
             expect(
                 violations(analyzeSource(`${name}.spec.ts`, source)).map(describeViolation),

@@ -363,6 +363,33 @@ func TestRun_FixRewritesTheBlock(t *testing.T) {
 	}
 }
 
+// `--fix` must not leave a stray temp file behind, and must preserve the
+// document's mode.
+func TestFixIsAtomicAndLeavesNoTempFile(t *testing.T) {
+	root := scaffold(t, "alpha.yml :: build :: build-and-test\n", fullRequired)
+	var out strings.Builder
+	if _, err := run(root, true, false, &out); err != nil {
+		t.Fatalf("run --fix: %v", err)
+	}
+	docs := filepath.Join(root, "docs")
+	entries, err := os.ReadDir(docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "ci-inventory.md" {
+			t.Errorf("--fix left %s behind in %s", e.Name(), docs)
+		}
+	}
+	info, err := os.Stat(filepath.Join(docs, "ci-inventory.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %v, want 0644", info.Mode().Perm())
+	}
+}
+
 // Anti-vacuity at the top level: an empty workflows dir must be an error,
 // not "the doc covers everything (there is nothing)".
 func TestRun_NoWorkflowsIsAnError(t *testing.T) {
