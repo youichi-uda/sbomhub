@@ -22,11 +22,11 @@
 #     (groups, RequireWrite, RateLimitByAPIKey, TenantTx, MCPAudit, the global
 #     HTTP error handler) rather than one middleware on a synthetic route;
 #   - the on-wire 403 envelope, and its BYTE identity across every refusal —
-#     sibling project, unallocated UUID, malformed :id, unclassified route,
-#     unknown project name — which is the property that makes the refusal
-#     useless as an existence oracle. The Go tests assert status only, except
-#     one handler-level test that compares echo.HTTPError message strings for
-#     POST /cli/projects;
+#     sibling project, a REAL project in another tenant, unallocated UUID,
+#     malformed :id, unclassified route, unknown project name — which is the
+#     property that makes the refusal useless as an existence oracle. The Go
+#     tests assert status only, except one handler-level test that compares
+#     echo.HTTPError message strings for POST /cli/projects;
 #   - Echo's real RouteNotFound catch-all under /api/v1/{mcp,cli}/* (the Go
 #     test registers `/api/v1/mcp/not-a-real-route` as a concrete route, so it
 #     never reaches the wildcard);
@@ -79,6 +79,10 @@
 #   SBOMHUB_PROJECT_SIBLING    a DIFFERENT project UUID in the same tenant
 #   SBOMHUB_PROJECT_OWN_NAME   name of SBOMHUB_PROJECT_OWN
 #   SBOMHUB_PROJECT_SIBLING_NAME name of SBOMHUB_PROJECT_SIBLING
+#
+# The second tenant and its project (the foreign-tenant refusal column) are
+# always seeded through psql, in both modes: nothing authenticates as that
+# tenant, so only a real project id whose tenant is not the key's is needed.
 #
 # Exit codes: 0 — every cell matched. non-zero — first failed assertion.
 # ---------------------------------------------------------------------------
@@ -245,19 +249,35 @@ ROUTE_COUNT=$(wc -l < "${WORK}/routes.txt")
 # Structural guard 1: the parse must find something.
 [ "${ROUTE_COUNT}" -ge 1 ] || die "derived 0 routes from ${SCOPE_TABLE_SRC} — the map literal format changed and this script's regex is stale"
 
-# Structural guard 2: the parse must find EVERY entry. Count the projectScopeRule
-# literals inside the map body — `{scope...` appears exactly once per entry and
-# is INDEPENDENT of the key regex above, so a key written in a shape that regex
-# skips (multi-line key, key and kind on separate lines, ...) shows up as a
-# mismatch instead of silently going untested.
-MAP_KEY_COUNT=$(awk '
-  /^var apiKeyRouteScope = map\[string\]projectScopeRule\{/ { inmap=1; next }
-  inmap && /^\}/ { inmap=0 }
-  inmap && /\{scope[A-Za-z]+/ { n++ }
-  END { print n+0 }
-' "${SCOPE_TABLE_SRC}")
-if [ "${ROUTE_COUNT}" -ne "${MAP_KEY_COUNT}" ]; then
-  die "derived ${ROUTE_COUNT} routes but the apiKeyRouteScope literal has ${MAP_KEY_COUNT} keys — some entry is written in a shape this script does not parse and would go UNTESTED"
+# Structural guard 2: the parse must find EVERY entry. The extraction above
+# requires the key and the `{scope...` to share a line; two INDEPENDENT counts
+# over the map body catch an entry written any other way:
+#
+#   MAP_KEY_COUNT   counts KEY literals   — independent of how the VALUE is laid
+#                                           out, so it still sees
+#                                             "GET /x": {
+#                                                 scopeTenantWide, "why",
+#                                             },
+#   MAP_RULE_COUNT  counts `{scope` opens — independent of how the KEY is laid
+#                                           out, so it still sees a key split
+#                                           across lines.
+#
+# A route that either count sees and the extraction does not is an UNTESTED
+# route, which is the whole failure mode this guard exists for. (Codex R1 High:
+# the previous single `{scope` count shared the extraction's own assumption, so
+# the multi-line-value case agreed with it and slipped through.)
+count_in_map() {
+  awk -v pat="$1" '
+    /^var apiKeyRouteScope = map\[string\]projectScopeRule\{/ { inmap=1; next }
+    inmap && /^\}/ { inmap=0 }
+    inmap && $0 ~ pat { n++ }
+    END { print n+0 }
+  ' "${SCOPE_TABLE_SRC}"
+}
+MAP_KEY_COUNT=$(count_in_map '^[[:space:]]*"[A-Z]+ /api/v1/[^"]*":')
+MAP_RULE_COUNT=$(count_in_map '\{scope[A-Za-z]+')
+if [ "${ROUTE_COUNT}" -ne "${MAP_KEY_COUNT}" ] || [ "${ROUTE_COUNT}" -ne "${MAP_RULE_COUNT}" ]; then
+  die "derived ${ROUTE_COUNT} routes, but the apiKeyRouteScope literal has ${MAP_KEY_COUNT} key literal(s) and ${MAP_RULE_COUNT} rule literal(s) — an entry is written in a shape this script does not parse and would go UNTESTED"
 fi
 
 # Structural guard 3: every class must be one this script knows how to judge.
@@ -349,9 +369,29 @@ SQL
     "${SBOMHUB_URL}/api/v1/projects/${PROJECT_OWN}/sbom"
 fi
 
+# A project in ANOTHER tenant. project_scope.go claims the refusal is identical
+# for "a sibling project that exists, a foreign tenant's project, and a UUID that
+# was never allocated" — the foreign-tenant leg of that was untested until Codex
+# R1 (Medium) pointed it out. Seeded straight through psql: nothing in this
+# script ever authenticates as tenant 2, it only needs a real project id whose
+# tenant is not the key's.
+FOREIGN_TENANT_ID="$(uuidgen)"
+PROJECT_FOREIGN="$(uuidgen)"
+psql_exec <<SQL
+INSERT INTO tenants (id, clerk_org_id, name, slug, plan)
+VALUES ('${FOREIGN_TENANT_ID}', 'ci_${FOREIGN_TENANT_ID}', 'project-scope-e2e-foreign',
+        'project-scope-e2e-foreign-${FOREIGN_TENANT_ID:0:8}', 'free')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO projects (id, tenant_id, name, description)
+VALUES ('${PROJECT_FOREIGN}', '${FOREIGN_TENANT_ID}', 'project-scope-e2e-foreign-project', '')
+ON CONFLICT (id) DO NOTHING;
+SQL
+
 note "tenant=${TENANT_ID}"
 note "P_own=${PROJECT_OWN} (${PROJECT_OWN_NAME})"
 note "P_sibling=${PROJECT_SIBLING} (${PROJECT_SIBLING_NAME})"
+note "P_foreign=${PROJECT_FOREIGN} (tenant ${FOREIGN_TENANT_ID}, a REAL project in another tenant)"
 
 # Fixture sanity: the two keys must actually be what the matrix assumes they
 # are. A run where K_scoped had project_id NULL would pass every "not 403"
@@ -366,11 +406,11 @@ note "K_scoped.project_id = ${SCOPED_KEY_PROJECT}, K_tenant.project_id = NULL  (
 # Step 2: the matrix — every apiKeyRouteScope entry, both key kinds
 # ---------------------------------------------------------------------------
 echo "=== Step 2: drive the matrix ==="
-printf '%-25s  %-64s %6s %6s %6s %6s %8s\n' KIND ROUTE own sib unalloc bad TENANT-KEY
-printf -- '-%.0s' {1..130}; echo
+printf '%-25s  %-64s %6s %6s %8s %8s %6s %8s\n' KIND ROUTE own sib foreign unalloc bad TENANT-KEY
+printf -- '-%.0s' {1..145}; echo
 
 while IFS='|' read -r kind route; do
-  s_own="-" ; s_sib="-" ; s_unalloc="-" ; s_bad="-"
+  s_own="-" ; s_sib="-" ; s_foreign="-" ; s_unalloc="-" ; s_bad="-"
 
   # Negative control pass: the tenant-level key, always against P_own. Runs for
   # EVERY class — a tenant-level key must never see a 403 anywhere in the table.
@@ -383,6 +423,7 @@ while IFS='|' read -r kind route; do
     scopeProjectPathParam)
       s_own=$(request     "${K_SCOPED}" "${route}" "${PROJECT_OWN}"        "${WORK}/own.body")
       s_sib=$(request     "${K_SCOPED}" "${route}" "${PROJECT_SIBLING}"    "${WORK}/sib.body")
+      s_foreign=$(request "${K_SCOPED}" "${route}" "${PROJECT_FOREIGN}"    "${WORK}/foreign.body")
       s_unalloc=$(request "${K_SCOPED}" "${route}" "${UNALLOCATED_PROJECT}" "${WORK}/unalloc.body")
       s_bad=$(request     "${K_SCOPED}" "${route}" "${MALFORMED_PROJECT}"  "${WORK}/bad.body")
 
@@ -393,7 +434,7 @@ while IFS='|' read -r kind route; do
       # per-route expectation, so it survives handler changes.
       [ "${s_own}" = "${t_own}" ] || fail "'${route}' on P_own: scoped key got ${s_own}, tenant-level key got ${t_own} — scoping changed behaviour inside the key's own project"
 
-      for pair in "sib:${s_sib}:sibling project" "unalloc:${s_unalloc}:unallocated UUID" "bad:${s_bad}:malformed :id"; do
+      for pair in "sib:${s_sib}:sibling project" "foreign:${s_foreign}:foreign tenant's project" "unalloc:${s_unalloc}:unallocated UUID" "bad:${s_bad}:malformed :id"; do
         tag="${pair%%:*}"; rest="${pair#*:}"; code="${rest%%:*}"; what="${rest#*:}"
         [ "${code}" = "403" ] || fail "'${route}' with ${what} returned ${code}, want 403"
         assert_refusal_body "${WORK}/${tag}.body" "${route} (${what})"
@@ -406,16 +447,29 @@ while IFS='|' read -r kind route; do
       assert_refusal_body "${WORK}/own.body" "${route} (tenant-wide)"
       ;;
 
-    scopeProjectListNarrowed|scopeHandlerChecked|scopeNoProjectResource)
-      # Admitted by the middleware; the substantive assertions are in Steps 3-5.
+    scopeProjectListNarrowed|scopeHandlerChecked)
+      # Admitted by the middleware; the substantive assertions are in Steps 3-4.
+      # No scoped-vs-tenant status comparison here: these two classes are
+      # SUPPOSED to answer differently for the two credentials (narrowed list,
+      # refused create).
       s_own=$(request "${K_SCOPED}" "${route}" "${PROJECT_OWN}" "${WORK}/own.body")
       [ "${s_own}" != "403" ] || fail "'${route}' is ${kind} (admitted at the middleware) but a project-scoped key got 403"
       assert_not_ratelimited "${s_own}" "'${route}' (scoped key)"
       ;;
+
+    scopeNoProjectResource)
+      # "allowed through UNCHANGED" is the promise, so "not 403" is too weak
+      # (Codex R1 Medium): a 401/500 that only a scoped key sees would pass it.
+      # Require the scoped key to get the same status as a tenant-level one.
+      s_own=$(request "${K_SCOPED}" "${route}" "${PROJECT_OWN}" "${WORK}/own.body")
+      [ "${s_own}" != "403" ] || fail "'${route}' is scopeNoProjectResource but a project-scoped key got 403"
+      assert_not_ratelimited "${s_own}" "'${route}' (scoped key)"
+      [ "${s_own}" = "${t_own}" ] || fail "'${route}' is scopeNoProjectResource ('allowed through unchanged') but the scoped key got ${s_own} where a tenant-level key got ${t_own}"
+      ;;
   esac
 
-  printf '%-25s  %-64s %6s %6s %6s %6s %8s\n' \
-    "${kind#scope}" "${route}" "${s_own}" "${s_sib}" "${s_unalloc}" "${s_bad}" "${t_own}"
+  printf '%-25s  %-64s %6s %6s %8s %8s %6s %8s\n' \
+    "${kind#scope}" "${route}" "${s_own}" "${s_sib}" "${s_foreign}" "${s_unalloc}" "${s_bad}" "${t_own}"
 done < "${WORK}/routes.txt"
 
 # ---------------------------------------------------------------------------
@@ -520,6 +574,15 @@ SBOMS_TENANT_AFTER=$(psql_query "SELECT COUNT(*) FROM sboms WHERE tenant_id = '$
 [ "${SBOMS_TENANT_AFTER}" = "${SBOMS_TENANT_BEFORE}" ]   || fail "sboms in the tenant went ${SBOMS_TENANT_BEFORE} -> ${SBOMS_TENANT_AFTER} across two refused uploads"
 note "sboms rows unchanged (sibling=${SBOMS_SIBLING_AFTER}, tenant=${SBOMS_TENANT_AFTER})"
 
+# The two project-row assertions above were taken BEFORE the uploads. An upload
+# that created the project and then refused the SBOM would satisfy every
+# assertion so far, so re-check both after the uploads too (Codex R1 High).
+PROJECTS_AFTER_UPLOADS=$(psql_query "SELECT COUNT(*) FROM projects WHERE tenant_id = '${TENANT_ID}'")
+NAMED_AFTER_UPLOADS=$(psql_query "SELECT COUNT(*) FROM projects WHERE tenant_id = '${TENANT_ID}' AND name = '${UNKNOWN_NAME}'")
+[ "${PROJECTS_AFTER_UPLOADS}" = "${PROJECTS_BEFORE}" ] || fail "projects row count went ${PROJECTS_BEFORE} -> ${PROJECTS_AFTER_UPLOADS} across the refused /cli/upload calls — a refused upload created a project"
+[ "${NAMED_AFTER_UPLOADS}" = "0" ] || fail "a project named '${UNKNOWN_NAME}' exists after the refused uploads — /cli/upload created it before refusing"
+note "projects rows still ${PROJECTS_AFTER_UPLOADS} after the refused uploads; still no row named '${UNKNOWN_NAME}'"
+
 # Anti-vacuity: the same two routes must still WORK for the key's own project,
 # otherwise the row-count assertions above would hold on a stack that refuses
 # everything.
@@ -533,8 +596,34 @@ w2=$(http POST "${SBOMHUB_URL}/api/v1/cli/upload" "${WORK}/up.own" \
   -H "Authorization: Bearer ${K_SCOPED}" -F "project_name=${PROJECT_OWN_NAME}" -F "sbom=@${SBOM_FIXTURE}")
 [ "${w2}" = "200" ] || fail "POST /api/v1/cli/upload into the key's OWN project returned ${w2}, want 200"
 assert_not_ratelimited "${w2}" "POST /api/v1/cli/upload (own project)"
-[ "$(jq -r '.project_created' <"${WORK}/up.own")" = "false" ] || fail "POST /api/v1/cli/upload reported project_created=true for a scoped key"
-note "anti-vacuity: own-project create -> ${w1} created=false, own-project upload -> ${w2}"
+[ "$(jq -r '.project_created' <"${WORK}/up.own" 2>/dev/null || echo '?')" = "false" ] || fail "POST /api/v1/cli/upload reported project_created=true for a scoped key"
+# A 200 is not enough: the row has to have landed in the key's OWN project.
+# Follow the sbom_id the response returns back into the database (Codex R1
+# Medium) — a write redirected to the sibling would otherwise pass.
+[ "$(jq -r '.project_id' <"${WORK}/up.own" 2>/dev/null || echo '?')" = "${PROJECT_OWN}" ] || fail "POST /api/v1/cli/upload into the OWN project reported project_id $(jq -r '.project_id' <"${WORK}/up.own" 2>/dev/null || echo '?'), want ${PROJECT_OWN}"
+UP_SBOM_ID=$(jq -r '.sbom_id // empty' <"${WORK}/up.own" 2>/dev/null || echo "")
+[ -n "${UP_SBOM_ID}" ] || fail "POST /api/v1/cli/upload into the OWN project returned no sbom_id"
+if [ -n "${UP_SBOM_ID}" ]; then
+  UP_SBOM_PROJECT=$(psql_query "SELECT COALESCE(project_id::text,'NULL') FROM sboms WHERE id = '${UP_SBOM_ID}'")
+  [ "${UP_SBOM_PROJECT}" = "${PROJECT_OWN}" ] || fail "the SBOM created by the own-project upload (${UP_SBOM_ID}) persisted under project '${UP_SBOM_PROJECT}', want ${PROJECT_OWN}"
+fi
+SBOMS_SIBLING_FINAL=$(psql_query "SELECT COUNT(*) FROM sboms WHERE project_id = '${PROJECT_SIBLING}'")
+[ "${SBOMS_SIBLING_FINAL}" = "${SBOMS_SIBLING_BEFORE}" ] || fail "the SUCCESSFUL own-project upload changed the sibling's sboms count (${SBOMS_SIBLING_BEFORE} -> ${SBOMS_SIBLING_FINAL})"
+note "anti-vacuity: own-project create -> ${w1} created=false; own-project upload -> ${w2}, sbom ${UP_SBOM_ID} persisted under P_own, sibling count still ${SBOMS_SIBLING_FINAL}"
+
+# --- scopeNoProjectResource: 'allowed through unchanged', byte for byte ---
+# The matrix compares statuses on the live /cli/check path, which calls OSV and
+# is therefore not byte-reproducible. Drive the deterministic handler-level
+# rejection (empty components) instead, where both credentials must produce the
+# SAME status AND the SAME bytes. That is what "unchanged" means and it needs no
+# network.
+chk_scoped_code=$(http POST "${SBOMHUB_URL}/api/v1/cli/check" "${WORK}/chk.scoped" \
+  -H "Authorization: Bearer ${K_SCOPED}" -H 'Content-Type: application/json' -d '{"components":[]}')
+chk_tenant_code=$(http POST "${SBOMHUB_URL}/api/v1/cli/check" "${WORK}/chk.tenant" \
+  -H "Authorization: Bearer ${K_TENANT}" -H 'Content-Type: application/json' -d '{"components":[]}')
+[ "${chk_scoped_code}" = "${chk_tenant_code}" ] || fail "POST /api/v1/cli/check (deterministic empty-components path): scoped key got ${chk_scoped_code}, tenant-level key got ${chk_tenant_code} — scopeNoProjectResource promises the route is reached unchanged"
+cmp -s "${WORK}/chk.scoped" "${WORK}/chk.tenant" || fail "POST /api/v1/cli/check answers a project-scoped key with different bytes than a tenant-level one: '$(tr -d '\n' <"${WORK}/chk.scoped")' vs '$(tr -d '\n' <"${WORK}/chk.tenant")'"
+note "POST /api/v1/cli/check (empty components): both credentials -> ${chk_scoped_code} $(tr -d '\n' <"${WORK}/chk.scoped")"
 
 # ---------------------------------------------------------------------------
 # Step 5: default-deny — an unclassified path under /mcp or /cli is 403, not 404
@@ -566,6 +655,7 @@ fi
 echo "project-scope E2E: PASSED"
 echo "  routes driven   = ${ROUTE_COUNT} (every apiKeyRouteScope entry)"
 echo "  scoped key      = project_id ${PROJECT_OWN}"
+echo "  refused :id set = sibling ${PROJECT_SIBLING} / foreign-tenant ${PROJECT_FOREIGN} / unallocated ${UNALLOCATED_PROJECT} / malformed '${MALFORMED_PROJECT}'"
 echo "  tenant key      = project_id NULL (negative control: 0 unexpected 403s)"
 echo "  refusal body    = $(tr -d '\n' <"${REFUSAL_REF}") ($(wc -c <"${REFUSAL_REF}") bytes, byte-identical everywhere)"
 echo "================================================================"

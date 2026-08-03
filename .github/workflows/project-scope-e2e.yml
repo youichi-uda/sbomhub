@@ -47,12 +47,22 @@ on:
       - "apps/api/**"
       - "scripts/project-scope-e2e.sh"
       - "test/fixtures/minimal-cyclonedx.json"
+      # The stack this gate runs against (Codex R1 Low): a change to any of
+      # these can redirect or invalidate the run without touching apps/api.
+      - "docker-compose.yml"
+      - ".env.example"
+      - "install.sh"
       - ".github/workflows/project-scope-e2e.yml"
   pull_request:
     paths:
       - "apps/api/**"
       - "scripts/project-scope-e2e.sh"
       - "test/fixtures/minimal-cyclonedx.json"
+      # The stack this gate runs against (Codex R1 Low): a change to any of
+      # these can redirect or invalidate the run without touching apps/api.
+      - "docker-compose.yml"
+      - ".env.example"
+      - "install.sh"
       - ".github/workflows/project-scope-e2e.yml"
   workflow_dispatch:
 
