@@ -29,6 +29,39 @@ import { dirname, join, relative } from 'node:path';
  * stopped the `&& !process.env.CI` from being "simplified" back out.
  * This file is that missing enforcement.
  *
+ * THREAT MODEL — read this before "hardening" anything here
+ * ---------------------------------------------------------
+ * This gate catches ACCIDENTS BY HONEST AUTHORS. That is the whole of
+ * its threat model, and it is a deliberate choice, not a shortfall:
+ *
+ *   - a CI guard "simplified" away (`cond && !process.env.CI` → `cond`)
+ *   - collection-time evaluation mistaken for run-time evaluation
+ *   - a new spec copying the holed shape from an old one
+ *
+ * It does NOT resist an author who WANTS the gate gone, and it cannot:
+ * deleting this file removes it entirely. Every call-shape trick that
+ * could be closed here — spelling `test.skip` differently, rebinding a
+ * global, smuggling the exemption marker somewhere unusual — is strictly
+ * more effort than `rm`, so closing them buys no adversarial resistance
+ * whatsoever. It only buys robustness against the shapes an honest
+ * refactor actually produces, which is why the ones handled below are
+ * handled: an extracted `const skip = test.skip` alias is something
+ * people really write; `process['env'].CI = ''` is not.
+ *
+ * Consequence for review: "an author could deliberately write X to evade
+ * this" is not, by itself, a finding. It becomes one only with an
+ * account of how an author writes X BY MISTAKE. Reviewing this file
+ * against a sabotage model produces an unbounded stream of syntactic
+ * corners and never converges — the repo has already paid for that
+ * lesson once (anti-pattern 98, the migration lock-budget lint: 12
+ * rounds of "cleverly-crafted SQL" findings that stopped the moment the
+ * threat model was written down).
+ *
+ * The gates that DO have to survive an adversary are the ones about
+ * tenant isolation and credentials (RLS, api-key scope, encryption-key
+ * refusal). This is not one of them; it is a spelling checker for CI
+ * guards.
+ *
  * THE RULE
  * --------
  * Every GROUP-WIDE conditional skip — a `test.skip` / `test.fixme` call
