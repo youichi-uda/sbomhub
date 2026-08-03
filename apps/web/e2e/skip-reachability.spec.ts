@@ -242,6 +242,10 @@ const CALLEE_SKIP = /^test\.(skip|fixme)$/;
 // being treated as a suite and its per-test skips reported. The rule says
 // `test.describe`. (Review finding: false positive.)
 const CALLEE_DESCRIBE = /^test\.describe(\.(only|serial|parallel|skip|fixme))*$/;
+// `test.describe.skip` / `.fixme` are already unconditionally off, so a
+// skip inside one cannot disarm anything — checking it reported correct
+// code. (Review finding: false positive.)
+const CALLEE_DESCRIBE_OFF = /^test\.describe(\.(only|serial|parallel))*\.(skip|fixme)$/;
 const CALLEE_TEST = /^test(\.(only|skip|fixme|fail|slow))?$/;
 const CALLEE_BEFORE_ALL = /^test\.beforeAll$/;
 // `afterAll` runs AFTER the group, so nothing in it can affect a
@@ -550,14 +554,25 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             return false;
         };
 
+        // A trailing inline BODY means `test.skip(title, body)` — the
+        // declaration form — however the title happens to be written. A
+        // conditional skip's last argument is a description, and a
+        // description is never a function, so this cannot misfire.
+        // Without it, `test.skip(envTitle || 'disabled', async () => {})`
+        // was read as a condition because of the `||`. (Review finding:
+        // false positive.)
+        const declaresATest = last !== undefined && isInlineFunction(last);
+
         const form: SkipSite['form'] =
             args.length === 0
                 ? 'noarg'
-                : isInlineFunction(unwrap(args[0]))
-                  ? 'callback'
-                  : isConditionShape(args[0])
-                    ? 'conditional'
-                    : 'other';
+                : declaresATest
+                  ? 'other'
+                  : isInlineFunction(unwrap(args[0]))
+                    ? 'callback'
+                    : isConditionShape(args[0])
+                      ? 'conditional'
+                      : 'other';
 
         let stmt: ts.Node = node;
         while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent;
@@ -590,7 +605,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             const hasInlineCallback = args.some((x) => isInlineFunction(unwrap(x)));
 
             if (CALLEE_DESCRIBE.test(callee) && hasInlineCallback) {
-                construct = 'describe';
+                construct = CALLEE_DESCRIBE_OFF.test(callee) ? 'closure' : 'describe';
                 isDescribe = true;
             } else if (CALLEE_BEFORE_ALL.test(callee) && hasInlineCallback) {
                 construct = 'beforeAll';
@@ -1446,6 +1461,30 @@ test.describe('gate', () => {
             test.skip(!HAS_TOOL, 'tool missing');
     }
     test('probe', async () => { void Gate; });
+});
+`,
+    ],
+    [
+        // `test.skip(title, body)` however the title is written.
+        'a declaration whose title comes from an || fallback',
+        `
+import { test } from '@playwright/test';
+const configuredTitle: string | undefined = process.env.SKIP_TEST_TITLE;
+test.describe('handoff', () => {
+    test.skip(configuredTitle || 'temporarily disabled', async () => {});
+});
+`,
+    ],
+    [
+        // The suite is already unconditionally off, so nothing inside it
+        // can disarm anything.
+        'a skip inside test.describe.skip',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe.skip('temporarily disabled: #123', () => {
+    test.skip(!HAS_TOOL, 'optional local prerequisite');
+    test('probe', async () => {});
 });
 `,
     ],
