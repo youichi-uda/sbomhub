@@ -905,3 +905,19 @@ jobs:
 		t.Error("the live check must be accepted")
 	}
 }
+
+// A folded block scalar carries a trailing newline that the line-wise
+// snapshot can never have.
+func TestFoldedBlockScalarNameIsTrimmed(t *testing.T) {
+	const body = "name: X\non:\n  push:\njobs:\n  gate:\n    name: >\n      Required gate\n"
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if jobs[0].checkName != "Required gate" {
+		t.Fatalf("got %q", jobs[0].checkName)
+	}
+	if !matchesJob("Required gate", jobs[0]) {
+		t.Error("the snapshot line must match")
+	}
+}

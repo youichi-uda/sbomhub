@@ -145,7 +145,12 @@ func (j job) line() string {
 func yamlString(v any) string {
 	switch t := v.(type) {
 	case string:
-		return t
+		// A folded/literal block scalar (`name: >`) carries a trailing
+		// newline. The required-check snapshot is read line-wise and
+		// therefore never has one, so keeping it reported a live check as
+		// stale and made `--fix` non-convergent. (Review finding: false
+		// positive.)
+		return strings.TrimSpace(t)
 	case float64:
 		return strconv.FormatFloat(t, 'f', -1, 64)
 	case float32:

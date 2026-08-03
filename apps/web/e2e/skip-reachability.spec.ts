@@ -412,7 +412,17 @@ function isInlineFunction(n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpres
  * finding: false positive.)
  */
 function isDeferredBoundary(n: ts.Node): boolean {
-    return isAnyFunction(n) || (ts.isPropertyDeclaration(n) && n.initializer !== undefined);
+    if (isAnyFunction(n)) return true;
+    if (ts.isPropertyDeclaration(n) && n.initializer !== undefined) {
+        // A STATIC field initialiser runs when the class DEFINITION is
+        // evaluated, which inside a describe body is collection time — so
+        // it is not a boundary. Only instance fields wait for `new`.
+        // (Review finding: rule/implementation mismatch.)
+        const mods = ts.canHaveModifiers(n) ? ts.getModifiers(n) : undefined;
+        const isStatic = (mods ?? []).some((m) => m.kind === ts.SyntaxKind.StaticKeyword);
+        return !isStatic;
+    }
+    return false;
 }
 
 function isAnyFunction(n: ts.Node): boolean {
@@ -461,7 +471,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
      * `if (false)`, or one written after the skip, invalidated correct
      * guards. (Review finding: false positive.)
      */
-    const envClearedAt: number[] = [];
+    const envEvents: { pos: number; clears: boolean }[] = [];
 
     const scopeNow = (): SkipSite['scope'] => (stack.length ? stack[stack.length - 1] : 'file');
 
@@ -513,11 +523,16 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             parent = parent.parent;
         }
         if (parent === undefined) return;
-        const isAssign =
+        const isPlainAssign =
             ts.isBinaryExpression(parent) &&
             parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-            parent.left === child &&
-            isFalsyLiteral(parent.right);
+            parent.left === child;
+        const isAssign = isPlainAssign && isFalsyLiteral((parent as ts.BinaryExpression).right);
+        // A RESTORE (`process.env.CI = savedCI`) puts it back. Recording
+        // only the clears meant a save/clear/restore preamble — an
+        // ordinary way to exercise CI-off behaviour locally — invalidated
+        // every guard after it. (Review finding: false positive.)
+        const isRestore = isPlainAssign && !isAssign;
         const isDelete = ts.isDeleteExpression(parent);
         const isIncDec = false;
         // Only file and describe scope run DURING collection. A write in
@@ -526,9 +541,9 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // invalidated correct guards in the same file. (Review finding:
         // false positive.)
         const at = scopeNow();
-        if (!(isAssign || isDelete) || (at !== 'file' && at !== 'describe')) return;
-        // Nested in a branch, a loop or a try: this lint does not evaluate
-        // control flow, so it does not claim the write happens.
+        if (!(isAssign || isDelete || isRestore) || (at !== 'file' && at !== 'describe')) return;
+
+        let nested = false;
         for (let a: ts.Node | undefined = n.parent; a; a = a.parent) {
             if (isDeferredBoundary(a) || ts.isSourceFile(a)) break;
             if (
@@ -539,10 +554,18 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 ts.isConditionalExpression(a) ||
                 ts.isCatchClause(a)
             ) {
-                return;
+                nested = true;
+                break;
             }
         }
-        envClearedAt.push(n.getStart(sf));
+        // Control flow is not evaluated, so nesting is read in whichever
+        // direction avoids a false positive: a CLEAR inside a branch is
+        // not claimed to happen, while a RESTORE inside one is not
+        // claimed NOT to happen. `if (saved !== undefined) process.env.CI
+        // = saved;` is the ordinary way to put it back. (Review finding:
+        // false positive.)
+        if (nested && !isRestore) return;
+        envEvents.push({ pos: n.getStart(sf), clears: isAssign || isDelete });
     };
 
     const classify = (
@@ -681,11 +704,20 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
 
     visit(sf);
 
-    if (envClearedAt.length > 0) {
-        const first = Math.min(...envClearedAt);
+    // A site is only defeated when the LAST collection-time write before
+    // it left `process.env.CI` cleared.
+    if (envEvents.length > 0) {
+        envEvents.sort((a, b) => a.pos - b.pos);
         for (const site of sites) {
             if (site.form !== 'conditional') continue;
-            if (site.pos > first) site.ciNeutral = false;
+            let cleared = false;
+            let seen = false;
+            for (const e of envEvents) {
+                if (e.pos >= site.pos) break;
+                cleared = e.clears;
+                seen = true;
+            }
+            if (seen && cleared) site.ciNeutral = false;
         }
     }
     return sites;
@@ -857,6 +889,21 @@ test.describe(
         test.skip(!HAS_TOOL, 'tool missing');
     }),
 );
+`,
+    ],
+    [
+        // A STATIC field initialiser runs when the class definition is
+        // evaluated, i.e. during collection.
+        'an unguarded skip in a static class field',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    class Gate {
+        static skipped = test.skip(!HAS_TOOL, 'tool missing');
+    }
+    test('probe', async () => { void Gate; });
+});
 `,
     ],
     [
@@ -1405,6 +1452,22 @@ test.describe('gate', () => {
     test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
 });
 delete process.env.CI;
+`,
+    ],
+    [
+        // Save / clear / restore is an ordinary way to exercise CI-off
+        // behaviour locally. The guard below is evaluated after the
+        // restore.
+        'clearing and restoring process.env.CI',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const savedCI = process.env.CI;
+delete process.env.CI;
+if (savedCI !== undefined) process.env.CI = savedCI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
 `,
     ],
     [
