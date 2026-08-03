@@ -121,6 +121,12 @@ type job struct {
 	// instead, which is lenient. (Review finding under the declared
 	// threat model.)
 	matrixIsPartial bool
+	// `name:` was written explicitly. A matrix job WITHOUT one reports as
+	// `<id> (<leg>)`, not as `<id>` — so turning a plain required job into
+	// a matrix job changes its check names, and keeping `<id>` would have
+	// vouched for the now-nonexistent old check. (Review finding under the
+	// declared threat model.)
+	namedExplicitly bool
 }
 
 func (j job) line() string {
@@ -211,6 +217,14 @@ func parseWorkflow(base, body string) ([]job, error) {
 				if m := reMatrixKey.FindStringSubmatch(line); m != nil {
 					matrixKey = m[1]
 					rest := strings.TrimSpace(m[2])
+					// `os: [ubuntu-latest] # windows removed` — the natural
+					// edit when dropping a leg. Without stripping the
+					// comment the list stopped looking readable and the
+					// lenient prefix fallback accepted the stale check.
+					// (Review finding under the declared threat model.)
+					if i := strings.Index(rest, "] #"); i >= 0 {
+						rest = strings.TrimSpace(rest[:i+1])
+					}
 					if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
 						// Declared inline, so its contents ARE known — even
 						// when empty. `os: []` (the last supported OS just
@@ -407,7 +421,38 @@ var reMatrixRef = regexp.MustCompile(`\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_]*)\
 func expandNames(j job) ([]string, bool) {
 	refs := reMatrixRef.FindAllStringSubmatch(j.checkName, -1)
 	if len(refs) == 0 {
-		return []string{j.checkName}, true
+		if j.namedExplicitly || len(j.matrix) == 0 {
+			return []string{j.checkName}, true
+		}
+		// No `name:` and a matrix: GitHub reports `<id> (<leg>, …)`.
+		if j.matrixIsPartial {
+			return nil, false
+		}
+		keys := make([]string, 0, len(j.matrix))
+		for k := range j.matrix {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		combos := []string{""}
+		for _, k := range keys {
+			values := j.matrix[k]
+			var next []string
+			for _, c := range combos {
+				for _, v := range values {
+					if c == "" {
+						next = append(next, v)
+					} else {
+						next = append(next, c+", "+v)
+					}
+				}
+			}
+			combos = next
+		}
+		names := make([]string, 0, len(combos))
+		for _, c := range combos {
+			names = append(names, fmt.Sprintf("%s (%s)", j.id, c))
+		}
+		return names, true
 	}
 	if j.matrixIsPartial {
 		return nil, false
@@ -438,9 +483,9 @@ func expandNames(j job) ([]string, bool) {
 // matchesJob reports whether a required status check name is produced by
 // this job.
 func matchesJob(required string, j job) bool {
-	if required == j.checkName {
-		return true
-	}
+	// Expansion first, and authoritative when it succeeds. A literal
+	// `required == j.checkName` shortcut would keep vouching for the
+	// pre-matrix name of a job that has since become a matrix job.
 	if names, ok := expandNames(j); ok {
 		for _, n := range names {
 			if required == n {
@@ -448,6 +493,9 @@ func matchesJob(required string, j job) bool {
 			}
 		}
 		return false
+	}
+	if required == j.checkName {
+		return true
 	}
 	// Unreadable matrix: fall back to the literal prefix before the first
 	// expression. `i > 0`, not `i >= 0` — a name that STARTS with an

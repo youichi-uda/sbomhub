@@ -228,11 +228,46 @@ const GROUP_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
     'beforeAll',
 ] as const);
 
+/**
+ * Array-iteration methods whose callback runs synchronously, in place,
+ * at the moment the surrounding code runs.
+ */
+const SYNC_ITERATORS = new Set(['forEach', 'map', 'flatMap', 'filter', 'reduce', 'some', 'every']);
+
+/** True when this function is invoked right where it is written. */
+function runsInPlace(fn: ts.Node): boolean {
+    const [child, parent] = skipParens(fn);
+    if (parent === undefined || !ts.isCallExpression(parent)) return false;
+    // IIFE: `(() => { … })()`
+    if (parent.expression === child) return true;
+    // `xs.forEach(cb)` and friends
+    if (!parent.arguments.includes(child as ts.Expression)) return false;
+    const callee = unwrap(parent.expression);
+    return ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
+}
+
 /** Function-ish nodes that are NOT a Playwright construct's callback. */
-type PlainFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+type PlainFunction =
+    | ts.FunctionDeclaration
+    | ts.FunctionExpression
+    | ts.ArrowFunction
+    | ts.MethodDeclaration
+    | ts.GetAccessorDeclaration
+    | ts.SetAccessorDeclaration;
 
 function isPlainFunction(n: ts.Node): n is PlainFunction {
-    return ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n);
+    return (
+        ts.isFunctionDeclaration(n) ||
+        ts.isFunctionExpression(n) ||
+        ts.isArrowFunction(n) ||
+        // Tidying per-test helpers into an object or class is ordinary;
+        // treating a method body as if it ran at describe scope made that
+        // refactor turn `main` red. (Review finding under the declared
+        // threat model.)
+        ts.isMethodDeclaration(n) ||
+        ts.isGetAccessorDeclaration(n) ||
+        ts.isSetAccessorDeclaration(n)
+    );
 }
 
 function hasExportModifier(n: ts.Node): boolean {
@@ -298,6 +333,15 @@ function plainFunctionIdentity(
     });
     if (ts.isFunctionDeclaration(fn)) {
         return result(fn.name?.text ?? null, hasExportModifier(fn));
+    }
+    if (
+        ts.isMethodDeclaration(fn) ||
+        ts.isGetAccessorDeclaration(fn) ||
+        ts.isSetAccessorDeclaration(fn)
+    ) {
+        // Reached through a member expression, never a bare identifier, so
+        // it can have no group-scope call site this pass would record.
+        return result(null, false);
     }
     const decl = fn.parent;
     if (decl && ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name)) {
@@ -466,7 +510,7 @@ function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
 }
 
 /**
- * True when nothing in the file writes to `process.env.CI`.
+ * True when nothing writes to `process.env.CI` at COLLECTION time.
  *
  * `delete process.env.CI;` or `process.env.CI = '';` at file scope makes
  * `!process.env.CI` true under CI at collection time, so a guard written
@@ -488,6 +532,19 @@ function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
  */
 function envIsPristine(sf: ts.SourceFile): boolean {
     let mutated = false;
+    // Only code that runs while the file is being COLLECTED can affect a
+    // collection-time skip. A `process.env.CI = '1'` inside a test body
+    // runs long afterwards; treating it as file-wide contamination
+    // rejected a correct guard. (Review finding under the declared threat
+    // model.)
+    const insideCallback = (n: ts.Node): boolean => {
+        for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+            if (!isPlainFunction(p)) continue;
+            if (runsInPlace(p)) continue;
+            return true;
+        }
+        return false;
+    };
     const visit = (n: ts.Node): void => {
         if (mutated) return;
         if (isProcessEnv(n)) {
@@ -500,7 +557,7 @@ function envIsPristine(sf: ts.SourceFile): boolean {
             // `process.env.TZ = 'UTC'` inside a test used to invalidate the
             // whole file and turn a correct `&& !process.env.CI` guard red.
             // (Review finding under the declared threat model.)
-            if (isMemberAccess && envKeyOf(parent) === 'CI') {
+            if (isMemberAccess && envKeyOf(parent) === 'CI' && !insideCallback(n)) {
                 const [accessChild, grand] = skipParens(parent);
                 if (grand !== undefined) {
                     if (ts.isDeleteExpression(grand)) {
@@ -791,7 +848,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // meaningless there and nothing in the file can be judged CI-neutral.
     const bound = boundNames(sf);
     const exportList = exportListNames(sf);
-    const fnNames = functionNames(sf);
     const defaultExported = defaultExportedFunctions(sf);
     const aliases = calleeAliases(sf, bound);
     /** Dotted callee name, with a file-scope alias expanded. */
@@ -906,11 +962,41 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 // `const title = '…'; test.skip(title, async () => {})` look
                 // like a conditional group skip and turned `main` red.
                 // (Review finding under the declared threat model.)
-                const isBody = (a: ts.Expression): boolean =>
-                    ts.isArrowFunction(a) ||
-                    ts.isFunctionExpression(a) ||
-                    (ts.isIdentifier(a) && fnNames.has(a.text));
-                const isDeclaration = args.length >= 2 && args.slice(1).some(isBody);
+                // Decided by the FIRST argument alone.
+                //
+                // `test.skip(title, body)` declares a statically-off test;
+                // `test.skip(condition, description)` is the conditional
+                // form. A title is a string, a condition is not — that is
+                // the only discriminator that does not depend on resolving
+                // the body, and resolving the body kept producing both
+                // kinds of error: an imported body made a correct
+                // declaration look conditional (red `main`), and a
+                // same-named helper in another suite made a correct
+                // conditional look like a declaration (missed gate).
+                // (Review findings under the declared threat model.)
+                const isTitle = (a: ts.Expression): boolean => {
+                    const cur = unwrap(a);
+                    if (
+                        ts.isStringLiteral(cur) ||
+                        ts.isNoSubstitutionTemplateLiteral(cur) ||
+                        ts.isTemplateExpression(cur)
+                    ) {
+                        return true;
+                    }
+                    if (ts.isIdentifier(cur)) {
+                        const init = consts.get(cur.text);
+                        if (init) {
+                            const u = unwrap(init);
+                            return (
+                                ts.isStringLiteral(u) ||
+                                ts.isNoSubstitutionTemplateLiteral(u) ||
+                                ts.isTemplateExpression(u)
+                            );
+                        }
+                    }
+                    return false;
+                };
+                const isDeclaration = args.length >= 2 && isTitle(args[0]);
                 const form: SkipSite['form'] =
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
                 const scope = stack.length ? stack[stack.length - 1] : 'file';
@@ -974,6 +1060,17 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 }
             }
             if (pushedDescribe) describeStack.pop();
+            return;
+        }
+
+        // A closure that is invoked SYNCHRONOUSLY where it is written runs
+        // in the scope it appears in: an IIFE, and the array-iteration
+        // callbacks a `for...of` gets refactored into. Parameterising a
+        // suite with `TOOLS.forEach(...)` is an ordinary edit and used to
+        // file the skip as a closure nobody calls. (Review finding under
+        // the declared threat model.)
+        if (isPlainFunction(node) && runsInPlace(node)) {
+            ts.forEachChild(node, visit);
             return;
         }
 
@@ -1472,6 +1569,64 @@ test.describe('gate', () => {
 });
 `;
 
+/** `for...of` parameterisation refactored into `forEach`. */
+const FIXTURE_FOREACH_PARAMETERISED = `
+import { test } from '@playwright/test';
+const TOOLS = [{ available: false }];
+TOOLS.forEach(({ available }) => {
+    test.skip(!available, 'tool missing');
+    test('gate', async () => {});
+});
+`;
+
+/** A same-named helper in another suite must not reclassify a condition. */
+const FIXTURE_SAMENAME_HELPER_ELSEWHERE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('messages', () => {
+    function reason() { return 'computed'; }
+    test('uses it', async () => { reason(); });
+});
+test.describe('gate', () => {
+    const reason = 'tool missing';
+    test.skip(!HAS_TOOL, reason);
+});
+`;
+
+/** A declaration body moved to a shared file is still a declaration. */
+const FIXTURE_DECLARATION_IMPORTED_BODY = `
+import { test } from '@playwright/test';
+import { disabledBody } from './disabled-body';
+test.describe('gate', () => {
+    test.skip('temporarily disabled', disabledBody);
+});
+`;
+
+/** Per-test helpers tidied into an object literal. */
+const FIXTURE_OBJECT_METHOD_HELPER = `
+import { test } from '@playwright/test';
+test.describe('gate', () => {
+    const soft = {
+        skipIfMissing(missing: boolean) {
+            test.skip(missing, 'not applicable');
+        },
+    };
+    test('probe', async () => soft.skipIfMissing(false));
+});
+`;
+
+/** Writing CI inside a TEST cannot affect a collection-time skip. */
+const FIXTURE_RUNTIME_CI_WRITE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+    test('CI parsing', async () => {
+        process.env.CI = '1';
+    });
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1585,6 +1740,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['named-describe-callback', FIXTURE_NAMED_DESCRIBE_CALLBACK],
             ['export-clause-helper', FIXTURE_EXPORT_CLAUSE_HELPER],
             ['default-export-helper', FIXTURE_DEFAULT_EXPORT_HELPER],
+            ['foreach-parameterised', FIXTURE_FOREACH_PARAMETERISED],
+            ['samename-helper-elsewhere', FIXTURE_SAMENAME_HELPER_ELSEWHERE],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
@@ -1616,6 +1773,9 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['callback-block-return', FIXTURE_CALLBACK_BLOCK_RETURN],
             ['declaration-title-const', FIXTURE_DECLARATION_TITLE_CONST],
             ['declaration-extracted-body', FIXTURE_DECLARATION_EXTRACTED_BODY],
+            ['declaration-imported-body', FIXTURE_DECLARATION_IMPORTED_BODY],
+            ['object-method-helper', FIXTURE_OBJECT_METHOD_HELPER],
+            ['runtime-ci-write', FIXTURE_RUNTIME_CI_WRITE],
             ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
             ['marker', FIXTURE_MARKER],
             ['marker-trailing', FIXTURE_MARKER_TRAILING],

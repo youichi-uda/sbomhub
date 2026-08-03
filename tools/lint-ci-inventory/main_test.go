@@ -737,3 +737,60 @@ jobs:
 		t.Error("an empty matrix must not vouch for any required check")
 	}
 }
+
+// Dropping a leg and leaving a comment is the natural edit; the list must
+// still be read as authoritative.
+func TestInlineMatrixWithTrailingComment(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  smoke:
+    name: build ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest] # windows removed
+    runs-on: ${{ matrix.os }}
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("build ubuntu-latest", jobs[0]) {
+		t.Error("the surviving leg must match")
+	}
+	if matchesJob("build windows-latest", jobs[0]) {
+		t.Error("the removed leg must NOT match")
+	}
+}
+
+// A job with no `name:` that becomes a matrix job reports as `id (leg)`.
+func TestNamelessMatrixJobExpandsToLegNames(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	names, ok := expandNames(jobs[0])
+	if !ok {
+		t.Fatal("readable matrix")
+	}
+	want := []string{"build (ubuntu-latest)", "build (macos-latest)"}
+	if strings.Join(names, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v, want %v", names, want)
+	}
+	if matchesJob("build", jobs[0]) {
+		t.Error("the pre-matrix check name must NOT be vouched for")
+	}
+}
