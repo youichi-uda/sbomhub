@@ -77,7 +77,12 @@ const (
 )
 
 var (
-	reJobID   = regexp.MustCompile(`^  ([A-Za-z_][A-Za-z0-9_.\-]*):\s*$`)
+	// A 2-space-indented key under `jobs:` opens a job. The trailing
+	// group captures anything after the colon so a shape this lint cannot
+	// read (`  build: {runs-on: x}`) becomes a loud error instead of a
+	// silently dropped job — a trailing `# comment` is the one tolerated
+	// case.
+	reJobID   = regexp.MustCompile(`^  ([A-Za-z_][A-Za-z0-9_.\-]*):(.*)$`)
 	reJobName = regexp.MustCompile(`^    name:\s*(\S.*?)\s*$`)
 	reTopKey  = regexp.MustCompile(`^[A-Za-z_'"]`)
 )
@@ -132,6 +137,14 @@ func parseWorkflow(base, body string) ([]job, error) {
 			break
 		}
 		if m := reJobID.FindStringSubmatch(line); m != nil {
+			if rest := strings.TrimSpace(m[2]); rest != "" && !strings.HasPrefix(rest, "#") {
+				return nil, fmt.Errorf(
+					"%s: job %q is declared as %q, which this lint cannot read "+
+						"(it expects `  <id>:` with the job body indented below). "+
+						"Reformat it or teach the lint — silently dropping the job would "+
+						"let an undocumented required status check slip through",
+					base, m[1], strings.TrimSpace(line))
+			}
 			flush()
 			cur = &job{file: base, id: m[1]}
 			continue

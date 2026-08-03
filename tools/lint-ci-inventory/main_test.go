@@ -121,6 +121,45 @@ jobs: {compact: {runs-on: ubuntu-latest}}
 	}
 }
 
+// A job key with an inline body would otherwise be read as a job with no
+// steps and no name — a silent drop of everything nested inside it.
+func TestParseWorkflow_InlineJobBodyIsAnError(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  good:
+    name: fine
+    runs-on: ubuntu-latest
+  compact: {runs-on: ubuntu-latest, name: sneaky}
+`
+	_, err := parseWorkflow("x.yml", body)
+	if err == nil || !strings.Contains(err.Error(), "compact") {
+		t.Fatalf("expected an inline-body error naming the job, got %v", err)
+	}
+}
+
+// A trailing comment on the job key is fine.
+func TestParseWorkflow_TrailingCommentOnJobKey(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  build: # the only job
+    name: build-and-test
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].checkName != "build-and-test" {
+		t.Fatalf("got %+v", jobs)
+	}
+}
+
 func TestParseWorkflow_BlockScalarNameIsAnError(t *testing.T) {
 	const body = `name: X
 on:
