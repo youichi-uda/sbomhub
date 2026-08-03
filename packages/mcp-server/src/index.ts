@@ -148,7 +148,10 @@ server.registerTool(
       "脆弱性は最大5000件まで走査し、超える場合は " +
       "vulnerabilities.scan_truncated=true になる。そのとき by_severity と " +
       "top_by_cvss は走査した analyzed 件の集計であって、" +
-      "プロジェクトの全件を数えた値ではない (全体の件数は total)",
+      "プロジェクトの全件を数えた値ではない (全体の件数は total)。" +
+      "またSBOMアップロード直後はサーバー側の脆弱性スキャンが未完了のことがあり、" +
+      "その間の件数は途中経過だが、このMCPからは完了したかを判定できない。" +
+      "0件や極端に少ない件数を「脆弱性なし」と断定しないこと",
     inputSchema: {
       project_id: projectIdSchema,
     },
@@ -303,7 +306,10 @@ server.registerTool(
       "内部の走査は最大5000件までで、それを超えるプロジェクトでは " +
       "scan_truncated=true が返る。その場合 matched と returned は" +
       "走査した範囲での件数なので、プロジェクト全体の値として報告しないこと " +
-      "(全体の件数は total_in_project)",
+      "(全体の件数は total_in_project)。" +
+      "またSBOMアップロード直後はサーバー側の脆弱性スキャンが未完了のことがあり、" +
+      "その間の件数は途中経過だが、このMCPからは完了したかを判定できない。" +
+      "0件や極端に少ない件数を「脆弱性なし」と断定しないこと",
     inputSchema: {
       project_id: projectIdSchema,
       severity: z

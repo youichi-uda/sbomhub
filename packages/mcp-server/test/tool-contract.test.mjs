@@ -17,7 +17,12 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
-import { DENIAL_STATUS, SCOPE_SOURCE, scopeKindOf } from "./helpers/backend-scope.mjs";
+import {
+  DENIAL_STATUS,
+  SCAN_LIFECYCLE,
+  SCOPE_SOURCE,
+  scopeKindOf,
+} from "./helpers/backend-scope.mjs";
 import {
   CONTRACT_CASES,
   declaredRouteKeysByTool,
@@ -368,6 +373,40 @@ test("every response field a description names exists in what the tool returns",
     }
   }
   assert.equal(checked > 0, true, "no description named a field — the check is vacuous");
+});
+
+// The counts come from an asynchronous scan the MCP group cannot query the
+// state of (there is no scan-status route under /api/v1/mcp). A project whose
+// scan is still running answers in exactly the shape a finished one does, so
+// "0 vulnerabilities" from a just-uploaded SBOM is indistinguishable from
+// "this project is clean" (Codex R5). Until the state is reachable, the only
+// honest place to put that is the description.
+test("a tool reporting scan counts warns that the scan may not have finished", () => {
+  assert.equal(
+    SCAN_LIFECYCLE.canBePartial,
+    true,
+    "the backend no longer has a running/completed scan lifecycle — revisit this rule " +
+      "instead of demanding a caveat that is no longer true"
+  );
+  assert.equal(
+    toolsObservedTruncating.size > 0,
+    true,
+    "no tool was observed reporting scan counts — the check is vacuous"
+  );
+  for (const tool of toolsObservedTruncating) {
+    const description = descriptionByTool.get(tool) ?? "";
+    assert.match(
+      description,
+      /未完了/,
+      `${tool} reports vulnerability counts from an asynchronous scan whose state this ` +
+        "server cannot see, and does not say so"
+    );
+    assert.match(
+      description,
+      /断定しないこと/,
+      `${tool} does not tell the model what NOT to conclude from a low or zero count`
+    );
+  }
 });
 
 test("a tool whose routes are all tenant-wide never sends a project id", () => {

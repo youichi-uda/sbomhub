@@ -144,3 +144,45 @@ export function scopeKindOf(routeKey) {
 export function scopeKindsOf(routeKeys) {
   return new Set([...routeKeys].map(scopeKindOf));
 }
+
+// ---------------------------------------------------------------------------
+// The vulnerability scan is asynchronous.
+//
+// apps/api tracks a per-SBOM scan state (running / completed / failed /
+// unknown) and says so explicitly: the counts behind
+// GET /projects/:id/vulnerabilities reflect whatever the background scan has
+// matched SO FAR, and are only authoritative once the scan reports completed.
+// The MCP route group exposes no scan-state route, so this server cannot tell
+// the two apart — which means a project whose scan is still running answers
+// "0 vulnerabilities" in exactly the shape a finished scan would. The tools
+// that report those counts must say so.
+//
+// Read from the Go source rather than assumed, so that the day the lifecycle
+// goes away (or reaches the MCP group) this check is revisited instead of
+// demanding a caveat that is no longer true.
+// ---------------------------------------------------------------------------
+const SCAN_SOURCE = fileURLToPath(
+  new URL("../../../../apps/api/internal/service/scan_tracker.go", import.meta.url)
+);
+
+export function loadScanLifecycle() {
+  let src;
+  try {
+    src = readFileSync(SCAN_SOURCE, "utf8");
+  } catch (err) {
+    throw new Error(
+      `cannot read the scan lifecycle at ${SCAN_SOURCE} (${err.code}); the MCP ` +
+        "vulnerability tools' caveat about partial scans is derived from it"
+    );
+  }
+  const states = [...src.matchAll(/ScanState\w+\s+ScanState = "(\w+)"/g)].map(
+    (m) => m[1]
+  );
+  return {
+    states,
+    // True when a caller can be served counts from a scan that has not finished.
+    canBePartial: states.includes("running"),
+  };
+}
+
+export const SCAN_LIFECYCLE = loadScanLifecycle();
