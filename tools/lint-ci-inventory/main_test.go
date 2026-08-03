@@ -823,3 +823,46 @@ jobs:
 		t.Fatalf("got %q, want declaration order", names[0])
 	}
 }
+
+// A NAMED job that gains a matrix keeps its explicit name; expanding it
+// to `id (leg)` would report a live required check as stale.
+func TestNamedMatrixJobKeepsExplicitName(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  checks:
+    name: Required gate
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !jobs[0].namedExplicitly {
+		t.Fatal("name: was explicit")
+	}
+	if !matchesJob("Required gate", jobs[0]) {
+		t.Error("the explicit name must still be vouched for")
+	}
+}
+
+func TestParseWorkflow_YamlAnchorNameIsAnError(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  gate:
+    name: *gate_name
+    runs-on: ubuntu-latest
+`
+	_, err := parseWorkflow("x.yml", body)
+	if err == nil || !strings.Contains(err.Error(), "anchor") {
+		t.Fatalf("expected an anchor/alias error, got %v", err)
+	}
+}

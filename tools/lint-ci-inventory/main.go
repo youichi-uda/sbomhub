@@ -288,7 +288,18 @@ func parseWorkflow(base, body string) ([]job, error) {
 							"give it a plain single-line name or teach the lint",
 						base, cur.id)
 				}
+				// A YAML anchor (`&x`) or alias (`*x`) would be recorded as
+				// the literal `&x` / `*x` text, silently making the whole
+				// inventory wrong. Refuse instead. (Review finding under the
+				// declared threat model.)
+				if strings.HasPrefix(v, "&") || strings.HasPrefix(v, "*") {
+					return nil, fmt.Errorf(
+						"%s: job %q uses a YAML anchor/alias for `name:` (%q), which this "+
+							"lint cannot resolve; write the name literally or teach the lint",
+						base, cur.id, v)
+				}
 				cur.checkName = scalarValue(v)
+				cur.namedExplicitly = true
 			}
 		}
 	}

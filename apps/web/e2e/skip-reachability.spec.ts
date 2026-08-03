@@ -234,8 +234,31 @@ const GROUP_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
  */
 const SYNC_ITERATORS = new Set(['forEach', 'map', 'flatMap', 'filter', 'reduce', 'some', 'every']);
 
+/**
+ * The plain function a file-scope name is bound to, for the three places
+ * that have to follow an identifier: a `describe` callback passed by
+ * name, a `forEach` callback passed by name, and `export default name`.
+ * Extracting any of those to a named function is an ordinary refactor,
+ * and each indirection used to lose the analysis. (Review findings under
+ * the declared threat model.)
+ */
+function namedFunctions(sf: ts.SourceFile): Map<string, ts.Node> {
+    const map = new Map<string, ts.Node>();
+    const visit = (n: ts.Node): void => {
+        if (ts.isFunctionDeclaration(n) && n.name) map.set(n.name.text, n);
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+            const init = unwrap(n.initializer);
+            if (isPlainFunction(init)) map.set(n.name.text, init);
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return map;
+}
+
 /** True when this function is invoked right where it is written. */
-function runsInPlace(fn: ts.Node): boolean {
+function runsInPlace(fn: ts.Node, alsoInPlace?: Set<ts.Node>): boolean {
+    if (alsoInPlace?.has(fn)) return true;
     const [child, parent] = skipParens(fn);
     if (parent === undefined || !ts.isCallExpression(parent)) return false;
     // IIFE: `(() => { … })()`
@@ -244,6 +267,33 @@ function runsInPlace(fn: ts.Node): boolean {
     if (!parent.arguments.includes(child as ts.Expression)) return false;
     const callee = unwrap(parent.expression);
     return ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
+}
+
+/**
+ * Function nodes reached only through a NAME but still executed during
+ * collection: `TOOLS.forEach(defineSuite)` and `test.describe('g', suite)`.
+ */
+function collectionTimeByName(sf: ts.SourceFile, named: Map<string, ts.Node>): Set<ts.Node> {
+    const out = new Set<ts.Node>();
+    const visit = (n: ts.Node): void => {
+        if (ts.isCallExpression(n)) {
+            const callee = unwrap(n.expression);
+            const isSyncIterator =
+                ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
+            if (isSyncIterator) {
+                for (const arg of n.arguments) {
+                    const a = unwrap(arg);
+                    if (ts.isIdentifier(a)) {
+                        const fn = named.get(a.text);
+                        if (fn) out.add(fn);
+                    }
+                }
+            }
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return out;
 }
 
 /** Function-ish nodes that are NOT a Playwright construct's callback. */
@@ -305,12 +355,18 @@ function exportListNames(sf: ts.SourceFile): Set<string> {
  * treat as group-wide. Splitting a helper out with a default export is
  * an ordinary choice. (Review finding under the declared threat model.)
  */
-function defaultExportedFunctions(sf: ts.SourceFile): Set<ts.Node> {
+function defaultExportedFunctions(sf: ts.SourceFile, named: Map<string, ts.Node>): Set<ts.Node> {
     const fns = new Set<ts.Node>();
     for (const stmt of sf.statements) {
         if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
             const expr = unwrap(stmt.expression);
-            if (isPlainFunction(expr)) fns.add(expr);
+            if (isPlainFunction(expr)) {
+                fns.add(expr);
+            } else if (ts.isIdentifier(expr)) {
+                // `const helper = …; export default helper;`
+                const fn = named.get(expr.text);
+                if (fn) fns.add(fn);
+            }
         }
     }
     return fns;
@@ -531,25 +587,32 @@ function envIsPristine(sf: ts.SourceFile): boolean {
     // runs long afterwards; treating it as file-wide contamination
     // rejected a correct guard. (Review finding under the declared threat
     // model.)
+    const named = namedFunctions(sf);
+    const describeBodies = new Set<ts.Node>();
+    {
+        const scan = (n: ts.Node): void => {
+            if (ts.isCallExpression(n) && CALLEE_DESCRIBE.test(calleeName(n.expression) ?? '')) {
+                for (const arg of n.arguments) {
+                    const a = unwrap(arg);
+                    if (isPlainFunction(a)) describeBodies.add(a);
+                    else if (ts.isIdentifier(a)) {
+                        const fn = named.get(a.text);
+                        if (fn) describeBodies.add(fn);
+                    }
+                }
+            }
+            ts.forEachChild(n, scan);
+        };
+        scan(sf);
+    }
+    const inPlace = collectionTimeByName(sf, named);
     const insideCallback = (n: ts.Node): boolean => {
         for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
             if (!isPlainFunction(p)) continue;
-            if (runsInPlace(p)) continue;
-            // A `test.describe` body runs synchronously DURING collection,
-            // so a stray `process.env.CI = ''` left in one really does
-            // defeat a sibling guard. Only a body that runs later — a
-            // test, a hook, a step — is irrelevant. Treating every
-            // callback as deferred missed that. (Review finding under the
-            // declared threat model.)
-            const [child, parent] = skipParens(p);
-            if (
-                parent !== undefined &&
-                ts.isCallExpression(parent) &&
-                parent.arguments.includes(child as ts.Expression) &&
-                CALLEE_DESCRIBE.test(calleeName(parent.expression) ?? '')
-            ) {
-                continue;
-            }
+            if (runsInPlace(p, inPlace)) continue;
+            // A describe body runs during collection, whether it was
+            // written inline or extracted and passed by name.
+            if (describeBodies.has(p)) continue;
             return true;
         }
         return false;
@@ -857,7 +920,10 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // meaningless there and nothing in the file can be judged CI-neutral.
     const bound = boundNames(sf);
     const exportList = exportListNames(sf);
-    const defaultExported = defaultExportedFunctions(sf);
+    const named = namedFunctions(sf);
+    const defaultExported = defaultExportedFunctions(sf, named);
+    // Functions executed during collection although reached only by name.
+    const inPlaceByName = collectionTimeByName(sf, named);
     const aliases = calleeAliases(sf, bound);
     /** Dotted callee name, with a file-scope alias expanded. */
     const resolvedCallee = (expr: ts.Expression): string => {
@@ -1026,8 +1092,20 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     }
                     return false;
                 };
-                const isTitle = (a: ts.Expression): boolean => isStringish(a);
-                const isDeclaration = args.length >= 2 && isTitle(args[0]);
+                // Declaration when the FIRST argument is a title (a
+                // string), or — for a title this pass cannot resolve, such
+                // as `titles.disabled` or an imported constant — when the
+                // LAST argument is an inline body. A description is never
+                // a function, so that second test cannot misfire on the
+                // conditional form. Guessing about an unresolvable first
+                // argument instead was wrong in both directions.
+                // (Review finding under the declared threat model.)
+                const last = args.length >= 2 ? unwrap(args[args.length - 1]) : undefined;
+                const lastIsBody =
+                    last !== undefined &&
+                    (ts.isArrowFunction(last) || ts.isFunctionExpression(last));
+                const isDeclaration =
+                    args.length >= 2 && (isStringish(args[0]) || lastIsBody);
                 const form: SkipSite['form'] =
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
                 const scope = stack.length ? stack[stack.length - 1] : 'file';
@@ -1100,7 +1178,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // suite with `TOOLS.forEach(...)` is an ordinary edit and used to
         // file the skip as a closure nobody calls. (Review finding under
         // the declared threat model.)
-        if (isPlainFunction(node) && runsInPlace(node)) {
+        if (isPlainFunction(node) && runsInPlace(node, inPlaceByName)) {
             ts.forEachChild(node, visit);
             return;
         }
@@ -1737,6 +1815,44 @@ test.describe('b', () => {
 });
 `;
 
+/** Test names tidied into a const object. */
+const FIXTURE_TITLE_FROM_OBJECT = `
+import { test } from '@playwright/test';
+const titles = { disabled: 'temporarily disabled' } as const;
+test.describe('gate', () => {
+    test.skip(titles.disabled, async () => {});
+});
+`;
+
+/** An inline describe callback extracted to a named function. */
+const FIXTURE_EXTRACTED_DESCRIBE_ENV_WRITE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+function suite() {
+    process.env.CI = '';
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+}
+test.describe('gate', suite);
+`;
+
+/** A forEach callback extracted to a named function. */
+const FIXTURE_FOREACH_NAMED_CALLBACK = `
+import { test } from '@playwright/test';
+const TOOLS = [{ missing: true }];
+const defineSuite = ({ missing }: { missing: boolean }) => {
+    test.skip(missing, 'tool missing');
+    test('gate', async () => {});
+};
+TOOLS.forEach(defineSuite);
+`;
+
+/** A named helper default-exported by reference. */
+const FIXTURE_DEFAULT_EXPORT_BY_NAME = `
+import { test } from '@playwright/test';
+const skipIfMissing = (missing: boolean) => test.skip(missing, 'tool missing');
+export default skipIfMissing;
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1853,6 +1969,9 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['foreach-parameterised', FIXTURE_FOREACH_PARAMETERISED],
             ['ci-write-in-describe', FIXTURE_CI_WRITE_IN_DESCRIBE],
             ['transitive-helper', FIXTURE_TRANSITIVE_HELPER],
+            ['extracted-describe-env-write', FIXTURE_EXTRACTED_DESCRIBE_ENV_WRITE],
+            ['foreach-named-callback', FIXTURE_FOREACH_NAMED_CALLBACK],
+            ['default-export-by-name', FIXTURE_DEFAULT_EXPORT_BY_NAME],
             ['samename-helper-elsewhere', FIXTURE_SAMENAME_HELPER_ELSEWHERE],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
@@ -1890,6 +2009,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['runtime-ci-write', FIXTURE_RUNTIME_CI_WRITE],
             ['imported-process', FIXTURE_IMPORTED_PROCESS],
             ['computed-title', FIXTURE_COMPUTED_TITLE],
+            ['title-from-object', FIXTURE_TITLE_FROM_OBJECT],
             ['samename-helper-both-suites', FIXTURE_SAMENAME_HELPER_BOTH_SUITES],
             ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
             ['marker', FIXTURE_MARKER],
