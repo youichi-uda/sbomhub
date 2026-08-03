@@ -222,7 +222,9 @@ server.registerTool(
       " (理由は sbomhub_search_cve と同じ)",
     inputSchema: {
       name: z.string().min(1).describe("コンポーネント名 (例: log4j)"),
-      version: z.string().optional().describe("バージョン (任意)"),
+      // min(1) for the same reason as sbomhub_diff's version selectors: an
+      // empty string would pass the schema and then silently widen the search.
+      version: z.string().min(1).optional().describe("バージョン (任意)"),
     },
   },
   async ({ name, version }) => {
@@ -262,6 +264,12 @@ server.registerTool(
         ),
       base_version: z
         .string()
+        // An empty string is not "omitted": without min(1) it passes the
+        // advertised schema and is then falsy in the resolver, so
+        // `base_version: ""` would quietly diff the newest two SBOMs and
+        // present the result as the comparison the caller asked for
+        // (Codex R7).
+        .min(1)
         .optional()
         .describe(
           "比較元SBOMの仕様バージョン (省略時: 2番目に新しいSBOM)。" +
@@ -270,6 +278,7 @@ server.registerTool(
         ),
       target_version: z
         .string()
+        .min(1)
         .optional()
         .describe(
           "比較先SBOMの仕様バージョン (省略時: 最新SBOM)。base_version と同じ注意点"

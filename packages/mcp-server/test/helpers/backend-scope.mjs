@@ -105,8 +105,17 @@ function load() {
   // quote it ("403で拒否される"), so it is read rather than hardcoded: if the
   // backend ever changed it, the descriptions would become false and this
   // suite has to notice.
+  //
+  // Full-line comments are stripped first. A commented-out `c.JSON(
+  // http.StatusForbidden, ...)` left above a changed return would otherwise
+  // keep yielding the OLD status, and every assertion downstream would go on
+  // agreeing with a value the server no longer answers (Codex R7).
+  const executable = src
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
   const denial = /func RespondProjectScopeDenied[\s\S]{0,400}?c\.JSON\(http\.Status(\w+),/.exec(
-    src
+    executable
   );
   if (!denial || !STATUS_BY_GO_NAME[denial[1]]) {
     throw new Error(

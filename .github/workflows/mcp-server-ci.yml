@@ -51,6 +51,11 @@ on:
       # so it has to re-run the contract tests. (GitHub Actions does not
       # support YAML anchors, hence the duplicated list below.)
       - "apps/api/internal/middleware/project_scope.go"
+      # Read the same way by helpers/backend-scope.mjs: the vulnerability
+      # tools' "the scan may not have finished" caveat is required only while
+      # this lifecycle exists, so a change here can make the suite fail — it
+      # must therefore be able to run.
+      - "apps/api/internal/service/scan_tracker.go"
   push:
     branches:
       - main
@@ -61,6 +66,7 @@ on:
       - "package.json"
       - ".github/workflows/mcp-server-ci.yml"
       - "apps/api/internal/middleware/project_scope.go"
+      - "apps/api/internal/service/scan_tracker.go"
   workflow_dispatch:
 
 permissions:

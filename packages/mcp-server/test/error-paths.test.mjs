@@ -439,6 +439,12 @@ test("arguments that violate the advertised schema are rejected before any API c
     ["sbomhub_get_vulnerabilities", { project_id: PROJECT_ID, severity: "Critical" }],
     ["sbomhub_get_vulnerabilities", { project_id: PROJECT_ID, sort: "epss-desc" }],
     ["sbomhub_search_component", { name: "" }],
+    // An empty selector is not an omitted one: accepting it would silently
+    // fall back to "the newest two SBOMs" and present that as the comparison
+    // the caller asked for (Codex R7).
+    ["sbomhub_diff", { project_id: PROJECT_ID, base_version: "" }],
+    ["sbomhub_diff", { project_id: PROJECT_ID, target_version: "" }],
+    ["sbomhub_search_component", { name: "log4j", version: "" }],
     ["sbomhub_list_sboms", {}],
   ]) {
     const result = await mcp.callTool(tool, args);

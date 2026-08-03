@@ -201,7 +201,13 @@ export class ApiClient {
       id?: string,
       version?: string
     ): SbomSummary | null => {
-      if (id) {
+      // Explicit undefined checks, not truthiness: "" reaching here would
+      // otherwise fall through to the default (the newest two SBOMs) and
+      // return a comparison nobody asked for.
+      if (id !== undefined) {
+        if (id === "") {
+          throw new Error(`${side}_sbom_id was empty; omit it or pass an SBOM id`);
+        }
         const found = sboms.find((s) => s.id === id);
         if (!found) {
           throw new Error(
@@ -210,7 +216,12 @@ export class ApiClient {
         }
         return found;
       }
-      if (version) {
+      if (version !== undefined) {
+        if (version === "") {
+          throw new Error(
+            `${side}_version was empty; omit it to default to the newest SBOMs`
+          );
+        }
         const matches = sboms.filter(
           (s) => s.version.toLowerCase() === version.toLowerCase()
         );
