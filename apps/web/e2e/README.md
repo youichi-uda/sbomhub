@@ -6,6 +6,17 @@ The Next.js frontend ships two layered Playwright suites:
 |---|---|---|---|
 | Smoke | `apps/web/e2e/smoke/*.spec.ts` (3 specs) | `.github/workflows/web-e2e.yml::web-e2e` (M8 #67) | Black-box smoke against the production-shaped docker compose stack with empty Clerk key. Pins `/` -> locale redirect, `/dashboard` reachability, `/api/v1/health` contract. |
 | Full | `apps/web/e2e/*.spec.ts` | `.github/workflows/web-e2e.yml::web-e2e-full` (M10-3 #71) | Feature-level flows: projects / sbom / vex / cra / meti / audit / dashboard / search / vulnerabilities / analytics / reports / etc. Self-seeds via the API for per-spec rows; needs the populated DB seed for dashboard / list views to render. |
+| Meta | `apps/web/e2e/skip-reachability.spec.ts` | `web-e2e-full` (binding) + `.github/workflows/frontend-ci.yml` (fast copy) | **Hermetic** — no browser, no server, no database. AST-parses every spec in this directory and fails if a collection-time `test.skip(cond)` could silently disarm a gate under CI. Runs anywhere: `PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test e2e/skip-reachability.spec.ts`. |
+
+> **Why the Meta suite exists.** A `test.skip(condition)` written at
+> `test.describe` scope is evaluated at COLLECTION time, and skipping the
+> group takes its `beforeAll` with it. A "CI must not skip this" guard
+> written as a throwing `beforeAll` is therefore unreachable in exactly
+> the situation it exists for, and a CI runner missing the tool reports
+> "N skipped" on a GREEN job. `report-unmeasured-pdf.spec.ts` shipped
+> with that shape. When adding an environment-conditional skip, append
+> `&& !process.env.CI` to the condition — the meta gate enforces it, and
+> its file header documents the escape hatch and the limits.
 
 > The `web-e2e-full` job's `name:` still reads "26 specs". That string is
 > a **required status check** on `main` under branch protection, so it is
