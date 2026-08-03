@@ -11,7 +11,8 @@
 // project will draw wrong conclusions and report them as fact.
 //
 // With a project-scoped key:
-//   - sbomhub_list_projects returns exactly that one project.
+//   - sbomhub_list_projects returns exactly that one project — or nothing,
+//     when that project is not visible under the request's own tenant.
 //   - sbomhub_get_dashboard / sbomhub_search_cve / sbomhub_search_component /
 //     sbomhub_diff are REFUSED with 403. They are tenant-wide by construction:
 //     narrowing them would silently redefine what their fields mean (a
@@ -19,8 +20,18 @@
 //     present" when it is present in a project the key cannot see), so the
 //     server refuses instead of answering narrowly. The refusal surfaces here
 //     as an isError result.
-//   - The per-project tools answer for the key's own project and 404 for any
+//   - The per-project tools answer for the key's own project and 403 for any
 //     other.
+//
+// Every refusal above is the same 403, from the same place: every project-scope
+// violation goes through middleware.RespondProjectScopeDenied. It is not the
+// not-found status, deliberately — project_scope.go's "Response: 403, not the
+// M47 W1 404 sentinel" section argues that reporting a project as absent when
+// it is merely unseen makes a mis-scoped CI job indistinguishable from a
+// deleted project, which in a compliance product means silently missing
+// evidence. test/tool-inventory.test.mjs re-reads that status out of the Go
+// source and fails if the block above quotes a different one, because this
+// paragraph is a claim about someone else's code.
 //
 // Built on the current @modelcontextprotocol/sdk high-level API:
 // McpServer.registerTool with zod raw-shape input schemas. The SDK validates
@@ -65,7 +76,20 @@ function errorResult(err: unknown): CallToolResult {
   };
 }
 
-const projectIdSchema = z.string().uuid().describe("プロジェクトID (UUID)");
+// The per-project tools all take this. The refusal a project-scoped key gets
+// for someone ELSE's project is stated on the argument that causes it, because
+// that is the only place the model can connect the 403 to a cause: the tool
+// surfaces `API error 403: {"error":"forbidden"}` verbatim, which on its own is
+// indistinguishable from an entirely invalid credential.
+const projectIdSchema = z
+  .string()
+  .uuid()
+  .describe(
+    "プロジェクトID (UUID)。" +
+      "プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を" +
+      "指定すると403で拒否される (「存在しない」ではなく" +
+      "「このキーからは見えない」を意味する)"
+  );
 
 server.registerTool(
   "sbomhub_list_projects",

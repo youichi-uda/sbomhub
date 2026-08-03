@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "//test": "The tests drive dist/index.js, so they build first. Files are listed explicitly rather than globbed: `node --test <dir>` was dropped in Node 24 and a shell glob would not expand on Windows. tool-inventory.test.mjs fails if a test file is missing from this list.",
-    "test": "tsc && node --test --test-reporter=spec test/tool-contract.test.mjs test/error-paths.test.mjs"
+    "test": "tsc && node --test --test-reporter=spec test/tool-contract.test.mjs test/error-paths.test.mjs test/tool-inventory.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
