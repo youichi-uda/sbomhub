@@ -241,27 +241,52 @@ function hasExportModifier(n: ts.Node): boolean {
 }
 
 /**
+ * Names exported through an `export { a, b as c }` clause.
+ *
+ * The `export` modifier is not on the declaration in that form, and it is
+ * the shape an IDE's "move to another file" refactor usually writes.
+ * (Review finding under the declared threat model.)
+ */
+function exportListNames(sf: ts.SourceFile): Set<string> {
+    const names = new Set<string>();
+    for (const stmt of sf.statements) {
+        if (!ts.isExportDeclaration(stmt) || !stmt.exportClause) continue;
+        if (ts.isNamedExports(stmt.exportClause)) {
+            for (const el of stmt.exportClause.elements) {
+                // `export { local as public }` exports the LOCAL binding.
+                names.add((el.propertyName ?? el.name).text);
+            }
+        }
+    }
+    return names;
+}
+
+/**
  * The name a helper function is reachable by, and whether it escapes the
  * file. `function f(){}`, `const f = () => {}` and `export const f = ...`
  * all resolve; an anonymous inline callback does not.
  */
-function plainFunctionIdentity(fn: PlainFunction): { name: string | null; exported: boolean } {
+function plainFunctionIdentity(
+    fn: PlainFunction,
+    exportList: Set<string>,
+): { name: string | null; exported: boolean } {
+    const result = (name: string | null, exported: boolean) => ({
+        name,
+        exported: exported || (name !== null && exportList.has(name)),
+    });
     if (ts.isFunctionDeclaration(fn)) {
-        return { name: fn.name?.text ?? null, exported: hasExportModifier(fn) };
+        return result(fn.name?.text ?? null, hasExportModifier(fn));
     }
     const decl = fn.parent;
     if (decl && ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name)) {
         const list = decl.parent;
         const stmt = list?.parent;
-        return {
-            name: decl.name.text,
-            exported: stmt !== undefined && hasExportModifier(stmt),
-        };
+        return result(decl.name.text, stmt !== undefined && hasExportModifier(stmt));
     }
     if (ts.isFunctionExpression(fn) && fn.name) {
-        return { name: fn.name.text, exported: false };
+        return result(fn.name.text, false);
     }
-    return { name: null, exported: false };
+    return result(null, false);
 }
 
 const CALLEE_SKIP = /^test\.(skip|fixme)$/;
@@ -379,6 +404,13 @@ function literalKey(node: ts.Expression): string | null {
     return null;
 }
 
+/** The literal key being read off `process.env`, or null. */
+function envKeyOf(access: ts.Node): string | null {
+    if (ts.isPropertyAccessExpression(access)) return access.name.text;
+    if (ts.isElementAccessExpression(access)) return literalKey(access.argumentExpression);
+    return null;
+}
+
 /** True when `node` is `process.env` — dotted or bracketed. */
 function isProcessEnv(node: ts.Node): boolean {
     if (!ts.isExpression(node)) return false;
@@ -412,7 +444,7 @@ function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
 }
 
 /**
- * True when nothing in the file writes to `process.env`.
+ * True when nothing in the file writes to `process.env.CI`.
  *
  * `delete process.env.CI;` or `process.env.CI = '';` at file scope makes
  * `!process.env.CI` true under CI at collection time, so a guard written
@@ -442,7 +474,11 @@ function envIsPristine(sf: ts.SourceFile): boolean {
                 parent !== undefined &&
                 (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
                 parent.expression === child;
-            if (isMemberAccess) {
+            // ONLY a write to `CI` can break the proof. An ordinary
+            // `process.env.TZ = 'UTC'` inside a test used to invalidate the
+            // whole file and turn a correct `&& !process.env.CI` guard red.
+            // (Review finding under the declared threat model.)
+            if (isMemberAccess && envKeyOf(parent) === 'CI') {
                 const [accessChild, grand] = skipParens(parent);
                 if (grand !== undefined) {
                     if (ts.isDeleteExpression(grand)) {
@@ -688,6 +724,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // If the file rebinds a global the proof reads by name, the proof is
     // meaningless there and nothing in the file can be judged CI-neutral.
     const bound = boundNames(sf);
+    const exportList = exportListNames(sf);
     const aliases = calleeAliases(sf, bound);
     /** Dotted callee name, with a file-scope alias expanded. */
     const resolvedCallee = (expr: ts.Expression): string => {
@@ -742,7 +779,17 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         if (ts.isCallExpression(node)) {
             const callee = resolvedCallee(node.expression);
             const args = node.arguments;
-            const hasCallback = args.length >= 1 && args.some((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
+            // A `test.describe` body extracted into a named function and
+            // passed by reference is an ordinary refactor of a long block.
+            // Accepting only inline functions here left its skips filed as
+            // a closure nobody calls. (Review finding under the declared
+            // threat model.)
+            const hasCallback =
+                args.length >= 1 &&
+                args.some(
+                    (a) =>
+                        ts.isArrowFunction(a) || ts.isFunctionExpression(a) || ts.isIdentifier(a),
+                );
 
             if (CALLEE_DESCRIBE.test(callee) && hasCallback) {
                 pushed = 'describe';
@@ -770,13 +817,32 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 callScopes.set(callee, seen);
             }
 
+            // `test.describe('gate', suite)` runs `suite`'s body AS the
+            // describe body, so record it exactly like a call from there.
+            if (pushed) {
+                for (const arg of args) {
+                    if (ts.isIdentifier(arg)) {
+                        const seen = callScopes.get(arg.text) ?? new Set<SkipSite['scope']>();
+                        seen.add(pushed);
+                        callScopes.set(arg.text, seen);
+                    }
+                }
+            }
+
             if (CALLEE_SKIP.test(callee)) {
+                // `test.skip(title, body)` / `test.skip(title, details, body)`
+                // declares a statically-off test. What distinguishes it from
+                // `test.skip(condition, description)` is that a LATER argument
+                // is a function — a description is always a string. Keying off
+                // the title being a string LITERAL instead made the ordinary
+                // `const title = '…'; test.skip(title, async () => {})` look
+                // like a conditional group skip and turned `main` red.
+                // (Review finding under the declared threat model.)
                 const isDeclaration =
                     args.length >= 2 &&
-                    (ts.isStringLiteral(args[0]) ||
-                        ts.isNoSubstitutionTemplateLiteral(args[0]) ||
-                        ts.isTemplateExpression(args[0])) &&
-                    (ts.isArrowFunction(args[1]) || ts.isFunctionExpression(args[1]));
+                    args
+                        .slice(1)
+                        .some((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
                 const form: SkipSite['form'] =
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
                 const scope = stack.length ? stack[stack.length - 1] : 'file';
@@ -847,7 +913,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // fire depends on its call sites, not on this position.
         if (isPlainFunction(node)) {
             stack.push('closure');
-            closureStack.push(plainFunctionIdentity(node));
+            closureStack.push(plainFunctionIdentity(node, exportList));
             ts.forEachChild(node, visit);
             closureStack.pop();
             stack.pop();
@@ -1260,6 +1326,51 @@ test.describe('gate', () => {
 });
 `;
 
+/** A long describe body extracted into a named function, passed by name. */
+const FIXTURE_NAMED_DESCRIBE_CALLBACK = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+function suite() {
+    test.skip(!HAS_TOOL, 'tool missing');
+    test('gate', async () => {});
+}
+test.describe('gate', suite);
+`;
+
+/** The `export { x }` clause form an IDE "move to file" refactor writes. */
+const FIXTURE_EXPORT_CLAUSE_HELPER = `
+import { test } from '@playwright/test';
+const skipIfMissing = (missing: boolean) => test.skip(missing, 'tool missing');
+export { skipIfMissing };
+`;
+
+/**
+ * A declaration-form skip whose TITLE is a constant. Not a condition at
+ * all; reporting it turned `main` red for a plain constant extraction.
+ */
+const FIXTURE_DECLARATION_TITLE_CONST = `
+import { test } from '@playwright/test';
+const title = 'temporarily disabled';
+test.describe('gate', () => {
+    test.skip(title, async () => {});
+});
+`;
+
+/**
+ * Writing an UNRELATED env var inside a test must not invalidate the
+ * file's CI proof. This was a false positive on a plain date test.
+ */
+const FIXTURE_UNRELATED_ENV_WRITE = `
+import { test } from '@playwright/test';
+const MISSING = true;
+test.describe('gate', () => {
+    test.skip(MISSING && !process.env.CI, 'tool missing');
+    test('date rendering', async () => {
+        process.env.TZ = 'UTC';
+    });
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1370,6 +1481,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['exported-helper', FIXTURE_EXPORTED_HELPER],
             ['helper-called-at-describe', FIXTURE_HELPER_CALLED_AT_DESCRIBE],
             ['callback-unguarded', FIXTURE_CALLBACK_UNGUARDED],
+            ['named-describe-callback', FIXTURE_NAMED_DESCRIBE_CALLBACK],
+            ['export-clause-helper', FIXTURE_EXPORT_CLAUSE_HELPER],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
@@ -1399,6 +1512,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['env-destructured-read', FIXTURE_ENV_DESTRUCTURED_READ],
             ['callback-guarded', FIXTURE_CALLBACK_GUARDED],
             ['callback-block-return', FIXTURE_CALLBACK_BLOCK_RETURN],
+            ['declaration-title-const', FIXTURE_DECLARATION_TITLE_CONST],
+            ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
             ['marker', FIXTURE_MARKER],
             ['marker-trailing', FIXTURE_MARKER_TRAILING],
         ] as const) {
@@ -1425,8 +1540,14 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         const e2eRoot = dirname(test.info().file);
         const files = specFiles(e2eRoot);
 
-        // Anti-vacuity: a broken walk must not read as "all clean".
-        expect(files.length, `expected to find e2e specs under ${e2eRoot}`).toBeGreaterThan(20);
+        // Anti-vacuity, without encoding a spec count: this very file must
+        // be among the results. A broken walk cannot satisfy that, and
+        // consolidating or deleting specs cannot break it. An earlier
+        // `> 20` floor would have turned `main` red on an ordinary spec
+        // merge. (Review finding under the declared threat model.)
+        expect(files, `the walk of ${e2eRoot} must include this spec itself`).toContain(
+            test.info().file,
+        );
 
         const sites = files.flatMap((f) =>
             analyzeSource(relative(e2eRoot, f), readFileSync(f, 'utf8')),

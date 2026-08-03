@@ -531,8 +531,19 @@ func TestRealRepositoryParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collectJobs: %v", err)
 	}
-	if countFiles(jobs) < 20 {
-		t.Fatalf("only %d workflow files parsed — the scanner has drifted", countFiles(jobs))
+	// Anti-vacuity without a magic count: every workflow file on disk must
+	// have produced at least one job. A hard `>= 20` floor would have gone
+	// red on an ordinary workflow consolidation. (Review finding under the
+	// declared threat model.)
+	onDisk, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk) == 0 {
+		t.Fatal("no workflow files found on disk")
+	}
+	if got := countFiles(jobs); got != len(onDisk) {
+		t.Fatalf("parsed jobs from %d files, but %d workflow files exist", got, len(onDisk))
 	}
 	for _, j := range jobs {
 		if j.checkName == "" {
@@ -665,5 +676,25 @@ jobs:
 	}
 	if !matchesJob("install.sh must succeed on windows-latest", jobs[0]) {
 		t.Error("an include-only leg must still be accepted (lenient fallback)")
+	}
+}
+
+// `jobs: # comment` is valid YAML and must not read as "no jobs".
+func TestParseWorkflow_JobsKeyWithComment(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs: # repository gates
+  build:
+    name: build-and-test
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].checkName != "build-and-test" {
+		t.Fatalf("got %+v", jobs)
 	}
 }

@@ -93,6 +93,7 @@ var (
 	// wrong check name recorded with no error — see parseWorkflow.
 	reQuotedNameKey = regexp.MustCompile(`^    ['"]name['"]\s*:`)
 	reTopKey        = regexp.MustCompile(`^[A-Za-z_'"]`)
+	reJobsOpen      = regexp.MustCompile(`^jobs:\s*(#.*)?$`)
 
 	// `strategy:` / `      matrix:` open the block; `        os:` is a key
 	// inside it, `          - ubuntu-latest` an item, `        os: [a, b]`
@@ -154,7 +155,11 @@ func parseWorkflow(base, body string) ([]job, error) {
 	for _, raw := range lines {
 		line := strings.TrimRight(raw, " \t\r")
 		if !inJobs {
-			if line == "jobs:" {
+			// `jobs: # repository gates` is valid YAML. Requiring an exact
+			// `jobs:` made an ordinary comment turn the whole file into
+			// "no jobs found" — a hard error on a correct workflow.
+			// (Review finding under the declared threat model.)
+			if reJobsOpen.MatchString(line) {
 				inJobs = true
 			}
 			continue
