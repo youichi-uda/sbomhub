@@ -54,6 +54,10 @@ on:
       - "install.sh"
       # install.sh sources this at runtime (Codex R2 Low).
       - "docker/scripts/_env_helpers.sh"
+      # Compose loads this automatically for every command in this job, so it
+      # can change the stack under test without touching anything else
+      # (Codex R3 Low).
+      - "docker-compose.override.yml"
       - ".github/workflows/project-scope-e2e.yml"
   pull_request:
     paths:
@@ -67,6 +71,10 @@ on:
       - "install.sh"
       # install.sh sources this at runtime (Codex R2 Low).
       - "docker/scripts/_env_helpers.sh"
+      # Compose loads this automatically for every command in this job, so it
+      # can change the stack under test without touching anything else
+      # (Codex R3 Low).
+      - "docker-compose.override.yml"
       - ".github/workflows/project-scope-e2e.yml"
   workflow_dispatch:
 

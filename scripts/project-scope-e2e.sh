@@ -41,12 +41,17 @@
 # THE ROUTE MATRIX IS DERIVED, NOT TRANSCRIBED
 #
 # The route list and each route's classification are parsed out of
-# project_scope.go itself (see derive_route_table). Copying the table into this
-# script would mean a route added there is silently untested here — exactly the
-# failure mode the table's own doc comment says default-deny exists to prevent.
-# Structural guards below fail the run if the parse degrades, if a class is
-# unknown, or if a route uses a path parameter this script has no substitution
-# for (i.e. the request recipe would be guessing).
+# project_scope.go itself. Copying the table into this script would mean a route
+# added there is silently untested here — exactly the failure mode the table's
+# own doc comment says default-deny exists to prevent.
+#
+# Six structural guards make that derivation trustworthy, i.e. make "the source
+# text" and "the runtime map" the same thing: the run fails if the parse finds
+# nothing (1), if two independent occurrence counts disagree with it (2), if a
+# class is unknown (3), if a route uses a path parameter with no substitution
+# (4), if a route joins one of the three classes the middleware merely ADMITS
+# without getting its own route-specific assertion (5), or if the map stops
+# being a closed literal of literal pairs (6).
 #
 # WHY grep AND NOT `go run` A HELPER THAT CALLS APIKeyRouteScopeKeys()
 #
@@ -219,9 +224,15 @@ request() {
 # is checked once, on the reference, so a change in the envelope is reported as
 # a shape failure rather than 40 identical diff failures.
 REFUSAL_REF="${WORK}/refusal.reference"
+REFUSAL_REF_TAKEN=0
 assert_refusal_body() {
   local file="$1" label="$2"
-  if [ ! -s "${REFUSAL_REF}" ]; then
+  # A flag, not `[ -s "${REFUSAL_REF}" ]`: a 403 whose body happened to be EMPTY
+  # would leave a zero-byte reference, and every later call would re-take it
+  # instead of comparing — i.e. the byte-identity check would quietly stop
+  # checking anything.
+  if [ "${REFUSAL_REF_TAKEN}" -eq 0 ]; then
+    REFUSAL_REF_TAKEN=1
     cp "${file}" "${REFUSAL_REF}"
     local keys err
     keys="$(jq -r 'keys | join(",")' <"${file}" 2>/dev/null || echo "<not json>")"
@@ -300,6 +311,36 @@ MAP_RULE_COUNT=$(match_in_map '\{scope[A-Za-z]+' | wc -l)
 if [ "${ROUTE_COUNT}" -ne "${MAP_KEY_COUNT}" ] || [ "${ROUTE_COUNT}" -ne "${MAP_RULE_COUNT}" ]; then
   die "derived ${ROUTE_COUNT} routes, but the apiKeyRouteScope literal has ${MAP_KEY_COUNT} key literal(s) and ${MAP_RULE_COUNT} rule literal(s) — an entry is written in a shape this script does not parse and would go UNTESTED"
 fi
+
+# Structural guard 6: the map must be a CLOSED LITERAL of literal key/value
+# pairs, so that "what the source text says" and "what the runtime map holds"
+# cannot diverge (Codex R3 High). Guard 2 already catches a non-literal on one
+# side of a pair — `"GET /x": ruleVar` makes keys > rules, `routeConst: {scope…}`
+# makes rules > keys. The two cases left are:
+#
+#   (a) BOTH sides non-literal (`routeConst: ruleVar`) — invisible to every
+#       count, so all three still agree. Caught by 6a: inside the map body a key
+#       must be a string literal, never a bare identifier followed by `:`.
+#   (b) entries added after the literal (init(), an index assignment, a copy
+#       from another map). Caught by 6b.
+#
+# Without these two, a route could exist at runtime, never be driven here, and
+# the run would still report full coverage.
+#
+# 6a — no identifier-shaped key inside the map body. Continuation lines of a
+# `why` string start with `"`, and a kind on its own line (`scopeTenantWide,`)
+# is followed by a comma, not a colon, so neither matches.
+BAD_KEY=$( { grep -nE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*:' "${WORK}/scope-map-body.go" || true; } | head -3)
+[ -z "${BAD_KEY}" ] || die "apiKeyRouteScope contains a non-literal (identifier) key, which this script cannot see and would therefore leave UNTESTED: ${BAD_KEY}"
+
+# 6b — the map is declared exactly once and never mutated afterwards. Anything
+# that adds entries at run time puts routes in the table that no amount of
+# source parsing can find.
+SCOPE_PKG_DIR="$(dirname "${SCOPE_TABLE_SRC}")"
+DECL_COUNT=$( { grep -rhcE '^var apiKeyRouteScope = map\[string\]projectScopeRule\{' "${SCOPE_TABLE_SRC}" || true; } )
+[ "${DECL_COUNT}" = "1" ] || die "expected exactly one 'var apiKeyRouteScope = map[string]projectScopeRule{' declaration, found ${DECL_COUNT}"
+MUTATIONS=$( { grep -rnE 'apiKeyRouteScope[[:space:]]*\[[^]]*\][[:space:]]*=|maps\.Copy\([[:space:]]*apiKeyRouteScope|delete\([[:space:]]*apiKeyRouteScope' "${SCOPE_PKG_DIR}" --include='*.go' 2>/dev/null || true; } | grep -v '_test\.go:' || true)
+[ -z "${MUTATIONS}" ] || die "apiKeyRouteScope is mutated outside its literal, so the runtime table cannot be derived from the source text: ${MUTATIONS}"
 
 # Structural guard 3: every class must be one this script knows how to judge.
 # Structural guard 4: every path parameter must be one request() substitutes.
