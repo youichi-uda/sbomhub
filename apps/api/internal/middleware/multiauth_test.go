@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -178,6 +179,213 @@ func TestAPIKeyCredentialDuplicateHeaders(t *testing.T) {
 			}
 			if raw != tc.wantRaw {
 				t.Errorf("raw = %q, want %q (values %q)", raw, tc.wantRaw, tc.values)
+			}
+		})
+	}
+}
+
+// TestAPIKeyCredentialDuplicateAuthorization — Codex R2 (Medium).
+//
+// Round 1 fixed the duplicate-header discard for X-API-Key and left
+// `Authorization` on Header.Get, so the identical shape survived on the other
+// channel:
+//
+//	Authorization:
+//	Authorization: Bearer sbh_<a scoped key>
+//
+// read as absent, fell through to the self-hosted branch, and served the request
+// as the default tenant's Owner with the key's project scope discarded.
+func TestAPIKeyCredentialDuplicateAuthorization(t *testing.T) {
+	const keyA = "sbh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const keyB = "sbh_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.e30.x"
+
+	cases := []struct {
+		name          string
+		values        []string
+		wantRaw       string
+		wantPresented bool
+	}{
+		{
+			name:          "an empty value before a real key does not hide it",
+			values:        []string{"", BearerPrefix + keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			// A Clerk JWT is not an API-key candidate, so it can neither
+			// authenticate here nor make the pair look conflicting — the key is
+			// still found, and the JWT still means nothing on this path.
+			name:          "a Clerk JWT alongside a key is not a conflict",
+			values:        []string{BearerPrefix + jwt, BearerPrefix + keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			name:          "two different keys are presented but unresolvable",
+			values:        []string{BearerPrefix + keyA, BearerPrefix + keyB},
+			wantRaw:       "",
+			wantPresented: true,
+		},
+		{
+			name:          "the same key repeated is one credential",
+			values:        []string{BearerPrefix + keyA, BearerPrefix + keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			// Only Clerk JWTs: no API-key credential was presented, so the
+			// request belongs to the Clerk path. That path reads the first
+			// value and answers 401 on an empty one, which is fail-closed
+			// already — deciding it here would take the web UI's session
+			// handling away from Auth().
+			name:          "duplicate Clerk JWTs are left to the Clerk path",
+			values:        []string{"", BearerPrefix + jwt},
+			wantRaw:       "",
+			wantPresented: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/x/sbom", nil)
+			for _, v := range tc.values {
+				req.Header.Add("Authorization", v)
+			}
+			raw, presented := apiKeyCredential(req)
+			if presented != tc.wantPresented {
+				t.Fatalf("presented = %v, want %v (values %q)", presented, tc.wantPresented, tc.values)
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("raw = %q, want %q (values %q)", raw, tc.wantRaw, tc.values)
+			}
+		})
+	}
+}
+
+// TestPickSingleCredentialStopsAtTheFirstConflict — Codex R2 (Medium, DoS).
+//
+// The first implementation compared each value against every value seen so far,
+// and kept going after ambiguity was already established. Go admits roughly a
+// MiB of request headers by default, which is tens of thousands of short
+// distinct `X-API-Key` lines — quadratic work on an UNAUTHENTICATED path.
+//
+// Asserted structurally rather than by timing: the extractor counts how many
+// values were inspected, and the answer is fixed once two DIFFERENT values have
+// been seen, so nothing after the second may be touched. A timing assertion
+// would be flaky on a loaded CI runner and would not say what is wrong.
+func TestPickSingleCredentialStopsAtTheFirstConflict(t *testing.T) {
+	values := make([]string, 10_000)
+	for i := range values {
+		values[i] = "sbh_" + strings.Repeat("x", i%16) + string(rune('a'+i%26))
+	}
+
+	inspected := 0
+	counting := func(v string) (string, bool) {
+		inspected++
+		return v, true
+	}
+
+	raw, present, ambiguous := pickSingleCredential(values, counting)
+	if !ambiguous || present != true || raw != "" {
+		t.Fatalf("raw=%q present=%v ambiguous=%v, want ambiguous with no value",
+			raw, present, ambiguous)
+	}
+	if inspected > 2 {
+		t.Errorf("inspected %d of %d values before answering; the answer cannot change after "+
+			"the second DISTINCT value, so a longer scan is unbounded work an unauthenticated "+
+			"caller controls", inspected, len(values))
+	}
+
+	// The other direction: identical values are not a conflict, so the whole
+	// list has to be read before "no conflict" can be claimed. Without this the
+	// early exit above could be implemented by simply stopping at 2 values.
+	same := make([]string, 500)
+	for i := range same {
+		same[i] = "sbh_same"
+	}
+	inspected = 0
+	raw, present, ambiguous = pickSingleCredential(same, counting)
+	if ambiguous || !present || raw != "sbh_same" {
+		t.Fatalf("raw=%q present=%v ambiguous=%v, want the repeated value with no conflict",
+			raw, present, ambiguous)
+	}
+	if inspected != len(same) {
+		t.Errorf("inspected %d of %d identical values; all of them must be checked before "+
+			"'no conflict' is asserted", inspected, len(same))
+	}
+}
+
+// TestPresentedAPIKeyMatchesMultiAuth — Codex R2 (Low).
+//
+// APIKeyAuth (/api/v1/{cli,mcp}/*) and MultiAuth (the canonical routes) resolve
+// the credential from the same request. When only MultiAuth read duplicate
+// values, one request could be TWO principals depending on which route family it
+// hit: an empty first X-API-Key followed by a real one authenticated as that key
+// on /api/v1/projects/*, while /api/v1/mcp/* skipped it and authenticated the
+// Bearer key instead.
+//
+// The two are not required to be identical — APIKeyAuth accepts any Bearer value
+// because its groups have no Clerk path — but they must never resolve the same
+// request to DIFFERENT keys.
+func TestPresentedAPIKeyMatchesMultiAuth(t *testing.T) {
+	const keyA = "sbh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const keyB = "sbh_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	cases := []struct {
+		name    string
+		build   func(h http.Header)
+		wantRaw string // "" means: refused or absent on both sides
+	}{
+		{
+			name: "empty X-API-Key, real X-API-Key, and a different Bearer key",
+			build: func(h http.Header) {
+				h.Add(APIKeyHeader, "")
+				h.Add(APIKeyHeader, keyA)
+				h.Set("Authorization", BearerPrefix+keyB)
+			},
+			wantRaw: keyA,
+		},
+		{
+			name: "conflicting X-API-Key values with a Bearer key present",
+			build: func(h http.Header) {
+				h.Add(APIKeyHeader, keyA)
+				h.Add(APIKeyHeader, keyB)
+				h.Set("Authorization", BearerPrefix+keyA)
+			},
+			wantRaw: "",
+		},
+		{
+			name: "duplicate Authorization with an empty first value",
+			build: func(h http.Header) {
+				h.Add("Authorization", "")
+				h.Add("Authorization", BearerPrefix+keyA)
+			},
+			wantRaw: keyA,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/x/sbom", nil)
+			tc.build(req.Header)
+
+			multiRaw, multiPresented := apiKeyCredential(req)
+			apiRaw, apiPresent, apiAmbiguous := presentedAPIKey(req)
+
+			if !multiPresented {
+				t.Fatalf("MultiAuth saw no credential at all")
+			}
+			// Both refuse, or both pick the same string. Anything else is one
+			// request with two identities.
+			gotMulti := multiRaw
+			gotAPI := apiRaw
+			if apiAmbiguous || !apiPresent {
+				gotAPI = ""
+			}
+			if gotMulti != tc.wantRaw || gotAPI != tc.wantRaw {
+				t.Errorf("MultiAuth resolved %q and APIKeyAuth resolved %q; both must be %q",
+					gotMulti, gotAPI, tc.wantRaw)
 			}
 		})
 	}

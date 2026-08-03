@@ -3,7 +3,6 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
@@ -17,22 +16,40 @@ const (
 	ContextKeyAPI = "api_key"
 )
 
+// presentedAPIKey resolves the credential an API-key-only route group was given.
+//
+// Codex R2 (Low): this used to read `Header.Get`, which returns only the FIRST
+// value of a repeated header, while MultiAuth (after Codex R1) reads them all.
+// The two then disagreed about the same request — an empty first `X-API-Key`
+// followed by a real one authenticated on the canonical routes and fell back to
+// `Authorization` here, so one request could be two different principals
+// depending on which route family it hit. Both now share pickSingleCredential.
+//
+// The Authorization extractor is bearerAny rather than bearerAPIKey: these route
+// groups have no Clerk path, so every Bearer value is meant as an API key,
+// including one that predates the `sbh_` prefix. Ambiguity (two DIFFERENT
+// values under one header) is refused rather than resolved by position.
+func presentedAPIKey(r *http.Request) (raw string, present, ambiguous bool) {
+	if v, ok, amb := pickSingleCredential(r.Header.Values(APIKeyHeader), asIs); amb || ok {
+		return v, ok, amb
+	}
+	return pickSingleCredential(r.Header.Values("Authorization"), bearerAny)
+}
+
 // APIKeyAuth returns a middleware that validates API keys
 func APIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Get API key from header
-			apiKey := c.Request().Header.Get(APIKeyHeader)
+			apiKey, present, ambiguous := presentedAPIKey(c.Request())
 
-			// Also check Authorization header
-			if apiKey == "" {
-				auth := c.Request().Header.Get("Authorization")
-				if strings.HasPrefix(auth, BearerPrefix) {
-					apiKey = strings.TrimPrefix(auth, BearerPrefix)
-				}
+			if ambiguous {
+				slog.Warn("apikey: request carried conflicting API-key headers")
+				return c.JSON(http.StatusUnauthorized, map[string]string{
+					"error": "invalid API key",
+				})
 			}
 
-			if apiKey == "" {
+			if !present {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error": "API key required. Use X-API-Key header or Authorization: Bearer <key>",
 				})
@@ -72,18 +89,19 @@ func APIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Get API key from header
-			apiKey := c.Request().Header.Get(APIKeyHeader)
+			apiKey, present, ambiguous := presentedAPIKey(c.Request())
 
-			// Also check Authorization header
-			if apiKey == "" {
-				auth := c.Request().Header.Get("Authorization")
-				if strings.HasPrefix(auth, BearerPrefix) {
-					apiKey = strings.TrimPrefix(auth, BearerPrefix)
-				}
+			// Optional does not mean "ignorable": a credential the caller
+			// supplied and this middleware cannot resolve must end the request,
+			// not be dropped so the route runs anonymously (Codex R2 Low).
+			if ambiguous {
+				slog.Warn("apikey: request carried conflicting API-key headers")
+				return c.JSON(http.StatusUnauthorized, map[string]string{
+					"error": "invalid API key",
+				})
 			}
 
-			if apiKey != "" {
+			if present {
 				// Validate the key if present
 				key, err := keyService.ValidateKey(c.Request().Context(), apiKey)
 				if err != nil {

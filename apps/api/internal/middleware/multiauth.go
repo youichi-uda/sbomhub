@@ -122,71 +122,123 @@ func MultiAuth(
 // Precedence is X-API-Key first, then Authorization — again APIKeyAuth's order.
 // The two middlewares must resolve the same principal from the same request, or
 // one credential pair would be one identity on /api/v1/mcp/* and another on
-// /api/v1/projects/*.
+// /api/v1/projects/*. Both now go through pickSingleCredential, so they agree
+// about duplicates as well as about precedence.
 //
-// # Duplicate headers (Codex R1, Medium)
+// # The two channels, and why they are not symmetric
 //
-// HTTP allows a field name to repeat, and Go keeps every value —
-// `Header.Get` returns only the FIRST. A first implementation used Get, so
+//   - X-API-Key is an API-key-only header. Any non-empty value is an attempt,
+//     `sbh_`-shaped or not, exactly as APIKeyAuth treats it.
+//   - Authorization also carries Clerk session JWTs, so only the `sbh_` prefix
+//     marks a Bearer value as an API key. Widening that would route every web
+//     UI request into the API-key table. A duplicate Authorization whose
+//     API-key candidates conflict is refused here; one whose values are all
+//     Clerk JWTs is left to the Clerk path, which reads the first value and
+//     answers 401 on an empty one — fail-closed already.
+//
+// Outcomes:
+//
+//	(v,  true)   exactly one distinct credential — use it
+//	("", true)   a credential was presented but there is no single answer to
+//	             "which one". MultiAuth answers 401 (see pickSingleCredential).
+//	("", false)  no credential at all
+func apiKeyCredential(r *http.Request) (raw string, presented bool) {
+	if v, present, ambiguous := pickSingleCredential(
+		r.Header.Values(APIKeyHeader), asIs,
+	); ambiguous {
+		return "", true
+	} else if present {
+		return v, true
+	}
+
+	if v, present, ambiguous := pickSingleCredential(
+		r.Header.Values("Authorization"), bearerAPIKey,
+	); ambiguous {
+		return "", true
+	} else if present {
+		return v, true
+	}
+
+	return "", false
+}
+
+// pickSingleCredential collapses the values a request carried under ONE header
+// name into a single decision.
+//
+// # Why every value is read (Codex R1 Medium, R2 Medium)
+//
+// HTTP lets a field name repeat and Go keeps every value, but `Header.Get`
+// returns only the FIRST. Reading a credential with Get therefore made
 //
 //	X-API-Key:
 //	X-API-Key: sbh_<a real key>
 //
-// read as "no credential" and fell through to the Clerk / self-hosted path,
-// reinstating the exact discard this function exists to remove. The shape is
-// reachable whenever something downstream of a client appends the key (a proxy
-// injecting a service credential after a client-controlled empty header).
+// look like no credential at all — the request fell through to the Clerk /
+// self-hosted path and, in `anonymous` self-host, was served as the DEFAULT
+// tenant's Owner. One empty header, prepended, silently strips a project-scoped
+// key of its scope. The identical shape exists on `Authorization`, which is why
+// both channels come through here.
 //
-// So every value is inspected, and the outcomes are three, not two:
+// # Why two different values are a refusal, not a choice
 //
-//	(v,  true)   exactly one distinct non-empty value — use it
-//	("", true)   two or more DIFFERENT non-empty values — a credential was
-//	             presented but there is no single answer to "which one".
-//	             MultiAuth answers 401; choosing either would be a guess, and
-//	             choosing the first is how the defect above worked.
-//	("", false)  no value, or only empty ones — no credential at all
+// Answering with either one is a guess about which the caller meant, and "take
+// the first" is exactly the rule that produced the defect above. Repeats of the
+// SAME value are not ambiguous — that is one credential sent twice, which says
+// nothing conflicting.
 //
-// Repeats of the SAME value are not ambiguous and are accepted: that is one
-// credential sent twice, which says nothing conflicting.
+// # Cost (Codex R2 Medium)
 //
-// NOTE: APIKeyAuth / OptionalAPIKeyAuth in apikey.go still use Header.Get and
-// therefore still read only the first value. Recorded rather than fixed here
-// because those middlewares are outside this change's scope; the consequence
-// there is the milder one (a discarded key yields 401 from the empty-value
-// branch, not a fall-through to a default identity, because those groups have
-// no anonymous path).
-func apiKeyCredential(r *http.Request) (raw string, presented bool) {
-	var distinct []string
-	for _, v := range r.Header.Values(APIKeyHeader) {
-		if v == "" {
+// One pass, no inner loop, and it returns the moment a second DISTINCT value
+// appears: the answer cannot change after that. A request stuffing thousands of
+// distinct header lines (Go admits ~1 MiB of headers by default) therefore costs
+// O(n) comparisons rather than O(n^2), on an UNAUTHENTICATED path.
+//
+// `extract` maps one raw header value to a credential candidate, and reports
+// whether the value is a candidate at all — that is what keeps Clerk JWTs in
+// Authorization from being counted as conflicting API keys.
+func pickSingleCredential(
+	values []string, extract func(string) (string, bool),
+) (raw string, present, ambiguous bool) {
+	for _, v := range values {
+		candidate, ok := extract(v)
+		if !ok || candidate == "" {
 			continue
 		}
-		seen := false
-		for _, d := range distinct {
-			if d == v {
-				seen = true
-				break
-			}
+		if !present {
+			raw, present = candidate, true
+			continue
 		}
-		if !seen {
-			distinct = append(distinct, v)
+		if candidate != raw {
+			return "", true, true
 		}
 	}
-	switch len(distinct) {
-	case 0:
-		// No API-key header worth reading; fall through to Authorization.
-	case 1:
-		return distinct[0], true
-	default:
-		return "", true
-	}
+	return raw, present, false
+}
 
-	authHeader := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(authHeader, BearerPrefix)
-	if token != authHeader && strings.HasPrefix(token, apiKeyPrefix) {
-		return token, true
+// asIs: the whole header value is the credential (X-API-Key).
+func asIs(v string) (string, bool) { return v, true }
+
+// bearerAPIKey: an `Authorization: Bearer sbh_...` value, and nothing else.
+// A Clerk JWT is not a candidate, so it neither authenticates here nor makes a
+// duplicate look ambiguous.
+func bearerAPIKey(v string) (string, bool) {
+	token := strings.TrimPrefix(v, BearerPrefix)
+	if token == v || !strings.HasPrefix(token, apiKeyPrefix) {
+		return "", false
 	}
-	return "", false
+	return token, true
+}
+
+// bearerAny: an `Authorization: Bearer <anything>` value. APIKeyAuth's route
+// groups have no Clerk path, so every Bearer value there is meant as an API
+// key — including one that predates the `sbh_` prefix. Kept separate from
+// bearerAPIKey so tightening one does not silently tighten the other.
+func bearerAny(v string) (string, bool) {
+	token := strings.TrimPrefix(v, BearerPrefix)
+	if token == v {
+		return "", false
+	}
+	return token, true
 }
 
 // handleAPIKeyAuth mirrors the APIKeyAuth + APIKeyTenant pair as a single
