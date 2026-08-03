@@ -288,7 +288,11 @@ func matchesJob(required string, j job) bool {
 	if required == j.checkName {
 		return true
 	}
-	if i := strings.Index(j.checkName, "${{"); i >= 0 {
+	if i := strings.Index(j.checkName, "${{"); i > 0 {
+		// `i > 0`, not `i >= 0`: a name that STARTS with an expression has
+		// an empty literal prefix, and `strings.HasPrefix(x, "")` is true
+		// for every x, so such a job would vouch for every required check
+		// in the snapshot and hide all of them. (Review finding, High.)
 		return strings.HasPrefix(required, j.checkName[:i])
 	}
 	return false

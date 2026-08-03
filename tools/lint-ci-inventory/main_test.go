@@ -244,6 +244,11 @@ func TestMatchesJob(t *testing.T) {
 	plain := job{file: "a.yml", id: "j", checkName: "static gate (hermetic)"}
 	matrix := job{file: "b.yml", id: "k", checkName: "install.sh must succeed on ${{ matrix.os }}"}
 
+	// A name that STARTS with an expression has an empty literal prefix.
+	// HasPrefix(x, "") is true for every x, so without the `i > 0` guard
+	// this job would vouch for every required check in the snapshot.
+	leading := job{file: "c.yml", id: "l", checkName: "${{ matrix.os }} build"}
+
 	cases := []struct {
 		required string
 		j        job
@@ -254,6 +259,8 @@ func TestMatchesJob(t *testing.T) {
 		{"install.sh must succeed on ubuntu-latest", matrix, true},
 		{"install.sh must succeed on macos-latest", matrix, true},
 		{"install.sh must fail on macos-latest", matrix, false},
+		{"anything at all", leading, false},
+		{"${{ matrix.os }} build", leading, true},
 	}
 	for _, c := range cases {
 		if got := matchesJob(c.required, c.j); got != c.want {

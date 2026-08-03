@@ -141,11 +141,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          # Declared empty first so `set -u` cannot trip on an unset array
-          # if the glob matches nothing.
+          # `find`, not a `tools/*/go.mod` glob: the glob misses a nested
+          # module such as tools/security/linter/go.mod, and the other
+          # modules would keep the anti-vacuity check below green while
+          # the nested one was never built. (Review finding, High.)
+          # testdata/ holds scripted go.mod FIXTURES for
+          # lint-toolchain-alignment, not real modules — `go build` in one
+          # would fail on a tree that is deliberately inconsistent.
+          #
+          # Declared empty first so `set -u` cannot trip on an unset array.
           modules=()
-          modules=(tools/*/go.mod)
+          while IFS= read -r m; do
+            modules+=("$m")
+          done < <(find tools -name go.mod -not -path '*/testdata/*' | sort)
           if [ ${#modules[@]} -eq 0 ]; then
             echo "::error::no modules found under tools/ — refusing to report an empty scan as clean"
             exit 1

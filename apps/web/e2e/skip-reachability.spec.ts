@@ -267,62 +267,101 @@ function assertsCiIsOff(node: ts.Expression, globalsIntact = true): boolean {
     return false;
 }
 
-/** True when `expr` is `process.env` (however it is spelled). */
+/** The literal key of a `x['k']` access, or null. */
+function literalKey(node: ts.Expression): string | null {
+    const k = unwrap(node);
+    if (ts.isStringLiteral(k) || ts.isNoSubstitutionTemplateLiteral(k)) return k.text;
+    return null;
+}
+
+/** True when `node` is `process.env` — dotted or bracketed. */
 function isProcessEnv(node: ts.Node): boolean {
     if (!ts.isExpression(node)) return false;
     const cur = unwrap(node);
-    return (
-        ts.isPropertyAccessExpression(cur) &&
-        cur.name.text === 'env' &&
-        ts.isIdentifier(cur.expression) &&
-        cur.expression.text === 'process'
-    );
-}
-
-/** True when the node reads through `process.env`, at any depth. */
-function rootedAtProcessEnv(node: ts.Node): boolean {
-    if (!ts.isExpression(node)) return false;
-    const cur = unwrap(node);
-    if (isProcessEnv(cur)) return true;
-    if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
-        return rootedAtProcessEnv(cur.expression);
+    const isProcess = (e: ts.Expression): boolean => {
+        const c = unwrap(e);
+        return ts.isIdentifier(c) && c.text === 'process';
+    };
+    if (ts.isPropertyAccessExpression(cur)) {
+        return cur.name.text === 'env' && isProcess(cur.expression);
+    }
+    if (ts.isElementAccessExpression(cur)) {
+        return literalKey(cur.argumentExpression) === 'env' && isProcess(cur.expression);
     }
     return false;
+}
+
+/** Climb out of any parentheses, returning [outermost child, its parent]. */
+function skipParens(node: ts.Node): [ts.Node, ts.Node | undefined] {
+    let child = node;
+    let parent = node.parent as ts.Node | undefined;
+    while (parent && ts.isParenthesizedExpression(parent)) {
+        child = parent;
+        parent = parent.parent;
+    }
+    return [child, parent];
+}
+
+function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+    return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
 }
 
 /**
  * True when nothing in the file can have changed `process.env`.
  *
- * Checking only for a rebound `process` identifier was not enough: a
- * plain `delete process.env.CI;` (or `process.env.CI = ''`) at file scope
- * makes `!process.env.CI` true under CI at collection time while the
- * binding check still says the global is intact. (Review finding, High.)
+ * Checking only for a rebound `process` identifier was not enough: a bare
+ * `delete process.env.CI;` at file scope makes `!process.env.CI` true
+ * under CI at collection time while the binding check still says the
+ * global is intact. Nor is it enough to look for writes spelled through
+ * `process.env` directly — `const env = process.env; env.CI = '';` is the
+ * same mutation one alias away. (Review findings, High.)
  *
- * Deliberately over-approximating — handing `process.env` to ANY call
- * counts as a possible mutation, because `Object.assign(process.env, …)`
- * is indistinguishable from a read at this level. Nothing in this suite
- * touches process.env, so the over-approximation costs nothing.
+ * So the rule is inverted and deliberately over-approximating: the ONLY
+ * use of `process.env` that leaves it pristine is reading a single member
+ * off it (`process.env.CI`, `process.env['CI']`). Every other appearance
+ * — aliasing it, spreading it, destructuring it, passing it to a call
+ * (`Object.assign(process.env, …)`), assigning to a member, deleting a
+ * member — marks the file as one where the CI proof means nothing.
+ * Nothing in this suite does any of that, so the over-approximation
+ * costs nothing here.
  */
 function envIsPristine(sf: ts.SourceFile): boolean {
     let mutated = false;
     const visit = (n: ts.Node): void => {
         if (mutated) return;
-        if (
-            ts.isBinaryExpression(n) &&
-            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
-            rootedAtProcessEnv(n.left)
-        ) {
-            mutated = true;
-            return;
-        }
-        if (ts.isDeleteExpression(n) && rootedAtProcessEnv(n.expression)) {
-            mutated = true;
-            return;
-        }
-        if (ts.isCallExpression(n) && n.arguments.some(rootedAtProcessEnv)) {
-            mutated = true;
-            return;
+        if (isProcessEnv(n)) {
+            const [child, parent] = skipParens(n);
+            const isMemberRead =
+                parent !== undefined &&
+                (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+                parent.expression === child;
+            if (!isMemberRead) {
+                mutated = true;
+                return;
+            }
+            const [accessChild, grand] = skipParens(parent);
+            if (grand !== undefined) {
+                if (ts.isDeleteExpression(grand)) {
+                    mutated = true;
+                    return;
+                }
+                if (
+                    ts.isBinaryExpression(grand) &&
+                    isAssignmentOperator(grand.operatorToken.kind) &&
+                    grand.left === accessChild
+                ) {
+                    mutated = true;
+                    return;
+                }
+                if (
+                    (ts.isPrefixUnaryExpression(grand) || ts.isPostfixUnaryExpression(grand)) &&
+                    (grand.operator === ts.SyntaxKind.PlusPlusToken ||
+                        grand.operator === ts.SyntaxKind.MinusMinusToken)
+                ) {
+                    mutated = true;
+                    return;
+                }
+            }
         }
         ts.forEachChild(n, visit);
     };
@@ -450,7 +489,18 @@ function bodyCanThrow(fn: ts.Node): boolean {
 }
 
 export function analyzeSource(fileName: string, text: string): SkipSite[] {
-    const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    // Parse with the grammar the extension implies: `<T>` is a type
+    // assertion in .ts and a JSX element in .tsx, so the wrong ScriptKind
+    // yields an error-recovered AST in which a skip can simply vanish.
+    // (Review finding, High.) `foo.spec.js` also has to be JS, not TS.
+    const kind = fileName.endsWith('x')
+        ? /\.[cm]?jsx$/.test(fileName)
+            ? ts.ScriptKind.JSX
+            : ts.ScriptKind.TSX
+        : /\.[cm]?js$/.test(fileName)
+          ? ts.ScriptKind.JS
+          : ts.ScriptKind.TS;
+    const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
     const consts = fileScopeConsts(sf);
     // If the file rebinds a global the proof reads by name, the proof is
     // meaningless there and nothing in the file can be judged CI-neutral.
@@ -808,6 +858,27 @@ test.describe('gate', () => {
 });
 `;
 
+/** The same mutation, one alias away. */
+const FIXTURE_ALIASED_ENV = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const env = process.env;
+env.CI = '';
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
+/** ...and spelled with brackets. */
+const FIXTURE_BRACKETED_ENV = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+process['env'].CI = '';
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -907,6 +978,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['shadowed-undefined', FIXTURE_SHADOWED_UNDEFINED],
             ['deleted-env-ci', FIXTURE_DELETED_ENV_CI],
             ['assigned-env-ci', FIXTURE_ASSIGNED_ENV_CI],
+            ['aliased-env', FIXTURE_ALIASED_ENV],
+            ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
         ] as const) {
             expect(
