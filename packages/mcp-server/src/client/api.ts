@@ -629,17 +629,20 @@ export class ApiClient {
    *   - it is the same SBOM (no upload made a different snapshot the latest), and
    *   - that SBOM's vulnerability count is unchanged.
    *
-   * The last one is what NARROWS the untracked-rescan window. apps/api's manual
-   * rescan path does not mark the shared ScanTracker at all, so a rescan of an
-   * SBOM whose entry still reads `completed` (entries are kept an hour) is
-   * invisible in the STATE. It is visible in the SUMMARY, but only when that
-   * summary MOVES BETWEEN THE TWO READINGS. A rescan whose writes all land
-   * outside that window is not detected — and its writes need not be all-or-
-   * nothing: the scan fetches from NVD and then from JVN, so it can write, then
-   * pause, and both readings can observe the same partial summary (Codex R2 and
-   * R4, High). An earlier version of this comment said the comparison caught a
-   * rescan "once it has written something"; that is not what it does, and the
-   * claim is corrected rather than softened.
+   * The last one is what covers the untracked rescan. apps/api's manual rescan
+   * path does not mark the shared ScanTracker at all, so a rescan of an SBOM
+   * whose entry still reads `completed` (entries are kept an hour) is invisible
+   * in the STATE. It is visible in the SUMMARY when that summary MOVES BETWEEN
+   * THE TWO READINGS — and because VulnerabilityHandler.runScan commits NVD and
+   * JVN in ONE transaction, a reader sees the whole rescan or none of it, so
+   * "between the two readings" is the only window in which a rescan can affect
+   * the walk without being reported. What remains is a rescan whose new summary
+   * equals the old, which is the replacement case below.
+   *
+   * Two earlier versions of this comment were wrong about this and are corrected
+   * rather than softened: it does NOT catch a rescan "once it has written
+   * something" (Codex R2), and the rescan does NOT write in phases that a reader
+   * could observe half of (Codex R6 — the transaction is what rules that out).
    *
    * That window cannot be closed from here: nothing the API exposes distinguishes
    * "no rescan running" from "a rescan running that has not written yet". Closing
@@ -677,9 +680,8 @@ export class ApiClient {
    * # What this still does not prove (honest limitations)
    *
    *   - the untracked-rescan window described above;
-   *   - a rescan whose summary is the same at both readings, whether because it
-   *     has not written yet or because its writes are paused between phases;
-   *   - a REPLACEMENT that keeps the whole summary the same. The per-page
+   *   - a REPLACEMENT that keeps the whole summary the same — including a
+   *     rescan whose result happens to be summary-identical. The per-page
    *     X-Total-Count guard fires only when the count MOVES, and the
    *     row-identity guard only when a row is seen twice, so an interleaving
    *     that swaps one row for another can slip past both: read rows 0-499,

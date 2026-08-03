@@ -847,16 +847,23 @@ flight.
 
 **What is still not proven — recorded, not closed.**
 
-1. **A rescan whose per-severity summary is the same at both readings.**
+1. **A manual rescan is invisible in `scan_state`.**
    `POST /api/v1/projects/:id/scan` never marks the shared `ScanTracker`, and
-   entries live an hour, so an SBOM being rescanned still reads `completed`. The
-   before/after comparison catches such a rescan only when the summary MOVES
-   BETWEEN THE TWO READINGS. Its writes are not all-or-nothing — the scan fetches
-   from NVD and then from JVN — so it can write, pause, and present the same
-   partial summary to both readings, and it is then certified. Nothing the API
-   exposes distinguishes "no rescan running" from "a rescan running that is
-   between writes"; closing this means marking the tracker on that handler, which
-   is a backend change and was left out of the change that found it.
+   entries live an hour, so an SBOM being rescanned still reads `completed`
+   throughout. Detection rests entirely on the summary comparison. That comparison
+   is stronger than it first appears here, because `VulnerabilityHandler.runScan`
+   commits NVD and JVN in ONE transaction (`database.WithTxFunc`, and the link
+   writes go through the transaction-bearing context), so a reader sees the whole
+   rescan or none of it: a commit before both readings or after both leaves the
+   walk consistent with them, and a commit in between changes the summary and is
+   reported as `changed`. What is left is the case where the new summary happens
+   to equal the old — i.e. limitation 2 below. Marking the tracker on that handler
+   would let `scan_state` say so directly; it is a backend change and was left out
+   of the change that found this.
+
+   (An earlier revision of this note claimed the rescan writes in phases and can
+   expose a partial summary between NVD and JVN. It does not — the two run inside
+   one transaction.)
 2. **A replacement that keeps the whole summary the same.** The per-page
    `X-Total-Count` guard fires only when the count moves and the row-identity
    guard only when a row comes back twice, so an interleaving that swaps one row
