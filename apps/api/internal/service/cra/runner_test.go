@@ -1478,6 +1478,14 @@ func TestRunnerGetReport_ReadsInsideTenantBoundTx(t *testing.T) {
 // TestRunnerGetReport_UnknownAndForeignAreTheSameAnswer pins the property the
 // handler's single 404 rests on: the runner cannot tell the caller apart a
 // report that does not exist from one belonging to another tenant.
+//
+// Honest limitation (Codex R1 Low): the fake collapses both to (nil, nil) by
+// construction, so this test guards the RUNNER layer only — that GetReport
+// does not add a distinguishing error or value of its own on top of the
+// repository. The claim that the REPOSITORY (and RLS underneath it) really
+// answers the same way for both is carried by
+// handler/m51_cra_reanalyse_tenant_binding_integration_test.go and
+// repository/cra_reports_rls_test.go, against a live database.
 func TestRunnerGetReport_UnknownAndForeignAreTheSameAnswer(t *testing.T) {
 	r, store, _ := newGetReportHarness(t)
 

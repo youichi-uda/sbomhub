@@ -32,10 +32,9 @@
 //   - the GUC was set once by an earlier `SET LOCAL` (any TenantTx request
 //     that borrowed the same pooled connection) → after that transaction ends
 //     the placeholder reverts to the EMPTY STRING, so the UUID cast receives
-//     an empty string and raises `invalid input syntax for type uuid: ""`.
-//     The read errors
-//     and the endpoint answers 500 — for a valid report as much as for an
-//     unallocated id.
+//     an empty string and raises `invalid input syntax for type uuid: ""`. The
+//     read errors and the endpoint answers 500 — for a valid report as much as
+//     for an unallocated id.
 //
 // Measured on the live schema as sbomhub_app (2026-08-04): a running server
 // hits the second branch on every request, because the read/decide/awareness/
@@ -54,7 +53,6 @@ package handler
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -86,16 +84,22 @@ func craReanalyseEnv(t *testing.T) (appURL, migURL string) {
 	return appURL, migURL
 }
 
+// craReanalyseOpen FAILS rather than skips when a URL is configured but
+// unusable (Codex R1 Low). craReanalyseEnv above already skips the "no
+// integration DB here" case; past that point the operator has asked for this
+// run, and a silent skip would let a tagged CI job report success with the
+// regression untested.
 func craReanalyseOpen(t *testing.T, url string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("postgres", url)
 	if err != nil {
-		t.Skipf("open %s failed: %v -- skipping", url, err)
+		t.Fatalf("open configured integration DB failed: %v", err)
 		return nil
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		t.Skipf("ping failed: %v -- skipping (is postgres up?)", err)
+		t.Fatalf("ping configured integration DB failed: %v (DATABASE_URL / MIGRATE_DATABASE_URL "+
+			"are set, so this is a broken environment, not an absent one)", err)
 		return nil
 	}
 	t.Cleanup(func() { _ = db.Close() })
@@ -283,7 +287,11 @@ func TestCRAReanalyseTenantBinding_UnseenReportIs404NotServerError(t *testing.T)
 		if err := h.Reanalyse(c); err != nil {
 			t.Fatalf("Reanalyse returned a transport error: %v", err)
 		}
-		return rec.Code, strings.TrimRight(rec.Body.String(), "\n")
+		// RAW bytes, with the trailing newline echo emits: this string is
+		// what the byte-identity check compares, so nothing may be
+		// normalised away first (Codex R1 Medium — a TrimRight here would
+		// let two refusals that differ only in trailing bytes pass).
+		return rec.Code, rec.Body.String()
 	}
 
 	// --- The three inputs the caller must not be able to tell apart. -------
@@ -295,27 +303,28 @@ func TestCRAReanalyseTenantBinding_UnseenReportIs404NotServerError(t *testing.T)
 		{"report in a sibling project of the same tenant", siblingReport},
 		{"real report belonging to another tenant", foreignReport},
 	}
-	bodies := make(map[string]string, len(invisible))
-	for _, tc := range invisible {
+	bodies := make([]string, len(invisible))
+	for i, tc := range invisible {
 		code, body := call(t, tc.reportID)
 		if code != http.StatusNotFound {
 			t.Errorf("%s: status = %d, want 404 (body=%s)", tc.name, code, body)
 		}
-		bodies[tc.name] = body
+		bodies[i] = body
 	}
 	if vulnStub.calls != 0 {
 		t.Errorf("the gatekeeper let %d invisible report(s) through to the runner; want 0", vulnStub.calls)
 	}
-	// M47 W1: byte identity, not merely equal status codes.
-	var first string
-	for _, tc := range invisible {
-		if first == "" {
-			first = bodies[tc.name]
-			continue
-		}
-		if bodies[tc.name] != first {
-			t.Errorf("refusal bodies differ — the endpoint is an existence oracle:\n  %q\n  %q",
-				first, bodies[tc.name])
+	// M47 W1: byte identity, not merely equal status codes. Indexed rather
+	// than sentinel-initialised, so an EMPTY first body is compared like any
+	// other value instead of being mistaken for "not yet seen".
+	if bodies[0] == "" {
+		t.Errorf("the refusal body is empty — a body that carries no bytes cannot be shown to be " +
+			"the same refusal the other inputs get")
+	}
+	for i := 1; i < len(bodies); i++ {
+		if bodies[i] != bodies[0] {
+			t.Errorf("refusal bodies differ — the endpoint is an existence oracle:\n  %s: %q\n  %s: %q",
+				invisible[0].name, bodies[0], invisible[i].name, bodies[i])
 		}
 	}
 
@@ -326,14 +335,14 @@ func TestCRAReanalyseTenantBinding_UnseenReportIs404NotServerError(t *testing.T)
 		t.Fatalf("own report: runner reached %d time(s), want 1 — the gatekeeper could not see a "+
 			"report the caller owns (status=%d body=%s)", vulnStub.calls, code, body)
 	}
-	if body == first {
+	if body == bodies[0] {
 		t.Errorf("own report produced the same body as an invisible one (%q) — the load did not "+
 			"succeed, it was refused", body)
 	}
-	if got := fmt.Sprintf("%d", code); got != "404" {
+	if code != http.StatusNotFound {
 		// 404 here comes from the STUB (ErrVulnerabilityNotInProject), not
 		// from the gatekeeper; assert it so an unrelated change to the stub
 		// contract does not silently weaken the check above.
-		t.Errorf("own report: status = %s, want 404 from the vulnerability stub (body=%s)", got, body)
+		t.Errorf("own report: status = %d, want 404 from the vulnerability stub (body=%s)", code, body)
 	}
 }
