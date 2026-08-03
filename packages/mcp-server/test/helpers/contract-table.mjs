@@ -207,10 +207,6 @@ export const CONTRACT_CASES = [
         query: vulnsQuery(i * 500),
       })),
       { method: "GET", path: P.compliance, query: {} },
-      // one for the dashboard's own SBOM section, two for the walk's
-      // snapshot bracket
-      { method: "GET", path: P.sboms, query: {} },
-      { method: "GET", path: P.sboms, query: {} },
       { method: "GET", path: P.sboms, query: {} },
     ],
     check({ payload }) {
@@ -421,18 +417,11 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, severity: "critical" },
     routes: {
       [K.vulns]: pagedVulns(1200, (i) => (i % 2 === 0 ? "CRITICAL" : "HIGH")),
-      // A walk that needs more than one request brackets itself with the
-      // project's latest-SBOM id, so pages from two snapshots cannot be
-      // concatenated (see fetchVulnerabilities).
-      [K.sboms]: ok(SBOMS),
     },
-    unordered: true,
     expect: [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
-      { method: "GET", path: P.sboms, query: {} },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
       { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
-      { method: "GET", path: P.sboms, query: {} },
     ],
     check({ payload }) {
       assert.equal(payload.total_in_project, 1200);
@@ -451,17 +440,12 @@ export const CONTRACT_CASES = [
     tool: "sbomhub_get_vulnerabilities",
     title: "stops at the 5000-row scan cap and flags the truncation",
     args: { project_id: PROJECT_ID },
-    routes: { [K.vulns]: pagedVulns(6000), [K.sboms]: ok(SBOMS) },
-    unordered: true,
-    expect: [
-      ...Array.from({ length: 10 }, (_, i) => ({
-        method: "GET",
-        path: P.vulns,
-        query: vulnsQuery(i * 500),
-      })),
-      { method: "GET", path: P.sboms, query: {} },
-      { method: "GET", path: P.sboms, query: {} },
-    ],
+    routes: { [K.vulns]: pagedVulns(6000) },
+    expect: Array.from({ length: 10 }, (_, i) => ({
+      method: "GET",
+      path: P.vulns,
+      query: vulnsQuery(i * 500),
+    })),
     check({ payload }) {
       assert.equal(payload.total_in_project, 6000);
       assert.equal(payload.scanned, 5000);
@@ -479,14 +463,11 @@ export const CONTRACT_CASES = [
     // The walk stops on a SHORT page, not when the header's count is reached:
     // a header that under-reports must not be able to cut the scan short. The
     // price is one extra request here.
-    routes: { [K.vulns]: pagedVulns(1000), [K.sboms]: ok(SBOMS) },
-    unordered: true,
+    routes: { [K.vulns]: pagedVulns(1000) },
     expect: [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
-      { method: "GET", path: P.sboms, query: {} },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
       { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
-      { method: "GET", path: P.sboms, query: {} },
     ],
     check({ payload }) {
       assert.equal(payload.scanned, 1000);
@@ -505,15 +486,11 @@ export const CONTRACT_CASES = [
         const reply = pagedVulns(1200)(req);
         return { ...reply, headers: { "X-Total-Count": "500" } };
       },
-      [K.sboms]: ok(SBOMS),
     },
-    unordered: true,
     expect: [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
-      { method: "GET", path: P.sboms, query: {} },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
       { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
-      { method: "GET", path: P.sboms, query: {} },
     ],
     check({ payload }) {
       assert.equal(payload.scanned, 1200);

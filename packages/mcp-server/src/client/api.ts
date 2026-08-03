@@ -302,14 +302,6 @@ export class ApiClient {
     );
   }
 
-  // Which SBOM the per-project vulnerability routes are currently answering
-  // for: the handler resolves "the project's latest" per request, and the list
-  // is newest-first. `null` means the project has no SBOM at all.
-  private async latestSbomId(projectId: string): Promise<string | null> {
-    const sboms = await this.listSboms(projectId);
-    return sboms[0]?.id ?? null;
-  }
-
   // Walks the paginated endpoint page by page (500 rows each) until the
   // project is exhausted or VULNS_SCAN_CAP is hit. `truncated` is true when
   // rows beyond the scan remain on the server, OR when the walk stopped at the
@@ -342,9 +334,13 @@ export class ApiClient {
     const vulnerabilities: VulnerabilityEntry[] = [];
     let reportedTotal = 0;
     let sawEnd = false;
-    // Read only when a walk actually spans more than one request: a
-    // single-page answer comes from one response and cannot mix snapshots.
-    let snapshotAtStart: string | null | undefined = undefined;
+    // Row identities seen so far. The backend returns each vulnerability at
+    // most once per walk (the paginated query dedupes by vulnerability id),
+    // so a repeat means the rows moved between requests — a replacement SBOM
+    // snapshot, or an EPSS sync rewriting the sort key under `?sort=epss`.
+    // Either way offsets no longer address a stable sequence and the pages
+    // cannot be concatenated.
+    const seen = new Set<string>();
 
     for (let offset = 0; offset < VULNS_SCAN_CAP; offset += VULNS_PAGE_LIMIT) {
       const { data, headers } = await this.requestRaw(
@@ -368,6 +364,18 @@ export class ApiClient {
         );
       }
 
+      for (const row of page) {
+        const key = rowIdentity(row);
+        if (seen.has(key)) {
+          throw new Error(
+            `the project's vulnerability list shifted while it was being read ` +
+              `(row ${key} came back twice, at offset ${offset}); the pages no longer form ` +
+              "one consistent list — retry"
+          );
+        }
+        seen.add(key);
+      }
+
       vulnerabilities.push(...page);
       reportedTotal = pageTotal;
 
@@ -378,27 +386,6 @@ export class ApiClient {
         break;
       }
 
-      // A second page is needed, so the answer will be assembled from several
-      // requests — each answered against whatever is the project's latest SBOM
-      // at that moment. The count check above misses a replacement snapshot
-      // that happens to have the SAME number of rows (two 600-row snapshots
-      // produced an impossible 500-from-one + 100-from-the-other set, Codex
-      // R9), so the identity of the snapshot is pinned here and verified after
-      // the last page.
-      if (snapshotAtStart === undefined) {
-        snapshotAtStart = await this.latestSbomId(projectId);
-      }
-    }
-
-    if (snapshotAtStart !== undefined) {
-      const snapshotAtEnd = await this.latestSbomId(projectId);
-      if (snapshotAtEnd !== snapshotAtStart) {
-        throw new Error(
-          `the project's latest SBOM changed while its vulnerabilities were being read ` +
-            `(${snapshotAtStart ?? "none"} → ${snapshotAtEnd ?? "none"}); the pages come ` +
-            "from different snapshots and cannot be combined — retry"
-        );
-      }
     }
 
     // A header that claims fewer rows than were actually read is not evidence
@@ -418,6 +405,18 @@ export class ApiClient {
 }
 
 // ---------------------------------------------------------------------------
+
+// Identity of one vulnerability row. model.Vulnerability carries a uuid `id`;
+// cve_id and then the whole row are fallbacks so a shape change degrades the
+// check rather than silently disabling it.
+function rowIdentity(row: VulnerabilityEntry): string {
+  const record = row as Record<string, unknown>;
+  if (typeof record.id === "string" && record.id !== "") return record.id;
+  if (typeof record.cve_id === "string" && record.cve_id !== "") {
+    return record.cve_id;
+  }
+  return JSON.stringify(row);
+}
 
 // apps/api/internal/handler/sbom.go always sets X-Total-Count on the success
 // path (it is what the Web UI pages with). Its absence means something else
