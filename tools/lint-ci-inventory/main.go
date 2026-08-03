@@ -82,9 +82,13 @@ var (
 	// read (`  build: {runs-on: x}`) becomes a loud error instead of a
 	// silently dropped job — a trailing `# comment` is the one tolerated
 	// case.
-	reJobID   = regexp.MustCompile(`^  ([A-Za-z_][A-Za-z0-9_.\-]*):(.*)$`)
-	reJobName = regexp.MustCompile(`^    name:\s*(\S.*?)\s*$`)
-	reTopKey  = regexp.MustCompile(`^[A-Za-z_'"]`)
+	reJobID = regexp.MustCompile(`^  ([A-Za-z_][A-Za-z0-9_.\-]*):(.*)$`)
+	// Any 2-space-indented key at all. A line that looks like a job key
+	// but does not match reJobID (a quoted `'hidden':`, say) must be an
+	// ERROR, not a silently dropped job — see parseWorkflow.
+	reAnyJobKey = regexp.MustCompile(`^  \S.*:`)
+	reJobName   = regexp.MustCompile(`^    name:\s*(\S.*?)\s*$`)
+	reTopKey    = regexp.MustCompile(`^[A-Za-z_'"]`)
 )
 
 // job is one CI job: the workflow file it lives in, its YAML key, and the
@@ -148,6 +152,19 @@ func parseWorkflow(base, body string) ([]job, error) {
 			flush()
 			cur = &job{file: base, id: m[1]}
 			continue
+		}
+		// A 2-space key that reJobID could not read is a job this lint
+		// cannot see. Dropping it silently would hide a whole job — and
+		// possibly a required status check — from the inventory, while the
+		// file's OTHER jobs kept the "no jobs found" guard quiet.
+		// (Review finding, High.)
+		if reAnyJobKey.MatchString(line) {
+			return nil, fmt.Errorf(
+				"%s: %q looks like a job key but is not in the `  <id>:` form this lint "+
+					"reads (quoted or non-identifier keys are not supported). Reformat it "+
+					"or teach the lint — silently dropping the job would let an "+
+					"undocumented required status check slip through",
+				base, strings.TrimSpace(line))
 		}
 		if cur != nil && cur.checkName == "" {
 			if m := reJobName.FindStringSubmatch(line); m != nil {
@@ -244,6 +261,18 @@ func extractBlock(doc, begin, end string) ([]string, error) {
 // this job. Matrix jobs expand `${{ matrix.x }}` at run time, so a job
 // whose name carries a template matches any check sharing its literal
 // prefix.
+//
+// KNOWN IMPRECISION (review finding): the prefix rule is too permissive
+// for matrix jobs. `install.sh must succeed on windows-latest` matches
+// `install.sh must succeed on ${{ matrix.os }}` even if the matrix only
+// lists ubuntu and macos, so a stale required check naming a dropped
+// matrix leg would not be reported. Resolving it means evaluating the
+// `strategy.matrix` cross-product, which a stdlib line scanner cannot do
+// honestly. It is one-directional — the check can be too lenient, never
+// too strict, so it cannot block `main` spuriously — and no required
+// status check on `main` currently comes from a matrix job (the repo's
+// only one is install-smoke.yml, which is not required). Revisit if that
+// changes.
 func matchesJob(required string, j job) bool {
 	if required == j.checkName {
 		return true

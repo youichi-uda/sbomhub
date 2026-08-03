@@ -140,6 +140,28 @@ jobs:
 	}
 }
 
+// A quoted job key is valid YAML but outside what this scanner reads.
+// Dropping it silently would hide a whole job — the file's other jobs
+// keep the "no jobs found" guard quiet — so it must be a loud error.
+func TestParseWorkflow_QuotedJobKeyIsAnError(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  visible:
+    name: visible
+    runs-on: ubuntu-latest
+  'hidden':
+    name: required-hidden
+    runs-on: ubuntu-latest
+`
+	_, err := parseWorkflow("x.yml", body)
+	if err == nil || !strings.Contains(err.Error(), "hidden") {
+		t.Fatalf("expected an error naming the unreadable key, got %v", err)
+	}
+}
+
 // A trailing comment on the job key is fine.
 func TestParseWorkflow_TrailingCommentOnJobKey(t *testing.T) {
 	const body = `name: X

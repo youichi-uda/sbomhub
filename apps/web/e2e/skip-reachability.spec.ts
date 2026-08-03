@@ -195,6 +195,14 @@ function calleeName(expr: ts.Expression): string | null {
         const left = calleeName(cur.expression);
         return left === null ? null : `${left}.${cur.name.text}`;
     }
+    // `test['skip']` is the same call as `test.skip`. (Review finding, High.)
+    if (ts.isElementAccessExpression(cur)) {
+        const key = unwrap(cur.argumentExpression);
+        if (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) {
+            const left = calleeName(cur.expression);
+            return left === null ? null : `${left}.${key.text}`;
+        }
+    }
     return null;
 }
 
@@ -225,8 +233,15 @@ function isProcessEnvCI(node: ts.Expression): boolean {
     );
 }
 
-/** `!process.env.CI`, `process.env.CI === undefined`, `process.env.CI == null`. */
-function assertsCiIsOff(node: ts.Expression): boolean {
+/**
+ * `!process.env.CI`, `process.env.CI === undefined`, `process.env.CI == null`.
+ *
+ * `processIsGlobal` is false when the file binds a name called `process`
+ * itself; then `process.env.CI` proves nothing about the environment and
+ * NOTHING in the file counts as CI-neutral. (Review finding, High.)
+ */
+function assertsCiIsOff(node: ts.Expression, processIsGlobal = true): boolean {
+    if (!processIsGlobal) return false;
     const cur = unwrap(node);
     if (
         ts.isPrefixUnaryExpression(cur) &&
@@ -246,26 +261,15 @@ function assertsCiIsOff(node: ts.Expression): boolean {
     return false;
 }
 
-/**
- * Collect file-scope `const NAME = <expr>;` initialisers for one-hop
- * resolution.
- *
- * A name declared more than ONCE anywhere in the file (any scope) is
- * dropped rather than resolved: an inner `const SKIP = !HAS_TOOL;` inside
- * the describe shadows a file-scope `const SKIP = !HAS_TOOL &&
- * !process.env.CI;`, and resolving to the outer one would clear a skip
- * that is in fact live under CI. Dropping it means the site is judged
- * not-proven, i.e. a violation — fail-closed.
- */
-function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
-    const declaredAnywhere = new Map<string, number>();
-    const bump = (name: string): void =>
-        void declaredAnywhere.set(name, (declaredAnywhere.get(name) ?? 0) + 1);
+/** Every name the file binds, however it binds it, with a count. */
+function boundNames(sf: ts.SourceFile): Map<string, number> {
+    const counts = new Map<string, number>();
+    const bump = (name: string): void => void counts.set(name, (counts.get(name) ?? 0) + 1);
     const count = (n: ts.Node): void => {
-        // Every construct that can introduce a binding of the same name.
-        // Counting only `const`/`let`/`var` missed a callback PARAMETER
-        // shadowing a file-scope constant. (Review finding, High; pinned
-        // by FIXTURE_PARAM_SHADOW.)
+        // Every construct that can introduce a binding. Counting only
+        // `const`/`let`/`var` missed a callback PARAMETER, and later a
+        // named FUNCTION EXPRESSION, shadowing a file-scope constant.
+        // (Review findings, High.)
         if (
             (ts.isVariableDeclaration(n) ||
                 ts.isParameter(n) ||
@@ -274,8 +278,11 @@ function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
                 ts.isImportClause(n) ||
                 ts.isNamespaceImport(n) ||
                 ts.isFunctionDeclaration(n) ||
+                ts.isFunctionExpression(n) ||
                 ts.isClassDeclaration(n) ||
-                ts.isEnumDeclaration(n)) &&
+                ts.isClassExpression(n) ||
+                ts.isEnumDeclaration(n) ||
+                ts.isModuleDeclaration(n)) &&
             n.name &&
             ts.isIdentifier(n.name)
         ) {
@@ -284,10 +291,35 @@ function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
         ts.forEachChild(n, count);
     };
     count(sf);
+    return counts;
+}
+
+/**
+ * Collect file-scope `const NAME = <expr>;` initialisers for one-hop
+ * resolution.
+ *
+ * Two things disqualify a name:
+ *
+ *   - It is bound more than ONCE anywhere in the file (any scope, any
+ *     construct). An inner `const SKIP = !HAS_TOOL;` inside the describe,
+ *     or a callback parameter of the same name, shadows a file-scope
+ *     `const SKIP = !HAS_TOOL && !process.env.CI;`, and resolving to the
+ *     outer one would clear a skip that is in fact live under CI.
+ *   - It is not `const`. `let LOCAL_ONLY = !process.env.CI;` followed by
+ *     `LOCAL_ONLY = true;` has a CI-safe INITIALISER and a live VALUE.
+ *     (Review finding, High.)
+ *
+ * Disqualified means the site is judged not-proven, i.e. a violation —
+ * fail-closed.
+ */
+function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
+    const declaredAnywhere = boundNames(sf);
 
     const map = new Map<string, ts.Expression>();
     for (const stmt of sf.statements) {
         if (!ts.isVariableStatement(stmt)) continue;
+        // `let` / `var` can be reassigned after the initialiser is read.
+        if ((stmt.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
         for (const decl of stmt.declarationList.declarations) {
             if (
                 ts.isIdentifier(decl.name) &&
@@ -301,13 +333,18 @@ function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
     return map;
 }
 
-function isCiNeutral(cond: ts.Expression, consts: Map<string, ts.Expression>): boolean {
-    if (conjuncts(cond).some(assertsCiIsOff)) return true;
+function isCiNeutral(
+    cond: ts.Expression,
+    consts: Map<string, ts.Expression>,
+    processIsGlobal: boolean,
+): boolean {
+    const off = (e: ts.Expression): boolean => assertsCiIsOff(e, processIsGlobal);
+    if (conjuncts(cond).some(off)) return true;
     const cur = unwrap(cond);
     if (ts.isIdentifier(cur)) {
         const init = consts.get(cur.text);
         // One hop only, and never back into an identifier (no cycles).
-        if (init && conjuncts(init).some(assertsCiIsOff)) return true;
+        if (init && conjuncts(init).some(off)) return true;
     }
     return false;
 }
@@ -346,6 +383,9 @@ function bodyCanThrow(fn: ts.Node): boolean {
 export function analyzeSource(fileName: string, text: string): SkipSite[] {
     const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     const consts = fileScopeConsts(sf);
+    // If the file binds its own `process`, `process.env.CI` says nothing
+    // about the environment, so nothing in it can be proven CI-neutral.
+    const processIsGlobal = !boundNames(sf).has('process');
     const sites: SkipSite[] = [];
     // Enclosing test-construct scopes, innermost last.
     const stack: SkipSite['scope'][] = [];
@@ -420,7 +460,10 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     form,
                     scope,
                     condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
-                    ciNeutral: form === 'conditional' ? isCiNeutral(args[0], consts) : true,
+                    ciNeutral:
+                        form === 'conditional'
+                            ? isCiNeutral(args[0], consts, processIsGlobal)
+                            : true,
                     allowMarker: hasAllowMarker(text, stmt),
                     guardedByThrowingBeforeAll:
                         describeStack.length > 0 &&
@@ -609,6 +652,43 @@ test.describe('gate', (LOCAL_ONLY = !HAS_TOOL) => {
 });
 `;
 
+/** `test['skip']` is the same call, spelled differently. */
+const FIXTURE_ELEMENT_ACCESS_CALLEE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test['skip'](!HAS_TOOL, 'tool missing');
+});
+`;
+
+/** A CI-safe initialiser is not a CI-safe value when the binding is `let`. */
+const FIXTURE_MUTABLE_BINDING = `
+import { test } from '@playwright/test';
+let LOCAL_ONLY = !process.env.CI;
+LOCAL_ONLY = true;
+test.describe('gate', () => {
+    test.skip(LOCAL_ONLY, 'tool missing');
+});
+`;
+
+/** A named function expression binds its own name inside itself. */
+const FIXTURE_FUNCTION_EXPR_SHADOW = `
+import { test } from '@playwright/test';
+const LOCAL_ONLY = !process.env.CI;
+test.describe('gate', function LOCAL_ONLY() {
+    test.skip(LOCAL_ONLY, 'tool missing');
+});
+`;
+
+/** A locally-bound `process` proves nothing about the environment. */
+const FIXTURE_SHADOWED_PROCESS = `
+import { test } from '@playwright/test';
+const process = { env: { CI: undefined } };
+test.describe('gate', () => {
+    test.skip(true && !process.env.CI, 'tool missing');
+});
+`;
+
 /**
  * The escape hatch smuggled into the skip's DESCRIPTION rather than a
  * comment. It reads as an ordinary message; it must not buy an exemption.
@@ -686,11 +766,22 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             '`(test.skip)(...)` must still be recognised',
         ).toHaveLength(1);
 
-        // Shadowing is not limited to `const`: a parameter binds too.
-        expect(
-            violations(analyzeSource('param-shadow.spec.ts', FIXTURE_PARAM_SHADOW)),
-            'a parameter shadowing the outer const must not clear the skip',
-        ).toHaveLength(1);
+        // Every shape that spells the same call, or defeats the one-hop
+        // resolution, must still land as a violation. Each of these was a
+        // review finding; keeping them in one table makes it obvious that
+        // the analyzer's job is to be conservative, not clever.
+        for (const [name, source] of [
+            ['element-access-callee', FIXTURE_ELEMENT_ACCESS_CALLEE],
+            ['param-shadow', FIXTURE_PARAM_SHADOW],
+            ['function-expr-shadow', FIXTURE_FUNCTION_EXPR_SHADOW],
+            ['mutable-binding', FIXTURE_MUTABLE_BINDING],
+            ['shadowed-process', FIXTURE_SHADOWED_PROCESS],
+        ] as const) {
+            expect(
+                violations(analyzeSource(`${name}.spec.ts`, source)).length,
+                `${name} must be reported as a violation`,
+            ).toBe(1);
+        }
 
         // The escape hatch must be a COMMENT. Putting `ci-skip-ok:` in the
         // skip's own description reads like an ordinary message and must
