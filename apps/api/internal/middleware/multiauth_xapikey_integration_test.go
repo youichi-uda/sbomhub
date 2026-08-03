@@ -292,6 +292,103 @@ func TestMultiAuthNoHeaderStillReachesTheSelfHostedDefault(t *testing.T) {
 	}
 }
 
+// TestTheTwoAuthenticatorsResolveTheSamePrincipal — Codex R3 (Low).
+//
+// TestPresentedAPIKeyMatchesMultiAuth (multiauth_test.go) compares the two
+// RESOLVERS, apiKeyCredential and presentedAPIKey. That is not the property
+// worth having: reverting APIKeyAuth to `Header.Get` while leaving
+// presentedAPIKey in place would keep it green and reinstate exactly the
+// cross-route divergence it is named after.
+//
+// So this drives the two MIDDLEWARES, over one request that separates them.
+// The request carries
+//
+//	X-API-Key:                       (empty — the value a first-value-only read stops at)
+//	X-API-Key: <the SCOPED key>
+//	Authorization: Bearer <the TENANT-LEVEL key>
+//
+// A middleware reading only the first X-API-Key value sees nothing there, falls
+// back to Authorization, and authenticates the TENANT-LEVEL key — which carries
+// no project scope at all. So "which key won" is observable as
+// APIKeyProjectID(c), not merely as a status: both middlewares must reach their
+// handler carrying the SCOPED key's project.
+//
+// It needs a live database because the divergence is only visible once both
+// keys actually validate; the helper-level test is what covers the same ground
+// in the default (untagged) gate.
+func TestTheTwoAuthenticatorsResolveTheSamePrincipal(t *testing.T) {
+	appURL, migURL := m50w3Env(t)
+	appDB := m50w3Open(t, appURL)
+	migDB := m50w3Open(t, migURL)
+	seed := m50w3SeedAuth(t, migDB)
+
+	setHeaders := func(h http.Header) {
+		h.Add(APIKeyHeader, "")
+		h.Add(APIKeyHeader, seed.scopedKey)
+		h.Set("Authorization", BearerPrefix+seed.tenantKey)
+	}
+
+	// One route per authenticator, both classified scopeProjectPathParam and
+	// both addressed at the scoped key's OWN project, so the scope filter
+	// admits whichever key it ends up with — the difference shows up in what
+	// the handler SEES, not in the status.
+	for _, tc := range []struct {
+		name       string
+		routePath  string
+		requestURL string
+		mw         echo.MiddlewareFunc
+	}{
+		{
+			name:       "APIKeyAuth (/api/v1/mcp/*)",
+			routePath:  "/api/v1/mcp/projects/:id/sboms",
+			requestURL: "/api/v1/mcp/projects/" + seed.projectID.String() + "/sboms",
+			mw:         APIKeyAuth(service.NewAPIKeyService(repository.NewAPIKeyRepository(appDB))),
+		},
+		{
+			name:       "MultiAuth (canonical routes)",
+			routePath:  "/api/v1/projects/:id/sbom",
+			requestURL: "/api/v1/projects/" + seed.projectID.String() + "/sbom",
+			mw: MultiAuth(
+				selfHostedConfig(t),
+				repository.NewTenantRepository(appDB),
+				repository.NewUserRepository(appDB),
+				service.NewAPIKeyService(repository.NewAPIKeyRepository(appDB)),
+			),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := echo.New()
+			var out multiAuthHeaderResult
+			e.GET(tc.routePath, func(c echo.Context) error {
+				out.handlerRan = true
+				out.sawProjectID, out.sawScoped = APIKeyProjectID(c)
+				_, out.sawAPIKey = c.Get(ContextKeyAPI).(*model.APIKey)
+				return c.JSON(http.StatusOK, map[string]string{"reached": "handler"})
+			}, tc.mw)
+
+			req := httptest.NewRequest(http.MethodGet, tc.requestURL, nil)
+			setHeaders(req.Header)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			out.status, out.body = rec.Code, rec.Body.String()
+
+			if !out.handlerRan || out.status != http.StatusOK {
+				t.Fatalf("%s: request refused (status %d, body %s)", tc.name, out.status, out.body)
+			}
+			if !out.sawAPIKey {
+				t.Fatalf("%s: no API key on the context", tc.name)
+			}
+			if !out.sawScoped || out.sawProjectID != seed.projectID {
+				t.Errorf("%s: the handler saw scope (%s, scoped=%v); it authenticated the "+
+					"TENANT-LEVEL key from Authorization instead of the project-scoped key sitting "+
+					"in the second %s value. The other authenticator resolves the scoped key, so "+
+					"one request is two principals depending on which route family it reaches.",
+					tc.name, out.sawProjectID, out.sawScoped, APIKeyHeader)
+			}
+		})
+	}
+}
+
 // TestMultiAuthXAPIKeyWinsOverAuthorization pins the precedence, which apikey.go
 // already fixes for its own routes (it reads X-API-Key first and only falls back
 // to Authorization). Two credentials naming different identities must not be
