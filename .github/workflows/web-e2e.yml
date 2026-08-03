@@ -264,6 +264,11 @@ jobs:
   # clashes with). The job loads the seed in between `api /health` (a
   # public endpoint, no Auth middleware) and the web container start.
   web-e2e-full:
+    # DO NOT edit `name:` — it is a required status check on `main` under
+    # branch protection, and renaming it makes the branch permanently
+    # unmergeable until the protection rule is edited to match. The "26"
+    # is therefore FROZEN at its original value and is not a spec count to
+    # keep current; the job runs whatever `e2e/*.spec.ts` matches.
     name: Playwright full suite (26 specs against seeded stack)
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -402,6 +407,19 @@ jobs:
           docker compose exec -T postgres psql -U sbomhub -d sbomhub \
             < docker/seed/web-e2e.sql
 
+      - name: Load analytics MTTR / SLO / compliance fixture
+        # Appended on top of web-e2e.sql (which it FK-references) for
+        # analytics-unmeasured.spec.ts and report-unmeasured-pdf.spec.ts.
+        # web-e2e.sql leaves every analytics metric unmeasured at every
+        # period, which is the M49 "state A" those specs need — this file
+        # supplies the complementary MEASURED state by putting two
+        # resolutions 60 days back, inside a 90-day window and outside a
+        # 30-day one. Without it both specs' state-B halves would be
+        # vacuous, so their beforeAll fails loudly rather than skipping.
+        run: |
+          docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+            -U sbomhub -d sbomhub < docker/seed/analytics-mttr.sql
+
       - name: Verify seed (deterministic tenant_id)
         # Confirms the seed loaded AND that the API's GetOrCreateDefault
         # picked up the seeded tenant on first auth (rather than minting
@@ -444,6 +462,15 @@ jobs:
         run: |
           cd apps/web
           pnpm exec playwright install --with-deps chromium
+
+      - name: Install poppler-utils (PDF text extraction)
+        # report-unmeasured-pdf.spec.ts downloads the REAL generated
+        # executive report and reads its text layer with pdftotext, because
+        # "generatePDF returned non-empty bytes" (the pre-existing Go test)
+        # cannot see whether the summary line says "未計測" or "0.0 時間".
+        # The spec hard-fails instead of skipping when pdftotext is absent
+        # under CI, so this step is load-bearing for the gate.
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
 
       - name: Run Playwright full suite (e2e/*.spec.ts, excluding smoke/)
         # The positional `e2e/*.spec.ts` glob matches the 26 top-level

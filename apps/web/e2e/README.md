@@ -5,7 +5,13 @@ The Next.js frontend ships two layered Playwright suites:
 | Suite | Files | CI workflow | Purpose |
 |---|---|---|---|
 | Smoke | `apps/web/e2e/smoke/*.spec.ts` (3 specs) | `.github/workflows/web-e2e.yml::web-e2e` (M8 #67) | Black-box smoke against the production-shaped docker compose stack with empty Clerk key. Pins `/` -> locale redirect, `/dashboard` reachability, `/api/v1/health` contract. |
-| Full | `apps/web/e2e/*.spec.ts` (26 specs) | `.github/workflows/web-e2e.yml::web-e2e-full` (M10-3 #71) | Feature-level flows: projects / sbom / vex / cra / meti / audit / dashboard / search / vulnerabilities / etc. Self-seeds via the API for per-spec rows; needs the populated DB seed for dashboard / list views to render. |
+| Full | `apps/web/e2e/*.spec.ts` | `.github/workflows/web-e2e.yml::web-e2e-full` (M10-3 #71) | Feature-level flows: projects / sbom / vex / cra / meti / audit / dashboard / search / vulnerabilities / analytics / reports / etc. Self-seeds via the API for per-spec rows; needs the populated DB seed for dashboard / list views to render. |
+
+> The `web-e2e-full` job's `name:` still reads "26 specs". That string is
+> a **required status check** on `main` under branch protection, so it is
+> frozen at its original value and is not a live count — the job runs
+> whatever `e2e/*.spec.ts` matches. Renaming it makes `main` unmergeable
+> until the protection rule is edited to match.
 
 This README is the **local repro recipe** for the full suite. The smoke
 suite is also runnable locally via the same recipe (it shares the
@@ -24,12 +30,19 @@ until curl -fsS http://localhost:8080/api/v1/health >/dev/null; do sleep 1; done
 # fires — otherwise the auto-create path mints a random-UUID tenant.
 docker compose exec -T postgres psql -U sbomhub -d sbomhub \
     < docker/seed/web-e2e.sql
+# Analytics fixture (M49 render gate) — must come AFTER web-e2e.sql,
+# which owns the tenant / project / CVE UUIDs it references.
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+    -U sbomhub -d sbomhub < docker/seed/analytics-mttr.sql
 docker compose up -d web
 
 # 2. Run the full Playwright suite against the docker compose web.
 cd apps/web
 pnpm install
 pnpm exec playwright install --with-deps chromium
+# report-unmeasured-pdf.spec.ts reads the generated PDF's text layer.
+# Without poppler-utils it skips locally (and hard-fails under CI).
+sudo apt-get install -y poppler-utils
 PLAYWRIGHT_BASE_URL=http://localhost:3000 \
 PLAYWRIGHT_API_URL=http://localhost:8080 \
 PLAYWRIGHT_SKIP_WEB_SERVER=1 \
@@ -56,6 +69,10 @@ docker compose up -d api
 until curl -fsS http://localhost:8080/api/v1/health >/dev/null; do sleep 1; done
 docker compose exec -T postgres psql -U sbomhub -d sbomhub \
     < docker/seed/web-e2e.sql
+# Analytics fixture (M49 render gate) — must come AFTER web-e2e.sql,
+# which owns the tenant / project / CVE UUIDs it references.
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
+    -U sbomhub -d sbomhub < docker/seed/analytics-mttr.sql
 
 # Then run the bundled webServer launcher:
 cd apps/web
@@ -94,6 +111,45 @@ All UUIDs are hardcoded constants (see CLAUDE.md M10-3 brief
 "Constraints"). The seed file is **idempotent** — every INSERT carries
 `ON CONFLICT DO NOTHING` so re-running against a partial DB is safe.
 
+### `docker/seed/analytics-mttr.sql` (M49 render gate)
+
+A second, append-only fixture loaded **after** `web-e2e.sql`, for
+`analytics-unmeasured.spec.ts` and `report-unmeasured-pdf.spec.ts`. It
+changes no row `web-e2e.sql` inserts, so the pre-existing specs see the
+same database they always did.
+
+`web-e2e.sql` seeds zero `vulnerability_resolution_events` and zero
+`compliance_snapshots`, which means `/analytics` answers null for every
+MTTR / SLO / compliance ratio at every period. That is already M49's
+"state A" — a tenant that has never remediated anything, the state that
+used to be reported as `0.0 時間 / 100.0%`. This file supplies the
+complementary MEASURED state without disturbing it:
+
+| Table | Row | Purpose |
+|---|---|---|
+| `vulnerability_resolution_events` | CRITICAL, detected −62 d, resolved −60 d (48 h vs a 24 h target → late) | Inside a 90-day window, outside a 30-day one. Gives the 90d view a real MTTR and a **measured 0.0% SLO achievement**, which is what makes "unmeasured renders as a label" falsifiable: a page that replaced every number with the label would still pass a label-only assertion. |
+| `vulnerability_resolution_events` | HIGH, detected −60 d 12 h, resolved −60 d (12 h vs a 168 h target → on target) | The on-target counterpart: 100.0% achievement, green bar. Together the two give the headline a count-weighted mean of 30 h and an overall achievement of 50.0%. |
+| `compliance_snapshots` | tenant-level, −20 d, 8 / 10 | A real 80% row in the compliance trend. |
+| `compliance_snapshots` | tenant-level, −5 d, 0 / 0 | No checklist configured. Drives both the per-row and the headline "not measured" branch (209b55e replaced a hard-coded em dash here that bypassed next-intl). Newest row, so it is also what `GetQuickStats` reads for the headline tile. |
+
+Timestamps are relative to load time and only their *differences* are
+asserted, so the expected values are stable whenever the seed runs.
+Idempotent via `ON CONFLICT (id) DO NOTHING` — the PK, deliberately:
+`compliance_snapshots`' `UNIQUE (tenant_id, project_id, snapshot_date)`
+treats NULLs as distinct in PostgreSQL 15, so a `project_id IS NULL` row
+would re-insert forever if that constraint were the conflict target.
+
+Both specs' `beforeAll` **fails** (does not skip) when the fixture is
+missing, because a gate that silently downgrades itself to nothing when
+its fixture is absent is not a gate.
+
+`report-unmeasured-pdf.spec.ts` additionally needs `pdftotext`
+(poppler-utils) on PATH: it downloads the real generated executive /
+technical / compliance PDF and reads its text layer, since the
+pre-existing Go test can only assert that `generatePDF` returned
+non-empty bytes. Missing locally → the describe skips with an actionable
+message; missing under `CI` → hard failure.
+
 ## Critical ordering
 
 The API's `apps/api/internal/middleware/auth.go::handleSelfHostedAuth`
@@ -110,7 +166,7 @@ To avoid this:
 2. Start the **api** container (which runs migrations on boot).
 3. Wait for `/api/v1/health` — this is a public endpoint, no Auth
    middleware, so it does NOT trigger `GetOrCreateDefault`.
-4. Load the seed.
+4. Load the seed (`web-e2e.sql`, then `analytics-mttr.sql`).
 5. Start the **web** container — its first SSR call to `/api/v1/me`
    will now find the seeded tenant by slug and use its UUID.
 
