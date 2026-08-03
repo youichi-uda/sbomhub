@@ -134,6 +134,33 @@ jobs:
       - name: Proxy matcher invariant (M10-4)
         run: node apps/web/src/proxy.matcher.test.mjs
 
+      # e2e skip-reachability meta-gate — fast, hermetic copy of a check
+      # that also runs inside `web-e2e.yml::web-e2e-full` (which is the
+      # BINDING run: that job is a required status check, this one is
+      # not). It is duplicated here because it needs no browser, no
+      # server and no database — it only AST-parses apps/web/e2e/**, so
+      # it finishes in under a second and reports the defect minutes
+      # before the 35-minute seeded-stack job would.
+      #
+      # What it defends: a `test.skip(cond)` written at describe scope is
+      # evaluated at COLLECTION time and skips the group's `beforeAll`
+      # with it, so a "CI must not skip this" guard written in a
+      # beforeAll becomes unreachable and a CI runner missing the tool
+      # reports "N skipped" on a GREEN job. See the file header of
+      # apps/web/e2e/skip-reachability.spec.ts.
+      #
+      # No `playwright install` step: the spec touches no browser
+      # fixture, and Playwright only resolves a browser executable when
+      # one is requested (measured — the run is green against an empty
+      # PLAYWRIGHT_BROWSERS_PATH).
+      - name: E2E skip reachability meta-gate (hermetic)
+        env:
+          PLAYWRIGHT_SKIP_WEB_SERVER: '1'
+        run: |
+          cd apps/web
+          pnpm exec playwright test --reporter=list --retries=0 \
+            e2e/skip-reachability.spec.ts
+
       # M14-2 #94: UI primitive ARIA + type/render invariants
       # (F209 Tooltip role + aria-describedby, F210 AlertDescription
       # type/render alignment, F211 CardTitle ref/props symmetry,
