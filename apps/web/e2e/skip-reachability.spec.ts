@@ -508,13 +508,22 @@ test.describe('gate', () => {
 // Spec bodies
 // ---------------------------------------------------------------------
 
+/**
+ * Playwright's default `testMatch`, near enough:
+ * `**\/*.@(spec|test).?(c|m)[jt]s?(x)`. Matching only `*.spec.ts` would
+ * leave a future `foo.test.ts` collected by the runner but invisible to
+ * this gate.
+ */
+const TEST_FILE = /\.(spec|test)\.[cm]?[jt]sx?$/;
+
 function specFiles(root: string): string[] {
     const out: string[] = [];
     const walk = (dir: string): void => {
         for (const entry of readdirSync(dir).sort()) {
+            if (entry === 'node_modules') continue;
             const p = join(dir, entry);
             if (statSync(p).isDirectory()) walk(p);
-            else if (p.endsWith('.spec.ts')) out.push(p);
+            else if (TEST_FILE.test(entry)) out.push(p);
         }
     };
     walk(root);
