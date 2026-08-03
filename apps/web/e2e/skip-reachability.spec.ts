@@ -150,6 +150,24 @@ import { dirname, join, relative } from 'node:path';
  *     or a renamed import (`import { test as t }`). The matcher keys on
  *     the literal `test.` prefix.
  *
+ *   - `process.env.CI` being written by the spec itself. A file that does
+ *
+ *         delete process.env.CI;
+ *         test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+ *
+ *     has hollowed out its own guard, and nothing here will say so. This
+ *     gate models the environment not at all.
+ *
+ *     An earlier revision did model it, and that machinery — write
+ *     detection, save/clear/restore tracking, deciding whether a write
+ *     nested in an `if` happens — produced THREE of the four false
+ *     positives found in the last two review rounds, while no spec in
+ *     this suite writes `process.env.CI` at all. Carrying a
+ *     false-positive source to defend a case that does not exist is a bad
+ *     trade when a false positive turns `main` red. Clearing CI on
+ *     purpose is also outside the threat model: nobody does it by
+ *     accident.
+ *
  *   - Anything outside `apps/web/e2e/**`, and skips configured outside
  *     the spec source entirely: `testIgnore` / `grep` in
  *     playwright.config.ts, a workflow's spec selector, a step with
@@ -180,8 +198,6 @@ import { dirname, join, relative } from 'node:path';
 interface SkipSite {
     file: string;
     line: number;
-    /** Character offset, for ordering against env writes. */
-    pos: number;
     callee: string;
     /**
      * `conditional` — first argument written as `!x` or an `&&`/`||`
@@ -405,11 +421,12 @@ function isInlineFunction(n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpres
 /**
  * Boundaries beyond which code no longer runs during collection.
  *
- * A class PROPERTY INITIALISER runs when the class is instantiated, which
- * is inside a test — the same reason an explicit constructor is a
- * boundary. Without it, `skipped = test.skip(!X, …)` in a class declared
- * inside a describe was reported as a describe-scope skip. (Review
- * finding: false positive.)
+ * An INSTANCE field initialiser runs when the class is instantiated,
+ * which is inside a test — the same reason an explicit constructor is a
+ * boundary. A STATIC field initialiser runs when the class DEFINITION is
+ * evaluated, so inside a describe body it is collection time and is not a
+ * boundary. (Both were review findings: the first a false positive, the
+ * second a rule/implementation mismatch.)
  */
 function isDeferredBoundary(n: ts.Node): boolean {
     if (isAnyFunction(n)) return true;
@@ -464,15 +481,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
      * COLLECTED makes every proof in it meaningless. Writes inside a test
      * body or a hook run long afterwards and are irrelevant.
      */
-    /**
-     * Positions of unconditional collection-time writes that clear
-     * `process.env.CI`. Only a write that actually runs, and runs BEFORE
-     * a skip, can defeat that skip: counting a `delete` inside
-     * `if (false)`, or one written after the skip, invalidated correct
-     * guards. (Review finding: false positive.)
-     */
-    const envEvents: { pos: number; clears: boolean }[] = [];
-
     const scopeNow = (): SkipSite['scope'] => (stack.length ? stack[stack.length - 1] : 'file');
 
     const describeHasThrowingBeforeAll = (describeBody: ts.Node): boolean => {
@@ -492,80 +500,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         };
         ts.forEachChild(describeBody, visit);
         return found;
-    };
-
-    /**
-     * A literal that is falsy, so assigning it really does defeat
-     * `!process.env.CI`. `process.env.CI = 'true'` does the opposite —
-     * counting it invalidated a CORRECT guard. Anything non-literal is
-     * unknown and therefore not counted: fail toward a miss, not toward a
-     * red `main`. (Review finding: false positive.)
-     */
-    const isFalsyLiteral = (e: ts.Expression): boolean => {
-        const cur = unwrap(e);
-        if (ts.isStringLiteral(cur) || ts.isNoSubstitutionTemplateLiteral(cur)) {
-            return cur.text === '';
-        }
-        if (ts.isNumericLiteral(cur)) return cur.text === '0';
-        if (cur.kind === ts.SyntaxKind.FalseKeyword || cur.kind === ts.SyntaxKind.NullKeyword) {
-            return true;
-        }
-        return ts.isIdentifier(cur) && cur.text === 'undefined';
-    };
-
-    /** Detects `delete process.env.CI` and `process.env.CI = <falsy literal>`. */
-    const noteEnvWrite = (n: ts.Node): void => {
-        if (!isProcessEnvCI(n)) return;
-        let child: ts.Node = n;
-        let parent = n.parent as ts.Node | undefined;
-        while (parent && ts.isParenthesizedExpression(parent)) {
-            child = parent;
-            parent = parent.parent;
-        }
-        if (parent === undefined) return;
-        const isPlainAssign =
-            ts.isBinaryExpression(parent) &&
-            parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-            parent.left === child;
-        const isAssign = isPlainAssign && isFalsyLiteral((parent as ts.BinaryExpression).right);
-        // A RESTORE (`process.env.CI = savedCI`) puts it back. Recording
-        // only the clears meant a save/clear/restore preamble — an
-        // ordinary way to exercise CI-off behaviour locally — invalidated
-        // every guard after it. (Review finding: false positive.)
-        const isRestore = isPlainAssign && !isAssign;
-        const isDelete = ts.isDeleteExpression(parent);
-        const isIncDec = false;
-        // Only file and describe scope run DURING collection. A write in
-        // `beforeAll` happens after the group is already collected, so it
-        // cannot have affected a collection-time skip — counting it
-        // invalidated correct guards in the same file. (Review finding:
-        // false positive.)
-        const at = scopeNow();
-        if (!(isAssign || isDelete || isRestore) || (at !== 'file' && at !== 'describe')) return;
-
-        let nested = false;
-        for (let a: ts.Node | undefined = n.parent; a; a = a.parent) {
-            if (isDeferredBoundary(a) || ts.isSourceFile(a)) break;
-            if (
-                ts.isIfStatement(a) ||
-                ts.isIterationStatement(a, false) ||
-                ts.isTryStatement(a) ||
-                ts.isSwitchStatement(a) ||
-                ts.isConditionalExpression(a) ||
-                ts.isCatchClause(a)
-            ) {
-                nested = true;
-                break;
-            }
-        }
-        // Control flow is not evaluated, so nesting is read in whichever
-        // direction avoids a false positive: a CLEAR inside a branch is
-        // not claimed to happen, while a RESTORE inside one is not
-        // claimed NOT to happen. `if (saved !== undefined) process.env.CI
-        // = saved;` is the ordinary way to put it back. (Review finding:
-        // false positive.)
-        if (nested && !isRestore) return;
-        envEvents.push({ pos: n.getStart(sf), clears: isAssign || isDelete });
     };
 
     const classify = (
@@ -621,7 +555,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         return {
             file: fileName,
             line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
-            pos: node.getStart(sf),
             callee,
             form,
             scope: scopeNow(),
@@ -635,8 +568,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     };
 
     const visit = (node: ts.Node): void => {
-        noteEnvWrite(node);
-
         let construct: SkipSite['scope'] | null = null;
         let isDescribe = false;
 
@@ -704,22 +635,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
 
     visit(sf);
 
-    // A site is only defeated when the LAST collection-time write before
-    // it left `process.env.CI` cleared.
-    if (envEvents.length > 0) {
-        envEvents.sort((a, b) => a.pos - b.pos);
-        for (const site of sites) {
-            if (site.form !== 'conditional') continue;
-            let cleared = false;
-            let seen = false;
-            for (const e of envEvents) {
-                if (e.pos >= site.pos) break;
-                cleared = e.clears;
-                seen = true;
-            }
-            if (seen && cleared) site.ciNeutral = false;
-        }
-    }
     return sites;
 }
 
@@ -839,29 +754,6 @@ import { test } from '@playwright/test';
 const HAS_TOOL = false;
 test.describe('gate', () => {
     test.skip(!HAS_TOOL, 'ci-skip-ok: tool missing');
-});
-`,
-    ],
-    [
-        // A stray env poke left in a describe body runs during collection.
-        'CI written in a describe body',
-        `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    process.env.CI = '';
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-});
-`,
-    ],
-    [
-        'CI deleted at file scope',
-        `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-delete process.env.CI;
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
 });
 `,
     ],
@@ -1465,6 +1357,41 @@ const HAS_TOOL = false;
 const savedCI = process.env.CI;
 delete process.env.CI;
 if (savedCI !== undefined) process.env.CI = savedCI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        // ACCEPTED MISS: this gate no longer models `process.env.CI`
+        // writes at all. A spec that clears CI before its own guard is
+        // evaluated hollows that guard out, and nothing here will say so.
+        //
+        // The machinery that did model it — write detection, save /
+        // clear / restore tracking, control-flow judgement — produced
+        // three of the four false positives found in the last two review
+        // rounds, and no spec in this suite writes process.env.CI at all.
+        // Carrying a false-positive source to defend a case that does not
+        // exist is a bad trade when a false positive turns `main` red.
+        // Deliberately clearing CI is also outside the threat model: it is
+        // not something an honest author does by accident.
+        'MISS: process.env.CI cleared in a describe body',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    process.env.CI = '';
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        // ACCEPTED MISS, same reason.
+        'MISS: process.env.CI deleted at file scope',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+delete process.env.CI;
 test.describe('gate', () => {
     test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
 });
