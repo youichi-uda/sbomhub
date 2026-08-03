@@ -213,12 +213,14 @@ func TestAPIKeyCredentialDuplicateAuthorization(t *testing.T) {
 			wantPresented: true,
 		},
 		{
-			// A Clerk JWT is not an API-key candidate, so it can neither
-			// authenticate here nor make the pair look conflicting — the key is
-			// still found, and the JWT still means nothing on this path.
-			name:          "a Clerk JWT alongside a key is not a conflict",
+			// Codex R4 (Medium): the first fix decided ambiguity over the
+			// API-key-shaped values ONLY, so a Clerk JWT beside a key left one
+			// candidate and the key was authenticated — while APIKeyAuth, which
+			// does not filter, refused the same request. Two credentials of
+			// different KINDS is still two credentials.
+			name:          "a Clerk JWT alongside a key is two credentials, not one",
 			values:        []string{BearerPrefix + jwt, BearerPrefix + keyA},
-			wantRaw:       keyA,
+			wantRaw:       "",
 			wantPresented: true,
 		},
 		{
@@ -234,13 +236,42 @@ func TestAPIKeyCredentialDuplicateAuthorization(t *testing.T) {
 			wantPresented: true,
 		},
 		{
-			// Only Clerk JWTs: no API-key credential was presented, so the
-			// request belongs to the Clerk path. That path reads the first
-			// value and answers 401 on an empty one, which is fail-closed
-			// already — deciding it here would take the web UI's session
-			// handling away from Auth().
-			name:          "duplicate Clerk JWTs are left to the Clerk path",
+			// A single Clerk JWT (the empty value is not a credential) is not an
+			// API-key attempt, so the request belongs to the Clerk path.
+			// Deciding it here would take the web UI's session handling away
+			// from Auth().
+			name:          "a lone Clerk JWT is left to the Clerk path",
 			values:        []string{"", BearerPrefix + jwt},
+			wantRaw:       "",
+			wantPresented: false,
+		},
+		// RFC 7235: the auth-scheme is case-insensitive and more than one space
+		// is legal. A literal `TrimPrefix(v, "Bearer ")` rejected both forms —
+		// and rejection here meant falling through to the self-hosted default
+		// identity, not 401 (Codex R4, Medium).
+		{
+			name:          "a lowercase scheme is still a Bearer credential",
+			values:        []string{"bearer " + keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			name:          "mixed case and extra spaces are still a Bearer credential",
+			values:        []string{"BeArEr   " + keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			// The scheme name must be followed by whitespace, or it is just the
+			// first token of some other credential.
+			name:          "BearerX is not a Bearer credential",
+			values:        []string{"Bearer" + keyA},
+			wantRaw:       "",
+			wantPresented: false,
+		},
+		{
+			name:          "a Bearer with no token is not a credential",
+			values:        []string{"Bearer   "},
 			wantRaw:       "",
 			wantPresented: false,
 		},

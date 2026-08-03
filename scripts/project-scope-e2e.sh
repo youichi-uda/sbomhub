@@ -938,10 +938,26 @@ note "X-API-Key unusable values (unknown sbh_ / not key-shaped) -> ${XK_BAD_CODE
 # That 404 is itself the evidence — it comes from SbomHandler.Get, which only
 # runs after the middleware admitted the request. The contrast that matters is
 # 404-from-the-handler versus the 401-from-the-middleware above, on one URL.
+#
+# Asserted as an ALLOWLIST, not as "anything but 401/403" (Codex R4 Low): a 500
+# from the default-tenant provisioning or from TenantTx also happens BEFORE the
+# handler, so accepting it would let a broken stack satisfy a control whose whole
+# claim is that the handler was reached.
+#
+# Two statuses qualify, and both are handler answers:
+#   404 — this script's own fixtures, where the project belongs to the tenant it
+#         seeded and RLS hides it from the default tenant (SbomHandler.Get maps
+#         GetLatest's ErrNoRows to 404);
+#   200 — a pre-seeded run (SBOMHUB_PROJECT_OWN et al.) whose project happens to
+#         live in the default tenant.
 xk_none=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_OWN}/sbom" "${WORK}/xk.none")
-[ "${xk_none}" != "401" ] || fail "NEGATIVE CONTROL: a request with NO credential returned 401 on an anonymous self-host stack. Refusing an UNUSABLE header must not also refuse the ABSENCE of one — 'self-host first' promises a header-less curl still works"
-[ "${xk_none}" != "403" ] || fail "NEGATIVE CONTROL: a request with NO credential returned 403 — a credential-less request has no project scope to violate, so this is the scope filter running on an identity that has none"
-note "no header         GET ${XKEY_ROUTE}/<own>/sbom -> ${xk_none} (not 401: admitted, then answered by the handler under the default tenant)"
+case "${xk_none}" in
+  200|404) ;;
+  401) fail "NEGATIVE CONTROL: a request with NO credential returned 401 on an anonymous self-host stack. Refusing an UNUSABLE header must not also refuse the ABSENCE of one — 'self-host first' promises a header-less curl still works" ;;
+  403) fail "NEGATIVE CONTROL: a request with NO credential returned 403 — a credential-less request has no project scope to violate, so this is the scope filter running on an identity that has none" ;;
+  *)   fail "NEGATIVE CONTROL: a request with NO credential returned ${xk_none} ($(tr -d '\n' <"${WORK}/xk.none")). Only a HANDLER answer (404 under this script's own fixtures, 200 for a pre-seeded default-tenant project) shows the request was admitted; a 5xx comes from the middleware chain and proves nothing" ;;
+esac
+note "no header         GET ${XKEY_ROUTE}/<own>/sbom -> ${xk_none} (a handler answer: admitted, then resolved under the default tenant)"
 
 # ---------------------------------------------------------------------------
 # Step 5: default-deny — an unclassified path under /mcp or /cli is 403, not 404

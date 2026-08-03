@@ -151,11 +151,23 @@ func apiKeyCredential(r *http.Request) (raw string, presented bool) {
 		return v, true
 	}
 
-	if v, present, ambiguous := pickSingleCredential(
-		r.Header.Values("Authorization"), bearerAPIKey,
-	); ambiguous {
+	// bearerAny, not bearerAPIKey: ambiguity is decided over EVERY Bearer value,
+	// not only the API-key-shaped ones (Codex R4 Medium). Filtering first meant
+	// `Authorization: Bearer <clerk jwt>` + `Authorization: Bearer sbh_<key>`
+	// left exactly one candidate and authenticated the key, while APIKeyAuth —
+	// which does not filter — refused the same request. Two credentials of
+	// different KINDS is still two credentials; refusing is both fail-closed and
+	// what makes the two middlewares agree.
+	v, present, ambiguous := pickSingleCredential(
+		r.Header.Values("Authorization"), bearerAny,
+	)
+	if ambiguous {
 		return "", true
-	} else if present {
+	}
+	// A single Bearer value that is not `sbh_`-shaped is a Clerk session token.
+	// It is not an API-key attempt, so it goes to the Clerk path rather than
+	// being refused here.
+	if present && strings.HasPrefix(v, apiKeyPrefix) {
 		return v, true
 	}
 
@@ -218,24 +230,32 @@ func pickSingleCredential(
 // asIs: the whole header value is the credential (X-API-Key).
 func asIs(v string) (string, bool) { return v, true }
 
-// bearerAPIKey: an `Authorization: Bearer sbh_...` value, and nothing else.
-// A Clerk JWT is not a candidate, so it neither authenticates here nor makes a
-// duplicate look ambiguous.
-func bearerAPIKey(v string) (string, bool) {
-	token := strings.TrimPrefix(v, BearerPrefix)
-	if token == v || !strings.HasPrefix(token, apiKeyPrefix) {
+// bearerAny extracts the token from an `Authorization: Bearer <token>` value.
+//
+// # Why not strings.TrimPrefix(v, "Bearer ") (Codex R4, Medium)
+//
+// RFC 7235 makes the auth-scheme CASE-INSENSITIVE and allows more than one space
+// before the credential, so `bearer sbh_...` and `Bearer  sbh_...` are both
+// well-formed. A literal-prefix trim rejects them — and "rejects" here did not
+// mean 401: an unrecognised Authorization value falls through to the Clerk /
+// self-hosted path, so in `anonymous` self-host a correctly-formed request
+// carrying a project-scoped key was served as the default tenant's Owner with
+// the key discarded. That is the same fail-open this whole change removes,
+// reachable by lowercasing one word.
+//
+// The scheme name must still be followed by whitespace: `BearerX` is one token,
+// not a Bearer credential.
+func bearerAny(v string) (string, bool) {
+	const scheme = "bearer"
+	if len(v) <= len(scheme) || !strings.EqualFold(v[:len(scheme)], scheme) {
 		return "", false
 	}
-	return token, true
-}
-
-// bearerAny: an `Authorization: Bearer <anything>` value. APIKeyAuth's route
-// groups have no Clerk path, so every Bearer value there is meant as an API
-// key — including one that predates the `sbh_` prefix. Kept separate from
-// bearerAPIKey so tightening one does not silently tighten the other.
-func bearerAny(v string) (string, bool) {
-	token := strings.TrimPrefix(v, BearerPrefix)
-	if token == v {
+	rest := v[len(scheme):]
+	if rest[0] != ' ' && rest[0] != '\t' {
+		return "", false
+	}
+	token := strings.TrimLeft(rest, " \t")
+	if token == "" {
 		return "", false
 	}
 	return token, true
