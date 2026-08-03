@@ -765,3 +765,52 @@ jobs:
 		t.Error("the lenient prefix fallback must still accept the live check")
 	}
 }
+
+// Adding `exclude:` to a nameless matrix job is ordinary. Its checks are
+// `id (leg)`, and the check name carries no expression to prefix-match
+// on, so the leg form has to be accepted rather than called stale.
+func TestNamelessPartialMatrixAcceptsLegForm(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        exclude:
+          - os: windows-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("build (ubuntu-latest)", jobs[0]) {
+		t.Error("a live leg check must be accepted")
+	}
+}
+
+// A non-matrix expression in the name is resolved by GitHub at run time.
+func TestNonMatrixExpressionNameIsLenient(t *testing.T) {
+	const body = `name: X
+'on':
+  pull_request:
+
+jobs:
+  gate:
+    name: gate (${{ github.event_name }})
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("gate (pull_request)", jobs[0]) {
+		t.Error("the run-time-resolved check name must be accepted")
+	}
+	if matchesJob("something else", jobs[0]) {
+		t.Error("the literal prefix must still be required")
+	}
+}

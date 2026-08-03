@@ -317,6 +317,13 @@ func expandNames(j job) ([]string, bool) {
 	if len(reAnyMatrixRef.FindAllString(j.checkName, -1)) != len(refs) {
 		return nil, false
 	}
+	// Any OTHER `${{ … }}` expression — `gate (${{ github.event_name }})`
+	// is an ordinary way to label a check — is resolved by GitHub at run
+	// time, not here. Comparing the raw text would report a live required
+	// check as stale. (Review finding: false positive.)
+	if len(refs) == 0 && strings.Contains(j.checkName, "${{") {
+		return nil, false
+	}
 	if len(refs) == 0 {
 		if j.namedExplicitly || len(j.matrix) == 0 {
 			return []string{j.checkName}, true
@@ -393,6 +400,14 @@ func matchesJob(required string, j job) bool {
 	// the snapshot and hide all of them.
 	if i := strings.Index(j.checkName, "${{"); i > 0 {
 		return strings.HasPrefix(required, j.checkName[:i])
+	}
+	// A NAMELESS job whose matrix could not be expanded (an `include:` /
+	// `exclude:`, say) reports as `<id> (<leg>)`, and its check name
+	// carries no expression to take a prefix from. Accept the leg form
+	// rather than call a live check stale. (Review finding: false
+	// positive.)
+	if !j.namedExplicitly && len(j.matrix) > 0 {
+		return required == j.id || strings.HasPrefix(required, j.id+" (")
 	}
 	return false
 }

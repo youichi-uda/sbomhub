@@ -66,56 +66,64 @@ import { dirname, join, relative } from 'node:path';
  *
  * THE RULE
  * --------
- * A `test.skip` / `test.fixme` call carrying a CONDITION, written at
+ * A `test.skip` / `test.fixme` call written at
  *
  *   - file scope,
  *   - directly inside an INLINE `test.describe` callback, or
  *   - directly inside an INLINE `test.beforeAll` callback,
  *
- * must be provably inert under CI. "Provably" is structural, not
- * semantic: the condition must be a top-level `&&` chain with one
- * conjunct that is literally
+ * whose FIRST ARGUMENT is written as `!x` or as an `&&` / `||` chain,
+ * must be provably inert under CI: the condition's top-level `&&` chain
+ * must contain a conjunct that is literally
  *
  *     !process.env.CI            (or `process.env.CI === undefined`
  *                                 / `process.env.CI == null`)
  *
  * because `A && B && !process.env.CI` cannot be true when CI is set, no
- * matter what A and B are. One hop of file-scope `const` resolution is
- * performed, so `const LOCAL_ONLY = !HAS_TOOL && !process.env.CI;` +
- * `test.skip(LOCAL_ONLY, ...)` also passes — unless the name is bound
- * more than once in the file, in which case shadowing makes the hop
- * unsound and the site is treated as unproven.
+ * matter what A and B are.
  *
- * Nothing else is examined. In particular there is NO analysis of where a
- * helper function is called from. An earlier revision tried to follow
- * that — exported helpers, `forEach` callbacks, transitive call graphs,
- * identifier-passed callbacks — and it was the single largest source of
- * defects in this file, in BOTH directions: it produced false positives
- * on `const skipIf = () => test.skip(…)` used per-test, and it needed a
- * new special case for every way a callback can be spelled. Deleting it
- * removed about a third of this file.
+ * That is the whole rule. It is pure syntax: no name resolution, no
+ * call-site analysis, no guessing whether an expression is a condition, a
+ * title or a callback.
+ *
+ * WHY SYNTAX IS ENOUGH
+ * --------------------
+ * The defect actually shipped was `test.skip(!HAS_PDFTOTEXT, …)`, and the
+ * way it comes back is "simplifying" `cond && !process.env.CI` down to
+ * `cond`. Both are syntax. The shape of the accident and the reach of a
+ * syntactic rule coincide, so the semantic machinery earlier revisions
+ * grew — resolving identifiers, following helpers to their call sites,
+ * deciding whether an argument was a title — was never needed for the job
+ * and was the source of every false positive this file has had.
  *
  * WHAT THIS DOES NOT CATCH — deliberately
  * ---------------------------------------
- * Each of these is a MISS accepted to avoid a false positive. If one of
- * them ever bites, the fix is a targeted fixture, not a return to
- * whole-program analysis.
+ * Each of these is a MISS accepted to avoid a false positive, because
+ * this spec runs inside a required check and a red `main` on correct code
+ * costs more than one accident slipping through. Several are asserted in
+ * the fixture table below (prefixed `MISS:`) so the trade-off stays
+ * visible rather than becoming folklore.
  *
- *   - A skip inside ANY helper function, wherever that helper is called:
+ *   - A condition that is not written as `!x` / `&&` / `||`:
+ *
+ *         test.skip(SKIP, 'tool missing');          // an identifier
+ *         test.skip(toolMissing(), 'tool missing');  // a predicate call
+ *         test.skip(cfg.missing, 'tool missing');    // a member read
+ *         test.skip(platform !== 'linux', 'linux');  // a comparison
+ *         test.skip(true, 'always');                 // a literal
+ *
+ *     Naming a condition or extracting it into a predicate takes it out
+ *     of scope. Write the guard inline if you want it checked.
+ *
+ *   - A skip inside ANY helper function, wherever that helper is called,
+ *     and a `describe` body passed by NAME rather than written inline:
  *
  *         const skipIfMissing = () => test.skip(!HAS_TOOL, 'missing');
- *         test.describe('gate', () => { skipIfMissing(); });
- *
- *     Not reported. The same shape called from inside a test body is a
- *     legitimate per-test skip, and this gate cannot tell the two apart
- *     without following call sites.
- *
- *   - A `describe` body passed by NAME rather than written inline:
- *
  *         function suite() { test.skip(!HAS_TOOL, 'missing'); }
  *         test.describe('gate', suite);
  *
- *     Not reported, same reason.
+ *     The same shape called from inside a test body is a legitimate
+ *     per-test skip, and telling the two apart needs call-site analysis.
  *
  *   - A skip in a helper module under `e2e/` that other specs import.
  *
@@ -128,12 +136,11 @@ import { dirname, join, relative } from 'node:path';
  *     where `&& !process.env.CI` is the WRONG advice, and a gate that
  *     emits inapplicable advice on a documented idiom is broken.
  *
- *   - Per-test skips: inside a test body, a `test.step`, or a
- *     `beforeEach`. They disable one test, not the gate, and they are the
- *     repo's "soft gate" idiom (48 sites) for seed-dependent assertions.
- *     A `beforeEach` skip with a constant condition is group-wide in
- *     effect; prefer `beforeAll` (which IS checked) for a group-level
- *     precondition.
+ *   - Per-test skips: inside a test body, a `test.step`, a `beforeEach`
+ *     or an `afterAll`. They disable one test, or run after the group, so
+ *     they cannot make a `beforeAll` guard unreachable. A `beforeEach`
+ *     skip with a constant condition is group-wide in effect; prefer
+ *     `beforeAll` (which IS checked) for a group-level precondition.
  *
  *   - Declaration-form `test.skip('name', fn)` and `test.describe.skip`.
  *     Statically and unconditionally off, and self-announcing in the
@@ -175,12 +182,14 @@ interface SkipSite {
     line: number;
     callee: string;
     /**
-     * `conditional`  — `test.skip(cond)` / `test.skip(cond, desc)`.
-     * `callback`     — `test.skip(fn, desc)`, Playwright's fixture form.
-     * `declaration`  — `test.skip('name', fn)`, a statically-off test.
-     * `noarg`        — `test.skip()`, only meaningful at runtime.
+     * `conditional` — first argument written as `!x` or an `&&`/`||`
+     *                 chain. The only form this gate reports.
+     * `callback`    — `test.skip(fn, desc)`, Playwright's fixture form.
+     * `noarg`       — `test.skip()`, only meaningful at runtime.
+     * `other`       — a title, an identifier, a call, a comparison: not
+     *                 recognised as a condition, so not reported.
      */
-    form: 'conditional' | 'callback' | 'declaration' | 'noarg';
+    form: 'conditional' | 'callback' | 'noarg' | 'other';
     /**
      * Where the call is WRITTEN. `file` / `describe` / `beforeAll` are the
      * checked scopes; everything else is either per-test or inside a
@@ -338,109 +347,12 @@ function assertsCiIsOff(node: ts.Expression): boolean {
 // ---------------------------------------------------------------------
 
 /**
- * Every FILE-SCOPE variable initialiser, `const` or not.
- *
- * Used only to answer "does this identifier hold a condition?", never for
- * the CI-neutrality proof (that stays on `consts`, which is const-only
- * and refuses shadowed names). Treating any locally-bound identifier as a
- * condition made `const title = makeTitle();` inside a describe — an
- * ordinary title extraction — a violation. (Review finding: false
- * positive.)
+ * `A && B && !process.env.CI` cannot be true when CI is set, whatever A
+ * and B are. That is the entire proof, and it is purely local — no name
+ * resolution, so nothing to get wrong.
  */
-function fileScopeInitializers(sf: ts.SourceFile): Map<string, ts.Expression> {
-    const map = new Map<string, ts.Expression>();
-    for (const stmt of sf.statements) {
-        if (!ts.isVariableStatement(stmt)) continue;
-        for (const decl of stmt.declarationList.declarations) {
-            if (ts.isIdentifier(decl.name) && decl.initializer && !map.has(decl.name.text)) {
-                map.set(decl.name.text, decl.initializer);
-            }
-        }
-    }
-    return map;
-}
-
-/** Names bound to a FUNCTION in this file. */
-function functionBindings(sf: ts.SourceFile): Set<string> {
-    const names = new Set<string>();
-    const visit = (n: ts.Node): void => {
-        if (ts.isFunctionDeclaration(n) && n.name) names.add(n.name.text);
-        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
-            const init = unwrap(n.initializer);
-            if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
-                names.add(n.name.text);
-            }
-        }
-        ts.forEachChild(n, visit);
-    };
-    visit(sf);
-    return names;
-}
-
-/** Every name the file binds, however it binds it, with a count. */
-function boundNames(sf: ts.SourceFile): Map<string, number> {
-    const counts = new Map<string, number>();
-    const bump = (name: string): void => void counts.set(name, (counts.get(name) ?? 0) + 1);
-    const count = (n: ts.Node): void => {
-        if (
-            (ts.isVariableDeclaration(n) ||
-                ts.isParameter(n) ||
-                ts.isBindingElement(n) ||
-                ts.isImportSpecifier(n) ||
-                ts.isImportClause(n) ||
-                ts.isNamespaceImport(n) ||
-                ts.isFunctionDeclaration(n) ||
-                ts.isFunctionExpression(n) ||
-                ts.isClassDeclaration(n) ||
-                ts.isClassExpression(n) ||
-                ts.isEnumDeclaration(n) ||
-                ts.isModuleDeclaration(n)) &&
-            n.name &&
-            ts.isIdentifier(n.name)
-        ) {
-            bump(n.name.text);
-        }
-        ts.forEachChild(n, count);
-    };
-    count(sf);
-    return counts;
-}
-
-/**
- * File-scope `const NAME = <expr>;` initialisers, for one-hop resolution.
- *
- * A name is dropped rather than resolved when it is bound more than once
- * anywhere in the file (shadowing would make the hop unsound) or when it
- * is not `const` (`let X = !process.env.CI; X = true;` has a CI-safe
- * INITIALISER and a live VALUE). Dropped means "not proven", i.e. the
- * site is reported.
- */
-function fileScopeConsts(
-    sf: ts.SourceFile,
-    bound: Map<string, number>,
-): Map<string, ts.Expression> {
-    const map = new Map<string, ts.Expression>();
-    for (const stmt of sf.statements) {
-        if (!ts.isVariableStatement(stmt)) continue;
-        if ((stmt.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
-        for (const decl of stmt.declarationList.declarations) {
-            if (ts.isIdentifier(decl.name) && decl.initializer && bound.get(decl.name.text) === 1) {
-                map.set(decl.name.text, decl.initializer);
-            }
-        }
-    }
-    return map;
-}
-
-function isCiNeutral(cond: ts.Expression, consts: Map<string, ts.Expression>): boolean {
-    if (conjuncts(cond).some(assertsCiIsOff)) return true;
-    const cur = unwrap(cond);
-    if (ts.isIdentifier(cur)) {
-        const init = consts.get(cur.text);
-        // One hop only, and never back into an identifier (no cycles).
-        if (init && conjuncts(init).some(assertsCiIsOff)) return true;
-    }
-    return false;
+function isCiNeutral(cond: ts.Expression): boolean {
+    return conjuncts(cond).some(assertsCiIsOff);
 }
 
 /**
@@ -503,10 +415,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
           : ts.ScriptKind.TS;
     const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
 
-    const bound = boundNames(sf);
-    const consts = fileScopeConsts(sf, bound);
-    const functionNames = functionBindings(sf);
-    const fileInits = fileScopeInitializers(sf);
 
     const sites: SkipSite[] = [];
     /** Enclosing test-construct scopes, innermost last. */
@@ -572,26 +480,6 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         }
     };
 
-    /** A string, a template, a `+` of one, or a one-hop const to one. */
-    const isStringish = (e: ts.Expression, depth = 0): boolean => {
-        const cur = unwrap(e);
-        if (
-            ts.isStringLiteral(cur) ||
-            ts.isNoSubstitutionTemplateLiteral(cur) ||
-            ts.isTemplateExpression(cur)
-        ) {
-            return true;
-        }
-        if (ts.isBinaryExpression(cur) && cur.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-            return isStringish(cur.left, depth) || isStringish(cur.right, depth);
-        }
-        if (depth === 0 && ts.isIdentifier(cur)) {
-            const init = consts.get(cur.text);
-            if (init) return isStringish(init, depth + 1);
-        }
-        return false;
-    };
-
     const classify = (
         node: ts.CallExpression,
         callee: string,
@@ -599,63 +487,33 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     ): SkipSite => {
         const last = args.length >= 2 ? unwrap(args[args.length - 1]) : undefined;
 
-        // WHITELIST, not blacklist. A site is only reported when its
-        // first argument is RECOGNISABLY A CONDITION. Everything else —
-        // a title, a callback, a call, a member read, an imported name —
-        // is left alone.
+        // (a) SYNTAX ONLY. A site is reported when its first argument is
+        // written as `!x` or as an `&&` / `||` chain, and never otherwise.
         //
-        // The previous shape asked "is this a declaration?" and reported
-        // whatever it could not prove was one, so every unfamiliar way of
-        // writing a title or a callback became a red `main`:
-        // `test.skip(disabledTitle(), body)`, `test.skip(namedCallback,
-        // 'msg')`, an imported title. Inverting it makes the failure mode
-        // a miss instead. (Review findings: false positives.)
-        const isConditionShape = (e: ts.Expression, depth = 0): boolean => {
+        // That is the whole rule, and it is enough because it matches the
+        // accident exactly: the defect we actually shipped was
+        // `test.skip(!HAS_PDFTOTEXT, …)`, and the way it comes back is
+        // "simplifying" `cond && !process.env.CI` to `cond`. Both are
+        // syntax. Everything else — an identifier, a call, a member read,
+        // a comparison, a literal — is left alone, which means this
+        // analyzer never has to guess whether an expression is a
+        // condition, a title, or a callback. Guessing was the source of
+        // every false positive this file has ever had, and each guard
+        // added to the guess produced the next one.
+        const isConditionShape = (e: ts.Expression): boolean => {
             const cur = unwrap(e);
-            // `!x`
             if (
                 ts.isPrefixUnaryExpression(cur) &&
                 cur.operator === ts.SyntaxKind.ExclamationToken
             ) {
                 return true;
             }
-            // `a && b`, `a || b`, `a === b`, `a > b`, ...
             if (ts.isBinaryExpression(cur)) {
                 const k = cur.operatorToken.kind;
                 return (
                     k === ts.SyntaxKind.AmpersandAmpersandToken ||
-                    k === ts.SyntaxKind.BarBarToken ||
-                    k === ts.SyntaxKind.QuestionQuestionToken ||
-                    k === ts.SyntaxKind.EqualsEqualsToken ||
-                    k === ts.SyntaxKind.EqualsEqualsEqualsToken ||
-                    k === ts.SyntaxKind.ExclamationEqualsToken ||
-                    k === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
-                    k === ts.SyntaxKind.LessThanToken ||
-                    k === ts.SyntaxKind.GreaterThanToken ||
-                    k === ts.SyntaxKind.LessThanEqualsToken ||
-                    k === ts.SyntaxKind.GreaterThanEqualsToken ||
-                    k === ts.SyntaxKind.InKeyword ||
-                    k === ts.SyntaxKind.InstanceOfKeyword
+                    k === ts.SyntaxKind.BarBarToken
                 );
-            }
-            // `true` / `false`
-            if (
-                cur.kind === ts.SyntaxKind.TrueKeyword ||
-                cur.kind === ts.SyntaxKind.FalseKeyword
-            ) {
-                return true;
-            }
-            // A local name bound to something that is itself a condition.
-            // An identifier bound to a FUNCTION is the callback form; an
-            // identifier this file does not bind at all is imported and
-            // could be either, so neither is reported.
-            if (depth === 0 && ts.isIdentifier(cur)) {
-                if (functionNames.has(cur.text)) return false;
-                const init = fileInits.get(cur.text);
-                if (init) return isConditionShape(init, depth + 1);
-                // Not declared at file scope: a local, an import, a
-                // parameter. Could be anything, so do not report.
-                return false;
             }
             return false;
         };
@@ -667,7 +525,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                   ? 'callback'
                   : isConditionShape(args[0])
                     ? 'conditional'
-                    : 'declaration';
+                    : 'other';
 
         let stmt: ts.Node = node;
         while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent;
@@ -679,7 +537,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             form,
             scope: scopeNow(),
             condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
-            ciNeutral: form === 'conditional' ? isCiNeutral(args[0], consts) : true,
+            ciNeutral: form === 'conditional' ? isCiNeutral(args[0]) : true,
             allowMarker: hasAllowMarker(text, stmt),
             guardedByThrowingBeforeAll:
                 describeStack.length > 0 &&
@@ -696,7 +554,10 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         if (ts.isCallExpression(node)) {
             const callee = calleeName(node.expression) ?? '';
             const args = node.arguments;
-            const hasInlineCallback = args.some(isInlineFunction);
+            // `unwrap` first: `(() => {…}) satisfies () => void` is still
+            // an inline callback, and the rule says inline callbacks are
+            // checked. (Review finding: rule/implementation mismatch.)
+            const hasInlineCallback = args.some((x) => isInlineFunction(unwrap(x)));
 
             if (CALLEE_DESCRIBE.test(callee) && hasInlineCallback) {
                 construct = 'describe';
@@ -725,10 +586,11 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             if (isDescribe) describeStack.push(node);
             visit(node.expression);
             for (const arg of node.arguments) {
-                if (isInlineFunction(arg)) {
+                const fn = unwrap(arg);
+                if (isInlineFunction(fn)) {
                     stack.push(construct);
-                    for (const param of arg.parameters) visit(param);
-                    if (arg.body) visit(arg.body);
+                    for (const param of fn.parameters) visit(param);
+                    if (fn.body) visit(fn.body);
                     stack.pop();
                 } else {
                     visit(arg);
@@ -844,31 +706,6 @@ import { test } from '@playwright/test';
 const HAS_TOOL = false;
 test.describe('gate', () => {
     test.skip(!HAS_TOOL || !!process.env.CI, 'tool missing');
-});
-`,
-    ],
-    [
-        // A shadowed name must not resolve to the outer, CI-guarded one.
-        'shadowed const',
-        `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const SKIP = !HAS_TOOL && !process.env.CI;
-test.describe('gate', () => {
-    const SKIP = !HAS_TOOL;
-    test.skip(SKIP, 'tool missing');
-});
-`,
-    ],
-    [
-        // A CI-safe initialiser is not a CI-safe value when it is `let`.
-        'mutable binding',
-        `
-import { test } from '@playwright/test';
-let LOCAL_ONLY = !process.env.CI;
-LOCAL_ONLY = true;
-test.describe('gate', () => {
-    test.skip(LOCAL_ONLY, 'tool missing');
 });
 `,
     ],
@@ -1336,6 +1173,60 @@ test.describe('CI behavior', () => {
 `,
     ],
     [
+        // ACCEPTED MISS under rule (a): the condition is an identifier, so
+        // it is not syntactically a condition and is not reported. Kept
+        // here so the trade-off is visible and asserted, not forgotten.
+        'MISS: a shadowed const condition',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const SKIP = !HAS_TOOL && !process.env.CI;
+test.describe('gate', () => {
+    const SKIP = !HAS_TOOL;
+    test.skip(SKIP, 'tool missing');
+});
+`,
+    ],
+    [
+        // ACCEPTED MISS under rule (a), same reason.
+        'MISS: a mutable binding condition',
+        `
+import { test } from '@playwright/test';
+let LOCAL_ONLY = !process.env.CI;
+LOCAL_ONLY = true;
+test.describe('gate', () => {
+    test.skip(LOCAL_ONLY, 'tool missing');
+});
+`,
+    ],
+    [
+        // ACCEPTED MISS under rule (a): a predicate extracted to a call.
+        'MISS: a condition extracted into a predicate call',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const toolMissing = () => !HAS_TOOL;
+test.describe('gate', () => {
+    test.skip(toolMissing(), 'tool missing');
+});
+`,
+    ],
+    [
+        // A wrapped inline callback IS inline; the rule covers it, so the
+        // skip inside is checked — and here it is correctly CI-guarded.
+        'a describe callback wrapped in `satisfies`',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe(
+    'gate',
+    (() => {
+        test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+    }) satisfies () => void,
+);
+`,
+    ],
+    [
         'a parameterised suite built with forEach',
         `
 import { test } from '@playwright/test';
@@ -1406,9 +1297,9 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         // wrong reason.
         const soft = analyzeSource('soft.spec.ts', MUST_BE_CLEAN[3][1]);
         expect(soft.map((s) => `${s.form}/${s.scope}`).sort()).toEqual([
-            'conditional/test',
-            'declaration/describe',
             'noarg/test',
+            'other/describe',
+            'other/test',
         ]);
 
         // Both halves are non-empty, so neither loop can pass vacuously,
