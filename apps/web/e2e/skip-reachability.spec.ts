@@ -337,6 +337,29 @@ function assertsCiIsOff(node: ts.Expression): boolean {
 // Bindings
 // ---------------------------------------------------------------------
 
+/**
+ * Every FILE-SCOPE variable initialiser, `const` or not.
+ *
+ * Used only to answer "does this identifier hold a condition?", never for
+ * the CI-neutrality proof (that stays on `consts`, which is const-only
+ * and refuses shadowed names). Treating any locally-bound identifier as a
+ * condition made `const title = makeTitle();` inside a describe — an
+ * ordinary title extraction — a violation. (Review finding: false
+ * positive.)
+ */
+function fileScopeInitializers(sf: ts.SourceFile): Map<string, ts.Expression> {
+    const map = new Map<string, ts.Expression>();
+    for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt)) continue;
+        for (const decl of stmt.declarationList.declarations) {
+            if (ts.isIdentifier(decl.name) && decl.initializer && !map.has(decl.name.text)) {
+                map.set(decl.name.text, decl.initializer);
+            }
+        }
+    }
+    return map;
+}
+
 /** Names bound to a FUNCTION in this file. */
 function functionBindings(sf: ts.SourceFile): Set<string> {
     const names = new Set<string>();
@@ -457,6 +480,7 @@ function isAnyFunction(n: ts.Node): boolean {
         isInlineFunction(n) ||
         ts.isFunctionDeclaration(n) ||
         ts.isMethodDeclaration(n) ||
+        ts.isConstructorDeclaration(n) ||
         ts.isGetAccessorDeclaration(n) ||
         ts.isSetAccessorDeclaration(n)
     );
@@ -482,6 +506,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     const bound = boundNames(sf);
     const consts = fileScopeConsts(sf, bound);
     const functionNames = functionBindings(sf);
+    const fileInits = fileScopeInitializers(sf);
 
     const sites: SkipSite[] = [];
     /** Enclosing test-construct scopes, innermost last. */
@@ -536,7 +561,13 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
             (parent.operator === ts.SyntaxKind.PlusPlusToken ||
                 parent.operator === ts.SyntaxKind.MinusMinusToken);
-        if ((isAssign || isDelete || isIncDec) && CHECKED_SCOPES.has(scopeNow())) {
+        // Only file and describe scope run DURING collection. A write in
+        // `beforeAll` happens after the group is already collected, so it
+        // cannot have affected a collection-time skip — counting it
+        // invalidated correct guards in the same file. (Review finding:
+        // false positive.)
+        const at = scopeNow();
+        if ((isAssign || isDelete || isIncDec) && (at === 'file' || at === 'describe')) {
             envWrittenAtCollectionTime = true;
         }
     };
@@ -620,12 +651,11 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             // could be either, so neither is reported.
             if (depth === 0 && ts.isIdentifier(cur)) {
                 if (functionNames.has(cur.text)) return false;
-                const init = consts.get(cur.text);
+                const init = fileInits.get(cur.text);
                 if (init) return isConditionShape(init, depth + 1);
-                // Bound locally but not resolvable (a `let`, a shadowed
-                // name): still a condition slot, and the `let` case is one
-                // this gate exists to catch.
-                return bound.has(cur.text) && !isStringish(cur);
+                // Not declared at file scope: a local, an import, a
+                // parameter. Could be anything, so do not report.
+                return false;
             }
             return false;
         };
@@ -1251,6 +1281,53 @@ const HAS_TOOL = false;
 const savedCI = process.env.CI;
 test.describe('gate', () => {
     test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+    test.afterAll(() => {
+        if (savedCI === undefined) delete process.env.CI;
+        else process.env.CI = savedCI;
+    });
+});
+`,
+    ],
+    [
+        // Extracting the title into a local inside the suite.
+        'a declaration whose title is a local built by a call',
+        `
+import { test } from '@playwright/test';
+const makeTitle = () => 'temporarily disabled';
+test.describe('handoff', () => {
+    const title = makeTitle();
+    test.skip(title, async () => {});
+});
+`,
+    ],
+    [
+        // A per-test setup helper turned into a class.
+        'a per-test skip inside a constructor',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+class PerTestSetup {
+    constructor() {
+        test.skip(!HAS_TOOL, 'not applicable to this test');
+    }
+}
+test('probe', async () => {
+    new PerTestSetup();
+});
+`,
+    ],
+    [
+        // beforeAll runs after the group is collected.
+        'beforeAll writing process.env.CI',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const savedCI = process.env.CI;
+test.describe('CI behavior', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'local-only');
+    test.beforeAll(() => {
+        process.env.CI = 'true';
+    });
     test.afterAll(() => {
         if (savedCI === undefined) delete process.env.CI;
         else process.env.CI = savedCI;
