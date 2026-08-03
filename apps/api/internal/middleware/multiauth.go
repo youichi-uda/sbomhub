@@ -151,8 +151,8 @@ func apiKeyCredential(r *http.Request) (raw string, presented bool) {
 		return v, true
 	}
 
-	// bearerAny, not bearerAPIKey: ambiguity is decided over EVERY Bearer value,
-	// not only the API-key-shaped ones (Codex R4 Medium). Filtering first meant
+	// bearerAny, not an API-key-shaped filter: ambiguity is decided over EVERY
+	// Bearer value (Codex R4 Medium). Filtering first meant
 	// `Authorization: Bearer <clerk jwt>` + `Authorization: Bearer sbh_<key>`
 	// left exactly one candidate and authenticated the key, while APIKeyAuth —
 	// which does not filter — refused the same request. Two credentials of
@@ -164,10 +164,18 @@ func apiKeyCredential(r *http.Request) (raw string, presented bool) {
 	if ambiguous {
 		return "", true
 	}
-	// A single Bearer value that is not `sbh_`-shaped is a Clerk session token.
-	// It is not an API-key attempt, so it goes to the Clerk path rather than
-	// being refused here.
-	if present && strings.HasPrefix(v, apiKeyPrefix) {
+	if !present {
+		return "", false
+	}
+	// A single Bearer value that is not `sbh_`-shaped is a Clerk session token,
+	// not an API-key attempt, so it goes to the Clerk path. APIKeyAuth applies
+	// the SAME prefix rule (see apikey.go), which is what keeps one request from
+	// being an API key there and a Clerk session here (Codex R5, Medium).
+	//
+	// An empty credential (`Authorization: Bearer` with nothing after it) has no
+	// prefix to test and cannot be a Clerk token either; it is refused rather
+	// than handed on.
+	if v == "" || strings.HasPrefix(v, apiKeyPrefix) {
 		return v, true
 	}
 
@@ -213,7 +221,7 @@ func pickSingleCredential(
 ) (raw string, present, ambiguous bool) {
 	for _, v := range values {
 		candidate, ok := extract(v)
-		if !ok || candidate == "" {
+		if !ok {
 			continue
 		}
 		if !present {
@@ -227,8 +235,17 @@ func pickSingleCredential(
 	return raw, present, false
 }
 
-// asIs: the whole header value is the credential (X-API-Key).
-func asIs(v string) (string, bool) { return v, true }
+// asIs: the whole header value is the credential (X-API-Key). An empty value is
+// NOT a candidate — that is the "a shell expanded an unset variable" case, and
+// APIKeyAuth treats it the same way. It is the one place where empty means
+// absent rather than presented-but-unusable, because the header carries no
+// scheme announcing that a credential follows.
+func asIs(v string) (string, bool) {
+	if v == "" {
+		return "", false
+	}
+	return v, true
+}
 
 // bearerAny extracts the token from an `Authorization: Bearer <token>` value.
 //
@@ -243,22 +260,25 @@ func asIs(v string) (string, bool) { return v, true }
 // the key discarded. That is the same fail-open this whole change removes,
 // reachable by lowercasing one word.
 //
-// The scheme name must still be followed by whitespace: `BearerX` is one token,
-// not a Bearer credential.
+// The scheme name must still be followed by a space: `BearerX` is one token, not
+// a Bearer credential. SPACE only, not HTAB — RFC 9110's credentials grammar is
+// `auth-scheme 1*SP token68`, and accepting a tab here would authenticate a
+// syntax the Clerk path parses differently (Codex R5, Low).
+//
+// A Bearer with NO token after it returns ("", true): a candidate whose
+// credential is empty, which pickSingleCredential reports as
+// presented-but-unusable rather than absent. Announcing a credential and
+// supplying none must end the request, not fall through to a default identity.
 func bearerAny(v string) (string, bool) {
 	const scheme = "bearer"
 	if len(v) <= len(scheme) || !strings.EqualFold(v[:len(scheme)], scheme) {
 		return "", false
 	}
 	rest := v[len(scheme):]
-	if rest[0] != ' ' && rest[0] != '\t' {
+	if rest[0] != ' ' {
 		return "", false
 	}
-	token := strings.TrimLeft(rest, " \t")
-	if token == "" {
-		return "", false
-	}
-	return token, true
+	return strings.TrimLeft(rest, " "), true
 }
 
 // handleAPIKeyAuth mirrors the APIKeyAuth + APIKeyTenant pair as a single

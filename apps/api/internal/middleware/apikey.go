@@ -3,6 +3,7 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
@@ -25,15 +26,37 @@ const (
 // `Authorization` here, so one request could be two different principals
 // depending on which route family it hit. Both now share pickSingleCredential.
 //
-// The Authorization extractor is bearerAny rather than bearerAPIKey: these route
-// groups have no Clerk path, so every Bearer value is meant as an API key,
-// including one that predates the `sbh_` prefix. Ambiguity (two DIFFERENT
-// values under one header) is refused rather than resolved by position.
+// Ambiguity (two DIFFERENT values under one header) is refused rather than
+// resolved by position.
+//
+// Codex R5 (Medium): the Authorization channel applies the same `sbh_` prefix
+// rule MultiAuth does. It previously accepted ANY Bearer value here, on the
+// stated grounds that these groups have no Clerk path and a key predating the
+// prefix should keep working — but nothing in the product mints such a key
+// (service.APIKeyService.generateAPIKey always emits `sbh_`), so that was a
+// claim without a source, and it made one request resolve to an API key here and
+// to a Clerk/self-hosted identity on the canonical routes. One rule, both
+// middlewares.
+//
+// A key that genuinely lacks the prefix is still accepted in X-API-Key, which
+// applies no prefix rule on either middleware.
 func presentedAPIKey(r *http.Request) (raw string, present, ambiguous bool) {
 	if v, ok, amb := pickSingleCredential(r.Header.Values(APIKeyHeader), asIs); amb || ok {
 		return v, ok, amb
 	}
-	return pickSingleCredential(r.Header.Values("Authorization"), bearerAny)
+	v, present, ambiguous := pickSingleCredential(
+		r.Header.Values("Authorization"), bearerAny)
+	if ambiguous || !present {
+		return "", present, ambiguous
+	}
+	if v != "" && !strings.HasPrefix(v, apiKeyPrefix) {
+		// A Bearer value that is not key-shaped is not a credential this
+		// middleware can use. Reported as PRESENT with no value, so the caller
+		// refuses it rather than answering "API key required" — the caller did
+		// supply one.
+		return "", true, false
+	}
+	return v, true, false
 }
 
 // APIKeyAuth returns a middleware that validates API keys
@@ -42,8 +65,8 @@ func APIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			apiKey, present, ambiguous := presentedAPIKey(c.Request())
 
-			if ambiguous {
-				slog.Warn("apikey: request carried conflicting API-key headers")
+			if ambiguous || (present && apiKey == "") {
+				slog.Warn("apikey: request carried an unusable API-key header")
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error": "invalid API key",
 				})
@@ -94,8 +117,8 @@ func OptionalAPIKeyAuth(keyService *service.APIKeyService) echo.MiddlewareFunc {
 			// Optional does not mean "ignorable": a credential the caller
 			// supplied and this middleware cannot resolve must end the request,
 			// not be dropped so the route runs anonymously (Codex R2 Low).
-			if ambiguous {
-				slog.Warn("apikey: request carried conflicting API-key headers")
+			if ambiguous || (present && apiKey == "") {
+				slog.Warn("apikey: request carried an unusable API-key header")
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error": "invalid API key",
 				})

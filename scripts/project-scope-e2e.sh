@@ -905,10 +905,15 @@ note "X-API-Key scoped  GET ${XKEY_ROUTE}/<sibling>/sbom -> ${xk_sib} $(tr -d '\
 # scan-status: the route the MCP server reads the asynchronous scan state from.
 # 404 is the expected answer for a made-up sbom_id — what matters is that the
 # request was ADMITTED for the key's own project and REFUSED for the sibling.
+# Asserted as one status, not "anything but 401/403" (Codex R5 Low): a 5xx from
+# the middleware chain also avoids those two and would prove nothing about the
+# request having been ADMITTED. `DUMMY_SUBRESOURCE` is a well-formed UUID that
+# is not one of this project's SBOMs, so SbomHandler.ScanStatus maps
+# GetVulnerabilitiesBySbom's ErrNoRows to exactly 404 — a handler answer, which
+# is the evidence wanted here.
 xk_scan_own=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_OWN}/sboms/${DUMMY_SUBRESOURCE}/scan-status" \
   "${WORK}/xk.scan.own" -H "X-API-Key: ${K_SCOPED}")
-[ "${xk_scan_own}" != "403" ] || fail "scan-status for the scoped key's OWN project was refused with 403 — the MCP server reads the scan state through this route and would report every count as unverifiable"
-[ "${xk_scan_own}" != "401" ] || fail "scan-status with X-API-Key returned 401 — MultiAuth is not reading the header"
+[ "${xk_scan_own}" = "404" ] || fail "scan-status for the scoped key's OWN project (with an sbom_id that is not this project's) returned ${xk_scan_own} ($(tr -d '\n' <"${WORK}/xk.scan.own")), want 404 from SbomHandler.ScanStatus. 403 would mean the scope filter refused the key's own project; 401 would mean MultiAuth is not reading ${XKEY_ROUTE##*/}'s X-API-Key at all; anything else did not reach the handler. The MCP server reads the scan state through this route and would report every count as unverifiable."
 xk_scan_sib=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_SIBLING}/sboms/${DUMMY_SUBRESOURCE}/scan-status" \
   "${WORK}/xk.scan.sib" -H "X-API-Key: ${K_SCOPED}")
 [ "${xk_scan_sib}" = "403" ] || fail "scan-status for a SIBLING project returned ${xk_scan_sib}, want 403"

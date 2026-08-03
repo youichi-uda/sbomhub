@@ -270,8 +270,27 @@ func TestAPIKeyCredentialDuplicateAuthorization(t *testing.T) {
 			wantPresented: false,
 		},
 		{
-			name:          "a Bearer with no token is not a credential",
+			// Codex R5 (Medium): announcing a Bearer credential and supplying
+			// none is presented-but-unusable, not absent. Reporting it as
+			// absent sent the request to the self-hosted default identity while
+			// APIKeyAuth answered 401 for the same header.
+			name:          "a Bearer with no token is presented and unusable",
 			values:        []string{"Bearer   "},
+			wantRaw:       "",
+			wantPresented: true,
+		},
+		{
+			name:          "a bare scheme with nothing after it is not a Bearer credential",
+			values:        []string{"Bearer"},
+			wantRaw:       "",
+			wantPresented: false,
+		},
+		{
+			// RFC 9110's credentials grammar is `auth-scheme 1*SP token68`;
+			// HTAB is not SP. Accepting it would authenticate a syntax the
+			// Clerk path parses differently (Codex R5, Low).
+			name:          "a tab between scheme and token is not a Bearer credential",
+			values:        []string{"Bearer\t" + keyA},
 			wantRaw:       "",
 			wantPresented: false,
 		},
@@ -394,19 +413,54 @@ func TestPresentedAPIKeyMatchesMultiAuth(t *testing.T) {
 			},
 			wantRaw: keyA,
 		},
+		{
+			// Codex R5 (Medium): a Bearer value that is not `sbh_`-shaped used
+			// to be an API key here and a Clerk session on the canonical routes,
+			// so one request was two principals — and in `anonymous` self-host
+			// the canonical side resolved to the default Owner, dropping the
+			// key's project scope. Both middlewares now apply one prefix rule.
+			name: "a Bearer value that is not key-shaped",
+			build: func(h http.Header) {
+				h.Set("Authorization", BearerPrefix+"legacy-key-without-a-prefix")
+			},
+			wantRaw: "",
+		},
+		{
+			name: "a Bearer announcing a credential and supplying none",
+			build: func(h http.Header) {
+				h.Set("Authorization", "Bearer  ")
+			},
+			wantRaw: "",
+		},
 	}
+
+	// Guard against a vacuous pass: at least one case must resolve to a real key
+	// on both sides, or the table would be checking only that both refuse.
+	resolvedAKey := false
+	t.Cleanup(func() {
+		if !resolvedAKey {
+			t.Errorf("no case resolved an actual key on both sides — the comparison only " +
+				"ever compared two refusals")
+		}
+	})
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantRaw != "" {
+				resolvedAKey = true
+			}
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/x/sbom", nil)
 			tc.build(req.Header)
 
 			multiRaw, multiPresented := apiKeyCredential(req)
 			apiRaw, apiPresent, apiAmbiguous := presentedAPIKey(req)
 
-			if !multiPresented {
-				t.Fatalf("MultiAuth saw no credential at all")
-			}
+			// Not "MultiAuth must see a credential": for a Bearer value that is
+			// not key-shaped it legitimately sees none and hands the request to
+			// the Clerk path, while APIKeyAuth — which has no Clerk path —
+			// refuses. That asymmetry is structural and documented. What must
+			// never differ is WHICH KEY the two resolve.
+			_ = multiPresented
 			// Both refuse, or both pick the same string. Anything else is one
 			// request with two identities.
 			gotMulti := multiRaw
