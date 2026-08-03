@@ -31,11 +31,11 @@ import { dirname, join, relative } from 'node:path';
  *
  * THE RULE
  * --------
- * Every COLLECTION-TIME conditional skip (`test.skip` / `test.fixme` with
- * a condition argument, evaluated at file scope or directly in a
- * `test.describe` body) must be provably inert under CI. "Provably" is
- * structural, not semantic: the condition must be a top-level `&&` chain
- * with one conjunct that is literally
+ * Every GROUP-WIDE conditional skip — a `test.skip` / `test.fixme` call
+ * carrying a condition, written at file scope, directly in a
+ * `test.describe` body, or inside a `test.beforeAll` — must be provably
+ * inert under CI. "Provably" is structural, not semantic: the condition
+ * must be a top-level `&&` chain with one conjunct that is literally
  *
  *     !process.env.CI            (or `process.env.CI === undefined`
  *                                 / `process.env.CI == null`)
@@ -43,23 +43,32 @@ import { dirname, join, relative } from 'node:path';
  * because `A && B && !process.env.CI` cannot be true when CI is set, no
  * matter what A and B are. One hop of file-scope `const` resolution is
  * performed, so `const LOCAL_ONLY = !HAS_TOOL && !process.env.CI;` +
- * `test.skip(LOCAL_ONLY, ...)` also passes.
+ * `test.skip(LOCAL_ONLY, ...)` also passes — unless the name is declared
+ * more than once in the file, in which case shadowing makes the hop
+ * unsound and the site is treated as unproven.
  *
  * WHERE THE LINE IS DRAWN — and why
  * ---------------------------------
- * "CI must not skip this"  → collection-time CONDITIONAL skips. These are
+ * "CI must not skip this"  → conditional skips that take a WHOLE GROUP
+ *   with them: file scope, describe scope, `beforeAll`. These are
  *   environment-conditional gates (an external binary, a fixture, a
  *   feature flag). Their whole purpose is to be a gate, and a gate that
  *   evaporates when its precondition is missing is worse than no gate: it
  *   is a green tick that means nothing. Enforced here.
  *
+ *   File and describe scope are the sharp case, because they are
+ *   evaluated at COLLECTION time and therefore also delete the group's
+ *   `beforeAll`. `beforeAll` scope is included because the blast radius
+ *   is the same group even though the timing is not — it just cannot
+ *   make a preceding `throw` unreachable.
+ *
  * "CI may skip this"       → everything else, deliberately NOT gated:
- *   - Runtime skips inside a test body / hook / step (`test.skip()`,
- *     `test.skip(cond, msg)` after an `await`). These run AFTER
- *     `beforeAll`, so they cannot disarm a `beforeAll` guard. They are
- *     the repo's "soft gate" idiom (48 sites) for seed-dependent
- *     assertions, and they are a DIFFERENT bug class (a soft gate can
- *     make a test vacuous, but it does not make a loud guard unreachable).
+ *   - Per-test runtime skips: inside a test body, a `test.step`, or a
+ *     `beforeEach` (`test.skip()`, `test.skip(cond, msg)` after an
+ *     `await`). They disable one test, not the gate, and they are the
+ *     repo's "soft gate" idiom (48 sites) for seed-dependent assertions.
+ *     A soft gate can make a test vacuous, but that is a different bug
+ *     class from a group-wide gate switching itself off.
  *   - Declaration-form `test.skip('name', fn)` (2 sites in
  *     error-handling.spec.ts). Statically and unconditionally off, with a
  *     written hand-off. It never pretends to be conditional, so there is
@@ -84,11 +93,15 @@ import { dirname, join, relative } from 'node:path';
  *     self-disable (Go `t.Skip`, a shell step that `exit 0`s when a tool
  *     is missing, a workflow step with `continue-on-error`).
  *   - A runtime soft gate that makes a test vacuous rather than skipped
- *     (e.g. `if (!found) return;`).
+ *     (e.g. `if (!found) return;`), and per-test / `beforeEach` skips of
+ *     any shape.
  *   - Semantic CI-safety that is not syntactically visible — a condition
  *     computed by a helper function, or through two hops of `const`, is
  *     reported as a violation (fail-closed). Fix by inlining the
- *     `&& !process.env.CI` or by adding the `ci-skip-ok` marker.
+ *     `&& !process.env.CI` or by adding the `ci-skip-ok` marker. The same
+ *     fail-closed direction applies to a skip written inside a plain
+ *     helper closure declared at describe scope: it is attributed to the
+ *     describe even though it only runs when the helper is called.
  *
  * NON-VACUITY
  * -----------
@@ -113,8 +126,11 @@ interface SkipSite {
      * `noarg`       — `test.skip()`, only meaningful at runtime.
      */
     form: 'conditional' | 'declaration' | 'noarg';
-    /** `file` / `describe` are collection time; the rest are runtime. */
-    scope: 'file' | 'describe' | 'test' | 'hook' | 'step';
+    /**
+     * Where the call sits. `file` / `describe` / `beforeAll` disable a
+     * WHOLE GROUP; `test` / `beforeEach` / `step` disable one test.
+     */
+    scope: 'file' | 'describe' | 'beforeAll' | 'test' | 'eachHook' | 'step';
     condition: string;
     ciNeutral: boolean;
     allowMarker: boolean;
@@ -122,10 +138,18 @@ interface SkipSite {
     guardedByThrowingBeforeAll: boolean;
 }
 
+/** Scopes at which one skip call takes an entire group with it. */
+const GROUP_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
+    'file',
+    'describe',
+    'beforeAll',
+] as const);
+
 const CALLEE_SKIP = /^test\.(skip|fixme)$/;
 const CALLEE_DESCRIBE = /^(test\.describe(\.(only|serial|parallel|skip|fixme))*|describe)$/;
 const CALLEE_TEST = /^test(\.(only|skip|fixme|fail|slow))?$/;
-const CALLEE_HOOK = /^test\.(beforeAll|afterAll|beforeEach|afterEach)$/;
+const CALLEE_ALL_HOOK = /^test\.(beforeAll|afterAll)$/;
+const CALLEE_EACH_HOOK = /^test\.(beforeEach|afterEach)$/;
 const ALLOW_MARKER = /ci-skip-ok:\s*\S/;
 
 function unwrap(node: ts.Expression): ts.Expression {
@@ -182,13 +206,36 @@ function assertsCiIsOff(node: ts.Expression): boolean {
     return false;
 }
 
-/** Collect file-scope `const NAME = <expr>;` initialisers for one-hop resolution. */
+/**
+ * Collect file-scope `const NAME = <expr>;` initialisers for one-hop
+ * resolution.
+ *
+ * A name declared more than ONCE anywhere in the file (any scope) is
+ * dropped rather than resolved: an inner `const SKIP = !HAS_TOOL;` inside
+ * the describe shadows a file-scope `const SKIP = !HAS_TOOL &&
+ * !process.env.CI;`, and resolving to the outer one would clear a skip
+ * that is in fact live under CI. Dropping it means the site is judged
+ * not-proven, i.e. a violation — fail-closed.
+ */
 function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
+    const declaredAnywhere = new Map<string, number>();
+    const count = (n: ts.Node): void => {
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
+            declaredAnywhere.set(n.name.text, (declaredAnywhere.get(n.name.text) ?? 0) + 1);
+        }
+        ts.forEachChild(n, count);
+    };
+    count(sf);
+
     const map = new Map<string, ts.Expression>();
     for (const stmt of sf.statements) {
         if (!ts.isVariableStatement(stmt)) continue;
         for (const decl of stmt.declarationList.declarations) {
-            if (ts.isIdentifier(decl.name) && decl.initializer) {
+            if (
+                ts.isIdentifier(decl.name) &&
+                decl.initializer &&
+                declaredAnywhere.get(decl.name.text) === 1
+            ) {
                 map.set(decl.name.text, decl.initializer);
             }
         }
@@ -258,8 +305,10 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             if (CALLEE_DESCRIBE.test(callee) && hasCallback) {
                 pushed = 'describe';
                 pushedDescribe = true;
-            } else if (CALLEE_HOOK.test(callee)) {
-                pushed = 'hook';
+            } else if (CALLEE_ALL_HOOK.test(callee)) {
+                pushed = 'beforeAll';
+            } else if (CALLEE_EACH_HOOK.test(callee)) {
+                pushed = 'eachHook';
             } else if (callee === 'test.step') {
                 pushed = 'step';
             } else if (
@@ -315,25 +364,29 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     return sites;
 }
 
-/** Collection-time conditional skips that are not provably inert under CI. */
+/** Group-wide conditional skips that are not provably inert under CI. */
 export function violations(sites: SkipSite[]): SkipSite[] {
     return sites.filter(
         (s) =>
             s.form === 'conditional' &&
-            (s.scope === 'file' || s.scope === 'describe') &&
+            GROUP_SCOPES.has(s.scope) &&
             !s.ciNeutral &&
             !s.allowMarker,
     );
 }
 
 function describeViolation(v: SkipSite): string {
-    const why = v.guardedByThrowingBeforeAll
-        ? 'the enclosing describe has a `beforeAll` that throws — a collection-time ' +
-          'skip takes that beforeAll with it, so the guard is DEAD CODE'
-        : 'a collection-time skip disables the whole group under CI with no loud failure';
+    const collection = v.scope === 'file' || v.scope === 'describe';
+    const when = collection ? 'evaluated at COLLECTION time' : 'runs before every test in the group';
+    const why =
+        collection && v.guardedByThrowingBeforeAll
+            ? 'the enclosing describe has a `beforeAll` that throws — a collection-time ' +
+              'skip takes that beforeAll with it, so the guard is DEAD CODE'
+            : 'this disables the WHOLE GROUP under CI with no loud failure, which turns ' +
+              'the gate into a green tick that certifies nothing';
     return (
         `${v.file}:${v.line}  ${v.callee}(${v.condition})\n` +
-        `    scope=${v.scope} (evaluated at COLLECTION time)\n` +
+        `    scope=${v.scope} (${when})\n` +
         `    ${why}.\n` +
         '    Fix: append `&& !process.env.CI` to the condition, or, if skipping under\n' +
         '    CI really is intended, add a `// ci-skip-ok: <reason>` comment.'
@@ -405,6 +458,41 @@ test.describe('gate', () => {
 });
 `;
 
+/** A `beforeAll` skip disables the whole group too, just later. */
+const FIXTURE_BEFORE_ALL_GROUP_SKIP = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.beforeAll(() => {
+        test.skip(!HAS_TOOL, 'tool missing');
+    });
+    test('asserts something', async () => {});
+});
+`;
+
+/** A shadowed name must not be resolved to the outer, CI-guarded one. */
+const FIXTURE_SHADOWED_CONST = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const SKIP = !HAS_TOOL && !process.env.CI;
+test.describe('gate', () => {
+    const SKIP = !HAS_TOOL;
+    test.skip(SKIP, 'tool missing');
+    test('asserts something', async () => {});
+});
+`;
+
+/** A per-test `beforeEach` skip is the ordinary runtime idiom. */
+const FIXTURE_BEFORE_EACH = `
+import { test } from '@playwright/test';
+test.describe('soft', () => {
+    test.beforeEach(async ({ page }) => {
+        test.skip(await page.evaluate(() => false), 'not applicable here');
+    });
+    test('a', async () => {});
+});
+`;
+
 /** The escape hatch, used deliberately. */
 const FIXTURE_MARKER = `
 import { test } from '@playwright/test';
@@ -449,11 +537,28 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         const inverted = violations(analyzeSource('inverted.spec.ts', FIXTURE_INVERTED));
         expect(inverted, 'an ||-CI condition must still be a violation').toHaveLength(1);
 
+        // Same blast radius, different timing: a beforeAll skip switches
+        // the whole group off under CI just as thoroughly.
+        expect(
+            violations(analyzeSource('before-all.spec.ts', FIXTURE_BEFORE_ALL_GROUP_SKIP)).map(
+                (v) => v.scope,
+            ),
+            'a group-wide beforeAll skip must be a violation',
+        ).toEqual(['beforeAll']);
+
+        // The one-hop const resolution must not be fooled by shadowing:
+        // the inner `SKIP` is live under CI even though the outer is not.
+        expect(
+            violations(analyzeSource('shadowed.spec.ts', FIXTURE_SHADOWED_CONST)),
+            'a shadowed const must not be resolved to the outer CI-guarded one',
+        ).toHaveLength(1);
+
         // Negative controls — none of these may be reported.
         for (const [name, source] of [
             ['guarded', FIXTURE_GUARDED],
             ['const-hop', FIXTURE_CONST_HOP],
             ['runtime-soft-gate', FIXTURE_RUNTIME_SOFT_GATE],
+            ['before-each', FIXTURE_BEFORE_EACH],
             ['marker', FIXTURE_MARKER],
         ] as const) {
             expect(
