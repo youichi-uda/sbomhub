@@ -124,7 +124,11 @@ const DOWNSTREAM_CASES = [
           ? page(500, 1200)
           : { status, body: { error: "denied" } },
     }),
-    expectedRequests: 2,
+    // Three: the scan-state probe taken BEFORE the walk resolves the project's
+    // latest SBOM first, and no route is registered for it here, so it fails and
+    // no scan-status request follows. Then two pages, the second of which is the
+    // refusal under test.
+    expectedRequests: 3,
   },
   {
     title: "sbomhub_get_project_dashboard: the vulnerabilities leg fails",
@@ -135,7 +139,8 @@ const DOWNSTREAM_CASES = [
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
     }),
-    expectedRequests: 3,
+    // Four: as above, plus the compliance and SBOM legs of the fan-out.
+    expectedRequests: 4,
   },
   {
     title: "sbomhub_get_project_dashboard: the compliance leg fails",
@@ -147,11 +152,11 @@ const DOWNSTREAM_CASES = [
       [K.sboms]: ok(SBOMS),
       ...scanProbe("completed"),
     }),
-    // Five, not three: the vulnerabilities leg SUCCEEDS here, and a successful
-    // walk is followed by the two-request scan-state probe. The failure the
+    // Seven, not three: the vulnerabilities leg SUCCEEDS here, and the walk is
+    // BRACKETED by two scan-state probes of two requests each. The failure the
     // tool reports is still the compliance leg's — the point of this case is
     // that a legible refusal survives the other legs completing.
-    expectedRequests: 5,
+    expectedRequests: 7,
   },
   {
     title: "sbomhub_get_project_dashboard: the SBOM leg fails",
@@ -163,8 +168,8 @@ const DOWNSTREAM_CASES = [
       [K.sboms]: { status, body: { error: "denied" } },
       ...scanProbe("completed"),
     }),
-    // Five, for the same reason as the compliance case above.
-    expectedRequests: 5,
+    // Seven, for the same reason as the compliance case above.
+    expectedRequests: 7,
   },
 ];
 

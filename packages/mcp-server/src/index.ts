@@ -99,8 +99,10 @@ function errorResult(err: unknown): CallToolResult {
 const SCAN_STATE_NOTE =
   "件数は非同期スキャンの途中経過のことがある。" +
   "counts_final=true のときだけ確定値で、false のときは scan_state を見ること " +
-  "(running=走査中、failed=失敗、no_sbom=SBOM未登録、unknown=状態不明、" +
-  "unavailable=状態を取得できず)。" +
+  "(completed=完了、running=走査中、failed=失敗、unknown=状態不明、" +
+  "changed=読み取り中にスキャンかSBOMが変わった、" +
+  "unavailable=状態を取得できず。これ以外の値が返ることもあり、" +
+  "その場合も確定値ではない)。" +
   "どのSBOMに対する件数かは scanned_sbom_id。" +
   "counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。";
 

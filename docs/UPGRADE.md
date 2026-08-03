@@ -764,3 +764,84 @@ docker compose up -d
 
 Then file an issue with the api logs (`docker compose logs api > api.log`)
 attached so we can address the regression in the next M0 patch.
+
+---
+
+## 7. `X-API-Key` on the canonical routes, and the MCP scan-state probe
+
+Added 2026-08-04. Two changes that an operator can observe, plus one residual
+that is recorded rather than closed.
+
+### 7.1 `X-API-Key` now authenticates on `/api/v1/projects/...`
+
+`APIKeyAuth` (the `/api/v1/cli/*` and `/api/v1/mcp/*` groups) has always accepted
+the key in either `X-API-Key` or `Authorization: Bearer`. `MultiAuth`, which
+fronts the canonical per-project routes, read only `Authorization`.
+
+A request that carried only `X-API-Key` was therefore **not refused** — with
+`Authorization` empty it fell through to the Clerk/self-hosted handler, and in
+`SBOMHUB_AUTH_MODE=anonymous` that handler provisions the default tenant's
+Owner. The key was discarded and, with it, `api_keys.project_id`: a
+**project-scoped key reached any project of the deployment**. Measured on a
+throwaway stack (2026-08-04, anonymous mode) before the fix:
+
+| header | route | before | after |
+|---|---|---|---|
+| `X-API-Key: <project-scoped>` | `GET /api/v1/projects/<OWN>/sbom` | 200 (key ignored) | 200 (key honoured) |
+| `X-API-Key: <project-scoped>` | `GET /api/v1/projects/<SIBLING>/sbom` | **200** | **403** |
+| `X-API-Key: <invalid>` | `GET /api/v1/projects/<OWN>/sbom` | **200** | **401** |
+| *(no header)* | `GET /api/v1/projects/<OWN>/sbom` | 200 | 200 |
+
+**What this is not.** In `anonymous` mode this was not a privilege escalation:
+a caller sending no header at all already reaches those routes as the default
+tenant's Owner, which is that mode's acknowledged posture. What was broken is
+the promise the web UI's "Project-scoped" label makes about a key someone was
+handed. Under `SBOMHUB_AUTH_MODE=clerk` the same requests were answered 401
+before the fix and are answered 401 or 403 after it.
+
+**What operators may need to change.** Nothing, if requests already used
+`Authorization: Bearer` (the CLI, GitHub Actions via `sbomhub scan`, and
+`docs/api.md`'s examples all do). Two behaviours are new:
+
+- a request carrying an `X-API-Key` value that does not validate is now **401**
+  where an anonymous-mode deployment previously served it as the default Owner.
+  A CI job pointing a stale or revoked key at `POST /api/v1/projects/:id/sbom`
+  will start failing loudly instead of silently uploading;
+- a request carrying **two different** values under one credential header
+  (`X-API-Key` or `Authorization`) is **401**. Picking one would be a guess.
+  Repeats of the same value are unaffected.
+
+The self-host promise is unchanged: a request with **no** credential still
+reaches the default tenant in `anonymous` mode. "No credential" and "a
+credential I cannot use" are deliberately different cases.
+
+### 7.2 The MCP server now reports whether a scan had finished
+
+`packages/mcp-server` reads `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status`
+around its vulnerability walk and reports `scan_state` / `counts_final` /
+`scanned_sbom_id`. Before this it could not see the asynchronous scan's state,
+so a project whose scan was still running answered `0 vulnerabilities` in exactly
+the shape a scanned-and-clean project does.
+
+**Extra requests per tool call.** The walk is bracketed by two probes of two
+requests each. The second probe is only issued when the first said `completed`,
+so a project whose scan is running — or whose tracker entry has aged out, which
+is the steady state after an hour or an API restart — costs **two** extra
+requests; one that can be certified costs **four**.
+
+**Rate-limit consequence (not closed).** `RateLimitByAPIKey` keys its Redis
+counter on the API key alone (`mcp:ratelimit:<key id>:<window>`) with no route in
+the key, so every limiter an API key passes through shares one counter and the
+smallest limit wins. The probe's requests are charged to the same bucket as the
+`/mcp` group's 60/min. A one-page `sbomhub_get_vulnerabilities` call now costs 3
+or 5 against that bucket instead of 1, so a key doing nothing else exhausts it
+after roughly 12-20 tool calls per minute rather than 60. Raising the `/mcp`
+limit, or giving the limiter a per-route counter, is a separate change.
+
+**What is still not proven.** A rescan that removes exactly as many rows as it
+adds, entirely within the walk, leaves both the scan state and the count
+unchanged and would be reported as final. The per-page `X-Total-Count` and
+row-identity guards catch it whenever the walk spans more than one page.
+`GET /api/v1/projects/:id/sbom` also answers 404 for a project with no SBOM, for
+a project that does not exist, and for a repository error alike, so the client
+reports `unavailable` for all three rather than naming one.

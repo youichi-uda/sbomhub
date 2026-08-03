@@ -43,8 +43,8 @@ import {
 // no answer at all. Imported rather than transcribed for the same reason
 // SCOPE_NOTE is.
 import {
+  SCAN_STATE_CHANGED,
   SCAN_STATE_FINAL,
-  SCAN_STATE_NO_SBOM,
   SCAN_STATE_UNAVAILABLE,
 } from "../dist/client/api.js";
 
@@ -54,7 +54,7 @@ import {
 // is what the claim is checked against.
 const SCAN_STATE_VOCABULARY = new Set([
   ...SCAN_LIFECYCLE.states,
-  SCAN_STATE_NO_SBOM,
+  SCAN_STATE_CHANGED,
   SCAN_STATE_UNAVAILABLE,
 ]);
 
@@ -78,8 +78,6 @@ const toolsCarryingScanCounts = new Set();
 const scanStatePairs = [];
 /** @type {Map<string, Set<string>>} tool → every field name seen in its payloads */
 const payloadKeysByTool = new Map();
-/** @type {Map<string, Set<string>>} tool → every field name AND string value seen */
-const payloadTokensByTool = new Map();
 
 const UUID_ANYWHERE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -111,36 +109,6 @@ function collectKeys(value, into) {
   for (const [key, child] of Object.entries(value)) {
     into.add(key);
     collectKeys(child, into);
-  }
-  return into;
-}
-
-/**
- * Every snake_case token the payload contains: keys AND string values.
- *
- * The description rule below started as "a field the description names must
- * exist". Enumerated VALUES are the same kind of claim — a description telling
- * the model that `scan_state` can read `no_sbom` is checkable in exactly the
- * same way, and against exactly the same evidence — and they are shaped like
- * field names, so a key-only collector reported them as missing fields. Adding
- * values keeps the token vocabulary closed over what the tools actually emit;
- * it does loosen the check by the (small) chance that a bogus field name
- * coincides with some string in the payload.
- */
-function collectTokens(value, into) {
-  if (value === null) return into;
-  if (typeof value === "string") {
-    into.add(value);
-    return into;
-  }
-  if (typeof value !== "object") return into;
-  if (Array.isArray(value)) {
-    for (const item of value) collectTokens(item, into);
-    return into;
-  }
-  for (const [key, child] of Object.entries(value)) {
-    into.add(key);
-    collectTokens(child, into);
   }
   return into;
 }
@@ -240,11 +208,6 @@ for (const testCase of CONTRACT_CASES) {
         payload,
         payloadKeysByTool.get(testCase.tool) ??
           payloadKeysByTool.set(testCase.tool, new Set()).get(testCase.tool)
-      );
-      collectTokens(
-        payload,
-        payloadTokensByTool.get(testCase.tool) ??
-          payloadTokensByTool.set(testCase.tool, new Set()).get(testCase.tool)
       );
     }
 
@@ -448,12 +411,17 @@ test("every response field a description names exists in what the tool returns",
   // snake_case tokens only — prose and tool names (sbomhub_*) are not fields.
   const FIELD_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
   let checked = 0;
-  for (const [tool, tokens] of payloadTokensByTool) {
-    // A tool that reports scan_state may name any state that field can take,
-    // including ones no case here produced — see SCAN_STATE_VOCABULARY.
-    const keys = (payloadKeysByTool.get(tool) ?? new Set()).has("scan_state")
-      ? new Set([...tokens, ...SCAN_STATE_VOCABULARY])
-      : tokens;
+  for (const [tool, fields] of payloadKeysByTool) {
+    // A tool that reports scan_state may also NAME the states that field can
+    // take. Those are enumerated values, not fields, and they are checked
+    // against the closed vocabulary the client can produce (see
+    // SCAN_STATE_VOCABULARY) rather than against whatever strings happened to
+    // appear in a payload — admitting every string value as evidence would let
+    // a nonexistent field name pass whenever it collided with payload data
+    // (Codex R1, Low).
+    const keys = fields.has("scan_state")
+      ? new Set([...fields, ...SCAN_STATE_VOCABULARY])
+      : fields;
     const description = descriptionByTool.get(tool) ?? "";
     for (const [token] of description.matchAll(FIELD_TOKEN)) {
       if (token.startsWith("sbomhub_")) continue;
@@ -573,7 +541,7 @@ test("no observed payload called a non-completed scan's counts final", () => {
       true,
       `a payload reported scan_state="${pair.scan_state}", which is neither a ` +
         `service.ScanState (${SCAN_LIFECYCLE.states.join(", ")}) nor one of the client's ` +
-        `own states (${SCAN_STATE_NO_SBOM}, ${SCAN_STATE_UNAVAILABLE})`
+        `own states (${SCAN_STATE_CHANGED}, ${SCAN_STATE_UNAVAILABLE})`
     );
   }
 });

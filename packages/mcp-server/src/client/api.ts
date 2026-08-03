@@ -43,6 +43,10 @@ const ScanStatusSchema = z
   .object({
     status: z.string(),
     sbom_id: z.string(),
+    // handler.VulnerabilitySummaryCount.Total, a COUNT over the same join the
+    // vulnerability pages are drawn from. Compared before and after the walk;
+    // see probeScanState.
+    vulnerabilities: z.object({ total: z.number() }).passthrough(),
   })
   .passthrough();
 
@@ -61,19 +65,27 @@ export type VulnSort = "cvss" | "epss";
 // "the scan has matched nothing YET" into "this project is clean".
 export const SCAN_STATE_FINAL = "completed";
 
-// States this client generates itself, for the two ways the probe can fail to
-// produce a backend answer. Both are non-final.
+// States this client generates itself. Both are non-final.
 //
-//   no_sbom     — the project has no SBOM at all, so nothing was ever scanned.
-//                 A zero count here means "nothing uploaded", not "nothing
-//                 found", and those are different answers to a compliance
-//                 question.
-//   unavailable — the scan state could not be read (the request failed, the
-//                 body did not parse). Notably what a backend older than the
+//   unavailable — the scan state could not be read at all: the request failed,
+//                 the project or its latest SBOM could not be resolved, or the
+//                 body did not parse. Notably what a backend older than the
 //                 X-API-Key fix answers, since it 401s the canonical routes for
 //                 this client's header.
-export const SCAN_STATE_NO_SBOM = "no_sbom";
+//
+//                 This deliberately does NOT distinguish "the project has no
+//                 SBOM" (Codex R1 Low): GET /api/v1/projects/:id/sbom answers
+//                 404 for a project that has no SBOM, for a project that does
+//                 not exist, and for any repository error on the way — the
+//                 handler maps every failure to that one status. A state named
+//                 for one of those three would be a claim the response cannot
+//                 support.
+//
+//   changed     — the scan, or the SBOM it belongs to, moved between the two
+//                 probes taken around the page walk. The rows that were read
+//                 cannot be attributed to a settled scan; see probeScanState.
 export const SCAN_STATE_UNAVAILABLE = "unavailable";
+export const SCAN_STATE_CHANGED = "changed";
 
 /**
  * What the tool reports about the asynchronous scan behind the counts it just
@@ -84,6 +96,13 @@ export const SCAN_STATE_UNAVAILABLE = "unavailable";
  * because nobody knows", which call for different next steps (wait and retry
  * vs. check the deployment).
  */
+/** One reading of the scan state, as taken by readScanState. */
+type ScanProbe = {
+  state: string;
+  sbomId: string | null;
+  total: number | null;
+};
+
 export type ScanReport = {
   scan_state: string;
   counts_final: boolean;
@@ -108,8 +127,6 @@ const VULNS_RETURN_CAP = 500;
 type RequestOptions = {
   method?: string;
   body?: unknown;
-  /** Statuses to return instead of throwing (see requestRaw). */
-  allowStatus?: number[];
 };
 
 // How the caller names the two SBOMs to compare. Ids win over versions; both
@@ -133,7 +150,7 @@ export class ApiClient {
   private async requestRaw(
     path: string,
     options: RequestOptions = {}
-  ): Promise<{ data: unknown; headers: Headers; status: number }> {
+  ): Promise<{ data: unknown; headers: Headers }> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: options.method ?? "GET",
       headers: {
@@ -154,18 +171,11 @@ export class ApiClient {
       redirect: "error",
     });
 
-    // `allowStatus` is a narrow escape hatch for ONE case: a 404 that is an
-    // answer rather than a failure (a project with no SBOM). It is opt-in per
-    // call so no other path can start treating an error status as data.
-    if (!res.ok && !options.allowStatus?.includes(res.status)) {
+    if (!res.ok) {
       const text = await res.text();
       throw new Error(`API error ${res.status}: ${text}`);
     }
-    return {
-      data: (await res.json()) as unknown,
-      headers: res.headers,
-      status: res.status,
-    };
+    return { data: (await res.json()) as unknown, headers: res.headers };
   }
 
   async request(path: string, options: RequestOptions = {}): Promise<unknown> {
@@ -402,6 +412,10 @@ export class ApiClient {
     truncated: boolean;
     report: ScanReport;
   }> {
+    // BEFORE the walk. See probeScanState for why one probe on either side is
+    // not enough and this one has to be taken first.
+    const before = await this.readScanState(projectId);
+
     const vulnerabilities: VulnerabilityEntry[] = [];
     let reportedTotal = 0;
     let sawEnd = false;
@@ -471,92 +485,158 @@ export class ApiClient {
       // conservative direction: over-reporting truncation costs a caveat,
       // under-reporting it costs a wrong compliance answer.
       truncated: !sawEnd || total > vulnerabilities.length,
-      // AFTER the walk, deliberately. See probeScanState.
-      report: await this.probeScanState(projectId),
+      // The walk is bracketed by two probes; this closes the pair.
+      report: await this.probeScanState(projectId, before),
     };
   }
 
   /**
-   * Ask whether the background scan behind the counts just read has finished.
-   *
-   * # Why this exists
+   * Read the state of the asynchronous scan behind a project's vulnerability
+   * counts, ONCE.
    *
    * apps/api answers `GET /mcp/projects/:id/vulnerabilities` from whatever the
-   * asynchronous NVD/JVN scan has matched SO FAR. A project whose scan is still
-   * running therefore answers `[]` with `X-Total-Count: 0` — byte-identical to a
-   * project that was scanned and found clean. Every field of this client's
-   * response would then be individually true and the answer as a whole wrong, in
-   * the direction that matters most in a compliance product.
-   *
-   * # Why the probe runs AFTER the page walk
-   *
-   * Each page is answered against whatever is the project's LATEST SBOM at that
-   * moment (SbomService.GetVulnerabilitiesPaginated → sbomRepo.GetLatest), so an
-   * upload landing mid-walk moves the ground under the pages. Resolving the
-   * latest SBOM afterwards means such a walk is attributed to the NEW snapshot,
-   * whose scan was marked running synchronously by the upload handler before its
-   * goroutine started — so the race resolves to "not final", which is the
-   * conservative direction. Probing first would have the opposite bias: a
-   * `completed` answer captured before an upload would be reported for pages
-   * read after it.
+   * background NVD/JVN scan has matched SO FAR, so a project whose scan is still
+   * running answers `[]` with `X-Total-Count: 0` — byte-identical to a project
+   * that was scanned and found clean. This is what tells the two apart.
    *
    * `GET /api/v1/projects/:id/sbom` is the SAME resolution the vulnerability
-   * pages use — not `/mcp/projects/:id/sboms` ordered newest-first, which would
-   * be an inference about which row that resolution picks.
+   * pages use (SbomService.GetVulnerabilitiesPaginated -> sbomRepo.GetLatest),
+   * not `/mcp/projects/:id/sboms` ordered newest-first, which would be an
+   * inference about which row that resolution picks.
+   *
+   * `total` comes back too: it is a COUNT over the same join the pages are drawn
+   * from, and comparing it across the walk is what probeScanState uses to detect
+   * a scan that moved. The response's own `sbom_id` is checked against the one
+   * asked for, so an answer about a different SBOM is reported as unreadable
+   * rather than accepted (Codex R1).
+   *
+   * Never throws: a failure here must not turn a usable vulnerability answer
+   * into a tool error, and must not be mistaken for "finished" either. It
+   * becomes SCAN_STATE_UNAVAILABLE, which is non-final.
+   */
+  private async readScanState(projectId: string): Promise<ScanProbe> {
+    const unreadable: ScanProbe = {
+      state: SCAN_STATE_UNAVAILABLE,
+      sbomId: null,
+      total: null,
+    };
+
+    try {
+      const latest = SbomSummarySchema.parse(
+        await this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/sbom`)
+      );
+      const status = ScanStatusSchema.parse(
+        await this.request(
+          `/api/v1/projects/${encodeURIComponent(projectId)}` +
+            `/sboms/${encodeURIComponent(latest.id)}/scan-status`
+        )
+      );
+      if (status.sbom_id !== latest.id) {
+        return unreadable;
+      }
+      return {
+        state: status.status,
+        sbomId: status.sbom_id,
+        total: status.vulnerabilities.total,
+      };
+    } catch {
+      return unreadable;
+    }
+  }
+
+  /**
+   * Decide whether the rows just read may be reported as settled.
+   *
+   * # What "settled" has to mean (Codex R1, High)
+   *
+   * A single probe AFTER the walk is not enough, and a single probe BEFORE it is
+   * not either. The scan can finish DURING the walk: pages read while it was
+   * still matching return stale — possibly empty — rows, and a probe taken
+   * afterwards then reports `completed` and certifies them. That is the original
+   * defect with a smaller window, which is not a fix.
+   *
+   * So the walk is bracketed. `counts_final` requires all of:
+   *
+   *   - the scan was already `completed` when the walk STARTED, and
+   *   - it is still `completed` now, and
+   *   - it is the same SBOM (no upload made a different snapshot the latest), and
+   *   - that SBOM's vulnerability count is unchanged.
+   *
+   * The last one is what covers a rescan. apps/api's manual rescan path does not
+   * mark the shared ScanTracker at all, so a rescan of an SBOM whose entry still
+   * reads `completed` (entries are kept an hour) is invisible in the STATE —
+   * but not in the count, which is a COUNT over the rows the pages come from.
+   *
+   * # Cost, and why the cheap case is the common one
+   *
+   * The second probe is only issued when the first said `completed`, because
+   * nothing the second could say would make a non-completed answer final. A
+   * just-uploaded project (`running`) and any project whose tracker entry has
+   * aged out (`unknown`, the steady state after an hour or a restart) therefore
+   * cost two requests, not four.
+   *
+   * This matters more than it looks: RateLimitByAPIKey keys its Redis counter on
+   * the API key alone (`mcp:ratelimit:<key id>:<window>`), with no route in the
+   * key, so the probe's requests are charged to the same bucket as the /mcp
+   * group's 60/min — the smaller of the two limits the key passes through.
+   * Recorded in docs/UPGRADE.md.
    *
    * # Why a failure here is not a tool failure
    *
    * The vulnerabilities were read successfully; only the ability to vouch for
    * them is missing. Refusing the whole call would make the tool unusable
    * against, for instance, a backend that predates the X-API-Key fix (it 401s
-   * these routes for this client's header). So the failure is reported in-band
-   * as a non-final state, never swallowed into an implied "finished".
+   * these routes for this client's header). So a failure is reported in-band as
+   * a non-final state, never swallowed into an implied "finished".
+   *
+   * # What this still does not prove (honest limitation)
+   *
+   * A rescan that removes exactly as many rows as it adds, entirely within the
+   * walk, leaves both the state and the count unchanged and would be certified.
+   * The per-page X-Total-Count and row-identity guards in fetchVulnerabilities
+   * catch it whenever the walk spans more than one page.
    */
-  private async probeScanState(projectId: string): Promise<ScanReport> {
-    const unavailable = (sbomId: string | null): ScanReport => ({
-      scan_state: SCAN_STATE_UNAVAILABLE,
-      counts_final: false,
-      scanned_sbom_id: sbomId,
-    });
-
-    let sbomId: string;
-    try {
-      const { data, status } = await this.requestRaw(
-        `/api/v1/projects/${encodeURIComponent(projectId)}/sbom`,
-        { allowStatus: [404] }
-      );
-      if (status === 404) {
-        // No SBOM was ever uploaded. Nothing was scanned, so a count of zero
-        // says nothing about the project's exposure — which is exactly the
-        // conclusion a model would otherwise draw from it.
-        return {
-          scan_state: SCAN_STATE_NO_SBOM,
-          counts_final: false,
-          scanned_sbom_id: null,
-        };
-      }
-      sbomId = SbomSummarySchema.parse(data).id;
-    } catch {
-      return unavailable(null);
-    }
-
-    try {
-      const data = await this.request(
-        `/api/v1/projects/${encodeURIComponent(projectId)}` +
-          `/sboms/${encodeURIComponent(sbomId)}/scan-status`
-      );
-      const state = ScanStatusSchema.parse(data).status;
+  private async probeScanState(
+    projectId: string,
+    before: ScanProbe
+  ): Promise<ScanReport> {
+    if (before.state !== SCAN_STATE_FINAL) {
       return {
-        scan_state: state,
-        // Equality against ONE literal, not a list of "bad" states: a state
-        // this client has never heard of is then non-final by construction
-        // rather than by having been enumerated.
-        counts_final: state === SCAN_STATE_FINAL,
-        scanned_sbom_id: sbomId,
+        scan_state: before.state,
+        counts_final: false,
+        scanned_sbom_id: before.sbomId,
       };
-    } catch {
-      return unavailable(sbomId);
     }
+
+    const after = await this.readScanState(projectId);
+    if (after.state === SCAN_STATE_UNAVAILABLE) {
+      // The walk began on a finished scan, but whether it still is cannot be
+      // read — which is not evidence that it is.
+      return {
+        scan_state: SCAN_STATE_UNAVAILABLE,
+        counts_final: false,
+        scanned_sbom_id: before.sbomId,
+      };
+    }
+
+    const settled =
+      after.state === SCAN_STATE_FINAL &&
+      after.sbomId === before.sbomId &&
+      after.total === before.total;
+
+    if (!settled) {
+      return {
+        scan_state: SCAN_STATE_CHANGED,
+        counts_final: false,
+        scanned_sbom_id: after.sbomId ?? before.sbomId,
+      };
+    }
+
+    return {
+      scan_state: SCAN_STATE_FINAL,
+      counts_final: true,
+      scanned_sbom_id: before.sbomId,
+    };
   }
 }
 
