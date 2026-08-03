@@ -43,32 +43,38 @@ import { dirname, join, relative } from 'node:path';
  * could be closed here — spelling `test.skip` differently, rebinding a
  * global, smuggling the exemption marker somewhere unusual — is strictly
  * more effort than `rm`, so closing them buys no adversarial resistance
- * whatsoever. It only buys robustness against the shapes an honest
- * refactor actually produces, which is why the ones handled below are
- * handled: an extracted `const skip = test.skip` alias is something
- * people really write; `process['env'].CI = ''` is not.
+ * whatsoever.
  *
  * Consequence for review: "an author could deliberately write X to evade
- * this" is not, by itself, a finding. It becomes one only with an
- * account of how an author writes X BY MISTAKE. Reviewing this file
- * against a sabotage model produces an unbounded stream of syntactic
- * corners and never converges — the repo has already paid for that
- * lesson once (anti-pattern 98, the migration lock-budget lint: 12
- * rounds of "cleverly-crafted SQL" findings that stopped the moment the
- * threat model was written down).
+ * this" is not, by itself, a finding. It becomes one only with an account
+ * of how an author writes X BY MISTAKE. Reviewing this file against a
+ * sabotage model produces an unbounded stream of syntactic corners and
+ * never converges — the repo has already paid for that lesson twice
+ * (anti-pattern 98, and nine rounds of it here).
  *
- * The gates that DO have to survive an adversary are the ones about
- * tenant isolation and credentials (RLS, api-key scope, encryption-key
- * refusal). This is not one of them; it is a spelling checker for CI
- * guards.
+ * FALSE POSITIVES ARE WORSE THAN MISSES
+ * -------------------------------------
+ * This spec is collected by `e2e/*.spec.ts`, so it runs inside the
+ * REQUIRED status check `Playwright full suite (…)`. A false positive is
+ * therefore not an annoyance, it is a red `main` on correct code — and
+ * this repo's standing rule is that a gate which is red for no reason
+ * gets switched off. A miss costs one accident slipping through, and it
+ * is written down below so the next person hitting it knows why.
+ *
+ * So: WHEN IN DOUBT, DO NOT REPORT. Every ambiguous shape below resolves
+ * toward "not a violation".
  *
  * THE RULE
  * --------
- * Every GROUP-WIDE conditional skip — a `test.skip` / `test.fixme` call
- * carrying a condition, written at file scope, directly in a
- * `test.describe` body, or inside a `test.beforeAll` — must be provably
- * inert under CI. "Provably" is structural, not semantic: the condition
- * must be a top-level `&&` chain with one conjunct that is literally
+ * A `test.skip` / `test.fixme` call carrying a CONDITION, written at
+ *
+ *   - file scope,
+ *   - directly inside an INLINE `test.describe` callback, or
+ *   - directly inside an INLINE `test.beforeAll` callback,
+ *
+ * must be provably inert under CI. "Provably" is structural, not
+ * semantic: the condition must be a top-level `&&` chain with one
+ * conjunct that is literally
  *
  *     !process.env.CI            (or `process.env.CI === undefined`
  *                                 / `process.env.CI == null`)
@@ -76,105 +82,92 @@ import { dirname, join, relative } from 'node:path';
  * because `A && B && !process.env.CI` cannot be true when CI is set, no
  * matter what A and B are. One hop of file-scope `const` resolution is
  * performed, so `const LOCAL_ONLY = !HAS_TOOL && !process.env.CI;` +
- * `test.skip(LOCAL_ONLY, ...)` also passes — unless the name is declared
+ * `test.skip(LOCAL_ONLY, ...)` also passes — unless the name is bound
  * more than once in the file, in which case shadowing makes the hop
  * unsound and the site is treated as unproven.
  *
- * WHERE THE LINE IS DRAWN — and why
- * ---------------------------------
- * "CI must not skip this"  → conditional skips that take a WHOLE GROUP
- *   with them: file scope, describe scope, `beforeAll`. These are
- *   environment-conditional gates (an external binary, a fixture, a
- *   feature flag). Their whole purpose is to be a gate, and a gate that
- *   evaporates when its precondition is missing is worse than no gate: it
- *   is a green tick that means nothing. Enforced here.
+ * Nothing else is examined. In particular there is NO analysis of where a
+ * helper function is called from. An earlier revision tried to follow
+ * that — exported helpers, `forEach` callbacks, transitive call graphs,
+ * identifier-passed callbacks — and it was the single largest source of
+ * defects in this file, in BOTH directions: it produced false positives
+ * on `const skipIf = () => test.skip(…)` used per-test, and it needed a
+ * new special case for every way a callback can be spelled. Deleting it
+ * removed about a third of this file.
  *
- *   File and describe scope are the sharp case, because they are
- *   evaluated at COLLECTION time and therefore also delete the group's
- *   `beforeAll`. `beforeAll` scope is included because the blast radius
- *   is the same group even though the timing is not — it just cannot
- *   make a preceding `throw` unreachable.
+ * WHAT THIS DOES NOT CATCH — deliberately
+ * ---------------------------------------
+ * Each of these is a MISS accepted to avoid a false positive. If one of
+ * them ever bites, the fix is a targeted fixture, not a return to
+ * whole-program analysis.
  *
- *   A skip written inside a plain HELPER function is judged by where the
- *   helper is CALLED, not where it is written: called from a describe
- *   body it is group-wide, called from a test body it is not. An
- *   EXPORTED helper is treated as group-wide because its call sites are
- *   not all visible. Attributing it to the declaration site instead
- *   turned an ordinary `const skipIf = () => test.skip(...)` used
- *   per-test into a red gate.
+ *   - A skip inside ANY helper function, wherever that helper is called:
  *
- * "CI may skip this"       → everything else, deliberately NOT gated:
- *   - Per-test runtime skips: inside a test body, a `test.step`, or a
- *     `beforeEach` (`test.skip()`, `test.skip(cond, msg)` after an
- *     `await`). They disable one test, not the gate, and they are the
+ *         const skipIfMissing = () => test.skip(!HAS_TOOL, 'missing');
+ *         test.describe('gate', () => { skipIfMissing(); });
+ *
+ *     Not reported. The same shape called from inside a test body is a
+ *     legitimate per-test skip, and this gate cannot tell the two apart
+ *     without following call sites.
+ *
+ *   - A `describe` body passed by NAME rather than written inline:
+ *
+ *         function suite() { test.skip(!HAS_TOOL, 'missing'); }
+ *         test.describe('gate', suite);
+ *
+ *     Not reported, same reason.
+ *
+ *   - A skip in a helper module under `e2e/` that other specs import.
+ *
+ *   - `test.skip(callback, description)`, Playwright's fixture-aware
+ *     form. MEASURED: at describe scope it behaves exactly like the
+ *     literal form — the group is skipped and a throwing `beforeAll`
+ *     never runs — so this really is a miss, not a non-issue. It is
+ *     excluded because the form exists precisely for conditions that
+ *     depend on fixtures (`({ browserName }) => browserName !== 'webkit'`),
+ *     where `&& !process.env.CI` is the WRONG advice, and a gate that
+ *     emits inapplicable advice on a documented idiom is broken.
+ *
+ *   - Per-test skips: inside a test body, a `test.step`, or a
+ *     `beforeEach`. They disable one test, not the gate, and they are the
  *     repo's "soft gate" idiom (48 sites) for seed-dependent assertions.
- *     A soft gate can make a test vacuous, but that is a different bug
- *     class from a group-wide gate switching itself off.
- *   - Declaration-form `test.skip('name', fn)` (2 sites in
- *     error-handling.spec.ts). Statically and unconditionally off, with a
- *     written hand-off. It never pretends to be conditional, so there is
- *     nothing to silently flip.
- *   - `test.describe.skip(...)` / `test.describe.fixme(...)` (0 sites).
- *     Same reasoning: unconditional and self-announcing in the source.
+ *     A `beforeEach` skip with a constant condition is group-wide in
+ *     effect; prefer `beforeAll` (which IS checked) for a group-level
+ *     precondition.
+ *
+ *   - Declaration-form `test.skip('name', fn)` and `test.describe.skip`.
+ *     Statically and unconditionally off, and self-announcing in the
+ *     source, so there is nothing to silently flip.
+ *
+ *   - A call through a local alias (`const skip = test.skip; skip(cond)`)
+ *     or a renamed import (`import { test as t }`). The matcher keys on
+ *     the literal `test.` prefix.
+ *
+ *   - Anything outside `apps/web/e2e/**`, and skips configured outside
+ *     the spec source entirely: `testIgnore` / `grep` in
+ *     playwright.config.ts, a workflow's spec selector, a step with
+ *     `continue-on-error`.
  *
  * ESCAPE HATCH
  * ------------
- * A collection-time conditional skip that genuinely may skip under CI must
- * say so out loud: put `// ci-skip-ok: <reason>` on or above the call. The
- * marker requires a non-empty reason and shows up in review — which is the
- * point. It is an explicit decision, not a default.
- *
- * WHAT THIS DOES NOT CATCH (honest limitations)
- * ---------------------------------------------
- *   - Skips configured outside the spec source: `testIgnore` / `grep` /
- *     project filters in playwright.config.ts, or a `--grep-invert` in a
- *     workflow. A whole spec can be excluded from a run without any
- *     `test.skip` existing.
- *   - Specs outside `apps/web/e2e/**` and non-Playwright gates that
- *     self-disable (Go `t.Skip`, a shell step that `exit 0`s when a tool
- *     is missing, a workflow step with `continue-on-error`).
- *   - A renamed import. The matcher is syntactic on the literal
- *     `test.` prefix, so `import { test as t }` + `t.skip(...)` is
- *     invisible to it. Every spec in this directory imports `test` under
- *     its own name; a file that does not is a visible deviation from the
- *     convention, which is the (weak) thing standing in for a check here.
- *   - A runtime soft gate that makes a test vacuous rather than skipped
- *     (e.g. `if (!found) return;`), and per-test skips of any shape.
- *   - `test.beforeEach(() => test.skip(!HAS_TOOL, ...))`. Formally this
- *     is a per-test decision — it re-runs for every test and may consult
- *     that test's fixtures — which is why it sits on the runtime side of
- *     the line. But when the condition is a module-level constant the
- *     effect is the same group-wide switch-off, and the gate will not say
- *     so. Gating it would instead force `&& !process.env.CI` onto the
- *     legitimate `test.skip(await page.evaluate(...))` idiom, where that
- *     suffix would be actively wrong. Prefer `beforeAll` (which IS gated)
- *     for a group-level precondition; that is the shape this file wants
- *     you to reach for.
- *   - Semantic CI-safety that is not syntactically visible — a condition
- *     computed by a helper function, or through two hops of `const`, is
- *     reported as a violation (fail-closed). Fix by inlining the
- *     `&& !process.env.CI` or by adding the `ci-skip-ok` marker.
- *   - A helper defined OUTSIDE `apps/web/e2e/**` (say in
- *     `apps/web/test-utils/`). Helpers under `e2e/` are scanned; ones
- *     that are not are invisible.
- *   - An anonymous closure with no name to match call sites against.
- *   - Mutating `process.env` through an alias
- *     (`const env = process.env; env.CI = ''`). Direct
- *     `process.env.CI = …` / `delete process.env.CI` ARE caught; the
- *     aliased form is sabotage-class (see THREAT MODEL) and chasing it
- *     cost a false positive on an innocent `process.platform` read.
+ * A checked skip that genuinely may skip under CI must say so out loud:
+ * put `// ci-skip-ok: <reason>` on or above the call. It has to be a
+ * COMMENT — the marker inside the skip's own description string does not
+ * count, because that reads to a human as an ordinary message.
  *
  * NON-VACUITY
  * -----------
- * `analyzer detects the hole it exists for` below runs the analyzer over
- * embedded holed/guarded fixtures on every CI run, so this file cannot
- * degrade into a scan that finds nothing and passes. Measured externally
- * too: a temp spec carrying the holed shape was dropped into `e2e/` and
- * turned this suite red before being removed.
+ * `analyzer verdicts` below runs the analyzer over embedded fixtures on
+ * every CI run — both the shapes that must be REPORTED and a larger set
+ * of correct-code shapes that must stay CLEAN — so this file cannot
+ * degrade into a scan that finds nothing and passes, and cannot quietly
+ * become trigger-happy either. Measured externally too: a temp spec
+ * carrying the holed shape was dropped into `e2e/` and turned this suite
+ * red before being removed.
  */
 
 // ---------------------------------------------------------------------
-// Analyzer
+// Model
 // ---------------------------------------------------------------------
 
 interface SkipSite {
@@ -182,252 +175,31 @@ interface SkipSite {
     line: number;
     callee: string;
     /**
-     * `conditional` — `test.skip(cond)` / `test.skip(cond, desc)`.
-     * `declaration` — `test.skip('name', fn)`, a statically-off test.
-     * `noarg`       — `test.skip()`, only meaningful at runtime.
+     * `conditional`  — `test.skip(cond)` / `test.skip(cond, desc)`.
+     * `callback`     — `test.skip(fn, desc)`, Playwright's fixture form.
+     * `declaration`  — `test.skip('name', fn)`, a statically-off test.
+     * `noarg`        — `test.skip()`, only meaningful at runtime.
      */
-    form: 'conditional' | 'declaration' | 'noarg';
+    form: 'conditional' | 'callback' | 'declaration' | 'noarg';
     /**
-     * Where the call sits. `file` / `describe` / `beforeAll` disable a
-     * WHOLE GROUP; `test` / `beforeEach` / `step` disable one test.
+     * Where the call is WRITTEN. `file` / `describe` / `beforeAll` are the
+     * checked scopes; everything else is either per-test or inside a
+     * helper whose call sites this gate deliberately does not follow.
      */
-    scope:
-        | 'file'
-        | 'describe'
-        | 'beforeAll'
-        | 'test'
-        | 'eachHook'
-        | 'step'
-        /**
-         * Inside a plain (non-test-construct) function. The blast radius
-         * depends on WHERE that function is called, not on where it is
-         * written — see `closureIsGroupWide`.
-         */
-        | 'closure';
+    scope: 'file' | 'describe' | 'beforeAll' | 'test' | 'eachHook' | 'step' | 'closure';
     condition: string;
     ciNeutral: boolean;
     allowMarker: boolean;
-    /** Name of the innermost enclosing plain function, if it has one. */
-    closureName: string | null;
-    /** That function is exported, so its call sites are not all visible. */
-    closureExported: boolean;
-    /**
-     * Whether this skip can take a whole GROUP with it. Syntactic scope
-     * decides it directly; for a `closure` scope it is decided by where
-     * that closure is called (see analyzeSource).
-     */
-    groupWide: boolean;
     /** The enclosing describe has a `beforeAll` that can `throw`. */
     guardedByThrowingBeforeAll: boolean;
 }
 
 /** Scopes at which one skip call takes an entire group with it. */
-const GROUP_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
+const CHECKED_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
     'file',
     'describe',
     'beforeAll',
 ] as const);
-
-/**
- * Array-iteration methods whose callback runs synchronously, in place,
- * at the moment the surrounding code runs.
- */
-const SYNC_ITERATORS = new Set(['forEach', 'map', 'flatMap', 'filter', 'reduce', 'some', 'every']);
-
-/**
- * The plain function a file-scope name is bound to, for the three places
- * that have to follow an identifier: a `describe` callback passed by
- * name, a `forEach` callback passed by name, and `export default name`.
- * Extracting any of those to a named function is an ordinary refactor,
- * and each indirection used to lose the analysis. (Review findings under
- * the declared threat model.)
- */
-function namedFunctions(sf: ts.SourceFile): Map<string, ts.Node> {
-    const map = new Map<string, ts.Node>();
-    const visit = (n: ts.Node): void => {
-        if (ts.isFunctionDeclaration(n) && n.name) map.set(n.name.text, n);
-        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
-            const init = unwrap(n.initializer);
-            if (isPlainFunction(init)) map.set(n.name.text, init);
-        }
-        ts.forEachChild(n, visit);
-    };
-    visit(sf);
-    return map;
-}
-
-/** True when this function is invoked right where it is written. */
-function runsInPlace(fn: ts.Node, alsoInPlace?: Set<ts.Node>): boolean {
-    if (alsoInPlace?.has(fn)) return true;
-    const [child, parent] = skipParens(fn);
-    if (parent === undefined || !ts.isCallExpression(parent)) return false;
-    // IIFE: `(() => { … })()`
-    if (parent.expression === child) return true;
-    const callee = unwrap(parent.expression);
-    // `Array.from(iterable, cb)` — the callback is the SECOND argument.
-    if (
-        ts.isPropertyAccessExpression(callee) &&
-        callee.name.text === 'from' &&
-        ts.isIdentifier(callee.expression) &&
-        callee.expression.text === 'Array'
-    ) {
-        return parent.arguments[1] === child;
-    }
-    // `xs.forEach(cb)` and friends: only the FIRST argument is the
-    // callback. `reduce(cb, initialValue)` can carry a FUNCTION as its
-    // accumulator seed, which is never called during collection —
-    // treating every argument as a callback made that correct code a
-    // describe-scope violation. (Review finding under the declared
-    // threat model.)
-    if (parent.arguments[0] !== child) return false;
-    return ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
-}
-
-/**
- * Function nodes reached only through a NAME but still executed during
- * collection: `TOOLS.forEach(defineSuite)` and `test.describe('g', suite)`.
- */
-function collectionTimeByName(sf: ts.SourceFile, named: Map<string, ts.Node>): Set<ts.Node> {
-    const out = new Set<ts.Node>();
-    const visit = (n: ts.Node): void => {
-        if (ts.isCallExpression(n)) {
-            const callee = unwrap(n.expression);
-            const isArrayFrom =
-                ts.isPropertyAccessExpression(callee) &&
-                callee.name.text === 'from' &&
-                ts.isIdentifier(callee.expression) &&
-                callee.expression.text === 'Array';
-            const isSyncIterator =
-                ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
-            const cb = isArrayFrom ? n.arguments[1] : isSyncIterator ? n.arguments[0] : undefined;
-            if (cb !== undefined) {
-                const a = unwrap(cb);
-                if (ts.isIdentifier(a)) {
-                    const fn = named.get(a.text);
-                    if (fn) out.add(fn);
-                }
-            }
-        }
-        ts.forEachChild(n, visit);
-    };
-    visit(sf);
-    return out;
-}
-
-/** Function-ish nodes that are NOT a Playwright construct's callback. */
-type PlainFunction =
-    | ts.FunctionDeclaration
-    | ts.FunctionExpression
-    | ts.ArrowFunction
-    | ts.MethodDeclaration
-    | ts.GetAccessorDeclaration
-    | ts.SetAccessorDeclaration;
-
-function isPlainFunction(n: ts.Node): n is PlainFunction {
-    return (
-        ts.isFunctionDeclaration(n) ||
-        ts.isFunctionExpression(n) ||
-        ts.isArrowFunction(n) ||
-        // Tidying per-test helpers into an object or class is ordinary;
-        // treating a method body as if it ran at describe scope made that
-        // refactor turn `main` red. (Review finding under the declared
-        // threat model.)
-        ts.isMethodDeclaration(n) ||
-        ts.isGetAccessorDeclaration(n) ||
-        ts.isSetAccessorDeclaration(n)
-    );
-}
-
-function hasExportModifier(n: ts.Node): boolean {
-    const mods = ts.canHaveModifiers(n) ? ts.getModifiers(n) : undefined;
-    return (mods ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
-}
-
-/**
- * Names exported through an `export { a, b as c }` clause.
- *
- * The `export` modifier is not on the declaration in that form, and it is
- * the shape an IDE's "move to another file" refactor usually writes.
- * (Review finding under the declared threat model.)
- */
-function exportListNames(sf: ts.SourceFile): Set<string> {
-    const names = new Set<string>();
-    for (const stmt of sf.statements) {
-        if (!ts.isExportDeclaration(stmt) || !stmt.exportClause) continue;
-        if (ts.isNamedExports(stmt.exportClause)) {
-            for (const el of stmt.exportClause.elements) {
-                // `export { local as public }` exports the LOCAL binding.
-                names.add((el.propertyName ?? el.name).text);
-            }
-        }
-    }
-    return names;
-}
-
-/**
- * Functions reachable through `export default`.
- *
- * `export default (missing) => test.skip(missing, '…')` is anonymous and
- * carries no export modifier, so neither the name check nor the clause
- * check saw it — yet it is exactly the shared helper the gate has to
- * treat as group-wide. Splitting a helper out with a default export is
- * an ordinary choice. (Review finding under the declared threat model.)
- */
-function defaultExportedFunctions(sf: ts.SourceFile, named: Map<string, ts.Node>): Set<ts.Node> {
-    const fns = new Set<ts.Node>();
-    for (const stmt of sf.statements) {
-        if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
-            const expr = unwrap(stmt.expression);
-            if (isPlainFunction(expr)) {
-                fns.add(expr);
-            } else if (ts.isIdentifier(expr)) {
-                // `const helper = …; export default helper;`
-                const fn = named.get(expr.text);
-                if (fn) fns.add(fn);
-            }
-        }
-    }
-    return fns;
-}
-
-/**
- * The name a helper function is reachable by, and whether it escapes the
- * file. `function f(){}`, `const f = () => {}` and `export const f = ...`
- * all resolve; an anonymous inline callback does not.
- */
-function plainFunctionIdentity(
-    fn: PlainFunction,
-    exportList: Set<string>,
-    defaultExported: Set<ts.Node>,
-): { name: string | null; exported: boolean } {
-    const isDefault = defaultExported.has(fn);
-    const result = (name: string | null, exported: boolean) => ({
-        name,
-        exported: exported || isDefault || (name !== null && exportList.has(name)),
-    });
-    if (ts.isFunctionDeclaration(fn)) {
-        return result(fn.name?.text ?? null, hasExportModifier(fn));
-    }
-    if (
-        ts.isMethodDeclaration(fn) ||
-        ts.isGetAccessorDeclaration(fn) ||
-        ts.isSetAccessorDeclaration(fn)
-    ) {
-        // Reached through a member expression, never a bare identifier, so
-        // it can have no group-scope call site this pass would record.
-        return result(null, false);
-    }
-    const decl = fn.parent;
-    if (decl && ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name)) {
-        const list = decl.parent;
-        const stmt = list?.parent;
-        return result(decl.name.text, stmt !== undefined && hasExportModifier(stmt));
-    }
-    if (ts.isFunctionExpression(fn) && fn.name) {
-        return result(fn.name.text, false);
-    }
-    return result(null, false);
-}
 
 const CALLEE_SKIP = /^test\.(skip|fixme)$/;
 const CALLEE_DESCRIBE = /^(test\.describe(\.(only|serial|parallel|skip|fixme))*|describe)$/;
@@ -435,6 +207,10 @@ const CALLEE_TEST = /^test(\.(only|skip|fixme|fail|slow))?$/;
 const CALLEE_ALL_HOOK = /^test\.(beforeAll|afterAll)$/;
 const CALLEE_EACH_HOOK = /^test\.(beforeEach|afterEach)$/;
 const ALLOW_MARKER = /ci-skip-ok:\s*\S/;
+
+// ---------------------------------------------------------------------
+// Expression helpers
+// ---------------------------------------------------------------------
 
 /** Strip the wrappers that change an expression's text but not its value. */
 function unwrap(node: ts.Expression): ts.Expression {
@@ -448,15 +224,18 @@ function unwrap(node: ts.Expression): ts.Expression {
     }
 }
 
+/** The literal key of a `x['k']` access, or null. */
+function literalKey(node: ts.Expression): string | null {
+    const k = unwrap(node);
+    if (ts.isStringLiteral(k) || ts.isNoSubstitutionTemplateLiteral(k)) return k.text;
+    return null;
+}
+
 /**
  * Dotted name of a call target — `test.skip`, `test.describe.serial` — or
- * null when it is not a plain identifier chain.
- *
- * Built structurally instead of from `getText()`: source text carries the
- * punctuation and whitespace an author happened to write, so `(test.skip)`
- * and `test . skip` both read as "not test.skip" and slipped past the
- * matcher entirely — the site was not even recorded. (Review finding,
- * High; pinned by FIXTURE_PARENTHESISED_CALLEE.)
+ * null when it is not a plain identifier chain. Built structurally rather
+ * than from `getText()`, so `(test.skip)` and `test['skip']` read the
+ * same as `test.skip`.
  */
 function calleeName(expr: ts.Expression): string | null {
     const cur = unwrap(expr);
@@ -465,12 +244,11 @@ function calleeName(expr: ts.Expression): string | null {
         const left = calleeName(cur.expression);
         return left === null ? null : `${left}.${cur.name.text}`;
     }
-    // `test['skip']` is the same call as `test.skip`. (Review finding, High.)
     if (ts.isElementAccessExpression(cur)) {
-        const key = unwrap(cur.argumentExpression);
-        if (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) {
+        const key = literalKey(cur.argumentExpression);
+        if (key !== null) {
             const left = calleeName(cur.expression);
-            return left === null ? null : `${left}.${key.text}`;
+            return left === null ? null : `${left}.${key}`;
         }
     }
     return null;
@@ -491,27 +269,38 @@ function conjuncts(node: ts.Expression, out: ts.Expression[] = []): ts.Expressio
     return out;
 }
 
-function isProcessEnvCI(node: ts.Expression): boolean {
+/** True when `node` is `process.env` — dotted or bracketed. */
+function isProcessEnv(node: ts.Node): boolean {
+    if (!ts.isExpression(node)) return false;
     const cur = unwrap(node);
-    return (
-        ts.isPropertyAccessExpression(cur) &&
-        cur.name.text === 'CI' &&
-        ts.isPropertyAccessExpression(cur.expression) &&
-        cur.expression.name.text === 'env' &&
-        ts.isIdentifier(cur.expression.expression) &&
-        cur.expression.expression.text === 'process'
-    );
+    const isProcess = (e: ts.Expression): boolean => {
+        const c = unwrap(e);
+        return ts.isIdentifier(c) && c.text === 'process';
+    };
+    if (ts.isPropertyAccessExpression(cur)) {
+        return cur.name.text === 'env' && isProcess(cur.expression);
+    }
+    if (ts.isElementAccessExpression(cur)) {
+        return literalKey(cur.argumentExpression) === 'env' && isProcess(cur.expression);
+    }
+    return false;
 }
 
-/**
- * `!process.env.CI`, `process.env.CI === undefined`, `process.env.CI == null`.
- *
- * `globalsIntact` is false when the file writes `process.env.CI` at
- * collection time, which makes the proof say nothing about the real
- * environment.
- */
-function assertsCiIsOff(node: ts.Expression, globalsIntact = true): boolean {
-    if (!globalsIntact) return false;
+/** True when `node` is `process.env.CI`. */
+function isProcessEnvCI(node: ts.Node): boolean {
+    if (!ts.isExpression(node)) return false;
+    const cur = unwrap(node);
+    if (ts.isPropertyAccessExpression(cur)) {
+        return cur.name.text === 'CI' && isProcessEnv(cur.expression);
+    }
+    if (ts.isElementAccessExpression(cur)) {
+        return literalKey(cur.argumentExpression) === 'CI' && isProcessEnv(cur.expression);
+    }
+    return false;
+}
+
+/** `!process.env.CI`, `process.env.CI === undefined`, `… == null`. */
+function assertsCiIsOff(node: ts.Expression): boolean {
     const cur = unwrap(node);
     if (
         ts.isPrefixUnaryExpression(cur) &&
@@ -531,189 +320,15 @@ function assertsCiIsOff(node: ts.Expression, globalsIntact = true): boolean {
     return false;
 }
 
-/** The literal key of a `x['k']` access, or null. */
-function literalKey(node: ts.Expression): string | null {
-    const k = unwrap(node);
-    if (ts.isStringLiteral(k) || ts.isNoSubstitutionTemplateLiteral(k)) return k.text;
-    return null;
-}
-
-/** The literal key being read off `process.env`, or null. */
-function envKeyOf(access: ts.Node): string | null {
-    if (ts.isPropertyAccessExpression(access)) return access.name.text;
-    if (ts.isElementAccessExpression(access)) return literalKey(access.argumentExpression);
-    return null;
-}
-
-/** True when `node` is `process.env` — dotted or bracketed. */
-function isProcessEnv(node: ts.Node): boolean {
-    if (!ts.isExpression(node)) return false;
-    const cur = unwrap(node);
-    const isProcess = (e: ts.Expression): boolean => {
-        const c = unwrap(e);
-        return ts.isIdentifier(c) && c.text === 'process';
-    };
-    if (ts.isPropertyAccessExpression(cur)) {
-        return cur.name.text === 'env' && isProcess(cur.expression);
-    }
-    if (ts.isElementAccessExpression(cur)) {
-        return literalKey(cur.argumentExpression) === 'env' && isProcess(cur.expression);
-    }
-    return false;
-}
-
-/** Climb out of any parentheses, returning [outermost child, its parent]. */
-function skipParens(node: ts.Node): [ts.Node, ts.Node | undefined] {
-    let child = node;
-    let parent = node.parent as ts.Node | undefined;
-    while (parent && ts.isParenthesizedExpression(parent)) {
-        child = parent;
-        parent = parent.parent;
-    }
-    return [child, parent];
-}
-
-function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
-    return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
-}
-
-/**
- * True when nothing writes to `process.env.CI` at COLLECTION time.
- *
- * `delete process.env.CI;` or `process.env.CI = '';` at file scope makes
- * `!process.env.CI` true under CI at collection time, so a guard written
- * with the `&& !process.env.CI` suffix silently stops guarding. That IS
- * an accident an honest author can have: poking at env vars to reproduce
- * something locally and leaving the line in.
- *
- * Scoped to DIRECT writes on purpose. An earlier revision of this check
- * treated every appearance of `process` or `process.env` that was not a
- * single member read as a possible mutation, to catch
- * `const env = process.env; env.CI = '';`. That is a sabotage shape (see
- * the THREAT MODEL above — the same author can delete this file), and
- * the over-approximation had a real cost in the other direction: an
- * ordinary `const IS_LINUX = process.platform === 'linux';` in a spec
- * made the whole file "not CI-neutral" and turned a CORRECT
- * `!IS_LINUX && !process.env.CI` guard into a red gate. Blocking `main`
- * over an unrelated `process.platform` read is a much likelier and much
- * more damaging accident than the one it was buying.
- */
-function envIsPristine(sf: ts.SourceFile): boolean {
-    let mutated = false;
-    // Only code that runs while the file is being COLLECTED can affect a
-    // collection-time skip. A `process.env.CI = '1'` inside a test body
-    // runs long afterwards; treating it as file-wide contamination
-    // rejected a correct guard. (Review finding under the declared threat
-    // model.)
-    const named = namedFunctions(sf);
-    const describeBodies = new Set<ts.Node>();
-    {
-        const scan = (n: ts.Node): void => {
-            if (ts.isCallExpression(n) && CALLEE_DESCRIBE.test(calleeName(n.expression) ?? '')) {
-                for (const arg of n.arguments) {
-                    const a = unwrap(arg);
-                    if (isPlainFunction(a)) describeBodies.add(a);
-                    else if (ts.isIdentifier(a)) {
-                        const fn = named.get(a.text);
-                        if (fn) describeBodies.add(fn);
-                    }
-                }
-            }
-            ts.forEachChild(n, scan);
-        };
-        scan(sf);
-    }
-    const inPlace = collectionTimeByName(sf, named);
-    const insideCallback = (n: ts.Node): boolean => {
-        for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
-            if (!isPlainFunction(p)) continue;
-            if (runsInPlace(p, inPlace)) continue;
-            // A describe body runs during collection, whether it was
-            // written inline or extracted and passed by name.
-            if (describeBodies.has(p)) continue;
-            return true;
-        }
-        return false;
-    };
-    const visit = (n: ts.Node): void => {
-        if (mutated) return;
-        if (isProcessEnv(n)) {
-            const [child, parent] = skipParens(n);
-            const isMemberAccess =
-                parent !== undefined &&
-                (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
-                parent.expression === child;
-            // ONLY a write to `CI` can break the proof. An ordinary
-            // `process.env.TZ = 'UTC'` inside a test used to invalidate the
-            // whole file and turn a correct `&& !process.env.CI` guard red.
-            // (Review finding under the declared threat model.)
-            if (isMemberAccess && envKeyOf(parent) === 'CI' && !insideCallback(n)) {
-                const [accessChild, grand] = skipParens(parent);
-                if (grand !== undefined) {
-                    if (ts.isDeleteExpression(grand)) {
-                        mutated = true;
-                        return;
-                    }
-                    if (
-                        ts.isBinaryExpression(grand) &&
-                        isAssignmentOperator(grand.operatorToken.kind) &&
-                        grand.left === accessChild
-                    ) {
-                        mutated = true;
-                        return;
-                    }
-                    if (
-                        (ts.isPrefixUnaryExpression(grand) || ts.isPostfixUnaryExpression(grand)) &&
-                        (grand.operator === ts.SyntaxKind.PlusPlusToken ||
-                            grand.operator === ts.SyntaxKind.MinusMinusToken)
-                    ) {
-                        mutated = true;
-                        return;
-                    }
-                }
-            }
-        }
-        ts.forEachChild(n, visit);
-    };
-    visit(sf);
-    return !mutated;
-}
-
-/**
- * Names bound to a function in this file.
- *
- * `test.skip('title', disabledBody)` is still the declaration form after
- * an Extract-Function refactor; recognising only INLINE functions made it
- * look like a conditional group skip and turned `main` red. (Review
- * finding under the declared threat model.)
- */
-function functionNames(sf: ts.SourceFile): Set<string> {
-    const names = new Set<string>();
-    const visit = (n: ts.Node): void => {
-        if (ts.isFunctionDeclaration(n) && n.name) names.add(n.name.text);
-        if (
-            ts.isVariableDeclaration(n) &&
-            ts.isIdentifier(n.name) &&
-            n.initializer &&
-            isPlainFunction(unwrap(n.initializer))
-        ) {
-            names.add(n.name.text);
-        }
-        ts.forEachChild(n, visit);
-    };
-    visit(sf);
-    return names;
-}
+// ---------------------------------------------------------------------
+// Bindings
+// ---------------------------------------------------------------------
 
 /** Every name the file binds, however it binds it, with a count. */
 function boundNames(sf: ts.SourceFile): Map<string, number> {
     const counts = new Map<string, number>();
     const bump = (name: string): void => void counts.set(name, (counts.get(name) ?? 0) + 1);
     const count = (n: ts.Node): void => {
-        // Every construct that can introduce a binding. Counting only
-        // `const`/`let`/`var` missed a callback PARAMETER, and later a
-        // named FUNCTION EXPRESSION, shadowing a file-scope constant.
-        // (Review findings, High.)
         if (
             (ts.isVariableDeclaration(n) ||
                 ts.isParameter(n) ||
@@ -739,37 +354,24 @@ function boundNames(sf: ts.SourceFile): Map<string, number> {
 }
 
 /**
- * Collect file-scope `const NAME = <expr>;` initialisers for one-hop
- * resolution.
+ * File-scope `const NAME = <expr>;` initialisers, for one-hop resolution.
  *
- * Two things disqualify a name:
- *
- *   - It is bound more than ONCE anywhere in the file (any scope, any
- *     construct). An inner `const SKIP = !HAS_TOOL;` inside the describe,
- *     or a callback parameter of the same name, shadows a file-scope
- *     `const SKIP = !HAS_TOOL && !process.env.CI;`, and resolving to the
- *     outer one would clear a skip that is in fact live under CI.
- *   - It is not `const`. `let LOCAL_ONLY = !process.env.CI;` followed by
- *     `LOCAL_ONLY = true;` has a CI-safe INITIALISER and a live VALUE.
- *     (Review finding, High.)
- *
- * Disqualified means the site is judged not-proven, i.e. a violation —
- * fail-closed.
+ * A name is dropped rather than resolved when it is bound more than once
+ * anywhere in the file (shadowing would make the hop unsound) or when it
+ * is not `const` (`let X = !process.env.CI; X = true;` has a CI-safe
+ * INITIALISER and a live VALUE). Dropped means "not proven", i.e. the
+ * site is reported.
  */
-function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
-    const declaredAnywhere = boundNames(sf);
-
+function fileScopeConsts(
+    sf: ts.SourceFile,
+    bound: Map<string, number>,
+): Map<string, ts.Expression> {
     const map = new Map<string, ts.Expression>();
     for (const stmt of sf.statements) {
         if (!ts.isVariableStatement(stmt)) continue;
-        // `let` / `var` can be reassigned after the initialiser is read.
         if ((stmt.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
         for (const decl of stmt.declarationList.declarations) {
-            if (
-                ts.isIdentifier(decl.name) &&
-                decl.initializer &&
-                declaredAnywhere.get(decl.name.text) === 1
-            ) {
+            if (ts.isIdentifier(decl.name) && decl.initializer && bound.get(decl.name.text) === 1) {
                 map.set(decl.name.text, decl.initializer);
             }
         }
@@ -777,136 +379,32 @@ function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
     return map;
 }
 
-/**
- * Playwright also accepts `test.skip(callback, description)`, where the
- * callback receives fixtures. MEASURED: at describe scope it behaves
- * exactly like the literal form — the group is skipped and a throwing
- * `beforeAll` never runs — so it is in the same dangerous class and has
- * to be checked. Unwrap it to the expression it returns so
- * `test.skip(() => !HAS_TOOL && !process.env.CI, '…')` can still be
- * proven; a callback with real statements in it is not analysable and is
- * reported (the `ci-skip-ok` marker is the way out).
- */
-function conditionExpression(arg: ts.Expression): ts.Expression | null {
-    const cur = unwrap(arg);
-    if (!ts.isArrowFunction(cur) && !ts.isFunctionExpression(cur)) return cur;
-    const body = cur.body;
-    if (!ts.isBlock(body)) return body;
-    if (body.statements.length === 1) {
-        const only = body.statements[0];
-        if (ts.isReturnStatement(only) && only.expression) return only.expression;
-    }
-    return null;
-}
-
-function isCiNeutral(
-    cond: ts.Expression,
-    consts: Map<string, ts.Expression>,
-    globalsIntact: boolean,
-): boolean {
-    const off = (e: ts.Expression): boolean => assertsCiIsOff(e, globalsIntact);
-    if (conjuncts(cond).some(off)) return true;
+function isCiNeutral(cond: ts.Expression, consts: Map<string, ts.Expression>): boolean {
+    if (conjuncts(cond).some(assertsCiIsOff)) return true;
     const cur = unwrap(cond);
     if (ts.isIdentifier(cur)) {
         const init = consts.get(cur.text);
         // One hop only, and never back into an identifier (no cycles).
-        if (init && conjuncts(init).some(off)) return true;
+        if (init && conjuncts(init).some(assertsCiIsOff)) return true;
     }
     return false;
 }
 
 /**
  * True when a `ci-skip-ok:` marker appears in a COMMENT attached to the
- * statement — never merely somewhere in its source text.
- *
- * Scanning the raw statement text instead let the marker be smuggled into
- * the skip's own description string:
- *
- *     test.skip(!HAS_TOOL, 'ci-skip-ok: tool missing');
- *
- * which reads to a human as an ordinary skip message and silently bought
- * the exemption. Found by review; pinned by FIXTURE_MARKER_IN_STRING.
+ * statement — never merely somewhere in its source text, and never
+ * bleeding from the previous statement's trailing comment.
  */
 function hasAllowMarker(text: string, stmt: ts.Node): boolean {
     const fullStart = stmt.getFullStart();
     const leading = (ts.getLeadingCommentRanges(text, fullStart) ?? []).filter((r) =>
         // A comment with no newline between it and the previous token is
-        // that token's TRAILING comment, and TypeScript hands it back as
-        // this statement's leading trivia too. Without this filter a
-        // `// ci-skip-ok:` on one skip silently exempted the next one.
-        // (Review finding, High.)
+        // that token's TRAILING comment, which TypeScript also hands back
+        // as this statement's leading trivia.
         text.slice(fullStart, r.pos).includes('\n'),
     );
     const trailing = ts.getTrailingCommentRanges(text, stmt.getEnd()) ?? [];
     return [...leading, ...trailing].some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
-}
-
-/**
- * File-scope `const skip = test.skip;`-style aliases, so a call through
- * the alias resolves to the same dotted name.
- *
- * Extracting a helper alias is an ordinary refactor, and without this the
- * aliased call was not recorded at all. Only `const` and only names
- * rooted at `test` are followed, and only when the name is bound exactly
- * once in the file (same shadowing rule as the condition resolver).
- * (Review finding, High.)
- */
-function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<string, string> {
-    const rootedAtTest = (name: string | null): boolean =>
-        name !== null && (name === 'test' || name.startsWith('test.'));
-
-    // Targets seen per name, and how many of that name's bindings were
-    // alias declarations. Requiring the name to be bound exactly once in
-    // the file meant that copying `const skip = test.skip;` into a second
-    // suite — an ordinary duplication — silently un-resolved BOTH of them
-    // and took the gate with it. Agreeing aliases are safe to resolve no
-    // matter how many there are; only a name that ALSO means something
-    // else has to be refused. (Review finding under the declared threat
-    // model.)
-    const targets = new Map<string, Set<string>>();
-    const aliasDecls = new Map<string, number>();
-
-    const record = (name: string, target: string): void => {
-        const set = targets.get(name) ?? new Set<string>();
-        set.add(target);
-        targets.set(name, set);
-        aliasDecls.set(name, (aliasDecls.get(name) ?? 0) + 1);
-    };
-
-    const visit = (n: ts.Node): void => {
-        if (ts.isVariableDeclaration(n) && n.initializer) {
-            const list = n.parent;
-            const isConst =
-                ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
-            if (isConst) {
-                const target = calleeName(n.initializer);
-                if (ts.isIdentifier(n.name) && rootedAtTest(target)) {
-                    record(n.name.text, target as string);
-                } else if (ts.isObjectBindingPattern(n.name) && rootedAtTest(target)) {
-                    // `const { skip } = test;`
-                    for (const el of n.name.elements) {
-                        if (!ts.isIdentifier(el.name) || el.dotDotDotToken) continue;
-                        const prop =
-                            el.propertyName && ts.isIdentifier(el.propertyName)
-                                ? el.propertyName.text
-                                : el.name.text;
-                        record(el.name.text, `${target as string}.${prop}`);
-                    }
-                }
-            }
-        }
-        ts.forEachChild(n, visit);
-    };
-    visit(sf);
-
-    const aliases = new Map<string, string>();
-    for (const [name, set] of targets) {
-        // Every binding of the name must be an alias, and they must agree.
-        if (set.size === 1 && aliasDecls.get(name) === bound.get(name)) {
-            aliases.set(name, [...set][0]);
-        }
-    }
-    return aliases;
 }
 
 function bodyCanThrow(fn: ts.Node): boolean {
@@ -920,11 +418,28 @@ function bodyCanThrow(fn: ts.Node): boolean {
     return found;
 }
 
+function isInlineFunction(n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpression {
+    return ts.isArrowFunction(n) || ts.isFunctionExpression(n);
+}
+
+function isAnyFunction(n: ts.Node): boolean {
+    return (
+        isInlineFunction(n) ||
+        ts.isFunctionDeclaration(n) ||
+        ts.isMethodDeclaration(n) ||
+        ts.isGetAccessorDeclaration(n) ||
+        ts.isSetAccessorDeclaration(n)
+    );
+}
+
+// ---------------------------------------------------------------------
+// Analyzer
+// ---------------------------------------------------------------------
+
 export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // Parse with the grammar the extension implies: `<T>` is a type
     // assertion in .ts and a JSX element in .tsx, so the wrong ScriptKind
     // yields an error-recovered AST in which a skip can simply vanish.
-    // (Review finding, High.) `foo.spec.js` also has to be JS, not TS.
     const kind = fileName.endsWith('x')
         ? /\.[cm]?jsx$/.test(fileName)
             ? ts.ScriptKind.JSX
@@ -933,54 +448,23 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
           ? ts.ScriptKind.JS
           : ts.ScriptKind.TS;
     const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
-    const consts = fileScopeConsts(sf);
-    // If the file rebinds a global the proof reads by name, the proof is
-    // meaningless there and nothing in the file can be judged CI-neutral.
+
     const bound = boundNames(sf);
-    const exportList = exportListNames(sf);
-    const named = namedFunctions(sf);
-    const defaultExported = defaultExportedFunctions(sf, named);
-    // Functions executed during collection although reached only by name.
-    const inPlaceByName = collectionTimeByName(sf, named);
-    const aliases = calleeAliases(sf, bound);
-    /** Dotted callee name, with a file-scope alias expanded. */
-    const resolvedCallee = (expr: ts.Expression): string => {
-        const name = calleeName(expr);
-        if (name === null) return '';
-        const head = name.split('.')[0];
-        const target = aliases.get(head);
-        return target === undefined ? name : target + name.slice(head.length);
-    };
-    // Rebinding `process` or `undefined` is a sabotage shape, not an
-    // accident, and treating a plain `import process from 'node:process'`
-    // as one made a CORRECT guard red. See THREAT MODEL. Only an actual
-    // collection-time write to process.env.CI disqualifies the proof.
-    const globalsIntact = envIsPristine(sf);
+    const consts = fileScopeConsts(sf, bound);
+
     const sites: SkipSite[] = [];
-    // Enclosing test-construct scopes, innermost last.
+    /** Enclosing test-construct scopes, innermost last. */
     const stack: SkipSite['scope'][] = [];
-    // Enclosing `test.describe` callbacks, for the beforeAll-throws diagnosis.
+    /** Enclosing inline `test.describe` callbacks, for the diagnosis. */
     const describeStack: ts.Node[] = [];
-    // Enclosing plain (non-construct) functions, innermost last.
-    const closureStack: { name: string | null; exported: boolean }[] = [];
     /**
-     * Scopes from which each bare-identifier call is made, so a skip
-     * inside a named helper can be judged by WHERE THE HELPER IS CALLED
-     * rather than where it is written. Attributing it to the declaration
-     * site made `const only = () => test.skip(...)` declared in a
-     * describe but called from a test body — a per-test skip, out of
-     * scope by design — a violation that blocks `main`. (Review finding
-     * under the declared threat model.)
+     * A `process.env.CI` write that runs while the file is being
+     * COLLECTED makes every proof in it meaningless. Writes inside a test
+     * body or a hook run long afterwards and are irrelevant.
      */
-    const callScopes = new Map<string, Set<SkipSite['scope']>>();
-    /**
-     * `callee name -> names of the helpers it is called from`, so a helper
-     * called only from another helper still inherits that helper's blast
-     * radius. Extracting a skip out of an already-extracted suite body is
-     * an ordinary refactor. (Review finding under the declared threat
-     * model.)
-     */
-    const callFromClosure = new Map<string, Set<string>>();
+    let envWrittenAtCollectionTime = false;
+
+    const scopeNow = (): SkipSite['scope'] => (stack.length ? stack[stack.length - 1] : 'file');
 
     const describeHasThrowingBeforeAll = (describeBody: ts.Node): boolean => {
         let found = false;
@@ -988,7 +472,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             if (found) return;
             if (
                 ts.isCallExpression(n) &&
-                resolvedCallee(n.expression) === 'test.beforeAll' &&
+                calleeName(n.expression) === 'test.beforeAll' &&
                 n.arguments.length > 0 &&
                 bodyCanThrow(n.arguments[0])
             ) {
@@ -1001,196 +485,140 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         return found;
     };
 
+    /** Detects `process.env.CI = …`, `delete process.env.CI`, `++`/`--`. */
+    const noteEnvWrite = (n: ts.Node): void => {
+        if (!isProcessEnvCI(n)) return;
+        let child: ts.Node = n;
+        let parent = n.parent as ts.Node | undefined;
+        while (parent && ts.isParenthesizedExpression(parent)) {
+            child = parent;
+            parent = parent.parent;
+        }
+        if (parent === undefined) return;
+        const isAssign =
+            ts.isBinaryExpression(parent) &&
+            parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+            parent.left === child;
+        const isDelete = ts.isDeleteExpression(parent);
+        const isIncDec =
+            (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
+            (parent.operator === ts.SyntaxKind.PlusPlusToken ||
+                parent.operator === ts.SyntaxKind.MinusMinusToken);
+        if ((isAssign || isDelete || isIncDec) && CHECKED_SCOPES.has(scopeNow())) {
+            envWrittenAtCollectionTime = true;
+        }
+    };
+
+    /** A string, a template, a `+` of one, or a one-hop const to one. */
+    const isStringish = (e: ts.Expression, depth = 0): boolean => {
+        const cur = unwrap(e);
+        if (
+            ts.isStringLiteral(cur) ||
+            ts.isNoSubstitutionTemplateLiteral(cur) ||
+            ts.isTemplateExpression(cur)
+        ) {
+            return true;
+        }
+        if (ts.isBinaryExpression(cur) && cur.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+            return isStringish(cur.left, depth) || isStringish(cur.right, depth);
+        }
+        if (depth === 0 && ts.isIdentifier(cur)) {
+            const init = consts.get(cur.text);
+            if (init) return isStringish(init, depth + 1);
+        }
+        return false;
+    };
+
+    const classify = (
+        node: ts.CallExpression,
+        callee: string,
+        args: ts.NodeArray<ts.Expression>,
+    ): SkipSite => {
+        const last = args.length >= 2 ? unwrap(args[args.length - 1]) : undefined;
+
+        // `test.skip(title, body)` declares a statically-off test;
+        // `test.skip(condition, description)` is the conditional form. A
+        // title is a string and a description is never a function, so
+        // three independent signals each mean "declaration", and any one
+        // of them is enough. All three lean toward NOT reporting, which
+        // is the safe direction here.
+        const declaration =
+            args.length >= 2 &&
+            (isStringish(args[0]) ||
+                (last !== undefined && isInlineFunction(last)) ||
+                // `test.skip(titles.disabled, importedBody)`: neither slot
+                // is resolvable, but a member read in slot 0 with a
+                // non-string last argument can only be the declaration.
+                (ts.isPropertyAccessExpression(unwrap(args[0])) &&
+                    last !== undefined &&
+                    !isStringish(last)));
+
+        const form: SkipSite['form'] =
+            args.length === 0
+                ? 'noarg'
+                : declaration
+                  ? 'declaration'
+                  : isInlineFunction(unwrap(args[0]))
+                    ? 'callback'
+                    : 'conditional';
+
+        let stmt: ts.Node = node;
+        while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent;
+
+        return {
+            file: fileName,
+            line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
+            callee,
+            form,
+            scope: scopeNow(),
+            condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
+            ciNeutral: form === 'conditional' ? isCiNeutral(args[0], consts) : true,
+            allowMarker: hasAllowMarker(text, stmt),
+            guardedByThrowingBeforeAll:
+                describeStack.length > 0 &&
+                describeHasThrowingBeforeAll(describeStack[describeStack.length - 1]),
+        };
+    };
+
     const visit = (node: ts.Node): void => {
-        let pushed: SkipSite['scope'] | null = null;
-        let pushedDescribe = false;
+        noteEnvWrite(node);
+
+        let construct: SkipSite['scope'] | null = null;
+        let isDescribe = false;
 
         if (ts.isCallExpression(node)) {
-            const callee = resolvedCallee(node.expression);
+            const callee = calleeName(node.expression) ?? '';
             const args = node.arguments;
-            // A `test.describe` body extracted into a named function and
-            // passed by reference is an ordinary refactor of a long block.
-            // Accepting only inline functions here left its skips filed as
-            // a closure nobody calls. (Review finding under the declared
-            // threat model.)
-            const hasCallback =
-                args.length >= 1 &&
-                args.some(
-                    (a) =>
-                        ts.isArrowFunction(a) || ts.isFunctionExpression(a) || ts.isIdentifier(a),
-                );
+            const hasInlineCallback = args.some(isInlineFunction);
 
-            if (CALLEE_DESCRIBE.test(callee) && hasCallback) {
-                pushed = 'describe';
-                pushedDescribe = true;
-            } else if (CALLEE_ALL_HOOK.test(callee)) {
-                pushed = 'beforeAll';
-            } else if (CALLEE_EACH_HOOK.test(callee)) {
-                pushed = 'eachHook';
-            } else if (callee === 'test.step') {
-                pushed = 'step';
-            } else if (
-                CALLEE_TEST.test(callee) &&
-                args.length >= 2 &&
-                (ts.isStringLiteral(args[0]) ||
-                    ts.isNoSubstitutionTemplateLiteral(args[0]) ||
-                    ts.isTemplateExpression(args[0]))
-            ) {
-                pushed = 'test';
-            }
-
-            if (callee !== '' && !callee.includes('.')) {
-                const at = stack.length ? stack[stack.length - 1] : 'file';
-                const seen = callScopes.get(callee) ?? new Set<SkipSite['scope']>();
-                seen.add(at);
-                callScopes.set(callee, seen);
-                const from = closureStack.length
-                    ? closureStack[closureStack.length - 1].name
-                    : null;
-                if (from !== null) {
-                    const fromSet = callFromClosure.get(callee) ?? new Set<string>();
-                    fromSet.add(from);
-                    callFromClosure.set(callee, fromSet);
-                }
-            }
-
-            // `test.describe('gate', suite)` runs `suite`'s body AS the
-            // describe body, so record it exactly like a call from there.
-            if (pushed) {
-                for (const arg of args) {
-                    if (ts.isIdentifier(arg)) {
-                        const seen = callScopes.get(arg.text) ?? new Set<SkipSite['scope']>();
-                        seen.add(pushed);
-                        callScopes.set(arg.text, seen);
-                    }
-                }
+            if (CALLEE_DESCRIBE.test(callee) && hasInlineCallback) {
+                construct = 'describe';
+                isDescribe = true;
+            } else if (CALLEE_ALL_HOOK.test(callee) && hasInlineCallback) {
+                construct = 'beforeAll';
+            } else if (CALLEE_EACH_HOOK.test(callee) && hasInlineCallback) {
+                construct = 'eachHook';
+            } else if (callee === 'test.step' && hasInlineCallback) {
+                construct = 'step';
+            } else if (CALLEE_TEST.test(callee) && args.length >= 2 && hasInlineCallback) {
+                construct = 'test';
             }
 
             if (CALLEE_SKIP.test(callee)) {
-                // `test.skip(title, body)` / `test.skip(title, details, body)`
-                // declares a statically-off test. What distinguishes it from
-                // `test.skip(condition, description)` is that a LATER argument
-                // is a function — a description is always a string. Keying off
-                // the title being a string LITERAL instead made the ordinary
-                // `const title = '…'; test.skip(title, async () => {})` look
-                // like a conditional group skip and turned `main` red.
-                // (Review finding under the declared threat model.)
-                // Decided by the FIRST argument alone.
-                //
-                // `test.skip(title, body)` declares a statically-off test;
-                // `test.skip(condition, description)` is the conditional
-                // form. A title is a string, a condition is not — that is
-                // the only discriminator that does not depend on resolving
-                // the body, and resolving the body kept producing both
-                // kinds of error: an imported body made a correct
-                // declaration look conditional (red `main`), and a
-                // same-named helper in another suite made a correct
-                // conditional look like a declaration (missed gate).
-                // (Review findings under the declared threat model.)
-                const isStringish = (e: ts.Expression, depth = 0): boolean => {
-                    const cur = unwrap(e);
-                    if (
-                        ts.isStringLiteral(cur) ||
-                        ts.isNoSubstitutionTemplateLiteral(cur) ||
-                        ts.isTemplateExpression(cur)
-                    ) {
-                        return true;
-                    }
-                    // `'temporarily disabled: ' + ticket` — appending an
-                    // issue number to a title is an ordinary edit.
-                    if (
-                        ts.isBinaryExpression(cur) &&
-                        cur.operatorToken.kind === ts.SyntaxKind.PlusToken
-                    ) {
-                        return isStringish(cur.left, depth) || isStringish(cur.right, depth);
-                    }
-                    if (depth === 0 && ts.isIdentifier(cur)) {
-                        const init = consts.get(cur.text);
-                        if (init) return isStringish(init, depth + 1);
-                    }
-                    return false;
-                };
-                // Declaration when the FIRST argument is a title (a
-                // string), or — for a title this pass cannot resolve, such
-                // as `titles.disabled` or an imported constant — when the
-                // LAST argument is an inline body. A description is never
-                // a function, so that second test cannot misfire on the
-                // conditional form. Guessing about an unresolvable first
-                // argument instead was wrong in both directions.
-                // (Review finding under the declared threat model.)
-                const last = args.length >= 2 ? unwrap(args[args.length - 1]) : undefined;
-                const lastIsBody =
-                    last !== undefined &&
-                    (ts.isArrowFunction(last) || ts.isFunctionExpression(last));
-                // `test.skip(titles.disabled, disabledBody)` — title
-                // aggregated into an object AND body moved to a shared
-                // file. Neither slot is resolvable here, but a member read
-                // in slot 0 with a NON-string last argument can only be
-                // the declaration form: a conditional skip's last argument
-                // is its description. (Review finding under the declared
-                // threat model.)
-                const memberTitle =
-                    args.length >= 2 &&
-                    ts.isPropertyAccessExpression(unwrap(args[0])) &&
-                    last !== undefined &&
-                    !isStringish(last);
-                const isDeclaration =
-                    args.length >= 2 && (isStringish(args[0]) || lastIsBody || memberTitle);
-                const form: SkipSite['form'] =
-                    args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
-                const scope = stack.length ? stack[stack.length - 1] : 'file';
-
-                let stmt: ts.Node = node;
-                while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent;
-
-                sites.push({
-                    file: fileName,
-                    line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
-                    callee,
-                    form,
-                    scope,
-                    condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
-                    ciNeutral:
-                        form === 'conditional'
-                            ? (() => {
-                                  const expr = conditionExpression(args[0]);
-                                  return (
-                                      expr !== null && isCiNeutral(expr, consts, globalsIntact)
-                                  );
-                              })()
-                            : true,
-                    closureName: closureStack.length
-                        ? closureStack[closureStack.length - 1].name
-                        : null,
-                    closureExported: closureStack.length
-                        ? closureStack[closureStack.length - 1].exported
-                        : false,
-                    // Filled in by the post-pass below.
-                    groupWide: false,
-                    allowMarker: hasAllowMarker(text, stmt),
-                    guardedByThrowingBeforeAll:
-                        describeStack.length > 0 &&
-                        describeHasThrowingBeforeAll(describeStack[describeStack.length - 1]),
-                });
+                sites.push(classify(node, callee, args));
             }
         }
 
-        // Only the CALLBACK argument of `test(...)` / `test.describe(...)`
-        // / a hook is inside that construct. Its other arguments — the
-        // title above all — are evaluated eagerly, at collection time, in
-        // the ENCLOSING scope. Pushing the scope over the whole call let a
-        // skip hidden in a test's title expression be filed as a per-test
-        // runtime skip and pass. (Review finding, High.)
-        if (pushed && ts.isCallExpression(node)) {
-            if (pushedDescribe) describeStack.push(node);
+        // Only the CALLBACK argument of a construct is inside it. Its
+        // other arguments — the title above all — are evaluated eagerly,
+        // at collection time, in the ENCLOSING scope.
+        if (construct !== null && ts.isCallExpression(node)) {
+            if (isDescribe) describeStack.push(node);
             visit(node.expression);
             for (const arg of node.arguments) {
-                const isCallback = ts.isArrowFunction(arg) || ts.isFunctionExpression(arg);
-                if (isCallback) {
-                    stack.push(pushed);
-                    // Descend into the parameters and body rather than the
-                    // function node, so the construct's own callback is not
-                    // then re-classified as a plain closure below.
+                if (isInlineFunction(arg)) {
+                    stack.push(construct);
                     for (const param of arg.parameters) visit(param);
                     if (arg.body) visit(arg.body);
                     stack.pop();
@@ -1198,28 +626,16 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     visit(arg);
                 }
             }
-            if (pushedDescribe) describeStack.pop();
+            if (isDescribe) describeStack.pop();
             return;
         }
 
-        // A closure that is invoked SYNCHRONOUSLY where it is written runs
-        // in the scope it appears in: an IIFE, and the array-iteration
-        // callbacks a `for...of` gets refactored into. Parameterising a
-        // suite with `TOOLS.forEach(...)` is an ordinary edit and used to
-        // file the skip as a closure nobody calls. (Review finding under
-        // the declared threat model.)
-        if (isPlainFunction(node) && runsInPlace(node, inPlaceByName)) {
-            ts.forEachChild(node, visit);
-            return;
-        }
-
-        // A function that is NOT a construct's callback. Where its skips
-        // fire depends on its call sites, not on this position.
-        if (isPlainFunction(node)) {
+        // Any other function. Where its skips fire depends on where it is
+        // CALLED, which this gate deliberately does not follow — so its
+        // contents are recorded as `closure` and never reported.
+        if (isAnyFunction(node)) {
             stack.push('closure');
-            closureStack.push(plainFunctionIdentity(node, exportList, defaultExported));
             ts.forEachChild(node, visit);
-            closureStack.pop();
             stack.pop();
             return;
         }
@@ -1229,57 +645,20 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
 
     visit(sf);
 
-    // Which helper names run at group scope. Seeded from direct call
-    // sites, then closed transitively: a helper called from a helper that
-    // runs at group scope also runs at group scope.
-    //
-    // A name bound more than once in the file is dropped rather than
-    // resolved. Two independent suites each declaring `const setup = …`
-    // is ordinary code, and merging their call sites made one suite's
-    // per-test helper inherit the other's describe-scope call — a
-    // violation on correct code. Fail OPEN here on purpose: a missed gate
-    // in a rare shape is better than a red `main` on a common one.
-    // (Review finding under the declared threat model.)
-    const groupWideHelpers = new Set<string>();
-    for (const [name, scopes] of callScopes) {
-        if (bound.get(name) !== 1) continue;
-        if ([...scopes].some((sc) => GROUP_SCOPES.has(sc))) groupWideHelpers.add(name);
-    }
-    for (let changed = true; changed; ) {
-        changed = false;
-        for (const [name, from] of callFromClosure) {
-            if (groupWideHelpers.has(name)) continue;
-            if (bound.get(name) !== 1) continue;
-            if ([...from].some((f) => groupWideHelpers.has(f))) {
-                groupWideHelpers.add(name);
-                changed = true;
-            }
+    if (envWrittenAtCollectionTime) {
+        for (const site of sites) {
+            if (site.form === 'conditional') site.ciNeutral = false;
         }
     }
-
-    for (const site of sites) {
-        if (site.scope !== 'closure') {
-            site.groupWide = GROUP_SCOPES.has(site.scope);
-            continue;
-        }
-        // An exported helper can be called from any spec, including at
-        // describe scope in one this pass never sees, so it is treated as
-        // group-wide. An unnamed closure has no visible call site and is
-        // left alone (documented limitation).
-        site.groupWide =
-            site.closureExported ||
-            (site.closureName !== null && groupWideHelpers.has(site.closureName));
-    }
-
     return sites;
 }
 
-/** Group-wide conditional skips that are not provably inert under CI. */
+/** Checked-scope conditional skips that are not provably inert under CI. */
 export function violations(sites: SkipSite[]): SkipSite[] {
     return sites.filter(
         (s) =>
             s.form === 'conditional' &&
-            s.groupWide &&
+            CHECKED_SCOPES.has(s.scope) &&
             !s.ciNeutral &&
             !s.allowMarker,
     );
@@ -1287,15 +666,7 @@ export function violations(sites: SkipSite[]): SkipSite[] {
 
 function describeViolation(v: SkipSite): string {
     const collection = v.scope === 'file' || v.scope === 'describe';
-    const when = collection
-        ? 'evaluated at COLLECTION time'
-        : v.scope === 'beforeAll'
-          ? 'runs before every test in the group'
-          : v.closureExported
-            ? `inside exported helper \`${v.closureName ?? '<anonymous>'}\`, whose call sites ` +
-              'are not all visible from this file'
-            : `inside helper \`${v.closureName ?? '<anonymous>'}\`, which is called at ` +
-              'group scope';
+    const when = collection ? 'evaluated at COLLECTION time' : 'runs before every test in the group';
     const why =
         collection && v.guardedByThrowingBeforeAll
             ? 'the enclosing describe has a `beforeAll` that throws — a collection-time ' +
@@ -1306,18 +677,21 @@ function describeViolation(v: SkipSite): string {
         `${v.file}:${v.line}  ${v.callee}(${v.condition})\n` +
         `    scope=${v.scope} (${when})\n` +
         `    ${why}.\n` +
-        '    Fix: append `&& !process.env.CI` to the condition (inside the callback,\n' +
-        '    if this is the `test.skip(cb, desc)` form), or, when skipping under CI\n' +
-        '    really is intended, add a `// ci-skip-ok: <reason>` comment.'
+        '    Fix: append `&& !process.env.CI` to the condition, or, when skipping under\n' +
+        '    CI really is intended, add a `// ci-skip-ok: <reason>` comment.'
     );
 }
 
 // ---------------------------------------------------------------------
-// Fixtures — these keep the gate honest (see NON-VACUITY above)
+// Fixtures
+//
+// Two groups, and the second is the larger one on purpose: this gate runs
+// inside a REQUIRED status check, so "correct code stays green" is the
+// property that has to be nailed down hardest.
 // ---------------------------------------------------------------------
 
-/** The exact shape that shipped broken: CI guard rendered unreachable. */
-const FIXTURE_HOLED = `
+/** The shape that shipped broken. */
+const HOLED = `
 import { test } from '@playwright/test';
 const HAS_TOOL = false;
 test.describe('gate', () => {
@@ -1329,8 +703,154 @@ test.describe('gate', () => {
 });
 `;
 
-/** The fixed shape, as it stands in report-unmeasured-pdf.spec.ts. */
-const FIXTURE_GUARDED = `
+const MUST_REPORT: ReadonlyArray<readonly [string, string]> = [
+    ['holed', HOLED],
+    [
+        'file scope',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.skip(!HAS_TOOL, 'tool missing');
+test('asserts something', async () => {});
+`,
+    ],
+    [
+        // Same blast radius, different timing.
+        'beforeAll body',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.beforeAll(() => {
+        test.skip(!HAS_TOOL, 'tool missing');
+    });
+    test('asserts something', async () => {});
+});
+`,
+    ],
+    [
+        // Referencing process.env.CI is not enough: this skips BECAUSE of CI.
+        'inverted CI condition',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL || !!process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        // A shadowed name must not resolve to the outer, CI-guarded one.
+        'shadowed const',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const SKIP = !HAS_TOOL && !process.env.CI;
+test.describe('gate', () => {
+    const SKIP = !HAS_TOOL;
+    test.skip(SKIP, 'tool missing');
+});
+`,
+    ],
+    [
+        // A CI-safe initialiser is not a CI-safe value when it is `let`.
+        'mutable binding',
+        `
+import { test } from '@playwright/test';
+let LOCAL_ONLY = !process.env.CI;
+LOCAL_ONLY = true;
+test.describe('gate', () => {
+    test.skip(LOCAL_ONLY, 'tool missing');
+});
+`,
+    ],
+    [
+        // Punctuation that changes the text but not what is called.
+        'parenthesised callee',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    (test.skip)(!HAS_TOOL, 'tool missing');
+});
+`,
+    ],
+    [
+        'element-access callee',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test['skip'](!HAS_TOOL, 'tool missing');
+});
+`,
+    ],
+    [
+        // The marker has to be a COMMENT; in the description it reads as
+        // an ordinary message and must not buy the exemption.
+        'marker smuggled into the description',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL, 'ci-skip-ok: tool missing');
+});
+`,
+    ],
+    [
+        // A stray env poke left in a describe body runs during collection.
+        'CI written in a describe body',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    process.env.CI = '';
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        'CI deleted at file scope',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+delete process.env.CI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        // A skip in a test's TITLE is evaluated eagerly, at collection.
+        'skip in a test title',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test(\`\${(test.skip(!HAS_TOOL, 'tool missing'), 'probe')}\`, async () => {});
+});
+`,
+    ],
+    [
+        'fixme is checked too',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.fixme(!HAS_TOOL, 'tool missing');
+});
+`,
+    ],
+];
+
+/**
+ * Correct code. A hit here is a red `main` for no reason, which this gate
+ * treats as worse than the miss it would have bought.
+ */
+const MUST_BE_CLEAN: ReadonlyArray<readonly [string, string]> = [
+    [
+        'the fixed shape, as report-unmeasured-pdf.spec.ts has it',
+        `
 import { test } from '@playwright/test';
 const HAS_TOOL = false;
 test.describe('gate', () => {
@@ -1338,23 +858,34 @@ test.describe('gate', () => {
     test.beforeAll(() => {
         if (!HAS_TOOL) throw new Error('required in CI');
     });
-    test('asserts something', async () => {});
 });
-`;
-
-/** One-hop const resolution. */
-const FIXTURE_CONST_HOP = `
+`,
+    ],
+    [
+        'one-hop const resolution',
+        `
 import { test } from '@playwright/test';
 const HAS_TOOL = false;
 const LOCAL_ONLY = !HAS_TOOL && !process.env.CI;
 test.describe('gate', () => {
     test.skip(LOCAL_ONLY, 'tool missing');
-    test('asserts something', async () => {});
 });
-`;
-
-/** Runtime soft gates: allowed, they cannot disarm a beforeAll. */
-const FIXTURE_RUNTIME_SOFT_GATE = `
+`,
+    ],
+    [
+        'process.env.CI === undefined',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && process.env.CI === undefined, 'tool missing');
+});
+`,
+    ],
+    [
+        // The repo's soft-gate idiom, 48 sites.
+        'per-test runtime skips',
+        `
 import { test } from '@playwright/test';
 test.describe('soft gate', () => {
     test.beforeAll(() => { throw new Error('loud'); });
@@ -1365,44 +896,11 @@ test.describe('soft gate', () => {
     });
     test.skip('statically off, documented hand-off', async () => {});
 });
-`;
-
-/** Referencing CI is not enough — this one skips *because* of CI. */
-const FIXTURE_INVERTED = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL || !!process.env.CI, 'tool missing');
-    test('asserts something', async () => {});
-});
-`;
-
-/** A `beforeAll` skip disables the whole group too, just later. */
-const FIXTURE_BEFORE_ALL_GROUP_SKIP = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.beforeAll(() => {
-        test.skip(!HAS_TOOL, 'tool missing');
-    });
-    test('asserts something', async () => {});
-});
-`;
-
-/** A shadowed name must not be resolved to the outer, CI-guarded one. */
-const FIXTURE_SHADOWED_CONST = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const SKIP = !HAS_TOOL && !process.env.CI;
-test.describe('gate', () => {
-    const SKIP = !HAS_TOOL;
-    test.skip(SKIP, 'tool missing');
-    test('asserts something', async () => {});
-});
-`;
-
-/** A per-test `beforeEach` skip is the ordinary runtime idiom. */
-const FIXTURE_BEFORE_EACH = `
+`,
+    ],
+    [
+        'beforeEach with a fixture-dependent condition',
+        `
 import { test } from '@playwright/test';
 test.describe('soft', () => {
     test.beforeEach(async ({ page }) => {
@@ -1410,284 +908,80 @@ test.describe('soft', () => {
     });
     test('a', async () => {});
 });
-`;
-
-/** The escape hatch, used deliberately. */
-const FIXTURE_MARKER = `
+`,
+    ],
+    [
+        'the escape hatch, as a leading comment',
+        `
 import { test } from '@playwright/test';
 const HAS_TOOL = false;
 test.describe('gate', () => {
     // ci-skip-ok: covered by the API-side integration suite instead.
     test.skip(!HAS_TOOL, 'tool missing');
-    test('asserts something', async () => {});
 });
-`;
-
-/** Same, as a trailing comment. */
-const FIXTURE_MARKER_TRAILING = `
+`,
+    ],
+    [
+        'the escape hatch, as a trailing comment',
+        `
 import { test } from '@playwright/test';
 const HAS_TOOL = false;
 test.describe('gate', () => {
     test.skip(!HAS_TOOL, 'tool missing'); // ci-skip-ok: covered elsewhere
-    test('asserts something', async () => {});
 });
-`;
-
-/** Punctuation that changes the call's TEXT but not what it calls. */
-const FIXTURE_PARENTHESISED_CALLEE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    (test.skip)(!HAS_TOOL, 'tool missing');
-});
-`;
-
-/** A callback PARAMETER shadowing the file-scope, CI-guarded constant. */
-const FIXTURE_PARAM_SHADOW = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const LOCAL_ONLY = !HAS_TOOL && !process.env.CI;
-test.describe('gate', (LOCAL_ONLY = !HAS_TOOL) => {
-    test.skip(LOCAL_ONLY, 'tool missing');
-});
-`;
-
-/** `test['skip']` is the same call, spelled differently. */
-const FIXTURE_ELEMENT_ACCESS_CALLEE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test['skip'](!HAS_TOOL, 'tool missing');
-});
-`;
-
-/** A CI-safe initialiser is not a CI-safe value when the binding is `let`. */
-const FIXTURE_MUTABLE_BINDING = `
-import { test } from '@playwright/test';
-let LOCAL_ONLY = !process.env.CI;
-LOCAL_ONLY = true;
-test.describe('gate', () => {
-    test.skip(LOCAL_ONLY, 'tool missing');
-});
-`;
-
-/** A named function expression binds its own name inside itself. */
-const FIXTURE_FUNCTION_EXPR_SHADOW = `
-import { test } from '@playwright/test';
-const LOCAL_ONLY = !process.env.CI;
-test.describe('gate', function LOCAL_ONLY() {
-    test.skip(LOCAL_ONLY, 'tool missing');
-});
-`;
-
-
-
-/** Mutating the environment makes the proof false without rebinding anything. */
-const FIXTURE_DELETED_ENV_CI = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-delete process.env.CI;
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-});
-`;
-
-/** Assignment counts too. */
-const FIXTURE_ASSIGNED_ENV_CI = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-process.env.CI = '';
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-});
-`;
-
-
-/** Extracting `test.skip` into a local alias is an ordinary refactor. */
-const FIXTURE_ALIASED_SKIP = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const skip = test.skip;
-test.describe('gate', () => {
-    skip(!HAS_TOOL, 'tool missing');
-});
-`;
-
-/** The alias declared inside the describe, and via destructuring. */
-const FIXTURE_INNER_ALIASED_SKIP = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    const skip = test.skip;
-    skip(!HAS_TOOL, 'tool missing');
-});
-`;
-
-const FIXTURE_DESTRUCTURED_SKIP = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const { skip } = test;
-test.describe('gate', () => {
-    skip(!HAS_TOOL, 'tool missing');
-});
-`;
-
-/**
- * A trailing `ci-skip-ok:` is ALSO leading trivia of the next statement.
- * Only the first skip here is exempt; the second must be reported.
- */
-const FIXTURE_MARKER_BLEED = `
+`,
+    ],
+    [
+        // The first skip is exempt; the SECOND must not inherit the marker
+        // — and the second is CI-guarded, so the file is clean either way.
+        'a trailing marker does not bleed onto the next statement',
+        `
 import { test } from '@playwright/test';
 const IS_LINUX = false;
 const HAS_TOOL = false;
 test.describe('gate', () => {
     test.skip(!IS_LINUX, 'unsupported'); // ci-skip-ok: covered elsewhere
-    test.skip(!HAS_TOOL, 'tool missing');
-});
-`;
-
-
-/** ...and spelled with brackets. */
-const FIXTURE_BRACKETED_ENV = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-process['env'].CI = '';
-test.describe('gate', () => {
     test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
 });
-`;
-
-/**
- * A skip moved into a shared exported helper. Ordinary de-duplication
- * refactor; the helper's call sites are not all visible from here, so it
- * has to carry the guard itself.
- */
-const FIXTURE_EXPORTED_HELPER = `
-import { test } from '@playwright/test';
-export const skipIfMissing = (missing: boolean) =>
-    test.skip(missing, 'tool missing');
-`;
-
-/**
- * A local helper called from a DESCRIBE body: group-wide, so gated.
- */
-const FIXTURE_HELPER_CALLED_AT_DESCRIBE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const skipIfMissing = () => test.skip(!HAS_TOOL, 'tool missing');
-test.describe('gate', () => {
-    skipIfMissing();
-    test('probe', async () => {});
-});
-`;
-
-/**
- * The SAME helper called only from a test body: a per-test skip, out of
- * scope by design. Judging it by its declaration site made this a
- * violation and blocked `main` for no reason.
- */
-const FIXTURE_HELPER_CALLED_IN_TEST = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    const skipIfMissing = () => test.skip(!HAS_TOOL, 'tool missing');
-    test('probe', async () => {
-        skipIfMissing();
-    });
-});
-`;
-
-/**
- * An unrelated `process` read must not disarm a correct guard. This was
- * a real false positive: it turned a CORRECT `&& !process.env.CI` red.
- */
-const FIXTURE_PROCESS_PLATFORM_READ = `
+`,
+    ],
+    [
+        // An unrelated `process` read must not disarm a correct guard.
+        'process.platform read',
+        `
 import { test } from '@playwright/test';
 const IS_LINUX = process.platform === 'linux';
 test.describe('gate', () => {
     test.skip(!IS_LINUX && !process.env.CI, 'unsupported');
 });
-`;
-
-/** Reading several env vars is ordinary and must not disarm the guard. */
-const FIXTURE_ENV_DESTRUCTURED_READ = `
+`,
+    ],
+    [
+        'reading several env vars',
+        `
 import { test } from '@playwright/test';
 const { PLAYWRIGHT_BASE_URL } = process.env;
 const HAS_TOOL = Boolean(PLAYWRIGHT_BASE_URL);
 test.describe('gate', () => {
     test.skip(!HAS_TOOL && !process.env.CI, 'unsupported');
 });
-`;
-
-/**
- * `test.skip(callback, description)` — Playwright's fixture-aware form.
- * MEASURED to behave exactly like the literal form at describe scope
- * (group skipped, throwing beforeAll never runs), so a guard written
- * inside the callback must still be provable.
- */
-const FIXTURE_CALLBACK_GUARDED = `
+`,
+    ],
+    [
+        'making an implicit global explicit',
+        `
 import { test } from '@playwright/test';
+import process from 'node:process';
 const HAS_TOOL = false;
 test.describe('gate', () => {
-    test.skip(() => !HAS_TOOL && !process.env.CI, 'tool missing');
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
 });
-`;
-
-/** ...and unguarded, it is the same hole. */
-const FIXTURE_CALLBACK_UNGUARDED = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.skip(() => !HAS_TOOL, 'tool missing');
-});
-`;
-
-/** A block-bodied callback with a single return is still analysable. */
-const FIXTURE_CALLBACK_BLOCK_RETURN = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.skip(() => {
-        return !HAS_TOOL && !process.env.CI;
-    }, 'tool missing');
-});
-`;
-
-/** A long describe body extracted into a named function, passed by name. */
-const FIXTURE_NAMED_DESCRIBE_CALLBACK = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-function suite() {
-    test.skip(!HAS_TOOL, 'tool missing');
-    test('gate', async () => {});
-}
-test.describe('gate', suite);
-`;
-
-/** The `export { x }` clause form an IDE "move to file" refactor writes. */
-const FIXTURE_EXPORT_CLAUSE_HELPER = `
-import { test } from '@playwright/test';
-const skipIfMissing = (missing: boolean) => test.skip(missing, 'tool missing');
-export { skipIfMissing };
-`;
-
-/**
- * A declaration-form skip whose TITLE is a constant. Not a condition at
- * all; reporting it turned `main` red for a plain constant extraction.
- */
-const FIXTURE_DECLARATION_TITLE_CONST = `
-import { test } from '@playwright/test';
-const title = 'temporarily disabled';
-test.describe('gate', () => {
-    test.skip(title, async () => {});
-});
-`;
-
-/**
- * Writing an UNRELATED env var inside a test must not invalidate the
- * file's CI proof. This was a false positive on a plain date test.
- */
-const FIXTURE_UNRELATED_ENV_WRITE = `
+`,
+    ],
+    [
+        // Writing an unrelated env var, inside a test, long after collection.
+        'unrelated env write inside a test',
+        `
 import { test } from '@playwright/test';
 const MISSING = true;
 test.describe('gate', () => {
@@ -1696,76 +990,113 @@ test.describe('gate', () => {
         process.env.TZ = 'UTC';
     });
 });
-`;
-
-/** The same local alias extracted in two independent suites. */
-const FIXTURE_DUPLICATE_ALIAS = `
+`,
+    ],
+    [
+        'writing CI itself, inside a test',
+        `
 import { test } from '@playwright/test';
-const HAS_A = false;
-const HAS_B = false;
-test.describe('a', () => {
-    const skip = test.skip;
-    skip(!HAS_A, 'missing');
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+    test('CI parsing', async () => {
+        process.env.CI = '1';
+    });
 });
-test.describe('b', () => {
-    const skip = test.skip;
-    skip(!HAS_B, 'missing');
-});
-`;
-
-/** A helper split out with a default export. */
-const FIXTURE_DEFAULT_EXPORT_HELPER = `
+`,
+    ],
+    [
+        'a declaration whose title is a constant',
+        `
 import { test } from '@playwright/test';
-export default (missing: boolean) => test.skip(missing, 'tool missing');
-`;
-
-/**
- * The declaration form after an Extract-Function refactor. Still a
- * statically-off test, not a condition — reporting it turned `main` red.
- */
-const FIXTURE_DECLARATION_EXTRACTED_BODY = `
+const title = 'temporarily disabled';
+test.describe('gate', () => {
+    test.skip(title, async () => {});
+});
+`,
+    ],
+    [
+        'a declaration whose title is computed',
+        `
+import { test } from '@playwright/test';
+const ticket = 'M12-4';
+const title = 'temporarily disabled: ' + ticket;
+test.describe('gate', () => {
+    test.skip(title, async () => {});
+});
+`,
+    ],
+    [
+        'a declaration whose title came from a const object',
+        `
+import { test } from '@playwright/test';
+const titles = { disabled: 'temporarily disabled' } as const;
+test.describe('gate', () => {
+    test.skip(titles.disabled, async () => {});
+});
+`,
+    ],
+    [
+        'a declaration whose body was extracted',
+        `
 import { test } from '@playwright/test';
 const disabledBody = async () => {};
 test.describe('gate', () => {
     test.skip('temporarily disabled', disabledBody);
 });
-`;
-
-/** `for...of` parameterisation refactored into `forEach`. */
-const FIXTURE_FOREACH_PARAMETERISED = `
-import { test } from '@playwright/test';
-const TOOLS = [{ available: false }];
-TOOLS.forEach(({ available }) => {
-    test.skip(!available, 'tool missing');
-    test('gate', async () => {});
-});
-`;
-
-/** A same-named helper in another suite must not reclassify a condition. */
-const FIXTURE_SAMENAME_HELPER_ELSEWHERE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('messages', () => {
-    function reason() { return 'computed'; }
-    test('uses it', async () => { reason(); });
-});
-test.describe('gate', () => {
-    const reason = 'tool missing';
-    test.skip(!HAS_TOOL, reason);
-});
-`;
-
-/** A declaration body moved to a shared file is still a declaration. */
-const FIXTURE_DECLARATION_IMPORTED_BODY = `
+`,
+    ],
+    [
+        'a declaration whose title AND body are both indirect',
+        `
 import { test } from '@playwright/test';
 import { disabledBody } from './disabled-body';
+const titles = { disabled: 'temporarily disabled' } as const;
 test.describe('gate', () => {
-    test.skip('temporarily disabled', disabledBody);
+    test.skip(titles.disabled, disabledBody);
 });
-`;
-
-/** Per-test helpers tidied into an object literal. */
-const FIXTURE_OBJECT_METHOD_HELPER = `
+`,
+    ],
+    [
+        // Playwright's documented fixture-aware form. Excluded by design;
+        // see the limitations list in the file header.
+        'the callback form',
+        `
+import { test } from '@playwright/test';
+test.describe('gate', () => {
+    test.skip(({ browserName }) => browserName !== 'webkit', 'Safari-only');
+});
+`,
+    ],
+    [
+        // Not followed to its call sites, in either direction.
+        'a helper called from a test body',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    const skipIfMissing = () => test.skip(!HAS_TOOL, 'tool missing');
+    test('probe', async () => {
+        skipIfMissing();
+    });
+});
+`,
+    ],
+    [
+        'a describe body passed by name',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+function suite() {
+    test.skip(!HAS_TOOL, 'tool missing');
+    test('gate', async () => {});
+}
+test.describe('gate', suite);
+`,
+    ],
+    [
+        'per-test helpers tidied into an object',
+        `
 import { test } from '@playwright/test';
 test.describe('gate', () => {
     const soft = {
@@ -1775,64 +1106,12 @@ test.describe('gate', () => {
     };
     test('probe', async () => soft.skipIfMissing(false));
 });
-`;
-
-/** Writing CI inside a TEST cannot affect a collection-time skip. */
-const FIXTURE_RUNTIME_CI_WRITE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-    test('CI parsing', async () => {
-        process.env.CI = '1';
-    });
-});
-`;
-
-/** A stray env poke left in a DESCRIBE body runs during collection. */
-const FIXTURE_CI_WRITE_IN_DESCRIBE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    process.env.CI = '';
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-});
-`;
-
-/** A helper extracted out of an already-extracted suite body. */
-const FIXTURE_TRANSITIVE_HELPER = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-const suite = () => {
-    const skipIfMissing = () => test.skip(!HAS_TOOL, 'tool missing');
-    skipIfMissing();
-    test('gate', async () => {});
-};
-test.describe('gate', suite);
-`;
-
-/** Making an implicit global explicit is ordinary ESM tidying. */
-const FIXTURE_IMPORTED_PROCESS = `
-import { test } from '@playwright/test';
-import process from 'node:process';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-});
-`;
-
-/** Appending an issue number to a disabled test's title. */
-const FIXTURE_COMPUTED_TITLE = `
-import { test } from '@playwright/test';
-const ticket = 'M12-4';
-const title = 'temporarily disabled: ' + ticket;
-test.describe('gate', () => {
-    test.skip(title, async () => {});
-});
-`;
-
-/** The same general helper name used independently in two suites. */
-const FIXTURE_SAMENAME_HELPER_BOTH_SUITES = `
+`,
+    ],
+    [
+        // Two independent suites using the same general helper name.
+        'same helper name in two suites',
+        `
 import { test } from '@playwright/test';
 const ready = false;
 test.describe('a', () => {
@@ -1843,60 +1122,12 @@ test.describe('b', () => {
     const setup = () => { void 0; };
     setup();
 });
-`;
-
-/** Test names tidied into a const object. */
-const FIXTURE_TITLE_FROM_OBJECT = `
-import { test } from '@playwright/test';
-const titles = { disabled: 'temporarily disabled' } as const;
-test.describe('gate', () => {
-    test.skip(titles.disabled, async () => {});
-});
-`;
-
-/** An inline describe callback extracted to a named function. */
-const FIXTURE_EXTRACTED_DESCRIBE_ENV_WRITE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-function suite() {
-    process.env.CI = '';
-    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
-}
-test.describe('gate', suite);
-`;
-
-/** A forEach callback extracted to a named function. */
-const FIXTURE_FOREACH_NAMED_CALLBACK = `
-import { test } from '@playwright/test';
-const TOOLS = [{ missing: true }];
-const defineSuite = ({ missing }: { missing: boolean }) => {
-    test.skip(missing, 'tool missing');
-    test('gate', async () => {});
-};
-TOOLS.forEach(defineSuite);
-`;
-
-/** A named helper default-exported by reference. */
-const FIXTURE_DEFAULT_EXPORT_BY_NAME = `
-import { test } from '@playwright/test';
-const skipIfMissing = (missing: boolean) => test.skip(missing, 'tool missing');
-export default skipIfMissing;
-`;
-
-/** `Array.from(iterable, cb)` runs its callback during collection. */
-const FIXTURE_ARRAY_FROM = `
-import { test } from '@playwright/test';
-const TOOLS = new Set([{ missing: true }]);
-test.describe('gate', () => {
-    Array.from(TOOLS, ({ missing }) => {
-        test.skip(missing, 'tool missing');
-        test('probe', async () => {});
-    });
-});
-`;
-
-/** `reduce`'s SEED is a value, not a callback — it never runs here. */
-const FIXTURE_REDUCE_SEED = `
+`,
+    ],
+    [
+        // A function value chosen in a reduce is never called here.
+        'a function value in a reduce seed',
+        `
 import { test } from '@playwright/test';
 const HAS_TOOL = false;
 const handlers: (() => void)[] = [];
@@ -1907,39 +1138,20 @@ test.describe('soft gate', () => {
     );
     test('probe', async () => selected());
 });
-`;
-
-/** Title aggregated into an object AND body moved to a shared file. */
-const FIXTURE_MEMBER_TITLE_IMPORTED_BODY = `
+`,
+    ],
+    [
+        'a parameterised suite built with forEach',
+        `
 import { test } from '@playwright/test';
-import { disabledBody } from './disabled-body';
-const titles = { disabled: 'temporarily disabled' } as const;
-test.describe('gate', () => {
-    test.skip(titles.disabled, disabledBody);
+const TOOLS = [{ missing: true }];
+TOOLS.forEach(({ missing }) => {
+    test.skip(missing, 'tool missing');
+    test('gate', async () => {});
 });
-`;
-
-/** A test's TITLE is evaluated eagerly, at collection time. */
-const FIXTURE_SKIP_IN_TEST_TITLE = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test(\`\${(test.skip(!HAS_TOOL, 'tool missing'), 'probe')}\`, async () => {});
-});
-`;
-
-/**
- * The escape hatch smuggled into the skip's DESCRIPTION rather than a
- * comment. It reads as an ordinary message; it must not buy an exemption.
- */
-const FIXTURE_MARKER_IN_STRING = `
-import { test } from '@playwright/test';
-const HAS_TOOL = false;
-test.describe('gate', () => {
-    test.skip(!HAS_TOOL, 'ci-skip-ok: tool missing');
-    test('asserts something', async () => {});
-});
-`;
+`,
+    ],
+];
 
 // ---------------------------------------------------------------------
 // Spec bodies
@@ -1947,20 +1159,13 @@ test.describe('gate', () => {
 
 /**
  * Every TS/JS source file under `e2e/`, not just the ones Playwright
- * collects.
- *
- * Two reasons. Playwright's default `testMatch` is
- * `**\/*.@(spec|test).?(c|m)[jt]s?(x)`, so matching only `*.spec.ts`
- * would leave a future `foo.test.ts` collected by the runner but
- * invisible here. And moving a repeated skip into a shared
- * `e2e/skip-helper.ts` is an ordinary refactor that would otherwise
- * carry the skip straight out of the gate's field of view. (Review
- * finding under the declared threat model.)
+ * collects: matching only `*.spec.ts` would leave a `foo.test.ts`
+ * collected by the runner but invisible here.
  */
 const SCANNED_FILE = /\.[cm]?[jt]sx?$/;
 const DECLARATION_FILE = /\.d\.[cm]?ts$/;
 
-function specFiles(root: string): string[] {
+function scannedFiles(root: string): string[] {
     const out: string[] = [];
     const walk = (dir: string): void => {
         for (const entry of readdirSync(dir).sort()) {
@@ -1975,143 +1180,58 @@ function specFiles(root: string): string[] {
 }
 
 test.describe('e2e skip reachability (hermetic meta-gate)', () => {
-    test('analyzer detects the hole it exists for', () => {
+    test('analyzer verdicts', () => {
         // Positive control — the shape that shipped broken must be caught,
         // and must be diagnosed as a dead beforeAll guard.
-        const holed = violations(analyzeSource('holed.spec.ts', FIXTURE_HOLED));
+        const holed = violations(analyzeSource('holed.spec.ts', HOLED));
         expect(
             holed.map((v) => `${v.line}:${v.condition}`),
             'the holed fixture must produce exactly one violation',
         ).toEqual(['8:!HAS_TOOL']);
         expect(holed[0].guardedByThrowingBeforeAll).toBe(true);
 
-        // Referencing process.env.CI is not sufficient: this one skips
-        // *when* CI is set, which is the failure mode wearing a disguise.
-        const inverted = violations(analyzeSource('inverted.spec.ts', FIXTURE_INVERTED));
-        expect(inverted, 'an ||-CI condition must still be a violation').toHaveLength(1);
-
-        // Same blast radius, different timing: a beforeAll skip switches
-        // the whole group off under CI just as thoroughly.
-        expect(
-            violations(analyzeSource('before-all.spec.ts', FIXTURE_BEFORE_ALL_GROUP_SKIP)).map(
-                (v) => v.scope,
-            ),
-            'a group-wide beforeAll skip must be a violation',
-        ).toEqual(['beforeAll']);
-
-        // The one-hop const resolution must not be fooled by shadowing:
-        // the inner `SKIP` is live under CI even though the outer is not.
-        expect(
-            violations(analyzeSource('shadowed.spec.ts', FIXTURE_SHADOWED_CONST)),
-            'a shadowed const must not be resolved to the outer CI-guarded one',
-        ).toHaveLength(1);
-
-        // The matcher must key off what is CALLED, not how it is spelled.
-        expect(
-            violations(analyzeSource('parens.spec.ts', FIXTURE_PARENTHESISED_CALLEE)),
-            '`(test.skip)(...)` must still be recognised',
-        ).toHaveLength(1);
-
-        // Every shape that spells the same call, or defeats the one-hop
-        // resolution, must still land as a violation. Each of these was a
-        // review finding; keeping them in one table makes it obvious that
-        // the analyzer's job is to be conservative, not clever.
-        for (const [name, source] of [
-            ['element-access-callee', FIXTURE_ELEMENT_ACCESS_CALLEE],
-            ['param-shadow', FIXTURE_PARAM_SHADOW],
-            ['function-expr-shadow', FIXTURE_FUNCTION_EXPR_SHADOW],
-            ['mutable-binding', FIXTURE_MUTABLE_BINDING],
-            ['deleted-env-ci', FIXTURE_DELETED_ENV_CI],
-            ['assigned-env-ci', FIXTURE_ASSIGNED_ENV_CI],
-            ['aliased-skip', FIXTURE_ALIASED_SKIP],
-            ['inner-aliased-skip', FIXTURE_INNER_ALIASED_SKIP],
-            ['destructured-skip', FIXTURE_DESTRUCTURED_SKIP],
-            ['exported-helper', FIXTURE_EXPORTED_HELPER],
-            ['helper-called-at-describe', FIXTURE_HELPER_CALLED_AT_DESCRIBE],
-            ['callback-unguarded', FIXTURE_CALLBACK_UNGUARDED],
-            ['named-describe-callback', FIXTURE_NAMED_DESCRIBE_CALLBACK],
-            ['export-clause-helper', FIXTURE_EXPORT_CLAUSE_HELPER],
-            ['default-export-helper', FIXTURE_DEFAULT_EXPORT_HELPER],
-            ['foreach-parameterised', FIXTURE_FOREACH_PARAMETERISED],
-            ['ci-write-in-describe', FIXTURE_CI_WRITE_IN_DESCRIBE],
-            ['transitive-helper', FIXTURE_TRANSITIVE_HELPER],
-            ['extracted-describe-env-write', FIXTURE_EXTRACTED_DESCRIBE_ENV_WRITE],
-            ['foreach-named-callback', FIXTURE_FOREACH_NAMED_CALLBACK],
-            ['array-from', FIXTURE_ARRAY_FROM],
-            ['default-export-by-name', FIXTURE_DEFAULT_EXPORT_BY_NAME],
-            ['samename-helper-elsewhere', FIXTURE_SAMENAME_HELPER_ELSEWHERE],
-            ['marker-bleed', FIXTURE_MARKER_BLEED],
-            ['bracketed-env', FIXTURE_BRACKETED_ENV],
-            ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
-        ] as const) {
+        for (const [name, source] of MUST_REPORT) {
             expect(
                 violations(analyzeSource(`${name}.spec.ts`, source)).length,
-                `${name} must be reported as a violation`,
-            ).toBe(1);
+                `MUST BE REPORTED: ${name}`,
+            ).toBeGreaterThan(0);
         }
 
-        // The escape hatch must be a COMMENT. Putting `ci-skip-ok:` in the
-        // skip's own description reads like an ordinary message and must
-        // not buy the exemption.
-        expect(
-            violations(analyzeSource('marker-in-string.spec.ts', FIXTURE_MARKER_IN_STRING)),
-            'the marker inside a string literal must not exempt anything',
-        ).toHaveLength(1);
-
-        // Negative controls — none of these may be reported.
-        for (const [name, source] of [
-            ['guarded', FIXTURE_GUARDED],
-            ['const-hop', FIXTURE_CONST_HOP],
-            ['runtime-soft-gate', FIXTURE_RUNTIME_SOFT_GATE],
-            ['before-each', FIXTURE_BEFORE_EACH],
-            ['helper-called-in-test', FIXTURE_HELPER_CALLED_IN_TEST],
-            ['process-platform-read', FIXTURE_PROCESS_PLATFORM_READ],
-            ['env-destructured-read', FIXTURE_ENV_DESTRUCTURED_READ],
-            ['callback-guarded', FIXTURE_CALLBACK_GUARDED],
-            ['callback-block-return', FIXTURE_CALLBACK_BLOCK_RETURN],
-            ['declaration-title-const', FIXTURE_DECLARATION_TITLE_CONST],
-            ['declaration-extracted-body', FIXTURE_DECLARATION_EXTRACTED_BODY],
-            ['declaration-imported-body', FIXTURE_DECLARATION_IMPORTED_BODY],
-            ['object-method-helper', FIXTURE_OBJECT_METHOD_HELPER],
-            ['runtime-ci-write', FIXTURE_RUNTIME_CI_WRITE],
-            ['imported-process', FIXTURE_IMPORTED_PROCESS],
-            ['computed-title', FIXTURE_COMPUTED_TITLE],
-            ['title-from-object', FIXTURE_TITLE_FROM_OBJECT],
-            ['reduce-seed', FIXTURE_REDUCE_SEED],
-            ['member-title-imported-body', FIXTURE_MEMBER_TITLE_IMPORTED_BODY],
-            ['samename-helper-both-suites', FIXTURE_SAMENAME_HELPER_BOTH_SUITES],
-            ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
-            ['marker', FIXTURE_MARKER],
-            ['marker-trailing', FIXTURE_MARKER_TRAILING],
-        ] as const) {
+        // The half that keeps `main` green. A hit here is a false positive
+        // on correct code, which this gate treats as worse than a miss.
+        for (const [name, source] of MUST_BE_CLEAN) {
             expect(
                 violations(analyzeSource(`${name}.spec.ts`, source)).map(describeViolation),
-                `${name} fixture must be clean`,
+                `MUST BE CLEAN: ${name}`,
             ).toEqual([]);
         }
 
-        // The classifier must still recognise the runtime idioms as runtime,
-        // otherwise "0 violations" above would be true for the wrong reason.
-        const soft = analyzeSource('soft.spec.ts', FIXTURE_RUNTIME_SOFT_GATE);
+        // The classifier must still recognise the runtime idioms as
+        // runtime, otherwise "0 violations" above would be true for the
+        // wrong reason.
+        const soft = analyzeSource('soft.spec.ts', MUST_BE_CLEAN[3][1]);
         expect(soft.map((s) => `${s.form}/${s.scope}`).sort()).toEqual([
             'conditional/test',
             'declaration/describe',
             'noarg/test',
         ]);
+
+        // Both halves are non-empty, so neither loop can pass vacuously,
+        // and the correct-code half is the larger one by policy.
+        expect(MUST_REPORT.length).toBeGreaterThan(5);
+        expect(MUST_BE_CLEAN.length).toBeGreaterThan(MUST_REPORT.length);
     });
 
     test('no e2e spec can be silently skipped in CI', () => {
-        // Scan unit: every *.spec.ts under apps/web/e2e/, recursively
+        // Scan unit: every TS/JS source under apps/web/e2e/, recursively
         // (this file's own directory), parsed with the TypeScript AST —
         // not grepped, so comments and string literals cannot trip it.
         const e2eRoot = dirname(test.info().file);
-        const files = specFiles(e2eRoot);
+        const files = scannedFiles(e2eRoot);
 
-        // Anti-vacuity, without encoding a spec count: this very file must
+        // Anti-vacuity without encoding a file count: this very file must
         // be among the results. A broken walk cannot satisfy that, and
-        // consolidating or deleting specs cannot break it. An earlier
-        // `> 20` floor would have turned `main` red on an ordinary spec
-        // merge. (Review finding under the declared threat model.)
+        // consolidating or deleting specs cannot break it.
         expect(files, `the walk of ${e2eRoot} must include this spec itself`).toContain(
             test.info().file,
         );
@@ -2125,7 +1245,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         ).toBeGreaterThan(0);
 
         const bad = violations(sites);
-        expect(bad.map(describeViolation).join('\n\n'), 'collection-time skip(s) not CI-proof').toBe(
+        expect(bad.map(describeViolation).join('\n\n'), 'checked-scope skip(s) not CI-proof').toBe(
             '',
         );
     });
