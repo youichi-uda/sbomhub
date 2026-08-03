@@ -45,20 +45,22 @@
 # added there is silently untested here — exactly the failure mode the table's
 # own doc comment says default-deny exists to prevent.
 #
-# Six structural guards make that derivation trustworthy, i.e. make "the source
-# text" and "the runtime map" the same thing: the run fails if the parse finds
-# nothing (1), if two independent occurrence counts disagree with it (2), if a
-# class is unknown (3), if a route uses a path parameter with no substitution
-# (4), if a route joins one of the three classes the middleware merely ADMITS
-# without getting its own route-specific assertion (5), or if the map stops
-# being a closed literal of literal pairs (6).
+# Seven structural guards make that derivation trustworthy. Six are cheap source
+# checks that fail with a precise message — the parse finding nothing (1), two
+# independent occurrence counts disagreeing with it (2), an unknown class (3), a
+# path parameter with no substitution (4), a route joining one of the three
+# classes the middleware merely ADMITS without getting its own route-specific
+# assertion (5), the map ceasing to be a closed literal of literal pairs (6).
 #
-# WHY grep AND NOT `go run` A HELPER THAT CALLS APIKeyRouteScopeKeys()
-#
-# The exported helpers give the KEYS (APIKeyRouteScopeKeys) and the narrowed
-# subset (APIKeyProjectListNarrowedRoutes) but not each route's class, which is
-# what decides the expected status. Parsing the map literal yields strictly
-# more, and keeps the runner free of a Go toolchain.
+# The seventh is the actual PROOF of completeness: the parsed route set is
+# compared against the RUNTIME map, read out of the initialised
+# apiKeyRouteScope through APIKeyRouteScopeKeys() /
+# APIKeyProjectListNarrowedRoutes() by a throwaway program that `go run
+# -overlay` mounts inside apps/api without writing a repo file. Source-shape
+# inference alone is an arms race — an expression key, a mutation through an
+# alias, a whole-map reassignment each hide a route from every regex while
+# leaving the counts in agreement — so the run REQUIRES the Go toolchain rather
+# than skipping the check when it is missing.
 #
 # ---------------------------------------------------------------------------
 # CONTRACT
@@ -380,6 +382,86 @@ assert_deferred_class_set() {
 assert_deferred_class_set scopeProjectListNarrowed "GET /api/v1/cli/projects;GET /api/v1/mcp/projects"
 assert_deferred_class_set scopeHandlerChecked      "POST /api/v1/cli/projects;POST /api/v1/cli/upload"
 assert_deferred_class_set scopeNoProjectResource   "POST /api/v1/cli/check"
+
+# ---------------------------------------------------------------------------
+# Structural guard 7: the RUNTIME map must contain exactly the routes parsed out
+# of the source text.
+#
+# Guards 1-6 are all inferences about source SHAPE, and Codex R4 was right that
+# shape inference is an arms race it eventually loses: an expression key
+# (`prefix + "/x": rule`), a mutation through an alias (`m := apiKeyRouteScope;
+# m[k] = r`), `clear()`, a whole-map reassignment — each one hides a route from
+# every regex while leaving all the counts in agreement, and the gate would then
+# report full coverage over an incomplete set.
+#
+# So ask the initialised map itself. middleware exports APIKeyRouteScopeKeys()
+# and APIKeyProjectListNarrowedRoutes() for exactly this kind of cross-check;
+# this runs a throwaway `package main` that prints both.
+#
+# `go run -overlay` mounts that program at a path INSIDE apps/api that does not
+# exist on disk, so:
+#   - the import of the module's own internal/ package is legal (the overlaid
+#     path is under github.com/sbomhub/sbomhub/, which is what Go's internal
+#     rule keys off);
+#   - it resolves through apps/api's real go.mod / go.sum — no second module, no
+#     go.sum juggling;
+#   - NOTHING is written into the repository, so this is safe to run against a
+#     working tree somebody else is editing.
+#
+# Go is a HARD requirement, not a skip: a silently skipped completeness proof is
+# the same as not having one.
+#
+# What this does NOT settle: the per-route KIND still comes from the text for
+# the four classes with no runtime accessor. A text/runtime disagreement there
+# is caught behaviourally instead — swap scopeTenantWide and
+# scopeProjectPathParam either way and the matrix's own-project or refusal
+# assertion fails — and the narrowed set, the one deferred promise that would be
+# silent, is compared against the runtime accessor below.
+# ---------------------------------------------------------------------------
+GO_BIN="${SBOMHUB_GO:-go}"
+command -v "${GO_BIN}" >/dev/null 2>&1 || die "the route-table completeness proof needs the Go toolchain (set SBOMHUB_GO if it is not on PATH). It reads the RUNTIME apiKeyRouteScope; skipping it would leave route coverage resting on source-text regexes alone."
+
+API_MODULE_DIR="${REPO_ROOT}/apps/api"
+cat > "${WORK}/scopedump.go" <<'GOPROG'
+// Throwaway: prints the runtime apiKeyRouteScope as "<narrowed>|<route>".
+// Mounted into the module by `go run -overlay`; never written to disk in-repo.
+package main
+
+import (
+	"fmt"
+
+	mw "github.com/sbomhub/sbomhub/internal/middleware"
+)
+
+func main() {
+	narrowed := map[string]bool{}
+	for _, r := range mw.APIKeyProjectListNarrowedRoutes() {
+		narrowed[r] = true
+	}
+	for _, k := range mw.APIKeyRouteScopeKeys() {
+		fmt.Printf("%v|%s\n", narrowed[k], k)
+	}
+}
+GOPROG
+VIRTUAL_PKG="zz_project_scope_e2e_scopedump"
+printf '{"Replace":{"%s/%s/main.go":"%s"}}\n' "${API_MODULE_DIR}" "${VIRTUAL_PKG}" "${WORK}/scopedump.go" > "${WORK}/overlay.json"
+( cd "${API_MODULE_DIR}" && GOWORK=off "${GO_BIN}" run -overlay "${WORK}/overlay.json" "./${VIRTUAL_PKG}" ) > "${WORK}/runtime.txt" \
+  || die "could not read the runtime apiKeyRouteScope (go run -overlay failed in ${API_MODULE_DIR})"
+
+cut -d'|' -f2 "${WORK}/runtime.txt" | sort > "${WORK}/runtime-keys.txt"
+cut -d'|' -f2 "${WORK}/routes.txt"  | sort > "${WORK}/derived-keys.txt"
+if ! diff -u "${WORK}/derived-keys.txt" "${WORK}/runtime-keys.txt" > "${WORK}/keys.diff"; then
+  die "the routes parsed from project_scope.go do NOT match the runtime apiKeyRouteScope — routes marked '+' exist at run time and would go UNTESTED, routes marked '-' are parsed but not in the map:
+$(cat "${WORK}/keys.diff")"
+fi
+
+awk -F'|' '$1=="true"  {print $2}' "${WORK}/runtime.txt" | sort > "${WORK}/runtime-narrowed.txt"
+awk -F'|' '$1=="scopeProjectListNarrowed" {print $2}' "${WORK}/routes.txt" | sort > "${WORK}/derived-narrowed.txt"
+if ! diff -u "${WORK}/derived-narrowed.txt" "${WORK}/runtime-narrowed.txt" > "${WORK}/narrowed.diff"; then
+  die "scopeProjectListNarrowed disagrees between the source text and APIKeyProjectListNarrowedRoutes() at run time:
+$(cat "${WORK}/narrowed.diff")"
+fi
+note "runtime apiKeyRouteScope agrees with the parsed table ($(wc -l < "${WORK}/runtime-keys.txt") routes, $(wc -l < "${WORK}/runtime-narrowed.txt") narrowed) — via go run -overlay, no repo file created"
 
 note "derived ${ROUTE_COUNT} routes:"
 cut -d'|' -f1 "${WORK}/routes.txt" | sort | uniq -c | sed 's/^/    /'

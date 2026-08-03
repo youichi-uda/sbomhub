@@ -83,10 +83,26 @@ jobs:
     name: project-scoped API key matrix over HTTP (every apiKeyRouteScope route)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Pin the compose file set (Codex R4 Low). Without this, adding any other
+      # name Compose auto-discovers (compose.yaml, compose.override.yml, ...)
+      # would change the stack under test while that file is not in `paths:`
+      # above, so the gate would not even run for it.
+      COMPOSE_FILE: docker-compose.yml:docker-compose.override.yml
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Go
+        # scripts/project-scope-e2e.sh proves route-table completeness by
+        # reading the RUNTIME apiKeyRouteScope (go run -overlay against
+        # apps/api). It refuses to run without a Go toolchain rather than
+        # skipping that proof, so this step is required, not a convenience.
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache-dependency-path: apps/api/go.sum
 
       - name: Show tool versions
         run: |
