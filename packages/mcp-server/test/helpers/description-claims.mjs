@@ -64,6 +64,10 @@ export const MARKERS = {
 export const ANTI_MARKERS = {
   negatedRefusal:
     /拒否され(?:ない|ません)|拒否されることは(?:ない|ありません)|拒否されるわけではない/,
+  // 「…1件が返ることはなく」 — the narrowing denied while every marker for it
+  // is present (Codex R2).
+  negatedNarrowing:
+    /1件(?:のみ)?が?返ることは(?:なく|ない|ありません)|1件(?:のみ)?が?返(?:らない|りません)|1件ではなく/,
 };
 
 /**
@@ -217,6 +221,12 @@ export function scopeClaimViolations({
           `one-element answer reads as "the tenant has one project".`
       );
     }
+    if (has(description, ANTI_MARKERS.negatedNarrowing)) {
+      violations.push(
+        `${where}: the description denies the narrowing the backend performs — with a ` +
+          `project-scoped key this route answers with that key's own project, one row.`
+      );
+    }
     if (
       has(description, MARKERS.tenantWideClaim) &&
       !has(description, MARKERS.tenantKeyMentioned)
@@ -311,4 +321,30 @@ export const EVASIONS = [
     description:
       "プロジェクトの脆弱性一覧を取得。プロジェクトスコープのAPIキーでは403で拒否される",
   },
+  {
+    label: "attributes the requirement to another tool and then denies its own (Codex R2)",
+    kind: "scopeTenantWide",
+    description:
+      "テナント全体のダッシュボードサマリーを取得。テナント単位のAPIキーが必要なのは" +
+      "sbomhub_search_cveである。このツールはどのキーでも利用でき、403で拒否されることはない",
+  },
+  {
+    label: "inverts the narrowed result (Codex R2)",
+    kind: "scopeProjectListNarrowed",
+    description:
+      "プロジェクト一覧を取得。プロジェクトスコープのAPIキーではそのプロジェクト1件が" +
+      "返ることはなく、別のプロジェクトが複数返る",
+  },
 ];
+
+// Evasions these prose rules do NOT catch, kept here so the limitation is
+// written down next to the rules rather than discovered again:
+//
+//   - a description that embeds the correct canonical clause and then
+//     contradicts it in other words ("単一案件の結果だけを返す");
+//   - a scope claim in vocabulary the markers do not know ("あらゆる案件").
+//
+// The first is bounded by tool-contract.test.mjs's rule that credentials may
+// only be named inside the canonical clause; the second is not bounded at all.
+// Both are why the canonical clause exists: the claim that MUST be present is
+// exact, and only the surrounding explanation is free prose.

@@ -46,6 +46,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 import { ApiClient } from "./client/api.js";
+import { SCOPE_NOTE } from "./scope-notes.js";
 
 const apiUrl = process.env.SBOMHUB_API_URL || "http://localhost:8080";
 const apiKey = process.env.SBOMHUB_API_KEY || "";
@@ -104,9 +105,8 @@ server.registerTool(
   {
     description:
       "この資格情報が参照できるプロジェクトの一覧を取得。" +
-      "テナント単位のAPIキーではテナントの全プロジェクト、" +
-      "プロジェクトスコープのAPIキーではそのプロジェクト1件のみが返る。" +
-      "件数からテナントの規模を推測しないこと",
+      SCOPE_NOTE.projectListNarrowed +
+      "。件数からテナントの規模を推測しないこと",
   },
   async () => {
     try {
@@ -128,9 +128,8 @@ server.registerTool(
   {
     description:
       "テナント全体のダッシュボードサマリーを取得。" +
-      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
-      "403で拒否される (絞り込むと集計値の意味が変わるため、" +
-      "サーバーは狭い答えを返さず拒否する)",
+      SCOPE_NOTE.tenantWide +
+      " (絞り込むと集計値の意味が変わるため、サーバーは狭い答えを返さず拒否する)",
   },
   async () => {
     try {
@@ -185,9 +184,9 @@ server.registerTool(
   {
     description:
       "CVE IDでテナントの全プロジェクトを横断検索。" +
-      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
-      "403で拒否される。「見つからない」と「見る権限が無い」を" +
-      "区別できなくなるため、絞り込みではなく拒否する",
+      SCOPE_NOTE.tenantWide +
+      "。「見つからない」と「見る権限が無い」を区別できなくなるため、" +
+      "絞り込みではなく拒否する",
     inputSchema: {
       cve_id: z
         .string()
@@ -213,8 +212,8 @@ server.registerTool(
   {
     description:
       "コンポーネント名でテナントの全プロジェクトを横断検索。" +
-      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
-      "403で拒否される (理由は sbomhub_search_cve と同じ)",
+      SCOPE_NOTE.tenantWide +
+      " (理由は sbomhub_search_cve と同じ)",
     inputSchema: {
       name: z.string().min(1).describe("コンポーネント名 (例: log4j)"),
       version: z.string().optional().describe("バージョン (任意)"),
@@ -234,8 +233,8 @@ server.registerTool(
   {
     description:
       "2つのSBOMを比較して差分を取得。バージョン省略時は最新2つを比較。" +
-      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは" +
-      "自分のプロジェクトのSBOMであっても403で拒否される " +
+      SCOPE_NOTE.tenantWide +
+      " — 自分のプロジェクトのSBOM同士であっても拒否される " +
       "(対象SBOMをbodyのUUIDで選ぶため、どのプロジェクトのものかが" +
       "判明するのが両行の読み込み後になる)",
     inputSchema: {

@@ -25,6 +25,14 @@ import {
 import { scopeClaimViolations } from "./helpers/description-claims.mjs";
 import { API_KEY, jsonOf, startMcpServer, textOf } from "./helpers/mcp-harness.mjs";
 import { routeKeyOf, startStubApi } from "./helpers/stub-api.mjs";
+// The clauses the SERVER ships, imported from the built artifact. Not a copy of
+// the description: the source composes each description from these same
+// strings, so "the tool says the right thing" becomes an exact check instead of
+// a pattern match over prose (Codex R2, High).
+import {
+  PROJECT_SCOPE_DENIAL_STATUS,
+  SCOPE_NOTE,
+} from "../dist/scope-notes.js";
 
 let stub;
 let mcp;
@@ -172,6 +180,101 @@ test("every description states the scope the backend actually enforces", () => {
     [],
     `tool descriptions disagree with ${SCOPE_SOURCE}:\n\n- ${failures.join("\n\n- ")}\n`
   );
+});
+
+// ---------------------------------------------------------------------------
+// The canonical-clause layer.
+//
+// The rules in helpers/description-claims.mjs read prose with regular
+// expressions; that is necessarily incomplete (a false claim can always be
+// phrased outside the vocabulary). This layer is not:
+//   - the clause for each classification is ONE string, shipped in
+//     src/scope-notes.ts and validated here against the Go source and against
+//     the same claim rules;
+//   - every tool of that classification must contain it VERBATIM, and must not
+//     contain the clause of another classification.
+// A description can still be padded with contradictory prose — the heuristic
+// layer above is what looks for that — but it can no longer simply omit or
+// reword the load-bearing claim.
+// ---------------------------------------------------------------------------
+test("the shipped scope clauses agree with the backend", () => {
+  assert.equal(
+    PROJECT_SCOPE_DENIAL_STATUS,
+    DENIAL_STATUS,
+    `src/scope-notes.ts quotes HTTP ${PROJECT_SCOPE_DENIAL_STATUS} for a project-scope ` +
+      `refusal; ${SCOPE_SOURCE} answers ${DENIAL_STATUS}`
+  );
+
+  // Each clause must satisfy, on its own, the rules its classification implies.
+  const forKind = {
+    scopeTenantWide: SCOPE_NOTE.tenantWide,
+    scopeProjectListNarrowed: SCOPE_NOTE.projectListNarrowed,
+  };
+  for (const [kind, clause] of Object.entries(forKind)) {
+    assert.deepEqual(
+      scopeClaimViolations({
+        tool: "sbomhub_canonical_clause",
+        description: clause,
+        routeKindByKey: new Map([["GET /api/v1/mcp/canonical", kind]]),
+        denialStatus: DENIAL_STATUS,
+      }),
+      [],
+      `the canonical clause for ${kind} does not satisfy its own rules: ${clause}`
+    );
+  }
+});
+
+test("every tool embeds the canonical clause for its classification, verbatim", () => {
+  const clauseForKinds = (kinds) => {
+    if (kinds.has("scopeTenantWide")) return SCOPE_NOTE.tenantWide;
+    if (kinds.has("scopeProjectListNarrowed")) return SCOPE_NOTE.projectListNarrowed;
+    return null;
+  };
+
+  let checked = 0;
+  for (const [tool, routeKeys] of observedRouteKeysByTool) {
+    const kinds = new Set([...routeKeys].map(scopeKindOf));
+    const description = descriptionByTool.get(tool) ?? "";
+    const expected = clauseForKinds(kinds);
+
+    if (expected) {
+      checked += 1;
+      assert.equal(
+        description.includes(expected),
+        true,
+        `${tool} calls ${[...routeKeys].join(", ")} but its description does not contain the ` +
+          `clause every tool of that classification ships:\n  expected: ${expected}\n  got: ${description}`
+      );
+    }
+    for (const [name, clause] of Object.entries(SCOPE_NOTE)) {
+      if (clause === expected) continue;
+      assert.equal(
+        description.includes(clause),
+        false,
+        `${tool} carries the "${name}" scope clause, which is not what its routes ` +
+          `(${[...routeKeys].join(", ")}) do`
+      );
+    }
+
+    // Credentials are named ONLY inside the canonical clause. Otherwise a
+    // description could embed the correct clause and then contradict it in
+    // free prose ("...ただし実際にはプロジェクトスコープのAPIキーで利用でき、
+    // テナント単位のAPIキーが403で拒否される") — a review round produced
+    // exactly that (Codex R2). The surrounding prose may explain WHY; it may
+    // not restate WHO.
+    const remainder = Object.values(SCOPE_NOTE).reduce(
+      (acc, clause) => acc.split(clause).join(""),
+      description
+    );
+    assert.doesNotMatch(
+      remainder,
+      /プロジェクトスコープのAPIキー|テナント単位のAPIキー/,
+      `${tool} names an API key kind outside the canonical clause. Whatever it says there ` +
+        `cannot be checked against the backend, and if it disagrees with the clause the model ` +
+        `has two answers:\n  ${remainder}`
+    );
+  }
+  assert.equal(checked > 0, true, "no tool needed a scope clause — the check is vacuous");
 });
 
 // A tool that can answer with less than it was asked for has to say so where
