@@ -1,11 +1,18 @@
 package middleware
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/labstack/echo/v4"
+	_ "github.com/lib/pq"
+
+	"github.com/sbomhub/sbomhub/internal/config"
 	"github.com/sbomhub/sbomhub/internal/model"
+	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/service"
 )
 
 // TestAPIKeyCredential pins the credential lookup MultiAuth performs, without a
@@ -81,6 +88,196 @@ func TestAPIKeyCredential(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPIKeyCredentialDuplicateHeaders — Codex R1 (Medium).
+//
+// HTTP lets a field name repeat and Go keeps every value, but `Header.Get`
+// returns only the FIRST. Reading the credential with Get therefore made
+//
+//	X-API-Key:
+//	X-API-Key: sbh_<a real key>
+//
+// look like no credential at all, and the request fell through to the Clerk /
+// self-hosted path — the same silent discard the whole change removes, reachable
+// by prepending one empty header.
+//
+// Set() cannot express this; Add() is what the cases below use.
+func TestAPIKeyCredentialDuplicateHeaders(t *testing.T) {
+	const keyA = "sbh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const keyB = "sbh_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	cases := []struct {
+		name          string
+		values        []string
+		authorization string
+		wantRaw       string
+		wantPresented bool
+	}{
+		{
+			name:          "an empty value before a real one does not hide it",
+			values:        []string{"", keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			// The dangerous variant: with Authorization ALSO set to something
+			// the Clerk path would accept, a first-value-only read hands the
+			// request to Clerk while an API key was sitting in the same header.
+			name:          "an empty value cannot divert the request to the Clerk path",
+			values:        []string{"", keyA},
+			authorization: BearerPrefix + "eyJhbGciOiJSUzI1NiJ9.e30.x",
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			name:          "the same key repeated is one credential, not a conflict",
+			values:        []string{keyA, keyA},
+			wantRaw:       keyA,
+			wantPresented: true,
+		},
+		{
+			// Two different credentials. Answering with either is a guess about
+			// which the caller meant, and "take the first" is precisely the rule
+			// that produced the defect above. presented=true with no value is
+			// how the middleware is told to refuse.
+			name:          "two different keys are presented but unresolvable",
+			values:        []string{keyA, keyB},
+			wantRaw:       "",
+			wantPresented: true,
+		},
+		{
+			name:          "only empty values is still no credential",
+			values:        []string{"", ""},
+			wantRaw:       "",
+			wantPresented: false,
+		},
+		{
+			// ...and in that case Authorization is still consulted, so the
+			// empty-means-absent rule does not swallow the other channel.
+			name:          "only empty values falls through to Authorization",
+			values:        []string{"", ""},
+			authorization: BearerPrefix + keyB,
+			wantRaw:       keyB,
+			wantPresented: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/x/sbom", nil)
+			for _, v := range tc.values {
+				req.Header.Add(APIKeyHeader, v)
+			}
+			if tc.authorization != "" {
+				req.Header.Set("Authorization", tc.authorization)
+			}
+			raw, presented := apiKeyCredential(req)
+			if presented != tc.wantPresented {
+				t.Fatalf("presented = %v, want %v (values %q)", presented, tc.wantPresented, tc.values)
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("raw = %q, want %q (values %q)", raw, tc.wantRaw, tc.values)
+			}
+		})
+	}
+}
+
+// TestMultiAuthReadsTheAPIKeyHeader — Codex R1 (Low).
+//
+// Every other proof that MultiAuth reads X-API-Key lives behind the
+// `integration` build tag and skips itself when DATABASE_URL is unset, so
+// `go test ./...` could go green with none of it exercised. TestAPIKeyCredential
+// above does run there, but it calls the helper directly: it would pass
+// unchanged if the helper existed and MultiAuth were still wired to the old
+// Authorization-only lookup.
+//
+// This closes that gap without a database, by asking a question whose answer
+// does not depend on one. The API-key service is built over a *sql.DB that
+// cannot connect, so:
+//
+//   - X-API-Key present  → ValidateKey fails → 401, and the handler must not run.
+//     Pre-fix the header was ignored, the request went to the self-hosted
+//     branch, and that branch's own DB call failed with 500 — a different status
+//     from a different code path, which is what makes this discriminating.
+//   - no header          → still the self-hosted branch, so NOT 401.
+//
+// The unreachable database is the point, not a limitation: it makes the two
+// paths answer differently without either of them succeeding.
+func TestMultiAuthReadsTheAPIKeyHeader(t *testing.T) {
+	t.Setenv("CLERK_SECRET_KEY", "")
+	cfg := config.Load()
+	if !cfg.IsSelfHosted() {
+		t.Fatalf("expected a self-hosted config, got mode %q", cfg.Mode())
+	}
+
+	// A DSN that parses but cannot connect. sql.Open is lazy, so this never
+	// touches the network until a query runs, and then it fails.
+	db, err := sql.Open("postgres",
+		"postgres://nobody:nobody@127.0.0.1:1/nonexistent?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	mw := MultiAuth(
+		cfg,
+		repository.NewTenantRepository(db),
+		repository.NewUserRepository(db),
+		service.NewAPIKeyService(repository.NewAPIKeyRepository(db)),
+	)
+
+	drive := func(t *testing.T, set func(h http.Header)) (int, bool) {
+		t.Helper()
+		e := echo.New()
+		handlerRan := false
+		e.GET("/api/v1/projects/:id/sbom", func(c echo.Context) error {
+			handlerRan = true
+			return c.JSON(http.StatusOK, map[string]string{"reached": "handler"})
+		}, mw)
+
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/v1/projects/3f1d6f6e-1b6a-4a7e-9f0b-2a5c8d4e1b90/sbom", nil)
+		set(req.Header)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec.Code, handlerRan
+	}
+
+	t.Run("a value in X-API-Key is validated as a credential", func(t *testing.T) {
+		code, ran := drive(t, func(h http.Header) {
+			h.Set(APIKeyHeader, "sbh_0123456789abcdef0123456789abcdef")
+		})
+		if ran {
+			t.Fatalf("the handler ran for an unvalidatable credential (status %d)", code)
+		}
+		if code != http.StatusUnauthorized {
+			t.Errorf("status %d, want 401. MultiAuth is not reading %s: the request took the "+
+				"Clerk/self-hosted branch, whose own failure here is 500.", code, APIKeyHeader)
+		}
+	})
+
+	t.Run("two conflicting X-API-Key values are refused, not guessed", func(t *testing.T) {
+		code, ran := drive(t, func(h http.Header) {
+			h.Add(APIKeyHeader, "sbh_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			h.Add(APIKeyHeader, "sbh_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+		})
+		if ran || code != http.StatusUnauthorized {
+			t.Errorf("status %d handlerRan=%v, want 401 and no handler", code, ran)
+		}
+	})
+
+	t.Run("no header still takes the self-hosted branch", func(t *testing.T) {
+		code, ran := drive(t, func(http.Header) {})
+		if ran {
+			t.Fatalf("the handler ran although the self-hosted branch's DB is unreachable")
+		}
+		if code == http.StatusUnauthorized {
+			t.Errorf("a credential-less request was answered 401; in self-hosted mode it must "+
+				"reach Auth()'s default-tenant branch (which fails 500 here because the "+
+				"database is unreachable, not because it refused). status %d", code)
+		}
+	})
 }
 
 // TestRoleFromAPIKeyPermissions_F14 pins the F14 contract (Codex M1

@@ -71,6 +71,7 @@ type multiAuthHeaderResult struct {
 	sawScoped    bool
 	sawProjectID uuid.UUID
 	sawTenantID  uuid.UUID
+	sawClerkUser string
 }
 
 // selfHostedConfig builds the config MultiAuth sees in `anonymous` self-host,
@@ -114,6 +115,7 @@ func driveMultiAuthWithHeaders(
 		out.sawProjectID, out.sawScoped = APIKeyProjectID(c)
 		_, out.sawAPIKey = c.Get(ContextKeyAPI).(*model.APIKey)
 		out.sawTenantID, _ = c.Get(ContextKeyTenantID).(uuid.UUID)
+		out.sawClerkUser, _ = c.Get(ContextKeyClerkUserID).(string)
 		return c.JSON(http.StatusOK, map[string]string{"reached": "handler"})
 	}
 	e.Add(method, routePath, handler, mw)
@@ -266,6 +268,21 @@ func TestMultiAuthNoHeaderStillReachesTheSelfHostedDefault(t *testing.T) {
 			if r.sawAPIKey {
 				t.Errorf("%s: the handler saw an API key on the context although none was sent",
 					tc.name)
+			}
+			// Codex R1 (Low): "not the seeded tenant" is satisfied by uuid.Nil
+			// and by any unrelated tenant, so it does not actually show the
+			// self-hosted branch ran. handleSelfHostedAuth is the only thing
+			// that stamps ContextKeyClerkUserID with this literal
+			// (auth.go: c.Set(ContextKeyClerkUserID, "self-hosted")), and
+			// GetAuthContext().IsSelfHosted keys off the same value.
+			if r.sawClerkUser != "self-hosted" {
+				t.Errorf("%s: handler saw clerk_user_id %q, want \"self-hosted\" — the request did "+
+					"not go through Auth()'s self-hosted branch, so the default tenant/user was "+
+					"never provisioned", tc.name, r.sawClerkUser)
+			}
+			if r.sawTenantID == uuid.Nil {
+				t.Errorf("%s: handler saw no tenant at all; the self-hosted branch must bind the "+
+					"default tenant before calling next", tc.name)
 			}
 			if r.sawTenantID == seed.tenantID {
 				t.Errorf("%s: the anonymous fall-through resolved to the SEEDED tenant %s; it "+

@@ -55,7 +55,17 @@ func MultiAuth(
 		clerkChain := clerkAuth(next)
 
 		return func(c echo.Context) error {
-			if raw, presented := apiKeyCredential(c.Request()); presented {
+			raw, presented := apiKeyCredential(c.Request())
+			if presented && raw == "" {
+				// A credential was presented that cannot be resolved to ONE
+				// value (see apiKeyCredential). Guessing which one the caller
+				// meant is the same mistake as ignoring it.
+				slog.Debug("MultiAuth: ambiguous API-key header")
+				return c.JSON(http.StatusUnauthorized, map[string]string{
+					"error": "invalid API key",
+				})
+			}
+			if presented {
 				return handleAPIKeyAuth(c, raw, tenantRepo, userRepo, apiKeyService, next)
 			}
 
@@ -113,10 +123,64 @@ func MultiAuth(
 // The two middlewares must resolve the same principal from the same request, or
 // one credential pair would be one identity on /api/v1/mcp/* and another on
 // /api/v1/projects/*.
+//
+// # Duplicate headers (Codex R1, Medium)
+//
+// HTTP allows a field name to repeat, and Go keeps every value —
+// `Header.Get` returns only the FIRST. A first implementation used Get, so
+//
+//	X-API-Key:
+//	X-API-Key: sbh_<a real key>
+//
+// read as "no credential" and fell through to the Clerk / self-hosted path,
+// reinstating the exact discard this function exists to remove. The shape is
+// reachable whenever something downstream of a client appends the key (a proxy
+// injecting a service credential after a client-controlled empty header).
+//
+// So every value is inspected, and the outcomes are three, not two:
+//
+//	(v,  true)   exactly one distinct non-empty value — use it
+//	("", true)   two or more DIFFERENT non-empty values — a credential was
+//	             presented but there is no single answer to "which one".
+//	             MultiAuth answers 401; choosing either would be a guess, and
+//	             choosing the first is how the defect above worked.
+//	("", false)  no value, or only empty ones — no credential at all
+//
+// Repeats of the SAME value are not ambiguous and are accepted: that is one
+// credential sent twice, which says nothing conflicting.
+//
+// NOTE: APIKeyAuth / OptionalAPIKeyAuth in apikey.go still use Header.Get and
+// therefore still read only the first value. Recorded rather than fixed here
+// because those middlewares are outside this change's scope; the consequence
+// there is the milder one (a discarded key yields 401 from the empty-value
+// branch, not a fall-through to a default identity, because those groups have
+// no anonymous path).
 func apiKeyCredential(r *http.Request) (raw string, presented bool) {
-	if v := r.Header.Get(APIKeyHeader); v != "" {
-		return v, true
+	var distinct []string
+	for _, v := range r.Header.Values(APIKeyHeader) {
+		if v == "" {
+			continue
+		}
+		seen := false
+		for _, d := range distinct {
+			if d == v {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			distinct = append(distinct, v)
+		}
 	}
+	switch len(distinct) {
+	case 0:
+		// No API-key header worth reading; fall through to Authorization.
+	case 1:
+		return distinct[0], true
+	default:
+		return "", true
+	}
+
 	authHeader := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(authHeader, BearerPrefix)
 	if token != authHeader && strings.HasPrefix(token, apiKeyPrefix) {
