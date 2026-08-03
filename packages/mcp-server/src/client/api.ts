@@ -60,6 +60,15 @@ type RequestOptions = {
   body?: unknown;
 };
 
+// How the caller names the two SBOMs to compare. Ids win over versions; both
+// sides default to the newest two snapshots.
+export type DiffSelector = {
+  baseVersion?: string;
+  targetVersion?: string;
+  baseSbomId?: string;
+  targetSbomId?: string;
+};
+
 export class ApiClient {
   private baseUrl: string;
   private apiKey: string;
@@ -172,24 +181,66 @@ export class ApiClient {
 
   // POST /api/v1/mcp/sbom/diff with { base_sbom_id, target_sbom_id },
   // resolved from the project's SBOM list (newest first).
-  async diff(
-    projectId: string,
-    baseVersion?: string,
-    targetVersion?: string
-  ): Promise<unknown> {
+  //
+  // `version` is NOT an upload version. apps/api/internal/service/sbom.go
+  // fills model.Sbom.Version from the document's own spec version
+  // (CycloneDX `specVersion`, SPDX `spdxVersion`), so a project that keeps
+  // uploading CycloneDX 1.5 has every row reading "1.5". Selecting by version
+  // used to take the first match — the NEWEST — which meant
+  // `base_version: "1.5", target_version: "1.5"` silently diffed the newest
+  // SBOM against itself and reported "no changes" (Codex R4). Ambiguity is now
+  // an error, and `*_sbom_id` gives the model a selector that actually selects.
+  async diff(projectId: string, selector: DiffSelector = {}): Promise<unknown> {
     const sboms = await this.listSboms(projectId);
     if (sboms.length < 2) {
       throw new Error("Not enough SBOMs to diff");
     }
 
-    const findByVersion = (version: string) =>
-      sboms.find((s) => s.version.toLowerCase() === version.toLowerCase());
+    const pick = (
+      side: "base" | "target",
+      id?: string,
+      version?: string
+    ): SbomSummary | null => {
+      if (id) {
+        const found = sboms.find((s) => s.id === id);
+        if (!found) {
+          throw new Error(
+            `${side}_sbom_id ${id} is not one of this project's SBOMs`
+          );
+        }
+        return found;
+      }
+      if (version) {
+        const matches = sboms.filter(
+          (s) => s.version.toLowerCase() === version.toLowerCase()
+        );
+        if (matches.length === 0) {
+          throw new Error("SBOM version not found");
+        }
+        if (matches.length > 1) {
+          throw new Error(
+            `${side}_version "${version}" matches ${matches.length} SBOMs ` +
+              `(${matches.map((m) => `${m.id} @ ${m.created_at}`).join(", ")}). ` +
+              "`version` is the SBOM spec version (CycloneDX/SPDX), not a unique " +
+              `identifier — pass ${side}_sbom_id to choose one`
+          );
+        }
+        return matches[0];
+      }
+      return null;
+    };
 
-    const target = targetVersion ? findByVersion(targetVersion) : sboms[0];
-    const base = baseVersion ? findByVersion(baseVersion) : sboms[1];
+    const target =
+      pick("target", selector.targetSbomId, selector.targetVersion) ?? sboms[0];
+    const base =
+      pick("base", selector.baseSbomId, selector.baseVersion) ?? sboms[1];
 
-    if (!target || !base) {
-      throw new Error("SBOM version not found");
+    if (base.id === target.id) {
+      throw new Error(
+        `base and target resolved to the same SBOM (${base.id}); a diff of an ` +
+          "SBOM against itself is empty by construction, which would read as " +
+          "'nothing changed'"
+      );
     }
 
     return this.request("/api/v1/mcp/sbom/diff", {
@@ -278,8 +329,25 @@ export class ApiClient {
         `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/vulnerabilities?limit=${VULNS_PAGE_LIMIT}&offset=${offset}&sort=${sort}`
       );
       const page = VulnerabilityListSchema.parse(data);
+      const pageTotal = parseTotalCount(headers, offset);
+
+      // Every page is answered against whatever is the project's LATEST SBOM
+      // at that moment — the handler resolves it per request. If an upload (or
+      // a rescan) lands mid-walk, the pages come from different snapshots and
+      // concatenating them produces a vulnerability set that never existed.
+      // The per-request count is the cheapest evidence of that: it is a
+      // COUNT(*) over the same snapshot the page came from, so a change means
+      // the ground moved (Codex R4). Refuse rather than blend.
+      if (offset > 0 && pageTotal !== reportedTotal) {
+        throw new Error(
+          `the project's vulnerability set changed while it was being read ` +
+            `(X-Total-Count went from ${reportedTotal} to ${pageTotal} at offset ${offset}); ` +
+            "the pages come from different SBOM snapshots and cannot be combined — retry"
+        );
+      }
+
       vulnerabilities.push(...page);
-      reportedTotal = parseTotalCount(headers, offset);
+      reportedTotal = pageTotal;
 
       // Short page = the server has no more rows. This is the ONLY evidence
       // accepted for "the scan is complete".

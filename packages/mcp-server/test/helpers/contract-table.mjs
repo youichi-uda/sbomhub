@@ -57,6 +57,15 @@ export const VULNS = [
   vuln("CVE-2023-3333", "LOW", 3.1),
 ];
 
+// What the SBOM list really looks like: `version` is the document's own spec
+// version (apps/api/internal/service/sbom.go detectFormatAndVersion), so a
+// project uploading CycloneDX repeatedly has the same string on every row.
+export const SPEC_VERSION_SBOMS = [
+  { id: SBOM_NEWEST, version: "1.5", created_at: "2026-08-01T00:00:00Z" },
+  { id: SBOM_MIDDLE, version: "1.5", created_at: "2026-07-01T00:00:00Z" },
+  { id: SBOM_OLDEST, version: "1.4", created_at: "2026-06-01T00:00:00Z" },
+];
+
 export const DIFF_RESULT = { added: ["log4j-core@2.17.1"], removed: [], changed: [] };
 
 // Registered ("<METHOD> <echo path>") route keys — the form project_scope.go
@@ -299,6 +308,30 @@ export const CONTRACT_CASES = [
         target_sbom_id: SBOM_NEWEST,
       });
       assert.deepEqual(payload, DIFF_RESULT);
+    },
+  },
+
+  {
+    tool: "sbomhub_diff",
+    title: "explicit SBOM ids select the snapshots, ignoring their versions",
+    args: {
+      project_id: PROJECT_ID,
+      base_sbom_id: SBOM_OLDEST,
+      target_sbom_id: SBOM_MIDDLE,
+    },
+    // The realistic shape: `version` is the CycloneDX/SPDX SPEC version, so
+    // every snapshot of a project reads the same. Ids are the only selector
+    // that identifies one (Codex R4).
+    routes: { [K.sboms]: ok(SPEC_VERSION_SBOMS), [K.diff]: ok(DIFF_RESULT) },
+    expect: [
+      { method: "GET", path: P.sboms, query: {} },
+      { method: "POST", path: P.diff, query: {} },
+    ],
+    check({ requests }) {
+      assert.deepEqual(requests[1].body, {
+        base_sbom_id: SBOM_OLDEST,
+        target_sbom_id: SBOM_MIDDLE,
+      });
     },
   },
 

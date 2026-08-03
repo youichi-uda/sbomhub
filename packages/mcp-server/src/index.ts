@@ -165,7 +165,10 @@ server.registerTool(
 server.registerTool(
   "sbomhub_list_sboms",
   {
-    description: "プロジェクトのSBOM一覧を取得 (新しい順)",
+    description:
+      "プロジェクトのSBOM一覧を取得 (新しい順)。" +
+      "version はSBOM仕様のバージョン (CycloneDX/SPDX) であってアップロードの" +
+      "版数ではないため、同じ値が並ぶのが普通。個々のSBOMを指すには id を使うこと",
     inputSchema: {
       project_id: projectIdSchema,
     },
@@ -239,13 +242,53 @@ server.registerTool(
       "判明するのが両行の読み込み後になる)",
     inputSchema: {
       project_id: projectIdSchema,
-      base_version: z.string().optional().describe("比較元SBOMのバージョン (省略時: 2番目に新しいSBOM)"),
-      target_version: z.string().optional().describe("比較先SBOMのバージョン (省略時: 最新SBOM)"),
+      // Ids first: they are the only selector that identifies one snapshot.
+      base_sbom_id: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "比較元SBOMのID (sbomhub_list_sboms の id。任意。指定すると base_version より優先)"
+        ),
+      target_sbom_id: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "比較先SBOMのID (sbomhub_list_sboms の id。任意。指定すると target_version より優先)"
+        ),
+      base_version: z
+        .string()
+        .optional()
+        .describe(
+          "比較元SBOMの仕様バージョン (省略時: 2番目に新しいSBOM)。" +
+            "これはCycloneDX/SPDXの仕様バージョンでアップロードの版数ではないため、" +
+            "同じ値のSBOMが複数あるのが普通で、その場合はエラーになる — base_sbom_id を使うこと"
+        ),
+      target_version: z
+        .string()
+        .optional()
+        .describe(
+          "比較先SBOMの仕様バージョン (省略時: 最新SBOM)。base_version と同じ注意点"
+        ),
     },
   },
-  async ({ project_id, base_version, target_version }) => {
+  async ({
+    project_id,
+    base_version,
+    target_version,
+    base_sbom_id,
+    target_sbom_id,
+  }) => {
     try {
-      return jsonResult(await client.diff(project_id, base_version, target_version));
+      return jsonResult(
+        await client.diff(project_id, {
+          baseVersion: base_version,
+          targetVersion: target_version,
+          baseSbomId: base_sbom_id,
+          targetSbomId: target_sbom_id,
+        })
+      );
     } catch (err) {
       return errorResult(err);
     }

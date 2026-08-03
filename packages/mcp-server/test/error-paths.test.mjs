@@ -21,6 +21,7 @@ import {
   P,
   PROJECT_ID,
   SBOMS,
+  SPEC_VERSION_SBOMS,
 } from "./helpers/contract-table.mjs";
 import { jsonOf, startMcpServer, textOf } from "./helpers/mcp-harness.mjs";
 import { startStubApi } from "./helpers/stub-api.mjs";
@@ -281,6 +282,94 @@ test("sbomhub_diff reports an unknown version instead of falling back to another
     stub.requests.map((r) => r.path),
     [P.sboms]
   );
+});
+
+// ---------------------------------------------------------------------------
+// Selecting the wrong SBOM is worse than failing to select one: a diff of a
+// snapshot against itself comes back empty, and "no changes since the last
+// SBOM" is a statement a compliance report can be built on. `version` cannot
+// disambiguate — it is the CycloneDX/SPDX spec version, identical across a
+// project's uploads (Codex R4).
+// ---------------------------------------------------------------------------
+const AMBIGUOUS_DIFF_CASES = [
+  {
+    title: "an ambiguous base_version names two snapshots",
+    args: { project_id: PROJECT_ID, base_version: "1.5" },
+    expect: /matches 2 SBOMs/,
+  },
+  {
+    title: "both sides given the same (duplicated) spec version",
+    args: { project_id: PROJECT_ID, base_version: "1.5", target_version: "1.5" },
+    expect: /matches 2 SBOMs/,
+  },
+  {
+    title: "the two selectors resolve to one SBOM",
+    args: {
+      project_id: PROJECT_ID,
+      base_sbom_id: SPEC_VERSION_SBOMS[0].id,
+      target_sbom_id: SPEC_VERSION_SBOMS[0].id,
+    },
+    expect: /same SBOM/,
+  },
+  {
+    title: "an id that is not one of this project's SBOMs",
+    args: {
+      project_id: PROJECT_ID,
+      base_sbom_id: "99999999-9999-4999-8999-999999999999",
+    },
+    expect: /not one of this project's SBOMs/,
+  },
+];
+
+for (const c of AMBIGUOUS_DIFF_CASES) {
+  test(`sbomhub_diff refuses when ${c.title}`, async () => {
+    stub.reset();
+    stub.routes({
+      [K.sboms]: { status: 200, body: SPEC_VERSION_SBOMS },
+      [K.diff]: { status: 200, body: { added: [], removed: [], changed: [] } },
+    });
+
+    const result = await mcp.callTool("sbomhub_diff", c.args);
+    await stub.quiet();
+    assert.equal(result.isError, true, textOf(result));
+    assert.match(textOf(result), c.expect);
+    // Critically: no diff was requested, so no empty result can be reported.
+    assert.deepEqual(
+      stub.requests.map((r) => r.path),
+      [P.sboms]
+    );
+  });
+}
+
+test("the vulnerability walk refuses to blend two SBOM snapshots", async () => {
+  // Each page is answered against whatever is latest at that moment. If an
+  // upload lands mid-walk, page 2 comes from a different snapshot and the
+  // concatenation never existed as a state of the project.
+  stub.reset();
+  stub.routes({
+    [K.vulns]: (req) => {
+      const offset = Number(req.query.offset ?? "0");
+      const rows = Array.from({ length: offset === 0 ? 500 : 100 }, (_, i) => ({
+        cve_id: `CVE-2026-${40000 + offset + i}`,
+        severity: "HIGH",
+        cvss_score: 7,
+      }));
+      return {
+        status: 200,
+        body: rows,
+        // The second page is answered from a newer, smaller snapshot.
+        headers: { "X-Total-Count": offset === 0 ? "1200" : "600" },
+      };
+    },
+  });
+
+  const result = await mcp.callTool("sbomhub_get_vulnerabilities", {
+    project_id: PROJECT_ID,
+  });
+  await stub.quiet();
+  assert.equal(result.isError, true, textOf(result));
+  assert.match(textOf(result), /changed while it was being read/);
+  assert.throws(() => JSON.parse(textOf(result)));
 });
 
 test("a 200 whose body is not the documented shape is an error, not an empty result", async () => {
