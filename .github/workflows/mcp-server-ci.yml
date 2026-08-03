@@ -51,10 +51,21 @@ on:
       # so it has to re-run the contract tests. (GitHub Actions does not
       # support YAML anchors, hence the duplicated list below.)
       - "apps/api/internal/middleware/project_scope.go"
-      # Read the same way by helpers/backend-scope.mjs: the vulnerability
-      # tools' "the scan may not have finished" caveat is required only while
-      # this lifecycle exists, so a change here can make the suite fail — it
-      # must therefore be able to run.
+      # Read the same way by helpers/backend-scope.mjs. The vulnerability tools
+      # now REPORT the scan state (counts_final / scan_state) rather than only
+      # warning that they cannot see it, and the client treats exactly one
+      # literal — service.ScanStateCompleted — as "the counts are settled". A
+      # rename or removal here makes that mapping wrong, so a change to this
+      # file has to be able to fail the suite.
+      #
+      # Not listed, and deliberately: apps/api/internal/middleware/multiauth.go.
+      # The scan-state probe reaches a canonical (MultiAuth) route with the
+      # X-API-Key header, which only authenticates there since e84142c — but
+      # this suite is hermetic (stub API), so it cannot observe that coupling
+      # and listing the file would add a trigger that proves nothing. The
+      # coupling is covered by
+      # apps/api/internal/middleware/multiauth_xapikey_integration_test.go and
+      # by scripts/project-scope-e2e.sh, which drive the real server.
       - "apps/api/internal/service/scan_tracker.go"
   push:
     branches:

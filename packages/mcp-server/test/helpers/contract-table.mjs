@@ -14,6 +14,8 @@
 // is REQUIRED to say. That is the bad1b8c layer: description ⟷ route ⟷ policy.
 import assert from "node:assert/strict";
 
+import { registeredPathFor } from "./backend-scope.mjs";
+
 // Valid v4 UUIDs — the input schemas use z.string().uuid(), so the SDK would
 // reject anything else before the callback runs.
 export const PROJECT_ID = "3f1d6f6e-1b6a-4a7e-9f0b-2a5c8d4e1b90";
@@ -70,6 +72,11 @@ export const DIFF_RESULT = { added: ["log4j-core@2.17.1"], removed: [], changed:
 
 // Registered ("<METHOD> <echo path>") route keys — the form project_scope.go
 // is keyed by.
+//
+// `latestSbom` / `scanStatus` are NOT under /api/v1/mcp/. They are canonical
+// (MultiAuth) routes, classified scopeProjectPathParam like every other
+// per-project route here, and they are what lets a tool say whether the counts
+// it just read came from a finished scan.
 export const K = {
   projects: "GET /api/v1/mcp/projects",
   dashboard: "GET /api/v1/mcp/dashboard/summary",
@@ -79,6 +86,8 @@ export const K = {
   sboms: "GET /api/v1/mcp/projects/:id/sboms",
   vulns: "GET /api/v1/mcp/projects/:id/vulnerabilities",
   compliance: "GET /api/v1/mcp/projects/:id/compliance",
+  latestSbom: "GET /api/v1/projects/:id/sbom",
+  scanStatus: "GET /api/v1/projects/:id/sboms/:sbom_id/scan-status",
 };
 
 // Concrete paths for the project used by these cases.
@@ -91,9 +100,49 @@ export const P = {
   sboms: `/api/v1/mcp/projects/${PROJECT_ID}/sboms`,
   vulns: `/api/v1/mcp/projects/${PROJECT_ID}/vulnerabilities`,
   compliance: `/api/v1/mcp/projects/${PROJECT_ID}/compliance`,
+  latestSbom: `/api/v1/projects/${PROJECT_ID}/sbom`,
+  scanStatus: `/api/v1/projects/${PROJECT_ID}/sboms/${SBOM_NEWEST}/scan-status`,
 };
 
 const ok = (body, headers) => ({ status: 200, body, headers });
+
+// apps/api/internal/handler/sbom.go ScanStatusResponse. `status` is
+// service.ScanState: running | completed | failed | unknown.
+export const scanStatusBody = (status, extra = {}) => ({
+  status,
+  sbom_id: SBOM_NEWEST,
+  project_id: PROJECT_ID,
+  vulnerabilities: {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    unknown: 0,
+    kev: 0,
+    total: 0,
+  },
+  ...extra,
+});
+
+/**
+ * The two requests every counts-reporting tool makes AFTER walking the
+ * vulnerability pages: resolve the project's latest SBOM (the same row
+ * SbomService.GetVulnerabilitiesPaginated resolves for each page), then ask for
+ * that SBOM's scan state.
+ *
+ * `scanProbe(state)` is the stub side, `SCAN_PROBE_EXPECT` the observed side.
+ * They are shared rather than repeated so a change to the probe cannot be
+ * applied to some cases and forgotten in others.
+ */
+export const scanProbe = (state = "completed") => ({
+  [K.latestSbom]: ok(SBOMS[0]),
+  [K.scanStatus]: ok(scanStatusBody(state)),
+});
+
+export const SCAN_PROBE_EXPECT = [
+  { method: "GET", path: P.latestSbom, query: {} },
+  { method: "GET", path: P.scanStatus, query: {} },
+];
 
 // A vulnerabilities endpoint carrying `total` rows, paged the way
 // apps/api/internal/handler/sbom.go does (limit/offset + X-Total-Count).
@@ -160,6 +209,7 @@ export const CONTRACT_CASES = [
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
+      ...scanProbe("completed"),
     },
     // Promise.all fan-out: assert the SET, not the order.
     unordered: true,
@@ -167,6 +217,7 @@ export const CONTRACT_CASES = [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
       { method: "GET", path: P.compliance, query: {} },
       { method: "GET", path: P.sboms, query: {} },
+      ...SCAN_PROBE_EXPECT,
     ],
     check({ payload }) {
       assert.equal(payload.project_id, PROJECT_ID);
@@ -198,6 +249,7 @@ export const CONTRACT_CASES = [
       [K.vulns]: pagedVulns(6000, (i) => (i % 3 === 0 ? "CRITICAL" : "HIGH")),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
+      ...scanProbe("completed"),
     },
     unordered: true,
     expect: [
@@ -208,6 +260,7 @@ export const CONTRACT_CASES = [
       })),
       { method: "GET", path: P.compliance, query: {} },
       { method: "GET", path: P.sboms, query: {} },
+      ...SCAN_PROBE_EXPECT,
     ],
     check({ payload }) {
       assert.equal(payload.vulnerabilities.total, 6000);
@@ -361,8 +414,12 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed"),
     },
-    expect: [{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      ...SCAN_PROBE_EXPECT,
+    ],
     check({ payload }) {
       assert.equal(payload.total_in_project, VULNS.length);
       assert.equal(payload.scanned, VULNS.length);
@@ -372,6 +429,12 @@ export const CONTRACT_CASES = [
       assert.equal(payload.matched, VULNS.length);
       assert.equal(payload.returned, VULNS.length);
       assert.deepEqual(payload.vulnerabilities, VULNS);
+      // The positive pole of the scan-state rule. Without a case that observes
+      // counts_final=true, a client hardcoding `false` would satisfy every
+      // "must not claim final" assertion below.
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, true);
+      assert.equal(payload.scanned_sbom_id, SBOM_NEWEST);
     },
   },
 
@@ -381,9 +444,13 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, severity: "critical" },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed"),
     },
     // The backend has no severity parameter — the query must stay untouched.
-    expect: [{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      ...SCAN_PROBE_EXPECT,
+    ],
     check({ payload }) {
       assert.equal(payload.severity_filter, "CRITICAL");
       assert.equal(payload.scanned, VULNS.length);
@@ -404,8 +471,12 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, sort: "epss" },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("completed"),
     },
-    expect: [{ method: "GET", path: P.vulns, query: vulnsQuery(0, "epss") }],
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0, "epss") },
+      ...SCAN_PROBE_EXPECT,
+    ],
     check({ payload }) {
       assert.equal(payload.sort, "epss");
     },
@@ -417,11 +488,13 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, severity: "critical" },
     routes: {
       [K.vulns]: pagedVulns(1200, (i) => (i % 2 === 0 ? "CRITICAL" : "HIGH")),
+      ...scanProbe("completed"),
     },
     expect: [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
       { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
+      ...SCAN_PROBE_EXPECT,
     ],
     check({ payload }) {
       assert.equal(payload.total_in_project, 1200);
@@ -440,12 +513,15 @@ export const CONTRACT_CASES = [
     tool: "sbomhub_get_vulnerabilities",
     title: "stops at the 5000-row scan cap and flags the truncation",
     args: { project_id: PROJECT_ID },
-    routes: { [K.vulns]: pagedVulns(6000) },
-    expect: Array.from({ length: 10 }, (_, i) => ({
-      method: "GET",
-      path: P.vulns,
-      query: vulnsQuery(i * 500),
-    })),
+    routes: { [K.vulns]: pagedVulns(6000), ...scanProbe("completed") },
+    expect: [
+      ...Array.from({ length: 10 }, (_, i) => ({
+        method: "GET",
+        path: P.vulns,
+        query: vulnsQuery(i * 500),
+      })),
+      ...SCAN_PROBE_EXPECT,
+    ],
     check({ payload }) {
       assert.equal(payload.total_in_project, 6000);
       assert.equal(payload.scanned, 5000);
@@ -463,11 +539,12 @@ export const CONTRACT_CASES = [
     // The walk stops on a SHORT page, not when the header's count is reached:
     // a header that under-reports must not be able to cut the scan short. The
     // price is one extra request here.
-    routes: { [K.vulns]: pagedVulns(1000) },
+    routes: { [K.vulns]: pagedVulns(1000), ...scanProbe("completed") },
     expect: [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
       { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
+      ...SCAN_PROBE_EXPECT,
     ],
     check({ payload }) {
       assert.equal(payload.scanned, 1000);
@@ -486,17 +563,176 @@ export const CONTRACT_CASES = [
         const reply = pagedVulns(1200)(req);
         return { ...reply, headers: { "X-Total-Count": "500" } };
       },
+      ...scanProbe("completed"),
     },
     expect: [
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
       { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
+      ...SCAN_PROBE_EXPECT,
     ],
     check({ payload }) {
       assert.equal(payload.scanned, 1200);
       // Report what is known to exist, not the smaller claim.
       assert.equal(payload.total_in_project, 1200);
       assert.equal(payload.scan_truncated, false);
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // The asynchronous scan.
+  //
+  // apps/api starts the NVD/JVN scan in a goroutine after an SBOM upload and
+  // tracks its state per SBOM (service.ScanTracker). Until this wave the MCP
+  // server could not see that state, so a project whose scan was still running
+  // answered with exactly the payload a finished one produces — "0
+  // vulnerabilities" from a just-uploaded SBOM was byte-identical to "this
+  // project is clean". The cases below pin the four shapes the tool must
+  // distinguish, and in every one of them the requirement is the same: the
+  // model must not be able to read a non-final count as a final one.
+  // -------------------------------------------------------------------------
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a scan still RUNNING is reported as running, and its counts as not final",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      // The dangerous shape: an empty result set from a scan that has barely
+      // started. Byte-identical to a clean project unless the state is read.
+      [K.vulns]: ok([], { "X-Total-Count": "0" }),
+      ...scanProbe("running"),
+    },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      ...SCAN_PROBE_EXPECT,
+    ],
+    check({ payload }) {
+      assert.equal(payload.total_in_project, 0);
+      assert.equal(payload.scan_state, "running");
+      assert.equal(
+        payload.counts_final,
+        false,
+        "a running scan's counts were reported as final — this is the defect the " +
+          "whole scan-status probe exists to close"
+      );
+      // The model needs to know WHICH snapshot the counts describe, not just
+      // that they are provisional: two uploads in flight produce two answers.
+      assert.equal(payload.scanned_sbom_id, SBOM_NEWEST);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a scan the tracker no longer remembers (unknown) is not reported as final",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("unknown"),
+    },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      ...SCAN_PROBE_EXPECT,
+    ],
+    check({ payload }) {
+      // ScanTracker is in-process with a 1h retention, so `unknown` is what an
+      // API restart or any upload older than an hour produces. It means "no
+      // record", which is not evidence of completion — mapping it to final
+      // would make the common steady-state case the unsafe one.
+      assert.equal(payload.scan_state, "unknown");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scanned, VULNS.length);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a FAILED scan is reported as failed, not as a finished one",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      ...scanProbe("failed"),
+    },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      ...SCAN_PROBE_EXPECT,
+    ],
+    check({ payload }) {
+      assert.equal(payload.scan_state, "failed");
+      assert.equal(payload.counts_final, false);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a project with NO SBOM says so instead of letting 0 read as clean",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok([], { "X-Total-Count": "0" }),
+      // apps/api answers 404 {"error":"sbom not found"} when the project has
+      // never had an SBOM uploaded.
+      [K.latestSbom]: { status: 404, body: { error: "sbom not found" } },
+    },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      // The scan-status request is not made: there is no SBOM to ask about.
+      { method: "GET", path: P.latestSbom, query: {} },
+    ],
+    check({ payload }) {
+      assert.equal(payload.scan_state, "no_sbom");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scanned_sbom_id, null);
+      assert.equal(payload.total_in_project, 0);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "an unreachable scan-status degrades to 'unavailable', never to 'finished'",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      [K.latestSbom]: ok(SBOMS[0]),
+      // A backend that predates e84142c answers 401 here, because it does not
+      // read X-API-Key on the canonical routes. That is the realistic failure
+      // and it must not silently become a claim of completeness — the tool
+      // still answers with the vulnerabilities, it just cannot vouch for them.
+      [K.scanStatus]: { status: 401, body: { error: "missing authorization header" } },
+    },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      ...SCAN_PROBE_EXPECT,
+    ],
+    check({ payload, result }) {
+      assert.notEqual(result.isError, true, "the vulnerability data is still usable");
+      assert.equal(payload.scan_state, "unavailable");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scanned, VULNS.length);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_project_dashboard",
+    title: "the dashboard carries the same scan state, one level down",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok([], { "X-Total-Count": "0" }),
+      [K.compliance]: ok(COMPLIANCE),
+      [K.sboms]: ok(SBOMS),
+      ...scanProbe("running"),
+    },
+    unordered: true,
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      { method: "GET", path: P.compliance, query: {} },
+      { method: "GET", path: P.sboms, query: {} },
+      ...SCAN_PROBE_EXPECT,
+    ],
+    check({ payload }) {
+      // Nested, for the same reason scan_truncated is: this tool composes the
+      // vulnerability answer into a sub-object, and a flag that only exists at
+      // the root would be lost exactly where the counts are shown.
+      assert.equal(payload.vulnerabilities.scan_state, "running");
+      assert.equal(payload.vulnerabilities.counts_final, false);
+      assert.deepEqual(payload.vulnerabilities.by_severity, {});
     },
   },
 
@@ -526,5 +762,9 @@ export function declaredRouteKeysByTool() {
 }
 
 function routePatternOf(path) {
-  return path.replace(PROJECT_ID, ":id");
+  // Same fold the stub applies to observed traffic (stub-api.mjs), so the
+  // DECLARED and OBSERVED route keys are produced by the same rule. A local
+  // `.replace(PROJECT_ID, ":id")` would leave the scan-status path carrying a
+  // raw SBOM uuid and the two sets could never compare equal.
+  return registeredPathFor("GET", path) ?? path.replace(PROJECT_ID, ":id");
 }

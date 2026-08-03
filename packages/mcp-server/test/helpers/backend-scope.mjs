@@ -42,8 +42,14 @@ const STATUS_BY_GO_NAME = {
   InternalServerError: 500,
 };
 
-// The MCP server can only reach these eight. Asserting they are all present
-// makes a regex that stopped matching fail loudly instead of vacuously.
+// Every route the MCP server can reach. Asserting they are all present makes a
+// regex that stopped matching fail loudly instead of vacuously.
+//
+// The last two are NOT under /api/v1/mcp/. They sit on the canonical route
+// group (MultiAuth), which the MCP client reaches with the same X-API-Key it
+// uses everywhere else — that header only started authenticating there in
+// e84142c. They are what makes the asynchronous scan state observable to this
+// server; see SCAN_LIFECYCLE below.
 export const MCP_ROUTES = [
   "GET /api/v1/mcp/projects",
   "GET /api/v1/mcp/dashboard/summary",
@@ -53,6 +59,8 @@ export const MCP_ROUTES = [
   "GET /api/v1/mcp/projects/:id/vulnerabilities",
   "GET /api/v1/mcp/projects/:id/compliance",
   "GET /api/v1/mcp/projects/:id/sboms",
+  "GET /api/v1/projects/:id/sbom",
+  "GET /api/v1/projects/:id/sboms/:sbom_id/scan-status",
 ];
 
 function load() {
@@ -155,20 +163,72 @@ export function scopeKindsOf(routeKeys) {
 }
 
 // ---------------------------------------------------------------------------
+// Folding a concrete request path back to the REGISTERED echo path.
+//
+// project_scope.go is keyed by the registered path, `:param` names and all, so
+// an observed URL has to be folded before it can be looked up. Doing that by
+// SHAPE alone — "a UUID segment is `:id`" — was enough while every route had
+// exactly one parameter. It is not any more: the scan-status route registers
+// `:id` AND `:sbom_id`, and a shape fold produces
+// `/api/v1/projects/:id/sboms/:id/scan-status`, which matches no table entry
+// and would make a classified route look unclassified.
+//
+// So the fold uses the table's own keys as its vocabulary. A concrete path
+// matches a key when the segment counts agree, every literal segment is equal,
+// and every `:param` position holds a UUID. The UUID requirement is what keeps
+// the fold from inventing matches: `/api/v1/mcp/projects/not-a-uuid/sboms`
+// stays unfolded rather than being reported as a route that was called.
+// ---------------------------------------------------------------------------
+const UUID_SEGMENT_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const REGISTERED_ROUTES = [...ROUTE_SCOPE.keys()].map((key) => {
+  const sep = key.indexOf(" ");
+  return {
+    key,
+    method: key.slice(0, sep),
+    segments: key.slice(sep + 1).split("/"),
+  };
+});
+
+/**
+ * The registered path for a concrete request, or null when the table knows no
+ * route of that shape.
+ */
+export function registeredPathFor(method, pathname) {
+  const observed = pathname.split("/");
+  for (const route of REGISTERED_ROUTES) {
+    if (route.method !== method) continue;
+    if (route.segments.length !== observed.length) continue;
+    const matches = route.segments.every((seg, i) =>
+      seg.startsWith(":") ? UUID_SEGMENT_RE.test(observed[i]) : seg === observed[i]
+    );
+    if (matches) return route.segments.join("/");
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // The vulnerability scan is asynchronous.
 //
 // apps/api tracks a per-SBOM scan state (running / completed / failed /
 // unknown) and says so explicitly: the counts behind
 // GET /projects/:id/vulnerabilities reflect whatever the background scan has
 // matched SO FAR, and are only authoritative once the scan reports completed.
-// The MCP route group exposes no scan-state route, so this server cannot tell
-// the two apart — which means a project whose scan is still running answers
-// "0 vulnerabilities" in exactly the shape a finished scan would. The tools
-// that report those counts must say so.
 //
-// Read from the Go source rather than assumed, so that the day the lifecycle
-// goes away (or reaches the MCP group) this check is revisited instead of
-// demanding a caveat that is no longer true.
+// That state used to be UNREACHABLE from this server, so a project whose scan
+// was still running answered "0 vulnerabilities" in exactly the shape a
+// finished scan would, and the only honest place to put it was the tool
+// description. It is reachable now:
+// `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` sits on the canonical
+// (MultiAuth) group, is classified scopeProjectPathParam, and — since e84142c —
+// authenticates with the X-API-Key header this client sends. The tools that
+// report scan counts therefore REPORT the state instead of merely warning about
+// it, and the description explains what the reported states mean.
+//
+// Read from the Go source rather than assumed, so the day the lifecycle changes
+// this check is revisited instead of pinning a vocabulary the server no longer
+// speaks.
 // ---------------------------------------------------------------------------
 const SCAN_SOURCE = fileURLToPath(
   new URL("../../../../apps/api/internal/service/scan_tracker.go", import.meta.url)
@@ -191,6 +251,12 @@ export function loadScanLifecycle() {
     states,
     // True when a caller can be served counts from a scan that has not finished.
     canBePartial: states.includes("running"),
+    // The ONE state under which the counts are final. The client maps exactly
+    // this string to counts_final=true; every other state, known or not, is
+    // reported as non-final. Pinned here so a rename in Go is caught as a
+    // vocabulary change rather than silently turning counts_final into a
+    // constant false.
+    finalState: states.includes("completed") ? "completed" : null,
   };
 }
 

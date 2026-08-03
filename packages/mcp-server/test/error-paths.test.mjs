@@ -22,6 +22,7 @@ import {
   PROJECT_ID,
   SBOMS,
   SPEC_VERSION_SBOMS,
+  scanProbe,
 } from "./helpers/contract-table.mjs";
 
 import { jsonOf, startMcpServer, textOf } from "./helpers/mcp-harness.mjs";
@@ -144,8 +145,13 @@ const DOWNSTREAM_CASES = [
       [K.vulns]: page(2, 2),
       [K.compliance]: { status, body: { error: "denied" } },
       [K.sboms]: ok(SBOMS),
+      ...scanProbe("completed"),
     }),
-    expectedRequests: 3,
+    // Five, not three: the vulnerabilities leg SUCCEEDS here, and a successful
+    // walk is followed by the two-request scan-state probe. The failure the
+    // tool reports is still the compliance leg's — the point of this case is
+    // that a legible refusal survives the other legs completing.
+    expectedRequests: 5,
   },
   {
     title: "sbomhub_get_project_dashboard: the SBOM leg fails",
@@ -155,8 +161,10 @@ const DOWNSTREAM_CASES = [
       [K.vulns]: page(2, 2),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: { status, body: { error: "denied" } },
+      ...scanProbe("completed"),
     }),
-    expectedRequests: 3,
+    // Five, for the same reason as the compliance case above.
+    expectedRequests: 5,
   },
 ];
 

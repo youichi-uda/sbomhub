@@ -35,10 +35,60 @@ const VulnerabilityListSchema = z
   .nullable()
   .transform((v) => v ?? []);
 
+// apps/api/internal/handler/sbom.go ScanStatusResponse. `status` is
+// service.ScanState — running | completed | failed | unknown — and is NOT
+// narrowed to an enum here: an unrecognised state must reach the caller as
+// itself so it is reported as "not final" rather than rejected outright.
+const ScanStatusSchema = z
+  .object({
+    status: z.string(),
+    sbom_id: z.string(),
+  })
+  .passthrough();
+
 export type SbomSummary = z.infer<typeof SbomSummarySchema>;
 export type VulnerabilityEntry = z.infer<typeof VulnerabilitySchema>;
 
 export type VulnSort = "cvss" | "epss";
+
+// The ONE backend state under which the vulnerability counts are settled
+// (service.ScanStateCompleted). Everything else — running, failed, unknown, a
+// state this client has never heard of, or a scan-status request that could not
+// be made at all — leaves them provisional.
+//
+// The asymmetry is deliberate and is the whole point: reporting a finished scan
+// as unfinished costs a caveat, reporting an unfinished one as finished turns
+// "the scan has matched nothing YET" into "this project is clean".
+export const SCAN_STATE_FINAL = "completed";
+
+// States this client generates itself, for the two ways the probe can fail to
+// produce a backend answer. Both are non-final.
+//
+//   no_sbom     — the project has no SBOM at all, so nothing was ever scanned.
+//                 A zero count here means "nothing uploaded", not "nothing
+//                 found", and those are different answers to a compliance
+//                 question.
+//   unavailable — the scan state could not be read (the request failed, the
+//                 body did not parse). Notably what a backend older than the
+//                 X-API-Key fix answers, since it 401s the canonical routes for
+//                 this client's header.
+export const SCAN_STATE_NO_SBOM = "no_sbom";
+export const SCAN_STATE_UNAVAILABLE = "unavailable";
+
+/**
+ * What the tool reports about the asynchronous scan behind the counts it just
+ * read.
+ *
+ * `counts_final` is the field a model is expected to read; `scan_state` is why.
+ * They travel together so "provisional" can be told apart from "provisional
+ * because nobody knows", which call for different next steps (wait and retry
+ * vs. check the deployment).
+ */
+export type ScanReport = {
+  scan_state: string;
+  counts_final: boolean;
+  scanned_sbom_id: string | null;
+};
 
 // GET /mcp/projects/:id/vulnerabilities caps `?limit=` at 500 and
 // `?offset=` at 10000 (apps/api/internal/handler/sbom.go VulnsMaxLimit /
@@ -58,6 +108,8 @@ const VULNS_RETURN_CAP = 500;
 type RequestOptions = {
   method?: string;
   body?: unknown;
+  /** Statuses to return instead of throwing (see requestRaw). */
+  allowStatus?: number[];
 };
 
 // How the caller names the two SBOMs to compare. Ids win over versions; both
@@ -81,13 +133,17 @@ export class ApiClient {
   private async requestRaw(
     path: string,
     options: RequestOptions = {}
-  ): Promise<{ data: unknown; headers: Headers }> {
+  ): Promise<{ data: unknown; headers: Headers; status: number }> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: options.method ?? "GET",
       headers: {
         "Content-Type": "application/json",
-        // apps/api/internal/middleware/apikey.go accepts X-API-Key (primary)
-        // or Authorization: Bearer. We send the documented primary header.
+        // apps/api accepts the key in X-API-Key on every route an API key can
+        // reach: APIKeyAuth (/api/v1/{cli,mcp}/*) always did, and MultiAuth
+        // (the canonical /api/v1/projects/:id/... routes this client uses for
+        // the scan-status probe) does since e84142c — before that it read only
+        // Authorization and silently served the request as the self-hosted
+        // default identity.
         "X-API-Key": this.apiKey,
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
@@ -98,11 +154,18 @@ export class ApiClient {
       redirect: "error",
     });
 
-    if (!res.ok) {
+    // `allowStatus` is a narrow escape hatch for ONE case: a 404 that is an
+    // answer rather than a failure (a project with no SBOM). It is opt-in per
+    // call so no other path can start treating an error status as data.
+    if (!res.ok && !options.allowStatus?.includes(res.status)) {
       const text = await res.text();
       throw new Error(`API error ${res.status}: ${text}`);
     }
-    return { data: (await res.json()) as unknown, headers: res.headers };
+    return {
+      data: (await res.json()) as unknown,
+      headers: res.headers,
+      status: res.status,
+    };
   }
 
   async request(path: string, options: RequestOptions = {}): Promise<unknown> {
@@ -158,6 +221,12 @@ export class ApiClient {
         // (scan_truncated, see VULNS_SCAN_CAP).
         analyzed: scan.vulnerabilities.length,
         scan_truncated: scan.truncated,
+        // Nested with the counts they qualify, not at the root: this tool
+        // composes the vulnerability answer into a sub-object, and a flag
+        // sitting one level away from the numbers is a flag the model reads
+        // separately from them (the shape that let a truncated dashboard pass
+        // the disclosure rule, Codex R2).
+        ...scan.report,
         by_severity: bySeverity,
         top_by_cvss: scan.vulnerabilities.slice(0, 10),
       },
@@ -287,6 +356,7 @@ export class ApiClient {
       total_in_project: scan.total,
       scanned: scan.vulnerabilities.length,
       scan_truncated: scan.truncated,
+      ...scan.report,
       sort,
       severity_filter: severityFilter,
       matched: matched.length,
@@ -330,6 +400,7 @@ export class ApiClient {
     total: number;
     vulnerabilities: VulnerabilityEntry[];
     truncated: boolean;
+    report: ScanReport;
   }> {
     const vulnerabilities: VulnerabilityEntry[] = [];
     let reportedTotal = 0;
@@ -400,7 +471,92 @@ export class ApiClient {
       // conservative direction: over-reporting truncation costs a caveat,
       // under-reporting it costs a wrong compliance answer.
       truncated: !sawEnd || total > vulnerabilities.length,
+      // AFTER the walk, deliberately. See probeScanState.
+      report: await this.probeScanState(projectId),
     };
+  }
+
+  /**
+   * Ask whether the background scan behind the counts just read has finished.
+   *
+   * # Why this exists
+   *
+   * apps/api answers `GET /mcp/projects/:id/vulnerabilities` from whatever the
+   * asynchronous NVD/JVN scan has matched SO FAR. A project whose scan is still
+   * running therefore answers `[]` with `X-Total-Count: 0` — byte-identical to a
+   * project that was scanned and found clean. Every field of this client's
+   * response would then be individually true and the answer as a whole wrong, in
+   * the direction that matters most in a compliance product.
+   *
+   * # Why the probe runs AFTER the page walk
+   *
+   * Each page is answered against whatever is the project's LATEST SBOM at that
+   * moment (SbomService.GetVulnerabilitiesPaginated → sbomRepo.GetLatest), so an
+   * upload landing mid-walk moves the ground under the pages. Resolving the
+   * latest SBOM afterwards means such a walk is attributed to the NEW snapshot,
+   * whose scan was marked running synchronously by the upload handler before its
+   * goroutine started — so the race resolves to "not final", which is the
+   * conservative direction. Probing first would have the opposite bias: a
+   * `completed` answer captured before an upload would be reported for pages
+   * read after it.
+   *
+   * `GET /api/v1/projects/:id/sbom` is the SAME resolution the vulnerability
+   * pages use — not `/mcp/projects/:id/sboms` ordered newest-first, which would
+   * be an inference about which row that resolution picks.
+   *
+   * # Why a failure here is not a tool failure
+   *
+   * The vulnerabilities were read successfully; only the ability to vouch for
+   * them is missing. Refusing the whole call would make the tool unusable
+   * against, for instance, a backend that predates the X-API-Key fix (it 401s
+   * these routes for this client's header). So the failure is reported in-band
+   * as a non-final state, never swallowed into an implied "finished".
+   */
+  private async probeScanState(projectId: string): Promise<ScanReport> {
+    const unavailable = (sbomId: string | null): ScanReport => ({
+      scan_state: SCAN_STATE_UNAVAILABLE,
+      counts_final: false,
+      scanned_sbom_id: sbomId,
+    });
+
+    let sbomId: string;
+    try {
+      const { data, status } = await this.requestRaw(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/sbom`,
+        { allowStatus: [404] }
+      );
+      if (status === 404) {
+        // No SBOM was ever uploaded. Nothing was scanned, so a count of zero
+        // says nothing about the project's exposure — which is exactly the
+        // conclusion a model would otherwise draw from it.
+        return {
+          scan_state: SCAN_STATE_NO_SBOM,
+          counts_final: false,
+          scanned_sbom_id: null,
+        };
+      }
+      sbomId = SbomSummarySchema.parse(data).id;
+    } catch {
+      return unavailable(null);
+    }
+
+    try {
+      const data = await this.request(
+        `/api/v1/projects/${encodeURIComponent(projectId)}` +
+          `/sboms/${encodeURIComponent(sbomId)}/scan-status`
+      );
+      const state = ScanStatusSchema.parse(data).status;
+      return {
+        scan_state: state,
+        // Equality against ONE literal, not a list of "bad" states: a state
+        // this client has never heard of is then non-final by construction
+        // rather than by having been enumerated.
+        counts_final: state === SCAN_STATE_FINAL,
+        scanned_sbom_id: sbomId,
+      };
+    } catch {
+      return unavailable(sbomId);
+    }
   }
 }
 

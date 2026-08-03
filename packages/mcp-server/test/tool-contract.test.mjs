@@ -38,6 +38,25 @@ import {
   PROJECT_SCOPE_DENIAL_STATUS,
   SCOPE_NOTE,
 } from "../dist/scope-notes.js";
+// The scan-state vocabulary the SHIPPED client can produce: the backend's own
+// lifecycle plus the two states the client generates when the backend gives it
+// no answer at all. Imported rather than transcribed for the same reason
+// SCOPE_NOTE is.
+import {
+  SCAN_STATE_FINAL,
+  SCAN_STATE_NO_SBOM,
+  SCAN_STATE_UNAVAILABLE,
+} from "../dist/client/api.js";
+
+// Everything `scan_state` may read. A description enumerating the states is
+// making a claim about this set, not about whichever states a particular
+// contract case happened to exercise — so the set, not the observed payloads,
+// is what the claim is checked against.
+const SCAN_STATE_VOCABULARY = new Set([
+  ...SCAN_LIFECYCLE.states,
+  SCAN_STATE_NO_SBOM,
+  SCAN_STATE_UNAVAILABLE,
+]);
 
 let stub;
 let mcp;
@@ -47,8 +66,20 @@ let descriptionByTool = new Map();
 const observedRouteKeysByTool = new Map();
 /** tools observed returning a deliberately incomplete answer */
 const toolsObservedTruncating = new Set();
+/**
+ * Tools observed reporting vulnerability SCAN COUNTS at all — the population
+ * the scan-state rules apply to. Membership is by the presence of the
+ * `scan_truncated` KEY (not its value): that key marks a payload whose numbers
+ * came from the capped walk over the asynchronous scan's results, which is
+ * exactly the set that has to say whether the scan had finished.
+ */
+const toolsCarryingScanCounts = new Set();
+/** every {scan_state, counts_final} pair any tool emitted, in observation order */
+const scanStatePairs = [];
 /** @type {Map<string, Set<string>>} tool → every field name seen in its payloads */
 const payloadKeysByTool = new Map();
+/** @type {Map<string, Set<string>>} tool → every field name AND string value seen */
+const payloadTokensByTool = new Map();
 
 const UUID_ANYWHERE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -84,10 +115,59 @@ function collectKeys(value, into) {
   return into;
 }
 
+/**
+ * Every snake_case token the payload contains: keys AND string values.
+ *
+ * The description rule below started as "a field the description names must
+ * exist". Enumerated VALUES are the same kind of claim — a description telling
+ * the model that `scan_state` can read `no_sbom` is checkable in exactly the
+ * same way, and against exactly the same evidence — and they are shaped like
+ * field names, so a key-only collector reported them as missing fields. Adding
+ * values keeps the token vocabulary closed over what the tools actually emit;
+ * it does loosen the check by the (small) chance that a bogus field name
+ * coincides with some string in the payload.
+ */
+function collectTokens(value, into) {
+  if (value === null) return into;
+  if (typeof value === "string") {
+    into.add(value);
+    return into;
+  }
+  if (typeof value !== "object") return into;
+  if (Array.isArray(value)) {
+    for (const item of value) collectTokens(item, into);
+    return into;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    into.add(key);
+    collectTokens(child, into);
+  }
+  return into;
+}
+
 function declaresTruncation(value) {
   if (value === null || typeof value !== "object") return false;
   if (value.scan_truncated === true) return true;
   return Object.values(value).some(declaresTruncation);
+}
+
+/**
+ * Collect every {scan_state, counts_final} pair, at whatever depth it sits.
+ * sbomhub_get_project_dashboard nests the vulnerability answer one level down,
+ * the same way it nests scan_truncated, so a root-only read would let the
+ * dashboard escape the rule (the shape Codex R2 caught for truncation).
+ */
+function collectScanStatePairs(value, into) {
+  if (value === null || typeof value !== "object") return into;
+  if (Array.isArray(value)) {
+    for (const item of value) collectScanStatePairs(item, into);
+    return into;
+  }
+  if (typeof value.scan_state === "string" && "counts_final" in value) {
+    into.push({ scan_state: value.scan_state, counts_final: value.counts_final });
+  }
+  for (const child of Object.values(value)) collectScanStatePairs(child, into);
+  return into;
 }
 
 const shape = (r) => ({ method: r.method, path: r.path, query: r.query });
@@ -152,10 +232,19 @@ for (const testCase of CONTRACT_CASES) {
     if (!testCase.expectError) {
       const payload = jsonOf(result);
       if (declaresTruncation(payload)) toolsObservedTruncating.add(testCase.tool);
+      if (collectKeys(payload, new Set()).has("scan_truncated")) {
+        toolsCarryingScanCounts.add(testCase.tool);
+      }
+      collectScanStatePairs(payload, scanStatePairs);
       collectKeys(
         payload,
         payloadKeysByTool.get(testCase.tool) ??
           payloadKeysByTool.set(testCase.tool, new Set()).get(testCase.tool)
+      );
+      collectTokens(
+        payload,
+        payloadTokensByTool.get(testCase.tool) ??
+          payloadTokensByTool.set(testCase.tool, new Set()).get(testCase.tool)
       );
     }
 
@@ -359,7 +448,12 @@ test("every response field a description names exists in what the tool returns",
   // snake_case tokens only — prose and tool names (sbomhub_*) are not fields.
   const FIELD_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
   let checked = 0;
-  for (const [tool, keys] of payloadKeysByTool) {
+  for (const [tool, tokens] of payloadTokensByTool) {
+    // A tool that reports scan_state may name any state that field can take,
+    // including ones no case here produced — see SCAN_STATE_VOCABULARY.
+    const keys = (payloadKeysByTool.get(tool) ?? new Set()).has("scan_state")
+      ? new Set([...tokens, ...SCAN_STATE_VOCABULARY])
+      : tokens;
     const description = descriptionByTool.get(tool) ?? "";
     for (const [token] of description.matchAll(FIELD_TOKEN)) {
       if (token.startsWith("sbomhub_")) continue;
@@ -367,44 +461,119 @@ test("every response field a description names exists in what the tool returns",
       assert.equal(
         keys.has(token),
         true,
-        `${tool}'s description names the field "${token}", which appears nowhere in the ` +
-          `payloads it produced. Fields seen: ${[...keys].sort().join(", ")}`
+        `${tool}'s description names "${token}", which appears in the payloads it produced ` +
+          `neither as a field nor as a value. Seen: ${[...keys].sort().join(", ")}`
       );
     }
   }
   assert.equal(checked > 0, true, "no description named a field — the check is vacuous");
 });
 
-// The counts come from an asynchronous scan the MCP group cannot query the
-// state of (there is no scan-status route under /api/v1/mcp). A project whose
-// scan is still running answers in exactly the shape a finished one does, so
-// "0 vulnerabilities" from a just-uploaded SBOM is indistinguishable from
-// "this project is clean" (Codex R5). Until the state is reachable, the only
-// honest place to put that is the description.
-test("a tool reporting scan counts warns that the scan may not have finished", () => {
+// The counts come from an asynchronous scan (service.ScanTracker: running /
+// completed / failed / unknown, per SBOM). A project whose scan is still
+// running answers in exactly the shape a finished one does, so "0
+// vulnerabilities" from a just-uploaded SBOM used to be indistinguishable from
+// "this project is clean" (Codex R5).
+//
+// That was disclosed in prose and left unfixed because the state was believed
+// unreachable from this server. It is reachable — GET
+// /api/v1/projects/:id/sboms/:sbom_id/scan-status, classified
+// scopeProjectPathParam, authenticating with the same X-API-Key this client
+// already sends (apps/api e84142c) — so the rule is no longer "warn about it"
+// but "report it", with the description explaining what the report means.
+test("a tool reporting scan counts reports whether the scan had finished", () => {
   assert.equal(
     SCAN_LIFECYCLE.canBePartial,
     true,
     "the backend no longer has a running/completed scan lifecycle — revisit this rule " +
-      "instead of demanding a caveat that is no longer true"
+      "instead of demanding a report that is no longer meaningful"
   );
   assert.equal(
-    toolsObservedTruncating.size > 0,
+    toolsCarryingScanCounts.size > 0,
     true,
     "no tool was observed reporting scan counts — the check is vacuous"
   );
-  for (const tool of toolsObservedTruncating) {
+  for (const tool of toolsCarryingScanCounts) {
+    const keys = payloadKeysByTool.get(tool) ?? new Set();
+    assert.equal(
+      keys.has("counts_final"),
+      true,
+      `${tool} reports vulnerability counts from an asynchronous scan and never says whether ` +
+        "that scan had finished. The state is readable; a payload that omits it hands the " +
+        "model a provisional count shaped exactly like a settled one."
+    );
+    assert.equal(
+      keys.has("scan_state"),
+      true,
+      `${tool} reports counts_final without the state it was derived from, so a model cannot ` +
+        "tell 'the scan is still running' from 'nobody knows'"
+    );
     const description = descriptionByTool.get(tool) ?? "";
     assert.match(
       description,
-      /未完了/,
-      `${tool} reports vulnerability counts from an asynchronous scan whose state this ` +
-        "server cannot see, and does not say so"
+      /counts_final/,
+      `${tool} carries counts_final in its payload but never names it where the model reads. ` +
+        "A field nobody was told to look at is not a disclosure."
     );
     assert.match(
       description,
       /断定しないこと/,
       `${tool} does not tell the model what NOT to conclude from a low or zero count`
+    );
+  }
+});
+
+// The other half, and the one that reproduces the original defect: whatever the
+// mapping from backend state to counts_final is, `running` must not land on
+// true. Stated over the OBSERVED payloads rather than over the client source,
+// so an implementation that computes counts_final some other way is judged the
+// same.
+test("no observed payload called a non-completed scan's counts final", () => {
+  // The literal the SHIPPED client compares against, checked against the Go
+  // source rather than against a copy of itself. If service.ScanStateCompleted
+  // were renamed, counts_final would silently become a constant false — a safe
+  // direction, but one that would make the field useless without anything
+  // failing.
+  assert.equal(
+    SCAN_STATE_FINAL,
+    SCAN_LIFECYCLE.finalState,
+    `the client treats "${SCAN_STATE_FINAL}" as the finished state; the Go lifecycle's is ` +
+      `"${SCAN_LIFECYCLE.finalState}"`
+  );
+  assert.equal(
+    scanStatePairs.length > 0,
+    true,
+    "no payload carried a scan_state / counts_final pair — the check is vacuous"
+  );
+  const finals = new Set(
+    scanStatePairs.filter((p) => p.counts_final === true).map((p) => p.scan_state)
+  );
+  assert.deepEqual(
+    [...finals],
+    [SCAN_LIFECYCLE.finalState],
+    `counts_final=true was reported for scan states ${[...finals].join(", ")}. Only ` +
+      `"${SCAN_LIFECYCLE.finalState}" is evidence that the background scan is done; every ` +
+      "other state (running, failed, unknown, and anything this client could not read) " +
+      "leaves the counts provisional."
+  );
+  // And the positive pole: at least one case must have produced a final answer,
+  // or a client hardcoding `false` would satisfy the assertion above.
+  assert.equal(
+    scanStatePairs.some((p) => p.counts_final === true),
+    true,
+    "no case observed counts_final=true — a client that always reports 'not final' would " +
+      "pass this rule while telling the model nothing"
+  );
+  // Every state reported must be one the client can actually produce. A state
+  // from nowhere would mean the client passed something through unrecognised,
+  // and the description's enumeration would be incomplete without saying so.
+  for (const pair of scanStatePairs) {
+    assert.equal(
+      SCAN_STATE_VOCABULARY.has(pair.scan_state),
+      true,
+      `a payload reported scan_state="${pair.scan_state}", which is neither a ` +
+        `service.ScanState (${SCAN_LIFECYCLE.states.join(", ")}) nor one of the client's ` +
+        `own states (${SCAN_STATE_NO_SBOM}, ${SCAN_STATE_UNAVAILABLE})`
     );
   }
 });
@@ -474,5 +643,30 @@ test("route pattern folding maps a concrete project path back to the registered 
   assert.equal(
     routeKeyOf("GET", "/api/v1/mcp/projects"),
     "GET /api/v1/mcp/projects"
+  );
+  // Two parameters, with DIFFERENT names. A shape-only fold ("a uuid segment is
+  // `:id`") produces `/api/v1/projects/:id/sboms/:id/scan-status`, which
+  // project_scope.go does not carry — so the route the scan-state probe uses
+  // would be reported as unclassified, i.e. as default-denied for a
+  // project-scoped key, when it is in fact classified scopeProjectPathParam.
+  assert.equal(
+    routeKeyOf(
+      "GET",
+      "/api/v1/projects/3f1d6f6e-1b6a-4a7e-9f0b-2a5c8d4e1b90" +
+        "/sboms/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa/scan-status"
+    ),
+    "GET /api/v1/projects/:id/sboms/:sbom_id/scan-status"
+  );
+  // The fold may not invent a match: a non-uuid in a parameter position is not
+  // that route, and reporting it as one would hide a client sending garbage.
+  assert.notEqual(
+    routeKeyOf("GET", "/api/v1/projects/not-a-uuid/sboms/also-not/scan-status"),
+    "GET /api/v1/projects/:id/sboms/:sbom_id/scan-status"
+  );
+  // Method is part of the key: a POST to a GET-only registered path must not
+  // borrow that path's classification.
+  assert.equal(
+    routeKeyOf("POST", "/api/v1/projects/3f1d6f6e-1b6a-4a7e-9f0b-2a5c8d4e1b90/sbom"),
+    "POST /api/v1/projects/:id/sbom"
   );
 });

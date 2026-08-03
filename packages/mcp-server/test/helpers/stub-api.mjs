@@ -16,24 +16,37 @@
 import http from "node:http";
 import { once } from "node:events";
 
-// A path segment that is a UUID is a route parameter. Echo registers the MCP
-// per-project routes as `/api/v1/mcp/projects/:id/...`, and
-// apps/api/internal/middleware/project_scope.go keys its authority table by
-// that REGISTERED path — so an observed concrete path has to be folded back to
-// the same shape before it can be looked up. Doing it by shape (rather than by
-// a hardcoded list of routes) means a new per-project route is folded too.
+import { registeredPathFor } from "./backend-scope.mjs";
+
+// An observed concrete path has to be folded back to the REGISTERED echo path
+// before apps/api/internal/middleware/project_scope.go can be asked about it —
+// that table is keyed by the registered path, `:param` names included.
+//
+// The fold asks project_scope.go's own key set first (registeredPathFor), which
+// is what gets the parameter NAMES right: the scan-status route registers `:id`
+// AND `:sbom_id`, so the shape-only fold below turns it into
+// `/api/v1/projects/:id/sboms/:id/scan-status` — a key that exists nowhere, and
+// would make a classified route look unclassified (which the suite reports as
+// "this tool is calling a route nobody has classified yet").
+//
+// The shape fold remains the fallback, so a per-project route the table does
+// not carry is still folded to something legible rather than being reported
+// with a raw UUID in it.
 const UUID_SEGMENT =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function toRoutePattern(pathname) {
-  return pathname
-    .split("/")
-    .map((seg) => (UUID_SEGMENT.test(seg) ? ":id" : seg))
-    .join("/");
+export function toRoutePattern(pathname, method = "GET") {
+  return (
+    registeredPathFor(method, pathname) ??
+    pathname
+      .split("/")
+      .map((seg) => (UUID_SEGMENT.test(seg) ? ":id" : seg))
+      .join("/")
+  );
 }
 
 export function routeKeyOf(method, pathname) {
-  return `${method} ${toRoutePattern(pathname)}`;
+  return `${method} ${toRoutePattern(pathname, method)}`;
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

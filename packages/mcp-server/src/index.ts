@@ -77,6 +77,33 @@ function errorResult(err: unknown): CallToolResult {
   };
 }
 
+// What every counts-reporting tool says about the asynchronous scan behind its
+// numbers.
+//
+// The backend starts the NVD/JVN scan in a goroutine after an SBOM upload, so a
+// project whose scan is still running answers `0 vulnerabilities` in exactly the
+// shape a scanned-and-clean project does. This server now READS that state
+// (`GET /api/v1/projects/:id/sboms/:sbom_id/scan-status`, per SBOM) instead of
+// only warning that it cannot — but the state is only ever evidence in one
+// direction, and the note has to say which:
+//
+//   counts_final=true   the scan for `scanned_sbom_id` reported completed.
+//   counts_final=false  everything else, and the reasons are not equivalent —
+//                       running (wait), failed / no_sbom / unknown /
+//                       unavailable (the count is not an answer at all).
+//
+// Stated once and shared, for the reason SCOPE_NOTE is: a per-tool rewording is
+// a per-tool opportunity to describe a payload the tool does not produce. Every
+// field named here is asserted to exist in what the tools actually return
+// (test/tool-contract.test.mjs).
+const SCAN_STATE_NOTE =
+  "件数は非同期スキャンの途中経過のことがある。" +
+  "counts_final=true のときだけ確定値で、false のときは scan_state を見ること " +
+  "(running=走査中、failed=失敗、no_sbom=SBOM未登録、unknown=状態不明、" +
+  "unavailable=状態を取得できず)。" +
+  "どのSBOMに対する件数かは scanned_sbom_id。" +
+  "counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。";
+
 // The per-project tools all take this. The refusal a project-scoped key gets
 // for someone ELSE's project is stated on the argument that causes it, because
 // that is where the model can connect the status to a cause: the tool surfaces
@@ -149,9 +176,8 @@ server.registerTool(
       "vulnerabilities.scan_truncated=true になる。そのとき by_severity と " +
       "top_by_cvss は走査した analyzed 件の集計であって、" +
       "プロジェクトの全件を数えた値ではない (全体の件数は total)。" +
-      "またSBOMアップロード直後はサーバー側の脆弱性スキャンが未完了のことがあり、" +
-      "その間の件数は途中経過だが、このMCPからは完了したかを判定できない。" +
-      "0件や極端に少ない件数を「脆弱性なし」と断定しないこと",
+      SCAN_STATE_NOTE +
+      "これらは vulnerabilities の下に入る",
     inputSchema: {
       project_id: projectIdSchema,
     },
@@ -316,9 +342,7 @@ server.registerTool(
       "scan_truncated=true が返る。その場合 matched と returned は" +
       "走査した範囲での件数なので、プロジェクト全体の値として報告しないこと " +
       "(全体の件数は total_in_project)。" +
-      "またSBOMアップロード直後はサーバー側の脆弱性スキャンが未完了のことがあり、" +
-      "その間の件数は途中経過だが、このMCPからは完了したかを判定できない。" +
-      "0件や極端に少ない件数を「脆弱性なし」と断定しないこと",
+      SCAN_STATE_NOTE,
     inputSchema: {
       project_id: projectIdSchema,
       severity: z
