@@ -535,9 +535,17 @@ func TestRealRepositoryParses(t *testing.T) {
 	// have produced at least one job. A hard `>= 20` floor would have gone
 	// red on an ordinary workflow consolidation. (Review finding under the
 	// declared threat model.)
-	onDisk, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
-	if err != nil {
-		t.Fatal(err)
+	// BOTH extensions, matching collectJobs. Counting only `*.yml` would
+	// have gone red when an author added a perfectly ordinary
+	// `new-workflow.yaml` and documented it. (Review finding under the
+	// declared threat model.)
+	var onDisk []string
+	for _, pat := range []string{"*.yml", "*.yaml"} {
+		m, err := filepath.Glob(filepath.Join(root, ".github", "workflows", pat))
+		if err != nil {
+			t.Fatal(err)
+		}
+		onDisk = append(onDisk, m...)
 	}
 	if len(onDisk) == 0 {
 		t.Fatal("no workflow files found on disk")
@@ -696,5 +704,36 @@ jobs: # repository gates
 	}
 	if len(jobs) != 1 || jobs[0].checkName != "build-and-test" {
 		t.Fatalf("got %+v", jobs)
+	}
+}
+
+// Removing the last supported OS and leaving `os: []` produces NO legs.
+// The stale required check must be reported, not accepted on a prefix.
+func TestEmptyInlineMatrixProducesNoNames(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  smoke:
+    name: build ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: []
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	names, ok := expandNames(jobs[0])
+	if !ok {
+		t.Fatal("an explicitly empty inline list is readable")
+	}
+	if len(names) != 0 {
+		t.Fatalf("expected no names, got %v", names)
+	}
+	if matchesJob("build ubuntu-latest", jobs[0]) {
+		t.Error("an empty matrix must not vouch for any required check")
 	}
 }

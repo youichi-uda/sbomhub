@@ -212,6 +212,13 @@ func parseWorkflow(base, body string) ([]job, error) {
 					matrixKey = m[1]
 					rest := strings.TrimSpace(m[2])
 					if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
+						// Declared inline, so its contents ARE known — even
+						// when empty. `os: []` (the last supported OS just
+						// removed) produces no legs at all, and the stale
+						// required check naming the old leg has to be
+						// reported rather than accepted on a bare prefix.
+						// (Review finding under the declared threat model.)
+						cur.matrix[matrixKey] = []string{}
 						for _, v := range strings.Split(rest[1:len(rest)-1], ",") {
 							if v = scalarValue(v); v != "" {
 								cur.matrix[matrixKey] = append(cur.matrix[matrixKey], v)
@@ -409,8 +416,13 @@ func expandNames(j job) ([]string, bool) {
 	for _, ref := range refs {
 		key := ref[1]
 		values, ok := j.matrix[key]
-		if !ok || len(values) == 0 {
+		if !ok {
+			// Key not readable at all: stay lenient.
 			return nil, false
+		}
+		if len(values) == 0 {
+			// Readable and empty: the job produces no check names.
+			return nil, true
 		}
 		var next []string
 		for _, n := range names {

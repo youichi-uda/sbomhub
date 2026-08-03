@@ -262,6 +262,26 @@ function exportListNames(sf: ts.SourceFile): Set<string> {
 }
 
 /**
+ * Functions reachable through `export default`.
+ *
+ * `export default (missing) => test.skip(missing, '…')` is anonymous and
+ * carries no export modifier, so neither the name check nor the clause
+ * check saw it — yet it is exactly the shared helper the gate has to
+ * treat as group-wide. Splitting a helper out with a default export is
+ * an ordinary choice. (Review finding under the declared threat model.)
+ */
+function defaultExportedFunctions(sf: ts.SourceFile): Set<ts.Node> {
+    const fns = new Set<ts.Node>();
+    for (const stmt of sf.statements) {
+        if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
+            const expr = unwrap(stmt.expression);
+            if (isPlainFunction(expr)) fns.add(expr);
+        }
+    }
+    return fns;
+}
+
+/**
  * The name a helper function is reachable by, and whether it escapes the
  * file. `function f(){}`, `const f = () => {}` and `export const f = ...`
  * all resolve; an anonymous inline callback does not.
@@ -269,10 +289,12 @@ function exportListNames(sf: ts.SourceFile): Set<string> {
 function plainFunctionIdentity(
     fn: PlainFunction,
     exportList: Set<string>,
+    defaultExported: Set<ts.Node>,
 ): { name: string | null; exported: boolean } {
+    const isDefault = defaultExported.has(fn);
     const result = (name: string | null, exported: boolean) => ({
         name,
-        exported: exported || (name !== null && exportList.has(name)),
+        exported: exported || isDefault || (name !== null && exportList.has(name)),
     });
     if (ts.isFunctionDeclaration(fn)) {
         return result(fn.name?.text ?? null, hasExportModifier(fn));
@@ -510,6 +532,32 @@ function envIsPristine(sf: ts.SourceFile): boolean {
     return !mutated;
 }
 
+/**
+ * Names bound to a function in this file.
+ *
+ * `test.skip('title', disabledBody)` is still the declaration form after
+ * an Extract-Function refactor; recognising only INLINE functions made it
+ * look like a conditional group skip and turned `main` red. (Review
+ * finding under the declared threat model.)
+ */
+function functionNames(sf: ts.SourceFile): Set<string> {
+    const names = new Set<string>();
+    const visit = (n: ts.Node): void => {
+        if (ts.isFunctionDeclaration(n) && n.name) names.add(n.name.text);
+        if (
+            ts.isVariableDeclaration(n) &&
+            ts.isIdentifier(n.name) &&
+            n.initializer &&
+            isPlainFunction(unwrap(n.initializer))
+        ) {
+            names.add(n.name.text);
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return names;
+}
+
 /** Every name the file binds, however it binds it, with a count. */
 function boundNames(sf: ts.SourceFile): Map<string, number> {
     const counts = new Map<string, number>();
@@ -657,13 +705,27 @@ function hasAllowMarker(text: string, stmt: ts.Node): boolean {
  * (Review finding, High.)
  */
 function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<string, string> {
-    const aliases = new Map<string, string>();
     const rootedAtTest = (name: string | null): boolean =>
         name !== null && (name === 'test' || name.startsWith('test.'));
 
-    // Any scope, not just file scope: `const skip = test.skip;` inside the
-    // describe is the same refactor. Names bound more than once are
-    // skipped for the same shadowing reason as the condition resolver.
+    // Targets seen per name, and how many of that name's bindings were
+    // alias declarations. Requiring the name to be bound exactly once in
+    // the file meant that copying `const skip = test.skip;` into a second
+    // suite — an ordinary duplication — silently un-resolved BOTH of them
+    // and took the gate with it. Agreeing aliases are safe to resolve no
+    // matter how many there are; only a name that ALSO means something
+    // else has to be refused. (Review finding under the declared threat
+    // model.)
+    const targets = new Map<string, Set<string>>();
+    const aliasDecls = new Map<string, number>();
+
+    const record = (name: string, target: string): void => {
+        const set = targets.get(name) ?? new Set<string>();
+        set.add(target);
+        targets.set(name, set);
+        aliasDecls.set(name, (aliasDecls.get(name) ?? 0) + 1);
+    };
+
     const visit = (n: ts.Node): void => {
         if (ts.isVariableDeclaration(n) && n.initializer) {
             const list = n.parent;
@@ -671,10 +733,8 @@ function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<strin
                 ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
             if (isConst) {
                 const target = calleeName(n.initializer);
-                if (ts.isIdentifier(n.name)) {
-                    if (bound.get(n.name.text) === 1 && rootedAtTest(target)) {
-                        aliases.set(n.name.text, target as string);
-                    }
+                if (ts.isIdentifier(n.name) && rootedAtTest(target)) {
+                    record(n.name.text, target as string);
                 } else if (ts.isObjectBindingPattern(n.name) && rootedAtTest(target)) {
                     // `const { skip } = test;`
                     for (const el of n.name.elements) {
@@ -683,9 +743,7 @@ function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<strin
                             el.propertyName && ts.isIdentifier(el.propertyName)
                                 ? el.propertyName.text
                                 : el.name.text;
-                        if (bound.get(el.name.text) === 1) {
-                            aliases.set(el.name.text, `${target as string}.${prop}`);
-                        }
+                        record(el.name.text, `${target as string}.${prop}`);
                     }
                 }
             }
@@ -693,6 +751,14 @@ function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<strin
         ts.forEachChild(n, visit);
     };
     visit(sf);
+
+    const aliases = new Map<string, string>();
+    for (const [name, set] of targets) {
+        // Every binding of the name must be an alias, and they must agree.
+        if (set.size === 1 && aliasDecls.get(name) === bound.get(name)) {
+            aliases.set(name, [...set][0]);
+        }
+    }
     return aliases;
 }
 
@@ -725,6 +791,8 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // meaningless there and nothing in the file can be judged CI-neutral.
     const bound = boundNames(sf);
     const exportList = exportListNames(sf);
+    const fnNames = functionNames(sf);
+    const defaultExported = defaultExportedFunctions(sf);
     const aliases = calleeAliases(sf, bound);
     /** Dotted callee name, with a file-scope alias expanded. */
     const resolvedCallee = (expr: ts.Expression): string => {
@@ -838,11 +906,11 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 // `const title = '…'; test.skip(title, async () => {})` look
                 // like a conditional group skip and turned `main` red.
                 // (Review finding under the declared threat model.)
-                const isDeclaration =
-                    args.length >= 2 &&
-                    args
-                        .slice(1)
-                        .some((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
+                const isBody = (a: ts.Expression): boolean =>
+                    ts.isArrowFunction(a) ||
+                    ts.isFunctionExpression(a) ||
+                    (ts.isIdentifier(a) && fnNames.has(a.text));
+                const isDeclaration = args.length >= 2 && args.slice(1).some(isBody);
                 const form: SkipSite['form'] =
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
                 const scope = stack.length ? stack[stack.length - 1] : 'file';
@@ -913,7 +981,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // fire depends on its call sites, not on this position.
         if (isPlainFunction(node)) {
             stack.push('closure');
-            closureStack.push(plainFunctionIdentity(node, exportList));
+            closureStack.push(plainFunctionIdentity(node, exportList, defaultExported));
             ts.forEachChild(node, visit);
             closureStack.pop();
             stack.pop();
@@ -1371,6 +1439,39 @@ test.describe('gate', () => {
 });
 `;
 
+/** The same local alias extracted in two independent suites. */
+const FIXTURE_DUPLICATE_ALIAS = `
+import { test } from '@playwright/test';
+const HAS_A = false;
+const HAS_B = false;
+test.describe('a', () => {
+    const skip = test.skip;
+    skip(!HAS_A, 'missing');
+});
+test.describe('b', () => {
+    const skip = test.skip;
+    skip(!HAS_B, 'missing');
+});
+`;
+
+/** A helper split out with a default export. */
+const FIXTURE_DEFAULT_EXPORT_HELPER = `
+import { test } from '@playwright/test';
+export default (missing: boolean) => test.skip(missing, 'tool missing');
+`;
+
+/**
+ * The declaration form after an Extract-Function refactor. Still a
+ * statically-off test, not a condition — reporting it turned `main` red.
+ */
+const FIXTURE_DECLARATION_EXTRACTED_BODY = `
+import { test } from '@playwright/test';
+const disabledBody = async () => {};
+test.describe('gate', () => {
+    test.skip('temporarily disabled', disabledBody);
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1483,6 +1584,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['callback-unguarded', FIXTURE_CALLBACK_UNGUARDED],
             ['named-describe-callback', FIXTURE_NAMED_DESCRIBE_CALLBACK],
             ['export-clause-helper', FIXTURE_EXPORT_CLAUSE_HELPER],
+            ['default-export-helper', FIXTURE_DEFAULT_EXPORT_HELPER],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
@@ -1513,6 +1615,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['callback-guarded', FIXTURE_CALLBACK_GUARDED],
             ['callback-block-return', FIXTURE_CALLBACK_BLOCK_RETURN],
             ['declaration-title-const', FIXTURE_DECLARATION_TITLE_CONST],
+            ['declaration-extracted-body', FIXTURE_DECLARATION_EXTRACTED_BODY],
             ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
             ['marker', FIXTURE_MARKER],
             ['marker-trailing', FIXTURE_MARKER_TRAILING],
