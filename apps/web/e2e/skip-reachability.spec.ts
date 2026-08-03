@@ -166,10 +166,36 @@ const CALLEE_ALL_HOOK = /^test\.(beforeAll|afterAll)$/;
 const CALLEE_EACH_HOOK = /^test\.(beforeEach|afterEach)$/;
 const ALLOW_MARKER = /ci-skip-ok:\s*\S/;
 
+/** Strip the wrappers that change an expression's text but not its value. */
 function unwrap(node: ts.Expression): ts.Expression {
     let cur = node;
-    while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
-    return cur;
+    for (;;) {
+        if (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+        else if (ts.isNonNullExpression(cur)) cur = cur.expression;
+        else if (ts.isAsExpression(cur)) cur = cur.expression;
+        else if (ts.isSatisfiesExpression(cur)) cur = cur.expression;
+        else return cur;
+    }
+}
+
+/**
+ * Dotted name of a call target — `test.skip`, `test.describe.serial` — or
+ * null when it is not a plain identifier chain.
+ *
+ * Built structurally instead of from `getText()`: source text carries the
+ * punctuation and whitespace an author happened to write, so `(test.skip)`
+ * and `test . skip` both read as "not test.skip" and slipped past the
+ * matcher entirely — the site was not even recorded. (Review finding,
+ * High; pinned by FIXTURE_PARENTHESISED_CALLEE.)
+ */
+function calleeName(expr: ts.Expression): string | null {
+    const cur = unwrap(expr);
+    if (ts.isIdentifier(cur)) return cur.text;
+    if (ts.isPropertyAccessExpression(cur)) {
+        const left = calleeName(cur.expression);
+        return left === null ? null : `${left}.${cur.name.text}`;
+    }
+    return null;
 }
 
 /** Flatten a top-level `&&` chain into its conjuncts. */
@@ -233,9 +259,27 @@ function assertsCiIsOff(node: ts.Expression): boolean {
  */
 function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
     const declaredAnywhere = new Map<string, number>();
+    const bump = (name: string): void =>
+        void declaredAnywhere.set(name, (declaredAnywhere.get(name) ?? 0) + 1);
     const count = (n: ts.Node): void => {
-        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
-            declaredAnywhere.set(n.name.text, (declaredAnywhere.get(n.name.text) ?? 0) + 1);
+        // Every construct that can introduce a binding of the same name.
+        // Counting only `const`/`let`/`var` missed a callback PARAMETER
+        // shadowing a file-scope constant. (Review finding, High; pinned
+        // by FIXTURE_PARAM_SHADOW.)
+        if (
+            (ts.isVariableDeclaration(n) ||
+                ts.isParameter(n) ||
+                ts.isBindingElement(n) ||
+                ts.isImportSpecifier(n) ||
+                ts.isImportClause(n) ||
+                ts.isNamespaceImport(n) ||
+                ts.isFunctionDeclaration(n) ||
+                ts.isClassDeclaration(n) ||
+                ts.isEnumDeclaration(n)) &&
+            n.name &&
+            ts.isIdentifier(n.name)
+        ) {
+            bump(n.name.text);
         }
         ts.forEachChild(n, count);
     };
@@ -314,7 +358,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             if (found) return;
             if (
                 ts.isCallExpression(n) &&
-                n.expression.getText(sf) === 'test.beforeAll' &&
+                calleeName(n.expression) === 'test.beforeAll' &&
                 n.arguments.length > 0 &&
                 bodyCanThrow(n.arguments[0])
             ) {
@@ -332,7 +376,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         let pushedDescribe = false;
 
         if (ts.isCallExpression(node)) {
-            const callee = node.expression.getText(sf);
+            const callee = calleeName(node.expression) ?? '';
             const args = node.arguments;
             const hasCallback = args.length >= 1 && args.some((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
 
@@ -546,6 +590,25 @@ test.describe('gate', () => {
 });
 `;
 
+/** Punctuation that changes the call's TEXT but not what it calls. */
+const FIXTURE_PARENTHESISED_CALLEE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    (test.skip)(!HAS_TOOL, 'tool missing');
+});
+`;
+
+/** A callback PARAMETER shadowing the file-scope, CI-guarded constant. */
+const FIXTURE_PARAM_SHADOW = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const LOCAL_ONLY = !HAS_TOOL && !process.env.CI;
+test.describe('gate', (LOCAL_ONLY = !HAS_TOOL) => {
+    test.skip(LOCAL_ONLY, 'tool missing');
+});
+`;
+
 /**
  * The escape hatch smuggled into the skip's DESCRIPTION rather than a
  * comment. It reads as an ordinary message; it must not buy an exemption.
@@ -615,6 +678,18 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         expect(
             violations(analyzeSource('shadowed.spec.ts', FIXTURE_SHADOWED_CONST)),
             'a shadowed const must not be resolved to the outer CI-guarded one',
+        ).toHaveLength(1);
+
+        // The matcher must key off what is CALLED, not how it is spelled.
+        expect(
+            violations(analyzeSource('parens.spec.ts', FIXTURE_PARENTHESISED_CALLEE)),
+            '`(test.skip)(...)` must still be recognised',
+        ).toHaveLength(1);
+
+        // Shadowing is not limited to `const`: a parameter binds too.
+        expect(
+            violations(analyzeSource('param-shadow.spec.ts', FIXTURE_PARAM_SHADOW)),
+            'a parameter shadowing the outer const must not clear the skip',
         ).toHaveLength(1);
 
         // The escape hatch must be a COMMENT. Putting `ci-skip-ok:` in the
