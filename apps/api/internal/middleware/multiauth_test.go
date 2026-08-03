@@ -1,10 +1,87 @@
 package middleware
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/sbomhub/sbomhub/internal/model"
 )
+
+// TestAPIKeyCredential pins the credential lookup MultiAuth performs, without a
+// database. The behavioural consequences — the key is honoured, its project
+// scope applies, an unusable one is refused instead of downgraded — are driven
+// against a live stack in multiauth_xapikey_integration_test.go; this is the
+// part that runs in the default `go test ./...` gate, where the integration
+// tags are off.
+//
+// The two properties worth stating separately:
+//
+//   - `presented` is what makes the middleware fail-closed. It must be true for
+//     any non-empty X-API-Key, INCLUDING values that are not `sbh_`-shaped:
+//     the caller meant to authenticate, so the value has to validate rather
+//     than be dropped in favour of the self-hosted default identity.
+//   - it must be FALSE when no credential is offered (no header, empty header,
+//     a bare Clerk JWT), because that is the self-host "curl with no header
+//     still works" path, and the fix must not take it with it.
+func TestAPIKeyCredential(t *testing.T) {
+	const key = "sbh_0123456789abcdef0123456789abcdef"
+
+	cases := []struct {
+		name          string
+		headers       map[string]string
+		wantRaw       string
+		wantPresented bool
+	}{
+		{"no headers at all", nil, "", false},
+		{"empty X-API-Key is absent, as in apikey.go",
+			map[string]string{APIKeyHeader: ""}, "", false},
+		{"X-API-Key carries the key",
+			map[string]string{APIKeyHeader: key}, key, true},
+		// Fail-closed: a value that cannot possibly validate is still an
+		// attempt. Returning presented=false here would restore exactly the
+		// silent fall-through this lookup exists to remove.
+		{"X-API-Key that is not key-shaped is still an attempt",
+			map[string]string{APIKeyHeader: "definitely-not-a-key"},
+			"definitely-not-a-key", true},
+		{"X-API-Key of whitespace is an attempt, not an absence",
+			map[string]string{APIKeyHeader: " "}, " ", true},
+		{"Authorization: Bearer sbh_ carries the key",
+			map[string]string{"Authorization": BearerPrefix + key}, key, true},
+		// Authorization is shared with Clerk, so only the sbh_ prefix marks a
+		// Bearer value as an API key. Widening this would route every web UI
+		// session token into the API-key table.
+		{"a Clerk JWT in Authorization is not an API key",
+			map[string]string{"Authorization": BearerPrefix + "eyJhbGciOiJSUzI1NiJ9.e30.x"},
+			"", false},
+		{"a non-Bearer Authorization is not an API key",
+			map[string]string{"Authorization": "Basic " + key}, "", false},
+		// Precedence, matching APIKeyAuth: X-API-Key is read first. Without
+		// this the same request would resolve to different principals on
+		// /api/v1/mcp/* and /api/v1/projects/*.
+		{"X-API-Key wins over Authorization",
+			map[string]string{
+				APIKeyHeader:    key,
+				"Authorization": BearerPrefix + "sbh_ffffffffffffffffffffffffffffffff",
+			}, key, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/x/sbom", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			raw, presented := apiKeyCredential(req)
+			if presented != tc.wantPresented {
+				t.Fatalf("presented = %v, want %v (headers %v)", presented, tc.wantPresented, tc.headers)
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("raw = %q, want %q", raw, tc.wantRaw)
+			}
+		})
+	}
+}
 
 // TestRoleFromAPIKeyPermissions_F14 pins the F14 contract (Codex M1
 // round 6): api_keys.permissions must map onto the TenantContext role

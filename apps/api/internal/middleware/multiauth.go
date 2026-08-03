@@ -26,20 +26,22 @@ const apiKeyPrefix = "sbh_"
 // existing Auth() and APIKeyAuth() middlewares are intentionally left
 // untouched so any route that needs strictly one auth model keeps working.
 //
-// Decision rule:
+// Decision rule (see apiKeyCredential for the credential lookup itself):
+//   - X-API-Key: <anything non-empty> → API key path. The header carries no
+//     other kind of credential, so its mere presence is an API-key attempt.
 //   - Authorization: Bearer sbh_... → API key path (apiKeyService.ValidateKey +
 //     tenant context derived from the key's own tenant_id).
 //   - Any other Bearer value → Clerk JWT path (delegates to Auth()).
-//   - Self-hosted mode (no Clerk secret) with no Authorization header → falls
+//   - Self-hosted mode (no Clerk secret) with NEITHER header → falls
 //     through to Auth()'s self-hosted handler, which provisions the default
 //     tenant/user. This preserves the "self-host first" promise: a local
 //     curl with no header still works against the local server.
 //
 // Failure modes:
-//   - Bearer sbh_<key> that doesn't validate → 401 (does NOT fall through to
+//   - A presented API key that doesn't validate → 401 (does NOT fall through to
 //     Clerk; an obviously-shaped API key that fails validation is a hard
 //     denial so a leaked-and-revoked key cannot be retried as a JWT).
-//   - Empty Authorization in SaaS mode → delegated to Auth(), which returns
+//   - Neither header, in SaaS mode → delegated to Auth(), which returns
 //     401 with its usual error body.
 func MultiAuth(
 	cfg *config.Config,
@@ -53,20 +55,74 @@ func MultiAuth(
 		clerkChain := clerkAuth(next)
 
 		return func(c echo.Context) error {
-			authHeader := c.Request().Header.Get("Authorization")
-			token := strings.TrimPrefix(authHeader, BearerPrefix)
-
-			// Detect API key by literal prefix. We only treat values with
-			// `sbh_` as API keys — anything else (Clerk JWTs, empty, garbage)
-			// goes through the Clerk/Self-hosted path.
-			if token != authHeader && strings.HasPrefix(token, apiKeyPrefix) {
-				return handleAPIKeyAuth(c, token, tenantRepo, userRepo, apiKeyService, next)
+			if raw, presented := apiKeyCredential(c.Request()); presented {
+				return handleAPIKeyAuth(c, raw, tenantRepo, userRepo, apiKeyService, next)
 			}
 
 			// Fall back to Clerk JWT (or self-hosted default) path.
 			return clerkChain(c)
 		}
 	}
+}
+
+// apiKeyCredential reports the API-key credential a request presents, and
+// whether it presented one at all.
+//
+// # Why X-API-Key is read here
+//
+// APIKeyAuth (apikey.go) has always accepted the key in EITHER header, and says
+// so in the 401 body it hands to clients ("Use X-API-Key header or
+// Authorization: Bearer <key>"). MultiAuth read only Authorization, which made
+// the two authenticators disagree about what a credential is — on the same
+// server, for the same key. Two shipped clients landed on the wrong side of
+// that split: packages/mcp-server (src/client/api.ts) and the reusable
+// .github/workflows/sbom-upload.yml, which POSTs an SBOM to the MultiAuth-
+// fronted /api/v1/projects/:id/sbom with X-API-Key alone.
+//
+// # Why `presented` exists (fail-closed)
+//
+// Not reading the header was only half the defect. The other half is what
+// happened next: with Authorization empty, the request fell through to Auth(),
+// whose self-hosted branch provisions the DEFAULT tenant's Owner. So a request
+// carrying a project-scoped key was served as an unscoped tenant Owner — the
+// key discarded, apiKeyProjectScopeAllowed never consulted, and a 200 returned
+// for a project the key is scoped away from (measured on a throwaway stack
+// 2026-08-04; see multiauth_xapikey_integration_test.go for the numbers). That
+// is M48's fail-open shape: a refusal degrading into a default.
+//
+// `presented` is therefore not "the value looks like a key" but "the caller
+// meant to authenticate with one". When it is true the value MUST validate, and
+// handleAPIKeyAuth answers 401 when it does not. Silently ignoring a supplied
+// credential is never the safe branch, because the caller cannot see that it
+// was ignored.
+//
+// # The two channels, and why they are not symmetric
+//
+//   - X-API-Key is an API-key-only header. Any non-empty value is an attempt,
+//     `sbh_`-shaped or not, exactly as APIKeyAuth treats it.
+//   - Authorization also carries Clerk session JWTs, so only the `sbh_` prefix
+//     marks a Bearer value as an API key. Widening that would route every web
+//     UI request into the API-key table.
+//
+// An EMPTY X-API-Key is treated as absent, matching APIKeyAuth's `if apiKey ==
+// ""` fallback. That is the shape a shell produces when it expands an unset
+// variable into `-H "X-API-Key: $KEY"`, and refusing it would break the
+// self-host promise above for a request that carries no credential at all.
+//
+// Precedence is X-API-Key first, then Authorization — again APIKeyAuth's order.
+// The two middlewares must resolve the same principal from the same request, or
+// one credential pair would be one identity on /api/v1/mcp/* and another on
+// /api/v1/projects/*.
+func apiKeyCredential(r *http.Request) (raw string, presented bool) {
+	if v := r.Header.Get(APIKeyHeader); v != "" {
+		return v, true
+	}
+	authHeader := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(authHeader, BearerPrefix)
+	if token != authHeader && strings.HasPrefix(token, apiKeyPrefix) {
+		return token, true
+	}
+	return "", false
 }
 
 // handleAPIKeyAuth mirrors the APIKeyAuth + APIKeyTenant pair as a single
