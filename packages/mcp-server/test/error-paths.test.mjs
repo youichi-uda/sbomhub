@@ -21,10 +21,12 @@ import { startStubApi } from "./helpers/stub-api.mjs";
 let stub;
 let mcp;
 
+// A generous per-hook timeout: a server that fails to come up should fail the
+// run with a legible message rather than sit there until the job's own limit.
 before(async () => {
   stub = await startStubApi();
   mcp = await startMcpServer({ apiUrl: stub.url });
-});
+}, { timeout: 60_000 });
 
 after(async () => {
   await mcp?.close();

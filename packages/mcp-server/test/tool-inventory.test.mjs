@@ -19,6 +19,7 @@ import { after, before, test } from "node:test";
 
 import { DENIAL_STATUS, scopeKindOf } from "./helpers/backend-scope.mjs";
 import { CONTRACT_CASES, declaredRouteKeysByTool } from "./helpers/contract-table.mjs";
+import { MARKERS } from "./helpers/description-claims.mjs";
 import { SERVER_SOURCE, startMcpServer } from "./helpers/mcp-harness.mjs";
 import { startStubApi } from "./helpers/stub-api.mjs";
 
@@ -28,11 +29,13 @@ let stub;
 let mcp;
 let tools;
 
+// A generous per-hook timeout: a server that fails to come up should fail the
+// run with a legible message rather than sit there until the job's own limit.
 before(async () => {
   stub = await startStubApi();
   mcp = await startMcpServer({ apiUrl: stub.url });
   tools = await mcp.listTools();
-});
+}, { timeout: 60_000 });
 
 after(async () => {
   await mcp?.close();
@@ -181,6 +184,25 @@ test("descriptions quote that same status", () => {
           `backend answers ${DENIAL_STATUS}`
       );
     }
+  }
+});
+
+test("every claim marker still matches some real description", () => {
+  // Anti-vacuity guard for helpers/description-claims.mjs. Its rules are
+  // phrased as "the description must contain X". A marker that matches nothing
+  // anywhere (a typo, a phrase the product stopped using) would keep the
+  // must-NOT-contain rules green forever while checking nothing, and would turn
+  // the must-contain rules into an unsatisfiable demand nobody can read. Each
+  // marker is expected to be live vocabulary — matched by at least one tool.
+  const descriptions = tools.map((t) => t.description ?? "");
+  for (const [name, marker] of Object.entries(MARKERS)) {
+    assert.equal(
+      descriptions.some((d) => marker.test(d)),
+      true,
+      `MARKERS.${name} (${marker}) matches none of the advertised descriptions. ` +
+        "Either the wording it looks for was replaced — in which case update the " +
+        "marker deliberately — or the rule it backs is now checking nothing."
+    );
   }
 });
 

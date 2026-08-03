@@ -36,12 +36,14 @@ const observedRouteKeysByTool = new Map();
 const UUID_ANYWHERE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
+// A generous per-hook timeout: a server that fails to come up should fail the
+// run with a legible message rather than sit there until the job's own limit.
 before(async () => {
   stub = await startStubApi();
   mcp = await startMcpServer({ apiUrl: stub.url });
   const tools = await mcp.listTools();
   descriptionByTool = new Map(tools.map((t) => [t.name, t.description ?? ""]));
-});
+}, { timeout: 60_000 });
 
 after(async () => {
   await mcp?.close();
