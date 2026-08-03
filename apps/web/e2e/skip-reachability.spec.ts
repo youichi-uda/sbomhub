@@ -98,8 +98,17 @@ import { dirname, join, relative } from 'node:path';
  *     its own name; a file that does not is a visible deviation from the
  *     convention, which is the (weak) thing standing in for a check here.
  *   - A runtime soft gate that makes a test vacuous rather than skipped
- *     (e.g. `if (!found) return;`), and per-test / `beforeEach` skips of
- *     any shape.
+ *     (e.g. `if (!found) return;`), and per-test skips of any shape.
+ *   - `test.beforeEach(() => test.skip(!HAS_TOOL, ...))`. Formally this
+ *     is a per-test decision — it re-runs for every test and may consult
+ *     that test's fixtures — which is why it sits on the runtime side of
+ *     the line. But when the condition is a module-level constant the
+ *     effect is the same group-wide switch-off, and the gate will not say
+ *     so. Gating it would instead force `&& !process.env.CI` onto the
+ *     legitimate `test.skip(await page.evaluate(...))` idiom, where that
+ *     suffix would be actively wrong. Prefer `beforeAll` (which IS gated)
+ *     for a group-level precondition; that is the shape this file wants
+ *     you to reach for.
  *   - Semantic CI-safety that is not syntactically visible — a condition
  *     computed by a helper function, or through two hops of `const`, is
  *     reported as a violation (fail-closed). Fix by inlining the
