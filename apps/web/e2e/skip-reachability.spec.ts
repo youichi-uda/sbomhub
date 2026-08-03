@@ -267,6 +267,69 @@ function assertsCiIsOff(node: ts.Expression, globalsIntact = true): boolean {
     return false;
 }
 
+/** True when `expr` is `process.env` (however it is spelled). */
+function isProcessEnv(node: ts.Node): boolean {
+    if (!ts.isExpression(node)) return false;
+    const cur = unwrap(node);
+    return (
+        ts.isPropertyAccessExpression(cur) &&
+        cur.name.text === 'env' &&
+        ts.isIdentifier(cur.expression) &&
+        cur.expression.text === 'process'
+    );
+}
+
+/** True when the node reads through `process.env`, at any depth. */
+function rootedAtProcessEnv(node: ts.Node): boolean {
+    if (!ts.isExpression(node)) return false;
+    const cur = unwrap(node);
+    if (isProcessEnv(cur)) return true;
+    if (ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur)) {
+        return rootedAtProcessEnv(cur.expression);
+    }
+    return false;
+}
+
+/**
+ * True when nothing in the file can have changed `process.env`.
+ *
+ * Checking only for a rebound `process` identifier was not enough: a
+ * plain `delete process.env.CI;` (or `process.env.CI = ''`) at file scope
+ * makes `!process.env.CI` true under CI at collection time while the
+ * binding check still says the global is intact. (Review finding, High.)
+ *
+ * Deliberately over-approximating — handing `process.env` to ANY call
+ * counts as a possible mutation, because `Object.assign(process.env, …)`
+ * is indistinguishable from a read at this level. Nothing in this suite
+ * touches process.env, so the over-approximation costs nothing.
+ */
+function envIsPristine(sf: ts.SourceFile): boolean {
+    let mutated = false;
+    const visit = (n: ts.Node): void => {
+        if (mutated) return;
+        if (
+            ts.isBinaryExpression(n) &&
+            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+            rootedAtProcessEnv(n.left)
+        ) {
+            mutated = true;
+            return;
+        }
+        if (ts.isDeleteExpression(n) && rootedAtProcessEnv(n.expression)) {
+            mutated = true;
+            return;
+        }
+        if (ts.isCallExpression(n) && n.arguments.some(rootedAtProcessEnv)) {
+            mutated = true;
+            return;
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return !mutated;
+}
+
 /** Every name the file binds, however it binds it, with a count. */
 function boundNames(sf: ts.SourceFile): Map<string, number> {
     const counts = new Map<string, number>();
@@ -392,7 +455,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // If the file rebinds a global the proof reads by name, the proof is
     // meaningless there and nothing in the file can be judged CI-neutral.
     const bound = boundNames(sf);
-    const globalsIntact = !PROOF_GLOBALS.some((g) => bound.has(g));
+    const globalsIntact = !PROOF_GLOBALS.some((g) => bound.has(g)) && envIsPristine(sf);
     const sites: SkipSite[] = [];
     // Enclosing test-construct scopes, innermost last.
     const stack: SkipSite['scope'][] = [];
@@ -725,6 +788,26 @@ test.describe('gate', () => {
 });
 `;
 
+/** Mutating the environment makes the proof false without rebinding anything. */
+const FIXTURE_DELETED_ENV_CI = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+delete process.env.CI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
+/** Assignment counts too. */
+const FIXTURE_ASSIGNED_ENV_CI = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+process.env.CI = '';
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -822,6 +905,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['mutable-binding', FIXTURE_MUTABLE_BINDING],
             ['shadowed-process', FIXTURE_SHADOWED_PROCESS],
             ['shadowed-undefined', FIXTURE_SHADOWED_UNDEFINED],
+            ['deleted-env-ci', FIXTURE_DELETED_ENV_CI],
+            ['assigned-env-ci', FIXTURE_ASSIGNED_ENV_CI],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
         ] as const) {
             expect(
