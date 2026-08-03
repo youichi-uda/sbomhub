@@ -376,7 +376,7 @@ done < "${WORK}/routes.txt"
 # TestM50W2HandlerCheckedRoutesAreExactlyTheKnownTwo.
 assert_deferred_class_set() {
   local kind="$1" want="$2" got
-  got=$(awk -F'|' -v k="${kind}" '$1==k {print $2}' "${WORK}/routes.txt" | sort | paste -sd';' -)
+  got=$(awk -v k="${kind}" 'index($0, k "|") == 1 { sub(/^[^|]*\|/, ""); print }' "${WORK}/routes.txt" | sort | paste -sd';' -)
   [ "${got}" = "${want}" ] || die "${kind} is now {${got}}, expected {${want}}. This class is ADMITTED by the middleware, so the matrix alone proves nothing about it — its enforcement is asserted route-by-route in Steps 3-4. Add the new route's own deterministic assertion there, then update this expected set."
 }
 assert_deferred_class_set scopeProjectListNarrowed "GET /api/v1/cli/projects;GET /api/v1/mcp/projects"
@@ -445,23 +445,36 @@ func main() {
 GOPROG
 VIRTUAL_PKG="zz_project_scope_e2e_scopedump"
 printf '{"Replace":{"%s/%s/main.go":"%s"}}\n' "${API_MODULE_DIR}" "${VIRTUAL_PKG}" "${WORK}/scopedump.go" > "${WORK}/overlay.json"
-( cd "${API_MODULE_DIR}" && GOWORK=off "${GO_BIN}" run -overlay "${WORK}/overlay.json" "./${VIRTUAL_PKG}" ) > "${WORK}/runtime.txt" \
-  || die "could not read the runtime apiKeyRouteScope (go run -overlay failed in ${API_MODULE_DIR})"
+# CGO_ENABLED=0 GOOS=linux matches apps/api/Dockerfile's build of ./cmd/server
+# exactly (Codex R6 Medium). Without it the dump is compiled under the host's
+# defaults, so a file selected by a different build constraint — `//go:build
+# !cgo`, `//go:build linux` — could contribute routes to the SERVER's map that
+# the dump never sees. Built then executed rather than `go run`, because `go
+# run` refuses to execute a binary whose GOOS is not the host's; the runner is
+# linux, same as the image.
+( cd "${API_MODULE_DIR}" && GOWORK=off CGO_ENABLED=0 GOOS=linux \
+    "${GO_BIN}" build -overlay "${WORK}/overlay.json" -o "${WORK}/scopedump" "./${VIRTUAL_PKG}" ) \
+  || die "could not build the runtime apiKeyRouteScope dump (go build -overlay failed in ${API_MODULE_DIR})"
+"${WORK}/scopedump" > "${WORK}/runtime.txt" \
+  || die "could not read the runtime apiKeyRouteScope (the dump binary failed to run)"
 
-cut -d'|' -f2 "${WORK}/runtime.txt" | sort > "${WORK}/runtime-keys.txt"
-cut -d'|' -f2 "${WORK}/routes.txt"  | sort > "${WORK}/derived-keys.txt"
+# `-f2-` / a single leading-field strip, not `-f2`: a route key containing `|`
+# would otherwise be truncated on both sides and two different keys could
+# compare equal (Codex R6 Low).
+cut -d'|' -f2- "${WORK}/runtime.txt" | sort > "${WORK}/runtime-keys.txt"
+cut -d'|' -f2- "${WORK}/routes.txt"  | sort > "${WORK}/derived-keys.txt"
 if ! diff -u "${WORK}/derived-keys.txt" "${WORK}/runtime-keys.txt" > "${WORK}/keys.diff"; then
   die "the routes parsed from project_scope.go do NOT match the runtime apiKeyRouteScope — routes marked '+' exist at run time and would go UNTESTED, routes marked '-' are parsed but not in the map:
 $(cat "${WORK}/keys.diff")"
 fi
 
-awk -F'|' '$1=="true"  {print $2}' "${WORK}/runtime.txt" | sort > "${WORK}/runtime-narrowed.txt"
-awk -F'|' '$1=="scopeProjectListNarrowed" {print $2}' "${WORK}/routes.txt" | sort > "${WORK}/derived-narrowed.txt"
+awk '/^true\|/  { sub(/^[^|]*\|/, ""); print }' "${WORK}/runtime.txt" | sort > "${WORK}/runtime-narrowed.txt"
+awk '/^scopeProjectListNarrowed\|/ { sub(/^[^|]*\|/, ""); print }' "${WORK}/routes.txt" | sort > "${WORK}/derived-narrowed.txt"
 if ! diff -u "${WORK}/derived-narrowed.txt" "${WORK}/runtime-narrowed.txt" > "${WORK}/narrowed.diff"; then
   die "scopeProjectListNarrowed disagrees between the source text and APIKeyProjectListNarrowedRoutes() at run time:
 $(cat "${WORK}/narrowed.diff")"
 fi
-note "runtime apiKeyRouteScope agrees with the parsed table ($(wc -l < "${WORK}/runtime-keys.txt") routes, $(wc -l < "${WORK}/runtime-narrowed.txt") narrowed) — via go run -overlay, no repo file created"
+note "runtime apiKeyRouteScope agrees with the parsed table ($(wc -l < "${WORK}/runtime-keys.txt") routes, $(wc -l < "${WORK}/runtime-narrowed.txt") narrowed) — CGO_ENABLED=0 GOOS=linux via -overlay, no repo file created"
 
 note "derived ${ROUTE_COUNT} routes:"
 cut -d'|' -f1 "${WORK}/routes.txt" | sort | uniq -c | sed 's/^/    /'
