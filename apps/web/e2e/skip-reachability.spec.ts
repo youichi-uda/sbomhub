@@ -92,6 +92,11 @@ import { dirname, join, relative } from 'node:path';
  *   - Specs outside `apps/web/e2e/**` and non-Playwright gates that
  *     self-disable (Go `t.Skip`, a shell step that `exit 0`s when a tool
  *     is missing, a workflow step with `continue-on-error`).
+ *   - A renamed import. The matcher is syntactic on the literal
+ *     `test.` prefix, so `import { test as t }` + `t.skip(...)` is
+ *     invisible to it. Every spec in this directory imports `test` under
+ *     its own name; a file that does not is a visible deviation from the
+ *     convention, which is the (weak) thing standing in for a check here.
  *   - A runtime soft gate that makes a test vacuous rather than skipped
  *     (e.g. `if (!found) return;`), and per-test / `beforeEach` skips of
  *     any shape.
