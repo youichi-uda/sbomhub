@@ -411,7 +411,15 @@ assert_deferred_class_set scopeNoProjectResource   "POST /api/v1/cli/check"
 # Go is a HARD requirement, not a skip: a silently skipped completeness proof is
 # the same as not having one.
 #
-# What this does NOT settle: the per-route KIND still comes from the text for
+# What this does NOT settle: the dump is a HOST process. It is built with the
+# image's flags (CGO_ENABLED=0 GOOS=linux, see below) so build-constraint file
+# selection matches, but a map mutation conditioned on the container's runtime
+# ENVIRONMENT would still be invisible here. That case is covered by
+# TestM50W2APIKeyReachableRoutesAreAllClassified, which compares the runtime map
+# against cmd/server/main.go's registrations; the workflow runs it in the same
+# job, before this script, so the gate does not depend on go-test.yml having run.
+#
+# Nor does it settle: the per-route KIND still comes from the text for
 # the four classes with no runtime accessor. A text/runtime disagreement there
 # is caught behaviourally instead — swap scopeTenantWide and
 # scopeProjectPathParam either way and the matrix's own-project or refusal

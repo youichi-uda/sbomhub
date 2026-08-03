@@ -185,6 +185,28 @@ jobs:
           docker compose logs --tail=100 postgres || true
           exit 1
 
+      - name: Structural route-table tests (must pass before the matrix)
+        # Codex R7 Medium: this gate has its own name in branch protection, so
+        # it must not be able to report green on a route set that the shipped
+        # server does not agree with. The AST tests below are the ones that pin
+        # apiKeyRouteScope against cmd/server/main.go's registrations and pin
+        # the ValidateKey call sites; they otherwise only run in go-test.yml,
+        # which a `paths:`-filtered PR can bypass. Running them here, BEFORE the
+        # matrix, makes this job self-contained.
+        #
+        # Residual (documented, not closed): scripts/project-scope-e2e.sh reads
+        # the runtime map from a host process built with the image's flags, not
+        # from inside the api container, so an environment-conditional mutation
+        # of the map would still be invisible to the dump. These tests are what
+        # covers that case.
+        working-directory: apps/api
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          go test ./cmd/server ./internal/middleware -count=1 \
+            -run 'TestM50W2(APIKeyReachableRoutesAreAllClassified|APIKeyReachableRouteCountIsPinned|ScopeCheckCoversEveryValidateKeyCallSite|NoWildcardRouteIsAPIKeyReachable|OptionalAPIKeyAuthIsUnwired|HandlerCheckedRoutesAreExactlyTheKnownTwo|EchoPathIsTheRegisteredRouteInMiddleware)|TestM50W3(NarrowedListRoutesAreExactlyTheKnownTwo|ExactlyOneProjectListRouteIsAPIKeyReachablePerHandler|EveryNarrowedRouteHandlerCallsTheSharedDecision)'
+
       - name: Drive the project-scope matrix
         env:
           SBOMHUB_URL: http://localhost:8080
