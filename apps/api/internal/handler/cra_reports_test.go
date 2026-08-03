@@ -35,6 +35,13 @@ type fakeCRARunner struct {
 	captured []cra.RunInput
 	result   *cra.RunResult
 	err      error
+
+	// store backs GetReport. In production cra.Runner.GetReport wraps the
+	// same repository the handler's other reads use, in a tenant-bound
+	// read tx; here the fake reads the very map the store fake serves, so
+	// a test that seeds through the store still drives the gatekeeper.
+	store        *fakeCRAReportStore
+	getReportHit int
 }
 
 func (f *fakeCRARunner) Run(_ context.Context, in cra.RunInput) (*cra.RunResult, error) {
@@ -59,6 +66,19 @@ func (f *fakeCRARunner) Run(_ context.Context, in cra.RunInput) (*cra.RunResult,
 		f.result.Report.Lang = string(in.Lang)
 	}
 	return f.result, nil
+}
+
+// GetReport mirrors cra.Runner.GetReport: the tenant-scoped single-row
+// read the handler's loadReportScoped gatekeeper goes through.
+func (f *fakeCRARunner) GetReport(ctx context.Context, tenantID, reportID uuid.UUID) (*repository.CRAReport, error) {
+	f.mu.Lock()
+	f.getReportHit++
+	store := f.store
+	f.mu.Unlock()
+	if store == nil {
+		return nil, errors.New("fakeCRARunner.GetReport: no store wired")
+	}
+	return store.Get(ctx, tenantID, reportID)
 }
 
 type fakeCRAReportStore struct {
@@ -265,6 +285,7 @@ func newCRAHarness() *craHarness {
 		byID:      make(map[uuid.UUID]repository.CRAReport),
 		byProject: make(map[uuid.UUID][]repository.CRAReport),
 	}
+	runner.store = store
 	audit := &fakeCRAAudit{}
 	submissions := &fakeCRASubmissions{earliest: make(map[uuid.UUID]time.Time)}
 	h := NewCRAReportsHandler(runner, store, audit, submissions)

@@ -12,7 +12,7 @@
 // -count=1 is load-bearing (F344): live DB state is not an input to go's test
 // cache.
 //
-// WHAT THIS PINS DOWN
+// # WHAT THIS PINS DOWN
 //
 // /reanalyse is one of the four F19 routes registered WITHOUT appmw.TenantTx
 // (cmd/server/main.go) because the drafting cycle must not hold a Postgres
@@ -31,8 +31,9 @@
 //     or not, answers a FALSE 404.
 //   - the GUC was set once by an earlier `SET LOCAL` (any TenantTx request
 //     that borrowed the same pooled connection) → after that transaction ends
-//     the placeholder reverts to the EMPTY STRING, so the cast is ''::UUID,
-//     which raises `invalid input syntax for type uuid: ""`. The read errors
+//     the placeholder reverts to the EMPTY STRING, so the UUID cast receives
+//     an empty string and raises `invalid input syntax for type uuid: ""`.
+//     The read errors
 //     and the endpoint answers 500 — for a valid report as much as for an
 //     unallocated id.
 //

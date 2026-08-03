@@ -200,8 +200,18 @@ type ReachabilityReader interface {
 
 // CRAReportWriter is the subset of *repository.CRAReportsRepository
 // the runner needs.
+//
+// Get is here for the same reason triage's DraftReader carries it: the
+// handler's /reanalyse gatekeeper has to read cra_reports on a route
+// registered WITHOUT an ambient TenantTx (F19 — the drafting cycle must
+// not hold a transaction across the LLM call), so that read has to come
+// through GetReport below, which opens its own tenant-bound tx. The
+// repository alone cannot: it would fall back to the pooled *sql.DB with
+// no `app.current_tenant_id` bound, where the FORCE-RLS policy on
+// cra_reports either matches nothing or fails outright.
 type CRAReportWriter interface {
 	Insert(ctx context.Context, c *repository.CRAReport) error
+	Get(ctx context.Context, tenantID, id uuid.UUID) (*repository.CRAReport, error)
 }
 
 // LLMCallWriter is the subset of *repository.LLMCallsRepository the
@@ -883,6 +893,61 @@ func (r *Runner) runAIDisabled(ctx context.Context, in RunInput, provider llm.Pr
 		Report:     report,
 		AIDisabled: true,
 	}, nil
+}
+
+// ----------------------------------------------------------------------------
+// Scoped read
+// ----------------------------------------------------------------------------
+
+// GetReport loads one cra_reports row inside a SHORT, tenant-bound read
+// transaction. It is the mirror of triage.Runner.GetDraft and exists for
+// the same reason: the handler's loadReportScoped gatekeeper runs on
+// /cra-reports/:report_id/reanalyse, which cmd/server/main.go registers
+// WITHOUT appmw.TenantTx (F19 — the drafting cycle must not hold a
+// Postgres transaction across the LLM call).
+//
+// Reading the repository directly from such a handler means running on a
+// pooled connection with no `app.current_tenant_id` bound, and the
+// tenant_isolation_cra_reports policy (migration 038, FORCE ROW LEVEL
+// SECURITY) is
+//
+//	tenant_id = current_setting('app.current_tenant_id', true)::UUID
+//
+// which then has two failure modes, neither of them the intended answer:
+// on a backend that never had the GUC set the predicate is NULL and the
+// read silently returns zero rows (every report, including the caller's
+// own, becomes a false 404); on a backend where any earlier `SET LOCAL`
+// has since ended the placeholder is the EMPTY STRING, so the UUID cast
+// raises 22P02 and the read fails (every report becomes a 500). A live server
+// hits the second one, because every other cra-reports route runs
+// TenantTx over the same pool.
+//
+// RunRead reuses an ambient transaction when the caller already has one
+// (the read / decide / awareness routes), so this is a no-op there and
+// the gatekeeper stays a single code path for all callers.
+//
+// Returns (nil, nil) when no row matches — "unknown" and "another
+// tenant's" are the same answer by construction, which is what lets the
+// handler collapse them into one 404.
+func (r *Runner) GetReport(ctx context.Context, tenantID, reportID uuid.UUID) (*repository.CRAReport, error) {
+	if tenantID == uuid.Nil {
+		return nil, errors.New("cra.GetReport: tenant_id is required")
+	}
+	if reportID == uuid.Nil {
+		return nil, errors.New("cra.GetReport: report_id is required")
+	}
+	var report *repository.CRAReport
+	if err := r.txManager.RunRead(ctx, tenantID, func(ctx context.Context) error {
+		found, err := r.craReports.Get(ctx, tenantID, reportID)
+		if err != nil {
+			return err
+		}
+		report = found
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return report, nil
 }
 
 // ----------------------------------------------------------------------------

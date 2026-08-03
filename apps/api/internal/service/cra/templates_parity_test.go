@@ -346,14 +346,18 @@ func TestCRATemplateRegistryParity_F341(t *testing.T) {
 		"internal/service/meti/criteria/sbom_operation.go": true, // doc comment naming the milestones
 	}
 	wantGoTest := map[string]bool{
-		"internal/handler/cra_reports_test.go":            true,
-		"internal/repository/cra_reports_rls_test.go":     true,
-		"internal/repository/cra_reports_test.go":         true,
-		"internal/service/cra/deadline_test.go":           true, // M34 F423: deadline table test names the report-type wire values
-		"internal/repository/cra_submissions_rls_test.go": true, // M33 F418: RLS smoke seeds an approved cra_report fixture (report_type literal)
-		"internal/service/evidence_pack/builder_test.go":  true,
-		"internal/service/evidence_pack/zip_test.go":      true, // M31 F405: CRA (report_type, lang) collision-suffix test fixtures
-		"internal/service/meti/criteria/criteria_test.go": true,
+		"internal/handler/cra_reports_test.go": true,
+		// The /reanalyse RLS-binding regression seeds cra_reports rows
+		// directly through SQL, so the report_type literal appears in the
+		// INSERT fixture.
+		"internal/handler/m51_cra_reanalyse_tenant_binding_integration_test.go": true,
+		"internal/repository/cra_reports_rls_test.go":                           true,
+		"internal/repository/cra_reports_test.go":                               true,
+		"internal/service/cra/deadline_test.go":                                 true, // M34 F423: deadline table test names the report-type wire values
+		"internal/repository/cra_submissions_rls_test.go":                       true, // M33 F418: RLS smoke seeds an approved cra_report fixture (report_type literal)
+		"internal/service/evidence_pack/builder_test.go":                        true,
+		"internal/service/evidence_pack/zip_test.go":                            true, // M31 F405: CRA (report_type, lang) collision-suffix test fixtures
+		"internal/service/meti/criteria/criteria_test.go":                       true,
 	}
 	gotGoNonTest := make(map[string]bool)
 	gotGoTest := make(map[string]bool)

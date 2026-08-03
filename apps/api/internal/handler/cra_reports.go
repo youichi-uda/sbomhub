@@ -56,17 +56,31 @@ const (
 // RunReport / Reanalyse delegation. Declared as an interface so
 // cra_reports_test.go can substitute a fake without spinning up a
 // real LLM provider.
+//
+// GetReport (not Run) is what loadReportScoped calls: it opens a short
+// tenant-bound read tx, which is the only way the scope check works on
+// /reanalyse — that route carries no ambient TenantTx (F19) and
+// cra_reports is FORCE ROW LEVEL SECURITY. See cra.Runner.GetReport.
+// This mirrors vex_drafts.go, whose loadDraftScoped reads through
+// triage.Runner.GetDraft for exactly the same reason.
 type CRAReportRunner interface {
 	Run(ctx context.Context, in cra.RunInput) (*cra.RunResult, error)
+	GetReport(ctx context.Context, tenantID, reportID uuid.UUID) (*repository.CRAReport, error)
 }
 
 // CRAReportStore is the subset of *repository.CRAReportsRepository the
-// handler uses directly. The runner does not expose List / Get /
+// handler uses directly. The runner does not expose List /
 // CountByProject / UpdateDecision (those are pure repository surface
 // area, not 2-stage tx territory), so the handler holds a separate
 // reference.
+//
+// Get is deliberately NOT part of this interface: every one of these
+// calls happens on a route that carries an ambient TenantTx, whereas the
+// single-row read also has to serve /reanalyse, which does not. Routing
+// that one read through CRAReportRunner.GetReport instead of here is
+// what keeps the FORCE-RLS GUC bound on every path, so the raw store
+// deliberately offers no way to re-introduce the unbound read.
 type CRAReportStore interface {
-	Get(ctx context.Context, tenantID, id uuid.UUID) (*repository.CRAReport, error)
 	ListByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.CRAReportListFilter) ([]repository.CRAReport, error)
 	CountByProject(ctx context.Context, tenantID, projectID uuid.UUID, filter repository.CRAReportListFilter) (int, error)
 	UpdateDecision(ctx context.Context, tenantID, id uuid.UUID, upd repository.CRAReportDecisionUpdate) error
@@ -1015,8 +1029,19 @@ func buildRunReportResponse(res *cra.RunResult) runReportResponse {
 
 // loadReportScoped loads a cra_reports row and enforces the route's
 // project boundary (M1 F7/F8/F9 pattern adapted to CRA). It is the
-// single gatekeeper for GetReport, Decide, and Reanalyse so the
-// project-scope check cannot drift between callers.
+// single gatekeeper for GetReport, Decide, SetAwareness and Reanalyse so
+// the project-scope check cannot drift between callers.
+//
+// The read goes through runner.GetReport, NOT the repository directly.
+// Three of the four callers sit behind appmw.TenantTx and would be fine
+// either way, but Reanalyse is an F19 route with no ambient transaction,
+// so a direct repository read would run on a pooled connection with no
+// `app.current_tenant_id` bound — under cra_reports' FORCE RLS policy
+// that is either a zero-row read (false 404 for a report the caller
+// owns) or a hard empty-string-to-UUID cast error (500 for every input). The
+// runner's TxManager opens a short tenant-bound read tx when there is no
+// ambient one and reuses the ambient tx when there is, so all four
+// callers keep a single code path. See cra.Runner.GetReport.
 //
 // Return contract:
 //   - (*report, 0, nil) on success.
@@ -1030,7 +1055,7 @@ func (h *CRAReportsHandler) loadReportScoped(
 	tenantID, projectID, reportID uuid.UUID,
 	endpointName string,
 ) (*repository.CRAReport, int, map[string]string) {
-	report, err := h.reports.Get(ctx, tenantID, reportID)
+	report, err := h.runner.GetReport(ctx, tenantID, reportID)
 	if err != nil {
 		slog.Warn("cra_reports: load report failed",
 			"endpoint", endpointName,

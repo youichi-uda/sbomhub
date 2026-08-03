@@ -131,6 +131,38 @@ type fakeCRAReportWriter struct {
 	mu       sync.Mutex
 	inserted []repository.CRAReport
 	err      error
+
+	// stored backs Get (the GetReport read path). Rows land here via
+	// seedStored; getErr forces the storage-failure branch.
+	stored map[uuid.UUID]repository.CRAReport
+	getErr error
+}
+
+// seedStored makes one report visible to Get for the given tenant.
+func (f *fakeCRAReportWriter) seedStored(r repository.CRAReport) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stored == nil {
+		f.stored = make(map[uuid.UUID]repository.CRAReport)
+	}
+	f.stored[r.ID] = r
+}
+
+// Get mirrors repository.CRAReportsRepository.Get: (nil, nil) when no row
+// matches (tenant, id) — "unknown" and "another tenant's" are the same
+// answer, which is the property the handler's single 404 depends on.
+func (f *fakeCRAReportWriter) Get(_ context.Context, tenantID, id uuid.UUID) (*repository.CRAReport, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	r, ok := f.stored[id]
+	if !ok || r.TenantID != tenantID {
+		return nil, nil
+	}
+	dup := r
+	return &dup, nil
 }
 
 func (f *fakeCRAReportWriter) Insert(_ context.Context, c *repository.CRAReport) error {
@@ -1339,5 +1371,170 @@ func TestRunner_Run_TombstoneOnlyAdvisory_PromptRendersNoneAndNoEvidence(t *test
 		if e.Kind == "advisory_excerpt" {
 			t.Errorf("tombstone must not be cited as advisory_excerpt evidence: %+v", e)
 		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// GetReport — the scoped single-row read the handler's /reanalyse
+// gatekeeper depends on.
+// ----------------------------------------------------------------------------
+
+// recordingTxManager wraps the passthrough behaviour and records which
+// tenant each RunRead / RunWrite was opened for. It is what lets the test
+// below assert the load-bearing part of GetReport: that the read happens
+// INSIDE a tenant-bound read transaction, not on a bare pooled connection
+// where cra_reports' FORCE-RLS policy has no `app.current_tenant_id` to
+// compare against.
+type recordingTxManager struct {
+	reads     []uuid.UUID
+	writes    []uuid.UUID
+	inRead    bool
+	readDepth int
+}
+
+func (m *recordingTxManager) RunRead(ctx context.Context, tenantID uuid.UUID, fn func(ctx context.Context) error) error {
+	m.reads = append(m.reads, tenantID)
+	m.inRead = true
+	m.readDepth++
+	defer func() { m.inRead = false }()
+	return fn(ctx)
+}
+
+func (m *recordingTxManager) RunWrite(ctx context.Context, tenantID uuid.UUID, fn func(ctx context.Context) error) error {
+	m.writes = append(m.writes, tenantID)
+	return fn(ctx)
+}
+
+// txAssertingReportStore fails the test if Get is called outside a RunRead.
+type txAssertingReportStore struct {
+	*fakeCRAReportWriter
+	tx       *recordingTxManager
+	sawOutTx bool
+}
+
+func (s *txAssertingReportStore) Get(ctx context.Context, tenantID, id uuid.UUID) (*repository.CRAReport, error) {
+	if !s.tx.inRead {
+		s.sawOutTx = true
+	}
+	return s.fakeCRAReportWriter.Get(ctx, tenantID, id)
+}
+
+func newGetReportHarness(t *testing.T) (*Runner, *txAssertingReportStore, *recordingTxManager) {
+	t.Helper()
+	txMgr := &recordingTxManager{}
+	store := &txAssertingReportStore{fakeCRAReportWriter: &fakeCRAReportWriter{}, tx: txMgr}
+	r := NewRunner(RunnerConfig{
+		VEXDrafts:           &fakeVEXDraftReader{},
+		AdvisoryExcerpts:    &fakeAdvisoryReader{},
+		ReachabilityResults: &fakeReachabilityReader{},
+		CRAReports:          store,
+		LLMCalls:            &fakeLLMCallWriter{},
+		Audit:               &fakeAuditWriter{},
+		Provider:            &stubProvider{},
+		TxManager:           txMgr,
+	})
+	return r, store, txMgr
+}
+
+// TestRunnerGetReport_ReadsInsideTenantBoundTx is the unit-level half of the
+// /reanalyse RLS fix. The handler route carries no ambient TenantTx (F19), so
+// GetReport MUST open its own tenant-bound read tx; a repository read outside
+// one runs with no `app.current_tenant_id` and cra_reports (FORCE RLS,
+// migration 038) then either matches nothing or fails the empty-string-to-UUID
+// cast.
+func TestRunnerGetReport_ReadsInsideTenantBoundTx(t *testing.T) {
+	r, store, txMgr := newGetReportHarness(t)
+
+	tenantID := uuid.New()
+	report := repository.CRAReport{
+		ID:              uuid.New(),
+		TenantID:        tenantID,
+		ProjectID:       uuid.New(),
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2026-9001",
+		DraftText:       "body",
+	}
+	store.seedStored(report)
+
+	got, err := r.GetReport(context.Background(), tenantID, report.ID)
+	if err != nil {
+		t.Fatalf("GetReport: unexpected error: %v", err)
+	}
+	if got == nil || got.ID != report.ID {
+		t.Fatalf("GetReport returned %+v, want the seeded report %s", got, report.ID)
+	}
+	if store.sawOutTx {
+		t.Error("cra_reports was read OUTSIDE a tenant-bound tx — under FORCE RLS that read " +
+			"is either empty or a hard error on a pooled connection")
+	}
+	if len(txMgr.reads) != 1 || txMgr.reads[0] != tenantID {
+		t.Errorf("RunRead calls = %v, want exactly one for tenant %s", txMgr.reads, tenantID)
+	}
+	if len(txMgr.writes) != 0 {
+		t.Errorf("GetReport opened %d write tx; a read must not", len(txMgr.writes))
+	}
+}
+
+// TestRunnerGetReport_UnknownAndForeignAreTheSameAnswer pins the property the
+// handler's single 404 rests on: the runner cannot tell the caller apart a
+// report that does not exist from one belonging to another tenant.
+func TestRunnerGetReport_UnknownAndForeignAreTheSameAnswer(t *testing.T) {
+	r, store, _ := newGetReportHarness(t)
+
+	tenantID := uuid.New()
+	foreign := repository.CRAReport{
+		ID:              uuid.New(),
+		TenantID:        uuid.New(), // NOT tenantID
+		ProjectID:       uuid.New(),
+		VulnerabilityID: uuid.New(),
+		CVEID:           "CVE-2026-9002",
+		DraftText:       "body",
+	}
+	store.seedStored(foreign)
+
+	unknown, err := r.GetReport(context.Background(), tenantID, uuid.New())
+	if err != nil {
+		t.Fatalf("GetReport(unknown): unexpected error: %v", err)
+	}
+	otherTenants, err := r.GetReport(context.Background(), tenantID, foreign.ID)
+	if err != nil {
+		t.Fatalf("GetReport(foreign): unexpected error: %v", err)
+	}
+	if unknown != nil || otherTenants != nil {
+		t.Errorf("unknown=%v foreign=%v — both must be (nil, nil) so the handler's 404 bodies "+
+			"cannot be told apart", unknown, otherTenants)
+	}
+}
+
+// TestRunnerGetReport_RejectsZeroIDs keeps the two guard clauses honest: a
+// zero tenant id would otherwise reach the repository, whose own guard
+// returns a different error, and a zero report id is always caller error.
+func TestRunnerGetReport_RejectsZeroIDs(t *testing.T) {
+	r, _, txMgr := newGetReportHarness(t)
+
+	if _, err := r.GetReport(context.Background(), uuid.Nil, uuid.New()); err == nil {
+		t.Error("GetReport with a zero tenant id must fail")
+	}
+	if _, err := r.GetReport(context.Background(), uuid.New(), uuid.Nil); err == nil {
+		t.Error("GetReport with a zero report id must fail")
+	}
+	if len(txMgr.reads) != 0 {
+		t.Errorf("rejected input still opened %d read tx; validation must come first", len(txMgr.reads))
+	}
+}
+
+// TestRunnerGetReport_PropagatesStorageError pins that a storage failure is
+// surfaced, not swallowed as "not found" — the handler maps the two to
+// different statuses (500 vs 404) on purpose.
+func TestRunnerGetReport_PropagatesStorageError(t *testing.T) {
+	r, store, _ := newGetReportHarness(t)
+	store.getErr = errors.New("connection reset")
+
+	got, err := r.GetReport(context.Background(), uuid.New(), uuid.New())
+	if err == nil {
+		t.Fatalf("GetReport must propagate the storage error, got (%v, nil)", got)
+	}
+	if got != nil {
+		t.Errorf("GetReport returned a report alongside an error: %+v", got)
 	}
 }
