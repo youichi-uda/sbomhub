@@ -21,6 +21,7 @@ import { DENIAL_STATUS, scopeKindOf } from "./helpers/backend-scope.mjs";
 import { CONTRACT_CASES, declaredRouteKeysByTool } from "./helpers/contract-table.mjs";
 import {
   ANTI_MARKERS,
+  EVASIONS,
   MARKERS,
   refusalMarker,
   scopeClaimViolations,
@@ -227,6 +228,25 @@ test("every claim marker still matches some real description", () => {
       offenders.map((t) => t.name),
       [],
       `ANTI_MARKERS.${name} (${marker}) matched a live description`
+    );
+  }
+});
+
+test("the rules still catch every evasion previously found", () => {
+  // Regression corpus. Each entry was accepted with zero violations by some
+  // earlier version of helpers/description-claims.mjs.
+  for (const { label, kind, description } of EVASIONS) {
+    const violations = scopeClaimViolations({
+      tool: "sbomhub_get_dashboard",
+      description,
+      routeKindByKey: new Map([["GET /api/v1/mcp/pretend", kind]]),
+      denialStatus: DENIAL_STATUS,
+    });
+    assert.equal(
+      violations.length > 0,
+      true,
+      `a description that "${label}" produced no violation for a ${kind} route. ` +
+        `This evasion was found and closed once; the rules have regressed.\n  ${description}`
     );
   }
 });

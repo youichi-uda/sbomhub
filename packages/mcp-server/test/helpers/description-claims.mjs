@@ -51,8 +51,11 @@ export const MARKERS = {
   projectScopedKeyMentioned: /プロジェクトスコープのAPIキー/,
   ownProject: /そのプロジェクト/,
   narrowedToOne: /1件/,
-  // An unconditional claim of tenant-wide reach.
-  tenantWideClaim: /テナント全体|全プロジェクト/,
+  // A claim of tenant-wide reach, in the wordings this product uses. Free
+  // prose has no closed vocabulary, so this cannot be complete — see the
+  // EVASIONS corpus below for what completeness is being traded for.
+  tenantWideClaim:
+    /テナント全体|全プロジェクト|すべてのプロジェクト|全ての?プロジェクト|プロジェクト横断/,
 };
 
 // Phrasings that assert the OPPOSITE of the rules below. Expected to match no
@@ -72,8 +75,47 @@ export function refusalMarker(status) {
   return new RegExp(`${status}で拒否される`);
 }
 
+// Claiming the answer gets NARROWED. For a scopeTenantWide route that is the
+// exact misconception the backend refuses in order to prevent, so a description
+// may not assert both the refusal and a narrowing. It is not a global
+// anti-marker: for the narrowed-list route saying this is mandatory.
+export const NARROWING_CLAIM = /に絞られ|1件(?:のみ)?[がにへ]?返る|1件に絞/;
+
+const TOOL_NAME = /sbomhub_[a-z_]+/g;
+
 function has(description, marker) {
   return marker.test(description);
+}
+
+/**
+ * Is the requirement stated ABOUT THIS TOOL, or copied in describing another?
+ * A description that says "sbomhub_search_cve needs a tenant-level key" while
+ * describing sbomhub_get_dashboard contains every required marker and tells
+ * the model nothing true about the tool it is attached to.
+ */
+function attributedToAnotherTool(description, marker, tool) {
+  const match = marker.exec(description);
+  if (!match) return null;
+  const before = description.slice(0, match.index);
+  const names = [...before.matchAll(TOOL_NAME)]
+    .map((m) => m[0])
+    .filter((n) => n !== tool);
+  return names.length > 0 ? names[names.length - 1] : null;
+}
+
+/**
+ * Which credential does the refusal clause hang off? The refusal applies to a
+ * project-scoped key; a description saying "テナント単位のAPIキーが403で拒否
+ * される" carries both markers and inverts the meaning. The credential
+ * mentioned LAST before the refusal clause is the one it reads as.
+ */
+function credentialBeforeRefusal(description, status) {
+  const match = refusalMarker(status).exec(description);
+  if (!match) return null;
+  const before = description.slice(0, match.index);
+  const mentions = [...before.matchAll(/プロジェクトスコープのAPIキー|テナント単位のAPIキー/g)];
+  if (mentions.length === 0) return null;
+  return mentions[mentions.length - 1][0];
 }
 
 /**
@@ -134,6 +176,33 @@ export function scopeClaimViolations({
           `(scopeTenantWide → ${denialStatus}). State refusals affirmatively.`
       );
     }
+    if (has(description, NARROWING_CLAIM)) {
+      violations.push(
+        `${where}: the description says the answer is NARROWED for a project-scoped key. ` +
+          `It is refused (${denialStatus}). Narrowing is what the backend deliberately does ` +
+          `not do here — a narrowed aggregate or search result would read as a tenant-level ` +
+          `fact, which is the failure this classification exists to prevent.`
+      );
+    }
+    const misattributed = attributedToAnotherTool(
+      description,
+      MARKERS.tenantKeyRequired,
+      tool
+    );
+    if (misattributed) {
+      violations.push(
+        `${where}: the credential requirement is stated about ${misattributed}, not about ` +
+          `this tool. A model reads the description of the tool it is calling; a rule ` +
+          `attributed to another tool tells it nothing about this one.`
+      );
+    }
+    const credential = credentialBeforeRefusal(description, denialStatus);
+    if (credential && credential !== "プロジェクトスコープのAPIキー") {
+      violations.push(
+        `${where}: the ${denialStatus} refusal is attached to 「${credential}」. The backend ` +
+          `refuses the PROJECT-SCOPED key; a tenant-level key is exactly the one that works.`
+      );
+    }
   } else if (hasNarrowedList) {
     if (
       !has(description, MARKERS.projectScopedKeyMentioned) ||
@@ -180,3 +249,66 @@ export function scopeClaimViolations({
 
   return violations;
 }
+
+// ---------------------------------------------------------------------------
+// Known evasions.
+//
+// Every entry is a description that is FALSE for the classification it is
+// paired with, and that an earlier version of the rules above accepted with
+// zero violations. tool-inventory.test.mjs asserts each one still produces at
+// least one violation, so a later simplification of the rules cannot quietly
+// reopen a hole that was already found and closed.
+//
+// This corpus is not a claim of completeness. These rules read free Japanese
+// prose with regular expressions: a determined author can write something
+// false that they do not match. What the corpus pins is that the specific
+// evasions found by review (Codex R1) and by adversarial self-probing stay
+// closed.
+// ---------------------------------------------------------------------------
+export const EVASIONS = [
+  {
+    label: "negates the requirement while containing its words",
+    kind: "scopeTenantWide",
+    description:
+      "テナント全体のダッシュボードサマリーを取得。" +
+      "テナント単位のAPIキーが必要ではない — プロジェクトスコープのAPIキーでも403で拒否されることはない",
+  },
+  {
+    label: "announces the refusal, then claims the answer is narrowed instead",
+    kind: "scopeTenantWide",
+    description:
+      "テナント全体のダッシュボードサマリーを取得。テナント単位のAPIキーが必要 — " +
+      "プロジェクトスコープのAPIキーでは403で拒否されるが、実際にはそのプロジェクト1件に絞られて返る",
+  },
+  {
+    label: "states the rule about a different tool",
+    kind: "scopeTenantWide",
+    description:
+      "テナント全体のダッシュボードサマリーを取得。sbomhub_search_cve は" +
+      "テナント単位のAPIキーが必要 — プロジェクトスコープのAPIキーでは403で拒否される",
+  },
+  {
+    label: "hangs the refusal off the wrong credential",
+    kind: "scopeTenantWide",
+    description:
+      "テナント全体のダッシュボードサマリーを取得。テナント単位のAPIキーが必要 — " +
+      "プロジェクトスコープのAPIキーでは使えるが、テナント単位のAPIキーが403で拒否される",
+  },
+  {
+    label: "describes a narrowed list as a refusal",
+    kind: "scopeProjectListNarrowed",
+    description:
+      "プロジェクト一覧を取得。プロジェクトスコープのAPIキーではそのプロジェクト1件のみ403で拒否される",
+  },
+  {
+    label: "claims tenant-wide reach for a per-project tool, avoiding the obvious wording",
+    kind: "scopeProjectPathParam",
+    description: "すべてのプロジェクトの脆弱性を取得",
+  },
+  {
+    label: "per-project tool warning about a refusal that never happens",
+    kind: "scopeProjectPathParam",
+    description:
+      "プロジェクトの脆弱性一覧を取得。プロジェクトスコープのAPIキーでは403で拒否される",
+  },
+];
