@@ -8,7 +8,7 @@
 #      "レポジトリの状態の真実 (source of truth)" and is read alongside
 #      the branch protection settings. It was written when the repo had 5
 #      workflows; by 2026-08 the repo had 21 and TEN were absent from the
-#      document, including the ones producing 12 of the 17 required status
+#      document, including the ones producing 9 of the 17 required status
 #      checks on `main`. Nothing noticed, because nothing compared the
 #      document to the directory. tools/lint-ci-inventory does that
 #      comparison, plus a referential check that every required status
