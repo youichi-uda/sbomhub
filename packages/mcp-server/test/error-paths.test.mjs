@@ -182,6 +182,69 @@ for (const status of [403, 500]) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The pagination header is load-bearing: without it the client cannot tell how
+// much of a project it saw. Falling back to "what I got is all there is" turned
+// one 500-row page of a 1200-row project into `total_in_project: 500,
+// scan_truncated: false` — a partial answer wearing a complete answer's shape
+// (Codex R3, High). Every one of these must be a loud error instead.
+// ---------------------------------------------------------------------------
+const HEADERLESS_CASES = [
+  { title: "absent on the first page", headers: {}, rows: 1200, onPage: 0 },
+  { title: "empty on the first page", headers: { "X-Total-Count": "" }, rows: 1200, onPage: 0 },
+  { title: "not a number", headers: { "X-Total-Count": "many" }, rows: 1200, onPage: 0 },
+  { title: "negative", headers: { "X-Total-Count": "-1" }, rows: 1200, onPage: 0 },
+  { title: "absent on a later page", headers: {}, rows: 1200, onPage: 1 },
+];
+
+for (const c of HEADERLESS_CASES) {
+  test(`sbomhub_get_vulnerabilities refuses a scan whose X-Total-Count is ${c.title}`, async () => {
+    stub.reset();
+    stub.routes({
+      [K.vulns]: (req) => {
+        const offset = Number(req.query.offset ?? "0");
+        const size = Math.max(0, Math.min(500, c.rows - offset));
+        const rows = Array.from({ length: size }, (_, i) => ({
+          cve_id: `CVE-2026-${30000 + offset + i}`,
+          severity: "HIGH",
+          cvss_score: 7,
+        }));
+        const broken = offset === c.onPage * 500;
+        return {
+          status: 200,
+          body: rows,
+          headers: broken ? c.headers : { "X-Total-Count": String(c.rows) },
+        };
+      },
+    });
+
+    const result = await mcp.callTool("sbomhub_get_vulnerabilities", {
+      project_id: PROJECT_ID,
+    });
+    await stub.quiet();
+    assert.equal(result.isError, true, textOf(result));
+    assert.match(textOf(result), /X-Total-Count/);
+    // And it must not have answered with the rows it did manage to read.
+    assert.throws(() => JSON.parse(textOf(result)));
+  });
+}
+
+test("the project dashboard inherits that refusal", async () => {
+  stub.reset();
+  stub.routes({
+    [K.vulns]: { status: 200, body: [] },
+    [K.compliance]: { status: 200, body: COMPLIANCE },
+    [K.sboms]: { status: 200, body: SBOMS },
+  });
+
+  const result = await mcp.callTool("sbomhub_get_project_dashboard", {
+    project_id: PROJECT_ID,
+  });
+  await stub.quiet();
+  assert.equal(result.isError, true, textOf(result));
+  assert.match(textOf(result), /X-Total-Count/);
+});
+
 test("sbomhub_diff refuses to invent a comparison when there are fewer than two SBOMs", async () => {
   stub.reset();
   stub.routes({

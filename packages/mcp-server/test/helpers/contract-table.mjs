@@ -423,6 +423,51 @@ export const CONTRACT_CASES = [
   },
 
   {
+    tool: "sbomhub_get_vulnerabilities",
+    title:
+      "a row count that is an exact multiple of the page size still needs a short page",
+    args: { project_id: PROJECT_ID },
+    // The walk stops on a SHORT page, not when the header's count is reached:
+    // a header that under-reports must not be able to cut the scan short. The
+    // price is one extra request here.
+    routes: { [K.vulns]: pagedVulns(1000) },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      { method: "GET", path: P.vulns, query: vulnsQuery(500) },
+      { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
+    ],
+    check({ payload }) {
+      assert.equal(payload.scanned, 1000);
+      assert.equal(payload.total_in_project, 1000);
+      assert.equal(payload.scan_truncated, false);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "an X-Total-Count that under-reports cannot end the scan early",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      // 1200 rows, but every page claims the project has 500.
+      [K.vulns]: (req) => {
+        const reply = pagedVulns(1200)(req);
+        return { ...reply, headers: { "X-Total-Count": "500" } };
+      },
+    },
+    expect: [
+      { method: "GET", path: P.vulns, query: vulnsQuery(0) },
+      { method: "GET", path: P.vulns, query: vulnsQuery(500) },
+      { method: "GET", path: P.vulns, query: vulnsQuery(1000) },
+    ],
+    check({ payload }) {
+      assert.equal(payload.scanned, 1200);
+      // Report what is known to exist, not the smaller claim.
+      assert.equal(payload.total_in_project, 1200);
+      assert.equal(payload.scan_truncated, false);
+    },
+  },
+
+  {
     tool: "sbomhub_get_compliance",
     title: "reads the project's compliance route",
     args: { project_id: PROJECT_ID },

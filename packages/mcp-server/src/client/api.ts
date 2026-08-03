@@ -242,7 +242,25 @@ export class ApiClient {
 
   // Walks the paginated endpoint page by page (500 rows each) until the
   // project is exhausted or VULNS_SCAN_CAP is hit. `truncated` is true when
-  // rows beyond the scan remain on the server.
+  // rows beyond the scan remain on the server, OR when the walk stopped at the
+  // cap without ever seeing the end.
+  //
+  // Two ways this used to report a partial scan as a complete one:
+  //
+  //   1. A missing or unparseable X-Total-Count fell back to
+  //      `total = vulnerabilities.length`, which immediately satisfied the
+  //      `vulnerabilities.length >= total` break. One 500-row page out of a
+  //      1200-row project came back as `total_in_project: 500,
+  //      scan_truncated: false` — a partial answer that reads as the whole
+  //      project. The header is now REQUIRED and strictly parsed: absent,
+  //      empty, non-integer or negative is a loud error, because in a
+  //      compliance product an unanswerable question must not look like an
+  //      answered one.
+  //   2. The walk trusted that same header to decide it was finished. It now
+  //      continues while pages come back FULL and stops on a short page, which
+  //      is evidence from the data rather than from a header. A header that
+  //      under-reports therefore cannot cut the scan short; it costs one extra
+  //      request when the row count is an exact multiple of the page size.
   private async fetchVulnerabilities(
     projectId: string,
     sort: VulnSort
@@ -252,7 +270,8 @@ export class ApiClient {
     truncated: boolean;
   }> {
     const vulnerabilities: VulnerabilityEntry[] = [];
-    let total = 0;
+    let reportedTotal = 0;
+    let sawEnd = false;
 
     for (let offset = 0; offset < VULNS_SCAN_CAP; offset += VULNS_PAGE_LIMIT) {
       const { data, headers } = await this.requestRaw(
@@ -260,23 +279,51 @@ export class ApiClient {
       );
       const page = VulnerabilityListSchema.parse(data);
       vulnerabilities.push(...page);
+      reportedTotal = parseTotalCount(headers, offset);
 
-      const totalHeader = headers.get("X-Total-Count");
-      const parsed = totalHeader
-        ? Number.parseInt(totalHeader, 10)
-        : Number.NaN;
-      total = Number.isNaN(parsed) ? vulnerabilities.length : parsed;
-
-      // Short page = no more rows on the server.
-      if (page.length < VULNS_PAGE_LIMIT || vulnerabilities.length >= total) {
+      // Short page = the server has no more rows. This is the ONLY evidence
+      // accepted for "the scan is complete".
+      if (page.length < VULNS_PAGE_LIMIT) {
+        sawEnd = true;
         break;
       }
     }
 
+    // A header that claims fewer rows than were actually read is not evidence
+    // that rows are missing; report what is known to exist.
+    const total = Math.max(reportedTotal, vulnerabilities.length);
+
     return {
       total,
       vulnerabilities,
-      truncated: total > vulnerabilities.length,
+      // Stopping at the cap without a short page leaves the end unproven, so
+      // it is reported as truncated even if the header says otherwise. The
+      // conservative direction: over-reporting truncation costs a caveat,
+      // under-reporting it costs a wrong compliance answer.
+      truncated: !sawEnd || total > vulnerabilities.length,
     };
   }
+}
+
+// apps/api/internal/handler/sbom.go always sets X-Total-Count on the success
+// path (it is what the Web UI pages with). Its absence means something else
+// answered — a proxy, an error page, a future backend that dropped it — and
+// the honest response to "I cannot tell how much of this project I saw" is to
+// say so, not to assume the first page was all of it.
+function parseTotalCount(headers: Headers, offset: number): number {
+  const raw = headers.get("X-Total-Count");
+  if (raw === null || raw.trim() === "") {
+    throw new Error(
+      `vulnerabilities page at offset ${offset} carried no X-Total-Count header; ` +
+        "refusing to report a possibly partial scan as the whole project"
+    );
+  }
+  const value = Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      `vulnerabilities page at offset ${offset} carried an invalid X-Total-Count ` +
+        `("${raw}"); refusing to report a possibly partial scan as the whole project`
+    );
+  }
+  return value;
 }
