@@ -883,3 +883,25 @@ jobs:
 		t.Error("the literal suffix must still be required")
 	}
 }
+
+// A name that is entirely one expression has no literal to anchor on.
+// Accepting is the safe direction: too lenient only hides a stale entry,
+// too strict blocks `main` on a live check.
+func TestWhollyExpressionNameIsAccepted(t *testing.T) {
+	const body = `name: X
+'on':
+  pull_request:
+
+jobs:
+  gate:
+    name: ${{ github.event_name }}
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("pull_request", jobs[0]) {
+		t.Error("the live check must be accepted")
+	}
+}

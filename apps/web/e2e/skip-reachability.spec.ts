@@ -180,6 +180,8 @@ import { dirname, join, relative } from 'node:path';
 interface SkipSite {
     file: string;
     line: number;
+    /** Character offset, for ordering against env writes. */
+    pos: number;
     callee: string;
     /**
      * `conditional` — first argument written as `!x` or an `&&`/`||`
@@ -368,11 +370,18 @@ function isCiNeutral(cond: ts.Expression): boolean {
  */
 function hasAllowMarker(text: string, stmt: ts.Node): boolean {
     const fullStart = stmt.getFullStart();
-    const leading = (ts.getLeadingCommentRanges(text, fullStart) ?? []).filter((r) =>
-        // A comment with no newline between it and the previous token is
-        // that token's TRAILING comment, which TypeScript also hands back
-        // as this statement's leading trivia.
-        text.slice(fullStart, r.pos).includes('\n'),
+    const leading = (ts.getLeadingCommentRanges(text, fullStart) ?? []).filter(
+        (r) =>
+            // Nothing precedes the first statement in a file, so its
+            // leading comment is unambiguously its own. Requiring a
+            // newline unconditionally rejected a marker written on line 1.
+            // (Review finding: false positive.)
+            fullStart === 0 ||
+            // Otherwise: a comment with no newline between it and the
+            // previous token is that token's TRAILING comment, which
+            // TypeScript also hands back as this statement's leading
+            // trivia.
+            text.slice(fullStart, r.pos).includes('\n'),
     );
     const trailing = ts.getTrailingCommentRanges(text, stmt.getEnd()) ?? [];
     return [...leading, ...trailing].some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
@@ -391,6 +400,19 @@ function bodyCanThrow(fn: ts.Node): boolean {
 
 function isInlineFunction(n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpression {
     return ts.isArrowFunction(n) || ts.isFunctionExpression(n);
+}
+
+/**
+ * Boundaries beyond which code no longer runs during collection.
+ *
+ * A class PROPERTY INITIALISER runs when the class is instantiated, which
+ * is inside a test — the same reason an explicit constructor is a
+ * boundary. Without it, `skipped = test.skip(!X, …)` in a class declared
+ * inside a describe was reported as a describe-scope skip. (Review
+ * finding: false positive.)
+ */
+function isDeferredBoundary(n: ts.Node): boolean {
+    return isAnyFunction(n) || (ts.isPropertyDeclaration(n) && n.initializer !== undefined);
 }
 
 function isAnyFunction(n: ts.Node): boolean {
@@ -432,7 +454,14 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
      * COLLECTED makes every proof in it meaningless. Writes inside a test
      * body or a hook run long afterwards and are irrelevant.
      */
-    let envWrittenAtCollectionTime = false;
+    /**
+     * Positions of unconditional collection-time writes that clear
+     * `process.env.CI`. Only a write that actually runs, and runs BEFORE
+     * a skip, can defeat that skip: counting a `delete` inside
+     * `if (false)`, or one written after the skip, invalidated correct
+     * guards. (Review finding: false positive.)
+     */
+    const envClearedAt: number[] = [];
 
     const scopeNow = (): SkipSite['scope'] => (stack.length ? stack[stack.length - 1] : 'file');
 
@@ -497,9 +526,23 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // invalidated correct guards in the same file. (Review finding:
         // false positive.)
         const at = scopeNow();
-        if ((isAssign || isDelete) && (at === 'file' || at === 'describe')) {
-            envWrittenAtCollectionTime = true;
+        if (!(isAssign || isDelete) || (at !== 'file' && at !== 'describe')) return;
+        // Nested in a branch, a loop or a try: this lint does not evaluate
+        // control flow, so it does not claim the write happens.
+        for (let a: ts.Node | undefined = n.parent; a; a = a.parent) {
+            if (isDeferredBoundary(a) || ts.isSourceFile(a)) break;
+            if (
+                ts.isIfStatement(a) ||
+                ts.isIterationStatement(a, false) ||
+                ts.isTryStatement(a) ||
+                ts.isSwitchStatement(a) ||
+                ts.isConditionalExpression(a) ||
+                ts.isCatchClause(a)
+            ) {
+                return;
+            }
         }
+        envClearedAt.push(n.getStart(sf));
     };
 
     const classify = (
@@ -555,6 +598,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         return {
             file: fileName,
             line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
+            pos: node.getStart(sf),
             callee,
             form,
             scope: scopeNow(),
@@ -625,7 +669,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // Any other function. Where its skips fire depends on where it is
         // CALLED, which this gate deliberately does not follow — so its
         // contents are recorded as `closure` and never reported.
-        if (isAnyFunction(node)) {
+        if (isDeferredBoundary(node)) {
             stack.push('closure');
             ts.forEachChild(node, visit);
             stack.pop();
@@ -637,9 +681,11 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
 
     visit(sf);
 
-    if (envWrittenAtCollectionTime) {
+    if (envClearedAt.length > 0) {
+        const first = Math.min(...envClearedAt);
         for (const site of sites) {
-            if (site.form === 'conditional') site.ciNeutral = false;
+            if (site.form !== 'conditional') continue;
+            if (site.pos > first) site.ciNeutral = false;
         }
     }
     return sites;
@@ -1313,6 +1359,55 @@ test.describe('gate', () => {
 `,
     ],
     [
+        // The escape hatch on line 1 of a file.
+        'the escape hatch as the first line of the file',
+        `// ci-skip-ok: intentionally covered by the API-side suite
+test.skip(!HAS_TOOL, 'tool missing');
+`,
+    ],
+    [
+        // A class field initialiser runs at construction, inside a test.
+        'a per-test skip in a class field initialiser',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('suite', () => {
+    class PerTestSetup {
+        skipped = test.skip(!HAS_TOOL, 'per-test prerequisite');
+    }
+    test('probe', async () => {
+        new PerTestSetup();
+    });
+});
+`,
+    ],
+    [
+        // A write this lint cannot prove happens.
+        'a CI write nested in a branch',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+if (false) {
+    delete process.env.CI;
+}
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        // A write that happens after the skip has already been evaluated.
+        'a CI write after the skip',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+delete process.env.CI;
+`,
+    ],
+    [
         'a parameterised suite built with forEach',
         `
 import { test } from '@playwright/test';
@@ -1381,7 +1476,9 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
         // The classifier must still recognise the runtime idioms as
         // runtime, otherwise "0 violations" above would be true for the
         // wrong reason.
-        const soft = analyzeSource('soft.spec.ts', MUST_BE_CLEAN[3][1]);
+        const softSource = MUST_BE_CLEAN.find(([n]) => n === 'per-test runtime skips')?.[1];
+        expect(softSource, 'the soft-gate fixture must exist').toBeDefined();
+        const soft = analyzeSource('soft.spec.ts', softSource as string);
         expect(soft.map((s) => `${s.form}/${s.scope}`).sort()).toEqual([
             'noarg/test',
             'other/describe',

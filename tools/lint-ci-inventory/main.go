@@ -419,7 +419,13 @@ func matchesJob(required string, j job) bool {
 			suffix = j.checkName[k+2:]
 		}
 		if prefix == "" && suffix == "" {
-			return false
+			// The whole name is one expression (`name: ${{ github.event_name }}`).
+			// There is no literal to anchor on, so this job cannot be
+			// distinguished from any other — accept, rather than call a
+			// live required check stale. Being too lenient can only hide a
+			// stale entry; being too strict blocks `main`. (Review
+			// finding: false positive.)
+			return true
 		}
 		return strings.HasPrefix(required, prefix) &&
 			strings.HasSuffix(required, suffix) &&
