@@ -135,6 +135,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # Declared empty first so `set -u` cannot trip on an unset array
+          # if the glob matches nothing.
+          modules=()
           modules=(tools/*/go.mod)
           if [ ${#modules[@]} -eq 0 ]; then
             echo "::error::no modules found under tools/ — refusing to report an empty scan as clean"
