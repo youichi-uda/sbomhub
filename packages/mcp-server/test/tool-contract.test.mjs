@@ -277,6 +277,30 @@ test("every tool embeds the canonical clause for its classification, verbatim", 
       );
     }
 
+    if (expected) {
+      // The clause must be ASSERTED, not quoted and then disputed. A review
+      // round produced 「<clause>」という説明は誤りである — the clause present
+      // verbatim, every other check satisfied, and the sentence saying the
+      // opposite (Codex R3). Two structural requirements close that shape:
+      // the clause may not sit inside quotation marks, and the sentence it
+      // belongs to may not carry a disclaimer.
+      const at = description.indexOf(expected);
+      const before = description.slice(0, at);
+      const after = description.slice(at + expected.length);
+      assert.equal(
+        /[「『"']\s*$/.test(before) || /^\s*[」』"']/.test(after),
+        false,
+        `${tool} quotes the scope clause instead of stating it. A quoted claim is one the ` +
+          `sentence can then disown; the model cannot tell which reading is meant.`
+      );
+      assert.doesNotMatch(
+        after,
+        /誤り|間違い|正しくない|正確ではない|無視して|実際には|事実ではない/,
+        `${tool} states the scope clause and then disclaims it. Whatever follows the clause ` +
+          `may explain WHY it holds, not that it does not.`
+      );
+    }
+
     // Credentials are named ONLY inside the canonical clause. Otherwise a
     // description could embed the correct clause and then contradict it in
     // free prose ("...ただし実際にはプロジェクトスコープのAPIキーで利用でき、
