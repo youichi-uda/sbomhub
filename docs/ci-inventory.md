@@ -16,7 +16,13 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 
 ## 2. sbomhub (repo: youichi-uda/sbomhub)
 
-### 2.1 Existing workflows (5)
+> **完全な一覧は §2.4 (machine-checked)**。 §2.1 / §2.2 の表は各 wave の
+> 経緯を残した prose であり、 網羅性は保証しない (実際 2026-08 時点で 21
+> workflow 中 10 件がこの表から漏れていた)。 workflow / job の集合として
+> 正しいのは §2.4 のブロックだけで、 そこだけが
+> `tools/lint-ci-inventory` により CI で実ファイルと突き合わされる。
+
+### 2.1 Existing workflows (5) — #17 wave 時点
 
 | Workflow | Trigger | Job | Status |
 |---|---|---|---|
@@ -36,7 +42,23 @@ Action items に TODO として記録し、 後続 wave で順次追加する。
 | `migration-roundtrip.yml` | push main / PR (`apps/api/migrations/**`, `apps/api/cmd/migrate/**`, compose, install.sh, env paths) | docker compose postgres + role bootstrap + `migrate up` → `migrate down 999` → `migrate up` (regression check)。 schema diff は warn-only で初回 landing | Trust Rescue P1 #17-followup |
 | `frontend-ci.yml` | push main / PR (`apps/web/**`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `package.json` paths) | pnpm install → `pnpm --filter web lint` (**hard gate, ESLint v9 flat config**, M11-5 #80) / `typecheck` (`tsc --noEmit`, **hard gate**, M12-5 #86) / `build` (`next build`, **hard gate**, M12-5 #86)。 Node 22 LTS / pnpm 10.34.3 | Trust Rescue P1 #17-followup / M10-4 / M11-5 / M12-5 |
 | `web-e2e.yml` (job: `web-e2e`) | push main / PR (`apps/web/**`, `apps/api/**`, compose / `docker/seed/**` / install.sh / env / pnpm paths) | docker compose (postgres + redis + locally built api + web) を起動 → Playwright (chromium) で `apps/web/e2e/smoke/` を実行。 home (`/` redirect + SBOMHub brand) / dashboard (auth surface に到達) / api-health (`/api/v1/health` `status=ok`) の 3 scenario | M8 #67 |
-| `web-e2e.yml` (job: `web-e2e-full`) | 同上 trigger | docker compose 一式 + `docker/seed/web-e2e.sql` (deterministic tenant + project + **2 SBOMs** (log4j-core 2.14.0 / 2.17.0) + 4 components + **4 CVEs (44228 / 45046 / 23337 / 8203)** + vex_draft + cra_report + **meti.env_setup.01** + audit_log + **license_policies (MIT allow + GPL-3 deny)** + **api_keys 1 件 (synthetic hash)**) を pre-load → Playwright (chromium, `retries: 2`, `timeout: 60_000`) で `apps/web/e2e/*.spec.ts` 26 件を実行。 seed は web 起動より前に load することで API の `GetOrCreateDefault` が deterministic UUID (`00000000-0000-0000-0000-000000000001`) を採用する経路を強制 | M10-3 #71 / M11-2 #77 |
+| `web-e2e.yml` (job: `web-e2e-full`) | 同上 trigger | docker compose 一式 + `docker/seed/web-e2e.sql` (deterministic tenant + project + **2 SBOMs** (log4j-core 2.14.0 / 2.17.0) + 4 components + **4 CVEs (44228 / 45046 / 23337 / 8203)** + vex_draft + cra_report + **meti.env_setup.01** + audit_log + **license_policies (MIT allow + GPL-3 deny)** + **api_keys 1 件 (synthetic hash)**) を pre-load → Playwright (chromium, `retries: 2`, `timeout: 60_000`) で `apps/web/e2e/*.spec.ts` を実行 (job 名の "26" は branch protection に焼き付いた**凍結値**であり spec 数ではない。 §2.5 参照)。 seed は web 起動より前に load することで API の `GetOrCreateDefault` が deterministic UUID (`00000000-0000-0000-0000-000000000001`) を採用する経路を強制 | M10-3 #71 / M11-2 #77 |
+
+後続 wave で追加され、 §2.1 の表からは**長らく漏れていた** 10 workflow
+(2026-08-04 に `tools/lint-ci-inventory` 導入と同時に収録):
+
+| Workflow | Trigger | Job (= check 名) | 何を守るか |
+|---|---|---|---|
+| `migration-lint.yml` | push main / PR (`apps/api/migrations/**`, `tools/lint-migration-rls/**`, 自 workflow) | `lint-migration-rls` | 新規 tenant-scoped table を作る migration が RLS enable / policy を忘れていないか。 tenant 分離の一次統制が RLS なので hard gate (M13-5 #91) |
+| `migration-lock-lint.yml` | push main / PR (`apps/api/migrations/**`, `tools/lint-migration-locks/**`, `cmd/migrate/main.go`, `internal/database/migrate.go`, 自 workflow) | `lint-migration-locks` | 既存 relation に SHARE 以上のロックを取る migration が `lock_timeout` budget を先に張っているか。 CONCURRENTLY は runner の tx 内で走らないので拒否 |
+| `toolchain-lint.yml` | push main / PR (`apps/api/go.mod`, `apps/**/Dockerfile*`, `packages/**/Dockerfile*`, `docker/**`, `.github/workflows/**`, `tools/**`) | `lint-toolchain-alignment` | go.mod / Dockerfile / workflow / `tools/*/go.mod` の Go pin 4 層が乖離していないか (F243 / M16-2 #104。 M15-3 で go.mod だけ上げて Dockerfile が取り残され main が 4 workflow RED になった事故の再発防止) |
+| `nullscan.yml` | push main / PR (`apps/api/**`, compose, install.sh, env, 自 workflow) | `static gate (hermetic)` / `schema snapshot drift + measured tolerance table` | nullable 列を NULL 非許容の Go 型に scan する B1/B2 バグクラス。 前者は committed schema snapshot による静的解析 + baseline 差分、 後者は実 PostgreSQL で snapshot drift と NULL 耐性 decision table を実測 (M46 W0) |
+| `golden-path-e2e.yml` | push main / PR (`apps/api/**`, `scripts/golden-path-e2e.sh`, fixture, compose, env, install.sh, 自 workflow) / 毎日 17:00 UTC / dispatch | `Golden Path 12-step against live api (curl + jq)` | 起動直後の compose stack に対し M0+M1+M2+M3 の happy path 12 step を curl で通し、 Evidence Pack に承認済 VEX + CRA + METI が入ることまで確認 (#43) |
+| `project-scope-e2e.yml` | push main / PR (`apps/api/**`, `scripts/project-scope-e2e.sh`, fixture, compose, env, install.sh, `docker/scripts/_env_helpers.sh`, override, 自 workflow) | `project-scoped API key matrix over HTTP (every apiKeyRouteScope route)` | project-scoped API key が実 `sbh_...` 文字列として router + middleware chain を通ったときに `apiKeyRouteScope` の全 route で正しく DENY されるか (M50 W2/W3)。 unit / integration test では wire 越しの経路を張れない |
+| `scheduler-integration.yml` | push main / PR (`apps/api/internal/scheduler/**`, `apps/api/migrations/**`, compose, install.sh, env, 自 workflow) | `F234 chunk-abort blast-radius smoke` | chunk 単位 tx 分割の blast-radius 封じ込め。 sqlmock では "current transaction is aborted" の ACID 挙動を再現できないため実 PostgreSQL 必須 (F234 / M15-2 #99) |
+| `mcp-server-ci.yml` | push main / PR (`packages/mcp-server/**`, pnpm 系, `package.json`, 自 workflow, `apps/api/internal/middleware/project_scope.go`, `apps/api/internal/service/scan_tracker.go`) | `typecheck / build` | `packages/mcp-server` の `tsc --noEmit` 0 error と `dist/index.js` 生成 (どちらも hard gate)。 CI 皆無の間に SDK の型強化で 17 error まで腐って「宣伝しているのに build できない」状態になっていた (M46 Track D) |
+| `release.yml` | tag push `v*` / dispatch | `goreleaser` | `llm-bench` バイナリ archive + curl-only 運用 artifact (`install.sh` / `docker-compose.yml` / `.env.example` / `docker/scripts/*.sh`) + release 単位 `SHA256SUMS` を GitHub Release に publish (M5-2 #54 / M7 #57) |
+| `dr-rehearsal.yml` | 毎週日曜 04:00 UTC / dispatch | `dr-rehearsal` | HEAD の API image を build して DR (バックアップ/リストア) リハーサルを通す。 定期実行のみで PR は gate しない |
 
 ### 2.2 Required quality gates
 
@@ -68,19 +90,149 @@ Settings → Branches → Branch protection rules → `main`:
   - Require approvals: 1 (solo maintainer の場合は任意、 codex review を必須化するなら別途 GitHub App 経由)
 - **Require status checks to pass before merging**: ON
   - Require branches to be up to date before merging: ON
-  - Required status checks (現状):
-    - `docker-compose smoke / docker compose must abort without ENCRYPTION_KEY`
-    - `docs curl smoke / docs curl upload must succeed against live api`
-    - `install.sh smoke / install.sh must succeed on ubuntu-latest`
-    - `install.sh smoke / install.sh must succeed on macos-latest`
-    - `Go test / build-and-test` (本 wave で追加)
-    - `golangci-lint / lint` (M46 Track C-3c で hard gate 化に伴い追加 — USER action: GitHub UI で required に promote)
+  - Required status checks: **§2.5 の snapshot が実測値**。 かつてここに
+    書かれていた 6 件のリスト (#17 wave 時点の「こう設定してほしい」案) は
+    実際の設定と一致していなかった (`install.sh must succeed on ...` /
+    `docker compose must abort without ENCRYPTION_KEY` は required では
+    ない) ため削除した。 追加・削除するときは §2.5 を `gh api` の出力で
+    更新すること。
 - **Require linear history**: ON (rebase only、 merge commit 禁止)
 - **Require conversation resolution before merging**: ON
 - **Do not allow bypassing the above settings**: ON (管理者も bypass 不可、 ただし solo maintainer なら判断)
 - **Restrict who can push to matching branches**: org owner / maintainer のみ
 
 後続 wave で追加した workflow も上の Required status checks に都度追加する。
+
+### 2.4 Workflow / job インベントリ (machine-checked)
+
+**この節だけが workflow / job の集合として権威を持つ。** 下のブロックは
+`tools/lint-ci-inventory` が `.github/workflows/*.yml` から生成し、
+`.github/workflows/repo-hygiene.yml` の `lint-ci-inventory` job が実
+ファイルと**集合として一致すること**を CI で検証する。 workflow を足す /
+消す / job を rename すると red になる。
+
+再生成:
+
+```bash
+(cd tools/lint-ci-inventory && go run . --repo-root ../.. --fix)
+```
+
+形式は `<workflow file> :: <job id> :: <check 名>`。 check 名は GitHub が
+status check として表示し、 branch protection が**名前で**照合する文字列
+(`name:` 未指定なら job id がそのまま使われる)。
+
+なぜ prose の表と別に持つのか: §2.1 / §2.2 は wave ごとの経緯を書いた散文
+で、 網羅性を機械的に保証できない。 実際 #17 wave で 5 workflow を収録した
+まま 21 まで増え、 required status check 17 件のうち 12 件が「どこにも書か
+れていない workflow」から出ていた。 読まれて信じられる source of truth が
+2/3 欠けている状態は、 doc が無い状態より悪い。
+
+<!-- BEGIN GENERATED: workflow-job-inventory -->
+
+```text
+docker-compose-smoke.yml :: refuse-without-encryption-key :: docker compose must abort without ENCRYPTION_KEY
+docker-publish.yml :: build-and-push :: build-and-push
+docs-curl-smoke.yml :: curl-smoke :: docs curl upload must succeed against live api
+dr-rehearsal.yml :: dr-rehearsal :: dr-rehearsal
+frontend-ci.yml :: frontend :: lint / typecheck / build
+go-test.yml :: build-and-test :: build-and-test
+golangci-lint.yml :: golangci :: lint
+golden-path-e2e.yml :: api-e2e :: Golden Path 12-step against live api (curl + jq)
+install-smoke.yml :: install-smoke :: install.sh must succeed on ${{ matrix.os }}
+mcp-server-ci.yml :: mcp-server :: typecheck / build
+migration-lint.yml :: lint :: lint-migration-rls
+migration-lock-lint.yml :: lint :: lint-migration-locks
+migration-roundtrip.yml :: migration-roundtrip :: roundtrip
+nullscan.yml :: analyze :: static gate (hermetic)
+nullscan.yml :: schema-drift :: schema snapshot drift + measured tolerance table
+project-scope-e2e.yml :: api-key-project-scope :: project-scoped API key matrix over HTTP (every apiKeyRouteScope route)
+release.yml :: goreleaser :: goreleaser
+repo-hygiene.yml :: ci-inventory :: lint-ci-inventory
+repo-hygiene.yml :: tools-build-hygiene :: tools build leaves no untracked artifacts
+rls-integration.yml :: rls-integration :: integration
+sbom-upload.yml :: sbom :: sbom
+scheduler-integration.yml :: scheduler-integration :: F234 chunk-abort blast-radius smoke
+toolchain-lint.yml :: lint :: lint-toolchain-alignment
+web-e2e.yml :: web-e2e :: Playwright smoke (home / dashboard / api-health)
+web-e2e.yml :: web-e2e-full :: Playwright full suite (26 specs against seeded stack)
+```
+
+<!-- END GENERATED: workflow-job-inventory -->
+
+### 2.5 `main` の Required status checks (snapshot)
+
+取得元 (読み取りのみ):
+
+```bash
+t=$(gh auth token --user youichi-uda)
+GH_TOKEN="$t" gh api repos/youichi-uda/sbomhub/branches/main/protection \
+  -q '.required_status_checks.contexts[]'
+```
+
+最終取得: **2026-08-04**、 17 件。 `tools/lint-ci-inventory` は下の各行が
+§2.4 のいずれかの job の check 名と一致することを検証する — **GitHub は
+required check を名前で照合するので、 job の `name:` を変えた瞬間に
+required check が宙に浮き、 protection rule を人手で直すまで `main` が
+永久に merge 不能になる**。 その罠を「stuck branch」ではなく「red lint」に
+変換するのがこの照合の目的。
+
+したがって:
+
+- **既存 job の `name:` は変更しない。** 変更が必要なら branch protection
+  を先に更新し、 同じ PR でこの snapshot も更新する。
+- 特に `Playwright full suite (26 specs against seeded stack)` の
+  **「26」は凍結値**。 `apps/web/e2e/*.spec.ts` の実数ではなく、 job 名の
+  一部としてすでに protection に焼き付いている。 spec を増減しても更新
+  しないこと (`.github/workflows/web-e2e.yml` の job header にも同旨の
+  コメントがある)。
+- この lint は GitHub 側と照合しない (hermetic / offline / fork でも動く)。
+  照合するのは「snapshot に載っている名前を出す job が今も存在するか」
+  だけで、 「GitHub 側の設定が snapshot と同じか」は人手 + 上の `gh api`
+  で確認する。
+
+<!-- BEGIN SNAPSHOT: required-status-checks -->
+
+```text
+build-and-test
+lint
+integration
+F234 chunk-abort blast-radius smoke
+roundtrip
+lint-migration-rls
+lint-migration-locks
+lint-toolchain-alignment
+static gate (hermetic)
+schema snapshot drift + measured tolerance table
+Golden Path 12-step against live api (curl + jq)
+docs curl upload must succeed against live api
+Playwright smoke (home / dashboard / api-health)
+Playwright full suite (26 specs against seeded stack)
+build-and-push
+project-scoped API key matrix over HTTP (every apiKeyRouteScope route)
+typecheck / build
+```
+
+<!-- END SNAPSHOT: required-status-checks -->
+
+紛らわしい点を 2 つ明記しておく:
+
+- `typecheck / build` は **`mcp-server-ci.yml`** の job 名であり、
+  `frontend-ci.yml` の `lint / typecheck / build` とは別物。 後者は
+  required ではない。
+- `lint` は **`golangci-lint.yml`** の job 名。 `migration-lint.yml` /
+  `migration-lock-lint.yml` / `toolchain-lint.yml` の job **id** も `lint`
+  だが、 それぞれ `name:` を持つので check 名は衝突しない。
+
+### 2.6 repo-hygiene.yml
+
+§2.4 / §2.5 を守る lint 本体と、 `tools/` の build 生成物が untracked の
+まま commit に紛れないことの確認を置いた workflow。 2 job とも hermetic
+(DB もサーバも不要、 数十秒)。
+
+| Job (= check 名) | 何を守るか |
+|---|---|
+| `lint-ci-inventory` | §2.4 のブロックが `.github/workflows/*.yml` の実集合と一致すること + §2.5 の各 required check 名を出す job が実在すること。 lint 自身の unit test も同 job で先に走らせる (「lint を緩めて diff を通す」防止) |
+| `tools build leaves no untracked artifacts` | `tools/*/` の各モジュールで `go build ./...` を実行しても `git status --porcelain` が clean であること。 `go build` はモジュール名と同名のバイナリを `main.go` の隣に落とすので、 `.gitignore` に載っていないと `git add -A` で数 MB の実行ファイルが commit に入る (node_modules を commit して 421K insertions になった事故と同クラス)。 新しい tool を足したときの `.gitignore` 追記漏れを PR 時に検出する |
 
 ## 3. sbomhub-cli (repo: youichi-uda/sbomhub-cli)
 
@@ -126,6 +278,8 @@ P3 = それ以降):
 - [x] (M10-4 #72) sbomhub: `frontend-ci.yml` に proxy.ts matcher 不変条件 fixture (`apps/web/src/proxy.matcher.test.mjs`) + pnpm-workspace.yaml placeholder 検知 + pnpm 10 lifecycle-script skipped 5 package の native binding probe を追加。 §4.3 参照
 - [x] (M11-5 #80) sbomhub: `apps/web` の lint gate を strict 化。 ESLint v9 flat config (`apps/web/eslint.config.mjs`) に移行 (Next 16 が `next lint` を削除したため `next lint` → `eslint .`)、 既存 25 error を全部解消 (`@typescript-eslint/no-empty-object-type` 3 件 / `@typescript-eslint/no-explicit-any` 4 件 / `react/no-unescaped-entities` 6 件 / `@next/next/no-html-link-for-pages` 1 file / その他)、 `react-hooks` plugin v7 の新 strict rule (`set-state-in-effect` / `immutability`) は pre-existing 違反の refactor 規模を考慮し `warn` に downgrade (config に rationale 明記)、 `lib/auth.ts` の build-time-conditional Clerk hook 3 件は inline disable + 経緯コメント。 `frontend-ci.yml::Lint` step の `continue-on-error: true` を解除して hard gate 化。 typecheck / build は warn-only 据え置き (別 wave)
 - [x] (M12-5 #86) sbomhub: `apps/web` の typecheck / build gate を strict 化。 `frontend-ci.yml::Typecheck` (`tsc --noEmit`) と `frontend-ci.yml::Build` (`next build` with dummy `NEXT_PUBLIC_API_URL` / Clerk placeholder env) の `continue-on-error: true` を解除し **hard gate** 化。 M11-5 #80 lint cleanup の延長で `tsc --noEmit` が zero error に到達したことを確認後 promote、 build hard gate は M11-1 F164 production-build hydration-crash isolation (`next dev` では露見しない RSC full-SSR-hydration regression を捕まえる必須 guard) を根拠に typecheck と同時 promote。 併せて `react-hooks/set-state-in-effect` / `react-hooks/immutability` を M11-5 で `warn` に downgrade していた pre-existing 違反を全件解消し、 `apps/web/eslint.config.mjs` で `error` に昇格 (config rationale 更新)。 Required status checks への追加 (§2.3) は引き続き USER action
+- [x] (2026-08-04) sbomhub: **本 doc 自身の drift 検知**を CI gate 化。 収録漏れが 21 workflow 中 10 件 (`dr-rehearsal` / `golden-path-e2e` / `mcp-server-ci` / `migration-lint` / `migration-lock-lint` / `nullscan` / `project-scope-e2e` / `release` / `scheduler-integration` / `toolchain-lint`) まで膨らみ、 required status check 17 件のうち 12 件が「本 doc に一行も無い workflow」から出ている状態だった。 §2.1 末尾に 10 件の prose を追記、 §2.4 に machine-checked な workflow/job インベントリブロック、 §2.5 に required status checks の snapshot を追加。 `tools/lint-ci-inventory` + `.github/workflows/repo-hygiene.yml::lint-ci-inventory` が (a) §2.4 ブロックと `.github/workflows/*.yml` の集合一致 (b) §2.5 の各 check 名を出す job の実在 を PR 時に検証する。 (b) は job `name:` の rename が required check を宙に浮かせて `main` を永久 merge 不能にする罠を、 stuck branch ではなく red lint に変換するためのもの。 §2.3 の stale な required check リスト (実設定と不一致) は削除して §2.5 へ集約
+- [ ] (USER) §2.6 の 2 job (`lint-ci-inventory` / `tools build leaves no untracked artifacts`) を required status check に promote するか判断 (どちらも hermetic で 1 分未満)
 - [ ] (USER) GitHub UI で `main` ブランチに上記 Required status checks 設定 (§2.3 / §3.3)
 - [x] (P2) sbomhub: Golden Path E2E skeleton (Playwright を CI で実行) — `web-e2e.yml::web-e2e` (M8 #67) で docker compose 一式 (postgres + redis + locally built api + web) を立て、 chromium で `apps/web/e2e/smoke/` (home / dashboard / api-health) を実行。 docker-publish.yml (M7-5) の build-time HTML marker smoke と役割分担 (smoke=image build time / E2E=full stack runtime flow)
 - [x] (M10-3 #71) sbomhub: 認証込みの深堀り spec (`apps/web/e2e/*.spec.ts` 26 件) を `web-e2e.yml::web-e2e-full` に promote。 `docker/seed/web-e2e.sql` で deterministic UUID の test tenant + project + sbom + component + CVE-2021-44228 + vex_draft + cra_report + meti_assessment + audit_log を pre-load し、 web 起動より前に seed を load することで API の `GetOrCreateDefault` が seeded tenant を採用する経路を強制。 spec ごとの timeout は `playwright.config.ts` で `60_000`、 retries は CI で `2`、 失敗時は `playwright-report-full` artifact を upload。 local repro recipe は `apps/web/e2e/README.md`。 §4.4 参照

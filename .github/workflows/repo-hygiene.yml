@@ -1,0 +1,155 @@
+---
+# SBOMHub - repo hygiene (CI inventory drift + tools build artifacts)
+#
+# Two hermetic guards. Neither needs a database, a container stack or a
+# browser; both finish in well under a minute.
+#
+#   1. `lint-ci-inventory` — docs/ci-inventory.md calls itself
+#      "レポジトリの状態の真実 (source of truth)" and is read alongside
+#      the branch protection settings. It was written when the repo had 5
+#      workflows; by 2026-08 the repo had 21 and TEN were absent from the
+#      document, including the ones producing 12 of the 17 required status
+#      checks on `main`. Nothing noticed, because nothing compared the
+#      document to the directory. tools/lint-ci-inventory does that
+#      comparison, plus a referential check that every required status
+#      check named in the doc's snapshot is still produced by a real job —
+#      GitHub matches required checks BY NAME, so a job rename detaches
+#      the check and leaves `main` unmergeable until a human edits the
+#      protection rule. Better a red lint than a stuck branch.
+#
+#   2. `tools build leaves no untracked artifacts` — `go build ./...`
+#      inside a tools/ module drops a host-arch binary named after the
+#      module directory next to its main.go. Two of the three modules were
+#      not in any .gitignore, so a `git add -A` after a local build swept
+#      a multi-MB executable into the commit. This repo has already lost a
+#      commit to that class of accident once (node_modules, 421K
+#      insertions), and .gitignore-first is the standing rule. This job
+#      builds every module and fails if the worktree is dirty afterwards,
+#      so the NEXT tool added under tools/ cannot repeat it: forgetting
+#      the .gitignore line is caught at PR time instead of in a stray
+#      commit.
+#
+# Neither job renames or touches an existing job, so no required status
+# check on `main` is affected by this file.
+#
+# yamllint posture: document-start `---` + quoted `'on':` per the M6 F104
+# convention shared with golden-path-e2e.yml / web-e2e.yml.
+
+name: Repo hygiene
+
+'on':
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'docs/ci-inventory.md'
+      - 'tools/**'
+      - '.gitignore'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'docs/ci-inventory.md'
+      - 'tools/**'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-inventory:
+    name: lint-ci-inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        # Pin via the standalone tools module's go.mod, same posture as
+        # migration-lint.yml / migration-lock-lint.yml / toolchain-lint.yml:
+        # the lint runs on exactly the toolchain it was developed against,
+        # and tools/lint-toolchain-alignment records this step as
+        # auto-following rather than as a hardcoded pin to keep in sync.
+        #
+        # Caching is disabled: stdlib-only, no go.sum, so a build cache
+        # buys nothing and introduces a "file not found" failure mode when
+        # cache-dependency-path is wired up without a real lockfile.
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/lint-ci-inventory/go.mod
+          cache: false
+
+      - name: Show tool version
+        run: go version
+
+      # Unit tests first, against the same "fix the lint until my diff
+      # passes" antipattern the other three lint workflows guard. The
+      # fixtures pin the undocumented-workflow finding, the stale-entry
+      # finding, the renamed-required-check finding, and the anti-vacuity
+      # errors (an unreadable workflow file and an empty workflows
+      # directory are ERRORS, never a silent "nothing to check").
+      #
+      # Tests red => the diff changed the lint's contract and must update
+      # the fixture in the same PR. Tests green but the scan below red =>
+      # the doc has genuinely drifted from .github/workflows/.
+      - name: Run lint tool unit tests
+        working-directory: tools/lint-ci-inventory
+        run: go test ./...
+
+      - name: Run CI inventory lint against repository root
+        working-directory: tools/lint-ci-inventory
+        run: go run . --repo-root ../.. --verbose
+
+  tools-build-hygiene:
+    name: tools build leaves no untracked artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/lint-ci-inventory/go.mod
+          cache: false
+
+      - name: Show tool version
+        run: go version
+
+      # Build EVERY module under tools/ the way an operator would, then
+      # require the worktree to be unchanged. `go build ./...` writes the
+      # binary into the module directory; if .gitignore does not cover it,
+      # it shows up here as an untracked file.
+      #
+      # `git status --porcelain` is the assertion rather than a filename
+      # allowlist on purpose: it also catches a `go build` that rewrites a
+      # tracked file (a stale generated fixture, say), which a
+      # name-matching check would miss.
+      - name: go build every tools/ module, then require a clean worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          modules=(tools/*/go.mod)
+          if [ ${#modules[@]} -eq 0 ]; then
+            echo "::error::no modules found under tools/ — refusing to report an empty scan as clean"
+            exit 1
+          fi
+          for gomod in "${modules[@]}"; do
+            dir="$(dirname "$gomod")"
+            echo "--- go build ./... in $dir"
+            (cd "$dir" && go build ./...)
+          done
+
+          dirty="$(git status --porcelain)"
+          if [ -n "$dirty" ]; then
+            echo '::error::building the tools/ modules left the worktree dirty. A go build artifact is not gitignored, so `git add -A` would sweep it into a commit (see the node_modules incident). Add the binary path to .gitignore.'
+            echo "$dirty"
+            exit 1
+          fi
+          echo "worktree clean after building ${#modules[@]} module(s)"
