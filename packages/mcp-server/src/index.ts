@@ -253,7 +253,10 @@ server.registerTool(
   "sbomhub_get_vulnerabilities",
   {
     description:
-      "プロジェクトの脆弱性一覧を取得 (CVSS/EPSS順、最大500件、severityで絞り込み可)",
+      "プロジェクトの脆弱性一覧を取得 (CVSS/EPSS順、最大500件、severityで絞り込み可)。" +
+      "内部の走査は最大5000件までで、それを超えるプロジェクトでは" +
+      "scan_truncated=true が返る。その場合 matched / by_severity は" +
+      "走査した範囲の値なので、プロジェクト全体の件数として報告しないこと",
     inputSchema: {
       project_id: projectIdSchema,
       severity: z

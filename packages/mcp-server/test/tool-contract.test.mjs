@@ -32,6 +32,8 @@ let mcp;
 let descriptionByTool = new Map();
 /** @type {Map<string, Set<string>>} tool → route keys observed while running its cases */
 const observedRouteKeysByTool = new Map();
+/** tools observed returning a deliberately incomplete answer */
+const toolsObservedTruncating = new Set();
 
 const UUID_ANYWHERE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -109,6 +111,10 @@ for (const testCase of CONTRACT_CASES) {
     for (const r of requests) observed.add(r.routeKey);
     observedRouteKeysByTool.set(testCase.tool, observed);
 
+    if (!testCase.expectError && jsonOf(result)?.scan_truncated === true) {
+      toolsObservedTruncating.add(testCase.tool);
+    }
+
     if (testCase.check) {
       testCase.check({
         result,
@@ -156,6 +162,30 @@ test("every description states the scope the backend actually enforces", () => {
     [],
     `tool descriptions disagree with ${SCOPE_SOURCE}:\n\n- ${failures.join("\n\n- ")}\n`
   );
+});
+
+// A tool that can answer with less than it was asked for has to say so where
+// the model reads. This one is not about scope but about the same failure: a
+// partial answer that is byte-shaped like a complete one. The client caps its
+// own walk at 5000 rows (VULNS_SCAN_CAP) so one tool call cannot issue 20+
+// requests, and reports the cut in `scan_truncated` — but a model that was
+// never told the cap exists has no reason to look at that field before
+// reporting `matched` as the project's count.
+test("a tool that can truncate its own answer says so in its description", () => {
+  assert.equal(
+    toolsObservedTruncating.size > 0,
+    true,
+    "no case produced scan_truncated=true — this rule is checking nothing"
+  );
+  for (const tool of toolsObservedTruncating) {
+    assert.match(
+      descriptionByTool.get(tool) ?? "",
+      /scan_truncated|5000/,
+      `${tool} returned scan_truncated=true for a project it could not walk fully, but its ` +
+        "description never mentions the cap. The model will read the partial counts as the " +
+        "project's totals."
+    );
+  }
 });
 
 test("a tool whose routes are all tenant-wide never sends a project id", () => {
