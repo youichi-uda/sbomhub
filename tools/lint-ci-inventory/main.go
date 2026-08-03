@@ -93,6 +93,14 @@ var (
 	// wrong check name recorded with no error — see parseWorkflow.
 	reQuotedNameKey = regexp.MustCompile(`^    ['"]name['"]\s*:`)
 	reTopKey        = regexp.MustCompile(`^[A-Za-z_'"]`)
+
+	// `strategy:` / `      matrix:` open the block; `        os:` is a key
+	// inside it, `          - ubuntu-latest` an item, `        os: [a, b]`
+	// the inline form. Read only well enough to expand a `name:` template.
+	reStrategyOpen = regexp.MustCompile(`^    strategy:\s*$`)
+	reMatrixOpen   = regexp.MustCompile(`^      matrix:\s*$`)
+	reMatrixKey    = regexp.MustCompile(`^        ([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$`)
+	reMatrixItem   = regexp.MustCompile(`^          -\s*(\S.*?)\s*$`)
 )
 
 // job is one CI job: the workflow file it lives in, its YAML key, and the
@@ -101,6 +109,9 @@ type job struct {
 	file      string // basename, e.g. "web-e2e.yml"
 	id        string // YAML key under `jobs:`
 	checkName string // `name:` if present, else id
+	// matrix values keyed by `matrix.<key>`, when the job declares a
+	// `strategy.matrix` this scanner could read. Empty for a plain job.
+	matrix map[string][]string
 }
 
 func (j job) line() string {
@@ -113,11 +124,14 @@ func (j job) line() string {
 // package comment on failing loudly.
 func parseWorkflow(base, body string) ([]job, error) {
 	var (
-		jobs   []job
-		inJobs bool
-		cur    *job
-		lines  = strings.Split(body, "\n")
-		flush  = func() {}
+		jobs       []job
+		inJobs     bool
+		cur        *job
+		inStrategy bool
+		inMatrix   bool
+		matrixKey  string
+		lines      = strings.Split(body, "\n")
+		flush      = func() {}
 	)
 	flush = func() {
 		if cur != nil {
@@ -154,8 +168,46 @@ func parseWorkflow(base, body string) ([]job, error) {
 					base, m[1], strings.TrimSpace(line))
 			}
 			flush()
-			cur = &job{file: base, id: m[1]}
+			cur = &job{file: base, id: m[1], matrix: map[string][]string{}}
+			inStrategy, inMatrix, matrixKey = false, false, ""
 			continue
+		}
+
+		// strategy.matrix, read only well enough to expand a `name:`
+		// template. Anything unexpected simply leaves the map empty, and
+		// expandNames falls back to prefix matching.
+		if cur != nil {
+			if reStrategyOpen.MatchString(line) {
+				inStrategy, inMatrix, matrixKey = true, false, ""
+				continue
+			}
+			if inStrategy && reMatrixOpen.MatchString(line) {
+				inMatrix, matrixKey = true, ""
+				continue
+			}
+			if inMatrix {
+				if m := reMatrixItem.FindStringSubmatch(line); m != nil && matrixKey != "" {
+					cur.matrix[matrixKey] = append(cur.matrix[matrixKey], scalarValue(m[1]))
+					continue
+				}
+				if m := reMatrixKey.FindStringSubmatch(line); m != nil {
+					matrixKey = m[1]
+					rest := strings.TrimSpace(m[2])
+					if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
+						for _, v := range strings.Split(rest[1:len(rest)-1], ",") {
+							if v = scalarValue(v); v != "" {
+								cur.matrix[matrixKey] = append(cur.matrix[matrixKey], v)
+							}
+						}
+					}
+					continue
+				}
+				// Dedented out of the matrix block.
+				inMatrix, matrixKey = false, ""
+			}
+			if inStrategy && !strings.HasPrefix(line, "      ") {
+				inStrategy = false
+			}
 		}
 		// A 2-space key that reJobID could not read is a job this lint
 		// cannot see. Dropping it silently would hide a whole job — and
@@ -208,12 +260,42 @@ func parseWorkflow(base, body string) ([]job, error) {
 // the check name, while GitHub reports `Security gate` — a mismatch that
 // would then be "fixed" by writing the wrong name into the inventory.
 // (Review finding, High.)
+// A single-quoted YAML scalar escapes a quote by doubling it, so
+// `'API”s audit'` decodes to `API's audit`. Stopping at the first inner
+// quote read it as `API` — and since the wrong value went into BOTH the
+// parse and the `--fix` output, the two agreed and the lint reported
+// clean. An author adding an apostrophe to a job name and a formatter
+// quoting the line is all it takes. (Review finding under the declared
+// threat model.) Double-quoted scalars use backslash escapes instead.
 func scalarValue(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') {
-		q := s[0]
-		if i := strings.IndexByte(s[1:], q); i >= 0 {
-			return s[1 : 1+i]
+	if len(s) >= 2 && s[0] == '\'' {
+		var b strings.Builder
+		for i := 1; i < len(s); i++ {
+			if s[i] == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					b.WriteByte('\'')
+					i++
+					continue
+				}
+				return b.String()
+			}
+			b.WriteByte(s[i])
+		}
+		return s // unterminated; hand back the raw text so it mismatches loudly
+	}
+	if len(s) >= 2 && s[0] == '"' {
+		var b strings.Builder
+		for i := 1; i < len(s); i++ {
+			if s[i] == '\\' && i+1 < len(s) {
+				b.WriteByte(s[i+1])
+				i++
+				continue
+			}
+			if s[i] == '"' {
+				return b.String()
+			}
+			b.WriteByte(s[i])
 		}
 		return s
 	}
@@ -281,31 +363,65 @@ func extractBlock(doc, begin, end string) ([]string, error) {
 	return out, nil
 }
 
-// matchesJob reports whether a required status check name is produced by
-// this job. Matrix jobs expand `${{ matrix.x }}` at run time, so a job
-// whose name carries a template matches any check sharing its literal
-// prefix.
+var reMatrixRef = regexp.MustCompile(`\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
+
+// expandNames returns every check name a job can produce.
 //
-// KNOWN IMPRECISION (review finding): the prefix rule is too permissive
-// for matrix jobs. `install.sh must succeed on windows-latest` matches
-// `install.sh must succeed on ${{ matrix.os }}` even if the matrix only
-// lists ubuntu and macos, so a stale required check naming a dropped
-// matrix leg would not be reported. Resolving it means evaluating the
-// `strategy.matrix` cross-product, which a stdlib line scanner cannot do
-// honestly. It is one-directional — the check can be too lenient, never
-// too strict, so it cannot block `main` spuriously — and no required
-// status check on `main` currently comes from a matrix job (the repo's
-// only one is install-smoke.yml, which is not required). Revisit if that
-// changes.
+// A matrix job's `name:` carries `${{ matrix.os }}`, so the check GitHub
+// reports is one name per matrix leg. Expanding them makes the
+// required-check reference test exact: DROPPING a matrix leg (a normal
+// edit — "we no longer support windows") now reports the stale required
+// check instead of silently accepting it, because the old leg's name is
+// no longer produced by anything. That accident is exactly what the
+// snapshot exists to catch. (Review finding under the declared threat
+// model.)
+//
+// Returns ok=false when the name references a matrix key this scanner
+// could not read; the caller then falls back to prefix matching, which is
+// lenient rather than spuriously red.
+func expandNames(j job) ([]string, bool) {
+	refs := reMatrixRef.FindAllStringSubmatch(j.checkName, -1)
+	if len(refs) == 0 {
+		return []string{j.checkName}, true
+	}
+	names := []string{j.checkName}
+	for _, ref := range refs {
+		key := ref[1]
+		values, ok := j.matrix[key]
+		if !ok || len(values) == 0 {
+			return nil, false
+		}
+		var next []string
+		for _, n := range names {
+			for _, v := range values {
+				next = append(next, strings.ReplaceAll(n, ref[0], v))
+			}
+		}
+		names = next
+	}
+	return names, true
+}
+
+// matchesJob reports whether a required status check name is produced by
+// this job.
 func matchesJob(required string, j job) bool {
 	if required == j.checkName {
 		return true
 	}
+	if names, ok := expandNames(j); ok {
+		for _, n := range names {
+			if required == n {
+				return true
+			}
+		}
+		return false
+	}
+	// Unreadable matrix: fall back to the literal prefix before the first
+	// expression. `i > 0`, not `i >= 0` — a name that STARTS with an
+	// expression has an empty literal prefix, and HasPrefix(x, "") is true
+	// for every x, so such a job would vouch for every required check in
+	// the snapshot and hide all of them.
 	if i := strings.Index(j.checkName, "${{"); i > 0 {
-		// `i > 0`, not `i >= 0`: a name that STARTS with an expression has
-		// an empty literal prefix, and `strings.HasPrefix(x, "")` is true
-		// for every x, so such a job would vouch for every required check
-		// in the snapshot and hide all of them. (Review finding, High.)
 		return strings.HasPrefix(required, j.checkName[:i])
 	}
 	return false

@@ -540,3 +540,99 @@ func TestRealRepositoryParses(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------
+// Findings from the threat-model-declared review rounds
+// ---------------------------------------------------------------------
+
+// A single-quoted YAML scalar escapes a quote by doubling it. Stopping at
+// the first inner quote read `'API”s audit'` as `API`, and because the
+// same wrong value went into the `--fix` output the two agreed and the
+// lint reported clean.
+func TestScalarValue_EscapedQuotes(t *testing.T) {
+	cases := map[string]string{
+		`'API''s audit'`:          `API's audit`,
+		`"say \"hi\""`:            `say "hi"`,
+		`Security gate # comment`: `Security gate`,
+		`'gate #3' # comment`:     `gate #3`,
+		`plain`:                   `plain`,
+	}
+	for in, want := range cases {
+		if got := scalarValue(in); got != want {
+			t.Errorf("scalarValue(%s) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Dropping a matrix leg is an ordinary edit ("we no longer support
+// windows"). The required-check snapshot must then report the stale name
+// instead of accepting it on a bare prefix match.
+func TestMatrixLegRemovalIsCaught(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  smoke:
+    name: install.sh must succeed on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+`
+	jobs, err := parseWorkflow("install-smoke.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	j := jobs[0]
+	if got := j.matrix["os"]; len(got) != 2 || got[0] != "ubuntu-latest" || got[1] != "macos-latest" {
+		t.Fatalf("matrix os = %v", got)
+	}
+	for _, ok := range []string{
+		"install.sh must succeed on ubuntu-latest",
+		"install.sh must succeed on macos-latest",
+	} {
+		if !matchesJob(ok, j) {
+			t.Errorf("%q should match", ok)
+		}
+	}
+	if matchesJob("install.sh must succeed on windows-latest", j) {
+		t.Error("a dropped matrix leg must NOT match")
+	}
+}
+
+func TestMatrixInlineListForm(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  smoke:
+    name: build ${{ matrix.go }}
+    strategy:
+      matrix:
+        go: [1.25, 1.26]
+    runs-on: ubuntu-latest
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("build 1.26", jobs[0]) || matchesJob("build 1.24", jobs[0]) {
+		t.Fatalf("inline matrix not expanded: %v", jobs[0].matrix)
+	}
+}
+
+// An unreadable matrix must stay LENIENT (prefix), never spuriously red.
+func TestUnreadableMatrixFallsBackToPrefix(t *testing.T) {
+	j := job{file: "x.yml", id: "j", checkName: "build ${{ matrix.go }}", matrix: map[string][]string{}}
+	if !matchesJob("build anything", j) {
+		t.Error("unreadable matrix should fall back to prefix matching")
+	}
+	if matchesJob("test anything", j) {
+		t.Error("prefix must still be required")
+	}
+}
