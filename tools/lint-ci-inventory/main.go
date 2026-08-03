@@ -101,6 +101,7 @@ var (
 	reMatrixOpen   = regexp.MustCompile(`^      matrix:\s*$`)
 	reMatrixKey    = regexp.MustCompile(`^        ([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$`)
 	reMatrixItem   = regexp.MustCompile(`^          -\s*(\S.*?)\s*$`)
+	reMatrixAdjust = regexp.MustCompile(`^        (include|exclude):`)
 )
 
 // job is one CI job: the workflow file it lives in, its YAML key, and the
@@ -112,6 +113,13 @@ type job struct {
 	// matrix values keyed by `matrix.<key>`, when the job declares a
 	// `strategy.matrix` this scanner could read. Empty for a plain job.
 	matrix map[string][]string
+	// The matrix uses `include:` / `exclude:`, which add or remove legs
+	// this scanner does not model. Expanding the declared keys alone
+	// would then MISS legs and report a live required check as stale —
+	// a false positive that blocks `main`. Fall back to prefix matching
+	// instead, which is lenient. (Review finding under the declared
+	// threat model.)
+	matrixIsPartial bool
 }
 
 func (j job) line() string {
@@ -186,6 +194,11 @@ func parseWorkflow(base, body string) ([]job, error) {
 				continue
 			}
 			if inMatrix {
+				if reMatrixAdjust.MatchString(line) {
+					cur.matrixIsPartial = true
+					matrixKey = ""
+					continue
+				}
 				if m := reMatrixItem.FindStringSubmatch(line); m != nil && matrixKey != "" {
 					cur.matrix[matrixKey] = append(cur.matrix[matrixKey], scalarValue(m[1]))
 					continue
@@ -383,6 +396,9 @@ func expandNames(j job) ([]string, bool) {
 	refs := reMatrixRef.FindAllStringSubmatch(j.checkName, -1)
 	if len(refs) == 0 {
 		return []string{j.checkName}, true
+	}
+	if j.matrixIsPartial {
+		return nil, false
 	}
 	names := []string{j.checkName}
 	for _, ref := range refs {

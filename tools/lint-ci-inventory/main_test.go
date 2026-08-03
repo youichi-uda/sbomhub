@@ -636,3 +636,34 @@ func TestUnreadableMatrixFallsBackToPrefix(t *testing.T) {
 		t.Error("prefix must still be required")
 	}
 }
+
+// `include:` adds legs this scanner does not model. Expanding only the
+// declared keys would report a LIVE required check as stale and block
+// `main`; the lenient prefix fallback is the safe direction.
+func TestMatrixIncludeFallsBackToPrefix(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  smoke:
+    name: install.sh must succeed on ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+        include:
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !jobs[0].matrixIsPartial {
+		t.Fatal("include: should mark the matrix partial")
+	}
+	if !matchesJob("install.sh must succeed on windows-latest", jobs[0]) {
+		t.Error("an include-only leg must still be accepted (lenient fallback)")
+	}
+}

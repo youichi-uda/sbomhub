@@ -546,6 +546,28 @@ function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
     return map;
 }
 
+/**
+ * Playwright also accepts `test.skip(callback, description)`, where the
+ * callback receives fixtures. MEASURED: at describe scope it behaves
+ * exactly like the literal form — the group is skipped and a throwing
+ * `beforeAll` never runs — so it is in the same dangerous class and has
+ * to be checked. Unwrap it to the expression it returns so
+ * `test.skip(() => !HAS_TOOL && !process.env.CI, '…')` can still be
+ * proven; a callback with real statements in it is not analysable and is
+ * reported (the `ci-skip-ok` marker is the way out).
+ */
+function conditionExpression(arg: ts.Expression): ts.Expression | null {
+    const cur = unwrap(arg);
+    if (!ts.isArrowFunction(cur) && !ts.isFunctionExpression(cur)) return cur;
+    const body = cur.body;
+    if (!ts.isBlock(body)) return body;
+    if (body.statements.length === 1) {
+        const only = body.statements[0];
+        if (ts.isReturnStatement(only) && only.expression) return only.expression;
+    }
+    return null;
+}
+
 function isCiNeutral(
     cond: ts.Expression,
     consts: Map<string, ts.Expression>,
@@ -771,7 +793,12 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
                     ciNeutral:
                         form === 'conditional'
-                            ? isCiNeutral(args[0], consts, globalsIntact)
+                            ? (() => {
+                                  const expr = conditionExpression(args[0]);
+                                  return (
+                                      expr !== null && isCiNeutral(expr, consts, globalsIntact)
+                                  );
+                              })()
                             : true,
                     closureName: closureStack.length
                         ? closureStack[closureStack.length - 1].name
@@ -886,8 +913,9 @@ function describeViolation(v: SkipSite): string {
         `${v.file}:${v.line}  ${v.callee}(${v.condition})\n` +
         `    scope=${v.scope} (${when})\n` +
         `    ${why}.\n` +
-        '    Fix: append `&& !process.env.CI` to the condition, or, if skipping under\n' +
-        '    CI really is intended, add a `// ci-skip-ok: <reason>` comment.'
+        '    Fix: append `&& !process.env.CI` to the condition (inside the callback,\n' +
+        '    if this is the `test.skip(cb, desc)` form), or, when skipping under CI\n' +
+        '    really is intended, add a `// ci-skip-ok: <reason>` comment.'
     );
 }
 
@@ -1198,6 +1226,40 @@ test.describe('gate', () => {
 });
 `;
 
+/**
+ * `test.skip(callback, description)` — Playwright's fixture-aware form.
+ * MEASURED to behave exactly like the literal form at describe scope
+ * (group skipped, throwing beforeAll never runs), so a guard written
+ * inside the callback must still be provable.
+ */
+const FIXTURE_CALLBACK_GUARDED = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(() => !HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
+/** ...and unguarded, it is the same hole. */
+const FIXTURE_CALLBACK_UNGUARDED = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(() => !HAS_TOOL, 'tool missing');
+});
+`;
+
+/** A block-bodied callback with a single return is still analysable. */
+const FIXTURE_CALLBACK_BLOCK_RETURN = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(() => {
+        return !HAS_TOOL && !process.env.CI;
+    }, 'tool missing');
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1307,6 +1369,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['destructured-skip', FIXTURE_DESTRUCTURED_SKIP],
             ['exported-helper', FIXTURE_EXPORTED_HELPER],
             ['helper-called-at-describe', FIXTURE_HELPER_CALLED_AT_DESCRIBE],
+            ['callback-unguarded', FIXTURE_CALLBACK_UNGUARDED],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
@@ -1334,6 +1397,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['helper-called-in-test', FIXTURE_HELPER_CALLED_IN_TEST],
             ['process-platform-read', FIXTURE_PROCESS_PLATFORM_READ],
             ['env-destructured-read', FIXTURE_ENV_DESTRUCTURED_READ],
+            ['callback-guarded', FIXTURE_CALLBACK_GUARDED],
+            ['callback-block-return', FIXTURE_CALLBACK_BLOCK_RETURN],
             ['marker', FIXTURE_MARKER],
             ['marker-trailing', FIXTURE_MARKER_TRAILING],
         ] as const) {
