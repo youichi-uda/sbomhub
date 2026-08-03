@@ -921,3 +921,27 @@ func TestFoldedBlockScalarNameIsTrimmed(t *testing.T) {
 		t.Error("the snapshot line must match")
 	}
 }
+
+// Trailing space inside a QUOTED matrix leg is part of the value; the
+// check name really does contain it.
+func TestMatrixLegWhitespaceIsPreserved(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  gate:
+    name: 'gate-${{ matrix.label }}-end'
+    strategy:
+      matrix:
+        label: ['linux ']
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if !matchesJob("gate-linux -end", jobs[0]) {
+		names, _ := expandNames(jobs[0])
+		t.Fatalf("the live check must match; expanded to %q", names)
+	}
+}

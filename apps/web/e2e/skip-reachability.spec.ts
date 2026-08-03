@@ -384,8 +384,8 @@ function isCiNeutral(cond: ts.Expression): boolean {
  * statement — never merely somewhere in its source text, and never
  * bleeding from the previous statement's trailing comment.
  */
-function hasAllowMarker(text: string, stmt: ts.Node): boolean {
-    const fullStart = stmt.getFullStart();
+function markerOn(text: string, node: ts.Node): boolean {
+    const fullStart = node.getFullStart();
     const leading = (ts.getLeadingCommentRanges(text, fullStart) ?? []).filter(
         (r) =>
             // Nothing precedes the first statement in a file, so its
@@ -399,8 +399,18 @@ function hasAllowMarker(text: string, stmt: ts.Node): boolean {
             // trivia.
             text.slice(fullStart, r.pos).includes('\n'),
     );
-    const trailing = ts.getTrailingCommentRanges(text, stmt.getEnd()) ?? [];
+    const trailing = ts.getTrailingCommentRanges(text, node.getEnd()) ?? [];
     return [...leading, ...trailing].some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
+}
+
+/**
+ * The marker counts when it sits on the CALL or on the statement holding
+ * it. Looking only at the outermost statement missed a marker written
+ * directly above the call inside an initialiser. (Review finding: false
+ * positive.)
+ */
+function hasAllowMarker(text: string, call: ts.Node, stmt: ts.Node): boolean {
+    return markerOn(text, call) || markerOn(text, stmt);
 }
 
 function bodyCanThrow(fn: ts.Node): boolean {
@@ -560,7 +570,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             scope: scopeNow(),
             condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
             ciNeutral: form === 'conditional' ? isCiNeutral(args[0]) : true,
-            allowMarker: hasAllowMarker(text, stmt),
+            allowMarker: hasAllowMarker(text, node, stmt),
             guardedByThrowingBeforeAll:
                 describeStack.length > 0 &&
                 describeHasThrowingBeforeAll(describeStack[describeStack.length - 1]),
@@ -624,8 +634,19 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // CALLED, which this gate deliberately does not follow — so its
         // contents are recorded as `closure` and never reported.
         if (isDeferredBoundary(node)) {
+            // A COMPUTED property name is evaluated when the class
+            // definition is, not when an instance is made — so it stays
+            // in the enclosing scope while the initialiser goes inside.
+            // (Review finding: rule/implementation mismatch.)
+            const computedName =
+                ts.isPropertyDeclaration(node) && ts.isComputedPropertyName(node.name)
+                    ? node.name
+                    : undefined;
+            if (computedName !== undefined) visit(computedName);
             stack.push('closure');
-            ts.forEachChild(node, visit);
+            ts.forEachChild(node, (child) => {
+                if (child !== computedName) visit(child);
+            });
             stack.pop();
             return;
         }
@@ -793,6 +814,21 @@ const HAS_TOOL = false;
 test.describe('gate', () => {
     class Gate {
         static skipped = test.skip(!HAS_TOOL, 'tool missing');
+    }
+    test('probe', async () => { void Gate; });
+});
+`,
+    ],
+    [
+        // A COMPUTED property name is evaluated when the class definition
+        // is, i.e. during collection.
+        'an unguarded skip in a computed property name',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    class Gate {
+        [(test.skip(!HAS_TOOL, 'tool missing'), 'skipped')] = false;
     }
     test('probe', async () => { void Gate; });
 });
@@ -1394,6 +1430,22 @@ const HAS_TOOL = false;
 delete process.env.CI;
 test.describe('gate', () => {
     test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`,
+    ],
+    [
+        // The marker written directly above the call, inside an initialiser.
+        'the escape hatch directly above a call in an initialiser',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    class Gate {
+        static skipped =
+            // ci-skip-ok: intentionally covered elsewhere
+            test.skip(!HAS_TOOL, 'tool missing');
+    }
+    test('probe', async () => { void Gate; });
 });
 `,
     ],

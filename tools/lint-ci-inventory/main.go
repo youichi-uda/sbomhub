@@ -145,12 +145,7 @@ func (j job) line() string {
 func yamlString(v any) string {
 	switch t := v.(type) {
 	case string:
-		// A folded/literal block scalar (`name: >`) carries a trailing
-		// newline. The required-check snapshot is read line-wise and
-		// therefore never has one, so keeping it reported a live check as
-		// stale and made `--fix` non-convergent. (Review finding: false
-		// positive.)
-		return strings.TrimSpace(t)
+		return t
 	case float64:
 		return strconv.FormatFloat(t, 'f', -1, 64)
 	case float32:
@@ -198,7 +193,14 @@ func parseWorkflow(base, body string) ([]job, error) {
 		for _, field := range spec {
 			switch fmt.Sprint(field.Key) {
 			case "name":
-				j.checkName = yamlString(field.Value)
+				// TrimSpace only HERE. A folded/literal block scalar
+				// (`name: >`) carries a trailing newline, and the
+				// required-check snapshot is read line-wise so it never
+				// has one. Trimming inside yamlString instead also
+				// trimmed MATRIX LEGS, so `label: ['linux ']` produced a
+				// name nothing emits and reported a live check as stale.
+				// (Review findings: false positives, both directions.)
+				j.checkName = strings.TrimSpace(yamlString(field.Value))
 				j.namedExplicitly = true
 			case "strategy":
 				strategy, isMap := field.Value.(yaml.MapSlice)
