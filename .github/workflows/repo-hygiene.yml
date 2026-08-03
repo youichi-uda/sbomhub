@@ -122,9 +122,16 @@ jobs:
         run: go version
 
       # Build EVERY module under tools/ the way an operator would, then
-      # require the worktree to be unchanged. `go build ./...` writes the
-      # binary into the module directory; if .gitignore does not cover it,
-      # it shows up here as an untracked file.
+      # require the worktree to be unchanged. `go build` writes the binary
+      # into the module directory; if .gitignore does not cover it, it
+      # shows up here as an untracked file.
+      #
+      # BOTH `go build ./...` and `go build .` are run. `go build ./...`
+      # DISCARDS the executable as soon as the pattern matches more than
+      # one package, so a future tool module that grows an `internal/`
+      # package would stop producing a binary here and this job would go
+      # green while a plain `go build .` in that directory still dropped
+      # an unignored executable. (Review finding, High.)
       #
       # `git status --porcelain` is the assertion rather than a filename
       # allowlist on purpose: it also catches a `go build` that rewrites a
@@ -145,8 +152,8 @@ jobs:
           fi
           for gomod in "${modules[@]}"; do
             dir="$(dirname "$gomod")"
-            echo "--- go build ./... in $dir"
-            (cd "$dir" && go build ./...)
+            echo "--- go build ./... && go build . in $dir"
+            (cd "$dir" && go build ./... && go build .)
           done
 
           dirty="$(git status --porcelain)"

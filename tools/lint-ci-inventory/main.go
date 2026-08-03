@@ -88,7 +88,11 @@ var (
 	// ERROR, not a silently dropped job — see parseWorkflow.
 	reAnyJobKey = regexp.MustCompile(`^  \S.*:`)
 	reJobName   = regexp.MustCompile(`^    name:\s*(\S.*?)\s*$`)
-	reTopKey    = regexp.MustCompile(`^[A-Za-z_'"]`)
+	// A quoted `'name':` key is valid YAML that reJobName cannot read.
+	// Falling through would leave the job reporting under its ID, i.e. a
+	// wrong check name recorded with no error — see parseWorkflow.
+	reQuotedNameKey = regexp.MustCompile(`^    ['"]name['"]\s*:`)
+	reTopKey        = regexp.MustCompile(`^[A-Za-z_'"]`)
 )
 
 // job is one CI job: the workflow file it lives in, its YAML key, and the
@@ -167,6 +171,13 @@ func parseWorkflow(base, body string) ([]job, error) {
 				base, strings.TrimSpace(line))
 		}
 		if cur != nil && cur.checkName == "" {
+			if reQuotedNameKey.MatchString(line) {
+				return nil, fmt.Errorf(
+					"%s: job %q declares its name as %q, which this lint cannot read; "+
+						"use an unquoted `name:` key — falling back to the job id would "+
+						"record the WRONG check name with no error",
+					base, cur.id, strings.TrimSpace(line))
+			}
 			if m := reJobName.FindStringSubmatch(line); m != nil {
 				v := strings.TrimSpace(m[1])
 				if v == "|" || v == ">" || strings.HasPrefix(v, "|") || strings.HasPrefix(v, ">") {

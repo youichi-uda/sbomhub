@@ -233,15 +233,21 @@ function isProcessEnvCI(node: ts.Expression): boolean {
     );
 }
 
+/** Globals the CI-neutrality proof reads by name. */
+const PROOF_GLOBALS = ['process', 'undefined'] as const;
+
 /**
  * `!process.env.CI`, `process.env.CI === undefined`, `process.env.CI == null`.
  *
- * `processIsGlobal` is false when the file binds a name called `process`
- * itself; then `process.env.CI` proves nothing about the environment and
- * NOTHING in the file counts as CI-neutral. (Review finding, High.)
+ * `globalsIntact` is false when the file binds `process` or `undefined`
+ * itself. `const process = { env: { CI: undefined } }` makes
+ * `!process.env.CI` say nothing about the environment, and
+ * `const undefined = process.env.CI` makes `process.env.CI === undefined`
+ * true precisely when CI is set. Either way NOTHING in that file counts
+ * as CI-neutral. (Review findings, High.)
  */
-function assertsCiIsOff(node: ts.Expression, processIsGlobal = true): boolean {
-    if (!processIsGlobal) return false;
+function assertsCiIsOff(node: ts.Expression, globalsIntact = true): boolean {
+    if (!globalsIntact) return false;
     const cur = unwrap(node);
     if (
         ts.isPrefixUnaryExpression(cur) &&
@@ -336,9 +342,9 @@ function fileScopeConsts(sf: ts.SourceFile): Map<string, ts.Expression> {
 function isCiNeutral(
     cond: ts.Expression,
     consts: Map<string, ts.Expression>,
-    processIsGlobal: boolean,
+    globalsIntact: boolean,
 ): boolean {
-    const off = (e: ts.Expression): boolean => assertsCiIsOff(e, processIsGlobal);
+    const off = (e: ts.Expression): boolean => assertsCiIsOff(e, globalsIntact);
     if (conjuncts(cond).some(off)) return true;
     const cur = unwrap(cond);
     if (ts.isIdentifier(cur)) {
@@ -383,9 +389,10 @@ function bodyCanThrow(fn: ts.Node): boolean {
 export function analyzeSource(fileName: string, text: string): SkipSite[] {
     const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     const consts = fileScopeConsts(sf);
-    // If the file binds its own `process`, `process.env.CI` says nothing
-    // about the environment, so nothing in it can be proven CI-neutral.
-    const processIsGlobal = !boundNames(sf).has('process');
+    // If the file rebinds a global the proof reads by name, the proof is
+    // meaningless there and nothing in the file can be judged CI-neutral.
+    const bound = boundNames(sf);
+    const globalsIntact = !PROOF_GLOBALS.some((g) => bound.has(g));
     const sites: SkipSite[] = [];
     // Enclosing test-construct scopes, innermost last.
     const stack: SkipSite['scope'][] = [];
@@ -462,7 +469,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     condition: form === 'conditional' ? args[0].getText(sf).replace(/\s+/g, ' ') : '',
                     ciNeutral:
                         form === 'conditional'
-                            ? isCiNeutral(args[0], consts, processIsGlobal)
+                            ? isCiNeutral(args[0], consts, globalsIntact)
                             : true,
                     allowMarker: hasAllowMarker(text, stmt),
                     guardedByThrowingBeforeAll:
@@ -472,11 +479,30 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             }
         }
 
-        if (pushed) stack.push(pushed);
-        if (pushedDescribe) describeStack.push(node);
+        // Only the CALLBACK argument of `test(...)` / `test.describe(...)`
+        // / a hook is inside that construct. Its other arguments — the
+        // title above all — are evaluated eagerly, at collection time, in
+        // the ENCLOSING scope. Pushing the scope over the whole call let a
+        // skip hidden in a test's title expression be filed as a per-test
+        // runtime skip and pass. (Review finding, High.)
+        if (pushed && ts.isCallExpression(node)) {
+            if (pushedDescribe) describeStack.push(node);
+            visit(node.expression);
+            for (const arg of node.arguments) {
+                const isCallback = ts.isArrowFunction(arg) || ts.isFunctionExpression(arg);
+                if (isCallback) {
+                    stack.push(pushed);
+                    visit(arg);
+                    stack.pop();
+                } else {
+                    visit(arg);
+                }
+            }
+            if (pushedDescribe) describeStack.pop();
+            return;
+        }
+
         ts.forEachChild(node, visit);
-        if (pushedDescribe) describeStack.pop();
-        if (pushed) stack.pop();
     };
 
     visit(sf);
@@ -689,6 +715,25 @@ test.describe('gate', () => {
 });
 `;
 
+/** A locally-bound `undefined` inverts the equality proof. */
+const FIXTURE_SHADOWED_UNDEFINED = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const undefined = process.env.CI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && process.env.CI === undefined, 'tool missing');
+});
+`;
+
+/** A test's TITLE is evaluated eagerly, at collection time. */
+const FIXTURE_SKIP_IN_TEST_TITLE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test(\`\${(test.skip(!HAS_TOOL, 'tool missing'), 'probe')}\`, async () => {});
+});
+`;
+
 /**
  * The escape hatch smuggled into the skip's DESCRIPTION rather than a
  * comment. It reads as an ordinary message; it must not buy an exemption.
@@ -776,6 +821,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['function-expr-shadow', FIXTURE_FUNCTION_EXPR_SHADOW],
             ['mutable-binding', FIXTURE_MUTABLE_BINDING],
             ['shadowed-process', FIXTURE_SHADOWED_PROCESS],
+            ['shadowed-undefined', FIXTURE_SHADOWED_UNDEFINED],
+            ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
         ] as const) {
             expect(
                 violations(analyzeSource(`${name}.spec.ts`, source)).length,

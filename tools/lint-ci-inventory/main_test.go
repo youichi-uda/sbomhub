@@ -162,6 +162,24 @@ jobs:
 	}
 }
 
+// A quoted `'name':` key would otherwise fall through and record the job
+// under its ID — the wrong check name, with no error.
+func TestParseWorkflow_QuotedNameKeyIsAnError(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  build:
+    'name': required-gate
+    runs-on: ubuntu-latest
+`
+	_, err := parseWorkflow("x.yml", body)
+	if err == nil || !strings.Contains(err.Error(), "required-gate") {
+		t.Fatalf("expected an error naming the unreadable name key, got %v", err)
+	}
+}
+
 // A trailing comment on the job key is fine.
 func TestParseWorkflow_TrailingCommentOnJobKey(t *testing.T) {
 	const body = `name: X
