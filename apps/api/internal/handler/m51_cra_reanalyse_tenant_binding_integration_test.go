@@ -192,11 +192,11 @@ func (s *craReanalyseVulnStub) GetCVEIDByIDInProject(_ context.Context, _, _, _ 
 	return "", sql.ErrNoRows
 }
 
-// poisonTenantGUC reproduces what a live server's connection pool does to
+// craReanalysePoisonTenantGUC reproduces what a live server's connection pool does to
 // itself: one committed transaction that ran `SET LOCAL app.current_tenant_id`
 // leaves the placeholder GUC at the EMPTY STRING on that backend. With
 // MaxOpenConns(1) the connection the handler later borrows is the same one.
-func poisonTenantGUC(t *testing.T, appDB *sql.DB, tenantID uuid.UUID) {
+func craReanalysePoisonTenantGUC(t *testing.T, appDB *sql.DB, tenantID uuid.UUID) {
 	t.Helper()
 	tx, err := appDB.Begin()
 	if err != nil {
@@ -248,7 +248,7 @@ func TestCRAReanalyseTenantBinding_UnseenReportIs404NotServerError(t *testing.T)
 	foreignReport := craReanalyseSeedReport(t, migDB, foreignTenant, projectForeign, "CVE-2099-0003")
 	unallocated := uuid.New()
 
-	poisonTenantGUC(t, appDB, uuid.New())
+	craReanalysePoisonTenantGUC(t, appDB, uuid.New())
 
 	reportsRepo := repository.NewCRAReportsRepository(appDB)
 	vulnStub := &craReanalyseVulnStub{}
