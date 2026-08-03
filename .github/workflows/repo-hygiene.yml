@@ -135,6 +135,14 @@ jobs:
       # `go list` and built individually, which is exactly what an
       # operator's build leaves on disk. (Review findings, High.)
       #
+      # KNOWN LIMIT: this runs on ubuntu-latest, so `go list ./...` cannot
+      # see a `//go:build darwin` (or windows) main package, and an
+      # artifact only a macOS operator produces is not checked here. The
+      # global `*.exe` rule in .gitignore covers the Windows name; a
+      # darwin-only tool would need its own .gitignore line. Cross-listing
+      # with GOOS would need every tool module to build on every OS, which
+      # is a bigger promise than this job should make.
+      #
       # `git status --porcelain` is the assertion rather than a filename
       # allowlist on purpose: it also catches a `go build` that rewrites a
       # tracked file (a stale generated fixture, say), which a

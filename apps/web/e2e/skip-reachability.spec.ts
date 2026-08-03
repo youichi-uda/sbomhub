@@ -263,9 +263,23 @@ function runsInPlace(fn: ts.Node, alsoInPlace?: Set<ts.Node>): boolean {
     if (parent === undefined || !ts.isCallExpression(parent)) return false;
     // IIFE: `(() => { … })()`
     if (parent.expression === child) return true;
-    // `xs.forEach(cb)` and friends
-    if (!parent.arguments.includes(child as ts.Expression)) return false;
     const callee = unwrap(parent.expression);
+    // `Array.from(iterable, cb)` — the callback is the SECOND argument.
+    if (
+        ts.isPropertyAccessExpression(callee) &&
+        callee.name.text === 'from' &&
+        ts.isIdentifier(callee.expression) &&
+        callee.expression.text === 'Array'
+    ) {
+        return parent.arguments[1] === child;
+    }
+    // `xs.forEach(cb)` and friends: only the FIRST argument is the
+    // callback. `reduce(cb, initialValue)` can carry a FUNCTION as its
+    // accumulator seed, which is never called during collection —
+    // treating every argument as a callback made that correct code a
+    // describe-scope violation. (Review finding under the declared
+    // threat model.)
+    if (parent.arguments[0] !== child) return false;
     return ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
 }
 
@@ -278,15 +292,19 @@ function collectionTimeByName(sf: ts.SourceFile, named: Map<string, ts.Node>): S
     const visit = (n: ts.Node): void => {
         if (ts.isCallExpression(n)) {
             const callee = unwrap(n.expression);
+            const isArrayFrom =
+                ts.isPropertyAccessExpression(callee) &&
+                callee.name.text === 'from' &&
+                ts.isIdentifier(callee.expression) &&
+                callee.expression.text === 'Array';
             const isSyncIterator =
                 ts.isPropertyAccessExpression(callee) && SYNC_ITERATORS.has(callee.name.text);
-            if (isSyncIterator) {
-                for (const arg of n.arguments) {
-                    const a = unwrap(arg);
-                    if (ts.isIdentifier(a)) {
-                        const fn = named.get(a.text);
-                        if (fn) out.add(fn);
-                    }
+            const cb = isArrayFrom ? n.arguments[1] : isSyncIterator ? n.arguments[0] : undefined;
+            if (cb !== undefined) {
+                const a = unwrap(cb);
+                if (ts.isIdentifier(a)) {
+                    const fn = named.get(a.text);
+                    if (fn) out.add(fn);
                 }
             }
         }
@@ -1104,8 +1122,20 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 const lastIsBody =
                     last !== undefined &&
                     (ts.isArrowFunction(last) || ts.isFunctionExpression(last));
+                // `test.skip(titles.disabled, disabledBody)` — title
+                // aggregated into an object AND body moved to a shared
+                // file. Neither slot is resolvable here, but a member read
+                // in slot 0 with a NON-string last argument can only be
+                // the declaration form: a conditional skip's last argument
+                // is its description. (Review finding under the declared
+                // threat model.)
+                const memberTitle =
+                    args.length >= 2 &&
+                    ts.isPropertyAccessExpression(unwrap(args[0])) &&
+                    last !== undefined &&
+                    !isStringish(last);
                 const isDeclaration =
-                    args.length >= 2 && (isStringish(args[0]) || lastIsBody);
+                    args.length >= 2 && (isStringish(args[0]) || lastIsBody || memberTitle);
                 const form: SkipSite['form'] =
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
                 const scope = stack.length ? stack[stack.length - 1] : 'file';
@@ -1853,6 +1883,42 @@ const skipIfMissing = (missing: boolean) => test.skip(missing, 'tool missing');
 export default skipIfMissing;
 `;
 
+/** `Array.from(iterable, cb)` runs its callback during collection. */
+const FIXTURE_ARRAY_FROM = `
+import { test } from '@playwright/test';
+const TOOLS = new Set([{ missing: true }]);
+test.describe('gate', () => {
+    Array.from(TOOLS, ({ missing }) => {
+        test.skip(missing, 'tool missing');
+        test('probe', async () => {});
+    });
+});
+`;
+
+/** `reduce`'s SEED is a value, not a callback — it never runs here. */
+const FIXTURE_REDUCE_SEED = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const handlers: (() => void)[] = [];
+test.describe('soft gate', () => {
+    const selected = handlers.reduce<() => void>(
+        (chosen, next) => next ?? chosen,
+        () => test.skip(!HAS_TOOL, 'not applicable'),
+    );
+    test('probe', async () => selected());
+});
+`;
+
+/** Title aggregated into an object AND body moved to a shared file. */
+const FIXTURE_MEMBER_TITLE_IMPORTED_BODY = `
+import { test } from '@playwright/test';
+import { disabledBody } from './disabled-body';
+const titles = { disabled: 'temporarily disabled' } as const;
+test.describe('gate', () => {
+    test.skip(titles.disabled, disabledBody);
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1971,6 +2037,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['transitive-helper', FIXTURE_TRANSITIVE_HELPER],
             ['extracted-describe-env-write', FIXTURE_EXTRACTED_DESCRIBE_ENV_WRITE],
             ['foreach-named-callback', FIXTURE_FOREACH_NAMED_CALLBACK],
+            ['array-from', FIXTURE_ARRAY_FROM],
             ['default-export-by-name', FIXTURE_DEFAULT_EXPORT_BY_NAME],
             ['samename-helper-elsewhere', FIXTURE_SAMENAME_HELPER_ELSEWHERE],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
@@ -2010,6 +2077,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['imported-process', FIXTURE_IMPORTED_PROCESS],
             ['computed-title', FIXTURE_COMPUTED_TITLE],
             ['title-from-object', FIXTURE_TITLE_FROM_OBJECT],
+            ['reduce-seed', FIXTURE_REDUCE_SEED],
+            ['member-title-imported-body', FIXTURE_MEMBER_TITLE_IMPORTED_BODY],
             ['samename-helper-both-suites', FIXTURE_SAMENAME_HELPER_BOTH_SUITES],
             ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
             ['marker', FIXTURE_MARKER],

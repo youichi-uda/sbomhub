@@ -63,6 +63,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -244,7 +245,7 @@ func parseWorkflow(base, body string) ([]job, error) {
 							cur.matrixOrder = append(cur.matrixOrder, matrixKey)
 						}
 						cur.matrix[matrixKey] = []string{}
-						for _, v := range strings.Split(rest[1:len(rest)-1], ",") {
+						for _, v := range splitFlowList(rest[1 : len(rest)-1]) {
 							if v = scalarValue(v); v != "" {
 								cur.matrix[matrixKey] = append(cur.matrix[matrixKey], v)
 							}
@@ -349,8 +350,33 @@ func scalarValue(s string) string {
 		var b strings.Builder
 		for i := 1; i < len(s); i++ {
 			if s[i] == '\\' && i+1 < len(s) {
-				b.WriteByte(s[i+1])
-				i++
+				// A serializer that escapes non-ASCII writes `\u30b2`;
+				// copying the letters through recorded a name nobody uses
+				// and the same wrong value went into `--fix`, so the two
+				// agreed and the lint stayed clean. (Review finding under
+				// the declared threat model.)
+				switch s[i+1] {
+				case 'u', 'U', 'x':
+					width := map[byte]int{'x': 2, 'u': 4, 'U': 8}[s[i+1]]
+					if i+2+width <= len(s) {
+						if r, err := strconv.ParseUint(s[i+2:i+2+width], 16, 32); err == nil {
+							b.WriteRune(rune(r))
+							i += 1 + width
+							continue
+						}
+					}
+					b.WriteByte(s[i+1])
+					i++
+				case 'n':
+					b.WriteByte('\n')
+					i++
+				case 't':
+					b.WriteByte('\t')
+					i++
+				default:
+					b.WriteByte(s[i+1])
+					i++
+				}
 				continue
 			}
 			if s[i] == '"' {
@@ -364,6 +390,48 @@ func scalarValue(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// splitFlowList splits `a, 'b, c', "d"` on commas OUTSIDE quotes.
+//
+// A plain `strings.Split` turned the single element `'linux, amd64'` into
+// two, so the real check name was never produced and a live required
+// check was reported stale. Adding an architecture to a platform label is
+// an ordinary edit. (Review finding under the declared threat model.)
+func splitFlowList(s string) []string {
+	var (
+		out   []string
+		cur   strings.Builder
+		quote byte
+	)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			cur.WriteByte(c)
+			if c == quote {
+				// `''` inside a single-quoted scalar is an escaped quote.
+				if c == '\'' && i+1 < len(s) && s[i+1] == '\'' {
+					cur.WriteByte(s[i+1])
+					i++
+					continue
+				}
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			cur.WriteByte(c)
+		case c == ',':
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if strings.TrimSpace(cur.String()) != "" {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 // collectJobs scans every workflow file under .github/workflows.

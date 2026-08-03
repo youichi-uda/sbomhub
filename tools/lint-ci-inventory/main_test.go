@@ -866,3 +866,22 @@ jobs:
 		t.Fatalf("expected an anchor/alias error, got %v", err)
 	}
 }
+
+func TestSplitFlowListRespectsQuotes(t *testing.T) {
+	got := splitFlowList(`'linux, amd64', ubuntu-latest`)
+	if len(got) != 2 {
+		t.Fatalf("got %d elements: %q", len(got), got)
+	}
+	if scalarValue(got[0]) != "linux, amd64" || scalarValue(got[1]) != "ubuntu-latest" {
+		t.Fatalf("got %q / %q", scalarValue(got[0]), scalarValue(got[1]))
+	}
+}
+
+func TestScalarValue_UnicodeEscape(t *testing.T) {
+	// A serializer that escapes non-ASCII writes this; copying the letters
+	// through recorded a name nobody uses.
+	in := "\"security \\u30b2\\u30fc\\u30c8\""
+	if got := scalarValue(in); got != "security ゲート" {
+		t.Fatalf("got %q, want %q", got, "security ゲート")
+	}
+}
