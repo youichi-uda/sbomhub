@@ -186,7 +186,15 @@ interface SkipSite {
      * checked scopes; everything else is either per-test or inside a
      * helper whose call sites this gate deliberately does not follow.
      */
-    scope: 'file' | 'describe' | 'beforeAll' | 'test' | 'eachHook' | 'step' | 'closure';
+    scope:
+        | 'file'
+        | 'describe'
+        | 'beforeAll'
+        | 'test'
+        | 'afterAll'
+        | 'eachHook'
+        | 'step'
+        | 'closure';
     condition: string;
     ciNeutral: boolean;
     allowMarker: boolean;
@@ -204,7 +212,12 @@ const CHECKED_SCOPES: ReadonlySet<SkipSite['scope']> = new Set([
 const CALLEE_SKIP = /^test\.(skip|fixme)$/;
 const CALLEE_DESCRIBE = /^(test\.describe(\.(only|serial|parallel|skip|fixme))*|describe)$/;
 const CALLEE_TEST = /^test(\.(only|skip|fixme|fail|slow))?$/;
-const CALLEE_ALL_HOOK = /^test\.(beforeAll|afterAll)$/;
+const CALLEE_BEFORE_ALL = /^test\.beforeAll$/;
+// `afterAll` runs AFTER the group, so nothing in it can affect a
+// collection-time skip. Lumping it in with `beforeAll` meant an
+// ordinary `afterAll` that RESTORES process.env.CI invalidated the
+// proof of a correct sibling guard. (Review finding: false positive.)
+const CALLEE_AFTER_ALL = /^test\.afterAll$/;
 const CALLEE_EACH_HOOK = /^test\.(beforeEach|afterEach)$/;
 const ALLOW_MARKER = /ci-skip-ok:\s*\S/;
 
@@ -323,6 +336,23 @@ function assertsCiIsOff(node: ts.Expression): boolean {
 // ---------------------------------------------------------------------
 // Bindings
 // ---------------------------------------------------------------------
+
+/** Names bound to a FUNCTION in this file. */
+function functionBindings(sf: ts.SourceFile): Set<string> {
+    const names = new Set<string>();
+    const visit = (n: ts.Node): void => {
+        if (ts.isFunctionDeclaration(n) && n.name) names.add(n.name.text);
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+            const init = unwrap(n.initializer);
+            if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
+                names.add(n.name.text);
+            }
+        }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    return names;
+}
 
 /** Every name the file binds, however it binds it, with a count. */
 function boundNames(sf: ts.SourceFile): Map<string, number> {
@@ -451,6 +481,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
 
     const bound = boundNames(sf);
     const consts = fileScopeConsts(sf, bound);
+    const functionNames = functionBindings(sf);
 
     const sites: SkipSite[] = [];
     /** Enclosing test-construct scopes, innermost last. */
@@ -537,31 +568,76 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     ): SkipSite => {
         const last = args.length >= 2 ? unwrap(args[args.length - 1]) : undefined;
 
-        // `test.skip(title, body)` declares a statically-off test;
-        // `test.skip(condition, description)` is the conditional form. A
-        // title is a string and a description is never a function, so
-        // three independent signals each mean "declaration", and any one
-        // of them is enough. All three lean toward NOT reporting, which
-        // is the safe direction here.
-        const declaration =
-            args.length >= 2 &&
-            (isStringish(args[0]) ||
-                (last !== undefined && isInlineFunction(last)) ||
-                // `test.skip(titles.disabled, importedBody)`: neither slot
-                // is resolvable, but a member read in slot 0 with a
-                // non-string last argument can only be the declaration.
-                (ts.isPropertyAccessExpression(unwrap(args[0])) &&
-                    last !== undefined &&
-                    !isStringish(last)));
+        // WHITELIST, not blacklist. A site is only reported when its
+        // first argument is RECOGNISABLY A CONDITION. Everything else —
+        // a title, a callback, a call, a member read, an imported name —
+        // is left alone.
+        //
+        // The previous shape asked "is this a declaration?" and reported
+        // whatever it could not prove was one, so every unfamiliar way of
+        // writing a title or a callback became a red `main`:
+        // `test.skip(disabledTitle(), body)`, `test.skip(namedCallback,
+        // 'msg')`, an imported title. Inverting it makes the failure mode
+        // a miss instead. (Review findings: false positives.)
+        const isConditionShape = (e: ts.Expression, depth = 0): boolean => {
+            const cur = unwrap(e);
+            // `!x`
+            if (
+                ts.isPrefixUnaryExpression(cur) &&
+                cur.operator === ts.SyntaxKind.ExclamationToken
+            ) {
+                return true;
+            }
+            // `a && b`, `a || b`, `a === b`, `a > b`, ...
+            if (ts.isBinaryExpression(cur)) {
+                const k = cur.operatorToken.kind;
+                return (
+                    k === ts.SyntaxKind.AmpersandAmpersandToken ||
+                    k === ts.SyntaxKind.BarBarToken ||
+                    k === ts.SyntaxKind.QuestionQuestionToken ||
+                    k === ts.SyntaxKind.EqualsEqualsToken ||
+                    k === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+                    k === ts.SyntaxKind.ExclamationEqualsToken ||
+                    k === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+                    k === ts.SyntaxKind.LessThanToken ||
+                    k === ts.SyntaxKind.GreaterThanToken ||
+                    k === ts.SyntaxKind.LessThanEqualsToken ||
+                    k === ts.SyntaxKind.GreaterThanEqualsToken ||
+                    k === ts.SyntaxKind.InKeyword ||
+                    k === ts.SyntaxKind.InstanceOfKeyword
+                );
+            }
+            // `true` / `false`
+            if (
+                cur.kind === ts.SyntaxKind.TrueKeyword ||
+                cur.kind === ts.SyntaxKind.FalseKeyword
+            ) {
+                return true;
+            }
+            // A local name bound to something that is itself a condition.
+            // An identifier bound to a FUNCTION is the callback form; an
+            // identifier this file does not bind at all is imported and
+            // could be either, so neither is reported.
+            if (depth === 0 && ts.isIdentifier(cur)) {
+                if (functionNames.has(cur.text)) return false;
+                const init = consts.get(cur.text);
+                if (init) return isConditionShape(init, depth + 1);
+                // Bound locally but not resolvable (a `let`, a shadowed
+                // name): still a condition slot, and the `let` case is one
+                // this gate exists to catch.
+                return bound.has(cur.text) && !isStringish(cur);
+            }
+            return false;
+        };
 
         const form: SkipSite['form'] =
             args.length === 0
                 ? 'noarg'
-                : declaration
-                  ? 'declaration'
-                  : isInlineFunction(unwrap(args[0]))
-                    ? 'callback'
-                    : 'conditional';
+                : isInlineFunction(unwrap(args[0]))
+                  ? 'callback'
+                  : isConditionShape(args[0])
+                    ? 'conditional'
+                    : 'declaration';
 
         let stmt: ts.Node = node;
         while (stmt.parent && !ts.isStatement(stmt)) stmt = stmt.parent;
@@ -595,8 +671,10 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             if (CALLEE_DESCRIBE.test(callee) && hasInlineCallback) {
                 construct = 'describe';
                 isDescribe = true;
-            } else if (CALLEE_ALL_HOOK.test(callee) && hasInlineCallback) {
+            } else if (CALLEE_BEFORE_ALL.test(callee) && hasInlineCallback) {
                 construct = 'beforeAll';
+            } else if (CALLEE_AFTER_ALL.test(callee) && hasInlineCallback) {
+                construct = 'afterAll';
             } else if (CALLEE_EACH_HOOK.test(callee) && hasInlineCallback) {
                 construct = 'eachHook';
             } else if (callee === 'test.step' && hasInlineCallback) {
@@ -1137,6 +1215,46 @@ test.describe('soft gate', () => {
         () => test.skip(!HAS_TOOL, 'not applicable'),
     );
     test('probe', async () => selected());
+});
+`,
+    ],
+    [
+        // The callback form extracted to a name.
+        'a named callback condition',
+        `
+import { test } from '@playwright/test';
+const skipOutsideWebKit = ({ browserName }: { browserName: string }) =>
+    browserName !== 'webkit';
+test.describe('webkit behavior', () => {
+    test.skip(skipOutsideWebKit, 'WebKit only');
+});
+`,
+    ],
+    [
+        // A declaration whose title is produced by a call.
+        'a declaration whose title is computed by a call',
+        `
+import { test } from '@playwright/test';
+const disabledTitle = () => 'temporarily disabled';
+const disabledBody = async () => {};
+test.describe('handoff', () => {
+    test.skip(disabledTitle(), disabledBody);
+});
+`,
+    ],
+    [
+        // afterAll runs AFTER the group; restoring CI there is correct.
+        'afterAll restoring process.env.CI',
+        `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const savedCI = process.env.CI;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+    test.afterAll(() => {
+        if (savedCI === undefined) delete process.env.CI;
+        else process.env.CI = savedCI;
+    });
 });
 `,
     ],

@@ -736,3 +736,32 @@ func TestRequiredFromUndocumented(t *testing.T) {
 			len(fromUndocumented))
 	}
 }
+
+// An OBJECT matrix axis referenced as `${{ matrix.target.os }}` is a
+// normal way to pair values. Half-expanding it produced a name nothing
+// emits and reported a LIVE required check as stale.
+func TestObjectMatrixFallsBackToPrefix(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  smoke:
+    name: install.sh must succeed on ${{ matrix.target.os }}
+    strategy:
+      matrix:
+        target:
+          - os: ubuntu-latest
+            arch: amd64
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	if _, ok := expandNames(jobs[0]); ok {
+		t.Fatal("a dotted/object matrix must not be treated as expandable")
+	}
+	if !matchesJob("install.sh must succeed on ubuntu-latest", jobs[0]) {
+		t.Error("the lenient prefix fallback must still accept the live check")
+	}
+}

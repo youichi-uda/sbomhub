@@ -102,7 +102,13 @@ const (
 	workflowsRel = ".github/workflows"
 )
 
+// `${{ matrix.os }}`. A DOTTED path (`matrix.target.os`) is deliberately
+// not matched here — see expandNames.
 var reMatrixRef = regexp.MustCompile(`\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
+
+// Any matrix reference at all, dotted or not, so a shape the simple one
+// cannot expand is detected rather than half-expanded.
+var reAnyMatrixRef = regexp.MustCompile(`\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}`)
 
 // job is one CI job: the workflow file it lives in, its YAML key, and the
 // name GitHub will show (and match required status checks against).
@@ -220,8 +226,24 @@ func parseWorkflow(base, body string) ([]job, error) {
 							j.matrixOrder = append(j.matrixOrder, key)
 						}
 						legs := make([]string, 0, len(values))
+						nonScalar := false
 						for _, v := range values {
+							switch v.(type) {
+							case yaml.MapSlice, map[string]any, []any:
+								// An OBJECT matrix axis
+								// (`target: [{os: …, arch: …}]`, referenced
+								// as `${{ matrix.target.os }}`). Rendering
+								// it as a string would produce a name
+								// nothing emits and report a LIVE required
+								// check as stale. (Review finding: false
+								// positive.)
+								nonScalar = true
+							}
 							legs = append(legs, yamlString(v))
+						}
+						if nonScalar {
+							j.matrixIsPartial = true
+							continue
 						}
 						j.matrix[key] = legs
 					}
@@ -291,6 +313,10 @@ func collectJobs(root string) ([]job, error) {
 // red.
 func expandNames(j job) ([]string, bool) {
 	refs := reMatrixRef.FindAllStringSubmatch(j.checkName, -1)
+	// A dotted reference this expander does not model: stay lenient.
+	if len(reAnyMatrixRef.FindAllString(j.checkName, -1)) != len(refs) {
+		return nil, false
+	}
 	if len(refs) == 0 {
 		if j.namedExplicitly || len(j.matrix) == 0 {
 			return []string{j.checkName}, true
