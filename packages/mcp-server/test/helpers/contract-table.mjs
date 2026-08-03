@@ -59,6 +59,24 @@ export const VULNS = [
   vuln("CVE-2023-3333", "LOW", 3.1),
 ];
 
+/**
+ * The per-severity buckets apps/api would report for a set of rows.
+ *
+ * The client compares the WHOLE summary across the walk, so a fixture whose
+ * probe reports zero in every bucket while the pages return five rows of four
+ * severities is evidence that cannot describe the walk it certifies (Codex R5,
+ * Low) — the same shape as the `total: 0` default that preceded it.
+ */
+export const bucketsOf = (rows) => {
+  const out = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, kev: 0 };
+  for (const r of rows) {
+    const key = (r.severity ?? "unknown").toLowerCase();
+    if (key in out) out[key] += 1;
+    else out.unknown += 1;
+  }
+  return out;
+};
+
 // What the SBOM list really looks like: `version` is the document's own spec
 // version (apps/api/internal/service/sbom.go detectFormatAndVersion), so a
 // project uploading CycloneDX repeatedly has the same string on every row.
@@ -287,7 +305,7 @@ export const CONTRACT_CASES = [
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
-      ...scanProbe("completed", { total: VULNS.length }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     // Promise.all fan-out: assert the SET, not the order.
     unordered: true,
@@ -499,7 +517,7 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
-      ...scanProbe("completed", { total: VULNS.length }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
     check({ payload }) {
@@ -526,7 +544,7 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, severity: "critical" },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
-      ...scanProbe("completed", { total: VULNS.length }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     // The backend has no severity parameter — the query must stay untouched.
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
@@ -550,7 +568,7 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, sort: "epss" },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
-      ...scanProbe("completed", { total: VULNS.length }),
+      ...scanProbe("completed", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0, "epss") }]),
     check({ payload }) {
@@ -707,7 +725,7 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
-      ...scanProbe("unknown", { total: VULNS.length }),
+      ...scanProbe("unknown", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
       { after: false }),
@@ -728,7 +746,7 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID },
     routes: {
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
-      ...scanProbe("failed", { total: VULNS.length }),
+      ...scanProbe("failed", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
       { after: false }),
@@ -831,8 +849,8 @@ export const CONTRACT_CASES = [
       // still reads `completed`. The COUNT is what moves — it is a COUNT over
       // the same join the pages come from.
       ...scanProbeChanging(
-        { state: "completed", total: VULNS.length },
-        { state: "completed", total: VULNS.length + 3 }
+        { state: "completed", total: VULNS.length, buckets: bucketsOf(VULNS) },
+        { state: "completed", total: VULNS.length + 3, buckets: bucketsOf(VULNS) }
       ),
     },
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
@@ -857,8 +875,8 @@ export const CONTRACT_CASES = [
       // SBOMs. Every vulnerability page is answered against whatever is latest
       // at that moment, so the rows cannot be attributed to either snapshot.
       ...scanProbeChanging(
-        { state: "completed", total: VULNS.length, sbomId: SBOM_NEWEST },
-        { state: "completed", total: VULNS.length, sbomId: SBOM_MIDDLE }
+        { state: "completed", total: VULNS.length, sbomId: SBOM_NEWEST, buckets: bucketsOf(VULNS) },
+        { state: "completed", total: VULNS.length, sbomId: SBOM_MIDDLE, buckets: bucketsOf(VULNS) }
       ),
     },
     expect: [
@@ -879,6 +897,36 @@ export const CONTRACT_CASES = [
       // pages were answered somewhere in between, so naming one would assert an
       // origin for rows that may have come from the other (Codex R2, Medium).
       assert.equal(payload.scanned_sbom_id, null);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a scan-status body missing the severity buckets is unreadable, not final",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      [K.latestSbom]: { status: 200, body: SBOMS[0] },
+      // handler.VulnerabilitySummaryCount marshals all seven fields
+      // unconditionally, so a body without them did not come from this API. If
+      // the schema required only `total`, this would parse, compare equal across
+      // both readings, and be certified — having compared no per-severity
+      // summary at all (Codex R5, Medium). Refusing to read it is fail-closed.
+      [K.scanStatus]: {
+        status: 200,
+        body: {
+          status: "completed",
+          sbom_id: SBOM_NEWEST,
+          project_id: PROJECT_ID,
+          vulnerabilities: { total: VULNS.length },
+        },
+      },
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
+      { after: false }),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "unavailable");
+      assert.equal(payload.counts_final, false);
     },
   },
 
@@ -914,7 +962,7 @@ export const CONTRACT_CASES = [
       // status to an enum on purpose: a state added to apps/api later must
       // reach the model as itself rather than be rejected — and must not be
       // read as "finished", because only one literal is evidence of that.
-      ...scanProbe("queued", { total: VULNS.length }),
+      ...scanProbe("queued", { total: VULNS.length, buckets: bucketsOf(VULNS) }),
     },
     expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
       { after: false }),
@@ -940,7 +988,13 @@ export const CONTRACT_CASES = [
         return () => {
           n += 1;
           return n === 1
-            ? { status: 200, body: scanStatusBody("completed", { total: VULNS.length }) }
+            ? {
+                status: 200,
+                body: scanStatusBody("completed", {
+                  total: VULNS.length,
+                  buckets: bucketsOf(VULNS),
+                }),
+              }
             : { status: 500, body: { error: "boom" } };
         };
       })(),

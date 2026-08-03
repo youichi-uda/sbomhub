@@ -49,8 +49,25 @@ const ScanStatusSchema = z
     // `total` — a vulnerability whose severity is rewritten mid-walk (a KEV or
     // CVSS sync relabelling LOW as CRITICAL) leaves the total untouched while
     // making `by_severity` and any severity filter stale (Codex R4, High).
-    // .passthrough() keeps a bucket added later inside the compared value.
-    vulnerabilities: z.object({ total: z.number() }).passthrough(),
+    // Every bucket is REQUIRED, not optional (Codex R5, Medium): with only
+    // `total` required, a response omitting the severity buckets would parse,
+    // compare equal across both readings, and be certified — having compared no
+    // per-severity summary at all. handler.VulnerabilitySummaryCount marshals
+    // all seven fields unconditionally, so a body without them did not come from
+    // this API, and refusing to read it (-> SCAN_STATE_UNAVAILABLE) is the
+    // fail-closed direction. .passthrough() keeps a bucket added later inside
+    // the compared value.
+    vulnerabilities: z
+      .object({
+        critical: z.number(),
+        high: z.number(),
+        medium: z.number(),
+        low: z.number(),
+        unknown: z.number(),
+        kev: z.number(),
+        total: z.number(),
+      })
+      .passthrough(),
   })
   .passthrough();
 

@@ -769,8 +769,8 @@ attached so we can address the regression in the next M0 patch.
 
 ## 7. `X-API-Key` on the canonical routes, and the MCP scan-state probe
 
-Added 2026-08-04. Two changes that an operator can observe, plus one residual
-that is recorded rather than closed.
+Added 2026-08-04. Two changes an operator can observe, plus five limitations in
+§7.2 that are recorded rather than closed.
 
 ### 7.1 `X-API-Key` now authenticates on `/api/v1/projects/...`
 
