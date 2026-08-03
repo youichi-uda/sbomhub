@@ -494,6 +494,33 @@ function hasAllowMarker(text: string, stmt: ts.Node): boolean {
     return ranges.some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
 }
 
+/**
+ * File-scope `const skip = test.skip;`-style aliases, so a call through
+ * the alias resolves to the same dotted name.
+ *
+ * Extracting a helper alias is an ordinary refactor, and without this the
+ * aliased call was not recorded at all. Only `const` and only names
+ * rooted at `test` are followed, and only when the name is bound exactly
+ * once in the file (same shadowing rule as the condition resolver).
+ * (Review finding, High.)
+ */
+function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<string, string> {
+    const aliases = new Map<string, string>();
+    for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt)) continue;
+        if ((stmt.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+        for (const decl of stmt.declarationList.declarations) {
+            if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
+            if (bound.get(decl.name.text) !== 1) continue;
+            const target = calleeName(decl.initializer);
+            if (target !== null && (target === 'test' || target.startsWith('test.'))) {
+                aliases.set(decl.name.text, target);
+            }
+        }
+    }
+    return aliases;
+}
+
 function bodyCanThrow(fn: ts.Node): boolean {
     let found = false;
     const visit = (n: ts.Node): void => {
@@ -522,6 +549,15 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
     // If the file rebinds a global the proof reads by name, the proof is
     // meaningless there and nothing in the file can be judged CI-neutral.
     const bound = boundNames(sf);
+    const aliases = calleeAliases(sf, bound);
+    /** Dotted callee name, with a file-scope alias expanded. */
+    const resolvedCallee = (expr: ts.Expression): string => {
+        const name = calleeName(expr);
+        if (name === null) return '';
+        const head = name.split('.')[0];
+        const target = aliases.get(head);
+        return target === undefined ? name : target + name.slice(head.length);
+    };
     const globalsIntact = !PROOF_GLOBALS.some((g) => bound.has(g)) && envIsPristine(sf);
     const sites: SkipSite[] = [];
     // Enclosing test-construct scopes, innermost last.
@@ -535,7 +571,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
             if (found) return;
             if (
                 ts.isCallExpression(n) &&
-                calleeName(n.expression) === 'test.beforeAll' &&
+                resolvedCallee(n.expression) === 'test.beforeAll' &&
                 n.arguments.length > 0 &&
                 bodyCanThrow(n.arguments[0])
             ) {
@@ -553,7 +589,7 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         let pushedDescribe = false;
 
         if (ts.isCallExpression(node)) {
-            const callee = calleeName(node.expression) ?? '';
+            const callee = resolvedCallee(node.expression);
             const args = node.arguments;
             const hasCallback = args.length >= 1 && args.some((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a));
 
@@ -886,6 +922,16 @@ test.describe('gate', () => {
 });
 `;
 
+/** Extracting `test.skip` into a local alias is an ordinary refactor. */
+const FIXTURE_ALIASED_SKIP = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const skip = test.skip;
+test.describe('gate', () => {
+    skip(!HAS_TOOL, 'tool missing');
+});
+`;
+
 /** ...and one level further out, through a `process` alias. */
 const FIXTURE_ALIASED_PROCESS = `
 import { test } from '@playwright/test';
@@ -1008,6 +1054,7 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['assigned-env-ci', FIXTURE_ASSIGNED_ENV_CI],
             ['aliased-env', FIXTURE_ALIASED_ENV],
             ['aliased-process', FIXTURE_ALIASED_PROCESS],
+            ['aliased-skip', FIXTURE_ALIASED_SKIP],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
         ] as const) {

@@ -171,8 +171,15 @@ jobs:
                 echo "    (no main package)"
               fi
               for m in $mains; do
-                echo "    go build $m"
+                # Twice, because the artifact lands wherever the operator
+                # was standing: from the module root (`go build ./cmd/x`
+                # drops `<module>/x`) and from the package's own directory
+                # (`cd cmd/x && go build .` drops `<module>/cmd/x/x`).
+                # Both are unignored until someone adds them.
+                echo "    go build $m  (from module root and from its own dir)"
                 go build "$m"
+                pkgdir="$(go list -f '{{.Dir}}' "$m")"
+                (cd "$pkgdir" && go build .)
               done
             )
           done
