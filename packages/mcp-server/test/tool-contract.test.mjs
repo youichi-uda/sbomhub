@@ -42,6 +42,8 @@ let descriptionByTool = new Map();
 const observedRouteKeysByTool = new Map();
 /** tools observed returning a deliberately incomplete answer */
 const toolsObservedTruncating = new Set();
+/** @type {Map<string, Set<string>>} tool → every field name seen in its payloads */
+const payloadKeysByTool = new Map();
 
 const UUID_ANYWHERE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -64,6 +66,19 @@ after(async () => {
 // nests the same flag under `vulnerabilities`. Looking only at the top level
 // let a truncated dashboard pass the disclosure rule below (Codex R2, High),
 // so the whole payload is searched.
+function collectKeys(value, into) {
+  if (value === null || typeof value !== "object") return into;
+  if (Array.isArray(value)) {
+    for (const item of value) collectKeys(item, into);
+    return into;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    into.add(key);
+    collectKeys(child, into);
+  }
+  return into;
+}
+
 function declaresTruncation(value) {
   if (value === null || typeof value !== "object") return false;
   if (value.scan_truncated === true) return true;
@@ -129,8 +144,14 @@ for (const testCase of CONTRACT_CASES) {
     for (const r of requests) observed.add(r.routeKey);
     observedRouteKeysByTool.set(testCase.tool, observed);
 
-    if (!testCase.expectError && declaresTruncation(jsonOf(result))) {
-      toolsObservedTruncating.add(testCase.tool);
+    if (!testCase.expectError) {
+      const payload = jsonOf(result);
+      if (declaresTruncation(payload)) toolsObservedTruncating.add(testCase.tool);
+      collectKeys(
+        payload,
+        payloadKeysByTool.get(testCase.tool) ??
+          payloadKeysByTool.set(testCase.tool, new Set()).get(testCase.tool)
+      );
     }
 
     if (testCase.check) {
@@ -299,6 +320,30 @@ test("a tool that can truncate its own answer says so in its description", () =>
         "project's totals."
     );
   }
+});
+
+// A description that tells the model to read `by_severity` from a payload that
+// has no such field is the same defect in miniature: the model is told
+// something about the answer that is not true of the answer. Field names are
+// checkable against what the tool actually returned.
+test("every response field a description names exists in what the tool returns", () => {
+  // snake_case tokens only — prose and tool names (sbomhub_*) are not fields.
+  const FIELD_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+  let checked = 0;
+  for (const [tool, keys] of payloadKeysByTool) {
+    const description = descriptionByTool.get(tool) ?? "";
+    for (const [token] of description.matchAll(FIELD_TOKEN)) {
+      if (token.startsWith("sbomhub_")) continue;
+      checked += 1;
+      assert.equal(
+        keys.has(token),
+        true,
+        `${tool}'s description names the field "${token}", which appears nowhere in the ` +
+          `payloads it produced. Fields seen: ${[...keys].sort().join(", ")}`
+      );
+    }
+  }
+  assert.equal(checked > 0, true, "no description named a field — the check is vacuous");
 });
 
 test("a tool whose routes are all tenant-wide never sends a project id", () => {

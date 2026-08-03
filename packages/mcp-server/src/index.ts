@@ -145,10 +145,10 @@ server.registerTool(
   {
     description:
       "プロジェクト別ダッシュボードを取得 (脆弱性サマリー/コンプライアンス/SBOM状況)。" +
-      "脆弱性は最大5000件まで走査し、超える場合は" +
-      "vulnerabilities.scan_truncated=true になる。そのとき by_severity と" +
+      "脆弱性は最大5000件まで走査し、超える場合は " +
+      "vulnerabilities.scan_truncated=true になる。そのとき by_severity と " +
       "top_by_cvss は走査した analyzed 件の集計であって、" +
-      "プロジェクトの全件を数えた値ではない",
+      "プロジェクトの全件を数えた値ではない (全体の件数は total)",
     inputSchema: {
       project_id: projectIdSchema,
     },
@@ -257,9 +257,10 @@ server.registerTool(
   {
     description:
       "プロジェクトの脆弱性一覧を取得 (CVSS/EPSS順、最大500件、severityで絞り込み可)。" +
-      "内部の走査は最大5000件までで、それを超えるプロジェクトでは" +
-      "scan_truncated=true が返る。その場合 matched / by_severity は" +
-      "走査した範囲の値なので、プロジェクト全体の件数として報告しないこと",
+      "内部の走査は最大5000件までで、それを超えるプロジェクトでは " +
+      "scan_truncated=true が返る。その場合 matched と returned は" +
+      "走査した範囲での件数なので、プロジェクト全体の値として報告しないこと " +
+      "(全体の件数は total_in_project)",
     inputSchema: {
       project_id: projectIdSchema,
       severity: z
