@@ -150,6 +150,21 @@ pre-existing Go test can only assert that `generatePDF` returned
 non-empty bytes. Missing locally → the describe skips with an actionable
 message; missing under `CI` → hard failure.
 
+That split is expressed as `test.skip(!HAS_PDFTOTEXT && !process.env.CI)`
+plus a `beforeAll` that throws. **The `&& !process.env.CI` is
+load-bearing.** A describe-level `test.skip(cond)` is evaluated at
+collection time and skips the group *including its `beforeAll`*, so
+writing the condition as a bare `!HAS_PDFTOTEXT` makes the CI hard-fail
+unreachable — and a CI run without poppler-utils then reports "7 skipped"
+on a green job, i.e. a gate that certifies the PDF's contents without
+opening one. Verified both directions rather than assumed:
+
+```
+CI=1   + PATH without /usr/bin -> 1 failed, 6 did not run, exit 1
+(unset)+ PATH without /usr/bin -> 7 skipped, exit 0
+CI=1   + pdftotext present     -> all 7 collected and run
+```
+
 ## Critical ordering
 
 The API's `apps/api/internal/middleware/auth.go::handleSelfHostedAuth`

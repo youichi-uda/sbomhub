@@ -468,8 +468,16 @@ jobs:
         # executive report and reads its text layer with pdftotext, because
         # "generatePDF returned non-empty bytes" (the pre-existing Go test)
         # cannot see whether the summary line says "未計測" or "0.0 時間".
-        # The spec hard-fails instead of skipping when pdftotext is absent
-        # under CI, so this step is load-bearing for the gate.
+        #
+        # If this step ever stops installing the package, the spec FAILS
+        # here rather than skipping: its describe-level `test.skip` is
+        # conditioned on `!HAS_PDFTOTEXT && !process.env.CI`, so under CI
+        # the group is still collected and its beforeAll throws. Measured
+        # both ways (CI=1 + a PATH without /usr/bin -> exit 1; CI unset +
+        # same PATH -> 7 skipped, exit 0). Do not drop the `&& !CI`: a
+        # describe-level skip is evaluated at collection and takes the
+        # beforeAll with it, which silently turns this whole gate into
+        # "7 skipped" on a green job.
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
 
       - name: Run Playwright full suite (e2e/*.spec.ts, excluding smoke/)

@@ -39,7 +39,9 @@ import { join } from 'node:path';
  *
  * pdftotext (poppler-utils) is required. Under CI its absence is a hard
  * failure — a gate that skips itself when its tool is missing gates nothing.
- * Locally it degrades to a skip with an actionable message.
+ * Locally it degrades to a skip with an actionable message. See the comment
+ * on the skip condition below: getting that condition wrong makes the
+ * hard-fail unreachable while still LOOKING like a guard.
  */
 
 const API_BASE_URL =
@@ -144,16 +146,31 @@ const LABELS = {
 } as const;
 
 test.describe('Executive report PDF — unmeasured metrics are a label, never 0.0', () => {
+    // Under CI, a missing pdftotext must FAIL. Anywhere else it may skip.
+    //
+    // The `&& !process.env.CI` is load-bearing and must not be "simplified"
+    // away: a describe-level `test.skip(cond)` is evaluated at COLLECTION
+    // time and skips the whole group INCLUDING its beforeAll. With the
+    // condition written as a bare `!HAS_PDFTOTEXT`, the beforeAll below is
+    // unreachable in exactly the situation it exists for, and a CI run
+    // without poppler-utils reports "7 skipped" and a green job — a gate
+    // that certifies the PDF's contents without ever opening one. Measured,
+    // not assumed: with the bare condition, `CI=1` + a PATH without
+    // /usr/bin gave `7 skipped`, exit 0.
+    test.skip(
+        !HAS_PDFTOTEXT && !process.env.CI,
+        'pdftotext not installed — apt-get install poppler-utils',
+    );
+
     test.beforeAll(() => {
-        if (!HAS_PDFTOTEXT && process.env.CI) {
+        if (!HAS_PDFTOTEXT) {
+            // Only reachable under CI, because of the skip above.
             throw new Error(
                 'pdftotext (poppler-utils) is required to verify generated PDFs in CI. ' +
                     'Install it in the workflow (apt-get install -y poppler-utils).',
             );
         }
     });
-
-    test.skip(!HAS_PDFTOTEXT, 'pdftotext not installed — apt-get install poppler-utils');
 
     for (const locale of ['ja', 'en'] as const) {
         const L = LABELS[locale];

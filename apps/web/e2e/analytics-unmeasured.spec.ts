@@ -132,6 +132,15 @@ function severityRow(card: Locator, severity: string): Locator {
  * — feeding a null into `(mttr_hours / target_hours)` would coerce to 0 and
  * paint a full-width bar, so its absence is a load-bearing part of the fix
  * and not merely cosmetic. Class-coupled because the page ships no test ids.
+ *
+ * `toHaveCount(0)` on a selector that matches nothing passes for the wrong
+ * reason, so the 90-day test asserts `toHaveCount(1)` through this SAME
+ * helper. That positive assertion is the selector's own control: restyle the
+ * track and the suite goes red there rather than quietly agreeing that no
+ * severity has a bar. The same discipline applies to every `.not.*` /
+ * `toHaveCount(0)` below — each is preceded by a positive assertion on the
+ * same locator, so an unresolvable locator fails before it can satisfy a
+ * negative vacuously.
  */
 function barFills(row: Locator): Locator {
     return row.locator('div.h-2.bg-muted > div');
