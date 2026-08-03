@@ -33,24 +33,47 @@
 // claim in the recognised form (or update the marker with intent), whereas a
 // rule loose enough to accept any phrasing would accept the five rows above.
 
+// Positive vocabulary. Every one of these is expected to match at least one
+// live description (tool-inventory.test.mjs asserts that), so a marker that
+// stopped matching anything — a typo, a phrase the product abandoned — is
+// caught instead of quietly making a rule unsatisfiable or vacuous.
+//
+// The negative lookaheads matter: these are substring checks, and Japanese
+// negates at the END of the clause. Without them,
+// 「テナント単位のAPIキーが必要ではない」 would satisfy a check for
+// 「…が必要」 while asserting the opposite (Codex R1, High).
 export const MARKERS = {
-  // "テナント単位のAPIキーが必要" — the strong form: this tool needs one.
-  tenantKeyRequired: /テナント単位のAPIキーが必要/,
+  // The strong form: this tool needs a tenant-level key.
+  tenantKeyRequired:
+    /テナント単位のAPIキーが必要(?!ではない|ではありません|でない|ない|とは限らない)/,
   // Weak form: the tenant-level key is at least mentioned as a condition.
   tenantKeyMentioned: /テナント単位のAPIキー/,
   projectScopedKeyMentioned: /プロジェクトスコープのAPIキー/,
-  refusalWord: /拒否/,
+  ownProject: /そのプロジェクト/,
   narrowedToOne: /1件/,
   // An unconditional claim of tenant-wide reach.
   tenantWideClaim: /テナント全体|全プロジェクト/,
 };
 
-function has(description, marker) {
-  return marker.test(description);
+// Phrasings that assert the OPPOSITE of the rules below. Expected to match no
+// description at all; tool-inventory.test.mjs asserts that too, so these stay
+// meaningful rather than becoming dead regexes.
+export const ANTI_MARKERS = {
+  negatedRefusal:
+    /拒否され(?:ない|ません)|拒否されることは(?:ない|ありません)|拒否されるわけではない/,
+};
+
+/**
+ * 「<status>で拒否される」 as one affirmative clause. Checking the status number
+ * and the word 「拒否」 independently would accept a sentence that contains both
+ * while denying the refusal.
+ */
+export function refusalMarker(status) {
+  return new RegExp(`${status}で拒否される`);
 }
 
-function mentionsStatus(description, status) {
-  return new RegExp(`(?<!\\d)${status}(?!\\d)`).test(description);
+function has(description, marker) {
+  return marker.test(description);
 }
 
 /**
@@ -90,30 +113,39 @@ export function scopeClaimViolations({
           (tenantWideRoutes.length ? ` Tenant-wide: ${tenantWideRoutes.join(", ")}` : "")
       );
     }
-    if (!mentionsStatus(description, denialStatus)) {
+    if (!has(description, refusalMarker(denialStatus))) {
       violations.push(
         `${where}: the backend answers a project-scope violation with HTTP ${denialStatus} ` +
-          `and the tool surfaces it verbatim, but the description never names the status. ` +
-          `Without it the model cannot tell "refused" from "absent".`
+          `and the tool surfaces it verbatim, but the description does not state the refusal ` +
+          `(expected 「${denialStatus}で拒否される」 as one clause). Without it the model ` +
+          `cannot tell "refused" from "absent".`
       );
     }
-    if (!has(description, MARKERS.refusalWord)) {
+    if (!has(description, MARKERS.projectScopedKeyMentioned)) {
       violations.push(
-        `${where}: the route is refused, not narrowed, and the description does not say so ` +
-          `(expected 「拒否」). A description that leaves this out invites the model to ` +
-          `treat a narrowed or empty answer as the tenant's true state.`
+        `${where}: the refusal only happens to a PROJECT-SCOPED key, and the description ` +
+          `never names that credential. A model told only that "a tenant-level key is ` +
+          `required" cannot tell whether the key it was given is one.`
+      );
+    }
+    if (has(description, ANTI_MARKERS.negatedRefusal)) {
+      violations.push(
+        `${where}: the description denies a refusal that the backend does perform ` +
+          `(scopeTenantWide → ${denialStatus}). State refusals affirmatively.`
       );
     }
   } else if (hasNarrowedList) {
     if (
       !has(description, MARKERS.projectScopedKeyMentioned) ||
-      !has(description, MARKERS.narrowedToOne)
+      !has(description, MARKERS.narrowedToOne) ||
+      !has(description, MARKERS.ownProject)
     ) {
       violations.push(
         `${where}: the route is scopeProjectListNarrowed — with a project-scoped key the ` +
-          `backend answers with that ONE project instead of the tenant's list. The ` +
-          `description must say so (expected 「プロジェクトスコープのAPIキー」 and 「1件」), ` +
-          `otherwise a one-element answer reads as "the tenant has one project".`
+          `backend answers with THAT KEY'S OWN project instead of the tenant's list. The ` +
+          `description must say which project, not just how many (expected ` +
+          `「プロジェクトスコープのAPIキー」, 「そのプロジェクト」 and 「1件」), otherwise a ` +
+          `one-element answer reads as "the tenant has one project".`
       );
     }
     if (
@@ -137,7 +169,7 @@ export function scopeClaimViolations({
   }
 
   // Reverse direction: do not advertise a refusal that cannot happen.
-  if (!hasTenantWide && has(description, MARKERS.refusalWord) && mentionsStatus(description, denialStatus)) {
+  if (!hasTenantWide && has(description, refusalMarker(denialStatus))) {
     violations.push(
       `${where}: the description announces a ${denialStatus} refusal, but none of the routes ` +
         `this tool calls is scopeTenantWide, so the backend never refuses it on scope ` +

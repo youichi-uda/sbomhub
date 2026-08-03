@@ -59,6 +59,12 @@ for (const testCase of CONTRACT_CASES) {
     stub.routes(testCase.routes);
 
     const result = await mcp.callTool(testCase.tool, testCase.args);
+    // Wait for the traffic to settle before reading the log: a fan-out leg can
+    // still be arriving when the tool has already answered, and an UNEXPECTED
+    // extra request needs a chance to show up before "exactly these requests"
+    // is asserted.
+    await stub.waitFor(testCase.expect.length);
+    await stub.quiet();
     const requests = stub.requests;
 
     if (testCase.expectError) {

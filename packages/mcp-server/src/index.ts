@@ -78,17 +78,25 @@ function errorResult(err: unknown): CallToolResult {
 
 // The per-project tools all take this. The refusal a project-scoped key gets
 // for someone ELSE's project is stated on the argument that causes it, because
-// that is the only place the model can connect the 403 to a cause: the tool
-// surfaces `API error 403: {"error":"forbidden"}` verbatim, which on its own is
-// indistinguishable from an entirely invalid credential.
+// that is where the model can connect the status to a cause: the tool surfaces
+// `API error 403: {"error":"forbidden"}` verbatim, and on its own that is
+// indistinguishable from the tenant-wide tools' refusal — same status, same
+// body, different reason. (An invalid or expired key is 401, not 403.)
+//
+// What the note must NOT say is that the project exists. project_scope.go
+// answers the same 403 with the same body for a sibling project, another
+// tenant's project and a UUID that was never allocated
+// (TestM50W2PathParamDenialIsIndistinguishable asserts byte equality), so a
+// description promising "it exists, you just cannot see it" would hand the
+// model an inference the status does not support (Codex R1, Medium).
 const projectIdSchema = z
   .string()
   .uuid()
   .describe(
     "プロジェクトID (UUID)。" +
       "プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を" +
-      "指定すると403で拒否される (「存在しない」ではなく" +
-      "「このキーからは見えない」を意味する)"
+      "指定すると403で拒否される。この403は「このキーではそのIDを扱えない」" +
+      "という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
   );
 
 server.registerTool(

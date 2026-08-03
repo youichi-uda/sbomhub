@@ -36,6 +36,8 @@ export function routeKeyOf(method, pathname) {
   return `${method} ${toRoutePattern(pathname)}`;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function parseJson(raw) {
   try {
     return JSON.parse(raw);
@@ -53,11 +55,18 @@ export async function startStubApi() {
   /** @type {Array<object>} */
   const requests = [];
   let handler = () => undefined;
+  let inFlight = 0;
+  let lastArrivalAt = 0;
 
   const server = http.createServer((req, res) => {
+    inFlight += 1;
+    res.on("close", () => {
+      inFlight -= 1;
+    });
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
+      lastArrivalAt = Date.now();
       const raw = Buffer.concat(chunks).toString("utf8");
       const url = new URL(req.url, "http://stub.invalid");
       const record = {
@@ -119,8 +128,49 @@ export async function startStubApi() {
         return typeof entry === "function" ? entry(record, index) : entry;
       };
     },
+    /**
+     * Wait until at least `n` requests have been recorded.
+     *
+     * A tool that fans out with Promise.all resolves as soon as ONE leg
+     * rejects, while its siblings are still in flight. Comparing the request
+     * log at that moment is a race — and worse, the stragglers would land in
+     * the NEXT test's log after reset(). Both directions of that race were
+     * reproduced in a stress run (Codex R1, Medium).
+     */
+    async waitFor(n, timeoutMs = 5000) {
+      const deadline = Date.now() + timeoutMs;
+      while (requests.length < n) {
+        if (Date.now() > deadline) {
+          throw new Error(
+            `timed out waiting for ${n} requests; saw ${requests.length}: ` +
+              requests.map((r) => r.routeKey).join(", ")
+          );
+        }
+        await sleep(2);
+      }
+    },
+    /**
+     * Wait until nothing has arrived for `idleMs` and no response is still
+     * open. Used after each tool call: it makes "exactly these requests" mean
+     * exactly, by giving an unexpected extra request time to show up, and
+     * guarantees no straggler can leak past the next reset().
+     */
+    async quiet(idleMs = 25, timeoutMs = 5000) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const idleFor = Date.now() - lastArrivalAt;
+        if (inFlight === 0 && idleFor >= idleMs) return;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `stub never went quiet: inFlight=${inFlight}, last arrival ${idleFor}ms ago`
+          );
+        }
+        await sleep(5);
+      }
+    },
     reset() {
       requests.length = 0;
+      lastArrivalAt = 0;
       handler = () => undefined;
     },
     async close() {

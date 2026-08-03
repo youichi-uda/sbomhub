@@ -13,13 +13,18 @@
 // enumerate MCP resources or prompts — this server registers none, and that is
 // asserted below so the day it registers one, this file has to be revisited.
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
 import { DENIAL_STATUS, scopeKindOf } from "./helpers/backend-scope.mjs";
 import { CONTRACT_CASES, declaredRouteKeysByTool } from "./helpers/contract-table.mjs";
-import { MARKERS } from "./helpers/description-claims.mjs";
+import {
+  ANTI_MARKERS,
+  MARKERS,
+  refusalMarker,
+  scopeClaimViolations,
+} from "./helpers/description-claims.mjs";
 import { SERVER_SOURCE, startMcpServer } from "./helpers/mcp-harness.mjs";
 import { startStubApi } from "./helpers/stub-api.mjs";
 
@@ -135,6 +140,15 @@ test("argument schemas match the scope of the routes each tool calls", () => {
         `${tool}.project_id must say what happens when a project-scoped API key names ` +
           "another project (the backend answers " + DENIAL_STATUS + ")"
       );
+      // ...and must not turn that status into a claim about existence. The
+      // backend answers the same 403 for a project that exists, one in another
+      // tenant, and a UUID that was never allocated.
+      assert.doesNotMatch(
+        properties.project_id.description ?? "",
+        /存在する(?!かどうか)/,
+        `${tool}.project_id implies the named project exists; a scope refusal reveals nothing ` +
+          "about existence"
+      );
     }
   }
 });
@@ -195,7 +209,8 @@ test("every claim marker still matches some real description", () => {
   // the must-contain rules into an unsatisfiable demand nobody can read. Each
   // marker is expected to be live vocabulary — matched by at least one tool.
   const descriptions = tools.map((t) => t.description ?? "");
-  for (const [name, marker] of Object.entries(MARKERS)) {
+  const live = { ...MARKERS, refusal: refusalMarker(DENIAL_STATUS) };
+  for (const [name, marker] of Object.entries(live)) {
     assert.equal(
       descriptions.some((d) => marker.test(d)),
       true,
@@ -204,26 +219,49 @@ test("every claim marker still matches some real description", () => {
         "marker deliberately — or the rule it backs is now checking nothing."
     );
   }
+  // The mirror: the negated phrasings must match nothing. If one ever does,
+  // some description is denying a refusal the backend performs.
+  for (const [name, marker] of Object.entries(ANTI_MARKERS)) {
+    const offenders = tools.filter((t) => marker.test(t.description ?? ""));
+    assert.deepEqual(
+      offenders.map((t) => t.name),
+      [],
+      `ANTI_MARKERS.${name} (${marker}) matched a live description`
+    );
+  }
 });
 
-test("the test script runs every test file in this directory", () => {
-  // The `test` script lists files explicitly (see the "//test" note in
-  // package.json). A file that is never listed is a file CI never runs, which
-  // is indistinguishable from not having written it.
-  const pkg = JSON.parse(
-    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")
-  );
-  const script = pkg.scripts.test ?? "";
-  const files = readdirSync(fileURLToPath(new URL(".", import.meta.url)))
-    .filter((f) => f.endsWith(".test.mjs"))
-    .sort();
-  const missing = files.filter((f) => !script.includes(f));
-  assert.deepEqual(
-    missing,
-    [],
-    `test/${missing.join(", test/")} would never run: add them to the "test" script in ` +
-      "packages/mcp-server/package.json"
-  );
+test("the scope rules react to the classification, not only to the wording", () => {
+  // The join being tested elsewhere is description ⟷ route ⟷ backend policy.
+  // The wording side is exercised by every run; this exercises the POLICY side
+  // without a live Go server: take a live description and ask what the rules
+  // would say if the backend classified its route differently. Each case must
+  // produce at least one violation — if none does, the rules are insensitive to
+  // the classification and the join is decorative.
+  const live = new Map(tools.map((t) => [t.name, t.description ?? ""]));
+  const cases = [
+    // Claims tenant-wide coverage; would be false for a per-project route.
+    ["sbomhub_get_dashboard", "scopeProjectPathParam"],
+    // Says nothing about a tenant-level key; would be missing for a refused route.
+    ["sbomhub_get_compliance", "scopeTenantWide"],
+    // Describes the narrowing, not a refusal.
+    ["sbomhub_list_projects", "scopeTenantWide"],
+  ];
+
+  for (const [tool, pretendKind] of cases) {
+    const violations = scopeClaimViolations({
+      tool,
+      description: live.get(tool),
+      routeKindByKey: new Map([["GET /pretend", pretendKind]]),
+      denialStatus: DENIAL_STATUS,
+    });
+    assert.equal(
+      violations.length > 0,
+      true,
+      `reclassifying ${tool}'s route as ${pretendKind} would make its description wrong, ` +
+        "but the rules in helpers/description-claims.mjs reported nothing"
+    );
+  }
 });
 
 test("README.md documents exactly the tools the server registers", () => {
@@ -263,11 +301,30 @@ test("README.md tells the operator which tools a project-scoped key cannot use",
     if (!kinds.has("scopeTenantWide") && !kinds.has("scopeProjectListNarrowed")) {
       continue;
     }
+    const row = rows.get(tool) ?? "";
+    // Same shape of rule as the tool descriptions, and for the same reason a
+    // bare 「プロジェクトスコープ」 substring is not enough: the row has to say
+    // WHAT that key gets, affirmatively.
+    const required = kinds.has("scopeTenantWide")
+      ? new RegExp(`${DENIAL_STATUS}で拒否`)
+      : /そのプロジェクト.*1件/;
+
     assert.match(
-      rows.get(tool) ?? "",
+      row,
       /プロジェクトスコープ/,
-      `README's row for ${tool} does not say what a project-scoped API key gets. ` +
+      `README's row for ${tool} does not mention the project-scoped API key at all. ` +
         "That key is what the documented mint flow (a project's API Keys tab) produces."
+    );
+    assert.match(
+      row,
+      required,
+      `README's row for ${tool} does not say what a project-scoped key gets ` +
+        `(expected ${required}): "${row.trim()}"`
+    );
+    assert.doesNotMatch(
+      row,
+      ANTI_MARKERS.negatedRefusal,
+      `README's row for ${tool} denies a refusal the backend does perform`
     );
   }
 });

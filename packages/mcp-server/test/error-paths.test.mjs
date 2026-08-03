@@ -14,7 +14,14 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
-import { CONTRACT_CASES, K, P, PROJECT_ID, SBOMS } from "./helpers/contract-table.mjs";
+import {
+  COMPLIANCE,
+  CONTRACT_CASES,
+  K,
+  P,
+  PROJECT_ID,
+  SBOMS,
+} from "./helpers/contract-table.mjs";
 import { jsonOf, startMcpServer, textOf } from "./helpers/mcp-harness.mjs";
 import { startStubApi } from "./helpers/stub-api.mjs";
 
@@ -64,6 +71,7 @@ for (const status of [401, 403, 404, 500]) {
       stub.use(() => ({ status, body: { error: "denied" } }));
 
       const result = await mcp.callTool(tool, args);
+      await stub.quiet();
       assertLoudFailure(result, { status });
       assert.equal(
         stub.requests.length > 0,
@@ -74,22 +82,105 @@ for (const status of [401, 403, 404, 500]) {
   }
 }
 
-test("a failure part-way through a fan-out fails the whole tool, not silently", async () => {
-  // sbomhub_get_project_dashboard reads three routes concurrently. If the
-  // compliance leg is refused, a partial answer would present a dashboard with
-  // a missing section as if the project had none.
-  stub.reset();
-  stub.routes({
-    [K.vulns]: { status: 200, body: [], headers: { "X-Total-Count": "0" } },
-    [K.sboms]: { status: 200, body: SBOMS },
-    [K.compliance]: { status: 403, body: { error: "forbidden" } },
-  });
+// ---------------------------------------------------------------------------
+// Failures that are NOT on the first request.
+//
+// The matrix above fails everything, so for a multi-request tool it only ever
+// exercises the first leg: sbomhub_diff never reaches its POST, the paging walk
+// never fails on page two, and two of the dashboard's three legs are never the
+// one that breaks. Those are exactly the places where a partial answer could be
+// assembled and returned as if it were whole (Codex R1, High).
+// ---------------------------------------------------------------------------
+const ok = (body, headers) => ({ status: 200, body, headers });
+const page = (n, total) => {
+  const rows = [];
+  for (let i = 0; i < n; i += 1) {
+    rows.push({ cve_id: `CVE-2026-${20000 + i}`, severity: "HIGH", cvss_score: 7 });
+  }
+  return ok(rows, { "X-Total-Count": String(total) });
+};
 
-  const result = await mcp.callTool("sbomhub_get_project_dashboard", {
-    project_id: PROJECT_ID,
-  });
-  assertLoudFailure(result, { status: 403 });
-});
+const DOWNSTREAM_CASES = [
+  {
+    title: "sbomhub_diff: the diff POST itself is refused",
+    tool: "sbomhub_diff",
+    args: { project_id: PROJECT_ID },
+    routes: (status) => ({
+      [K.sboms]: ok(SBOMS),
+      [K.diff]: { status, body: { error: "denied" } },
+    }),
+    expectedRequests: 2,
+  },
+  {
+    title: "sbomhub_get_vulnerabilities: page two fails after page one succeeded",
+    tool: "sbomhub_get_vulnerabilities",
+    args: { project_id: PROJECT_ID },
+    routes: (status) => ({
+      [K.vulns]: (req) =>
+        req.query.offset === "0"
+          ? page(500, 1200)
+          : { status, body: { error: "denied" } },
+    }),
+    expectedRequests: 2,
+  },
+  {
+    title: "sbomhub_get_project_dashboard: the vulnerabilities leg fails",
+    tool: "sbomhub_get_project_dashboard",
+    args: { project_id: PROJECT_ID },
+    routes: (status) => ({
+      [K.vulns]: { status, body: { error: "denied" } },
+      [K.compliance]: ok(COMPLIANCE),
+      [K.sboms]: ok(SBOMS),
+    }),
+    expectedRequests: 3,
+  },
+  {
+    title: "sbomhub_get_project_dashboard: the compliance leg fails",
+    tool: "sbomhub_get_project_dashboard",
+    args: { project_id: PROJECT_ID },
+    routes: (status) => ({
+      [K.vulns]: page(2, 2),
+      [K.compliance]: { status, body: { error: "denied" } },
+      [K.sboms]: ok(SBOMS),
+    }),
+    expectedRequests: 3,
+  },
+  {
+    title: "sbomhub_get_project_dashboard: the SBOM leg fails",
+    tool: "sbomhub_get_project_dashboard",
+    args: { project_id: PROJECT_ID },
+    routes: (status) => ({
+      [K.vulns]: page(2, 2),
+      [K.compliance]: ok(COMPLIANCE),
+      [K.sboms]: { status, body: { error: "denied" } },
+    }),
+    expectedRequests: 3,
+  },
+];
+
+for (const status of [403, 500]) {
+  for (const c of DOWNSTREAM_CASES) {
+    test(`${c.title} (HTTP ${status})`, async () => {
+      stub.reset();
+      stub.routes(c.routes(status));
+
+      const result = await mcp.callTool(c.tool, c.args);
+      // All legs are issued before the tool can answer; wait for them so the
+      // count below is meaningful and nothing leaks into the next test.
+      await stub.waitFor(c.expectedRequests);
+      await stub.quiet();
+
+      assertLoudFailure(result, { status });
+      assert.equal(
+        stub.requests.length,
+        c.expectedRequests,
+        `expected ${c.expectedRequests} requests, saw ${stub.requests
+          .map((r) => r.routeKey)
+          .join(", ")}`
+      );
+    });
+  }
+}
 
 test("sbomhub_diff refuses to invent a comparison when there are fewer than two SBOMs", async () => {
   stub.reset();
@@ -99,6 +190,7 @@ test("sbomhub_diff refuses to invent a comparison when there are fewer than two 
   });
 
   const result = await mcp.callTool("sbomhub_diff", { project_id: PROJECT_ID });
+  await stub.quiet();
   assert.equal(result.isError, true);
   assert.match(textOf(result), /Not enough SBOMs to diff/);
   // And it must not have asked the API to diff anything.
@@ -119,6 +211,7 @@ test("sbomhub_diff reports an unknown version instead of falling back to another
     project_id: PROJECT_ID,
     base_version: "0.0.1-does-not-exist",
   });
+  await stub.quiet();
   assert.equal(result.isError, true);
   assert.match(textOf(result), /SBOM version not found/);
   assert.deepEqual(
@@ -167,6 +260,7 @@ test("the API key is never followed to a redirect target", async () => {
     }));
 
     const result = await mcp.callTool("sbomhub_list_projects", {});
+    await stub.quiet();
     assert.equal(result.isError, true, textOf(result));
     assert.deepEqual(
       attacker.requests,
@@ -194,6 +288,7 @@ test("arguments that violate the advertised schema are rejected before any API c
     ["sbomhub_list_sboms", {}],
   ]) {
     const result = await mcp.callTool(tool, args);
+    await stub.quiet();
     assert.equal(result.isError, true, `${tool} accepted ${JSON.stringify(args)}`);
     assert.deepEqual(
       stub.requests,
