@@ -1,0 +1,132 @@
+// Hermetic stand-in for the SBOMHub API.
+//
+// These tests exist to catch the class of defect fixed in bad1b8c: a tool
+// DESCRIPTION that says something the tool does not do. The only way to check
+// that mechanically is to observe what the server actually sends, so every
+// request the MCP server issues is recorded here (method, path, query, body,
+// headers) and asserted against.
+//
+// Constraints this file is built under:
+//   - no docker, no port from the workspace's reserved set: the listener binds
+//     127.0.0.1:0 and the kernel picks an ephemeral port, so any number of these
+//     can run concurrently (including alongside other agents' containers);
+//   - no outbound network: the MCP server is started with SBOMHUB_API_URL
+//     pointing at this stub, and `redirect: "error"` in the client means it
+//     cannot be talked into leaving it (error-paths.test.mjs pins that).
+import http from "node:http";
+import { once } from "node:events";
+
+// A path segment that is a UUID is a route parameter. Echo registers the MCP
+// per-project routes as `/api/v1/mcp/projects/:id/...`, and
+// apps/api/internal/middleware/project_scope.go keys its authority table by
+// that REGISTERED path — so an observed concrete path has to be folded back to
+// the same shape before it can be looked up. Doing it by shape (rather than by
+// a hardcoded list of routes) means a new per-project route is folded too.
+const UUID_SEGMENT =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function toRoutePattern(pathname) {
+  return pathname
+    .split("/")
+    .map((seg) => (UUID_SEGMENT.test(seg) ? ":id" : seg))
+    .join("/");
+}
+
+export function routeKeyOf(method, pathname) {
+  return `${method} ${toRoutePattern(pathname)}`;
+}
+
+function parseJson(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Start the stub. Returns a handle whose `routes` / `use` swap the responder
+ * between tests, so one listener (and one MCP server subprocess) serves a whole
+ * test file.
+ */
+export async function startStubApi() {
+  /** @type {Array<object>} */
+  const requests = [];
+  let handler = () => undefined;
+
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      const url = new URL(req.url, "http://stub.invalid");
+      const record = {
+        method: req.method,
+        path: url.pathname,
+        query: Object.fromEntries(url.searchParams.entries()),
+        search: url.search,
+        headers: req.headers,
+        rawBody: raw,
+        body: raw ? parseJson(raw) : undefined,
+        routeKey: routeKeyOf(req.method, url.pathname),
+      };
+      requests.push(record);
+
+      let reply;
+      try {
+        reply = handler(record, requests.length - 1);
+      } catch (err) {
+        reply = {
+          status: 599,
+          body: { error: `stub handler threw: ${err && err.message}` },
+        };
+      }
+      if (reply === undefined || reply === null) {
+        // Unrouted. Answering 404 (rather than hanging or crashing) keeps the
+        // failure legible: the tool reports the error in-band and the
+        // `requests` assertion names the route that was not expected.
+        reply = {
+          status: 404,
+          body: { error: `stub: no route registered for ${record.routeKey}` },
+        };
+      }
+
+      const status = reply.status ?? 200;
+      const headers = { "Content-Type": "application/json", ...reply.headers };
+      const payload =
+        reply.raw !== undefined ? reply.raw : JSON.stringify(reply.body ?? null);
+      res.writeHead(status, headers);
+      res.end(payload);
+    });
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address();
+
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    /** Install a raw responder: (record) => {status, body, headers, raw}. */
+    use(fn) {
+      handler = fn;
+    },
+    /** Install a responder keyed by "<METHOD> <registered path>". */
+    routes(map) {
+      handler = (record, index) => {
+        const entry = map[record.routeKey];
+        if (entry === undefined) return undefined;
+        return typeof entry === "function" ? entry(record, index) : entry;
+      };
+    },
+    reset() {
+      requests.length = 0;
+      handler = () => undefined;
+    },
+    async close() {
+      server.closeAllConnections?.();
+      server.close();
+      await once(server, "close");
+    },
+  };
+}
