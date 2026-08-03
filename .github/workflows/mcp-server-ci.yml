@@ -16,6 +16,20 @@
 #                must fail fast with the documented message — proves the
 #                emitted entrypoint is actually executable ESM, not just
 #                that tsc succeeded.
+#   - Tests:     HARD GATE. `pnpm --filter @sbomhub/mcp-server test`
+#                (node:test, no test framework dependency). The suite drives
+#                the BUILT server over stdio as a real MCP client against a
+#                stub API on an ephemeral port — no database, no docker, no
+#                network — and asserts that each tool's DESCRIPTION agrees
+#                with the request it actually issues and with how
+#                apps/api/internal/middleware/project_scope.go classifies
+#                that route. bad1b8c had to fix five descriptions that
+#                claimed a scope the backend does not grant; before this
+#                step nothing could have caught the sixth.
+#
+# The job `name:` stays "typecheck / build" even though it now also runs the
+# tests: it is the required-check name in branch protection, and renaming it
+# would leave main waiting forever for a check that no longer reports.
 #
 # Versions: Node 22 + pnpm 10.34.3, pinned to match frontend-ci.yml and the
 # root package.json `packageManager` field (see frontend-ci.yml header for
@@ -31,6 +45,12 @@ on:
       - "pnpm-workspace.yaml"
       - "package.json"
       - ".github/workflows/mcp-server-ci.yml"
+      # The tool descriptions state what a project-scoped API key may reach,
+      # and this file is where that is decided. A change to the scope table
+      # can therefore falsify a description without touching this package,
+      # so it has to re-run the contract tests. (GitHub Actions does not
+      # support YAML anchors, hence the duplicated list below.)
+      - "apps/api/internal/middleware/project_scope.go"
   push:
     branches:
       - main
@@ -40,6 +60,7 @@ on:
       - "pnpm-workspace.yaml"
       - "package.json"
       - ".github/workflows/mcp-server-ci.yml"
+      - "apps/api/internal/middleware/project_scope.go"
   workflow_dispatch:
 
 permissions:
@@ -105,3 +126,11 @@ jobs:
               exit 1
               ;;
           esac
+
+      # Contract tests (node:test — no test framework dependency). Hermetic:
+      # a stub API on an ephemeral 127.0.0.1 port, the built server driven
+      # over stdio by a real MCP client. Asserts what each tool tells the
+      # model against what it actually requests, and against the backend's
+      # own API-key scope table.
+      - name: Test (node:test contract suite)
+        run: pnpm --filter @sbomhub/mcp-server test
