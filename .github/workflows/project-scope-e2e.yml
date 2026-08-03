@@ -52,6 +52,8 @@ on:
       - "docker-compose.yml"
       - ".env.example"
       - "install.sh"
+      # install.sh sources this at runtime (Codex R2 Low).
+      - "docker/scripts/_env_helpers.sh"
       - ".github/workflows/project-scope-e2e.yml"
   pull_request:
     paths:
@@ -63,6 +65,8 @@ on:
       - "docker-compose.yml"
       - ".env.example"
       - "install.sh"
+      # install.sh sources this at runtime (Codex R2 Low).
+      - "docker/scripts/_env_helpers.sh"
       - ".github/workflows/project-scope-e2e.yml"
   workflow_dispatch:
 

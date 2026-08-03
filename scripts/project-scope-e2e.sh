@@ -132,8 +132,28 @@ assert_not_ratelimited() {
   [ "$1" != "429" ] || fail "RATE LIMITED (429) on $2 — RateLimitByAPIKey interfered, so this cell says nothing about project scope. Re-run against a fresh stack."
 }
 
-psql_exec()  { ${PSQL_CMD}; }              # SQL on stdin
-psql_query() { ${PSQL_CMD} -At -c "$1"; }  # scalar out
+# Split the configured psql command into an argv ARRAY once, and always invoke
+# it quoted. An unquoted `${PSQL_CMD}` would also glob-expand any `*`/`?` in the
+# command (Codex R2 Low). Splitting is on whitespace only, which is the
+# documented contract for SBOMHUB_PSQL_CMD — it takes a command line, not a
+# shell expression.
+IFS=' ' read -r -a PSQL_ARGV <<< "${PSQL_CMD}"
+psql_exec()  { "${PSQL_ARGV[@]}"; }              # SQL on stdin
+psql_query() { "${PSQL_ARGV[@]}" -At -c "$1"; }  # scalar out
+
+# assert_uuid VALUE LABEL — every identifier that reaches SQL goes through here
+# first. PROJECT_OWN / PROJECT_SIBLING come out of an HTTP response and
+# UP_SBOM_ID out of another, i.e. from the very code under test, and they are
+# then interpolated into statements run as the bootstrap superuser. A canonical
+# UUID contains no quote, semicolon or backslash, so validating the shape closes
+# that path (Codex R2 Medium). Pre-seeded values from the environment go through
+# the same check.
+assert_uuid() {
+  case "$1" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+    *) die "$2 is not a canonical UUID: '$1' — refusing to interpolate it into SQL" ;;
+  esac
+}
 
 # http METHOD URL BODYFILE [curl args...] -> prints status, writes body to BODYFILE
 http() {
@@ -235,23 +255,34 @@ echo "=== Step 0: derive apiKeyRouteScope from ${SCOPE_TABLE_SRC#"${REPO_ROOT}"/
 [ -f "${SCOPE_TABLE_SRC}" ] || die "scope table source not found: ${SCOPE_TABLE_SRC}"
 [ -f "${SBOM_FIXTURE}" ]    || die "SBOM fixture not found: ${SBOM_FIXTURE}"
 
-# `|| true` so a grep that matches NOTHING (the regex went stale against a
-# reformatted table) reaches structural guard 1 with its explanation, instead of
-# aborting the pipeline silently under `set -o pipefail`.
-derive_route_table() {
-  { grep -oE '^[[:space:]]*"[A-Z]+ /api/v1/[^"]*":[[:space:]]*\{scope[A-Za-z]+' "${SCOPE_TABLE_SRC}" || true; } \
-    | sed -E 's/^[[:space:]]*"([^"]*)":[[:space:]]*\{(scope[A-Za-z]+)/\2|\1/' \
-    | sort
-}
-derive_route_table > "${WORK}/routes.txt"
+# Everything below works on the map BODY only (between the `var apiKeyRouteScope
+# = ...{` line and its closing brace at column 0), so an unanchored regex cannot
+# stray into a doc comment that happens to quote a route.
+awk '
+  /^var apiKeyRouteScope = map\[string\]projectScopeRule\{/ { inmap=1; next }
+  inmap && /^\}/ { inmap=0 }
+  inmap
+' "${SCOPE_TABLE_SRC}" > "${WORK}/scope-map-body.go"
+
+# `grep -o` prints one line per OCCURRENCE, and the patterns are unanchored, so
+# two entries sharing a physical line are two matches rather than one. (Codex R2
+# High: the earlier `^`-anchored extraction and its line-counting guards all
+# agreed on 37 when two entries were coalesced onto one line, hiding a route.)
+# `|| true` so a pattern that matches NOTHING reaches structural guard 1 with its
+# explanation instead of aborting the pipeline under `set -o pipefail`.
+match_in_map() { { grep -oE "$1" "${WORK}/scope-map-body.go" || true; }; }
+
+match_in_map '"[A-Z]+ /api/v1/[^"]*":[[:space:]]*\{scope[A-Za-z]+' \
+  | sed -E 's/"([^"]*)":[[:space:]]*\{(scope[A-Za-z]+)/\2|\1/' \
+  | sort > "${WORK}/routes.txt"
 ROUTE_COUNT=$(wc -l < "${WORK}/routes.txt")
 
 # Structural guard 1: the parse must find something.
 [ "${ROUTE_COUNT}" -ge 1 ] || die "derived 0 routes from ${SCOPE_TABLE_SRC} — the map literal format changed and this script's regex is stale"
 
-# Structural guard 2: the parse must find EVERY entry. The extraction above
-# requires the key and the `{scope...` to share a line; two INDEPENDENT counts
-# over the map body catch an entry written any other way:
+# Structural guard 2: the parse must find EVERY entry. The extraction requires
+# the key and the `{scope...` to be adjacent; two INDEPENDENT occurrence counts
+# over the same body catch an entry written any other way:
 #
 #   MAP_KEY_COUNT   counts KEY literals   — independent of how the VALUE is laid
 #                                           out, so it still sees
@@ -263,19 +294,9 @@ ROUTE_COUNT=$(wc -l < "${WORK}/routes.txt")
 #                                           across lines.
 #
 # A route that either count sees and the extraction does not is an UNTESTED
-# route, which is the whole failure mode this guard exists for. (Codex R1 High:
-# the previous single `{scope` count shared the extraction's own assumption, so
-# the multi-line-value case agreed with it and slipped through.)
-count_in_map() {
-  awk -v pat="$1" '
-    /^var apiKeyRouteScope = map\[string\]projectScopeRule\{/ { inmap=1; next }
-    inmap && /^\}/ { inmap=0 }
-    inmap && $0 ~ pat { n++ }
-    END { print n+0 }
-  ' "${SCOPE_TABLE_SRC}"
-}
-MAP_KEY_COUNT=$(count_in_map '^[[:space:]]*"[A-Z]+ /api/v1/[^"]*":')
-MAP_RULE_COUNT=$(count_in_map '\{scope[A-Za-z]+')
+# route, which is the whole failure mode this guard exists for.
+MAP_KEY_COUNT=$(match_in_map '"[A-Z]+ /api/v1/[^"]*":' | wc -l)
+MAP_RULE_COUNT=$(match_in_map '\{scope[A-Za-z]+' | wc -l)
 if [ "${ROUTE_COUNT}" -ne "${MAP_KEY_COUNT}" ] || [ "${ROUTE_COUNT}" -ne "${MAP_RULE_COUNT}" ]; then
   die "derived ${ROUTE_COUNT} routes, but the apiKeyRouteScope literal has ${MAP_KEY_COUNT} key literal(s) and ${MAP_RULE_COUNT} rule literal(s) — an entry is written in a shape this script does not parse and would go UNTESTED"
 fi
@@ -298,6 +319,27 @@ while IFS='|' read -r kind route; do
   done
 done < "${WORK}/routes.txt"
 
+# Structural guard 5: the three classes the MIDDLEWARE ADMITS are promises about
+# code somewhere else — a handler that narrows (scopeProjectListNarrowed), a
+# handler that refuses (scopeHandlerChecked), or a route that genuinely touches
+# no project (scopeNoProjectResource). The matrix can only check "was admitted";
+# what the promise is actually worth is checked route by route in Steps 3-4,
+# against the CONCRETE response shapes of the routes below.
+#
+# So a route joining one of these classes must not be able to inherit that
+# vacuous "was admitted" pass (Codex R2 High). Pin the sets: adding a route here
+# fails the run until somebody writes its route-specific assertion. This is the
+# HTTP-level twin of TestM50W3NarrowedListRoutesAreExactlyTheKnownTwo and
+# TestM50W2HandlerCheckedRoutesAreExactlyTheKnownTwo.
+assert_deferred_class_set() {
+  local kind="$1" want="$2" got
+  got=$(awk -F'|' -v k="${kind}" '$1==k {print $2}' "${WORK}/routes.txt" | sort | paste -sd';' -)
+  [ "${got}" = "${want}" ] || die "${kind} is now {${got}}, expected {${want}}. This class is ADMITTED by the middleware, so the matrix alone proves nothing about it — its enforcement is asserted route-by-route in Steps 3-4. Add the new route's own deterministic assertion there, then update this expected set."
+}
+assert_deferred_class_set scopeProjectListNarrowed "GET /api/v1/cli/projects;GET /api/v1/mcp/projects"
+assert_deferred_class_set scopeHandlerChecked      "POST /api/v1/cli/projects;POST /api/v1/cli/upload"
+assert_deferred_class_set scopeNoProjectResource   "POST /api/v1/cli/check"
+
 note "derived ${ROUTE_COUNT} routes:"
 cut -d'|' -f1 "${WORK}/routes.txt" | sort | uniq -c | sed 's/^/    /'
 
@@ -316,10 +358,14 @@ if [ -n "${SBOMHUB_SCOPED_KEY:-}" ] && [ -n "${SBOMHUB_TENANT_KEY:-}" ] \
   PROJECT_SIBLING="${SBOMHUB_PROJECT_SIBLING}"
   PROJECT_OWN_NAME="${SBOMHUB_PROJECT_OWN_NAME:?SBOMHUB_PROJECT_OWN_NAME is required when pre-seeding}"
   PROJECT_SIBLING_NAME="${SBOMHUB_PROJECT_SIBLING_NAME:?SBOMHUB_PROJECT_SIBLING_NAME is required when pre-seeding}"
+  assert_uuid "${TENANT_ID}"      "SBOMHUB_TENANT_ID"
+  assert_uuid "${PROJECT_OWN}"    "SBOMHUB_PROJECT_OWN"
+  assert_uuid "${PROJECT_SIBLING}" "SBOMHUB_PROJECT_SIBLING"
   note "using pre-seeded fixtures (SBOMHUB_SCOPED_KEY et al. supplied)"
 else
   RUN_TAG="$(openssl rand -hex 4)"
   TENANT_ID="$(uuidgen)"
+  assert_uuid "${TENANT_ID}" "seeded tenant id"
   PROJECT_OWN_NAME="a3-scope-own-${RUN_TAG}"
   PROJECT_SIBLING_NAME="a3-scope-sibling-${RUN_TAG}"
   K_TENANT="sbh_$(openssl rand -hex 16)"
@@ -344,16 +390,21 @@ SQL
 
   # Both projects are created THROUGH the api with the tenant-level key, so the
   # fixture itself is evidence that a tenant-level key still creates.
+  # `|| return 1` + `|| die` at each call site: a command substitution normally
+  # clears errexit, so without them a failed seed curl would be reported only as
+  # an empty project id (Codex R2 Low).
   create_project() {
     local resp
     resp=$(curl --fail-with-body -sS -X POST \
       -H "Authorization: Bearer ${K_TENANT}" -H 'Content-Type: application/json' \
-      -d "{\"name\":\"$1\"}" "${SBOMHUB_URL}/api/v1/cli/projects")
+      -d "{\"name\":\"$1\"}" "${SBOMHUB_URL}/api/v1/cli/projects") || return 1
     printf '%s' "${resp}" | jq -r '.project.id // empty'
   }
-  PROJECT_OWN="$(create_project "${PROJECT_OWN_NAME}")"
-  PROJECT_SIBLING="$(create_project "${PROJECT_SIBLING_NAME}")"
+  PROJECT_OWN="$(create_project "${PROJECT_OWN_NAME}")"     || die "seed: POST /api/v1/cli/projects failed for '${PROJECT_OWN_NAME}'"
+  PROJECT_SIBLING="$(create_project "${PROJECT_SIBLING_NAME}")" || die "seed: POST /api/v1/cli/projects failed for '${PROJECT_SIBLING_NAME}'"
   [ -n "${PROJECT_OWN}" ] && [ -n "${PROJECT_SIBLING}" ] || die "failed to seed the two projects"
+  assert_uuid "${PROJECT_OWN}"     "project id returned by POST /api/v1/cli/projects"
+  assert_uuid "${PROJECT_SIBLING}" "project id returned by POST /api/v1/cli/projects"
 
   psql_exec <<SQL
 INSERT INTO api_keys (id, tenant_id, project_id, name, key_hash, key_prefix, permissions, created_at)
@@ -377,6 +428,8 @@ fi
 # tenant is not the key's.
 FOREIGN_TENANT_ID="$(uuidgen)"
 PROJECT_FOREIGN="$(uuidgen)"
+assert_uuid "${FOREIGN_TENANT_ID}" "seeded foreign tenant id"
+assert_uuid "${PROJECT_FOREIGN}"   "seeded foreign project id"
 psql_exec <<SQL
 INSERT INTO tenants (id, clerk_org_id, name, slug, plan)
 VALUES ('${FOREIGN_TENANT_ID}', 'ci_${FOREIGN_TENANT_ID}', 'project-scope-e2e-foreign',
@@ -585,7 +638,12 @@ note "projects rows still ${PROJECTS_AFTER_UPLOADS} after the refused uploads; s
 
 # Anti-vacuity: the same two routes must still WORK for the key's own project,
 # otherwise the row-count assertions above would hold on a stack that refuses
-# everything.
+# everything. Baselines taken here so the deltas the two SUCCESSFUL calls are
+# allowed to make can be stated exactly (Codex R2 Medium): +1 sbom in P_own and
+# nowhere else, and no new project at all.
+PROJECTS_BEFORE_OK=$(psql_query "SELECT COUNT(*) FROM projects WHERE tenant_id = '${TENANT_ID}'")
+SBOMS_OWN_BEFORE_OK=$(psql_query "SELECT COUNT(*) FROM sboms WHERE project_id = '${PROJECT_OWN}'")
+SBOMS_TENANT_BEFORE_OK=$(psql_query "SELECT COUNT(*) FROM sboms WHERE tenant_id = '${TENANT_ID}'")
 w1=$(http POST "${SBOMHUB_URL}/api/v1/cli/projects" "${WORK}/cp.own" \
   -H "Authorization: Bearer ${K_SCOPED}" -H 'Content-Type: application/json' -d "{\"name\":\"${PROJECT_OWN_NAME}\"}")
 [ "${w1}" = "200" ] || fail "POST /api/v1/cli/projects naming the key's OWN project returned ${w1}, want 200 (idempotent get-existing)"
@@ -604,11 +662,22 @@ assert_not_ratelimited "${w2}" "POST /api/v1/cli/upload (own project)"
 UP_SBOM_ID=$(jq -r '.sbom_id // empty' <"${WORK}/up.own" 2>/dev/null || echo "")
 [ -n "${UP_SBOM_ID}" ] || fail "POST /api/v1/cli/upload into the OWN project returned no sbom_id"
 if [ -n "${UP_SBOM_ID}" ]; then
+  assert_uuid "${UP_SBOM_ID}" "sbom_id returned by POST /api/v1/cli/upload"
   UP_SBOM_PROJECT=$(psql_query "SELECT COALESCE(project_id::text,'NULL') FROM sboms WHERE id = '${UP_SBOM_ID}'")
   [ "${UP_SBOM_PROJECT}" = "${PROJECT_OWN}" ] || fail "the SBOM created by the own-project upload (${UP_SBOM_ID}) persisted under project '${UP_SBOM_PROJECT}', want ${PROJECT_OWN}"
 fi
 SBOMS_SIBLING_FINAL=$(psql_query "SELECT COUNT(*) FROM sboms WHERE project_id = '${PROJECT_SIBLING}'")
 [ "${SBOMS_SIBLING_FINAL}" = "${SBOMS_SIBLING_BEFORE}" ] || fail "the SUCCESSFUL own-project upload changed the sibling's sboms count (${SBOMS_SIBLING_BEFORE} -> ${SBOMS_SIBLING_FINAL})"
+
+# Exact deltas for the two successful calls. "one valid own-project SBOM came
+# back" does not by itself rule out the server ALSO creating a project or
+# writing further sboms elsewhere in the tenant.
+PROJECTS_FINAL=$(psql_query "SELECT COUNT(*) FROM projects WHERE tenant_id = '${TENANT_ID}'")
+SBOMS_OWN_FINAL=$(psql_query "SELECT COUNT(*) FROM sboms WHERE project_id = '${PROJECT_OWN}'")
+SBOMS_TENANT_FINAL=$(psql_query "SELECT COUNT(*) FROM sboms WHERE tenant_id = '${TENANT_ID}'")
+[ "${PROJECTS_FINAL}" = "${PROJECTS_BEFORE_OK}" ] || fail "the two SUCCESSFUL own-project calls changed the tenant's projects count (${PROJECTS_BEFORE_OK} -> ${PROJECTS_FINAL}) — a scoped key must never create a project"
+[ "${SBOMS_OWN_FINAL}" = "$((SBOMS_OWN_BEFORE_OK + 1))" ] || fail "sboms in P_own went ${SBOMS_OWN_BEFORE_OK} -> ${SBOMS_OWN_FINAL}, want exactly +1 from the one successful upload"
+[ "${SBOMS_TENANT_FINAL}" = "$((SBOMS_TENANT_BEFORE_OK + 1))" ] || fail "sboms in the tenant went ${SBOMS_TENANT_BEFORE_OK} -> ${SBOMS_TENANT_FINAL}, want exactly +1 — the successful upload wrote rows outside P_own"
 note "anti-vacuity: own-project create -> ${w1} created=false; own-project upload -> ${w2}, sbom ${UP_SBOM_ID} persisted under P_own, sibling count still ${SBOMS_SIBLING_FINAL}"
 
 # --- scopeNoProjectResource: 'allowed through unchanged', byte for byte ---
