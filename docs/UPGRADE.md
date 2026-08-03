@@ -838,10 +838,37 @@ or 5 against that bucket instead of 1, so a key doing nothing else exhausts it
 after roughly 12-20 tool calls per minute rather than 60. Raising the `/mcp`
 limit, or giving the limiter a per-route counter, is a separate change.
 
-**What is still not proven.** A rescan that removes exactly as many rows as it
-adds, entirely within the walk, leaves both the scan state and the count
-unchanged and would be reported as final. The per-page `X-Total-Count` and
-row-identity guards catch it whenever the walk spans more than one page.
-`GET /api/v1/projects/:id/sbom` also answers 404 for a project with no SBOM, for
-a project that does not exist, and for a repository error alike, so the client
-reports `unavailable` for all three rather than naming one.
+**What `counts_final: true` asserts.** That the scan apps/api *tracks* for that
+SBOM reported `completed` both before and after the read, that its count did not
+move in between, and that the walk covered the whole project (a walk cut short by
+the 5000-row cap is reported `scan_truncated: true` and never final). It is the
+strongest statement the API supports — not a guarantee that no write is in
+flight.
+
+**What is still not proven — recorded, not closed.**
+
+1. **A rescan that has not written yet.** `POST /api/v1/projects/:id/scan` never
+   marks the shared `ScanTracker`, and entries live an hour, so an SBOM being
+   rescanned still reads `completed`. The before/after count comparison catches
+   such a rescan once it has written something; a rescan still fetching from
+   NVD/JVN through both readings is invisible in both the state and the count and
+   would be certified. Nothing the API exposes distinguishes "no rescan running"
+   from "a rescan running that has not written yet" — closing this means marking
+   the tracker on that handler, which is a backend change and was left out of the
+   change that found it.
+2. **A rescan that removes exactly as many rows as it adds**, entirely within the
+   walk. The per-page `X-Total-Count` and row-identity guards catch it whenever
+   the walk spans more than one page.
+3. **`GET /api/v1/projects/:id/sbom` answers 404** for a project with no SBOM,
+   for a project that does not exist, and for a repository error alike, so the
+   client reports `unavailable` for all three rather than naming one.
+4. **A failing `sbomhub_get_project_dashboard` keeps its other legs running.**
+   `Promise.all` rejects on the first failure but does not cancel the siblings,
+   so a capped project can keep issuing page requests — against the rate-limit
+   bucket above — after the tool has already answered with an error. An
+   `AbortController` fixes it and was written, then reverted: with it, the number
+   of requests a failing dashboard makes depends on when the abort lands relative
+   to the in-flight fetches, and every case in the MCP contract suite asserts the
+   EXACT request list. That exactness is what lets the suite catch a tool talking
+   to a route it should not, and it is worth more than a bounded amount of wasted
+   quota on an error path.

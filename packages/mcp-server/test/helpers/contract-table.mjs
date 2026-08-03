@@ -316,6 +316,8 @@ export const CONTRACT_CASES = [
       assert.equal(payload.vulnerabilities.total, 6000);
       assert.equal(payload.vulnerabilities.analyzed, 5000);
       assert.equal(payload.vulnerabilities.scan_truncated, true);
+      // The dashboard inherits the same rule, one level down.
+      assert.equal(payload.vulnerabilities.counts_final, false);
       // by_severity counts the ANALYZED rows, not the project.
       const counted = Object.values(payload.vulnerabilities.by_severity).reduce(
         (a, b) => a + b,
@@ -567,6 +569,15 @@ export const CONTRACT_CASES = [
       // Silence here would be the same defect class as bad1b8c: an answer
       // covering 5000 of 6000 rows that reads as the whole project.
       assert.equal(payload.scan_truncated, true);
+      // ...and a settled SCAN is not enough to call those numbers final: they
+      // are a prefix of the project. Under ?sort=epss the prefix is not even
+      // stable — an EPSS sync can demote rows past the cap between pages, so
+      // rows inside the intended range are never requested and no per-page
+      // guard fires (Codex R2, Medium). The scan-status probe says `completed`
+      // in this case; counts_final must still be false.
+      assert.equal(payload.scan_state, "completed");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scanned_sbom_id, null);
     },
   },
 
@@ -831,7 +842,10 @@ export const CONTRACT_CASES = [
     check({ payload }) {
       assert.equal(payload.scan_state, "changed");
       assert.equal(payload.counts_final, false);
-      assert.equal(payload.scanned_sbom_id, SBOM_MIDDLE);
+      // NULL, not either id: the two readings named different SBOMs and the
+      // pages were answered somewhere in between, so naming one would assert an
+      // origin for rows that may have come from the other (Codex R2, Medium).
+      assert.equal(payload.scanned_sbom_id, null);
     },
   },
 

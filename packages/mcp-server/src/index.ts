@@ -98,12 +98,15 @@ function errorResult(err: unknown): CallToolResult {
 // (test/tool-contract.test.mjs).
 const SCAN_STATE_NOTE =
   "件数は非同期スキャンの途中経過のことがある。" +
-  "counts_final=true のときだけ確定値で、false のときは scan_state を見ること " +
+  "counts_final=true は「サーバーが追跡しているスキャンが読み取りの前後とも完了" +
+  "扱いで、その間に件数が動かず、走査も打ち切られていない」ことを表す。" +
+  "false のときは scan_state を見ること " +
   "(completed=完了、running=走査中、failed=失敗、unknown=状態不明、" +
   "changed=読み取り中にスキャンかSBOMが変わった、" +
   "unavailable=状態を取得できず。これ以外の値が返ることもあり、" +
   "その場合も確定値ではない)。" +
-  "どのSBOMに対する件数かは scanned_sbom_id。" +
+  "scan_state がどのSBOMについての状態かは scanned_sbom_id " +
+  "(counts_final=true のときはその件数の出所でもある。特定できないときは null)。" +
   "counts_final=false のときの0件や極端に少ない件数を「脆弱性なし」と断定しないこと。";
 
 // The per-project tools all take this. The refusal a project-scoped key gets

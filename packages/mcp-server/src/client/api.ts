@@ -95,6 +95,12 @@ export const SCAN_STATE_CHANGED = "changed";
  * They travel together so "provisional" can be told apart from "provisional
  * because nobody knows", which call for different next steps (wait and retry
  * vs. check the deployment).
+ *
+ * `scanned_sbom_id` names the SBOM the STATE was read for. It is the source of
+ * the counts only when `counts_final` is true — that is the case in which both
+ * readings agreed on one SBOM. When they disagreed the field is null, because
+ * naming either would assert an origin for rows that may have come from the
+ * other or from both (Codex R2, Medium).
  */
 /** One reading of the scan state, as taken by readScanState. */
 type ScanProbe = {
@@ -127,6 +133,8 @@ const VULNS_RETURN_CAP = 500;
 type RequestOptions = {
   method?: string;
   body?: unknown;
+  /** Abort the in-flight request; see getProjectDashboard. */
+  signal?: AbortSignal;
 };
 
 // How the caller names the two SBOMs to compare. Ids win over versions; both
@@ -164,6 +172,7 @@ export class ApiClient {
         "X-API-Key": this.apiKey,
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: options.signal,
       // Never follow redirects: Node's fetch strips Authorization on
       // cross-origin redirects but forwards custom headers like X-API-Key,
       // so a redirecting (or open-redirect-abused) endpoint could exfiltrate
@@ -189,9 +198,10 @@ export class ApiClient {
   }
 
   // GET /api/v1/mcp/projects/:id/sboms — newest first (created_at DESC).
-  async listSboms(projectId: string): Promise<SbomSummary[]> {
+  async listSboms(projectId: string, signal?: AbortSignal): Promise<SbomSummary[]> {
     const data = await this.request(
-      `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/sboms`
+      `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/sboms`,
+      { signal }
     );
     return SbomListSchema.parse(data);
   }
@@ -205,6 +215,18 @@ export class ApiClient {
   // project-scoped MCP routes. The backend MCP group deliberately has no
   // per-project dashboard route (dashboardService.GetSummary is tenant-wide
   // only), so the old `GET /mcp/projects/:id` call was a guaranteed 404.
+  //
+  // NOT aborted when one leg fails (Codex R2, Low). Promise.all rejects on the
+  // first rejection but leaves the other legs running, so a capped project keeps
+  // issuing page requests after the tool has already answered with an error, and
+  // those land on the per-API-key rate-limit counter the next call needs. An
+  // AbortController fixes that and was written — and reverted, because the
+  // number of requests a failing dashboard makes then depends on when the abort
+  // lands relative to the in-flight fetches. Every case in the contract suite
+  // asserts the EXACT request list, and that exactness is what makes the suite
+  // able to catch a tool talking to a route it should not. Trading it for a
+  // bounded amount of wasted quota on an error path is the wrong way round.
+  // Recorded in docs/UPGRADE.md §7.2.
   async getProjectDashboard(projectId: string): Promise<unknown> {
     const [scan, compliance, sboms] = await Promise.all([
       this.fetchVulnerabilities(projectId, "cvss"),
@@ -376,9 +398,10 @@ export class ApiClient {
   }
 
   // GET /api/v1/mcp/projects/:id/compliance
-  getCompliance(projectId: string): Promise<unknown> {
+  getCompliance(projectId: string, signal?: AbortSignal): Promise<unknown> {
     return this.request(
-      `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/compliance`
+      `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/compliance`,
+      { signal }
     );
   }
 
@@ -405,7 +428,8 @@ export class ApiClient {
   //      request when the row count is an exact multiple of the page size.
   private async fetchVulnerabilities(
     projectId: string,
-    sort: VulnSort
+    sort: VulnSort,
+    signal?: AbortSignal
   ): Promise<{
     total: number;
     vulnerabilities: VulnerabilityEntry[];
@@ -414,7 +438,7 @@ export class ApiClient {
   }> {
     // BEFORE the walk. See probeScanState for why one probe on either side is
     // not enough and this one has to be taken first.
-    const before = await this.readScanState(projectId);
+    const before = await this.readScanState(projectId, signal);
 
     const vulnerabilities: VulnerabilityEntry[] = [];
     let reportedTotal = 0;
@@ -429,7 +453,8 @@ export class ApiClient {
 
     for (let offset = 0; offset < VULNS_SCAN_CAP; offset += VULNS_PAGE_LIMIT) {
       const { data, headers } = await this.requestRaw(
-        `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/vulnerabilities?limit=${VULNS_PAGE_LIMIT}&offset=${offset}&sort=${sort}`
+        `/api/v1/mcp/projects/${encodeURIComponent(projectId)}/vulnerabilities?limit=${VULNS_PAGE_LIMIT}&offset=${offset}&sort=${sort}`,
+        { signal }
       );
       const page = VulnerabilityListSchema.parse(data);
       const pageTotal = parseTotalCount(headers, offset);
@@ -476,17 +501,18 @@ export class ApiClient {
     // A header that claims fewer rows than were actually read is not evidence
     // that rows are missing; report what is known to exist.
     const total = Math.max(reportedTotal, vulnerabilities.length);
+    // Stopping at the cap without a short page leaves the end unproven, so it
+    // is reported as truncated even if the header says otherwise. The
+    // conservative direction: over-reporting truncation costs a caveat,
+    // under-reporting it costs a wrong compliance answer.
+    const truncated = !sawEnd || total > vulnerabilities.length;
 
     return {
       total,
       vulnerabilities,
-      // Stopping at the cap without a short page leaves the end unproven, so
-      // it is reported as truncated even if the header says otherwise. The
-      // conservative direction: over-reporting truncation costs a caveat,
-      // under-reporting it costs a wrong compliance answer.
-      truncated: !sawEnd || total > vulnerabilities.length,
+      truncated,
       // The walk is bracketed by two probes; this closes the pair.
-      report: await this.probeScanState(projectId, before),
+      report: await this.probeScanState(projectId, before, !truncated, signal),
     };
   }
 
@@ -514,7 +540,10 @@ export class ApiClient {
    * into a tool error, and must not be mistaken for "finished" either. It
    * becomes SCAN_STATE_UNAVAILABLE, which is non-final.
    */
-  private async readScanState(projectId: string): Promise<ScanProbe> {
+  private async readScanState(
+    projectId: string,
+    signal?: AbortSignal
+  ): Promise<ScanProbe> {
     const unreadable: ScanProbe = {
       state: SCAN_STATE_UNAVAILABLE,
       sbomId: null,
@@ -523,12 +552,16 @@ export class ApiClient {
 
     try {
       const latest = SbomSummarySchema.parse(
-        await this.request(`/api/v1/projects/${encodeURIComponent(projectId)}/sbom`)
+        await this.request(
+          `/api/v1/projects/${encodeURIComponent(projectId)}/sbom`,
+          { signal }
+        )
       );
       const status = ScanStatusSchema.parse(
         await this.request(
           `/api/v1/projects/${encodeURIComponent(projectId)}` +
-            `/sboms/${encodeURIComponent(latest.id)}/scan-status`
+            `/sboms/${encodeURIComponent(latest.id)}/scan-status`,
+          { signal }
         )
       );
       if (status.sbom_id !== latest.id) {
@@ -562,10 +595,24 @@ export class ApiClient {
    *   - it is the same SBOM (no upload made a different snapshot the latest), and
    *   - that SBOM's vulnerability count is unchanged.
    *
-   * The last one is what covers a rescan. apps/api's manual rescan path does not
-   * mark the shared ScanTracker at all, so a rescan of an SBOM whose entry still
-   * reads `completed` (entries are kept an hour) is invisible in the STATE —
-   * but not in the count, which is a COUNT over the rows the pages come from.
+   * The last one is what NARROWS the untracked-rescan window. apps/api's manual
+   * rescan path does not mark the shared ScanTracker at all, so a rescan of an
+   * SBOM whose entry still reads `completed` (entries are kept an hour) is
+   * invisible in the STATE. It is visible in the count — a COUNT over the rows
+   * the pages come from — but only once the rescan has WRITTEN something. A
+   * rescan that is still fetching from NVD/JVN through both readings leaves the
+   * state and the count identical and would be certified (Codex R2, High).
+   *
+   * That window cannot be closed from here: nothing the API exposes distinguishes
+   * "no rescan running" from "a rescan running that has not written yet". Closing
+   * it means marking the tracker on the manual rescan path in apps/api, which is
+   * a backend change; it is recorded in docs/UPGRADE.md §7.2 rather than papered
+   * over, because `counts_final` has to mean what it says.
+   *
+   * So what `counts_final: true` asserts, exactly: the scan apps/api TRACKS for
+   * this SBOM reported completed both before and after the read, its count did
+   * not move, and the walk covered the whole project. It is the strongest
+   * statement the API supports, not a guarantee that no write is in flight.
    *
    * # Cost, and why the cheap case is the common one
    *
@@ -589,16 +636,19 @@ export class ApiClient {
    * these routes for this client's header). So a failure is reported in-band as
    * a non-final state, never swallowed into an implied "finished".
    *
-   * # What this still does not prove (honest limitation)
+   * # What this still does not prove (honest limitations)
    *
-   * A rescan that removes exactly as many rows as it adds, entirely within the
-   * walk, leaves both the state and the count unchanged and would be certified.
-   * The per-page X-Total-Count and row-identity guards in fetchVulnerabilities
-   * catch it whenever the walk spans more than one page.
+   *   - the untracked-rescan window described above;
+   *   - a rescan that removes exactly as many rows as it adds, entirely within
+   *     the walk, leaves both the state and the count unchanged. The per-page
+   *     X-Total-Count and row-identity guards in fetchVulnerabilities catch it
+   *     whenever the walk spans more than one page.
    */
   private async probeScanState(
     projectId: string,
-    before: ScanProbe
+    before: ScanProbe,
+    walkCovered: boolean,
+    signal?: AbortSignal
   ): Promise<ScanReport> {
     if (before.state !== SCAN_STATE_FINAL) {
       return {
@@ -608,7 +658,7 @@ export class ApiClient {
       };
     }
 
-    const after = await this.readScanState(projectId);
+    const after = await this.readScanState(projectId, signal);
     if (after.state === SCAN_STATE_UNAVAILABLE) {
       // The walk began on a finished scan, but whether it still is cannot be
       // read — which is not evidence that it is.
@@ -628,14 +678,24 @@ export class ApiClient {
       return {
         scan_state: SCAN_STATE_CHANGED,
         counts_final: false,
-        scanned_sbom_id: after.sbomId ?? before.sbomId,
+        // Neither reading can be named as the origin of the rows: they
+        // disagree about which SBOM (or about its contents), and the pages
+        // were answered somewhere in between.
+        scanned_sbom_id: after.sbomId === before.sbomId ? before.sbomId : null,
       };
     }
 
     return {
       scan_state: SCAN_STATE_FINAL,
-      counts_final: true,
-      scanned_sbom_id: before.sbomId,
+      // A settled scan is not enough: the walk must also have COVERED the
+      // project (Codex R2, Medium). A truncated walk read a prefix, and under
+      // ?sort=epss that prefix is not even stable — an EPSS sync can demote
+      // rows past the 5000-row cap between pages, so rows that belong in the
+      // scanned range are never requested and no per-page guard fires. Calling
+      // such counts final would be the same claim this field exists to stop:
+      // "these are the project's numbers" about numbers that are not.
+      counts_final: walkCovered,
+      scanned_sbom_id: walkCovered ? before.sbomId : null,
     };
   }
 }
