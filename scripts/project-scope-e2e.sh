@@ -858,6 +858,92 @@ note "POST /api/v1/cli/check (empty components): both credentials -> ${chk_scope
 note "POST /api/v1/cli/check without a valid credential -> 401 (route is still behind APIKeyAuth)"
 
 # ---------------------------------------------------------------------------
+# Step 4b: the SAME key in the OTHER header
+#
+# Everything above authenticates with `Authorization: Bearer`. apps/api also
+# accepts the key in `X-API-Key` — APIKeyAuth always did, MultiAuth only since
+# e84142c — and until then a request carrying only that header was not refused
+# either: with Authorization empty it fell through to Auth(), whose self-hosted
+# branch provisions the DEFAULT tenant's Owner. A project-scoped key therefore
+# reached a SIBLING project with 200, because the scope comparison never ran on
+# a key that was never read.
+#
+# Two shipped clients send exactly that header to a MultiAuth route
+# (packages/mcp-server, .github/workflows/sbom-upload.yml), so this is checked
+# on the wire rather than only in Go tests. Four cells, and each is a different
+# claim:
+#
+#   scoped key, own project      -> 200   the header authenticates at all
+#   scoped key, sibling project  -> 403   ...and carries the key's scope with it
+#   unusable value               -> 401   fail-closed: a presented credential
+#                                         that cannot be used ENDS the request
+#   no header at all             -> 200   ...but the absence of one still does
+#                                         not (the self-host promise)
+#
+# The last two together are the whole point: "no credential" and "a credential
+# I cannot use" must not resolve to the same identity.
+#
+# NOTE: the 200s below assume this stack runs SBOMHUB_AUTH_MODE=anonymous, which
+# is what the workflow driving this script sets and what makes the no-header
+# cell meaningful at all. Under `clerk` the no-header cell would be 401.
+# ---------------------------------------------------------------------------
+echo "=== Step 4b: X-API-Key on a MultiAuth route ==="
+
+XKEY_ROUTE="/api/v1/projects"
+
+xk_own=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_OWN}/sbom" "${WORK}/xk.own" \
+  -H "X-API-Key: ${K_SCOPED}")
+[ "${xk_own}" = "200" ] || fail "X-API-Key with the scoped key on its OWN project returned ${xk_own}, want 200 — apps/api documents that header for API keys and MultiAuth must read it"
+note "X-API-Key scoped  GET ${XKEY_ROUTE}/<own>/sbom -> ${xk_own}"
+
+xk_sib=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_SIBLING}/sbom" "${WORK}/xk.sib" \
+  -H "X-API-Key: ${K_SCOPED}")
+[ "${xk_sib}" = "403" ] || fail "X-API-Key with the scoped key on a SIBLING project returned ${xk_sib}, want 403. Authorization: Bearer with the same key answers 403 here; a header that authenticates without carrying the key's project scope is worse than one that does not authenticate at all"
+assert_refusal_body "${WORK}/xk.sib" "GET ${XKEY_ROUTE}/:id/sbom (X-API-Key, sibling)"
+note "X-API-Key scoped  GET ${XKEY_ROUTE}/<sibling>/sbom -> ${xk_sib} $(tr -d '\n' <"${WORK}/xk.sib")"
+
+# scan-status: the route the MCP server reads the asynchronous scan state from.
+# 404 is the expected answer for a made-up sbom_id — what matters is that the
+# request was ADMITTED for the key's own project and REFUSED for the sibling.
+xk_scan_own=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_OWN}/sboms/${DUMMY_SUBRESOURCE}/scan-status" \
+  "${WORK}/xk.scan.own" -H "X-API-Key: ${K_SCOPED}")
+[ "${xk_scan_own}" != "403" ] || fail "scan-status for the scoped key's OWN project was refused with 403 — the MCP server reads the scan state through this route and would report every count as unverifiable"
+[ "${xk_scan_own}" != "401" ] || fail "scan-status with X-API-Key returned 401 — MultiAuth is not reading the header"
+xk_scan_sib=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_SIBLING}/sboms/${DUMMY_SUBRESOURCE}/scan-status" \
+  "${WORK}/xk.scan.sib" -H "X-API-Key: ${K_SCOPED}")
+[ "${xk_scan_sib}" = "403" ] || fail "scan-status for a SIBLING project returned ${xk_scan_sib}, want 403"
+assert_refusal_body "${WORK}/xk.scan.sib" "GET .../sboms/:sbom_id/scan-status (X-API-Key, sibling)"
+note "X-API-Key scoped  GET .../sboms/<dummy>/scan-status -> own ${xk_scan_own} / sibling ${xk_scan_sib}"
+
+XK_BAD_CODES=""
+for bad in "sbh_$(openssl rand -hex 16)" "definitely-not-a-key"; do
+  xk_bad=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_OWN}/sbom" "${WORK}/xk.bad" \
+    -H "X-API-Key: ${bad}")
+  XK_BAD_CODES="${XK_BAD_CODES}${XK_BAD_CODES:+/}${xk_bad}"
+  [ "${xk_bad}" = "401" ] || fail "X-API-Key carrying an unusable value returned ${xk_bad}, want 401. Anything else means the value was DISCARDED and the request served as somebody else — the fail-open shape M48 removed elsewhere"
+done
+# The observed codes, not the expected ones: a note that says "-> 401"
+# unconditionally is a line in the log that is false on exactly the runs where
+# the log matters.
+note "X-API-Key unusable values (unknown sbh_ / not key-shaped) -> ${XK_BAD_CODES} (want 401/401: fail-closed, no fall-through to the default identity)"
+
+# The negative control for the line above, on the SAME url: without the header
+# the request must still get PAST authentication, because that fall-through is
+# the documented self-host behaviour. 401 here would mean the fix tightened more
+# than it was supposed to.
+#
+# "Past authentication" is asserted as `not 401`, not as 200: the anonymous
+# fall-through resolves to the DEFAULT tenant, and this script's fixtures live
+# in a tenant it seeded, so RLS hides the project and the handler answers 404.
+# That 404 is itself the evidence — it comes from SbomHandler.Get, which only
+# runs after the middleware admitted the request. The contrast that matters is
+# 404-from-the-handler versus the 401-from-the-middleware above, on one URL.
+xk_none=$(http GET "${SBOMHUB_URL}${XKEY_ROUTE}/${PROJECT_OWN}/sbom" "${WORK}/xk.none")
+[ "${xk_none}" != "401" ] || fail "NEGATIVE CONTROL: a request with NO credential returned 401 on an anonymous self-host stack. Refusing an UNUSABLE header must not also refuse the ABSENCE of one — 'self-host first' promises a header-less curl still works"
+[ "${xk_none}" != "403" ] || fail "NEGATIVE CONTROL: a request with NO credential returned 403 — a credential-less request has no project scope to violate, so this is the scope filter running on an identity that has none"
+note "no header         GET ${XKEY_ROUTE}/<own>/sbom -> ${xk_none} (not 401: admitted, then answered by the handler under the default tenant)"
+
+# ---------------------------------------------------------------------------
 # Step 5: default-deny — an unclassified path under /mcp or /cli is 403, not 404
 # ---------------------------------------------------------------------------
 echo "=== Step 5: default-deny on Echo's RouteNotFound catch-all ==="
