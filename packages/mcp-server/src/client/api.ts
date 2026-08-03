@@ -302,6 +302,14 @@ export class ApiClient {
     );
   }
 
+  // Which SBOM the per-project vulnerability routes are currently answering
+  // for: the handler resolves "the project's latest" per request, and the list
+  // is newest-first. `null` means the project has no SBOM at all.
+  private async latestSbomId(projectId: string): Promise<string | null> {
+    const sboms = await this.listSboms(projectId);
+    return sboms[0]?.id ?? null;
+  }
+
   // Walks the paginated endpoint page by page (500 rows each) until the
   // project is exhausted or VULNS_SCAN_CAP is hit. `truncated` is true when
   // rows beyond the scan remain on the server, OR when the walk stopped at the
@@ -334,6 +342,9 @@ export class ApiClient {
     const vulnerabilities: VulnerabilityEntry[] = [];
     let reportedTotal = 0;
     let sawEnd = false;
+    // Read only when a walk actually spans more than one request: a
+    // single-page answer comes from one response and cannot mix snapshots.
+    let snapshotAtStart: string | null | undefined = undefined;
 
     for (let offset = 0; offset < VULNS_SCAN_CAP; offset += VULNS_PAGE_LIMIT) {
       const { data, headers } = await this.requestRaw(
@@ -366,6 +377,28 @@ export class ApiClient {
         sawEnd = true;
         break;
       }
+
+      // A second page is needed, so the answer will be assembled from several
+      // requests — each answered against whatever is the project's latest SBOM
+      // at that moment. The count check above misses a replacement snapshot
+      // that happens to have the SAME number of rows (two 600-row snapshots
+      // produced an impossible 500-from-one + 100-from-the-other set, Codex
+      // R9), so the identity of the snapshot is pinned here and verified after
+      // the last page.
+      if (snapshotAtStart === undefined) {
+        snapshotAtStart = await this.latestSbomId(projectId);
+      }
+    }
+
+    if (snapshotAtStart !== undefined) {
+      const snapshotAtEnd = await this.latestSbomId(projectId);
+      if (snapshotAtEnd !== snapshotAtStart) {
+        throw new Error(
+          `the project's latest SBOM changed while its vulnerabilities were being read ` +
+            `(${snapshotAtStart ?? "none"} → ${snapshotAtEnd ?? "none"}); the pages come ` +
+            "from different snapshots and cannot be combined — retry"
+        );
+      }
     }
 
     // A header that claims fewer rows than were actually read is not evidence
@@ -383,6 +416,8 @@ export class ApiClient {
     };
   }
 }
+
+// ---------------------------------------------------------------------------
 
 // apps/api/internal/handler/sbom.go always sets X-Total-Count on the success
 // path (it is what the Web UI pages with). Its absence means something else

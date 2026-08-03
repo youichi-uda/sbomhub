@@ -23,6 +23,9 @@ import {
   SBOMS,
   SPEC_VERSION_SBOMS,
 } from "./helpers/contract-table.mjs";
+
+// A snapshot id that is not in the fixture list.
+const OTHER_SBOM_ID = "dddddddd-4444-4444-8444-dddddddddddd";
 import { jsonOf, startMcpServer, textOf } from "./helpers/mcp-harness.mjs";
 import { startStubApi } from "./helpers/stub-api.mjs";
 
@@ -121,8 +124,10 @@ const DOWNSTREAM_CASES = [
         req.query.offset === "0"
           ? page(500, 1200)
           : { status, body: { error: "denied" } },
+      // The multi-page walk brackets itself with the latest-SBOM id.
+      [K.sboms]: ok(SBOMS),
     }),
-    expectedRequests: 2,
+    expectedRequests: 3,
   },
   {
     title: "sbomhub_get_project_dashboard: the vulnerabilities leg fails",
@@ -202,6 +207,7 @@ for (const c of HEADERLESS_CASES) {
   test(`sbomhub_get_vulnerabilities refuses a scan whose X-Total-Count is ${c.title}`, async () => {
     stub.reset();
     stub.routes({
+      [K.sboms]: { status: 200, body: SBOMS },
       [K.vulns]: (req) => {
         const offset = Number(req.query.offset ?? "0");
         const size = Math.max(0, Math.min(500, c.rows - offset));
@@ -347,6 +353,7 @@ test("the vulnerability walk refuses to blend two SBOM snapshots", async () => {
   // concatenation never existed as a state of the project.
   stub.reset();
   stub.routes({
+    [K.sboms]: { status: 200, body: SBOMS },
     [K.vulns]: (req) => {
       const offset = Number(req.query.offset ?? "0");
       const rows = Array.from({ length: offset === 0 ? 500 : 100 }, (_, i) => ({
@@ -369,6 +376,45 @@ test("the vulnerability walk refuses to blend two SBOM snapshots", async () => {
   await stub.quiet();
   assert.equal(result.isError, true, textOf(result));
   assert.match(textOf(result), /changed while it was being read/);
+  assert.throws(() => JSON.parse(textOf(result)));
+});
+
+test("two snapshots with the SAME row count are still refused", async () => {
+  // The count check cannot see this one: both snapshots have 600 rows, so
+  // X-Total-Count never changes. What does change is which SBOM the routes
+  // are answering for, and the walk pins that across pages (Codex R9).
+  stub.reset();
+  let sbomListReads = 0;
+  stub.routes({
+    [K.sboms]: () => {
+      sbomListReads += 1;
+      // The second read (after the last page) sees a different newest SBOM.
+      return {
+        status: 200,
+        body: sbomListReads === 1 ? SBOMS : [{ ...SBOMS[0], id: OTHER_SBOM_ID }, ...SBOMS],
+      };
+    },
+    [K.vulns]: (req) => {
+      const offset = Number(req.query.offset ?? "0");
+      const size = offset === 0 ? 500 : 100;
+      return {
+        status: 200,
+        body: Array.from({ length: size }, (_, i) => ({
+          cve_id: `CVE-2026-${50000 + offset + i}`,
+          severity: offset === 0 ? "CRITICAL" : "LOW",
+          cvss_score: 7,
+        })),
+        headers: { "X-Total-Count": "600" },
+      };
+    },
+  });
+
+  const result = await mcp.callTool("sbomhub_get_vulnerabilities", {
+    project_id: PROJECT_ID,
+  });
+  await stub.quiet();
+  assert.equal(result.isError, true, textOf(result));
+  assert.match(textOf(result), /latest SBOM changed/);
   assert.throws(() => JSON.parse(textOf(result)));
 });
 
