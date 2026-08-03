@@ -794,3 +794,32 @@ jobs:
 		t.Error("the pre-matrix check name must NOT be vouched for")
 	}
 }
+
+// GitHub's default name for a nameless matrix job lists the axes in YAML
+// DECLARATION order. Sorting them produced a different name whenever the
+// axes were reordered, which is an ordinary tidy-up.
+func TestNamelessMatrixUsesDeclarationOrder(t *testing.T) {
+	const body = `name: X
+on:
+  push:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        go: ['1.26']
+    runs-on: ${{ matrix.os }}
+`
+	jobs, err := parseWorkflow("x.yml", body)
+	if err != nil {
+		t.Fatalf("parseWorkflow: %v", err)
+	}
+	names, ok := expandNames(jobs[0])
+	if !ok || len(names) != 1 {
+		t.Fatalf("got %v ok=%v", names, ok)
+	}
+	if names[0] != "build (ubuntu-latest, 1.26)" {
+		t.Fatalf("got %q, want declaration order", names[0])
+	}
+}

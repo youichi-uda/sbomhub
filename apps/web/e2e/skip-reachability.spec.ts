@@ -429,18 +429,12 @@ function isProcessEnvCI(node: ts.Expression): boolean {
     );
 }
 
-/** Globals the CI-neutrality proof reads by name. */
-const PROOF_GLOBALS = ['process', 'undefined'] as const;
-
 /**
  * `!process.env.CI`, `process.env.CI === undefined`, `process.env.CI == null`.
  *
- * `globalsIntact` is false when the file binds `process` or `undefined`
- * itself. `const process = { env: { CI: undefined } }` makes
- * `!process.env.CI` say nothing about the environment, and
- * `const undefined = process.env.CI` makes `process.env.CI === undefined`
- * true precisely when CI is set. Either way NOTHING in that file counts
- * as CI-neutral. (Review findings, High.)
+ * `globalsIntact` is false when the file writes `process.env.CI` at
+ * collection time, which makes the proof say nothing about the real
+ * environment.
  */
 function assertsCiIsOff(node: ts.Expression, globalsIntact = true): boolean {
     if (!globalsIntact) return false;
@@ -541,6 +535,21 @@ function envIsPristine(sf: ts.SourceFile): boolean {
         for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
             if (!isPlainFunction(p)) continue;
             if (runsInPlace(p)) continue;
+            // A `test.describe` body runs synchronously DURING collection,
+            // so a stray `process.env.CI = ''` left in one really does
+            // defeat a sibling guard. Only a body that runs later — a
+            // test, a hook, a step — is irrelevant. Treating every
+            // callback as deferred missed that. (Review finding under the
+            // declared threat model.)
+            const [child, parent] = skipParens(p);
+            if (
+                parent !== undefined &&
+                ts.isCallExpression(parent) &&
+                parent.arguments.includes(child as ts.Expression) &&
+                CALLEE_DESCRIBE.test(calleeName(parent.expression) ?? '')
+            ) {
+                continue;
+            }
             return true;
         }
         return false;
@@ -858,7 +867,11 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         const target = aliases.get(head);
         return target === undefined ? name : target + name.slice(head.length);
     };
-    const globalsIntact = !PROOF_GLOBALS.some((g) => bound.has(g)) && envIsPristine(sf);
+    // Rebinding `process` or `undefined` is a sabotage shape, not an
+    // accident, and treating a plain `import process from 'node:process'`
+    // as one made a CORRECT guard red. See THREAT MODEL. Only an actual
+    // collection-time write to process.env.CI disqualifies the proof.
+    const globalsIntact = envIsPristine(sf);
     const sites: SkipSite[] = [];
     // Enclosing test-construct scopes, innermost last.
     const stack: SkipSite['scope'][] = [];
@@ -876,6 +889,14 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
      * under the declared threat model.)
      */
     const callScopes = new Map<string, Set<SkipSite['scope']>>();
+    /**
+     * `callee name -> names of the helpers it is called from`, so a helper
+     * called only from another helper still inherits that helper's blast
+     * radius. Extracting a skip out of an already-extracted suite body is
+     * an ordinary refactor. (Review finding under the declared threat
+     * model.)
+     */
+    const callFromClosure = new Map<string, Set<string>>();
 
     const describeHasThrowingBeforeAll = (describeBody: ts.Node): boolean => {
         let found = false;
@@ -939,6 +960,14 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 const seen = callScopes.get(callee) ?? new Set<SkipSite['scope']>();
                 seen.add(at);
                 callScopes.set(callee, seen);
+                const from = closureStack.length
+                    ? closureStack[closureStack.length - 1].name
+                    : null;
+                if (from !== null) {
+                    const fromSet = callFromClosure.get(callee) ?? new Set<string>();
+                    fromSet.add(from);
+                    callFromClosure.set(callee, fromSet);
+                }
             }
 
             // `test.describe('gate', suite)` runs `suite`'s body AS the
@@ -974,8 +1003,8 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                 // same-named helper in another suite made a correct
                 // conditional look like a declaration (missed gate).
                 // (Review findings under the declared threat model.)
-                const isTitle = (a: ts.Expression): boolean => {
-                    const cur = unwrap(a);
+                const isStringish = (e: ts.Expression, depth = 0): boolean => {
+                    const cur = unwrap(e);
                     if (
                         ts.isStringLiteral(cur) ||
                         ts.isNoSubstitutionTemplateLiteral(cur) ||
@@ -983,19 +1012,21 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
                     ) {
                         return true;
                     }
-                    if (ts.isIdentifier(cur)) {
+                    // `'temporarily disabled: ' + ticket` — appending an
+                    // issue number to a title is an ordinary edit.
+                    if (
+                        ts.isBinaryExpression(cur) &&
+                        cur.operatorToken.kind === ts.SyntaxKind.PlusToken
+                    ) {
+                        return isStringish(cur.left, depth) || isStringish(cur.right, depth);
+                    }
+                    if (depth === 0 && ts.isIdentifier(cur)) {
                         const init = consts.get(cur.text);
-                        if (init) {
-                            const u = unwrap(init);
-                            return (
-                                ts.isStringLiteral(u) ||
-                                ts.isNoSubstitutionTemplateLiteral(u) ||
-                                ts.isTemplateExpression(u)
-                            );
-                        }
+                        if (init) return isStringish(init, depth + 1);
                     }
                     return false;
                 };
+                const isTitle = (a: ts.Expression): boolean => isStringish(a);
                 const isDeclaration = args.length >= 2 && isTitle(args[0]);
                 const form: SkipSite['form'] =
                     args.length === 0 ? 'noarg' : isDeclaration ? 'declaration' : 'conditional';
@@ -1090,7 +1121,34 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
 
     visit(sf);
 
-    // Decide the blast radius now that every call site is known.
+    // Which helper names run at group scope. Seeded from direct call
+    // sites, then closed transitively: a helper called from a helper that
+    // runs at group scope also runs at group scope.
+    //
+    // A name bound more than once in the file is dropped rather than
+    // resolved. Two independent suites each declaring `const setup = …`
+    // is ordinary code, and merging their call sites made one suite's
+    // per-test helper inherit the other's describe-scope call — a
+    // violation on correct code. Fail OPEN here on purpose: a missed gate
+    // in a rare shape is better than a red `main` on a common one.
+    // (Review finding under the declared threat model.)
+    const groupWideHelpers = new Set<string>();
+    for (const [name, scopes] of callScopes) {
+        if (bound.get(name) !== 1) continue;
+        if ([...scopes].some((sc) => GROUP_SCOPES.has(sc))) groupWideHelpers.add(name);
+    }
+    for (let changed = true; changed; ) {
+        changed = false;
+        for (const [name, from] of callFromClosure) {
+            if (groupWideHelpers.has(name)) continue;
+            if (bound.get(name) !== 1) continue;
+            if ([...from].some((f) => groupWideHelpers.has(f))) {
+                groupWideHelpers.add(name);
+                changed = true;
+            }
+        }
+    }
+
     for (const site of sites) {
         if (site.scope !== 'closure') {
             site.groupWide = GROUP_SCOPES.has(site.scope);
@@ -1100,13 +1158,9 @@ export function analyzeSource(fileName: string, text: string): SkipSite[] {
         // describe scope in one this pass never sees, so it is treated as
         // group-wide. An unnamed closure has no visible call site and is
         // left alone (documented limitation).
-        if (site.closureExported) {
-            site.groupWide = true;
-            continue;
-        }
-        const calledFrom = site.closureName ? callScopes.get(site.closureName) : undefined;
         site.groupWide =
-            calledFrom !== undefined && [...calledFrom].some((sc) => GROUP_SCOPES.has(sc));
+            site.closureExported ||
+            (site.closureName !== null && groupWideHelpers.has(site.closureName));
     }
 
     return sites;
@@ -1627,6 +1681,62 @@ test.describe('gate', () => {
 });
 `;
 
+/** A stray env poke left in a DESCRIBE body runs during collection. */
+const FIXTURE_CI_WRITE_IN_DESCRIBE = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    process.env.CI = '';
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
+/** A helper extracted out of an already-extracted suite body. */
+const FIXTURE_TRANSITIVE_HELPER = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const suite = () => {
+    const skipIfMissing = () => test.skip(!HAS_TOOL, 'tool missing');
+    skipIfMissing();
+    test('gate', async () => {});
+};
+test.describe('gate', suite);
+`;
+
+/** Making an implicit global explicit is ordinary ESM tidying. */
+const FIXTURE_IMPORTED_PROCESS = `
+import { test } from '@playwright/test';
+import process from 'node:process';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!HAS_TOOL && !process.env.CI, 'tool missing');
+});
+`;
+
+/** Appending an issue number to a disabled test's title. */
+const FIXTURE_COMPUTED_TITLE = `
+import { test } from '@playwright/test';
+const ticket = 'M12-4';
+const title = 'temporarily disabled: ' + ticket;
+test.describe('gate', () => {
+    test.skip(title, async () => {});
+});
+`;
+
+/** The same general helper name used independently in two suites. */
+const FIXTURE_SAMENAME_HELPER_BOTH_SUITES = `
+import { test } from '@playwright/test';
+const ready = false;
+test.describe('a', () => {
+    const setup = () => test.skip(!ready, 'seed');
+    test('x', async () => { setup(); });
+});
+test.describe('b', () => {
+    const setup = () => { void 0; };
+    setup();
+});
+`;
+
 /** A test's TITLE is evaluated eagerly, at collection time. */
 const FIXTURE_SKIP_IN_TEST_TITLE = `
 import { test } from '@playwright/test';
@@ -1741,6 +1851,8 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['export-clause-helper', FIXTURE_EXPORT_CLAUSE_HELPER],
             ['default-export-helper', FIXTURE_DEFAULT_EXPORT_HELPER],
             ['foreach-parameterised', FIXTURE_FOREACH_PARAMETERISED],
+            ['ci-write-in-describe', FIXTURE_CI_WRITE_IN_DESCRIBE],
+            ['transitive-helper', FIXTURE_TRANSITIVE_HELPER],
             ['samename-helper-elsewhere', FIXTURE_SAMENAME_HELPER_ELSEWHERE],
             ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
@@ -1776,6 +1888,9 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['declaration-imported-body', FIXTURE_DECLARATION_IMPORTED_BODY],
             ['object-method-helper', FIXTURE_OBJECT_METHOD_HELPER],
             ['runtime-ci-write', FIXTURE_RUNTIME_CI_WRITE],
+            ['imported-process', FIXTURE_IMPORTED_PROCESS],
+            ['computed-title', FIXTURE_COMPUTED_TITLE],
+            ['samename-helper-both-suites', FIXTURE_SAMENAME_HELPER_BOTH_SUITES],
             ['unrelated-env-write', FIXTURE_UNRELATED_ENV_WRITE],
             ['marker', FIXTURE_MARKER],
             ['marker-trailing', FIXTURE_MARKER_TRAILING],

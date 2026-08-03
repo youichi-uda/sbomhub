@@ -114,6 +114,11 @@ type job struct {
 	// matrix values keyed by `matrix.<key>`, when the job declares a
 	// `strategy.matrix` this scanner could read. Empty for a plain job.
 	matrix map[string][]string
+	// Keys in YAML declaration order — GitHub's default name for a
+	// nameless matrix job is `id (v1, v2)` in THAT order, and sorting
+	// alphabetically produced a different (wrong) name whenever the axes
+	// were reordered. (Review finding under the declared threat model.)
+	matrixOrder []string
 	// The matrix uses `include:` / `exclude:`, which add or remove legs
 	// this scanner does not model. Expanding the declared keys alone
 	// would then MISS legs and report a live required check as stale —
@@ -211,6 +216,9 @@ func parseWorkflow(base, body string) ([]job, error) {
 					continue
 				}
 				if m := reMatrixItem.FindStringSubmatch(line); m != nil && matrixKey != "" {
+					if _, seen := cur.matrix[matrixKey]; !seen {
+						cur.matrixOrder = append(cur.matrixOrder, matrixKey)
+					}
 					cur.matrix[matrixKey] = append(cur.matrix[matrixKey], scalarValue(m[1]))
 					continue
 				}
@@ -232,6 +240,9 @@ func parseWorkflow(base, body string) ([]job, error) {
 						// required check naming the old leg has to be
 						// reported rather than accepted on a bare prefix.
 						// (Review finding under the declared threat model.)
+						if _, seen := cur.matrix[matrixKey]; !seen {
+							cur.matrixOrder = append(cur.matrixOrder, matrixKey)
+						}
 						cur.matrix[matrixKey] = []string{}
 						for _, v := range strings.Split(rest[1:len(rest)-1], ",") {
 							if v = scalarValue(v); v != "" {
@@ -428,11 +439,7 @@ func expandNames(j job) ([]string, bool) {
 		if j.matrixIsPartial {
 			return nil, false
 		}
-		keys := make([]string, 0, len(j.matrix))
-		for k := range j.matrix {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := j.matrixOrder
 		combos := []string{""}
 		for _, k := range keys {
 			values := j.matrix[k]
