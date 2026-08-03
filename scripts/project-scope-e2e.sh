@@ -815,7 +815,26 @@ chk_tenant_code=$(http POST "${SBOMHUB_URL}/api/v1/cli/check" "${WORK}/chk.tenan
   -H "Authorization: Bearer ${K_TENANT}" -H 'Content-Type: application/json' -d '{"components":[]}')
 [ "${chk_scoped_code}" = "${chk_tenant_code}" ] || fail "POST /api/v1/cli/check (deterministic empty-components path): scoped key got ${chk_scoped_code}, tenant-level key got ${chk_tenant_code} — scopeNoProjectResource promises the route is reached unchanged"
 cmp -s "${WORK}/chk.scoped" "${WORK}/chk.tenant" || fail "POST /api/v1/cli/check answers a project-scoped key with different bytes than a tenant-level one: '$(tr -d '\n' <"${WORK}/chk.scoped")' vs '$(tr -d '\n' <"${WORK}/chk.tenant")'"
+
+# Equality alone is not enough (Codex R5 Medium): two identical 500s satisfy it,
+# and so does a route that has slipped OUT from behind APIKeyAuth while its
+# handler keeps answering 400. Pin what the answer has to BE, and prove the
+# route is still authenticated.
+[ "${chk_scoped_code}" = "400" ] || fail "POST /api/v1/cli/check with empty components returned ${chk_scoped_code}, want 400 — the two credentials agreeing on some other status says nothing about the route being reached"
+CHK_ERR=$(jq -r '.error // "<none>"' <"${WORK}/chk.scoped" 2>/dev/null || echo "<not json>")
+[ "${CHK_ERR}" = "components array is required and cannot be empty" ] || fail "POST /api/v1/cli/check with empty components answered '${CHK_ERR}' — that is not CLIHandler.Check's validation error, so the request did not reach the handler"
+for bad in "" "sbh_$(openssl rand -hex 16)"; do
+  if [ -z "${bad}" ]; then
+    chk_unauth=$(http POST "${SBOMHUB_URL}/api/v1/cli/check" "${WORK}/chk.unauth" -H 'Content-Type: application/json' -d '{"components":[]}')
+    what="no credential"
+  else
+    chk_unauth=$(http POST "${SBOMHUB_URL}/api/v1/cli/check" "${WORK}/chk.unauth" -H "Authorization: Bearer ${bad}" -H 'Content-Type: application/json' -d '{"components":[]}')
+    what="an unknown sbh_ key"
+  fi
+  [ "${chk_unauth}" = "401" ] || fail "POST /api/v1/cli/check with ${what} returned ${chk_unauth}, want 401 — the route is no longer behind APIKeyAuth, so its 'reached unchanged' result above proves nothing about the scope filter"
+done
 note "POST /api/v1/cli/check (empty components): both credentials -> ${chk_scoped_code} $(tr -d '\n' <"${WORK}/chk.scoped")"
+note "POST /api/v1/cli/check without a valid credential -> 401 (route is still behind APIKeyAuth)"
 
 # ---------------------------------------------------------------------------
 # Step 5: default-deny — an unclassified path under /mcp or /cli is 403, not 404
