@@ -1,0 +1,171 @@
+# SBOMHub — project-scoped API key enforcement E2E (M50 W2/W3)
+#
+# WHY THIS EXISTS AS A SEPARATE GATE
+#
+# `api_keys.project_id` is the credential the web UI labels "Project-scoped" and
+# that an administrator hands to a contractor or a per-repository CI job. Until
+# M50 W2 the column was written and read by nothing, so the label was false and
+# every such key carried tenant-wide authority. The fix lives in
+# apps/api/internal/middleware/project_scope.go as a route classification table
+# whose default branch is DENY.
+#
+# go-test.yml already runs that file's unit tests and (since b384497) its
+# database-backed integration tests. What none of them do is put a real
+# `sbh_...` string on the wire against the router and middleware chains
+# cmd/server/main.go actually assembles — which is where a regression would
+# show up as, say, a route mounted on an API-key-fronted group without a table
+# entry, an error envelope that starts distinguishing "not yours" from "does
+# not exist", or a handler that stops narrowing a project list. This job is the
+# HTTP-level observation; scripts/project-scope-e2e.sh has the full rationale
+# and the list of what it deliberately does NOT re-prove.
+#
+# STACK
+#
+# Same shape as golden-path-e2e.yml (postgres + redis + a locally built api
+# image, self-host / anonymous auth mode, no LLM provider). The script seeds its
+# own tenant, two projects and two `sbh_...` keys through psql + the api, so the
+# workflow only has to produce a healthy stack and hand over the compose psql
+# service name.
+#
+# The runner is exclusive, so the default ports (8080 / 5432 / 6379) are safe.
+# Locally, drive the same script against a throwaway stack with
+#   SBOMHUB_URL=http://localhost:18080 \
+#   SBOMHUB_PSQL_CMD='docker exec -i <pg> psql -v ON_ERROR_STOP=1 -U sbomhub -d sbomhub -X -q' \
+#   bash scripts/project-scope-e2e.sh
+#
+# NOTE FOR BRANCH PROTECTION: this workflow is `paths:`-filtered. A required
+# check that is filtered out never reports on PRs that do not touch those paths.
+# Whoever adds it to the required set has to account for that.
+
+name: project-scope e2e
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - "scripts/project-scope-e2e.sh"
+      - "test/fixtures/minimal-cyclonedx.json"
+      - ".github/workflows/project-scope-e2e.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "scripts/project-scope-e2e.sh"
+      - "test/fixtures/minimal-cyclonedx.json"
+      - ".github/workflows/project-scope-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  api-key-project-scope:
+    name: project-scoped API key matrix over HTTP (every apiKeyRouteScope route)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
+        run: |
+          docker compose version
+          curl --version | head -n1
+          jq --version
+          openssl version
+          uuidgen --version 2>/dev/null || true
+
+      - name: Generate .env with per-run secrets
+        # Lifted from golden-path-e2e.yml. SBOMHUB_AUTH_MODE stays at
+        # .env.example's `anonymous`: this job authenticates every request with
+        # an API key and sets no CLERK_SECRET_KEY, so declaring `clerk` would
+        # make the api refuse to start. No SBOMHUB_LLM_PROVIDER is set either —
+        # nothing in this matrix touches the LLM path.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+
+          ENC_KEY="$(openssl rand -base64 32)"
+          MIG_PW="$(openssl rand -hex 16)"
+          APP_PW="$(openssl rand -hex 16)"
+
+          sed -i '/^ENCRYPTION_KEY=/d'        .env
+          sed -i '/^MIGRATOR_PASSWORD=/d'     .env
+          sed -i '/^APP_PASSWORD=/d'          .env
+          sed -i '/^APP_ENV=/d'               .env
+          sed -i '/^DATABASE_URL=/d'          .env
+          sed -i '/^MIGRATE_DATABASE_URL=/d'  .env
+          {
+            echo "ENCRYPTION_KEY=${ENC_KEY}"
+            echo "MIGRATOR_PASSWORD=${MIG_PW}"
+            echo "APP_PASSWORD=${APP_PW}"
+            echo "APP_ENV=development"
+            echo "DATABASE_URL=postgres://sbomhub_app:${APP_PW}@postgres:5432/sbomhub?sslmode=disable"
+            echo "MIGRATE_DATABASE_URL=postgres://sbomhub_migrator:${MIG_PW}@postgres:5432/sbomhub?sslmode=disable"
+          } >> .env
+
+      - name: Build api image locally
+        # docker-compose.yml pins api to y1uda/sbomhub-api:latest with no
+        # `build:` directive, so re-tag a local build under the same name to
+        # make `up` pick ours instead of the registry copy.
+        run: |
+          docker build \
+            -t y1uda/sbomhub-api:latest \
+            -f apps/api/Dockerfile \
+            apps/api
+
+      - name: Start postgres + redis
+        run: docker compose up -d --wait postgres redis
+
+      - name: Bootstrap DB roles (sbomhub_app / sbomhub_migrator)
+        # install.sh --bootstrap-roles is the canonical path. sbomhub_app is
+        # NOSUPERUSER NOBYPASSRLS, which matters here: the narrowed project list
+        # this job asserts on is read under RLS.
+        run: |
+          chmod +x install.sh
+          ./install.sh --bootstrap-roles
+
+      - name: Start api (locally built image)
+        run: |
+          docker compose up -d --pull never api
+          docker compose ps
+
+      - name: Wait for /api/v1/health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS http://localhost:8080/api/v1/health 2>/dev/null); then
+              echo "api healthy after $((i*2))s: $body"
+              exit 0
+            fi
+            echo "waiting for api... ($i/60)"
+            sleep 2
+          done
+          echo "::error::api did not become healthy within ~120s"
+          docker compose logs --tail=200 api || true
+          docker compose logs --tail=100 postgres || true
+          exit 1
+
+      - name: Drive the project-scope matrix
+        env:
+          SBOMHUB_URL: http://localhost:8080
+          COMPOSE_PSQL_SVC: postgres
+        run: |
+          chmod +x scripts/project-scope-e2e.sh
+          bash scripts/project-scope-e2e.sh
+
+      - name: Dump api / postgres logs on failure
+        if: failure()
+        run: |
+          echo "--- api ---"
+          docker compose logs --tail=500 api || true
+          echo "--- postgres ---"
+          docker compose logs --tail=200 postgres || true
+
+      - name: Tear down
+        # `|| true` for the same reason golden-path-e2e.yml has it: `down`
+        # interpolates docker-compose.yml, so a job that died before .env was
+        # generated would report a second, misleading failure here.
+        if: always()
+        run: docker compose down -v || true
