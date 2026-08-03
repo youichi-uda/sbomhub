@@ -487,11 +487,17 @@ function isCiNeutral(
  * the exemption. Found by review; pinned by FIXTURE_MARKER_IN_STRING.
  */
 function hasAllowMarker(text: string, stmt: ts.Node): boolean {
-    const ranges = [
-        ...(ts.getLeadingCommentRanges(text, stmt.getFullStart()) ?? []),
-        ...(ts.getTrailingCommentRanges(text, stmt.getEnd()) ?? []),
-    ];
-    return ranges.some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
+    const fullStart = stmt.getFullStart();
+    const leading = (ts.getLeadingCommentRanges(text, fullStart) ?? []).filter((r) =>
+        // A comment with no newline between it and the previous token is
+        // that token's TRAILING comment, and TypeScript hands it back as
+        // this statement's leading trivia too. Without this filter a
+        // `// ci-skip-ok:` on one skip silently exempted the next one.
+        // (Review finding, High.)
+        text.slice(fullStart, r.pos).includes('\n'),
+    );
+    const trailing = ts.getTrailingCommentRanges(text, stmt.getEnd()) ?? [];
+    return [...leading, ...trailing].some((r) => ALLOW_MARKER.test(text.slice(r.pos, r.end)));
 }
 
 /**
@@ -506,18 +512,41 @@ function hasAllowMarker(text: string, stmt: ts.Node): boolean {
  */
 function calleeAliases(sf: ts.SourceFile, bound: Map<string, number>): Map<string, string> {
     const aliases = new Map<string, string>();
-    for (const stmt of sf.statements) {
-        if (!ts.isVariableStatement(stmt)) continue;
-        if ((stmt.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
-        for (const decl of stmt.declarationList.declarations) {
-            if (!ts.isIdentifier(decl.name) || !decl.initializer) continue;
-            if (bound.get(decl.name.text) !== 1) continue;
-            const target = calleeName(decl.initializer);
-            if (target !== null && (target === 'test' || target.startsWith('test.'))) {
-                aliases.set(decl.name.text, target);
+    const rootedAtTest = (name: string | null): boolean =>
+        name !== null && (name === 'test' || name.startsWith('test.'));
+
+    // Any scope, not just file scope: `const skip = test.skip;` inside the
+    // describe is the same refactor. Names bound more than once are
+    // skipped for the same shadowing reason as the condition resolver.
+    const visit = (n: ts.Node): void => {
+        if (ts.isVariableDeclaration(n) && n.initializer) {
+            const list = n.parent;
+            const isConst =
+                ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0;
+            if (isConst) {
+                const target = calleeName(n.initializer);
+                if (ts.isIdentifier(n.name)) {
+                    if (bound.get(n.name.text) === 1 && rootedAtTest(target)) {
+                        aliases.set(n.name.text, target as string);
+                    }
+                } else if (ts.isObjectBindingPattern(n.name) && rootedAtTest(target)) {
+                    // `const { skip } = test;`
+                    for (const el of n.name.elements) {
+                        if (!ts.isIdentifier(el.name) || el.dotDotDotToken) continue;
+                        const prop =
+                            el.propertyName && ts.isIdentifier(el.propertyName)
+                                ? el.propertyName.text
+                                : el.name.text;
+                        if (bound.get(el.name.text) === 1) {
+                            aliases.set(el.name.text, `${target as string}.${prop}`);
+                        }
+                    }
+                }
             }
         }
-    }
+        ts.forEachChild(n, visit);
+    };
+    visit(sf);
     return aliases;
 }
 
@@ -932,6 +961,39 @@ test.describe('gate', () => {
 });
 `;
 
+/** The alias declared inside the describe, and via destructuring. */
+const FIXTURE_INNER_ALIASED_SKIP = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    const skip = test.skip;
+    skip(!HAS_TOOL, 'tool missing');
+});
+`;
+
+const FIXTURE_DESTRUCTURED_SKIP = `
+import { test } from '@playwright/test';
+const HAS_TOOL = false;
+const { skip } = test;
+test.describe('gate', () => {
+    skip(!HAS_TOOL, 'tool missing');
+});
+`;
+
+/**
+ * A trailing `ci-skip-ok:` is ALSO leading trivia of the next statement.
+ * Only the first skip here is exempt; the second must be reported.
+ */
+const FIXTURE_MARKER_BLEED = `
+import { test } from '@playwright/test';
+const IS_LINUX = false;
+const HAS_TOOL = false;
+test.describe('gate', () => {
+    test.skip(!IS_LINUX, 'unsupported'); // ci-skip-ok: covered elsewhere
+    test.skip(!HAS_TOOL, 'tool missing');
+});
+`;
+
 /** ...and one level further out, through a `process` alias. */
 const FIXTURE_ALIASED_PROCESS = `
 import { test } from '@playwright/test';
@@ -1055,6 +1117,9 @@ test.describe('e2e skip reachability (hermetic meta-gate)', () => {
             ['aliased-env', FIXTURE_ALIASED_ENV],
             ['aliased-process', FIXTURE_ALIASED_PROCESS],
             ['aliased-skip', FIXTURE_ALIASED_SKIP],
+            ['inner-aliased-skip', FIXTURE_INNER_ALIASED_SKIP],
+            ['destructured-skip', FIXTURE_DESTRUCTURED_SKIP],
+            ['marker-bleed', FIXTURE_MARKER_BLEED],
             ['bracketed-env', FIXTURE_BRACKETED_ENV],
             ['skip-in-test-title', FIXTURE_SKIP_IN_TEST_TITLE],
         ] as const) {
