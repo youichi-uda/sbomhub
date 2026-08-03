@@ -639,10 +639,20 @@ export class ApiClient {
    * # What this still does not prove (honest limitations)
    *
    *   - the untracked-rescan window described above;
-   *   - a rescan that removes exactly as many rows as it adds, entirely within
-   *     the walk, leaves both the state and the count unchanged. The per-page
-   *     X-Total-Count and row-identity guards in fetchVulnerabilities catch it
-   *     whenever the walk spans more than one page.
+   *   - a REPLACEMENT that keeps the row count the same. The per-page
+   *     X-Total-Count guard fires only when the count MOVES, and the
+   *     row-identity guard only when a row is seen twice, so an interleaving
+   *     that swaps one row for another can slip past both: read rows 0-499,
+   *     have row 0 replaced by a row that sorts last, and page two returns
+   *     501-599 plus the replacement — 600 distinct rows, none repeated, the
+   *     count unchanged, and row 500 never read (Codex R3, Medium; reproduced
+   *     against the stub). Ordering the walk over a snapshot is what would
+   *     close this, and the API offers no snapshot token to walk against.
+   *
+   * An earlier version of this comment claimed the multi-page guards caught the
+   * equal-cardinality case. They do not, and the claim is removed rather than
+   * softened: a false statement about what is guarded is worse than no
+   * statement, because it is the one a reader would rely on.
    */
   private async probeScanState(
     projectId: string,

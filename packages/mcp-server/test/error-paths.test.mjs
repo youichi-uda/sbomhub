@@ -150,7 +150,7 @@ const DOWNSTREAM_CASES = [
       [K.vulns]: page(2, 2),
       [K.compliance]: { status, body: { error: "denied" } },
       [K.sboms]: ok(SBOMS),
-      ...scanProbe("completed"),
+      ...scanProbe("completed", { total: 2 }),
     }),
     // Seven, not three: the vulnerabilities leg SUCCEEDS here, and the walk is
     // BRACKETED by two scan-state probes of two requests each. The failure the
@@ -166,7 +166,7 @@ const DOWNSTREAM_CASES = [
       [K.vulns]: page(2, 2),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: { status, body: { error: "denied" } },
-      ...scanProbe("completed"),
+      ...scanProbe("completed", { total: 2 }),
     }),
     // Seven, for the same reason as the compliance case above.
     expectedRequests: 7,

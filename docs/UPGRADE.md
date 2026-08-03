@@ -856,9 +856,14 @@ flight.
    from "a rescan running that has not written yet" — closing this means marking
    the tracker on that handler, which is a backend change and was left out of the
    change that found it.
-2. **A rescan that removes exactly as many rows as it adds**, entirely within the
-   walk. The per-page `X-Total-Count` and row-identity guards catch it whenever
-   the walk spans more than one page.
+2. **A replacement that keeps the row count the same.** The per-page
+   `X-Total-Count` guard fires only when the count moves and the row-identity
+   guard only when a row comes back twice, so an interleaving that swaps one row
+   for another passes both: read rows 0-499, have row 0 replaced by a row that
+   sorts last, and page two returns 501-599 plus the replacement — 600 distinct
+   rows, none repeated, the count unchanged, and row 500 never read. Closing this
+   needs a snapshot to walk against, which the API does not offer. (An earlier
+   revision of this note claimed the multi-page guards caught it; they do not.)
 3. **`GET /api/v1/projects/:id/sbom` answers 404** for a project with no SBOM,
    for a project that does not exist, and for a repository error alike, so the
    client reports `unavailable` for all three rather than naming one.

@@ -140,10 +140,23 @@ export const scanStatusBody = (status, { total = 0, sbomId = SBOM_NEWEST } = {})
  * rather than repeated so a change to the probe cannot be applied to some cases
  * and forgotten in others.
  */
-export const scanProbe = (state = "completed", opts = {}) => ({
-  [K.latestSbom]: ok(SBOMS[0]),
-  [K.scanStatus]: ok(scanStatusBody(state, opts)),
-});
+export const scanProbe = (state = "completed", { total, ...rest } = {}) => {
+  // `total` is required for a case whose walk returns rows (Codex R3, Low): the
+  // probe's count is a COUNT over the same join the pages come from, so a probe
+  // saying 0 while the pages return five rows certifies an answer with evidence
+  // that cannot describe it. Defaulting it silently to 0 hid that.
+  if (total === undefined) {
+    throw new Error(
+      "scanProbe requires an explicit `total` — it must match the row count the " +
+        "case's vulnerability route serves, or the fixture certifies a walk with a " +
+        "probe that contradicts it"
+    );
+  }
+  return {
+    [K.latestSbom]: ok(SBOMS[0]),
+    [K.scanStatus]: ok(scanStatusBody(state, { total, ...rest })),
+  };
+};
 
 /**
  * A probe whose two readings differ: `first` is served until the walk's pages
@@ -259,7 +272,7 @@ export const CONTRACT_CASES = [
       [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
-      ...scanProbe("completed"),
+      ...scanProbe("completed", { total: VULNS.length }),
     },
     // Promise.all fan-out: assert the SET, not the order.
     unordered: true,
@@ -284,6 +297,11 @@ export const CONTRACT_CASES = [
         LOW: 1,
       });
       assert.deepEqual(payload.compliance, COMPLIANCE);
+      // The finality fields are part of this payload too, and asserting them
+      // here is what makes the probe fixture load-bearing rather than decorative.
+      assert.equal(payload.vulnerabilities.scan_state, "completed");
+      assert.equal(payload.vulnerabilities.counts_final, true);
+      assert.equal(payload.vulnerabilities.scanned_sbom_id, SBOM_NEWEST);
     },
   },
 
@@ -299,7 +317,7 @@ export const CONTRACT_CASES = [
       [K.vulns]: pagedVulns(6000, (i) => (i % 3 === 0 ? "CRITICAL" : "HIGH")),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
-      ...scanProbe("completed"),
+      ...scanProbe("completed", { total: 6000 }),
     },
     unordered: true,
     expect: [
@@ -531,7 +549,7 @@ export const CONTRACT_CASES = [
     args: { project_id: PROJECT_ID, severity: "critical" },
     routes: {
       [K.vulns]: pagedVulns(1200, (i) => (i % 2 === 0 ? "CRITICAL" : "HIGH")),
-      ...scanProbe("completed"),
+      ...scanProbe("completed", { total: 1200 }),
     },
     expect: withProbes([
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
@@ -555,7 +573,7 @@ export const CONTRACT_CASES = [
     tool: "sbomhub_get_vulnerabilities",
     title: "stops at the 5000-row scan cap and flags the truncation",
     args: { project_id: PROJECT_ID },
-    routes: { [K.vulns]: pagedVulns(6000), ...scanProbe("completed") },
+    routes: { [K.vulns]: pagedVulns(6000), ...scanProbe("completed", { total: 6000 }) },
     expect: withProbes(
       Array.from({ length: 10 }, (_, i) => ({
         method: "GET",
@@ -589,7 +607,7 @@ export const CONTRACT_CASES = [
     // The walk stops on a SHORT page, not when the header's count is reached:
     // a header that under-reports must not be able to cut the scan short. The
     // price is one extra request here.
-    routes: { [K.vulns]: pagedVulns(1000), ...scanProbe("completed") },
+    routes: { [K.vulns]: pagedVulns(1000), ...scanProbe("completed", { total: 1000 }) },
     expect: withProbes([
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
       { method: "GET", path: P.vulns, query: vulnsQuery(500) },
@@ -612,7 +630,7 @@ export const CONTRACT_CASES = [
         const reply = pagedVulns(1200)(req);
         return { ...reply, headers: { "X-Total-Count": "500" } };
       },
-      ...scanProbe("completed"),
+      ...scanProbe("completed", { total: 1200 }),
     },
     expect: withProbes([
       { method: "GET", path: P.vulns, query: vulnsQuery(0) },
@@ -647,7 +665,7 @@ export const CONTRACT_CASES = [
       // The dangerous shape: an empty result set from a scan that has barely
       // started. Byte-identical to a clean project unless the state is read.
       [K.vulns]: ok([], { "X-Total-Count": "0" }),
-      ...scanProbe("running"),
+      ...scanProbe("running", { total: 0 }),
     },
     // One probe, not two: the first reading already settles the answer, so the
     // client does not spend two more requests confirming a `false` it has.
@@ -851,6 +869,28 @@ export const CONTRACT_CASES = [
 
   {
     tool: "sbomhub_get_vulnerabilities",
+    title: "a backend state this client has never heard of is relayed, not certified",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      // Not one of service.ScanState's four. The client does not narrow the
+      // status to an enum on purpose: a state added to apps/api later must
+      // reach the model as itself rather than be rejected — and must not be
+      // read as "finished", because only one literal is evidence of that.
+      ...scanProbe("queued", { total: VULNS.length }),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }],
+      { after: false }),
+    check({ payload, result }) {
+      assert.notEqual(result.isError, true, "an unknown state is not a failure");
+      assert.equal(payload.scan_state, "queued");
+      assert.equal(payload.counts_final, false);
+      assert.equal(payload.scanned, VULNS.length);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
     title: "a second probe that cannot be read leaves the answer uncertified",
     args: { project_id: PROJECT_ID },
     routes: {
@@ -883,7 +923,7 @@ export const CONTRACT_CASES = [
       [K.vulns]: ok([], { "X-Total-Count": "0" }),
       [K.compliance]: ok(COMPLIANCE),
       [K.sboms]: ok(SBOMS),
-      ...scanProbe("running"),
+      ...scanProbe("running", { total: 0 }),
     },
     unordered: true,
     expect: [

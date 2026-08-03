@@ -532,18 +532,35 @@ test("no observed payload called a non-completed scan's counts final", () => {
     "no case observed counts_final=true — a client that always reports 'not final' would " +
       "pass this rule while telling the model nothing"
   );
-  // Every state reported must be one the client can actually produce. A state
-  // from nowhere would mean the client passed something through unrecognised,
-  // and the description's enumeration would be incomplete without saying so.
+  // A state OUTSIDE the vocabulary is not forbidden — the client relays an
+  // unrecognised backend status verbatim, and the description says so. What is
+  // forbidden is certifying one: an unknown state is not evidence of anything
+  // (Codex R3, Low — the previous rule banned the pass-through outright, so the
+  // promised behaviour could not be tested without failing this assertion).
   for (const pair of scanStatePairs) {
+    if (SCAN_STATE_VOCABULARY.has(pair.scan_state)) continue;
     assert.equal(
-      SCAN_STATE_VOCABULARY.has(pair.scan_state),
-      true,
-      `a payload reported scan_state="${pair.scan_state}", which is neither a ` +
+      pair.counts_final,
+      false,
+      `a payload reported scan_state="${pair.scan_state}" — neither a ` +
         `service.ScanState (${SCAN_LIFECYCLE.states.join(", ")}) nor one of the client's ` +
-        `own states (${SCAN_STATE_CHANGED}, ${SCAN_STATE_UNAVAILABLE})`
+        `own states (${SCAN_STATE_CHANGED}, ${SCAN_STATE_UNAVAILABLE}) — and called its ` +
+        "counts final. A state this client does not recognise cannot be evidence that a " +
+        "scan finished."
     );
   }
+  assert.equal(
+    scanStatePairs.some((p) => SCAN_STATE_VOCABULARY.has(p.scan_state)),
+    true,
+    "no observed state was in the known vocabulary — the rule above is checking nothing"
+  );
+  assert.equal(
+    scanStatePairs.some((p) => !SCAN_STATE_VOCABULARY.has(p.scan_state)),
+    true,
+    "no case exercised an UNRECOGNISED backend state, which the description promises is " +
+      "relayed and treated as non-final. An untested promise is the shape this suite exists " +
+      "to catch."
+  );
 });
 
 test("a tool whose routes are all tenant-wide never sends a project id", () => {
