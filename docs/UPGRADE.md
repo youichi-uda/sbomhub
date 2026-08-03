@@ -847,16 +847,17 @@ flight.
 
 **What is still not proven — recorded, not closed.**
 
-1. **A rescan that has not written yet.** `POST /api/v1/projects/:id/scan` never
-   marks the shared `ScanTracker`, and entries live an hour, so an SBOM being
-   rescanned still reads `completed`. The before/after count comparison catches
-   such a rescan once it has written something; a rescan still fetching from
-   NVD/JVN through both readings is invisible in both the state and the count and
-   would be certified. Nothing the API exposes distinguishes "no rescan running"
-   from "a rescan running that has not written yet" — closing this means marking
-   the tracker on that handler, which is a backend change and was left out of the
-   change that found it.
-2. **A replacement that keeps the row count the same.** The per-page
+1. **A rescan whose per-severity summary is the same at both readings.**
+   `POST /api/v1/projects/:id/scan` never marks the shared `ScanTracker`, and
+   entries live an hour, so an SBOM being rescanned still reads `completed`. The
+   before/after comparison catches such a rescan only when the summary MOVES
+   BETWEEN THE TWO READINGS. Its writes are not all-or-nothing — the scan fetches
+   from NVD and then from JVN — so it can write, pause, and present the same
+   partial summary to both readings, and it is then certified. Nothing the API
+   exposes distinguishes "no rescan running" from "a rescan running that is
+   between writes"; closing this means marking the tracker on that handler, which
+   is a backend change and was left out of the change that found it.
+2. **A replacement that keeps the whole summary the same.** The per-page
    `X-Total-Count` guard fires only when the count moves and the row-identity
    guard only when a row comes back twice, so an interleaving that swaps one row
    for another passes both: read rows 0-499, have row 0 replaced by a row that

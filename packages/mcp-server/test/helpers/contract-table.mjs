@@ -110,10 +110,17 @@ const ok = (body, headers) => ({ status: 200, body, headers });
 // service.ScanState: running | completed | failed | unknown. `total` is a COUNT
 // over the same join the vulnerability pages come from, which is what the
 // client compares across the walk to notice a scan that moved.
-export const scanStatusBody = (status, { total = 0, sbomId = SBOM_NEWEST } = {}) => ({
+export const scanStatusBody = (
+  status,
+  { total = 0, sbomId = SBOM_NEWEST, buckets = {} } = {}
+) => ({
   status,
   sbom_id: sbomId,
   project_id: PROJECT_ID,
+  // The client compares this WHOLE object across the walk, not just `total`: a
+  // vulnerability relabelled LOW -> CRITICAL mid-walk leaves the total untouched
+  // while making by_severity and any severity filter stale (Codex R4, High).
+  // `buckets` lets a case move one without moving the total.
   vulnerabilities: {
     critical: 0,
     high: 0,
@@ -121,6 +128,7 @@ export const scanStatusBody = (status, { total = 0, sbomId = SBOM_NEWEST } = {})
     low: 0,
     unknown: 0,
     kev: 0,
+    ...buckets,
     total,
   },
 });
@@ -164,6 +172,7 @@ export const scanProbe = (state = "completed", { total, ...rest } = {}) => {
  * records, so it does not need to know how many pages the case walks.
  */
 export const scanProbeChanging = (first, second) => {
+  // `first` / `second` are {state, total, sbomId?, buckets?}.
   let latestReads = 0;
   let statusReads = 0;
   const at = (n, side) => (n === 0 ? first : second)[side];
@@ -180,7 +189,13 @@ export const scanProbeChanging = (first, second) => {
       // client's own "did the backend answer about the SBOM I named" check
       // passes and the case tests what it says it tests.
       const asked = req.path.split("/").at(-2);
-      return ok(scanStatusBody(which.state, { total: which.total ?? 0, sbomId: asked }));
+      return ok(
+        scanStatusBody(which.state, {
+          total: which.total ?? 0,
+          sbomId: asked,
+          buckets: which.buckets ?? {},
+        })
+      );
     },
   };
 };
@@ -864,6 +879,28 @@ export const CONTRACT_CASES = [
       // pages were answered somewhere in between, so naming one would assert an
       // origin for rows that may have come from the other (Codex R2, Medium).
       assert.equal(payload.scanned_sbom_id, null);
+    },
+  },
+
+  {
+    tool: "sbomhub_get_vulnerabilities",
+    title: "a severity rewritten during the walk is caught even though the total holds",
+    args: { project_id: PROJECT_ID },
+    routes: {
+      [K.vulns]: ok(VULNS, { "X-Total-Count": String(VULNS.length) }),
+      // Same state, same SBOM, same TOTAL — one row moved from LOW to CRITICAL.
+      // A KEV or CVSS sync does exactly this, and comparing only the total would
+      // certify `by_severity` / a severity filter computed from the old labels
+      // (Codex R4, High). The whole summary is compared, so it is caught.
+      ...scanProbeChanging(
+        { state: "completed", total: VULNS.length, buckets: { critical: 2, low: 1 } },
+        { state: "completed", total: VULNS.length, buckets: { critical: 3, low: 0 } }
+      ),
+    },
+    expect: withProbes([{ method: "GET", path: P.vulns, query: vulnsQuery(0) }]),
+    check({ payload }) {
+      assert.equal(payload.scan_state, "changed");
+      assert.equal(payload.counts_final, false);
     },
   },
 

@@ -43,9 +43,13 @@ const ScanStatusSchema = z
   .object({
     status: z.string(),
     sbom_id: z.string(),
-    // handler.VulnerabilitySummaryCount.Total, a COUNT over the same join the
-    // vulnerability pages are drawn from. Compared before and after the walk;
-    // see probeScanState.
+    // handler.VulnerabilitySummaryCount: per-severity buckets plus `kev` and
+    // `total`, all computed over the same join the vulnerability pages are drawn
+    // from. The WHOLE summary is compared before and after the walk, not just
+    // `total` — a vulnerability whose severity is rewritten mid-walk (a KEV or
+    // CVSS sync relabelling LOW as CRITICAL) leaves the total untouched while
+    // making `by_severity` and any severity filter stale (Codex R4, High).
+    // .passthrough() keeps a bucket added later inside the compared value.
     vulnerabilities: z.object({ total: z.number() }).passthrough(),
   })
   .passthrough();
@@ -106,7 +110,11 @@ export const SCAN_STATE_CHANGED = "changed";
 type ScanProbe = {
   state: string;
   sbomId: string | null;
-  total: number | null;
+  /**
+   * The whole per-severity summary, serialised, so two readings can be compared
+   * as one value. Null when the state could not be read.
+   */
+  counts: string | null;
 };
 
 export type ScanReport = {
@@ -530,11 +538,12 @@ export class ApiClient {
    * not `/mcp/projects/:id/sboms` ordered newest-first, which would be an
    * inference about which row that resolution picks.
    *
-   * `total` comes back too: it is a COUNT over the same join the pages are drawn
-   * from, and comparing it across the walk is what probeScanState uses to detect
-   * a scan that moved. The response's own `sbom_id` is checked against the one
-   * asked for, so an answer about a different SBOM is reported as unreadable
-   * rather than accepted (Codex R1).
+   * The per-severity summary comes back too: every bucket is computed over the
+   * same join the pages are drawn from, and comparing the WHOLE summary across
+   * the walk is what probeScanState uses to detect a scan that moved. The
+   * response's own `sbom_id` is checked against the one asked for, so an answer
+   * about a different SBOM is reported as unreadable rather than accepted
+   * (Codex R1).
    *
    * Never throws: a failure here must not turn a usable vulnerability answer
    * into a tool error, and must not be mistaken for "finished" either. It
@@ -547,7 +556,7 @@ export class ApiClient {
     const unreadable: ScanProbe = {
       state: SCAN_STATE_UNAVAILABLE,
       sbomId: null,
-      total: null,
+      counts: null,
     };
 
     try {
@@ -570,7 +579,15 @@ export class ApiClient {
       return {
         state: status.status,
         sbomId: status.sbom_id,
-        total: status.vulnerabilities.total,
+        // Serialised with sorted keys so the comparison is over VALUES and not
+        // over the backend's field order.
+        counts: JSON.stringify(
+          Object.fromEntries(
+            Object.entries(status.vulnerabilities).sort(([a], [b]) =>
+              a < b ? -1 : a > b ? 1 : 0
+            )
+          )
+        ),
       };
     } catch {
       return unreadable;
@@ -598,10 +615,14 @@ export class ApiClient {
    * The last one is what NARROWS the untracked-rescan window. apps/api's manual
    * rescan path does not mark the shared ScanTracker at all, so a rescan of an
    * SBOM whose entry still reads `completed` (entries are kept an hour) is
-   * invisible in the STATE. It is visible in the count — a COUNT over the rows
-   * the pages come from — but only once the rescan has WRITTEN something. A
-   * rescan that is still fetching from NVD/JVN through both readings leaves the
-   * state and the count identical and would be certified (Codex R2, High).
+   * invisible in the STATE. It is visible in the SUMMARY, but only when that
+   * summary MOVES BETWEEN THE TWO READINGS. A rescan whose writes all land
+   * outside that window is not detected — and its writes need not be all-or-
+   * nothing: the scan fetches from NVD and then from JVN, so it can write, then
+   * pause, and both readings can observe the same partial summary (Codex R2 and
+   * R4, High). An earlier version of this comment said the comparison caught a
+   * rescan "once it has written something"; that is not what it does, and the
+   * claim is corrected rather than softened.
    *
    * That window cannot be closed from here: nothing the API exposes distinguishes
    * "no rescan running" from "a rescan running that has not written yet". Closing
@@ -639,7 +660,9 @@ export class ApiClient {
    * # What this still does not prove (honest limitations)
    *
    *   - the untracked-rescan window described above;
-   *   - a REPLACEMENT that keeps the row count the same. The per-page
+   *   - a rescan whose summary is the same at both readings, whether because it
+   *     has not written yet or because its writes are paused between phases;
+   *   - a REPLACEMENT that keeps the whole summary the same. The per-page
    *     X-Total-Count guard fires only when the count MOVES, and the
    *     row-identity guard only when a row is seen twice, so an interleaving
    *     that swaps one row for another can slip past both: read rows 0-499,
@@ -682,7 +705,7 @@ export class ApiClient {
     const settled =
       after.state === SCAN_STATE_FINAL &&
       after.sbomId === before.sbomId &&
-      after.total === before.total;
+      after.counts === before.counts;
 
     if (!settled) {
       return {
