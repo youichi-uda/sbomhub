@@ -455,9 +455,35 @@ func (s *SSVCService) DeleteAssessment(ctx context.Context, projectID, tenantID,
 }
 
 // GetAssessmentHistory gets history for an assessment in the caller's
-// (tenant, project). Out-of-scope ids yield an empty history — see the
-// repository method for why that, and not a 404, is the right answer here.
+// (tenant, project).
+//
+// M50: this used to answer an empty history for an id that does not exist,
+// belongs to a sibling project, or belongs to another tenant. That was
+// probe-proof — all three were the same answer — but it was the WRONG member
+// of the pair, and the only sub-resource route in the api that picked it:
+// ssvc DELETE, cra-reports, vex-drafts, scan-status, vex, licenses and the
+// components paths all collapse unknown + not-yours into 404. Worse, `200 []`
+// collapses a FOURTH case that the others keep distinct — "your assessment,
+// which has simply never changed" — so a correct empty answer and a refusal
+// were the same bytes.
+//
+// The scoped existence check separates exactly those two and nothing else:
+//
+//	not in (tenant, project) -> ErrSSVCAssessmentNotInProject (handler: 404),
+//	                            one sentinel for unknown / sibling / foreign
+//	in scope, no changes yet -> nil, empty slice (handler: 200 [])
+//
+// Cost: one extra indexed PK lookup, inside the request's TenantTx (the route
+// sits behind appmw.TenantTx, so both statements share one transaction and
+// one tenant binding — this is not a check-then-use across connections).
 func (s *SSVCService) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
+	inScope, err := s.ssvcRepo.AssessmentInProject(ctx, projectID, tenantID, assessmentID)
+	if err != nil {
+		return nil, err
+	}
+	if !inScope {
+		return nil, ErrSSVCAssessmentNotInProject
+	}
 	return s.ssvcRepo.GetAssessmentHistory(ctx, projectID, tenantID, assessmentID)
 }
 

@@ -376,6 +376,15 @@ func (h *SSVCHandler) DeleteAssessment(c echo.Context) error {
 // nowhere here either, so any assessment's decision-change history was
 // readable through any project's URL. Both ids are now bound and the
 // repository constrains the parent assessment row.
+//
+// M50: that fix left this route answering `200 []` for an id the caller does
+// not own, which made it the ONLY sub-resource route in the api that did not
+// collapse "unknown" and "not yours" into the sibling DELETE's 404. The three
+// out-of-scope cases now share ErrSSVCAssessmentNotInProject -> 404 with the
+// SAME message as DeleteAssessment, so neither the status nor the body is an
+// existence oracle. "Your assessment, which has never changed" is NOT one of
+// those cases: it is real data (the web client types the response as an
+// array) and still answers 200 [].
 func (h *SSVCHandler) GetAssessmentHistory(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -394,6 +403,9 @@ func (h *SSVCHandler) GetAssessmentHistory(c echo.Context) error {
 
 	history, err := h.ssvcService.GetAssessmentHistory(c.Request().Context(), projectID, tenantID, assessmentID)
 	if err != nil {
+		if errors.Is(err, service.ErrSSVCAssessmentNotInProject) {
+			return echo.NewHTTPError(http.StatusNotFound, "assessment not found in project")
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 

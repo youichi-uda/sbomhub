@@ -419,6 +419,43 @@ func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenant
 // the column and its index. The authoritative record is the
 // ssvc_assessments row — see the SSVCService doc comment.
 
+// AssessmentInProject reports whether `id` names an ssvc_assessments row of
+// the caller's (tenant, project). It is the M50 follow-up the
+// GetAssessmentHistory comment below asked for: the scoped existence check
+// that lets the service tell "no such assessment, or not yours" (one
+// sentinel, 404) apart from "yours, and it has never changed" (200 []).
+//
+// It follows the route-level ownership contract documented at the head of
+// scope_checks.go — explicit tenant_id / project_id predicates as the belt,
+// ssvc_assessments' FORCE RLS as the braces, and (false, nil) for "absent",
+// "invisible" and "someone else's" alike so the caller has ONE sentinel to
+// collapse into a 404. Like GetCVEIDByIDInProject (vulnerability.go) and
+// ComponentBelongsToProject (vex.go) it lives beside its caller rather than
+// in scope_checks.go; that file holds the M47 W1 batch, not every predicate.
+//
+// Callers MUST run this inside the request's TenantTx, or the RLS half
+// degrades to "0 rows" — which this reports as not-in-scope (fail closed).
+//
+// Shape note: SELECT EXISTS always returns exactly one row, so a false answer
+// is a real "no" and never a swallowed error — unlike a QueryRow + ErrNoRows
+// dance, where a scan failure and an absent row have to be told apart at
+// every call site.
+func (r *SSVCRepository) AssessmentInProject(ctx context.Context, projectID, tenantID, id uuid.UUID) (bool, error) {
+	if tenantID == uuid.Nil || projectID == uuid.Nil || id == uuid.Nil {
+		return false, nil
+	}
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM ssvc_assessments
+			WHERE id = $1 AND project_id = $2 AND tenant_id = $3
+		)`
+	var exists bool
+	if err := r.q(ctx).QueryRowContext(ctx, query, id, projectID, tenantID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // GetAssessmentHistory gets history for an assessment that belongs to the
 // caller's (tenant, project).
 //
@@ -433,14 +470,19 @@ func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenant
 // history through any of its projects' URLs. The parent row is now joined and
 // constrained, which also makes the read tenant-safe through
 // ssvc_assessments' FORCE RLS (belt) on top of the explicit predicate
-// (braces). An out-of-scope id yields an EMPTY history rather than an error.
-// That is a deliberate trade-off, not a strictly better answer: it cannot be
-// used to probe for assessments the caller cannot see, but it also cannot
-// tell a client "no such assessment" apart from "this assessment has never
-// changed", which the sibling GetAssessment (404 when absent) can. A scoped
-// existence check plus a shared unknown/out-of-scope sentinel would be
-// equally probe-proof and more informative; it is left for a follow-up
-// because it adds a round trip to a read this wave only touched to scope.
+// (braces).
+//
+// M50: that wave left an out-of-scope id reading as an EMPTY history and
+// noted the cost — the route could not tell "no such assessment" apart from
+// "this assessment has never changed" — as a follow-up. This is the
+// follow-up. The statement below is UNCHANGED: it still returns rows only for
+// an in-scope assessment, and an empty slice for everything else. What
+// changed is upstream — SSVCService.GetAssessmentHistory now calls
+// AssessmentInProject FIRST and returns ErrSSVCAssessmentNotInProject (404)
+// when it is false, so the empty slice this method returns now means only
+// "in scope, no recorded changes". Keeping the scoping predicate here as well
+// is deliberate belt-and-braces: the existence check is an authorization
+// gate, not this read's only tenancy guard.
 func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
 	query := `
 		SELECT h.id, h.assessment_id,

@@ -518,9 +518,13 @@ func ssvcMBHistory(t *testing.T, appDB *sql.DB, h *SSVCHandler,
 // carries no project_id of its own and the statement filtered on
 // assessment_id alone, so any assessment's decision-change trail was readable
 // through any of the tenant's project URLs. Post-fix the parent assessment is
-// joined and constrained; an out-of-scope id reads as an empty history (the
-// same answer as an assessment that never changed, so it cannot be used as an
-// existence probe).
+// joined and constrained.
+//
+// M50 amended the out-of-scope answer from `200 []` to the sibling routes'
+// 404 (see m50_ssvc_history_scope_integration_test.go for why, and for the
+// "own assessment, never changed" case that must STAY 200 []). This test
+// keeps its original job — no row of another project may be readable here —
+// and follows the status change.
 func TestSSVCAssessmentHistoryScope_WrongProjectSeesNothing(t *testing.T) {
 	appURL, migURL := m46b1HandlerEnv(t)
 	migDB := m46b1OpenOrSkip(t, migURL)
@@ -565,11 +569,11 @@ func TestSSVCAssessmentHistoryScope_WrongProjectSeesNothing(t *testing.T) {
 		t.Errorf("history through the owning project = %s, want the recorded decision change", body)
 	}
 
-	// Same tenant, wrong project: nothing.
+	// Same tenant, wrong project: nothing, and (M50) the sibling routes' 404.
 	otherProject := ssvcMBSecondProject(t, migDB, seed.tenantID, "mhist")
 	code, body = ssvcMBHistory(t, appDB, h, seed.tenantID, otherProject, assessmentID)
-	if code != http.StatusOK {
-		t.Fatalf("history through a different project: status %d body %s, want 200 with an empty list", code, body)
+	if code != http.StatusNotFound {
+		t.Fatalf("history through a different project: status %d body %s, want 404", code, body)
 	}
 	if strings.Contains(body, "immediate") || strings.Contains(body, "assessment_id") {
 		t.Errorf("history through a different project leaked rows: %s (the route's :id must scope the read)", body)
