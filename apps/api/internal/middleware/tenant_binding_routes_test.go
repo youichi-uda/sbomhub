@@ -964,6 +964,7 @@ func m52SkipDir(name string) bool {
 // integration-tagged drives visible to this untagged test.
 func m52TestFuncNames(t *testing.T) map[string]string {
 	t.Helper()
+	m52RequireRouter(t)
 	out := map[string]string{}
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(apiRootPath, func(path string, d os.DirEntry, err error) error {
