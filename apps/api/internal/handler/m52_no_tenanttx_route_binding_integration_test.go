@@ -66,12 +66,12 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 
+	"github.com/sbomhub/sbomhub/internal/config"
 	appmw "github.com/sbomhub/sbomhub/internal/middleware"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -271,9 +271,20 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 		ComponentID: uuid.New(),
 		VulnID:      uuid.New(),
 	}
-	// A CVE id unique per fixture: `vulnerabilities` is global (no tenant
-	// column, no RLS) and shared with every other test in the package.
-	f.CVEID = "CVE-2099-" + strings.ToUpper(f.VulnID.String()[:8])
+	// A CVE id unique per fixture. `vulnerabilities` is global — no tenant
+	// column, no RLS — with a UNIQUE cve_id, and it is shared with every other
+	// test in the package AND with whatever residue a development database
+	// carries. A collision fails the SEED rather than an assertion, i.e. it is
+	// a flaky red on correct production code, so the id carries as much of the
+	// fixture UUID as the schema allows.
+	//
+	// The ceiling is 30 characters, not 50: `vulnerabilities.cve_id` is
+	// varchar(50), but the downstream rows this fixture produces —
+	// `vex_drafts`, `cra_reports`, `advisory_excerpts`,
+	// `reachability_results` — all declare varchar(30), so anything longer
+	// fails the Stage 3 write instead. 9 for the prefix leaves 21 hex digits =
+	// 84 bits, against the 32 bits an eight-digit truncation would have given.
+	f.CVEID = "CVE-2099-" + strings.ToUpper(strings.ReplaceAll(f.VulnID.String(), "-", "")[:21])
 
 	m52AsTenant(t, migDB, f.TenantID,
 		`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
@@ -494,8 +505,12 @@ func m52IsUnboundGUCError(err error) bool {
 	if !errors.As(err, &pqErr) {
 		return false
 	}
-	// 22P02 is the cast of the empty-string placeholder on a READ; 42501 is
-	// what a policy raises when it refuses a WRITE instead of casting.
+	// 22P02 is the empty-string placeholder failing its cast to UUID, which is
+	// what the poisoned state produces for both reads and writes. 42501 is the
+	// other unbound outcome — a policy REFUSING a write because its predicate
+	// came out false or NULL, which is what a backend whose GUC was never set
+	// raises instead. Both mean "no tenant was bound"; neither is expected
+	// from correctly bound code.
 	return pqErr.Code == "22P02" || pqErr.Code == "42501"
 }
 
@@ -503,51 +518,83 @@ func m52IsUnboundGUCError(err error) bool {
 // The drives
 // ---------------------------------------------------------------------------
 
+// m52ClerkConfig produces the one configuration in which
+// ClerkWebhookHandler.Handle does real work: SaaS mode (a Clerk secret is set,
+// so `IsSelfHosted()` is false and Handle does not answer "skipped"), no
+// webhook secret, and the development-only unsigned-webhook escape hatch so
+// verifySignature admits the request without a Svix signature.
+//
+// Same shape as m47rConfig, which the Lemon Squeezy atomicity tests use.
+func m52ClerkConfig(t *testing.T) *config.Config {
+	t.Helper()
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_m52")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "")
+	t.Setenv("SBOMHUB_ALLOW_UNSIGNED_WEBHOOKS", "true")
+	t.Setenv("APP_ENV", "development")
+	cfg := config.Load()
+	if cfg.IsSelfHosted() {
+		t.Fatal("m52ClerkConfig produced self-hosted mode; Handle would answer `skipped` " +
+			"and the drive below would assert nothing")
+	}
+	return cfg
+}
+
 // TestM52ClerkTenantCreateBindsOnAPoisonedConnection covers
 // POST /api/webhooks/clerk.
 //
-// The webhook itself issues no set_config, and four of the five tables it
-// reaches need none. The fifth does: TenantRepository.Create writes a default
-// `scan_settings` row for every new tenant, and migration 048 gave that table
-// the ENABLE+FORCE+policy triple. Create binds the new tenant's id between the
-// two INSERTs (F187), which is what this drives — against the pooled
-// connection state that turns a missing binding into a refusal.
+// The webhook issues no set_config of its own, and every table it names in a
+// statement of its own is RLS-exempt except one: TenantRepository.Create
+// writes a default `scan_settings` row for each new tenant, and migration 048
+// gave that table the ENABLE+FORCE+policy triple. Create binds the new
+// tenant's id between the two INSERTs (F187).
 //
-// The route reaches Create from organization.created and from the create
-// branch of organizationMembership.created.
+// This drives the ROUTE, not the repository: an `organization.created`
+// delivery through ClerkWebhookHandler.Handle. Driving Create directly would
+// have proved that Create binds while proving nothing about whether the
+// webhook still reaches it, or whether Handle has since gained an unbound
+// access of its own — and "the classification is a promise about code
+// elsewhere" is the whole reason these drives exist.
 func TestM52ClerkTenantCreateBindsOnAPoisonedConnection(t *testing.T) {
 	appURL, migURL := m52Env(t)
 	migDB := m52Open(t, migURL, "sbomhub_migrator")
 	appDB := m52PoisonedApp(t, appURL)
 
-	repo := repository.NewTenantRepository(appDB)
-	id := uuid.New()
-	tag := "m52-clerk-" + id.String()
-	now := time.Now().UTC()
-	tenant := &model.Tenant{
-		ID: id, ClerkOrgID: tag, Name: "m52 clerk", Slug: tag,
-		Plan: "free", CreatedAt: now, UpdatedAt: now,
-	}
+	orgID := "m52-clerk-" + uuid.New().String()
 	t.Cleanup(func() {
-		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, id); err != nil {
-			t.Errorf("cleanup tenant %s: %v", id, err)
+		if _, err := migDB.Exec(`DELETE FROM tenants WHERE clerk_org_id = $1`, orgID); err != nil {
+			t.Errorf("cleanup tenant %s: %v", orgID, err)
 		}
 	})
 
-	if err := repo.Create(context.Background(), tenant); err != nil {
-		t.Fatalf("TenantRepository.Create failed on a poisoned connection: %v\n"+
-			"POST /api/webhooks/clerk is classified TenantBindingBindsItself on the "+
-			"strength of the set_config Create issues before its scan_settings INSERT. "+
-			"If that binding is gone, every organization.created delivery answers 500 "+
-			"and the tenant is never provisioned.", err)
+	h := NewClerkWebhookHandler(m52ClerkConfig(t),
+		repository.NewTenantRepository(appDB),
+		repository.NewUserRepository(appDB),
+		repository.NewAuditRepository(appDB))
+
+	body := fmt.Sprintf(
+		`{"type":"organization.created","data":{"id":%q,"name":"M52 Clerk Org","slug":%q}}`,
+		orgID, orgID)
+	code, resp := m52Call(t, h.Handle, http.MethodPost, "/api/webhooks/clerk",
+		uuid.Nil, uuid.Nil, nil, body)
+	if code != http.StatusOK {
+		t.Fatalf("clerk organization.created = %d %s, want 200.\n"+
+			"The route carries no TenantTx, so TenantRepository.Create's own set_config is "+
+			"the only thing standing between the `scan_settings` INSERT and the FORCE RLS "+
+			"policy on that table. A 500 here means the tenant is never provisioned — for "+
+			"every organization Clerk creates.", code, resp)
 	}
 
+	var tenantID uuid.UUID
+	if err := migDB.QueryRow(
+		`SELECT id FROM tenants WHERE clerk_org_id = $1`, orgID).Scan(&tenantID); err != nil {
+		t.Fatalf("the delivery answered 200 but wrote no tenant row: %v", err)
+	}
 	// The count itself needs the GUC: scan_settings is FORCE ROW LEVEL
 	// SECURITY, which applies to the owning migrator role too.
-	n := m52CountRows(t, migDB, id, `SELECT count(*) FROM scan_settings WHERE tenant_id = $1`, id)
-	if n != 1 {
-		t.Errorf("scan_settings rows for the new tenant = %d, want 1 — Create returned nil "+
-			"without writing the RLS-protected row the binding exists for", n)
+	if n := m52CountRows(t, migDB, tenantID,
+		`SELECT count(*) FROM scan_settings WHERE tenant_id = $1`, tenantID); n != 1 {
+		t.Errorf("scan_settings rows for the new tenant = %d, want 1 — the delivery "+
+			"succeeded without writing the RLS-protected row the binding exists for", n)
 	}
 
 	// --- negative control: the same two INSERTs with no binding between them.
@@ -694,8 +741,9 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("RunTriage = %d %s, want 201.\n/triage/run carries no TenantTx by design "+
 			"(the runner must not hold a connection across the LLM call), so "+
-			"triage.DBTxManager is the only thing binding the tenant for the "+
-			"components/sboms reads and the vex_drafts write.", code, resp)
+			"triage.DBTxManager is the only thing binding the tenant for Stage 1's reads "+
+			"— tenant_llm_config first, then components/sboms — and for the Stage 3 "+
+			"vex_drafts write.", code, resp)
 	}
 	if n := m52CountRows(t, migDB, f.TenantID,
 		`SELECT count(*) FROM vex_drafts WHERE tenant_id = $1 AND project_id = $2`,
@@ -781,8 +829,9 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("RunReport = %d %s, want 201. cra.Runner shares the very same "+
 			"*triage.DBTxManager as the triage runner (main.go passes triageTxManager to "+
-			"both); a 5xx here means Stage 1's components/sboms join ran unbound.",
-			code, resp)
+			"both); a 5xx here means one of Stage 1's protected reads ran unbound — the "+
+			"first is the provider resolver's tenant_llm_config lookup, before the "+
+			"components/sboms join.", code, resp)
 	}
 	if n := m52CountRows(t, migDB, f.TenantID,
 		`SELECT count(*) FROM cra_reports WHERE tenant_id = $1 AND project_id = $2`,

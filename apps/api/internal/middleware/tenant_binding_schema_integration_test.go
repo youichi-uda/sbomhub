@@ -132,9 +132,12 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 		for _, table := range tables {
 			rls, exists := live[table]
 			if !exists {
-				t.Errorf("%s names table %q, which does not exist in the migrated schema. "+
-					"Either it was renamed or dropped — re-read the route and correct the "+
-					"list; a name that resolves to nothing is checked by nothing.", key, table)
+				t.Errorf("%s names %q, which is not an ordinary or partitioned table in "+
+					"schema `public`. A name that resolves to nothing is checked by "+
+					"nothing, so correct the list: if the object was renamed or dropped, "+
+					"re-read the route; if it is a VIEW, list the underlying tables instead "+
+					"— a view has no meaningful relrowsecurity of its own, the policies that "+
+					"decide the answer belong to what it selects from.", key, table)
 				continue
 			}
 			checked++
@@ -155,6 +158,48 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 		t.Fatal("no TouchesNoRLSTable rule named a table that exists — this test asserted " +
 			"nothing. /health names none by design, so at least the Lemon Squeezy rule's " +
 			"five should have been checked.")
+	}
+}
+
+// TestM52PublicIsTheOnlyApplicationSchema underwrites the unqualified table
+// names the table uses.
+//
+// m52LiveRLS keys by bare `relname` inside schema `public`. If the application
+// ever put a table in a second schema, a rule naming it would either report
+// "does not exist" (loud, tolerable) or — worse — silently match a same-named
+// `public` table and check the WRONG object's RLS flag. That second outcome is
+// a miss, not a false positive, and it would be invisible. This asserts the
+// precondition instead of assuming it.
+func TestM52PublicIsTheOnlyApplicationSchema(t *testing.T) {
+	db := m52SchemaDB(t)
+	rows, err := db.Query(`
+		SELECT n.nspname, count(*)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relkind IN ('r', 'p')
+		  AND n.nspname <> 'public'
+		  AND n.nspname NOT LIKE 'pg\_%'
+		  AND n.nspname <> 'information_schema'
+		GROUP BY n.nspname
+		ORDER BY n.nspname`)
+	if err != nil {
+		t.Fatalf("read pg_namespace: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var schema string
+		var n int
+		if err := rows.Scan(&schema, &n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		t.Errorf("schema %q holds %d table(s). middleware.noTenantTxRouteBinding's "+
+			"RLSExemptTables entries are UNQUALIFIED names resolved against `public` "+
+			"only, so a table here is either invisible to the check or — if `public` "+
+			"has one of the same name — silently substituted for it. Qualify the names "+
+			"and widen m52LiveRLS before adding a second application schema.", schema, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate pg_namespace: %v", err)
 	}
 }
 
