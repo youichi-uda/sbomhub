@@ -25,15 +25,17 @@
 //
 //  1. the writes are tx-bound (invisible to another connection mid-scan) and
 //     survived a scanner returning an error in the ONE execution this test
-//     drives: runScan's fn returns nil, so WithTxFunc ATTEMPTS the commit,
-//     and here it succeeded. The durable outcome needs both halves — an
-//     un-aborted transaction AND a Commit that returns nil (Codex R3, High:
-//     "provided the transaction is healthy" named only the first). The probe
-//     returns a synthetic non-SQL error, which is the un-aborted case. A
-//     scanner whose error came FROM a failed statement (ListBySbom hitting a
-//     server-side error) is case 2, not case 1 — the commit fails and the
-//     sibling's work goes too. That case is argued from case 2's measurement,
-//     not separately driven.
+//     drives: runScan's fn returns nil, so WithTxFunc ATTEMPTS the commit.
+//     The durable outcome needs both halves — an un-aborted transaction AND a
+//     Commit that returns nil (Codex R3, High: "provided the transaction is
+//     healthy" named only the first) — so BOTH are observed, not inferred:
+//     runScan swallows the WithTxFunc error into a log line, and the test
+//     captures the log and requires that line's ABSENCE alongside the durable
+//     row (Codex R5, High). The probe returns a synthetic non-SQL error, which
+//     is the un-aborted case. A scanner whose error came FROM a failed
+//     statement (ListBySbom hitting a server-side error) is case 2, not case 1
+//     — the commit fails and the sibling's work goes too. That case is argued
+//     from case 2's measurement, not separately driven.
 //  2. the writes do NOT survive a failed SQL STATEMENT: PostgreSQL aborts the
 //     transaction, later commands are refused, the COMMIT fails, and EVERY
 //     RELATIONAL ROW the sweep wrote is discarded — including one written
@@ -167,11 +169,13 @@ func m50NewVuln(t *testing.T, migDB *sql.DB) model.Vulnerability {
 // the old comment claimed: a scanner failure does not BY ITSELF discard the
 // work already written.
 //
-// The probe's error is synthetic and non-SQL, so the transaction is intact
-// and the commit succeeds. That is deliberate — it isolates one variable —
-// but it is also the limit of what this test shows: durability needs the
-// transaction un-aborted AND Commit returning nil, and only one execution of
-// that pair is observed here (Codex R3, High). The other case (a scanner
+// The probe's error is synthetic and non-SQL, so the transaction is intact.
+// That is deliberate — it isolates one variable — and it is the limit of what
+// this test shows: durability needs the transaction un-aborted AND Commit
+// returning nil, and only one execution of that pair is observed here (Codex
+// R3, High). Both halves are read off the run rather than assumed: the commit
+// error, if any, would appear in runScan's log, so the log is captured and
+// its absence asserted (Codex R5, High). The other case (a scanner
 // error originating in a failed statement) is the sibling test below, and the
 // two must not be read as one claim about "any scanner error" (Codex R2,
 // High).
@@ -188,7 +192,18 @@ func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing
 	}
 	h := &VulnerabilityHandler{db: appDB, nvdService: scanner}
 
-	h.runScan(context.Background(), seed.sbomID, seed.tenantID, "nvd")
+	// runScan swallows the WithTxFunc error (it logs and returns), so the only
+	// way to OBSERVE that Commit returned nil is the absence of the ERROR line
+	// it would otherwise emit. Capture the log rather than infer the commit
+	// from a durable row (Codex R5, High). Same logger-swap safety argument as
+	// the poison test below.
+	var logged strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	func() {
+		defer slog.SetDefault(prev)
+		h.runScan(context.Background(), seed.sbomID, seed.tenantID, "nvd")
+	}()
 
 	if !scanner.sawTx {
 		t.Fatal("the scanner's ctx carried no *sql.Tx — runScan must hand the scanners the " +
@@ -205,8 +220,16 @@ func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing
 
 	// The scanner returned an error; runScan logs it and returns nil from fn,
 	// so WithTxFunc goes on to ATTEMPT the commit — it does not follow from
-	// fn == nil that the commit succeeded (Codex R4, High). What follows is
-	// the assertion below: in THIS execution it did, and the write is durable.
+	// fn == nil that the commit succeeded (Codex R4, High). Both halves are
+	// therefore observed rather than inferred: the commit did not report an
+	// error, AND the row is durable.
+	logs := logged.String()
+	if strings.Contains(logs, "tenant transaction failed") {
+		t.Errorf("the commit reported an error: logs = %q. This test's subject is the "+
+			"UN-ABORTED path, so a commit failure here means the scenario was not set up "+
+			"as intended and the durability assertion below proves nothing", logs)
+	}
+
 	var after int
 	if err := appDB.QueryRow(
 		`SELECT COUNT(*) FROM vulnerabilities WHERE id = $1`, scanner.vuln.ID).Scan(&after); err != nil {
@@ -215,7 +238,7 @@ func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing
 	if after != 1 {
 		t.Errorf("rows after a scan whose scanner FAILED (without poisoning the tx) = %d, "+
 			"want 1 — fn returns nil regardless of per-scanner outcome, so WithTxFunc still "+
-			"attempts the commit, and with an un-aborted tx that commit succeeds", after)
+			"attempts the commit, and here that attempt was observed to succeed", after)
 	}
 }
 
