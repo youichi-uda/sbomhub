@@ -24,11 +24,14 @@
 // first draft of this header for asserting more than the tests establish:
 //
 //  1. the writes are tx-bound (invisible to another connection mid-scan) and
-//     DO survive a scanner returning an error PROVIDED THE TRANSACTION IS
-//     STILL HEALTHY, because runScan's fn returns nil and WithTxFunc commits.
-//     The probe returns a synthetic non-SQL error, which is the healthy case.
-//     A scanner whose error came FROM a failed statement (ListBySbom hitting
-//     a server-side error) is case 2, not case 1 — the commit fails and the
+//     survived a scanner returning an error in the ONE execution this test
+//     drives: runScan's fn returns nil, so WithTxFunc ATTEMPTS the commit,
+//     and here it succeeded. The durable outcome needs both halves — an
+//     un-aborted transaction AND a Commit that returns nil (Codex R3, High:
+//     "provided the transaction is healthy" named only the first). The probe
+//     returns a synthetic non-SQL error, which is the un-aborted case. A
+//     scanner whose error came FROM a failed statement (ListBySbom hitting a
+//     server-side error) is case 2, not case 1 — the commit fails and the
 //     sibling's work goes too. That case is argued from case 2's measurement,
 //     not separately driven.
 //  2. the writes do NOT survive a failed SQL STATEMENT: PostgreSQL aborts the
@@ -87,8 +90,9 @@ type m50TxProbeScanner struct {
 	// model a scanner whose SQL fails partway through (a constraint
 	// violation, a bad cast) rather than one whose HTTP call fails.
 	poisonFirst bool
-	// returnErr is what ScanComponents returns; runScan logs it and commits
-	// anyway.
+	// returnErr is what ScanComponents returns; runScan logs it and goes on to
+	// ATTEMPT the commit regardless (whether that commit succeeds is a
+	// separate question — see the file header).
 	returnErr error
 
 	sawTx            bool
@@ -160,14 +164,17 @@ func m50NewVuln(t *testing.T, migDB *sql.DB) model.Vulnerability {
 
 // TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError pins the
 // mechanism (tx, not raw *sql.DB) AND the conditional form of the property
-// the old comment claimed: a scanner failure does not discard the work
-// already written, PROVIDED the transaction is still healthy.
+// the old comment claimed: a scanner failure does not BY ITSELF discard the
+// work already written.
 //
 // The probe's error is synthetic and non-SQL, so the transaction is intact
-// when WithTxFunc commits. That is deliberate — it isolates one variable.
-// The other case (a scanner error that came FROM a failed statement) is the
-// sibling test below, and the two must not be read as one claim about "any
-// scanner error" (Codex R2, High).
+// and the commit succeeds. That is deliberate — it isolates one variable —
+// but it is also the limit of what this test shows: durability needs the
+// transaction un-aborted AND Commit returning nil, and only one execution of
+// that pair is observed here (Codex R3, High). The other case (a scanner
+// error originating in a failed statement) is the sibling test below, and the
+// two must not be read as one claim about "any scanner error" (Codex R2,
+// High).
 func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing.T) {
 	appURL, migURL := m46b1HandlerEnv(t)
 	migDB := m46b1OpenOrSkip(t, migURL)
@@ -205,8 +212,8 @@ func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing
 	}
 	if after != 1 {
 		t.Errorf("rows after a scan whose scanner FAILED (without poisoning the tx) = %d, "+
-			"want 1 — fn returns nil regardless of per-scanner outcome, so the commit still "+
-			"happens and the work survives", after)
+			"want 1 — fn returns nil regardless of per-scanner outcome, so WithTxFunc still "+
+			"attempts the commit, and with an un-aborted tx that commit succeeds", after)
 	}
 }
 

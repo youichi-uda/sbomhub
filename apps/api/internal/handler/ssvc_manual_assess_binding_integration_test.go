@@ -32,8 +32,14 @@
 //   - the (tenant, project, vulnerability) membership is verified through
 //     the RLS-protected components/sboms join; a vulnerability not linked
 //     to the project answers 404 with NO assessment row created and NO
-//     ssvc_decision write, and "unknown" is indistinguishable from
-//     "someone else's" (one sentinel);
+//     ssvc_decision write. The service collapses unknown and out-of-scope
+//     into ONE sentinel (ErrSSVCVulnerabilityNotInProject), but be precise
+//     about what THIS file pins (Codex R3, Low): its rejection cases drive
+//     EXISTING ids — an unlinked vulnerability and a foreign tenant's — and
+//     assert the status only. The unassigned-id cell and the body-level
+//     byte comparison are pinned for the history route in
+//     m50_ssvc_history_scope_integration_test.go; the equivalent for this
+//     route is not asserted here;
 //   - a row that already carries a mispaired cve_id is REPAIRED on the next
 //     assessment (UpdateAssessment persists cve_id).
 //
