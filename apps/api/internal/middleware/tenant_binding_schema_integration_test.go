@@ -149,8 +149,12 @@ type m52ReadVerdict struct {
 // So this asks two narrower questions, both about SELECT only:
 //
 //  1. The catalog, with PostgreSQL's actual applicability rules — command
-//     (`polcmd IN ('*','r')`), role (`polroles` is PUBLIC or includes one the
-//     current role has), and composition (PERMISSIVE policies are ORed, so one
+//     (`polcmd IN ('*','r')`), role (`polroles` contains oid 0, which is how
+//     PostgreSQL spells PUBLIC — tested with `0 = ANY(...)` rather than
+//     `= '{0}'` so a policy that names PUBLIC alongside other roles is not
+//     overlooked, which would have read as "denied" on a schema that is in
+//     fact fine — or includes a role the current one is a member of), and
+//     composition (PERMISSIVE policies are ORed, so one
 //     GUC-free permissive policy is enough to admit the read; RESTRICTIVE ones
 //     are ANDed, so one tenant-gated restrictive policy denies it).
 //  2. An actual `SELECT 1 FROM <t> LIMIT 1` on a connection in the poisoned
@@ -191,7 +195,7 @@ func m52UnboundReadVerdict(t *testing.T, table string) m52ReadVerdict {
 		WHERE n.nspname = 'public'
 		  AND c.relname = $1
 		  AND p.polcmd IN ('*', 'r')
-		  AND (p.polroles = '{0}'::oid[]
+		  AND (0 = ANY(p.polroles)
 		       OR EXISTS (SELECT 1 FROM unnest(p.polroles) rr
 		                  WHERE pg_has_role(current_user, rr, 'USAGE')))`,
 		table).Scan(&permissive, &permissiveGUCFree, &restrictiveGUCGated); err != nil {
