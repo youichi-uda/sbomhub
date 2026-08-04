@@ -365,7 +365,7 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 // that actually built an Ollama client would send Stage 2 at a network
 // endpoint that does not exist in CI. What it does keep is the READ, which is
 // the first RLS-protected statement a runner route issues.
-func m52ProviderResolver(t *testing.T, appDB *sql.DB) func(context.Context, uuid.UUID) (llm.Provider, error) {
+func m52ProviderResolver(appDB *sql.DB) func(context.Context, uuid.UUID) (llm.Provider, error) {
 	repo := repository.NewTenantLLMConfigRepository(appDB)
 	return func(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error) {
 		if _, err := repo.Get(ctx, tenantID); err != nil &&
@@ -428,7 +428,7 @@ func m52SeedVEXDraftRow(t *testing.T, migDB *sql.DB, f m52Fixture) uuid.UUID {
 // each drive can run its own negative control.
 // ---------------------------------------------------------------------------
 
-func m52TriageHandler(t *testing.T, appDB *sql.DB, txm triage.TxManager) *VexDraftsHandler {
+func m52TriageHandler(appDB *sql.DB, txm triage.TxManager) *VexDraftsHandler {
 	return NewVexDraftsHandler(triage.NewRunner(triage.RunnerConfig{
 		Drafts:                   repository.NewVEXDraftsRepository(appDB),
 		Advisories:               &triage.AdvisoryExcerptsAdapter{Repo: repository.NewAdvisoryExcerptsRepository(appDB)},
@@ -438,12 +438,12 @@ func m52TriageHandler(t *testing.T, appDB *sql.DB, txm triage.TxManager) *VexDra
 		ComponentVulnerabilities: repository.NewComponentRepository(appDB),
 		VulnerabilityCVE:         repository.NewVulnerabilityRepository(appDB),
 		Provider:                 &llm.DisabledProvider{Reason: "M52 integration test"},
-		ProviderResolver:         m52ProviderResolver(t, appDB),
+		ProviderResolver:         m52ProviderResolver(appDB),
 		TxManager:                txm,
 	}))
 }
 
-func m52CRAHandler(t *testing.T, appDB *sql.DB, txm cra.TxManager) *CRAReportsHandler {
+func m52CRAHandler(appDB *sql.DB, txm cra.TxManager) *CRAReportsHandler {
 	reports := repository.NewCRAReportsRepository(appDB)
 	return NewCRAReportsHandler(
 		cra.NewRunner(cra.RunnerConfig{
@@ -455,7 +455,7 @@ func m52CRAHandler(t *testing.T, appDB *sql.DB, txm cra.TxManager) *CRAReportsHa
 			VulnerabilityCVE:    repository.NewVulnerabilityRepository(appDB),
 			Audit:               repository.NewAuditRepository(appDB),
 			Provider:            &llm.DisabledProvider{Reason: "M52 integration test"},
-			ProviderResolver:    m52ProviderResolver(t, appDB),
+			ProviderResolver:    m52ProviderResolver(appDB),
 			TxManager:           txm,
 		}),
 		reports,
@@ -530,10 +530,10 @@ func m52IsUnboundGUCError(err error) bool {
 // carry no unique constraint other than their `id` primary key, which every
 // cycle mints fresh. This assertion is what keeps that true rather than
 // remembered.
-func m52AssertRepeatable(t *testing.T, h echo.HandlerFunc, method, target string,
+func m52AssertRepeatable(t *testing.T, h echo.HandlerFunc, target string,
 	tenantID, userID uuid.UUID, params map[string]string, body string) {
 	t.Helper()
-	code, resp := m52Call(t, h, method, target, tenantID, userID, params, body)
+	code, resp := m52Call(t, h, http.MethodPost, target, tenantID, userID, params, body)
 	if code != http.StatusCreated {
 		t.Fatalf("the same request answered %d %s on its SECOND bound run, want 201. The "+
 			"negative control below re-runs it once more with the binding removed and "+
@@ -774,7 +774,7 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 	f := m52SeedGraph(t, migDB, "triagerun")
 	body := fmt.Sprintf(`{"vulnerability_id":%q,"cve_id":%q}`, f.VulnID, f.CVEID)
 
-	h := m52TriageHandler(t, appDB, triage.NewDBTxManager(appDB))
+	h := m52TriageHandler(appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.RunTriage, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -792,12 +792,12 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 			"to a persisted draft", n)
 	}
 
-	m52AssertRepeatable(t, h.RunTriage, http.MethodPost,
+	m52AssertRepeatable(t, h.RunTriage,
 		"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the run fails", func(t *testing.T) {
-		nc := m52TriageHandler(t, appDB, triage.PassthroughTxManager{})
+		nc := m52TriageHandler(appDB, triage.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.RunTriage, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -825,7 +825,7 @@ func TestM52VexDraftReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 	f := m52SeedGraph(t, migDB, "vexre")
 	draftID := m52SeedVEXDraftRow(t, migDB, f)
 
-	h := m52TriageHandler(t, appDB, triage.NewDBTxManager(appDB))
+	h := m52TriageHandler(appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.Reanalyse, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
@@ -840,13 +840,13 @@ func TestM52VexDraftReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 			"draft the cycle mints)", n)
 	}
 
-	m52AssertRepeatable(t, h.Reanalyse, http.MethodPost,
+	m52AssertRepeatable(t, h.Reanalyse,
 		"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
 		f.TenantID, f.UserID,
 		map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the load fails", func(t *testing.T) {
-		nc := m52TriageHandler(t, appDB, triage.PassthroughTxManager{})
+		nc := m52TriageHandler(appDB, triage.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.Reanalyse, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
@@ -875,7 +875,7 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 		`{"vulnerability_id":%q,"cve_id":%q,"report_type":%q,"lang":%q}`,
 		f.VulnID, f.CVEID, cra.ReportTypeEarlyWarning, cra.LangEN)
 
-	h := m52CRAHandler(t, appDB, triage.NewDBTxManager(appDB))
+	h := m52CRAHandler(appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.RunReport, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -892,12 +892,12 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 		t.Errorf("cra_reports rows after the run = %d, want 1", n)
 	}
 
-	m52AssertRepeatable(t, h.RunReport, http.MethodPost,
+	m52AssertRepeatable(t, h.RunReport,
 		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the run fails", func(t *testing.T) {
-		nc := m52CRAHandler(t, appDB, cra.PassthroughTxManager{})
+		nc := m52CRAHandler(appDB, cra.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.RunReport, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -928,7 +928,7 @@ func TestM52CRAReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 	m52SeedApprovedVEXDraft(t, migDB, f)
 	reportID := m52SeedCRAReport(t, migDB, f)
 
-	h := m52CRAHandler(t, appDB, triage.NewDBTxManager(appDB))
+	h := m52CRAHandler(appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.Reanalyse, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
 		f.TenantID, f.UserID,
@@ -946,13 +946,13 @@ func TestM52CRAReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 			"report the cycle mints)", n)
 	}
 
-	m52AssertRepeatable(t, h.Reanalyse, http.MethodPost,
+	m52AssertRepeatable(t, h.Reanalyse,
 		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
 		f.TenantID, f.UserID,
 		map[string]string{"id": f.ProjectID.String(), "report_id": reportID.String()}, "{}")
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the load fails", func(t *testing.T) {
-		nc := m52CRAHandler(t, appDB, cra.PassthroughTxManager{})
+		nc := m52CRAHandler(appDB, cra.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.Reanalyse, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
 			f.TenantID, f.UserID,
