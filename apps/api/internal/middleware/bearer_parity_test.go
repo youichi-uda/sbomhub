@@ -497,3 +497,110 @@ func bearerParityClerkConfig(t *testing.T) *config.Config {
 	}
 	return cfg
 }
+
+// apiKeyPrefixSpellings is every casing of `sbh_` a caller can send. The prefix
+// is 4 ASCII characters, so 16 spellings; the table is generated rather than
+// written out so a future longer prefix stays covered.
+func apiKeyPrefixSpellings() []string {
+	out := []string{""}
+	for _, ch := range apiKeyPrefix {
+		lo, hi := strings.ToLower(string(ch)), strings.ToUpper(string(ch))
+		var next []string
+		for _, p := range out {
+			next = append(next, p+lo)
+			if hi != lo {
+				next = append(next, p+hi)
+			}
+		}
+		out = next
+	}
+	return out
+}
+
+// TestAPIKeyPrefixRuleIsCaseInsensitive is the second half of the parity
+// contract, and the one that carried real consequence.
+//
+// The Bearer SCHEME being case-insensitive is only half the header. The other
+// half is the `sbh_` prefix that decides whether a Bearer value is an API-key
+// attempt or a Clerk session token — and that test was
+// `strings.HasPrefix(v, "sbh_")` in two files. Uppercasing those four
+// characters made MultiAuth stop seeing a credential at all, so in
+// SBOMHUB_AUTH_MODE=anonymous the request fell through to the self-hosted
+// handler and ran as the DEFAULT tenant's Owner with api_keys.project_id
+// discarded. Measured on a throwaway stack (2026-08-04) with a PROJECT-SCOPED
+// key against a project in another tenant:
+//
+//	Authorization: Bearer sbh_<scoped key>   403 forbidden
+//	Authorization: Bearer SBH_<same key>     200 + the project's SBOM
+//	X-API-Key:            SBH_<same key>     401 invalid API key
+//
+// i.e. M50 W3's fall-through (docs/UPGRADE.md §7.1) reachable again by changing
+// the case of a prefix, with the two channels disagreeing about one string.
+func TestAPIKeyPrefixRuleIsCaseInsensitive(t *testing.T) {
+	const bodyHex = "ffffffffffffffffffffffffffffffff"
+	spellings := apiKeyPrefixSpellings()
+	// One spelling per subset of the CASED characters in the prefix ("sbh_" has
+	// three, so eight). Computed rather than hard-coded so the guard survives a
+	// change to the prefix, and asserted so a generator that silently produced
+	// only the canonical spelling cannot make this test vacuous.
+	want := 1
+	for _, ch := range apiKeyPrefix {
+		if strings.ToLower(string(ch)) != strings.ToUpper(string(ch)) {
+			want *= 2
+		}
+	}
+	if len(spellings) != want {
+		t.Fatalf("generated %d prefix spellings for %q, want %d",
+			len(spellings), apiKeyPrefix, want)
+	}
+	if want < 2 {
+		t.Fatalf("prefix %q has no cased characters — this test would be vacuous", apiKeyPrefix)
+	}
+	for _, prefix := range spellings {
+		v := prefix + bodyHex
+		t.Run(prefix, func(t *testing.T) {
+			r := bearerParityRequest([]string{"Bearer " + v})
+
+			multiRaw, multiPresented := apiKeyCredential(r)
+			if !multiPresented {
+				t.Errorf("MultiAuth does not see an API-key attempt in %q. It therefore "+
+					"falls through to the Clerk / self-hosted path, and in anonymous mode "+
+					"that serves the request as the DEFAULT tenant's Owner with the key — "+
+					"and its project scope — discarded.", v)
+			} else if multiRaw != v {
+				t.Errorf("MultiAuth extracted %q, want the credential verbatim %q", multiRaw, v)
+			}
+
+			keyRaw, keyPresent, keyAmbiguous := presentedAPIKey(r)
+			if keyAmbiguous || !keyPresent {
+				t.Errorf("APIKeyAuth: present=%v ambiguous=%v for %q, want a presented credential",
+					keyPresent, keyAmbiguous, v)
+			} else if keyRaw != v {
+				t.Errorf("APIKeyAuth extracted %q, want %q", keyRaw, v)
+			}
+		})
+	}
+}
+
+// TestAPIKeyPrefixRuleDoesNotSwallowClerkTokens is the anti-vacuity control for
+// the test above: a rule that answered "yes, an API key" to everything would
+// pass it, and would route every web-UI session into the API-key table.
+func TestAPIKeyPrefixRuleDoesNotSwallowClerkTokens(t *testing.T) {
+	for _, v := range []string{
+		// A Clerk JWT: the compact serialisation of {"alg":...} in base64url.
+		"eyJhbGciOiJSUzI1NiIsImtpZCI6ImZha2UifQ.eyJzdWIiOiJ1c2VyXzEifQ.sig",
+		"sbh", "sb", "s", "sbh-ffff", "xsbh_ffff", "SBH", "",
+	} {
+		if looksLikeAPIKey(v) {
+			t.Errorf("looksLikeAPIKey(%q) = true; only a value beginning with %q in some "+
+				"casing is an API-key attempt", v, apiKeyPrefix)
+		}
+	}
+	// And the positive control, so a rule that answered "no" to everything is
+	// caught too.
+	for _, v := range []string{"sbh_x", "SBH_x", "Sbh_", "sBh_ffff"} {
+		if !looksLikeAPIKey(v) {
+			t.Errorf("looksLikeAPIKey(%q) = false, want true", v)
+		}
+	}
+}

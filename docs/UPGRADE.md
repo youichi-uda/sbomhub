@@ -1029,3 +1029,47 @@ on sending `Authorization: Bearer` with nothing after it, it will now receive 40
   exactly that instant — the key never receives a TTL and persists. The
   `redis-cli --scan ... | xargs ... DEL` above is what removes such a key; for
   the normal case it remains unnecessary.
+
+### 8.6 The `sbh_` prefix test is now case-insensitive too
+
+Found by review after §8.4 landed, and the reason §8.4 is not the whole story.
+
+Whether a Bearer value is an API-key attempt or a Clerk session token is decided
+by a `sbh_` prefix test, and that test was case-sensitive in both windows. The
+consequence was not a 401 with a different body. Measured on a throwaway stack
+(2026-08-04, `SBOMHUB_AUTH_MODE=anonymous`) with a **project-scoped** key,
+against a project belonging to another tenant:
+
+| header | before | after |
+|---|---|---|
+| `Authorization: Bearer sbh_<scoped key>` | 403 `forbidden` | 403 `forbidden` |
+| `Authorization: Bearer SBH_<the same key>` | **200 + the project's SBOM** | **401** `invalid API key` |
+| `Authorization: Bearer sBh_<the same key>` | **200** | **401** |
+| `X-API-Key: SBH_<the same key>` | 401 | 401 |
+
+Uppercasing four characters made `MultiAuth` stop recognising the value as a
+credential, so the request fell through to the self-hosted handler and ran as the
+**default tenant's Owner with `api_keys.project_id` discarded** — §7.1's finding,
+reachable again through a different spelling, while `X-API-Key` answered 401 to
+the same string.
+
+Both windows now apply one case-insensitive rule. This does **not** make an
+uppercased key work: the service hashes the raw string, so `SBH_x` still does not
+match the stored hash of `sbh_x`. It makes the request a refusal instead of a
+default identity.
+
+**What operators may need to change.** Nothing. No client mints or sends a
+key with a different casing — `APIKeyService.generateAPIKey` always emits
+lowercase `sbh_`. A request that was silently served as the default tenant
+because of this will now return 401, which is the intended outcome.
+
+**Still open, recorded not closed.** A Bearer value that is neither
+`sbh_`-shaped nor a valid Clerk token (`Authorization: Bearer some-random-string`)
+still reaches the default identity in `anonymous` mode, because
+`handleSelfHostedAuth` does not read the header at all. Closing that means
+deciding whether a self-hosted deployment should refuse a request carrying an
+Authorization header it cannot use — which would also refuse
+`Authorization: Bearer sbh_<valid key>` on the Clerk-only route group, where it
+is currently served as the default Owner and where `scripts/project-scope-e2e.sh`
+and real CI jobs rely on it. That is a posture decision for the anonymous mode as
+a whole, not a bug in this change.

@@ -167,17 +167,53 @@ func apiKeyCredential(r *http.Request) (raw string, presented bool) {
 	}
 	// A single Bearer value that is not `sbh_`-shaped is a Clerk session token,
 	// not an API-key attempt, so it goes to the Clerk path. APIKeyAuth applies
-	// the SAME prefix rule (see apikey.go), which is what keeps one request from
-	// being an API key there and a Clerk session here (Codex R5, Medium).
+	// the SAME prefix rule (looksLikeAPIKey), which is what keeps one request
+	// from being an API key there and a Clerk session here (Codex R5, Medium).
 	//
 	// An empty credential (`Authorization: Bearer` with nothing after it) has no
 	// prefix to test and cannot be a Clerk token either; it is refused rather
 	// than handed on.
-	if v == "" || strings.HasPrefix(v, apiKeyPrefix) {
+	if v == "" || looksLikeAPIKey(v) {
 		return v, true
 	}
 
 	return "", false
+}
+
+// looksLikeAPIKey reports whether a Bearer credential is an API-key ATTEMPT, as
+// opposed to a Clerk session token. It is the single prefix rule; both windows
+// consult it.
+//
+// # Why the comparison is case-insensitive (M51 round 1, High)
+//
+// It used to be `strings.HasPrefix(v, apiKeyPrefix)` in two files, and the
+// consequence of the case-sensitivity was not a cosmetic 401:
+//
+//	Authorization: Bearer sbh_<a PROJECT-SCOPED key>   403 on another project
+//	Authorization: Bearer SBH_<the same key>           200, the project's SBOM
+//	X-API-Key: SBH_<the same key>                      401
+//
+// measured on a throwaway stack (2026-08-04, SBOMHUB_AUTH_MODE=anonymous).
+// Uppercasing four characters made MultiAuth stop recognising the value as an
+// API-key attempt, so the request fell through to the self-hosted handler and
+// was served as the DEFAULT tenant's Owner — the key discarded and, with it,
+// api_keys.project_id. That is M50 W3's finding (docs/UPGRADE.md §7.1) reachable
+// again through a different spelling, and X-API-Key answering 401 to the same
+// string is the two-windows-two-rules shape stated exactly.
+//
+// Case-insensitive here does NOT make an uppercased key WORK: APIKeyService
+// hashes the raw string, so `SBH_x` does not match the stored hash of `sbh_x`.
+// It makes the request a refusal (401) instead of a default identity, which is
+// the whole difference.
+//
+// A Clerk session token cannot be captured by this rule in any casing: Clerk
+// issues JWTs, whose compact serialisation begins with the base64url of `{"alg`
+// — `eyJ`.
+func looksLikeAPIKey(v string) bool {
+	if len(v) < len(apiKeyPrefix) {
+		return false
+	}
+	return strings.EqualFold(v[:len(apiKeyPrefix)], apiKeyPrefix)
 }
 
 // pickSingleCredential collapses the values a request carried under ONE header

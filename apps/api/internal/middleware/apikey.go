@@ -3,7 +3,6 @@ package middleware
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/sbomhub/sbomhub/internal/model"
@@ -48,7 +47,7 @@ func presentedAPIKey(r *http.Request) (raw string, present, ambiguous bool) {
 	if ambiguous || !present {
 		return "", present, ambiguous
 	}
-	if v != "" && !strings.HasPrefix(v, apiKeyPrefix) {
+	if v != "" && !looksLikeAPIKey(v) {
 		// A Bearer value that is not key-shaped is not a credential this
 		// middleware can use. Reported as PRESENT with no value, so the caller
 		// refuses it rather than answering "API key required" — the caller did
