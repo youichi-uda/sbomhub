@@ -117,31 +117,81 @@ import (
 // ---------------------------------------------------------------------------
 
 // mainGoPath is the router this gate reads, and apiRootPath is the module root
-// (apps/api). Both are derived from THIS FILE's own compiled-in location, not
-// from the working directory.
+// (apps/api). Both are located at package-init time, and NEITHER is a fixed
+// relative literal.
 //
-// They used to be the relative literals "../../cmd/server/main.go" and "../..",
-// which are correct only when the process runs in the package directory. `go
-// test` does arrange that, but a test BINARY does not carry it: built with
-// `go test -c` and run from anywhere else, `../..` resolved to a different
-// tree — measured 2026-08-05 from /tmp, where the walk climbed toward `/` and
-// died on `../../data/lost+found: permission denied`, and where main.go itself
-// was reported as "a router outside main.go" because the path comparison
-// against it no longer matched. Both are false failures of correct code, in a
-// REQUIRED CI check.
+// # Two ways this went wrong before
 //
-// runtime.Caller(0) gives this file's path as the compiler saw it, so the two
-// paths below are fixed at build time and the process may run wherever it
-// likes.
-var mainGoPath, apiRootPath = func() (string, string) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		panic("m52: runtime.Caller(0) failed; this gate cannot locate its own source")
+//  1. The literals "../../cmd/server/main.go" and "../.." are correct only
+//     when the process runs in the package directory. `go test` arranges that,
+//     but a binary built with `go test -c` does not carry it: run from /tmp,
+//     `../..` resolved to another tree, the walk climbed toward `/` and died
+//     on `../../data/lost+found: permission denied`, and main.go itself was
+//     reported as "a router outside main.go".
+//  2. Deriving them from runtime.Caller(0) alone fixes that — but only without
+//     `-trimpath`. Under it, the compiler records
+//     `github.com/sbomhub/sbomhub/internal/middleware/...`, which is not a
+//     filesystem path, and every parse fails.
+//
+// Both are correct builds failing a REQUIRED check, so the resolution tries
+// several origins in order and takes the first where `cmd/server/main.go`
+// actually exists. Measured 2026-08-05: this resolves under plain `go test`,
+// under `go test -trimpath`, from a compiled binary run in /tmp, / and $HOME,
+// and from a `-trimpath` binary run in the package directory.
+var mainGoPath, apiRootPath = m52LocateRouter()
+
+// m52LocateRouter returns (path to cmd/server/main.go, module root).
+//
+// It falls back to the relative literal rather than panicking when nothing
+// resolves: package-init panics take out every unrelated test in the package,
+// and a path that does not exist already fails loudly, and accurately, at the
+// first parse.
+func m52LocateRouter() (string, string) {
+	const rel = "../.."
+	var roots []string
+
+	// (a) This file's compiled-in location. Correct unless -trimpath.
+	if _, thisFile, _, ok := runtime.Caller(0); ok && filepath.IsAbs(thisFile) {
+		pkgDir := filepath.Dir(thisFile)
+		roots = append(roots, filepath.Dir(filepath.Dir(pkgDir)))
 	}
-	pkgDir := filepath.Dir(thisFile)              // .../apps/api/internal/middleware
-	apiRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../apps/api
-	return filepath.Join(apiRoot, "cmd", "server", "main.go"), apiRoot
-}()
+	// (b) The working directory, which `go test` sets to the package dir...
+	if wd, err := os.Getwd(); err == nil {
+		roots = append(roots, filepath.Join(wd, "..", ".."))
+		// (c) ...and, failing that, any ancestor of it. This is what carries
+		// `-trimpath` runs, where (a) is not a filesystem path.
+		for d := wd; ; {
+			roots = append(roots, d)
+			parent := filepath.Dir(d)
+			if parent == d {
+				break
+			}
+			d = parent
+		}
+	}
+
+	for _, root := range roots {
+		candidate := filepath.Join(root, "cmd", "server", "main.go")
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate, root
+		}
+	}
+	// Nothing resolved. That happens in exactly one shape: a `-trimpath`
+	// binary run outside the source tree, where there is neither a
+	// compiled-in path nor a working directory to anchor to. The gate cannot
+	// inspect a router it cannot find, and saying so is better than guessing
+	// — m52MissingRouterHint is what the first failure prints.
+	return filepath.Join(rel, "cmd", "server", "main.go"), rel
+}
+
+// m52MissingRouterHint explains the one unresolvable invocation shape, so a
+// "no such file" does not read as a defect in the router.
+const m52MissingRouterHint = "\n\nIf this says `no such file`, the gate could not LOCATE cmd/server/main.go, " +
+	"which is different from finding something wrong in it. That happens when a " +
+	"`-trimpath` test binary is run outside the source tree: -trimpath removes the " +
+	"compiled-in source path and the working directory is not under the module. Run " +
+	"`go test ./internal/middleware/` from apps/api, or run the binary from anywhere " +
+	"inside the checkout."
 
 // echoImportPath is the router library, used to resolve the local name main.go
 // gives the package (it could be aliased).
@@ -218,7 +268,7 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", mainGoPath, err)
+		t.Fatalf("parse %s: %v%s", mainGoPath, err, m52MissingRouterHint)
 	}
 	render := func(n ast.Node) string {
 		var buf bytes.Buffer
@@ -907,7 +957,7 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", mainGoPath, err)
+		t.Fatalf("parse %s: %v%s", mainGoPath, err, m52MissingRouterHint)
 	}
 	_, groups, _ := m52ParseMainGo(t)
 	rootName, rootFn := m52EchoInstanceName(t, file)
@@ -1400,7 +1450,7 @@ func TestM52MainGoDoesNotAliasTheRouterTypes(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", mainGoPath, err)
+		t.Fatalf("parse %s: %v%s", mainGoPath, err, m52MissingRouterHint)
 	}
 	echoPkg := m52EchoPackageName(file)
 	if echoPkg == "" {
