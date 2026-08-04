@@ -59,6 +59,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/http"
@@ -272,12 +273,17 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 		ComponentID: uuid.New(),
 		VulnID:      uuid.New(),
 	}
-	// A CVE id unique per fixture. `vulnerabilities` is global — no tenant
-	// column, no RLS — with a UNIQUE cve_id, and it is shared with every other
-	// test in the package AND with whatever residue a development database
-	// carries. A collision fails the SEED rather than an assertion, i.e. it is
-	// a flaky red on correct production code, so the id carries as much of the
-	// fixture UUID as the schema allows.
+	// A CVE id unique per fixture, and WELL-FORMED by this repository's own
+	// grammar: internal/validation's `^CVE-\d{4}-\d{4,}$` — the sequence part
+	// is DIGITS. An earlier version used hex from the fixture UUID, which no
+	// route validates today but which would have started failing these drives
+	// the day one did, for a reason with nothing to do with tenant binding.
+	//
+	// Uniqueness matters because `vulnerabilities` is global — no tenant
+	// column, no RLS — with a UNIQUE cve_id, shared with every other test in
+	// the package and with whatever residue a development database carries. A
+	// collision fails the SEED rather than an assertion, i.e. a flaky red on
+	// correct production code.
 	//
 	// The ceiling is 30 characters, not 50: `vulnerabilities.cve_id` is
 	// varchar(50), but the rows these drives actually write — `vex_drafts` and
@@ -285,9 +291,12 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 	// write instead. (`advisory_excerpts` and `reachability_results` share the
 	// 30-character limit but are never reached here: the resolver returns the
 	// disabled provider and both runners skip those reads on that branch.)
-	// 9 for the prefix leaves 21 hex digits = 84 bits, against the 32 bits an
-	// eight-digit truncation would have given.
-	f.CVEID = "CVE-2099-" + strings.ToUpper(strings.ReplaceAll(f.VulnID.String(), "-", "")[:21])
+	// "CVE-2099-" is 9, leaving 21 digits. A uint64 spans 20 of them, so the
+	// whole XOR-folded 64 bits of the fixture UUID go in — against the 32 an
+	// eight-hex-digit truncation gave.
+	hi := binary.BigEndian.Uint64(f.VulnID[0:8])
+	lo := binary.BigEndian.Uint64(f.VulnID[8:16])
+	f.CVEID = fmt.Sprintf("CVE-2099-%020d", hi^lo)
 
 	m52AsTenant(t, migDB, f.TenantID,
 		`INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)`,
