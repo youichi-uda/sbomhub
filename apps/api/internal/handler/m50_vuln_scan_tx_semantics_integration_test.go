@@ -10,8 +10,9 @@
 //
 // Why this file exists. runScan's doc comment claimed the scanners' writes to
 // the global (RLS-free) vulnerability tables "go through the raw *sql.DB and
-// must survive a partial failure". The first half is false: every repository
-// resolves its Queryable with database.Querier(ctx, r.db), runScan hands the
+// must survive a partial failure". The first half is false: the repositories
+// the scanners use (VulnerabilityRepository, ComponentRepository) resolve
+// their Queryable with database.Querier(ctx, r.db), runScan hands the
 // scanners the ctx returned by WithTxFunc, and that ctx carries the *sql.Tx —
 // so the writes go through the TRANSACTION. The comment described a
 // durability property the code does not have by the mechanism the comment
@@ -19,18 +20,28 @@
 // this repo treats as first-class.
 //
 // These two tests pin what is really true, so the corrected comment cannot
-// drift back:
+// drift back. Note the scope of each claim carefully — Codex R2 flagged the
+// first draft of this header for asserting more than the tests establish:
 //
 //  1. the writes are tx-bound (invisible to another connection mid-scan) and
-//     DO survive a scanner returning an error, because runScan's fn returns
-//     nil and WithTxFunc commits regardless; and
-//  2. they do NOT survive a failed SQL STATEMENT: PostgreSQL aborts the whole
-//     transaction, the later writes cannot run, and the COMMIT fails, so the
-//     sweep's entire output is discarded. That is the gap the "raw *sql.DB"
-//     wording implied did not exist. It is logged (WithTxFunc returns the
-//     commit error and runScan logs it at ERROR) — but the per-scanner
-//     "NVD scan completed" INFO line is emitted anyway, so the logs say both
-//     things at once.
+//     DO survive a scanner returning an error PROVIDED THE TRANSACTION IS
+//     STILL HEALTHY, because runScan's fn returns nil and WithTxFunc commits.
+//     The probe returns a synthetic non-SQL error, which is the healthy case.
+//     A scanner whose error came FROM a failed statement (ListBySbom hitting
+//     a server-side error) is case 2, not case 1 — the commit fails and the
+//     sibling's work goes too. That case is argued from case 2's measurement,
+//     not separately driven.
+//  2. the writes do NOT survive a failed SQL STATEMENT: PostgreSQL aborts the
+//     transaction, later commands are refused, the COMMIT fails, and EVERY
+//     RELATIONAL ROW the sweep wrote is discarded — including one written
+//     successfully beforehand, which the probe establishes explicitly.
+//     "Relational" is the honest boundary: this probe only ever writes to
+//     PostgreSQL, so it says nothing about NVD's Redis result cache, which is
+//     populated outside the transaction and survives the abort. That is the
+//     gap the "raw *sql.DB" wording implied did not exist. The loss is
+//     logged (WithTxFunc returns the commit error and runScan logs it at
+//     ERROR) — but the per-scanner "NVD scan completed" INFO line is emitted
+//     anyway, so the logs say both things at once.
 //
 // Measurement note (2026-08-05): the first draft of the corrected doc comment
 // asserted the commit "degrades to a silent ROLLBACK — no error reaches this
@@ -148,8 +159,15 @@ func m50NewVuln(t *testing.T, migDB *sql.DB) model.Vulnerability {
 }
 
 // TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError pins the
-// mechanism (tx, not raw *sql.DB) AND the property the old comment claimed
-// (a scanner failure does not discard the work already written).
+// mechanism (tx, not raw *sql.DB) AND the conditional form of the property
+// the old comment claimed: a scanner failure does not discard the work
+// already written, PROVIDED the transaction is still healthy.
+//
+// The probe's error is synthetic and non-SQL, so the transaction is intact
+// when WithTxFunc commits. That is deliberate — it isolates one variable.
+// The other case (a scanner error that came FROM a failed statement) is the
+// sibling test below, and the two must not be read as one claim about "any
+// scanner error" (Codex R2, High).
 func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing.T) {
 	appURL, migURL := m46b1HandlerEnv(t)
 	migDB := m46b1OpenOrSkip(t, migURL)
@@ -186,23 +204,31 @@ func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing
 		t.Fatalf("read back after runScan: %v", err)
 	}
 	if after != 1 {
-		t.Errorf("rows after a scan whose scanner FAILED = %d, want 1 (the tx is committed "+
-			"regardless of per-scanner outcome, so partial work survives)", after)
+		t.Errorf("rows after a scan whose scanner FAILED (without poisoning the tx) = %d, "+
+			"want 1 — fn returns nil regardless of per-scanner outcome, so the commit still "+
+			"happens and the work survives", after)
 	}
 }
 
-// TestM50VulnScanTx_AFailedStatementDiscardsEverything is the half the old
-// comment denied. A scanner whose SQL fails poisons the transaction: every
-// later command in it is refused and the COMMIT fails, so the sweep's whole
-// output is discarded. "Writes survive a partial failure" is therefore true
-// of scanner-level failures ONLY.
+// TestM50VulnScanTx_AFailedStatementDiscardsEveryRelationalRow is the half
+// the old comment denied. A scanner whose SQL fails poisons the transaction:
+// every later command in it is refused, the COMMIT fails, and every
+// PostgreSQL row the sweep wrote is discarded — including one that had
+// already succeeded, which is what this test establishes and the reason it is
+// not merely "later commands are refused".
+//
+// "Relational" is the boundary, not "everything" (Codex R2, High): this probe
+// writes only to PostgreSQL, so it says nothing about NVD's Redis result
+// cache, which getVulnerabilitiesWithCache populates outside the transaction
+// and which survives the abort. "Writes survive a partial failure" is
+// therefore true only of failures that leave the transaction healthy.
 //
 // The loss is not silent — the commit error is logged at ERROR — but the
 // scanner's own "NVD scan completed" INFO line is logged too, because
 // ScanComponents returned nil while its writes were being refused. Both log
 // assertions are pinned: an operator reading only the INFO line would
 // conclude the scan worked.
-func TestM50VulnScanTx_AFailedStatementDiscardsEverything(t *testing.T) {
+func TestM50VulnScanTx_AFailedStatementDiscardsEveryRelationalRow(t *testing.T) {
 	appURL, migURL := m46b1HandlerEnv(t)
 	migDB := m46b1OpenOrSkip(t, migURL)
 	appDB := m46b1OpenOrSkip(t, appURL)
@@ -248,8 +274,8 @@ func TestM50VulnScanTx_AFailedStatementDiscardsEverything(t *testing.T) {
 	}
 
 	// The load-bearing assertion: the write that had ALREADY SUCCEEDED is gone
-	// too. That is what makes this "the whole sweep is discarded" rather than
-	// the much weaker "later commands are refused".
+	// too. That is what makes this "every relational row is discarded" rather
+	// than the much weaker "later commands are refused".
 	var earlierAfter int
 	if err := appDB.QueryRow(
 		`SELECT COUNT(*) FROM vulnerabilities WHERE id = $1`, earlier.ID).Scan(&earlierAfter); err != nil {

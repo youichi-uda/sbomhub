@@ -433,19 +433,28 @@ func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenant
 // ComponentBelongsToProject (vex.go) it lives beside its caller rather than
 // in scope_checks.go; that file holds the M47 W1 batch, not every predicate.
 //
-// Callers MUST run this inside the request's TenantTx, or the RLS half
-// degrades to "0 rows" — which this reports as not-in-scope (fail closed).
+// Callers MUST run this inside the request's TenantTx. Outside one it fails
+// closed, but NOT uniformly (Codex R2, High — an earlier draft here claimed
+// it always degrades to "0 rows"): on a fresh connection the policy matches
+// nothing and this returns (false, nil), while on a POOLED connection that
+// previously ran a TenantTx the GUC survives commit as the empty string and
+// `current_setting('app.current_tenant_id', true)::uuid` raises
+// `invalid input syntax for type uuid: ""`, which surfaces here as an error.
+// Both are fail-closed — neither can answer "yes" — but only one of them is
+// the one sentinel. The measurement is ListReachabilityTargets' in
+// vulnerability.go (2026-07-30, PostgreSQL 15).
 //
 // One deliberate divergence from the scope_checks.go predicates: NO
-// `if id == uuid.Nil { return false, nil }` short circuit (Codex R1, High).
-// `00000000-0000-0000-0000-000000000000` is a legal PostgreSQL uuid, nothing
-// in the schema or in CreateAssessment forbids it as a primary key, and
-// uuid.Parse accepts it in the route — so the guard would answer "not in
-// scope" for a row that IS in scope and was readable before M50. It never
-// helped: it saved one indexed lookup on a request that was already going to
-// the database anyway, and a Nil tenant_id / project_id matches no row
-// through the predicate regardless. Pinned by
-// handler/m50_ssvc_history_scope_integration_test.go's zero-uuid test.
+// `if ... == uuid.Nil { return false, nil }` short circuit on ANY of the three
+// ids (Codex R1, High). `00000000-0000-0000-0000-000000000000` is a legal
+// PostgreSQL uuid, nothing in the schema or in CreateAssessment forbids it as
+// a primary key — and the same is true of the tenant_id / project_id columns —
+// while uuid.Parse accepts it in the route. The guard would therefore answer
+// "not in scope" for a row that IS in scope and was readable before M50, to
+// save one indexed lookup on a request that was already going to the database.
+// Pinned by handler/m50_ssvc_history_scope_integration_test.go's zero-uuid
+// test, which covers the assessment id; the tenant / project variants are
+// argued from the same schema fact, not separately measured.
 //
 // Shape note: SELECT EXISTS always returns exactly one row, so a false answer
 // is a real "no" and never a swallowed error — unlike a QueryRow + ErrNoRows
