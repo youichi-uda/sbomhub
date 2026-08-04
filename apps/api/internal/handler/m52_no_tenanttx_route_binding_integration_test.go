@@ -517,6 +517,31 @@ func m52IsUnboundGUCError(err error) bool {
 	return pqErr.Code == "22P02" || pqErr.Code == "42501"
 }
 
+// m52AssertRepeatable re-issues a request that already succeeded and requires
+// it to succeed again.
+//
+// It is what makes the negative controls below decisive rather than
+// suggestive. Each control re-runs the same request with the binding removed
+// and expects 500; without this, that 500 could equally mean "the SECOND call
+// always fails" — a unique constraint, a state flip, an idempotency guard —
+// and the control would be measuring the repeat rather than the binding.
+//
+// Measured on the migrated schema, 2026-08-05: `vex_drafts` and `cra_reports`
+// carry no unique constraint other than their `id` primary key, which every
+// cycle mints fresh. This assertion is what keeps that true rather than
+// remembered.
+func m52AssertRepeatable(t *testing.T, h echo.HandlerFunc, method, target string,
+	tenantID, userID uuid.UUID, params map[string]string, body string) {
+	t.Helper()
+	code, resp := m52Call(t, h, method, target, tenantID, userID, params, body)
+	if code != http.StatusCreated {
+		t.Fatalf("the same request answered %d %s on its SECOND bound run, want 201. The "+
+			"negative control below re-runs it once more with the binding removed and "+
+			"expects a 500; if the second run fails for its own reasons, that 500 says "+
+			"nothing about the binding.", code, resp)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The drives
 // ---------------------------------------------------------------------------
@@ -767,6 +792,10 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 			"to a persisted draft", n)
 	}
 
+	m52AssertRepeatable(t, h.RunTriage, http.MethodPost,
+		"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
+		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
+
 	t.Run("negative control: PassthroughTxManager binds nothing and the run fails", func(t *testing.T) {
 		nc := m52TriageHandler(t, appDB, triage.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.RunTriage, http.MethodPost,
@@ -810,6 +839,11 @@ func TestM52VexDraftReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 		t.Errorf("vex_drafts rows after reanalyse = %d, want 2 (the source plus the fresh "+
 			"draft the cycle mints)", n)
 	}
+
+	m52AssertRepeatable(t, h.Reanalyse, http.MethodPost,
+		"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
+		f.TenantID, f.UserID,
+		map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the load fails", func(t *testing.T) {
 		nc := m52TriageHandler(t, appDB, triage.PassthroughTxManager{})
@@ -857,6 +891,10 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 		f.TenantID, f.ProjectID); n != 1 {
 		t.Errorf("cra_reports rows after the run = %d, want 1", n)
 	}
+
+	m52AssertRepeatable(t, h.RunReport, http.MethodPost,
+		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
+		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the run fails", func(t *testing.T) {
 		nc := m52CRAHandler(t, appDB, cra.PassthroughTxManager{})
@@ -907,6 +945,11 @@ func TestM52CRAReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 		t.Errorf("cra_reports rows after reanalyse = %d, want 2 (the source plus the fresh "+
 			"report the cycle mints)", n)
 	}
+
+	m52AssertRepeatable(t, h.Reanalyse, http.MethodPost,
+		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
+		f.TenantID, f.UserID,
+		map[string]string{"id": f.ProjectID.String(), "report_id": reportID.String()}, "{}")
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the load fails", func(t *testing.T) {
 		nc := m52CRAHandler(t, appDB, cra.PassthroughTxManager{})
