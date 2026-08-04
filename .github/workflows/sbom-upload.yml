@@ -31,6 +31,31 @@ jobs:
         run: |
           syft dir:. -o cyclonedx-json=sbom.json
 
+      # The key travels in `Authorization: Bearer`, not `X-API-Key`.
+      #
+      # Both are accepted by the API (middleware.apiKeyCredential reads either,
+      # X-API-Key first), so this is not a compatibility fix — it is about what
+      # each header does on a REDIRECT.
+      #
+      # Measured with curl 8.18.0 against a throwaway server that 302s across
+      # origins (2026-08-04):
+      #
+      #   curl -L  ...  origin A: Authorization SENT   X-API-Key SENT
+      #                 origin B: Authorization STRIPPED, X-API-Key SENT
+      #
+      # curl drops Authorization when a redirect changes host/port/scheme and
+      # keeps custom headers, because it has no way to know a custom header is a
+      # credential. The calls below carry no -L, so as written the redirect is
+      # never followed at all (measured: num_redirects=0, the 3xx is returned as
+      # is) and nothing leaks — the change is for the copy of this file that
+      # someone adds -L to when their deployment lands behind a redirecting
+      # proxy, which is a one-character edit away from mailing the key to
+      # whatever host the proxy names.
+      #
+      # Cost of the switch, stated: the Authorization channel requires the
+      # `sbh_` prefix that service.APIKeyService.generateAPIKey always emits,
+      # while X-API-Key accepts any value. A key hand-inserted into the database
+      # without that prefix would stop working here.
       - name: Upload SBOM to SBOMHub
         env:
           SBOMHUB_API_KEY: ${{ secrets.SBOMHUB_API_KEY }}
@@ -48,12 +73,31 @@ jobs:
           curl -X POST \
             "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${SBOMHUB_API_KEY}" \
+            -H "Authorization: Bearer ${SBOMHUB_API_KEY}" \
             -d @sbom.json \
             --fail-with-body
 
           echo "SBOM uploaded successfully!"
 
+      # KNOWN LIMITATION, measured 2026-08-04 on a throwaway stack and NOT fixed
+      # here: the scan call below does not work with an API key on either header.
+      #
+      # POST /api/v1/projects/:id/scan is registered on the Clerk-only `authWrite`
+      # group in cmd/server/main.go, not on the MultiAuth-fronted chain the two
+      # /sbom calls use, so no API key is ever consulted for it. Measured, one
+      # tenant-level sbh_ key, both header spellings:
+      #
+      #   POST /api/v1/projects/<id>/sbom              201
+      #   GET  /api/v1/projects/<id>/sbom              200
+      #   POST /api/v1/projects/<id>/scan?sbom_id=...  404   <- resolved as the
+      #                                                         DEFAULT tenant,
+      #                                                         which does not own
+      #                                                         the project
+      #
+      # In a Clerk deployment it is a 401 instead. `continue-on-error: true` is
+      # why this has never surfaced as a red run. Fixing it means moving the route
+      # onto MultiAuth, which also means classifying it in
+      # middleware/project_scope.go (default-deny) — out of scope for this change.
       - name: Trigger Vulnerability Scan (Optional)
         env:
           SBOMHUB_API_KEY: ${{ secrets.SBOMHUB_API_KEY }}
@@ -61,14 +105,14 @@ jobs:
           # Get latest SBOM ID
           SBOM_RESPONSE=$(curl -s \
             "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
-            -H "X-API-Key: ${SBOMHUB_API_KEY}")
+            -H "Authorization: Bearer ${SBOMHUB_API_KEY}")
 
           SBOM_ID=$(echo $SBOM_RESPONSE | jq -r '.id')
 
           if [ "$SBOM_ID" != "null" ] && [ -n "$SBOM_ID" ]; then
             curl -X POST \
               "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/scan?sbom_id=${SBOM_ID}&sources=nvd,jvn" \
-              -H "X-API-Key: ${SBOMHUB_API_KEY}"
+              -H "Authorization: Bearer ${SBOMHUB_API_KEY}"
             echo "Vulnerability scan triggered!"
           fi
         continue-on-error: true

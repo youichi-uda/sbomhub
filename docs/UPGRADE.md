@@ -885,3 +885,141 @@ flight.
    EXACT request list. That exactness is what lets the suite catch a tool talking
    to a route it should not, and it is worth more than a bounded amount of wasted
    quota on an error path.
+
+---
+
+## 8. Per-API-key rate limits are now separated (M51)
+
+Added 2026-08-05. One change with an operator-visible effect on the first minute
+after the deploy, and one that is permanent.
+
+### 8.1 What was wrong
+
+`RateLimitByAPIKey` was configured 28 times in `cmd/server/main.go` with two
+different ceilings — 60 requests/minute for uploads and one-shot reads, 300 for
+the polling and list surfaces — but the Redis key every one of them incremented
+was
+
+```
+mcp:ratelimit:<api key uuid>:<yyyymmddhhmm>
+```
+
+which names the key and the minute and nothing else. All 28 therefore advanced
+**one** integer, and a route's own ceiling only decided the threshold that shared
+integer was compared against. Measured on a throwaway stack (2026-08-04, one
+tenant-level `sbh_` key, inside a single minute):
+
+| # | request | configured ceiling | before | after |
+|---|---|---|---|---|
+| 1-61 | `GET /api/v1/projects/:id/sboms/:sbom_id/scan-status` | 300/min | 200 | 200 |
+| 62 | `GET /api/v1/projects/:id/sbom` — **its first call** | 60/min | **429** | **200** (`X-RateLimit-Remaining: 59`) |
+| 63 | `GET /api/v1/projects/:id/vulnerabilities` — **its first call** | 60/min | **429** | **200** |
+
+and in the other direction:
+
+| # | request | configured ceiling | before | after |
+|---|---|---|---|---|
+| 1-60 | `GET /api/v1/projects/:id/sbom` | 60/min | 200 | 200 |
+| 61 | `GET /api/v1/projects/:id/sbom` | 60/min | 429 | 429 |
+| 62 | `GET .../scan-status` | 300/min | 200, `X-RateLimit-Remaining: 238` | 200, `X-RateLimit-Remaining: 299` |
+
+The direction that costs a legitimate client is the first one: `sbomhub scan
+--fail-on <severity>` polls `scan-status` about once a second, which is exactly
+what its 300/min ceiling exists for, and 60 of those polls used to lock the same
+key out of the SBOM upload it had just made.
+
+### 8.2 What changed
+
+The counter is now named by a **budget** — a (name, ceiling, window) triple — so
+every request charged to a counter has the same ceiling as every other request
+charged to it. The ceiling is part of the budget rather than an argument at the
+call site, which is what makes "one counter, two ceilings" impossible to spell.
+
+Four budgets, all per API key, all per minute:
+
+| budget | ceiling | routes |
+|---|---|---|
+| `standard` | 60 | canonical `/api/v1/projects/...` mutations, plus `GET .../sbom` and `GET .../vulnerabilities` |
+| `poll` | 300 | `scan-status`, `reachability/targets`, and the `vex-drafts` / `cra-reports` / `submissions` / METI list+get surfaces |
+| `mcp` | 60 | the `/api/v1/mcp/*` group |
+| `cli` | 60 | the legacy `/api/v1/cli/*` group |
+
+**The aggregate one key may spend goes up**, and that is deliberate rather than
+incidental: previously a key was capped at whatever ceiling the route it was
+calling had (about 300/minute in practice), and it is now the sum of the four
+budgets, **480 requests/minute**. Splitting per ROUTE instead — the obvious
+one-line repair — would have made it roughly 4,300/minute for one key, since the
+budget would then multiply by the size of the route table; that is why the split
+is by budget.
+
+If your deployment sizes anything on "one API key cannot exceed ~300 req/min",
+that assumption is now 480.
+
+### 8.3 The deploy itself: counters reset once
+
+The Redis key changed shape and prefix:
+
+```
+before:  mcp:ratelimit:<api key uuid>:<window>
+after:   ratelimit:apikey:v2:<api key uuid>:<budget>:<window>
+```
+
+**Every counter that is live at the moment the new binary starts serving is
+abandoned.** A key that had already spent its budget starts the new buckets at
+zero, so within that one minute it can spend a full budget again. The exposure is
+bounded by the window: less than 60 seconds, and at most one extra budget per
+bucket.
+
+**During a rolling deploy the two binaries do not share a counter.** Old and new
+pods increment different keys, so for the duration of the rollout a key can spend
+up to one full budget on each fleet — up to twice the intended rate. Two options,
+neither of them required:
+
+- accept it. The overshoot is bounded by the rollout window and by 2x, and it
+  affects only API-key traffic (the limiter is a no-op for Clerk sessions and for
+  the self-hosted default identity);
+- if a deployment cannot accept even that, stop the old pods before starting the
+  new ones rather than rolling.
+
+**No cleanup is needed.** The old `mcp:ratelimit:*` keys carry a TTL of
+window + 1s and expire on their own within a minute of the last request that
+touched them. Deleting them by hand is harmless but pointless:
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'mcp:ratelimit:*' | \
+  xargs -r docker compose exec -T redis redis-cli DEL
+```
+
+### 8.4 `Authorization: bearer <token>` is now accepted everywhere it should be
+
+Separately, `Auth()` (the Clerk window) parsed the `Authorization` header with a
+case-sensitive `strings.TrimPrefix(v, "Bearer ")` over `Header.Get`, while
+`MultiAuth` and `APIKeyAuth` used the RFC 9110 rule — case-insensitive scheme,
+one or more delimiting spaces, and a refusal when a repeated header carries two
+different credentials. All three now share one parser. Four measurable
+differences disappear, of which three **tighten** the Clerk window:
+
+| request shape | before, `Auth()` routes | after |
+|---|---|---|
+| `Authorization: bearer <token>` | 401 `invalid authorization header format` | parsed and verified normally |
+| `Authorization: Bearer ` (no token) | passed on to Clerk as an empty token → 401 `invalid token` | **401** `invalid authorization header format` |
+| two different `Authorization` values | first one silently used | **401** — picking one is a guess |
+| empty `Authorization` followed by a real one | 401 `missing authorization header` | the real one is used |
+
+Nothing an existing client sends changes: `Bearer <token>` with a single space is
+unaffected. If a client of yours relies on a repeated `Authorization` header, or
+on sending `Authorization: Bearer` with nothing after it, it will now receive 401.
+
+### 8.5 Not fixed here
+
+- The window is still **fixed**, not sliding. A caller can spend a bucket at the
+  end of one minute and another at the start of the next, so the observable
+  short-term peak is twice the ceiling. Unchanged from before M51.
+- Nothing bounds the aggregate **across** budgets, or a **tenant** holding
+  several API keys.
+- A Redis error still answers **500** on these routes (fail-closed), so a Redis
+  outage takes the API-key surface down rather than un-throttling it. Unchanged.
+- `POST /api/v1/projects/:id/scan` is still registered on the Clerk-only route
+  group, so an API key cannot trigger a scan. `.github/workflows/sbom-upload.yml`
+  attempts it under `continue-on-error: true` and has therefore always failed
+  silently; the workflow now says so in a comment.
