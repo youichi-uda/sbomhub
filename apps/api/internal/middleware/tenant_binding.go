@@ -357,7 +357,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 			"PassthroughTxManager, which binds nothing — the negative control in the " +
 			"ProvedBy test swaps it in and observes the 500. The third BindsVia entry is " +
 			"route-wide rather than runner-level: see the file header's note on what runs " +
-			"before every classified handler.",
+			"before the four authenticated handlers.",
 	},
 	"POST /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse": {
 		Kind:    TenantBindingBindsItself,
@@ -417,11 +417,11 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 
 // NoTenantTxRouteBindings returns a copy of the classification table.
 //
-// It exists so other packages can check the table against something real:
-// cmd/server has the AST (see tenant_binding_routes_test.go, which lives here
-// and reads main.go by path), and internal/handler has the live database (see
+// It exists so internal/handler — the package with the live database — can
+// check the table against the drives it actually runs (see
 // TestM52EveryBindsItselfRouteIsDriven, which fails when a BindsItself route
-// has no drive). Nothing in the request path calls it.
+// has none). The AST half needs no accessor: it lives in this package and
+// reads main.go by path. Nothing in the request path calls either.
 //
 // The returned map is a shallow copy: the slice fields are shared, so callers
 // must not mutate them.
