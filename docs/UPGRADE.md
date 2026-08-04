@@ -1122,3 +1122,18 @@ One further tightening falls out of it: `Authorization: Bearer` followed by a
 second `Authorization: Bearer <token>` is now **ambiguous** (a credential
 announced twice with different content) and answers 401, where the bare value
 used to be invisible.
+
+### 8.9 Correction to §8.4 on repeated `Authorization` headers
+
+§8.4 said "If a client of yours relies on a repeated `Authorization` header […]
+it will now receive 401." That is wider than what the code does and would send an
+operator looking for a client that does not exist.
+
+What is refused is a repeated header whose values are **different**. Identical
+repeats are one credential sent twice, which says nothing conflicting, and they
+authenticate exactly as a single header does — `pickSingleCredential` returns
+early only when a second DISTINCT value appears. The §8.4 table row should be
+read as "two **different** `Authorization` values".
+
+(§8.8 adds one shape to the "different" set that was previously invisible: a bare
+`Authorization: Bearer` alongside a real one now counts as two different values.)
