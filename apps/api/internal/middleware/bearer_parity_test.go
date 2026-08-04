@@ -92,6 +92,13 @@ type bearerParityCase struct {
 	want   bearerClass
 	// wantToken is the credential the request presents, for classParsed.
 	wantToken string
+	// wantIsAPIKey records, INDEPENDENTLY of any production function, whether
+	// wantToken is an SBOMHub API key rather than a Clerk session token. It is
+	// stated in the table on purpose: deciding it with looksLikeAPIKey would
+	// make TestBearerParityWindowsAgreeOrDivergeExactlyOnce move with the bug it
+	// exists to catch — measured, that version stayed green under a negative
+	// control that reverted the case-insensitive prefix.
+	wantIsAPIKey bool
 	// why records what the shape is, so a failure reads as a statement about
 	// HTTP rather than about this table.
 	why string
@@ -141,7 +148,7 @@ func bearerParityCases() []bearerParityCase {
 		},
 		{
 			name: "lowercase + two spaces", values: []string{"bearer  " + key},
-			want: classParsed, wantToken: key,
+			want: classParsed, wantToken: key, wantIsAPIKey: true,
 			why: "both relaxations at once, on an API-key-shaped credential",
 		},
 		{
@@ -187,7 +194,7 @@ func bearerParityCases() []bearerParityCase {
 		{
 			name:   "empty first, real second",
 			values: []string{"", "Bearer " + key},
-			want:   classParsed, wantToken: key,
+			want:   classParsed, wantToken: key, wantIsAPIKey: true,
 			why: "Header.Get returns only the first value, so this shape used to " +
 				"look like no credential at all",
 		},
@@ -602,5 +609,78 @@ func TestAPIKeyPrefixRuleDoesNotSwallowClerkTokens(t *testing.T) {
 		if !looksLikeAPIKey(v) {
 			t.Errorf("looksLikeAPIKey(%q) = false, want true", v)
 		}
+	}
+}
+
+// TestBearerParityWindowsAgreeOrDivergeExactlyOnce closes the hole that let the
+// prefix defect through review.
+//
+// TestBearerParityAPIKeyWindows checks each window against the shared rule
+// SEPARATELY, so a shape both windows get wrong in DIFFERENT ways can satisfy it
+// — which is what "`SBH_` is absent here and presented-unusable there" was. This
+// asserts the two windows against EACH OTHER, and pins the single place they are
+// allowed to differ.
+//
+// The permitted divergence, and why it exists: a non-empty Bearer value that is
+// not API-key-shaped is a Clerk session token. MultiAuth has a Clerk path and
+// must hand it on, so it reports "no API-key credential". APIKeyAuth's route
+// groups have no Clerk path, so the same value is an API-key attempt it cannot
+// use, and it reports "presented, unusable" — a 401 either way on its own
+// routes. Any OTHER disagreement is the M51 bug class.
+func TestBearerParityWindowsAgreeOrDivergeExactlyOnce(t *testing.T) {
+	cases := bearerParityCases()
+	for _, prefix := range apiKeyPrefixSpellings() {
+		cases = append(cases, bearerParityCase{
+			name:         "prefix spelling " + prefix,
+			values:       []string{"Bearer " + prefix + "ffffffffffffffffffffffffffffffff"},
+			want:         classParsed,
+			wantToken:    prefix + "ffffffffffffffffffffffffffffffff",
+			wantIsAPIKey: true,
+			why:          "every casing of the API-key prefix is the same credential",
+		})
+	}
+
+	divergences := 0
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bearerParityRequest(tc.values)
+			multiRaw, multiPresented := apiKeyCredential(r)
+			keyRaw, keyPresent, keyAmbiguous := presentedAPIKey(r)
+
+			// Stated by the table, never derived from the code under test.
+			clerkCandidate := tc.want == classParsed && tc.wantToken != "" && !tc.wantIsAPIKey
+
+			if clerkCandidate {
+				divergences++
+				// The one permitted disagreement, pinned exactly so it cannot
+				// widen into "and also for these other shapes".
+				if multiPresented {
+					t.Errorf("MultiAuth claims an API-key credential in the Clerk token %q — "+
+						"every web-UI session would be looked up in the API-key table", tc.wantToken)
+				}
+				if !keyPresent || keyRaw != "" || keyAmbiguous {
+					t.Errorf("APIKeyAuth: (%q, present=%v, ambiguous=%v) for a Clerk token; "+
+						"want presented-but-unusable (\"\", true, false) so its routes answer 401",
+						keyRaw, keyPresent, keyAmbiguous)
+				}
+				return
+			}
+
+			if multiPresented != keyPresent {
+				t.Errorf("the two windows disagree about %q: MultiAuth presented=%v, "+
+					"APIKeyAuth present=%v. One request, two conclusions — and in "+
+					"anonymous mode the window that says `absent` serves it as the "+
+					"DEFAULT tenant's Owner. (%s)",
+					tc.values, multiPresented, keyPresent, tc.why)
+			}
+			if multiPresented && keyPresent && multiRaw != keyRaw {
+				t.Errorf("the two windows extract DIFFERENT credentials from %q: "+
+					"MultiAuth %q, APIKeyAuth %q", tc.values, multiRaw, keyRaw)
+			}
+		})
+	}
+	if divergences == 0 {
+		t.Error("no case in this table exercised the permitted Clerk-token divergence, " +
+			"so the pin above is vacuous")
 	}
 }
