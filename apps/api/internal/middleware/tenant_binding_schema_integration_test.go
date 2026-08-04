@@ -16,7 +16,7 @@
 // A route classified TouchesNoRLSTable is safe only for as long as none of the
 // tables it names has Row-Level Security. Deciding that from the migrations by
 // grepping for `ENABLE ROW LEVEL SECURITY` gets it wrong in the one direction
-// that matters: three of this project's migrations (028 / 029 / 030 / 031)
+// that matters: four of this project's migrations (028 / 029 / 030 / 031)
 // exist specifically to DISABLE RLS on a table an earlier migration enabled it
 // on, and a later one could just as easily re-enable it. The grep would report
 // the first statement it finds and call the table protected — or, run the other
@@ -26,8 +26,9 @@
 // the state the policy engine actually consults, after every migration in the
 // directory has had its say.
 //
-// Measured on the migrated schema, 2026-08-05: 35 tables with RLS on, 26 with
-// it off.
+// Measured on the migrated schema, 2026-08-05: 61 ordinary tables in schema
+// `public`, 35 with RLS on and 26 with it off. No partitioned tables, no
+// application views, no non-`public` application schema.
 package middleware
 
 import (
@@ -65,16 +66,23 @@ func m52SchemaDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// m52LiveRLS returns table name → relrowsecurity for every ordinary table in
-// the public schema of the migrated database.
+// m52LiveRLS returns table name → relrowsecurity for every ordinary or
+// partitioned table in the public schema of the migrated database.
 func m52LiveRLS(t *testing.T) map[string]bool {
 	t.Helper()
 	db := m52SchemaDB(t)
+	// relkind 'r' is an ordinary table and 'p' a PARTITIONED one. Both carry
+	// relrowsecurity; the schema has no partitioned table today, but filtering
+	// them out would make a future one read as "does not exist" and fail a
+	// classification that is in fact correct — a false positive on correct
+	// code, which is the failure mode that gets a gate deleted. Views ('v'),
+	// materialised views ('m') and foreign tables ('f') are excluded because
+	// RLS is a property of the underlying table, not of them.
 	rows, err := db.Query(`
 		SELECT c.relname, c.relrowsecurity
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public' AND c.relkind = 'r'`)
+		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')`)
 	if err != nil {
 		t.Fatalf("read pg_class: %v", err)
 	}

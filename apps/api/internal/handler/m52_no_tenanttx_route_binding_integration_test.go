@@ -231,7 +231,8 @@ func m52SeedTenant(t *testing.T, migDB *sql.DB, label string) uuid.UUID {
 	t.Cleanup(func() {
 		// The tenant CASCADE reaps every child row, including the FORCE-RLS
 		// ones: PostgreSQL referential-integrity triggers bypass row security,
-		// so no GUC is needed here.
+		// so no GUC is needed here. Registered FIRST, so LIFO runs it LAST —
+		// see the ordering note in m52SeedGraph.
 		if _, err := migDB.Exec(`DELETE FROM tenants WHERE id = $1`, id); err != nil {
 			t.Errorf("cleanup tenant %s: %v", id, err)
 		}
@@ -287,9 +288,27 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 		f.ComponentID, f.TenantID, f.SbomID)
 
 	// `vulnerabilities` is not tenant-scoped and is NOT reaped by the tenant
-	// CASCADE, so it gets its own cleanup. Registered AFTER the tenant's, and
-	// t.Cleanup is LIFO, so the tenant (and with it component_vulnerabilities)
-	// goes first.
+	// CASCADE, so it gets its own cleanup.
+	//
+	// Cleanup order, spelled out because t.Cleanup is LIFO and the registration
+	// order above is tenant → user → vulnerability, so teardown runs
+	// vulnerability → user → tenant:
+	//
+	//	vulnerability  CASCADEs component_vulnerabilities (and the other
+	//	               vulnerability children). vex_drafts and cra_reports carry
+	//	               a vulnerability_id with NO foreign key, so nothing blocks.
+	//	user           SET NULLs audit_logs.user_id and llm_calls.user_id —
+	//	               both FORCE RLS, both reached by an RI trigger, which
+	//	               bypasses row security (measured; see
+	//	               middleware.TenantBindingBindsItself's doc comment). The
+	//	               runner rows written by the drives above still reference
+	//	               this user at that moment; that is fine for the same
+	//	               reason.
+	//	tenant         CASCADEs the whole remaining tree.
+	//
+	// Every one of those is a delete the migrator role issues with NO tenant
+	// GUC bound, and it works for the RI reason above — the same fact the
+	// Clerk webhook's classification rests on.
 	if _, err := migDB.Exec(`
 		INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source)
 		VALUES ($1, $2, 'm52 fixture', 'HIGH', 7.5, 'NVD')`, f.VulnID, f.CVEID); err != nil {
