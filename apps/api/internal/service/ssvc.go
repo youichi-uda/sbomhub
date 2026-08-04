@@ -476,6 +476,17 @@ func (s *SSVCService) DeleteAssessment(ctx context.Context, projectID, tenantID,
 // Cost: one extra indexed PK lookup, inside the request's TenantTx (the route
 // sits behind appmw.TenantTx, so both statements share one transaction and
 // one tenant binding — this is not a check-then-use across connections).
+//
+// Sharing a tx is NOT the same as sharing a snapshot: the tx runs at
+// PostgreSQL's default READ COMMITTED, so each statement takes a fresh one
+// and a concurrent DELETE of the assessment can land between the two. The
+// resulting answer is `200 []` — "in scope, no changes" for a row that no
+// longer exists. That is benign and needs no locking: it is one legitimate
+// serialisation of two concurrent requests (the read simply ordered before
+// the delete), it discloses nothing the caller was not already entitled to,
+// and the caller's next read 404s. Nothing here is a check-then-USE — the
+// second statement is a read, not a mutation, so there is no window in which
+// a stale "yes" authorises a write.
 func (s *SSVCService) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
 	inScope, err := s.ssvcRepo.AssessmentInProject(ctx, projectID, tenantID, assessmentID)
 	if err != nil {

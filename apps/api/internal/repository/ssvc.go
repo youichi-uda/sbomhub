@@ -468,9 +468,13 @@ func (r *SSVCRepository) AssessmentInProject(ctx context.Context, projectID, ten
 // segment was therefore decorative here exactly as it was on
 // DeleteAssessment: a caller could read any assessment's decision-change
 // history through any of its projects' URLs. The parent row is now joined and
-// constrained, which also makes the read tenant-safe through
-// ssvc_assessments' FORCE RLS (belt) on top of the explicit predicate
-// (braces).
+// constrained, which also makes the read tenant-safe through the explicit
+// predicate (belt) on top of ssvc_assessments' FORCE RLS (braces).
+//
+// (M50 nit: the M46 wording had those two labels swapped relative to the
+// convention scope_checks.go's header states and SbomInProject / vex.go
+// follow — explicit predicate = belt, RLS policy = braces. Corrected in
+// place; no behaviour is described differently.)
 //
 // M50: that wave left an out-of-scope id reading as an EMPTY history and
 // noted the cost — the route could not tell "no such assessment" apart from
