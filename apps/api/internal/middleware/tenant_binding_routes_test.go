@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,12 +116,32 @@ import (
 //
 // ---------------------------------------------------------------------------
 
-// mainGoPath is the router this gate reads. Relative to the middleware package
-// directory, which is where `go test` runs.
-const mainGoPath = "../../cmd/server/main.go"
-
-// apiRootPath is the module root (apps/api), relative to this package.
-const apiRootPath = "../.."
+// mainGoPath is the router this gate reads, and apiRootPath is the module root
+// (apps/api). Both are derived from THIS FILE's own compiled-in location, not
+// from the working directory.
+//
+// They used to be the relative literals "../../cmd/server/main.go" and "../..",
+// which are correct only when the process runs in the package directory. `go
+// test` does arrange that, but a test BINARY does not carry it: built with
+// `go test -c` and run from anywhere else, `../..` resolved to a different
+// tree — measured 2026-08-05 from /tmp, where the walk climbed toward `/` and
+// died on `../../data/lost+found: permission denied`, and where main.go itself
+// was reported as "a router outside main.go" because the path comparison
+// against it no longer matched. Both are false failures of correct code, in a
+// REQUIRED CI check.
+//
+// runtime.Caller(0) gives this file's path as the compiler saw it, so the two
+// paths below are fixed at build time and the process may run wherever it
+// likes.
+var mainGoPath, apiRootPath = func() (string, string) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("m52: runtime.Caller(0) failed; this gate cannot locate its own source")
+	}
+	pkgDir := filepath.Dir(thisFile)              // .../apps/api/internal/middleware
+	apiRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../apps/api
+	return filepath.Join(apiRoot, "cmd", "server", "main.go"), apiRoot
+}()
 
 // echoImportPath is the router library, used to resolve the local name main.go
 // gives the package (it could be aliased).
@@ -1458,9 +1479,17 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 	// shape at all.
 	notARouter := map[string]string{}
 
-	mainAbs, err := filepath.Abs(mainGoPath)
+	mainInfo, err := os.Stat(mainGoPath)
 	if err != nil {
-		t.Fatalf("abs %s: %v", mainGoPath, err)
+		t.Fatalf("stat %s: %v", mainGoPath, err)
+	}
+	// Identity by inode, not by path spelling. Comparing rendered paths made
+	// this walk report main.go as "a router outside main.go" whenever the two
+	// spellings diverged — through a symlink, a bind mount, or a different
+	// working directory.
+	isMainGo := func(path string) bool {
+		info, serr := os.Stat(path)
+		return serr == nil && os.SameFile(info, mainInfo)
 	}
 
 	fset := token.NewFileSet()
@@ -1478,8 +1507,7 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		abs, aerr := filepath.Abs(path)
-		if aerr == nil && abs == mainAbs {
+		if isMainGo(path) {
 			return nil
 		}
 		if _, ok := allowed[filepath.ToSlash(path)]; ok {
@@ -1551,7 +1579,7 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if abs, aerr := filepath.Abs(path); aerr == nil && abs == mainAbs {
+		if isMainGo(path) {
 			return nil
 		}
 		if _, ok := allowed[filepath.ToSlash(path)]; ok {

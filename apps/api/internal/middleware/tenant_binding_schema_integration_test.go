@@ -121,55 +121,53 @@ func m52LiveRLS(t *testing.T) map[string]m52TableRLS {
 	return out
 }
 
-// m52ReadVerdict is what an unbound SELECT of one table would do, as decided
-// by the server rather than by a model written here.
+// m52ReadVerdict is what actually happened when the runtime role read one
+// table with no tenant bound.
 type m52ReadVerdict struct {
-	// SelectDenied is true when PostgreSQL's permissive-OR semantics leave no
-	// way for the runtime role to SELECT a row without app.current_tenant_id.
-	SelectDenied bool
-	// Why records the reason, for the failure message.
-	Why string
 	// ProbeErr is the error a real `SELECT 1 FROM <t> LIMIT 1` raised on the
-	// poisoned connection, or nil.
+	// poisoned connection, or nil. This is the ONLY failing signal.
 	ProbeErr error
+	// Rows is how many rows that read returned (0 or 1). A read that returned
+	// a row is positive proof the role can see into the table; a read that
+	// returned none proves nothing, because the table may simply be empty.
+	Rows int
+	// Policies and Context are diagnostic only — they go into messages, never
+	// into the pass/fail decision. See the doc comment below for why.
+	Policies int
+	Context  string
 }
 
-// m52UnboundReadVerdict decides, for one RLS-enabled table, whether the
-// runtime role can read it with no tenant bound.
+// m52UnboundReadVerdict reads one RLS-enabled table as the runtime role with
+// no tenant bound, and reports what happened.
 //
-// # Why this shape
+// # Why the policy catalogue is diagnostic and not decisive
 //
-// The first version of this check asked only whether RLS was enabled; the
-// second asked whether ANY policy mentioned the tenant GUC. Both were models
-// of a question PostgreSQL answers itself, and both were wrong at the edges: a
-// table with `FOR SELECT TO sbomhub_app USING (true)` beside a tenant-gated
-// `FOR INSERT` is read perfectly well by an unbound route, and the second
-// model failed it.
+// Three earlier versions tried to DECIDE from the catalogue: "RLS is enabled",
+// then "some policy mentions the GUC", then "every permissive SELECT policy
+// applicable to this role mentions the GUC". Each was a model of a question
+// PostgreSQL answers itself, and each was wrong at an edge that reddens CI on
+// a correct schema. The last one failed this, which is a policy that
+// deliberately ADMITS the unbound state:
 //
-// So this asks two narrower questions, both about SELECT only:
+//	CREATE POLICY p ON t FOR SELECT TO sbomhub_app
+//	  USING (NULLIF(current_setting('app.current_tenant_id', true), '') IS NULL);
 //
-//  1. The catalog, with PostgreSQL's actual applicability rules — command
-//     (`polcmd IN ('*','r')`), role (`polroles` contains oid 0, which is how
-//     PostgreSQL spells PUBLIC — tested with `0 = ANY(...)` rather than
-//     `= '{0}'` so a policy that names PUBLIC alongside other roles is not
-//     overlooked, which would have read as "denied" on a schema that is in
-//     fact fine — or includes a role the current one is a member of), and
-//     composition (PERMISSIVE policies are ORed, so one
-//     GUC-free permissive policy is enough to admit the read; RESTRICTIVE ones
-//     are ANDed, so one tenant-gated restrictive policy denies it).
-//  2. An actual `SELECT 1 FROM <t> LIMIT 1` on a connection in the poisoned
-//     state, which catches the 22P02 the empty-string placeholder raises when
-//     a row IS scanned.
+// It mentions `app.current_tenant_id`, so the text model called it
+// tenant-gated and reported the table denied — while the live read returned
+// rows. Visibility is the BOOLEAN RESULT of an expression over a row, not a
+// property of its deparsed text, and reproducing that in Go means
+// reimplementing PostgreSQL's policy evaluation: exactly the hand-written
+// analysis this whole gate exists to avoid.
 //
-// Neither is complete on its own — (1) models only SELECT, and (2) evaluates
-// nothing when the table happens to be empty — and the caller reports what
-// each did and did not establish rather than implying more.
+// So the only thing that fails is the statement itself failing. The catalogue
+// is still read, and still reported, because "RLS is on and there are N
+// policies" is what a human needs in order to go and look.
 func m52UnboundReadVerdict(t *testing.T, table string) m52ReadVerdict {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		t.Skip("this check needs DATABASE_URL (the sbomhub_app role): the migrator OWNS " +
-			"these tables, and role applicability is half the question")
+			"these tables, and what the RUNTIME role can read is the whole question")
 	}
 	db, err := sql.Open("postgres", url)
 	if err != nil {
@@ -179,40 +177,14 @@ func m52UnboundReadVerdict(t *testing.T, table string) m52ReadVerdict {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	var permissive, permissiveGUCFree, restrictiveGUCGated int
+	v := m52ReadVerdict{}
 	if err := db.QueryRow(`
-		SELECT
-		  count(*) FILTER (WHERE p.polpermissive),
-		  count(*) FILTER (WHERE p.polpermissive
-		                     AND coalesce(pg_get_expr(p.polqual, p.polrelid), '')
-		                           NOT LIKE '%app.current_tenant_id%'),
-		  count(*) FILTER (WHERE NOT p.polpermissive
-		                     AND coalesce(pg_get_expr(p.polqual, p.polrelid), '')
-		                           LIKE '%app.current_tenant_id%')
+		SELECT count(*)
 		FROM pg_policy p
 		JOIN pg_class c ON c.oid = p.polrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public'
-		  AND c.relname = $1
-		  AND p.polcmd IN ('*', 'r')
-		  AND (0 = ANY(p.polroles)
-		       OR EXISTS (SELECT 1 FROM unnest(p.polroles) rr
-		                  WHERE pg_has_role(current_user, rr, 'USAGE')))`,
-		table).Scan(&permissive, &permissiveGUCFree, &restrictiveGUCGated); err != nil {
+		WHERE n.nspname = 'public' AND c.relname = $1`, table).Scan(&v.Policies); err != nil {
 		t.Fatalf("read pg_policy for %q: %v", table, err)
-	}
-
-	v := m52ReadVerdict{}
-	switch {
-	case permissive == 0:
-		v.SelectDenied, v.Why = true, "RLS is enabled and no PERMISSIVE policy applies to "+
-			"SELECT for this role, which under RLS is default-deny"
-	case permissiveGUCFree == 0:
-		v.SelectDenied, v.Why = true, "every PERMISSIVE SELECT policy that applies to this "+
-			"role is gated on app.current_tenant_id"
-	case restrictiveGUCGated > 0:
-		v.SelectDenied, v.Why = true, "a RESTRICTIVE SELECT policy gated on "+
-			"app.current_tenant_id applies, and restrictive policies are ANDed"
 	}
 
 	// Put the single connection into the state a running server's pool is in:
@@ -233,9 +205,27 @@ func m52UnboundReadVerdict(t *testing.T, table string) m52ReadVerdict {
 		t.Fatalf("probe precondition not met: app.current_tenant_id is (null=%v, value=%q), "+
 			"want a non-NULL empty string", isNull, val.String)
 	}
+
 	// The identifier comes from the classification table in this repository,
 	// and has already been resolved against pg_class by the caller.
-	_, v.ProbeErr = db.Exec(`SELECT 1 FROM "` + table + `" LIMIT 1`)
+	rows, perr := db.Query(`SELECT 1 FROM "` + table + `" LIMIT 1`)
+	if perr != nil {
+		v.ProbeErr = perr
+		return v
+	}
+	for rows.Next() {
+		v.Rows++
+	}
+	if cerr := rows.Err(); cerr != nil {
+		v.ProbeErr = cerr
+	}
+	_ = rows.Close()
+	if v.Rows > 0 {
+		v.Context = "the read returned a row, so the role can see into the table"
+	} else {
+		v.Context = "the read returned no rows, which proves nothing: the table may be " +
+			"empty, or a policy may be excluding everything"
+	}
 	return v
 }
 
@@ -275,11 +265,10 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 			if st.Kind == "m" {
 				// A materialised view. Reading one returns its STORED result —
 				// the underlying query runs at REFRESH time — so no row
-				// security applies to the route's read and relrowsecurity is
-				// false for it by construction. Naming one here is legitimate;
-				// it is logged rather than silently accepted so that the day
-				// this project starts using matviews, the fact is visible in
-				// the run rather than inferred from this comment.
+				// security applies to the route's read. Naming one here is
+				// legitimate; it is logged rather than silently accepted so
+				// that the day this project starts using matviews, the fact is
+				// visible in the run rather than inferred from this comment.
 				t.Logf("NOTE: %s names %q, which is a MATERIALISED VIEW. Its reads return "+
 					"stored rows and carry no row security, so it is exempt by construction "+
 					"— but if the route also REFRESHes it, the refresh executes the "+
@@ -293,31 +282,25 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 				continue
 			}
 			v := m52UnboundReadVerdict(t, table)
-			switch {
-			case v.SelectDenied:
-				t.Errorf("%s is classified TenantBindingTouchesNoRLSTable, but %q now has ROW "+
-					"LEVEL SECURITY enabled and an unbound SELECT of it is denied: %s.\n"+
-					"This route carries no TenantTx, so that is the state its statements run "+
-					"in. Move the route onto a TenantTx chain, or re-classify it "+
-					"TenantBindingBindsItself and give it a binding plus a drive.\n"+
-					"Reason recorded for the old classification: %s", key, table, v.Why, rule.Why)
-			case v.ProbeErr != nil:
-				t.Errorf("%s is classified TenantBindingTouchesNoRLSTable, but a plain "+
-					"`SELECT 1 FROM %s LIMIT 1` as the runtime role, with no tenant bound, "+
-					"FAILS: %v\nThat is the state this route's statements run in. Move the "+
+			if v.ProbeErr != nil {
+				t.Errorf("%s names %q, and a plain `SELECT 1 FROM %s LIMIT 1` as the runtime "+
+					"role, with no tenant bound, FAILS: %v\n"+
+					"That is exactly the state this route's statements run in — it carries no "+
+					"TenantTx. (%q has ROW LEVEL SECURITY enabled with %d policies.) Move the "+
 					"route onto a TenantTx chain, or re-classify it TenantBindingBindsItself "+
 					"and give it a binding plus a drive.\n"+
 					"Reason recorded for the old classification: %s",
-					key, table, v.ProbeErr, rule.Why)
-			default:
-				// Neither signal says the read is broken. Record what that
-				// does NOT establish rather than implying more.
-				t.Logf("NOTE: %s names %q, which now has ROW LEVEL SECURITY enabled. A "+
-					"permissive SELECT policy admits the runtime role without the tenant "+
-					"GUC and a live unbound read raised nothing, so this is not failing — "+
-					"but only SELECT was examined. If the route also INSERTs or UPDATEs "+
-					"this table, re-read the policies for those commands.", key, table)
+					key, table, table, v.ProbeErr, table, v.Policies, rule.Why)
+				continue
 			}
+			// No error. Record what that does and does not establish rather
+			// than implying more — see m52UnboundReadVerdict's doc comment for
+			// why the policy catalogue is not consulted for a verdict.
+			t.Logf("NOTE: %s names %q, which now has ROW LEVEL SECURITY enabled with %d "+
+				"policies. An unbound read of it as the runtime role raised nothing, so this "+
+				"is not failing — %s. Only SELECT was exercised; if the route also INSERTs "+
+				"or UPDATEs this table, read those policies yourself.",
+				key, table, v.Policies, v.Context)
 		}
 	}
 	if checked == 0 {
