@@ -94,6 +94,35 @@ func TestM51EveryRateLimitCallSiteNamesADeclaredBudget(t *testing.T) {
 	}
 }
 
+// TestM51BudgetNamesAreDistinct is the invariant the whole separation rests on.
+//
+// The Redis counter is named by Budget.Name, so two budgets sharing a name are
+// ONE counter with two ceilings — the M51 defect, reintroduced by a copy-paste
+// in the var block rather than by a call site. Nothing else in the codebase
+// would notice: both routes would keep working, and the one with the lower
+// ceiling would simply start refusing early.
+func TestM51BudgetNamesAreDistinct(t *testing.T) {
+	seen := map[string]int{}
+	for _, b := range appmw.AllBudgets() {
+		if prev, dup := seen[b.Name]; dup {
+			t.Errorf("two budgets are named %q (ceilings %d and %d) — they are ONE "+
+				"Redis counter, which is exactly the defect M51 removed",
+				b.Name, prev, b.Limit)
+		}
+		seen[b.Name] = b.Limit
+		if strings.Contains(b.Name, ":") {
+			t.Errorf("budget %q contains the Redis key separator", b.Name)
+		}
+		if b.Limit <= 0 || b.Window <= 0 {
+			t.Errorf("budget %q has limit %d window %s; RateLimitByAPIKey panics on this",
+				b.Name, b.Limit, b.Window)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("AllBudgets() is empty — this test would pass vacuously")
+	}
+}
+
 // TestM51NoBareLimitReachesTheLimiter is the narrower half stated on its own,
 // because it is the regression that would be easiest to reintroduce: a new
 // route copied from a pre-M51 example.

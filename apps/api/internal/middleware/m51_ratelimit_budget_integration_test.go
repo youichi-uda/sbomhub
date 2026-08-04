@@ -59,6 +59,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,24 +257,12 @@ func TestM51RateLimitRedisKeyNamesTheBudget(t *testing.T) {
 	}
 	for _, b := range AllBudgets() {
 		k := rateLimitRedisKey(key, b, now)
-		if !contains(k, b.Name) {
+		if !strings.Contains(k, b.Name) {
 			t.Errorf("budget %q: key %q does not name the budget", b.Name, k)
 		}
-		if !contains(k, key.ID.String()) {
+		if !strings.Contains(k, key.ID.String()) {
 			t.Errorf("budget %q: key %q does not name the API key — one tenant's "+
 				"traffic would throttle another's", b.Name, k)
 		}
 	}
-}
-
-func contains(haystack, needle string) bool {
-	return len(needle) > 0 && len(haystack) >= len(needle) &&
-		(func() bool {
-			for i := 0; i+len(needle) <= len(haystack); i++ {
-				if haystack[i:i+len(needle)] == needle {
-					return true
-				}
-			}
-			return false
-		})()
 }

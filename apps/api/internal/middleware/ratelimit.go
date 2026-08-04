@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -166,9 +167,18 @@ func RateLimitByAPIKey(rdb *redis.Client, budget Budget) echo.MiddlewareFunc {
 	// is while main() is assembling routes. Left to run, Budget{} would answer
 	// 429 to every request on the route it was given (limit 0), which reads as
 	// a production incident rather than as a typo.
-	if budget.Name == "" || budget.Limit <= 0 || budget.Window <= 0 {
+	//
+	// This runs when the middleware is CONSTRUCTED — i.e. inside main(), before
+	// the server listens — never per request, so it cannot be reached by a
+	// caller.
+	//
+	// The colon is refused because it is the key separator: a name containing
+	// one could make two (key, budget, window) triples render to the same Redis
+	// string, which is the exact confusion this whole change removes.
+	if budget.Name == "" || budget.Limit <= 0 || budget.Window <= 0 ||
+		strings.Contains(budget.Name, ":") {
 		panic(fmt.Sprintf("middleware: invalid rate-limit budget %+v "+
-			"(name must be set, limit and window must be positive)", budget))
+			"(name must be set and free of ':', limit and window must be positive)", budget))
 	}
 	limit := budget.Limit
 	window := budget.Window
