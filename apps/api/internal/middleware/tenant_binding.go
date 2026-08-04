@@ -106,10 +106,13 @@ import (
 //     and they answer "yes, TenantTx". What that middleware does is covered
 //     by the note below rather than by a rule.
 //
-// # What runs before every classified handler
+// # What runs before four of the classified handlers
 //
-// Six of the nine routes sit behind `triageMultiAuth` / `authMiddleware`, and
-// that middleware does two things worth knowing when reading a rule:
+// Four of the nine routes — the F19 runner four — sit behind
+// `triageMultiAuth`, and that middleware does two things worth knowing when
+// reading their rules. (The other five carry no authentication at all: the two
+// provider webhooks verify their own signature, /health is anonymous, and the
+// two share-link routes are authorised by the token itself.)
 //
 //  1. It CAN provision a tenant. `Auth`'s self-hosted branch calls
 //     TenantRepository.GetOrCreateDefault and its Clerk branch calls
