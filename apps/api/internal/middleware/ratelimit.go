@@ -51,11 +51,14 @@ import (
 // product charges per request — and it is NOT a fairness device between tenants,
 // which is what makes the per-key aggregate the number that matters.
 //
-// Per-route buckets multiply that aggregate by the size of the route table:
-// ~34 rate-limited routes at 60/min and 300/min come to roughly 4,300 req/min
-// for one key, against about 300 today. A caller that rotates paths is exactly
-// the caller this limiter is aimed at, so "fix" would have meant a fourteen-fold
-// loosening of the only control on it.
+// Per-route buckets multiply that aggregate by the size of the route table.
+// Counted from cmd/server/main.go: 38 rate-limited route paths — 25 registered
+// individually (16 standard, 9 poll) plus 8 on the /mcp group and 5 on the two
+// /cli groups — which is 9x300 + 29x60 = 4,440 req/min for one key, against
+// about 300 today (the shared counter tripped at whatever ceiling the route
+// being called had, so 300 was the most a key could spend). A caller that
+// rotates paths is exactly the caller this limiter is aimed at, so "fix" would
+// have meant a roughly fifteen-fold loosening of the only control on it.
 //
 // A budget is the coarsest split that still makes every stated ceiling true:
 // every request charged to a counter has the SAME ceiling as every other

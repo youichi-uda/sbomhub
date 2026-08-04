@@ -1073,3 +1073,12 @@ Authorization header it cannot use — which would also refuse
 is currently served as the default Owner and where `scripts/project-scope-e2e.sh`
 and real CI jobs rely on it. That is a posture decision for the anonymous mode as
 a whole, not a bug in this change.
+
+### 8.7 Correction to §8.2's per-route figure
+
+§8.2 said splitting the counter per ROUTE would come to "roughly 4,300/minute".
+Counted rather than estimated, from `cmd/server/main.go`: 38 rate-limited route
+paths — 25 registered individually (16 on `standard`, 9 on `poll`) plus 8 on the
+`/mcp` group and 5 on the two `/cli` groups — i.e. 9x300 + 29x60 =
+**4,440 req/min** for a single API key. The conclusion is unchanged; the number
+is now measured.
