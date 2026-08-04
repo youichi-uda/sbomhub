@@ -268,12 +268,25 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 				continue
 			}
 			checked++
-			if st.Kind == "r" || st.Kind == "p" {
-				if !st.Enabled {
-					// Decisive on its own: with relrowsecurity false,
-					// PostgreSQL ignores every stored policy.
-					continue
-				}
+			switch {
+			case (st.Kind == "r" || st.Kind == "p") && !st.Enabled:
+				// Decisive on its own: with relrowsecurity false, PostgreSQL
+				// ignores every stored policy.
+				continue
+			case st.Kind == "f":
+				// A foreign table. PostgreSQL has no way to put row security
+				// on one — there is no ALTER FOREIGN TABLE ... ENABLE ROW
+				// LEVEL SECURITY — so there is nothing here to check, and
+				// probing it would reach the remote server: a wrapper that is
+				// unreachable, misconfigured or slow would fail this gate for
+				// a reason that has nothing to do with tenant binding.
+				// Measured 2026-08-05: a foreign table on a handler-less
+				// wrapper made the probe raise, which is exactly that false
+				// alarm.
+				t.Logf("NOTE: %s names %q, a FOREIGN TABLE. It cannot carry local row "+
+					"security, so it is exempt by construction and is not probed — whatever "+
+					"the remote enforces is outside this gate.", key, table)
+				continue
 			}
 			if ack, ok := rule.RLSEnabledButReachable[table]; ok {
 				t.Logf("NOTE: %s names %q, which carries row security, and the rule declares "+
