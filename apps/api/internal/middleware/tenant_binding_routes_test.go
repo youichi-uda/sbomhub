@@ -50,9 +50,10 @@ import (
 //	GLOBAL      every `<root>.Use(<mw>)` argument, prepended to EVERY route's
 //	            chain (that is what echo.Echo.Use means).
 //	ROUTES      every *ast.CallExpr whose Fun is a SelectorExpr with Sel in
-//	            {GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, Any}, whose
-//	            receiver is an identifier known to be a group, with >= 2
-//	            arguments and a string-literal first argument.
+//	            m52RouteVerbs (echo's nine HTTP-verb methods plus Any — every
+//	            method with the `(path, handler, mw...)` shape), whose receiver
+//	            is an identifier known to be a group, with >= 2 arguments and a
+//	            string-literal first argument.
 //	CHAIN       global `e.Use` args ++ the group's inherited middleware ++ the
 //	            registration's own args[2:], each rendered with go/printer.
 //	TenantTx?   any chain entry whose rendered text contains "TenantTx(",
@@ -88,10 +89,22 @@ const apiRootPath = "../.."
 // and precise.
 const echoImportPath = "github.com/labstack/echo/v4"
 
-// m52RouteVerbs are the echo.Group / echo.Echo methods that register a route.
+// m52RouteVerbs are the echo.Group / echo.Echo methods that register a route
+// with the signature this parser reads: (path string, h HandlerFunc,
+// m ...MiddlewareFunc).
+//
+// This is echo v4's full set of that shape — the nine HTTP verbs plus Any.
+// CONNECT and TRACE are here for completeness rather than because main.go uses
+// them; the alternative (leaving them out) would have routed them through
+// TestM52RouteScanUnitCoversEveryRegistrationForm's "unknown method" branch,
+// which is loud but demands a code change to accept a perfectly ordinary
+// registration. Echo's OTHER registration methods — Add, Match, Static, File,
+// Host, RouteNotFound — take a different shape and are deliberately NOT read;
+// that test is what makes their absence audible instead of silent.
 var m52RouteVerbs = map[string]bool{
-	"GET": true, "POST": true, "PUT": true, "PATCH": true,
-	"DELETE": true, "HEAD": true, "OPTIONS": true, "Any": true,
+	"CONNECT": true, "DELETE": true, "GET": true, "HEAD": true,
+	"OPTIONS": true, "PATCH": true, "POST": true, "PUT": true,
+	"TRACE": true, "Any": true,
 }
 
 // m52NonRoutingGroupMethods are the other methods main.go is allowed to call

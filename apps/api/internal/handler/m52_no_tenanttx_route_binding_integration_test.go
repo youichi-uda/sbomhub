@@ -142,19 +142,41 @@ func m52PoisonedApp(t *testing.T, appURL string) *sql.DB {
 		t.Fatalf("commit poison tx: %v", err)
 	}
 
+	m52AssertPlaceholderIsEmpty(t, db, "after a committed SET LOCAL")
+
+	// The other way a running server reaches the same state, asserted here so
+	// the reproduction is not merely ANALOGOUS to production but identical to
+	// it: MultiAuth's handleAPIKeyAuth calls TenantRepository.SetCurrentTenant,
+	// which on a route with no TenantTx has no ambient transaction to attach
+	// to. `is_local = true` then discards the value at the end of the implicit
+	// single-statement transaction, one statement before the handler runs.
+	if _, err := db.Exec(`SELECT set_config('app.current_tenant_id', $1, true)`,
+		uuid.New().String()); err != nil {
+		t.Fatalf("bare set_config: %v", err)
+	}
+	m52AssertPlaceholderIsEmpty(t, db, "after a bare set_config with no transaction")
+
+	return db
+}
+
+// m52AssertPlaceholderIsEmpty fails unless `app.current_tenant_id` on the
+// pool's single connection is the EMPTY STRING — non-NULL, which is what makes
+// the policy predicate raise 22P02 rather than quietly match nothing.
+func m52AssertPlaceholderIsEmpty(t *testing.T, db *sql.DB, when string) {
+	t.Helper()
 	var isNull bool
 	var val sql.NullString
 	if err := db.QueryRow(
 		`SELECT current_setting('app.current_tenant_id', true) IS NULL,
 		        current_setting('app.current_tenant_id', true)`).Scan(&isNull, &val); err != nil {
-		t.Fatalf("read GUC state: %v", err)
+		t.Fatalf("read GUC state (%s): %v", when, err)
 	}
 	if isNull || val.String != "" {
-		t.Fatalf("precondition not met: app.current_tenant_id is (null=%v, value=%q), want a "+
-			"non-NULL empty string. The pooled connection was not poisoned, so nothing "+
-			"below can observe the defect it exists to reproduce.", isNull, val.String)
+		t.Fatalf("precondition not met %s: app.current_tenant_id is (null=%v, value=%q), "+
+			"want a non-NULL empty string. The pooled connection was not poisoned, so "+
+			"nothing below can observe the defect it exists to reproduce.",
+			when, isNull, val.String)
 	}
-	return db
 }
 
 // ---------------------------------------------------------------------------
