@@ -97,15 +97,60 @@ import (
 //     job of the M47 W1 scope checks and the RLS policy itself.
 //   - Background jobs, the scheduler, and anything not reachable through an
 //     Echo route registration in cmd/server/main.go.
+//   - Statements issued by middleware that runs BEFORE TenantTx on a route
+//     that does have it. `authMiddleware` sits outside TenantTx on every
+//     `auth*` group (main.go declares `authBase := api.Group("",
+//     authMiddleware)` and hangs the TenantTx groups off it), so its own
+//     database work is as unbound as anything here — this table simply does
+//     not enumerate those routes, because the question it asks is per-route
+//     and they answer "yes, TenantTx". What that middleware does is covered
+//     by the note below rather than by a rule.
+//
+// # What runs before every classified handler
+//
+// Six of the nine routes sit behind `triageMultiAuth` / `authMiddleware`, and
+// that middleware does two things worth knowing when reading a rule:
+//
+//  1. It CAN provision a tenant. `Auth`'s self-hosted branch calls
+//     TenantRepository.GetOrCreateDefault and its Clerk branch calls
+//     GetOrCreateByClerkOrgID; both fall through to TenantRepository.Create on
+//     a first visit, and Create writes the RLS-protected `scan_settings` row.
+//     That access is bound — Create opens its own transaction and issues the
+//     set_config between the two INSERTs (F187) — so it is listed in the
+//     affected rules' BindsVia even though it happens before the handler.
+//  2. Its own `SetCurrentTenant` does NOT bind anything for the handler.
+//     handleAPIKeyAuth calls `tenantRepo.SetCurrentTenant`, which issues
+//     `SELECT set_config('app.current_tenant_id', $1, true)` through the
+//     request-scoped query helper. On a route with no TenantTx there is no
+//     ambient transaction, so the statement runs in its own implicit one and
+//     `is_local = true` discards the value the moment it commits. Measured on
+//     the migrated schema, 2026-08-05: the very next statement on the same
+//     connection reads the placeholder as the EMPTY STRING, not the tenant and
+//     not NULL. So on these routes the auth step is not a binding — it is one
+//     of the things that leaves the pooled connection in exactly the state
+//     that turned /reanalyse's unbound read into a 500 rather than a false
+//     404.
 
 // TenantBindingKind is how a route that carries no TenantTx keeps its
 // database access inside a tenant.
 type TenantBindingKind string
 
 const (
-	// TenantBindingBindsItself: the route's code path touches at least one
-	// RLS-protected table, and it opens its own transaction with
-	// `SELECT set_config('app.current_tenant_id', $1, true)` before doing so.
+	// TenantBindingBindsItself: the route ISSUES at least one statement
+	// against an RLS-protected table, and every such statement is preceded on
+	// its branch by a transaction of the route's own carrying
+	// `SELECT set_config('app.current_tenant_id', $1, true)`.
+	//
+	// "Issues" is load-bearing. It excludes the work PostgreSQL performs on
+	// the route's behalf to maintain referential integrity: an `ON DELETE
+	// CASCADE` or `ON DELETE SET NULL` reaching an RLS-protected child table.
+	// Those actions run in RI triggers, which bypass row security by design,
+	// so they need no binding and a rule is not expected to name one for them.
+	// Measured on the migrated schema as the NOBYPASSRLS `sbomhub_app` role
+	// with no GUC set, 2026-08-05: `DELETE FROM tenants` removed the tenant's
+	// `projects` row (FORCE RLS) and raised nothing, and `DELETE FROM users`
+	// nulled `llm_calls.user_id` (FORCE RLS) and raised nothing. The Clerk
+	// webhook's two delete branches are the routes that depend on this.
 	//
 	// This classification is a PROMISE ABOUT CODE ELSEWHERE, so it is not
 	// accepted on its word: every rule carrying it must name, in ProvedBy, a
@@ -186,20 +231,22 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 		Handler:  "clerkWebhookHandler.Handle",
 		BindsVia: []string{"repository.TenantRepository.Create"},
 		ProvedBy: "TestM52ClerkTenantCreateBindsOnAPoisonedConnection",
-		Why: "The handler itself issues no set_config, and four of the five tables it " +
-			"reaches do not need one — `users`, `tenants` and `tenant_users` never had " +
-			"RLS and migration 029 removed it from `audit_logs`. The fifth is the reason " +
-			"this is not TouchesNoRLSTable: TenantRepository.Create writes a default " +
-			"`scan_settings` row for every new tenant, and migration 048 gave that table " +
-			"the full ENABLE+FORCE+policy triple. Create opens its own tx and binds the " +
-			"NEW tenant's id between the `tenants` INSERT and the `scan_settings` INSERT " +
-			"(F187) — organization.created and the create branch of " +
+		Why: "The handler itself issues no set_config, and every table it names in a " +
+			"statement of its own is RLS-exempt except one — `users`, `tenants` and " +
+			"`tenant_users` never had RLS and migration 029 removed it from `audit_logs`. " +
+			"The exception is why this is not TouchesNoRLSTable: TenantRepository.Create " +
+			"writes a default `scan_settings` row for every new tenant, and migration 048 " +
+			"gave that table the full ENABLE+FORCE+policy triple. Create opens its own tx " +
+			"and binds the NEW tenant's id between the `tenants` INSERT and the " +
+			"`scan_settings` INSERT (F187) — organization.created and the create branch of " +
 			"organizationMembership.created both reach it. " +
-			"tenantRepo.Delete (organization.deleted) is a plain `DELETE FROM tenants`; " +
-			"its cascade into RLS-protected children needs no GUC because PostgreSQL " +
-			"referential-integrity triggers bypass row security (measured 2026-08-05 on " +
-			"the migrated schema: DELETE FROM tenants as sbomhub_app with no GUC removed " +
-			"the tenant's `projects` row and raised nothing).",
+			"The two DELETE branches (organization.deleted → `DELETE FROM tenants`, " +
+			"user.deleted → `DELETE FROM users`) do reach RLS-protected tables, but only " +
+			"through referential integrity: CASCADE into `projects` and the rest of the " +
+			"tenant's tree, SET NULL into `llm_calls.user_id` and " +
+			"`generated_reports.generated_by`. Those are RI-trigger actions, which bypass " +
+			"row security — see TenantBindingBindsItself's doc comment for the " +
+			"measurement — so they need no binding and none is named for them.",
 	},
 	"POST /api/webhooks/lemonsqueezy": {
 		Kind:    TenantBindingTouchesNoRLSTable,
@@ -211,7 +258,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 			"subscriptions",
 			"tenants",
 		},
-		Why: "Every table the delivery touches is RLS-exempt, and three of them are " +
+		Why: "Every table the delivery touches is RLS-exempt, and four of the five are " +
 			"exempt BECAUSE of this route: migration 031 removed RLS from " +
 			"`subscriptions` / `subscription_events`, 029 from `audit_logs`, and 060 " +
 			"created `subscription_checkout_claims` without it, all so a callback that " +
@@ -273,22 +320,36 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	// owns the transaction boundary instead.
 	// -----------------------------------------------------------------
 	"POST /api/v1/projects/:id/triage/run": {
-		Kind:     TenantBindingBindsItself,
-		Handler:  "vexDraftsHandler.RunTriage",
-		BindsVia: []string{"triage.DBTxManager.RunRead", "triage.DBTxManager.RunWrite"},
+		Kind:    TenantBindingBindsItself,
+		Handler: "vexDraftsHandler.RunTriage",
+		BindsVia: []string{
+			"triage.DBTxManager.RunRead",
+			"triage.DBTxManager.RunWrite",
+			"repository.TenantRepository.Create (reached from the auth middleware on a first visit)",
+		},
 		ProvedBy: "TestM52TriageRunBindsOnAPoisonedConnection",
 		Why: "triage.Runner.Run is a 3-stage cycle (short read tx → LLM call with no tx " +
 			"→ short write tx) and every DB stage goes through the TxManager, which " +
 			"issues the set_config and reuses an ambient tx when one exists. Stage 1's " +
-			"first RLS-protected read is resolveComponentIDs over `components`/`sboms`; " +
-			"Stage 3 writes `vex_drafts`. Production wires *triage.DBTxManager " +
-			"(main.go); the nil default is PassthroughTxManager, which binds nothing — " +
-			"the negative control in the ProvedBy test swaps it in and observes the 500.",
+			"first RLS-protected read is resolveProvider → tenant_llm_config (production " +
+			"wires newTenantLLMProviderResolver, and migration 037 gave that table the " +
+			"ENABLE+FORCE+policy triple); resolveComponentIDs over `components`/`sboms` " +
+			"and the Stage 3 `vex_drafts` INSERT follow, all inside the same manager. " +
+			"Production wires *triage.DBTxManager (main.go); the nil default is " +
+			"PassthroughTxManager, which binds nothing — the negative control in the " +
+			"ProvedBy test swaps it in and observes the 500. The third BindsVia entry is " +
+			"route-wide rather than runner-level: see the file header's note on what runs " +
+			"before every classified handler.",
 	},
 	"POST /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse": {
-		Kind:     TenantBindingBindsItself,
-		Handler:  "vexDraftsHandler.Reanalyse",
-		BindsVia: []string{"triage.Runner.GetDraft", "triage.DBTxManager.RunRead", "triage.DBTxManager.RunWrite"},
+		Kind:    TenantBindingBindsItself,
+		Handler: "vexDraftsHandler.Reanalyse",
+		BindsVia: []string{
+			"triage.Runner.GetDraft",
+			"triage.DBTxManager.RunRead",
+			"triage.DBTxManager.RunWrite",
+			"repository.TenantRepository.Create (reached from the auth middleware on a first visit)",
+		},
 		ProvedBy: "TestM52VexDraftReanalyseBindsOnAPoisonedConnection",
 		Why: "Same 3-stage runner as /triage/run, plus a gatekeeper read that runs " +
 			"BEFORE it: loadDraftScoped reads `vex_drafts` (FORCE RLS) through " +
@@ -298,20 +359,30 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 			"input.",
 	},
 	"POST /api/v1/projects/:id/cra-reports/run": {
-		Kind:     TenantBindingBindsItself,
-		Handler:  "craReportsHandler.RunReport",
-		BindsVia: []string{"triage.DBTxManager.RunRead", "triage.DBTxManager.RunWrite"},
+		Kind:    TenantBindingBindsItself,
+		Handler: "craReportsHandler.RunReport",
+		BindsVia: []string{
+			"triage.DBTxManager.RunRead",
+			"triage.DBTxManager.RunWrite",
+			"repository.TenantRepository.Create (reached from the auth middleware on a first visit)",
+		},
 		ProvedBy: "TestM52CRAReportRunBindsOnAPoisonedConnection",
 		Why: "cra.Runner.Run is the CRA counterpart of triage.Runner.Run and shares the " +
 			"very same *triage.DBTxManager instance (main.go passes triageTxManager to " +
-			"both). Stage 1's first RLS-protected read is resolveAuthoritativeCVEID, " +
-			"whose EXISTS subquery joins `components` and `sboms`; Stage 3 writes " +
-			"`cra_reports`.",
+			"both). Stage 1 opens with resolveProvider → tenant_llm_config (FORCE RLS, " +
+			"migration 037), then resolveAuthoritativeCVEID whose EXISTS subquery joins " +
+			"`components` and `sboms`, then the source vex_draft lookup; Stage 3 writes " +
+			"`cra_reports`. Same route-wide third entry as /triage/run.",
 	},
 	"POST /api/v1/projects/:id/cra-reports/:report_id/reanalyse": {
-		Kind:     TenantBindingBindsItself,
-		Handler:  "craReportsHandler.Reanalyse",
-		BindsVia: []string{"cra.Runner.GetReport", "triage.DBTxManager.RunRead", "triage.DBTxManager.RunWrite"},
+		Kind:    TenantBindingBindsItself,
+		Handler: "craReportsHandler.Reanalyse",
+		BindsVia: []string{
+			"cra.Runner.GetReport",
+			"triage.DBTxManager.RunRead",
+			"triage.DBTxManager.RunWrite",
+			"repository.TenantRepository.Create (reached from the auth middleware on a first visit)",
+		},
 		ProvedBy: "TestM52CRAReanalyseBindsOnAPoisonedConnection",
 		Why: "The route this whole file exists because of. loadReportScoped read " +
 			"`cra_reports` (FORCE RLS) straight from the repository on the request's " +
