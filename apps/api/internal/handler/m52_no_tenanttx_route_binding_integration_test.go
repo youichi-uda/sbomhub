@@ -1017,8 +1017,12 @@ var m52DrivenRoutes = map[string]string{
 //
 //   - every BindsItself route appears in m52DrivenRoutes;
 //   - the test named there is the one the table names in ProvedBy;
-//   - no two BindsItself routes name the SAME test, which is what a
-//     copy-forward of a neighbouring entry produces;
+//   - no two BindsItself routes name the SAME test UNLESS that test is
+//     declared in m52SharedDrives with a reason. Sharing is usually the
+//     copy-forward shape — a rule added by duplicating its neighbour, pointing
+//     at a test that drives only the original — but one table-driven test can
+//     legitimately cover both share-link siblings, so it is gated rather than
+//     refused;
 //   - nothing is driven that the table no longer classifies as BindsItself.
 //
 // # What it does NOT enforce
@@ -1027,8 +1031,9 @@ var m52DrivenRoutes = map[string]string{
 // derive which route that function exercises — so it cannot tell a genuine new
 // drive from a plausible-looking name. What it does is make the omission
 // audible: a new BindsItself route is red until somebody adds a drive here and
-// wires the name up, and the uniqueness rule stops the cheapest way of
-// silencing that red without writing one. Under the threat model in
+// wires the name up, and the declared-sharing rule stops the cheapest way of
+// silencing that red without writing one — reusing a neighbour's test name now
+// costs an explicit m52SharedDrives entry with a reason. Under the threat model in
 // middleware/tenant_binding.go — an honest author's oversight, not evasion —
 // that is the property worth having; claiming more than that would be the same
 // kind of unbacked promise this whole wave exists to replace.
