@@ -57,6 +57,11 @@ import (
 //	            m52RouteVerbs (echo's nine HTTP-verb methods plus Any), whose
 //	            receiver is an identifier known to be a group, with >= 2
 //	            arguments and a string-literal first argument.
+//
+// All of it inside ONE function: the one that calls echo.New(). Resolving
+// group names file-wide meant a helper's `api *echo.Group` parameter picked up
+// main()'s `api`, which is wrong in both directions — and silently bound in the
+// worse one.
 //	CHAIN       GLOBAL ++ the group's middleware at that point ++ the
 //	            registration's own args[2:], each rendered with go/printer.
 //	TenantTx?   any chain entry whose rendered text contains "TenantTx(", after
