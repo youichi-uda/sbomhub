@@ -59,7 +59,6 @@ package handler
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -423,13 +422,7 @@ func m52Call(t *testing.T, h echo.HandlerFunc, method, target string,
 	tenantID, userID uuid.UUID, params map[string]string, body string) (int, string) {
 	t.Helper()
 	e := echo.New()
-	var reader *strings.Reader
-	if body == "" {
-		reader = strings.NewReader("")
-	} else {
-		reader = strings.NewReader(body)
-	}
-	req := httptest.NewRequest(method, target, reader)
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
@@ -456,18 +449,13 @@ func m52Call(t *testing.T, h echo.HandlerFunc, method, target string,
 // produces on a poisoned connection: `invalid input syntax for type uuid: ""`
 // (SQLSTATE 22P02), raised when the policy casts the empty-string placeholder.
 func m52IsUnboundGUCError(err error) bool {
-	if err == nil {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
 		return false
 	}
-	var pqErr *pq.Error
-	if errors.As(err, &pqErr) && pqErr.Code == "22P02" {
-		return true
-	}
-	// A policy that refuses a WRITE reports 42501 instead of casting.
-	if errors.As(err, &pqErr) && pqErr.Code == "42501" {
-		return true
-	}
-	return false
+	// 22P02 is the cast of the empty-string placeholder on a READ; 42501 is
+	// what a policy raises when it refuses a WRITE instead of casting.
+	return pqErr.Code == "22P02" || pqErr.Code == "42501"
 }
 
 // ---------------------------------------------------------------------------
@@ -913,10 +901,9 @@ func TestM52TableIsNotSilentlyEmpty(t *testing.T) {
 			"the whole life of this gate. A table this small means the sweeps are "+
 			"asserting nothing.", n)
 	}
-	// json is imported for this one check: the table's Why strings are the
-	// audit trail, and an entry whose Why does not survive a round-trip is a
-	// malformed literal rather than a reason.
-	if _, err := json.Marshal(appmw.NoTenantTxRouteBindings()); err != nil {
-		t.Fatalf("the binding table does not marshal: %v", err)
+	if n := len(m52DrivenRoutes); n == 0 {
+		t.Fatal("m52DrivenRoutes is empty, so TestM52EveryBindsItselfRouteIsDriven's second " +
+			"loop asserts nothing and its first loop would report every route as undriven " +
+			"— which is loud, but the emptiness itself should be caught here.")
 	}
 }
