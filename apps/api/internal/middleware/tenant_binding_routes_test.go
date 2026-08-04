@@ -39,14 +39,16 @@ import (
 // One file: apps/api/cmd/server/main.go, parsed with go/parser into a single
 // *ast.File. Within it:
 //
+//	ROOT        the identifier bound by `<name> := echo.New()`, resolved from
+//	            the source rather than assumed to be `e`, with an empty prefix
+//	            and an empty middleware list.
 //	GROUPS      every `<name> := <recv>.Group("<prefix>", mw...)` assignment
 //	            whose <recv> is an identifier already known to be a group.
-//	            Seeded with `e` (the echo.Echo instance: empty prefix, empty
-//	            middleware). Prefix and middleware are inherited from the
-//	            parent, so a nested group's chain is fully resolved. Source
-//	            order guarantees a parent is registered before its children.
-//	GLOBAL      every `e.Use(<mw>)` argument, prepended to EVERY route's chain
-//	            (that is what echo.Echo.Use means).
+//	            Prefix and middleware are inherited from the parent, so a
+//	            nested group's chain is fully resolved. Source order guarantees
+//	            a parent is registered before its children.
+//	GLOBAL      every `<root>.Use(<mw>)` argument, prepended to EVERY route's
+//	            chain (that is what echo.Echo.Use means).
 //	ROUTES      every *ast.CallExpr whose Fun is a SelectorExpr with Sel in
 //	            {GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, Any}, whose
 //	            receiver is an identifier known to be a group, with >= 2
@@ -58,9 +60,10 @@ import (
 //
 // Three guards keep that unit honest rather than merely stated:
 // TestM52RouteScanUnitCoversEveryRegistrationForm (no route is registered
-// through a method this parser does not read), TestM52MainGoIsTheOnlyRouter
-// (no other non-test file constructs an Echo instance or a group), and
-// TestM52RouteCountsArePinned (the parser did not go blind).
+// through a method or a receiver shape this parser does not read),
+// TestM52MainGoIsTheOnlyRouter (no other non-test file holds a router), and
+// TestM52RouteCountsArePinned (the parser did not go blind, and the count of
+// unbound routes is what it was).
 //
 // # What the scan unit still cannot see
 //
@@ -78,6 +81,12 @@ const mainGoPath = "../../cmd/server/main.go"
 
 // apiRootPath is the module root (apps/api), relative to this package.
 const apiRootPath = "../.."
+
+// echoImportPath is the router library. A non-test file that does not import
+// it cannot hold an *echo.Echo or an *echo.Group, and therefore cannot
+// register a route — which is what makes TestM52MainGoIsTheOnlyRouter cheap
+// and precise.
+const echoImportPath = "github.com/labstack/echo/v4"
 
 // m52RouteVerbs are the echo.Group / echo.Echo methods that register a route.
 var m52RouteVerbs = map[string]bool{
@@ -146,7 +155,12 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 	})
 
 	// Pass 2 — groups, in source order so a parent is always known first.
-	groups = map[string]m52Group{"e": {}}
+	//
+	// The root is whatever `<name> := echo.New()` binds rather than a
+	// hardcoded `e`: renaming the Echo instance would otherwise silently
+	// empty every set this file computes.
+	root := m52EchoInstanceName(t, file)
+	groups = map[string]m52Group{root: {}}
 	ast.Inspect(file, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
@@ -208,7 +222,7 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 			return true
 		}
 		recv, ok := sel.X.(*ast.Ident)
-		if !ok || recv.Name != "e" {
+		if !ok || recv.Name != root {
 			return true
 		}
 		for _, a := range call.Args {
@@ -259,6 +273,77 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 	})
 	sort.Slice(routes, func(i, j int) bool { return routes[i].line < routes[j].line })
 	return routes, groups, aliases
+}
+
+// m52EchoInstanceName returns the identifier bound by `<name> := echo.New()`.
+//
+// Deriving it removes the last hardcoded assumption about main.go's shape: a
+// rename would otherwise leave `groups` seeded with a name nothing matches,
+// every route unresolved, and the sweep passing on an empty set. It fails
+// rather than defaulting, because a default is what would hide the rename.
+func m52EchoInstanceName(t *testing.T, file *ast.File) string {
+	t.Helper()
+	echoPkg := m52EchoPackageName(file)
+	found := ""
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		name, ok := assign.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if !m52IsEchoSelectorCall(assign.Rhs[0], echoPkg, "New") {
+			return true
+		}
+		if found != "" && found != name.Name {
+			t.Fatalf("main.go binds %s.New() to both %q and %q; this gate assumes a single "+
+				"Echo instance and would resolve routes against only one of them",
+				echoPkg, found, name.Name)
+		}
+		found = name.Name
+		return true
+	})
+	if found == "" {
+		t.Fatalf("found no `<name> := %s.New()` in %s. Every set this file computes is "+
+			"seeded from that instance, so without it the sweep would pass on an empty "+
+			"route set.", echoPkg, mainGoPath)
+	}
+	return found
+}
+
+// m52EchoPackageName returns the local name the file uses for the echo
+// package ("echo" unless the import is aliased).
+func m52EchoPackageName(file *ast.File) string {
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != echoImportPath {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "echo"
+	}
+	return ""
+}
+
+// m52IsEchoSelectorCall reports whether expr is `<echoPkg>.<sel>(...)`.
+func m52IsEchoSelectorCall(expr ast.Expr, echoPkg, selName string) bool {
+	if echoPkg == "" {
+		return false
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != selName {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == echoPkg
 }
 
 // m52Normalise collapses runs of whitespace so a rendered handler expression
@@ -532,32 +617,74 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 		if !ok {
 			return true
 		}
-		recv, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		if _, isGroup := groups[recv.Name]; !isGroup {
-			return true
-		}
 		name := sel.Sel.Name
-		if m52RouteVerbs[name] || m52NonRoutingGroupMethods[name] {
+		recv, isIdent := sel.X.(*ast.Ident)
+		if isIdent {
+			if _, isGroup := groups[recv.Name]; !isGroup {
+				// Some other receiver entirely — but if it is being called
+				// with a verb name it may still be a router this parser has
+				// not resolved (a group passed in as a parameter, say).
+				if m52RouteVerbs[name] {
+					t.Errorf("main.go:%d calls %s.%s(...) on a receiver this gate did not "+
+						"resolve to a route group. If %s is a router, the routes registered "+
+						"on it are invisible to TestM52NoTenantTxRoutesAreAllClassified.",
+						fset.Position(call.Pos()).Line, recv.Name, name, recv.Name)
+				}
+				return true
+			}
+			if m52RouteVerbs[name] || m52NonRoutingGroupMethods[name] {
+				return true
+			}
+			t.Errorf("main.go:%d calls %s.%s(...), which this gate's parser does not read. "+
+				"If it registers a route, the route is invisible to "+
+				"TestM52NoTenantTxRoutesAreAllClassified and could be unbound without anyone "+
+				"being told. Teach m52ParseMainGo the shape, or add %q to "+
+				"m52NonRoutingGroupMethods if it registers nothing.",
+				fset.Position(call.Pos()).Line, recv.Name, name, name)
 			return true
 		}
-		t.Errorf("main.go:%d calls %s.%s(...), which this gate's parser does not read. "+
-			"If it registers a route, the route is invisible to "+
-			"TestM52NoTenantTxRoutesAreAllClassified and could be unbound without anyone "+
-			"being told. Teach m52ParseMainGo the shape, or add %q to "+
-			"m52NonRoutingGroupMethods if it registers nothing.",
-			fset.Position(call.Pos()).Line, recv.Name, name, name)
+		// A non-identifier receiver: `e.Group("/x", mw).GET(...)` chains the
+		// registration onto a group that was never assigned to a variable, so
+		// pass 2 never saw it and the route is invisible. main.go assigns
+		// every group today; this fires if that stops being true.
+		if m52RouteVerbs[name] {
+			t.Errorf("main.go:%d registers %s(...) on an unnamed receiver (%s). This gate "+
+				"resolves middleware chains through group VARIABLES, so a chained "+
+				"registration is invisible to it. Assign the group to a variable first.",
+				fset.Position(call.Pos()).Line, name, m52Normalise(renderNode(fset, sel.X)))
+		}
 		return true
 	})
 }
 
+// renderNode prints an AST node with go/printer, for error messages.
+func renderNode(fset *token.FileSet, n ast.Node) string {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, n); err != nil {
+		return "<unprintable>"
+	}
+	return buf.String()
+}
+
 // TestM52MainGoIsTheOnlyRouter underwrites "one file is the whole scan unit".
 //
-// If a second non-test file constructed an Echo instance or a group, its
-// routes would never be seen. The allowlist is empty on purpose: today
-// exactly one non-test file does either.
+// If a second non-test file held an Echo instance or a group, the routes
+// registered on it would never be seen by the sweep. The allowlist is empty on
+// purpose: today exactly one non-test file does.
+//
+// # Why the signal is the echo package and not a text pattern
+//
+// The first version of this test looked for the literal `.Group("`, which
+// `slog.Group("k", ...)` — a perfectly ordinary logging call — would have
+// matched. Reddening CI on a log statement is exactly the kind of false
+// positive that gets a gate switched off.
+//
+// A router object can only enter a file two ways: it is constructed there
+// (`echo.New()`), or it arrives as a value of type `*echo.Echo` / `*echo.Group`
+// — and both spellings are package-qualified, so the check is: does this file
+// import github.com/labstack/echo/v4, and if so does it mention that package's
+// New / Echo / Group identifiers? A file that does not import echo at all is
+// skipped without reading further.
 func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 	// Files exempted from the check, with the reason. Empty today.
 	allowed := map[string]string{}
@@ -567,6 +694,13 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 		t.Fatalf("abs %s: %v", mainGoPath, err)
 	}
 
+	// The echo identifiers that can only mean "a router lives here".
+	// `echo.Context`, `echo.HandlerFunc`, `echo.MiddlewareFunc`,
+	// `echo.NewHTTPError` and friends are what handler and middleware files
+	// legitimately use, and none of them can register a route.
+	routerIdents := map[string]bool{"New": true, "Echo": true, "Group": true}
+
+	fset := token.NewFileSet()
 	var offenders []string
 	err = filepath.WalkDir(apiRootPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -588,14 +722,29 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 		if _, ok := allowed[filepath.ToSlash(path)]; ok {
 			return nil
 		}
-		src, rerr := os.ReadFile(path) //nolint:gosec // walking our own source tree
-		if rerr != nil {
-			return rerr
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Errorf("parse %s: %v — this walk cannot judge a file it cannot read, and a "+
+				"silent skip is how a second router would hide", path, perr)
+			return nil
 		}
-		body := string(src)
-		if strings.Contains(body, "echo.New()") || strings.Contains(body, ".Group(\"") {
-			offenders = append(offenders, filepath.ToSlash(path))
+		echoPkg := m52EchoPackageName(file)
+		if echoPkg == "" {
+			return nil // does not import echo: cannot hold a router
 		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || !routerIdents[sel.Sel.Name] {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok || ident.Name != echoPkg {
+				return true
+			}
+			offenders = append(offenders, filepath.ToSlash(path)+" ("+echoPkg+"."+sel.Sel.Name+
+				" at line "+strconv.Itoa(fset.Position(sel.Pos()).Line)+")")
+			return false
+		})
 		return nil
 	})
 	if err != nil {
@@ -611,23 +760,31 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 	}
 }
 
-// TestM52RouteCountsArePinned is a tripwire, not a contract.
+// TestM52RouteCountsArePinned pins the size of the surface THIS gate owns,
+// and only that.
 //
-// 181 registrations and 9 of them without TenantTx, as of 2026-08-05. The
-// numbers are here so a change in the SIZE of the surface shows up in a diff
-// even when the table was updated consistently — which is when a reviewer
-// most wants to be told to look.
+// The exact number pinned is the count of routes with no TenantTx — 9 as of
+// 2026-08-05. It changes only when somebody adds or removes an unbound route,
+// which is precisely the event a reviewer should be told about, and which
+// already requires a deliberate edit to the table next door.
+//
+// The TOTAL registration count is deliberately NOT pinned to an exact value.
+// 181 routes exist today, but adding a 182nd on a TenantTx chain is correct
+// code that this gate has no business reddening; an exact pin would make every
+// unrelated route addition fail a tenant-binding test, and a gate that cries
+// on correct changes is a gate somebody deletes. The lower bound is kept
+// because a parser that suddenly resolves 4 routes IS this gate failing
+// silently.
 func TestM52RouteCountsArePinned(t *testing.T) {
 	const (
-		wantTotal       = 181
-		wantNoTenantTx  = 9
-		wantMinRLSGuard = 5
+		minTotal       = 100
+		wantNoTenantTx = 9
+		minGroups      = 5
 	)
 	routes, groups, aliases := m52ParseMainGo(t)
-	if len(routes) != wantTotal {
-		t.Errorf("main.go registers %d routes, pinned at %d. Update the number here and in "+
-			"the noTenantTxRouteBinding header if the change is intended.",
-			len(routes), wantTotal)
+	if len(routes) < minTotal {
+		t.Errorf("resolved %d routes from main.go, want at least %d — the parser is blind, "+
+			"not the router", len(routes), minTotal)
 	}
 	n := 0
 	for _, r := range routes {
@@ -636,9 +793,14 @@ func TestM52RouteCountsArePinned(t *testing.T) {
 		}
 	}
 	if n != wantNoTenantTx {
-		t.Errorf("%d routes carry no TenantTx, pinned at %d.", n, wantNoTenantTx)
+		t.Errorf("%d routes carry no TenantTx, pinned at %d. Every one of them is a route "+
+			"where nothing binds app.current_tenant_id for the handler; if the change is "+
+			"intended, classify the new route in noTenantTxRouteBinding and update this "+
+			"number in the same commit.", n, wantNoTenantTx)
 	}
-	if len(groups) < wantMinRLSGuard {
-		t.Errorf("resolved %d groups, want at least %d", len(groups), wantMinRLSGuard)
+	if len(groups) < minGroups {
+		t.Errorf("resolved %d route groups, want at least %d — a group that fails to resolve "+
+			"takes its whole middleware chain with it, and every route on it would then read "+
+			"as unbound", len(groups), minGroups)
 	}
 }

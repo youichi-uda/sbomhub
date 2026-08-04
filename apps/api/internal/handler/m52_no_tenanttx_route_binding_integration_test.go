@@ -287,7 +287,40 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 		VALUES ($1, $2)`, f.ComponentID, f.VulnID); err != nil {
 		t.Fatalf("seed component_vulnerabilities: %v", err)
 	}
+
+	// tenant_llm_config is FORCE RLS and is read by the production
+	// ProviderResolver on EVERY runner request — the first statement Stage 1
+	// issues, before any of the reads above. A row has to exist for the read
+	// to evaluate the policy predicate at all: an empty table scans nothing
+	// and raises nothing, which would make the resolver's presence in the
+	// drives decorative.
+	m52AsTenant(t, migDB, f.TenantID, `
+		INSERT INTO tenant_llm_config (tenant_id, mode, provider, model)
+		VALUES ($1, 'byok', 'ollama', 'm52-model')`, f.TenantID)
 	return f
+}
+
+// m52ProviderResolver reproduces the shape of production's per-tenant provider
+// resolution (cmd/server/main.go newTenantLLMProviderResolver): a
+// tenant_llm_config read, issued inside whatever transaction the runner's
+// TxManager has opened.
+//
+// It returns the disabled provider whatever the row says, because the point
+// under test is the tenant BINDING, not provider selection — and a resolver
+// that actually built an Ollama client would send Stage 2 at a network
+// endpoint that does not exist in CI. What it does keep is the READ, which is
+// the first RLS-protected statement a runner route issues.
+func m52ProviderResolver(t *testing.T, appDB *sql.DB) func(context.Context, uuid.UUID) (llm.Provider, error) {
+	repo := repository.NewTenantLLMConfigRepository(appDB)
+	return func(ctx context.Context, tenantID uuid.UUID) (llm.Provider, error) {
+		if _, err := repo.Get(ctx, tenantID); err != nil &&
+			!errors.Is(err, repository.ErrTenantLLMConfigNotFound) {
+			// Production wraps and propagates this, which is what turns an
+			// unbound read into the 500 the negative controls observe.
+			return nil, fmt.Errorf("m52: load tenant_llm_config: %w", err)
+		}
+		return &llm.DisabledProvider{Reason: "M52 integration test"}, nil
+	}
 }
 
 // m52SeedApprovedVEXDraft inserts the approved draft cra.Runner auto-picks as
@@ -340,7 +373,7 @@ func m52SeedVEXDraftRow(t *testing.T, migDB *sql.DB, f m52Fixture) uuid.UUID {
 // each drive can run its own negative control.
 // ---------------------------------------------------------------------------
 
-func m52TriageHandler(appDB *sql.DB, txm triage.TxManager) *VexDraftsHandler {
+func m52TriageHandler(t *testing.T, appDB *sql.DB, txm triage.TxManager) *VexDraftsHandler {
 	return NewVexDraftsHandler(triage.NewRunner(triage.RunnerConfig{
 		Drafts:                   repository.NewVEXDraftsRepository(appDB),
 		Advisories:               &triage.AdvisoryExcerptsAdapter{Repo: repository.NewAdvisoryExcerptsRepository(appDB)},
@@ -350,11 +383,12 @@ func m52TriageHandler(appDB *sql.DB, txm triage.TxManager) *VexDraftsHandler {
 		ComponentVulnerabilities: repository.NewComponentRepository(appDB),
 		VulnerabilityCVE:         repository.NewVulnerabilityRepository(appDB),
 		Provider:                 &llm.DisabledProvider{Reason: "M52 integration test"},
+		ProviderResolver:         m52ProviderResolver(t, appDB),
 		TxManager:                txm,
 	}))
 }
 
-func m52CRAHandler(appDB *sql.DB, txm cra.TxManager) *CRAReportsHandler {
+func m52CRAHandler(t *testing.T, appDB *sql.DB, txm cra.TxManager) *CRAReportsHandler {
 	reports := repository.NewCRAReportsRepository(appDB)
 	return NewCRAReportsHandler(
 		cra.NewRunner(cra.RunnerConfig{
@@ -366,6 +400,7 @@ func m52CRAHandler(appDB *sql.DB, txm cra.TxManager) *CRAReportsHandler {
 			VulnerabilityCVE:    repository.NewVulnerabilityRepository(appDB),
 			Audit:               repository.NewAuditRepository(appDB),
 			Provider:            &llm.DisabledProvider{Reason: "M52 integration test"},
+			ProviderResolver:    m52ProviderResolver(t, appDB),
 			TxManager:           txm,
 		}),
 		reports,
@@ -623,7 +658,7 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 	f := m52SeedGraph(t, migDB, "triagerun")
 	body := fmt.Sprintf(`{"vulnerability_id":%q,"cve_id":%q}`, f.VulnID, f.CVEID)
 
-	h := m52TriageHandler(appDB, triage.NewDBTxManager(appDB))
+	h := m52TriageHandler(t, appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.RunTriage, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -641,7 +676,7 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 	}
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the run fails", func(t *testing.T) {
-		nc := m52TriageHandler(appDB, triage.PassthroughTxManager{})
+		nc := m52TriageHandler(t, appDB, triage.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.RunTriage, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -669,7 +704,7 @@ func TestM52VexDraftReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 	f := m52SeedGraph(t, migDB, "vexre")
 	draftID := m52SeedVEXDraftRow(t, migDB, f)
 
-	h := m52TriageHandler(appDB, triage.NewDBTxManager(appDB))
+	h := m52TriageHandler(t, appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.Reanalyse, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
@@ -685,7 +720,7 @@ func TestM52VexDraftReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 	}
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the load fails", func(t *testing.T) {
-		nc := m52TriageHandler(appDB, triage.PassthroughTxManager{})
+		nc := m52TriageHandler(t, appDB, triage.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.Reanalyse, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
@@ -710,7 +745,7 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 		`{"vulnerability_id":%q,"cve_id":%q,"report_type":%q,"lang":%q}`,
 		f.VulnID, f.CVEID, cra.ReportTypeEarlyWarning, cra.LangEN)
 
-	h := m52CRAHandler(appDB, triage.NewDBTxManager(appDB))
+	h := m52CRAHandler(t, appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.RunReport, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
 		f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -727,7 +762,7 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 	}
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the run fails", func(t *testing.T) {
-		nc := m52CRAHandler(appDB, cra.PassthroughTxManager{})
+		nc := m52CRAHandler(t, appDB, cra.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.RunReport, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
@@ -757,7 +792,7 @@ func TestM52CRAReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 	m52SeedApprovedVEXDraft(t, migDB, f)
 	reportID := m52SeedCRAReport(t, migDB, f)
 
-	h := m52CRAHandler(appDB, triage.NewDBTxManager(appDB))
+	h := m52CRAHandler(t, appDB, triage.NewDBTxManager(appDB))
 	code, resp := m52Call(t, h.Reanalyse, http.MethodPost,
 		"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
 		f.TenantID, f.UserID,
@@ -776,7 +811,7 @@ func TestM52CRAReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 	}
 
 	t.Run("negative control: PassthroughTxManager binds nothing and the load fails", func(t *testing.T) {
-		nc := m52CRAHandler(appDB, cra.PassthroughTxManager{})
+		nc := m52CRAHandler(t, appDB, cra.PassthroughTxManager{})
 		code, resp := m52Call(t, nc.Reanalyse, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
 			f.TenantID, f.UserID,
