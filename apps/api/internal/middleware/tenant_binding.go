@@ -233,7 +233,8 @@ type TenantBindingRule struct {
 
 	// RLSExemptTables lists every table the route's code path names in a
 	// statement of its own, for TenantBindingTouchesNoRLSTable only. Each is
-	// asserted to have RLS disabled in the live schema.
+	// checked against the live schema — see the Kind's doc comment for the
+	// outcomes, only one of which is "row security is disabled".
 	//
 	// "of its own" matches TenantBindingBindsItself's use of the word: tables
 	// reached only by a CASCADE or SET NULL are not listed, because RI
@@ -242,6 +243,27 @@ type TenantBindingRule struct {
 	// the Lemon Squeezy delivery issues no DELETE — but the field means the
 	// same thing in both places.
 	RLSExemptTables []string
+
+	// RLSEnabledButReachable is the escape hatch for a relation in
+	// RLSExemptTables that has GAINED row security and is nonetheless still
+	// fine for this route, keyed by relation name and carrying the reason.
+	//
+	// It exists because row security is per-COMMAND and per-ROLE, and because
+	// an ordinary view evaluates policies as its OWNER unless it is
+	// security_invoker. The schema check reads with a plain SELECT as the
+	// runtime role; three shapes make that SELECT fail while the route is
+	// correct:
+	//
+	//	the route only INSERTs into the relation, and the new policy set pairs
+	//	`FOR INSERT ... WITH CHECK (true)` with a tenant-gated FOR SELECT;
+	//	the route reads through a view whose owner sees rows the runtime role
+	//	cannot;
+	//	the relation is a foreign table, which carries no local RLS at all.
+	//
+	// Rather than let any of those redden a required check, the check names
+	// them in its failure message and passes when the relation is listed here
+	// with a reason. Empty today — no rule names a relation with row security.
+	RLSEnabledButReachable map[string]string
 }
 
 // noTenantTxRouteBinding classifies every route cmd/server/main.go registers

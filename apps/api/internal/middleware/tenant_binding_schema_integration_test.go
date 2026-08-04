@@ -13,8 +13,9 @@
 //
 // # Why pg_class and not grep
 //
-// A route classified TouchesNoRLSTable is safe only for as long as none of the
-// tables it names has Row-Level Security. Deciding that from the migrations by
+// A route classified TouchesNoRLSTable is safe only for as long as the runtime
+// role can still reach every relation it names with no tenant bound. In
+// practice today that means none of them has Row-Level Security. Deciding that from the migrations by
 // grepping for `ENABLE ROW LEVEL SECURITY` gets it wrong in the one direction
 // that matters: four of this project's migrations (028 / 029 / 030 / 031)
 // exist specifically to DISABLE RLS on a table an earlier migration enabled it
@@ -79,15 +80,20 @@ type m52TableRLS struct {
 	Kind string
 }
 
-// m52LiveRLS returns table name → row-security state for every relation in the
-// public schema that a route could read: ordinary ('r'), partitioned ('p') and
-// materialised ('m') views.
+// m52LiveRLS returns relation name → row-security state for every relation in
+// the public schema a route could name: ordinary ('r'), partitioned ('p'),
+// materialised views ('m'), ordinary views ('v') and foreign tables ('f').
 //
-// Materialised views are included because a route that reads one reads its
-// STORED result — the underlying query is executed at REFRESH time, not at
-// read time — so naming one in RLSExemptTables is a legitimate thing to do and
-// must resolve to something rather than to "does not exist". They carry no row
-// security of their own, which is what relrowsecurity reports for them.
+// All five are included because a rule may legitimately name any of them, and
+// "does not exist" is the wrong answer for a relation that is simply not an
+// ordinary table:
+//
+//	'm'  reads return the STORED result; the underlying query runs at REFRESH.
+//	'v'  policies are evaluated as the view's OWNER unless it is
+//	     security_invoker, so telling the author to list base tables instead
+//	     would test the wrong identity. The view itself is probed.
+//	'f'  foreign tables carry no local RLS at all (there is no
+//	     ALTER FOREIGN TABLE ... ENABLE ROW LEVEL SECURITY).
 func m52LiveRLS(t *testing.T) map[string]m52TableRLS {
 	t.Helper()
 	db := m52SchemaDB(t)
@@ -95,7 +101,7 @@ func m52LiveRLS(t *testing.T) map[string]m52TableRLS {
 		SELECT c.relname, c.relrowsecurity, c.relkind::text
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'm')`)
+		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'm', 'v', 'f')`)
 	if err != nil {
 		t.Fatalf("read pg_class: %v", err)
 	}
@@ -262,45 +268,42 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 				continue
 			}
 			checked++
-			if st.Kind == "m" {
-				// A materialised view. Reading one returns its STORED result —
-				// the underlying query runs at REFRESH time — so no row
-				// security applies to the route's read. Naming one here is
-				// legitimate; it is logged rather than silently accepted so
-				// that the day this project starts using matviews, the fact is
-				// visible in the run rather than inferred from this comment.
-				t.Logf("NOTE: %s names %q, which is a MATERIALISED VIEW. Its reads return "+
-					"stored rows and carry no row security, so it is exempt by construction "+
-					"— but if the route also REFRESHes it, the refresh executes the "+
-					"underlying query and every RLS table in it applies. Check that "+
-					"separately.", key, table)
-				continue
+			if st.Kind == "r" || st.Kind == "p" {
+				if !st.Enabled {
+					// Decisive on its own: with relrowsecurity false,
+					// PostgreSQL ignores every stored policy.
+					continue
+				}
 			}
-			if !st.Enabled {
-				// Decisive on its own: with relrowsecurity false, PostgreSQL
-				// ignores every stored policy.
+			if ack, ok := rule.RLSEnabledButReachable[table]; ok {
+				t.Logf("NOTE: %s names %q, which carries row security, and the rule declares "+
+					"it reachable anyway: %s", key, table, ack)
 				continue
 			}
 			v := m52UnboundReadVerdict(t, table)
 			if v.ProbeErr != nil {
-				t.Errorf("%s names %q, and a plain `SELECT 1 FROM %s LIMIT 1` as the runtime "+
-					"role, with no tenant bound, FAILS: %v\n"+
-					"That is exactly the state this route's statements run in — it carries no "+
-					"TenantTx. (%q has ROW LEVEL SECURITY enabled with %d policies.) Move the "+
-					"route onto a TenantTx chain, or re-classify it TenantBindingBindsItself "+
-					"and give it a binding plus a drive.\n"+
+				t.Errorf("%s names %q (relkind %q), and a plain `SELECT 1 FROM %s LIMIT 1` as "+
+					"the runtime role, with no tenant bound, FAILS: %v\n"+
+					"That is the connection state this route's statements run in — it carries "+
+					"no TenantTx. (%d policies on the relation.)\n"+
+					"Move the route onto a TenantTx chain, or re-classify it "+
+					"TenantBindingBindsItself with a binding and a drive. If instead the READ "+
+					"is not what this route does — it only INSERTs, or it reads through a view "+
+					"whose owner can see what the runtime role cannot — say so in the rule's "+
+					"RLSEnabledButReachable entry for %q and this passes.\n"+
 					"Reason recorded for the old classification: %s",
-					key, table, table, v.ProbeErr, table, v.Policies, rule.Why)
+					key, table, st.Kind, table, v.ProbeErr, v.Policies, table, rule.Why)
 				continue
 			}
 			// No error. Record what that does and does not establish rather
 			// than implying more — see m52UnboundReadVerdict's doc comment for
 			// why the policy catalogue is not consulted for a verdict.
-			t.Logf("NOTE: %s names %q, which now has ROW LEVEL SECURITY enabled with %d "+
-				"policies. An unbound read of it as the runtime role raised nothing, so this "+
-				"is not failing — %s. Only SELECT was exercised; if the route also INSERTs "+
-				"or UPDATEs this table, read those policies yourself.",
-				key, table, v.Policies, v.Context)
+			if st.Enabled || st.Kind != "r" {
+				t.Logf("NOTE: %s names %q (relkind %q, rls=%v, %d policies). An unbound read "+
+					"of it as the runtime role raised nothing, so this is not failing — %s. "+
+					"Only SELECT was exercised; if the route also INSERTs or UPDATEs, read "+
+					"those policies yourself.", key, table, st.Kind, st.Enabled, v.Policies, v.Context)
+			}
 		}
 	}
 	if checked == 0 {
@@ -345,6 +348,15 @@ func TestM52NoExemptTableNameIsAmbiguous(t *testing.T) {
 	}
 	sort.Strings(names)
 
+	// The runtime role, not the migrator: this test reads current_schemas(),
+	// which is a property of the CONNECTING role. Resolving it as the migrator
+	// would judge name ambiguity against a search_path the route never has —
+	// and a migrator-only schema ahead of `public` would fail a deployment in
+	// which sbomhub_app resolves correctly.
+	if os.Getenv("DATABASE_URL") == "" {
+		t.Skip("name-ambiguity resolution is a property of the RUNTIME role's search_path, " +
+			"so this check needs DATABASE_URL (sbomhub_app) rather than the migrator fallback")
+	}
 	db := m52SchemaDB(t)
 
 	// The effective search_path of the connecting role, with "$user" and
