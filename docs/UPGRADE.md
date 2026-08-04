@@ -1137,3 +1137,27 @@ read as "two **different** `Authorization` values".
 
 (§8.8 adds one shape to the "different" set that was previously invisible: a bare
 `Authorization: Bearer` alongside a real one now counts as two different values.)
+
+### 8.10 Two more corrections, both to §8.8/§8.9's wording
+
+Neither changes behaviour; both are places where the guide claimed more than the
+code does. Measured against the shipped build on a throwaway stack (2026-08-05).
+
+**§8.9 said "different `Authorization` values" are refused. It is narrower than
+that: two distinct BEARER candidates are.** A value that is not a Bearer
+credential at all — a different scheme, or an empty value — is not a candidate,
+so it cannot conflict with anything:
+
+| headers | result |
+|---|---|
+| `Authorization: Basic anVuaw==` + `Authorization: Bearer <valid key>` | **200** — one Bearer candidate |
+| `Authorization:` (empty) + `Authorization: Bearer <valid key>` | **200** — one Bearer candidate |
+| `Authorization: Bearer <key A>` + `Authorization: Bearer <key B>` | **401** — two distinct candidates |
+
+**§8.8 said a tab "anywhere in or before the credential" newly returns 401.
+Only *before* it is new.** A tab AFTER the recognised `sbh_` prefix —
+`Bearer sbh_ab<HTAB>cd` — already matched the prefix before this change, went
+down the API-key path, failed validation and answered 401. What changed is the
+values that previously escaped API-key classification altogether and were served
+as the default identity: a bad delimiter, a bare scheme, or a credential whose
+first four characters are not `sbh_` in some casing.

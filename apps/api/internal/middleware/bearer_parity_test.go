@@ -52,6 +52,7 @@
 package middleware
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -422,9 +423,67 @@ func TestBearerParityClerkRequestIsCanonicalised(t *testing.T) {
 	}
 }
 
+// bearerRuleViolations reports every place in one parsed file that applies its
+// OWN Bearer prefix rule instead of calling the shared parser.
+//
+// It is a function rather than an inline loop so the sweep can be driven
+// against a synthetic source as an anti-vacuity control — Codex round 3 (Low)
+// added a forbidden reader to auth.go and watched the previous version of this
+// test stay green, because that version only looked at string LITERALS and the
+// reader it added spelled the prefix as the `BearerPrefix` constant.
+//
+// Two argument shapes therefore count: a string literal containing "bearer" in
+// any casing, and an identifier ending in "BearerPrefix" (the package constant,
+// qualified or not).
+func bearerRuleViolations(fset *token.FileSet, file *ast.File) []string {
+	var out []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "TrimPrefix", "HasPrefix", "TrimLeft", "CutPrefix", "EqualFold", "Cut", "Index", "Split":
+		default:
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "strings" {
+			return true
+		}
+		for _, arg := range call.Args {
+			var what string
+			switch a := arg.(type) {
+			case *ast.BasicLit:
+				if a.Kind == token.STRING && strings.Contains(strings.ToLower(a.Value), "bearer") {
+					what = a.Value
+				}
+			case *ast.Ident:
+				if strings.HasSuffix(a.Name, "BearerPrefix") {
+					what = a.Name
+				}
+			case *ast.SelectorExpr:
+				if strings.HasSuffix(a.Sel.Name, "BearerPrefix") {
+					what = a.Sel.Name
+				}
+			}
+			if what == "" {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s: strings.%s(..., %s)",
+				fset.Position(arg.Pos()), sel.Sel.Name, what))
+		}
+		return true
+	})
+	return out
+}
+
 // TestBearerParityOneRuleInTheSource is the structural half: the behavioural
 // tests above pass just as well if a fourth reader is added tomorrow with its
-// own literal.
+// own rule.
 //
 // Stripping a `Bearer` prefix off a header value is the exact shape of the
 // defect, so no non-test file in this package may do it outside bearerAny.
@@ -439,7 +498,7 @@ func TestBearerParityOneRuleInTheSource(t *testing.T) {
 		t.Fatalf("read package dir: %v", err)
 	}
 	fset := token.NewFileSet()
-	scanned, checked := 0, 0
+	scanned := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -450,42 +509,60 @@ func TestBearerParityOneRuleInTheSource(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "TrimPrefix" && sel.Sel.Name != "HasPrefix" &&
-				sel.Sel.Name != "EqualFold" && sel.Sel.Name != "Cut" {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "strings" {
-				return true
-			}
-			checked++
-			for _, arg := range call.Args {
-				lit, ok := arg.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
-				}
-				if !strings.Contains(strings.ToLower(lit.Value), "bearer") {
-					continue
-				}
-				if name == "multiauth.go" {
-					continue // bearerAny lives here; it IS the rule
-				}
-				t.Errorf("%s:%d applies its own Bearer rule (%s(..., %s)). "+
-					"Use bearerFromRequest so the windows cannot disagree.",
-					name, fset.Position(lit.Pos()).Line, sel.Sel.Name, lit.Value)
-			}
-			return true
-		})
+		if name == "multiauth.go" {
+			continue // bearerAny lives here; it IS the rule
+		}
+		for _, v := range bearerRuleViolations(fset, file) {
+			t.Errorf("%s applies its own Bearer rule. Use bearerFromRequest so the "+
+				"windows cannot disagree.", v)
+		}
 	}
-	if scanned == 0 || checked == 0 {
-		t.Fatalf("swept %d files and inspected %d strings.* prefix calls — "+
-			"the sweep would pass vacuously", scanned, checked)
+	if scanned == 0 {
+		t.Fatal("swept no source files — the sweep would pass vacuously")
+	}
+}
+
+// TestBearerRuleSweepRejectsASecondParser is the anti-vacuity control for the
+// sweep, and it exists because the sweep failed one.
+//
+// Codex round 3 (Low) added `strings.TrimPrefix(v, BearerPrefix)` to auth.go and
+// TestBearerParityOneRuleInTheSource stayed green: it inspected string literals
+// only, and a constant is not a literal. A structural test that cannot be shown
+// to reject the thing it forbids is a comment with a test's name on it.
+//
+// Each source below is a second parser spelled a different way. All must be
+// rejected; the last one must NOT be, because it is the legitimate call every
+// window makes.
+func TestBearerRuleSweepRejectsASecondParser(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantFlag bool
+	}{
+		{"literal prefix", `func f(v string) string { return strings.TrimPrefix(v, "Bearer ") }`, true},
+		{"lowercase literal", `func f(v string) string { return strings.TrimPrefix(v, "bearer ") }`, true},
+		{"the package constant", `func f(v string) string { return strings.TrimPrefix(v, BearerPrefix) }`, true},
+		{"a qualified constant", `func f(v string) string { return strings.TrimPrefix(v, mw.BearerPrefix) }`, true},
+		{"HasPrefix test", `func f(v string) bool { return strings.HasPrefix(v, BearerPrefix) }`, true},
+		{"CutPrefix", `func f(v string) (string, bool) { return strings.CutPrefix(v, "Bearer ") }`, true},
+		{"the shared parser", `func f(r *http.Request) (string, bool, bool) { return bearerFromRequest(r) }`, false},
+		{"an unrelated strings call", `func f(v string) string { return strings.TrimPrefix(v, "sbh_") }`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			src := "package middleware\n\nimport \"strings\"\n\n" + tc.body + "\n"
+			file, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+			if err != nil {
+				t.Fatalf("parse synthetic source: %v", err)
+			}
+			got := bearerRuleViolations(fset, file)
+			if tc.wantFlag && len(got) == 0 {
+				t.Errorf("the sweep does NOT reject a second Bearer parser:\n\t%s", tc.body)
+			}
+			if !tc.wantFlag && len(got) != 0 {
+				t.Errorf("the sweep rejects legitimate code %q: %v", tc.body, got)
+			}
+		})
 	}
 }
 
