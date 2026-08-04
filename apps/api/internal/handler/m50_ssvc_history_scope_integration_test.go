@@ -171,8 +171,12 @@ func TestM50SSVCHistory_UnknownSiblingAndForeignAnswerAlike(t *testing.T) {
 		{"foreign tenant", foreignID},
 	}
 
-	bodies := make(map[string]string, len(cells))
-	for _, cell := range cells {
+	type answer struct {
+		code int
+		body string
+	}
+	answers := make([]answer, len(cells))
+	for i, cell := range cells {
 		code, body := ssvcMBHistory(t, appDB, h, caller.tenantID, caller.projectID, cell.id)
 		if code != http.StatusNotFound {
 			t.Errorf("history for %s: status %d body %s, want 404 "+
@@ -183,21 +187,19 @@ func TestM50SSVCHistory_UnknownSiblingAndForeignAnswerAlike(t *testing.T) {
 		if strings.Contains(body, "SECRET") || strings.Contains(body, "assessment_id") {
 			t.Errorf("history for %s leaked rows: %s", cell.name, body)
 		}
-		bodies[cell.name] = body
+		answers[i] = answer{code, body}
 	}
 
 	// The M47 W1 property: the three answers must be indistinguishable.
-	var first string
-	for _, cell := range cells {
-		got := bodies[cell.name]
-		if first == "" {
-			first = got
-			continue
-		}
-		if got != first {
-			t.Errorf("out-of-scope answers differ: %q (%s) vs %q — the status/body must not "+
-				"tell an unknown id apart from one the caller does not own",
-				got, cell.name, first)
+	// Compared against index 0 unconditionally — an "if first == \"\" { first =
+	// got; continue }" accumulator would skip the comparison entirely in the
+	// one case (all bodies empty) where it must not.
+	for i := 1; i < len(answers); i++ {
+		if answers[i] != answers[0] {
+			t.Errorf("out-of-scope answers differ: %s -> %d %q vs %s -> %d %q — the status and "+
+				"body must not tell an unknown id apart from one the caller does not own",
+				cells[i].name, answers[i].code, answers[i].body,
+				cells[0].name, answers[0].code, answers[0].body)
 		}
 	}
 }
