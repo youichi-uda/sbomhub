@@ -73,6 +73,10 @@ type m52TableRLS struct {
 	// ignored entirely and the table is a hazard to nobody — that much the
 	// catalog decides on its own.
 	Enabled bool
+	// Kind is pg_class.relkind: 'r' ordinary, 'p' partitioned, 'm'
+	// materialised view. The last one is exempt by construction and is
+	// reported rather than assessed.
+	Kind string
 }
 
 // m52LiveRLS returns table name → row-security state for every relation in the
@@ -88,7 +92,7 @@ func m52LiveRLS(t *testing.T) map[string]m52TableRLS {
 	t.Helper()
 	db := m52SchemaDB(t)
 	rows, err := db.Query(`
-		SELECT c.relname, c.relrowsecurity
+		SELECT c.relname, c.relrowsecurity, c.relkind::text
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'm')`)
@@ -101,7 +105,7 @@ func m52LiveRLS(t *testing.T) map[string]m52TableRLS {
 	for rows.Next() {
 		var name string
 		var st m52TableRLS
-		if err := rows.Scan(&name, &st.Enabled); err != nil {
+		if err := rows.Scan(&name, &st.Enabled, &st.Kind); err != nil {
 			t.Fatalf("scan pg_class row: %v", err)
 		}
 		out[name] = st
@@ -264,6 +268,21 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 				continue
 			}
 			checked++
+			if st.Kind == "m" {
+				// A materialised view. Reading one returns its STORED result —
+				// the underlying query runs at REFRESH time — so no row
+				// security applies to the route's read and relrowsecurity is
+				// false for it by construction. Naming one here is legitimate;
+				// it is logged rather than silently accepted so that the day
+				// this project starts using matviews, the fact is visible in
+				// the run rather than inferred from this comment.
+				t.Logf("NOTE: %s names %q, which is a MATERIALISED VIEW. Its reads return "+
+					"stored rows and carry no row security, so it is exempt by construction "+
+					"— but if the route also REFRESHes it, the refresh executes the "+
+					"underlying query and every RLS table in it applies. Check that "+
+					"separately.", key, table)
+				continue
+			}
 			if !st.Enabled {
 				// Decisive on its own: with relrowsecurity false, PostgreSQL
 				// ignores every stored policy.

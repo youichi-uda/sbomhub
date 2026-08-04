@@ -994,6 +994,12 @@ func m52CountRows(t *testing.T, migDB *sql.DB, tenantID uuid.UUID, query string,
 // it. It is the local half of the cross-check: the middleware package can see
 // that ProvedBy names an existing function, but only this package can say
 // whether the function drives THIS route.
+// m52SharedDrives records the tests that legitimately drive MORE THAN ONE
+// route, with the reason. Empty today: each of the seven routes has its own
+// drive, and the two share-link siblings are driven separately on purpose
+// (PublicDownload is the path that hands over the raw SBOM bytes).
+var m52SharedDrives = map[string]string{}
+
 var m52DrivenRoutes = map[string]string{
 	"POST /api/webhooks/clerk":                                   "TestM52ClerkTenantCreateBindsOnAPoisonedConnection",
 	"GET /api/v1/public/:token":                                  "TestM52PublicGetBindsOnAPoisonedConnection",
@@ -1029,8 +1035,13 @@ var m52DrivenRoutes = map[string]string{
 func TestM52EveryBindsItselfRouteIsDriven(t *testing.T) {
 	table := appmw.NoTenantTxRouteBindings()
 
-	// A drive proves one route. Two routes naming one test means at most one
-	// of them is actually driven — the copy-forward shape.
+	// Two routes naming the same ProvedBy is USUALLY the copy-forward shape —
+	// a rule added by duplicating its neighbour, pointing at a test that
+	// drives only the original. It is not always: one table-driven test can
+	// legitimately cover both public-link siblings. So sharing is allowed and
+	// must be DECLARED, which is the same default-deny-with-an-escape-hatch
+	// the rest of this gate uses. Refusing it outright would fail an
+	// idiomatic, correct test.
 	byTest := map[string][]string{}
 	for key, rule := range table {
 		if rule.Kind == appmw.TenantBindingBindsItself && rule.ProvedBy != "" {
@@ -1038,12 +1049,19 @@ func TestM52EveryBindsItselfRouteIsDriven(t *testing.T) {
 		}
 	}
 	for test, keys := range byTest {
-		if len(keys) > 1 {
-			sort.Strings(keys)
-			t.Errorf("%d routes name ProvedBy %q: %v. One test drives one route; two routes "+
-				"sharing a name means at least one of them was classified by copying its "+
-				"neighbour and is not driven by anything.", len(keys), test, keys)
+		if len(keys) < 2 {
+			continue
 		}
+		sort.Strings(keys)
+		if why, declared := m52SharedDrives[test]; declared {
+			t.Logf("%q drives %d routes by declaration: %s", test, len(keys), why)
+			continue
+		}
+		t.Errorf("%d routes name ProvedBy %q: %v — and it is not in m52SharedDrives. "+
+			"Usually that means one of them was classified by copying its neighbour and "+
+			"the named test drives only the original. If the test really does drive both "+
+			"(a table-driven one over the two share-link siblings, say), add it to "+
+			"m52SharedDrives with the reason and this passes.", len(keys), test, keys)
 	}
 
 	for key, rule := range table {

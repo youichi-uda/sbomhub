@@ -216,14 +216,31 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 	// not necessarily the one Echo captured — so it is left unexpanded, which
 	// makes its route read as unbound and demand a classification. That is the
 	// safe direction; guessing would be the other one.
+	root, rootFn := m52EchoInstanceName(t, file)
+
 	bindingCount := map[string]int{}
 	bindingText := map[string]string{}
 	bindingExpr := map[string]ast.Expr{}
-	m52EachBinding(file, func(name string, rhs ast.Expr) {
+	collect := func(name string, rhs ast.Expr) {
 		bindingCount[name]++
 		bindingText[name] = render(rhs)
 		bindingExpr[name] = rhs
-	})
+	}
+	// Only the router function's own bindings, plus package-level ones. A
+	// file-wide map conflated distinct lexical bindings that happen to share a
+	// spelling: an unrelated local named `publicLinkHandler` in some helper
+	// would have pushed the real one's count to two, dropped it out of the
+	// alias map, and failed the handler pins of routes nobody had touched.
+	m52EachBindingIn(rootFn, collect)
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			m52VisitBindingNode(spec, collect)
+		}
+	}
 	aliases = map[string]string{}
 	uniqueExpr := map[string]ast.Expr{}
 	for name, n := range bindingCount {
@@ -232,8 +249,6 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 			uniqueExpr[name] = bindingExpr[name]
 		}
 	}
-
-	root, rootFn := m52EchoInstanceName(t, file)
 
 	// Global middleware: `<root>.Use(...)` and `<root>.Pre(...)`. echo.Echo
 	// applies both at request time to every route however it was registered,
@@ -378,9 +393,10 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 	return routes, groups, aliases
 }
 
-// m52EachBinding visits every single-value binding of a plain identifier in
-// source order, in both spellings Go offers: the short form `x := <expr>` and
-// the declaration `var x = <expr>` (including inside a grouped `var (...)`).
+// m52EachBindingIn visits every single-value binding of a plain identifier
+// under `root`, in source order, in both spellings Go offers: the short form
+// `x := <expr>` and the declaration `var x = <expr>` (including inside a
+// grouped `var (...)`).
 //
 // Handling only the short form was a blind spot rather than a simplification:
 // a group declared `var api = e.Group("/api/v1")` would have been unknown to
@@ -388,11 +404,6 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 // middleware chains — including any TenantTx — would never have been read.
 // TestM52RouteScanUnitCoversEveryRegistrationForm would have caught it, but
 // as "unknown receiver" noise on a perfectly ordinary declaration.
-func m52EachBinding(file *ast.File, visit func(name string, rhs ast.Expr)) {
-	m52EachBindingIn(file, visit)
-}
-
-// m52EachBindingIn is m52EachBinding over an arbitrary subtree.
 func m52EachBindingIn(root ast.Node, visit func(name string, rhs ast.Expr)) {
 	ast.Inspect(root, func(n ast.Node) bool {
 		m52VisitBindingNode(n, visit)
@@ -704,22 +715,15 @@ func TestM52NoTenantTxRoutesAreAllClassified(t *testing.T) {
 // A classification is a statement about CODE, not about a URL. Re-pointing
 // `GET /api/v1/health` at a handler that queries the database changes nothing
 // this file's route sweep can see — same method, same path, still no TenantTx
-// — while making the recorded reason false. Comparing the rendered handler
-// argument costs one string per route and fails with the new text in the
-// message.
+// — while making the recorded reason false.
 //
-// Whitespace is normalised, so gofmt churn inside an inline closure does not
-// trip it; a changed identifier or a changed literal does.
-//
-// # The cost, stated rather than discovered
-//
-// This compares TEXT, not identity, so renaming the handler variable in
-// main.go — `lsWebhookHandler` → `lsHandler`, same object, same method — also
-// fails it. That is a false alarm on correct code, accepted deliberately
-// because the alternative loses the check: comparing only the method name
-// (`.Handle`) would pass `someOtherHandler.Handle`, which is the swap worth
-// noticing. The failure message below says which of the two happened, and the
-// fix for a rename is one string.
+// What is compared is m52HandlerIdentity's rendering, not the source text:
+// `<constructor>#<method>` when the receiver is bound exactly once, so
+// renaming `lsWebhookHandler` to `lsHandler` does NOT fail this, while
+// pointing the route at `clerkWebhookHandler.Handle` does. An inline handler
+// falls back to its whitespace-normalised expression, which is the right
+// answer there — for an inline handler the body IS the classified code, so a
+// change to it should demand a re-read.
 func TestM52ClassifiedRoutesStillHaveTheHandlerTheyWereClassifiedFor(t *testing.T) {
 	derived := m52NoTenantTxRoutes(t)
 	for _, key := range NoTenantTxRouteKeys() {
@@ -809,7 +813,14 @@ func TestM52EveryBindsItselfRuleNamesAnExistingTest(t *testing.T) {
 // m52SkipDir reports whether a directory is outside the source tree these
 // walks care about.
 func m52SkipDir(name string) bool {
-	return name == "vendor" || name == "node_modules" || strings.HasPrefix(name, ".")
+	// `testdata` is excluded by the go tool from the build, and this repo uses
+	// it for exactly what it is for: analyzer fixtures under
+	// internal/nullscan/testdata (some deliberately unparsable) and sample
+	// programs under internal/service/reachability/testdata. A fixture that
+	// happens to contain an Echo server is not a second production router, and
+	// reddening the gate for one would be a false alarm on correct code.
+	return name == "vendor" || name == "node_modules" || name == "testdata" ||
+		strings.HasPrefix(name, ".")
 }
 
 // m52TestFuncNames returns every `func TestXxx(t *testing.T)` declared under
@@ -881,6 +892,58 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 	rootName, rootFn := m52EchoInstanceName(t, file)
 	at := func(n ast.Node) int { return fset.Position(n.Pos()).Line }
 
+	// (0b) A registration or a Use call inside a CLOSURE. The ordered walk
+	// visits a FuncLit's body where it is WRITTEN, but Go runs it where it is
+	// CALLED, so the middleware a group carries at registration time can
+	// differ from what the walk computed — in both directions:
+	//
+	//	mount := func() { g.GET("/r", h) }
+	//	g.Use(appmw.TenantTx(db))
+	//	mount()                            // bound at runtime; walk says unbound
+	//
+	//	addTx := func() { g.Use(appmw.TenantTx(db)) }
+	//	g.GET("/r", h)
+	//	addTx()                            // unbound at runtime; walk says bound
+	//
+	// The second is a silent miss, which is why this is refused rather than
+	// modelled. Note that a handler passed AS AN ARGUMENT — /health's inline
+	// closure — is not affected: the registration call is not itself inside a
+	// FuncLit body.
+	ast.Inspect(rootFn, func(n ast.Node) bool {
+		lit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		ast.Inspect(lit.Body, func(m ast.Node) bool {
+			call, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if _, isGroup := groups[recv.Name]; !isGroup {
+				return true
+			}
+			if !m52RouteVerbs[sel.Sel.Name] && sel.Sel.Name != "Use" &&
+				!m52UnreadRegistrationMethods[sel.Sel.Name] {
+				return true
+			}
+			t.Errorf("main.go:%d calls %s.%s(...) inside a closure. This gate orders group "+
+				"middleware by SOURCE position, and a closure runs where it is called, not "+
+				"where it is written — so the chain it computes for this can be wrong in "+
+				"either direction, including reporting an unbound route as bound. Move the "+
+				"call out of the closure.", at(call), recv.Name, sel.Sel.Name)
+			return true
+		})
+		return false
+	})
+
 	// (0a) A registration in ANOTHER function of main.go. m52ParseMainGo reads
 	// only the function that builds the Echo instance, so a helper like
 	//
@@ -890,9 +953,19 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 	// to be a group name in main(), nothing downstream notices either. Scoping
 	// the parser to one function is what stopped it attributing the WRONG
 	// chain to such a route; this is what stops it being silent about it.
+	echoPkgMain := m52EchoPackageName(file)
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil || fn == rootFn {
+			continue
+		}
+		// Only a function that RECEIVES a router can register on one. Without
+		// this, a perfectly ordinary helper — `func probe(c *httpClient) {
+		// c.GET("/status", nil) }` — matched the registration shape and
+		// reddened the gate, which is the false alarm that gets a gate
+		// switched off. The parameter type is the discriminator, and it is the
+		// same one TestM52MainGoIsTheOnlyRouter uses for other files.
+		if !m52TakesARouter(fn, echoPkgMain) {
 			continue
 		}
 		ast.Inspect(fn, func(n ast.Node) bool {
@@ -904,16 +977,29 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 			// Only VERBS are decisive here: `Add` on some receiver in a helper
 			// is `wg.Add(1)` far more often than an echo registration, and
 			// reddening for a WaitGroup is the false alarm that gets a gate
-			// switched off.
-			if !ok || !m52RouteVerbs[sel.Sel.Name] {
+			// switched off. The same reasoning demands the REGISTRATION SHAPE
+			// (a string-literal path and a handler) and the notARouter hatch:
+			// `client.GET(url)` on an HTTP client is not this gate's business.
+			if !ok || !m52RouteVerbs[sel.Sel.Name] || len(call.Args) < 2 {
 				return true
+			}
+			if lit, isLit := call.Args[0].(*ast.BasicLit); !isLit || lit.Kind != token.STRING {
+				return true
+			}
+			if recv, isIdent := sel.X.(*ast.Ident); isIdent {
+				if why, exempt := notARouter[recv.Name]; exempt {
+					t.Logf("main.go:%d %s.%s(...) in func %s exempt: %s",
+						at(call), recv.Name, sel.Sel.Name, fn.Name.Name, why)
+					return true
+				}
 			}
 			t.Errorf("main.go:%d registers %s(...) inside func %s, not inside the function "+
 				"that builds the Echo instance (func %s). This gate reads route "+
 				"registrations from that one function, so anything registered here is "+
 				"invisible to TestM52NoTenantTxRoutesAreAllClassified — including its "+
 				"middleware chain. Register the route alongside the others, or teach "+
-				"m52ParseMainGo to follow the helper.",
+				"m52ParseMainGo to follow the helper. If the receiver is not a router at "+
+				"all, add it to this test's `notARouter` map with the reason.",
 				at(call), sel.Sel.Name, fn.Name.Name, rootFn.Name.Name)
 			return true
 		})
@@ -956,11 +1042,12 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 		// flagged by name because it is unambiguous — nothing else in this
 		// codebase is called Router() on the Echo instance — where flagging
 		// `<something>.Add(...)` generally would redden for `wg.Add(1)`.
-		if isIdent && recv.Name == rootName && name == "Router" {
-			t.Errorf("main.go:%d calls %s.Router(). Routes added through the raw router are "+
-				"invisible to this gate: it resolves chains through group variables, and a "+
-				"router object belongs to no group. Register through the Echo instance or a "+
-				"group instead.", at(call), recv.Name)
+		if isIdent && recv.Name == rootName && (name == "Router" || name == "Routers") {
+			t.Errorf("main.go:%d calls %s.%s(). Routes added through a raw router — including "+
+				"`%s.Routers()[\"\"].Add(...)` — are invisible to this gate: it resolves "+
+				"chains through group variables, and a router object belongs to no group. "+
+				"Register through the Echo instance or a group instead.",
+				at(call), recv.Name, name, recv.Name)
 			return true
 		}
 
@@ -1060,85 +1147,223 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 // implementation reddens it. That is a demand for review rather than a false
 // alarm: the whole gate rests on what that field holds.
 func TestM52ProductionWiresTheBindingsTheDrivesMeasure(t *testing.T) {
+	// Every non-test file of package main, not just main.go. Wiring is
+	// routinely extracted into a sibling (llm_resolver.go already holds
+	// newTenantLLMProviderResolver), and refusing that would fail a refactor
+	// that changes nothing.
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", mainGoPath, err)
-	}
+	files := m52CmdServerFiles(t, fset)
 	render := func(n ast.Node) string { return m52Normalise(renderNode(fset, n)) }
 	_, _, aliases := m52ParseMainGo(t)
 
-	// (a) Both runner configs must set TxManager to a real DBTxManager.
-	wantConfigs := map[string]bool{"triage.RunnerConfig": false, "cra.RunnerConfig": false}
-	ast.Inspect(file, func(n ast.Node) bool {
-		lit, ok := n.(*ast.CompositeLit)
-		if !ok || lit.Type == nil {
-			return true
-		}
-		typeName := render(lit.Type)
-		if _, want := wantConfigs[typeName]; !want {
-			return true
-		}
-		wantConfigs[typeName] = true
-		value := ""
-		for _, el := range lit.Elts {
-			kv, ok := el.(*ast.KeyValueExpr)
-			if !ok {
+	// Names of functions in the package whose body constructs a real
+	// DBTxManager, so `TxManager: newTenantTxManager(db)` resolves as well as
+	// the direct call does. One level is enough for the shapes this codebase
+	// uses; anything deeper falls through to the message below, which asks for
+	// a human rather than guessing.
+	txFactories := map[string]bool{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
 				continue
 			}
-			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "TxManager" {
-				value = render(kv.Value)
+			if strings.Contains(render(fn.Body), "NewDBTxManager(") {
+				txFactories[fn.Name.Name] = true
 			}
 		}
-		line := fset.Position(lit.Pos()).Line
-		if value == "" {
-			t.Errorf("main.go:%d builds a %s with NO TxManager field. Both runners default "+
-				"to PassthroughTxManager, which binds nothing — every F19 route would run "+
-				"unbound in production while the M52 drives, which inject their own "+
-				"manager, stayed green.", line, typeName)
+	}
+	bindsTenant := func(value string) bool {
+		expanded := m52Expand(value, aliases)
+		if strings.Contains(expanded, "NewDBTxManager(") {
 			return true
 		}
-		if !strings.Contains(m52Expand(value, aliases), "NewDBTxManager(") {
-			t.Errorf("main.go:%d sets %s.TxManager = %s, which does not resolve to a "+
-				"triage.NewDBTxManager(...). That field is what binds "+
-				"app.current_tenant_id for every stage of the F19 routes; if the "+
-				"replacement really does bind, say so here and update this check.",
-				line, typeName, value)
+		for name := range txFactories {
+			if strings.Contains(expanded, name+"(") {
+				return true
+			}
 		}
-		return true
-	})
+		return false
+	}
+
+	// (a) Both runner configs must set TxManager to something that binds.
+	wantConfigs := map[string]bool{"triage.RunnerConfig": false, "cra.RunnerConfig": false}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || lit.Type == nil {
+				return true
+			}
+			typeName := render(lit.Type)
+			if _, want := wantConfigs[typeName]; !want {
+				return true
+			}
+			wantConfigs[typeName] = true
+			value := ""
+			for _, el := range lit.Elts {
+				kv, ok := el.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "TxManager" {
+					value = render(kv.Value)
+				}
+			}
+			line := fset.Position(lit.Pos()).Line
+			file := filepath.Base(fset.Position(lit.Pos()).Filename)
+			if value == "" {
+				t.Errorf("%s:%d builds a %s with NO TxManager field. Both runners default to "+
+					"PassthroughTxManager, which binds nothing — every F19 route would run "+
+					"unbound in production while the M52 drives, which inject their own "+
+					"manager, stayed green.", file, line, typeName)
+				return true
+			}
+			if !bindsTenant(value) {
+				t.Errorf("%s:%d sets %s.TxManager = %s, and this gate cannot resolve that to a "+
+					"triage.NewDBTxManager(...) — directly, through a single-binding local, or "+
+					"through a function in this package whose body constructs one.\n"+
+					"That field is what binds app.current_tenant_id for every stage of the F19 "+
+					"routes, and the live drives inject their OWN manager, so nothing else "+
+					"here would notice its loss. If the replacement really does bind, extend "+
+					"this check to recognise it.", file, line, typeName, value)
+			}
+			return true
+		})
+	}
 	for typeName, seen := range wantConfigs {
 		if !seen {
-			t.Errorf("found no %s literal in main.go — either the runner moved or this "+
-				"check went blind; either way it is asserting nothing.", typeName)
+			t.Errorf("found no %s literal anywhere in cmd/server — either the runner moved out "+
+				"of package main or this check went blind; either way it is asserting "+
+				"nothing.", typeName)
 		}
 	}
 
 	// (b) PublicLinkService must receive a live *sql.DB: runWithTenantTx
 	// returns "db handle is nil" rather than binding when it does not.
 	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "NewPublicLinkService" || len(call.Args) == 0 {
+				return true
+			}
+			found = true
+			if arg := m52ResolvesToNil(call.Args[0], f, render); arg != "" {
+				t.Errorf("%s:%d constructs the public-link service with a nil *sql.DB (%s). "+
+					"PublicLinkService.runWithTenantTx is the only thing binding the tenant on "+
+					"the two anonymous share routes, and it refuses outright without a handle.",
+					filepath.Base(fset.Position(call.Pos()).Filename),
+					fset.Position(call.Pos()).Line,
+					m52ResolvesToNil(call.Args[0], f, render))
+			}
 			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "NewPublicLinkService" || len(call.Args) == 0 {
-			return true
-		}
-		found = true
-		if arg := render(call.Args[0]); arg == "nil" {
-			t.Errorf("main.go:%d constructs the public-link service with a nil *sql.DB. "+
-				"PublicLinkService.runWithTenantTx is the only thing binding the tenant on "+
-				"the two anonymous share routes, and it refuses outright without a handle.",
-				fset.Position(call.Pos()).Line)
-		}
-		return true
-	})
+		})
+	}
 	if !found {
-		t.Error("found no NewPublicLinkService(...) call in main.go — the two share-link " +
+		t.Error("found no NewPublicLinkService(...) call in cmd/server — the two share-link " +
 			"rules name its runWithTenantTx as their binding, so this check must resolve it.")
 	}
+}
+
+// m52TakesARouter reports whether fn declares a parameter of type *echo.Echo
+// or *echo.Group — i.e. whether it can register a route at all.
+func m52TakesARouter(fn *ast.FuncDecl, echoPkg string) bool {
+	if echoPkg == "" || fn.Type.Params == nil {
+		return false
+	}
+	for _, param := range fn.Type.Params.List {
+		star, ok := param.Type.(*ast.StarExpr)
+		if !ok {
+			continue
+		}
+		sel, ok := star.X.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		ident, ok := sel.X.(*ast.Ident)
+		if !ok || ident.Name != echoPkg {
+			continue
+		}
+		if sel.Sel.Name == "Echo" || sel.Sel.Name == "Group" {
+			return true
+		}
+	}
+	return false
+}
+
+// m52ResolvesToNil reports how `arg` is nil, or "" when it is not.
+//
+// Comparing the rendered text against "nil" was this guard's own hole: a
+// deployment that passed `var publicLinkDB *sql.DB` or `(*sql.DB)(nil)` would
+// have satisfied it while PublicLinkService.runWithTenantTx refused every
+// anonymous share request for want of a handle. Three shapes are recognised —
+// the literal, a conversion of one, and an identifier declared in this file
+// with a pointer type and no initialiser. Anything else is treated as
+// non-nil, which is the direction that does not redden correct code.
+func m52ResolvesToNil(arg ast.Expr, file *ast.File, render func(ast.Node) string) string {
+	switch a := arg.(type) {
+	case *ast.Ident:
+		if a.Name == "nil" {
+			return "the literal nil"
+		}
+		// `var x *T` with no value, anywhere in this file.
+		empty := ""
+		ast.Inspect(file, func(n ast.Node) bool {
+			spec, ok := n.(*ast.ValueSpec)
+			if !ok || len(spec.Values) != 0 || spec.Type == nil {
+				return true
+			}
+			if _, isPtr := spec.Type.(*ast.StarExpr); !isPtr {
+				return true
+			}
+			for _, nm := range spec.Names {
+				if nm.Name == a.Name {
+					empty = "`var " + a.Name + " " + render(spec.Type) + "` is declared with no value"
+				}
+			}
+			return true
+		})
+		return empty
+	case *ast.CallExpr:
+		// `(*sql.DB)(nil)` and friends.
+		if len(a.Args) == 1 {
+			if id, ok := a.Args[0].(*ast.Ident); ok && id.Name == "nil" {
+				return "a conversion of the literal nil: " + render(a)
+			}
+		}
+	case *ast.ParenExpr:
+		return m52ResolvesToNil(a.X, file, render)
+	}
+	return ""
+}
+
+// m52CmdServerFiles parses every non-test .go file of package main.
+func m52CmdServerFiles(t *testing.T, fset *token.FileSet) []*ast.File {
+	t.Helper()
+	dir := filepath.Dir(mainGoPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var out []*ast.File
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", e.Name(), perr)
+		}
+		out = append(out, f)
+	}
+	if len(out) < 2 {
+		t.Fatalf("parsed only %d non-test files in %s — the walk is blind", len(out), dir)
+	}
+	return out
 }
 
 // TestM52MainGoDoesNotAliasTheRouterTypes closes the one way another file can
@@ -1262,8 +1487,12 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
-			t.Errorf("parse %s: %v — this walk cannot judge a file it cannot read, and a "+
-				"silent skip is how a second router would hide", path, perr)
+			// Reported, not failed. A file the Go compiler would reject is not
+			// a running router, and `testdata` — where deliberately unparsable
+			// fixtures live — is already skipped above.
+			t.Logf("NOTE: %s does not parse (%v); this walk skipped it. If it is real "+
+				"production source, the build is broken and that will be said elsewhere.",
+				path, perr)
 			return nil
 		}
 		echoPkg := m52EchoPackageName(file)
@@ -1303,6 +1532,71 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk %s: %v", apiRootPath, err)
 	}
+	// A function elsewhere that TAKES a router is a mounter whether or not its
+	// paths are literals: `func mount(g *echo.Group) { g.GET(reportsPath, h) }`
+	// registers real routes that neither walker above can see, because the
+	// path is an identifier and the file need not construct anything. The
+	// parameter TYPE is the signal — precise, and nothing else in this
+	// codebase has it.
+	err = filepath.WalkDir(apiRootPath, func(path string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			if path != apiRootPath && m52SkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		if abs, aerr := filepath.Abs(path); aerr == nil && abs == mainAbs {
+			return nil
+		}
+		if _, ok := allowed[filepath.ToSlash(path)]; ok {
+			return nil
+		}
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return nil // already reported above
+		}
+		echoPkg := m52EchoPackageName(file)
+		if echoPkg == "" {
+			return nil
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Type.Params == nil {
+				continue
+			}
+			for _, param := range fn.Type.Params.List {
+				star, ok := param.Type.(*ast.StarExpr)
+				if !ok {
+					continue
+				}
+				sel, ok := star.X.(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				ident, ok := sel.X.(*ast.Ident)
+				if !ok || ident.Name != echoPkg {
+					continue
+				}
+				if sel.Sel.Name != "Echo" && sel.Sel.Name != "Group" {
+					continue
+				}
+				offenders = append(offenders, filepath.ToSlash(path)+":"+
+					strconv.Itoa(fset.Position(fn.Pos()).Line)+" declares func "+fn.Name.Name+
+					" taking a *"+echoPkg+"."+sel.Sel.Name+" (a router mounter)")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s for router mounters: %v", apiRootPath, err)
+	}
+
 	sort.Strings(offenders)
 	for _, f := range offenders {
 		t.Errorf("%s — outside cmd/server/main.go. The M52 tenant-binding sweep reads "+
