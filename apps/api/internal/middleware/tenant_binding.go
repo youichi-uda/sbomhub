@@ -203,9 +203,16 @@ type TenantBindingRule struct {
 	// against a live database. Required for TenantBindingBindsItself.
 	ProvedBy string
 
-	// RLSExemptTables lists the tables the route's code path touches, for
-	// TenantBindingTouchesNoRLSTable only. Each is asserted to have RLS
-	// disabled in the live schema.
+	// RLSExemptTables lists every table the route's code path names in a
+	// statement of its own, for TenantBindingTouchesNoRLSTable only. Each is
+	// asserted to have RLS disabled in the live schema.
+	//
+	// "of its own" matches TenantBindingBindsItself's use of the word: tables
+	// reached only by a CASCADE or SET NULL are not listed, because RI
+	// triggers bypass row security and their RLS flag therefore says nothing
+	// about whether the route is safe. No rule needs that carve-out today —
+	// the Lemon Squeezy delivery issues no DELETE — but the field means the
+	// same thing in both places.
 	RLSExemptTables []string
 }
 
