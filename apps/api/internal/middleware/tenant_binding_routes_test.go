@@ -555,10 +555,16 @@ func m52HandlerIdentity(arg ast.Expr, uniqueExpr map[string]ast.Expr, render fun
 // neither is a semantic limit. Anything still unresolved stays as written and
 // reads as "no TenantTx".
 func m52Expand(entry string, aliases map[string]string) string {
+	// A chain of bindings that each mention two others grows exponentially.
+	// main.go's are shallow (the whole middleware package's suite runs in
+	// ~0.1s), but a cap keeps a pathological one from turning this test into a
+	// hang — and stopping early only ever leaves text unexpanded, which reads
+	// as "no TenantTx" and demands a classification.
+	const maxLen = 1 << 16
 	cur := strings.TrimSpace(entry)
 	seen := map[string]bool{}
 	for i := 0; i < 16; i++ {
-		if seen[cur] {
+		if seen[cur] || len(cur) > maxLen {
 			return cur
 		}
 		seen[cur] = true
