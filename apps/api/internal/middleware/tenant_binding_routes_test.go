@@ -753,8 +753,17 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 
 		// (2) A chained registration: `e.Group("/x", mw).GET(...)` never binds
 		// the group to a variable, so its chain was never resolved.
+		//
+		// Only ROUTE VERBS are flagged here, not m52UnreadRegistrationMethods.
+		// A non-identifier receiver plus `Add` is `time.Now().Add(time.Hour)`
+		// far more often than it is a chained echo registration, and reddening
+		// CI for a duration calculation is exactly the false alarm that gets a
+		// gate switched off. The cost is that a chained
+		// `.Group("/x").Static(...)` would go unnoticed; nothing in echo makes
+		// that shape natural, and guard (4) still covers the same methods on a
+		// named group.
 		if !isIdent {
-			if m52RouteVerbs[name] || m52UnreadRegistrationMethods[name] {
+			if m52RouteVerbs[name] {
 				t.Errorf("main.go:%d registers %s(...) on an unnamed receiver (%s). This gate "+
 					"resolves middleware chains through group VARIABLES, so a chained "+
 					"registration is invisible to it. Assign the group to a variable first.",
