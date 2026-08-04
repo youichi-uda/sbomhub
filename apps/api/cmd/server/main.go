@@ -1085,7 +1085,7 @@ func main() {
 		appmw.APIKeyAuth(apiKeyService),
 		appmw.APIKeyTenant(projectRepo, tenantRepo),
 		appmw.TenantTx(db),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetMCP),
 		appmw.MCPAudit(auditRepo),
 	)
 
@@ -1138,12 +1138,12 @@ func main() {
 	cliWrite := cliBase.Group("",
 		appmw.RequireWrite(),
 		appmw.TenantTx(db),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetCLI),
 		appmw.MCPAudit(auditRepo),
 	)
 	cli := cliBase.Group("",
 		appmw.TenantTx(db),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetCLI),
 		appmw.MCPAudit(auditRepo),
 	)
 	cliWrite.POST("/upload", cliHandler.Upload)
@@ -1336,7 +1336,7 @@ func main() {
 	e.POST("/api/v1/projects/:id/sbom", sbomHandler.Upload,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 
@@ -1354,12 +1354,12 @@ func main() {
 	e.POST("/api/v1/projects/:id/reachability", reachabilityHandler.Upload,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.GET("/api/v1/projects/:id/reachability/targets", reachabilityHandler.GetTargets,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// GET /sbom is the companion read-back to the canonical upload above:
@@ -1382,7 +1382,7 @@ func main() {
 	e.GET("/api/v1/projects/:id/sbom",
 		sbomHandler.Get,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	auth.GET("/projects/:id/sboms", sbomHandler.List)
@@ -1419,7 +1419,7 @@ func main() {
 	e.GET("/api/v1/projects/:id/vulnerabilities",
 		sbomHandler.GetVulnerabilities,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// Per-SBOM background-scan status endpoint observed by `sbomhub scan
@@ -1443,7 +1443,7 @@ func main() {
 	e.GET("/api/v1/projects/:id/sboms/:sbom_id/scan-status",
 		sbomHandler.ScanStatus,
 		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// M47 W1 (Codex round 1, High): RequireWrite is mandatory here, and it
@@ -1574,25 +1574,25 @@ func main() {
 		vexDraftsHandler.RunTriage,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		triageConcurrencyLimiter.Middleware())
 	e.GET("/api/v1/projects/:id/vex-drafts",
 		vexDraftsHandler.ListDrafts,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.GET("/api/v1/projects/:id/vex-drafts/:draft_id",
 		vexDraftsHandler.GetDraft,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.PUT("/api/v1/projects/:id/vex-drafts/:draft_id/decision",
 		vexDraftsHandler.Decide,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// /vex-drafts/:id/reanalyse calls runner.Run() like /triage/run, so
@@ -1604,7 +1604,7 @@ func main() {
 		vexDraftsHandler.Reanalyse,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		triageConcurrencyLimiter.Middleware())
 
 	// CRA report endpoints (Wave M2-4 / issue #36).
@@ -1639,25 +1639,25 @@ func main() {
 		craReportsHandler.RunReport,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		craConcurrencyLimiter.Middleware())
 	e.GET("/api/v1/projects/:id/cra-reports",
 		craReportsHandler.ListReports,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.GET("/api/v1/projects/:id/cra-reports/:report_id",
 		craReportsHandler.GetReport,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.PUT("/api/v1/projects/:id/cra-reports/:report_id/decision",
 		craReportsHandler.Decide,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// CRA Art.14 awareness editable-later (M35 F429 / issue #152). PATCH reuses
@@ -1670,7 +1670,7 @@ func main() {
 		craReportsHandler.SetAwareness,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// CRA Art.14 submission records (M33 F419 / issue #146). POST reuses the
@@ -1681,20 +1681,20 @@ func main() {
 		craSubmissionsHandler.Record,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.GET("/api/v1/projects/:id/cra-reports/:report_id/submissions",
 		craSubmissionsHandler.List,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.POST("/api/v1/projects/:id/cra-reports/:report_id/reanalyse",
 		craReportsHandler.Reanalyse,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		craConcurrencyLimiter.Middleware())
 
 	// METI self-assessment endpoints (Wave M3-4 / issue #37).
@@ -1731,21 +1731,21 @@ func main() {
 	e.GET("/api/v1/projects/:id/meti/assessment",
 		metiHandler.ListAssessments,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.POST("/api/v1/projects/:id/meti/assessment/refresh",
 		metiHandler.RefreshAssessment,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.PUT("/api/v1/projects/:id/meti/assessment/:criterion_id/override",
 		metiHandler.OverrideAssessment,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	// M3 Codex review #F33: DELETE override is the operator's only
@@ -1759,13 +1759,13 @@ func main() {
 		metiHandler.ClearOverride,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 	e.GET("/api/v1/projects/:id/meti/improvement-actions",
 		metiHandler.ListImprovementActions,
 		triageMultiAuth,
-		appmw.RateLimitByAPIKey(rdb, 300, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll),
 		appmw.TenantTx(db),
 		auditMiddleware)
 
@@ -1796,7 +1796,7 @@ func main() {
 		evidencePackHandler.Build,
 		triageMultiAuth,
 		appmw.RequireWrite(),
-		appmw.RateLimitByAPIKey(rdb, 60, time.Minute),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
 		appmw.TenantTx(db),
 		auditMiddleware)
 

@@ -16,9 +16,163 @@ import (
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
-// RateLimitByAPIKey creates a rate limiting middleware based on API key
-// SECURITY FIX: Window bucket key now correctly uses the configured duration
-func RateLimitByAPIKey(rdb *redis.Client, limit int, window time.Duration) echo.MiddlewareFunc {
+// Budget names ONE per-API-key rate-limit counter, together with the ceiling
+// that counter is measured against.
+//
+// # What this exists to prevent (M51)
+//
+// Before M51 the middleware took a bare `limit int`, and the Redis key it
+// INCRed was
+//
+//	"mcp:ratelimit:" + key.ID.String() + ":" + windowKey
+//
+// — the API key and the minute, and nothing else. cmd/server/main.go configures
+// 28 of these middlewares with two different ceilings, so 28 route families
+// advanced ONE integer and the only thing a route's own ceiling decided was the
+// threshold that shared integer was compared against.
+//
+// Measured over HTTP on a throwaway stack (2026-08-04, api built from a85a0fb),
+// one API key, one minute: 61 requests to the 300/min scan-status poll made the
+// FIRST request to the 60/min SBOM read-back answer 429. A route's configured
+// budget was therefore not a property of the route at all.
+//
+// # Why the fix is a budget and not the route path
+//
+// The obvious repair — put c.Path() in the key — makes every stated limit true
+// and is one line. It was rejected because of what it does to the quantity this
+// limiter actually protects.
+//
+// PROTECTED RESOURCE, stated so the numbers can be argued about: the share of
+// ONE API server's capacity (CPU for parsing and hashing, Postgres connections
+// held by TenantTx, and outbound bandwidth) that a SINGLE api_keys row can
+// consume, plus the rate at which a leaked key can pull tenant data out through
+// the read-back routes. It is NOT metering for billing — nothing in this
+// product charges per request — and it is NOT a fairness device between tenants,
+// which is what makes the per-key aggregate the number that matters.
+//
+// Per-route buckets multiply that aggregate by the size of the route table:
+// ~34 rate-limited routes at 60/min and 300/min come to roughly 4,300 req/min
+// for one key, against about 300 today. A caller that rotates paths is exactly
+// the caller this limiter is aimed at, so "fix" would have meant a fourteen-fold
+// loosening of the only control on it.
+//
+// A budget is the coarsest split that still makes every stated ceiling true:
+// every request charged to a counter has the SAME ceiling as every other
+// request charged to it, so no route can spend a budget it was not given. The
+// aggregate one key may spend becomes the sum over BUDGETS (four), not over
+// routes — 480 req/min, up from ~300, which is a change of scale rather than of
+// kind and is stated here rather than discovered later.
+//
+// # Why the limit lives on the Budget
+//
+// Because that is what makes the defect unrepresentable. As long as the ceiling
+// was a per-call-site argument, two call sites could name one counter with two
+// numbers — which is precisely what happened. A Budget IS the pair, so there is
+// no way to spell the broken configuration.
+//
+// # What a budget does NOT do
+//
+//   - It does not bound the aggregate across budgets. A key may spend all four
+//     concurrently. Bounding that needs a second, hierarchical counter and a
+//     second Redis round trip on every request; it is not in this wave.
+//   - The window is FIXED, not sliding (unchanged from before): a caller can
+//     spend one bucket at the end of a minute and the next at the start of the
+//     following one, so the observable short-term peak is twice the ceiling.
+//   - It is per API key, so an attacker holding two keys for one tenant has two
+//     of everything. Nothing here bounds a TENANT.
+type Budget struct {
+	// Name is the counter's identity in Redis, and the thing that makes the
+	// separation legible in `redis-cli --scan`. Two budgets with the same name
+	// are the same counter.
+	Name string
+	// Limit is how many requests this counter admits per Window.
+	Limit int
+	// Window is the counting period. calculateWindowKey turns it into a bucket
+	// suffix, so a value that is not a whole minute / hour / day is rounded UP
+	// to the next granularity it supports.
+	Window time.Duration
+}
+
+// The budgets this product issues. Adding a route means choosing one of these,
+// which is a visible decision; inventing a new ceiling means adding a budget
+// here, which is a visible decision too.
+//
+// The four are separate because their traffic SHAPES are separate, not because
+// their numbers differ (BudgetStandard, BudgetMCP and BudgetCLI happen to share
+// a ceiling). Merging any two of them would recreate the M51 defect in
+// miniature: an MCP tool call that fans out to several API requests would spend
+// the SBOM upload budget, which is the interference this whole change removes.
+var (
+	// BudgetStandard covers the canonical MultiAuth-fronted routes that are not
+	// polling surfaces: every mutation (SBOM upload, reachability upload,
+	// triage/CRA runs and decisions, METI refresh/override, evidence-pack
+	// build) and the two reads that are deliberate one-shot calls rather than
+	// loops (GET .../sbom, GET .../vulnerabilities — the first is a whole-SBOM
+	// download and the second is called once per `sbomhub triage` session).
+	BudgetStandard = Budget{Name: "standard", Limit: 60, Window: time.Minute}
+
+	// BudgetPoll covers the read-back and list surfaces a CLI sits in a loop
+	// on: scan-status (`sbomhub scan --fail-on` polls it about once a second),
+	// reachability targets, and the vex-drafts / cra-reports / submissions /
+	// METI list+get endpoints. 300/min is ~5 req/s, comfortably above a 1s
+	// cadence with several concurrent CLI invocations.
+	BudgetPoll = Budget{Name: "poll", Limit: 300, Window: time.Minute}
+
+	// BudgetMCP covers the /api/v1/mcp/* group. It is separate from
+	// BudgetStandard despite sharing its ceiling because ONE MCP tool call
+	// fans out to several HTTP requests (the server probes before and after a
+	// scan), so MCP traffic arrives in multiples. Sharing a counter with SBOM
+	// upload would mean a handful of tool calls locking a CI upload out — the
+	// M51 complaint, one layer down.
+	BudgetMCP = Budget{Name: "mcp", Limit: 60, Window: time.Minute}
+
+	// BudgetCLI covers the legacy /api/v1/cli/* group, deprecated in favour of
+	// the canonical MultiAuth routes. Its own counter means the overlap period
+	// does not have the two paths throttling each other while clients migrate.
+	BudgetCLI = Budget{Name: "cli", Limit: 60, Window: time.Minute}
+)
+
+// AllBudgets returns every budget this package issues, for tests that must
+// enumerate them rather than restate them.
+func AllBudgets() []Budget {
+	return []Budget{BudgetStandard, BudgetPoll, BudgetMCP, BudgetCLI}
+}
+
+// rateLimitRedisKey names the counter for (api key, budget, window).
+//
+// The prefix changed from "mcp:" with M51. That prefix was a misnomer — the
+// counter has covered every API-key-authenticated route since long before this
+// wave — and changing it makes the cutover legible in the keyspace instead of
+// silently reusing names whose meaning changed. See docs/UPGRADE.md for what
+// happens to the counters that are live at the moment of the deploy.
+func rateLimitRedisKey(key *model.APIKey, b Budget, now time.Time) string {
+	return "ratelimit:apikey:v2:" + key.ID.String() + ":" + b.Name + ":" +
+		calculateWindowKey(now, b.Window)
+}
+
+// RateLimitByAPIKey throttles one API key's traffic against one Budget.
+//
+// It is a NO-OP when no API key is on the context: the MultiAuth-fronted routes
+// serve Clerk sessions and the self-hosted default identity through the same
+// chain, and those are not what this bounds. That is unchanged from before M51
+// and is why the web UI is not throttled.
+//
+// Failure mode: a Redis error answers 500. That is fail-CLOSED for a limiter,
+// and deliberately unchanged — but note it is the opposite trade from
+// RateLimitPublicLink's 503, and it means a Redis outage takes the API-key
+// surface down rather than un-throttling it.
+func RateLimitByAPIKey(rdb *redis.Client, budget Budget) echo.MiddlewareFunc {
+	// A malformed budget is a wiring bug, and the only honest time to find one
+	// is while main() is assembling routes. Left to run, Budget{} would answer
+	// 429 to every request on the route it was given (limit 0), which reads as
+	// a production incident rather than as a typo.
+	if budget.Name == "" || budget.Limit <= 0 || budget.Window <= 0 {
+		panic(fmt.Sprintf("middleware: invalid rate-limit budget %+v "+
+			"(name must be set, limit and window must be positive)", budget))
+	}
+	limit := budget.Limit
+	window := budget.Window
+
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			key, ok := c.Get(ContextKeyAPI).(*model.APIKey)
@@ -29,8 +183,7 @@ func RateLimitByAPIKey(rdb *redis.Client, limit int, window time.Duration) echo.
 			now := time.Now().UTC()
 			// SECURITY FIX: Calculate window bucket based on actual window duration
 			// Previously always used minute granularity regardless of window setting
-			windowKey := calculateWindowKey(now, window)
-			redisKey := "mcp:ratelimit:" + key.ID.String() + ":" + windowKey
+			redisKey := rateLimitRedisKey(key, budget, now)
 
 			count, err := rdb.Incr(c.Request().Context(), redisKey).Result()
 			if err != nil {
