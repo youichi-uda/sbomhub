@@ -223,16 +223,38 @@ func TestM51RateLimitOneBudgetIsOneCounter(t *testing.T) {
 	}
 	h := newM51Harness(t, budgets)
 
-	for i := 0; i < BudgetStandard.Limit; i++ {
-		path := "/std/a"
-		if i%2 == 1 {
-			path = "/std/b"
+	// The counting window is a wall-clock minute, so a run that straddles a
+	// minute boundary spends part of the budget in one bucket and part in the
+	// next — and the "it must refuse now" assertion below would then be
+	// measuring the clock rather than the limiter. The loop takes tens of
+	// milliseconds against a local Redis, so the straddle is rare (~0.05% of
+	// runs) and never happens twice; detecting it and redoing the loop turns a
+	// rare red build on correct code into no red build at all, which matters
+	// because a flaky security gate is a gate someone disables.
+	for attempt := 1; ; attempt++ {
+		before := calculateWindowKey(time.Now().UTC(), BudgetStandard.Window)
+		for i := 0; i < BudgetStandard.Limit; i++ {
+			path := "/std/a"
+			if i%2 == 1 {
+				path = "/std/b"
+			}
+			if got := h.get(path); got.status != http.StatusOK {
+				t.Fatalf("%s request %d: %s, want 200", path, i+1, got)
+			}
 		}
-		if got := h.get(path); got.status != http.StatusOK {
-			t.Fatalf("%s request %d: %s, want 200", path, i+1, got)
+		if after := calculateWindowKey(time.Now().UTC(), BudgetStandard.Window); after == before {
+			break
 		}
+		if attempt == 2 {
+			t.Fatalf("the counting window rolled over on both attempts (started in %s); "+
+				"this test cannot tell a spent budget from a fresh bucket", before)
+		}
+		// Start the second attempt from zero in the CURRENT bucket.
+		h.rdb.Del(context.Background(),
+			rateLimitRedisKey(h.key, BudgetStandard, time.Now().UTC()))
 	}
-	// The budget is spent. BOTH routes must now refuse — an attacker who
+
+	// The budget is spent. BOTH routes must now refuse — a caller who
 	// alternates paths must not get two ceilings.
 	for _, path := range []string{"/std/a", "/std/b"} {
 		if got := h.get(path); got.status != http.StatusTooManyRequests {
