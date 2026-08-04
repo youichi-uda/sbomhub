@@ -147,10 +147,16 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 					"This route carries no TenantTx, so its statements against %q run on a "+
 					"pooled connection with no app.current_tenant_id bound: the policy "+
 					"predicate is NULL on a fresh backend (zero rows) or ''::UUID on a "+
-					"reused one (22P02, a 500). Either re-classify the route as "+
-					"TenantBindingBindsItself and give it a binding plus a drive, or move "+
-					"the route onto a TenantTx chain.\nReason recorded for the old "+
-					"classification: %s", key, table, table, rule.Why)
+					"reused one (22P02, a 500).\n"+
+					"Three ways out, in order of preference: move the route onto a TenantTx "+
+					"chain; re-classify it TenantBindingBindsItself and give it a binding "+
+					"plus a drive; or — if the new policy is PERMISSIVE for what this route "+
+					"reads (slo_targets' `tenant_id IS NULL OR ...` is the shape) — say so in "+
+					"a BindsItself rule with a drive, because RLSExemptTables can no longer "+
+					"be the evidence. Note that even a permissive policy of that shape still "+
+					"raises 22P02 on the poisoned connection for any row whose tenant_id is "+
+					"NOT null, so 'permissive' is rarely the whole answer.\n"+
+					"Reason recorded for the old classification: %s", key, table, table, rule.Why)
 			}
 		}
 	}
