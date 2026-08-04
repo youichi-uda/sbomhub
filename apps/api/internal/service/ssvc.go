@@ -479,14 +479,23 @@ func (s *SSVCService) DeleteAssessment(ctx context.Context, projectID, tenantID,
 //
 // Sharing a tx is NOT the same as sharing a snapshot: the tx runs at
 // PostgreSQL's default READ COMMITTED, so each statement takes a fresh one
-// and a concurrent DELETE of the assessment can land between the two. The
-// resulting answer is `200 []` — "in scope, no changes" for a row that no
-// longer exists. That is benign and needs no locking: it is one legitimate
-// serialisation of two concurrent requests (the read simply ordered before
-// the delete), it discloses nothing the caller was not already entitled to,
-// and the caller's next read 404s. Nothing here is a check-then-USE — the
-// second statement is a read, not a mutation, so there is no window in which
-// a stale "yes" authorises a write.
+// and a concurrent DELETE of the assessment (which cascades to its history,
+// migration 021) can land between the two. The answer is then `200 []`.
+//
+// Be precise about what that is: for an assessment that HAD history, `200 []`
+// is an outcome no serial order produces — read-then-delete would have
+// returned the rows, delete-then-read would have 404'd. It is a read anomaly,
+// not a legitimate serialisation, and calling it one would be the same
+// overclaim this wave exists to remove.
+//
+// It is nevertheless accepted rather than locked against: the window is one
+// statement wide; the caller owned the row when the check ran, so nothing is
+// disclosed that they were not already entitled to; the anomaly is transient
+// (their next read 404s); and — the part that actually matters — this is not
+// a check-then-USE. The second statement is a read, so no stale "yes" ever
+// authorises a mutation. A SELECT ... FOR SHARE on the parent, or REPEATABLE
+// READ, would close it at the cost of taking locks on a read path that has no
+// integrity requirement to protect.
 func (s *SSVCService) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
 	inScope, err := s.ssvcRepo.AssessmentInProject(ctx, projectID, tenantID, assessmentID)
 	if err != nil {
