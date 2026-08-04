@@ -1023,3 +1023,9 @@ on sending `Authorization: Bearer` with nothing after it, it will now receive 40
   group, so an API key cannot trigger a scan. `.github/workflows/sbom-upload.yml`
   attempts it under `continue-on-error: true` and has therefore always failed
   silently; the workflow now says so in a comment.
+- One correction to §8.3's "no cleanup is needed": the TTL on a counter is set
+  by a separate `EXPIRE` issued only after the **first** `INCR` of a window
+  (unchanged from before M51). If that one `EXPIRE` fails — a Redis error in
+  exactly that instant — the key never receives a TTL and persists. The
+  `redis-cli --scan ... | xargs ... DEL` above is what removes such a key; for
+  the normal case it remains unnecessary.
