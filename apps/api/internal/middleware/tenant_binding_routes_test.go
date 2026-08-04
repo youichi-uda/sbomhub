@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/printer"
 	"go/token"
@@ -147,7 +148,6 @@ var mainGoPath, apiRootPath = m52LocateRouter()
 // and a path that does not exist already fails loudly, and accurately, at the
 // first parse.
 func m52LocateRouter() (string, string) {
-	const rel = "../.."
 	var roots []string
 
 	// (a) This file's compiled-in location. Correct unless -trimpath.
@@ -176,22 +176,30 @@ func m52LocateRouter() (string, string) {
 			return candidate, root
 		}
 	}
-	// Nothing resolved. That happens in exactly one shape: a `-trimpath`
-	// binary run outside the source tree, where there is neither a
-	// compiled-in path nor a working directory to anchor to. The gate cannot
-	// inspect a router it cannot find, and saying so is better than guessing
-	// — m52MissingRouterHint is what the first failure prints.
-	return filepath.Join(rel, "cmd", "server", "main.go"), rel
+	// Nothing resolved. One shape does that: a `-trimpath` binary run outside
+	// the source tree, where there is neither a compiled-in path nor a working
+	// directory to anchor to. The gate cannot inspect a router it cannot find
+	// and must not RED for it, because the build was correct and the router is
+	// fine. m52RequireRouter turns this into a skip.
+	return "", ""
 }
 
-// m52MissingRouterHint explains the one unresolvable invocation shape, so a
-// "no such file" does not read as a defect in the router.
-const m52MissingRouterHint = "\n\nIf this says `no such file`, the gate could not LOCATE cmd/server/main.go, " +
-	"which is different from finding something wrong in it. That happens when a " +
-	"`-trimpath` test binary is run outside the source tree: -trimpath removes the " +
-	"compiled-in source path and the working directory is not under the module. Run " +
-	"`go test ./internal/middleware/` from apps/api, or run the binary from anywhere " +
-	"inside the checkout."
+// m52RequireRouter skips when the gate cannot locate cmd/server/main.go.
+//
+// That is not a finding about the router — it is the gate not knowing where to
+// look, which happens only for a `-trimpath` binary run outside the checkout.
+// Failing there would be a correct build reddening a required check; a skip
+// says exactly what happened.
+func m52RequireRouter(t *testing.T) {
+	t.Helper()
+	if mainGoPath == "" {
+		t.Skip("this gate could not LOCATE cmd/server/main.go — not a finding about the " +
+			"router. `-trimpath` removes the compiled-in source path, so a binary built " +
+			"with it and run outside the checkout has no anchor. Run " +
+			"`go test ./internal/middleware/` from apps/api, or run the binary from " +
+			"inside the checkout.")
+	}
+}
 
 // echoImportPath is the router library, used to resolve the local name main.go
 // gives the package (it could be aliased).
@@ -270,11 +278,12 @@ type m52Group struct {
 // is created. Two independent passes would get both wrong.
 func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group, aliasAt m52AliasResolver) {
 	t.Helper()
+	m52RequireRouter(t)
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v%s", mainGoPath, err, m52MissingRouterHint)
+		t.Fatalf("parse %s: %v", mainGoPath, err)
 	}
 	render := func(n ast.Node) string {
 		var buf bytes.Buffer
@@ -753,12 +762,25 @@ func m52NoTenantTxRoutes(t *testing.T) map[string]m52Route {
 		t.Fatalf("parsed only %d routes from %s — the parser is blind, not the router",
 			len(routes), mainGoPath)
 	}
-	out := map[string]m52Route{}
+	// Echo REPLACES the handler when the same method+path is registered twice
+	// (echo.Router.add overwrites), so the last registration is the one that
+	// serves. Collapsing by key first, then filtering, is what makes a later
+	// bound registration remove an earlier unbound one — the previous version
+	// only ever ADDED unbound routes, so an unbound registration followed by
+	// the real, TenantTx-carrying one left the route reported as unbound.
+	last := map[string]m52Route{}
 	for _, r := range routes {
+		key := r.method + " " + r.fullPath
+		if prev, seen := last[key]; !seen || r.line >= prev.line {
+			last[key] = r
+		}
+	}
+	out := map[string]m52Route{}
+	for key, r := range last {
 		if m52HasTenantTx(r.chain, r.chainAt, aliasAt) {
 			continue
 		}
-		out[r.method+" "+r.fullPath] = r
+		out[key] = r
 	}
 	return out
 }
@@ -915,6 +937,14 @@ func TestM52EveryBindsItselfRuleNamesAnExistingTest(t *testing.T) {
 	}
 }
 
+// m52InDefaultBuild reports whether the go tool would compile this file for
+// the current build configuration.
+func m52InDefaultBuild(path string) (bool, error) {
+	ctx := build.Default
+	ctx.UseAllFiles = false
+	return ctx.MatchFile(filepath.Dir(path), filepath.Base(path))
+}
+
 // m52SkipDir reports whether a directory is outside the source tree these
 // walks care about.
 func m52SkipDir(name string) bool {
@@ -961,6 +991,23 @@ func m52TestFuncNames(t *testing.T) map[string]string {
 			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
 				continue
 			}
+			// The SIGNATURE too, not just the name: `func TestHelper(x int)`
+			// is not a runnable test, and accepting it would let ProvedBy
+			// resolve to something `go test` never calls.
+			if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
+				continue
+			}
+			star, ok := fn.Type.Params.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			sel, ok := star.X.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "T" {
+				continue
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "testing" {
+				continue
+			}
 			out[fn.Name.Name] = path
 		}
 		return nil
@@ -984,6 +1031,7 @@ func m52TestFuncNames(t *testing.T) map[string]string {
 // earlier version that errored on them would have reddened CI for correct
 // code.
 func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
+	m52RequireRouter(t)
 	// Receivers that carry a route-verb method name but are NOT routers, with
 	// the reason. Empty today: main.go calls GET/POST/... on nothing else.
 	notARouter := map[string]string{}
@@ -991,7 +1039,7 @@ func TestM52RouteScanUnitCoversEveryRegistrationForm(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v%s", mainGoPath, err, m52MissingRouterHint)
+		t.Fatalf("parse %s: %v", mainGoPath, err)
 	}
 	_, groups, _ := m52ParseMainGo(t)
 	rootName, rootFn := m52EchoInstanceName(t, file)
@@ -1259,7 +1307,22 @@ func TestM52ProductionWiresTheBindingsTheDrivesMeasure(t *testing.T) {
 	fset := token.NewFileSet()
 	files := m52CmdServerFiles(t, fset)
 	render := func(n ast.Node) string { return m52Normalise(renderNode(fset, n)) }
-	_, _, aliasAt := m52ParseMainGo(t)
+
+	// Aliases from EVERY file of package main, not just main.go. Moving the
+	// runner construction into a sibling is a plausible refactor — the package
+	// already keeps newTenantLLMProviderResolver in llm_resolver.go — and
+	// taking aliases from main.go alone rejected a `txManager :=
+	// triage.NewDBTxManager(db)` declared beside the literal it feeds.
+	pkgAlias := map[string]string{}
+	for _, f := range files {
+		m52EachBindingIn(f, func(name string, rhs ast.Expr) {
+			pkgAlias[name] = render(rhs)
+		})
+	}
+	aliasAt := m52AliasResolver(func(name string, _ token.Pos) (string, bool) {
+		v, ok := pkgAlias[name]
+		return v, ok
+	})
 
 	// Names of functions in the package whose body constructs a real
 	// DBTxManager, so `TxManager: newTenantTxManager(db)` resolves as well as
@@ -1279,7 +1342,7 @@ func TestM52ProductionWiresTheBindingsTheDrivesMeasure(t *testing.T) {
 		}
 	}
 	bindsTenant := func(value string) bool {
-		expanded := m52Expand(value, token.Pos(1<<30), aliasAt)
+		expanded := m52Expand(value, token.NoPos, aliasAt)
 		if strings.Contains(expanded, "NewDBTxManager(") {
 			return true
 		}
@@ -1357,13 +1420,13 @@ func TestM52ProductionWiresTheBindingsTheDrivesMeasure(t *testing.T) {
 				return true
 			}
 			found = true
-			if arg := m52ResolvesToNil(call.Args[0], f, render); arg != "" {
+			if arg := m52ResolvesToNil(call.Args[0], call.Pos(), f, render); arg != "" {
 				t.Errorf("%s:%d constructs the public-link service with a nil *sql.DB (%s). "+
 					"PublicLinkService.runWithTenantTx is the only thing binding the tenant on "+
 					"the two anonymous share routes, and it refuses outright without a handle.",
 					filepath.Base(fset.Position(call.Pos()).Filename),
 					fset.Position(call.Pos()).Line,
-					m52ResolvesToNil(call.Args[0], f, render))
+					m52ResolvesToNil(call.Args[0], call.Pos(), f, render))
 			}
 			return true
 		})
@@ -1409,25 +1472,46 @@ func m52TakesARouter(fn *ast.FuncDecl, echoPkg string) bool {
 // the literal, a conversion of one, and an identifier declared in this file
 // with a pointer type and no initialiser. Anything else is treated as
 // non-nil, which is the direction that does not redden correct code.
-func m52ResolvesToNil(arg ast.Expr, file *ast.File, render func(ast.Node) string) string {
+func m52ResolvesToNil(arg ast.Expr, at token.Pos, file *ast.File, render func(ast.Node) string) string {
 	switch a := arg.(type) {
 	case *ast.Ident:
 		if a.Name == "nil" {
 			return "the literal nil"
 		}
-		// `var x *T` with no value, anywhere in this file.
-		empty := ""
+		// `var x *T` with no value — but only the LAST such declaration
+		// before the call, and only if no later initialised binding of the
+		// same name intervenes. Searching the whole file by name alone made a
+		// live `db := liveDB()` in main() read as nil because some unrelated
+		// helper elsewhere declared `var db *sql.DB`.
+		empty, bestPos := "", token.NoPos
 		ast.Inspect(file, func(n ast.Node) bool {
-			spec, ok := n.(*ast.ValueSpec)
-			if !ok || len(spec.Values) != 0 || spec.Type == nil {
-				return true
-			}
-			if _, isPtr := spec.Type.(*ast.StarExpr); !isPtr {
-				return true
-			}
-			for _, nm := range spec.Names {
-				if nm.Name == a.Name {
-					empty = "`var " + a.Name + " " + render(spec.Type) + "` is declared with no value"
+			switch d := n.(type) {
+			case *ast.ValueSpec:
+				if d.Pos() >= at {
+					return true
+				}
+				initialised := len(d.Values) != 0
+				for _, nm := range d.Names {
+					if nm.Name != a.Name || d.Pos() < bestPos {
+						continue
+					}
+					if initialised || d.Type == nil {
+						empty, bestPos = "", d.Pos()
+						continue
+					}
+					if _, isPtr := d.Type.(*ast.StarExpr); isPtr {
+						empty = "`var " + a.Name + " " + render(d.Type) + "` is declared with no value"
+						bestPos = d.Pos()
+					} else {
+						empty, bestPos = "", d.Pos()
+					}
+				}
+			case *ast.AssignStmt:
+				if d.Pos() >= at || len(d.Lhs) != 1 {
+					return true
+				}
+				if id, ok := d.Lhs[0].(*ast.Ident); ok && id.Name == a.Name && d.Pos() >= bestPos {
+					empty, bestPos = "", d.Pos()
 				}
 			}
 			return true
@@ -1441,7 +1525,7 @@ func m52ResolvesToNil(arg ast.Expr, file *ast.File, render func(ast.Node) string
 			}
 		}
 	case *ast.ParenExpr:
-		return m52ResolvesToNil(a.X, file, render)
+		return m52ResolvesToNil(a.X, at, file, render)
 	}
 	return ""
 }
@@ -1449,6 +1533,7 @@ func m52ResolvesToNil(arg ast.Expr, file *ast.File, render func(ast.Node) string
 // m52CmdServerFiles parses every non-test .go file of package main.
 func m52CmdServerFiles(t *testing.T, fset *token.FileSet) []*ast.File {
 	t.Helper()
+	m52RequireRouter(t)
 	dir := filepath.Dir(mainGoPath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1481,10 +1566,11 @@ func m52CmdServerFiles(t *testing.T, fset *token.FileSet) []*ast.File {
 // (`type routeGroup echo.Group`, no `=`) cannot receive echo's methods, so
 // only the ALIAS form is refused.
 func TestM52MainGoDoesNotAliasTheRouterTypes(t *testing.T) {
+	m52RequireRouter(t)
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, mainGoPath, nil, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v%s", mainGoPath, err, m52MissingRouterHint)
+		t.Fatalf("parse %s: %v", mainGoPath, err)
 	}
 	echoPkg := m52EchoPackageName(file)
 	if echoPkg == "" {
@@ -1552,6 +1638,7 @@ func renderNode(fset *token.FileSet, n ast.Node) string {
 // registration-shaped calls exist outside main.go, so the check costs nothing
 // today.
 func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
+	m52RequireRouter(t)
 	// Files exempted from the check, with the reason. Empty today.
 	allowed := map[string]string{}
 
@@ -1595,6 +1682,13 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 			return nil
 		}
 		if _, ok := allowed[filepath.ToSlash(path)]; ok {
+			return nil
+		}
+		// A file the default build excludes (`//go:build ignore`, a foreign
+		// GOOS/GOARCH, a tag this build does not set) is not part of the
+		// running server, so a router in it is not a second router. Judging it
+		// as production source reddened the gate for a build-excluded helper.
+		if included, berr := m52InDefaultBuild(path); berr == nil && !included {
 			return nil
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)
@@ -1679,29 +1773,38 @@ func TestM52MainGoIsTheOnlyRouter(t *testing.T) {
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Type.Params == nil {
+			if !ok || fn.Body == nil || !m52TakesARouter(fn, echoPkg) {
 				continue
 			}
-			for _, param := range fn.Type.Params.List {
-				star, ok := param.Type.(*ast.StarExpr)
+			// Taking a router is not registering on one. A function that only
+			// READS from it — logging len(e.Routes()), say — is correct code,
+			// and the earlier version rejected it. Require an actual
+			// registration-shaped call in the body.
+			registers := ""
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || registers != "" {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok {
-					continue
+					return true
 				}
-				sel, ok := star.X.(*ast.SelectorExpr)
-				if !ok {
-					continue
+				if !m52RouteVerbs[sel.Sel.Name] && !m52UnreadRegistrationMethods[sel.Sel.Name] {
+					return true
 				}
-				ident, ok := sel.X.(*ast.Ident)
-				if !ok || ident.Name != echoPkg {
-					continue
+				if len(call.Args) < 2 {
+					return true
 				}
-				if sel.Sel.Name != "Echo" && sel.Sel.Name != "Group" {
-					continue
-				}
-				offenders = append(offenders, filepath.ToSlash(path)+":"+
-					strconv.Itoa(fset.Position(fn.Pos()).Line)+" declares func "+fn.Name.Name+
-					" taking a *"+echoPkg+"."+sel.Sel.Name+" (a router mounter)")
+				registers = m52Normalise(renderNode(fset, sel.X)) + "." + sel.Sel.Name
+				return false
+			})
+			if registers == "" {
+				continue
 			}
+			offenders = append(offenders, filepath.ToSlash(path)+":"+
+				strconv.Itoa(fset.Position(fn.Pos()).Line)+" declares func "+fn.Name.Name+
+				", which takes a router and calls "+registers+"(...) on one")
 		}
 		return nil
 	})
