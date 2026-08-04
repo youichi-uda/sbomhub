@@ -204,7 +204,9 @@ func TestM50VulnScanTx_ScannerWritesAreTxBoundAndSurviveAScannerError(t *testing
 	}
 
 	// The scanner returned an error; runScan logs it and returns nil from fn,
-	// so WithTxFunc commits. The write must be durable.
+	// so WithTxFunc goes on to ATTEMPT the commit — it does not follow from
+	// fn == nil that the commit succeeded (Codex R4, High). What follows is
+	// the assertion below: in THIS execution it did, and the write is durable.
 	var after int
 	if err := appDB.QueryRow(
 		`SELECT COUNT(*) FROM vulnerabilities WHERE id = $1`, scanner.vuln.ID).Scan(&after); err != nil {
@@ -312,7 +314,8 @@ func TestM50VulnScanTx_AFailedStatementDiscardsEveryRelationalRow(t *testing.T) 
 	}
 	if !strings.Contains(logs, "NVD scan completed") {
 		t.Errorf("logs = %q, want the scanner's own success line too — it is emitted even "+
-			"though every write it made was refused, which is why the ERROR line above is "+
+			"though not one of the scanner's writes survived (the first was rolled back, the "+
+			"second refused outright: Codex R4, Low), which is why the ERROR line above is "+
 			"the only honest signal", logs)
 	}
 }

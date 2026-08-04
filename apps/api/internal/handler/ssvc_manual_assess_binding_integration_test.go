@@ -26,7 +26,14 @@
 //     to the GLOBAL vulnerabilities.ssvc_decision column of a vulnerability
 //     outside its scope.
 //
-// Contract after the fix (kept by this test), identical to the auto route:
+// Contract after the fix (kept by this test). The first two items are
+// identical to the auto route; the third is NOT (Codex R4, High — this header
+// used to say "identical to the auto route" of the whole list):
+// AutoAssessVulnerability bails out early on an existing assessment whose
+// exploitation_auto and automatable_auto are both false, returning it
+// unchanged so as not to overwrite a human's judgement — which is exactly the
+// shape of a legacy mispaired row, so the auto route does NOT repair one.
+// Only the manual route does.
 //   - the `cve_id` query parameter is IGNORED; the CVE is derived
 //     server-side from :vuln_id (GetCVEIDByIDInProject);
 //   - the (tenant, project, vulnerability) membership is verified through
