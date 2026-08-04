@@ -684,3 +684,110 @@ func TestBearerParityWindowsAgreeOrDivergeExactlyOnce(t *testing.T) {
 			"so the pin above is vacuous")
 	}
 }
+
+// TestBearerAnnouncedButUnusableIsRefusedEverywhere is the third parity
+// dimension, after the scheme's case and the key prefix's case: the DELIMITER
+// and the credential's own character set.
+//
+// # The finding (M51 round 2)
+//
+// `bearerAny` reported "not a candidate" for anything after the scheme that was
+// not `1*SP ...`, and its TrimLeft stripped SPACE only. So a tab made a
+// perfectly recognisable credential look like the ABSENCE of one, and on a
+// MultiAuth route in `anonymous` self-host absence means the DEFAULT tenant's
+// Owner. Measured on a throwaway stack (2026-08-04) with a PROJECT-SCOPED key,
+// against a project belonging to another tenant:
+//
+//	Authorization: Bearer<SP>sbh_<scoped>          403 forbidden
+//	Authorization: Bearer<SP><HTAB>sbh_<scoped>    200 + that project's SBOM
+//	Authorization: Bearer<HTAB>sbh_<scoped>        200 + that project's SBOM
+//
+// One tab, and api_keys.project_id is gone — the same fall-through the prefix
+// casing produced (TestAPIKeyPrefixRuleIsCaseInsensitive), reached through the
+// delimiter instead. `Bearer<SP><HTAB>...` additionally disagreed BETWEEN the
+// windows: APIKeyAuth answered 401 while MultiAuth served it.
+//
+// # Why the earlier tests did not catch it
+//
+// TestBearerParityAPIKeyWindows' malformed branch asks only that no USABLE
+// credential was produced, and `presented=false` satisfies that. The
+// cross-window test compares the two windows to each other, and for
+// `Bearer<HTAB>x` they agreed — both said absent. Agreeing on the fail-open
+// answer is not the property that was wanted.
+//
+// So this asserts the fail-CLOSED contract directly: a header that ANNOUNCES
+// Bearer and does not carry a usable credential must be presented-but-unusable
+// at both windows, which is a 401 rather than a fall-through.
+func TestBearerAnnouncedButUnusableIsRefusedEverywhere(t *testing.T) {
+	const key = "sbh_ffffffffffffffffffffffffffffffff"
+	for _, tc := range []struct{ name, value, why string }{
+		{"SP then HTAB", "Bearer \t" + key,
+			"TrimLeft stripped SPACE only, so the credential kept a leading tab"},
+		{"HTAB delimiter", "Bearer\t" + key,
+			"an auth-scheme is an HTTP token, so it ends at the tab: this announces Bearer"},
+		{"bare scheme", "Bearer",
+			"announced and supplied nothing"},
+		{"two spaces then HTAB", "Bearer  \t" + key,
+			"the relaxed multi-space delimiter must not smuggle a tab in behind it"},
+		{"inner space in the token", "Bearer " + key + " x",
+			"token68 admits no whitespace; this used to be forwarded verbatim"},
+		{"control character in the token", "Bearer " + key + "\x01",
+			"a credential is not a place for control characters"},
+		{"non-ASCII in the token", "Bearer " + key + "é",
+			"token68 is ASCII"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bearerParityRequest([]string{tc.value})
+
+			multiRaw, multiPresented := apiKeyCredential(r)
+			if !multiPresented {
+				t.Errorf("MultiAuth reports NO credential for %q (%s). It therefore falls "+
+					"through to the Clerk / self-hosted path, and in anonymous mode that "+
+					"serves the request as the DEFAULT tenant's Owner with the key — and "+
+					"its project scope — discarded.", tc.value, tc.why)
+			} else if multiRaw != "" {
+				t.Errorf("MultiAuth resolved %q to the usable credential %q", tc.value, multiRaw)
+			}
+
+			keyRaw, keyPresent, keyAmbiguous := presentedAPIKey(r)
+			if keyAmbiguous || !keyPresent || keyRaw != "" {
+				t.Errorf("APIKeyAuth: (%q, present=%v, ambiguous=%v) for %q; want "+
+					"presented-but-unusable (\"\", true, false)",
+					keyRaw, keyPresent, keyAmbiguous, tc.value)
+			}
+		})
+	}
+}
+
+// TestBearerSchemeAnnouncementIsBoundedByTheTokenGrammar is the anti-vacuity
+// control for the test above: a rule that called EVERY Authorization value an
+// announcement would satisfy it, and would then refuse credentials belonging to
+// other schemes instead of leaving them alone.
+func TestBearerSchemeAnnouncementIsBoundedByTheTokenGrammar(t *testing.T) {
+	for _, v := range []string{
+		"Basic YWJjOmRlZg==",                   // a different scheme
+		"BearerX sbh_ffff",                     // a longer scheme NAME
+		"Bearer-Token sbh_ffff",                // ditto: '-' is a tchar
+		"",                                     // nothing
+		"sbh_ffffffffffffffffffffffffffffffff", // a raw key, no scheme
+	} {
+		if _, ok := bearerAny(v); ok {
+			t.Errorf("bearerAny(%q) reports a Bearer announcement; only the Bearer "+
+				"auth-scheme is one, and refusing other schemes here would break "+
+				"any future authenticator this product adds", v)
+		}
+	}
+	// Positive control: the shapes that ARE announcements carrying a usable
+	// credential must still come through verbatim.
+	for _, tc := range []struct{ in, want string }{
+		{"Bearer sbh_ffff", "sbh_ffff"},
+		{"bearer   sbh_ffff", "sbh_ffff"},
+		{"BEARER eyJhbGciOiJIUzI1NiJ9.e30.sig", "eyJhbGciOiJIUzI1NiJ9.e30.sig"},
+		{"Bearer YWJjZGVm==", "YWJjZGVm=="},
+	} {
+		got, ok := bearerAny(tc.in)
+		if !ok || got != tc.want {
+			t.Errorf("bearerAny(%q) = (%q, %v), want (%q, true)", tc.in, got, ok, tc.want)
+		}
+	}
+}

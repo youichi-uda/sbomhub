@@ -280,19 +280,56 @@ func TestAPIKeyCredentialDuplicateAuthorization(t *testing.T) {
 			wantPresented: true,
 		},
 		{
-			name:          "a bare scheme with nothing after it is not a Bearer credential",
+			// M51 round 2 flipped this expectation from `false`. The grammar
+			// reading behind the old value was right — a bare scheme name
+			// carries no token68 — but the CONCLUSION drawn from it was the
+			// fail-open one: "not a well-formed credential" was reported as "no
+			// credential", which on a MultiAuth route in `anonymous` self-host
+			// means the DEFAULT tenant's Owner. The caller announced Bearer, so
+			// the request must end here. Same reasoning as the `Bearer   ` case
+			// above, which already said so.
+			name:          "a bare scheme with nothing after it is presented and unusable",
 			values:        []string{"Bearer"},
 			wantRaw:       "",
-			wantPresented: false,
+			wantPresented: true,
 		},
 		{
-			// RFC 9110's credentials grammar is `auth-scheme 1*SP token68`;
-			// HTAB is not SP. Accepting it would authenticate a syntax the
-			// Clerk path parses differently (Codex R5, Low).
-			name:          "a tab between scheme and token is not a Bearer credential",
+			// RFC 9110's credentials grammar is `auth-scheme 1*SP token68` and
+			// HTAB is not SP, so this is still not a USABLE credential — but
+			// M51 round 2 flipped `presented` from false, because reporting it
+			// absent is what let it through. Measured on a throwaway stack
+			// (2026-08-04, anonymous mode) with a PROJECT-SCOPED key against a
+			// project in another tenant:
+			//
+			//	Bearer<SP>sbh_<scoped>        403 forbidden
+			//	Bearer<HTAB>sbh_<scoped>      200 + that project's SBOM
+			//	Bearer<SP><HTAB>sbh_<scoped>  200 + that project's SBOM
+			//
+			// An auth-scheme is an HTTP `token`, so it ends at the HTAB: this
+			// value ANNOUNCES Bearer with a bad delimiter, and is refused,
+			// rather than being mistaken for a request that carries nothing.
+			name:          "a tab between scheme and token is presented and unusable",
 			values:        []string{"Bearer\t" + keyA},
 			wantRaw:       "",
-			wantPresented: false,
+			wantPresented: true,
+		},
+		{
+			// The other half of that measurement: SP, then HTAB. TrimLeft only
+			// stripped SPACE, so the credential arrived with a leading tab, the
+			// `sbh_` prefix test missed it, and the request fell through.
+			name:          "SP then HTAB before the token is presented and unusable",
+			values:        []string{"Bearer \t" + keyA},
+			wantRaw:       "",
+			wantPresented: true,
+		},
+		{
+			// A token68 admits no inner whitespace. This used to be handed on
+			// verbatim, so the credential reaching ValidateKey was not the one
+			// the caller typed.
+			name:          "whitespace inside the token is presented and unusable",
+			values:        []string{"Bearer " + keyA + " x"},
+			wantRaw:       "",
+			wantPresented: true,
 		},
 	}
 

@@ -1082,3 +1082,43 @@ paths — 25 registered individually (16 on `standard`, 9 on `poll`) plus 8 on t
 `/mcp` group and 5 on the two `/cli` groups — i.e. 9x300 + 29x60 =
 **4,440 req/min** for a single API key. The conclusion is unchanged; the number
 is now measured.
+
+### 8.8 A malformed Bearer credential is now refused, not ignored
+
+Found by review after §8.6, and the same fall-through reached through the
+DELIMITER rather than the prefix.
+
+`bearerAny` reported "no credential" for anything after the scheme that was not
+`<space>...`, and it stripped only SPACE when skipping the delimiter. A tab
+therefore made a perfectly recognisable key look like the absence of one — and
+absence, on a MultiAuth route in `SBOMHUB_AUTH_MODE=anonymous`, means the default
+tenant's Owner. Measured on a throwaway stack (2026-08-04) with a
+**project-scoped** key against a project in another tenant:
+
+| header | before | after |
+|---|---|---|
+| `Authorization: Bearer<SP>sbh_<scoped key>` | 403 `forbidden` | 403 `forbidden` |
+| `Authorization: Bearer<SP><HTAB>sbh_<same>` | **200 + that project's SBOM** | **401** `invalid API key` |
+| `Authorization: Bearer<HTAB>sbh_<same>` | **200 + that project's SBOM** | **401** `invalid API key` |
+| `Authorization: Bearer` (bare scheme) | served as the default identity | **401** `invalid API key` |
+
+The rule is now in two parts, matching RFC 9110. Whether a request ANNOUNCED
+Bearer is decided by the scheme name alone — an auth-scheme is an HTTP `token`,
+so it ends at the first non-`tchar`, which makes `Bearer<HTAB>x` an announcement
+with a bad delimiter while `BearerX x` remains a different scheme. Whether the
+announcement carries a usable credential is then decided by `1*SP token68`. An
+announcement that fails the second test is **presented but unusable**, which every
+window turns into 401 instead of a default identity.
+
+**What operators may need to change.** Nothing for a well-formed client:
+`Bearer <token>` with one or more spaces and a `token68` credential is unaffected,
+and both credential kinds this product accepts are `token68` by construction (an
+`sbh_` key is `sbh_` + hex; a Clerk JWT is base64url segments joined by `.`).
+Requests that will newly receive 401 rather than being served as the default
+tenant: a tab anywhere in or before the credential, a bare `Bearer`, whitespace
+or control characters inside the token.
+
+One further tightening falls out of it: `Authorization: Bearer` followed by a
+second `Authorization: Bearer <token>` is now **ambiguous** (a credential
+announced twice with different content) and answers 401, where the bare value
+used to be invisible.

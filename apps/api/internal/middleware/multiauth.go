@@ -303,16 +303,103 @@ func asIs(v string) (string, bool) {
 // credential is empty, which pickSingleCredential reports as
 // presented-but-unusable rather than absent. Announcing a credential and
 // supplying none must end the request, not fall through to a default identity.
+// # Why announcing the scheme is enough to be "presented" (M51 round 2, High)
+//
+// The version this replaces reported "not a candidate" for anything after the
+// scheme that was not `1*SP <rest>`, and TrimLeft only stripped SPACE, so
+// `Bearer<HTAB>sbh_...` and `Bearer<SP><HTAB>sbh_...` both fell out as "no
+// credential". On a MultiAuth route in `anonymous` self-host that means the
+// self-hosted handler, i.e. the DEFAULT tenant's Owner. Measured on a throwaway
+// stack (2026-08-04) with a PROJECT-SCOPED key, against a project in another
+// tenant:
+//
+//	Authorization: Bearer<SP>sbh_<scoped>          403 forbidden
+//	Authorization: Bearer<SP><HTAB>sbh_<scoped>    200 + that project's SBOM
+//	Authorization: Bearer<HTAB>sbh_<scoped>        200 + that project's SBOM
+//
+// One tab, and the key's project scope is gone — the same fall-through the
+// prefix casing produced, and APIKeyAuth answered 401 to the first of those two
+// while MultiAuth served it, so the windows disagreed as well.
+//
+// So the rule is now in two parts. Whether the request ANNOUNCED Bearer is
+// decided by the scheme name alone, because an auth-scheme is an HTTP `token`
+// and therefore ends at the first non-tchar: `Bearer<HTAB>x` announces Bearer
+// with a bad delimiter, while `BearerX x` is a different scheme name entirely.
+// Whether the announcement carries a USABLE credential is then decided by
+// `1*SP token68`. An announcement that fails the second test is
+// presented-but-unusable — ("", true) — which every caller turns into 401.
 func bearerAny(v string) (string, bool) {
 	const scheme = "bearer"
-	if len(v) <= len(scheme) || !strings.EqualFold(v[:len(scheme)], scheme) {
+	if len(v) < len(scheme) || !strings.EqualFold(v[:len(scheme)], scheme) {
 		return "", false
 	}
 	rest := v[len(scheme):]
-	if rest[0] != ' ' {
+	// A tchar here means the scheme name is a longer word (`BearerX`), so this
+	// is not the Bearer scheme and not this product's credential at all.
+	if rest != "" && isTchar(rest[0]) {
 		return "", false
 	}
-	return strings.TrimLeft(rest, " "), true
+	// From here the caller announced Bearer, so anything unusable must END the
+	// request rather than be mistaken for no credential.
+	if rest == "" || rest[0] != ' ' {
+		return "", true
+	}
+	token := strings.TrimLeft(rest, " ")
+	if token == "" || !isToken68(token) {
+		return "", true
+	}
+	return token, true
+}
+
+// isTchar reports whether c may appear in an HTTP `token` (RFC 9110 §5.6.2),
+// which is the production an auth-scheme name uses.
+func isTchar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
+// isToken68 reports whether s is a `token68` (RFC 9110 §11.2), the production a
+// Bearer credential uses:
+//
+//	token68 = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="
+//
+// Both credentials this product accepts satisfy it: an `sbh_` key is
+// `sbh_` + hex, and a Clerk JWT's compact serialisation is base64url segments
+// (ALPHA / DIGIT / "-" / "_") joined by ".". Nothing legitimate is refused by
+// this check; what it refuses is whitespace and control characters smuggled into
+// the credential, which is what made a tab look like the absence of one.
+func isToken68(s string) bool {
+	if s == "" {
+		return false
+	}
+	i := 0
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			continue
+		}
+		switch c {
+		case '-', '.', '_', '~', '+', '/':
+			continue
+		}
+		break
+	}
+	if i == 0 {
+		return false // no leading 1*( ... )
+	}
+	for ; i < len(s); i++ {
+		if s[i] != '=' {
+			return false
+		}
+	}
+	return true
 }
 
 // bearerFromRequest resolves the ONE `Authorization: Bearer ...` credential a
