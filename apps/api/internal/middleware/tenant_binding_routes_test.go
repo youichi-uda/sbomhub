@@ -241,12 +241,18 @@ var m52UnreadRegistrationMethods = map[string]bool{
 	"AddRouteToHost": true, // (host, Routable)
 }
 
+// m52AliasResolver answers "what was `name` bound to, as of this position?".
+type m52AliasResolver func(name string, at token.Pos) (string, bool)
+
 type m52Route struct {
 	method   string
 	fullPath string
 	handler  string
 	chain    []string
-	line     int
+	// chainAt is the source position the chain was collected at; alias
+	// expansion resolves names as of this point, not as of end-of-file.
+	chainAt token.Pos
+	line    int
 }
 
 type m52Group struct {
@@ -262,7 +268,7 @@ type m52Group struct {
 // appends to a group's middleware for registrations that follow it, and
 // echo.Group.Group snapshots the parent's middleware at the moment the child
 // is created. Two independent passes would get both wrong.
-func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group, aliases map[string]string) {
+func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group, aliasAt m52AliasResolver) {
 	t.Helper()
 
 	fset := token.NewFileSet()
@@ -289,13 +295,24 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 	// safe direction; guessing would be the other one.
 	root, rootFn := m52EchoInstanceName(t, file)
 
-	bindingCount := map[string]int{}
-	bindingText := map[string]string{}
-	bindingExpr := map[string]ast.Expr{}
+	// Every binding, WITH its source position. Resolution is "the last binding
+	// of this name before the use", which is what straight-line Go means and
+	// what a map keyed by name alone could not express.
+	//
+	// The previous rule was "expand only names bound exactly once". It was
+	// meant to avoid guessing but guessed the other way: a middleware assigned
+	// twice whose final value IS appmw.TenantTx(db) went unexpanded and its
+	// routes read as unbound, and an unrelated variable that merely SHADOWED a
+	// handler name pushed the real one's count to two and failed the handler
+	// pins of routes nobody had touched. Both redden correct code.
+	type m52Binding struct {
+		pos  token.Pos
+		text string
+		expr ast.Expr
+	}
+	bindings := map[string][]m52Binding{}
 	collect := func(name string, rhs ast.Expr) {
-		bindingCount[name]++
-		bindingText[name] = render(rhs)
-		bindingExpr[name] = rhs
+		bindings[name] = append(bindings[name], m52Binding{pos: rhs.Pos(), text: render(rhs), expr: rhs})
 	}
 	// Only the router function's own bindings, plus package-level ones. A
 	// file-wide map conflated distinct lexical bindings that happen to share a
@@ -312,13 +329,28 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 			m52VisitBindingNode(spec, collect)
 		}
 	}
-	aliases = map[string]string{}
-	uniqueExpr := map[string]ast.Expr{}
-	for name, n := range bindingCount {
-		if n == 1 {
-			aliases[name] = bindingText[name]
-			uniqueExpr[name] = bindingExpr[name]
+	resolveAt := func(name string, at token.Pos) (m52Binding, bool) {
+		best, found := m52Binding{}, false
+		for _, b := range bindings[name] {
+			if b.pos < at && (!found || b.pos > best.pos) {
+				best, found = b, true
+			}
 		}
+		return best, found
+	}
+	aliasAt = func(name string, at token.Pos) (string, bool) {
+		b, ok := resolveAt(name, at)
+		if !ok {
+			return "", false
+		}
+		return b.text, true
+	}
+	exprAt := func(name string, at token.Pos) (ast.Expr, bool) {
+		b, ok := resolveAt(name, at)
+		if !ok {
+			return nil, false
+		}
+		return b.expr, true
 	}
 
 	// Global middleware: `<root>.Use(...)` and `<root>.Pre(...)`. echo.Echo
@@ -446,8 +478,9 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 			}
 			routes = append(routes, m52Route{
 				method:   sel.Sel.Name,
+				chainAt:  node.Pos(),
 				fullPath: grp.prefix + path,
-				handler:  m52HandlerIdentity(node.Args[1], uniqueExpr, render),
+				handler:  m52HandlerIdentity(node.Args[1], node.Pos(), exprAt, render),
 				chain:    chain,
 				line:     fset.Position(node.Pos()).Line,
 			})
@@ -461,7 +494,7 @@ func m52ParseMainGo(t *testing.T) (routes []m52Route, groups map[string]m52Group
 			len(groups), mainGoPath)
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].line < routes[j].line })
-	return routes, groups, aliases
+	return routes, groups, aliasAt
 }
 
 // m52EachBindingIn visits every single-value binding of a plain identifier
@@ -593,7 +626,7 @@ func m52Normalise(s string) string { return strings.Join(strings.Fields(s), " ")
 // to the whitespace-normalised expression. For an inline handler that is the
 // right answer anyway: the body IS the code the classification was written
 // about, so a change to it should demand a re-read.
-func m52HandlerIdentity(arg ast.Expr, uniqueExpr map[string]ast.Expr, render func(ast.Node) string) string {
+func m52HandlerIdentity(arg ast.Expr, at token.Pos, exprAt func(string, token.Pos) (ast.Expr, bool), render func(ast.Node) string) string {
 	sel, ok := arg.(*ast.SelectorExpr)
 	if !ok {
 		return m52Normalise(render(arg))
@@ -602,7 +635,7 @@ func m52HandlerIdentity(arg ast.Expr, uniqueExpr map[string]ast.Expr, render fun
 	if !ok {
 		return m52Normalise(render(arg))
 	}
-	bound, ok := uniqueExpr[recv.Name]
+	bound, ok := exprAt(recv.Name, at)
 	if !ok {
 		return m52Normalise(render(arg))
 	}
@@ -641,7 +674,7 @@ func m52HandlerIdentity(arg ast.Expr, uniqueExpr map[string]ast.Expr, render fun
 // `seen` is a cycle guard and the iteration cap bounds pathological chains;
 // neither is a semantic limit. Anything still unresolved stays as written and
 // reads as "no TenantTx".
-func m52Expand(entry string, aliases map[string]string) string {
+func m52Expand(entry string, at token.Pos, aliasAt m52AliasResolver) string {
 	// A chain of bindings that each mention two others grows exponentially.
 	// main.go's are shallow (the whole middleware package's suite runs in
 	// ~0.1s), but a cap keeps a pathological one from turning this test into a
@@ -655,7 +688,7 @@ func m52Expand(entry string, aliases map[string]string) string {
 			return cur
 		}
 		seen[cur] = true
-		next := m52SubstituteIdents(cur, aliases)
+		next := m52SubstituteIdents(cur, at, aliasAt)
 		if next == cur {
 			return cur
 		}
@@ -666,7 +699,7 @@ func m52Expand(entry string, aliases map[string]string) string {
 
 // m52SubstituteIdents replaces every whole-identifier occurrence of an alias
 // name in `text` with its bound expression, once.
-func m52SubstituteIdents(text string, aliases map[string]string) string {
+func m52SubstituteIdents(text string, at token.Pos, aliasAt m52AliasResolver) string {
 	var b strings.Builder
 	i := 0
 	for i < len(text) {
@@ -683,7 +716,8 @@ func m52SubstituteIdents(text string, aliases map[string]string) string {
 		// `pkg.Name` — only the leading identifier of a selector is a local
 		// binding, and a name preceded by '.' is a field or method.
 		precededByDot := i > 0 && text[i-1] == '.'
-		if repl, ok := aliases[word]; ok && !precededByDot {
+		repl, ok := aliasAt(word, at)
+		if ok && !precededByDot {
 			b.WriteString(repl)
 		} else {
 			b.WriteString(word)
@@ -702,9 +736,9 @@ func m52IsIdentPart(c byte) bool {
 }
 
 // m52HasTenantTx reports whether an effective chain carries appmw.TenantTx.
-func m52HasTenantTx(chain []string, aliases map[string]string) bool {
+func m52HasTenantTx(chain []string, at token.Pos, aliasAt m52AliasResolver) bool {
 	for _, entry := range chain {
-		if strings.Contains(m52Expand(entry, aliases), "TenantTx(") {
+		if strings.Contains(m52Expand(entry, at, aliasAt), "TenantTx(") {
 			return true
 		}
 	}
@@ -714,14 +748,14 @@ func m52HasTenantTx(chain []string, aliases map[string]string) bool {
 // m52NoTenantTxRoutes returns the derived "<METHOD> <path>" → route map.
 func m52NoTenantTxRoutes(t *testing.T) map[string]m52Route {
 	t.Helper()
-	routes, _, aliases := m52ParseMainGo(t)
+	routes, _, aliasAt := m52ParseMainGo(t)
 	if len(routes) < 100 {
 		t.Fatalf("parsed only %d routes from %s — the parser is blind, not the router",
 			len(routes), mainGoPath)
 	}
 	out := map[string]m52Route{}
 	for _, r := range routes {
-		if m52HasTenantTx(r.chain, aliases) {
+		if m52HasTenantTx(r.chain, r.chainAt, aliasAt) {
 			continue
 		}
 		out[r.method+" "+r.fullPath] = r
@@ -1225,7 +1259,7 @@ func TestM52ProductionWiresTheBindingsTheDrivesMeasure(t *testing.T) {
 	fset := token.NewFileSet()
 	files := m52CmdServerFiles(t, fset)
 	render := func(n ast.Node) string { return m52Normalise(renderNode(fset, n)) }
-	_, _, aliases := m52ParseMainGo(t)
+	_, _, aliasAt := m52ParseMainGo(t)
 
 	// Names of functions in the package whose body constructs a real
 	// DBTxManager, so `TxManager: newTenantTxManager(db)` resolves as well as
@@ -1245,7 +1279,7 @@ func TestM52ProductionWiresTheBindingsTheDrivesMeasure(t *testing.T) {
 		}
 	}
 	bindsTenant := func(value string) bool {
-		expanded := m52Expand(value, aliases)
+		expanded := m52Expand(value, token.Pos(1<<30), aliasAt)
 		if strings.Contains(expanded, "NewDBTxManager(") {
 			return true
 		}
@@ -1714,7 +1748,7 @@ func TestM52ParserIsNotBlind(t *testing.T) {
 		minRoutes = 100
 		minGroups = 5
 	)
-	routes, groups, aliases := m52ParseMainGo(t)
+	routes, groups, aliasAt := m52ParseMainGo(t)
 	if len(routes) < minRoutes {
 		t.Errorf("resolved %d routes from main.go, want at least %d — the parser is blind, "+
 			"not the router", len(routes), minRoutes)
@@ -1730,7 +1764,7 @@ func TestM52ParserIsNotBlind(t *testing.T) {
 	// never matches, which no amount of table editing would reveal as a bug.
 	bound, unbound := 0, 0
 	for _, r := range routes {
-		if m52HasTenantTx(r.chain, aliases) {
+		if m52HasTenantTx(r.chain, r.chainAt, aliasAt) {
 			bound++
 		} else {
 			unbound++
