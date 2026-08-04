@@ -757,9 +757,9 @@ func TestM52TriageRunBindsOnAPoisonedConnection(t *testing.T) {
 		code, resp := m52Call(t, nc.RunTriage, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/triage/run",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
-		if code < 500 {
-			t.Fatalf("control: with the binding removed the run answered %d %s, want a 5xx. "+
-				"If an unbound run succeeds, the DBTxManager wiring is not what makes the "+
+		if code != http.StatusInternalServerError {
+			t.Fatalf("control: with the binding removed the run answered %d %s, want 500. If "+
+				"an unbound run succeeds, the DBTxManager wiring is not what makes the "+
 				"positive case above work and this test measures nothing.", code, resp)
 		}
 		t.Logf("control observed: %d %s", code, strings.TrimSpace(resp))
@@ -801,9 +801,13 @@ func TestM52VexDraftReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 		code, resp := m52Call(t, nc.Reanalyse, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/vex-drafts/"+draftID.String()+"/reanalyse",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String(), "draft_id": draftID.String()}, "{}")
-		if code < 400 {
-			t.Fatalf("control: with the binding removed the reanalyse answered %d %s, want a "+
-				"refusal (500 from the errored read, or 404 from a zero-row one)", code, resp)
+		if code != http.StatusInternalServerError {
+			t.Fatalf("control: with the binding removed the reanalyse answered %d %s, want "+
+				"500. On THIS connection state the unbound outcome is specifically an "+
+				"ERROR — the placeholder is the empty string, so the policy raises 22P02 "+
+				"rather than quietly matching nothing. A 404 here would mean the read "+
+				"returned zero rows, i.e. the poison is not what it should be; a 2xx would "+
+				"mean the binding is not what makes the positive case work.", code, resp)
 		}
 		t.Logf("control observed: %d %s", code, strings.TrimSpace(resp))
 	})
@@ -844,9 +848,10 @@ func TestM52CRAReportRunBindsOnAPoisonedConnection(t *testing.T) {
 		code, resp := m52Call(t, nc.RunReport, http.MethodPost,
 			"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/run",
 			f.TenantID, f.UserID, map[string]string{"id": f.ProjectID.String()}, body)
-		if code < 400 {
-			t.Fatalf("control: with the binding removed the run answered %d %s, want a refusal",
-				code, resp)
+		if code != http.StatusInternalServerError {
+			t.Fatalf("control: with the binding removed the run answered %d %s, want 500 — "+
+				"the 22P02 the empty-string placeholder raises. Anything else means the "+
+				"control is not removing what the positive case relies on.", code, resp)
 		}
 		t.Logf("control observed: %d %s", code, strings.TrimSpace(resp))
 	})
@@ -894,9 +899,11 @@ func TestM52CRAReanalyseBindsOnAPoisonedConnection(t *testing.T) {
 			"/api/v1/projects/"+f.ProjectID.String()+"/cra-reports/"+reportID.String()+"/reanalyse",
 			f.TenantID, f.UserID,
 			map[string]string{"id": f.ProjectID.String(), "report_id": reportID.String()}, "{}")
-		if code < 400 {
+		if code != http.StatusInternalServerError {
 			t.Fatalf("control: with the binding removed the reanalyse answered %d %s, want "+
-				"a refusal — that refusal IS the production defect, reproduced", code, resp)
+				"500 — that 500 IS the production defect, reproduced. A 404 would mean the "+
+				"read returned zero rows instead of erroring, which is the OTHER unbound "+
+				"outcome and not the one this connection state produces.", code, resp)
 		}
 		t.Logf("control observed: %d %s", code, strings.TrimSpace(resp))
 	})
