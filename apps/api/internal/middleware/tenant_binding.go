@@ -165,15 +165,32 @@ const (
 	// checks the test set actually covers the table.
 	TenantBindingBindsItself TenantBindingKind = "binds-itself"
 
-	// TenantBindingTouchesNoRLSTable: the route's code path reads and writes
-	// only tables that have Row-Level Security DISABLED, so no GUC is needed.
+	// TenantBindingTouchesNoRLSTable: the route's code path names only tables
+	// that the runtime role can reach with no tenant bound, so no GUC is
+	// needed. In practice today that means Row-Level Security is DISABLED on
+	// all of them.
 	//
-	// RLSExemptTables must name them. Every named table is checked against
-	// live `pg_class.relrowsecurity` by
-	// TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables, so a migration
-	// that turns RLS on for one of them reddens this gate instead of turning
-	// the route into the next /reanalyse. An empty list means the route
-	// touches no table at all.
+	// RLSExemptTables must name them, and
+	// TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables checks each against
+	// the live database:
+	//
+	//	relrowsecurity false  → accepted. PostgreSQL ignores every stored
+	//	                        policy, so nothing about the tenant GUC can
+	//	                        break the route.
+	//	a materialised view   → accepted and LOGGED. Reads return stored rows
+	//	                        and carry no row security.
+	//	relrowsecurity true   → the runtime role is made to read the table on a
+	//	                        connection in the poisoned state. If that
+	//	                        statement RAISES, the rule fails. If it does
+	//	                        not, the rule passes and the run logs what was
+	//	                        and was not established.
+	//
+	// That last branch is why the wording above is "can reach" rather than
+	// "has RLS disabled": a permissive policy can admit the unbound read, and
+	// deciding otherwise from the policy TEXT produced a false failure on a
+	// correct schema (see m52UnboundReadVerdict's doc comment for the exact
+	// policy that broke the text model). An empty list means the route touches
+	// no table at all.
 	TenantBindingTouchesNoRLSTable TenantBindingKind = "touches-no-rls-table"
 )
 
