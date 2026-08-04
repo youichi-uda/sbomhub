@@ -25,6 +25,22 @@
 //	sibling project (same tenant)     200     37517e5f3dc66819   []
 //	foreign tenant                    200     37517e5f3dc66819   []
 //
+// and AFTER the fix, same stack, same fixtures:
+//
+//	positive control (own, hist=2)    200     f2370f09294ea7f1   [{...}, {...}]
+//	own project, hist=0               200     37517e5f3dc66819   []
+//	unassigned random UUID            404     ae9ad7573f76f2c5   {"message":"assessment not found in project"}
+//	sibling project (same tenant)     404     ae9ad7573f76f2c5   {"message":"assessment not found in project"}
+//	foreign tenant                    404     ae9ad7573f76f2c5   {"message":"assessment not found in project"}
+//
+// The three 404 responses were also compared INCLUDING response headers (Date
+// and X-Request-Id stripped) and hashed identically:
+// b1e4a747f2dff4d993db287315d04497d475d9c441f8960b6ef1df81c4111d80.
+//
+// The tests below drive handlers directly, so they pin status + message
+// rather than serialised wire bytes; that is why the wire-level equality is
+// recorded here as a measurement rather than asserted in code.
+//
 // M47 W1's contract is that "unknown" and "yours but out of scope" collapse
 // into ONE answer so the status cannot be used as an existence oracle. The
 // pre-fix history route satisfied the anti-probing half (all four cells were
@@ -201,6 +217,109 @@ func TestM50SSVCHistory_UnknownSiblingAndForeignAnswerAlike(t *testing.T) {
 				cells[i].name, answers[i].code, answers[i].body,
 				cells[0].name, answers[0].code, answers[0].body)
 		}
+	}
+
+	// And the answer must be the SIBLING ROUTE's answer, not merely some 404 of
+	// its own. DELETE on the same out-of-scope id is the route this one was
+	// diverging from; drive it and compare the pair. (Codex R1, Low: this file
+	// exercises handlers directly, so it pins status + message rather than the
+	// serialised wire bytes. The wire-level equality was measured separately
+	// over real HTTP — see the table in this file's package comment.)
+	delCode, delBody := ssvcMBDelete(t, appDB, h, caller.tenantID, caller.projectID, unknownID)
+	if delCode != answers[0].code || delBody != answers[0].body {
+		t.Errorf("history answers %d %q for an out-of-scope id but the sibling DELETE answers "+
+			"%d %q — the whole point of this wave is that the two agree",
+			answers[0].code, answers[0].body, delCode, delBody)
+	}
+}
+
+// TestM50SSVCHistory_ZeroUUIDAssessmentIsNotShortCircuitedTo404 (Codex R1,
+// High): the first cut of AssessmentInProject answered `false` WITHOUT
+// querying when any id was `uuid.Nil`, copying the guard scope_checks.go's
+// predicates use. `00000000-0000-0000-0000-000000000000` is a legal
+// PostgreSQL uuid, nothing in the schema or in CreateAssessment forbids it as
+// a primary key, and `uuid.Parse` accepts it in the route — so an in-scope
+// assessment carrying that id read its history fine before this wave and
+// would have 404'd after. Contrived, but it is a real row answering with
+// someone else's error, which is the defect class this wave is closing.
+//
+// Note what the guard did NOT do: it was not an oracle (the fast 404 was the
+// same whether or not the zero row existed). It was a correctness bug only,
+// which is why the fix is to delete the short circuit and let the predicate
+// answer.
+func TestM50SSVCHistory_ZeroUUIDAssessmentIsNotShortCircuitedTo404(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+
+	seed := ssvcABSeedAll(t, migDB, "m50zero")
+	h := ssvcABHandler(appDB)
+
+	// Seed an in-scope assessment (with history) whose PK is the zero uuid.
+	zeroID := uuid.Nil
+	tx, err := migDB.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SELECT set_config('app.current_tenant_id', $1, true)`, seed.tenantID.String()); err != nil {
+		t.Fatalf("SET LOCAL: %v", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO ssvc_assessments
+			(id, project_id, tenant_id, vulnerability_id, cve_id,
+			 exploitation, automatable, technical_impact, mission_prevalence,
+			 safety_impact, decision)
+		VALUES ($1, $2, $3, $4, $5, 'active', 'yes', 'total', 'essential',
+			'significant', 'immediate')`,
+		zeroID, seed.projectID, seed.tenantID, seed.vulnA, seed.cveA); err != nil {
+		t.Fatalf("insert zero-uuid assessment (if PostgreSQL refused this, the "+
+			"guard would be defensible and this test should be deleted): %v", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO ssvc_assessment_history
+			(assessment_id,
+			 new_exploitation, new_automatable, new_technical_impact,
+			 new_mission_prevalence, new_safety_impact, new_decision,
+			 change_reason)
+		VALUES ($1, 'active', 'yes', 'total', 'essential', 'significant',
+			'immediate', 'ZERO UUID ROW')`, zeroID); err != nil {
+		t.Fatalf("insert history for the zero-uuid assessment: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	// C27: the seed's tenant cleanup cascades, but the zero uuid is a global
+	// singleton — leaving it behind would collide with the next run of this
+	// test. Reap it explicitly.
+	t.Cleanup(func() {
+		cleanupTx, err := migDB.Begin()
+		if err != nil {
+			t.Errorf("C27 cleanup begin: %v", err)
+			return
+		}
+		defer func() { _ = cleanupTx.Rollback() }()
+		if _, err := cleanupTx.Exec(`SELECT set_config('app.current_tenant_id', $1, true)`, seed.tenantID.String()); err != nil {
+			t.Errorf("C27 cleanup SET LOCAL: %v", err)
+			return
+		}
+		if _, err := cleanupTx.Exec(`DELETE FROM ssvc_assessments WHERE id = $1`, zeroID); err != nil {
+			t.Errorf("C27 cleanup delete zero-uuid assessment: %v", err)
+			return
+		}
+		if err := cleanupTx.Commit(); err != nil {
+			t.Errorf("C27 cleanup commit: %v", err)
+		}
+	})
+
+	code, body := ssvcMBHistory(t, appDB, h, seed.tenantID, seed.projectID, zeroID)
+	if code != http.StatusOK {
+		t.Fatalf("history of an IN-SCOPE assessment whose id is the zero uuid: status %d "+
+			"body %s, want 200 — a short circuit on uuid.Nil turns a real, readable row "+
+			"into someone else's 404", code, body)
+	}
+	if !strings.Contains(body, "ZERO UUID ROW") {
+		t.Errorf("history of the zero-uuid assessment = %s, want the recorded change", body)
 	}
 }
 

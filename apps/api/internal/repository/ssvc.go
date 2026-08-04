@@ -436,14 +436,22 @@ func (r *SSVCRepository) DeleteAssessment(ctx context.Context, projectID, tenant
 // Callers MUST run this inside the request's TenantTx, or the RLS half
 // degrades to "0 rows" — which this reports as not-in-scope (fail closed).
 //
+// One deliberate divergence from the scope_checks.go predicates: NO
+// `if id == uuid.Nil { return false, nil }` short circuit (Codex R1, High).
+// `00000000-0000-0000-0000-000000000000` is a legal PostgreSQL uuid, nothing
+// in the schema or in CreateAssessment forbids it as a primary key, and
+// uuid.Parse accepts it in the route — so the guard would answer "not in
+// scope" for a row that IS in scope and was readable before M50. It never
+// helped: it saved one indexed lookup on a request that was already going to
+// the database anyway, and a Nil tenant_id / project_id matches no row
+// through the predicate regardless. Pinned by
+// handler/m50_ssvc_history_scope_integration_test.go's zero-uuid test.
+//
 // Shape note: SELECT EXISTS always returns exactly one row, so a false answer
 // is a real "no" and never a swallowed error — unlike a QueryRow + ErrNoRows
 // dance, where a scan failure and an absent row have to be told apart at
 // every call site.
 func (r *SSVCRepository) AssessmentInProject(ctx context.Context, projectID, tenantID, id uuid.UUID) (bool, error) {
-	if tenantID == uuid.Nil || projectID == uuid.Nil || id == uuid.Nil {
-		return false, nil
-	}
 	const query = `
 		SELECT EXISTS (
 			SELECT 1 FROM ssvc_assessments
@@ -483,10 +491,18 @@ func (r *SSVCRepository) AssessmentInProject(ctx context.Context, projectID, ten
 // an in-scope assessment, and an empty slice for everything else. What
 // changed is upstream — SSVCService.GetAssessmentHistory now calls
 // AssessmentInProject FIRST and returns ErrSSVCAssessmentNotInProject (404)
-// when it is false, so the empty slice this method returns now means only
-// "in scope, no recorded changes". Keeping the scoping predicate here as well
-// is deliberate belt-and-braces: the existence check is an authorization
-// gate, not this read's only tenancy guard.
+// when it is false, so the empty slice a CALLER sees on that path means "in
+// scope, no recorded changes" — with one documented exception: the two
+// statements run at READ COMMITTED, so a delete that cascades the history
+// away between them also surfaces as an empty slice. See the service method
+// for why that anomaly is accepted (Codex R1, High: the earlier wording here
+// stated the meaning without the exception).
+//
+// Keeping the scoping predicate in this statement as well is deliberate
+// belt-and-braces: the existence check is an authorization gate, not this
+// read's only tenancy guard. Direct callers that skip the service — the
+// repository's own tests — still get an empty slice for an out-of-scope id
+// rather than an error.
 func (r *SSVCRepository) GetAssessmentHistory(ctx context.Context, projectID, tenantID, assessmentID uuid.UUID) ([]model.SSVCAssessmentHistory, error) {
 	query := `
 		SELECT h.id, h.assessment_id,

@@ -66,22 +66,43 @@ type m50TxProbeScanner struct {
 	appDB *sql.DB
 	vuln  model.Vulnerability
 
-	// poisonFirst issues a statement that ERRORS before the write, to model
-	// a scanner whose SQL fails partway through (a constraint violation, a
-	// bad cast) rather than one whose HTTP call fails.
+	// earlier, when set, is written BEFORE the poison statement and must
+	// succeed. It is what proves the abort discards work that had already
+	// landed, rather than only refusing the writes that came after (Codex R1,
+	// Medium: the first cut poisoned first and so proved the weaker claim).
+	earlier *model.Vulnerability
+
+	// poisonFirst issues a statement that ERRORS before `vuln` is written, to
+	// model a scanner whose SQL fails partway through (a constraint
+	// violation, a bad cast) rather than one whose HTTP call fails.
 	poisonFirst bool
 	// returnErr is what ScanComponents returns; runScan logs it and commits
 	// anyway.
 	returnErr error
 
-	sawTx          bool
-	visibleOutside int
-	createErr      error
-	poisonErr      error
+	sawTx            bool
+	visibleOutside   int
+	earlierCreateErr error
+	earlierInTx      int
+	createErr        error
+	poisonErr        error
 }
 
 func (s *m50TxProbeScanner) ScanComponents(ctx context.Context, _ uuid.UUID) error {
 	_, s.sawTx = database.TxFromContext(ctx)
+	repo := repository.NewVulnerabilityRepository(s.appDB)
+
+	if s.earlier != nil {
+		s.earlierCreateErr = repo.Create(ctx, s.earlier)
+		// Confirm it really landed INSIDE the tx before anything is poisoned;
+		// otherwise "it is gone afterwards" would be consistent with "it was
+		// never written".
+		if err := database.Querier(ctx, s.appDB).QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM vulnerabilities WHERE id = $1`, s.earlier.ID,
+		).Scan(&s.earlierInTx); err != nil {
+			s.earlierInTx = -1
+		}
+	}
 
 	if s.poisonFirst {
 		// A failed statement inside a PostgreSQL transaction aborts the whole
@@ -91,7 +112,6 @@ func (s *m50TxProbeScanner) ScanComponents(ctx context.Context, _ uuid.UUID) err
 			QueryRowContext(ctx, `SELECT 1/0`).Scan(&one)
 	}
 
-	repo := repository.NewVulnerabilityRepository(s.appDB)
 	s.createErr = repo.Create(ctx, &s.vuln)
 
 	// Read the row back on a DIFFERENT connection (the pool, not the tx). If
@@ -188,28 +208,56 @@ func TestM50VulnScanTx_AFailedStatementDiscardsEverything(t *testing.T) {
 	appDB := m46b1OpenOrSkip(t, appURL)
 
 	seed := m47SeedAll(t, migDB, "m50txpoison")
+	earlier := m50NewVuln(t, migDB)
 	scanner := &m50TxProbeScanner{
 		appDB:       appDB,
+		earlier:     &earlier,
 		vuln:        m50NewVuln(t, migDB),
 		poisonFirst: true,
 	}
 	h := &VulnerabilityHandler{db: appDB, nvdService: scanner}
 
-	// No test in this package calls t.Parallel(), so swapping the process
-	// logger for the duration of one test is safe (precedent:
-	// reachability_targets_test.go).
+	// No test in this package calls t.Parallel() and the fake scanner is
+	// synchronous, so swapping the process logger for the duration of one test
+	// is safe (precedent: reachability_targets_test.go). Restored with defer
+	// so a panic in runScan cannot leak the replacement into later tests.
 	var logged strings.Builder
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	h.runScan(context.Background(), seed.sbomID, seed.tenantID, "nvd")
-	slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	func() {
+		defer slog.SetDefault(prev)
+		h.runScan(context.Background(), seed.sbomID, seed.tenantID, "nvd")
+	}()
 
+	// Preconditions: the earlier write really landed inside the tx, and the
+	// poison really poisoned. Without both, "it is gone afterwards" would be
+	// consistent with "it was never written".
+	if scanner.earlierCreateErr != nil {
+		t.Fatalf("the pre-failure write did not succeed: %v", scanner.earlierCreateErr)
+	}
+	if scanner.earlierInTx != 1 {
+		t.Fatalf("the pre-failure write was not visible inside its own tx (count=%d, want 1)",
+			scanner.earlierInTx)
+	}
 	if scanner.poisonErr == nil {
 		t.Fatal("precondition: `SELECT 1/0` did not error, so the transaction was never poisoned")
 	}
 	if scanner.createErr == nil {
 		t.Error("the write after a failed statement SUCCEEDED — PostgreSQL is expected to " +
 			"refuse every command until the aborted transaction ends")
+	}
+
+	// The load-bearing assertion: the write that had ALREADY SUCCEEDED is gone
+	// too. That is what makes this "the whole sweep is discarded" rather than
+	// the much weaker "later commands are refused".
+	var earlierAfter int
+	if err := appDB.QueryRow(
+		`SELECT COUNT(*) FROM vulnerabilities WHERE id = $1`, earlier.ID).Scan(&earlierAfter); err != nil {
+		t.Fatalf("read back the pre-failure write after runScan: %v", err)
+	}
+	if earlierAfter != 0 {
+		t.Errorf("rows from the write that succeeded BEFORE the failure = %d, want 0 — a "+
+			"surviving row would mean the writes are not tx-bound after all", earlierAfter)
 	}
 
 	var after int
@@ -224,10 +272,10 @@ func TestM50VulnScanTx_AFailedStatementDiscardsEverything(t *testing.T) {
 	}
 
 	logs := logged.String()
-	if !strings.Contains(logs, "tenant transaction failed") {
-		t.Errorf("the discarded sweep was NOT reported: logs = %q, want the WithTxFunc commit "+
-			"error surfaced at ERROR (if this ever stops holding, the data loss really is "+
-			"silent and the doc comment must say so)", logs)
+	if !strings.Contains(logs, `level=ERROR msg="vulnerability scan: tenant transaction failed"`) {
+		t.Errorf("the discarded sweep was NOT reported at ERROR: logs = %q. The doc comment "+
+			"claims the loss is logged rather than silent; if that stops holding the comment "+
+			"must say so", logs)
 	}
 	if !strings.Contains(logs, "NVD scan completed") {
 		t.Errorf("logs = %q, want the scanner's own success line too — it is emitted even "+
