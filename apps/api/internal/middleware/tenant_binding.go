@@ -182,15 +182,23 @@ type TenantBindingRule struct {
 	// Kind is the classification.
 	Kind TenantBindingKind
 
-	// Handler is the registration's handler argument as main.go writes it,
-	// with runs of whitespace collapsed to single spaces.
+	// Handler identifies the code the classification is about, as
+	// m52HandlerIdentity renders it from main.go's registration:
 	//
-	// It is part of the key material, not decoration: without it, swapping
-	// `GET /api/v1/health`'s inline "return 200 ok" closure for a handler
-	// that pings the database would inherit a classification made about
-	// different code. Comparing it costs one string per route and fails
-	// loudly with the new text in the message, so the fix is to re-read the
-	// new handler and update this field.
+	//	<constructor>#<method>   for the usual `xHandler.Method` shape, where
+	//	                         the receiver is bound exactly once — so a
+	//	                         RENAME of the variable does not trip this,
+	//	                         but pointing the route at a different handler
+	//	                         does;
+	//	<expression>             for anything else, whitespace-normalised.
+	//	                         /health's inline closure lands here, and that
+	//	                         is right: for an inline handler the body IS
+	//	                         the code being classified.
+	//
+	// It is key material, not decoration. Without it, swapping /health's
+	// "return 200 ok" closure for a handler that pings the database would
+	// inherit a classification written about different code, with the route
+	// set and the middleware chain both unchanged.
 	Handler string
 
 	// Why is the reason for the classification, in the table rather than in a
@@ -238,7 +246,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	// -----------------------------------------------------------------
 	"POST /api/webhooks/clerk": {
 		Kind:     TenantBindingBindsItself,
-		Handler:  "clerkWebhookHandler.Handle",
+		Handler:  "handler.NewClerkWebhookHandler#Handle",
 		BindsVia: []string{"repository.TenantRepository.Create"},
 		ProvedBy: "TestM52ClerkTenantCreateBindsOnAPoisonedConnection",
 		Why: "The handler itself issues no set_config, and every table it names in a " +
@@ -260,7 +268,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	},
 	"POST /api/webhooks/lemonsqueezy": {
 		Kind:    TenantBindingTouchesNoRLSTable,
-		Handler: "lsWebhookHandler.Handle",
+		Handler: "handler.NewLemonSqueezyWebhookHandler#Handle",
 		RLSExemptTables: []string{
 			"audit_logs",
 			"subscription_checkout_claims",
@@ -303,7 +311,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	// -----------------------------------------------------------------
 	"GET /api/v1/public/:token": {
 		Kind:     TenantBindingBindsItself,
-		Handler:  "publicLinkHandler.PublicGet",
+		Handler:  "handler.NewPublicLinkHandler#PublicGet",
 		BindsVia: []string{"service.PublicLinkService.runWithTenantTx"},
 		ProvedBy: "TestM52PublicGetBindsOnAPoisonedConnection",
 		Why: "GetPublicView resolves the token against `public_links` (RLS removed in " +
@@ -315,7 +323,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	},
 	"GET /api/v1/public/:token/download": {
 		Kind:     TenantBindingBindsItself,
-		Handler:  "publicLinkHandler.PublicDownload",
+		Handler:  "handler.NewPublicLinkHandler#PublicDownload",
 		BindsVia: []string{"service.PublicLinkService.runWithTenantTx"},
 		ProvedBy: "TestM52PublicDownloadBindsOnAPoisonedConnection",
 		Why: "GetPublicSbomRaw mirrors GetPublicView: token lookup outside the tx, the " +
@@ -331,7 +339,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	// -----------------------------------------------------------------
 	"POST /api/v1/projects/:id/triage/run": {
 		Kind:    TenantBindingBindsItself,
-		Handler: "vexDraftsHandler.RunTriage",
+		Handler: "handler.NewVexDraftsHandler#RunTriage",
 		BindsVia: []string{
 			"triage.DBTxManager.RunRead",
 			"triage.DBTxManager.RunWrite",
@@ -353,7 +361,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	},
 	"POST /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse": {
 		Kind:    TenantBindingBindsItself,
-		Handler: "vexDraftsHandler.Reanalyse",
+		Handler: "handler.NewVexDraftsHandler#Reanalyse",
 		BindsVia: []string{
 			"triage.Runner.GetDraft",
 			"triage.DBTxManager.RunRead",
@@ -370,7 +378,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	},
 	"POST /api/v1/projects/:id/cra-reports/run": {
 		Kind:    TenantBindingBindsItself,
-		Handler: "craReportsHandler.RunReport",
+		Handler: "handler.NewCRAReportsHandler#RunReport",
 		BindsVia: []string{
 			"triage.DBTxManager.RunRead",
 			"triage.DBTxManager.RunWrite",
@@ -386,7 +394,7 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 	},
 	"POST /api/v1/projects/:id/cra-reports/:report_id/reanalyse": {
 		Kind:    TenantBindingBindsItself,
-		Handler: "craReportsHandler.Reanalyse",
+		Handler: "handler.NewCRAReportsHandler#Reanalyse",
 		BindsVia: []string{
 			"cra.Runner.GetReport",
 			"triage.DBTxManager.RunRead",

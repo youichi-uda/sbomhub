@@ -66,9 +66,24 @@ func m52SchemaDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// m52LiveRLS returns table name → relrowsecurity for every ordinary or
+// m52TableRLS is what the catalog says about one table's row security.
+type m52TableRLS struct {
+	// Enabled is pg_class.relrowsecurity. When false, stored policies are
+	// ignored entirely and the table is a hazard to nobody.
+	Enabled bool
+	// Policies is how many policies the table carries. Zero WITH Enabled is
+	// default-deny: every statement matches nothing.
+	Policies int
+	// TenantGated is how many of them mention `app.current_tenant_id` in
+	// their USING or WITH CHECK expression. This is what distinguishes "RLS
+	// is on and it is the tenant GUC that decides" from "RLS is on for some
+	// other reason" — the enable bit alone does not say.
+	TenantGated int
+}
+
+// m52LiveRLS returns table name → row-security state for every ordinary or
 // partitioned table in the public schema of the migrated database.
-func m52LiveRLS(t *testing.T) map[string]bool {
+func m52LiveRLS(t *testing.T) map[string]m52TableRLS {
 	t.Helper()
 	db := m52SchemaDB(t)
 	// relkind 'r' is an ordinary table and 'p' a PARTITIONED one. Both carry
@@ -79,23 +94,31 @@ func m52LiveRLS(t *testing.T) map[string]bool {
 	// materialised views ('m') and foreign tables ('f') are excluded because
 	// RLS is a property of the underlying table, not of them.
 	rows, err := db.Query(`
-		SELECT c.relname, c.relrowsecurity
+		SELECT c.relname,
+		       c.relrowsecurity,
+		       count(p.oid)                                             AS policies,
+		       count(*) FILTER (WHERE pg_get_expr(p.polqual, p.polrelid)
+		                                LIKE '%app.current_tenant_id%'
+		                           OR pg_get_expr(p.polwithcheck, p.polrelid)
+		                                LIKE '%app.current_tenant_id%') AS tenant_gated
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')`)
+		LEFT JOIN pg_policy p ON p.polrelid = c.oid
+		WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+		GROUP BY c.relname, c.relrowsecurity`)
 	if err != nil {
 		t.Fatalf("read pg_class: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := map[string]bool{}
+	out := map[string]m52TableRLS{}
 	for rows.Next() {
 		var name string
-		var rls bool
-		if err := rows.Scan(&name, &rls); err != nil {
+		var st m52TableRLS
+		if err := rows.Scan(&name, &st.Enabled, &st.Policies, &st.TenantGated); err != nil {
 			t.Fatalf("scan pg_class row: %v", err)
 		}
-		out[name] = rls
+		out[name] = st
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate pg_class: %v", err)
@@ -130,7 +153,7 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 		tables := append([]string{}, rule.RLSExemptTables...)
 		sort.Strings(tables)
 		for _, table := range tables {
-			rls, exists := live[table]
+			st, exists := live[table]
 			if !exists {
 				t.Errorf("%s names %q, which is not an ordinary or partitioned table in "+
 					"schema `public`. A name that resolves to nothing is checked by "+
@@ -141,22 +164,45 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 				continue
 			}
 			checked++
-			if rls {
-				t.Errorf("%s is classified TenantBindingTouchesNoRLSTable, but %q now has "+
-					"ROW LEVEL SECURITY enabled.\n"+
+			if !st.Enabled {
+				continue
+			}
+			// RLS is on. Whether that BREAKS this route depends on what the
+			// policies say, not on the enable bit: a table could carry
+			// `FOR SELECT TO sbomhub_app USING (true)` and remain perfectly
+			// readable with no GUC. Only two states are decided here, and the
+			// third is handed back to a human rather than guessed at.
+			switch {
+			case st.Policies == 0:
+				t.Errorf("%s is classified TenantBindingTouchesNoRLSTable, but %q now has ROW "+
+					"LEVEL SECURITY enabled and NO policies — under RLS that is default-deny, "+
+					"so every statement this route issues against it matches nothing. Move "+
+					"the route onto a TenantTx chain, or re-classify it "+
+					"TenantBindingBindsItself with a binding and a drive.\n"+
+					"Reason recorded for the old classification: %s", key, table, rule.Why)
+			case st.TenantGated > 0:
+				t.Errorf("%s is classified TenantBindingTouchesNoRLSTable, but %q now has ROW "+
+					"LEVEL SECURITY enabled with %d of its %d policies gated on "+
+					"app.current_tenant_id.\n"+
 					"This route carries no TenantTx, so its statements against %q run on a "+
-					"pooled connection with no app.current_tenant_id bound: the policy "+
-					"predicate is NULL on a fresh backend (zero rows) or ''::UUID on a "+
-					"reused one (22P02, a 500).\n"+
-					"Three ways out, in order of preference: move the route onto a TenantTx "+
-					"chain; re-classify it TenantBindingBindsItself and give it a binding "+
-					"plus a drive; or — if the new policy is PERMISSIVE for what this route "+
-					"reads (slo_targets' `tenant_id IS NULL OR ...` is the shape) — say so in "+
-					"a BindsItself rule with a drive, because RLSExemptTables can no longer "+
-					"be the evidence. Note that even a permissive policy of that shape still "+
-					"raises 22P02 on the poisoned connection for any row whose tenant_id is "+
-					"NOT null, so 'permissive' is rarely the whole answer.\n"+
-					"Reason recorded for the old classification: %s", key, table, table, rule.Why)
+					"pooled connection where that setting is NULL on a fresh backend (the "+
+					"predicate is NULL, zero rows) or the empty string on a reused one "+
+					"(''::UUID, 22P02, a 500). Move the route onto a TenantTx chain, or "+
+					"re-classify it TenantBindingBindsItself and give it a binding plus a "+
+					"drive.\nReason recorded for the old classification: %s",
+					key, table, st.TenantGated, st.Policies, table, rule.Why)
+			default:
+				// RLS on, policies present, none of them mentioning the tenant
+				// GUC. Whether those policies admit what this route does is a
+				// question about their expressions, their commands and their
+				// roles — this check does not read any of that, and guessing
+				// would mean reddening CI for a table that is in fact fine.
+				// Recorded as a limitation, loudly, rather than asserted.
+				t.Logf("NOTE: %s names %q, which now has ROW LEVEL SECURITY enabled with %d "+
+					"policies, none of them referencing app.current_tenant_id. This gate "+
+					"cannot tell whether they admit what the route does, so it is NOT "+
+					"failing — re-read the policies and, if they do gate on anything the "+
+					"route cannot supply, re-classify the route.", key, table, st.Policies)
 			}
 		}
 	}
@@ -167,45 +213,65 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 	}
 }
 
-// TestM52PublicIsTheOnlyApplicationSchema underwrites the unqualified table
-// names the table uses.
+// TestM52NoExemptTableNameIsAmbiguous underwrites the unqualified table names
+// the classification table uses.
 //
-// m52LiveRLS keys by bare `relname` inside schema `public`. If the application
-// ever put a table in a second schema, a rule naming it would either report
-// "does not exist" (loud, tolerable) or — worse — silently match a same-named
-// `public` table and check the WRONG object's RLS flag. That second outcome is
-// a miss, not a false positive, and it would be invisible. This asserts the
-// precondition instead of assuming it.
-func TestM52PublicIsTheOnlyApplicationSchema(t *testing.T) {
-	db := m52SchemaDB(t)
-	rows, err := db.Query(`
-		SELECT n.nspname, count(*)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.relkind IN ('r', 'p')
-		  AND n.nspname <> 'public'
-		  AND n.nspname NOT LIKE 'pg\_%'
-		  AND n.nspname <> 'information_schema'
-		GROUP BY n.nspname
-		ORDER BY n.nspname`)
-	if err != nil {
-		t.Fatalf("read pg_namespace: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var schema string
-		var n int
-		if err := rows.Scan(&schema, &n); err != nil {
-			t.Fatalf("scan: %v", err)
+// m52LiveRLS keys by bare `relname` inside schema `public`. If a table with the
+// SAME NAME also existed in another schema, a rule naming it would silently be
+// checked against the `public` one — the wrong object, and a miss nothing would
+// reveal.
+//
+// The check is scoped to the names the table actually uses, not to schemas in
+// general. An earlier version asserted that no non-system schema held any table
+// at all, which would have reddened for `CREATE SCHEMA observability` or for
+// any extension that installs its own tables — correct deployments that have
+// nothing to do with this gate.
+func TestM52NoExemptTableNameIsAmbiguous(t *testing.T) {
+	named := map[string]bool{}
+	for _, key := range NoTenantTxRouteKeys() {
+		for _, table := range noTenantTxRouteBinding[key].RLSExemptTables {
+			named[table] = true
 		}
-		t.Errorf("schema %q holds %d table(s). middleware.noTenantTxRouteBinding's "+
-			"RLSExemptTables entries are UNQUALIFIED names resolved against `public` "+
-			"only, so a table here is either invisible to the check or — if `public` "+
-			"has one of the same name — silently substituted for it. Qualify the names "+
-			"and widen m52LiveRLS before adding a second application schema.", schema, n)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate pg_namespace: %v", err)
+	if len(named) == 0 {
+		t.Skip("no rule names an exempt table, so there is no name to disambiguate")
+	}
+	names := make([]string, 0, len(named))
+	for n := range named {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	db := m52SchemaDB(t)
+	for _, name := range names {
+		rows, err := db.Query(`
+			SELECT n.nspname
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relkind IN ('r', 'p')
+			  AND c.relname = $1
+			  AND n.nspname <> 'public'
+			ORDER BY n.nspname`, name)
+		if err != nil {
+			t.Fatalf("look up %q outside public: %v", name, err)
+		}
+		for rows.Next() {
+			var schema string
+			if err := rows.Scan(&schema); err != nil {
+				_ = rows.Close()
+				t.Fatalf("scan: %v", err)
+			}
+			t.Errorf("a table named %q also exists in schema %q. "+
+				"middleware.noTenantTxRouteBinding names it UNQUALIFIED and this gate "+
+				"resolves it against `public`, so whichever one the route actually uses, "+
+				"the check may be reading the other. Qualify the name in the rule and widen "+
+				"m52LiveRLS before letting the two coexist.", name, schema)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatalf("iterate: %v", err)
+		}
+		_ = rows.Close()
 	}
 }
 
@@ -217,8 +283,8 @@ func TestM52PublicIsTheOnlyApplicationSchema(t *testing.T) {
 func TestM52LiveSchemaHasRLSAtAll(t *testing.T) {
 	live := m52LiveRLS(t)
 	on := 0
-	for _, rls := range live {
-		if rls {
+	for _, st := range live {
+		if st.Enabled {
 			on++
 		}
 	}

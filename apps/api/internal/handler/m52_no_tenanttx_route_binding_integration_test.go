@@ -64,6 +64,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 
@@ -279,11 +280,13 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 	// fixture UUID as the schema allows.
 	//
 	// The ceiling is 30 characters, not 50: `vulnerabilities.cve_id` is
-	// varchar(50), but the downstream rows this fixture produces —
-	// `vex_drafts`, `cra_reports`, `advisory_excerpts`,
-	// `reachability_results` — all declare varchar(30), so anything longer
-	// fails the Stage 3 write instead. 9 for the prefix leaves 21 hex digits =
-	// 84 bits, against the 32 bits an eight-digit truncation would have given.
+	// varchar(50), but the rows these drives actually write — `vex_drafts` and
+	// `cra_reports` — declare varchar(30), so anything longer fails the Stage 3
+	// write instead. (`advisory_excerpts` and `reachability_results` share the
+	// 30-character limit but are never reached here: the resolver returns the
+	// disabled provider and both runners skip those reads on that branch.)
+	// 9 for the prefix leaves 21 hex digits = 84 bits, against the 32 bits an
+	// eight-digit truncation would have given.
 	f.CVEID = "CVE-2099-" + strings.ToUpper(strings.ReplaceAll(f.VulnID.String(), "-", "")[:21])
 
 	m52AsTenant(t, migDB, f.TenantID,
@@ -308,9 +311,10 @@ func m52SeedGraph(t *testing.T, migDB *sql.DB, label string) m52Fixture {
 	//	vulnerability  CASCADEs component_vulnerabilities (and the other
 	//	               vulnerability children). vex_drafts and cra_reports carry
 	//	               a vulnerability_id with NO foreign key, so nothing blocks.
-	//	user           SET NULLs audit_logs.user_id and llm_calls.user_id —
-	//	               both FORCE RLS, both reached by an RI trigger, which
-	//	               bypasses row security (measured; see
+	//	user           SET NULLs audit_logs.user_id and llm_calls.user_id.
+	//	               `llm_calls` is FORCE RLS; `audit_logs` is not (migration
+	//	               029 removed it). The RLS-protected half is reached by an
+	//	               RI trigger, which bypasses row security (measured; see
 	//	               middleware.TenantBindingBindsItself's doc comment). The
 	//	               runner rows written by the drives above still reference
 	//	               this user at that moment; that is fine for the same
@@ -497,9 +501,8 @@ func m52Call(t *testing.T, h echo.HandlerFunc, method, target string,
 	return rec.Code, rec.Body.String()
 }
 
-// m52IsUnboundGUCError reports whether err is the failure an unbound RLS read
-// produces on a poisoned connection: `invalid input syntax for type uuid: ""`
-// (SQLSTATE 22P02), raised when the policy casts the empty-string placeholder.
+// m52IsUnboundGUCError reports whether err is one of the two failures an RLS
+// policy produces when no tenant is bound.
 func m52IsUnboundGUCError(err error) bool {
 	var pqErr *pq.Error
 	if !errors.As(err, &pqErr) {
@@ -580,8 +583,10 @@ func TestM52ClerkTenantCreateBindsOnAPoisonedConnection(t *testing.T) {
 		t.Fatalf("clerk organization.created = %d %s, want 200.\n"+
 			"The route carries no TenantTx, so TenantRepository.Create's own set_config is "+
 			"the only thing standing between the `scan_settings` INSERT and the FORCE RLS "+
-			"policy on that table. A 500 here means the tenant is never provisioned — for "+
-			"every organization Clerk creates.", code, resp)
+			"policy on that table. Check WHERE the 500 came from before assuming the "+
+			"binding: Create commits its two INSERTs before the audit write, so an audit "+
+			"failure also answers 500 with the tenant already landed. The scan_settings "+
+			"assertion below is what separates the two.", code, resp)
 	}
 
 	var tenantID uuid.UUID
@@ -627,6 +632,11 @@ func TestM52ClerkTenantCreateBindsOnAPoisonedConnection(t *testing.T) {
 				"if it is not, TenantRepository.Create's binding is not load-bearing and " +
 				"the positive case above proves nothing.")
 		}
+		if !m52IsUnboundGUCError(err) {
+			t.Fatalf("control: the unbound INSERT failed, but not with the unbound-GUC error "+
+				"(22P02 / 42501): %v. A NOT NULL or FK violation would satisfy a bare "+
+				"'it failed' check while showing nothing about the binding.", err)
+		}
 		t.Logf("control observed: %v", err)
 	})
 }
@@ -663,11 +673,12 @@ func TestM52PublicGetBindsOnAPoisonedConnection(t *testing.T) {
 				"policy; either way the positive case above proves nothing.")
 		}
 		if !m52IsUnboundGUCError(err) {
-			t.Logf("control failed with a non-22P02 error (still a failure, still the "+
-				"point): %v", err)
-		} else {
-			t.Logf("control observed: %v", err)
+			t.Fatalf("control: the unbound read failed, but not with the unbound-GUC error "+
+				"(22P02 / 42501): %v. Any other failure means the control removed something "+
+				"else, so it does not show that the binding is what makes the positive case "+
+				"work.", err)
 		}
+		t.Logf("control observed: %v", err)
 	})
 }
 
@@ -697,6 +708,10 @@ func TestM52PublicDownloadBindsOnAPoisonedConnection(t *testing.T) {
 		if err == nil {
 			t.Fatal("control: reading `sboms` on the poisoned pool with no tenant bound " +
 				"succeeded — the positive case above proves nothing.")
+		}
+		if !m52IsUnboundGUCError(err) {
+			t.Fatalf("control: the unbound read failed, but not with the unbound-GUC error "+
+				"(22P02 / 42501): %v", err)
 		}
 		t.Logf("control observed: %v", err)
 	})
@@ -946,15 +961,47 @@ var m52DrivenRoutes = map[string]string{
 	"POST /api/v1/projects/:id/cra-reports/:report_id/reanalyse": "TestM52CRAReanalyseBindsOnAPoisonedConnection",
 }
 
-// TestM52EveryBindsItselfRouteIsDriven is what stops the classification from
-// being fail-open with only a procedural guard.
+// TestM52EveryBindsItselfRouteIsDriven cross-checks the classification table
+// against the drives in this file.
 //
-// Without it, adding a route to noTenantTxRouteBinding as BindsItself and
-// pointing ProvedBy at any existing test name would satisfy every check in the
-// middleware package while nothing ever drove the new route. With it, the new
-// route has to be run against a live database before the suite is green.
+// # What it enforces, exactly
+//
+//   - every BindsItself route appears in m52DrivenRoutes;
+//   - the test named there is the one the table names in ProvedBy;
+//   - no two BindsItself routes name the SAME test, which is what a
+//     copy-forward of a neighbouring entry produces;
+//   - nothing is driven that the table no longer classifies as BindsItself.
+//
+// # What it does NOT enforce
+//
+// It compares strings. It does not invoke the named function, and it cannot
+// derive which route that function exercises — so it cannot tell a genuine new
+// drive from a plausible-looking name. What it does is make the omission
+// audible: a new BindsItself route is red until somebody adds a drive here and
+// wires the name up, and the uniqueness rule stops the cheapest way of
+// silencing that red without writing one. Under the threat model in
+// middleware/tenant_binding.go — an honest author's oversight, not evasion —
+// that is the property worth having; claiming more than that would be the same
+// kind of unbacked promise this whole wave exists to replace.
 func TestM52EveryBindsItselfRouteIsDriven(t *testing.T) {
 	table := appmw.NoTenantTxRouteBindings()
+
+	// A drive proves one route. Two routes naming one test means at most one
+	// of them is actually driven — the copy-forward shape.
+	byTest := map[string][]string{}
+	for key, rule := range table {
+		if rule.Kind == appmw.TenantBindingBindsItself && rule.ProvedBy != "" {
+			byTest[rule.ProvedBy] = append(byTest[rule.ProvedBy], key)
+		}
+	}
+	for test, keys := range byTest {
+		if len(keys) > 1 {
+			sort.Strings(keys)
+			t.Errorf("%d routes name ProvedBy %q: %v. One test drives one route; two routes "+
+				"sharing a name means at least one of them was classified by copying its "+
+				"neighbour and is not driven by anything.", len(keys), test, keys)
+		}
+	}
 
 	for key, rule := range table {
 		if rule.Kind != appmw.TenantBindingBindsItself {
