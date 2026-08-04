@@ -151,16 +151,14 @@ func apiKeyCredential(r *http.Request) (raw string, presented bool) {
 		return v, true
 	}
 
-	// bearerAny, not an API-key-shaped filter: ambiguity is decided over EVERY
-	// Bearer value (Codex R4 Medium). Filtering first meant
+	// bearerFromRequest, not an API-key-shaped filter: ambiguity is decided over
+	// EVERY Bearer value (Codex R4 Medium). Filtering first meant
 	// `Authorization: Bearer <clerk jwt>` + `Authorization: Bearer sbh_<key>`
 	// left exactly one candidate and authenticated the key, while APIKeyAuth —
 	// which does not filter — refused the same request. Two credentials of
 	// different KINDS is still two credentials; refusing is both fail-closed and
 	// what makes the two middlewares agree.
-	v, present, ambiguous := pickSingleCredential(
-		r.Header.Values("Authorization"), bearerAny,
-	)
+	v, present, ambiguous := bearerFromRequest(r)
 	if ambiguous {
 		return "", true
 	}
@@ -279,6 +277,39 @@ func bearerAny(v string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimLeft(rest, " "), true
+}
+
+// bearerFromRequest resolves the ONE `Authorization: Bearer ...` credential a
+// request presents, and is the single Bearer rule in this package.
+//
+// # Why it exists (M51)
+//
+// It did not, and auth.go read the same header its own way:
+//
+//	token := strings.TrimPrefix(authHeader, "Bearer ")   // case-sensitive
+//	if token == authHeader { 401 }                       // over Header.Get
+//
+// so one request line was parsed by two rules depending on which middleware saw
+// it. Measured on a throwaway stack (2026-08-04, SBOMHUB_AUTH_MODE=clerk),
+// `Authorization: bearer sbh_<key>` was 200 on a MultiAuth route and 401 on an
+// Auth() route, and `Authorization:` followed by `Authorization: Bearer
+// sbh_<key>` was honoured by MultiAuth and reported as "missing authorization
+// header" by Auth(). It ran the other way too: two CONFLICTING Bearer values
+// were refused by MultiAuth and silently resolved to the first by Auth().
+//
+// That is anti-pattern 107's shape — one credential, two rules — and the
+// durable repair is not "copy the relaxed rule into auth.go" (which leaves two
+// copies to drift) but one function all three readers call. bearer_parity_test.go
+// pins that the classification each window reaches is the classification this
+// function produces, over a table of every header dimension a caller controls.
+//
+// Returns are pickSingleCredential's: (token, present, ambiguous). A caller
+// MUST refuse on `ambiguous`, and MUST refuse a `present` credential whose token
+// is empty — announcing a credential and supplying none is not the same as
+// supplying none, and treating it as absent is what lets a request fall through
+// to a default identity.
+func bearerFromRequest(r *http.Request) (token string, present, ambiguous bool) {
+	return pickSingleCredential(r.Header.Values(echo.HeaderAuthorization), bearerAny)
 }
 
 // handleAPIKeyAuth mirrors the APIKeyAuth + APIKeyTenant pair as a single

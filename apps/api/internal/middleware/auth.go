@@ -113,17 +113,42 @@ func handleSelfHostedAuth(c echo.Context, ctx context.Context, tenantRepo *repos
 // No config parameter: Clerk verification uses the process-global key
 // (clerk.SetKey at startup — see verifyClerkJWT).
 func handleClerkAuth(c echo.Context, ctx context.Context, tenantRepo *repository.TenantRepository, userRepo *repository.UserRepository, next echo.HandlerFunc) error {
-	// Get token from Authorization header
-	authHeader := c.Request().Header.Get("Authorization")
-	if authHeader == "" {
+	// Get token from Authorization header.
+	//
+	// M51: read through bearerFromRequest, the package's single Bearer rule,
+	// rather than the `strings.TrimPrefix(authHeader, "Bearer ")` over
+	// `Header.Get` that used to live here. That local rule differed from the one
+	// MultiAuth / APIKeyAuth apply in four measurable ways — scheme case, the
+	// number of delimiting spaces, a repeated header (first-wins here, refused
+	// there), and an announced-but-empty credential (admitted here, refused
+	// there) — so the same request line meant different things on different
+	// routes of one server. See bearerFromRequest and bearer_parity_test.go.
+	if bearerHeaderAbsent(c.Request()) {
 		slog.Debug("Auth failed: missing authorization header")
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "missing authorization header",
 		})
 	}
 
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader {
+	token, present, ambiguous := bearerFromRequest(c.Request())
+	switch {
+	case ambiguous:
+		// Two DIFFERENT credentials under one header name. Picking either is a
+		// guess about which the caller meant, and "take the first" is the rule
+		// that produced the M50 fall-through. MultiAuth already refuses this;
+		// now so does the Clerk window, which is what makes the accepted set
+		// the same on both.
+		slog.Warn("Auth failed: request carried conflicting Authorization values",
+			"ip", c.RealIP())
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"error": "invalid authorization header format",
+		})
+	case !present, token == "":
+		// `!present` is a non-Bearer scheme or a malformed one. `token == ""` is
+		// `Authorization: Bearer ` with nothing after it — a credential
+		// announced and not supplied, which previously slipped past this check
+		// (TrimPrefix returns "" which is != the header) and reached Clerk as an
+		// empty token.
 		slog.Debug("Auth failed: invalid authorization header format")
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "invalid authorization header format",
@@ -133,7 +158,7 @@ func handleClerkAuth(c echo.Context, ctx context.Context, tenantRepo *repository
 	slog.Debug("Verifying Clerk JWT", "token_length", len(token), "token_prefix", token[:min(20, len(token))])
 
 	// Verify JWT with Clerk using official HTTP middleware
-	claims, err := verifyClerkJWT(c)
+	claims, err := verifyClerkJWT(c, token)
 	if err != nil {
 		slog.Error("Clerk JWT verification failed", "error", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -258,10 +283,69 @@ type ClerkClaims struct {
 	OrgRole string
 }
 
+// bearerHeaderAbsent reports whether a request carries no Authorization value
+// worth parsing.
+//
+// It reads EVERY value, not `Header.Get` (M51). With Get, the shape
+//
+//	Authorization:
+//	Authorization: Bearer sbh_<a real key>
+//
+// answered "missing authorization header" while MultiAuth — which reads all
+// values — honoured the key. One request, two answers.
+//
+// An empty value counts as absent rather than as a malformed credential: that
+// is what a shell produces from `-H "Authorization: $UNSET"`, and asIs in
+// multiauth.go has always treated the X-API-Key equivalent the same way.
+func bearerHeaderAbsent(r *http.Request) bool {
+	for _, v := range r.Header.Values(echo.HeaderAuthorization) {
+		if strings.TrimSpace(v) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// clerkAuthorizationRequest returns a copy of r whose Authorization header is
+// the canonical `Bearer <token>`, leaving r itself untouched.
+//
+// # Why the header is re-emitted rather than passed through (M51)
+//
+// The Clerk SDK does its own parse of the header we hand it
+// (clerk-sdk-go/v2@v2.0.0, http/middleware.go:61):
+//
+//	token := strings.TrimPrefix(authorization, "Bearer ")
+//
+// which is the same case-sensitive, exactly-one-space rule this file just
+// stopped applying. Relaxing our own check and forwarding the raw header would
+// therefore have changed the 401 BODY for `bearer <jwt>` and nothing else: the
+// SDK would strip nothing, try to decode `bearer <jwt>` as a JWT, fail, and
+// answer 401 anyway. The credential sets would still differ between the two
+// windows, just less visibly.
+//
+// Emitting the token in the one spelling the SDK accepts makes the relaxation
+// real end-to-end. It also collapses a repeated Authorization header to a single
+// value — the caller has already been refused above unless every value agreed,
+// so this cannot smuggle a second credential past the SDK's own Get.
+//
+// The copy is shallow with a cloned header map: handlers and the audit
+// middleware read the original request after us, and rewriting a caller's
+// header in place would make the access log disagree with the wire.
+func clerkAuthorizationRequest(r *http.Request, token string) *http.Request {
+	clone := *r
+	clone.Header = r.Header.Clone()
+	clone.Header.Set(echo.HeaderAuthorization, BearerPrefix+token)
+	return &clone
+}
+
 // verifyClerkJWT verifies a Clerk JWT token using the official Clerk HTTP
 // middleware. Verification relies on the process-global Clerk key
 // (clerk.SetKey at startup), so no per-request config is needed.
-func verifyClerkJWT(c echo.Context) (*ClerkClaims, error) {
+//
+// `token` is the credential handleClerkAuth already extracted with the
+// package's shared Bearer rule; it is re-emitted canonically for the SDK — see
+// clerkAuthorizationRequest.
+func verifyClerkJWT(c echo.Context, token string) (*ClerkClaims, error) {
 	// Use Clerk's official HTTP middleware to verify the token
 	var claims *ClerkClaims
 	var verifyErr error
@@ -286,8 +370,9 @@ func verifyClerkJWT(c echo.Context) (*ClerkClaims, error) {
 	// Create a response recorder (we don't need the response)
 	recorder := &noopResponseWriter{}
 
-	// Execute the middleware chain
-	protectedHandler.ServeHTTP(recorder, c.Request())
+	// Execute the middleware chain against a request whose Authorization header
+	// is spelled the one way the SDK's own parser recognises.
+	protectedHandler.ServeHTTP(recorder, clerkAuthorizationRequest(c.Request(), token))
 
 	if verifyErr != nil {
 		return nil, verifyErr

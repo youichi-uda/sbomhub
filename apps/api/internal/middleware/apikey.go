@@ -44,8 +44,7 @@ func presentedAPIKey(r *http.Request) (raw string, present, ambiguous bool) {
 	if v, ok, amb := pickSingleCredential(r.Header.Values(APIKeyHeader), asIs); amb || ok {
 		return v, ok, amb
 	}
-	v, present, ambiguous := pickSingleCredential(
-		r.Header.Values("Authorization"), bearerAny)
+	v, present, ambiguous := bearerFromRequest(r)
 	if ambiguous || !present {
 		return "", present, ambiguous
 	}
