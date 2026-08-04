@@ -1507,11 +1507,18 @@ func m52ResolvesToNil(arg ast.Expr, at token.Pos, file *ast.File, render func(as
 					}
 				}
 			case *ast.AssignStmt:
-				if d.Pos() >= at || len(d.Lhs) != 1 {
+				// ANY assignment that names the identifier clears the
+				// "declared without a value" state, including a multi-value
+				// one. `db, err := database.Connect(...)` is how this codebase
+				// actually obtains the handle, and skipping it left an
+				// unrelated helper's `var db *sql.DB` as the last thing seen.
+				if d.Pos() >= at || d.Pos() < bestPos {
 					return true
 				}
-				if id, ok := d.Lhs[0].(*ast.Ident); ok && id.Name == a.Name && d.Pos() >= bestPos {
-					empty, bestPos = "", d.Pos()
+				for _, lhs := range d.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == a.Name {
+						empty, bestPos = "", d.Pos()
+					}
 				}
 			}
 			return true
