@@ -28,10 +28,14 @@ import (
 // is the order echo runs them in; the globals are not ordered against each
 // other, which does not matter here and cannot start mattering silently — see
 // preTenantTxMiddleware's "does NOT cover" list for why. So the derivation is
-// one line of set logic over that chain:
+// one pass of set logic over that chain:
 //
-//	for each route, take the chain entries BEFORE the first one that expands
-//	to contain "TenantTx(" — the whole chain when there is none.
+//	for each route, flatten every entry into the middlewares it contributes
+//	and take those BEFORE the first one that expands to contain "TenantTx(" —
+//	the whole chain when there is none.
+//
+// Flattening BEFORE the cut rather than after is load-bearing; see
+// m52pChainMiddleware for the silent miss the other order produces.
 //
 // Everything the route parser cannot see, this cannot see either, and every
 // gap errs the same way it does there: an unresolved thing reads as "not
@@ -43,7 +47,7 @@ import (
 //
 // # The key, and the one way it is deliberately lossy
 //
-// m52pMiddlewareIdentities renders the constructor and DROPS the arguments, so
+// m52pMiddlewareIdentity renders the constructor and DROPS the arguments, so
 //
 //	appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll)
 //	appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)
@@ -67,77 +71,130 @@ import (
 // matches nothing in the table, and fails. Loud on a shape nobody writes today,
 // rather than silent on one somebody might. A slice of middleware is the one
 // non-call shape that is understood rather than refused, because the route
-// parser understands it too; see m52pMiddlewareIdentities.
+// parser understands it too; see m52pChainMiddleware.
 // ---------------------------------------------------------------------------
 
-// m52pMiddlewareIdentities reduces one rendered (and already alias-expanded)
-// chain entry to the key(s) preTenantTxMiddleware is written against.
+// m52pChainMiddleware flattens ONE rendered (and already alias-expanded) chain
+// entry into the middlewares it actually contributes, in order.
 //
 // Re-parsing the rendered text rather than carrying ast.Expr through the group
 // walk is deliberate: alias expansion happens on TEXT (m52Expand substitutes
 // into the rendering), so the expression an entry finally denotes only exists
 // as a string. Parsing that string is the one place both halves agree.
 //
-// # Why it returns a SLICE
+// # Why one entry can be several middlewares
 //
-// One chain entry is usually one middleware, but not always. m52Expand's own
-// doc comment names the shape that made it substitute inside text at all:
+// m52Expand's own doc comment names the shape that made it substitute inside
+// text at all:
 //
 //	tenantTx := appmw.TenantTx(db)
 //	chain := []echo.MiddlewareFunc{tenantTx}
 //	e.POST(path, handler, chain...)
 //
-// The route parser renders `chain` as one argument, expands it to the composite
-// literal, and finds TenantTx inside — that is a shape it deliberately supports,
-// and reddening CI for it is described there as "the failure mode this gate
-// cannot afford". A reduction that turned the whole literal into ONE
-// unclassifiable key would reintroduce exactly that false positive one gate
-// over. So a composite literal is flattened into its elements, each reduced on
-// its own; anything else is one key as before.
-func m52pMiddlewareIdentities(entry string) []string {
+// The route parser records `chain` as ONE argument — go/ast hangs the `...` off
+// the enclosing CallExpr (call.Ellipsis), not off the argument, so
+// printer.Fprint of that argument renders exactly `chain` with no ellipsis
+// (measured with go/printer on both `e.POST("/x", h, chain...)` and
+// `e.POST("/y", h, []echo.MiddlewareFunc{a, b}...)`, 2026-08-05) — and then
+// expands it to the composite literal and finds TenantTx inside. That is a
+// shape it deliberately supports, and reddening CI for it is described there as
+// "the failure mode this gate cannot afford".
+//
+// So the literal is flattened here, and flattened BEFORE the TenantTx cut
+// rather than after. That ordering is the whole point: with
+//
+//	[]echo.MiddlewareFunc{appmw.Audit(auditRepo), appmw.TenantTx(db)}
+//
+// as a single entry, cutting per-ENTRY drops the entry whole and `Audit` — which
+// runs before TenantTx — vanishes from the unbound set with nothing said. A
+// silent miss is the one direction this gate must not fail in, and per-entry
+// cutting is how it would.
+func m52pChainMiddleware(entry string) []string {
 	text := strings.TrimSpace(entry)
 	expr, err := parser.ParseExpr(text)
 	if err != nil {
-		// Not an expression this can reduce. Returning the text unchanged makes
-		// it an unclassified key, which fails the sweep with the text in the
-		// message — the loud direction.
+		// Not an expression this can flatten. Returning the text unchanged makes
+		// it one element, whose key is that text, which is unclassified and
+		// fails the sweep with the text in the message — the loud direction.
 		return []string{m52Normalise(text)}
 	}
-	return m52pReduce(expr, token.NewFileSet())
+	return m52pFlatten(expr, token.NewFileSet())
 }
 
-// m52pReduce is m52pMiddlewareIdentities over an already-parsed expression.
+// m52pFlatten is m52pChainMiddleware over an already-parsed expression.
 //
 // The recursion is over composite-literal ELEMENTS only, and each element is
-// reduced by exactly the same rules as a top-level entry, so a nested literal
-// cannot produce a key shape the flat case could not. Depth is bounded by the
-// source: go/parser will not build a literal deeper than the text nests.
-func m52pReduce(expr ast.Expr, fset *token.FileSet) []string {
-	for {
-		p, ok := expr.(*ast.ParenExpr)
-		if !ok {
-			break
-		}
-		expr = p.X
-	}
-	switch e := expr.(type) {
-	case *ast.CallExpr:
-		// The constructor, with its arguments dropped.
-		return []string{m52Normalise(renderNode(fset, e.Fun))}
-	case *ast.CompositeLit:
+// treated by exactly the same rules as a top-level entry, so a nested literal
+// cannot produce an element shape the flat case could not. Depth is bounded by
+// the source: go/parser will not build a literal deeper than the text nests.
+func m52pFlatten(expr ast.Expr, fset *token.FileSet) []string {
+	expr = m52pUnparen(expr)
+	if lit, ok := expr.(*ast.CompositeLit); ok {
 		// A slice of middleware. An EMPTY one contributes nothing, which is
 		// right: `[]echo.MiddlewareFunc{}` adds no middleware to the chain.
 		var out []string
-		for _, el := range e.Elts {
-			out = append(out, m52pReduce(el, fset)...)
+		for _, el := range lit.Elts {
+			out = append(out, m52pFlatten(el, fset)...)
 		}
 		return out
-	default:
-		// A middleware VALUE rather than a call: `var mw echo.MiddlewareFunc =
-		// ...` passed straight through, or an identifier main.go never bound.
-		// Its own text is the key, so it is classified explicitly or it fails.
-		return []string{m52Normalise(renderNode(fset, expr))}
 	}
+	return []string{m52Normalise(renderNode(fset, expr))}
+}
+
+// m52pUnparen strips redundant parentheses. `(x)` and `x` are the same
+// expression, and Go accepts the parenthesised spelling everywhere.
+func m52pUnparen(expr ast.Expr) ast.Expr {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			return expr
+		}
+		expr = p.X
+	}
+}
+
+// m52pMiddlewareIdentity reduces ONE flattened middleware expression to the key
+// preTenantTxMiddleware is written against: the constructor, with its arguments
+// dropped.
+//
+// The callee is un-parenthesised as well as the expression: `(middleware.Logger)()`
+// means exactly what `middleware.Logger()` means, and deriving `(middleware.Logger)`
+// from it would fail this gate for a change that is semantics-preserving.
+func m52pMiddlewareIdentity(element string) string {
+	text := strings.TrimSpace(element)
+	expr, err := parser.ParseExpr(text)
+	if err != nil {
+		return m52Normalise(text)
+	}
+	fset := token.NewFileSet()
+	expr = m52pUnparen(expr)
+	if call, ok := expr.(*ast.CallExpr); ok {
+		return m52Normalise(renderNode(fset, m52pUnparen(call.Fun)))
+	}
+	// A middleware VALUE rather than a call: `var mw echo.MiddlewareFunc = ...`
+	// passed straight through, or an identifier main.go never bound. Its own
+	// text is the key, so it is classified explicitly or it fails.
+	return m52Normalise(renderNode(fset, expr))
+}
+
+// m52pUnboundPrefix returns the identities of every middleware in `chain` that
+// runs before anything has bound the tenant, plus whether the chain binds at
+// all.
+//
+// Pure, and separated from the AST walk so it can be driven directly: the
+// element-wise cut is the piece with a failure mode nothing else would notice
+// (see m52pChainMiddleware), and a per-route comparison against
+// m52HasTenantTx cannot see inside an entry.
+func m52pUnboundPrefix(chain []string, expand func(string) string) (ids []string, bound bool) {
+	for _, entry := range chain {
+		for _, element := range m52pChainMiddleware(expand(entry)) {
+			if strings.Contains(element, "TenantTx(") {
+				return ids, true
+			}
+			ids = append(ids, m52pMiddlewareIdentity(element))
+		}
+	}
+	return ids, false
 }
 
 // m52pUnboundMiddleware returns middleware identity → the route keys it runs
@@ -149,23 +206,17 @@ func m52pUnboundMiddleware(t *testing.T) (map[string][]string, int) {
 	out := map[string]map[string]bool{}
 	withTx := 0
 	for key, r := range m52LastRegistrationPerKey(routes) {
-		cut := len(r.chain)
-		for i, entry := range r.chain {
-			if strings.Contains(m52Expand(entry, r.chainAt, aliasAt), "TenantTx(") {
-				cut = i
-				break
-			}
-		}
-		if cut < len(r.chain) {
+		ids, bound := m52pUnboundPrefix(r.chain, func(entry string) string {
+			return m52Expand(entry, r.chainAt, aliasAt)
+		})
+		if bound {
 			withTx++
 		}
-		for _, entry := range r.chain[:cut] {
-			for _, id := range m52pMiddlewareIdentities(m52Expand(entry, r.chainAt, aliasAt)) {
-				if out[id] == nil {
-					out[id] = map[string]bool{}
-				}
-				out[id][key] = true
+		for _, id := range ids {
+			if out[id] == nil {
+				out[id] = map[string]bool{}
 			}
+			out[id][key] = true
 		}
 	}
 
@@ -301,6 +352,53 @@ func TestM52PEveryPreTenantTxRuleCarriesItsEvidence(t *testing.T) {
 			t.Errorf("%s has an unknown Kind %q. Add a case here and decide what evidence it "+
 				"must carry before the table accepts it.", key, rule.Kind)
 		}
+		m52CheckEnabledButReachable(t, "middleware.preTenantTxMiddleware", key,
+			rule.RLSExemptTables, rule.RLSEnabledButReachable)
+	}
+}
+
+// m52CheckEnabledButReachable enforces the shape of an RLSEnabledButReachable
+// map, for either table.
+//
+// This field is the ONLY way to silence the live probe — the one check in this
+// family that measures rather than asserts. Its own doc comment says it is
+// "keyed by relation name and carrying the reason", and until this existed
+// neither half of that was true: an entry with an empty reason silenced the
+// probe just as effectively as one with a paragraph, and a key naming a
+// relation the rule does not list silenced nothing while looking like it did.
+//
+// Both are cheap to get wrong under pressure, which is exactly when an escape
+// hatch gets used. Empty in both tables today, so this costs nothing now and
+// is here for the day it is not.
+func m52CheckEnabledButReachable(t *testing.T, table, key string, listed []string, ack map[string]string) {
+	t.Helper()
+	if len(ack) == 0 {
+		return
+	}
+	inList := make(map[string]bool, len(listed))
+	for _, name := range listed {
+		inList[name] = true
+	}
+	names := make([]string, 0, len(ack))
+	for name := range ack {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.TrimSpace(ack[name]) == "" {
+			t.Errorf("%s: %s declares %q RLSEnabledButReachable with an EMPTY reason. That "+
+				"entry silences the live unbound-read probe — the only thing here that "+
+				"measures rather than asserts — so it is the last place a blank is "+
+				"acceptable. Write why the runtime role can still reach it: an INSERT-only "+
+				"path, a view read as its owner, a foreign table.", table, key, name)
+		}
+		if !inList[name] {
+			t.Errorf("%s: %s declares %q RLSEnabledButReachable, but does not list %q among "+
+				"the tables it names. The acknowledgement is keyed by relation and is only "+
+				"consulted for a relation the rule listed, so this one silences nothing and "+
+				"reads as though it does. Either add %q to the table list or drop the "+
+				"acknowledgement.", table, key, name, name, name)
+		}
 	}
 }
 
@@ -380,7 +478,10 @@ func TestM52PMiddlewareIdentityReducesTheShapesMainGoUses(t *testing.T) {
 			[]string{"appmw.NewTriageConcurrencyLimiterFromEnv().Middleware"},
 			"a method on a constructed value keeps the whole selector"},
 		{"( appmw.RequireAdmin() )", []string{"appmw.RequireAdmin"},
-			"parenthesised"},
+			"parentheses around the whole expression"},
+		{"(middleware.Logger)()", []string{"middleware.Logger"},
+			"parentheses around the CALLEE — semantics-preserving, so it must not " +
+				"derive a new key and fail the sweep in both directions"},
 		{"appmw.SomeMiddlewareValue", []string{"appmw.SomeMiddlewareValue"},
 			"a value rather than a call is its own key, so it is classified explicitly"},
 		{"middleware.BodyLimit(\"10M\")", []string{"middleware.BodyLimit"},
@@ -401,16 +502,92 @@ func TestM52PMiddlewareIdentityReducesTheShapesMainGoUses(t *testing.T) {
 			"unparsable text is returned as-is rather than dropped"},
 	}
 	for _, c := range cases {
-		got := m52pMiddlewareIdentities(c.in)
+		var got []string
+		for _, el := range m52pChainMiddleware(c.in) {
+			got = append(got, m52pMiddlewareIdentity(el))
+		}
 		if len(got) != len(c.want) {
-			t.Errorf("m52pMiddlewareIdentities(%q) = %v (%d keys), want %v (%d) — %s",
+			t.Errorf("identities of %q = %v (%d keys), want %v (%d) — %s",
 				c.in, got, len(got), c.want, len(c.want), c.why)
 			continue
 		}
 		for i := range got {
 			if got[i] != c.want[i] {
-				t.Errorf("m52pMiddlewareIdentities(%q)[%d] = %q, want %q (%s)",
+				t.Errorf("identities of %q, [%d] = %q, want %q (%s)",
 					c.in, i, got[i], c.want[i], c.why)
+			}
+		}
+	}
+}
+
+// TestM52PTenantTxInsideASliceCutsAtTheELEMENT is the regression for a silent
+// miss, and the reason m52pUnboundPrefix is a separate, pure function.
+//
+// One chain entry can be a whole slice of middleware. When TenantTx is inside
+// such a slice, the middlewares BEFORE it in that same slice still run unbound
+// — and a cut that works per ENTRY drops the entry whole, so they disappear
+// from the unbound set with nothing said. Nothing else here would notice:
+// TestM52PUnboundPrefixAgreesWithTheRouteSweep compares whether a route binds,
+// not where, and m52HasTenantTx gives the same answer either way.
+//
+// Neither shape exists in main.go today. This is here so the fix cannot be
+// undone by a simplification, since the failure it prevents is invisible.
+func TestM52PTenantTxInsideASliceCutsAtTheELEMENT(t *testing.T) {
+	identity := func(s string) string { return s }
+
+	cases := []struct {
+		name      string
+		chain     []string
+		wantIDs   []string
+		wantBound bool
+	}{
+		{
+			name: "TenantTx mid-slice: the elements before it are still unbound",
+			chain: []string{
+				"middleware.Logger()",
+				"[]echo.MiddlewareFunc{appmw.Audit(auditRepo), appmw.TenantTx(db)}",
+				"appmw.RequireWrite()",
+			},
+			// Audit runs before TenantTx and must be reported; RequireWrite runs
+			// after it and must not.
+			wantIDs:   []string{"middleware.Logger", "appmw.Audit"},
+			wantBound: true,
+		},
+		{
+			name: "TenantTx first in the slice: nothing in that slice is unbound",
+			chain: []string{
+				"middleware.Logger()",
+				"[]echo.MiddlewareFunc{appmw.TenantTx(db), appmw.Audit(auditRepo)}",
+			},
+			wantIDs:   []string{"middleware.Logger"},
+			wantBound: true,
+		},
+		{
+			name: "a slice with no TenantTx contributes every element",
+			chain: []string{
+				"[]echo.MiddlewareFunc{appmw.MultiAuth(a, b, c, d), appmw.RequireWrite()}",
+				"appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)",
+			},
+			wantIDs: []string{
+				"appmw.MultiAuth", "appmw.RequireWrite", "appmw.RateLimitByAPIKey",
+			},
+			wantBound: false,
+		},
+	}
+
+	for _, c := range cases {
+		ids, bound := m52pUnboundPrefix(c.chain, identity)
+		if bound != c.wantBound {
+			t.Errorf("%s: bound = %v, want %v", c.name, bound, c.wantBound)
+		}
+		if len(ids) != len(c.wantIDs) {
+			t.Errorf("%s: ids = %v (%d), want %v (%d)", c.name, ids, len(ids),
+				c.wantIDs, len(c.wantIDs))
+			continue
+		}
+		for i := range ids {
+			if ids[i] != c.wantIDs[i] {
+				t.Errorf("%s: ids[%d] = %q, want %q", c.name, i, ids[i], c.wantIDs[i])
 			}
 		}
 	}
@@ -430,7 +607,22 @@ func TestM52PUnboundPrefixAgreesWithTheRouteSweep(t *testing.T) {
 	routes, _, aliasAt := m52ParseMainGo(t)
 	wholeChain := map[string]bool{}
 	for key, r := range m52LastRegistrationPerKey(routes) {
-		if !m52HasTenantTx(r.chain, r.chainAt, aliasAt) {
+		expand := func(entry string) string { return m52Expand(entry, r.chainAt, aliasAt) }
+		_, bound := m52pUnboundPrefix(r.chain, expand)
+
+		// The two readings of "does this chain bind" must agree per route, not
+		// only as sets. m52HasTenantTx looks for the substring in each ENTRY;
+		// m52pUnboundPrefix looks in each flattened ELEMENT. Flattening cannot
+		// split a token, so the two are the same predicate — asserted rather
+		// than argued, because if a future change to either made them differ
+		// the set comparison below could still pass.
+		if want := m52HasTenantTx(r.chain, r.chainAt, aliasAt); bound != want {
+			t.Errorf("%s: m52pUnboundPrefix says bound=%v, m52HasTenantTx says %v. The "+
+				"element-wise and entry-wise readings of the same chain have diverged, so "+
+				"one of the two gates is classifying against a chain the other does not "+
+				"recognise.", key, bound, want)
+		}
+		if !bound {
 			wholeChain[key] = true
 		}
 	}
@@ -452,7 +644,18 @@ func TestM52PUnboundPrefixAgreesWithTheRouteSweep(t *testing.T) {
 	}
 	if len(wholeChain) == 0 {
 		t.Error("no route was found without TenantTx, so this comparison compared two empty " +
-			"sets. main.go has always had at least the two provider webhooks and /health.")
+			"sets — and the route sweep will have said the same thing more loudly.\n" +
+			"The only way to reach this state is a TenantTx that every chain carries, most " +
+			"plausibly a global `e.Use(appmw.TenantTx(db))`. That is refused rather than " +
+			"modelled, and not merely because these gates were built around it: it would " +
+			"open a Postgres transaction on /api/v1/health, on both provider webhooks and " +
+			"on the two anonymous share links, none of which HAS a tenant to bind when the " +
+			"middleware runs; and it would hold one across the LLM call on the four F19 " +
+			"routes, which is the single thing their design exists to prevent (see " +
+			"noTenantTxRouteBinding's F19 section). If some future design really does bind " +
+			"globally, this gate and the route sweep both need rewriting — starting with " +
+			"the order-insensitive treatment of e.Pre / e.Use — and failing here is the " +
+			"demand for that rather than a verdict on the router.")
 	}
 }
 
@@ -484,7 +687,7 @@ func TestM52PDerivationIsNotBlind(t *testing.T) {
 			"the prefix this gate examines is being taken from chains it failed to "+
 			"resolve, not from the router.", withTx, minTenantTx)
 	}
-	// Both sides of the reduction must work. If m52pMiddlewareIdentities fell
+	// Both sides of the reduction must work. If m52pMiddlewareIdentity fell
 	// back to raw text for everything, the sweep would fail loudly — but if it
 	// fell back for a MINORITY the sweep failure would look like an ordinary
 	// unclassified middleware, so name the shape here instead.
@@ -500,7 +703,7 @@ func TestM52PDerivationIsNotBlind(t *testing.T) {
 	}
 	if unreduced == len(derived) {
 		t.Errorf("not one of the %d derived keys reduced to a constructor expression — "+
-			"m52pMiddlewareIdentities is failing on everything, and the sweep's failures "+
+			"m52pMiddlewareIdentity is failing on everything, and the sweep's failures "+
 			"are about the reduction rather than about the router.", len(derived))
 	}
 }

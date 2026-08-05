@@ -921,6 +921,11 @@ func TestM52EveryRuleCarriesItsEvidence(t *testing.T) {
 			t.Errorf("%s has an unknown Kind %q. Add a case here and decide what evidence it "+
 				"must carry before the table accepts it.", key, rule.Kind)
 		}
+		// The escape hatch is checked for both kinds. A BindsItself rule may not
+		// carry RLSExemptTables at all (above), so an acknowledgement on one is
+		// keyed to nothing and is reported by the second branch of this helper.
+		m52CheckEnabledButReachable(t, "middleware.noTenantTxRouteBinding", key,
+			rule.RLSExemptTables, rule.RLSEnabledButReachable)
 	}
 }
 
