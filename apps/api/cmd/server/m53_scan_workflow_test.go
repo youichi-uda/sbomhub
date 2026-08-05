@@ -16,15 +16,17 @@ import (
 // defect was actually visible: a scan trigger that had never worked with an API
 // key produced green runs for months.
 //
-// TWO things made that possible, and it is worth separating them because only
-// one is obvious (Codex round 4, Low — an earlier draft here blamed the obvious
-// one alone). The step carried `continue-on-error: true`. It ALSO could not fail
-// on its own: its curl had no --fail flag, so a 404 was printed and curl exited
-// 0 (measured), and the step's last command was an unconditional `echo
-// "Vulnerability scan triggered!"`. Deleting continue-on-error would have
-// changed nothing by itself. That is why this file pins the exact-status checks
-// as hard as it pins the absence of continue-on-error — the second is what
-// people look for, the first is what actually fails the step.
+// TWO independent things made that possible, and it is worth separating them
+// because only one is obvious (Codex round 4, Low — an earlier draft here blamed
+// the obvious one alone; Codex round 5, Low — the correction then overshot).
+// The step carried `continue-on-error: true`. It ALSO could not fail on an HTTP
+// REFUSAL: its curl had no --fail flag, so a 404 was printed and curl exited 0
+// (measured), and the `echo "Vulnerability scan triggered!"` after it ran
+// anyway. It could still have failed on a transport error or on jq choking, so
+// continue-on-error was not redundant — it was the other half. That is why this
+// file pins the exact-status checks as hard as it pins the absence of
+// continue-on-error: the second is what people look for, the first is what
+// actually fails the step when the server says no.
 //
 // It is a text check rather than a YAML parse on purpose — apps/api has no YAML
 // dependency, and every property here is a literal token whose absence is the
@@ -96,8 +98,8 @@ func TestM53ScanStepFailsLoudly(t *testing.T) {
 	if regexp.MustCompile(`(?m)^\s*continue-on-error\s*:`).MatchString(body) {
 		t.Errorf("%s sets `continue-on-error`. It was removed in M53 W1: a scan trigger "+
 			"that answered 404/401 for every API key never turned a run red, and this was "+
-			"half the reason (the other half — a curl with no --fail and an unconditional "+
-			"trailing echo — is covered by the status assertions below).", m53WorkflowPath)
+			"one of two independent reasons (the other — a curl with no --fail, so an HTTP "+
+			"refusal exited 0 — is covered by the status assertions below).", m53WorkflowPath)
 	}
 
 	scan := m53RunBlock(t, "Trigger Vulnerability Scan")

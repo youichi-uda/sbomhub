@@ -1461,7 +1461,7 @@ func main() {
 	//
 	// M53 W1: moved off the Clerk-only `authWrite` group onto the canonical
 	// MultiAuth chain, because the route was UNREACHABLE with an API key and
-	// the product ships a GitHub Action that calls it with one.
+	// the repository ships a workflow that calls it with one.
 	// .github/workflows/sbom-upload.yml is upload -> read-back -> scan; the
 	// first two are the MultiAuth registrations above, the third was this
 	// line. Measured on a throwaway stack 2026-08-05 with one tenant-level
@@ -1470,31 +1470,51 @@ func main() {
 	// tenant, which does not own the SBOM — the same 404 the route gives
 	// with no credential at all) and 401 in Clerk mode.
 	//
-	// Why nobody noticed, stated precisely (Codex round 4, Low — an earlier
-	// draft blamed `continue-on-error: true` alone): the step could not fail.
-	// Its curl carried no --fail flag, so a 404 body was printed and curl
-	// exited 0 (measured: `curl -X POST … ; echo $?` → 0 on the 404 above),
-	// and the step's last command was an unconditional `echo "Vulnerability
-	// scan triggered!"`. `continue-on-error: true` sat on top of that as belt
-	// AND braces. Both had to go, and the exact-status checks the workflow now
-	// makes are the half that actually turns a refusal red.
+	// Why nobody noticed, stated precisely (Codex rounds 4 and 5, Low — the
+	// first draft blamed `continue-on-error: true` alone, the second overshot
+	// to "the step could not fail"): the step could not fail ON AN HTTP
+	// REFUSAL. Its curl carried no --fail flag, so a 404 body was printed and
+	// curl exited 0 (measured: `curl -X POST … ; echo $?` → 0 on the 404
+	// above), and the `echo "Vulnerability scan triggered!"` that followed ran
+	// anyway. It COULD still fail on a transport error or on jq choking, so
+	// `continue-on-error: true` was not redundant — it was the second of two
+	// independent reasons an auth refusal was invisible. Both had to go, and
+	// the exact-status checks the workflow now makes are the half that turns a
+	// refusal red.
 	//
 	// Chain shape, and why each position:
 	//
 	//   MultiAuth           accepts `Bearer sbh_...` and keeps the Clerk JWT /
-	//                       self-hosted path through its clerkChain fallback,
-	//                       so nothing that reached this route before loses
-	//                       access. An earlier draft justified that by naming
-	//                       "the web UI's Scan now button"; there is no such
-	//                       button (Codex round 4, Low — `rg '/api/v1/projects/
-	//                       .*/scan'` over apps/web/src finds nothing; the web
-	//                       app's only /scan reference is /settings/scan).
-	//                       Verified on a throwaway stack instead: with
+	//                       self-hosted path through its clerkChain fallback.
+	//                       An earlier draft justified that by naming "the web
+	//                       UI's Scan now button"; there is no such button
+	//                       (Codex round 4, Low — `rg '/api/v1/projects/.*/scan'`
+	//                       over apps/web/src finds nothing; the web app's only
+	//                       /scan reference is /settings/scan). Verified on a
+	//                       throwaway stack instead: with
 	//                       SBOMHUB_AUTH_MODE=anonymous and NO credential at
 	//                       all — the self-hosted default identity — the route
 	//                       still answers 202.
-	//   RequireWrite        UNCHANGED in effect (the authWrite group carried
-	//                       it), but now explicit and, critically, placed
+	//
+	//                       IT IS NOT PURELY ADDITIVE, and an earlier draft
+	//                       claiming "nothing loses access" was wrong (Codex
+	//                       round 5, Low). In anonymous mode the pre-M53 Auth()
+	//                       IGNORED the Authorization header entirely and served
+	//                       every request as the default tenant's Owner, so a
+	//                       request that HAPPENED to carry an `sbh_` key still
+	//                       got through. Measured on a throwaway stack
+	//                       2026-08-05 against a DEFAULT-tenant SBOM, before →
+	//                       after: read-only (Viewer) key 202 → 403; unknown
+	//                       `sbh_` value 202 → 401; no header at all 202 → 202.
+	//                       That is the point of the change — the credential is
+	//                       finally read — but a self-hosted CI job that passed
+	//                       a read-scoped or stale key to this route was
+	//                       succeeding by accident and now fails.
+	//   RequireWrite        the same GUARD the authWrite group carried, now
+	//                       explicit — but not the same EFFECT everywhere: in
+	//                       anonymous mode it used to judge the default Owner
+	//                       and now judges the API key's own role (see the
+	//                       measurement above). Placed, critically,
 	//                       BEFORE the limiter and the transaction: a
 	//                       read-scoped key is refused without spending a
 	//                       rate-limit token or opening a tx. Same F15

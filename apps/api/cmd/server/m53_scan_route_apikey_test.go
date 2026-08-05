@@ -11,11 +11,14 @@ import (
 // # The defect this closes
 //
 // .github/workflows/sbom-upload.yml is the workflow this repository ships and
-// runs against its own code — a `workflow_dispatch`-only dogfooding /
-// copy-me-into-your-repo reference, NOT a reusable action (Codex round 4, Low:
-// an earlier draft called it that; it declares no `workflow_call` trigger and
-// there is no action manifest, and docs/ci-inventory.md classifies it as
-// manual). It is three steps: upload the SBOM, read it back to learn its id,
+// runs against its own code. It is `workflow_dispatch`-only — NOT a reusable
+// action and not a called workflow (Codex round 4, Low: an earlier draft said
+// "reusable GitHub Action"; it declares no `workflow_call` trigger, there is no
+// action manifest anywhere in the tree, and docs/ci-inventory.md classifies it
+// as manual dogfooding. Codex round 5, Low: the replacement wording
+// "copy-me-into-your-repo reference" was also unsupported by anything in the
+// repository and is gone too).
+// It is three steps: upload the SBOM, read it back to learn its id,
 // then POST that id to /scan. The first two ran on the MultiAuth-fronted
 // chain and worked with `Authorization: Bearer sbh_...`; the third was
 // registered on the Clerk-only `authWrite` group, so no API key was ever
@@ -31,8 +34,11 @@ import (
 // The 404 is the worse half: with SBOMHUB_AUTH_MODE=anonymous the Bearer header
 // is ignored and the request resolves as the DEFAULT tenant, which does not own
 // the SBOM — the same 404, byte for byte, that the route answers with NO
-// credential at all. And because the workflow step carried
-// `continue-on-error: true`, neither status ever turned a run red.
+// credential at all. And neither status ever turned a run red for two
+// independent reasons: the step carried `continue-on-error: true`, and — the
+// half that is easy to miss — its curl had no --fail flag, so an HTTP refusal
+// exited 0 and the `echo "Vulnerability scan triggered!"` after it ran anyway
+// (Codex rounds 4 and 5, Low).
 //
 // # What was NOT broken (corrected after Codex round 1, Medium)
 //
@@ -52,6 +58,24 @@ import (
 // is still a defect: an endpoint the product documents, and calls from its own
 // shipped workflow, that answers 404 to every API key in existence.
 //
+// # What this change is NOT: purely additive (Codex round 5, Low)
+//
+// In SBOMHUB_AUTH_MODE=anonymous the pre-M53 Auth() ignored the Authorization
+// header outright and served every request as the DEFAULT tenant's Owner. So a
+// request that happened to carry an `sbh_` key was not refused — the key was
+// simply not read, and the request succeeded on the default identity whenever
+// the target belonged to the default tenant. Measured on a throwaway stack
+// 2026-08-05 against a default-tenant SBOM, pre-fix binary → post-fix binary:
+//
+//	read-scoped (Viewer) key   202 -> 403
+//	unknown `sbh_` value       202 -> 401
+//	no Authorization header    202 -> 202   (the self-hosted identity, unchanged)
+//
+// That tightening is the whole point — the credential is finally read — but it
+// is a behaviour change for self-hosted deployments, not a pure gain, and
+// docs/UPGRADE.md says so. A CI job passing a read-scoped or stale key to this
+// route was succeeding by accident and now fails.
+//
 // # What this file pins
 //
 // TestM50W2APIKeyReachableRoutesAreAllClassified already sweeps every
@@ -64,7 +88,7 @@ import (
 const m53ScanRoute = "POST /api/v1/projects/:id/scan"
 
 // TestM53ScanRouteIsAPIKeyReachable is the direct statement of the fix: the
-// route the shipped GitHub Action calls must accept a Bearer API key.
+// route the shipped workflow calls must accept a Bearer API key.
 func TestM53ScanRouteIsAPIKeyReachable(t *testing.T) {
 	reachable := apiKeyReachableRoutes(t)
 	if _, ok := reachable[m53ScanRoute]; !ok {
@@ -105,16 +129,32 @@ func TestM53ScanRouteIsAPIKeyReachable(t *testing.T) {
 func TestM53ScanRouteChainMatchesItsNeighbours(t *testing.T) {
 	routes, _ := parseRoutes(t)
 	var chain []string
-	found := false
+	var lines []int
 	for _, r := range routes {
 		if r.method+" "+r.fullPath == m53ScanRoute {
-			chain = r.chain
-			found = true
-			break
+			if chain == nil {
+				chain = r.chain
+			}
+			lines = append(lines, r.line)
 		}
 	}
-	if !found {
+	if len(lines) == 0 {
 		t.Fatalf("main.go no longer registers %s at all — this guard is blind", m53ScanRoute)
+	}
+
+	// EXACTLY ONE registration (Codex round 5, Low). Echo lets the same
+	// method+path be registered twice and serves the LAST one, while every
+	// assertion below — and TestM50W2APIKeyReachableRoutesAreAllClassified's
+	// set membership, and TestM47W1ManualScanRequiresWrite's per-match loop —
+	// is satisfied by the FIRST. So re-adding the historical
+	// `authWrite.POST("/projects/:id/scan", vulnHandler.Scan)` further down
+	// main.go would restore the Clerk-only behaviour at run time with the whole
+	// suite green. Counting is the only thing that sees it.
+	if len(lines) != 1 {
+		t.Errorf("main.go registers %s %d times (lines %v). Echo serves the LAST "+
+			"registration for a duplicate method+path, so the effective chain is not "+
+			"necessarily the one asserted below — and every other guard in this package "+
+			"is satisfied by the first match.", m53ScanRoute, len(lines), lines)
 	}
 
 	idx := func(needle string) int {

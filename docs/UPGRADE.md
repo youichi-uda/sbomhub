@@ -329,11 +329,12 @@ The four that remain are the tenant-wide ones refused in the table above —
 > resolved as the *default* tenant, which does not own the SBOM — the identical
 > 404 the route gives with no credential at all) and **401** under Clerk. That
 > is the third step of the workflow this repository ships
-> (`.github/workflows/sbom-upload.yml`), which never turned a run red — not only
-> because it carried `continue-on-error: true`, but because its `curl` had no
-> `--fail` flag and its last command was an unconditional `echo`, so the step
-> could not fail in the first place. Both were removed and the two calls now
-> compare their status exactly (200 / 202). The route now sits on the same MultiAuth →
+> (`.github/workflows/sbom-upload.yml`), which never turned a run red for two
+> independent reasons: it carried `continue-on-error: true`, and its `curl` had
+> no `--fail` flag, so an HTTP refusal exited 0 and the `echo` after it ran
+> anyway. (The step could still have failed on a transport error, so neither
+> reason was redundant.) Both were removed and the two calls now compare their
+> status exactly (200 / 202). The route now sits on the same MultiAuth →
 > RequireWrite → RateLimitByAPIKey(standard, 60/min) → TenantTx → audit chain as
 > `POST /api/v1/projects/:id/sbom`, and is classified `scopeProjectPathParam`,
 > so a project-scoped key may scan **its own project only** and is answered the
@@ -354,9 +355,25 @@ The four that remain are the tenant-wide ones refused in the table above —
 > the row count, and no movement in `scan-status`, because this route has no
 > ScanTracker).
 >
-> **Operator action.** None for the API keys themselves: no existing key loses
-> anything, and a tenant-level key is unaffected by the scope table entirely.
-> One caveat if you use the shipped workflow — take the workflow and the server
+> **Operator action.** A tenant-level key is unaffected by the scope table
+> entirely, and no key loses access to any route it could already use *as a
+> key*. But in `SBOMHUB_AUTH_MODE=anonymous` this route is now STRICTER than it
+> was, because the header it used to ignore is now read (Codex round 5 caught an
+> earlier version of this note claiming otherwise). Measured on a throwaway
+> stack 2026-08-05 against a default-tenant SBOM, pre-fix binary → post-fix
+> binary:
+>
+> | credential on the scan call | before | after |
+> |---|---|---|
+> | read-scoped (Viewer) `sbh_` key | 202 | **403** |
+> | unknown / stale `sbh_` value | 202 | **401** |
+> | no `Authorization` header | 202 | 202 |
+>
+> The old behaviour was that `Auth()` ignored the header and served the request
+> as the default tenant's Owner, so the key was never consulted. If a
+> self-hosted CI job passes a read-scoped or stale key to this route, it was
+> succeeding by accident and will now fail — give it a write-scoped key.
+> One further caveat if you use the shipped workflow — take the workflow and the server
 > in the same upgrade, or leave `scan` off. The upload step is irreversible and
 > the scan step no longer swallows its errors, so a NEW workflow pointed at an
 > OLD server stores (and scans) the SBOM and then goes red on the trigger, and

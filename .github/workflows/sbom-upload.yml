@@ -116,10 +116,13 @@ jobs:
       #
       # `continue-on-error: true` is NOT why that stayed green, or not on its
       # own (Codex round 4, Low): the old step's curl carried no --fail flag, so
-      # it printed the 404 body and exited 0 (measured), and the step ended with
-      # an unconditional `echo "Vulnerability scan triggered!"`. The step could
-      # not fail. continue-on-error was belt AND braces; the exact-status checks
-      # below are the half that actually makes a refusal red. The
+      # it printed the 404 body and exited 0 (measured), and the
+      # `echo "Vulnerability scan triggered!"` that followed ran anyway. The step
+      # could not fail ON AN HTTP REFUSAL — it could still fail on a transport
+      # error or on jq choking (Codex round 5, Low, narrowing an over-broad
+      # "could not fail" in the previous draft), which is exactly what
+      # continue-on-error was covering. Two independent reasons, both removed;
+      # the exact-status checks below are the half that makes a REFUSAL red. The
       # route moved onto the MultiAuth chain (cmd/server/main.go, M53 W1) and is
       # classified in middleware/project_scope.go, so it now answers 202 for a
       # tenant-level key and for a project-scoped key naming its OWN project (403
