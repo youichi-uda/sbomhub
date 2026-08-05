@@ -298,7 +298,7 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 
 		// Return mock response
 		response := NVDResponse{
-			ResultsPerPage: 1,
+			ResultsPerPage: nvdIntPtr(1),
 			StartIndex:     0,
 			TotalResults:   1,
 			Vulnerabilities: []NVDVulnEntry{
@@ -357,7 +357,7 @@ func TestNVDService_SearchByCVEID_HTTPMock(t *testing.T) {
 			t.Errorf("expected cveId query CVE-2021-44228, got %q", got)
 		}
 		response := NVDResponse{
-			ResultsPerPage: 1,
+			ResultsPerPage: nvdIntPtr(1),
 			TotalResults:   1,
 			Vulnerabilities: []NVDVulnEntry{
 				{
@@ -478,8 +478,11 @@ func TestNVDService_HTTPMock_Timeout(t *testing.T) {
 
 func TestNVDService_HTTPMock_EmptyResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// resultsPerPage is PRESENT and zero — a real "no CVEs for this
+		// component" answer, which must stay distinguishable from a body that
+		// carries no envelope at all (M54, Codex R4).
 		response := NVDResponse{
-			ResultsPerPage:  0,
+			ResultsPerPage:  nvdIntPtr(0),
 			StartIndex:      0,
 			TotalResults:    0,
 			Vulnerabilities: []NVDVulnEntry{},
@@ -635,17 +638,29 @@ func TestConvertToVulnerabilities_DateParsing(t *testing.T) {
 	}
 }
 
-// Test that non-RFC3339 dates (like NVD uses) are handled gracefully
+// TestConvertToVulnerabilities_NonRFC3339Date pins the zoneless timestamp NVD
+// actually sends.
+//
+// M54 (Codex R4, Medium) INVERTED this test. It used to assert
+// `PublishedAt == nil` for "2023-06-15T14:30:00.000", and its own comment said
+// why: "NVD API actually returns dates like ... which doesn't match RFC3339,
+// so PublishedAt remains zero". So the format the production API sends was
+// known, and the test pinned the parser's failure to read it as if that were
+// the intended behaviour. The consequence was not cosmetic — EVERY
+// vulnerability this scanner created stored published_at = NULL, and the field
+// was absent from every API response built from a scan.
+//
+// A test that encodes a defect as a contract is worse than no test: it makes
+// the defect look deliberate and turns the fix into a red build. The
+// assertion is now what a caller needs to be true.
 func TestConvertToVulnerabilities_NonRFC3339Date(t *testing.T) {
 	svc := &NVDService{}
 
-	// NVD API actually returns dates like "2023-06-15T14:30:00.000" without timezone
-	// which doesn't match RFC3339, so PublishedAt remains zero
 	entries := []NVDVulnEntry{
 		{
 			CVE: NVDCVE{
 				ID:        "CVE-2023-0001",
-				Published: "2023-06-15T14:30:00.000", // Not RFC3339 compliant
+				Published: "2023-06-15T14:30:00.000", // exactly what NVD sends
 				Descriptions: []NVDDesc{
 					{Lang: "en", Value: "Test"},
 				},
@@ -659,10 +674,15 @@ func TestConvertToVulnerabilities_NonRFC3339Date(t *testing.T) {
 		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
 	}
 
-	// Since the date format doesn't match RFC3339, PublishedAt stays nil
-	// (M46 B2: absent timestamps are nil, not a zero time.Time).
-	if vulns[0].PublishedAt != nil {
-		t.Errorf("expected nil PublishedAt for non-RFC3339 date, got %v", *vulns[0].PublishedAt)
+	if vulns[0].PublishedAt == nil {
+		t.Fatal("PublishedAt is nil for the timestamp shape the NVD API actually sends. " +
+			"RFC3339 requires an offset and NVD does not send one, so parsing with RFC3339 " +
+			"alone drops every real publication date.")
+	}
+	// The zoneless form is read as UTC, which is what the NVD API documents.
+	want := time.Date(2023, 6, 15, 14, 30, 0, 0, time.UTC)
+	if !vulns[0].PublishedAt.Equal(want) {
+		t.Errorf("PublishedAt = %v, want %v", *vulns[0].PublishedAt, want)
 	}
 }
 
@@ -766,5 +786,87 @@ func BenchmarkConvertToVulnerabilities(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		svc.convertToVulnerabilities(entries)
+	}
+}
+
+// nvdIntPtr is the addressable-literal helper for NVDResponse.ResultsPerPage,
+// which is a pointer so that an ABSENT envelope field is distinguishable from
+// a present zero (M54, Codex R4 Critical).
+func nvdIntPtr(v int) *int { return &v }
+
+// TestM54NVDResponse_EnvelopeAbsenceIsNotZeroResults pins the distinction the
+// pointer field exists for (Codex M54 R4, Critical): a 200 response whose body
+// is not an NVD envelope must be an ERROR, not "this component has no CVEs".
+//
+// It matters because NVDService.baseURL is operator-overridable for air-gapped
+// mirrors, so a proxy or mirror answering 200 with `null` / `{}` is reachable
+// in the field — and before this, the scan counted that component as processed
+// and reported completed with zero findings.
+func TestM54NVDResponse_EnvelopeAbsenceIsNotZeroResults(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"null body", `null`, true},
+		{"empty object", `{}`, true},
+		{"envelope present, genuinely zero results", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, false},
+		{"envelope present with results", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("write body: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			svc := NewNVDService(nil, nil, "", srv.URL, false)
+			_, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0")
+			if tc.wantErr && err == nil {
+				t.Errorf("body %s produced no error — an empty body is indistinguishable from "+
+					"'no CVEs found', which the scan reports as a completed, clean result", tc.body)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("body %s: unexpected error %v", tc.body, err)
+			}
+		})
+	}
+}
+
+// TestM54ParseNVDTimestamp_AcceptsTheFormatNVDActuallySends pins the
+// zoneless shape (Codex M54 R4, Medium). time.RFC3339 alone rejected every
+// real NVD `published` value, so published_at was stored NULL for every
+// vulnerability this scanner created.
+func TestM54ParseNVDTimestamp_AcceptsTheFormatNVDActuallySends(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string // RFC3339 rendering, or "" for nil
+	}{
+		{"2024-03-29T17:15:21.150", "2024-03-29T17:15:21Z"}, // what NVD really sends
+		{"2024-03-29T17:15:21", "2024-03-29T17:15:21Z"},
+		{"2024-03-29T17:15:21.150Z", "2024-03-29T17:15:21Z"}, // offset honoured, not reinterpreted
+		{"2024-03-29T17:15:21+09:00", "2024-03-29T08:15:21Z"},
+		{"", ""},
+		{"not a timestamp", ""},
+	}
+	for _, tc := range cases {
+		got := parseNVDTimestamp(tc.in)
+		if tc.want == "" {
+			if got != nil {
+				t.Errorf("parseNVDTimestamp(%q) = %v, want nil", tc.in, got)
+			}
+			continue
+		}
+		if got == nil {
+			t.Errorf("parseNVDTimestamp(%q) = nil, want %s — NVD does not send an offset, so "+
+				"RFC3339 alone drops every real publication date", tc.in, tc.want)
+			continue
+		}
+		if g := got.UTC().Format(time.RFC3339); g != tc.want {
+			t.Errorf("parseNVDTimestamp(%q) = %s, want %s", tc.in, g, tc.want)
+		}
 	}
 }

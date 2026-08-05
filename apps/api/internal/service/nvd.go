@@ -81,10 +81,35 @@ func NewNVDServiceWithCache(vr *repository.VulnerabilityRepository, cr *reposito
 }
 
 type NVDResponse struct {
-	ResultsPerPage  int            `json:"resultsPerPage"`
+	// ResultsPerPage is a POINTER so its ABSENCE is distinguishable from a
+	// legitimate zero (M54, Codex R4 Critical). encoding/json decodes a body of
+	// `null` or `{}` into a zero-valued struct WITHOUT error — measured — so
+	// with a plain int, a 200 response carrying no NVD envelope at all was
+	// indistinguishable from "this component genuinely has no CVEs". The worker
+	// counted it as processed, persisted nothing, and the scan reported
+	// completed with zero findings, sailing straight past the
+	// total-fetch-failure guard in processComponentsParallel.
+	//
+	// That is reachable in the field: baseURL is operator-overridable for
+	// air-gapped mirrors (M40 Wave B), and an interposing proxy or a
+	// misconfigured mirror answering 200 with an empty body is exactly the
+	// shape this now refuses. resultsPerPage is part of every documented NVD
+	// response envelope, so requiring it present costs nothing against a real
+	// endpoint.
+	ResultsPerPage  *int           `json:"resultsPerPage"`
 	StartIndex      int            `json:"startIndex"`
 	TotalResults    int            `json:"totalResults"`
 	Vulnerabilities []NVDVulnEntry `json:"vulnerabilities"`
+}
+
+// validate rejects a 200 response whose body is not an NVD envelope. See the
+// note on ResultsPerPage for why absence, not value, is what is checked.
+func (r *NVDResponse) validate() error {
+	if r == nil || r.ResultsPerPage == nil {
+		return fmt.Errorf("NVD response is missing the resultsPerPage envelope field; " +
+			"the endpoint returned 200 but the body is not an NVD CVE API response")
+	}
+	return nil
 }
 
 type NVDVulnEntry struct {
@@ -572,6 +597,9 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 	if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
 		return nil, err
 	}
+	if err := nvdResp.validate(); err != nil {
+		return nil, err
+	}
 
 	return s.convertToVulnerabilities(nvdResp.Vulnerabilities), nil
 }
@@ -597,9 +625,7 @@ func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vu
 		vuln.CVSSScore = score
 		vuln.Severity = severity
 
-		if t, err := time.Parse(time.RFC3339, entry.CVE.Published); err == nil {
-			vuln.PublishedAt = &t
-		}
+		vuln.PublishedAt = parseNVDTimestamp(entry.CVE.Published)
 		now := time.Now()
 		vuln.UpdatedAt = &now
 
@@ -607,6 +633,45 @@ func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vu
 	}
 
 	return vulns
+}
+
+// nvdTimestampLayouts are the shapes NVD actually publishes, most specific
+// first.
+//
+// M54 (Codex R4, Medium): this used to try time.RFC3339 and nothing else.
+// RFC3339 REQUIRES an offset, and the NVD CVE API does not send one — its
+// `published` / `lastModified` values look like `2024-03-29T17:15:21.150`.
+// Measured: time.Parse(time.RFC3339, "2024-03-29T17:15:21.150") fails with
+// `cannot parse "" as "Z07:00"`. The error was discarded, so PublishedAt
+// stayed nil and EVERY vulnerability this scanner created stored
+// published_at = NULL. The API then omitted the field and nothing downstream
+// could sort or age a finding by publication date.
+//
+// The zoneless layouts are read as UTC (time.Parse's default when the layout
+// has no zone), which is what the NVD API documents its timestamps to be. The
+// offset-bearing RFC3339 form is tried first so a mirror that does send one is
+// honoured rather than reinterpreted.
+var nvdTimestampLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05.000",
+	"2006-01-02T15:04:05",
+}
+
+// parseNVDTimestamp returns nil when the value is absent or in none of the
+// known shapes. nil is meaningful here — model.Vulnerability.PublishedAt is a
+// pointer precisely so "unknown" is representable rather than being flattened
+// to year 1 (M46 B2).
+func parseNVDTimestamp(v string) *time.Time {
+	if v == "" {
+		return nil
+	}
+	for _, layout := range nvdTimestampLayouts {
+		if t, err := time.Parse(layout, v); err == nil {
+			return &t
+		}
+	}
+	slog.Debug("unparseable NVD timestamp", "value", v)
+	return nil
 }
 
 // extractCvss returns the CVE's base score and severity. M46 B2: a CVE
@@ -674,6 +739,11 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 	var nvdResp NVDResponse
 	if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
 		return nil, fmt.Errorf("failed to decode NVD response: %w", err)
+	}
+	// Same envelope check as searchByKeyword: without it an empty body reads
+	// as an authoritative "CVE not found" (Codex M54 R4, Critical).
+	if err := nvdResp.validate(); err != nil {
+		return nil, err
 	}
 
 	if len(nvdResp.Vulnerabilities) == 0 {

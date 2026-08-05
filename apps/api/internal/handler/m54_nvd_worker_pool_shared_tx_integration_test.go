@@ -41,13 +41,19 @@
 // discarded — the same total loss the M50 poison test measured, reached
 // without any statement being individually invalid.
 //
-// It was also loud in the wrong direction: the scanner returned nil, so
-// "NVD scan completed" was logged at INFO in the same run as the ERROR that
-// reported the discarded commit. That asymmetry is MEASURED by M50's poison
-// test, which asserts on both lines; this file does NOT pin it (Codex M54 R1,
-// Low — an earlier draft of this paragraph claimed it did). All this file
-// asserts about logs is that the success line is present on the fixed path,
-// which would not notice the success line being moved after the commit.
+// It was also loud in the wrong direction AT THE TIME: the scanner returned
+// nil, so "NVD scan completed" was logged at INFO in the same run as the ERROR
+// that reported the discarded commit. That is history, not current behaviour
+// (Codex M54 R4, Low — this paragraph outlived the code it described): the R1
+// follow-up made processComponentsParallel count refused writes and return an
+// error, and TestM54NVDScan_RefusedWritesAreReportedAsFailure below asserts
+// the success line is ABSENT in that case. M50's poison test still measures
+// the original asymmetry against the JVN path, which was not changed.
+//
+// This file does NOT pin the asymmetry (Codex M54 R1, Low — an earlier draft
+// claimed it did). All it asserts about logs is that the success line is
+// present on the fixed path, which would not notice that line being moved
+// after the commit.
 //
 // # Why the timing is ordinary rather than exotic
 //
