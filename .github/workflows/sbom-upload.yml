@@ -79,13 +79,10 @@ jobs:
 
           echo "SBOM uploaded successfully!"
 
-      # KNOWN LIMITATION, measured 2026-08-04 on a throwaway stack and NOT fixed
-      # here: the scan call below does not work with an API key on either header.
+      # `continue-on-error: true` was REMOVED from this step on 2026-08-05.
       #
-      # POST /api/v1/projects/:id/scan is registered on the Clerk-only `authWrite`
-      # group in cmd/server/main.go, not on the MultiAuth-fronted chain the two
-      # /sbom calls use, so no API key is ever consulted for it. Measured, one
-      # tenant-level sbh_ key, both header spellings:
+      # What it was hiding, measured on a throwaway stack 2026-08-04/05 with one
+      # tenant-level sbh_ key, on both header spellings:
       #
       #   POST /api/v1/projects/<id>/sbom              201
       #   GET  /api/v1/projects/<id>/sbom              200
@@ -94,25 +91,58 @@ jobs:
       #                                                         which does not own
       #                                                         the project
       #
-      # In a Clerk deployment it is a 401 instead. `continue-on-error: true` is
-      # why this has never surfaced as a red run. Fixing it means moving the route
-      # onto MultiAuth, which also means classifying it in
-      # middleware/project_scope.go (default-deny) — out of scope for this change.
-      - name: Trigger Vulnerability Scan (Optional)
+      # 401 under Clerk. POST /api/v1/projects/:id/scan was registered on the
+      # Clerk-only `authWrite` group, so no API key was ever consulted for it —
+      # every run of this workflow uploaded an SBOM that was never scanned, and
+      # every one of them was green. Two steps of three working is the worst
+      # possible shape for a compliance product: the evidence looks present.
+      #
+      # The route moved onto the MultiAuth chain (cmd/server/main.go, M53 W1) and
+      # is classified in middleware/project_scope.go, so it now answers 202 for a
+      # tenant-level key and for a project-scoped key naming its OWN project (403
+      # for any other project id, which is a real error and should be red here).
+      #
+      # WHAT THIS STEP CAN AND CANNOT DETECT. The endpoint is a TRIGGER: it
+      # answers 202 Accepted and runs the NVD/JVN sweep in a background
+      # goroutine, with no tracker for this route (see VulnerabilityHandler.
+      # runScan's doc comment). So a red step here means "the scan was not
+      # started"; a green step does NOT mean the scan finished, or found
+      # anything, or that its transaction committed. To gate a build on scan
+      # RESULTS use the CLI instead — `sbomhub scan . --project <name> --fail-on
+      # critical` polls /sboms/:sbom_id/scan-status and blocks on the counts.
+      #
+      # The `if:` wires up the `scan` workflow_dispatch input, which was declared
+      # at the top of this file and read by nothing — the step ran unconditionally
+      # and answering "false" to the prompt did nothing. That is not a silent
+      # FAILURE (workflow_dispatch is manual, the operator chose it, and GitHub
+      # renders a skipped step as skipped), but it was a silent lie, and it is the
+      # same species as the one this change is about.
+      - name: Trigger Vulnerability Scan
+        if: ${{ inputs.scan }}
         env:
           SBOMHUB_API_KEY: ${{ secrets.SBOMHUB_API_KEY }}
         run: |
-          # Get latest SBOM ID
-          SBOM_RESPONSE=$(curl -s \
+          set -euo pipefail
+
+          # Get latest SBOM ID. --fail-with-body so an auth/permission failure
+          # here is the step's failure and not an empty SBOM_ID two lines later:
+          # the previous version treated "no id in the response" as "nothing to
+          # do" and exited 0, which is the same silence continue-on-error gave.
+          SBOM_RESPONSE=$(curl -sS --fail-with-body \
             "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
             -H "Authorization: Bearer ${SBOMHUB_API_KEY}")
 
-          SBOM_ID=$(echo $SBOM_RESPONSE | jq -r '.id')
+          SBOM_ID=$(echo "$SBOM_RESPONSE" | jq -r '.id // empty')
 
-          if [ "$SBOM_ID" != "null" ] && [ -n "$SBOM_ID" ]; then
-            curl -X POST \
-              "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/scan?sbom_id=${SBOM_ID}&sources=nvd,jvn" \
-              -H "Authorization: Bearer ${SBOMHUB_API_KEY}"
-            echo "Vulnerability scan triggered!"
+          if [ -z "$SBOM_ID" ]; then
+            echo "Error: could not read back the SBOM just uploaded (no .id in the response)"
+            echo "$SBOM_RESPONSE"
+            exit 1
           fi
-        continue-on-error: true
+
+          curl -sS --fail-with-body -X POST \
+            "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/scan?sbom_id=${SBOM_ID}&sources=nvd,jvn" \
+            -H "Authorization: Bearer ${SBOMHUB_API_KEY}"
+
+          echo
+          echo "Vulnerability scan triggered for sbom ${SBOM_ID} (accepted; it runs in the background)"
