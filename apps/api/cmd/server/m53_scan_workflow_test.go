@@ -95,9 +95,11 @@ func TestM53ScanStepFailsLoudly(t *testing.T) {
 
 	for _, want := range []struct{ token, why string }{
 		{"set -euo pipefail",
-			"GitHub already runs the step as `bash -e {0}`, so what this adds is `-u` " +
-				"(an unset variable must not become an empty segment of a URL) and " +
-				"`pipefail`"},
+			"GitHub already runs the step as `bash -e {0}`, so `-e` is not what this " +
+				"adds; `-u` is (an unset variable must not become an empty segment of a " +
+				"URL). `pipefail` is inert today — the block contains no pipeline, by " +
+				"design — and is pinned so that adding one later cannot reintroduce a " +
+				"swallowed exit status (Codex round 3, Low)"},
 		{`!= "200"`,
 			"the read-back's status must be compared EXACTLY. curl --fail-with-body " +
 				"only fails on >= 400, so a 3xx (these calls do not follow redirects) or " +

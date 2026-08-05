@@ -204,6 +204,15 @@ func TestM50W2PathParamScopeMatrix(t *testing.T) {
 // the response distinguishes them, which is exactly the property M47 W1's 404
 // sentinel buys — obtained here without asserting "not found" about a project
 // that may well exist.
+//
+// M53 W1 (Codex round 3, Low): the MALFORMED `:id` is now one of the cases. It
+// takes a DIFFERENT branch of apiKeyProjectScopeAllowed (uuid.Parse fails, so it
+// refuses before the comparison) with a different `reason` string, and it was
+// covered only by a status assertion — a change to that branch's body would have
+// left every test here green while splitting the four-way identity the file's
+// doc comment claims. scripts/project-scope-e2e.sh has always compared it on the
+// wire; this closes the same gap in the unit tests, which are what a developer
+// runs.
 func TestM50W2PathParamDenialIsIndistinguishable(t *testing.T) {
 	own := uuid.New()
 	key := m50w2ProjectKey(own)
@@ -213,13 +222,14 @@ func TestM50W2PathParamDenialIsIndistinguishable(t *testing.T) {
 		body string
 	}
 	got := map[string]answer{}
-	for name, target := range map[string]uuid.UUID{
-		"sibling project of the same tenant": uuid.New(),
-		"project of a different tenant":      uuid.New(),
-		"uuid that was never allocated":      uuid.New(),
+	for name, target := range map[string]string{
+		"sibling project of the same tenant":         uuid.New().String(),
+		"project of a different tenant":              uuid.New().String(),
+		"uuid that was never allocated":              uuid.New().String(),
+		"a path parameter that is not a uuid at all": "not-a-uuid",
 	} {
 		c, rec := m50w2Ctx(http.MethodGet, "/api/v1/projects/:id/sbom",
-			map[string]string{"id": target.String()})
+			map[string]string{"id": target})
 		if allowed, _ := apiKeyProjectScopeAllowed(c, key); allowed {
 			t.Fatalf("%s was allowed", name)
 		}

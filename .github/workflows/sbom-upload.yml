@@ -146,15 +146,19 @@ jobs:
       # the new default "byte-for-byte what it was", which is false at the
       # request level even though the server-side outcome is identical).
       #
-      # WHEN TO SWITCH IT ON, honestly scoped to what THIS step does: it always
-      # runs after an upload in this workflow, and it hardcodes
-      # `sources=nvd,jvn`. So it buys one thing — a second sweep of the SBOM
-      # just uploaded, against advisory data fetched now rather than at ingest,
-      # which matters only if the two are far enough apart to differ. The
-      # route's other uses (re-scanning an OLD sbom_id without uploading, or
-      # narrowing `sources`) are reasons the endpoint exists; they are not
-      # reachable from this step without editing it (Codex round 2, Low: the
-      # previous wording offered both as if this step provided them).
+      # WHEN TO SWITCH IT ON, honestly scoped to what THIS step does — which,
+      # after two rounds of review, is very little. It always runs after an
+      # upload in this workflow, and it hardcodes `sources=nvd,jvn`, so the
+      # route's genuine uses (re-scanning an OLD sbom_id without uploading, or
+      # narrowing `sources`) are not reachable from here without editing it.
+      # And the second sweep is not reliably "fresher" than the first: it does
+      # not wait for the upload's own scan, so the two can overlap, and NVD is
+      # served from its Redis cache anyway (measured above: cache_hits=1,
+      # api_calls=0). What switching it on actually buys is a JVN request that
+      # is not cached, plus an on-the-wire assertion that this API key can in
+      # fact trigger a scan. Treat it as a smoke test of the credential, not as
+      # a way to get better data. (Codex rounds 2 and 3, Low: the two earlier
+      # drafts of this paragraph each promised more than the step delivers.)
       #
       # WHAT THIS STEP CAN AND CANNOT DETECT. The endpoint is a TRIGGER: it
       # answers 202 Accepted and runs the sweep in a background goroutine, with
@@ -180,10 +184,14 @@ jobs:
         run: |
           # GitHub already runs an unspecified `run:` on a Linux runner as
           # `bash -e {0}`, so `-e` is not what this line adds (Codex round 2, Low
-          # — an earlier comment here claimed it was). What it adds is `-u`
-          # (an unset variable is an error rather than an empty string in a URL)
-          # and `pipefail` (the `curl | jq` shapes below fail on the curl, not
-          # only on the jq).
+          # — an earlier comment here claimed it was). What it adds TODAY is `-u`:
+          # an unset variable becomes an error instead of an empty segment in a
+          # URL. `pipefail` is INERT as written, because there is no pipeline in
+          # this block at all — curl writes with `-o` and jq reads with `<`,
+          # which is deliberate (Codex round 3, Low, which caught the previous
+          # comment claiming a `curl | jq` benefit that does not exist here). It
+          # is kept so that adding a pipeline later cannot quietly reintroduce
+          # the swallowed-exit-status shape this whole step exists to remove.
           set -euo pipefail
 
           # Both calls compare the status EXACTLY instead of relying on curl's

@@ -116,7 +116,26 @@ func TestM53ScanRouteChainMatchesItsNeighbours(t *testing.T) {
 	idx := func(needle string) int {
 		return indexOf(chain, func(m string) bool { return strings.Contains(m, needle) })
 	}
+	auth := idx("MultiAuth(")
 	gate, limit, tx := idx("RequireWrite"), idx("RateLimitByAPIKey"), idx("TenantTx(")
+
+	// MultiAuth must be OUTERMOST (Codex round 3, Low). Asserting only the
+	// relative order of the three below leaves a mutation undetected that
+	// breaks the route completely: swap the registration to
+	// `RequireWrite(), MultiAuth(...), RateLimit..., TenantTx...` and every
+	// other assertion in this test still holds — RequireWrite is still before
+	// the limiter, the limiter still before TenantTx, MultiAuth is still
+	// present — while at run time RequireWrite executes before any credential
+	// has been read, so ContextKeyRole is unset and every API key is answered
+	// 401. Echo composes route middleware outermost-first, so position 0 is
+	// the claim.
+	if auth != 0 {
+		t.Errorf("%s does not run MultiAuth first (position %d in %v). Every guard after "+
+			"it reads context MultiAuth populates — RequireWrite reads the role, "+
+			"RateLimitByAPIKey keys off the API key, TenantTx off the tenant — so anything "+
+			"ahead of it judges a request whose credential has not been read yet.",
+			m53ScanRoute, auth, chain)
+	}
 
 	if gate < 0 {
 		t.Errorf("%s has no RequireWrite in its chain %v — a read-scoped API key could "+

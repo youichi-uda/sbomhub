@@ -1077,9 +1077,12 @@ on sending `Authorization: Bearer` with nothing after it, it will now receive 40
   trigger, the step still cannot observe whether the background sweep finished —
   poll `/sboms/:sbom_id/scan-status`, or use `sbomhub scan --fail-on`, for that.
   The route is rate-limited but not capacity-managed: the limiter caps
-  ADMISSIONS (60 per window per key) and nothing else — 60 admissions spawn 60
-  background sweeps whose lifetimes may or may not overlap, nothing caps the
-  work in flight, and the fixed window admits 120 across a boundary.
+  ADMISSIONS (60 per window per key) and nothing else. An admission is not a
+  sweep — a request admitted by the limiter still has to pass the handler's
+  synchronous `SbomInProject` check, and a refused one starts nothing. What is
+  uncapped is the layer past that check: up to 60 ACCEPTED requests per window
+  each spawn a background goroutine, nothing limits how many run at once, and
+  the fixed window admits 120 across a boundary.
 - One correction to §8.3's "no cleanup is needed": the TTL on a counter is set
   by a separate `EXPIRE` issued only after the **first** `INCR` of a window
   (unchanged from before M51). If that one `EXPIRE` fails — a Redis error in
