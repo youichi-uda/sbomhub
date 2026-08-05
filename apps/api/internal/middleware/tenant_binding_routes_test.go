@@ -754,6 +754,30 @@ func m52HasTenantTx(chain []string, at token.Pos, aliasAt m52AliasResolver) bool
 	return false
 }
 
+// m52LastRegistrationPerKey collapses registrations to the one that actually
+// serves each "<METHOD> <path>".
+//
+// Echo REPLACES the handler when the same method+path is registered twice
+// (echo.Router.add overwrites), so the last registration wins. Collapsing
+// BEFORE any filtering is what makes a later bound registration remove an
+// earlier unbound one — a version that only ever ADDED unbound routes left a
+// route reported as unbound when an unbound registration was followed by the
+// real, TenantTx-carrying one.
+//
+// Shared with tenant_binding_premw_test.go on purpose: two notions of "the
+// route set" would drift, and the second gate's whole claim is that it slices
+// the SAME chains this one filters.
+func m52LastRegistrationPerKey(routes []m52Route) map[string]m52Route {
+	last := map[string]m52Route{}
+	for _, r := range routes {
+		key := r.method + " " + r.fullPath
+		if prev, seen := last[key]; !seen || r.line >= prev.line {
+			last[key] = r
+		}
+	}
+	return last
+}
+
 // m52NoTenantTxRoutes returns the derived "<METHOD> <path>" → route map.
 func m52NoTenantTxRoutes(t *testing.T) map[string]m52Route {
 	t.Helper()
@@ -762,21 +786,8 @@ func m52NoTenantTxRoutes(t *testing.T) map[string]m52Route {
 		t.Fatalf("parsed only %d routes from %s — the parser is blind, not the router",
 			len(routes), mainGoPath)
 	}
-	// Echo REPLACES the handler when the same method+path is registered twice
-	// (echo.Router.add overwrites), so the last registration is the one that
-	// serves. Collapsing by key first, then filtering, is what makes a later
-	// bound registration remove an earlier unbound one — the previous version
-	// only ever ADDED unbound routes, so an unbound registration followed by
-	// the real, TenantTx-carrying one left the route reported as unbound.
-	last := map[string]m52Route{}
-	for _, r := range routes {
-		key := r.method + " " + r.fullPath
-		if prev, seen := last[key]; !seen || r.line >= prev.line {
-			last[key] = r
-		}
-	}
 	out := map[string]m52Route{}
-	for key, r := range last {
+	for key, r := range m52LastRegistrationPerKey(routes) {
 		if m52HasTenantTx(r.chain, r.chainAt, aliasAt) {
 			continue
 		}

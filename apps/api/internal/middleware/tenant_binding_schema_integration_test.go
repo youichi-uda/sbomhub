@@ -326,6 +326,112 @@ func TestM52TouchesNoRLSTableRulesNameOnlyRLSExemptTables(t *testing.T) {
 	}
 }
 
+// TestM52PPreTenantTxRulesNameOnlyReachableTables is the same check for the
+// pre-TenantTx middleware table.
+//
+// It matters for the same reason and rather more widely: `api_keys` is
+// RLS-free BECAUSE migration 028 removed it so an API-key lookup could run
+// before any tenant is known, and `appmw.Auth` reads three RLS-free tables on
+// most routes of the API. Any migration that gives one of those a policy turns
+// a middleware that runs on 137 chains into a 500, and it does so on a
+// connection where nothing has bound the tenant. On that day this goes red.
+//
+// The verdict machinery is shared with the route check above, deliberately: it
+// took three attempts to get "can the runtime role read this with no tenant
+// bound" right, and the answer is not one to reimplement.
+func TestM52PPreTenantTxRulesNameOnlyReachableTables(t *testing.T) {
+	live := m52LiveRLS(t)
+
+	checked := 0
+	for _, key := range PreTenantTxMiddlewareKeys() {
+		rule := PreTenantTxMiddlewareRules()[key]
+
+		tables := append([]string{}, rule.RLSExemptTables...)
+		sort.Strings(tables)
+		for _, table := range tables {
+			st, exists := live[table]
+			if !exists {
+				t.Errorf("%s names %q in RLSExemptTables, which is not a relation in schema "+
+					"`public`. A name that resolves to nothing is checked by nothing: if the "+
+					"table was renamed or dropped, re-read the middleware and correct the list.",
+					key, table)
+				continue
+			}
+			checked++
+			switch {
+			case (st.Kind == "r" || st.Kind == "p") && !st.Enabled:
+				continue // relrowsecurity false — every stored policy is ignored
+			case st.Kind == "f":
+				t.Logf("NOTE: %s names %q, a FOREIGN TABLE. It cannot carry local row security, "+
+					"so it is exempt by construction and is not probed.", key, table)
+				continue
+			}
+			if ack, ok := rule.RLSEnabledButReachable[table]; ok {
+				t.Logf("NOTE: %s names %q, which carries row security, and the rule declares it "+
+					"reachable anyway: %s", key, table, ack)
+				continue
+			}
+			v := m52UnboundReadVerdict(t, table)
+			if v.ProbeErr != nil {
+				t.Errorf("%s names %q (relkind %q), and a plain `SELECT 1 FROM %s LIMIT 1` as the "+
+					"runtime role, with no tenant bound, FAILS: %v\n"+
+					"That is the connection state this middleware runs in on every route it is "+
+					"registered on — it sits AHEAD of TenantTx, so nothing has bound the tenant "+
+					"when it issues its statements. (%d policies on the relation.)\n"+
+					"Either give the middleware a transaction of its own that binds before it "+
+					"reads — and re-classify it PreTenantTxBindsWhatItReaches with a BindsVia "+
+					"and a ProvedBy drive — or, if the READ is not what it does here (an "+
+					"INSERT-only path, a view read as its owner, a foreign table), record that "+
+					"in the rule's RLSEnabledButReachable entry for %q.\n"+
+					"Reason recorded for the current classification: %s",
+					key, table, st.Kind, table, v.ProbeErr, v.Policies, table, rule.Why)
+				continue
+			}
+			if st.Enabled || st.Kind != "r" {
+				t.Logf("NOTE: %s names %q (relkind %q, rls=%v, %d policies). An unbound read of "+
+					"it as the runtime role raised nothing, so this is not failing — %s. Only "+
+					"SELECT was exercised; if the middleware also INSERTs or UPDATEs, read those "+
+					"policies yourself.", key, table, st.Kind, st.Enabled, v.Policies, v.Context)
+			}
+		}
+
+		// BoundRLSTables is checked in ONE direction only, and the asymmetry is
+		// the point. A name that resolves to nothing is a stale rule and fails.
+		// A name whose row security has been REMOVED makes the rule
+		// over-cautious rather than wrong — the middleware still binds, the
+		// binding is simply no longer needed — so that is logged. Failing there
+		// would redden a correct middleware for a migration that made its life
+		// easier, which is the false alarm that gets a gate switched off.
+		bound := append([]string{}, rule.BoundRLSTables...)
+		sort.Strings(bound)
+		for _, table := range bound {
+			st, exists := live[table]
+			if !exists {
+				t.Errorf("%s names %q in BoundRLSTables, which is not a relation in schema "+
+					"`public`. That name is the load-bearing fact of a "+
+					"PreTenantTxBindsWhatItReaches rule — the protected table that forced the "+
+					"classification — so a rule pointing at nothing is asserting nothing. "+
+					"Re-read the middleware and correct the list.", key, table)
+				continue
+			}
+			checked++
+			if !st.Enabled {
+				t.Logf("NOTE: %s names %q in BoundRLSTables, but relrowsecurity is now FALSE on "+
+					"it (relkind %q). The rule is not wrong — %s still binds — but the binding "+
+					"is no longer what makes the middleware safe, so the rule may be "+
+					"simplifiable to PreTenantTxRLSExemptTablesOnly. Not failing: a migration "+
+					"that removes a policy has not broken anything here.",
+					key, table, st.Kind, strings.Join(rule.BindsVia, " / "))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no pre-TenantTx rule named a table that exists — this test asserted nothing. " +
+			"The authenticators name five between them (api_keys, tenants, tenant_users, " +
+			"users, scan_settings), so those should have been checked.")
+	}
+}
+
 // TestM52NoExemptTableNameIsAmbiguous underwrites the unqualified table names
 // the classification table uses.
 //
@@ -349,6 +455,20 @@ func TestM52NoExemptTableNameIsAmbiguous(t *testing.T) {
 	named := map[string]bool{}
 	for _, key := range NoTenantTxRouteKeys() {
 		for _, table := range noTenantTxRouteBinding[key].RLSExemptTables {
+			named[table] = true
+		}
+	}
+	// The pre-TenantTx middleware table names tables the same way and is
+	// resolved by the same unqualified lookup, so it inherits the same hazard.
+	// Both of its lists are included: a BoundRLSTables name that resolves to a
+	// shadowing relation would make the binding check assert something about a
+	// different object just as readily.
+	for _, key := range PreTenantTxMiddlewareKeys() {
+		rule := PreTenantTxMiddlewareRules()[key]
+		for _, table := range rule.RLSExemptTables {
+			named[table] = true
+		}
+		for _, table := range rule.BoundRLSTables {
 			named[table] = true
 		}
 	}

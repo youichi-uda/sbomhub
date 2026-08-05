@@ -103,8 +103,10 @@ import (
 //     authMiddleware)` and hangs the TenantTx groups off it), so its own
 //     database work is as unbound as anything here — this table simply does
 //     not enumerate those routes, because the question it asks is per-route
-//     and they answer "yes, TenantTx". What that middleware does is covered
-//     by the note below rather than by a rule.
+//     and they answer "yes, TenantTx".
+//     That remainder is NOT unexamined: preTenantTxMiddleware, further down
+//     this file, classifies it per MIDDLEWARE instead of per route, over
+//     every chain in main.go rather than only these nine.
 //
 // # What runs before four of the classified handlers
 //
@@ -452,6 +454,371 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 			"points at the M52 drive instead because that one also carries the negative " +
 			"control.",
 	},
+}
+
+// ---------------------------------------------------------------------------
+// M52P — the OTHER half of the same question: what runs while nothing has
+// bound `app.current_tenant_id`, on EVERY route rather than only on the nine.
+// ---------------------------------------------------------------------------
+
+// PreTenantTxKind is how a middleware that runs with no tenant bound keeps its
+// own database access safe.
+//
+// # The gap this closes
+//
+// The table above asks a question PER ROUTE — "does this route carry
+// TenantTx?" — and its own header says what that leaves out:
+//
+//	Statements issued by middleware that runs BEFORE TenantTx on a route
+//	that does have it.
+//
+// That is not a small remainder. Measured from cmd/server/main.go's AST
+// (2026-08-05, before the /projects/:id/scan registration landed): 181 route
+// registrations, 172 of them carrying TenantTx — and on all 181 there is a
+// prefix of the chain that runs before anything has bound the GUC. Nine of the
+// 181 have no TenantTx at all, so for them the prefix is the WHOLE chain.
+// `authMiddleware` is in that prefix on 137 routes; it reads four tables.
+//
+// A statement issued there lands on exactly the connection state that made
+// /reanalyse answer 500 for every input, for exactly the same reason. Whether
+// that is a defect depends on which TABLES those middlewares name, and that is
+// the question this table answers — once, per middleware, with a reason.
+//
+// # Scan unit
+//
+// Every middleware entry in every route's effective chain that is NOT preceded
+// by appmw.TenantTx in that same chain. One sentence, and it covers both
+// shapes: the prefix on a TenantTx route, and the entirety of a route without
+// one. Derived from main.go's AST by tenant_binding_premw_test.go, reusing the
+// same parser the route sweep uses; the key is the middleware's CONSTRUCTOR
+// expression with its arguments dropped, so `appmw.RateLimitByAPIKey(rdb,
+// appmw.BudgetPoll)` and `appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)`
+// are one entry — the question is about the function, not about a call site.
+//
+// # The measured answer, and why it is not "no problem, then"
+//
+// As of 2026-08-05 nothing here reads or writes an RLS-protected table
+// unbound. Five tables are named in that region — `api_keys`, `tenant_users`,
+// `tenants`, `users` and `scan_settings` — and the first four have
+// relrowsecurity FALSE on the migrated schema, while the fifth is reached only
+// through TenantRepository.Create, which opens its own transaction and binds
+// between its two INSERTs (F187).
+//
+// That is a fact about today's code, and three of the four exemptions are
+// deliberate but REVERSIBLE: migration 028 removed RLS from `api_keys`
+// precisely so an API-key lookup could run before any tenant is known, and
+// nothing stops a later migration putting it back. So the answer is written
+// down as a table a change has to edit, rather than as a paragraph a change
+// can leave standing.
+//
+// # What this does NOT cover, stated because each one is a real gap
+//
+//   - WHICH tenant. Same limit as the route table: this asks only whether a
+//     tenant is bound, never whether it is the right one.
+//   - The handler. That is the route table's job above.
+//   - Statements a middleware issues through code it does not name — a
+//     repository method that grows a new join is invisible here. The
+//     classification is a human's reading of the middleware, kept honest by
+//     the live-schema check on the tables it DOES name, not by call-graph
+//     analysis. See the route table's "What it deliberately is NOT".
+//   - Ordering WITHIN the pre-TenantTx prefix. Two middlewares there both run
+//     unbound; which runs first changes nothing this table asks.
+//
+// # One thing that is emphatically not a binding
+//
+// Three of these middlewares call TenantRepository.SetCurrentTenant, and it
+// does NOT bind anything for what follows. It issues
+// `SELECT set_config('app.current_tenant_id', $1, true)` through the
+// request-scoped query helper; with no ambient transaction the statement runs
+// in its own implicit one and `is_local = true` discards the value the moment
+// that commits. Measured on the migrated schema, 2026-08-05: the next
+// statement on the same connection reads the placeholder as the EMPTY STRING.
+// So those calls do not protect the middleware's own reads, and they are one
+// of the things that leave a pooled connection in the state that turns an
+// unbound read into a 500 rather than a false 404. No rule below may name
+// SetCurrentTenant in BindsVia; TestM52PSetCurrentTenantIsNotAcceptedAsABinding
+// refuses it.
+type PreTenantTxKind string
+
+const (
+	// PreTenantTxNamesNoTable: the middleware issues no statement that names a
+	// table. It may still issue a statement — SetCurrentTenant names none —
+	// and it may hold a *sql.DB it does not use; Why must say which.
+	//
+	// Nothing about row security can reach a middleware in this class, so it
+	// carries no table list and nothing about it is checked against the live
+	// schema. That is why Why has to be specific: it is the whole of the
+	// evidence.
+	PreTenantTxNamesNoTable PreTenantTxKind = "names-no-table"
+
+	// PreTenantTxRLSExemptTablesOnly: the middleware names tables, and the
+	// runtime role can reach every one of them with no tenant bound.
+	//
+	// RLSExemptTables must name them, and they are checked against the live
+	// database by TestM52PPreTenantTxRulesNameOnlyReachableTables with exactly
+	// the outcomes TenantBindingTouchesNoRLSTable's doc comment describes —
+	// relrowsecurity false is decisive, a foreign table is exempt by
+	// construction, and anything else is settled by making the runtime role
+	// perform the read on a poisoned connection.
+	PreTenantTxRLSExemptTablesOnly PreTenantTxKind = "rls-exempt-tables-only"
+
+	// PreTenantTxBindsWhatItReaches: the middleware names at least one
+	// RLS-protected table, and every statement against one is preceded on its
+	// branch by a transaction of its own carrying
+	// `SELECT set_config('app.current_tenant_id', $1, true)`.
+	//
+	// BoundRLSTables names those tables; RLSExemptTables names the rest, and
+	// is checked exactly as it is for the class above — a middleware does not
+	// stop having to account for its other reads because one of them is bound.
+	//
+	// Like TenantBindingBindsItself this is a promise about code elsewhere, so
+	// ProvedBy must name a test that drives the binding against a live
+	// database on a poisoned pooled connection, with a negative control.
+	PreTenantTxBindsWhatItReaches PreTenantTxKind = "binds-what-it-reaches"
+)
+
+// PreTenantTxRule is one middleware's classification plus the evidence.
+type PreTenantTxRule struct {
+	// Kind is the classification.
+	Kind PreTenantTxKind
+
+	// Why is the reason, in the table rather than in a comment so a new
+	// middleware cannot be classified by copying its neighbour.
+	Why string
+
+	// RLSExemptTables lists every table the middleware names in a statement of
+	// its own that is NOT covered by a binding. Each is checked against the
+	// live schema. Required non-empty for PreTenantTxRLSExemptTablesOnly;
+	// allowed, and still checked, for PreTenantTxBindsWhatItReaches.
+	//
+	// "of its own" means the same thing it does in the route table: a table
+	// reached only by an ON DELETE CASCADE / SET NULL is not listed, because
+	// RI triggers bypass row security.
+	RLSExemptTables []string
+
+	// BoundRLSTables lists the RLS-protected tables the middleware reaches
+	// through a binding. For PreTenantTxBindsWhatItReaches only.
+	//
+	// Each name must RESOLVE against the live schema — a name that resolves to
+	// nothing is a stale rule. Whether it still has row security is only
+	// LOGGED, not asserted: if a migration removes RLS from one of these the
+	// rule becomes over-cautious rather than wrong, and failing there would
+	// redden correct code.
+	BoundRLSTables []string
+
+	// BindsVia names the function(s) that issue the set_config. Required for
+	// PreTenantTxBindsWhatItReaches. SetCurrentTenant is refused here — see
+	// the kind's doc comment.
+	BindsVia []string
+
+	// ProvedBy is the name of the test that drives the binding against a live
+	// database. Required for PreTenantTxBindsWhatItReaches.
+	ProvedBy string
+
+	// RLSEnabledButReachable is the escape hatch for a relation in
+	// RLSExemptTables that has gained row security and is nonetheless fine for
+	// this middleware, keyed by relation name and carrying the reason. Same
+	// three shapes as the route table's field of the same name. Empty today.
+	RLSEnabledButReachable map[string]string
+}
+
+// preTenantTxMiddleware classifies every middleware that cmd/server/main.go
+// puts in front of appmw.TenantTx on some route — or on a route that has no
+// TenantTx at all.
+//
+// The key is the constructor expression with its arguments dropped, exactly as
+// main.go spells it: `appmw.Auth`, `middleware.BodyLimit`,
+// `appmw.NewTriageConcurrencyLimiterFromEnv().Middleware`. Renaming the
+// package qualifier changes the key and demands a one-line edit here; that is
+// the price of a key stable against everything else.
+//
+// TestM52PPreTenantTxMiddlewareIsClassified re-derives the set from main.go's
+// AST and compares in both directions, which is what makes this an enumeration
+// rather than a claim.
+var preTenantTxMiddleware = map[string]PreTenantTxRule{
+	// -----------------------------------------------------------------
+	// Echo's own global middleware. `e.Use` applies these to every route
+	// however it was registered, so they are the first four entries of all
+	// 181 chains and are unbound on every one of them.
+	// -----------------------------------------------------------------
+	"middleware.Logger": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "echo's request logger (labstack/echo/v4/middleware). It writes a line to the " +
+			"configured io.Writer after the handler returns and holds no database handle " +
+			"of any kind — the whole of its state is a template and an output stream.",
+	},
+	"middleware.Recover": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "echo's panic recovery. It calls next(c) inside a defer/recover and, on a " +
+			"panic, logs a stack trace and answers 500. No handle, no statement.",
+	},
+	"middleware.BodyLimit": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "echo's request-size cap. It compares Content-Length and wraps the body reader " +
+			"with a counting limiter, answering 413 when the limit is passed. Entirely " +
+			"in-process.",
+	},
+	"middleware.CORSWithConfig": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "echo's CORS. It matches the Origin header against a configured allowlist and " +
+			"sets response headers; the preflight branch answers 204 without calling the " +
+			"handler. The allowlist is a []string literal in main.go, not a lookup.",
+	},
+
+	// -----------------------------------------------------------------
+	// This package's non-database middleware.
+	// -----------------------------------------------------------------
+	"appmw.RequireWrite": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "role_guard.go. It reads ContextKeyTenantID and ContextKeyRole through " +
+			"NewTenantContext, which is a wrapper over echo.Context.Get and nothing else, " +
+			"and answers 401 or 403 from those two values. It holds no repository. This is " +
+			"why it can sit ahead of TenantTx at all: a denial never opens the request " +
+			"transaction (TestM47RRoleGuardRefusesWithoutTheRequestTransaction).",
+	},
+	"appmw.RequireAdmin": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "role_guard.go, the CanAdmin twin of RequireWrite and the same shape: " +
+			"TenantContext over echo.Context.Get, no repository, no statement. Reached " +
+			"through main.go's `adminOnly` alias, which this gate expands.",
+	},
+	"appmw.RateLimitByAPIKey": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "ratelimit.go. Its only I/O is Redis — INCR on " +
+			"`ratelimit:apikey:v2:<key id>:<budget>:<window>` and, on the first request of " +
+			"a bucket, EXPIRE. The API key it counts against is read from the echo context " +
+			"(ContextKeyAPI), already validated by the auth middleware ahead of it, so it " +
+			"issues no lookup of its own. ratelimit.go does not import database/sql at all.",
+	},
+	"appmw.RateLimitPublicLink": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "ratelimit.go, the anonymous share-link limiter. Same file, same absence of a " +
+			"database handle: a cumulative failure counter and a sorted-set lease, both in " +
+			"Redis, keyed by the token from the URL and the caller's IP. It runs on the two " +
+			"routes that have no TenantTx at all, so `unbound` there is the whole request, " +
+			"not a prefix — and it still names no table.",
+	},
+	"appmw.NewTriageConcurrencyLimiterFromEnv().Middleware": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "triage_concurrency.go. Two buffered channels used as semaphores — one per " +
+			"tenant, one global — sized from the environment at construction. The tenant id " +
+			"comes from the echo context. No handle, no statement; the file imports neither " +
+			"database/sql nor redis.",
+	},
+	"appmw.NewCRAConcurrencyLimiterFromEnv().Middleware": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "cra_concurrency.go, the CRA counterpart of the triage limiter and the same " +
+			"in-process semaphore pair. Listed separately because it is a different type " +
+			"with its own env vars, and because a shared classification would hide the day " +
+			"one of them starts persisting its queue.",
+	},
+	"appmw.APIKeyTenant": {
+		Kind: PreTenantTxNamesNoTable,
+		Why: "apikey.go. It issues exactly ONE statement — TenantRepository.SetCurrentTenant's " +
+			"`SELECT set_config('app.current_tenant_id', $1, true)` — which names no table, " +
+			"and then sets two context values from the *model.APIKey that APIKeyAuth already " +
+			"put on the context. It takes a *ProjectRepository it no longer uses (M50 W2 " +
+			"moved the project-scope check into APIKeyAuth). So it TOUCHES the pool without " +
+			"reading anything from it: it is on the harmless side of this table and on the " +
+			"harmful side of the connection-state note above, because that set_config is " +
+			"precisely what leaves the placeholder at the empty string for whatever borrows " +
+			"the connection next.",
+	},
+
+	// -----------------------------------------------------------------
+	// The authenticators. These are the middlewares that actually read.
+	// -----------------------------------------------------------------
+	"appmw.APIKeyAuth": {
+		Kind:            PreTenantTxRLSExemptTablesOnly,
+		RLSExemptTables: []string{"api_keys"},
+		Why: "apikey.go, the legacy /api/v1/{cli,mcp}/* authenticator. It hashes the " +
+			"presented credential and calls APIKeyService.ValidateKey, which is two " +
+			"statements against ONE table: APIKeyRepository.GetByKeyHash (SELECT ... FROM " +
+			"api_keys WHERE key_hash = $1) and the best-effort " +
+			"UpdateLastUsed (UPDATE api_keys SET last_used_at ... WHERE id = $2 AND " +
+			"tenant_id = $3). `api_keys` is RLS-free BECAUSE of this middleware: migration " +
+			"028 removed it so a key lookup, which by definition happens before any tenant " +
+			"is known, can reach the row that names the tenant. That is also why the " +
+			"tenant_id predicate is written into UpdateLastUsed by hand — with RLS gone it " +
+			"is the whole of the isolation. apiKeyProjectScopeAllowed, which runs " +
+			"immediately after, reads only c.Path() and the key struct.",
+	},
+	"appmw.Auth": {
+		Kind:            PreTenantTxBindsWhatItReaches,
+		RLSExemptTables: []string{"tenant_users", "tenants", "users"},
+		BoundRLSTables:  []string{"scan_settings"},
+		BindsVia:        []string{"repository.TenantRepository.Create"},
+		ProvedBy:        "TestM52ClerkTenantCreateBindsOnAPoisonedConnection",
+		Why: "auth.go, and the widest surface in this table: main.go's `authMiddleware` is " +
+			"the first thing on every route of the authBase group, which is where the " +
+			"authAdmin / authWrite / auth TenantTx groups hang off, so it runs unbound on " +
+			"most of the API. Both branches read. Self-hosted: TenantRepository." +
+			"GetOrCreateDefault (SELECT ... FROM tenants WHERE slug = 'default') then " +
+			"UserRepository.GetOrCreateDefault (SELECT ... FROM users WHERE email = $1, " +
+			"then INSERT INTO users and INSERT INTO tenant_users on a first visit). Clerk: " +
+			"GetOrCreateByClerkOrgID (tenants by clerk_org_id), GetByClerkUserID / Create " +
+			"(users), GetUserRole / AddToTenant (tenant_users). All three tables have " +
+			"relrowsecurity FALSE — `tenants` and `tenant_users` never had it (migration " +
+			"007 protected the per-tenant RESOURCE tables only), and `users` is global by " +
+			"design because one Clerk user can belong to several tenants. " +
+			"The exception, and the reason this is not RLSExemptTablesOnly: on a first " +
+			"visit both branches fall through to TenantRepository.Create, which writes a " +
+			"default `scan_settings` row, and migration 048 gave that table the " +
+			"ENABLE+FORCE+policy triple. Create opens its OWN transaction and issues the " +
+			"set_config between the `tenants` INSERT and the `scan_settings` INSERT (F187), " +
+			"so that write is bound even though everything around it is not. The named " +
+			"drive is the one the Clerk-webhook rule above already uses: it replays those " +
+			"two INSERTs on a poisoned connection and, as its negative control, replays " +
+			"them without the set_config and observes the refusal. " +
+			"Auth also calls SetCurrentTenant at the end of both branches. That is NOT what " +
+			"makes any of the above safe — see the header note; it binds nothing for the " +
+			"middleware's own reads, which have already happened, and nothing for the " +
+			"handler either.",
+	},
+	"appmw.MultiAuth": {
+		Kind:            PreTenantTxBindsWhatItReaches,
+		RLSExemptTables: []string{"api_keys", "tenant_users", "tenants", "users"},
+		BoundRLSTables:  []string{"scan_settings"},
+		BindsVia:        []string{"repository.TenantRepository.Create"},
+		ProvedBy:        "TestM52ClerkTenantCreateBindsOnAPoisonedConnection",
+		Why: "multiauth.go, the canonical authenticator, and the union of the two above. " +
+			"Its Clerk / self-hosted fall-through IS appmw.Auth — MultiAuth constructs one " +
+			"and calls it — so everything in that rule applies here unchanged, including " +
+			"the TenantRepository.Create binding. Its API-key branch adds `api_keys` " +
+			"(APIKeyService.ValidateKey, the same two statements APIKeyAuth issues) and " +
+			"reaches `users` + `tenant_users` a second way, through " +
+			"UserRepository.GetOrCreateAPIKeyUser: GetByClerkUserID on " +
+			"`api-key:<tenant uuid>`, then INSERT INTO users and INSERT INTO tenant_users " +
+			"for the synthetic per-tenant user that audit_logs.user_id points at. " +
+			"handleAPIKeyAuth's SetCurrentTenant is subject to the header note like the " +
+			"rest. Reached under two names in main.go — the inline " +
+			"`appmw.MultiAuth(...)` on the canonical routes and the `triageMultiAuth` alias " +
+			"on the four F19 routes, which have no TenantTx at all — and this gate expands " +
+			"the alias, so both spellings land on this one rule.",
+	},
+}
+
+// PreTenantTxMiddlewareRules returns a copy of the pre-TenantTx table.
+//
+// It exists for the same reason NoTenantTxRouteBindings does: a package with a
+// live database may need to check the table against what it can measure. The
+// returned map is a shallow copy, so callers must not mutate the slice fields.
+func PreTenantTxMiddlewareRules() map[string]PreTenantTxRule {
+	out := make(map[string]PreTenantTxRule, len(preTenantTxMiddleware))
+	for k, v := range preTenantTxMiddleware {
+		out[k] = v
+	}
+	return out
+}
+
+// PreTenantTxMiddlewareKeys returns the classified middleware keys, sorted.
+func PreTenantTxMiddlewareKeys() []string {
+	out := make([]string, 0, len(preTenantTxMiddleware))
+	for k := range preTenantTxMiddleware {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // NoTenantTxRouteBindings returns a copy of the classification table.
