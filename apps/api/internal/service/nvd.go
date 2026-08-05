@@ -217,7 +217,9 @@ func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 // What this does NOT fix: a statement that fails on its own merits still
 // aborts the shared transaction and discards every row the sweep wrote (M50).
 // Serialising the workers removes the concurrency as a CAUSE of that abort; it
-// does not change what an abort costs.
+// does not change what an abort costs. What it does change, as of the R1
+// follow-up below, is that the scanner now REPORTS it instead of returning
+// nil.
 func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) error {
 	maxWorkers := maxConcurrentNoKey
 	rateLimit := rateLimitWithoutKey
@@ -253,6 +255,10 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	processedCount := 0
 	cacheHits := 0
 	apiCalls := 0
+	// refusedWrites counts statements the DATABASE refused (Codex M54 R1,
+	// Critical). See the return at the bottom of this function for why this
+	// one class of failure is escalated and the fetch failures above are not.
+	refusedWrites := 0
 
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
@@ -286,7 +292,12 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 				mu.Unlock()
 
 				// Link vulnerabilities to all component instances
-				s.persistWorkItem(ctx, &dbMu, vulns, work.componentIDs)
+				refused := s.persistWorkItem(ctx, &dbMu, vulns, work.componentIDs)
+				if refused > 0 {
+					mu.Lock()
+					refusedWrites += refused
+					mu.Unlock()
+				}
 			}
 		}()
 	}
@@ -297,7 +308,31 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 		"processed", processedCount,
 		"cache_hits", cacheHits,
 		"api_calls", apiCalls,
+		"refused_writes", refusedWrites,
 	)
+
+	// A refused WRITE means the database declined to record a match we had
+	// already obtained. Reporting success after that is the silent-data-loss
+	// failure this product cannot afford: the caller marks the scan completed,
+	// the CLI trusts the counts, and `sbomhub scan --fail-on critical` exits 0
+	// on an incomplete result. So it is escalated (Codex M54 R1, Critical).
+	//
+	// This is also the loudest symptom of the M50 abort cascade: once one
+	// statement poisons the shared transaction, every subsequent write is
+	// refused, so this count goes from 0 to "all of them" and the scanner now
+	// says so instead of returning nil.
+	//
+	// Deliberately NOT escalated here: a FETCH failure (the `continue` above,
+	// NVD answering 429/500 or timing out). Those are logged and skipped, and
+	// turning them into a scan failure is a product-policy decision — how many
+	// components may fail before the scan is worthless? — not a bug fix. It
+	// stays tracked as the ※要確認 threshold noted on SbomHandler.runScan.
+	// The distinction is deliberate: "we could not ask about this component"
+	// and "we were told the answer and could not write it down" are different
+	// failures, and only the second one means the data we DO have is unsound.
+	if refusedWrites > 0 {
+		return fmt.Errorf("nvd: database refused %d vulnerability write(s); scan results are incomplete", refusedWrites)
+	}
 
 	return nil
 }
@@ -314,25 +349,33 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 // QueryRowContext hands back an open *sql.Rows and only Scan closes it, so a
 // read left the connection mid-message just as readily as a write does.
 //
-// Per-CVE failures are logged and skipped rather than propagated, which is the
-// behaviour this had before M54 and is left unchanged here — see the
-// known-limitation note on SbomHandler.runScan for why a scan that lost rows
-// still reports success.
+// It returns the number of statements the DATABASE REFUSED — failed Creates
+// plus failed LinkComponents. The caller escalates a non-zero count into a
+// scan error (Codex M54 R1, Critical): before that, a run whose every write
+// was refused still logged "NVD scan completed" and was marked completed for
+// the CLI. A GetByCVE miss is NOT counted: sql.ErrNoRows is this function's
+// normal "not in the catalogue yet" branch, i.e. control flow, not failure.
+//
+// Per-statement failures are still logged and skipped rather than aborting the
+// item, so one bad row cannot cost the other 799. The count is what makes the
+// loss visible; the skipping is what keeps it small.
 func (s *NVDService) persistWorkItem(
 	ctx context.Context,
 	dbMu *sync.Mutex,
 	vulns []model.Vulnerability,
 	componentIDs []uuid.UUID,
-) {
+) int {
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
+	refused := 0
 	for i := range vulns {
 		vuln := vulns[i]
 		existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
 		if err != nil {
 			if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
 				slog.Warn("failed to create vulnerability", "cve", vuln.CVEID, "error", err)
+				refused++
 				continue
 			}
 			existing = &vuln
@@ -340,10 +383,15 @@ func (s *NVDService) persistWorkItem(
 
 		for _, compID := range componentIDs {
 			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID); err != nil {
+				// Kept at Debug for volume (one line per component instance
+				// per CVE), but no longer the ONLY trace: the refused count
+				// this function returns is what reaches the caller.
 				slog.Debug("failed to link component", "component", compID, "vuln", existing.ID, "error", err)
+				refused++
 			}
 		}
 	}
+	return refused
 }
 
 // getVulnerabilitiesWithCache tries cache first, falls back to API

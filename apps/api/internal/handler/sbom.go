@@ -581,14 +581,22 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //
 // Without this contract, a transient NVD/JVN outage would land the
 // CLI-observed scan status at "completed, 0 vulnerabilities" and
-// `sbomhub scan --fail-on critical` would silently exit 0. See also the
-// known limitation in NVDService.processComponentsParallel: per-component
-// failures inside the scanner are logged but the function still returns
-// nil, so this top-level err propagation is only an upper bound — it
-// catches catastrophic failures (cannot reach NVD at all) but not
-// partial-result conditions. A stricter threshold (e.g. "N% of components
-// failed → return error") belongs inside the scanner itself and is
-// tracked separately (※要確認).
+// `sbomhub scan --fail-on critical` would silently exit 0.
+//
+// How much of the partial-result gap the scanner now closes (M54 R1):
+// NVDService.processComponentsParallel counts the statements the DATABASE
+// refused and returns an error when that count is non-zero, so a scan that
+// obtained matches and then failed to record them reaches `errs` and
+// MarkFailed rather than reporting success. That is the half where the data
+// we already hold is unsound.
+//
+// The other half is still open and is still only an upper bound here: a
+// component whose NVD FETCH failed (429 / 500 / timeout) is logged and
+// skipped, and the scanner returns nil, so "every component failed to
+// fetch" still lands as a completed scan with 0 findings. Choosing a
+// threshold for that (e.g. "N% of components failed → return error") is a
+// product-policy decision, not a bug fix, and remains tracked separately
+// (※要確認).
 func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 	var errs []string
 

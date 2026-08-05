@@ -41,10 +41,13 @@
 // discarded — the same total loss the M50 poison test measured, reached
 // without any statement being individually invalid.
 //
-// It is also loud in the wrong direction: the scanner keeps returning nil, so
-// "NVD scan completed" is logged at INFO in the same run as the ERROR that
-// reports the discarded commit (M50 established this asymmetry; this test
-// pins that it still applies here).
+// It was also loud in the wrong direction: the scanner returned nil, so
+// "NVD scan completed" was logged at INFO in the same run as the ERROR that
+// reported the discarded commit. That asymmetry is MEASURED by M50's poison
+// test, which asserts on both lines; this file does NOT pin it (Codex M54 R1,
+// Low — an earlier draft of this paragraph claimed it did). All this file
+// asserts about logs is that the success line is present on the fixed path,
+// which would not notice the success line being moved after the commit.
 //
 // # Why the timing is ordinary rather than exotic
 //
@@ -53,9 +56,20 @@
 // it staggers starts, not database sections: a worker reaches its writes at
 // tick + HTTP latency, and NVD response latency varies by far more than 700ms.
 // Two responses landing together is the ordinary case over a long scan, not a
-// contrived one. The fake NVD server below makes that instant deterministic by
+// contrived one. The fake NVD server below manufactures that instant by
 // holding both requests until both have arrived and then answering them
 // together — it manufactures the *timing*, not the *possibility*.
+//
+// How reliable that is, stated as what was measured rather than as a
+// guarantee (Codex M54 R1, Medium): the barrier synchronises the HTTP
+// RELEASE, not entry into persistWorkItem, so JSON decoding and goroutine
+// scheduling still sit between the two. Sizing each worker's database section
+// at m54CVEsPerItem CVEs makes that gap small relative to the overlap window.
+// Against the unfixed implementation this test went RED in 12 of 12 runs
+// (2026-08-05, PostgreSQL 15, this schema), and 3 of 3 more with the lock
+// present but not spanning GetByCVE. It is not a proof of overlap on every
+// possible schedule, and a green run on a broken implementation would be a
+// false negative rather than evidence of correctness.
 //
 // # Scope of the claim
 //
@@ -95,8 +109,9 @@ const (
 	m54WorkItems = 2
 	// m54CVEsPerItem sizes each worker's database section. Each CVE costs a
 	// GetByCVE + a Create + one LinkComponent, so 400 CVEs is roughly 1200
-	// statements (~150ms locally) — wide enough that two workers released
-	// together are certain to overlap, rather than merely likely.
+	// statements (~150ms locally). That window is what makes two workers
+	// released together overlap in practice — 12 of 12 measured runs against
+	// the unfixed implementation. It is not a guarantee; see the header.
 	m54CVEsPerItem = 400
 )
 
@@ -104,9 +119,9 @@ const (
 // until `release` of them have arrived and then answers them all at once.
 //
 // Each request gets its own contiguous block of synthetic CVE ids drawn from
-// `base`, so the two workers never contend on the same `vulnerabilities` row
-// and an ON CONFLICT collision cannot be mistaken for the defect under test.
-func m54BarrierNVDServer(t *testing.T, release, base, perItem int) *httptest.Server {
+// `ns`, so the two workers never contend on the same `vulnerabilities` row and
+// an ON CONFLICT collision cannot be mistaken for the defect under test.
+func m54BarrierNVDServer(t *testing.T, release int, ns m54Namespace, perItem int) *httptest.Server {
 	t.Helper()
 
 	var mu sync.Mutex
@@ -136,7 +151,7 @@ func m54BarrierNVDServer(t *testing.T, release, base, perItem int) *httptest.Ser
 		entries := make([]m54Entry, 0, perItem)
 		for i := 0; i < perItem; i++ {
 			entries = append(entries, m54Entry{CVE: m54CVE{
-				ID:           m54CVEID(base, block, i),
+				ID:           ns.m54CVEID(block, i),
 				Published:    "2093-01-01T00:00:00.000",
 				Descriptions: []m54Desc{{Lang: "en", Value: "m54 shared-tx probe"}},
 				Metrics: m54Metrics{V31: []m54Metric{{
@@ -193,20 +208,44 @@ type m54CvssData struct {
 	BaseSeverity string  `json:"baseSeverity"`
 }
 
-// m54CVEID mints the id for CVE `i` of request `block`. The blocks are
-// m54CVEsPerItem apart so they cannot overlap, and `base` is drawn per test
-// run so two concurrent runs against the same dev database do not collide on
-// the `vulnerabilities.cve_id` unique index.
-func m54CVEID(base, block, i int) string {
-	return fmt.Sprintf("CVE-2093-%07d", base+block*m54CVEsPerItem+i)
+// m54Namespace is the per-run coordinate of this test's synthetic CVE block:
+// a year in the far future (never a real CVE, and outside the CVE-2093 /
+// CVE-2095 ranges other test files in this package use) plus an offset within
+// that year's 7-digit sequence.
+//
+// Both halves are drawn per run because `vulnerabilities.cve_id` is UNIQUE and
+// tenant-less: two runs that landed on the same ids would see each other's
+// rows in the durability count and delete each other's rows in cleanup. Codex
+// M54 R1 (Low) measured the first cut's namespace at 9,000 slots — a 1/9,000
+// pairwise collision, which is not "cannot collide" as that comment claimed.
+// Widening the year to 100 values takes it to 1,250,000 slots. Still not zero;
+// the honest statement is 1-in-1.25M per pair, not impossible.
+type m54Namespace struct {
+	year int
+	base int
 }
 
-// m54ExpectedCVEIDs is every id the fake server will hand out for this run.
-func m54ExpectedCVEIDs(base int) []string {
+func m54NewNamespace() m54Namespace {
+	id := uuid.New().ID()
+	return m54Namespace{
+		year: 2900 + int(id%100),
+		// 10^7 ids per year / 800 needed per run = 12,500 disjoint blocks.
+		base: int((id/100)%12500) * (m54WorkItems * m54CVEsPerItem),
+	}
+}
+
+// m54CVEID mints the id for CVE `i` of request `block`. Blocks are
+// m54CVEsPerItem apart, so the two workers never contend on one row.
+func (n m54Namespace) m54CVEID(block, i int) string {
+	return fmt.Sprintf("CVE-%04d-%07d", n.year, n.base+block*m54CVEsPerItem+i)
+}
+
+// expectedCVEIDs is every id the fake server will hand out for this run.
+func (n m54Namespace) expectedCVEIDs() []string {
 	ids := make([]string, 0, m54WorkItems*m54CVEsPerItem)
 	for b := 0; b < m54WorkItems; b++ {
 		for i := 0; i < m54CVEsPerItem; i++ {
-			ids = append(ids, m54CVEID(base, b, i))
+			ids = append(ids, n.m54CVEID(b, i))
 		}
 	}
 	return ids
@@ -234,11 +273,8 @@ func TestM54NVDWorkerPool_ConcurrentWorkersDoNotCorruptTheSharedTx(t *testing.T)
 	// m54WorkItems keys and hands out exactly that many rate-limiter ticks.
 	m54AddComponent(t, migDB, seed, "m54lib")
 
-	// A per-run base keeps the synthetic cve_id block clear of other runs.
-	// uuid.ID() is a uint32; %9000*1000 spreads runs 1000 ids apart while this
-	// run needs only m54WorkItems*m54CVEsPerItem = 800.
-	base := int(uuid.New().ID()%9000) * 1000
-	expected := m54ExpectedCVEIDs(base)
+	ns := m54NewNamespace()
+	expected := ns.expectedCVEIDs()
 	t.Cleanup(func() {
 		// `vulnerabilities` is the shared tenant-less catalogue, so it is
 		// reaped explicitly (C27). component_vulnerabilities cascades from it.
@@ -248,7 +284,7 @@ func TestM54NVDWorkerPool_ConcurrentWorkersDoNotCorruptTheSharedTx(t *testing.T)
 		}
 	})
 
-	srv := m54BarrierNVDServer(t, m54WorkItems, base, m54CVEsPerItem)
+	srv := m54BarrierNVDServer(t, m54WorkItems, ns, m54CVEsPerItem)
 
 	// A non-empty API key is what selects maxConcurrentWithKey (5) over
 	// maxConcurrentNoKey (1); without it the pool is single-threaded and this
@@ -336,6 +372,127 @@ func TestM54NVDWorkerPool_ConcurrentWorkersDoNotCorruptTheSharedTx(t *testing.T)
 	if !strings.Contains(logs, "NVD scan completed") {
 		t.Error("the scanner's success line is missing — its ABSENCE would mean the scan errored " +
 			"out rather than being fixed")
+	}
+}
+
+// TestM54NVDScan_RefusedWritesAreReportedAsFailure pins the second half of
+// the M54 change (Codex R1, Critical): a scan whose writes the DATABASE
+// refused must not report success.
+//
+// Before this, processComponentsParallel returned nil unconditionally. Every
+// per-CVE write failure was logged — Create at WARN, LinkComponent at DEBUG,
+// which is off by default — and then the scanner said "NVD scan completed".
+// On the SbomHandler path that is what ScanTracker records, so the CLI polls
+// scan-status, sees "completed" with 0 findings, and `sbomhub scan --fail-on
+// critical` exits 0 on a scan that wrote nothing. That is the exact
+// silent-data-loss shape this product cannot ship.
+//
+// The poison here is data, not privileges or DDL: `vulnerabilities.cve_id` is
+// VARCHAR(50), so a CVE id longer than that is refused by PostgreSQL with
+// "value too long". Nothing about the schema is mutated, so this test cannot
+// leak state into the rest of the package. It also reproduces the M50 cascade
+// on the way through — the failed INSERT aborts the shared transaction, so the
+// writes that follow are refused too and the commit fails — which is why the
+// durable count is 0 rather than "all but one".
+//
+// Scope: this pins REFUSED WRITES only. A component whose NVD FETCH failed
+// (429 / 500 / timeout) is still logged, skipped, and reported as success;
+// that threshold is a product-policy decision and is deliberately still open
+// (see the note on SbomHandler.runScan).
+func TestM54NVDScan_RefusedWritesAreReportedAsFailure(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+
+	seed := m47SeedAll(t, migDB, "m54refuse")
+	ns := m54NewNamespace()
+
+	// One work item is enough: this test is about the report, not concurrency.
+	// m47SeedAll's own "libm47" component supplies it.
+	const good = 2
+	okIDs := []string{ns.m54CVEID(0, 0), ns.m54CVEID(0, 1)}
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(
+			`DELETE FROM vulnerabilities WHERE cve_id = ANY($1)`, m54TextArray(okIDs)); err != nil {
+			t.Errorf("C27 cleanup: %v", err)
+		}
+	})
+
+	// 51 characters — one past the VARCHAR(50) the column declares.
+	tooLong := "CVE-2900-" + strings.Repeat("9", 42)
+	if len(tooLong) <= 50 {
+		t.Fatalf("precondition: poison cve_id is %d chars, need >50 to be refused", len(tooLong))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		entries := []m54Entry{
+			{CVE: m54CVE{ID: okIDs[0], Published: "2093-01-01T00:00:00.000",
+				Descriptions: []m54Desc{{Lang: "en", Value: "ok"}}}},
+			{CVE: m54CVE{ID: tooLong, Published: "2093-01-01T00:00:00.000",
+				Descriptions: []m54Desc{{Lang: "en", Value: "refused by the column width"}}}},
+			{CVE: m54CVE{ID: okIDs[1], Published: "2093-01-01T00:00:00.000",
+				Descriptions: []m54Desc{{Lang: "en", Value: "refused by the aborted tx"}}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(m54Response{
+			ResultsPerPage: len(entries), TotalResults: len(entries), Vulnerabilities: entries,
+		}); err != nil {
+			t.Errorf("encode fake NVD response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	nvd := service.NewNVDService(
+		repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB),
+		"m54-fake-api-key", srv.URL, false,
+	)
+	h := &VulnerabilityHandler{db: appDB, nvdService: nvd}
+
+	var logged strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	func() {
+		defer slog.SetDefault(prev)
+		h.runScan(context.Background(), seed.sbomID, seed.tenantID, "nvd")
+	}()
+	logs := logged.String()
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("scan log digest: %s", m54Digest(logs))
+		}
+	})
+
+	// Precondition: the poison really was refused. Without it, "the scan
+	// reported failure" could mean anything.
+	if !strings.Contains(logs, "value too long") {
+		t.Fatalf("precondition: PostgreSQL did not refuse the over-long cve_id, so no write "+
+			"failure was provoked. digest = %s", m54Digest(logs))
+	}
+
+	// The load-bearing assertion. runScan logs the scanner's error as
+	// "NVD scan failed" and its success as "NVD scan completed"; exactly one of
+	// them may appear.
+	if strings.Contains(logs, "NVD scan completed") {
+		t.Error("the scanner reported SUCCESS for a run whose writes the database refused. " +
+			"On the upload path this is what ScanTracker records, so the CLI would exit 0 on " +
+			"a scan that persisted nothing")
+	}
+	if !strings.Contains(logs, "NVD scan failed") {
+		t.Errorf("the scanner did not report failure. digest = %s", m54Digest(logs))
+	}
+
+	// And nothing survived, which is what makes the false success expensive
+	// rather than merely inaccurate.
+	var durable int
+	if err := appDB.QueryRow(
+		`SELECT COUNT(*) FROM vulnerabilities WHERE cve_id = ANY($1)`,
+		m54TextArray(okIDs)).Scan(&durable); err != nil {
+		t.Fatalf("count durable: %v", err)
+	}
+	if durable != 0 {
+		t.Errorf("durable vulnerabilities = %d, want 0 — the failed statement aborts the shared "+
+			"transaction, so even the write that succeeded before it is discarded (M50)", durable)
 	}
 }
 
