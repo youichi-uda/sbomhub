@@ -637,8 +637,11 @@ func keysOf(m map[string]bool) []string {
 // throwaway stack
 // 2026-08-05 (`go build -overlay` with this entry deleted, no repo file
 // touched): the route answers 403 for a project-scoped key while a tenant-level
-// key still gets 202 — so the failure is invisible to anyone testing with a
-// tenant-level key, which is what CI and most operators hold.
+// key still gets 202 — so anyone verifying the fix with a tenant-level key
+// would see it working. (How many keys are of each kind is not measured here
+// and is not the point; the point is that one credential kind cannot detect
+// this regression at all. Codex round 4, Low: an earlier draft asserted what
+// "most operators hold".)
 //
 // `:id` really is the project here and not a sub-resource:
 // VulnerabilityHandler.Scan parses c.Param("id") as the project UUID and takes

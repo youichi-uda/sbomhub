@@ -13,14 +13,22 @@ import (
 // The rest of this wave is Go: the route registration, its middleware chain and
 // its project-scope classification are all pinned by AST tests. None of that
 // touches .github/workflows/sbom-upload.yml, and the workflow is where the
-// defect was actually visible — `continue-on-error: true` is what turned "the
-// scan trigger has never worked with an API key" into a green run for months.
-// Codex's repro was exact: restoring that one line left `go test ./...` green.
+// defect was actually visible: a scan trigger that had never worked with an API
+// key produced green runs for months.
 //
-// So this file asserts the three properties of the scan step that make a
-// failure LOUD, over the shipped YAML. It is a text check rather than a YAML
-// parse on purpose — apps/api has no YAML dependency, and every property here
-// is a literal token whose absence is the regression.
+// TWO things made that possible, and it is worth separating them because only
+// one is obvious (Codex round 4, Low — an earlier draft here blamed the obvious
+// one alone). The step carried `continue-on-error: true`. It ALSO could not fail
+// on its own: its curl had no --fail flag, so a 404 was printed and curl exited
+// 0 (measured), and the step's last command was an unconditional `echo
+// "Vulnerability scan triggered!"`. Deleting continue-on-error would have
+// changed nothing by itself. That is why this file pins the exact-status checks
+// as hard as it pins the absence of continue-on-error — the second is what
+// people look for, the first is what actually fails the step.
+//
+// It is a text check rather than a YAML parse on purpose — apps/api has no YAML
+// dependency, and every property here is a literal token whose absence is the
+// regression.
 // ---------------------------------------------------------------------------
 
 const m53WorkflowPath = "../../../../.github/workflows/sbom-upload.yml"
@@ -86,9 +94,10 @@ func TestM53ScanStepFailsLoudly(t *testing.T) {
 	// that `continue-on-error: true` was removed, and a substring match would
 	// therefore fail on the explanation for the fix.
 	if regexp.MustCompile(`(?m)^\s*continue-on-error\s*:`).MatchString(body) {
-		t.Errorf("%s sets `continue-on-error`. It was removed in M53 W1 because it was "+
-			"the single reason a scan trigger that answered 404/401 for every API key never "+
-			"turned a run red. A step that cannot fail cannot report anything.", m53WorkflowPath)
+		t.Errorf("%s sets `continue-on-error`. It was removed in M53 W1: a scan trigger "+
+			"that answered 404/401 for every API key never turned a run red, and this was "+
+			"half the reason (the other half — a curl with no --fail and an unconditional "+
+			"trailing echo — is covered by the status assertions below).", m53WorkflowPath)
 	}
 
 	scan := m53RunBlock(t, "Trigger Vulnerability Scan")
@@ -164,9 +173,11 @@ func TestM53UploadStepFailsLoudly(t *testing.T) {
 //
 // Hence `default: false`. Doing otherwise would have made this wave ADD
 // duplicated outbound traffic to every dispatch, in the name of fixing a silent
-// failure. With the default off, the observable behaviour of a plain dispatch is
-// unchanged by M53 W1 — the SBOM is still scanned, once, by the upload — and the
-// input now means something when it is switched on.
+// failure. What is unchanged by M53 W1 for a plain dispatch is the SERVER-SIDE
+// outcome — the SBOM is uploaded and scanned once, exactly as before. The
+// workflow's own behaviour does change: the step is now skipped rather than run
+// and ignored, so its two HTTP calls are no longer made (Codex round 4, Low —
+// an earlier draft of this paragraph called the whole thing unchanged).
 func TestM53ScanInputIsWiredAndOptIn(t *testing.T) {
 	body := m53Workflow(t)
 

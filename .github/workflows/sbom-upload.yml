@@ -112,8 +112,14 @@ jobs:
       #                                                         the project
       #
       # 401 under Clerk. POST /api/v1/projects/:id/scan was registered on the
-      # Clerk-only `authWrite` group, so no API key was ever consulted for it,
-      # and `continue-on-error: true` meant no run ever went red over it. The
+      # Clerk-only `authWrite` group, so no API key was ever consulted for it.
+      #
+      # `continue-on-error: true` is NOT why that stayed green, or not on its
+      # own (Codex round 4, Low): the old step's curl carried no --fail flag, so
+      # it printed the 404 body and exited 0 (measured), and the step ended with
+      # an unconditional `echo "Vulnerability scan triggered!"`. The step could
+      # not fail. continue-on-error was belt AND braces; the exact-status checks
+      # below are the half that actually makes a refusal red. The
       # route moved onto the MultiAuth chain (cmd/server/main.go, M53 W1) and is
       # classified in middleware/project_scope.go, so it now answers 202 for a
       # tenant-level key and for a project-scoped key naming its OWN project (403

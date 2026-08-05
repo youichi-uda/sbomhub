@@ -25,8 +25,13 @@
 #     sibling project, a REAL project in another tenant, unallocated UUID,
 #     malformed :id, unclassified route, unknown project name — which is the
 #     property that makes the refusal useless as an existence oracle. The Go
-#     tests assert status only, except one handler-level test that compares
-#     echo.HTTPError message strings for POST /cli/projects;
+#     tests cover part of this: TestM50W2PathParamDenialIsIndistinguishable
+#     compares status AND body across the four :id cases (M53 W1 added the
+#     malformed one), and one handler-level test compares echo.HTTPError message
+#     strings for POST /cli/projects. What is only observed here is the identity
+#     ACROSS those families and over the real HTTP envelope — a path-param
+#     refusal, an unclassified-route refusal and a name-resolved refusal all
+#     being the same bytes, after the global error handler has run;
 #   - Echo's real RouteNotFound catch-all under /api/v1/{mcp,cli}/* (the Go
 #     test registers `/api/v1/mcp/not-a-real-route` as a concrete route, so it
 #     never reaches the wildcard);

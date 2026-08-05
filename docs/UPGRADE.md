@@ -328,9 +328,12 @@ The four that remain are the tenant-wide ones refused in the table above —
 > `SBOMHUB_AUTH_MODE=anonymous` (the Bearer header was ignored and the request
 > resolved as the *default* tenant, which does not own the SBOM — the identical
 > 404 the route gives with no credential at all) and **401** under Clerk. That
-> is the third step of the GitHub Action this repository ships
-> (`.github/workflows/sbom-upload.yml`), which carried `continue-on-error: true`
-> and therefore never turned a run red. The route now sits on the same MultiAuth →
+> is the third step of the workflow this repository ships
+> (`.github/workflows/sbom-upload.yml`), which never turned a run red — not only
+> because it carried `continue-on-error: true`, but because its `curl` had no
+> `--fail` flag and its last command was an unconditional `echo`, so the step
+> could not fail in the first place. Both were removed and the two calls now
+> compare their status exactly (200 / 202). The route now sits on the same MultiAuth →
 > RequireWrite → RateLimitByAPIKey(standard, 60/min) → TenantTx → audit chain as
 > `POST /api/v1/projects/:id/sbom`, and is classified `scopeProjectPathParam`,
 > so a project-scoped key may scan **its own project only** and is answered the

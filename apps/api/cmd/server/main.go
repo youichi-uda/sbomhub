@@ -1468,14 +1468,31 @@ func main() {
 	// `sbh_` key: upload 201, read-back 200, scan 404 in anonymous mode
 	// (the Bearer header ignored, so the request resolved as the DEFAULT
 	// tenant, which does not own the SBOM — the same 404 the route gives
-	// with no credential at all) and 401 in Clerk mode. The workflow step
-	// carried `continue-on-error: true`, so it never turned a run red.
+	// with no credential at all) and 401 in Clerk mode.
+	//
+	// Why nobody noticed, stated precisely (Codex round 4, Low — an earlier
+	// draft blamed `continue-on-error: true` alone): the step could not fail.
+	// Its curl carried no --fail flag, so a 404 body was printed and curl
+	// exited 0 (measured: `curl -X POST … ; echo $?` → 0 on the 404 above),
+	// and the step's last command was an unconditional `echo "Vulnerability
+	// scan triggered!"`. `continue-on-error: true` sat on top of that as belt
+	// AND braces. Both had to go, and the exact-status checks the workflow now
+	// makes are the half that actually turns a refusal red.
 	//
 	// Chain shape, and why each position:
 	//
 	//   MultiAuth           accepts `Bearer sbh_...` and keeps the Clerk JWT /
 	//                       self-hosted path through its clerkChain fallback,
-	//                       so the web UI's "Scan now" button is unaffected.
+	//                       so nothing that reached this route before loses
+	//                       access. An earlier draft justified that by naming
+	//                       "the web UI's Scan now button"; there is no such
+	//                       button (Codex round 4, Low — `rg '/api/v1/projects/
+	//                       .*/scan'` over apps/web/src finds nothing; the web
+	//                       app's only /scan reference is /settings/scan).
+	//                       Verified on a throwaway stack instead: with
+	//                       SBOMHUB_AUTH_MODE=anonymous and NO credential at
+	//                       all — the self-hosted default identity — the route
+	//                       still answers 202.
 	//   RequireWrite        UNCHANGED in effect (the authWrite group carried
 	//                       it), but now explicit and, critically, placed
 	//                       BEFORE the limiter and the transaction: a

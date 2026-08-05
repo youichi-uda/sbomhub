@@ -10,9 +10,13 @@ import (
 //
 // # The defect this closes
 //
-// .github/workflows/sbom-upload.yml is the reusable GitHub Action SBOMHub ships
-// to its users. It is three steps: upload the SBOM, read it back to learn its
-// id, then POST that id to /scan. The first two ran on the MultiAuth-fronted
+// .github/workflows/sbom-upload.yml is the workflow this repository ships and
+// runs against its own code — a `workflow_dispatch`-only dogfooding /
+// copy-me-into-your-repo reference, NOT a reusable action (Codex round 4, Low:
+// an earlier draft called it that; it declares no `workflow_call` trigger and
+// there is no action manifest, and docs/ci-inventory.md classifies it as
+// manual). It is three steps: upload the SBOM, read it back to learn its id,
+// then POST that id to /scan. The first two ran on the MultiAuth-fronted
 // chain and worked with `Authorization: Bearer sbh_...`; the third was
 // registered on the Clerk-only `authWrite` group, so no API key was ever
 // consulted for it.
@@ -41,7 +45,7 @@ import (
 // GET /sboms/:sbom_id/scan-status reporting `"status":"completed"` with
 // `"critical":1`.
 //
-// So the shipped Action's SBOMs were scanned. What never worked is the explicit
+// So the workflow's SBOMs were scanned. What never worked is the explicit
 // RE-scan trigger — the route that lets a client sweep an existing SBOM again
 // (against refreshed advisory data, or with a narrower `sources` list) without
 // re-uploading it. That is a smaller defect than "nothing was scanned", and it
@@ -54,7 +58,7 @@ import (
 // API-key-fronted route, but it is symmetric: it is equally happy if this route
 // leaves the MultiAuth chain again, as long as the scope table follows it out.
 // That is exactly the regression that would silently re-break the shipped
-// Action's re-scan step, so the route is named here explicitly.
+// workflow's re-scan step, so the route is named here explicitly.
 // ---------------------------------------------------------------------------
 
 const m53ScanRoute = "POST /api/v1/projects/:id/scan"
@@ -67,7 +71,7 @@ func TestM53ScanRouteIsAPIKeyReachable(t *testing.T) {
 		t.Errorf("%s is not on an API-key-fronted chain. "+
 			".github/workflows/sbom-upload.yml's third step calls it with "+
 			"`Authorization: Bearer sbh_...`, which means it is answered 401 (clerk) or "+
-			"404-as-the-default-tenant (anonymous), so the shipped Action's re-scan step "+
+			"404-as-the-default-tenant (anonymous), so the shipped workflow's re-scan step "+
 			"does nothing at all. (The SBOM is still scanned on ingest by the upload — see "+
 			"the file comment — but the explicit re-scan trigger is unreachable.)", m53ScanRoute)
 	}
