@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1115,5 +1117,44 @@ func TestM54SearchByCVEID_RefusesAnAnswerAboutADifferentCVE(t *testing.T) {
 				t.Error("expected the requested CVE to be returned")
 			}
 		})
+	}
+}
+
+// m54TruncatedBody is an io.Reader that yields data and then reports a broken
+// transfer rather than a clean EOF — a server that declared a longer body and
+// closed the connection.
+type m54TruncatedBody struct {
+	data []byte
+	i    int
+}
+
+func (t *m54TruncatedBody) Read(p []byte) (int, error) {
+	if t.i >= len(t.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	n := copy(p, t.data[t.i:])
+	t.i += n
+	return n, nil
+}
+
+// TestM54DecodeNVDResponse_RejectsATruncatedTransfer pins the difference
+// between "the body ended" and "the connection broke" (Codex M54 R9,
+// Critical).
+//
+// The R8 cut used dec.More(), which returns a bool and collapses its
+// lookahead's error into false. A transfer cut short immediately after a
+// complete empty-result envelope therefore reported "nothing follows" and was
+// accepted as an authoritative zero-finding answer.
+func TestM54DecodeNVDResponse_RejectsATruncatedTransfer(t *testing.T) {
+	envelope := `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`
+
+	if _, err := decodeNVDResponse(&m54TruncatedBody{data: []byte(envelope)}); err == nil {
+		t.Error("a truncated transfer produced no error; a complete-looking empty envelope " +
+			"followed by a broken connection would be read as 'this component has no CVEs'")
+	}
+
+	// The same bytes over a clean reader must still be accepted.
+	if _, err := decodeNVDResponse(strings.NewReader(envelope)); err != nil {
+		t.Errorf("a clean, well-formed zero-result body must be accepted: %v", err)
 	}
 }

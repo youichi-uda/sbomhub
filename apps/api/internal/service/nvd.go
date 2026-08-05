@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -621,19 +622,27 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 			// indefinitely, stored as CVEID "" (VARCHAR NOT NULL accepts it),
 			// and linked to components with no failure counter moving.
 			//
-			// Same treatment as the wire: canonicalise, and drop what does not
-			// validate. Dropping rather than failing the whole lookup is
-			// deliberate here — a poisoned or stale cache entry should not
-			// take down a scan that can simply re-fetch, and the miss is
-			// logged.
+			// Same treatment as the wire: canonicalise, and refuse what does
+			// not validate.
+			//
+			// A malformed entry makes the whole cache record untrustworthy, so
+			// the record is DISCARDED and the lookup falls through to the API
+			// (M54, Codex R9 Critical). The R8 cut filtered the bad entries out
+			// and returned the remainder AS A CACHE HIT, which its own comment
+			// described as something the scan "can simply re-fetch" — it did
+			// not re-fetch. A record whose entries were all malformed became an
+			// empty, successful, zero-finding lookup with no HTTP request at
+			// all; a mixed one silently lost the malformed findings.
 			cachedAt := entry.CachedAt
 			vulns := make([]model.Vulnerability, 0, len(entry.Vulnerabilities))
+			usable := true
 			for _, cv := range entry.Vulnerabilities {
 				canonical, err := validation.ValidateCVEID(cv.CVEID)
 				if err != nil {
-					slog.Warn("dropping cached NVD entry with a malformed CVE ID",
-						"component", name, "cve", cv.CVEID)
-					continue
+					slog.Warn("discarding cached NVD record: malformed CVE ID",
+						"component", name, "version", version, "cve", cv.CVEID)
+					usable = false
+					break
 				}
 				// M46 B2: CachedVuln mirrors the model's pointer fields, so
 				// CVSSScore/PublishedAt carry through without sentinels.
@@ -648,7 +657,10 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 					UpdatedAt:   &cachedAt,
 				})
 			}
-			return vulns, true, nil
+			if usable {
+				return vulns, true, nil
+			}
+			// Fall through to the API below, exactly as a cache miss would.
 		}
 	}
 
@@ -753,15 +765,31 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 // followed by a second document, or by garbage, decodes without error. So a
 // proxy or mirror could prefix an empty-result envelope to anything at all and
 // have the scan accept it as an authoritative "this component has no CVEs".
+//
+// The check is a SECOND Decode that must return io.EOF, not dec.More()
+// (Codex M54 R9, Critical). More() returns a bool and collapses every error
+// from its lookahead into false, so a transfer that was cut short right after
+// a complete envelope — a server that declared a longer body and closed —
+// reported "nothing follows" and the truncated response was accepted as
+// authoritative. Measured: with a reader that returns io.ErrUnexpectedEOF
+// after the body, More() is false while a second Decode returns
+// "unexpected EOF". Requiring io.EOF separates the three outcomes that matter:
+// clean end, trailing content, and a broken transfer.
 func decodeNVDResponse(r io.Reader) (*NVDResponse, error) {
 	dec := json.NewDecoder(r)
 	var out NVDResponse
 	if err := dec.Decode(&out); err != nil {
 		return nil, err
 	}
-	if dec.More() {
+	var trailing json.RawMessage
+	switch err := dec.Decode(&trailing); {
+	case errors.Is(err, io.EOF):
+		// The only acceptable outcome: the body held exactly one value.
+	case err == nil:
 		return nil, fmt.Errorf("NVD response has trailing content after the JSON body; " +
 			"the endpoint returned 200 but the body is not a single NVD CVE API response")
+	default:
+		return nil, fmt.Errorf("NVD response body did not end cleanly: %w", err)
 	}
 	if err := out.validate(); err != nil {
 		return nil, err

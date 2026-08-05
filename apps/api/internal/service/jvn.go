@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 const (
@@ -59,6 +60,28 @@ type JVNRSSFeed struct {
 	XMLName xml.Name   `xml:"RDF"`
 	Channel JVNChannel `xml:"channel"`
 	Items   []JVNItem  `xml:"item"`
+	// Status is MyJVN's application-level result, and it was not modelled at
+	// all until M54 (Codex R9, Critical). MyJVN reports failures — bad
+	// parameters, service trouble — through retCd on this element, commonly
+	// WITH HTTP 200. An unmodelled Status meant such a response unmarshalled
+	// happily into zero items, scanComponent returned nil, the component was
+	// counted as successfully checked, and even a total application-level
+	// outage finished as "JVN scan completed" with no findings.
+	Status JVNStatus `xml:"Status"`
+}
+
+// JVNStatus is the MyJVN <status:Status> element. retCd "0" is success;
+// anything else is an application-level error carrying errCd / errMsg.
+type JVNStatus struct {
+	Version  string `xml:"version,attr"`
+	Method   string `xml:"method,attr"`
+	RetCd    string `xml:"retCd,attr"`
+	RetMax   string `xml:"retMax,attr"`
+	ErrCd    string `xml:"errCd,attr"`
+	ErrMsg   string `xml:"errMsg,attr"`
+	TotalRes string `xml:"totalRes,attr"`
+	FirstRes string `xml:"firstRes,attr"`
+	Feed     string `xml:"feed,attr"`
 }
 
 type JVNChannel struct {
@@ -181,6 +204,35 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) e
 	return nil
 }
 
+// searchByKeyword asks MyJVN for advisories matching a component name.
+//
+// # Two known completeness defects, NOT fixed in M54
+//
+// Both are the JVN twins of the NVD resultsPerPage truncation documented on
+// NVDService.searchByKeyword, and both are deferred for the same reason: the
+// repair is a fetch-policy decision, not a loop, and getting it wrong makes
+// every scan of a common library unusably slow against a rate-limited API.
+// Raised by Codex in M54 R9 (both Critical) and reported upward rather than
+// left undocumented.
+//
+//  1. NO DATE RANGE IS SENT. MyJVN defaults rangeDatePublic /
+//     rangeDatePublished / rangeDateFirstPublished to the past WEEK when they
+//     are absent, so this only ever sees advisories from the last seven days.
+//     Anything older is invisible to the scan, which still reports success.
+//     Sending `n` (no range) is one line — but it turns every component lookup
+//     into a full-history query, which interacts directly with defect 2.
+//  2. THE RESULT SET IS TRUNCATED AT TEN. maxCountItem=10 is requested,
+//     startItem is never sent, and the response's totalRes is ignored. An
+//     eleventh match is dropped silently, and with defect 1 repaired there
+//     would routinely be thousands.
+//
+// Fixing 1 without 2 makes under-reporting worse, not better: a full-history
+// query returns far more matches, all but the first ten of which are then
+// discarded. They have to be decided together, with a paging and rate-limit
+// budget, which is why neither is taken here.
+//
+// Until then, a completed JVN scan means "the first ten matches from the last
+// seven days, per component" — not "every advisory affecting this component".
 func (s *JVNService) searchByKeyword(ctx context.Context, keyword string) ([]model.Vulnerability, error) {
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "jvn")
@@ -225,6 +277,16 @@ func (s *JVNService) parseJVNResponse(data []byte) ([]model.Vulnerability, error
 		return nil, fmt.Errorf("failed to parse JVN response: %w", err)
 	}
 
+	// MyJVN signals application-level failure through retCd, usually with HTTP
+	// 200 (M54, Codex R9 Critical). An empty retCd is tolerated so a fixture
+	// or mirror that omits the element is not rejected outright; a PRESENT
+	// non-zero value is an error, because reading it as "no vulnerabilities"
+	// is the silent-under-report this product cannot afford.
+	if rc := strings.TrimSpace(feed.Status.RetCd); rc != "" && rc != "0" {
+		return nil, fmt.Errorf("JVN API reported failure: retCd=%s errCd=%s errMsg=%s",
+			rc, feed.Status.ErrCd, feed.Status.ErrMsg)
+	}
+
 	var vulns []model.Vulnerability
 	for _, item := range feed.Items {
 		vuln := s.convertJVNItemToVulnerability(item)
@@ -237,11 +299,32 @@ func (s *JVNService) parseJVNResponse(data []byte) ([]model.Vulnerability, error
 }
 
 func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerability {
-	// Extract CVE ID from references or identifier
-	cveID := s.extractCVEID(item)
+	// Extract CVE ID from references or identifier.
+	//
+	// M54 (Codex R9, Critical): the fallback to item.Identifier used to be
+	// unconditional, so an item carrying NEITHER a CVE reference NOR an
+	// identifier produced CVEID "". `vulnerabilities.cve_id` is VARCHAR NOT
+	// NULL and accepts the empty string, so that row was created, the
+	// component was linked to it, and the scan reported success — and because
+	// cve_id is the ON CONFLICT key, every such item across every component
+	// collapsed onto one nameless catalogue row. MyJVN's zero-match responses
+	// are the ordinary way to reach that, which makes it a live defect rather
+	// than a hostile-input one.
+	//
+	// CVE ids are canonicalised for the same reason NVD's are (M54 R8, High):
+	// cve_id is UNIQUE and compared exactly, so "cve-..." and "CVE-..." would
+	// otherwise become two rows for one vulnerability.
+	cveID := ""
+	if canonical, err := validation.ValidateCVEID(s.extractCVEID(item)); err == nil {
+		cveID = canonical
+	} else if id := strings.TrimSpace(item.Identifier); id != "" {
+		// JVN advisories that carry no CVE are keyed by their JVNDB id.
+		cveID = id
+	}
 	if cveID == "" {
-		// Use JVN ID if no CVE
-		cveID = item.Identifier
+		slog.Warn("dropping JVN item with no CVE reference and no identifier",
+			"title", item.Title, "link", item.Link)
+		return nil
 	}
 
 	// Get CVSS score and severity. M46 B2: an item without any CVSS
@@ -279,14 +362,25 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	}
 }
 
+// extractCVEID finds the CVE this advisory is about, if it names one.
+//
+// The prefix test is case-INSENSITIVE (M54). It was `HasPrefix(ref.ID, "CVE-")`
+// before, so a reference written "cve-2021-44228" was not recognised as a CVE
+// at all and the advisory fell through to being keyed by its JVNDB id —
+// producing a SECOND catalogue row for a vulnerability the NVD scanner already
+// stores under its CVE id. That is the same identity split the canonicalisation
+// in convertJVNItemToVulnerability exists to prevent, one step earlier.
+//
+// Callers must still validate: this returns the RAW matched string, which is
+// only a candidate.
 func (s *JVNService) extractCVEID(item JVNItem) string {
 	for _, ref := range item.References {
-		if strings.HasPrefix(ref.ID, "CVE-") {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ref.ID)), "CVE-") {
 			return ref.ID
 		}
 	}
 	// Check in identifier
-	if strings.HasPrefix(item.Identifier, "CVE-") {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(item.Identifier)), "CVE-") {
 		return item.Identifier
 	}
 	return ""

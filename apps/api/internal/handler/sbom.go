@@ -623,14 +623,26 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //   - that CVE metadata already in the catalogue was refreshed — a CVE NVD has
 //     re-scored is linked but not updated (see NVDService.persistWorkItem).
 //
-// Not closed by any of the above, and reported rather than fixed in M54:
-// NVDService.searchByKeyword asks NVD for resultsPerPage=20 and never follows
-// `totalResults` / `startIndex`, so a component matching more than 20 CVEs is
-// silently truncated to the first 20 and the scan still reports success
-// (Codex M54 R2, Critical). Paging it naively would multiply every scan's
-// rate-limited request count by the match cardinality, so the repair is a
-// design decision — cap deliberately, match on CPE instead of keyword, or
-// surface the truncation — and belongs in its own change.
+// Not closed by any of the above, and reported rather than fixed in M54 —
+// three fetch-COMPLETENESS defects, all of the same shape. Each makes a
+// successful scan mean less than it appears to, and each needs a paging and
+// rate-limit budget rather than a loop, so all three belong in their own
+// change:
+//
+//   - NVDService.searchByKeyword asks NVD for resultsPerPage=20 and never
+//     follows `totalResults` / `startIndex`, so a component matching more than
+//     20 CVEs is truncated to the first 20 (Codex M54 R2, Critical).
+//   - JVNService.searchByKeyword sends no date range, and MyJVN defaults to
+//     the PAST WEEK — so JVN results cover seven days, not history (R9,
+//     Critical).
+//   - JVNService.searchByKeyword requests maxCountItem=10, never sends
+//     startItem, and ignores totalRes (R9, Critical).
+//
+// Paging any of them naively multiplies a scan's rate-limited request count by
+// the match cardinality; the JVN pair in particular must be decided together,
+// because removing the date default without paging makes the truncation worse.
+// The honest reading of a completed scan today is therefore "the first N
+// matches per component, from the window each API defaults to".
 func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 	var errs []string
 
