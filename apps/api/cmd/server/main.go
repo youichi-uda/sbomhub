@@ -1486,11 +1486,23 @@ func main() {
 	//   RateLimitByAPIKey   BudgetStandard (60/min), the same budget as the
 	//                       upload this route follows — NOT BudgetPoll, which
 	//                       exists for the scan-STATUS polling loop. This is a
-	//                       once-per-upload trigger and it starts the most
-	//                       expensive side effect an API key has (unbounded
-	//                       outbound NVD/JVN fetches writing the global
-	//                       vulnerability tables), so the tighter ceiling is
-	//                       the correct one. No-op for the Clerk JWT path.
+	//                       trigger, not a polling surface, and it starts the
+	//                       most expensive side effect an API key has (outbound
+	//                       NVD/JVN fetches writing the global vulnerability
+	//                       tables), so the tighter of the two ceilings is the
+	//                       right one. No-op for the Clerk JWT path.
+	//                       Measured on a throwaway stack 2026-08-05: 65 POSTs
+	//                       with a fresh key gave 60 × 404 (the handler's
+	//                       answer for a bogus sbom_id, i.e. admitted) then
+	//                       5 × 429.
+	//                       WHAT THAT DOES NOT BOUND (Codex R1 Low): nothing
+	//                       limits how many sweeps are IN FLIGHT — 60 accepted
+	//                       requests are 60 background goroutines — and the
+	//                       window is fixed, not sliding, so a caller straddling
+	//                       the boundary gets 120 in a couple of seconds. This
+	//                       route is rate-limited; it is not capacity-managed.
+	//                       Both limits are properties of RateLimitByAPIKey
+	//                       (docs/UPGRADE.md §8.5), not of this registration.
 	//   TenantTx            required: Scan answers 401 without a tenant
 	//                       context and its SbomInProject check is RLS-filtered.
 	//   auditMiddleware     unchanged; the group carried it before.

@@ -5,11 +5,18 @@ name: SBOM Upload
 
 on:
   workflow_dispatch:
+    # `scan` is a RE-scan, and it is off by default. Uploading an SBOM already
+    # runs a tracked NVD/JVN scan server-side (SbomHandler.startBackgroundScan),
+    # so leaving this off does NOT mean "no vulnerability scan" — it means "do
+    # not sweep the same SBOM a second time". See the long comment on the step
+    # itself for the measurement. The description says so, because the previous
+    # one ('Run vulnerability scan after upload') read as if switching it off
+    # disabled scanning, which was never true.
     inputs:
       scan:
-        description: 'Run vulnerability scan after upload'
+        description: 'Re-scan the uploaded SBOM (the upload already scans it once)'
         required: false
-        default: true
+        default: false
         type: boolean
 
 env:
@@ -92,31 +99,55 @@ jobs:
       #                                                         the project
       #
       # 401 under Clerk. POST /api/v1/projects/:id/scan was registered on the
-      # Clerk-only `authWrite` group, so no API key was ever consulted for it —
-      # every run of this workflow uploaded an SBOM that was never scanned, and
-      # every one of them was green. Two steps of three working is the worst
-      # possible shape for a compliance product: the evidence looks present.
-      #
-      # The route moved onto the MultiAuth chain (cmd/server/main.go, M53 W1) and
-      # is classified in middleware/project_scope.go, so it now answers 202 for a
+      # Clerk-only `authWrite` group, so no API key was ever consulted for it,
+      # and `continue-on-error: true` meant no run ever went red over it. The
+      # route moved onto the MultiAuth chain (cmd/server/main.go, M53 W1) and is
+      # classified in middleware/project_scope.go, so it now answers 202 for a
       # tenant-level key and for a project-scoped key naming its OWN project (403
       # for any other project id, which is a real error and should be red here).
       #
-      # WHAT THIS STEP CAN AND CANNOT DETECT. The endpoint is a TRIGGER: it
-      # answers 202 Accepted and runs the NVD/JVN sweep in a background
-      # goroutine, with no tracker for this route (see VulnerabilityHandler.
-      # runScan's doc comment). So a red step here means "the scan was not
-      # started"; a green step does NOT mean the scan finished, or found
-      # anything, or that its transaction committed. To gate a build on scan
-      # RESULTS use the CLI instead — `sbomhub scan . --project <name> --fail-on
-      # critical` polls /sboms/:sbom_id/scan-status and blocks on the counts.
+      # WHAT WAS *NOT* BROKEN — corrected here after Codex review, because the
+      # first draft of this comment said "every run uploaded an SBOM that was
+      # never scanned" and that is FALSE. POST /api/v1/projects/:id/sbom starts
+      # its own tracked NVD/JVN scan on ingest (SbomHandler.startBackgroundScan)
+      # and always has. Measured on a throwaway stack 2026-08-05: uploading the
+      # fixture and making NO /scan call left one component_vulnerabilities row
+      # and GET /sboms/<id>/scan-status reporting
+      # `{"status":"completed", ... "critical":1}`. The SBOMs were scanned. What
+      # never worked is this explicit RE-scan trigger.
       #
-      # The `if:` wires up the `scan` workflow_dispatch input, which was declared
-      # at the top of this file and read by nothing — the step ran unconditionally
-      # and answering "false" to the prompt did nothing. That is not a silent
-      # FAILURE (workflow_dispatch is manual, the operator chose it, and GitHub
-      # renders a skipped step as skipped), but it was a silent lie, and it is the
-      # same species as the one this change is about.
+      # WHICH IS WHY THE `scan` INPUT NOW DEFAULTS TO FALSE. With the route
+      # reachable, running this step on a freshly uploaded SBOM sweeps it a
+      # SECOND time, and the second sweep is untracked: measured on the same
+      # stack, NVD was absorbed by its Redis cache (`cache_hits=1, api_calls=0`)
+      # but JVN issued a fresh outbound request (it has no cache), the
+      # component_vulnerabilities count did not change, and scan-status did not
+      # move — because this route has no ScanTracker. Fixing a silent failure is
+      # not a licence to add duplicated outbound traffic to every dispatch, so
+      # the default keeps a plain run byte-for-byte what it was, and the input
+      # (declared at the top of this file since the beginning and read by
+      # NOTHING until now) finally means what it says.
+      #
+      # WHEN TO SWITCH IT ON: to re-run the sweep against refreshed NVD/JVN data
+      # without re-uploading, or to scan with a narrower `sources` list.
+      #
+      # WHAT THIS STEP CAN AND CANNOT DETECT. The endpoint is a TRIGGER: it
+      # answers 202 Accepted and runs the sweep in a background goroutine, with
+      # no tracker for this route (see VulnerabilityHandler.runScan's doc
+      # comment). So a red step here means "the re-scan was not started"; a green
+      # step does NOT mean it finished, or found anything, or that its
+      # transaction committed. To gate a build on scan RESULTS use the CLI —
+      # `sbomhub scan . --project <name> --fail-on critical` polls
+      # /sboms/:sbom_id/scan-status and blocks on the counts.
+      #
+      # KNOWN, and the reason this step is last: the upload above is
+      # irreversible, so a failure here reds a job whose SBOM is already stored
+      # AND already scanned. That is deliberate — an operator who explicitly
+      # asked for a re-scan should be told it was refused — but re-dispatching
+      # the workflow will upload the SBOM again. The rate limit is shared with
+      # the upload (both on the 60/min standard budget per API key), so a key
+      # near its ceiling can fail here for reasons that have nothing to do with
+      # this step.
       - name: Trigger Vulnerability Scan
         if: ${{ inputs.scan }}
         env:

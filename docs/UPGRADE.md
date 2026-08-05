@@ -330,16 +330,36 @@ The four that remain are the tenant-wide ones refused in the table above —
 > 404 the route gives with no credential at all) and **401** under Clerk. That
 > is the third step of the GitHub Action this repository ships
 > (`.github/workflows/sbom-upload.yml`), which carried `continue-on-error: true`
-> and therefore never turned a run red — SBOMs were uploaded and never scanned,
-> with a green check next to them. The route now sits on the same MultiAuth →
+> and therefore never turned a run red. The route now sits on the same MultiAuth →
 > RequireWrite → RateLimitByAPIKey(standard, 60/min) → TenantTx → audit chain as
 > `POST /api/v1/projects/:id/sbom`, and is classified `scopeProjectPathParam`,
 > so a project-scoped key may scan **its own project only** and is answered the
 > same 403 as everywhere else for any other project id. Read the two sentences
 > before this note as **35 of the 39** and **thirty of them name the project in
-> the path**, i.e. 30 + 5 + 4 = 39. **Operator action: none** — no existing key
-> loses anything, and a tenant-level key is unaffected by the scope table
-> entirely.
+> the path**, i.e. 30 + 5 + 4 = 39.
+>
+> **What was NOT broken.** An earlier draft of this note said SBOMs "were
+> uploaded and never scanned". That is false. `POST /api/v1/projects/:id/sbom`
+> starts its own **tracked** NVD/JVN scan on ingest and always has — measured on
+> the same stack, an upload with no `/scan` call afterwards left a
+> `component_vulnerabilities` row and `GET /sboms/<id>/scan-status` reporting
+> `{"status":"completed", … "critical":1}`. What never worked is the explicit
+> **re-scan** trigger. Because of that, the workflow's `scan` input now defaults
+> to **false**: with the route reachable, running it on a freshly uploaded SBOM
+> sweeps it a second time (measured: NVD served from its Redis cache,
+> `cache_hits=1 api_calls=0`; JVN issuing a fresh outbound request; no change to
+> the row count, and no movement in `scan-status`, because this route has no
+> ScanTracker).
+>
+> **Operator action.** None for the API keys themselves: no existing key loses
+> anything, and a tenant-level key is unaffected by the scope table entirely.
+> One caveat if you use the shipped workflow — take the workflow and the server
+> in the same upgrade, or leave `scan` off. The upload step is irreversible and
+> the scan step no longer swallows its errors, so a NEW workflow pointed at an
+> OLD server stores (and scans) the SBOM and then goes red on the trigger, and
+> re-dispatching uploads it again. The same shape applies to the shared 60/min
+> rate limit: upload, read-back and trigger all draw on one budget per key, so a
+> key near its ceiling can red the job after the upload has already succeeded.
 
 **Why the project lists are narrowed and the other tenant-wide endpoints are
 not.** Narrowing an answer is safe exactly when the response *is* the set being
@@ -1052,9 +1072,13 @@ on sending `Authorization: Bearer` with nothing after it, it will now receive 40
   `middleware/project_scope.go`, so an API key does trigger a scan: 202 for a
   tenant-level key, and for a project-scoped key naming its own project.
   `continue-on-error: true` was removed from the workflow step, which now fails
-  the run when the trigger is refused. See §2d's M53 W1 note. Being a trigger,
-  the step still cannot observe whether the background sweep finished — poll
-  `/sboms/:sbom_id/scan-status`, or use `sbomhub scan --fail-on`, for that.
+  the run when the trigger is refused, and the step's `scan` input now defaults
+  to **false** because the upload already scans (see §2d's M53 W1 note). Being a
+  trigger, the step still cannot observe whether the background sweep finished —
+  poll `/sboms/:sbom_id/scan-status`, or use `sbomhub scan --fail-on`, for that.
+  The route is rate-limited but not capacity-managed: 60 accepted requests are
+  60 concurrent background sweeps, and the fixed window admits 120 across a
+  boundary.
 - One correction to §8.3's "no cleanup is needed": the TTL on a counter is set
   by a separate `EXPIRE` issued only after the **first** `INCR` of a window
   (unchanged from before M51). If that one `EXPIRE` fails — a Redis error in

@@ -622,11 +622,13 @@ func keysOf(m map[string]bool) []string {
 // The sweeps above are all shape-checks over whatever the table happens to
 // contain, so they stay green if this entry is deleted — and deleting it is not
 // a no-op: default-deny would 403 every project-scoped key on the scan route,
-// which is precisely the "silently broken shipped Action" this wave closed
-// (.github/workflows/sbom-upload.yml step 3). Measured on a throwaway stack
-// 2026-08-05: with the entry removed the route answers 403 for a project-scoped
-// key while a tenant-level key still gets 202, so the failure is invisible to
-// anyone testing with a tenant-level key.
+// re-breaking the re-scan step of the GitHub Action this repository ships
+// (.github/workflows/sbom-upload.yml step 3) in a new way. Measured on a
+// throwaway stack
+// 2026-08-05 (`go build -overlay` with this entry deleted, no repo file
+// touched): the route answers 403 for a project-scoped key while a tenant-level
+// key still gets 202 — so the failure is invisible to anyone testing with a
+// tenant-level key, which is what CI and most operators hold.
 //
 // `:id` really is the project here and not a sub-resource:
 // VulnerabilityHandler.Scan parses c.Param("id") as the project UUID and takes
