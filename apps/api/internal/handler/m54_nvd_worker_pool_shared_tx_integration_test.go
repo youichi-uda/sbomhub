@@ -112,6 +112,15 @@ const (
 	// statements (~150ms locally). That window is what makes two workers
 	// released together overlap in practice — 12 of 12 measured runs against
 	// the unfixed implementation. It is not a guarantee; see the header.
+	//
+	// It is also NOT production's page size (Codex M54 R2, Medium):
+	// searchByKeyword asks NVD for resultsPerPage=20, so a real work item's
+	// database section is ~20x narrower and the per-run collision odds are
+	// correspondingly lower. That does not make the defect rarer in aggregate
+	// — a real scan has hundreds of work items and runs for minutes, where
+	// this test has two and runs for 1.4s — but the 12/12 figure above is the
+	// reliability of THIS fixture, not an estimate of production incidence,
+	// and nothing here measures the latter.
 	m54CVEsPerItem = 400
 )
 
@@ -493,6 +502,72 @@ func TestM54NVDScan_RefusedWritesAreReportedAsFailure(t *testing.T) {
 	if durable != 0 {
 		t.Errorf("durable vulnerabilities = %d, want 0 — the failed statement aborts the shared "+
 			"transaction, so even the write that succeeded before it is discarded (M50)", durable)
+	}
+}
+
+// TestM54NVDScan_TotalFetchFailureIsReportedAsFailure pins the third piece
+// (Codex M54 R2, Critical): a scan in which NOT ONE component lookup answered
+// has zero coverage and must not report success.
+//
+// The R1 follow-up escalated refused WRITES but left every fetch failure
+// (429 / 500 / timeout) as "logged, skipped, success", on the argument that
+// choosing a failure threshold is product policy. That argument does not reach
+// this case: deciding that a scan which checked nothing checked nothing needs
+// no threshold. Left alone, an NVD outage produced scan-status "completed"
+// with 0 findings and `sbomhub scan --fail-on critical` exited 0.
+//
+// PARTIAL fetch failure is still success and still open — see the closing
+// comment on processComponentsParallel. This test deliberately does not
+// exercise it, because pinning behaviour that is expected to change would make
+// the eventual policy decision harder to land.
+func TestM54NVDScan_TotalFetchFailureIsReportedAsFailure(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+
+	seed := m47SeedAll(t, migDB, "m54outage")
+
+	// Every request fails, for every component in the SBOM.
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		http.Error(w, `{"message":"simulated NVD outage"}`, http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	nvd := service.NewNVDService(
+		repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB),
+		"m54-fake-api-key", srv.URL, false,
+	)
+	h := &VulnerabilityHandler{db: appDB, nvdService: nvd}
+
+	var logged strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	func() {
+		defer slog.SetDefault(prev)
+		h.runScan(context.Background(), seed.sbomID, seed.tenantID, "nvd")
+	}()
+	logs := logged.String()
+
+	// Precondition: the scan really did try, and really did get nothing. A
+	// scan that never reached the server would also log no success line, for
+	// the wrong reason.
+	if got := atomic.LoadInt64(&hits); got == 0 {
+		t.Fatal("precondition: the scanner never called NVD, so no fetch failure was provoked")
+	}
+	if !strings.Contains(logs, "processed=0") {
+		t.Fatalf("precondition: expected every lookup to fail (processed=0); logs = %q", logs)
+	}
+
+	if strings.Contains(logs, "NVD scan completed") {
+		t.Error("the scanner reported SUCCESS for a scan in which every component lookup failed. " +
+			"On the upload path ScanTracker records that as completed, so the CLI reads " +
+			"'0 vulnerabilities' off an NVD outage and exits 0")
+	}
+	if !strings.Contains(logs, "NVD scan failed") {
+		t.Errorf("the scanner did not report failure; logs = %q", logs)
 	}
 }
 

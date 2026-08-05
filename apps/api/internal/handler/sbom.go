@@ -583,20 +583,34 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 // CLI-observed scan status at "completed, 0 vulnerabilities" and
 // `sbomhub scan --fail-on critical` would silently exit 0.
 //
-// How much of the partial-result gap the scanner now closes (M54 R1):
-// NVDService.processComponentsParallel counts the statements the DATABASE
-// refused and returns an error when that count is non-zero, so a scan that
-// obtained matches and then failed to record them reaches `errs` and
-// MarkFailed rather than reporting success. That is the half where the data
-// we already hold is unsound.
+// How much of the partial-result gap the scanner now closes, and what
+// "completed" is therefore worth (M54):
 //
-// The other half is still open and is still only an upper bound here: a
-// component whose NVD FETCH failed (429 / 500 / timeout) is logged and
-// skipped, and the scanner returns nil, so "every component failed to
-// fetch" still lands as a completed scan with 0 findings. Choosing a
-// threshold for that (e.g. "N% of components failed → return error") is a
-// product-policy decision, not a bug fix, and remains tracked separately
-// (※要確認).
+//   - REFUSED WRITES (R1). processComponentsParallel counts the statements
+//     the DATABASE refused and errors when that count is non-zero, so a scan
+//     that obtained matches and then failed to record them reaches `errs` and
+//     MarkFailed. This is the case where the data we already hold is unsound.
+//   - TOTAL FETCH FAILURE (R2). If every component lookup failed (429 / 500 /
+//     timeout) the scanner errors too. Deciding that a scan which checked
+//     nothing checked nothing needs no threshold, and leaving it as success
+//     meant an NVD outage read out as "completed, 0 vulnerabilities".
+//   - PARTIAL FETCH FAILURE — still success, still open. Some components
+//     answered and some did not, and choosing how many may fail before the
+//     scan is worthless (e.g. "N% failed → error") is a product-policy
+//     decision, not a bug fix. Tracked separately (※要確認).
+//
+// So a "completed" status now promises: at least one component was checked,
+// and everything the scan learned was written down. It does NOT promise that
+// every component was checked.
+//
+// Not closed by any of the above, and reported rather than fixed in M54:
+// NVDService.searchByKeyword asks NVD for resultsPerPage=20 and never follows
+// `totalResults` / `startIndex`, so a component matching more than 20 CVEs is
+// silently truncated to the first 20 and the scan still reports success
+// (Codex M54 R2, Critical). Paging it naively would multiply every scan's
+// rate-limited request count by the match cardinality, so the repair is a
+// design decision — cap deliberately, match on CPE instead of keyword, or
+// surface the truncation — and belongs in its own change.
 func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 	var errs []string
 

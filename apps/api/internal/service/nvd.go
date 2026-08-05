@@ -256,9 +256,11 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	cacheHits := 0
 	apiCalls := 0
 	// refusedWrites counts statements the DATABASE refused (Codex M54 R1,
-	// Critical). See the return at the bottom of this function for why this
-	// one class of failure is escalated and the fetch failures above are not.
+	// Critical); fetchFailures counts work items whose NVD lookup never
+	// returned an answer (Codex M54 R2, Critical). See the returns at the
+	// bottom of this function for exactly which combinations are escalated.
 	refusedWrites := 0
+	fetchFailures := 0
 
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
@@ -279,6 +281,9 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 						"component", work.key.Name,
 						"version", work.key.Version,
 						"error", err)
+					mu.Lock()
+					fetchFailures++
+					mu.Unlock()
 					continue
 				}
 
@@ -309,6 +314,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 		"cache_hits", cacheHits,
 		"api_calls", apiCalls,
 		"refused_writes", refusedWrites,
+		"fetch_failures", fetchFailures,
 	)
 
 	// A refused WRITE means the database declined to record a match we had
@@ -322,18 +328,32 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	// refused, so this count goes from 0 to "all of them" and the scanner now
 	// says so instead of returning nil.
 	//
-	// Deliberately NOT escalated here: a FETCH failure (the `continue` above,
-	// NVD answering 429/500 or timing out). Those are logged and skipped, and
-	// turning them into a scan failure is a product-policy decision — how many
-	// components may fail before the scan is worthless? — not a bug fix. It
-	// stays tracked as the ※要確認 threshold noted on SbomHandler.runScan.
-	// The distinction is deliberate: "we could not ask about this component"
-	// and "we were told the answer and could not write it down" are different
-	// failures, and only the second one means the data we DO have is unsound.
 	if refusedWrites > 0 {
 		return fmt.Errorf("nvd: database refused %d vulnerability write(s); scan results are incomplete", refusedWrites)
 	}
 
+	// TOTAL fetch failure: every work item was asked about and none answered,
+	// so this scan has ZERO coverage. Codex M54 R2 (Critical) was right that
+	// the first cut hid this behind the policy argument below — deciding that
+	// no component was successfully checked requires no threshold, and
+	// reporting "completed, 0 vulnerabilities" for it is the same
+	// silent-data-loss shape as the refused writes above. `sbomhub scan
+	// --fail-on critical` would exit 0 on an NVD outage.
+	//
+	// The condition is deliberately processedCount == 0 rather than
+	// fetchFailures > 0: it fires only when NOTHING got through.
+	if processedCount == 0 && fetchFailures > 0 {
+		return fmt.Errorf("nvd: all %d component lookup(s) failed; the scan has no coverage", fetchFailures)
+	}
+
+	// STILL NOT escalated, and this is the honest remainder: a PARTIAL fetch
+	// failure (some components answered, some did not). Turning that into a
+	// scan failure needs a threshold — how many components may fail before the
+	// scan is worthless? — and that is a product-policy decision, not a bug
+	// fix. It stays tracked as the ※要確認 threshold noted on
+	// SbomHandler.runScan. A caller that reads "completed" today is therefore
+	// promised "at least one component was checked and everything we learned
+	// was written down", not "every component was checked".
 	return nil
 }
 
@@ -356,9 +376,20 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 // the CLI. A GetByCVE miss is NOT counted: sql.ErrNoRows is this function's
 // normal "not in the catalogue yet" branch, i.e. control flow, not failure.
 //
-// Per-statement failures are still logged and skipped rather than aborting the
-// item, so one bad row cannot cost the other 799. The count is what makes the
-// loss visible; the skipping is what keeps it small.
+// Per-statement failures are logged and skipped rather than aborting the item.
+// Do NOT read that as "one bad row only costs that row" — an earlier draft of
+// this comment said exactly that and it was wrong (Codex M54 R2, High). On a
+// tx-bearing ctx, which is every production caller, PostgreSQL aborts the
+// whole transaction at the FIRST refusal: every later statement is refused as
+// well, and every earlier one is discarded at rollback. The loss is the whole
+// sweep, and TestM54NVDScan_RefusedWritesAreReportedAsFailure measures it at
+// 0 durable rows.
+//
+// What the skipping actually buys is the count: the loop keeps going and keeps
+// counting, so `refused` reflects the true scale of the loss instead of
+// stopping at the first one. Row-local loss is what it buys on a tx-FREE ctx
+// (Querier falling back to the pooled *sql.DB, i.e. autocommit), which no
+// production caller uses today.
 func (s *NVDService) persistWorkItem(
 	ctx context.Context,
 	dbMu *sync.Mutex,
@@ -449,6 +480,29 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 	return vulns, false, nil
 }
 
+// searchByKeyword asks NVD for CVEs matching "<name> <version>".
+//
+// # Known defect, NOT fixed in M54: the result set is silently truncated
+//
+// This asks for resultsPerPage=20, decodes ONE response, and returns. It never
+// reads NVDResponse.TotalResults and never issues the startIndex follow-ups
+// the NVD API requires when totalResults exceeds resultsPerPage. A component
+// matching 21+ CVEs therefore contributes its first 20 and the scan reports
+// success — the omitted page can hold the critical CVE that should have failed
+// the build. Raised by Codex in M54 R2 (Critical) and reported upward rather
+// than left undocumented.
+//
+// It is not fixed here because the repair is a design decision, not a loop.
+// Every page costs one rate-limited request (rateLimitWithKey is 700ms), so
+// paging exhaustively multiplies a scan's wall time by the match cardinality —
+// a keyword like "linux" matches thousands. The real options are to cap
+// deliberately and SAY the result is capped, to match on CPE instead of a
+// keyword, or to surface truncation as a scan-level warning; picking among
+// them is out of scope for a concurrency fix, and doing it badly would make
+// every scan of a common library unusably slow.
+//
+// Until then, callers must read a completed NVD scan as "the first
+// resultsPerPage matches per component", not "every match".
 func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) ([]model.Vulnerability, error) {
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "nvd")
