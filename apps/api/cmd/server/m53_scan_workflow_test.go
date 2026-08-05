@@ -111,6 +111,11 @@ func TestM53ScanStepFailsLoudly(t *testing.T) {
 				"URL). `pipefail` is inert today — the block contains no pipeline, by " +
 				"design — and is pinned so that adding one later cannot reintroduce a " +
 				"swallowed exit status (Codex round 3, Low)"},
+		{`-w '%{http_code}'`,
+			"the status being compared has to be the one curl OBSERVED. Replacing the " +
+				"format string with a literal (`-w '202'`) leaves both comparisons below " +
+				"textually intact while every response, including a 401, assigns the " +
+				"expected value (Codex round 6, Low)"},
 		{`!= "200"`,
 			"the read-back's status must be compared EXACTLY. curl --fail-with-body " +
 				"only fails on >= 400, so a 3xx (these calls do not follow redirects) or " +
@@ -128,6 +133,12 @@ func TestM53ScanStepFailsLoudly(t *testing.T) {
 	// Three refusals: read-back status, missing .id, scan status. Counting them
 	// is what catches "one of the three checks was deleted" — each `if` above
 	// is useless without its `exit 1`.
+	if n := strings.Count(scan, `-w '%{http_code}'`); n < 2 {
+		t.Errorf("the scan step's shell captures the observed status %d time(s), want 2 "+
+			"(read-back and scan POST). A comparison against a status the request did not "+
+			"return is not a check.", n)
+	}
+
 	if n := strings.Count(scan, "exit 1"); n < 3 {
 		t.Errorf("the scan step's shell has %d `exit 1`(s), want at least 3 (read-back "+
 			"status, missing .id, scan status). A check whose branch does not exit is a "+
@@ -146,6 +157,11 @@ func TestM53ScanStepFailsLoudly(t *testing.T) {
 func TestM53UploadStepFailsLoudly(t *testing.T) {
 	upload := m53RunBlock(t, "Upload SBOM to SBOMHub")
 
+	if !strings.Contains(upload, `-w '%{http_code}'`) {
+		t.Errorf("the upload step's shell in %s does not capture the observed status with "+
+			"-w '%%{http_code}', so the comparison below could be against a literal",
+			m53WorkflowPath)
+	}
 	if !strings.Contains(upload, `!= "201"`) {
 		t.Errorf("the upload step's shell in %s does not compare the status to 201. "+
 			"curl --fail-with-body passes on a 3xx, so the step would print "+
