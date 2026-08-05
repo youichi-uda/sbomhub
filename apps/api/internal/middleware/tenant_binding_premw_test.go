@@ -43,7 +43,7 @@ import (
 //
 // # The key, and the one way it is deliberately lossy
 //
-// m52pMiddlewareIdentity renders the constructor and DROPS the arguments, so
+// m52pMiddlewareIdentities renders the constructor and DROPS the arguments, so
 //
 //	appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll)
 //	appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)
@@ -63,28 +63,56 @@ import (
 // # Which way it errs
 //
 // An entry this file cannot reduce to a constructor — an unparsable rendering,
-// a composite literal, a bare identifier main.go never bound — keeps its
-// normalised text as the key, matches nothing in the table, and fails. Loud on
-// a shape nobody writes today, rather than silent on one somebody might.
+// a bare identifier main.go never bound — keeps its normalised text as the key,
+// matches nothing in the table, and fails. Loud on a shape nobody writes today,
+// rather than silent on one somebody might. A slice of middleware is the one
+// non-call shape that is understood rather than refused, because the route
+// parser understands it too; see m52pMiddlewareIdentities.
 // ---------------------------------------------------------------------------
 
-// m52pMiddlewareIdentity reduces one rendered (and already alias-expanded)
-// chain entry to the key preTenantTxMiddleware is written against.
+// m52pMiddlewareIdentities reduces one rendered (and already alias-expanded)
+// chain entry to the key(s) preTenantTxMiddleware is written against.
 //
 // Re-parsing the rendered text rather than carrying ast.Expr through the group
 // walk is deliberate: alias expansion happens on TEXT (m52Expand substitutes
 // into the rendering), so the expression an entry finally denotes only exists
 // as a string. Parsing that string is the one place both halves agree.
-func m52pMiddlewareIdentity(entry string) string {
+//
+// # Why it returns a SLICE
+//
+// One chain entry is usually one middleware, but not always. m52Expand's own
+// doc comment names the shape that made it substitute inside text at all:
+//
+//	tenantTx := appmw.TenantTx(db)
+//	chain := []echo.MiddlewareFunc{tenantTx}
+//	e.POST(path, handler, chain...)
+//
+// The route parser renders `chain` as one argument, expands it to the composite
+// literal, and finds TenantTx inside — that is a shape it deliberately supports,
+// and reddening CI for it is described there as "the failure mode this gate
+// cannot afford". A reduction that turned the whole literal into ONE
+// unclassifiable key would reintroduce exactly that false positive one gate
+// over. So a composite literal is flattened into its elements, each reduced on
+// its own; anything else is one key as before.
+func m52pMiddlewareIdentities(entry string) []string {
 	text := strings.TrimSpace(entry)
 	expr, err := parser.ParseExpr(text)
 	if err != nil {
 		// Not an expression this can reduce. Returning the text unchanged makes
 		// it an unclassified key, which fails the sweep with the text in the
 		// message — the loud direction.
-		return m52Normalise(text)
+		return []string{m52Normalise(text)}
 	}
-	fset := token.NewFileSet()
+	return m52pReduce(expr, token.NewFileSet())
+}
+
+// m52pReduce is m52pMiddlewareIdentities over an already-parsed expression.
+//
+// The recursion is over composite-literal ELEMENTS only, and each element is
+// reduced by exactly the same rules as a top-level entry, so a nested literal
+// cannot produce a key shape the flat case could not. Depth is bounded by the
+// source: go/parser will not build a literal deeper than the text nests.
+func m52pReduce(expr ast.Expr, fset *token.FileSet) []string {
 	for {
 		p, ok := expr.(*ast.ParenExpr)
 		if !ok {
@@ -92,13 +120,24 @@ func m52pMiddlewareIdentity(entry string) string {
 		}
 		expr = p.X
 	}
-	if call, ok := expr.(*ast.CallExpr); ok {
-		return m52Normalise(renderNode(fset, call.Fun))
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		// The constructor, with its arguments dropped.
+		return []string{m52Normalise(renderNode(fset, e.Fun))}
+	case *ast.CompositeLit:
+		// A slice of middleware. An EMPTY one contributes nothing, which is
+		// right: `[]echo.MiddlewareFunc{}` adds no middleware to the chain.
+		var out []string
+		for _, el := range e.Elts {
+			out = append(out, m52pReduce(el, fset)...)
+		}
+		return out
+	default:
+		// A middleware VALUE rather than a call: `var mw echo.MiddlewareFunc =
+		// ...` passed straight through, or an identifier main.go never bound.
+		// Its own text is the key, so it is classified explicitly or it fails.
+		return []string{m52Normalise(renderNode(fset, expr))}
 	}
-	// A middleware VALUE rather than a call: `var mw echo.MiddlewareFunc = ...`
-	// passed straight through, or an identifier main.go never bound. Its own
-	// text is the key, so it is classified explicitly or it fails.
-	return m52Normalise(renderNode(fset, expr))
 }
 
 // m52pUnboundMiddleware returns middleware identity → the route keys it runs
@@ -121,11 +160,12 @@ func m52pUnboundMiddleware(t *testing.T) (map[string][]string, int) {
 			withTx++
 		}
 		for _, entry := range r.chain[:cut] {
-			id := m52pMiddlewareIdentity(m52Expand(entry, r.chainAt, aliasAt))
-			if out[id] == nil {
-				out[id] = map[string]bool{}
+			for _, id := range m52pMiddlewareIdentities(m52Expand(entry, r.chainAt, aliasAt)) {
+				if out[id] == nil {
+					out[id] = map[string]bool{}
+				}
+				out[id][key] = true
 			}
-			out[id][key] = true
 		}
 	}
 
@@ -323,32 +363,55 @@ func TestM52PEveryBindingRuleNamesAnExistingTest(t *testing.T) {
 // collapse two call sites onto one rule, and that a shape the reduction cannot
 // handle keeps its text rather than silently becoming some other rule's key.
 func TestM52PMiddlewareIdentityReducesTheShapesMainGoUses(t *testing.T) {
-	cases := []struct{ in, want, why string }{
-		{"appmw.RequireWrite()", "appmw.RequireWrite",
+	cases := []struct {
+		in   string
+		want []string
+		why  string
+	}{
+		{"appmw.RequireWrite()", []string{"appmw.RequireWrite"},
 			"the no-argument case"},
-		{"appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll)", "appmw.RateLimitByAPIKey",
+		{"appmw.RateLimitByAPIKey(rdb, appmw.BudgetPoll)", []string{"appmw.RateLimitByAPIKey"},
 			"arguments dropped, so this and the BudgetStandard call site are ONE rule"},
-		{"appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)", "appmw.RateLimitByAPIKey",
+		{"appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)", []string{"appmw.RateLimitByAPIKey"},
 			"the other half of the same pair"},
 		{"appmw.Auth(config.Load(), repository.NewTenantRepository(db), repository.NewUserRepository(db))",
-			"appmw.Auth", "nested constructor calls in the arguments are dropped with them"},
+			[]string{"appmw.Auth"}, "nested constructor calls in the arguments are dropped with them"},
 		{"appmw.NewTriageConcurrencyLimiterFromEnv().Middleware()",
-			"appmw.NewTriageConcurrencyLimiterFromEnv().Middleware",
+			[]string{"appmw.NewTriageConcurrencyLimiterFromEnv().Middleware"},
 			"a method on a constructed value keeps the whole selector"},
-		{"( appmw.RequireAdmin() )", "appmw.RequireAdmin",
+		{"( appmw.RequireAdmin() )", []string{"appmw.RequireAdmin"},
 			"parenthesised"},
-		{"appmw.SomeMiddlewareValue", "appmw.SomeMiddlewareValue",
+		{"appmw.SomeMiddlewareValue", []string{"appmw.SomeMiddlewareValue"},
 			"a value rather than a call is its own key, so it is classified explicitly"},
-		{"[]echo.MiddlewareFunc{a, b}", "[]echo.MiddlewareFunc{a, b}",
-			"a shape the reduction does not model keeps its text and fails the sweep loudly"},
-		{"appmw.Broken(", "appmw.Broken(",
-			"unparsable text is returned as-is rather than dropped"},
-		{"middleware.BodyLimit(\"10M\")", "middleware.BodyLimit",
+		{"middleware.BodyLimit(\"10M\")", []string{"middleware.BodyLimit"},
 			"a literal argument is dropped like any other"},
+
+		// The `chain...` shape m52Expand exists to support. Each element is a
+		// middleware in its own right, so the literal contributes one key each
+		// rather than one unclassifiable key for the lot.
+		{"[]echo.MiddlewareFunc{appmw.RequireWrite(), appmw.RequireAdmin()}",
+			[]string{"appmw.RequireWrite", "appmw.RequireAdmin"},
+			"a slice of middleware is flattened, in order"},
+		{"[]echo.MiddlewareFunc{}", nil,
+			"an empty slice adds no middleware to the chain, so it contributes no key"},
+		{"[]echo.MiddlewareFunc{someUnboundName}", []string{"someUnboundName"},
+			"an element the reduction cannot resolve is still its own key, not the literal's"},
+
+		{"appmw.Broken(", []string{"appmw.Broken("},
+			"unparsable text is returned as-is rather than dropped"},
 	}
 	for _, c := range cases {
-		if got := m52pMiddlewareIdentity(c.in); got != c.want {
-			t.Errorf("m52pMiddlewareIdentity(%q) = %q, want %q (%s)", c.in, got, c.want, c.why)
+		got := m52pMiddlewareIdentities(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("m52pMiddlewareIdentities(%q) = %v (%d keys), want %v (%d) — %s",
+				c.in, got, len(got), c.want, len(c.want), c.why)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("m52pMiddlewareIdentities(%q)[%d] = %q, want %q (%s)",
+					c.in, i, got[i], c.want[i], c.why)
+			}
 		}
 	}
 }
@@ -421,7 +484,7 @@ func TestM52PDerivationIsNotBlind(t *testing.T) {
 			"the prefix this gate examines is being taken from chains it failed to "+
 			"resolve, not from the router.", withTx, minTenantTx)
 	}
-	// Both sides of the reduction must work. If m52pMiddlewareIdentity fell
+	// Both sides of the reduction must work. If m52pMiddlewareIdentities fell
 	// back to raw text for everything, the sweep would fail loudly — but if it
 	// fell back for a MINORITY the sweep failure would look like an ordinary
 	// unclassified middleware, so name the shape here instead.
@@ -437,7 +500,7 @@ func TestM52PDerivationIsNotBlind(t *testing.T) {
 	}
 	if unreduced == len(derived) {
 		t.Errorf("not one of the %d derived keys reduced to a constructor expression — "+
-			"m52pMiddlewareIdentity is failing on everything, and the sweep's failures "+
+			"m52pMiddlewareIdentities is failing on everything, and the sweep's failures "+
 			"are about the reduction rather than about the router.", len(derived))
 	}
 }
