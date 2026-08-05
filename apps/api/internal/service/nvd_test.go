@@ -1012,6 +1012,12 @@ func TestM54ExtractCvss_V31StillOutranksV40(t *testing.T) {
 // rejected any non-envelope body — a comment stronger than the code, which is
 // the defect class this repo treats as first-class (Codex M54 R5, Critical).
 func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
+	// Every case below that is meant to exercise a LATER check carries
+	// startIndex:0 (Codex M54 R10, Low). When R8 made startIndex required, the
+	// cases written before it started failing at that earlier check instead of
+	// the one they were named for — so removing the page-length check or the
+	// cve.id validation would have left them green. A test that passes for the
+	// wrong reason pins nothing.
 	cases := []struct {
 		name    string
 		body    string
@@ -1020,8 +1026,8 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 		{"null", `null`, true},
 		{"empty object", `{}`, true},
 		{"resultsPerPage only, no array", `{"resultsPerPage":0}`, true},
-		{"claims results but carries none", `{"resultsPerPage":1,"totalResults":1}`, true},
-		{"claims results, empty array", `{"resultsPerPage":0,"totalResults":5,"vulnerabilities":[]}`, true},
+		{"claims results but carries none", `{"resultsPerPage":1,"startIndex":0,"totalResults":1}`, true},
+		{"claims results, empty array", `{"resultsPerPage":0,"startIndex":0,"totalResults":5,"vulnerabilities":[]}`, true},
 		// Both of these passed the R5 cut, whose name already claimed it
 		// checked "the whole envelope" — the test's coverage was weaker than
 		// its own title (Codex M54 R6, Critical).
@@ -1031,15 +1037,15 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 		// Critical).
 		{"startIndex absent", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, true},
 		{"a later page, internally consistent", `{"resultsPerPage":1,"startIndex":20,"totalResults":40,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
-		{"page shorter than it declares", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
+		{"page shorter than it declares", `{"resultsPerPage":2,"startIndex":0,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
 		// An entry with no usable cve.id passed every earlier cut (Codex M54
 		// R7, Critical). It became a row with CVEID "", which VARCHAR NOT NULL
 		// accepts, so components were linked to an unidentifiable finding and
 		// the scan still completed.
-		{"entry with no cve wrapper", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{}]}`, true},
-		{"entry with empty cve.id", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":""}}]}`, true},
-		{"entry with malformed cve.id", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"not-a-cve"}}]}`, true},
-		{"one good entry, one malformed", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}},{"cve":{"id":""}}]}`, true},
+		{"entry with no cve wrapper", `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{}]}`, true},
+		{"entry with empty cve.id", `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{"cve":{"id":""}}]}`, true},
+		{"entry with malformed cve.id", `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{"cve":{"id":"not-a-cve"}}]}`, true},
+		{"one good entry, one malformed", `{"resultsPerPage":2,"startIndex":0,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}},{"cve":{"id":""}}]}`, true},
 		{"genuine no-matches answer", `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`, false},
 		{"normal answer", `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
 		// A truncated RESULT SET is well-formed: the page is internally honest

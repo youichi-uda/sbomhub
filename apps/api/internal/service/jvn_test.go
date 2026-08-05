@@ -5,13 +5,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // cannedJVNFeed is a minimal but structurally faithful MyJVN getVulnOverviewList
 // RSS/RDF response: one <channel> plus one <item> carrying a CVE reference and a
 // CVSS v3.1 base score, matching the JVNRSSFeed / JVNItem parse structs.
+// cannedJVNFeed models a real MyJVN getVulnOverviewList response.
+//
+// The <status:Status> element is REQUIRED here as of M54 (Codex R10,
+// Critical): MyJVN sends it on both success and error responses, so its
+// absence means the body is not a MyJVN answer at all, and parseJVNResponse
+// now rejects that rather than reading it as "no vulnerabilities". This
+// fixture omitted it, which is why it needed updating — a fixture that does
+// not carry what the real contract carries stops the test from exercising the
+// contract.
 const cannedJVNFeed = `<?xml version="1.0" encoding="UTF-8"?>
 <RDF>
+  <Status version="3.3" method="getVulnOverviewList" retCd="0" retMax="10" errCd="" errMsg="" totalRes="1" totalResRet="1" firstRes="1" feed="hnd"/>
   <channel>
     <title>JVNDB Vulnerability Overview</title>
     <description>test feed</description>
@@ -148,6 +159,12 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "no status element at all",
+			body: `<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>`,
+			wantErr: true,
+		},
+		{
 			name: "retCd=0 with no matches is a legitimate empty answer",
 			body: `<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
@@ -207,5 +224,27 @@ func TestM54JVN_ItemWithoutAnyIdentityIsDropped(t *testing.T) {
 	}
 	if got.CVEID != "CVE-2021-44228" {
 		t.Errorf("CVEID = %q, want the canonical upper-cased form", got.CVEID)
+	}
+}
+
+// TestM54JVN_PublicationTimestampIsKept pins that JVN advisories carry their
+// publication date (Codex M54 R10, Medium). JVNItem.Published was decoded and
+// then never used, so every JVN row stored published_at = NULL and consumers
+// could not display, sort or age those findings.
+func TestM54JVN_PublicationTimestampIsKept(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+	got := svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2023-000001",
+		Published:  "2023-01-15T10:30:00+09:00",
+	})
+	if got == nil {
+		t.Fatal("item was dropped")
+	}
+	if got.PublishedAt == nil {
+		t.Fatal("PublishedAt is nil; every JVN finding would store published_at = NULL")
+	}
+	want := time.Date(2023, 1, 15, 1, 30, 0, 0, time.UTC)
+	if !got.PublishedAt.UTC().Equal(want) {
+		t.Errorf("PublishedAt = %v, want %v", got.PublishedAt.UTC(), want)
 	}
 }

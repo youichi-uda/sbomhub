@@ -637,6 +637,12 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //     Critical).
 //   - JVNService.searchByKeyword requests maxCountItem=10, never sends
 //     startItem, and ignores totalRes (R9, Critical).
+//   - JVNService.parseJVNResponse checks neither firstRes (which page this is)
+//     nor totalResRet (how many entries the page should hold), so a later page
+//     or a short page is accepted as a complete answer (R10, Critical). The
+//     NVD equivalents of both checks are enforced in NVDResponse.validate;
+//     the JVN pair is deferred with the paging work above rather than written
+//     twice.
 //
 // Paging any of them naively multiplies a scan's rate-limited request count by
 // the match cardinality; the JVN pair in particular must be decided together,

@@ -134,9 +134,11 @@ func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 		return fmt.Errorf("failed to get components: %w", err)
 	}
 
-	scanned, failed := 0, 0
+	scanned, failed, refusedWrites := 0, 0, 0
 	for _, comp := range components {
-		if err := s.scanComponent(ctx, &comp); err != nil {
+		refused, err := s.scanComponent(ctx, &comp)
+		refusedWrites += refused
+		if err != nil {
 			slog.Error("Failed to scan component for JVN vulnerabilities",
 				"component", comp.Name,
 				"error", err)
@@ -159,21 +161,39 @@ func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 	// NVD scanner: choosing how many components may fail before a scan is
 	// worthless is a product-policy decision, not a bug fix. See the note on
 	// SbomHandler.runScan.
+	// A refused WRITE means the database declined to record a match we had
+	// already obtained — the same escalation NVDService makes, for the same
+	// reason (M54, Codex R10 Critical).
+	if refusedWrites > 0 {
+		return fmt.Errorf("jvn: database refused %d vulnerability write(s); scan results are incomplete",
+			refusedWrites)
+	}
+
 	if scanned == 0 && failed > 0 {
 		return fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage", failed)
 	}
 
-	slog.Info("JVN component scan completed", "scanned", scanned, "failed", failed)
+	slog.Info("JVN component scan completed",
+		"scanned", scanned, "failed", failed, "refused_writes", refusedWrites)
 	return nil
 }
 
-func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) error {
+// scanComponent looks one component up in JVN and records what it finds.
+//
+// It returns the number of statements the DATABASE REFUSED alongside any fetch
+// error, so ScanComponents can escalate (M54, Codex R10 Critical — the JVN twin
+// of the R1 NVD defect). Before this, every write failure was logged and
+// swallowed and scanComponent always returned nil, so a component whose matches
+// could not be recorded was counted as successfully scanned and "JVN scan
+// completed" was emitted for a sweep that persisted nothing.
+func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) (int, error) {
 	// Search JVN by product name
 	vulns, err := s.searchByKeyword(ctx, comp.Name)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
+	refused := 0
 	for _, vuln := range vulns {
 		// Check if vulnerability already exists
 		existing, _ := s.vulnRepo.GetByCVEID(ctx, vuln.CVEID)
@@ -184,6 +204,7 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) e
 			if err := s.vulnRepo.LinkToComponent(ctx, existing.ID, comp.ID); err != nil {
 				slog.Error("Failed to link existing vulnerability to component",
 					"cve_id", vuln.CVEID, "component", comp.Name, "error", err)
+				refused++
 			}
 			continue
 		}
@@ -192,16 +213,18 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) e
 		vuln.ID = uuid.New()
 		if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
 			slog.Error("Failed to create JVN vulnerability", "cve_id", vuln.CVEID, "error", err)
+			refused++
 			continue
 		}
 
 		// Link to component
 		if err := s.vulnRepo.LinkToComponent(ctx, vuln.ID, comp.ID); err != nil {
 			slog.Error("Failed to link vulnerability to component", "error", err)
+			refused++
 		}
 	}
 
-	return nil
+	return refused, nil
 }
 
 // searchByKeyword asks MyJVN for advisories matching a component name.
@@ -231,8 +254,18 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) e
 // discarded. They have to be decided together, with a paging and rate-limit
 // budget, which is why neither is taken here.
 //
-// Until then, a completed JVN scan means "the first ten matches from the last
-// seven days, per component" — not "every advisory affecting this component".
+//  3. THE PAGE IS NOT IDENTIFIED. MyJVN sends firstRes (which page this is)
+//     and totalResRet (how many entries it holds); neither is checked, so a
+//     later page is accepted with the first one missing, and a page that is
+//     short of its own totalResRet is accepted as complete (Codex M54 R10,
+//     Critical). This is the JVN twin of the NVD startIndex / resultsPerPage
+//     checks in NVDResponse.validate and is the one of the three that is NOT a
+//     policy question — it is deferred only because it belongs with the paging
+//     work above, whose response handling it would otherwise be written twice.
+//
+// Until then, a completed JVN scan means "some page of the first ten matches
+// from the last seven days, per component" — not "every advisory affecting
+// this component".
 func (s *JVNService) searchByKeyword(ctx context.Context, keyword string) ([]model.Vulnerability, error) {
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "jvn")
@@ -278,11 +311,18 @@ func (s *JVNService) parseJVNResponse(data []byte) ([]model.Vulnerability, error
 	}
 
 	// MyJVN signals application-level failure through retCd, usually with HTTP
-	// 200 (M54, Codex R9 Critical). An empty retCd is tolerated so a fixture
-	// or mirror that omits the element is not rejected outright; a PRESENT
-	// non-zero value is an error, because reading it as "no vulnerabilities"
-	// is the silent-under-report this product cannot afford.
-	if rc := strings.TrimSpace(feed.Status.RetCd); rc != "" && rc != "0" {
+	// 200 (M54, Codex R9 Critical). retCd is part of BOTH the success and the
+	// error envelope, so its ABSENCE means the body is not a MyJVN response at
+	// all — the R9 cut tolerated that, which made a bare `<rdf:RDF/>` read as
+	// an authoritative "no vulnerabilities" (R10, Critical). Same reasoning as
+	// NVDResponse.validate: what distinguishes "no matches" from "not an
+	// answer" is the presence of the envelope, not its value.
+	rc := strings.TrimSpace(feed.Status.RetCd)
+	if rc == "" {
+		return nil, fmt.Errorf("JVN response has no status element; the endpoint returned 200 " +
+			"but the body is not a MyJVN getVulnOverviewList response")
+	}
+	if rc != "0" {
 		return nil, fmt.Errorf("JVN API reported failure: retCd=%s errCd=%s errMsg=%s",
 			rc, feed.Status.ErrCd, feed.Status.ErrMsg)
 	}
@@ -327,6 +367,13 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 		return nil
 	}
 
+	// M54 (Codex R10, Medium): JVNItem.Published was decoded and then never
+	// used, so every JVN row stored published_at = NULL and consumers could
+	// not display, sort or age those findings. JVN issues RFC3339 timestamps
+	// with an offset; the zoneless NVD shapes are accepted too rather than
+	// maintaining a second, subtly different parser.
+	publishedAt := parseNVDTimestamp(item.Published)
+
 	// Get CVSS score and severity. M46 B2: an item without any CVSS
 	// entry yields a nil score (NOT 0.0, a real "None" score) so
 	// un-scored JVN advisories are stored as NULL.
@@ -357,6 +404,7 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 		Description: item.Description,
 		Severity:    severity,
 		CVSSScore:   cvssScore,
+		PublishedAt: publishedAt,
 		Source:      "JVN",
 		UpdatedAt:   &now,
 	}
