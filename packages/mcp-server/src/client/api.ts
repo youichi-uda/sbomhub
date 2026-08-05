@@ -663,11 +663,27 @@ export class ApiClient {
    * aged out (`unknown`, the steady state after an hour or a restart) therefore
    * cost two requests, not four.
    *
-   * This matters more than it looks: RateLimitByAPIKey keys its Redis counter on
-   * the API key alone (`mcp:ratelimit:<key id>:<window>`), with no route in the
-   * key, so the probe's requests are charged to the same bucket as the /mcp
-   * group's 60/min — the smaller of the two limits the key passes through.
-   * Recorded in docs/UPGRADE.md.
+   * It costs less than it used to, and the reason is worth stating because two
+   * earlier versions of this comment were written against the old behaviour.
+   * RateLimitByAPIKey once keyed its Redis counter on the API key and the
+   * minute alone (`mcp:ratelimit:<key id>:<window>`), so every rate-limited
+   * route on the server advanced ONE integer and these probes were charged to
+   * the same bucket as the vulnerability walk. Since M51 the counter is named by
+   * a BUDGET — `ratelimit:apikey:v2:<key id>:<budget>:<window>` — and the three
+   * requests this method's caller makes land in three different places:
+   *
+   *   GET /api/v1/mcp/projects/:id/vulnerabilities   budget `mcp`       60/min
+   *   GET /api/v1/projects/:id/sbom                  budget `standard`  60/min
+   *   GET .../sboms/:sbom_id/scan-status             budget `poll`     300/min
+   *
+   * So the probe no longer eats the walk's budget, and the polling half of it
+   * runs against the 300/min ceiling that exists for polling. What it DOES share
+   * is `standard` with SBOM upload and `GET .../vulnerabilities`, so a client
+   * that both uploads and probes in the same minute spends one 60/min bucket on
+   * the pair. The route is still not part of the key: two routes on one budget
+   * still share a counter, by design (see the Budget doc comment in
+   * apps/api/internal/middleware/ratelimit.go for why per-route buckets were
+   * rejected). Recorded in docs/UPGRADE.md §8.
    *
    * # Why a failure here is not a tool failure
    *

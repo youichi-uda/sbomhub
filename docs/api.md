@@ -492,11 +492,85 @@ All errors follow this format:
 
 ## Rate Limiting
 
-Self-host has no built-in rate limiting; apply it at a reverse proxy (Nginx, Caddy, etc.) if needed.
+Self-host **does** have built-in rate limiting, but only for requests that
+authenticate with an API key. It needs Redis, which the bundled Docker Compose
+stack already runs.
 
-For a future SaaS comeback, the planned rate-limit header format is:
+### What is limited, and what is not
+
+The limiter (`RateLimitByAPIKey`, wired on 28 route registrations in
+`cmd/server/main.go`) counts per **`api_keys` row**. It is a **no-op** when no
+API key is on the request context — a Clerk session and the self-hosted default
+identity both pass through it untouched, which is why the web UI is not
+throttled. Requests that never reach an authenticated identity at all (a 401,
+say) are not counted either.
+
+So: if you need to bound anonymous or browser traffic, that is still a reverse
+proxy's job (Nginx, Caddy, …). What is covered here is a leaked or misbehaving
+`sbh_…` key.
+
+### The four budgets
+
+A counter is named by a **budget** — a (name, ceiling, window) triple — not by
+the route. Every request charged to a counter has the same ceiling as every
+other request charged to it. All four are per API key, per minute:
+
+| budget | ceiling | routes |
+|---|---|---|
+| `standard` | 60/min | canonical `/api/v1/projects/…` mutations, plus `GET …/sbom` and `GET …/vulnerabilities` |
+| `poll` | 300/min | `scan-status`, `reachability/targets`, and the `vex-drafts` / `cra-reports` / `submissions` / METI list+get surfaces |
+| `mcp` | 60/min | the `/api/v1/mcp/*` group |
+| `cli` | 60/min | the legacy `/api/v1/cli/*` group |
+
+One key may spend all four concurrently, so the aggregate ceiling is
+**480 req/min**, not 60. The window is fixed rather than sliding, so the
+observable short-term peak is twice the ceiling (spend a bucket at the end of
+one minute and the next at the start of the following one). Nothing here bounds
+a *tenant*: two keys for one tenant get two of everything.
+
+`docs/UPGRADE.md` §8 has the migration notes, including the one-off counter
+reset at the deploy that introduced budgets.
+
+### Headers
+
+Every non-throttled API-key response carries:
+
 ```
-X-RateLimit-Limit: 1000
-X-RateLimit-Remaining: 999
-X-RateLimit-Reset: 1704067200
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 59
 ```
+
+A throttled one answers `429` with `Retry-After` in **seconds**:
+
+```
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 0
+Retry-After: 60
+
+{"error": "rate limit exceeded", "retry_after": "60s"}
+```
+
+There is **no `X-RateLimit-Reset` header** — an earlier draft of this page
+advertised one, and nothing emits it. Use `Retry-After`.
+
+A Redis failure answers `500`, not `200`: the limiter is fail-closed, so a Redis
+outage takes the API-key surface down rather than un-throttling it.
+
+### Public share links are limited separately
+
+`GET /api/v1/public/:token` and `…/download` are anonymous, so they are bounded
+by their own limiter (`RateLimitPublicLink`) rather than by a budget. It counts
+**failed** attempts — 10 per token and 60 per IP per hour — so a link that is
+merely popular is not throttled by its own success, and it separately caps
+concurrent admissions (16 per token, 64 per IP) so a parallel burst cannot turn
+connection count into bcrypt work. Both rejections answer the same `429` body,
+deliberately, so a caller cannot tell which limit it hit:
+
+```json
+{"error": "too many requests for this share link", "retry_after": "3600s"}
+```
+
+These routes carry no `X-RateLimit-*` headers. When the counters cannot be
+consulted at all the answer is `503 {"error": "temporarily unavailable"}` —
+fail-closed, but a different status from the API-key limiter's `500`.
