@@ -16,6 +16,7 @@ import (
 	"github.com/sbomhub/sbomhub/internal/cache"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 const (
@@ -123,10 +124,13 @@ func (r *NVDResponse) entries() []NVDVulnEntry {
 
 // validate rejects a 200 response that is not a well-formed NVD envelope.
 //
-// It checks exactly three things, and the comment says three because an
-// earlier draft claimed it "rejects a 200 response whose body is not an NVD
-// envelope" while testing only the first — stronger than the code, which is
-// the defect class this repo treats as first-class (Codex M54 R5, Critical):
+// The enumeration below is the whole of what it checks — kept exhaustive on
+// purpose, because an earlier draft claimed it "rejects a 200 response whose
+// body is not an NVD envelope" while testing only the first item, and a later
+// one still said "exactly three things" over a list of five (Codex M54 R5
+// Critical, R7 Low). A comment stronger than the code is the defect class this
+// repo treats as first-class, and a stale COUNT is the cheapest way to
+// reintroduce it:
 //
 //  1. resultsPerPage is PRESENT. `null` and `{}` decode into a zero-valued
 //     struct without error, so absence is what distinguishes "not an NVD
@@ -143,6 +147,13 @@ func (r *NVDResponse) entries() []NVDVulnEntry {
 //  5. totalResults > 0 with no entries at all is inconsistent even when
 //     resultsPerPage agrees (`{"resultsPerPage":0,"totalResults":5,...}`), and
 //     must not be read as "no CVEs".
+//  6. every entry carries a well-formed cve.id. `[{}]` used to satisfy every
+//     check above (Codex M54 R7, Critical): it became a vulnerability with
+//     CVEID "", which the VARCHAR NOT NULL column accepts, so a nameless row
+//     was stored, components were linked to it, no failure counter moved, and
+//     the scan completed having persisted nothing identifiable. Worse, cve_id
+//     is the ON CONFLICT key, so every such entry across every component
+//     collapses onto the same "" row.
 //
 // What it still does NOT do is verify that the RESULT SET is complete — see
 // the known truncation defect on searchByKeyword. A first page of 20 out of
@@ -170,6 +181,12 @@ func (r *NVDResponse) validate() error {
 	if *r.TotalResults > 0 && len(*r.Vulnerabilities) == 0 {
 		return fmt.Errorf("NVD response claims totalResults=%d but carries no entries; "+
 			"treating that as 'no vulnerabilities' would silently under-report", *r.TotalResults)
+	}
+	for i, e := range *r.Vulnerabilities {
+		if !validation.IsValidCVEID(e.CVE.ID) {
+			return fmt.Errorf("NVD response entry %d has no well-formed cve.id (got %q); "+
+				"storing it would create an unidentifiable finding", i, e.CVE.ID)
+		}
 	}
 	return nil
 }
@@ -461,10 +478,16 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	// SbomHandler.runScan.
 	//
 	// Note that the guard above is `processedCount == 0 && fetchFailures > 0`,
-	// not `processedCount == 0`. A scan with NO work at all — offline mode, an
-	// SBOM with no components, an SBOM whose component names are all empty —
-	// returns nil from the early paths in ScanComponents and never reaches
-	// here. Those are not failures to report: there was nothing to look up.
+	// not `processedCount == 0`. A scan with NO work at all must not be
+	// reported as a failure — there was nothing to look up — and the two
+	// clauses are what distinguish it from a scan that tried and got nothing.
+	//
+	// Those scans arrive here by two different routes, and an earlier draft of
+	// this comment claimed both took the first (Codex M54 R7, Low): offline
+	// mode and an SBOM with no components return from ScanComponents before
+	// this function is called, but an SBOM whose component names are all empty
+	// is filtered into an EMPTY work map and does reach here, running the loop
+	// zero times and emitting the completion log above.
 	// But it does mean "completed" cannot be read as "something was checked"
 	// (Codex M54 R3, Critical, against an earlier draft of this comment that
 	// promised exactly that). See SbomHandler.runScan for what the status is
@@ -866,6 +889,29 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 	vulns := s.convertToVulnerabilities(nvdResp.entries())
 	if len(vulns) == 0 {
 		return nil, nil
+	}
+
+	// This is a POINT LOOKUP: the request named one cveId, so the answer must
+	// be that CVE. Until M54 the first entry was returned unchecked (Codex R7,
+	// High), so a mirror — baseURL is operator-overridable for air-gapped
+	// deployments — answering a request for CVE-A with CVE-B had its answer
+	// accepted, cached and served under A's identity. Substituting a LOW
+	// finding for the CRITICAL one that was asked about is the whole attack.
+	//
+	// Compared through ValidateCVEID's normalisation so case and surrounding
+	// whitespace are not treated as a mismatch.
+	want, err := validation.ValidateCVEID(cveID)
+	if err != nil {
+		return nil, fmt.Errorf("SearchByCVEID: %q is not a well-formed CVE ID: %w", cveID, err)
+	}
+	got, err := validation.ValidateCVEID(vulns[0].CVEID)
+	if err != nil {
+		return nil, fmt.Errorf("SearchByCVEID: NVD returned a malformed CVE ID %q for %s",
+			vulns[0].CVEID, want)
+	}
+	if got != want {
+		return nil, fmt.Errorf("SearchByCVEID: asked NVD for %s and it answered with %s; "+
+			"refusing to serve one CVE under another's identity", want, got)
 	}
 
 	return &vulns[0], nil

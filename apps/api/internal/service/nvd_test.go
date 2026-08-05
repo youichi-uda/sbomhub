@@ -982,6 +982,14 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 		// its own title (Codex M54 R6, Critical).
 		{"totalResults absent entirely", `{"resultsPerPage":0,"vulnerabilities":[]}`, true},
 		{"page shorter than it declares", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
+		// An entry with no usable cve.id passed every earlier cut (Codex M54
+		// R7, Critical). It became a row with CVEID "", which VARCHAR NOT NULL
+		// accepts, so components were linked to an unidentifiable finding and
+		// the scan still completed.
+		{"entry with no cve wrapper", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{}]}`, true},
+		{"entry with empty cve.id", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":""}}]}`, true},
+		{"entry with malformed cve.id", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"not-a-cve"}}]}`, true},
+		{"one good entry, one malformed", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}},{"cve":{"id":""}}]}`, true},
 		{"genuine no-matches answer", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, false},
 		{"normal answer", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
 		// A truncated RESULT SET is well-formed: the page is internally honest
@@ -1002,6 +1010,61 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Errorf("validate() rejected %s: %v", tc.body, err)
+			}
+		})
+	}
+}
+
+// TestM54SearchByCVEID_RefusesAnAnswerAboutADifferentCVE pins the point-lookup
+// identity check (Codex M54 R7, High).
+//
+// The request names one cveId, so the answer must be that CVE. Until M54 the
+// first entry was returned unchecked, so a mirror — NVDService.baseURL is
+// operator-overridable for air-gapped deployments — could answer a request for
+// a CRITICAL CVE with a LOW one and have it cached and served under the
+// requested identity.
+func TestM54SearchByCVEID_RefusesAnAnswerAboutADifferentCVE(t *testing.T) {
+	cases := []struct {
+		name      string
+		asked     string
+		answered  string
+		wantErr   bool
+		wantFound bool
+	}{
+		{"honest answer", "CVE-2021-44228", "CVE-2021-44228", false, true},
+		{"case difference is not a mismatch", "cve-2021-44228", "CVE-2021-44228", false, true},
+		{"substituted CVE", "CVE-2021-44228", "CVE-2000-0001", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body := `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"` +
+					tc.answered + `","descriptions":[{"lang":"en","value":"x"}]}}]}`
+				if _, err := w.Write([]byte(body)); err != nil {
+					t.Errorf("write: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			svc := NewNVDService(nil, nil, "", srv.URL, false)
+			got, err := svc.SearchByCVEID(context.Background(), tc.asked)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("asked for %s, NVD answered with %s, and the lookup returned no "+
+						"error — the wrong CVE would be cached and served under the requested id",
+						tc.asked, tc.answered)
+				}
+				if got != nil {
+					t.Errorf("a rejected answer must not be returned; got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantFound && got == nil {
+				t.Error("expected the requested CVE to be returned")
 			}
 		})
 	}
