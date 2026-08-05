@@ -610,9 +610,13 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 // It does NOT promise any of the following, each of which reports completed
 // today:
 //
-//   - that any component was checked at all — an SBOM with no components, an
-//     SBOM whose component names are all empty, and offline mode each finish
-//     with nothing looked up;
+//   - that any component was checked at all — an SBOM with no components and
+//     offline mode both finish with nothing looked up. (An earlier draft
+//     listed "component names are all empty" as a third example of that. It
+//     is not: NVD skips nameless components, but JVNService.ScanComponents
+//     has no such guard and issues one keyword query per component with an
+//     empty keyword — Codex M54 R6, Low. The limitation on what "completed"
+//     means still holds; that example was simply wrong.);
 //   - that every component was checked (partial fetch failure, above);
 //   - that every match for a checked component was seen (the resultsPerPage
 //     truncation, below);

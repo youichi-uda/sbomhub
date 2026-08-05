@@ -98,7 +98,12 @@ type NVDResponse struct {
 	// endpoint.
 	ResultsPerPage *int `json:"resultsPerPage"`
 	StartIndex     int  `json:"startIndex"`
-	TotalResults   int  `json:"totalResults"`
+	// TotalResults is a POINTER for the same reason (Codex M54 R6, Critical):
+	// as a plain int, `{"resultsPerPage":0,"vulnerabilities":[]}` — no
+	// totalResults at all — decoded to zero and passed the R5 consistency
+	// check, so a mirror could omit the field and every finding with it. The
+	// NVD 2.0 schema lists totalResults as required.
+	TotalResults *int `json:"totalResults"`
 	// Vulnerabilities is a POINTER TO SLICE for the same reason
 	// ResultsPerPage is a pointer: an ABSENT array and a present empty one
 	// mean different things. `{"resultsPerPage":0}` used to pass validation
@@ -126,26 +131,45 @@ func (r *NVDResponse) entries() []NVDVulnEntry {
 //  1. resultsPerPage is PRESENT. `null` and `{}` decode into a zero-valued
 //     struct without error, so absence is what distinguishes "not an NVD
 //     response" from "no CVEs for this component".
-//  2. the vulnerabilities array is PRESENT (it may be empty — that is the
+//  2. totalResults is PRESENT, for the same reason — without this,
+//     `{"resultsPerPage":0,"vulnerabilities":[]}` read as an authoritative
+//     "no CVEs" (Codex M54 R6, Critical).
+//  3. the vulnerabilities array is PRESENT (it may be empty — that is the
 //     genuine no-matches answer).
-//  3. the two agree: a body claiming totalResults > 0 while carrying no
-//     entries is internally inconsistent and must not be read as "no CVEs".
+//  4. the page carries what it says it carries: len(vulnerabilities) equals
+//     resultsPerPage, which the NVD schema defines as the number of records in
+//     THIS response. A page declaring two and shipping one is silently short,
+//     and the missing one may be the finding that mattered.
+//  5. totalResults > 0 with no entries at all is inconsistent even when
+//     resultsPerPage agrees (`{"resultsPerPage":0,"totalResults":5,...}`), and
+//     must not be read as "no CVEs".
 //
-// What it still does NOT do is verify that the page is COMPLETE — see the
-// known truncation defect on searchByKeyword. A response with
-// totalResults=500 and 20 entries is well-formed and is accepted here.
+// What it still does NOT do is verify that the RESULT SET is complete — see
+// the known truncation defect on searchByKeyword. A first page of 20 out of
+// totalResults=500 satisfies every check above, because each of them is about
+// the page being internally honest, not about the pages that were never
+// fetched.
 func (r *NVDResponse) validate() error {
 	if r == nil || r.ResultsPerPage == nil {
 		return fmt.Errorf("NVD response is missing the resultsPerPage envelope field; " +
+			"the endpoint returned 200 but the body is not an NVD CVE API response")
+	}
+	if r.TotalResults == nil {
+		return fmt.Errorf("NVD response is missing the totalResults envelope field; " +
 			"the endpoint returned 200 but the body is not an NVD CVE API response")
 	}
 	if r.Vulnerabilities == nil {
 		return fmt.Errorf("NVD response is missing the vulnerabilities array; " +
 			"the endpoint returned 200 but the body is not an NVD CVE API response")
 	}
-	if r.TotalResults > 0 && len(*r.Vulnerabilities) == 0 {
+	if got, want := len(*r.Vulnerabilities), *r.ResultsPerPage; got != want {
+		return fmt.Errorf("NVD response declares resultsPerPage=%d but carries %d entries; "+
+			"the page is short of what it claims and the missing entries would be "+
+			"silently dropped", want, got)
+	}
+	if *r.TotalResults > 0 && len(*r.Vulnerabilities) == 0 {
 		return fmt.Errorf("NVD response claims totalResults=%d but carries no entries; "+
-			"treating that as 'no vulnerabilities' would silently under-report", r.TotalResults)
+			"treating that as 'no vulnerabilities' would silently under-report", *r.TotalResults)
 	}
 	return nil
 }

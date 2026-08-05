@@ -44,8 +44,8 @@ func TestNVDResponse_Parsing(t *testing.T) {
 		t.Fatalf("failed to unmarshal NVD response: %v", err)
 	}
 
-	if resp.TotalResults != 2 {
-		t.Errorf("expected TotalResults 2, got %d", resp.TotalResults)
+	if resp.TotalResults == nil || *resp.TotalResults != 2 {
+		t.Errorf("expected TotalResults 2, got %v", resp.TotalResults)
 	}
 	// entries() is the nil-safe accessor: Vulnerabilities is a pointer so an
 	// ABSENT array is distinguishable from a present empty one (M54, Codex R5).
@@ -302,7 +302,7 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 		response := NVDResponse{
 			ResultsPerPage: nvdIntPtr(1),
 			StartIndex:     0,
-			TotalResults:   1,
+			TotalResults:   nvdIntPtr(1),
 			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{
 				{
 					CVE: NVDCVE{
@@ -360,7 +360,7 @@ func TestNVDService_SearchByCVEID_HTTPMock(t *testing.T) {
 		}
 		response := NVDResponse{
 			ResultsPerPage: nvdIntPtr(1),
-			TotalResults:   1,
+			TotalResults:   nvdIntPtr(1),
 			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{
 				{
 					CVE: NVDCVE{
@@ -486,7 +486,7 @@ func TestNVDService_HTTPMock_EmptyResults(t *testing.T) {
 		response := NVDResponse{
 			ResultsPerPage:  nvdIntPtr(0),
 			StartIndex:      0,
-			TotalResults:    0,
+			TotalResults:    nvdIntPtr(0),
 			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{}),
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -977,12 +977,17 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 		{"resultsPerPage only, no array", `{"resultsPerPage":0}`, true},
 		{"claims results but carries none", `{"resultsPerPage":1,"totalResults":1}`, true},
 		{"claims results, empty array", `{"resultsPerPage":0,"totalResults":5,"vulnerabilities":[]}`, true},
+		// Both of these passed the R5 cut, whose name already claimed it
+		// checked "the whole envelope" — the test's coverage was weaker than
+		// its own title (Codex M54 R6, Critical).
+		{"totalResults absent entirely", `{"resultsPerPage":0,"vulnerabilities":[]}`, true},
+		{"page shorter than it declares", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
 		{"genuine no-matches answer", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, false},
 		{"normal answer", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
-		// A truncated page is well-formed. validate does NOT close the
-		// resultsPerPage truncation gap documented on searchByKeyword, and
-		// must not be read as if it did.
-		{"truncated page is accepted", `{"resultsPerPage":1,"totalResults":500,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+		// A truncated RESULT SET is well-formed: the page is internally honest
+		// about carrying 1 of 500. validate does NOT close the pagination gap
+		// documented on searchByKeyword and must not be read as if it did.
+		{"first page of a larger result set is accepted", `{"resultsPerPage":1,"totalResults":500,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -417,10 +417,14 @@ func TestM54NVDWorkerPool_ConcurrentWorkersDoNotCorruptTheSharedTx(t *testing.T)
 // writes that follow are refused too and the commit fails — which is why the
 // durable count is 0 rather than "all but one".
 //
-// Scope: this pins REFUSED WRITES only. A component whose NVD FETCH failed
-// (429 / 500 / timeout) is still logged, skipped, and reported as success;
-// that threshold is a product-policy decision and is deliberately still open
-// (see the note on SbomHandler.runScan).
+// Scope: this pins REFUSED WRITES only. Fetch failures are a separate axis and
+// this sentence used to describe them all as "reported as success", which the
+// R2 follow-up made false (Codex M54 R6, Low): a scan in which EVERY component
+// lookup failed now errors, as TestM54NVDScan_TotalFetchFailureIsReportedAsFailure
+// below asserts. What is still reported as success is a PARTIAL fetch failure —
+// some components answered, some did not — because choosing a threshold for
+// that is a product-policy decision and is deliberately still open (see the
+// note on SbomHandler.runScan).
 func TestM54NVDScan_RefusedWritesAreReportedAsFailure(t *testing.T) {
 	appURL, migURL := m46b1HandlerEnv(t)
 	migDB := m46b1OpenOrSkip(t, migURL)
