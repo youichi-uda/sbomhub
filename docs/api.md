@@ -492,22 +492,28 @@ All errors follow this format:
 
 ## Rate Limiting
 
-Self-host **does** have built-in rate limiting, but only for requests that
-authenticate with an API key. It needs Redis, which the bundled Docker Compose
-stack already runs.
+Self-host **does** have built-in rate limiting. There are two independent
+limiters, and both need Redis — which the bundled Docker Compose stack already
+runs:
+
+| limiter | covers | counted per |
+|---|---|---|
+| `RateLimitByAPIKey` | the API-key-authenticated surface | `api_keys` row × budget |
+| `RateLimitPublicLink` | the two anonymous share-link routes | share token, and caller IP |
 
 ### What is limited, and what is not
 
-The limiter (`RateLimitByAPIKey` in `cmd/server/main.go`, on every route in the
-budget table below) counts per **`api_keys` row**. It is a **no-op** when no
-API key is on the request context — a Clerk session and the self-hosted default
+`RateLimitByAPIKey` counts per **`api_keys` row**. It is a **no-op** when no API
+key is on the request context — a Clerk session and the self-hosted default
 identity both pass through it untouched, which is why the web UI is not
 throttled. Requests that never reach an authenticated identity at all (a 401,
 say) are not counted either.
 
-So: if you need to bound anonymous or browser traffic, that is still a reverse
-proxy's job (Nginx, Caddy, …). What is covered here is a leaked or misbehaving
-`sbh_…` key.
+`RateLimitPublicLink` covers `GET /api/v1/public/:token` and `…/download`,
+which take no credential at all; see the last section below.
+
+So: **browser traffic on the authenticated UI is not bounded by anything here.**
+If you need to bound that, it is still a reverse proxy's job (Nginx, Caddy, …).
 
 ### The four budgets
 
@@ -562,10 +568,21 @@ outage takes the API-key surface down rather than un-throttling it.
 `GET /api/v1/public/:token` and `…/download` are anonymous, so they are bounded
 by their own limiter (`RateLimitPublicLink`) rather than by a budget. It counts
 **failed** attempts — 10 per token and 60 per IP per hour — so a link that is
-merely popular is not throttled by its own success, and it separately caps
-concurrent admissions (16 per token, 64 per IP) so a parallel burst cannot turn
-connection count into bcrypt work. Both rejections answer the same `429` body,
-deliberately, so a caller cannot tell which limit it hit:
+merely popular is not throttled by its own success. A password-protected link
+verifies with bcrypt, so it separately caps how many requests may hold a live
+admission lease at once (16 per token, 64 per IP), which bounds what a
+simultaneous burst can get through — the failure counter alone cannot, because
+it is read before the handler and written after it.
+
+That cap is **not** a hard ceiling on concurrent bcrypt work, and the difference
+is worth knowing before you size anything on it: a lease expires after two
+minutes and is not renewed, and there is no server-side request deadline, so a
+handler that outruns its lease keeps running while a later wave is admitted. It
+bounds the burst; it does not guarantee that at most 16 verifications are ever
+in flight for one token.
+
+Both rejections answer the same `429` body, deliberately, so a caller cannot
+tell which limit it hit:
 
 ```json
 {"error": "too many requests for this share link", "retry_after": "3600s"}

@@ -663,14 +663,21 @@ export class ApiClient {
    * aged out (`unknown`, the steady state after an hour or a restart) therefore
    * cost two requests, not four.
    *
-   * It costs less than it used to, and the reason is worth stating because two
-   * earlier versions of this comment were written against the old behaviour.
+   * The request COUNT is unchanged by any of this, and is worth stating exactly
+   * because it is easy to read the paragraph below as though it were smaller. A
+   * one-page walk over a `completed` scan issues five requests: two for the
+   * probe before the walk, one page, and two for the probe after it. Each
+   * additional page is one more. A non-completed scan issues three, because the
+   * second probe is skipped.
+   *
+   * What DID change is where those requests are charged, and two earlier
+   * versions of this comment were written against the old behaviour.
    * RateLimitByAPIKey once keyed its Redis counter on the API key and the
    * minute alone (`mcp:ratelimit:<key id>:<window>`), so every rate-limited
    * route on the server advanced ONE integer and these probes were charged to
    * the same bucket as the vulnerability walk. Since M51 the counter is named by
    * a BUDGET — `ratelimit:apikey:v2:<key id>:<budget>:<window>` — and the three
-   * requests this method's caller makes land in three different places:
+   * ROUTES this method's caller touches sit in three different buckets:
    *
    *   GET /api/v1/mcp/projects/:id/vulnerabilities   budget `mcp`       60/min
    *   GET /api/v1/projects/:id/sbom                  budget `standard`  60/min
