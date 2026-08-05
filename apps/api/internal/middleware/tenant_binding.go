@@ -523,6 +523,14 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 //     analysis. See the route table's "What it deliberately is NOT".
 //   - Ordering WITHIN the pre-TenantTx prefix. Two middlewares there both run
 //     unbound; which runs first changes nothing this table asks.
+//   - Ordering among the GLOBAL middlewares. `e.Pre` runs before `e.Use` at
+//     request time whatever order they are written in, and the parser this
+//     derivation borrows collects both order-insensitively. That is harmless
+//     while no global entry is TenantTx — everything global is then in the
+//     unbound prefix regardless of order, which is the answer this table wants
+//     — and it cannot silently become harmful, because a global TenantTx would
+//     leave the route sweep above with an EMPTY set of unbound routes and
+//     TestM52NoTenantTxRoutesAreAllClassified fails outright on that.
 //
 // # One thing that is emphatically not a binding
 //
