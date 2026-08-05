@@ -473,11 +473,11 @@ var noTenantTxRouteBinding = map[string]TenantBindingRule{
 //	that does have it.
 //
 // That is not a small remainder. Measured from cmd/server/main.go's AST
-// (2026-08-05, before the /projects/:id/scan registration landed): 181 route
-// registrations, 172 of them carrying TenantTx — and on all 181 there is a
-// prefix of the chain that runs before anything has bound the GUC. Nine of the
-// 181 have no TenantTx at all, so for them the prefix is the WHOLE chain.
-// `authMiddleware` is in that prefix on 137 routes; it reads four tables.
+// (2026-08-05): 181 route registrations, 172 of them carrying TenantTx — and
+// on all 181 there is a prefix of the chain that runs before anything has
+// bound the GUC. Nine of the 181 have no TenantTx at all, so for them the
+// prefix is the WHOLE chain. `authMiddleware` is in that prefix on 137 routes,
+// and it names four tables: three it reads and one it writes.
 //
 // A statement issued there lands on exactly the connection state that made
 // /reanalyse answer 500 for every input, for exactly the same reason. Whether

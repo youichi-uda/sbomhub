@@ -22,10 +22,13 @@ import (
 // # Scan unit — the same one, sliced differently
 //
 // Nothing new is parsed. m52ParseMainGo already resolves every route's
-// EFFECTIVE chain (global `e.Use` ++ inherited group middleware ++ the
-// registration's own arguments) in source order, which is the order echo runs
-// them in, and m52Expand already resolves an entry held in a variable. So the
-// derivation is one line of set logic over that:
+// EFFECTIVE chain (global `e.Use` / `e.Pre` ++ inherited group middleware ++
+// the registration's own arguments), and m52Expand already resolves an entry
+// held in a variable. Group and per-route entries are in source order, which
+// is the order echo runs them in; the globals are not ordered against each
+// other, which does not matter here and cannot start mattering silently — see
+// preTenantTxMiddleware's "does NOT cover" list for why. So the derivation is
+// one line of set logic over that chain:
 //
 //	for each route, take the chain entries BEFORE the first one that expands
 //	to contain "TenantTx(" — the whole chain when there is none.
@@ -46,10 +49,11 @@ import (
 //	appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard)
 //
 // are one entry. That is the right loss: the question is "does this middleware
-// read an RLS-protected table with no tenant bound", which is a property of
-// the FUNCTION. Keying by the call site instead would have produced 26 entries
-// for one answer, and every new route would have needed a new line saying the
-// same thing — the shape that gets a table rubber-stamped.
+// read an RLS-protected table with no tenant bound", which is a property of the
+// FUNCTION. Keying by the rendered call instead would have split that one
+// answer across two rules differing only in a budget constant — and made the
+// key change every time an argument was renamed, which is the churn that gets a
+// table rubber-stamped.
 //
 // What it does NOT drop is the package qualifier: `appmw.Auth` and `mw.Auth`
 // are different keys. An import alias rename therefore costs one line here.
@@ -397,9 +401,10 @@ func TestM52PUnboundPrefixAgreesWithTheRouteSweep(t *testing.T) {
 // (the sweep above already owns that surface). What they catch is the
 // derivation resolving nothing, which would make every assertion here vacuous.
 //
-// For the record rather than as an assertion, measured 2026-08-05: 182 route
-// registrations, 173 carrying TenantTx, 14 distinct middlewares running
-// unbound.
+// For the record rather than as an assertion, measured 2026-08-05: 181 route
+// registrations resolving to 181 distinct method+path keys, 172 of them
+// carrying TenantTx, and 14 distinct middlewares running unbound — four of
+// them echo's globals, on all 181.
 func TestM52PDerivationIsNotBlind(t *testing.T) {
 	const (
 		minMiddleware = 4  // echo's global e.Use set alone
