@@ -1495,14 +1495,18 @@ func main() {
 	//                       with a fresh key gave 60 × 404 (the handler's
 	//                       answer for a bogus sbom_id, i.e. admitted) then
 	//                       5 × 429.
-	//                       WHAT THAT DOES NOT BOUND (Codex R1 Low): nothing
-	//                       limits how many sweeps are IN FLIGHT — 60 accepted
-	//                       requests are 60 background goroutines — and the
-	//                       window is fixed, not sliding, so a caller straddling
-	//                       the boundary gets 120 in a couple of seconds. This
-	//                       route is rate-limited; it is not capacity-managed.
-	//                       Both limits are properties of RateLimitByAPIKey
-	//                       (docs/UPGRADE.md §8.5), not of this registration.
+	//                       WHAT THAT DOES NOT BOUND (Codex R1 Low, narrowed in
+	//                       R2 Low): the limiter caps ADMISSIONS per window per
+	//                       key and nothing else. It does not cap work in
+	//                       flight — 60 admissions spawn 60 goroutines, which
+	//                       overlap or not depending on how long each sweep
+	//                       takes, and nothing measures that here — and the
+	//                       window is fixed rather than sliding, so a caller
+	//                       straddling the boundary is admitted 120 times in a
+	//                       couple of seconds. This route is rate-limited; it is
+	//                       not capacity-managed. Both limits are properties of
+	//                       RateLimitByAPIKey (docs/UPGRADE.md §8.5), not of
+	//                       this registration.
 	//   TenantTx            required: Scan answers 401 without a tenant
 	//                       context and its SbomInProject check is RLS-filtered.
 	//   auditMiddleware     unchanged; the group carried it before.

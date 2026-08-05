@@ -77,12 +77,25 @@ jobs:
             exit 1
           fi
 
-          curl -X POST \
+          # The status is compared to 201 EXACTLY, rather than left to curl's
+          # --fail-with-body (Codex round 2, Medium — reported against the scan
+          # step below and true of this one for the same reason).
+          # --fail-with-body only fails on >= 400, so a 3xx — which this call
+          # deliberately does not follow, see the header note above — or an
+          # unexpected 2xx from a proxy would leave curl exiting 0 and this step
+          # printing "SBOM uploaded successfully!" with nothing uploaded. That is
+          # the same shape as the failure this file's other step was hiding.
+          UPLOAD_STATUS=$(curl -sS -o upload-response.json -w '%{http_code}' -X POST \
             "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${SBOMHUB_API_KEY}" \
-            -d @sbom.json \
-            --fail-with-body
+            -d @sbom.json)
+
+          if [ "$UPLOAD_STATUS" != "201" ]; then
+            echo "Error: SBOM upload returned ${UPLOAD_STATUS}, want 201"
+            cat upload-response.json
+            exit 1
+          fi
 
           echo "SBOM uploaded successfully!"
 
@@ -124,12 +137,24 @@ jobs:
       # component_vulnerabilities count did not change, and scan-status did not
       # move — because this route has no ScanTracker. Fixing a silent failure is
       # not a licence to add duplicated outbound traffic to every dispatch, so
-      # the default keeps a plain run byte-for-byte what it was, and the input
-      # (declared at the top of this file since the beginning and read by
-      # NOTHING until now) finally means what it says.
+      # the default leaves a plain run doing exactly the work it did before
+      # (upload, one tracked scan) and the input — declared at the top of this
+      # file since the beginning and read by NOTHING until now — finally means
+      # what it says. What DOES change on a plain run is that the step is now
+      # SKIPPED rather than executed-and-ignored, so the two HTTP calls it used
+      # to make are no longer made (Codex round 2, Low: an earlier draft called
+      # the new default "byte-for-byte what it was", which is false at the
+      # request level even though the server-side outcome is identical).
       #
-      # WHEN TO SWITCH IT ON: to re-run the sweep against refreshed NVD/JVN data
-      # without re-uploading, or to scan with a narrower `sources` list.
+      # WHEN TO SWITCH IT ON, honestly scoped to what THIS step does: it always
+      # runs after an upload in this workflow, and it hardcodes
+      # `sources=nvd,jvn`. So it buys one thing — a second sweep of the SBOM
+      # just uploaded, against advisory data fetched now rather than at ingest,
+      # which matters only if the two are far enough apart to differ. The
+      # route's other uses (re-scanning an OLD sbom_id without uploading, or
+      # narrowing `sources`) are reasons the endpoint exists; they are not
+      # reachable from this step without editing it (Codex round 2, Low: the
+      # previous wording offered both as if this step provided them).
       #
       # WHAT THIS STEP CAN AND CANNOT DETECT. The endpoint is a TRIGGER: it
       # answers 202 Accepted and runs the sweep in a background goroutine, with
@@ -153,27 +178,50 @@ jobs:
         env:
           SBOMHUB_API_KEY: ${{ secrets.SBOMHUB_API_KEY }}
         run: |
+          # GitHub already runs an unspecified `run:` on a Linux runner as
+          # `bash -e {0}`, so `-e` is not what this line adds (Codex round 2, Low
+          # — an earlier comment here claimed it was). What it adds is `-u`
+          # (an unset variable is an error rather than an empty string in a URL)
+          # and `pipefail` (the `curl | jq` shapes below fail on the curl, not
+          # only on the jq).
           set -euo pipefail
 
-          # Get latest SBOM ID. --fail-with-body so an auth/permission failure
-          # here is the step's failure and not an empty SBOM_ID two lines later:
-          # the previous version treated "no id in the response" as "nothing to
-          # do" and exited 0, which is the same silence continue-on-error gave.
-          SBOM_RESPONSE=$(curl -sS --fail-with-body \
+          # Both calls compare the status EXACTLY instead of relying on curl's
+          # --fail-with-body (Codex round 2, Medium). --fail-with-body fails only
+          # on >= 400: a 3xx — which these calls deliberately do not follow, see
+          # the header note on the upload step — or an unexpected 2xx from a
+          # proxy leaves curl exiting 0, and the step would then print "scan
+          # triggered" having triggered nothing. Requiring 200 and 202 by number
+          # is the whole point of removing continue-on-error; anything weaker
+          # re-opens the same silence one layer down.
+          READBACK_STATUS=$(curl -sS -o sbom-readback.json -w '%{http_code}' \
             "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/sbom" \
             -H "Authorization: Bearer ${SBOMHUB_API_KEY}")
 
-          SBOM_ID=$(echo "$SBOM_RESPONSE" | jq -r '.id // empty')
-
-          if [ -z "$SBOM_ID" ]; then
-            echo "Error: could not read back the SBOM just uploaded (no .id in the response)"
-            echo "$SBOM_RESPONSE"
+          if [ "$READBACK_STATUS" != "200" ]; then
+            echo "Error: SBOM read-back returned ${READBACK_STATUS}, want 200"
+            cat sbom-readback.json
             exit 1
           fi
 
-          curl -sS --fail-with-body -X POST \
-            "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/scan?sbom_id=${SBOM_ID}&sources=nvd,jvn" \
-            -H "Authorization: Bearer ${SBOMHUB_API_KEY}"
+          SBOM_ID=$(jq -r '.id // empty' < sbom-readback.json)
 
+          if [ -z "$SBOM_ID" ]; then
+            echo "Error: could not read back the SBOM just uploaded (no .id in the response)"
+            cat sbom-readback.json
+            exit 1
+          fi
+
+          SCAN_STATUS=$(curl -sS -o scan-response.json -w '%{http_code}' -X POST \
+            "${SBOMHUB_URL}/api/v1/projects/${PROJECT_ID}/scan?sbom_id=${SBOM_ID}&sources=nvd,jvn" \
+            -H "Authorization: Bearer ${SBOMHUB_API_KEY}")
+
+          if [ "$SCAN_STATUS" != "202" ]; then
+            echo "Error: scan trigger returned ${SCAN_STATUS}, want 202 Accepted"
+            cat scan-response.json
+            exit 1
+          fi
+
+          cat scan-response.json
           echo
           echo "Vulnerability scan triggered for sbom ${SBOM_ID} (accepted; it runs in the background)"
