@@ -615,3 +615,38 @@ func keysOf(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestM53ScanRouteIsClassifiedAsAPathParamRoute names the one route M53 W1
+// added to the table.
+//
+// The sweeps above are all shape-checks over whatever the table happens to
+// contain, so they stay green if this entry is deleted — and deleting it is not
+// a no-op: default-deny would 403 every project-scoped key on the scan route,
+// which is precisely the "silently broken shipped Action" this wave closed
+// (.github/workflows/sbom-upload.yml step 3). Measured on a throwaway stack
+// 2026-08-05: with the entry removed the route answers 403 for a project-scoped
+// key while a tenant-level key still gets 202, so the failure is invisible to
+// anyone testing with a tenant-level key.
+//
+// `:id` really is the project here and not a sub-resource:
+// VulnerabilityHandler.Scan parses c.Param("id") as the project UUID and takes
+// the SBOM from the `sbom_id` QUERY parameter, so scopeProjectPathParam's
+// comparison is against the right identifier.
+func TestM53ScanRouteIsClassifiedAsAPathParamRoute(t *testing.T) {
+	const key = "POST /api/v1/projects/:id/scan"
+	rule, ok := apiKeyRouteScope[key]
+	if !ok {
+		t.Fatalf("%s is not classified. The route is registered on the MultiAuth chain "+
+			"(cmd/server/main.go), so an unclassified entry means every project-scoped key "+
+			"is refused on it by default-deny — the shipped GitHub Action's scan step breaks "+
+			"again, this time as a 403.", key)
+	}
+	if rule.kind != scopeProjectPathParam {
+		t.Errorf("%s is classified %v, want scopeProjectPathParam: VulnerabilityHandler.Scan "+
+			"reads the project from c.Param(\"id\") and the SBOM from the sbom_id query "+
+			"parameter, so the middleware has a project id in hand to compare", key, rule.kind)
+	}
+	if rule.why == "" {
+		t.Errorf("%s carries no reason", key)
+	}
+}

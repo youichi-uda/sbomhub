@@ -94,23 +94,33 @@ func TestM47W1GlobalSyncRoutesAreAdminGated(t *testing.T) {
 //
 // M47R: accepts the `authWrite` group as well as the per-route argument, for
 // the same reason as the admin guard above.
+//
+// M53 W1: rewritten from a LINE regex to the AST-derived chain. The route moved
+// off `authWrite` onto an explicit MultiAuth chain whose middleware arguments
+// sit on their own lines, and the old
+// `(?m)^.*\.POST\("/projects/:id/scan",.*$` matched neither the new registered
+// path (which is the full "/api/v1/..." on the Echo instance) nor a single line
+// carrying the guard. Both failure modes were silent-ish in opposite
+// directions — a stale path anchor t.Fatal'd "this guard is now blind", and a
+// multi-line registration would have reported a MISSING gate that is in fact
+// present. parseRoutes resolves the group's inherited middleware and the
+// per-route arguments into one chain, so it is indifferent to both.
 func TestM47W1ManualScanRequiresWrite(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
-	}
-	re := regexp.MustCompile(`(?m)^.*\.POST\("/projects/:id/scan",.*$`)
-	matches := re.FindAllString(string(src), -1)
-	if len(matches) == 0 {
-		t.Fatal("no POST registration found for /projects/:id/scan — this guard is now blind")
-	}
-	for _, line := range matches {
-		if !strings.Contains(line, "RequireWrite()") &&
-			!strings.HasPrefix(strings.TrimSpace(line), "authWrite.") {
-			t.Errorf("POST /projects/:id/scan is registered without a write gate:\n\t%s\n"+
-				"A read-scoped Viewer must not be able to drive outbound scans that write "+
-				"the global vulnerability tables.", strings.TrimSpace(line))
+	routes, _ := parseRoutes(t)
+	found := 0
+	for _, r := range routes {
+		if r.method != "POST" || !strings.HasSuffix(r.fullPath, "/projects/:id/scan") {
+			continue
 		}
+		found++
+		if indexOf(r.chain, func(m string) bool { return strings.Contains(m, "RequireWrite") }) < 0 {
+			t.Errorf("main.go:%d %s %s is registered without a write gate; chain = %v\n"+
+				"A read-scoped Viewer must not be able to drive outbound scans that write "+
+				"the global vulnerability tables.", r.line, r.method, r.fullPath, r.chain)
+		}
+	}
+	if found == 0 {
+		t.Fatal("no POST registration found for /projects/:id/scan — this guard is now blind")
 	}
 }
 

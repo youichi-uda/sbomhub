@@ -1458,7 +1458,54 @@ func main() {
 	// reads. RequireWrite (not RequireAdmin) is the right level — this is a
 	// project mutation, the same class as SBOM upload and triage/run, which
 	// both sit behind it.
-	authWrite.POST("/projects/:id/scan", vulnHandler.Scan)
+	//
+	// M53 W1: moved off the Clerk-only `authWrite` group onto the canonical
+	// MultiAuth chain, because the route was UNREACHABLE with an API key and
+	// the product ships a GitHub Action that calls it with one.
+	// .github/workflows/sbom-upload.yml is upload -> read-back -> scan; the
+	// first two are the MultiAuth registrations above, the third was this
+	// line. Measured on a throwaway stack 2026-08-05 with one tenant-level
+	// `sbh_` key: upload 201, read-back 200, scan 404 in anonymous mode
+	// (the Bearer header ignored, so the request resolved as the DEFAULT
+	// tenant, which does not own the SBOM — the same 404 the route gives
+	// with no credential at all) and 401 in Clerk mode. The workflow step
+	// carried `continue-on-error: true`, so it never turned a run red.
+	//
+	// Chain shape, and why each position:
+	//
+	//   MultiAuth           accepts `Bearer sbh_...` and keeps the Clerk JWT /
+	//                       self-hosted path through its clerkChain fallback,
+	//                       so the web UI's "Scan now" button is unaffected.
+	//   RequireWrite        UNCHANGED in effect (the authWrite group carried
+	//                       it), but now explicit and, critically, placed
+	//                       BEFORE the limiter and the transaction: a
+	//                       read-scoped key is refused without spending a
+	//                       rate-limit token or opening a tx. Same F15
+	//                       reasoning as POST /sbom above. The M47 W1
+	//                       paragraph above is why the gate exists at all.
+	//   RateLimitByAPIKey   BudgetStandard (60/min), the same budget as the
+	//                       upload this route follows — NOT BudgetPoll, which
+	//                       exists for the scan-STATUS polling loop. This is a
+	//                       once-per-upload trigger and it starts the most
+	//                       expensive side effect an API key has (unbounded
+	//                       outbound NVD/JVN fetches writing the global
+	//                       vulnerability tables), so the tighter ceiling is
+	//                       the correct one. No-op for the Clerk JWT path.
+	//   TenantTx            required: Scan answers 401 without a tenant
+	//                       context and its SbomInProject check is RLS-filtered.
+	//   auditMiddleware     unchanged; the group carried it before.
+	//
+	// Being MultiAuth-fronted also makes the route subject to
+	// middleware.apiKeyRouteScope's default-deny, so it is classified there
+	// (scopeProjectPathParam) — without that entry a project-scoped key would
+	// get 403 instead.
+	// Middleware chain: MultiAuth -> RequireWrite -> RateLimitByAPIKey -> TenantTx -> audit -> handler.
+	e.POST("/api/v1/projects/:id/scan", vulnHandler.Scan,
+		appmw.MultiAuth(cfg, tenantRepo, userRepo, apiKeyService),
+		appmw.RequireWrite(),
+		appmw.RateLimitByAPIKey(rdb, appmw.BudgetStandard),
+		appmw.TenantTx(db),
+		auditMiddleware)
 
 	// SBOM Diff endpoints
 	auth.POST("/sbom/diff", sbomDiffHandler.Diff)

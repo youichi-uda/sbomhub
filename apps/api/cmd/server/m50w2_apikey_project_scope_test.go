@@ -188,15 +188,19 @@ func TestM50W2APIKeyReachableRoutesAreAllClassified(t *testing.T) {
 // TestM50W2APIKeyReachableRouteCountIsPinned records the size of the surface so a
 // change in it is visible in a diff rather than only in the table.
 //
-// 38 as of 2026-07-30: 8 on the /api/v1/mcp group, 5 on /api/v1/cli, and 25
-// registered directly on the Echo instance behind MultiAuth. The remaining 143
+// 39 as of 2026-08-05: 8 on the /api/v1/mcp group, 5 on /api/v1/cli, and 26
+// registered directly on the Echo instance behind MultiAuth. The remaining 142
 // of main.go's 181 registrations sit on appmw.Auth (Clerk JWT / self-hosted
 // default), which never inspects an API key.
+//
+// It was 38 until M53 W1 moved POST /api/v1/projects/:id/scan off the Clerk-only
+// `authWrite` group — the route the shipped GitHub Action calls, which had never
+// worked with an API key.
 //
 // This is a tripwire, not a contract: if you add or remove an API-key-fronted
 // route, update the number AND the breakdown above.
 func TestM50W2APIKeyReachableRouteCountIsPinned(t *testing.T) {
-	const want = 38
+	const want = 39
 	reachable := apiKeyReachableRoutes(t)
 	if len(reachable) != want {
 		keys := make([]string, 0, len(reachable))

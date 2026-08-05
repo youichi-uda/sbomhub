@@ -35,7 +35,7 @@ import (
 // the same as "must name its own project on every request": a route that touches
 // no project-scoped resource at all (POST /api/v1/cli/check) is allowed through
 // without naming anything. Rather than
-// bolt a guard onto each of the 38 API-key-reachable route registrations — where
+// bolt a guard onto each of the 39 API-key-reachable route registrations — where
 // the cost of forgetting one is a silently unscoped route, and the count alone
 // says how easy that is — the check lives at the three places where a raw
 // `sbh_...` string becomes an authenticated request context, i.e. every caller of
@@ -239,13 +239,22 @@ var apiKeyRouteScope = map[string]projectScopeRule{
 	"GET /api/v1/projects/:id/reachability/targets":                      {scopeProjectPathParam, ":id is the project"},
 	"GET /api/v1/projects/:id/sbom":                                      {scopeProjectPathParam, ":id is the project"},
 	"POST /api/v1/projects/:id/sbom":                                     {scopeProjectPathParam, ":id is the project"},
-	"GET /api/v1/projects/:id/sboms/:sbom_id/scan-status":                {scopeProjectPathParam, ":id is the project"},
-	"POST /api/v1/projects/:id/triage/run":                               {scopeProjectPathParam, ":id is the project"},
-	"GET /api/v1/projects/:id/vex-drafts":                                {scopeProjectPathParam, ":id is the project"},
-	"GET /api/v1/projects/:id/vex-drafts/:draft_id":                      {scopeProjectPathParam, ":id is the project"},
-	"PUT /api/v1/projects/:id/vex-drafts/:draft_id/decision":             {scopeProjectPathParam, ":id is the project"},
-	"POST /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse":           {scopeProjectPathParam, ":id is the project"},
-	"GET /api/v1/projects/:id/vulnerabilities":                           {scopeProjectPathParam, ":id is the project"},
+	"POST /api/v1/projects/:id/scan": {scopeProjectPathParam,
+		":id is the project. The SBOM to scan is the `sbom_id` QUERY parameter, " +
+			"not a path segment, so `:id` is unambiguously the project and the " +
+			"comparison here is against the right identifier — " +
+			"VulnerabilityHandler.Scan then checks the sbom belongs to it " +
+			"(SbomInProject) under the tenant GUC. M53 W1 moved this route onto " +
+			"MultiAuth because the GitHub Action SBOMHub ships calls it with an " +
+			"API key and it was registered Clerk-only; default-deny means the " +
+			"route needs this entry or the same Action breaks as a 403 instead"},
+	"GET /api/v1/projects/:id/sboms/:sbom_id/scan-status":      {scopeProjectPathParam, ":id is the project"},
+	"POST /api/v1/projects/:id/triage/run":                     {scopeProjectPathParam, ":id is the project"},
+	"GET /api/v1/projects/:id/vex-drafts":                      {scopeProjectPathParam, ":id is the project"},
+	"GET /api/v1/projects/:id/vex-drafts/:draft_id":            {scopeProjectPathParam, ":id is the project"},
+	"PUT /api/v1/projects/:id/vex-drafts/:draft_id/decision":   {scopeProjectPathParam, ":id is the project"},
+	"POST /api/v1/projects/:id/vex-drafts/:draft_id/reanalyse": {scopeProjectPathParam, ":id is the project"},
+	"GET /api/v1/projects/:id/vulnerabilities":                 {scopeProjectPathParam, ":id is the project"},
 
 	// -----------------------------------------------------------------
 	// The response IS the project enumeration — the HANDLER narrows it.
