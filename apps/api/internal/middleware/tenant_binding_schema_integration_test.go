@@ -433,12 +433,14 @@ func TestM52PPreTenantTxRulesNameOnlyReachableTables(t *testing.T) {
 }
 
 // TestM52NoExemptTableNameIsAmbiguous underwrites the unqualified table names
-// the classification table uses.
+// BOTH classification tables use — noTenantTxRouteBinding's RLSExemptTables and
+// preTenantTxMiddleware's RLSExemptTables and BoundRLSTables.
 //
 // m52LiveRLS keys by bare `relname` inside schema `public`. If a relation with
 // the SAME NAME sat EARLIER in the runtime search_path, an unqualified query in
-// the route would resolve to that one while this gate kept checking the
-// `public` one — the wrong object, and a miss nothing would reveal.
+// the route or the middleware would resolve to that one while these gates kept
+// checking the `public` one — the wrong object, and a miss nothing would
+// reveal.
 //
 // # Two things it deliberately does not do
 //
@@ -533,10 +535,12 @@ func TestM52NoExemptTableNameIsAmbiguous(t *testing.T) {
 				continue
 			}
 			t.Errorf("a relation named %q (relkind %q) exists in schema %q, which precedes "+
-				"`public` in the search_path (%s). middleware.noTenantTxRouteBinding names "+
-				"it UNQUALIFIED, so the route's own unqualified statements resolve to THAT "+
-				"relation while this gate keeps checking the `public` one. Qualify the name "+
-				"in the rule and widen m52LiveRLS, or take the schema out of the path.",
+				"`public` in the search_path (%s). The classification tables "+
+				"(middleware.noTenantTxRouteBinding and middleware.preTenantTxMiddleware) "+
+				"name it UNQUALIFIED, so the route's or middleware's own unqualified "+
+				"statements resolve to THAT relation while these gates keep checking the "+
+				"`public` one. Qualify the name in the rule and widen m52LiveRLS, or take "+
+				"the schema out of the path.",
 				name, kind, schema, string(path))
 		}
 		if err := rows.Err(); err != nil {
