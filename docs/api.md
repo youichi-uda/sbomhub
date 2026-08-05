@@ -498,8 +498,8 @@ stack already runs.
 
 ### What is limited, and what is not
 
-The limiter (`RateLimitByAPIKey`, wired on 28 route registrations in
-`cmd/server/main.go`) counts per **`api_keys` row**. It is a **no-op** when no
+The limiter (`RateLimitByAPIKey` in `cmd/server/main.go`, on every route in the
+budget table below) counts per **`api_keys` row**. It is a **no-op** when no
 API key is on the request context — a Clerk session and the self-hosted default
 identity both pass through it untouched, which is why the web UI is not
 throttled. Requests that never reach an authenticated identity at all (a 401,
