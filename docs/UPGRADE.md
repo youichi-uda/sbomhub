@@ -279,6 +279,7 @@ in the path, and require that `:id` to be the key's own project — in full:
 ```
 POST   /api/v1/projects/:id/sbom
 GET    /api/v1/projects/:id/sbom
+POST   /api/v1/projects/:id/scan
 GET    /api/v1/projects/:id/vulnerabilities
 GET    /api/v1/projects/:id/sboms/:sbom_id/scan-status
 POST   /api/v1/projects/:id/reachability
@@ -318,6 +319,27 @@ The other five name no project in the path:
 
 The four that remain are the tenant-wide ones refused in the table above —
 29 + 5 + 4 = the 38 endpoints that accept an API key.
+
+> **M53 W1 (2026-08-05) — the counts above are one higher.** `POST
+> /api/v1/projects/:id/scan` was added to the fenced list. It had been
+> registered Clerk-only since M47 W1, so **no API key could reach it at all**:
+> measured on a throwaway stack with one tenant-level `sbh_` key, upload
+> answered 201, read-back 200, and `POST …/scan?sbom_id=…` answered **404** in
+> `SBOMHUB_AUTH_MODE=anonymous` (the Bearer header was ignored and the request
+> resolved as the *default* tenant, which does not own the SBOM — the identical
+> 404 the route gives with no credential at all) and **401** under Clerk. That
+> is the third step of the GitHub Action this repository ships
+> (`.github/workflows/sbom-upload.yml`), which carried `continue-on-error: true`
+> and therefore never turned a run red — SBOMs were uploaded and never scanned,
+> with a green check next to them. The route now sits on the same MultiAuth →
+> RequireWrite → RateLimitByAPIKey(standard, 60/min) → TenantTx → audit chain as
+> `POST /api/v1/projects/:id/sbom`, and is classified `scopeProjectPathParam`,
+> so a project-scoped key may scan **its own project only** and is answered the
+> same 403 as everywhere else for any other project id. Read the two sentences
+> before this note as **35 of the 39** and **thirty of them name the project in
+> the path**, i.e. 30 + 5 + 4 = 39. **Operator action: none** — no existing key
+> loses anything, and a tenant-level key is unaffected by the scope table
+> entirely.
 
 **Why the project lists are narrowed and the other tenant-wide endpoints are
 not.** Narrowing an answer is safe exactly when the response *is* the set being
@@ -1023,6 +1045,16 @@ on sending `Authorization: Bearer` with nothing after it, it will now receive 40
   group, so an API key cannot trigger a scan. `.github/workflows/sbom-upload.yml`
   attempts it under `continue-on-error: true` and has therefore always failed
   silently; the workflow now says so in a comment.
+- **RESOLVED 2026-08-05 (M53 W1) — the bullet directly above is no longer true.**
+  `POST /api/v1/projects/:id/scan` moved onto the MultiAuth chain
+  (`MultiAuth → RequireWrite → RateLimitByAPIKey(standard, 60/min) → TenantTx →
+  audit`) and is classified `scopeProjectPathParam` in
+  `middleware/project_scope.go`, so an API key does trigger a scan: 202 for a
+  tenant-level key, and for a project-scoped key naming its own project.
+  `continue-on-error: true` was removed from the workflow step, which now fails
+  the run when the trigger is refused. See §2d's M53 W1 note. Being a trigger,
+  the step still cannot observe whether the background sweep finished — poll
+  `/sboms/:sbom_id/scan-status`, or use `sbomhub scan --fail-on`, for that.
 - One correction to §8.3's "no cleanup is needed": the TTL on a counter is set
   by a separate `EXPIRE` issued only after the **first** `INCR` of a window
   (unchanged from before M51). If that one `EXPIRE` fails — a Redis error in

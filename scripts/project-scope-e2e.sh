@@ -212,6 +212,18 @@ request() {
     "POST /api/v1/projects/:id/sbom")
       http POST "${SBOMHUB_URL}${path}" "${out}" -H "${auth}" -H "${json}" \
         --data-binary "@${SBOM_FIXTURE}" ;;
+    # POST /api/v1/projects/:id/scan (M53 W1) deliberately has NO recipe and
+    # falls through to the generic `{}` below, which omits the required
+    # `sbom_id` query parameter and is therefore answered 400 by
+    # VulnerabilityHandler.Scan. That is the intended cell: the scope decision
+    # is made in middleware, before the handler reads anything, so 400-vs-400
+    # between the two credentials is exactly as strong a "the key's own project
+    # was ADMITTED" as 202-vs-202 would be — and supplying a real sbom_id would
+    # start a real NVD/JVN sweep, i.e. outbound network traffic and writes to
+    # the global vulnerability tables, on every CI run of this script. That the
+    # route works end to end with an API key is observed elsewhere (the M53
+    # negative-control run recorded in docs/UPGRADE.md §2d, and
+    # cmd/server/m53_scan_route_apikey_test.go for the wiring).
     GET*)
       http GET "${SBOMHUB_URL}${path}" "${out}" -H "${auth}" ;;
     *)
