@@ -278,14 +278,37 @@ func (h *SbomHandler) Upload(c echo.Context) error {
 // and `sbomhub scan --fail-on critical` would always exit 0 — Codex R1
 // production blocker.
 //
-// Concurrency: the NVD scan internally spawns a worker pool, but those
-// workers only touch the global `vulnerabilities` and
-// `component_vulnerabilities` tables (no RLS) via the raw `*sql.DB`, not
-// the tx — so they do not contend on the single tx connection. Only the
-// initial ListBySbom (read on `components`) and the JVN sequential pass
-// flow through the tx. The tx therefore stays effectively idle for most
-// of the scan but pins one pooled connection for the scan's duration;
-// that is an acknowledged trade-off (see ※要確認 in completion report).
+// Concurrency (corrected M54 — the previous text here was false in a way
+// that mattered). This used to claim the NVD worker pool touches the
+// global `vulnerabilities` / `component_vulnerabilities` tables "via the
+// raw `*sql.DB`, not the tx — so they do not contend on the single tx
+// connection", and that the tx "stays effectively idle for most of the
+// scan". Neither half was true. The repositories resolve their Queryable
+// with database.Querier(ctx, r.db), runScan below hands the scanners the
+// ctx WithTxFunc created, and that ctx carries the *sql.Tx: every write
+// the pool makes goes through this transaction, on its one connection.
+// The same correction was applied to VulnerabilityHandler.runScan in M50
+// (0090c7b); this copy of the claim was missed then.
+//
+// The contention the old text denied was real and it was destructive.
+// Up to maxConcurrentWithKey (5) workers ran concurrently against that one
+// *sql.Tx whenever NVD_API_KEY was set; *sql.Tx is not safe for concurrent
+// use, and two workers overlapping desynchronised the lib/pq wire protocol
+// (`pq: unexpected Parse response`), poisoned the connection
+// (`driver: bad connection`), failed the commit, and discarded EVERY row
+// the sweep had written — measured at 0 of 800 rows on PostgreSQL 15,
+// 2026-08-05. NVDService.processComponentsParallel now serialises the
+// pool's database section behind a mutex, so the workers do contend, but
+// they contend correctly and the cost is invisible next to the 700ms
+// rate-limiter tick each work item already waits for.
+//
+// What remains true: the tx pins one pooled connection for the scan's
+// duration, and that is an acknowledged trade-off (see ※要確認 in
+// completion report). Moving the pool's writes off the transaction
+// entirely (database.WithoutTx) would relieve that too and is a real
+// option, but it trades this route's all-or-nothing durability for
+// partial durability and was deliberately NOT taken in M54 — see the
+// commit note on processComponentsParallel.
 func (h *SbomHandler) startBackgroundScan(sbomID, tenantID, projectID uuid.UUID) {
 	go func() {
 		ctx := context.Background()
@@ -601,11 +624,25 @@ func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 			}
 		}
 
-		// Always commit so per-component-vulnerability links inserted
-		// outside this tx (NVD worker pool uses raw db) and any future
-		// tx-aware writes are durable. Per-scan failures are recorded
-		// in `errs` and surfaced through ScanTracker, not through tx
-		// rollback.
+		// Return nil even when a scanner failed, so WithTxFunc COMMITS
+		// rather than rolls back. Per-scan failures are recorded in
+		// `errs` and surfaced through ScanTracker, not through tx
+		// rollback: a JVN outage must not throw away the CVEs NVD
+		// already matched.
+		//
+		// M54 correction: the reason given here used to be that the
+		// "NVD worker pool uses raw db", i.e. that its links were
+		// inserted OUTSIDE this transaction and the commit merely had
+		// to not get in their way. That was false — the pool's writes
+		// go through THIS tx (see the Concurrency note on
+		// startBackgroundScan), so this commit is the only thing that
+		// makes them durable, and a rollback here would discard the
+		// entire sweep rather than nothing.
+		//
+		// Returning nil is therefore load-bearing, not permissive. It
+		// is also not sufficient: the commit can still fail on its own
+		// (an aborted transaction refuses it), which is exactly what
+		// txErr below reports and what M50's poison test measures.
 		return nil
 	})
 	if txErr != nil {
@@ -828,11 +865,23 @@ type VulnerabilitySummaryCount struct {
 //	                       "low": N, "unknown": N, "total": N }
 //	}
 //
-// The counts always reflect the current state of the
-// component_vulnerabilities join, so a caller polling during a "running"
-// scan can see counts climb as NVD/JVN match more components. CLI callers
-// (`sbomhub scan --fail-on`) should only trust counts once status =
-// "completed" — partial counts under "running" are advisory.
+// The counts reflect the current COMMITTED state of the
+// component_vulnerabilities join.
+//
+// M54 correction: this used to say a caller polling during a "running"
+// scan "can see counts climb as NVD/JVN match more components". It cannot.
+// runScan wraps the whole NVD + JVN sweep in ONE transaction and this
+// request reads on a different pooled connection, so none of the scan's
+// writes are visible until that transaction commits — measured by M50's
+// tx-semantics test, which reads a mid-scan write from a second connection
+// and gets 0. The observable sequence is a step, not a climb: 0 (or the
+// previous scan's totals) for the whole run, then the final totals at
+// once. A "running" poll returning 0 therefore means "not committed yet",
+// never "nothing found so far".
+//
+// The operational advice is unchanged and is now the only safe reading:
+// CLI callers (`sbomhub scan --fail-on`) must trust counts only once
+// status = "completed".
 func (h *SbomHandler) ScanStatus(c echo.Context) error {
 	projectID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -843,10 +892,13 @@ func (h *SbomHandler) ScanStatus(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid sbom id"})
 	}
 
-	// Vulnerability counts come from the live join — they reflect whatever
-	// the background scan has matched so far. We always return them even
-	// for status=running so the CLI can show progress; the threshold check
-	// is gated on status=completed by the client.
+	// Vulnerability counts come from the live join, which means whatever the
+	// background scan has COMMITTED — not what it has matched (M54: the scan
+	// holds one transaction for its whole run, so nothing it writes is
+	// visible here until it ends; see the godoc above). We return them for
+	// status=running anyway so the CLI has something to render, but they are
+	// the previous scan's totals until this one commits, and the threshold
+	// check is gated on status=completed by the client.
 	//
 	// Codex R2 P2: the lookup MUST be scoped by the URL sbom_id rather than
 	// by "the latest SBOM for this project". The previous implementation

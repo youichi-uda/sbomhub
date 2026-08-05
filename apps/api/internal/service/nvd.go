@@ -160,7 +160,52 @@ func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 	return s.processComponentsParallel(ctx, uniqueComponents)
 }
 
-// processComponentsParallel processes components in parallel with rate limiting
+// processComponentsParallel processes components in parallel with rate limiting.
+//
+// # Why the database section is serialised (M54)
+//
+// Every caller of ScanComponents hands this function a context that carries a
+// *sql.Tx: VulnerabilityHandler.runScan and SbomHandler.runScan both open one
+// via database.WithTxFunc, and scheduler.VulnerabilityScanJob.scanProject runs
+// inside runWithTenantTx. They must — `components` FORCEs row-level security,
+// so ListBySbom above returns zero rows on a connection with no
+// app.current_tenant_id bound. The repositories then resolve that tx through
+// database.Querier, which means every statement the workers below issue lands
+// on ONE PostgreSQL connection.
+//
+// *sql.DB is safe for concurrent use. *sql.Tx is not, and the gap is not
+// theoretical: an open *sql.Rows (which is what QueryRowContext returns until
+// Scan closes it) leaves lib/pq mid-message on the wire, so a second worker's
+// Parse is written into the middle of another worker's result set. Measured on
+// PostgreSQL 15 (2026-08-05) with two workers whose NVD responses arrived
+// together, 400 CVEs each:
+//
+//	pq: unexpected Parse response 'C'   <- first collision
+//	driver: bad connection              <- every statement after it
+//	database.WithTxFunc: commit: driver: bad connection
+//	durable rows: 0 of 800
+//
+// The connection is destroyed, the commit fails, and the WHOLE sweep is lost —
+// not just the two items that collided. Meanwhile ScanComponents still returns
+// nil, so "NVD scan completed" is logged in the same run as the error (the
+// asymmetry M50 pinned).
+//
+// dbMu closes that window: it is taken for the entire per-item persistence
+// section, so at most one goroutine is ever inside a statement on the shared
+// tx. It costs nothing worth measuring. The concurrency this pool exists for
+// is in the NVD HTTP round trip (hundreds of ms to seconds), which stays
+// outside the lock; the database section is ~0.1ms per CVE against a local
+// PostgreSQL, and the shared rate limiter caps the whole pool at one work item
+// per rateLimitWithKey (700ms) regardless of how many workers there are.
+//
+// The mutex is per-call rather than a field on NVDService on purpose: one
+// NVDService is shared process-wide, and two scans for different tenants run
+// on different transactions with nothing to contend over.
+//
+// What this does NOT fix: a statement that fails on its own merits still
+// aborts the shared transaction and discards every row the sweep wrote (M50).
+// Serialising the workers removes the concurrency as a CAUSE of that abort; it
+// does not change what an abort costs.
 func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) error {
 	maxWorkers := maxConcurrentNoKey
 	rateLimit := rateLimitWithoutKey
@@ -186,6 +231,13 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	// dbMu guards every statement issued against the (possibly transactional)
+	// ctx — see the "Why the database section is serialised" note above. It is
+	// deliberately separate from mu, which only protects the counters: mixing
+	// them would hold the database lock across the counter updates for no
+	// reason, and would make it easy to later "optimise" the counters and
+	// silently drop the correctness guarantee with them.
+	var dbMu sync.Mutex
 	processedCount := 0
 	cacheHits := 0
 	apiCalls := 0
@@ -222,22 +274,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 				mu.Unlock()
 
 				// Link vulnerabilities to all component instances
-				for _, vuln := range vulns {
-					existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
-					if err != nil {
-						if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
-							slog.Warn("failed to create vulnerability", "cve", vuln.CVEID, "error", err)
-							continue
-						}
-						existing = &vuln
-					}
-
-					for _, compID := range work.componentIDs {
-						if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID); err != nil {
-							slog.Debug("failed to link component", "component", compID, "vuln", existing.ID, "error", err)
-						}
-					}
-				}
+				s.persistWorkItem(ctx, &dbMu, vulns, work.componentIDs)
 			}
 		}()
 	}
@@ -251,6 +288,50 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	)
 
 	return nil
+}
+
+// persistWorkItem upserts one work item's vulnerabilities and links them to
+// every component instance that shares its (name, version).
+//
+// This is the ONLY place the worker pool touches the database, and it holds
+// dbMu for the whole body. That is the M54 correctness boundary described on
+// processComponentsParallel: ctx may carry a *sql.Tx shared by up to
+// maxConcurrentWithKey goroutines, and *sql.Tx is not safe for concurrent use.
+//
+// The lock spans GetByCVE as well as the writes, not just the writes:
+// QueryRowContext hands back an open *sql.Rows and only Scan closes it, so a
+// read left the connection mid-message just as readily as a write does.
+//
+// Per-CVE failures are logged and skipped rather than propagated, which is the
+// behaviour this had before M54 and is left unchanged here — see the
+// known-limitation note on SbomHandler.runScan for why a scan that lost rows
+// still reports success.
+func (s *NVDService) persistWorkItem(
+	ctx context.Context,
+	dbMu *sync.Mutex,
+	vulns []model.Vulnerability,
+	componentIDs []uuid.UUID,
+) {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	for i := range vulns {
+		vuln := vulns[i]
+		existing, err := s.vulnRepo.GetByCVE(ctx, vuln.CVEID)
+		if err != nil {
+			if err := s.vulnRepo.Create(ctx, &vuln); err != nil {
+				slog.Warn("failed to create vulnerability", "cve", vuln.CVEID, "error", err)
+				continue
+			}
+			existing = &vuln
+		}
+
+		for _, compID := range componentIDs {
+			if err := s.vulnRepo.LinkComponent(ctx, compID, existing.ID); err != nil {
+				slog.Debug("failed to link component", "component", compID, "vuln", existing.ID, "error", err)
+			}
+		}
+	}
 }
 
 // getVulnerabilitiesWithCache tries cache first, falls back to API
