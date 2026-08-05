@@ -599,9 +599,25 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //     scan is worthless (e.g. "N% failed → error") is a product-policy
 //     decision, not a bug fix. Tracked separately (※要確認).
 //
-// So a "completed" status now promises: at least one component was checked,
-// and everything the scan learned was written down. It does NOT promise that
-// every component was checked.
+// So what "completed" is worth, stated as the weakest true form (Codex M54 R3,
+// Critical — an earlier draft of this paragraph promised "at least one
+// component was checked and everything the scan learned was written down", and
+// both halves were false):
+//
+//	completed  ==  no database write was refused, AND it was not the case that
+//	               every attempted lookup failed.
+//
+// It does NOT promise any of the following, each of which reports completed
+// today:
+//
+//   - that any component was checked at all — an SBOM with no components, an
+//     SBOM whose component names are all empty, and offline mode each finish
+//     with nothing looked up;
+//   - that every component was checked (partial fetch failure, above);
+//   - that every match for a checked component was seen (the resultsPerPage
+//     truncation, below);
+//   - that CVE metadata already in the catalogue was refreshed — a CVE NVD has
+//     re-scored is linked but not updated (see NVDService.persistWorkItem).
 //
 // Not closed by any of the above, and reported rather than fixed in M54:
 // NVDService.searchByKeyword asks NVD for resultsPerPage=20 and never follows

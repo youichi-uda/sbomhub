@@ -351,14 +351,38 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	// scan failure needs a threshold — how many components may fail before the
 	// scan is worthless? — and that is a product-policy decision, not a bug
 	// fix. It stays tracked as the ※要確認 threshold noted on
-	// SbomHandler.runScan. A caller that reads "completed" today is therefore
-	// promised "at least one component was checked and everything we learned
-	// was written down", not "every component was checked".
+	// SbomHandler.runScan.
+	//
+	// Note that the guard above is `processedCount == 0 && fetchFailures > 0`,
+	// not `processedCount == 0`. A scan with NO work at all — offline mode, an
+	// SBOM with no components, an SBOM whose component names are all empty —
+	// returns nil from the early paths in ScanComponents and never reaches
+	// here. Those are not failures to report: there was nothing to look up.
+	// But it does mean "completed" cannot be read as "something was checked"
+	// (Codex M54 R3, Critical, against an earlier draft of this comment that
+	// promised exactly that). See SbomHandler.runScan for what the status is
+	// actually worth.
 	return nil
 }
 
-// persistWorkItem upserts one work item's vulnerabilities and links them to
-// every component instance that shares its (name, version).
+// persistWorkItem records one work item's matches: it links every component
+// instance that shares the item's (name, version) to each matched CVE, and
+// inserts the CVE into the global catalogue if it was not there already.
+//
+// It is NOT an upsert of the freshly fetched data, and an earlier draft of
+// this comment called it one (Codex M54 R3, Critical). Create only runs when
+// GetByCVE MISSES. When the CVE is already in the catalogue this function
+// writes the LINK and nothing else, so the severity, CVSS score and
+// description NVD just returned are discarded and whatever is stored — which
+// may be older, or may have come from JVN — is what the project's
+// vulnerability page keeps showing. A CVE that NVD has since re-scored from
+// LOW to CRITICAL therefore stays LOW until some other path refreshes it.
+//
+// That refresh gap is pre-existing and is NOT fixed in M54: making the scanner
+// overwrite the row on every scan would have it fight the CVE-sync scheduler
+// and would let an NVD sweep stamp `source = 'NVD'` over a JVN-authored row.
+// Deciding who owns the catalogue's metadata is a design question, not a
+// concurrency fix. Reported rather than silently left undocumented.
 //
 // This is the ONLY place the worker pool touches the database, and it holds
 // dbMu for the whole body. That is the M54 correctness boundary described on
@@ -385,11 +409,17 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 // sweep, and TestM54NVDScan_RefusedWritesAreReportedAsFailure measures it at
 // 0 durable rows.
 //
-// What the skipping actually buys is the count: the loop keeps going and keeps
-// counting, so `refused` reflects the true scale of the loss instead of
-// stopping at the first one. Row-local loss is what it buys on a tx-FREE ctx
-// (Querier falling back to the pooled *sql.DB, i.e. autocommit), which no
-// production caller uses today.
+// What the skipping buys is that the loop keeps going and keeps counting, so
+// the returned number does not stop at the first refusal. It is still only a
+// count of REFUSALS, not of rows lost (Codex M54 R3, Medium): the writes that
+// SUCCEEDED before the first refusal are rolled back too and are counted
+// nowhere, so a poison late in a sweep can report "1 refused write" while
+// hundreds of rows silently fail to become durable. Treat a non-zero return as
+// "this scan lost data, at least this much", never as the size of the loss.
+//
+// Row-local loss is what the skipping buys on a tx-FREE ctx (Querier falling
+// back to the pooled *sql.DB, i.e. autocommit), which no production caller
+// uses today.
 func (s *NVDService) persistWorkItem(
 	ctx context.Context,
 	dbMu *sync.Mutex,
