@@ -452,8 +452,9 @@ func TestM52PPreTenantTxRulesNameOnlyReachableTables(t *testing.T) {
 //
 // It does not restrict the shadowing relation's kind. A view, a materialised
 // view or a foreign table earlier in the path shadows `public.<name>` exactly
-// as an ordinary table does, so all of them count here even though m52LiveRLS
-// itself only enumerates the kinds a route can carry RLS on.
+// as an ordinary table does, so all of them count here — which is the same set
+// m52LiveRLS enumerates, since that query covers every kind a rule can NAME
+// ('r', 'p', 'm', 'v', 'f') rather than only the kinds that can carry RLS.
 func TestM52NoExemptTableNameIsAmbiguous(t *testing.T) {
 	named := map[string]bool{}
 	for _, key := range NoTenantTxRouteKeys() {

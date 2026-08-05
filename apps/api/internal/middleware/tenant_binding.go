@@ -261,12 +261,15 @@ type TenantBindingRule struct {
 	//	the route reads through a view whose owner sees rows the runtime role
 	//	cannot.
 	//
-	// A FOREIGN TABLE is a third shape that would fail a probe, but it does not
+	// A FOREIGN TABLE is a third shape whose probe COULD fail, and it does not
 	// reach this map: PostgreSQL has no way to put row security on one, so the
 	// check exempts relkind 'f' by construction — and does not probe it at all,
 	// because probing would reach the remote server and a wrapper that is
 	// unreachable or slow would fail this gate for a reason that has nothing to
-	// do with tenant binding. Listing a foreign table here is therefore
+	// do with tenant binding. "Could", not "would": a reachable, correctly
+	// configured wrapper answers the SELECT perfectly well; the point is that
+	// the answer is a fact about the remote end rather than about row security,
+	// so it is not worth asking. Listing a foreign table here is therefore
 	// unnecessary rather than wrong; the check would have passed without it.
 	//
 	// Rather than let either of the two shapes redden a required check, the
