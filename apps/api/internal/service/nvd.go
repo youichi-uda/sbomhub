@@ -192,11 +192,23 @@ func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 //
 // dbMu closes that window: it is taken for the entire per-item persistence
 // section, so at most one goroutine is ever inside a statement on the shared
-// tx. It costs nothing worth measuring. The concurrency this pool exists for
-// is in the NVD HTTP round trip (hundreds of ms to seconds), which stays
-// outside the lock; the database section is ~0.1ms per CVE against a local
-// PostgreSQL, and the shared rate limiter caps the whole pool at one work item
-// per rateLimitWithKey (700ms) regardless of how many workers there are.
+// tx.
+//
+// The throughput it gives up is not the concurrency this pool exists for. The
+// NVD HTTP round trip (hundreds of ms to seconds) stays OUTSIDE the lock, and
+// the shared rate limiter already caps the whole pool at one work item per
+// rateLimitWithKey (700ms) no matter how many workers there are. What is
+// serialised is only the statements: measured on the same PostgreSQL 15, 200
+// statements over 40 work items took 22.4ms across 5 goroutines and 55.4ms on
+// one — so serialising costs ~0.8ms per work item against a 700ms tick, near
+// 0.1%. (Both figures come from an autocommit pool; a serial baseline for the
+// transactional path cannot be measured, because that is the configuration
+// that destroys its own connection.)
+//
+// The rejected alternative was maxConcurrentWithKey = 1, which serialises the
+// HTTP round trip as well. Measured end to end at 1.5s NVD latency over 6 work
+// items: 5.71s with this fix, 9.75s with one worker — a 1.7x regression paid
+// by exactly the operators who configured an API key to make scans faster.
 //
 // The mutex is per-call rather than a field on NVDService on purpose: one
 // NVDService is shared process-wide, and two scans for different tenants run
