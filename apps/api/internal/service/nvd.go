@@ -98,7 +98,14 @@ type NVDResponse struct {
 	// response envelope, so requiring it present costs nothing against a real
 	// endpoint.
 	ResultsPerPage *int `json:"resultsPerPage"`
-	StartIndex     int  `json:"startIndex"`
+	// StartIndex is a POINTER and is required to be 0 (Codex M54 R8,
+	// Critical). searchByKeyword never sends a startIndex, so a conforming
+	// endpoint answers with page zero; a mirror returning a LATER page would
+	// otherwise be accepted as a complete, internally consistent answer with
+	// the first page silently missing. This is separate from the accepted
+	// decision not to FETCH later pages: that is about pages we chose not to
+	// ask for, this is about not being able to tell which page we got.
+	StartIndex *int `json:"startIndex"`
 	// TotalResults is a POINTER for the same reason (Codex M54 R6, Critical):
 	// as a plain int, `{"resultsPerPage":0,"vulnerabilities":[]}` — no
 	// totalResults at all — decoded to zero and passed the R5 consistency
@@ -147,7 +154,9 @@ func (r *NVDResponse) entries() []NVDVulnEntry {
 //  5. totalResults > 0 with no entries at all is inconsistent even when
 //     resultsPerPage agrees (`{"resultsPerPage":0,"totalResults":5,...}`), and
 //     must not be read as "no CVEs".
-//  6. every entry carries a well-formed cve.id. `[{}]` used to satisfy every
+//  6. startIndex is PRESENT and zero — the scanner never asks for a later
+//     page, so an answer that is one cannot be the answer to this request.
+//  7. every entry carries a well-formed cve.id. `[{}]` used to satisfy every
 //     check above (Codex M54 R7, Critical): it became a vulnerability with
 //     CVEID "", which the VARCHAR NOT NULL column accepts, so a nameless row
 //     was stored, components were linked to it, no failure counter moved, and
@@ -172,6 +181,14 @@ func (r *NVDResponse) validate() error {
 	if r.Vulnerabilities == nil {
 		return fmt.Errorf("NVD response is missing the vulnerabilities array; " +
 			"the endpoint returned 200 but the body is not an NVD CVE API response")
+	}
+	if r.StartIndex == nil {
+		return fmt.Errorf("NVD response is missing the startIndex envelope field; " +
+			"the endpoint returned 200 but the body is not an NVD CVE API response")
+	}
+	if *r.StartIndex != 0 {
+		return fmt.Errorf("NVD response is page startIndex=%d; this request asked for the "+
+			"first page, so earlier results would be silently missing", *r.StartIndex)
 	}
 	if got, want := len(*r.Vulnerabilities), *r.ResultsPerPage; got != want {
 		return fmt.Errorf("NVD response declares resultsPerPage=%d but carries %d entries; "+
@@ -593,22 +610,43 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 		if err != nil {
 			slog.Debug("cache get error", "component", name, "error", err)
 		} else if entry != nil {
-			// Cache hit - convert cached vulns to model
-			vulns := make([]model.Vulnerability, len(entry.Vulnerabilities))
-			// M46 B2: CachedVuln mirrors the model's pointer fields, so
-			// CVSSScore/PublishedAt carry through without sentinels.
+			// Cache hit - convert cached vulns to model.
+			//
+			// The cache is NOT a trusted source (Codex M54 R8, Critical). The
+			// R7 cve.id check and the R8 canonicalisation both live on the
+			// HTTP path, so a cache hit used to reach the database having
+			// passed neither. Entries written by a pre-M54 build are still in
+			// Redis after an upgrade, and NVD results are cached BEFORE their
+			// PostgreSQL writes — so a malformed id could be served from cache
+			// indefinitely, stored as CVEID "" (VARCHAR NOT NULL accepts it),
+			// and linked to components with no failure counter moving.
+			//
+			// Same treatment as the wire: canonicalise, and drop what does not
+			// validate. Dropping rather than failing the whole lookup is
+			// deliberate here — a poisoned or stale cache entry should not
+			// take down a scan that can simply re-fetch, and the miss is
+			// logged.
 			cachedAt := entry.CachedAt
-			for i, cv := range entry.Vulnerabilities {
-				vulns[i] = model.Vulnerability{
+			vulns := make([]model.Vulnerability, 0, len(entry.Vulnerabilities))
+			for _, cv := range entry.Vulnerabilities {
+				canonical, err := validation.ValidateCVEID(cv.CVEID)
+				if err != nil {
+					slog.Warn("dropping cached NVD entry with a malformed CVE ID",
+						"component", name, "cve", cv.CVEID)
+					continue
+				}
+				// M46 B2: CachedVuln mirrors the model's pointer fields, so
+				// CVSSScore/PublishedAt carry through without sentinels.
+				vulns = append(vulns, model.Vulnerability{
 					ID:          uuid.New(),
-					CVEID:       cv.CVEID,
+					CVEID:       canonical,
 					Description: cv.Description,
 					Severity:    cv.Severity,
 					CVSSScore:   cv.CVSSScore,
 					PublishedAt: cv.PublishedAt,
 					Source:      "NVD",
 					UpdatedAt:   &cachedAt,
-				}
+				})
 			}
 			return vulns, true, nil
 		}
@@ -698,24 +736,62 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 		return nil, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
 	}
 
-	var nvdResp NVDResponse
-	if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
-		return nil, err
-	}
-	if err := nvdResp.validate(); err != nil {
+	nvdResp, err := decodeNVDResponse(resp.Body)
+	if err != nil {
 		return nil, err
 	}
 
 	return s.convertToVulnerabilities(nvdResp.entries()), nil
 }
 
+// decodeNVDResponse decodes exactly ONE JSON value from r, requires nothing to
+// follow it, and validates the envelope.
+//
+// The "nothing to follow it" half is not pedantry (Codex M54 R8, Critical).
+// json.Decoder.Decode reads a single value and stops; a body such as
+// `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`
+// followed by a second document, or by garbage, decodes without error. So a
+// proxy or mirror could prefix an empty-result envelope to anything at all and
+// have the scan accept it as an authoritative "this component has no CVEs".
+func decodeNVDResponse(r io.Reader) (*NVDResponse, error) {
+	dec := json.NewDecoder(r)
+	var out NVDResponse
+	if err := dec.Decode(&out); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("NVD response has trailing content after the JSON body; " +
+			"the endpoint returned 200 but the body is not a single NVD CVE API response")
+	}
+	if err := out.validate(); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vulnerability {
 	var vulns []model.Vulnerability
 
 	for _, entry := range entries {
+		// Store the CANONICAL id, not the wire form (Codex M54 R8, High).
+		// validate() accepts an id after trimming and upper-casing, but
+		// `vulnerabilities.cve_id` is UNIQUE and compared exactly, and
+		// GetByCVE matches exactly — so persisting "cve-2021-44228" would
+		// create a SECOND catalogue row alongside "CVE-2021-44228", splitting
+		// the component links, the KEV/EPSS enrichment and the severity
+		// metadata across two identities for one vulnerability.
+		//
+		// Unparseable ids cannot reach here: validate() rejects the whole
+		// response first. The error branch is a belt-and-braces skip rather
+		// than a silent pass-through of the raw value.
+		canonical, err := validation.ValidateCVEID(entry.CVE.ID)
+		if err != nil {
+			slog.Warn("dropping NVD entry with a malformed CVE ID", "cve", entry.CVE.ID)
+			continue
+		}
 		vuln := model.Vulnerability{
 			ID:     uuid.New(),
-			CVEID:  entry.CVE.ID,
+			CVEID:  canonical,
 			Source: "NVD",
 		}
 
@@ -872,14 +948,12 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 		return nil, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
 	}
 
-	var nvdResp NVDResponse
-	if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
+	// Same decode + envelope contract as searchByKeyword: without it an empty
+	// body reads as an authoritative "CVE not found" (Codex M54 R4, Critical)
+	// and a body with trailing content is accepted whole (R8, Critical).
+	nvdResp, err := decodeNVDResponse(resp.Body)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode NVD response: %w", err)
-	}
-	// Same envelope check as searchByKeyword: without it an empty body reads
-	// as an authoritative "CVE not found" (Codex M54 R4, Critical).
-	if err := nvdResp.validate(); err != nil {
-		return nil, err
 	}
 
 	if len(nvdResp.entries()) == 0 {

@@ -111,17 +111,36 @@ func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 		return fmt.Errorf("failed to get components: %w", err)
 	}
 
+	scanned, failed := 0, 0
 	for _, comp := range components {
 		if err := s.scanComponent(ctx, &comp); err != nil {
 			slog.Error("Failed to scan component for JVN vulnerabilities",
 				"component", comp.Name,
 				"error", err)
+			failed++
 			continue
 		}
+		scanned++
 		// Rate limiting - JVN API is more lenient but still be polite
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	// TOTAL failure has zero coverage and must not report success (M54, Codex
+	// R8 Critical). This mirrors NVDService.processComponentsParallel: with
+	// `?sources=jvn`, every request could return 500 and the caller still
+	// logged "JVN scan completed" — and on the upload path that is what
+	// ScanTracker records, so the CLI reads "0 vulnerabilities" off an outage
+	// and `sbomhub scan --fail-on critical` exits 0.
+	//
+	// PARTIAL failure stays success here for the same reason it does in the
+	// NVD scanner: choosing how many components may fail before a scan is
+	// worthless is a product-policy decision, not a bug fix. See the note on
+	// SbomHandler.runScan.
+	if scanned == 0 && failed > 0 {
+		return fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage", failed)
+	}
+
+	slog.Info("JVN component scan completed", "scanned", scanned, "failed", failed)
 	return nil
 }
 

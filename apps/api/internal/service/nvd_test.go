@@ -301,7 +301,7 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 		// Return mock response
 		response := NVDResponse{
 			ResultsPerPage: nvdIntPtr(1),
-			StartIndex:     0,
+			StartIndex:     nvdIntPtr(0),
 			TotalResults:   nvdIntPtr(1),
 			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{
 				{
@@ -360,6 +360,7 @@ func TestNVDService_SearchByCVEID_HTTPMock(t *testing.T) {
 		}
 		response := NVDResponse{
 			ResultsPerPage: nvdIntPtr(1),
+			StartIndex:     nvdIntPtr(0),
 			TotalResults:   nvdIntPtr(1),
 			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{
 				{
@@ -442,74 +443,116 @@ func TestNVDService_DefaultBaseURL(t *testing.T) {
 	}
 }
 
+// The five tests below used to stand up an httptest server and then assert
+// NOTHING — each ended in a comment like "the actual test would need the
+// searchByKeyword to be callable with a custom URL" (Codex M54 R8, Low). That
+// was true when they were written; NVDService.baseURL has been configurable
+// since M40 Wave B, so the reason expired and the placeholders stayed green no
+// matter what the error handling did. The invalid-JSON one is the test that
+// should have caught the R8 trailing-content defect and could not.
+//
+// They now drive the real lookup. Each asserts an ERROR, because the failure
+// mode this product cannot afford is a bad response being read as "this
+// component has no vulnerabilities".
+
 func TestNVDService_HTTPMock_APIError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"message": "Rate limit exceeded"}`))
+		_, _ = w.Write([]byte(`{"message": "Rate limit exceeded"}`))
 	}))
 	defer server.Close()
 
-	// This demonstrates the expected behavior when NVD returns an error
-	// The actual integration would require modifying the service to accept a configurable base URL
+	svc := NewNVDService(nil, nil, "", server.URL, false)
+	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+		t.Error("a 429 from NVD produced no error; the component would be counted as " +
+			"successfully checked with zero findings")
+	}
 }
 
 func TestNVDService_HTTPMock_InvalidJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{invalid json`))
-	}))
-	defer server.Close()
+	cases := map[string]string{
+		"malformed":         `{invalid json`,
+		"trailing document": `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}{"a":1}`,
+		"trailing garbage":  `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]} nope`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
 
-	// Test that invalid JSON responses are handled gracefully
+			svc := NewNVDService(nil, nil, "", server.URL, false)
+			if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+				t.Errorf("body %q produced no error; a valid envelope followed by anything at "+
+					"all would be accepted as an authoritative empty result", body)
+			}
+		})
+	}
 }
 
 func TestNVDService_HTTPMock_Timeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate slow response
-		time.Sleep(100 * time.Millisecond)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
+	defer func() {
+		close(release)
+		server.Close()
+	}()
 
-	// Create service with very short timeout
-	// The actual test would need the searchByKeyword to be callable with a custom URL
-	_ = &NVDService{
-		httpClient: &http.Client{Timeout: 1 * time.Millisecond},
+	svc := NewNVDService(nil, nil, "", server.URL, false)
+	svc.httpClient = &http.Client{Timeout: 20 * time.Millisecond}
+	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+		t.Error("a timed-out NVD request produced no error")
 	}
 }
 
 func TestNVDService_HTTPMock_EmptyResults(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// resultsPerPage is PRESENT and zero — a real "no CVEs for this
-		// component" answer, which must stay distinguishable from a body that
-		// carries no envelope at all (M54, Codex R4).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// A complete envelope reporting zero matches: the one shape that IS a
+		// legitimate "this component has no CVEs" and must NOT error.
 		response := NVDResponse{
 			ResultsPerPage:  nvdIntPtr(0),
-			StartIndex:      0,
+			StartIndex:      nvdIntPtr(0),
 			TotalResults:    nvdIntPtr(0),
 			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{}),
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
-	}))
-	defer server.Close()
-
-	// Verify empty results are handled correctly
-}
-
-func TestNVDService_HTTPMock_NetworkError(t *testing.T) {
-	// Test with a server that immediately closes connections
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Close the connection without sending anything
-		hj, ok := w.(http.Hijacker)
-		if ok {
-			conn, _, _ := hj.Hijack()
-			conn.Close()
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("encode: %v", err)
 		}
 	}))
 	defer server.Close()
 
-	// Network errors should be properly wrapped and returned
+	svc := NewNVDService(nil, nil, "", server.URL, false)
+	vulns, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0")
+	if err != nil {
+		t.Fatalf("a well-formed zero-result response must not error: %v", err)
+	}
+	if len(vulns) != 0 {
+		t.Errorf("got %d vulnerabilities, want 0", len(vulns))
+	}
+}
+
+func TestNVDService_HTTPMock_NetworkError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Close the connection without sending anything.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer server.Close()
+
+	svc := NewNVDService(nil, nil, "", server.URL, false)
+	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+		t.Error("a dropped connection produced no error")
+	}
 }
 
 func TestNewNVDService(t *testing.T) {
@@ -812,8 +855,8 @@ func TestM54NVDResponse_EnvelopeAbsenceIsNotZeroResults(t *testing.T) {
 	}{
 		{"null body", `null`, true},
 		{"empty object", `{}`, true},
-		{"envelope present, genuinely zero results", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, false},
-		{"envelope present with results", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+		{"envelope present, genuinely zero results", `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`, false},
+		{"envelope present with results", `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -981,6 +1024,11 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 		// checked "the whole envelope" — the test's coverage was weaker than
 		// its own title (Codex M54 R6, Critical).
 		{"totalResults absent entirely", `{"resultsPerPage":0,"vulnerabilities":[]}`, true},
+		// The scanner never asks for a later page, so being handed one means
+		// the first page is missing and nothing here can tell (Codex M54 R8,
+		// Critical).
+		{"startIndex absent", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, true},
+		{"a later page, internally consistent", `{"resultsPerPage":1,"startIndex":20,"totalResults":40,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
 		{"page shorter than it declares", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, true},
 		// An entry with no usable cve.id passed every earlier cut (Codex M54
 		// R7, Critical). It became a row with CVEID "", which VARCHAR NOT NULL
@@ -990,12 +1038,12 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 		{"entry with empty cve.id", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":""}}]}`, true},
 		{"entry with malformed cve.id", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"not-a-cve"}}]}`, true},
 		{"one good entry, one malformed", `{"resultsPerPage":2,"totalResults":2,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}},{"cve":{"id":""}}]}`, true},
-		{"genuine no-matches answer", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, false},
-		{"normal answer", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+		{"genuine no-matches answer", `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`, false},
+		{"normal answer", `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
 		// A truncated RESULT SET is well-formed: the page is internally honest
 		// about carrying 1 of 500. validate does NOT close the pagination gap
 		// documented on searchByKeyword and must not be read as if it did.
-		{"first page of a larger result set is accepted", `{"resultsPerPage":1,"totalResults":500,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+		{"first page of a larger result set is accepted", `{"resultsPerPage":1,"startIndex":0,"totalResults":500,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1039,7 +1087,7 @@ func TestM54SearchByCVEID_RefusesAnAnswerAboutADifferentCVE(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				body := `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"` +
+				body := `{"resultsPerPage":1,"startIndex":0,"totalResults":1,"vulnerabilities":[{"cve":{"id":"` +
 					tc.answered + `","descriptions":[{"lang":"en","value":"x"}]}}]}`
 				if _, err := w.Write([]byte(body)); err != nil {
 					t.Errorf("write: %v", err)

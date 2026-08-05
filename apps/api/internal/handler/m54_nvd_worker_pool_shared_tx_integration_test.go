@@ -649,3 +649,57 @@ func m54TextArray(ids []string) string {
 	b.WriteByte('}')
 	return b.String()
 }
+
+// TestM54JVNScan_TotalFetchFailureIsReportedAsFailure is the JVN twin of
+// TestM54NVDScan_TotalFetchFailureIsReportedAsFailure (Codex M54 R8, Critical).
+//
+// The R2 follow-up escalated total fetch failure in the NVD scanner and left
+// JVNService untouched, so `?sources=jvn` against a JVN outage still logged
+// "JVN scan completed" — and on the upload path that is what ScanTracker
+// records, so the CLI reads "0 vulnerabilities" off the outage and
+// `sbomhub scan --fail-on critical` exits 0. Fixing one scanner and not its
+// twin is how a defect survives its own fix.
+//
+// PARTIAL fetch failure remains success here too, for the same reason it does
+// in the NVD scanner: the threshold is a product-policy decision.
+func TestM54JVNScan_TotalFetchFailureIsReportedAsFailure(t *testing.T) {
+	appURL, migURL := m46b1HandlerEnv(t)
+	migDB := m46b1OpenOrSkip(t, migURL)
+	appDB := m46b1OpenOrSkip(t, appURL)
+
+	seed := m47SeedAll(t, migDB, "m54jvnout")
+
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		http.Error(w, "simulated JVN outage", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	jvn := service.NewJVNService(
+		repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB),
+		srv.URL, false,
+	)
+	h := &VulnerabilityHandler{db: appDB, jvnService: jvn}
+
+	var logged strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	func() {
+		defer slog.SetDefault(prev)
+		h.runScan(context.Background(), seed.sbomID, seed.tenantID, "jvn")
+	}()
+	logs := logged.String()
+
+	if atomic.LoadInt64(&hits) == 0 {
+		t.Fatal("precondition: the scanner never called JVN, so no fetch failure was provoked")
+	}
+	if strings.Contains(logs, "JVN scan completed") {
+		t.Error("the scanner reported SUCCESS for a scan in which every component lookup " +
+			"failed; on the upload path ScanTracker records that as completed")
+	}
+	if !strings.Contains(logs, "JVN scan failed") {
+		t.Errorf("the scanner did not report failure; logs = %q", logs)
+	}
+}
