@@ -96,18 +96,56 @@ type NVDResponse struct {
 	// shape this now refuses. resultsPerPage is part of every documented NVD
 	// response envelope, so requiring it present costs nothing against a real
 	// endpoint.
-	ResultsPerPage  *int           `json:"resultsPerPage"`
-	StartIndex      int            `json:"startIndex"`
-	TotalResults    int            `json:"totalResults"`
-	Vulnerabilities []NVDVulnEntry `json:"vulnerabilities"`
+	ResultsPerPage *int `json:"resultsPerPage"`
+	StartIndex     int  `json:"startIndex"`
+	TotalResults   int  `json:"totalResults"`
+	// Vulnerabilities is a POINTER TO SLICE for the same reason
+	// ResultsPerPage is a pointer: an ABSENT array and a present empty one
+	// mean different things. `{"resultsPerPage":0}` used to pass validation
+	// and read as an authoritative "this component has no CVEs" (Codex M54 R5,
+	// Critical). A real NVD response always carries the array.
+	Vulnerabilities *[]NVDVulnEntry `json:"vulnerabilities"`
 }
 
-// validate rejects a 200 response whose body is not an NVD envelope. See the
-// note on ResultsPerPage for why absence, not value, is what is checked.
+// entries returns the decoded matches, or nil when the array was absent.
+// Callers must validate() first; this is only the nil-safe accessor.
+func (r *NVDResponse) entries() []NVDVulnEntry {
+	if r == nil || r.Vulnerabilities == nil {
+		return nil
+	}
+	return *r.Vulnerabilities
+}
+
+// validate rejects a 200 response that is not a well-formed NVD envelope.
+//
+// It checks exactly three things, and the comment says three because an
+// earlier draft claimed it "rejects a 200 response whose body is not an NVD
+// envelope" while testing only the first — stronger than the code, which is
+// the defect class this repo treats as first-class (Codex M54 R5, Critical):
+//
+//  1. resultsPerPage is PRESENT. `null` and `{}` decode into a zero-valued
+//     struct without error, so absence is what distinguishes "not an NVD
+//     response" from "no CVEs for this component".
+//  2. the vulnerabilities array is PRESENT (it may be empty — that is the
+//     genuine no-matches answer).
+//  3. the two agree: a body claiming totalResults > 0 while carrying no
+//     entries is internally inconsistent and must not be read as "no CVEs".
+//
+// What it still does NOT do is verify that the page is COMPLETE — see the
+// known truncation defect on searchByKeyword. A response with
+// totalResults=500 and 20 entries is well-formed and is accepted here.
 func (r *NVDResponse) validate() error {
 	if r == nil || r.ResultsPerPage == nil {
 		return fmt.Errorf("NVD response is missing the resultsPerPage envelope field; " +
 			"the endpoint returned 200 but the body is not an NVD CVE API response")
+	}
+	if r.Vulnerabilities == nil {
+		return fmt.Errorf("NVD response is missing the vulnerabilities array; " +
+			"the endpoint returned 200 but the body is not an NVD CVE API response")
+	}
+	if r.TotalResults > 0 && len(*r.Vulnerabilities) == 0 {
+		return fmt.Errorf("NVD response claims totalResults=%d but carries no entries; "+
+			"treating that as 'no vulnerabilities' would silently under-report", r.TotalResults)
 	}
 	return nil
 }
@@ -132,10 +170,27 @@ type NVDDesc struct {
 type NVDMetrics struct {
 	CvssMetricV31 []CvssMetric `json:"cvssMetricV31"`
 	CvssMetricV30 []CvssMetric `json:"cvssMetricV30"`
+	// CvssMetricV40 was missing entirely until M54 (Codex R5, High). A CVE
+	// that NVD scores ONLY with CVSS v4 — increasingly common — matched none
+	// of the fields above, so extractCvss fell through to (nil, "UNKNOWN") and
+	// the finding was stored with no score and no severity. `--fail-on high`
+	// cannot see a HIGH that is recorded as UNKNOWN.
+	CvssMetricV40 []CvssMetric `json:"cvssMetricV40"`
 	CvssMetricV2  []CvssMetric `json:"cvssMetricV2"`
 }
 
 type CvssMetric struct {
+	// Type is "Primary" or "Secondary". NVD returns several assessments per
+	// CVE from different sources and does NOT order them with Primary first
+	// (Codex M54 R5, Critical) — a Secondary submitter's lower score can be
+	// element zero. Selecting blindly by index therefore stored, for example,
+	// a Secondary 6.3/MEDIUM in place of NVD's own Primary 9.8/CRITICAL, and a
+	// scan whose only finding was that CVE let `--fail-on critical` exit 0.
+	// See preferPrimary.
+	Type string `json:"type"`
+	// Source is the assessing organisation (e.g. "nvd@nist.gov"). Carried for
+	// diagnosis; selection keys off Type.
+	Source   string   `json:"source"`
 	CvssData CvssData `json:"cvssData"`
 }
 
@@ -211,9 +266,12 @@ func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 //	durable rows: 0 of 800
 //
 // The connection is destroyed, the commit fails, and the WHOLE sweep is lost —
-// not just the two items that collided. Meanwhile ScanComponents still returns
-// nil, so "NVD scan completed" is logged in the same run as the error (the
-// asymmetry M50 pinned).
+// not just the two items that collided. At the time of that measurement
+// ScanComponents also returned nil, so "NVD scan completed" was logged in the
+// same run as the error (the asymmetry M50 pinned). That second half no longer
+// describes this function (Codex M54 R5, Low — the sentence outlived the code
+// twice): the R1 follow-up below counts refused writes and returns an error,
+// so the contradictory INFO line is not emitted for that case any more.
 //
 // dbMu closes that window: it is taken for the entire per-item persistence
 // section, so at most one goroutine is ever inside a statement on the shared
@@ -601,7 +659,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 		return nil, err
 	}
 
-	return s.convertToVulnerabilities(nvdResp.Vulnerabilities), nil
+	return s.convertToVulnerabilities(nvdResp.entries()), nil
 }
 
 func (s *NVDService) convertToVulnerabilities(entries []NVDVulnEntry) []model.Vulnerability {
@@ -679,19 +737,50 @@ func parseNVDTimestamp(v string) *time.Time {
 // NOT 0.0, which is a real "None" score — so un-scored CVEs are stored as
 // NULL and rendered as unscored instead of "safe".
 func extractCvss(metrics NVDMetrics) (*float64, string) {
-	if len(metrics.CvssMetricV31) > 0 {
-		m := metrics.CvssMetricV31[0].CvssData
+	if m, ok := preferPrimary(metrics.CvssMetricV31); ok {
 		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
 	}
-	if len(metrics.CvssMetricV30) > 0 {
-		m := metrics.CvssMetricV30[0].CvssData
+	if m, ok := preferPrimary(metrics.CvssMetricV30); ok {
 		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
 	}
-	if len(metrics.CvssMetricV2) > 0 {
-		m := metrics.CvssMetricV2[0].CvssData
+	// v4.0 sits BELOW v3.x on purpose (M54, Codex R5 High). Adding it fixes
+	// the defect — v4-only CVEs used to land as UNKNOWN — without changing the
+	// severity of any CVE that already has a v3 score. Whether v4 should
+	// OUTRANK v3 when a CVE carries both is a product decision (it would
+	// re-grade existing findings across the whole catalogue), not a bug fix,
+	// and is deliberately not taken here.
+	if m, ok := preferPrimary(metrics.CvssMetricV40); ok {
+		return &m.BaseScore, strings.ToUpper(m.BaseSeverity)
+	}
+	if m, ok := preferPrimary(metrics.CvssMetricV2); ok {
+		// v2 records carry no baseSeverity, so it is derived from the score.
 		return &m.BaseScore, scoreToCvss2Severity(m.BaseScore)
 	}
 	return nil, "UNKNOWN"
+}
+
+// preferPrimary picks the assessment to trust from one CVSS version's list.
+//
+// NVD attaches several assessments to a CVE — its own ("Primary") plus any
+// submitted by CNAs and third parties ("Secondary") — and the array order is
+// NOT significant. Taking element zero, which this code did until M54, meant
+// whichever organisation happened to be listed first decided the severity this
+// product reports. Codex R5 (Critical) found a live example where that demotes
+// an NVD Primary 9.8/CRITICAL to a Secondary 6.3/MEDIUM.
+//
+// Primary wins. With no Primary present, the first entry is used, which is the
+// previous behaviour and the only thing left to do — every remaining candidate
+// is a Secondary and none is privileged over another.
+func preferPrimary(metrics []CvssMetric) (CvssData, bool) {
+	if len(metrics) == 0 {
+		return CvssData{}, false
+	}
+	for _, m := range metrics {
+		if strings.EqualFold(m.Type, "Primary") {
+			return m.CvssData, true
+		}
+	}
+	return metrics[0].CvssData, true
 }
 
 func scoreToCvss2Severity(score float64) string {
@@ -746,11 +835,11 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 		return nil, err
 	}
 
-	if len(nvdResp.Vulnerabilities) == 0 {
+	if len(nvdResp.entries()) == 0 {
 		return nil, nil // CVE not found
 	}
 
-	vulns := s.convertToVulnerabilities(nvdResp.Vulnerabilities)
+	vulns := s.convertToVulnerabilities(nvdResp.entries())
 	if len(vulns) == 0 {
 		return nil, nil
 	}

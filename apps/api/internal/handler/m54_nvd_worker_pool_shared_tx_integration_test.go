@@ -272,10 +272,17 @@ func (n m54Namespace) expectedCVEIDs() []string {
 // It is written as a durability assertion rather than a "no error was logged"
 // assertion because the durable row count is the thing an operator actually
 // loses: before the fix this run persists 0 of 800 vulnerabilities, after it
-// 800 of 800. The log assertions are kept alongside as corroboration — in
-// particular that the ERROR line reporting the discarded commit is absent,
-// since the scanner's own "completed" INFO line is emitted either way and is
-// therefore worthless as a signal (M50).
+// 800 of 800. The log assertions are kept alongside as corroboration, chiefly
+// that the ERROR line reporting the discarded commit is absent.
+//
+// The success INFO line is deliberately the WEAKER of the two assertions.
+// Under M50 it was worthless — emitted whether or not anything survived — and
+// an earlier draft of this comment still said "emitted either way" (Codex M54
+// R5, Low). Since the R1 follow-up it does carry information for the
+// refused-write case, which is what
+// TestM54NVDScan_RefusedWritesAreReportedAsFailure asserts. It still carries
+// none for a partial FETCH failure, so "the ERROR line is absent" remains the
+// load-bearing log check here.
 func TestM54NVDWorkerPool_ConcurrentWorkersDoNotCorruptTheSharedTx(t *testing.T) {
 	appURL, migURL := m46b1HandlerEnv(t)
 	migDB := m46b1OpenOrSkip(t, migURL)

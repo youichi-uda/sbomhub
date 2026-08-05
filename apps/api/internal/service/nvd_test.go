@@ -47,11 +47,13 @@ func TestNVDResponse_Parsing(t *testing.T) {
 	if resp.TotalResults != 2 {
 		t.Errorf("expected TotalResults 2, got %d", resp.TotalResults)
 	}
-	if len(resp.Vulnerabilities) != 1 {
-		t.Fatalf("expected 1 vulnerability, got %d", len(resp.Vulnerabilities))
+	// entries() is the nil-safe accessor: Vulnerabilities is a pointer so an
+	// ABSENT array is distinguishable from a present empty one (M54, Codex R5).
+	if len(resp.entries()) != 1 {
+		t.Fatalf("expected 1 vulnerability, got %d", len(resp.entries()))
 	}
 
-	vuln := resp.Vulnerabilities[0]
+	vuln := resp.entries()[0]
 	if vuln.CVE.ID != "CVE-2023-1234" {
 		t.Errorf("expected CVE ID 'CVE-2023-1234', got '%s'", vuln.CVE.ID)
 	}
@@ -301,7 +303,7 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 			ResultsPerPage: nvdIntPtr(1),
 			StartIndex:     0,
 			TotalResults:   1,
-			Vulnerabilities: []NVDVulnEntry{
+			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{
 				{
 					CVE: NVDCVE{
 						ID:        "CVE-2023-9999",
@@ -316,7 +318,7 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 						},
 					},
 				},
-			},
+			}),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -359,7 +361,7 @@ func TestNVDService_SearchByCVEID_HTTPMock(t *testing.T) {
 		response := NVDResponse{
 			ResultsPerPage: nvdIntPtr(1),
 			TotalResults:   1,
-			Vulnerabilities: []NVDVulnEntry{
+			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{
 				{
 					CVE: NVDCVE{
 						ID:        "CVE-2021-44228",
@@ -374,7 +376,7 @@ func TestNVDService_SearchByCVEID_HTTPMock(t *testing.T) {
 						},
 					},
 				},
-			},
+			}),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
@@ -485,7 +487,7 @@ func TestNVDService_HTTPMock_EmptyResults(t *testing.T) {
 			ResultsPerPage:  nvdIntPtr(0),
 			StartIndex:      0,
 			TotalResults:    0,
-			Vulnerabilities: []NVDVulnEntry{},
+			Vulnerabilities: nvdEntriesPtr([]NVDVulnEntry{}),
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
@@ -868,5 +870,134 @@ func TestM54ParseNVDTimestamp_AcceptsTheFormatNVDActuallySends(t *testing.T) {
 		if g := got.UTC().Format(time.RFC3339); g != tc.want {
 			t.Errorf("parseNVDTimestamp(%q) = %s, want %s", tc.in, g, tc.want)
 		}
+	}
+}
+
+// nvdEntriesPtr is the addressable-literal helper for
+// NVDResponse.Vulnerabilities, which is a pointer to slice so that an ABSENT
+// array is distinguishable from a present empty one (M54, Codex R5 Critical).
+func nvdEntriesPtr(v []NVDVulnEntry) *[]NVDVulnEntry { return &v }
+
+// TestM54ExtractCvss_PrefersPrimaryOverSecondary pins the severity-selection
+// rule (Codex M54 R5, Critical).
+//
+// NVD attaches several CVSS assessments to one CVE — its own "Primary" plus
+// any "Secondary" ones from CNAs and third parties — and does NOT order them
+// with Primary first. extractCvss used to take element zero, so whichever
+// organisation happened to be listed first decided the severity this product
+// reports. The live example Codex cited demotes an NVD Primary 9.8/CRITICAL to
+// a Secondary 6.3/MEDIUM, which is enough for `--fail-on critical` to exit 0
+// on a scan whose only finding is that CVE.
+func TestM54ExtractCvss_PrefersPrimaryOverSecondary(t *testing.T) {
+	metrics := NVDMetrics{
+		CvssMetricV31: []CvssMetric{
+			// Secondary first, exactly as NVD can order them.
+			{Type: "Secondary", Source: "vuldb@vuldb.com",
+				CvssData: CvssData{BaseScore: 6.3, BaseSeverity: "MEDIUM"}},
+			{Type: "Primary", Source: "nvd@nist.gov",
+				CvssData: CvssData{BaseScore: 9.8, BaseSeverity: "CRITICAL"}},
+		},
+	}
+	score, severity := extractCvss(metrics)
+	if score == nil {
+		t.Fatal("no score extracted")
+	}
+	if *score != 9.8 || severity != "CRITICAL" {
+		t.Errorf("extractCvss = (%v, %q), want (9.8, \"CRITICAL\") — the Primary assessment is "+
+			"NVD's own and must win regardless of array position", *score, severity)
+	}
+}
+
+// TestM54ExtractCvss_FallsBackToFirstWhenNoPrimary keeps the previous
+// behaviour for the ordinary case where NVD published no Primary assessment:
+// nothing privileges one Secondary over another, so the first is used.
+func TestM54ExtractCvss_FallsBackToFirstWhenNoPrimary(t *testing.T) {
+	metrics := NVDMetrics{
+		CvssMetricV31: []CvssMetric{
+			{Type: "Secondary", CvssData: CvssData{BaseScore: 6.3, BaseSeverity: "MEDIUM"}},
+			{Type: "Secondary", CvssData: CvssData{BaseScore: 4.0, BaseSeverity: "MEDIUM"}},
+		},
+	}
+	score, severity := extractCvss(metrics)
+	if score == nil || *score != 6.3 || severity != "MEDIUM" {
+		t.Errorf("extractCvss = (%v, %q), want (6.3, \"MEDIUM\")", score, severity)
+	}
+}
+
+// TestM54ExtractCvss_V40OnlyIsNotUnknown pins the CVSS v4 gap (Codex M54 R5,
+// High). A CVE that NVD scores only with v4 matched no modelled field, so it
+// was stored with a nil score and severity "UNKNOWN" — invisible to
+// `--fail-on high`.
+func TestM54ExtractCvss_V40OnlyIsNotUnknown(t *testing.T) {
+	metrics := NVDMetrics{
+		CvssMetricV40: []CvssMetric{
+			{Type: "Primary", CvssData: CvssData{BaseScore: 7.0, BaseSeverity: "HIGH"}},
+		},
+	}
+	score, severity := extractCvss(metrics)
+	if score == nil {
+		t.Fatal("a v4-only CVE produced no score; it would be stored as UNKNOWN and " +
+			"`--fail-on high` could not see it")
+	}
+	if *score != 7.0 || severity != "HIGH" {
+		t.Errorf("extractCvss = (%v, %q), want (7.0, \"HIGH\")", *score, severity)
+	}
+}
+
+// TestM54ExtractCvss_V31StillOutranksV40 pins the deliberately conservative
+// ordering: adding v4 must not re-grade any CVE that already has a v3 score.
+// Whether v4 should outrank v3 is a product decision, not part of this fix.
+func TestM54ExtractCvss_V31StillOutranksV40(t *testing.T) {
+	metrics := NVDMetrics{
+		CvssMetricV31: []CvssMetric{
+			{Type: "Primary", CvssData: CvssData{BaseScore: 9.8, BaseSeverity: "CRITICAL"}},
+		},
+		CvssMetricV40: []CvssMetric{
+			{Type: "Primary", CvssData: CvssData{BaseScore: 7.0, BaseSeverity: "HIGH"}},
+		},
+	}
+	score, severity := extractCvss(metrics)
+	if score == nil || *score != 9.8 || severity != "CRITICAL" {
+		t.Errorf("extractCvss = (%v, %q), want the v3.1 score (9.8, \"CRITICAL\")", score, severity)
+	}
+}
+
+// TestM54NVDResponse_ValidateChecksTheWholeEnvelope pins what validate really
+// rejects. The R4 cut checked only resultsPerPage while its comment claimed it
+// rejected any non-envelope body — a comment stronger than the code, which is
+// the defect class this repo treats as first-class (Codex M54 R5, Critical).
+func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"null", `null`, true},
+		{"empty object", `{}`, true},
+		{"resultsPerPage only, no array", `{"resultsPerPage":0}`, true},
+		{"claims results but carries none", `{"resultsPerPage":1,"totalResults":1}`, true},
+		{"claims results, empty array", `{"resultsPerPage":0,"totalResults":5,"vulnerabilities":[]}`, true},
+		{"genuine no-matches answer", `{"resultsPerPage":0,"totalResults":0,"vulnerabilities":[]}`, false},
+		{"normal answer", `{"resultsPerPage":1,"totalResults":1,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+		// A truncated page is well-formed. validate does NOT close the
+		// resultsPerPage truncation gap documented on searchByKeyword, and
+		// must not be read as if it did.
+		{"truncated page is accepted", `{"resultsPerPage":1,"totalResults":500,"vulnerabilities":[{"cve":{"id":"CVE-2021-44228"}}]}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r NVDResponse
+			if err := json.Unmarshal([]byte(tc.body), &r); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := r.validate()
+			if tc.wantErr && err == nil {
+				t.Errorf("validate() accepted %s; an unusable body must not read as "+
+					"'this component has no CVEs'", tc.body)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validate() rejected %s: %v", tc.body, err)
+			}
+		})
 	}
 }
