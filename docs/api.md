@@ -539,14 +539,24 @@ reset at the deploy that introduced budgets.
 
 ### Headers
 
-Every non-throttled API-key response carries:
+Every non-throttled API-key response carries two headers whose values come from
+**the budget that route is on**, not from a fixed number. Read `X-RateLimit-Limit`
+rather than assuming 60 — the same key on a `poll` route sees `300`:
 
 ```
+# first request of a minute, on a `standard` route
 X-RateLimit-Limit: 60
 X-RateLimit-Remaining: 59
+
+# first request of a minute, on a `poll` route (scan-status, the list surfaces)
+X-RateLimit-Limit: 300
+X-RateLimit-Remaining: 299
 ```
 
-A throttled one answers `429` with `Retry-After` in **seconds**:
+`Remaining` counts down within that budget's bucket for the rest of the window.
+
+A throttled response answers `429` with `Retry-After` in **seconds** (the
+budget's window):
 
 ```
 HTTP/1.1 429 Too Many Requests

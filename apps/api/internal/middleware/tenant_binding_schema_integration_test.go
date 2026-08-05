@@ -380,9 +380,10 @@ func TestM52PPreTenantTxRulesNameOnlyReachableTables(t *testing.T) {
 					"when it issues its statements. (%d policies on the relation.)\n"+
 					"Either give the middleware a transaction of its own that binds before it "+
 					"reads — and re-classify it PreTenantTxBindsWhatItReaches with a BindsVia "+
-					"and a ProvedBy drive — or, if the READ is not what it does here (an "+
-					"INSERT-only path, a view read as its owner, a foreign table), record that "+
-					"in the rule's RLSEnabledButReachable entry for %q.\n"+
+					"and a ProvedBy drive — or, if the READ is not what it does here (it only "+
+					"INSERTs, or it reads through a view whose owner can see what the runtime "+
+					"role cannot), record that in the rule's RLSEnabledButReachable entry for "+
+					"%q.\n"+
 					"Reason recorded for the current classification: %s",
 					key, table, st.Kind, table, v.ProbeErr, v.Policies, table, rule.Why)
 				continue

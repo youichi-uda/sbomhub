@@ -390,7 +390,8 @@ func m52CheckEnabledButReachable(t *testing.T, table, key string, listed []strin
 				"entry silences the live unbound-read probe — the only thing here that "+
 				"measures rather than asserts — so it is the last place a blank is "+
 				"acceptable. Write why the runtime role can still reach it: an INSERT-only "+
-				"path, a view read as its owner, a foreign table.", table, key, name)
+				"path, or a view read as its owner. (A foreign table needs no entry — the "+
+				"check exempts relkind 'f' without consulting this map.)", table, key, name)
 		}
 		if !inList[name] {
 			t.Errorf("%s: %s declares %q RLSEnabledButReachable, but does not list %q among "+

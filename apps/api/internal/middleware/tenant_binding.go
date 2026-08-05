@@ -253,18 +253,26 @@ type TenantBindingRule struct {
 	// It exists because row security is per-COMMAND and per-ROLE, and because
 	// an ordinary view evaluates policies as its OWNER unless it is
 	// security_invoker. The schema check reads with a plain SELECT as the
-	// runtime role; three shapes make that SELECT fail while the route is
+	// runtime role; two shapes make that SELECT fail while the route is
 	// correct:
 	//
 	//	the route only INSERTs into the relation, and the new policy set pairs
 	//	`FOR INSERT ... WITH CHECK (true)` with a tenant-gated FOR SELECT;
 	//	the route reads through a view whose owner sees rows the runtime role
-	//	cannot;
-	//	the relation is a foreign table, which carries no local RLS at all.
+	//	cannot.
 	//
-	// Rather than let any of those redden a required check, the check names
-	// them in its failure message and passes when the relation is listed here
-	// with a reason. Empty today — no rule names a relation with row security.
+	// A FOREIGN TABLE is a third shape that would fail a probe, but it does not
+	// reach this map: PostgreSQL has no way to put row security on one, so the
+	// check exempts relkind 'f' by construction — and does not probe it at all,
+	// because probing would reach the remote server and a wrapper that is
+	// unreachable or slow would fail this gate for a reason that has nothing to
+	// do with tenant binding. Listing a foreign table here is therefore
+	// unnecessary rather than wrong; the check would have passed without it.
+	//
+	// Rather than let either of the two shapes redden a required check, the
+	// check names them in its failure message and passes when the relation is
+	// listed here with a reason. Empty today — no rule names a relation with
+	// row security.
 	RLSEnabledButReachable map[string]string
 }
 
@@ -626,7 +634,9 @@ type PreTenantTxRule struct {
 	// RLSEnabledButReachable is the escape hatch for a relation in
 	// RLSExemptTables that has gained row security and is nonetheless fine for
 	// this middleware, keyed by relation name and carrying the reason. Same
-	// three shapes as the route table's field of the same name. Empty today.
+	// two shapes as the route table's field of the same name — and, like it,
+	// NOT the place to record a foreign table, which the check exempts by
+	// construction without consulting this map. Empty today.
 	RLSEnabledButReachable map[string]string
 }
 
