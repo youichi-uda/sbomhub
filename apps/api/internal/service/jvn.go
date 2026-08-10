@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +22,54 @@ import (
 
 const (
 	jvnAPIBaseURL = "https://jvndb.jvn.jp/myjvn"
+
+	// jvnMaxCountItem is MyJVN's OWN per-request ceiling, not a choice:
+	// getVulnOverviewList documents maxCountItem as 1..50 with 50 as the
+	// upper bound, and the FAQ states 「一度のアクセスで51件以上の取得はできません」.
+	// The scanner used to send 10, which threw away four fifths of every
+	// request's allowance for nothing.
+	//   https://jvndb.jvn.jp/apis/getVulnOverviewList_api_hnd.html
+	//   https://jvndb.jvn.jp/apis/myjvnapi_faq.html  (Q2-2)
+	jvnMaxCountItem = 50
+
+	// jvnMaxPagesPerComponent caps how deep one component's match set is
+	// followed: 10 pages == 500 advisories.
+	//
+	// Measured against the live API on 2026-08-11 with all three date
+	// ranges set to "n" (totalRes for one keyword):
+	//
+	//	lodash 11 | log4j 21 | jackson-databind 77 | nginx 233
+	//	curl 243  | openssl 459 | express 482 | linux 17622
+	//
+	// 500 covers every one of those outright except "linux", whose 17,622
+	// matches would cost 353 requests — roughly three minutes of MyJVN
+	// traffic for a SINGLE component, inside the transaction the upload
+	// scan holds open. Exhaustive paging is therefore not on the table;
+	// what is on the table is following the match set to a stated budget
+	// and SAYING SO when the budget binds, which is what jvnKeywordResult
+	// .Truncated and JVNScanReport.Err carry.
+	jvnMaxPagesPerComponent = 10
+
+	// jvnExtraPageBudgetPerScan is a pool shared by every component in one
+	// sweep, drawn on only by pages 2..N.
+	//
+	// The FIRST page of every component is always fetched and never draws
+	// on the pool. That is what keeps this change strictly better than
+	// what it replaces: a 2,000-component SBOM still issues its 2,000
+	// lookups, so no component loses coverage to a component that happened
+	// to match thousands of advisories. The pool bounds the ADDED traffic
+	// at a constant that does not grow with the SBOM — worst case ~500
+	// extra requests, ~7 minutes at the pacing below — instead of at
+	// components x 10.
+	jvnExtraPageBudgetPerScan = 500
+
+	// jvnRequestDelay paces MyJVN requests. The FAQ asks for roughly 2-3
+	// requests per second for short collections and gentler pacing for
+	// long ones (「短時間（数分）での収集であれば秒間あたり、2～3アクセス程度」),
+	// and warns that excessive traffic can get the source address blocked.
+	// 500ms == 2/s, the rate this scanner already used between components;
+	// page requests are paced identically rather than bursting.
+	jvnRequestDelay = 500 * time.Millisecond
 )
 
 // JVNService handles JVN (Japan Vulnerability Notes) API integration
@@ -33,6 +83,9 @@ type JVNService struct {
 	// offline short-circuits every HTTP fetch entry point when true (M40 Wave B
 	// air-gapped degrade mode).
 	offline bool
+	// requestDelay paces outbound MyJVN requests (jvnRequestDelay by
+	// default). Tests set it to zero; nothing else writes it.
+	requestDelay time.Duration
 }
 
 // NewJVNService creates a new JVN service.
@@ -50,8 +103,9 @@ func NewJVNService(vulnRepo *repository.VulnerabilityRepository, componentRepo *
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL: baseURL,
-		offline: offline,
+		baseURL:      baseURL,
+		offline:      offline,
+		requestDelay: jvnRequestDelay,
 	}
 }
 
@@ -72,16 +126,31 @@ type JVNRSSFeed struct {
 
 // JVNStatus is the MyJVN <status:Status> element. retCd "0" is success;
 // anything else is an application-level error carrying errCd / errMsg.
+//
+// The three paging attributes mean different things and only one of them says
+// how long the page is (measured against the live API, 2026-08-11):
+//
+//   - totalRes    "応答エントリ総数" — how many entries match the FILTER, across
+//     all pages. openssl with no date range answers 459.
+//   - totalResRet "応答エントリ数" — how many entries THIS response holds.
+//   - firstRes    "応答エントリ開始位置" — which entry this page starts at. It
+//     echoes the requested startItem when the page is non-empty (measured:
+//     startItem=457 answers firstRes="457") and is 1 when it is empty.
+//
+// retMax is NOT the page length: it is the API's own 50-entry ceiling and
+// answers "50" even when maxCountItem=3 was requested (measured). Using it to
+// validate a page would validate nothing.
 type JVNStatus struct {
-	Version  string `xml:"version,attr"`
-	Method   string `xml:"method,attr"`
-	RetCd    string `xml:"retCd,attr"`
-	RetMax   string `xml:"retMax,attr"`
-	ErrCd    string `xml:"errCd,attr"`
-	ErrMsg   string `xml:"errMsg,attr"`
-	TotalRes string `xml:"totalRes,attr"`
-	FirstRes string `xml:"firstRes,attr"`
-	Feed     string `xml:"feed,attr"`
+	Version     string `xml:"version,attr"`
+	Method      string `xml:"method,attr"`
+	RetCd       string `xml:"retCd,attr"`
+	RetMax      string `xml:"retMax,attr"`
+	ErrCd       string `xml:"errCd,attr"`
+	ErrMsg      string `xml:"errMsg,attr"`
+	TotalRes    string `xml:"totalRes,attr"`
+	TotalResRet string `xml:"totalResRet,attr"`
+	FirstRes    string `xml:"firstRes,attr"`
+	Feed        string `xml:"feed,attr"`
 }
 
 type JVNChannel struct {
@@ -122,60 +191,194 @@ type JVNCVSS struct {
 	Vector   string `xml:"vector,attr"`
 }
 
-// ScanComponents scans components for JVN vulnerabilities
+// JVNScanReport is what one ScanComponents sweep did, as counts.
+//
+// It exists because the counts have to be REACHABLE BY THE CALLER, not just
+// logged (M55). Before this, `failed` was incremented, written to a slog line
+// and discarded; a caller holding the `error` return could distinguish "every
+// lookup failed" from "fine" and nothing else, so a sweep in which 9 of 10
+// components could not be reached was indistinguishable from a clean one.
+//
+// Whether a partial failure should FAIL a scan is still a product decision and
+// is deliberately not taken here — Err() keeps the existing policy. Counting
+// it is not a policy decision, and is what this type fixes.
+type JVNScanReport struct {
+	// Components is how many components the SBOM held.
+	Components int
+	// Scanned is how many were looked up without error.
+	Scanned int
+	// Failed is how many lookups returned an error — the partial-fetch
+	// failure count that used to exist only in a log line.
+	Failed int
+	// SkippedNoName is how many components carried no usable name and were
+	// therefore not queried at all.
+	SkippedNoName int
+	// Unscanned is how many components were never reached because the
+	// sweep was cancelled part-way.
+	Unscanned int
+	// RefusedWrites is how many matches the database declined to record.
+	RefusedWrites int
+	// TruncatedComponents is how many components matched more advisories
+	// in MyJVN than the fetch budget retrieved.
+	TruncatedComponents int
+	// Requests is how many MyJVN requests the sweep issued.
+	Requests int
+	// EntriesRetrieved / EntriesAvailable are the advisory counts behind
+	// TruncatedComponents: what was pulled, versus what MyJVN said existed.
+	EntriesRetrieved int
+	EntriesAvailable int
+	// BudgetExhausted records that the shared extra-page pool ran out, so
+	// truncation here is our own budget rather than MyJVN's size.
+	BudgetExhausted bool
+}
+
+// Summary renders the report as a single log/diagnostic string.
+func (r JVNScanReport) Summary() string {
+	return fmt.Sprintf(
+		"components=%d scanned=%d failed=%d skipped_no_name=%d unscanned=%d refused_writes=%d "+
+			"truncated_components=%d entries=%d/%d requests=%d budget_exhausted=%t",
+		r.Components, r.Scanned, r.Failed, r.SkippedNoName, r.Unscanned, r.RefusedWrites,
+		r.TruncatedComponents, r.EntriesRetrieved, r.EntriesAvailable, r.Requests, r.BudgetExhausted)
+}
+
+// Err maps the report onto the single channel JVNService owns to the caller.
+//
+// The caller is SbomHandler.runScan, which turns a non-nil error into
+// ScanTracker.MarkFailed — documented as "the upload succeeded, but scan
+// results are incomplete". Every condition below is exactly that, so they all
+// escalate through it:
+//
+//   - a refused WRITE (M54 R10) — a match was obtained and not recorded;
+//   - EVERY lookup failing (M54 R8) — the sweep has no coverage at all;
+//   - the sweep being cancelled part-way — components were never looked up;
+//   - TRUNCATION (M55) — MyJVN holds more advisories for a component than the
+//     budget retrieved.
+//
+// A PARTIAL fetch failure deliberately stays a success, unchanged: picking the
+// threshold at which N of M unreachable components invalidates a scan is a
+// product decision. It is counted in the report either way.
+func (r JVNScanReport) Err() error {
+	if r.RefusedWrites > 0 {
+		return fmt.Errorf("jvn: database refused %d vulnerability write(s); scan results are incomplete",
+			r.RefusedWrites)
+	}
+	if r.Scanned == 0 && r.Failed > 0 {
+		return fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage", r.Failed)
+	}
+	if r.Unscanned > 0 {
+		return fmt.Errorf("jvn: the scan stopped with %d of %d component(s) never looked up; "+
+			"scan results are incomplete", r.Unscanned, r.Components)
+	}
+	if r.TruncatedComponents > 0 {
+		return fmt.Errorf("jvn: %d of %d component(s) match more advisories than the fetch budget "+
+			"retrieves (%d of %d entries pulled, budget_exhausted=%t); scan results are incomplete",
+			r.TruncatedComponents, r.Components, r.EntriesRetrieved, r.EntriesAvailable, r.BudgetExhausted)
+	}
+	return nil
+}
+
+// ScanComponents scans components for JVN vulnerabilities.
+//
+// It is the compatibility shell over ScanComponentsReport for callers that
+// only want the pass/fail verdict. Callers that need the counts — how many
+// component lookups failed, how many match sets were truncated — must use
+// ScanComponentsReport; those numbers cannot be recovered from this error.
 func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
+	_, err := s.ScanComponentsReport(ctx, sbomID)
+	return err
+}
+
+// ScanComponentsReport scans every component of the SBOM against MyJVN and
+// returns both the counts and the verdict. The report is populated even when
+// the error is non-nil, except when the component list itself could not be
+// read.
+func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID) (JVNScanReport, error) {
+	var rep JVNScanReport
+
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "jvn")
-		return nil
+		return rep, nil
 	}
 
 	components, err := s.componentRepo.ListBySbom(ctx, sbomID)
 	if err != nil {
-		return fmt.Errorf("failed to get components: %w", err)
+		return rep, fmt.Errorf("failed to get components: %w", err)
 	}
+	rep.Components = len(components)
 
-	scanned, failed, refusedWrites := 0, 0, 0
-	for _, comp := range components {
-		refused, err := s.scanComponent(ctx, &comp)
-		refusedWrites += refused
+	// The pool is per-SWEEP, so one pathological component cannot spend the
+	// whole scan's allowance and every component still gets its first page.
+	extraPages := jvnExtraPageBudgetPerScan
+
+	for i := range components {
+		comp := &components[i]
+
+		if strings.TrimSpace(comp.Name) == "" {
+			// Not merely useless: with the date default removed a blank
+			// keyword matches the ENTIRE JVN corpus, so querying it would
+			// burn the page budget on an answer that means nothing.
+			slog.Warn("skipping JVN lookup for a component with no name", "component_id", comp.ID)
+			rep.SkippedNoName++
+			continue
+		}
+
+		out, err := s.scanComponent(ctx, comp, &extraPages)
+		rep.RefusedWrites += out.RefusedWrites
+		rep.Requests += out.Fetch.Requests
+		rep.EntriesRetrieved += out.Fetch.Retrieved
+		rep.EntriesAvailable += out.Fetch.TotalRes
+		if out.Fetch.Truncated {
+			rep.TruncatedComponents++
+			slog.Warn("JVN match set truncated",
+				"component", comp.Name,
+				"retrieved", out.Fetch.Retrieved,
+				"available", out.Fetch.TotalRes,
+				"requests", out.Fetch.Requests,
+				"budget_exhausted", out.Fetch.BudgetExhausted)
+		}
+		if out.Fetch.BudgetExhausted {
+			rep.BudgetExhausted = true
+		}
 		if err != nil {
 			slog.Error("Failed to scan component for JVN vulnerabilities",
 				"component", comp.Name,
 				"error", err)
-			failed++
+			rep.Failed++
+			if ctx.Err() != nil {
+				// A cancelled context makes every remaining lookup fail
+				// for a reason that has nothing to do with the component.
+				// Counting those as "checked and clean" is how a killed
+				// scan used to finish as a successful one.
+				rep.Unscanned = len(components) - i - 1
+				break
+			}
 			continue
 		}
-		scanned++
-		// Rate limiting - JVN API is more lenient but still be polite
-		time.Sleep(500 * time.Millisecond)
+		rep.Scanned++
+
+		if err := s.pause(ctx); err != nil {
+			rep.Unscanned = len(components) - i - 1
+			break
+		}
 	}
 
-	// TOTAL failure has zero coverage and must not report success (M54, Codex
-	// R8 Critical). This mirrors NVDService.processComponentsParallel: with
-	// `?sources=jvn`, every request could return 500 and the caller still
-	// logged "JVN scan completed" — and on the upload path that is what
-	// ScanTracker records, so the CLI reads "0 vulnerabilities" off an outage
-	// and `sbomhub scan --fail-on critical` exits 0.
-	//
-	// PARTIAL failure stays success here for the same reason it does in the
-	// NVD scanner: choosing how many components may fail before a scan is
-	// worthless is a product-policy decision, not a bug fix. See the note on
-	// SbomHandler.runScan.
-	// A refused WRITE means the database declined to record a match we had
-	// already obtained — the same escalation NVDService makes, for the same
-	// reason (M54, Codex R10 Critical).
-	if refusedWrites > 0 {
-		return fmt.Errorf("jvn: database refused %d vulnerability write(s); scan results are incomplete",
-			refusedWrites)
-	}
+	slog.Info("JVN component scan completed", "report", rep.Summary())
+	return rep, rep.Err()
+}
 
-	if scanned == 0 && failed > 0 {
-		return fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage", failed)
+// pause applies the inter-request delay, abandoning it if the context ends.
+func (s *JVNService) pause(ctx context.Context) error {
+	if s.requestDelay <= 0 {
+		return ctx.Err()
 	}
-
-	slog.Info("JVN component scan completed",
-		"scanned", scanned, "failed", failed, "refused_writes", refusedWrites)
-	return nil
+	timer := time.NewTimer(s.requestDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // scanComponent looks one component up in JVN and records what it finds.
@@ -186,12 +389,14 @@ func (s *JVNService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 // swallowed and scanComponent always returned nil, so a component whose matches
 // could not be recorded was counted as successfully scanned and "JVN scan
 // completed" was emitted for a sweep that persisted nothing.
-func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) (int, error) {
+func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component, extraPages *int) (jvnComponentOutcome, error) {
 	// Search JVN by product name
-	vulns, err := s.searchByKeyword(ctx, comp.Name)
+	res, err := s.searchKeyword(ctx, comp.Name, extraPages)
+	out := jvnComponentOutcome{Fetch: res}
 	if err != nil {
-		return 0, err
+		return out, err
 	}
+	vulns := res.Vulns
 
 	refused := 0
 	for _, vuln := range vulns {
@@ -224,59 +429,140 @@ func (s *JVNService) scanComponent(ctx context.Context, comp *model.Component) (
 		}
 	}
 
-	return refused, nil
+	out.RefusedWrites = refused
+	return out, nil
 }
 
-// searchByKeyword asks MyJVN for advisories matching a component name.
+// jvnComponentOutcome is what one component's scan did: what was fetched, and
+// how much of it the database refused.
+type jvnComponentOutcome struct {
+	Fetch         jvnKeywordResult
+	RefusedWrites int
+}
+
+// jvnKeywordResult is one component's keyword lookup: what came back, and how
+// much of what MyJVN holds it represents.
 //
-// # Two known completeness defects, NOT fixed in M54
+// Retrieved and TotalRes are ENTRY counts from the wire (totalResRet summed
+// over the pages, and totalRes), not len(Vulns): items MyJVN returned but this
+// scanner could not identify are still entries MyJVN answered with, and
+// counting them as "not retrieved" would report truncation that did not
+// happen.
+type jvnKeywordResult struct {
+	Vulns     []model.Vulnerability
+	TotalRes  int
+	Retrieved int
+	Requests  int
+	// Truncated is Retrieved < TotalRes: MyJVN holds advisories for this
+	// keyword that this scan did not look at. It must reach the caller —
+	// silently keeping the first N is what M55 exists to stop.
+	Truncated bool
+	// BudgetExhausted distinguishes "our shared page pool ran out" from
+	// "this component alone exceeded the per-component cap".
+	BudgetExhausted bool
+}
+
+// searchKeyword asks MyJVN for the advisories matching a component name and
+// follows the result set to a stated budget.
 //
-// Both are the JVN twins of the NVD resultsPerPage truncation documented on
-// NVDService.searchByKeyword, and both are deferred for the same reason: the
-// repair is a fetch-policy decision, not a loop, and getting it wrong makes
-// every scan of a common library unusably slow against a rate-limited API.
-// Raised by Codex in M54 R9 (both Critical) and reported upward rather than
-// left undocumented.
+// # What this sends, and why (M55; primary source, not recall)
 //
-//  1. NO DATE RANGE IS SENT. MyJVN defaults rangeDatePublic /
-//     rangeDatePublished / rangeDateFirstPublished to the past WEEK when they
-//     are absent, so this only ever sees advisories from the last seven days.
-//     Anything older is invisible to the scan, which still reports success.
-//     Sending `n` (no range) is one line — but it turns every component lookup
-//     into a full-history query, which interacts directly with defect 2.
-//  2. THE RESULT SET IS TRUNCATED AT TEN. maxCountItem=10 is requested,
-//     startItem is never sent, and the response's totalRes is ignored. An
-//     eleventh match is dropped silently, and with defect 1 repaired there
-//     would routinely be thousands.
+// Every parameter below was checked against the getVulnOverviewList
+// specification and against live responses on 2026-08-11:
 //
-// Fixing 1 without 2 makes under-reporting worse, not better: a full-history
-// query returns far more matches, all but the first ten of which are then
-// discarded. They have to be decided together, with a paging and rate-limit
-// budget, which is why neither is taken here.
+//		https://jvndb.jvn.jp/apis/getVulnOverviewList_api_hnd.html
+//		https://jvndb.jvn.jp/apis/myjvnapi_faq.html
 //
-//  3. THE PAGE IS NOT IDENTIFIED. MyJVN sends firstRes (which page this is)
-//     and totalResRet (how many entries it holds); neither is checked, so a
-//     later page is accepted with the first one missing, and a page that is
-//     short of its own totalResRet is accepted as complete (Codex M54 R10,
-//     Critical). This is the JVN twin of the NVD startIndex / resultsPerPage
-//     checks in NVDResponse.validate and is the one of the three that is NOT a
-//     policy question — it is deferred only because it belongs with the paging
-//     work above, whose response handling it would otherwise be written twice.
+//	  - rangeDatePublic / rangeDatePublished / rangeDateFirstPublished = "n".
+//	    All three DEFAULT TO "w" — the past seven days including today. Omitting
+//	    them, which is what this code did, meant the scanner could only ever see
+//	    advisories published or updated in the last week: measured against a
+//	    canned corpus modelled on the live totalRes figures, a component whose
+//	    keyword matches 459 advisories (openssl) contributed 1, and one matching
+//	    17,622 (linux) contributed 2. "n" is the value the MyJVN FAQ itself uses
+//	    for an unrestricted query.
+//	  - maxCountItem = 50, the documented maximum ("1～50", and 「一度のアクセスで
+//	    51件以上の取得はできません」). The previous value of 10 discarded four
+//	    fifths of each request's allowance for no saving.
+//	  - startItem, 1-based, advanced by the number of entries each page actually
+//	    returned rather than by the page size we asked for.
 //
-// Until then, a completed JVN scan means "some page of the first ten matches
-// from the last seven days, per component" — not "every advisory affecting
-// this component".
-func (s *JVNService) searchByKeyword(ctx context.Context, keyword string) ([]model.Vulnerability, error) {
+// # What it does NOT do
+//
+// It does not page exhaustively. jvnMaxPagesPerComponent and the shared
+// jvnExtraPageBudgetPerScan pool bound the traffic; when either binds, or when
+// MyJVN simply holds more than the cap, Truncated is set and the sweep reports
+// the scan incomplete. The alternative — following every match set — costs 353
+// requests for a single "linux" component (measured), inside the transaction
+// the upload scan holds open.
+func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPages *int) (jvnKeywordResult, error) {
+	var res jvnKeywordResult
+
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "jvn")
-		return nil, nil
+		return res, nil
+	}
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		// Against the previous one-week window a blank keyword was merely
+		// wasteful. Against full history it matches the whole corpus.
+		return res, nil
 	}
 
+	startItem := 1
+	for page := 0; page < jvnMaxPagesPerComponent; page++ {
+		if page > 0 {
+			if extraPages != nil {
+				if *extraPages <= 0 {
+					res.BudgetExhausted = true
+					break
+				}
+				*extraPages--
+			}
+			if err := s.pause(ctx); err != nil {
+				return res, err
+			}
+		}
+
+		p, err := s.fetchPage(ctx, keyword, startItem)
+		if err != nil {
+			// A page we cannot trust makes the whole component's answer
+			// untrustworthy: the entries we already hold are a prefix of
+			// an answer whose length we can no longer establish.
+			res.Requests++
+			return res, err
+		}
+		res.Requests++
+		res.TotalRes = p.totalRes
+		res.Retrieved += p.totalResRet
+		res.Vulns = append(res.Vulns, p.vulns...)
+
+		if p.totalResRet == 0 {
+			break
+		}
+		startItem += p.totalResRet
+		if startItem > p.totalRes {
+			break
+		}
+	}
+
+	res.Truncated = res.Retrieved < res.TotalRes
+	return res, nil
+}
+
+// fetchPage issues one getVulnOverviewList request and validates that the
+// answer is the page that was asked for.
+func (s *JVNService) fetchPage(ctx context.Context, keyword string, startItem int) (*jvnPage, error) {
 	params := url.Values{}
 	params.Set("method", "getVulnOverviewList")
 	params.Set("feed", "hnd")
 	params.Set("keyword", keyword)
-	params.Set("maxCountItem", "10")
+	params.Set("maxCountItem", strconv.Itoa(jvnMaxCountItem))
+	params.Set("startItem", strconv.Itoa(startItem))
+	// See searchKeyword: all three default to the past week.
+	params.Set("rangeDatePublic", "n")
+	params.Set("rangeDatePublished", "n")
+	params.Set("rangeDateFirstPublished", "n")
 	params.Set("lang", "ja")
 
 	reqURL := fmt.Sprintf("%s?%s", s.baseURL, params.Encode())
@@ -301,13 +587,56 @@ func (s *JVNService) searchByKeyword(ctx context.Context, keyword string) ([]mod
 		return nil, err
 	}
 
-	return s.parseJVNResponse(body)
+	return s.parseJVNPage(body, startItem, jvnMaxCountItem)
 }
 
-func (s *JVNService) parseJVNResponse(data []byte) ([]model.Vulnerability, error) {
+// jvnPage is one validated getVulnOverviewList response.
+type jvnPage struct {
+	vulns       []model.Vulnerability
+	totalRes    int
+	totalResRet int
+	firstRes    int
+}
+
+// parseJVNPage decodes one getVulnOverviewList response and refuses anything
+// that cannot be identified as the page that was requested.
+//
+// # Page identity (M55; the JVN twin of NVDResponse.validate)
+//
+// Neither firstRes nor totalResRet was read before, so two different broken
+// answers were accepted as complete ones (measured against a canned mirror:
+// a response carrying firstRes=999 while claiming totalResRet=10 and holding 2
+// items returned err=nil and 2 advisories):
+//
+//   - a mirror that ignores startItem and re-serves page 1 turns the paging
+//     loop into a loop over the same 50 entries while the rest are recorded as
+//     "seen";
+//   - a page that is short of its own totalResRet loses the missing entries
+//     with no trace.
+//
+// firstRes is only meaningful when the page is non-empty: MyJVN answers
+// firstRes="1" for a zero-match response regardless of the startItem asked for
+// (measured), so the equality check is conditioned on totalResRet > 0.
+//
+// # The zero-match answer is not an empty document
+//
+// Measured: a keyword with no matches answers totalRes="0" totalResRet="0"
+// firstRes="1" AND one <item> titled 「MyJVN　該当する脆弱性対策情報はありません。」.
+// A naive len(items) == totalResRet check would reject every empty answer, so
+// totalResRet == 0 is handled explicitly — and is still required to hold no
+// IDENTIFIABLE advisory, so a mirror cannot hide entries behind a zero count.
+func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (*jvnPage, error) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
 	var feed JVNRSSFeed
-	if err := xml.Unmarshal(data, &feed); err != nil {
+	if err := dec.Decode(&feed); err != nil {
 		return nil, fmt.Errorf("failed to parse JVN response: %w", err)
+	}
+	// Nothing may follow the feed. Same reasoning as decodeNVDResponse:
+	// xml.Unmarshal decodes the first element and stops, so a proxy could
+	// prefix a valid empty envelope to anything at all and have the scan
+	// accept it as an authoritative "this component has no advisories".
+	if err := jvnRequireCleanEOF(dec); err != nil {
+		return nil, err
 	}
 
 	// MyJVN signals application-level failure through retCd, usually with HTTP
@@ -327,15 +656,96 @@ func (s *JVNService) parseJVNResponse(data []byte) ([]model.Vulnerability, error
 			rc, feed.Status.ErrCd, feed.Status.ErrMsg)
 	}
 
-	var vulns []model.Vulnerability
+	totalRes, err := jvnCount(feed.Status.TotalRes, "totalRes")
+	if err != nil {
+		return nil, err
+	}
+	totalResRet, err := jvnCount(feed.Status.TotalResRet, "totalResRet")
+	if err != nil {
+		return nil, err
+	}
+	firstRes, err := jvnCount(feed.Status.FirstRes, "firstRes")
+	if err != nil {
+		return nil, err
+	}
+
+	if totalResRet > maxCountItem {
+		return nil, fmt.Errorf("JVN response totalResRet=%d exceeds the requested maxCountItem=%d; "+
+			"the answer is not to the question that was asked", totalResRet, maxCountItem)
+	}
+
+	page := &jvnPage{totalRes: totalRes, totalResRet: totalResRet, firstRes: firstRes}
+
+	if totalResRet == 0 {
+		for _, item := range feed.Items {
+			if jvnItemIdentity(item) != "" {
+				return nil, fmt.Errorf("JVN response declares totalResRet=0 but carries advisory %q; "+
+					"the page contradicts its own entry count", jvnItemIdentity(item))
+			}
+		}
+		return page, nil
+	}
+
+	if firstRes != wantFirstRes {
+		return nil, fmt.Errorf("JVN response firstRes=%d but startItem=%d was requested; "+
+			"this is not the page that was asked for", firstRes, wantFirstRes)
+	}
+	if len(feed.Items) != totalResRet {
+		return nil, fmt.Errorf("JVN response declares totalResRet=%d but carries %d entries; "+
+			"the page is incomplete", totalResRet, len(feed.Items))
+	}
+
 	for _, item := range feed.Items {
 		vuln := s.convertJVNItemToVulnerability(item)
 		if vuln != nil {
-			vulns = append(vulns, *vuln)
+			page.vulns = append(page.vulns, *vuln)
 		}
 	}
 
-	return vulns, nil
+	return page, nil
+}
+
+// jvnRequireCleanEOF consumes what is left after the root element and rejects
+// anything that is not insignificant markup.
+func jvnRequireCleanEOF(dec *xml.Decoder) error {
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("JVN response body did not end cleanly: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(t)) != "" {
+				return errJVNTrailingContent
+			}
+		case xml.Comment, xml.ProcInst, xml.Directive:
+			// Insignificant.
+		default:
+			return errJVNTrailingContent
+		}
+	}
+}
+
+var errJVNTrailingContent = errors.New("JVN response has trailing content after the feed; " +
+	"the endpoint returned 200 but the body is not a single MyJVN getVulnOverviewList response")
+
+// jvnCount parses a MyJVN Status count attribute. An ABSENT attribute is an
+// error, not a zero: totalResRet in particular is the only thing that says how
+// long a page should be, so treating its absence as 0 would silently restore
+// the short-page hole this check exists to close.
+func jvnCount(raw, name string) (int, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return 0, fmt.Errorf("JVN response has no %s attribute; the page cannot be identified", name)
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("JVN response has a malformed %s attribute %q", name, raw)
+	}
+	return n, nil
 }
 
 func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerability {
@@ -354,13 +764,7 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	// CVE ids are canonicalised for the same reason NVD's are (M54 R8, High):
 	// cve_id is UNIQUE and compared exactly, so "cve-..." and "CVE-..." would
 	// otherwise become two rows for one vulnerability.
-	cveID := ""
-	if canonical, err := validation.ValidateCVEID(s.extractCVEID(item)); err == nil {
-		cveID = canonical
-	} else if id := strings.TrimSpace(item.Identifier); id != "" {
-		// JVN advisories that carry no CVE are keyed by their JVNDB id.
-		cveID = id
-	}
+	cveID := jvnItemIdentity(item)
 	if cveID == "" {
 		slog.Warn("dropping JVN item with no CVE reference and no identifier",
 			"title", item.Title, "link", item.Link)
@@ -410,7 +814,24 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	}
 }
 
-// extractCVEID finds the CVE this advisory is about, if it names one.
+// jvnItemIdentity returns the id an advisory would be catalogued under, or ""
+// when it carries none.
+//
+// It is shared by convertJVNItemToVulnerability and by parseJVNPage's
+// zero-entry check so that "does this item name an advisory?" has ONE answer.
+// The MyJVN placeholder that a zero-match response carries — an <item> titled
+// 「該当する脆弱性対策情報はありません。」 with no sec:identifier and no
+// sec:references — is exactly an item with no identity, which is why the empty
+// answer needs no special case beyond its entry count.
+func jvnItemIdentity(item JVNItem) string {
+	if canonical, err := validation.ValidateCVEID(extractJVNCVEID(item)); err == nil {
+		return canonical
+	}
+	// JVN advisories that carry no CVE are keyed by their JVNDB id.
+	return strings.TrimSpace(item.Identifier)
+}
+
+// extractJVNCVEID finds the CVE this advisory is about, if it names one.
 //
 // The prefix test is case-INSENSITIVE (M54). It was `HasPrefix(ref.ID, "CVE-")`
 // before, so a reference written "cve-2021-44228" was not recognised as a CVE
@@ -421,7 +842,7 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 //
 // Callers must still validate: this returns the RAW matched string, which is
 // only a candidate.
-func (s *JVNService) extractCVEID(item JVNItem) string {
+func extractJVNCVEID(item JVNItem) string {
 	for _, ref := range item.References {
 		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ref.ID)), "CVE-") {
 			return ref.ID
@@ -451,49 +872,27 @@ func (s *JVNService) mapCVSSSeverity(severity string) string {
 	}
 }
 
-// GetVulnerabilitiesByJVNID fetches detailed info for a specific JVNDB ID
-func (s *JVNService) GetVulnerabilitiesByJVNID(ctx context.Context, jvnID string) (*model.Vulnerability, error) {
-	if s.offline {
-		slog.Info("scan skipped: offline mode", "source", "jvn")
-		return nil, nil
-	}
-
-	params := url.Values{}
-	params.Set("method", "getVulnDetailInfo")
-	params.Set("feed", "hnd")
-	params.Set("vulnId", jvnID)
-	params.Set("lang", "ja")
-
-	reqURL := fmt.Sprintf("%s?%s", s.baseURL, params.Encode())
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("JVN API returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	vulns, err := s.parseJVNResponse(body)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(vulns) == 0 {
-		return nil, fmt.Errorf("vulnerability not found: %s", jvnID)
-	}
-
-	return &vulns[0], nil
-}
+// GetVulnerabilitiesByJVNID was REMOVED in M55.
+//
+// It called getVulnDetailInfo and handed the body to the getVulnOverviewList
+// parser. Those are different document types, which is not a subtlety —
+// measured against the live API on 2026-08-11 (vulnId=JVNDB-2021-012182), the
+// detail response root element is <VULDEF-Document> with <Vulinfo> children,
+// while the overview parser is bound to the <rdf:RDF> feed root. Unmarshalling
+// one as the other cannot succeed, so this entry point could never have
+// returned a vulnerability against MyJVN; every call would have failed at the
+// first line of parsing.
+//
+// It had no production callers (checked across apps/api, apps/web, packages
+// and the CLI: the only references were its own definition and one offline
+// test), so nothing regressed by deleting it, and nothing depended on the
+// behaviour it did not have.
+//
+// Deleting beat both alternatives. Keeping it documented would leave a public
+// method that reads as a working JVNDB detail lookup and is not one — the next
+// caller to reach for it inherits the bug. Fixing it would mean writing and
+// maintaining a VULDEF 3.2 parser, with its own page-identity handling, for a
+// feature nothing asks for. If a detail lookup is wanted later it should be
+// written against https://jvndb.jvn.jp/schema/vuldef_3.2.xsd from scratch, not
+// revived from here. TestM55JVN_DetailInfoIsNotAnRSSFeed keeps the measured
+// incompatibility executable so that decision is made with the fact in hand.

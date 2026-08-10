@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" ?>   
+<rdf:RDF 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xmlns="http://purl.org/rss/1.0/" 
+xmlns:rss="http://purl.org/rss/1.0/" 
+xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" 
+xmlns:dc="http://purl.org/dc/elements/1.1/" 
+xmlns:dcterms="http://purl.org/dc/terms/" 
+xmlns:sec="http://jvn.jp/rss/mod_sec/3.0/" 
+xmlns:marking="http://data-marking.mitre.org/Marking-1" 
+xmlns:tlpMarking="http://data-marking.mitre.org/extensions/MarkingStructure#TLP-1" 
+xmlns:status="http://jvndb.jvn.jp/myjvn/Status" 
+xsi:schemaLocation="http://purl.org/rss/1.0/ https://jvndb.jvn.jp/schema/jvnrss_3.2.xsd http://jvndb.jvn.jp/myjvn/Status https://jvndb.jvn.jp/schema/status_3.3.xsd" 
+xml:lang="ja">
+    <channel rdf:about="https://jvndb.jvn.jp/apis/myjvn">
+      <title>JVNDB　脆弱性対策情報</title>
+      <link>https://jvndb.jvn.jp/apis/myjvn</link>
+      <description>JVNDB　脆弱性対策情報</description>
+      <dc:date>2026-08-11T00:57:33+09:00</dc:date>
+      <dcterms:issued/>
+      <dcterms:modified>2026-08-11T00:57:33+09:00</dcterms:modified>
+      <sec:handling>
+        <marking:Marking>
+          <marking:Marking_Structure xsi:type="tlpMarking:TLPMarkingStructureType" marking_model_name="TLP" marking_model_ref="http://www.us-cert.gov/tlp/" color="WHITE"/>
+        </marking:Marking>
+      </sec:handling>
+      <items>
+        <rdf:Seq>
+          <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-027713.html"/>
+          <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-026249.html"/>
+          <rdf:li rdf:resource="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-026093.html"/>
+        </rdf:Seq>
+      </items>
+    </channel>
+    <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-027713.html">
+      <title>OpenSSLのOCSPレスポンス検証におけるクライアント側のメモリリークの脆弱性（CVE-2026-54876）</title>
+      <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-027713.html</link>
+      <description>OpenSSL ProjectからOpenSSL Security Advisory [5th August 2026]が公開されました。  &lt;ul&gt;&lt;li&gt;&lt;a href='https://openssl-library.org/news/secadv/20260805.txt' target='_blank'&gt;OpenSSL Security Advisory [5th August 2026]&lt;/a&gt;&lt;/li&gt;&lt;/ul&gt;</description>
+      <dc:creator>Information-technology Promotion Agency, Japan</dc:creator>
+      <sec:identifier>JVNDB-2026-027713</sec:identifier>
+      <sec:references source="CVE" id="CVE-2026-54876">https://www.cve.org/CVERecord?id=CVE-2026-54876</sec:references>
+      <sec:references source="JVN" id="JVNVU#92139835">https://jvn.jp/vu/JVNVU92139835/index.html</sec:references>
+      <sec:cpe version="2.2" vendor="OpenSSL Project" product="OpenSSL">cpe:/a:openssl:openssl</sec:cpe>
+      <dc:date>2026-08-10T16:08:21+09:00</dc:date>
+      <dcterms:issued>2026-08-10T16:08:21+09:00</dcterms:issued>
+      <dcterms:modified>2026-08-10T16:08:21+09:00</dcterms:modified>
+    </item>
+    <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-026249.html">
+      <title>libssh等の複数ベンダの製品におけるROMコードの修正能力の欠如に関する脆弱性</title>
+      <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-026249.html</link>
+      <description>libsshに脆弱性が発見されました。OpenSSLバックエンドを使用したビルドにおけるAES-GCMの最終化チェックが不正に行われるため、整合性保護が事実上失われています。その結果、通信経路上の攻撃者が検出されることなく平文を改ざんできる可能性があります。 </description>
+      <dc:creator>Information-technology Promotion Agency, Japan</dc:creator>
+      <sec:identifier>JVNDB-2026-026249</sec:identifier>
+      <sec:references source="CVE" id="CVE-2026-59847">https://www.cve.org/CVERecord?id=CVE-2026-59847</sec:references>
+      <sec:references source="NVD" id="CVE-2026-59847">https://nvd.nist.gov/vuln/detail/CVE-2026-59847</sec:references>
+      <sec:references id="CWE-1310" title="ROMコードの修正能力の欠如(CWE-1310)">https://cwe.mitre.org/data/definitions/1310.html</sec:references>
+      <sec:cpe version="2.2" vendor="libssh" product="libssh">cpe:/a:libssh:libssh</sec:cpe>
+      <sec:cpe version="2.2" vendor="レッドハット" product="Red Hat Enterprise Linux">cpe:/o:redhat:enterprise_linux</sec:cpe>
+      <sec:cpe version="2.2" vendor="レッドハット" product="Red Hat Hardened Images">cpe:/a:redhat:hardened_images</sec:cpe>
+      <sec:cvss score="7.5" severity="High" vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N" version="3.0" type="Base"/>
+      <dc:date>2026-07-31T15:02:57+09:00</dc:date>
+      <dcterms:issued>2026-07-31T15:02:57+09:00</dcterms:issued>
+      <dcterms:modified>2026-07-31T15:02:57+09:00</dcterms:modified>
+    </item>
+    <item rdf:about="https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-026093.html">
+      <title>libssh2.orgのlibssh2における複数の脆弱性</title>
+      <link>https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-026093.html</link>
+      <description>libssh2 バージョン 1.11.1 まで（a2ed82d コミットで修正済み）には、src/openssl.c の ssh2_cipher_crypt() 関数に、事前認証の整数アンダーフロー脆弱性が存在しています。これは、悪意のある SSH サーバーがハンドシェイク中に AES-GCM 暗号をネゴシエートすることで、任意のクライアントとの接続をクラッシュさせることを可能にします。攻撃者は、ブロックサイズから aadlen と認証タグ長を引く式のアンダーフローを悪用し、境界外読み取りおよび SIZE_MAX に近い長さの引数での memcpy 呼び出しを誘発し、認証が行われる前に即座にプロセスをクラッシュさせることができます。 </description>
+      <dc:creator>Information-technology Promotion Agency, Japan</dc:creator>
+      <sec:identifier>JVNDB-2026-026093</sec:identifier>
+      <sec:references source="CVE" id="CVE-2026-66033">https://www.cve.org/CVERecord?id=CVE-2026-66033</sec:references>
+      <sec:references source="NVD" id="CVE-2026-66033">https://nvd.nist.gov/vuln/detail/CVE-2026-66033</sec:references>
+      <sec:references source="関連文書" id="openssl: fix potential OOB read/write with AES-GCM in `ssh2_cipher_crypt()` by vszakats  Pull Request #2401  libssh2/libssh2  GitHub">https://github.com/libssh2/libssh2/pull/2401</sec:references>
+      <sec:references source="関連文書" id="openssl: fix potential OOB read/write with AES-GCM in `ssh2_cipher_cr…  libssh2/libssh2@a2ed82d  GitHub">https://github.com/libssh2/libssh2/commit/a2ed82d40964bbc0d64cd717aa0a5a892117d2e6</sec:references>
+      <sec:references id="CWE-125" title="境界外読み取り(CWE-125)">https://cwe.mitre.org/data/definitions/125.html</sec:references>
+      <sec:references id="CWE-191" title="整数アンダーフロー(CWE-191)">https://cwe.mitre.org/data/definitions/191.html</sec:references>
+      <sec:cpe version="2.2" vendor="libssh2.org" product="libssh2">cpe:/a:libssh2:libssh2</sec:cpe>
+      <sec:cvss score="7.5" severity="High" vector="CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H" version="3.0" type="Base"/>
+      <dc:date>2026-07-31T14:54:27+09:00</dc:date>
+      <dcterms:issued>2026-07-31T14:54:27+09:00</dcterms:issued>
+      <dcterms:modified>2026-07-31T14:54:27+09:00</dcterms:modified>
+    </item>
+    <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="459" totalResRet="3" firstRes="1" feed="hnd" keyword="openssl" maxCountItem="3" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
+  </rdf:RDF>
+

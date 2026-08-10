@@ -68,14 +68,15 @@ func TestJVNService_SearchByKeyword_HTTPMock(t *testing.T) {
 	defer server.Close()
 
 	svc := NewJVNService(nil, nil, server.URL, false)
-	vulns, err := svc.searchByKeyword(context.Background(), "libfoo")
+	svc.requestDelay = 0
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
 	if err != nil {
-		t.Fatalf("searchByKeyword returned error: %v", err)
+		t.Fatalf("searchKeyword returned error: %v", err)
 	}
-	if len(vulns) != 1 {
-		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
+	if len(res.Vulns) != 1 {
+		t.Fatalf("expected 1 vulnerability, got %d", len(res.Vulns))
 	}
-	v := vulns[0]
+	v := res.Vulns[0]
 	if v.CVEID != "CVE-2023-1234" {
 		t.Errorf("expected CVE-2023-1234, got %s", v.CVEID)
 	}
@@ -92,20 +93,23 @@ func TestJVNService_SearchByKeyword_HTTPMock(t *testing.T) {
 
 func TestJVNService_ParseJVNResponse(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)
-	vulns, err := svc.parseJVNResponse([]byte(cannedJVNFeed))
+	page, err := svc.parseJVNPage([]byte(cannedJVNFeed), 1, jvnMaxCountItem)
 	if err != nil {
-		t.Fatalf("parseJVNResponse returned error: %v", err)
+		t.Fatalf("parseJVNPage returned error: %v", err)
 	}
-	if len(vulns) != 1 {
-		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
+	if len(page.vulns) != 1 {
+		t.Fatalf("expected 1 vulnerability, got %d", len(page.vulns))
 	}
-	if vulns[0].CVEID != "CVE-2023-1234" {
-		t.Errorf("expected CVE-2023-1234, got %s", vulns[0].CVEID)
+	if page.vulns[0].CVEID != "CVE-2023-1234" {
+		t.Errorf("expected CVE-2023-1234, got %s", page.vulns[0].CVEID)
 	}
 }
 
-// TestJVNService_Offline_NoHTTP asserts offline mode short-circuits searchByKeyword
-// and GetVulnerabilitiesByJVNID to empty results with no network hit.
+// TestJVNService_Offline_NoHTTP asserts offline mode short-circuits the
+// keyword search to empty results with no network hit.
+//
+// M55: the GetVulnerabilitiesByJVNID half of this test went with the method
+// itself — see the note in jvn.go for why it was removed rather than fixed.
 func TestJVNService_Offline_NoHTTP(t *testing.T) {
 	hit := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,21 +119,20 @@ func TestJVNService_Offline_NoHTTP(t *testing.T) {
 	defer server.Close()
 
 	svc := NewJVNService(nil, nil, server.URL, true)
+	svc.requestDelay = 0
 
-	vulns, err := svc.searchByKeyword(context.Background(), "libfoo")
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
 	if err != nil {
-		t.Fatalf("offline searchByKeyword should not error, got %v", err)
+		t.Fatalf("offline searchKeyword should not error, got %v", err)
 	}
-	if len(vulns) != 0 {
-		t.Errorf("offline searchByKeyword should return empty, got %d", len(vulns))
+	if len(res.Vulns) != 0 {
+		t.Errorf("offline searchKeyword should return empty, got %d", len(res.Vulns))
 	}
-
-	vuln, err := svc.GetVulnerabilitiesByJVNID(context.Background(), "JVNDB-2023-000001")
-	if err != nil {
-		t.Fatalf("offline GetVulnerabilitiesByJVNID should not error, got %v", err)
+	if res.Requests != 0 {
+		t.Errorf("offline searchKeyword issued %d requests", res.Requests)
 	}
-	if vuln != nil {
-		t.Errorf("offline GetVulnerabilitiesByJVNID should return nil, got %v", vuln)
+	if res.Truncated {
+		t.Error("offline mode must not report truncation; it reports nothing looked at")
 	}
 
 	if hit {
@@ -154,7 +157,7 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 			name: "retCd=1 application error",
 			body: `<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
-  <status:Status version="3.3" method="getVulnOverviewList" retCd="1" retMax="10" errCd="MYJVN-ERR-101" errMsg="parameter error" totalRes="0" firstRes="0"/>
+  <status:Status version="3.3" method="getVulnOverviewList" retCd="1" retMax="50" errCd="MYJVN-ERR-101" errMsg="parameter error" totalRes="0" totalResRet="0" firstRes="1"/>
 </rdf:RDF>`,
 			wantErr: true,
 		},
@@ -165,10 +168,17 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// M55: the paging attributes are the ones the live API
+			// actually sends for a zero-match answer (measured:
+			// totalRes="0" totalResRet="0" firstRes="1"). The earlier
+			// fixture omitted totalResRet and wrote firstRes="0", i.e. it
+			// did not carry what the real contract carries — the same
+			// objection the M54 note above raises about the Status
+			// element itself.
 			name: "retCd=0 with no matches is a legitimate empty answer",
 			body: `<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
-  <status:Status version="3.3" method="getVulnOverviewList" retCd="0" retMax="10" errCd="" errMsg="" totalRes="0" firstRes="0"/>
+  <status:Status version="3.3" method="getVulnOverviewList" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1"/>
 </rdf:RDF>`,
 			wantErr: false,
 		},
@@ -176,7 +186,7 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := svc.parseJVNResponse([]byte(tc.body))
+			_, err := svc.parseJVNPage([]byte(tc.body), 1, jvnMaxCountItem)
 			if tc.wantErr && err == nil {
 				t.Error("a MyJVN application error produced no error; the component would be " +
 					"counted as successfully checked with zero findings")
