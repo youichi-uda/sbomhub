@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	_ "github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/model"
 )
 
 func m55MetaCVEID() string {
@@ -351,5 +353,230 @@ func TestM55UpdateMetadata_NilCVSSScoreClearsTheScore(t *testing.T) {
 	}
 	if score.Valid {
 		t.Errorf("cvss_score = %v, want NULL — 0.0 is a real score and must not be used as the 'no score' sentinel", score.Float64)
+	}
+}
+
+// m55HoldRowLock opens a transaction, applies `stmt` to the row (taking its
+// lock), and returns a func that commits. The caller races UpdateMetadata
+// against the held lock.
+func m55HoldRowLock(t *testing.T, db *sql.DB, stmt, cveID string) func() {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	if _, err := tx.Exec(stmt, cveID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("lock holder statement: %v", err)
+	}
+	committed := false
+	t.Cleanup(func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	})
+	return func() {
+		if err := tx.Commit(); err != nil {
+			t.Errorf("lock holder commit: %v", err)
+		}
+		committed = true
+	}
+}
+
+// TestM55UpdateMetadata_StaleWaiterLosesToACommittedNewerWrite is the
+// concurrency half of the staleness guard, and it is the half a single-
+// connection test cannot see (Codex M55 R1, High).
+//
+// The guard reads source_modified_at and then updates the row. Under READ
+// COMMITTED those are two different views of the row unless the read TAKES THE
+// LOCK: a writer that arrives second reads the pre-image, blocks on the row
+// lock held by a fresher writer, and — when it unblocks — applies a decision
+// made against a value that is no longer there. Measured against the
+// unlocked CTE: an NVD record modified 2026-02 overwrote one modified 2026-07
+// that had committed while it waited.
+//
+// This is not exotic for this job. The catalogue is global: the scanner's
+// Create races cve_sync, and two overlapping ticks race each other.
+func TestM55UpdateMetadata_StaleWaiterLosesToACommittedNewerWrite(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &old)
+
+	// A fresher record lands and holds its lock.
+	commit := m55HoldRowLock(t, migDB, `
+		UPDATE vulnerabilities
+		SET severity = 'CRITICAL', description = 'fresher record',
+		    source_modified_at = '2026-07-01T00:00:00Z'
+		WHERE cve_id = $1`, cveID)
+
+	// A staler record arrives while that lock is held.
+	february := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	type result struct {
+		outcome MetadataWriteOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		o, err := NewVulnerabilityRepository(appDB).
+			UpdateMetadata(context.Background(), m55Meta(cveID, "MEDIUM", 5.0, "staler record", &february))
+		done <- result{o, err}
+	}()
+
+	// Give the waiter time to reach the lock, then let the fresher write win.
+	time.Sleep(300 * time.Millisecond)
+	commit()
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("UpdateMetadata: %v", got.err)
+	}
+	if got.outcome != MetadataRefusedStale {
+		t.Errorf("outcome = %v, want %v", got.outcome, MetadataRefusedStale)
+	}
+
+	var severity, description string
+	var mod sql.NullTime
+	if err := migDB.QueryRow(`SELECT severity, description, source_modified_at FROM vulnerabilities WHERE cve_id = $1`, cveID).
+		Scan(&severity, &description, &mod); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if severity != "CRITICAL" || description != "fresher record" {
+		t.Errorf("row = %s / %q, want CRITICAL / \"fresher record\": the guard compared against the pre-image it "+
+			"read before waiting for the lock, so a stale record overwrote a newer one that committed in between",
+			severity, description)
+	}
+	if !mod.Valid || !mod.Time.UTC().Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("source_modified_at = %v, want 2026-07-01", mod.Time.UTC())
+	}
+}
+
+// TestM55UpdateMetadata_ConcurrentDeleteReportsRowAbsent: "the row was there
+// when I looked and gone when I wrote" must not be reported as a refused stale
+// write. The caller acts on the difference — a stale refusal is a no-op it
+// ignores, an absent row means the id it is about to link against is gone.
+func TestM55UpdateMetadata_ConcurrentDeleteReportsRowAbsent(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &old)
+
+	commit := m55HoldRowLock(t, migDB, `DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID)
+
+	july := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	type result struct {
+		outcome MetadataWriteOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		o, err := NewVulnerabilityRepository(appDB).
+			UpdateMetadata(context.Background(), m55Meta(cveID, "CRITICAL", 9.8, "after the delete", &july))
+		done <- result{o, err}
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	commit()
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("UpdateMetadata: %v", got.err)
+	}
+	if got.outcome != MetadataRowAbsent {
+		t.Errorf("outcome = %v, want %v — a row deleted under the write is absent, not stale", got.outcome, MetadataRowAbsent)
+	}
+}
+
+// TestM55UpdateMetadata_UnknownAgeIsRefusedAgainstALegacyNULLRow closes the
+// other half of the unknown-age rule (Codex M55 R1, High). The legacy-NULL
+// exception exists so a row with no recorded upstream time can be refreshed
+// ONCE and then arbitrated normally — it is not a licence for an undateable
+// record to write. A record we cannot date is not evidence about anything, and
+// accepting it here would let a malformed feed page downgrade legacy rows
+// repeatedly while never establishing an arbiter that would stop it.
+func TestM55UpdateMetadata_UnknownAgeIsRefusedAgainstALegacyNULLRow(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	cveID := m55SeedCatalogueRow(t, migDB, "NVD", nil)
+
+	outcome, err := NewVulnerabilityRepository(appDB).
+		UpdateMetadata(context.Background(), m55Meta(cveID, "LOW", 1.0, "undateable record", nil))
+	if err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+	if outcome != MetadataRefusedStale {
+		t.Errorf("outcome = %v, want %v", outcome, MetadataRefusedStale)
+	}
+	var severity string
+	if err := migDB.QueryRow(`SELECT severity FROM vulnerabilities WHERE cve_id = $1`, cveID).Scan(&severity); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if severity != "LOW" {
+		t.Errorf("severity = %q; the seeded row is LOW, so this assertion is only meaningful with a differing value", severity)
+	}
+	var description string
+	if err := migDB.QueryRow(`SELECT description FROM vulnerabilities WHERE cve_id = $1`, cveID).Scan(&description); err != nil {
+		t.Fatalf("read back description: %v", err)
+	}
+	if description != "stored description" {
+		t.Errorf("description = %q, want the stored one — an undateable record must change nothing", description)
+	}
+}
+
+// TestM55Create_ConflictDoesNotRewriteMetadata pins the other half of the
+// ownership decision (Codex M55 R1, High). Create is the SCANNER's entry
+// point, and the scanner is a pure linker: its conflict branch must adopt the
+// stored id (the M54 post-condition) WITHOUT rewriting metadata the catalogue
+// owner wrote. Before this, a scan racing cve_sync could put its own — older,
+// or JVN-sourced — description and severity onto a row that had just been
+// refreshed, and because Create does not touch source_modified_at the
+// staleness guard would then defend the corrupted values as fresh.
+func TestM55Create_ConflictDoesNotRewriteMetadata(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	july := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &july)
+	var storedID uuid.UUID
+	if err := migDB.QueryRow(`SELECT id FROM vulnerabilities WHERE cve_id = $1`, cveID).Scan(&storedID); err != nil {
+		t.Fatalf("read stored id: %v", err)
+	}
+	// Make the owner-written row unmistakable.
+	if _, err := migDB.Exec(`UPDATE vulnerabilities SET severity='CRITICAL', cvss_score=9.8, description='owner wrote this' WHERE cve_id=$1`, cveID); err != nil {
+		t.Fatalf("arrange: %v", err)
+	}
+
+	scannerScore := 1.0
+	pub := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
+	v := &model.Vulnerability{
+		ID: uuid.New(), CVEID: cveID, Description: "scanner wrote this",
+		Severity: "LOW", CVSSScore: &scannerScore, Source: "JVN",
+		PublishedAt: &pub, UpdatedAt: &now,
+	}
+	if err := NewVulnerabilityRepository(appDB).Create(context.Background(), v); err != nil {
+		t.Fatalf("Create on an existing cve_id must still succeed: %v", err)
+	}
+	// M54 post-condition survives.
+	if v.ID != storedID {
+		t.Errorf("after Create, v.ID = %s, want the stored id %s", v.ID, storedID)
+	}
+
+	var severity, description, source string
+	var score sql.NullFloat64
+	if err := migDB.QueryRow(`SELECT severity, description, source, cvss_score FROM vulnerabilities WHERE cve_id = $1`, cveID).
+		Scan(&severity, &description, &source, &score); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if severity != "CRITICAL" || description != "owner wrote this" || source != "NVD" || !score.Valid || score.Float64 != 9.8 {
+		t.Errorf("row after a racing Create = %s / %q / %s / %v, want the owner's CRITICAL / \"owner wrote this\" / NVD / 9.8: "+
+			"the scanner is a linker and must not rewrite catalogue metadata", severity, description, source, score.Float64)
 	}
 }

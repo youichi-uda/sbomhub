@@ -357,6 +357,25 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// is in the catalogue, never insert it if it is not (inserting would pull
 	// NVD's entire modification window into the table), and skip the match
 	// phase either way — there is nothing to match with.
+	//
+	// WHAT THIS STILL DOES NOT REACH (Codex M55 R1, High; honest limitation).
+	// This job is a delta reader: it only ever sees CVEs upstream modified
+	// AFTER the stored watermark. A catalogue row whose CVE was last modified
+	// BEFORE the watermark is never offered here, however stale its stored
+	// metadata is. That covers every row the per-component scanners created
+	// while this gate was closed, and every legacy row (migration 066 leaves
+	// their source_modified_at NULL and performs no backfill — the column
+	// makes such rows IDENTIFIABLE, `WHERE source_modified_at IS NULL`, which
+	// is what a reconciliation pass would need).
+	//
+	// Closing it means fetching those CVEs BY ID rather than by window: a
+	// bounded, rate-limited backfill pass over the NULL rows. That is a
+	// fetch-policy decision with a real budget attached — the same class as
+	// the paging/truncation policies deliberately deferred on the scanner side
+	// — and it is deferred here for the same reason, not overlooked. Until it
+	// exists, a stored row is refreshed the next time NVD modifies its CVE,
+	// which for an actively re-scored CVE is exactly when it matters and for a
+	// settled one may be never.
 	vulnIndex := make(map[string]cveVulnEntry, len(cves))
 	var refreshFailures, upsertFailures int
 	for _, cve := range cves {
@@ -376,14 +395,21 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		}
 		vulnIndex[cve.ID] = cveVulnEntry{id: vulnID, isNew: isNew}
 	}
-	// A failed write here is silent staleness, not a lost link: the CVE keeps
-	// whatever severity it already had and the next tick will not retry it,
-	// because updateLastSyncTime below advances the window regardless (see
-	// its call site). Surfacing the count is what makes that visible to an
-	// operator; changing the window policy is a fetch-policy decision and is
-	// deliberately not made here.
-	if refreshFailures > 0 || upsertFailures > 0 {
-		slog.Error("CVE sync: some catalogue writes failed; those CVEs keep their previously stored metadata until upstream modifies them again",
+	// A failed catalogue write is silent staleness: the CVE keeps whatever
+	// severity it already had, and because the window only ever moves forward
+	// there is no second chance until upstream modifies the CVE again — which
+	// for a CVE whose analysis has settled may be never (Codex M55 R1, High).
+	//
+	// So the window is NOT advanced when any catalogue write failed. The whole
+	// window is re-fetched next tick and the failures are retried. That is the
+	// same policy the NVD-fetch failure above already applies ("the last-sync
+	// time is deliberately NOT advanced ... so the NVD window is retried in
+	// full next tick"), for the same reason; it costs a repeat of one window's
+	// pagination against a rate-limited API, which is the cheaper side of the
+	// trade against serving a stale CRITICAL.
+	catalogueWritesFailed := refreshFailures > 0 || upsertFailures > 0
+	if catalogueWritesFailed {
+		slog.Error("CVE sync: some catalogue writes failed; holding the sync watermark so the window is retried next tick",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures, "cves_fetched", len(cves))
 	}
 
@@ -413,8 +439,12 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// full NVD feed) — see syncOSVVulnFuncs for the fetch-count bounds.
 	j.syncOSVVulnFuncs(ctx, tenantIDs)
 
-	// Update last sync time
-	if err := j.updateLastSyncTime(ctx, startTime); err != nil {
+	// Update last sync time — unless a catalogue write failed, in which case
+	// holding it is what buys the retry (see above).
+	if catalogueWritesFailed {
+		slog.Warn("CVE sync: sync watermark held at its previous value because catalogue writes failed",
+			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures)
+	} else if err := j.updateLastSyncTime(ctx, startTime); err != nil {
 		slog.Warn("failed to update last sync time", "error", err)
 	}
 
@@ -423,6 +453,7 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		"cves_fetched", len(cves),
 		"cves_matched", matchedCount,
 		"new_vulnerabilities", newVulnCount,
+		"catalogue_write_failures", refreshFailures+upsertFailures,
 		"duration_ms", duration.Milliseconds(),
 	)
 
@@ -1373,26 +1404,44 @@ func catalogueMetadata(cve CVEInfo) repository.VulnerabilityMetadata {
 	}
 }
 
-// refreshCatalogueMetadata updates a CVE that is ALREADY in the catalogue and
-// never inserts one. It is the path for CVEs the match phase cannot use (no
-// CPE keywords) — see the call site in Run.
+// catalogueCtx strips any transaction from ctx before a global catalogue
+// write.
 //
-// A MetadataRowAbsent outcome is control flow, not failure: NVD's modification
-// window is the whole feed, so the overwhelming majority of what arrives here
-// is a CVE nobody's SBOM mentions.
+// `vulnerabilities` is GLOBAL. A global write enlisted in a tenant's
+// transaction is discarded when that tenant's tx rolls back, and poisons that
+// tx when the write itself is refused (M54's abort cascade) — which is the
+// whole reason this job, and not the per-tenant scanner in service/nvd.go,
+// owns these columns. In production Run is started from a tx-free context, so
+// this is a no-op; enforcing it here makes the invariant structural instead of
+// a caller convention that any future call site could break without noticing
+// (Codex M55 R1, Medium). database.WithoutTx returns ctx unchanged when there
+// is nothing attached.
+func catalogueCtx(ctx context.Context) context.Context {
+	return database.WithoutTx(ctx)
+}
+
+// writeCatalogueMetadata applies one fetched record to an EXISTING catalogue
+// row. It never inserts.
 //
-// It runs on ctx as handed to Run, which carries no transaction, so
-// repository.UpdateMetadata falls through database.Querier to the pooled
-// *sql.DB in autocommit. That is required, not incidental: `vulnerabilities`
-// is the GLOBAL catalogue, and a global write enlisted in a tenant's
-// transaction is discarded when that tenant's tx rolls back and poisons the
-// tx when the write itself is refused (M54's abort cascade). It is also why
-// this job, and not the per-tenant scanner in service/nvd.go, owns these
-// columns.
-func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) error {
-	outcome, err := j.vulnRepo.UpdateMetadata(ctx, catalogueMetadata(cve))
+// A record with no usable upstream timestamp is not offered at all. NVD always
+// publishes `lastModified`; its absence here means the field did not parse, and
+// a record we cannot date cannot be arbitrated against the one already stored
+// (repository.UpdateMetadata refuses it defensively, but reporting that as a
+// "stale" skip would be a lie about why). It is NOT counted as a failure
+// either: re-fetching the window would return the same malformed record, so
+// treating it as retryable debt would hold the sync watermark forever
+// (Codex M55 R1, High).
+//
+// Returns true when the caller may treat the row as up to date for this tick.
+func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (repository.MetadataWriteOutcome, error) {
+	if cve.ModifiedAt.IsZero() {
+		slog.Warn("CVE sync: NVD record carries no usable lastModified; not written",
+			"cve_id", cve.ID)
+		return repository.MetadataRefusedStale, nil
+	}
+	outcome, err := j.vulnRepo.UpdateMetadata(catalogueCtx(ctx), catalogueMetadata(cve))
 	if err != nil {
-		return err
+		return repository.MetadataRowAbsent, err
 	}
 	if outcome == repository.MetadataRefusedStale {
 		// Not an error: the row already holds a NEWER upstream record. Logged
@@ -1401,7 +1450,19 @@ func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) 
 		slog.Info("CVE sync: kept the stored metadata; the fetched NVD record is older",
 			"cve_id", cve.ID, "fetched_last_modified", cve.ModifiedAt.Format(time.RFC3339))
 	}
-	return nil
+	return outcome, nil
+}
+
+// refreshCatalogueMetadata updates a CVE that is ALREADY in the catalogue and
+// never inserts one. It is the path for CVEs the match phase cannot use (no
+// CPE keywords) — see the call site in Run.
+//
+// A MetadataRowAbsent outcome is control flow, not failure: NVD's modification
+// window is the whole feed, so the overwhelming majority of what arrives here
+// is a CVE nobody's SBOM mentions.
+func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) error {
+	_, err := j.writeCatalogueMetadata(ctx, cve)
+	return err
 }
 
 // upsertVulnerability creates or refreshes one row of the global CVE
@@ -1410,68 +1471,72 @@ func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) 
 // The UPDATE half delegates to repository.UpdateMetadata, which carries the
 // staleness guard and the column-ownership rules (EPSS and KEV columns belong
 // to their own jobs and are never touched here). The INSERT half stays local
-// because it needs the new uuid.
+// because it mints the new uuid.
 //
-// M55 changed three things about the update:
+// M55 changed four things:
 //
 //	source              now follows the content it is written with
 //	published_at        now refreshed (NVD does correct it), and never with
 //	                    the year-1 zero time
 //	source_modified_at  recorded, so a replayed OLDER record cannot downgrade
 //	                    the row
+//	the insert          conflict-safe, so a concurrent creator is a refresh
+//	                    rather than a unique violation
 //
 // A refused-as-stale update is NOT an error: the caller still needs vulnID to
 // run the match phase, and the row it points at holds the newer record.
 func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid.UUID, bool, error) {
-	var vulnID uuid.UUID
-
-	// Check if vulnerability exists
-	err := j.db.QueryRowContext(ctx,
-		`SELECT id FROM vulnerabilities WHERE cve_id = $1`,
-		cve.ID,
-	).Scan(&vulnID)
-
+	// INSERT FIRST, conflict-safe. The previous shape was check-then-insert:
+	// SELECT id, and INSERT on a miss. Another writer inserting the same CVE in
+	// between — a scanner racing this job, or two ticks overlapping — turned
+	// that into a unique violation, which excluded the CVE from vulnIndex and
+	// dropped its match phase (Codex M55 R1, Medium). `ON CONFLICT DO NOTHING
+	// RETURNING id` collapses the race: we either created the row and hold its
+	// id, or we did not and fall through to the refresh path below.
+	//
+	// cve.CVSSScore is *float64: a nil binds as SQL NULL, so an "Awaiting
+	// Analysis" CVE is stored as un-scored rather than as the 0.0 sentinel
+	// (M46 B-1 High-3). published_at / source_modified_at take the same
+	// treatment for the zero time — see nilIfZeroTime.
+	newID := uuid.New()
+	var insertedID uuid.UUID
+	err := j.db.QueryRowContext(ctx, `
+		INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, published_at, source_modified_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'NVD', $6, $7, NOW())
+		ON CONFLICT (cve_id) DO NOTHING
+		RETURNING id
+	`, newID, cve.ID, cve.Description, cve.Severity, cve.CVSSScore,
+		nilIfZeroTime(cve.PublishedAt), nilIfZeroTime(cve.ModifiedAt)).Scan(&insertedID)
 	switch {
-	case err == sql.ErrNoRows:
-		// Create new vulnerability. cve.CVSSScore is *float64: a nil
-		// binds as SQL NULL, so an "Awaiting Analysis" CVE is stored as
-		// un-scored rather than as the 0.0 sentinel (M46 B-1 High-3).
-		// published_at / source_modified_at take the same treatment for the
-		// zero time — see nilIfZeroTime.
-		vulnID = uuid.New()
-		if _, err := j.db.ExecContext(ctx, `
-			INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, published_at, source_modified_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 'NVD', $6, $7, NOW())
-		`, vulnID, cve.ID, cve.Description, cve.Severity, cve.CVSSScore,
-			nilIfZeroTime(cve.PublishedAt), nilIfZeroTime(cve.ModifiedAt)); err != nil {
-			return uuid.Nil, false, err
-		}
-		return vulnID, true, nil
-
-	case err != nil:
+	case err == nil:
+		return insertedID, true, nil
+	case !errors.Is(err, sql.ErrNoRows):
 		return uuid.Nil, false, err
-
-	default:
-		outcome, uerr := j.vulnRepo.UpdateMetadata(ctx, catalogueMetadata(cve))
-		if uerr != nil {
-			return uuid.Nil, false, uerr
-		}
-		switch outcome {
-		case repository.MetadataRefusedStale:
-			slog.Info("CVE sync: kept the stored metadata; the fetched NVD record is older",
-				"cve_id", cve.ID, "fetched_last_modified", cve.ModifiedAt.Format(time.RFC3339))
-		case repository.MetadataRowAbsent:
-			// The row was there for the SELECT above and gone by the UPDATE:
-			// a concurrent delete. Benign for this tick — but the caller is
-			// about to link components to vulnID, and that FK no longer
-			// resolves, so it must not be handed back as a usable id.
-			slog.Warn("CVE sync: vulnerability row disappeared between lookup and refresh; skipping its match phase",
-				"cve_id", cve.ID)
-			return uuid.Nil, false, fmt.Errorf("cve_sync: vulnerability row for %s disappeared between lookup and refresh", cve.ID)
-		case repository.MetadataWritten:
-		}
-		return vulnID, false, nil
 	}
+
+	// The row already existed. Refresh it under the freshness guard, then
+	// resolve the id that is actually stored.
+	outcome, uerr := j.writeCatalogueMetadata(ctx, cve)
+	if uerr != nil {
+		return uuid.Nil, false, uerr
+	}
+	if outcome == repository.MetadataRowAbsent {
+		// Present for the INSERT's conflict check and gone by the UPDATE: a
+		// concurrent delete. The caller is about to link components against
+		// this id, and that FK no longer resolves, so it must not be handed
+		// back as usable.
+		slog.Warn("CVE sync: vulnerability row disappeared between insert and refresh; skipping its match phase",
+			"cve_id", cve.ID)
+		return uuid.Nil, false, fmt.Errorf("cve_sync: vulnerability row for %s disappeared between insert and refresh", cve.ID)
+	}
+
+	var vulnID uuid.UUID
+	if err := j.db.QueryRowContext(ctx,
+		`SELECT id FROM vulnerabilities WHERE cve_id = $1`, cve.ID,
+	).Scan(&vulnID); err != nil {
+		return uuid.Nil, false, err
+	}
+	return vulnID, false, nil
 }
 
 // getLastSyncTime returns the last CVE sync time

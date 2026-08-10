@@ -72,6 +72,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
 )
 
@@ -385,5 +386,271 @@ func TestM55CVEMetadata_KeywordlessCVENotInCatalogueIsNotInserted(t *testing.T) 
 	if n != 0 {
 		t.Errorf("catalogue rows for an unmatched keyword-less CVE = %d, want 0: the refresh must be "+
 			"update-only, or one tick imports NVD's entire modification window", n)
+	}
+}
+
+// m55PinWatermark snapshots system_settings.cve_sync_last_run (including its
+// absence), sets it to `at`, and restores the original in t.Cleanup.
+//
+// Every m55Sync call runs the real job, which moves this GLOBAL row. Leaving
+// it moved would hand the next suite — or a shared integration database — a
+// different scheduler position than it started with (Codex M55 R1, Low).
+func m55PinWatermark(t *testing.T, migDB *sql.DB, at time.Time) {
+	t.Helper()
+	var before sql.NullString
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&before); err != nil {
+		if err != sql.ErrNoRows {
+			t.Fatalf("read cve_sync_last_run: %v", err)
+		}
+		before = sql.NullString{}
+	}
+	t.Cleanup(func() {
+		var err error
+		if before.Valid {
+			_, err = migDB.Exec(`
+				INSERT INTO system_settings (key, value, updated_at) VALUES ('cve_sync_last_run', $1, NOW())
+				ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`, before.String)
+		} else {
+			_, err = migDB.Exec(`DELETE FROM system_settings WHERE key = 'cve_sync_last_run'`)
+		}
+		if err != nil {
+			t.Errorf("restore cve_sync_last_run: %v", err)
+		}
+	})
+	if _, err := migDB.Exec(`
+		INSERT INTO system_settings (key, value, updated_at) VALUES ('cve_sync_last_run', $1, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`, at.Format(time.RFC3339)); err != nil {
+		t.Fatalf("pin cve_sync_last_run: %v", err)
+	}
+}
+
+func m55Watermark(t *testing.T, migDB *sql.DB) string {
+	t.Helper()
+	var v string
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&v); err != nil {
+		t.Fatalf("read cve_sync_last_run: %v", err)
+	}
+	return v
+}
+
+// TestM55CVEMetadata_WatermarkHeldWhenACatalogueWriteFails is the retry half
+// of the fix (Codex M55 R1, High).
+//
+// The job only ever fetches FORWARD from cve_sync_last_run. If a catalogue
+// write fails and the watermark still advances, that CVE is never offered
+// again until upstream modifies it — which, for a CVE whose analysis has
+// settled, may be never. The failed write becomes permanent staleness on a row
+// the product is serving.
+//
+// The failure here is a severity longer than `severity varchar(20)`, which is
+// a real shape (an upstream vocabulary change) and, unlike a killed
+// connection, is reproducible.
+func TestM55CVEMetadata_WatermarkHeldWhenACatalogueWriteFails(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	pinned := time.Date(2026, 3, 3, 3, 3, 3, 0, time.UTC)
+	m55PinWatermark(t, migDB, pinned)
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	// 31 characters: the UPDATE is refused by the column, not by the guard.
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	if got := m55Watermark(t, migDB); got != pinned.Format(time.RFC3339) {
+		t.Errorf("cve_sync_last_run = %q, want it held at %q: advancing past a failed catalogue write means "+
+			"the CVE is never retried and keeps the previous severity indefinitely", got, pinned.Format(time.RFC3339))
+	}
+	if got := m55Read(t, migDB, cveID); got.severity != "LOW" {
+		t.Errorf("severity = %q, want the seeded LOW — the oversized write must not have partially landed", got.severity)
+	}
+}
+
+// TestM55CVEMetadata_WatermarkAdvancesOnACleanRun is the control for the test
+// above: holding the watermark must be the exception, not the behaviour.
+func TestM55CVEMetadata_WatermarkAdvancesOnACleanRun(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	pinned := time.Date(2026, 3, 3, 3, 3, 3, 0, time.UTC)
+	m55PinWatermark(t, migDB, pinned)
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "clean run",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	if got := m55Watermark(t, migDB); got == pinned.Format(time.RFC3339) {
+		t.Errorf("cve_sync_last_run = %q, want it advanced past the pinned value on a clean run", got)
+	}
+}
+
+// TestM55CVEMetadata_UndateableRecordIsNotWrittenAndNotRetried: NVD always
+// publishes `lastModified`; its absence means the field did not parse. Such a
+// record cannot be arbitrated against the stored one, so it must not be
+// written — and it must NOT be booked as retryable debt either, because
+// re-fetching the window returns the same malformed record and the watermark
+// would never move again.
+func TestM55CVEMetadata_UndateableRecordIsNotWrittenAndNotRetried(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	pinned := time.Date(2026, 3, 3, 3, 3, 3, 0, time.UTC)
+	m55PinWatermark(t, migDB, pinned)
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "undateable record",
+		"2026-06-01T00:00:00Z", "", m55CPEEmpty))
+
+	got := m55Read(t, migDB, cveID)
+	if got.severity != "LOW" || got.description != "first-fetch description" {
+		t.Errorf("row = %s / %q, want the seeded LOW / \"first-fetch description\": a record we cannot date "+
+			"must not overwrite one we can", got.severity, got.description)
+	}
+	if wm := m55Watermark(t, migDB); wm == pinned.Format(time.RFC3339) {
+		t.Errorf("cve_sync_last_run = %q, want it advanced: an undateable record is permanent, not retryable, "+
+			"and booking it as debt would freeze the watermark forever", wm)
+	}
+}
+
+// TestM55CVEMetadata_ConcurrentCreatorIsRefreshedNotRejected covers the
+// conflict-safe insert (Codex M55 R1, Medium).
+//
+// The previous shape was check-then-insert: SELECT id, INSERT on a miss.
+// Another writer creating the same CVE in between — a scanner racing this job,
+// or two ticks overlapping — turned that into a unique violation, which
+// excluded the CVE from vulnIndex and dropped its links for the tick.
+//
+// The race is driven, not hoped for: a second connection INSERTs the row and
+// holds the transaction open, so the row is invisible to a SELECT while its
+// unique-index entry is already there. The job's insert therefore blocks and
+// resolves only once the other transaction commits.
+func TestM55CVEMetadata_ConcurrentCreatorIsRefreshedNotRejected(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	cveID := m55CVEID(t)
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID); err != nil {
+			t.Errorf("cleanup: delete %s: %v", cveID, err)
+		}
+	})
+
+	// The competing creator: inserted, not yet committed.
+	otherID := uuid.New()
+	tx, err := migDB.Begin()
+	if err != nil {
+		t.Fatalf("begin competing creator: %v", err)
+	}
+	committed := false
+	t.Cleanup(func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	})
+	if _, err := tx.Exec(`
+		INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, published_at, updated_at)
+		VALUES ($1, $2, 'created by the racing writer', 'LOW', 2.0, 'JVN', '2025-01-01T00:00:00Z', NOW())`,
+		otherID, cveID); err != nil {
+		t.Fatalf("competing insert: %v", err)
+	}
+
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, "", false)
+	score := 9.8
+	type result struct {
+		id    uuid.UUID
+		isNew bool
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		id, isNew, err := j.upsertVulnerability(context.Background(), CVEInfo{
+			ID:          cveID,
+			Description: "written by the sync",
+			Severity:    "CRITICAL",
+			CVSSScore:   &score,
+			PublishedAt: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+			ModifiedAt:  time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+			Keywords:    []string{"acme"},
+		})
+		done <- result{id, isNew, err}
+	}()
+
+	// Let the job reach its insert and block on the unique index, then let the
+	// competing creator win.
+	time.Sleep(300 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit competing creator: %v", err)
+	}
+	committed = true
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("upsertVulnerability lost the create race and returned an error: %v.\n"+
+			"A CVE created by another writer must become a refresh, not a unique violation — the error path "+
+			"drops the CVE from the match index and its component links with it", got.err)
+	}
+	if got.isNew {
+		t.Error("isNew = true, but the row was created by the other writer")
+	}
+	if got.id != otherID {
+		t.Errorf("returned id = %s, want the stored %s — the match phase links against it", got.id, otherID)
+	}
+	if row := m55Read(t, migDB, cveID); row.severity != "CRITICAL" || row.source != "NVD" {
+		t.Errorf("row = %s / %s, want CRITICAL / NVD: the loser of the create race must still refresh the row",
+			row.severity, row.source)
+	}
+}
+
+// TestM55CVEMetadata_CatalogueWriteEscapesATenantTransaction: the catalogue is
+// global, and a global write enlisted in a tenant transaction is discarded
+// when that transaction rolls back. In production Run is started from a
+// tx-free context, so this pins the boundary rather than a live path — but a
+// convention that nothing enforces is one call site away from being false
+// (Codex M55 R1, Medium).
+func TestM55CVEMetadata_CatalogueWriteEscapesATenantTransaction(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	tx, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	txCtx := database.WithTx(context.Background(), tx)
+
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, "", false)
+	score := 9.8
+	if err := j.refreshCatalogueMetadata(txCtx, CVEInfo{
+		ID:          cveID,
+		Description: "written from inside a tenant tx",
+		Severity:    "CRITICAL",
+		CVSSScore:   &score,
+		PublishedAt: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		ModifiedAt:  time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("refreshCatalogueMetadata: %v", err)
+	}
+
+	// Throw the transaction away. A write that had joined it dies here.
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	if got := m55Read(t, migDB, cveID); got.severity != "CRITICAL" {
+		t.Errorf("severity = %q, want CRITICAL: the catalogue write joined the tenant transaction and was "+
+			"discarded with it", got.severity)
 	}
 }
