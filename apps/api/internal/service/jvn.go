@@ -570,6 +570,39 @@ type jvnKeywordResult struct {
 // searchKeyword asks MyJVN for the advisories matching a component name and
 // follows the result set to a stated budget.
 //
+// # The keyword is the component NAME, with no version — deliberately
+//
+// NVDService.searchByKeyword sends "<name> <version>" because the NVD keyword
+// search ANDs its terms, so the version narrows the match set. MyJVN does the
+// OPPOSITE: it takes the UNION. Measured on the live API, 2026-08-11, totalRes
+// with all three ranges "n":
+//
+//	keyword                   bare   +version   version alone
+//	glibc / 2.31               158        198              40   <- 158+40 exactly
+//	tomcat / 9.0.30            299        299               0
+//	openssl / 1.1.1k           459        459               -
+//	libxml2 / 2.9.10           135        139               -
+//	jackson-databind / 2.9.10   77         79               -
+//	lodash / 4.17.20            11         11               -
+//
+// glibc is the clean case: |glibc ∪ 2.31| = |glibc| + |2.31|. Appending a
+// version can therefore only WIDEN a JVN query, never narrow it, and versions
+// that appear nowhere in JVN's text (9.0.30) simply add nothing. Copying the
+// NVD strategy here would cost requests and precision and buy neither.
+//
+// The consequence has to be stated plainly, because it is the price of this
+// change: JVN matching is by name against advisory text, with no version and no
+// CPE constraint, so a component named "tomcat" now gets ~299 advisories linked
+// to it and "openssl" ~459 — most of them about other versions or other
+// products that merely mention the word. Widening the fetch does not make the
+// matching more precise, it makes the imprecision visible. Matching on the
+// cpeName parameter instead is the real answer and is a separate change.
+//
+// It also settles the budget question: every component measured except a
+// bare-OS-name class keyword fits inside jvnMaxPagesPerComponent (openssl 459
+// and express 482 are the largest, both under 500). The cap binds on "linux"
+// (17,622) and its relatives, not on ordinary library components.
+//
 // # What this sends, and why (M55; primary source, not recall)
 //
 // Every parameter below was checked against the getVulnOverviewList
