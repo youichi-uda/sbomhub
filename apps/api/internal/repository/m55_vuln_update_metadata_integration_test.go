@@ -178,32 +178,64 @@ func TestM55UpdateMetadata_OlderRecordIsRefused(t *testing.T) {
 	}
 }
 
-// TestM55UpdateMetadata_EqualTimestampIsApplied: `<=`, not `<`. Re-applying a
-// record with the same upstream timestamp has to work, or a row left
-// half-written by a failed run can only be repaired by waiting for upstream to
-// touch the CVE again.
-func TestM55UpdateMetadata_EqualTimestampIsApplied(t *testing.T) {
+// TestM55UpdateMetadata_EqualTimestampDoesNotOverwrite pins `<`, not `<=`
+// (Codex M55 S2, High).
+//
+// Two DIFFERENT bodies can carry the SAME upstream lastModified: baseURL is
+// overridable to a mirror for air-gapped installs, and a cached or
+// partially-populated mirror page is exactly a stale body under an unchanged
+// timestamp. Under `<=` the second one wins, which is a silent downgrade
+// reachable by replay alone. Under `<` the first body stands.
+//
+// The earlier justification for `<=` — "repair a row left half-written by a
+// failed run" — was false: UpdateMetadata is one atomic statement, so a
+// failure leaves every owned field unchanged, never some of them.
+func TestM55UpdateMetadata_EqualTimestampDoesNotOverwrite(t *testing.T) {
 	appURL, migURL := rlsTestEnv(t)
 	appDB := openOrSkip(t, appURL)
 	migDB := openOrSkip(t, migURL)
 
 	stored := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &stored)
+	// Seeded strictly OLDER than T so the first body at T legitimately lands.
+	seeded := stored.Add(-time.Hour)
+	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &seeded)
+	repo := NewVulnerabilityRepository(appDB)
 
-	outcome, err := NewVulnerabilityRepository(appDB).
-		UpdateMetadata(context.Background(), m55Meta(cveID, "HIGH", 7.5, "re-applied", &stored))
+	// First body at T wins.
+	if outcome, err := repo.UpdateMetadata(context.Background(),
+		m55Meta(cveID, "CRITICAL", 9.8, "first body at T", &stored)); err != nil {
+		t.Fatalf("UpdateMetadata (first): %v", err)
+	} else if outcome != MetadataWritten {
+		t.Fatalf("first write outcome = %v, want %v", outcome, MetadataWritten)
+	}
+
+	// A different body at the SAME T must not replace it.
+	outcome, err := repo.UpdateMetadata(context.Background(),
+		m55Meta(cveID, "LOW", 2.0, "stale mirror body at the same T", &stored))
 	if err != nil {
-		t.Fatalf("UpdateMetadata: %v", err)
+		t.Fatalf("UpdateMetadata (second): %v", err)
 	}
-	if outcome != MetadataWritten {
-		t.Fatalf("outcome = %v, want %v", outcome, MetadataWritten)
+	if outcome != MetadataRefusedStale {
+		t.Errorf("outcome = %v, want %v", outcome, MetadataRefusedStale)
 	}
-	var description string
-	if err := migDB.QueryRow(`SELECT description FROM vulnerabilities WHERE cve_id = $1`, cveID).Scan(&description); err != nil {
+	var severity, description string
+	if err := migDB.QueryRow(`SELECT severity, description FROM vulnerabilities WHERE cve_id = $1`, cveID).
+		Scan(&severity, &description); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if description != "re-applied" {
-		t.Errorf("description = %q, want the re-applied text", description)
+	if severity != "CRITICAL" || description != "first body at T" {
+		t.Errorf("row = %s / %q, want CRITICAL / \"first body at T\": a second body carrying the same upstream "+
+			"timestamp downgraded the row, which a replay against a mirror can do at will", severity, description)
+	}
+
+	// A strictly newer record still gets through — the guard must not have
+	// become a first-write-wins latch.
+	newer := stored.Add(time.Hour)
+	if outcome, err := repo.UpdateMetadata(context.Background(),
+		m55Meta(cveID, "MEDIUM", 5.0, "genuinely newer record", &newer)); err != nil {
+		t.Fatalf("UpdateMetadata (newer): %v", err)
+	} else if outcome != MetadataWritten {
+		t.Errorf("outcome for a strictly newer record = %v, want %v", outcome, MetadataWritten)
 	}
 }
 

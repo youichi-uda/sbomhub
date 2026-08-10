@@ -295,10 +295,12 @@ func TestM55CVEMetadata_StaleUpstreamRecordCannotDowngrade(t *testing.T) {
 	}
 }
 
-// TestM55CVEMetadata_ReapplyingTheSameRecordIsAllowed keeps the staleness
-// guard from freezing the row: `<=`, not `<`. Re-running a tick over an
-// unchanged NVD record must still be able to repair a half-written row.
-func TestM55CVEMetadata_ReapplyingTheSameRecordIsAllowed(t *testing.T) {
+// TestM55CVEMetadata_ReapplyingTheSameRecordDoesNotOverwrite is the sync-level
+// half of the `<` rule (Codex M55 S2, High). Replaying a tick over an
+// unchanged upstream timestamp must be a no-op on the row, not a
+// last-write-wins race between whatever two bodies happen to carry that
+// timestamp.
+func TestM55CVEMetadata_ReapplyingTheSameRecordDoesNotOverwrite(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
@@ -307,15 +309,19 @@ func TestM55CVEMetadata_ReapplyingTheSameRecordIsAllowed(t *testing.T) {
 	cveID := m55CVEID(t)
 	m55SeedLegacy(t, migDB, cveID, "NVD")
 
-	feed := func(desc string) string {
-		return m55Feed(cveID, "HIGH", 7.5, desc, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEWithKeywords)
+	feed := func(desc, severity string, score float64) string {
+		return m55Feed(cveID, severity, score, desc, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEWithKeywords)
 	}
-	m55Sync(t, appDB, feed("first application"))
-	m55Sync(t, appDB, feed("second application of the same lastModified"))
+	m55Sync(t, appDB, feed("first application", "CRITICAL", 9.8))
+	if got := m55Read(t, migDB, cveID); got.severity != "CRITICAL" {
+		t.Fatalf("setup: severity = %q after the first application, want CRITICAL", got.severity)
+	}
 
-	if got := m55Read(t, migDB, cveID); got.description != "second application of the same lastModified" {
-		t.Errorf("description = %q: a record with the SAME lastModified must still be applied, "+
-			"or a row that was half-written can never be repaired", got.description)
+	m55Sync(t, appDB, feed("stale mirror body at the same lastModified", "LOW", 2.0))
+	got := m55Read(t, migDB, cveID)
+	if got.severity != "CRITICAL" || got.description != "first application" {
+		t.Errorf("row = %s / %q, want CRITICAL / \"first application\": a replay under an unchanged upstream "+
+			"timestamp overwrote the row", got.severity, got.description)
 	}
 }
 

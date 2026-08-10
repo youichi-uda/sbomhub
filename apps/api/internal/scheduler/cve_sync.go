@@ -1572,7 +1572,7 @@ func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (r
 		// Not an error: the row already holds a NEWER upstream record. Logged
 		// because a persistent stream of these means the feed is replaying an
 		// old window and nothing else would say so.
-		slog.Info("CVE sync: kept the stored metadata; the fetched NVD record is older",
+		slog.Info("CVE sync: kept the stored metadata; the stored record is at least as new as the fetched one",
 			"cve_id", cve.ID, "fetched_last_modified", cve.ModifiedAt.Format(time.RFC3339))
 	}
 	return outcome, nil
@@ -1585,6 +1585,27 @@ func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (r
 // A MetadataRowAbsent outcome is control flow, not failure: NVD's modification
 // window is the whole feed, so the overwhelming majority of what arrives here
 // is a CVE nobody's SBOM mentions.
+//
+// KNOWN RACE, NOT FIXED HERE (Codex M55 S2, High). "Absent" is also what a row
+// looks like while some scanner's tenant transaction holds an uncommitted
+// INSERT of it: VulnerabilityRepository.Create still runs through the
+// scanner's ctx, so on the miss path the new row is invisible to this
+// connection until that transaction commits. This refresh then correctly
+// reports MetadataRowAbsent, skips, and the scanner's own metadata — which may
+// be older — is what commits.
+//
+// The OUTCOME is the accepted limitation, not a new class: the row lands with
+// source_modified_at NULL, which is writable exactly once, so the next record
+// for that CVE repairs it. What it costs is one refresh opportunity, the same
+// thing a failed write costs.
+//
+// The fix is to detach Create's insert from the tenant transaction, and that
+// is deliberately NOT done from this side: Create's write ordering is what
+// makes the scanner's component_vulnerabilities FK resolve inside its own
+// transaction, and M54's refused-write accounting is built on the current
+// contract. Changing it belongs in a wave that owns service/nvd.go and
+// service/jvn.go together with this file, not in a one-sided edit to the
+// repository they both call.
 func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) error {
 	_, err := j.writeCatalogueMetadata(ctx, cve)
 	return err
