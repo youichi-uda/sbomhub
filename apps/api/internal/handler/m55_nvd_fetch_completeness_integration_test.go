@@ -43,6 +43,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 
@@ -71,14 +72,16 @@ const (
 //
 // CVE ids come from `ns` so concurrent runs of this package cannot collide on
 // the tenant-less `vulnerabilities` table.
-func m55TruncatingNVDServer(t *testing.T, total int, ns m54Namespace) (*httptest.Server, func() []string) {
+func m55TruncatingNVDServer(t *testing.T, total int, ns m54Namespace) (*httptest.Server, func() ([]string, []time.Time)) {
 	t.Helper()
 	var mu sync.Mutex
 	var queries []string
+	var arrivals []time.Time
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		queries = append(queries, r.URL.RawQuery)
+		arrivals = append(arrivals, time.Now())
 		mu.Unlock()
 
 		rpp, err := strconv.Atoi(r.URL.Query().Get("resultsPerPage"))
@@ -121,12 +124,14 @@ func m55TruncatingNVDServer(t *testing.T, total int, ns m54Namespace) (*httptest
 	}))
 	t.Cleanup(srv.Close)
 
-	return srv, func() []string {
+	return srv, func() ([]string, []time.Time) {
 		mu.Lock()
 		defer mu.Unlock()
-		out := make([]string, len(queries))
-		copy(out, queries)
-		return out
+		q := make([]string, len(queries))
+		copy(q, queries)
+		a := make([]time.Time, len(arrivals))
+		copy(a, arrivals)
+		return q, a
 	}
 }
 
@@ -188,7 +193,7 @@ func TestM55NVDTruncatedResultSetIsReportedToTheCaller(t *testing.T) {
 	logs := logged.String()
 
 	// --- the walk itself -----------------------------------------------
-	q := calls()
+	q, arrivals := calls()
 	if len(q) != m55Budget {
 		t.Fatalf("issued %d NVD requests, want the budget %d: %v", len(q), m55Budget, q)
 	}
@@ -198,6 +203,27 @@ func TestM55NVDTruncatedResultSetIsReportedToTheCaller(t *testing.T) {
 		"startIndex=597", "startIndex=796"} {
 		if !strings.Contains(q[i], want) {
 			t.Errorf("request %d = %q, want it to carry %q", i, q[i], want)
+		}
+	}
+
+	// --- and every follow-up page took a rate-limiter tick ---------------
+	//
+	// Without this the wiring could regress to an unpaced walk and every M55
+	// test would stay green (Codex M55 R5, Low): the unit test injects its own
+	// pacer, so it cannot notice processComponentsParallel failing to pass the
+	// sweep's shared one. Unpaced, each work item would fire its first request
+	// plus nvdMaxPagesPerComponent-1 immediate follow-ups, which is 5 requests
+	// in a few milliseconds against a published ceiling of 50 per 30 seconds.
+	//
+	// The floor is deliberately well under rateLimitWithKey (700ms, unexported)
+	// so ordinary scheduling jitter cannot make this flaky, while still being
+	// two orders of magnitude above what an unpaced walk produces.
+	const minGap = 400 * time.Millisecond
+	for i := 1; i < len(arrivals); i++ {
+		if gap := arrivals[i].Sub(arrivals[i-1]); gap < minGap {
+			t.Errorf("NVD requests %d and %d arrived %v apart, want at least %v — every page "+
+				"after the first must take a tick from the sweep's shared rate limiter",
+				i-1, i, gap, minGap)
 		}
 	}
 
