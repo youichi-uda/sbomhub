@@ -71,6 +71,40 @@ type cannedJVNStatus struct {
 	FirstRes    int
 	// omitTotalResRet models a mirror that drops the attribute entirely.
 	omitTotalResRet bool
+	// The request echo the live API sends back on every success.
+	Method                  string
+	Feed                    string
+	Keyword                 string
+	MaxCountItem            string
+	StartItem               string
+	RangeDatePublic         string
+	RangeDatePublished      string
+	RangeDateFirstPublished string
+}
+
+// echoOf builds the Status request echo for a query, the way MyJVN does.
+func echoOf(q url.Values) cannedJVNStatus {
+	def := func(name, fallback string) string {
+		if v := q.Get(name); v != "" {
+			return v
+		}
+		return fallback
+	}
+	return cannedJVNStatus{
+		Method:                  def("method", "getVulnOverviewList"),
+		Feed:                    def("feed", "hnd"),
+		Keyword:                 q.Get("keyword"),
+		MaxCountItem:            def("maxCountItem", "50"),
+		StartItem:               def("startItem", "1"),
+		RangeDatePublic:         def("rangeDatePublic", "w"),
+		RangeDatePublished:      def("rangeDatePublished", "w"),
+		RangeDateFirstPublished: def("rangeDateFirstPublished", "w"),
+	}
+}
+
+// jvnTestPageReq is the request shape the hand-written fixtures answer.
+func jvnTestPageReq(keyword string, startItem int) jvnPageRequest {
+	return jvnPageRequest{keyword: keyword, startItem: startItem, maxCountItem: jvnMaxCountItem}
 }
 
 func (c *cannedMyJVN) calls() []url.Values {
@@ -151,12 +185,11 @@ func (c *cannedMyJVN) start(t *testing.T) *httptest.Server {
 			window = filtered[start-1 : end]
 		}
 
-		st := cannedJVNStatus{
-			RetCd:       "0",
-			TotalRes:    len(filtered),
-			TotalResRet: len(window),
-			FirstRes:    1,
-		}
+		st := echoOf(q)
+		st.RetCd = "0"
+		st.TotalRes = len(filtered)
+		st.TotalResRet = len(window)
+		st.FirstRes = 1
 		if len(window) > 0 {
 			st.FirstRes = start
 		}
@@ -213,8 +246,10 @@ func renderCannedMyJVN(st cannedJVNStatus, items []cannedJVNAdvisory, now time.T
 	if st.omitTotalResRet {
 		trr = ""
 	}
-	fmt.Fprintf(&b, `  <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="%s" retMax="50" errCd="" errMsg="" totalRes="%d"%s firstRes="%d" feed="hnd"/>
-</rdf:RDF>`, st.RetCd, st.TotalRes, trr, st.FirstRes)
+	fmt.Fprintf(&b, `  <status:Status version="3.3" method="%s" lang="ja" retCd="%s" retMax="50" errCd="" errMsg="" totalRes="%d"%s firstRes="%d" feed="%s" keyword="%s" maxCountItem="%s" startItem="%s" rangeDatePublic="%s" rangeDatePublished="%s" rangeDateFirstPublished="%s"/>
+</rdf:RDF>`, st.Method, st.RetCd, st.TotalRes, trr, st.FirstRes, st.Feed,
+		st.Keyword, st.MaxCountItem, st.StartItem,
+		st.RangeDatePublic, st.RangeDatePublished, st.RangeDateFirstPublished)
 	return b.String()
 }
 
@@ -454,6 +489,219 @@ func TestM55JVN_PageIdentityIsChecked(t *testing.T) {
 	}
 }
 
+// TestM55JVN_ResponseMustEchoTheRequest pins that a page is only accepted when
+// the Status element echoes the query that produced it (Codex M55 R1,
+// Critical). Without it, a cache or proxy could answer with a well-formed page
+// belonging to another component, or one taken under the old one-week window,
+// and nothing about its shape would give it away.
+func TestM55JVN_ResponseMustEchoTheRequest(t *testing.T) {
+	now := time.Now()
+
+	cases := []struct {
+		name    string
+		corrupt func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory)
+		wantErr string
+	}{
+		{
+			name: "answer is about a different component",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.Keyword = "some-other-component"
+			},
+			wantErr: "keyword",
+		},
+		{
+			// The whole point of the change: proving the seven-day
+			// default is gone, not merely no longer requested.
+			name: "answer still covers MyJVN's one-week default window",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.RangeDatePublic = "w"
+			},
+			wantErr: "rangeDatePublic",
+		},
+		{
+			name: "answer was built for a different startItem",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.StartItem = "999"
+			},
+			wantErr: "startItem",
+		},
+		{
+			name: "answer was built for a different page size",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.MaxCountItem = "10"
+			},
+			wantErr: "maxCountItem",
+		},
+		{
+			name: "answer is to a different method",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.Method = "getAlertList"
+			},
+			wantErr: "method",
+		},
+		{
+			name: "answer is in a different feed format",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.Feed = "itm"
+			},
+			wantErr: "feed",
+		},
+		{
+			name: "echo is absent entirely",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.Keyword, st.StartItem, st.MaxCountItem = "", "", ""
+				st.RangeDatePublic, st.RangeDatePublished, st.RangeDateFirstPublished = "", "", ""
+			},
+			wantErr: "rangeDatePublic",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &cannedMyJVN{corpus: cannedCorpus(now, 5, 5), now: now, corrupt: tc.corrupt}
+			ts := srv.start(t)
+			svc := NewJVNService(nil, nil, ts.URL, false)
+			svc.requestDelay = 0
+
+			_, err := svc.searchKeyword(context.Background(), "libfoo", nil)
+			if err == nil {
+				t.Fatal("a response that does not echo the request was accepted as its answer")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestM55JVN_NonASCIIKeywordEchoIsAccepted is the other half of the echo check:
+// it must not reject legitimate answers.
+//
+// Measured on the live API: MyJVN returns the keyword exactly as it appeared in
+// the query string, so a non-ASCII component name comes back percent-encoded.
+// A literal comparison would fail every such component — turning a guard into
+// an outage for exactly the Japanese-market components this product exists for.
+func TestM55JVN_NonASCIIKeywordEchoIsAccepted(t *testing.T) {
+	for _, keyword := range []string{"日本語 テスト", "golang.org/x/crypto", "OpenSSL-Test_1.0"} {
+		t.Run(keyword, func(t *testing.T) {
+			if !jvnKeywordEchoMatches(url.QueryEscape(keyword), keyword) {
+				t.Errorf("percent-encoded echo of %q was rejected", keyword)
+			}
+			if !jvnKeywordEchoMatches(keyword, keyword) {
+				t.Errorf("literal echo of %q was rejected", keyword)
+			}
+			if jvnKeywordEchoMatches("something-else", keyword) {
+				t.Errorf("echo of a different keyword was accepted for %q", keyword)
+			}
+		})
+	}
+}
+
+// TestM55JVN_ShrinkingTotalResStillCountsAsTruncated pins that a total which
+// drops between pages cannot erase the entries it previously advertised
+// (Codex M55 R1, Critical).
+//
+// Page 1 says totalRes=137 and hands over 50. Page 2 comes back empty and says
+// totalRes=50. Taking the last total made Retrieved == TotalRes, so 87 unseen
+// advisories were reported as a complete answer.
+func TestM55JVN_ShrinkingTotalResStillCountsAsTruncated(t *testing.T) {
+	now := time.Now()
+	srv := &cannedMyJVN{corpus: cannedCorpus(now, 137, 137), now: now,
+		corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+			if q.Get("startItem") != "1" {
+				*items = nil
+				st.TotalRes = 50
+				st.TotalResRet = 0
+				st.FirstRes = 1
+			}
+		}}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
+	if err != nil {
+		t.Fatalf("searchKeyword: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatalf("Retrieved=%d TotalRes=%d Truncated=false — 87 advertised advisories vanished "+
+			"and the component was reported complete", res.Retrieved, res.TotalRes)
+	}
+	if res.TotalRes != 137 {
+		t.Errorf("TotalRes = %d, want the largest total any page claimed (137)", res.TotalRes)
+	}
+}
+
+// TestM55JVN_RepeatedEntriesAreNotCountedTwice pins that Retrieved counts
+// DISTINCT advisories (Codex M55 R1, Critical).
+//
+// A mirror that re-serves page 1's entries as page 2, with a correct firstRes,
+// made 50 distinct advisories count as 100 against a totalRes of 137 — and the
+// second half of the match set was never fetched. It also covers the honest
+// version of the same event: MyJVN orders newest-first, so an advisory
+// published mid-scan shifts the window and one entry really does repeat.
+func TestM55JVN_RepeatedEntriesAreNotCountedTwice(t *testing.T) {
+	now := time.Now()
+	corpus := cannedCorpus(now, 137, 137)
+	srv := &cannedMyJVN{corpus: corpus, now: now,
+		corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+			// Always hand back the first 50, whatever was asked for,
+			// while claiming the page identity that was requested.
+			if len(*items) > 0 {
+				*items = corpus[:50]
+				st.TotalResRet = 50
+			}
+		}}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
+	if err != nil {
+		t.Fatalf("searchKeyword: %v", err)
+	}
+	if res.Retrieved != 50 {
+		t.Errorf("Retrieved = %d, want 50 distinct advisories (the wire returned %d entries)",
+			res.Retrieved, res.Entries)
+	}
+	if !res.Truncated {
+		t.Error("50 distinct advisories out of 137 were reported as a complete answer")
+	}
+	if len(res.Vulns) != 50 {
+		t.Errorf("returned %d vulnerabilities, want 50 — duplicates were not collapsed", len(res.Vulns))
+	}
+}
+
+// TestM55JVN_UnidentifiableEntryIsAShortfall pins that an entry MyJVN returned
+// but this scanner cannot record does not count as retrieved (Codex M55 R1,
+// Critical). Counting the wire entry made a page of unusable items read as a
+// complete answer that contributed nothing.
+func TestM55JVN_UnidentifiableEntryIsAShortfall(t *testing.T) {
+	now := time.Now()
+	corpus := cannedCorpus(now, 5, 5)
+	corpus[2].ID = ""  // no sec:identifier
+	corpus[2].CVE = "" // and no CVE reference
+	srv := &cannedMyJVN{corpus: corpus, now: now}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
+	if err != nil {
+		t.Fatalf("searchKeyword: %v", err)
+	}
+	if res.Retrieved != 4 {
+		t.Errorf("Retrieved = %d, want 4 — the unusable entry was counted as an advisory we hold",
+			res.Retrieved)
+	}
+	if res.Entries != 5 {
+		t.Errorf("Entries = %d, want 5 wire entries", res.Entries)
+	}
+	if !res.Truncated {
+		t.Error("an advisory MyJVN returned and this scan could not record was reported as covered")
+	}
+}
+
 // TestM55JVN_ZeroMatchSentinelIsNotAProtocolError pins the measured shape of a
 // zero-match answer: totalRes="0" totalResRet="0" firstRes="1" plus ONE
 // placeholder <item>. It is a legitimate empty answer, not a short page.
@@ -540,9 +788,14 @@ func TestM55JVN_ReportCountsAreCallerVisible(t *testing.T) {
 	}
 }
 
-// TestM55JVN_PartialFailureIsCountedPerComponent drives the counting through a
-// real fetch: one component's lookup 500s, the other succeeds.
-func TestM55JVN_PartialFailureIsCountedPerComponent(t *testing.T) {
+// TestM55JVN_FetchFailureSurfacesAsAnError pins that a MyJVN 500 is an ERROR
+// rather than zero matches, which is what makes it countable one level up.
+//
+// The aggregation itself (rep.Failed) needs a component list and therefore a
+// database; it is pinned in TestM55JVNScanReport_PartialFetchFailureIsCounted.
+// This test deliberately does not claim to cover it (Codex M55 R1, Low: it
+// used to be named as though it did).
+func TestM55JVN_FetchFailureSurfacesAsAnError(t *testing.T) {
 	now := time.Now()
 	srv := &cannedMyJVN{
 		corpus: cannedCorpus(now, 5, 5),
@@ -595,7 +848,7 @@ func TestM55JVN_DetailInfoIsNotAnRSSFeed(t *testing.T) {
 </VULDEF-Document>`
 
 	svc := NewJVNService(nil, nil, "", false)
-	if _, err := svc.parseJVNPage([]byte(vuldef), 1, jvnMaxCountItem); err == nil {
+	if _, err := svc.parseJVNPage([]byte(vuldef), jvnTestPageReq("libfoo", 1)); err == nil {
 		t.Fatal("a VULDEF detail document parsed as an overview feed without error")
 	}
 }
@@ -621,7 +874,7 @@ func TestM55JVN_RealResponseParses(t *testing.T) {
 	}
 	svc := NewJVNService(nil, nil, "", false)
 
-	page, err := svc.parseJVNPage(body, 1, 3)
+	page, err := svc.parseJVNPage(body, jvnPageRequest{keyword: "openssl", startItem: 1, maxCountItem: 3})
 	if err != nil {
 		t.Fatalf("a live MyJVN response did not parse: %v", err)
 	}
@@ -641,7 +894,7 @@ func TestM55JVN_RealResponseParses(t *testing.T) {
 	}
 
 	// The same body is not page 2, and the parser must say so.
-	if _, err := svc.parseJVNPage(body, 51, 3); err == nil {
+	if _, err := svc.parseJVNPage(body, jvnPageRequest{keyword: "openssl", startItem: 51, maxCountItem: 3}); err == nil {
 		t.Error("a live page 1 was accepted as the answer to startItem=51")
 	}
 }
@@ -650,9 +903,13 @@ func TestM55JVN_RealResponseParses(t *testing.T) {
 // trailing-content check: a mirror must not be able to prefix a valid empty
 // envelope to arbitrary content and have it read as an authoritative answer.
 func TestM55JVN_TrailingContentAfterTheFeedIsRejected(t *testing.T) {
-	body := renderCannedMyJVN(cannedJVNStatus{RetCd: "0"}, nil, time.Now()) + `<rdf:RDF/>`
+	st := echoOf(url.Values{"keyword": {"libfoo"}, "startItem": {"1"}, "maxCountItem": {"50"},
+		"rangeDatePublic": {"n"}, "rangeDatePublished": {"n"}, "rangeDateFirstPublished": {"n"}})
+	st.RetCd = "0"
+	st.FirstRes = 1
+	body := renderCannedMyJVN(st, nil, time.Now()) + `<rdf:RDF/>`
 	svc := NewJVNService(nil, nil, "", false)
-	if _, err := svc.parseJVNPage([]byte(body), 1, jvnMaxCountItem); err == nil {
+	if _, err := svc.parseJVNPage([]byte(body), jvnTestPageReq("libfoo", 1)); err == nil {
 		t.Fatal("a body with a second document after the feed was accepted")
 	}
 }

@@ -144,6 +144,72 @@ func TestM55JVNScanReport_TruncationReachesScanComponents(t *testing.T) {
 	})
 }
 
+// TestM55JVNScanReport_CancellationIsNotSuccess pins that a sweep killed
+// part-way does not report success (Codex M55 R1, Critical).
+//
+// Cancellation makes the remaining lookups fail for a reason that has nothing
+// to do with the components, and the first cut counted only the components
+// AFTER the current one as unscanned — so a context cancelled while the LAST
+// component was in flight left Unscanned == 0, and with one earlier success the
+// killed sweep came back clean.
+func TestM55JVNScanReport_CancellationIsNotSuccess(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	appDB := openOrSkipVS(t, appURL)
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+
+	tenant := seedTenantVS(t, migDB, "m55jvncancel")
+	project := uuid.New()
+	seedProjectVS(t, migDB, tenant, project, "m55jvncancel-"+project.String())
+	sbom := seedSbomVS(t, migDB, tenant, project)
+	// ORDER BY name: aaa-ok is scanned first and succeeds, zzz-last is the
+	// final component and is the one the cancellation lands on.
+	seedComponentVS(t, migDB, tenant, sbom, "aaa-ok", "1.0", "pkg:generic/aaa-ok@1.0")
+	seedComponentVS(t, migDB, tenant, sbom, "zzz-last", "1.0", "pkg:generic/zzz-last@1.0")
+
+	now := time.Now()
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := &cannedMyJVN{
+		now:       now,
+		corpusFor: func(string) []cannedJVNAdvisory { return cannedCorpus(now, 2, 0) },
+		fail: func(q url.Values) int {
+			if q.Get("keyword") == "zzz-last" {
+				cancel() // killed while the last component is in flight
+			}
+			return 0
+		},
+	}
+	ts := srv.start(t)
+
+	svc := NewJVNService(repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB), ts.URL, false)
+	svc.requestDelay = 0
+
+	tx, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`SELECT set_config('app.current_tenant_id', $1, true)`, tenant.String()); err != nil {
+		t.Fatalf("set tenant context: %v", err)
+	}
+
+	rep, err := svc.ScanComponentsReport(database.WithTx(ctx, tx), sbom)
+	t.Logf("report: %s", rep.Summary())
+	if !rep.Cancelled {
+		t.Errorf("Cancelled = false after the context was cancelled mid-sweep")
+	}
+	if err == nil {
+		t.Fatal("a cancelled sweep reported success; ScanTracker would record it as completed " +
+			"and the CLI would read a killed scan as a clean one")
+	}
+	if !strings.Contains(err.Error(), "incomplete") {
+		t.Errorf("error %q does not declare the results incomplete", err)
+	}
+}
+
 // TestM55JVNScanReport_PartialFetchFailureIsCounted pins the observability
 // requirement: a sweep where SOME components could not be reached still
 // reports success (unchanged product policy), but the number that failed is a

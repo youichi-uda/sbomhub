@@ -22,7 +22,7 @@ import (
 // contract.
 const cannedJVNFeed = `<?xml version="1.0" encoding="UTF-8"?>
 <RDF>
-  <Status version="3.3" method="getVulnOverviewList" retCd="0" retMax="10" errCd="" errMsg="" totalRes="1" totalResRet="1" firstRes="1" feed="hnd"/>
+  <Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="1" totalResRet="1" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
   <channel>
     <title>JVNDB Vulnerability Overview</title>
     <description>test feed</description>
@@ -93,7 +93,7 @@ func TestJVNService_SearchByKeyword_HTTPMock(t *testing.T) {
 
 func TestJVNService_ParseJVNResponse(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)
-	page, err := svc.parseJVNPage([]byte(cannedJVNFeed), 1, jvnMaxCountItem)
+	page, err := svc.parseJVNPage([]byte(cannedJVNFeed), jvnTestPageReq("libfoo", 1))
 	if err != nil {
 		t.Fatalf("parseJVNPage returned error: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 			name: "retCd=0 with no matches is a legitimate empty answer",
 			body: `<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
-  <status:Status version="3.3" method="getVulnOverviewList" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1"/>
+  <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
 </rdf:RDF>`,
 			wantErr: false,
 		},
@@ -186,7 +186,7 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := svc.parseJVNPage([]byte(tc.body), 1, jvnMaxCountItem)
+			_, err := svc.parseJVNPage([]byte(tc.body), jvnTestPageReq("libfoo", 1))
 			if tc.wantErr && err == nil {
 				t.Error("a MyJVN application error produced no error; the component would be " +
 					"counted as successfully checked with zero findings")

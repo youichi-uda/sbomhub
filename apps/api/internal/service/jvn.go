@@ -70,6 +70,11 @@ const (
 	// 500ms == 2/s, the rate this scanner already used between components;
 	// page requests are paced identically rather than bursting.
 	jvnRequestDelay = 500 * time.Millisecond
+
+	// The request values the Status echo is checked against.
+	jvnMethodOverviewList = "getVulnOverviewList"
+	jvnFeedHND            = "hnd"
+	jvnDateRangeAll       = "n"
 )
 
 // JVNService handles JVN (Japan Vulnerability Notes) API integration
@@ -140,6 +145,15 @@ type JVNRSSFeed struct {
 // retMax is NOT the page length: it is the API's own 50-entry ceiling and
 // answers "50" even when maxCountItem=3 was requested (measured). Using it to
 // validate a page would validate nothing.
+//
+// The element also ECHOES every request parameter (「各リクエストパラメタ」 in the
+// response template). That echo is what makes it possible to tell "the answer
+// to the query I sent" from "an answer" — a cache or proxy holding a reply for
+// a different component, or one taken before the date range was widened, is
+// otherwise indistinguishable from a genuine one. Measured echo behaviour: the
+// value is returned exactly as it appeared in the query string, so a non-ASCII
+// keyword comes back percent-encoded (keyword=日本語 echoes
+// "%E6%97%A5%E6%9C%AC%E8%AA%9E") — the comparison has to allow for that.
 type JVNStatus struct {
 	Version     string `xml:"version,attr"`
 	Method      string `xml:"method,attr"`
@@ -151,6 +165,14 @@ type JVNStatus struct {
 	TotalResRet string `xml:"totalResRet,attr"`
 	FirstRes    string `xml:"firstRes,attr"`
 	Feed        string `xml:"feed,attr"`
+
+	// Echoed request parameters.
+	Keyword                 string `xml:"keyword,attr"`
+	MaxCountItem            string `xml:"maxCountItem,attr"`
+	StartItem               string `xml:"startItem,attr"`
+	RangeDatePublic         string `xml:"rangeDatePublic,attr"`
+	RangeDatePublished      string `xml:"rangeDatePublished,attr"`
+	RangeDateFirstPublished string `xml:"rangeDateFirstPublished,attr"`
 }
 
 type JVNChannel struct {
@@ -216,6 +238,12 @@ type JVNScanReport struct {
 	// Unscanned is how many components were never reached because the
 	// sweep was cancelled part-way.
 	Unscanned int
+	// Cancelled records that the sweep ended early because its context
+	// did. It is separate from Unscanned because cancellation ON THE LAST
+	// component leaves nothing behind it — Unscanned would be 0 and, with
+	// one earlier success, the killed sweep would report success (Codex
+	// M55 R1, Critical).
+	Cancelled bool
 	// RefusedWrites is how many matches the database declined to record.
 	RefusedWrites int
 	// TruncatedComponents is how many components matched more advisories
@@ -224,9 +252,13 @@ type JVNScanReport struct {
 	// Requests is how many MyJVN requests the sweep issued.
 	Requests int
 	// EntriesRetrieved / EntriesAvailable are the advisory counts behind
-	// TruncatedComponents: what was pulled, versus what MyJVN said existed.
+	// TruncatedComponents: DISTINCT advisories actually obtained, versus
+	// what MyJVN said existed. EntriesReturned is what the API put on the
+	// wire; it exceeds EntriesRetrieved exactly when entries were repeated
+	// across pages or carried no identity.
 	EntriesRetrieved int
 	EntriesAvailable int
+	EntriesReturned  int
 	// BudgetExhausted records that the shared extra-page pool ran out, so
 	// truncation here is our own budget rather than MyJVN's size.
 	BudgetExhausted bool
@@ -235,10 +267,12 @@ type JVNScanReport struct {
 // Summary renders the report as a single log/diagnostic string.
 func (r JVNScanReport) Summary() string {
 	return fmt.Sprintf(
-		"components=%d scanned=%d failed=%d skipped_no_name=%d unscanned=%d refused_writes=%d "+
-			"truncated_components=%d entries=%d/%d requests=%d budget_exhausted=%t",
-		r.Components, r.Scanned, r.Failed, r.SkippedNoName, r.Unscanned, r.RefusedWrites,
-		r.TruncatedComponents, r.EntriesRetrieved, r.EntriesAvailable, r.Requests, r.BudgetExhausted)
+		"components=%d scanned=%d failed=%d skipped_no_name=%d unscanned=%d cancelled=%t "+
+			"refused_writes=%d truncated_components=%d advisories=%d/%d wire_entries=%d "+
+			"requests=%d budget_exhausted=%t",
+		r.Components, r.Scanned, r.Failed, r.SkippedNoName, r.Unscanned, r.Cancelled,
+		r.RefusedWrites, r.TruncatedComponents, r.EntriesRetrieved, r.EntriesAvailable,
+		r.EntriesReturned, r.Requests, r.BudgetExhausted)
 }
 
 // Err maps the report onto the single channel JVNService owns to the caller.
@@ -265,8 +299,8 @@ func (r JVNScanReport) Err() error {
 	if r.Scanned == 0 && r.Failed > 0 {
 		return fmt.Errorf("jvn: all %d component lookup(s) failed; the scan has no coverage", r.Failed)
 	}
-	if r.Unscanned > 0 {
-		return fmt.Errorf("jvn: the scan stopped with %d of %d component(s) never looked up; "+
+	if r.Cancelled {
+		return fmt.Errorf("jvn: the scan was cancelled with %d of %d component(s) never looked up; "+
 			"scan results are incomplete", r.Unscanned, r.Components)
 	}
 	if r.TruncatedComponents > 0 {
@@ -327,12 +361,14 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 		rep.Requests += out.Fetch.Requests
 		rep.EntriesRetrieved += out.Fetch.Retrieved
 		rep.EntriesAvailable += out.Fetch.TotalRes
+		rep.EntriesReturned += out.Fetch.Entries
 		if out.Fetch.Truncated {
 			rep.TruncatedComponents++
 			slog.Warn("JVN match set truncated",
 				"component", comp.Name,
 				"retrieved", out.Fetch.Retrieved,
 				"available", out.Fetch.TotalRes,
+				"wire_entries", out.Fetch.Entries,
 				"requests", out.Fetch.Requests,
 				"budget_exhausted", out.Fetch.BudgetExhausted)
 		}
@@ -349,6 +385,7 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 				// for a reason that has nothing to do with the component.
 				// Counting those as "checked and clean" is how a killed
 				// scan used to finish as a successful one.
+				rep.Cancelled = true
 				rep.Unscanned = len(components) - i - 1
 				break
 			}
@@ -357,6 +394,7 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 		rep.Scanned++
 
 		if err := s.pause(ctx); err != nil {
+			rep.Cancelled = true
 			rep.Unscanned = len(components) - i - 1
 			break
 		}
@@ -443,15 +481,33 @@ type jvnComponentOutcome struct {
 // jvnKeywordResult is one component's keyword lookup: what came back, and how
 // much of what MyJVN holds it represents.
 //
-// Retrieved and TotalRes are ENTRY counts from the wire (totalResRet summed
-// over the pages, and totalRes), not len(Vulns): items MyJVN returned but this
-// scanner could not identify are still entries MyJVN answered with, and
-// counting them as "not retrieved" would report truncation that did not
-// happen.
+// Retrieved counts DISTINCT ADVISORIES ACTUALLY OBTAINED — advisories whose
+// JVNDB / CVE identity this scan now holds — and is deliberately not the sum of
+// the pages' totalResRet (Codex M55 R1, Critical, two ways):
+//
+//   - an entry MyJVN returned that carries no identity is not an advisory this
+//     scan holds. Counting the wire entry made a page of 50 unusable items read
+//     as 50 retrieved, so Retrieved == TotalRes and the component was reported
+//     complete while contributing nothing.
+//   - a mirror that re-serves the same entries on page 2 (with a correct
+//     firstRes) made 50 distinct advisories count as 100. Distinct counting
+//     turns that into Retrieved=50 < TotalRes=100, i.e. truncated, which is the
+//     truth. It also handles the legitimate version of the same event: MyJVN
+//     orders newest-first, so an advisory published mid-scan shifts the window
+//     and one entry genuinely appears twice while another is missed.
+//
+// TotalRes is the LARGEST total any page claimed, not the last. A total that
+// shrinks between pages would otherwise erase the gap: page 1 saying
+// totalRes=100 and page 2 saying totalRes=50 after 50 entries would compute
+// Retrieved == TotalRes and report a complete answer with 50 advisories unseen.
 type jvnKeywordResult struct {
-	Vulns     []model.Vulnerability
-	TotalRes  int
+	Vulns    []model.Vulnerability
+	TotalRes int
+	// Retrieved is distinct advisories obtained; Entries is what the API
+	// returned on the wire. They differ exactly when something was dropped
+	// or repeated, which is why both are kept.
 	Retrieved int
+	Entries   int
 	Requests  int
 	// Truncated is Retrieved < TotalRes: MyJVN holds advisories for this
 	// keyword that this scan did not look at. It must reach the caller —
@@ -509,6 +565,8 @@ func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPag
 		return res, nil
 	}
 
+	seenAdvisories := make(map[string]struct{})
+	seenCVEs := make(map[string]struct{})
 	startItem := 1
 	for page := 0; page < jvnMaxPagesPerComponent; page++ {
 		if page > 0 {
@@ -533,9 +591,24 @@ func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPag
 			return res, err
 		}
 		res.Requests++
-		res.TotalRes = p.totalRes
-		res.Retrieved += p.totalResRet
-		res.Vulns = append(res.Vulns, p.vulns...)
+		if p.totalRes > res.TotalRes {
+			res.TotalRes = p.totalRes
+		}
+		res.Entries += p.totalResRet
+		for _, id := range p.advisoryIDs {
+			if _, dup := seenAdvisories[id]; dup {
+				continue
+			}
+			seenAdvisories[id] = struct{}{}
+			res.Retrieved++
+		}
+		for _, v := range p.vulns {
+			if _, dup := seenCVEs[v.CVEID]; dup {
+				continue
+			}
+			seenCVEs[v.CVEID] = struct{}{}
+			res.Vulns = append(res.Vulns, v)
+		}
 
 		if p.totalResRet == 0 {
 			break
@@ -554,15 +627,15 @@ func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPag
 // answer is the page that was asked for.
 func (s *JVNService) fetchPage(ctx context.Context, keyword string, startItem int) (*jvnPage, error) {
 	params := url.Values{}
-	params.Set("method", "getVulnOverviewList")
-	params.Set("feed", "hnd")
+	params.Set("method", jvnMethodOverviewList)
+	params.Set("feed", jvnFeedHND)
 	params.Set("keyword", keyword)
 	params.Set("maxCountItem", strconv.Itoa(jvnMaxCountItem))
 	params.Set("startItem", strconv.Itoa(startItem))
 	// See searchKeyword: all three default to the past week.
-	params.Set("rangeDatePublic", "n")
-	params.Set("rangeDatePublished", "n")
-	params.Set("rangeDateFirstPublished", "n")
+	params.Set("rangeDatePublic", jvnDateRangeAll)
+	params.Set("rangeDatePublished", jvnDateRangeAll)
+	params.Set("rangeDateFirstPublished", jvnDateRangeAll)
 	params.Set("lang", "ja")
 
 	reqURL := fmt.Sprintf("%s?%s", s.baseURL, params.Encode())
@@ -587,13 +660,28 @@ func (s *JVNService) fetchPage(ctx context.Context, keyword string, startItem in
 		return nil, err
 	}
 
-	return s.parseJVNPage(body, startItem, jvnMaxCountItem)
+	return s.parseJVNPage(body, jvnPageRequest{
+		keyword:      keyword,
+		startItem:    startItem,
+		maxCountItem: jvnMaxCountItem,
+	})
+}
+
+// jvnPageRequest is the question a response has to be the answer to.
+type jvnPageRequest struct {
+	keyword      string
+	startItem    int
+	maxCountItem int
 }
 
 // jvnPage is one validated getVulnOverviewList response.
 type jvnPage struct {
-	vulns       []model.Vulnerability
-	totalRes    int
+	vulns    []model.Vulnerability
+	totalRes int
+	// advisoryIDs are the identities of the entries this page carried, one
+	// per identifiable entry. An entry with no identity contributes
+	// nothing, which is how it shows up as a shortfall against totalRes.
+	advisoryIDs []string
 	totalResRet int
 	firstRes    int
 }
@@ -625,7 +713,17 @@ type jvnPage struct {
 // A naive len(items) == totalResRet check would reject every empty answer, so
 // totalResRet == 0 is handled explicitly — and is still required to hold no
 // IDENTIFIABLE advisory, so a mirror cannot hide entries behind a zero count.
-func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (*jvnPage, error) {
+// # The response has to answer the question that was asked
+//
+// The Status element echoes every request parameter, and all of them are
+// checked (Codex M55 R1, Critical). Without that, a cache or proxy could hand
+// back a well-formed answer belonging to a DIFFERENT component — attributing
+// one component's advisories to another — or one taken while the date range was
+// still MyJVN's one-week default, and neither is distinguishable from a genuine
+// reply by its shape alone. The date-range echo in particular is the only thing
+// that proves the seven-day window is really gone rather than merely no longer
+// requested.
+func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	var feed JVNRSSFeed
 	if err := dec.Decode(&feed); err != nil {
@@ -656,6 +754,10 @@ func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (
 			rc, feed.Status.ErrCd, feed.Status.ErrMsg)
 	}
 
+	if err := jvnCheckEcho(feed.Status, req); err != nil {
+		return nil, err
+	}
+
 	totalRes, err := jvnCount(feed.Status.TotalRes, "totalRes")
 	if err != nil {
 		return nil, err
@@ -669,9 +771,9 @@ func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (
 		return nil, err
 	}
 
-	if totalResRet > maxCountItem {
+	if totalResRet > req.maxCountItem {
 		return nil, fmt.Errorf("JVN response totalResRet=%d exceeds the requested maxCountItem=%d; "+
-			"the answer is not to the question that was asked", totalResRet, maxCountItem)
+			"the answer is not to the question that was asked", totalResRet, req.maxCountItem)
 	}
 
 	page := &jvnPage{totalRes: totalRes, totalResRet: totalResRet, firstRes: firstRes}
@@ -686,9 +788,11 @@ func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (
 		return page, nil
 	}
 
-	if firstRes != wantFirstRes {
+	// firstRes is only meaningful on a non-empty page; the echoed startItem
+	// above covers the empty case.
+	if firstRes != req.startItem {
 		return nil, fmt.Errorf("JVN response firstRes=%d but startItem=%d was requested; "+
-			"this is not the page that was asked for", firstRes, wantFirstRes)
+			"this is not the page that was asked for", firstRes, req.startItem)
 	}
 	if len(feed.Items) != totalResRet {
 		return nil, fmt.Errorf("JVN response declares totalResRet=%d but carries %d entries; "+
@@ -696,6 +800,12 @@ func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (
 	}
 
 	for _, item := range feed.Items {
+		// An entry with no identity is one this scan cannot record. It is
+		// NOT counted as retrieved (see jvnKeywordResult.Retrieved), so it
+		// surfaces as a shortfall against totalRes rather than vanishing.
+		if id := jvnItemIdentity(item); id != "" {
+			page.advisoryIDs = append(page.advisoryIDs, jvnAdvisoryKey(item, id))
+		}
 		vuln := s.convertJVNItemToVulnerability(item)
 		if vuln != nil {
 			page.vulns = append(page.vulns, *vuln)
@@ -703,6 +813,77 @@ func (s *JVNService) parseJVNPage(data []byte, wantFirstRes, maxCountItem int) (
 	}
 
 	return page, nil
+}
+
+// jvnAdvisoryKey is the identity used to tell entries apart ACROSS pages.
+//
+// It is the JVNDB advisory id where there is one, not the CVE id: totalRes
+// counts advisories, and two JVNDB advisories may cite the same CVE. Keying on
+// the CVE would collapse them, make Retrieved fall short of totalRes, and
+// report a truncation that did not happen.
+func jvnAdvisoryKey(item JVNItem, fallback string) string {
+	if id := strings.TrimSpace(item.Identifier); id != "" {
+		return id
+	}
+	return fallback
+}
+
+// jvnCheckEcho verifies that the Status element echoes the request that was
+// sent. Every attribute it inspects is present in the live success envelope
+// (measured); an absent one is a refusal, because "the parameter I cannot see"
+// and "the parameter that was ignored" have to be treated the same way.
+func jvnCheckEcho(st JVNStatus, req jvnPageRequest) error {
+	if got := strings.TrimSpace(st.Method); got != jvnMethodOverviewList {
+		return fmt.Errorf("JVN response is for method %q, not %q", got, jvnMethodOverviewList)
+	}
+	if got := strings.TrimSpace(st.Feed); got != jvnFeedHND {
+		return fmt.Errorf("JVN response is for feed %q, not %q", got, jvnFeedHND)
+	}
+	for _, rng := range []struct{ name, got string }{
+		{"rangeDatePublic", st.RangeDatePublic},
+		{"rangeDatePublished", st.RangeDatePublished},
+		{"rangeDateFirstPublished", st.RangeDateFirstPublished},
+	} {
+		if got := strings.TrimSpace(rng.got); got != jvnDateRangeAll {
+			return fmt.Errorf("JVN response echoes %s=%q, not %q; the answer covers a narrower "+
+				"date window than was asked for", rng.name, got, jvnDateRangeAll)
+		}
+	}
+	if got, err := jvnCount(st.StartItem, "startItem echo"); err != nil {
+		return err
+	} else if got != req.startItem {
+		return fmt.Errorf("JVN response echoes startItem=%d, not the requested %d", got, req.startItem)
+	}
+	if got, err := jvnCount(st.MaxCountItem, "maxCountItem echo"); err != nil {
+		return err
+	} else if got != req.maxCountItem {
+		return fmt.Errorf("JVN response echoes maxCountItem=%d, not the requested %d", got, req.maxCountItem)
+	}
+	if !jvnKeywordEchoMatches(st.Keyword, req.keyword) {
+		return fmt.Errorf("JVN response echoes keyword %q, not the requested %q; "+
+			"this answer is about a different component", st.Keyword, req.keyword)
+	}
+	return nil
+}
+
+// jvnKeywordEchoMatches compares the echoed keyword with the one that was
+// sent.
+//
+// MyJVN returns the value exactly as it appeared in the query string rather
+// than decoding it, so a non-ASCII component name comes back percent-encoded
+// (measured: keyword=日本語 テスト echoes
+// "%E6%97%A5%E6%9C%AC%E8%AA%9E%20%E3%83%86%E3%82%B9%E3%83%88"). Both forms are
+// accepted; requiring the literal form would reject every component whose name
+// is not plain ASCII, turning this check from a guard into an outage.
+func jvnKeywordEchoMatches(echo, want string) bool {
+	echo = strings.TrimSpace(echo)
+	if echo == want {
+		return true
+	}
+	if decoded, err := url.QueryUnescape(echo); err == nil && decoded == want {
+		return true
+	}
+	return false
 }
 
 // jvnRequireCleanEOF consumes what is left after the root element and rejects
