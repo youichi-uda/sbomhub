@@ -102,9 +102,10 @@ func echoOf(q url.Values) cannedJVNStatus {
 	}
 }
 
-// jvnTestPageReq is the request shape the hand-written fixtures answer.
-func jvnTestPageReq(keyword string, startItem int) jvnPageRequest {
-	return jvnPageRequest{keyword: keyword, startItem: startItem, maxCountItem: jvnMaxCountItem}
+// jvnTestPageReq is the request shape the hand-written fixtures answer: they
+// all echo keyword="libfoo", startItem=1, at the full page size.
+func jvnTestPageReq() jvnPageRequest {
+	return jvnPageRequest{keyword: "libfoo", startItem: 1, maxCountItem: jvnMaxCountItem}
 }
 
 func (c *cannedMyJVN) calls() []url.Values {
@@ -848,7 +849,7 @@ func TestM55JVN_DetailInfoIsNotAnRSSFeed(t *testing.T) {
 </VULDEF-Document>`
 
 	svc := NewJVNService(nil, nil, "", false)
-	if _, err := svc.parseJVNPage([]byte(vuldef), jvnTestPageReq("libfoo", 1)); err == nil {
+	if _, err := svc.parseJVNPage([]byte(vuldef), jvnTestPageReq()); err == nil {
 		t.Fatal("a VULDEF detail document parsed as an overview feed without error")
 	}
 }
@@ -909,7 +910,7 @@ func TestM55JVN_TrailingContentAfterTheFeedIsRejected(t *testing.T) {
 	st.FirstRes = 1
 	body := renderCannedMyJVN(st, nil, time.Now()) + `<rdf:RDF/>`
 	svc := NewJVNService(nil, nil, "", false)
-	if _, err := svc.parseJVNPage([]byte(body), jvnTestPageReq("libfoo", 1)); err == nil {
+	if _, err := svc.parseJVNPage([]byte(body), jvnTestPageReq()); err == nil {
 		t.Fatal("a body with a second document after the feed was accepted")
 	}
 }

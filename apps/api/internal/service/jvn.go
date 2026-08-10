@@ -288,9 +288,19 @@ func (r JVNScanReport) Summary() string {
 //   - TRUNCATION (M55) — MyJVN holds more advisories for a component than the
 //     budget retrieved.
 //
-// A PARTIAL fetch failure deliberately stays a success, unchanged: picking the
-// threshold at which N of M unreachable components invalidates a scan is a
-// product decision. It is counted in the report either way.
+// Two conditions are counted and NOT escalated:
+//
+//   - a PARTIAL fetch failure, unchanged: picking the threshold at which N of M
+//     unreachable components invalidates a scan is a product decision. Failed
+//     carries the number either way.
+//   - a component with no name (SkippedNoName). There is nothing to look up, so
+//     this is a defect in the uploaded SBOM rather than in the scan; the
+//     component is not claimed as checked, it is claimed as skipped.
+//
+// It follows that a sweep of an SBOM whose components are ALL nameless returns
+// nil — the same "nothing was looked up, and that is not an error" outcome an
+// empty SBOM and offline mode already produce (see SbomHandler.runScan on what
+// `completed` is worth).
 func (r JVNScanReport) Err() error {
 	if r.RefusedWrites > 0 {
 		return fmt.Errorf("jvn: database refused %d vulnerability write(s); scan results are incomplete",

@@ -93,7 +93,7 @@ func TestJVNService_SearchByKeyword_HTTPMock(t *testing.T) {
 
 func TestJVNService_ParseJVNResponse(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)
-	page, err := svc.parseJVNPage([]byte(cannedJVNFeed), jvnTestPageReq("libfoo", 1))
+	page, err := svc.parseJVNPage([]byte(cannedJVNFeed), jvnTestPageReq())
 	if err != nil {
 		t.Fatalf("parseJVNPage returned error: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := svc.parseJVNPage([]byte(tc.body), jvnTestPageReq("libfoo", 1))
+			_, err := svc.parseJVNPage([]byte(tc.body), jvnTestPageReq())
 			if tc.wantErr && err == nil {
 				t.Error("a MyJVN application error produced no error; the component would be " +
 					"counted as successfully checked with zero findings")
