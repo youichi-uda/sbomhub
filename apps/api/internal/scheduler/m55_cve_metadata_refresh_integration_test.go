@@ -664,18 +664,45 @@ func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
 	cveID := m55CVEID(t)
 	m55SeedLegacy(t, migDB, cveID, "NVD")
 
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	raw := m55Watermark(t, migDB)
-	got, perr := time.Parse(time.RFC3339, raw)
-	if perr != nil {
-		t.Fatalf("stored watermark %q does not parse: %v", raw, perr)
+	// Assert on what was REQUESTED, not just on the final watermark: the old
+	// unconditional advance leaves the same final state, so a final-state-only
+	// assertion passes against an implementation that never fixed the window
+	// at all (Codex M55 S1, Medium). The canned server records the request.
+	var gotStart, gotEnd string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gotStart == "" {
+			gotStart = r.URL.Query().Get("lastModStartDate")
+			gotEnd = r.URL.Query().Get("lastModEndDate")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(m55Feed(cveID, "CRITICAL", 9.8, "after the bad watermark",
+			"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty)))
+	}))
+	defer srv.Close()
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, srv.URL, false)
+	if err := j.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if got.After(time.Now().UTC()) {
-		t.Errorf("stored watermark = %s, still in the future: a future value yields a negative retained window, "+
-			"which always compares as inside the retry bound and pins the sync forever", got.UTC())
+
+	if gotStart == "" {
+		t.Fatal("the job never issued a request")
+	}
+	const nvdLayout = "2006-01-02T15:04:05.000"
+	start, err := time.Parse(nvdLayout, gotStart)
+	if err != nil {
+		t.Fatalf("lastModStartDate %q does not parse: %v", gotStart, err)
+	}
+	end, err := time.Parse(nvdLayout, gotEnd)
+	if err != nil {
+		t.Fatalf("lastModEndDate %q does not parse: %v", gotEnd, err)
+	}
+	if start.After(end) {
+		t.Errorf("requested window is inverted: start %s > end %s. NVD rejects that outright, so every tick "+
+			"repeats the same impossible request and the whole catalogue stops updating", start, end)
+	}
+	if age := end.Sub(start); age > 48*time.Hour {
+		t.Errorf("requested window span = %s, want the normal ~24h fallback: a future watermark must be "+
+			"discarded, not merely survived", age)
 	}
 }
 
@@ -730,6 +757,72 @@ func TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped(t *testing.T) {
 	}
 }
 
+// TestM55CVEMetadata_FutureUpstreamTimestampCannotFreezeARow is the guard's own
+// worst case (Codex M55 S1, High).
+//
+// The guard is monotonic: whatever source_modified_at a record establishes,
+// every later record must beat it. So a record carrying a timestamp from the
+// FUTURE does not merely land — it FREEZES the row until real time catches up.
+// A corrupt "2099" on a LOW record would refuse every legitimate CRITICAL for
+// seventy years, which is the exact failure the guard exists to prevent, with
+// the sign flipped. And unlike a missed refresh, this one is caused BY the
+// mechanism M55 added, so it is a regression this wave owns.
+//
+// A row must therefore never be dated from an implausible timestamp: it stays
+// unarbitrated (NULL) instead, which is writable once and self-heals.
+func TestM55CVEMetadata_FutureUpstreamTimestampCannotFreezeARow(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectWatermark(t, migDB)
+
+	// --- the UPDATE path: an existing row must not take the bogus date ---
+	existing := m55CVEID(t)
+	m55SeedLegacy(t, migDB, existing, "NVD")
+	m55Sync(t, appDB, m55Feed(existing, "LOW", 2.0, "record from the year 2099",
+		"2026-06-01T00:00:00Z", "2099-01-01T00:00:00Z", m55CPEWithKeywords))
+
+	row := m55Read(t, migDB, existing)
+	if row.sourceModAt.Valid {
+		t.Errorf("source_modified_at = %v: an implausible upstream timestamp was recorded as the freshness "+
+			"arbiter, and every legitimate record until then is now refused as stale", row.sourceModAt.Time.UTC())
+	}
+	// A legitimate record must still get through afterwards.
+	m55Sync(t, appDB, m55Feed(existing, "CRITICAL", 9.8, "legitimate re-score",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEWithKeywords))
+	if got := m55Read(t, migDB, existing); got.severity != "CRITICAL" {
+		t.Errorf("severity = %q, want CRITICAL: the row was frozen by a bogus future timestamp", got.severity)
+	}
+
+	// --- the INSERT path: a new row must be stored unarbitrated, not dated ---
+	fresh := m55CVEID(t)
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = $1`, fresh); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+	m55Sync(t, appDB, m55Feed(fresh, "LOW", 2.0, "new cve dated 2099",
+		"2026-06-01T00:00:00Z", "2099-01-01T00:00:00Z", m55CPEWithKeywords))
+	var present int
+	if err := migDB.QueryRow(`SELECT count(*) FROM vulnerabilities WHERE cve_id = $1`, fresh).Scan(&present); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if present == 0 {
+		t.Skip("the CVE was not inserted (no tenant match); the INSERT half of this test needs the row to exist")
+	}
+	inserted := m55Read(t, migDB, fresh)
+	if inserted.sourceModAt.Valid {
+		t.Errorf("source_modified_at = %v on a newly inserted row: an implausible timestamp must be stored as "+
+			"NULL (unarbitrated, writable once) rather than as an arbiter no real record can beat",
+			inserted.sourceModAt.Time.UTC())
+	}
+	m55Sync(t, appDB, m55Feed(fresh, "CRITICAL", 9.8, "legitimate re-score",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEWithKeywords))
+	if got := m55Read(t, migDB, fresh); got.severity != "CRITICAL" {
+		t.Errorf("severity = %q, want CRITICAL: the newly inserted row was frozen at insert time", got.severity)
+	}
+}
+
 // TestM55CVEMetadata_UndateableRecordIsNotWrittenAndNotRetried: NVD always
 // publishes `lastModified`; its absence means the field did not parse. Such a
 // record cannot be arbitrated against the stored one, so it must not be
@@ -747,8 +840,11 @@ func TestM55CVEMetadata_UndateableRecordIsNotWrittenAndNotRetried(t *testing.T) 
 	cveID := m55CVEID(t)
 	m55SeedLegacy(t, migDB, cveID, "NVD")
 
+	// CPE keywords PRESENT on purpose: with m55CPEEmpty the pre-M55 loop skips
+	// the CVE outright and every assertion below is satisfied without the
+	// timestamp rule ever running (Codex M55 S1, Low).
 	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "undateable record",
-		"2026-06-01T00:00:00Z", "", m55CPEEmpty))
+		"2026-06-01T00:00:00Z", "", m55CPEWithKeywords))
 
 	got := m55Read(t, migDB, cveID)
 	if got.severity != "LOW" || got.description != "first-fetch description" {

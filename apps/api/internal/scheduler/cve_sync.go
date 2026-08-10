@@ -1462,13 +1462,58 @@ func nilIfZeroTime(t time.Time) *time.Time {
 	return &t
 }
 
+// sourceClockSkewAllowance is how far ahead of our clock an upstream
+// `lastModified` may sit and still be believed.
+//
+// It exists because the freshness guard is monotonic: whatever
+// source_modified_at a record establishes, every later record must beat it. A
+// timestamp from the future therefore FREEZES the row until real time catches
+// up with it — a corrupt "2099" would hold a LOW severity against every
+// legitimate CRITICAL for 70 years, which is the very failure the guard was
+// added to prevent, inverted (Codex M55 S1, High).
+//
+// The allowance is generous on purpose, and the asymmetry is the point:
+//
+//	too tight  our own clock running slow makes every record look like the
+//	           future and nothing is refreshed — bad, but LOUD (each rejection
+//	           is logged) and self-correcting the moment the clock is fixed
+//	too loose  a bogus timestamp inside the allowance freezes that row for as
+//	           long as the allowance — silent, and per-row
+//
+// 24h keeps ordinary clock drift and timezone mistakes well inside the
+// believed range while capping the damage from a bogus-but-plausible
+// timestamp at one day. Wildly corrupt values (years out) are rejected
+// outright.
+const sourceClockSkewAllowance = 24 * time.Hour
+
+// usableSourceModifiedAt returns the upstream modification time to store, or
+// nil when it cannot be believed: absent/unparseable (the zero time — see
+// nilIfZeroTime) or implausibly far in the future.
+//
+// nil is the "undateable" shape the rest of this file already handles: the
+// UPDATE path declines to offer such a record at all, and the INSERT path
+// stores NULL, which is writable exactly once so the row self-heals on the
+// first believable record.
+func usableSourceModifiedAt(t, now time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	if t.After(now.Add(sourceClockSkewAllowance)) {
+		slog.Warn("CVE sync: upstream lastModified is implausibly far in the future; not recording it as the "+
+			"freshness arbiter (a future timestamp would freeze this row until real time caught up)",
+			"last_modified", t.Format(time.RFC3339), "now", now.Format(time.RFC3339))
+		return nil
+	}
+	return &t
+}
+
 // catalogueMetadata projects one fetched CVE onto the columns the CVE-sync
 // job owns. Source is always "NVD" because this job writes NVD's content: a
 // row refreshed from here carries NVD's description and NVD's score, so
 // leaving an older 'JVN' attribution in place would make the row claim a
 // provenance that no longer matches a single field on it (measured
 // 2026-08-11: a JVN-authored row took NVD's CRITICAL and kept source='JVN').
-func catalogueMetadata(cve CVEInfo) repository.VulnerabilityMetadata {
+func catalogueMetadata(cve CVEInfo, now time.Time) repository.VulnerabilityMetadata {
 	return repository.VulnerabilityMetadata{
 		CVEID:            cve.ID,
 		Description:      cve.Description,
@@ -1476,7 +1521,7 @@ func catalogueMetadata(cve CVEInfo) repository.VulnerabilityMetadata {
 		CVSSScore:        cve.CVSSScore,
 		Source:           "NVD",
 		PublishedAt:      nilIfZeroTime(cve.PublishedAt),
-		SourceModifiedAt: nilIfZeroTime(cve.ModifiedAt),
+		SourceModifiedAt: usableSourceModifiedAt(cve.ModifiedAt, now),
 	}
 }
 
@@ -1513,12 +1558,13 @@ func catalogueCtx(ctx context.Context) context.Context {
 // where an undateable record risks a downgrade; a first insert has nothing to
 // downgrade.
 func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (repository.MetadataWriteOutcome, error) {
-	if cve.ModifiedAt.IsZero() {
-		slog.Warn("CVE sync: NVD record carries no usable lastModified; not written",
+	m := catalogueMetadata(cve, time.Now())
+	if m.SourceModifiedAt == nil {
+		slog.Warn("CVE sync: NVD record carries no believable lastModified; not written",
 			"cve_id", cve.ID)
 		return repository.MetadataRefusedStale, nil
 	}
-	outcome, err := j.vulnRepo.UpdateMetadata(catalogueCtx(ctx), catalogueMetadata(cve))
+	outcome, err := j.vulnRepo.UpdateMetadata(catalogueCtx(ctx), m)
 	if err != nil {
 		return repository.MetadataRowAbsent, err
 	}
@@ -1589,8 +1635,9 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 	// Analysis" CVE is stored as un-scored rather than as the 0.0 sentinel
 	// (M46 B-1 High-3). published_at / source_modified_at take the same
 	// treatment for the zero time — see nilIfZeroTime.
-	if cve.ModifiedAt.IsZero() {
-		slog.Warn("CVE sync: NVD record carries no usable lastModified; if this CVE is new it is stored unarbitrated (source_modified_at NULL)",
+	sourceModifiedAt := usableSourceModifiedAt(cve.ModifiedAt, time.Now())
+	if sourceModifiedAt == nil {
+		slog.Warn("CVE sync: NVD record carries no believable lastModified; if this CVE is new it is stored unarbitrated (source_modified_at NULL)",
 			"cve_id", cve.ID)
 	}
 	newID := uuid.New()
@@ -1601,7 +1648,7 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 		ON CONFLICT (cve_id) DO NOTHING
 		RETURNING id
 	`, newID, cve.ID, cve.Description, cve.Severity, cve.CVSSScore,
-		nilIfZeroTime(cve.PublishedAt), nilIfZeroTime(cve.ModifiedAt)).Scan(&insertedID)
+		nilIfZeroTime(cve.PublishedAt), sourceModifiedAt).Scan(&insertedID)
 	switch {
 	case err == nil:
 		return insertedID, true, nil
