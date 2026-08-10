@@ -42,8 +42,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type cannedJVNAdvisory struct {
-	ID        string
+	ID string
+	// CVE is the advisory's single CVE; CVEs overrides it when an advisory
+	// covers several, the way real JVNDB advisories do.
 	CVE       string
+	CVEs      []string
 	Published time.Time
 	// CVSS, when set, replaces the default single 3.1/High/7.5 element.
 	CVSS []cannedJVNCVSS
@@ -284,12 +287,11 @@ func renderCannedMyJVN(st cannedJVNStatus, items []cannedJVNAdvisory, now time.T
     <link>https://jvndb.jvn.jp/ja/contents/%s.html</link>
     <description>test advisory</description>
     <sec:identifier>%s</sec:identifier>
-    <sec:references source="CVE" id="%s">https://www.cve.org/CVERecord?id=%s</sec:references>
-%s    <dc:date>%s</dc:date>
+%s%s    <dc:date>%s</dc:date>
     <dcterms:issued>%s</dcterms:issued>
     <dcterms:modified>%s</dcterms:modified>
   </item>
-`, a.ID, a.ID, a.ID, a.ID, a.CVE, a.CVE, renderCannedCVSS(a.CVSS),
+`, a.ID, a.ID, a.ID, a.ID, renderCannedRefs(a), renderCannedCVSS(a.CVSS),
 			a.Published.Format(time.RFC3339), a.Published.Format(time.RFC3339), a.Published.Format(time.RFC3339))
 	}
 	trr := fmt.Sprintf(` totalResRet="%d"`, st.TotalResRet)
@@ -300,6 +302,19 @@ func renderCannedMyJVN(st cannedJVNStatus, items []cannedJVNAdvisory, now time.T
 </rdf:RDF>`, st.Method, st.Lang, st.RetCd, st.TotalRes, trr, st.FirstRes, st.Feed,
 		st.Keyword, st.MaxCountItem, st.StartItem,
 		st.RangeDatePublic, st.RangeDatePublished, st.RangeDateFirstPublished)
+	return b.String()
+}
+
+func renderCannedRefs(a cannedJVNAdvisory) string {
+	cves := a.CVEs
+	if cves == nil {
+		cves = []string{a.CVE}
+	}
+	var b strings.Builder
+	for _, cve := range cves {
+		fmt.Fprintf(&b, "    <sec:references source=\"CVE\" id=%q>https://www.cve.org/CVERecord?id=%s</sec:references>\n",
+			cve, cve)
+	}
 	return b.String()
 }
 
@@ -946,6 +961,77 @@ func TestM55JVN_MultiCVEAdvisoryYieldsEveryCVE(t *testing.T) {
 	// No identity at all is still dropped.
 	if got = svc.convertJVNItemToVulnerabilities(JVNItem{Title: "nothing"}); len(got) != 0 {
 		t.Errorf("an item with no identity produced %v, want nothing", got)
+	}
+}
+
+// TestM55JVN_MultiCVEReachesTheFetchPath drives the multi-CVE rule through the
+// REAL paging path (Codex M55 R6, Medium: the helper-level test stayed green
+// when the parser was reverted to the singular conversion).
+func TestM55JVN_MultiCVEReachesTheFetchPath(t *testing.T) {
+	now := time.Now()
+	srv := &cannedMyJVN{now: now, corpus: []cannedJVNAdvisory{{
+		ID:        "JVNDB-2026-000019",
+		CVEs:      []string{"CVE-2026-20704", "CVE-2026-22550", "CVE-2026-24449", "CVE-2026-24465"},
+		Published: now,
+	}}}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
+	if err != nil {
+		t.Fatalf("searchKeyword: %v", err)
+	}
+	if len(res.Vulns) != 4 {
+		t.Fatalf("got %d vulnerabilities from a four-CVE advisory, want 4", len(res.Vulns))
+	}
+	// One ADVISORY was retrieved, and the total counts advisories, so this
+	// is complete rather than truncated.
+	if res.Retrieved != 1 || res.TotalRes != 1 || res.Truncated {
+		t.Errorf("Retrieved=%d TotalRes=%d Truncated=%v; a four-CVE advisory is one advisory",
+			res.Retrieved, res.TotalRes, res.Truncated)
+	}
+}
+
+// TestM55JVN_CompetingCVSSEntriesRankBySeverity pins that a stated CRITICAL is
+// not outranked by a higher-scored HIGH within one advisory (Codex M55 R6,
+// High).
+func TestM55JVN_CompetingCVSSEntriesRankBySeverity(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+	got := svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000010",
+		CVSS: []JVNCVSS{
+			jvnTestCVSS("3.1", "Critical", "8.0"),
+			jvnTestCVSS("3.1", "High", "8.5"),
+		},
+	})
+	if got == nil {
+		t.Fatal("item was dropped")
+	}
+	if got.Severity != "CRITICAL" || got.CVSSScore == nil || *got.CVSSScore != 8.0 {
+		t.Errorf("stored %s/%v, want CRITICAL/8.0 — the higher raw score demoted a stated CRITICAL",
+			got.Severity, got.CVSSScore)
+	}
+}
+
+// TestM55JVN_EmptyPageMustIdentifyItself pins that a zero-count answer still
+// says where it is (Codex M55 R6, High). firstRes was checked only on non-empty
+// pages, so values identifying no position at all passed unexamined.
+func TestM55JVN_EmptyPageMustIdentifyItself(t *testing.T) {
+	now := time.Now()
+	for _, firstRes := range []int{0, 999} {
+		t.Run(fmt.Sprintf("firstRes=%d", firstRes), func(t *testing.T) {
+			srv := &cannedMyJVN{corpus: nil, now: now,
+				corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+					st.FirstRes = firstRes
+				}}
+			ts := srv.start(t)
+			svc := NewJVNService(nil, nil, ts.URL, false)
+			svc.requestDelay = 0
+			if _, err := svc.searchKeyword(context.Background(), "libfoo", nil); err == nil {
+				t.Fatal("an empty page reporting an impossible firstRes was accepted")
+			}
+		})
 	}
 }
 

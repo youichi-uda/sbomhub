@@ -772,6 +772,21 @@ type jvnPage struct {
 // A naive len(items) == totalResRet check would reject every empty answer, so
 // totalResRet == 0 is handled explicitly — and is still required to hold no
 // IDENTIFIABLE advisory, so a mirror cannot hide entries behind a zero count.
+// # What these checks do NOT establish
+//
+// They establish CONSISTENCY, not AUTHENTICITY (Codex M55 R6). A mirror that
+// controls the connection can return a fully self-consistent empty feed — right
+// namespaces, right channel, right echoes, right placeholder — and nothing here
+// can tell it from a real "no advisories". Detecting that needs something this
+// layer does not have: a signed feed, pinned transport, or corroboration
+// against a second source. Transport security is the only thing standing behind
+// the answer today, and a completed JVN scan should be read that way.
+//
+// The CVSS `vector` attribute is likewise not parsed, so an element whose
+// vector encodes critical metrics while its severity says "Low" is stored as
+// Low. Recomputing a base score from the vector is a CVSS calculator, i.e. its
+// own component with its own tests, and is not attempted here.
+//
 // # The response has to answer the question that was asked
 //
 // The Status element echoes every request parameter, and all of them are
@@ -863,6 +878,15 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	page := &jvnPage{totalRes: totalRes, totalResRet: totalResRet, firstRes: firstRes}
 
 	if totalResRet == 0 {
+		// An empty page still has to say WHERE it is (Codex M55 R6, High).
+		// firstRes is not compared with startItem here because MyJVN
+		// answers firstRes="1" for a zero-match response (measured), but
+		// values such as 0 or 999 identify no position at all and used to
+		// pass unexamined.
+		if firstRes != 1 && firstRes != req.startItem {
+			return nil, fmt.Errorf("JVN response is empty and reports firstRes=%d, which is "+
+				"neither 1 nor the requested startItem=%d", firstRes, req.startItem)
+		}
 		// The measured zero-match body carries exactly ONE placeholder
 		// <item> and nothing else. Allowing any number of identity-less
 		// items (Codex M55 R3, High) left a shape in which a body could
@@ -1197,10 +1221,20 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 					"version", e.Version(), "score", e.Score())
 				continue
 			}
-			if best == nil || score > *best {
+			// Reconcile FIRST, then rank on the reconciled severity with
+			// the score as the tiebreak (Codex M55 R6, High). Ranking on
+			// the raw score meant an entry saying severity="Critical"
+			// score="8.0" lost to one saying severity="High" score="8.5",
+			// and the stated CRITICAL was discarded — the same
+			// version-blind numeric comparison already corrected in
+			// jvnMoreSevere, one level down.
+			candidate := jvnReconcileSeverity(e.Version(), e.Severity(), score)
+			if best == nil ||
+				jvnSeverityRank[candidate] > jvnSeverityRank[severity] ||
+				(jvnSeverityRank[candidate] == jvnSeverityRank[severity] && score > *best) {
 				s := score
 				best = &s
-				severity = jvnReconcileSeverity(e.Version(), e.Severity(), score)
+				severity = candidate
 			}
 		}
 		return best, severity
