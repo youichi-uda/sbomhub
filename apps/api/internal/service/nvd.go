@@ -350,8 +350,16 @@ type NVDScanReport struct {
 	UniqueComponents int
 	// Processed is how many of them produced an answer (from cache or API).
 	Processed int
+	// CacheHits is how many were served from Redis without any HTTP request.
+	// Processed - CacheHits is therefore the number of lookups that went to
+	// the network, which is NOT the same as APICalls below.
 	CacheHits int
-	APICalls  int
+	// APICalls is how many NVD HTTP REQUESTS the sweep issued — not how many
+	// lookups went to the network (Codex M55 R1, Low). One lookup can spend up
+	// to nvdMaxPagesPerComponent requests, and a lookup that FAILED partway
+	// still spent the requests it made. This is the number to compare against
+	// NVD's published rate limit.
+	APICalls int
 	// FetchFailures counts work items whose NVD lookup never returned an
 	// answer. Processed + FetchFailures == UniqueComponents unless the sweep
 	// was cancelled.
@@ -359,11 +367,14 @@ type NVDScanReport struct {
 	// RefusedWrites counts statements the DATABASE refused. See
 	// persistWorkItem: it is a floor on the loss, not its size.
 	RefusedWrites int
-	// TruncatedComponents counts work items whose match set was provably
-	// larger than the paging budget could fetch.
+	// TruncatedComponents counts work items whose match set the sweep could
+	// not prove it saw in full — the paging budget ran out, or the result set
+	// shifted underneath the page walk.
 	TruncatedComponents int
 	// DroppedMatches is the sum of (totalResults - fetched) over those
 	// components: how many matches are known to exist and were not retrieved.
+	// It is a FLOOR, not the size of the loss: a shifted walk contributes 0
+	// because it cannot say how many records slid past its offsets.
 	DroppedMatches int
 }
 
@@ -572,6 +583,10 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 						"error", err)
 					mu.Lock()
 					fetchFailures++
+					// The requests a FAILED walk already spent still count
+					// against NVD's rate limit, so they still belong in the
+					// accounting (Codex M55 R1, Low).
+					apiCalls += lookup.requests
 					mu.Unlock()
 					continue
 				}
@@ -582,9 +597,14 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					// component's match set was cut off, and that is the one
 					// thing they need in order to act (pin a version, add a
 					// purl, or accept the noise).
+					reason := "paging budget exhausted"
+					if lookup.shifted {
+						reason = "result set changed underneath the page walk"
+					}
 					slog.Warn("nvd: component match set truncated",
 						"component", work.key.Name,
 						"version", work.key.Version,
+						"reason", reason,
 						"fetched", lookup.fetched,
 						"total", lookup.total,
 						"page_size", nvdPageSize,
@@ -595,12 +615,15 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 				processedCount++
 				if lookup.fromCache {
 					cacheHits++
-				} else {
-					apiCalls++
 				}
+				apiCalls += lookup.requests
 				if lookup.truncated {
 					truncatedComponents++
-					droppedMatches += lookup.total - lookup.fetched
+					// A shifted walk knows it lost records but not how many,
+					// so it contributes 0 here rather than a negative number.
+					if d := lookup.total - lookup.fetched; d > 0 {
+						droppedMatches += d
+					}
 				}
 				mu.Unlock()
 
@@ -714,8 +737,9 @@ func (r NVDScanReport) incompleteErr() error {
 	// alternative — stay silent and let the count look authoritative — is the
 	// failure mode this product exists to prevent.
 	if r.TruncatedComponents > 0 {
-		return fmt.Errorf("nvd: %d component(s) matched more CVEs than the paging budget "+
-			"(%d pages x %d) could fetch; %d known match(es) were not retrieved and the "+
+		return fmt.Errorf("nvd: %d component(s) could not be enumerated completely "+
+			"(the paging budget of %d pages x %d ran out, or the result set changed "+
+			"underneath the walk); at least %d known match(es) were not retrieved and the "+
 			"findings for those components are incomplete",
 			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, r.DroppedMatches)
 	}
@@ -847,19 +871,50 @@ func (s *NVDService) persistWorkItem(
 type nvdLookup struct {
 	vulns     []model.Vulnerability
 	fromCache bool
-	// truncated, total and fetched are always false/0 for a cache hit — see
-	// getVulnerabilitiesWithCache for why a truncated result is never cached
-	// in the first place.
+	// truncated, shifted, total, fetched and requests are all zero for a cache
+	// hit — a cache hit issues no request, and a truncated result is never
+	// cached in the first place (see getVulnerabilitiesWithCache).
 	truncated bool
+	shifted   bool
 	total     int
 	fetched   int
+	// requests is how many NVD HTTP requests this lookup spent.
+	requests int
 }
+
+// nvdCacheSchema namespaces every cache key this build reads or writes.
+//
+// # Why (Codex M55 R1, High)
+//
+// Redis entries written by a PRE-M55 build hold the first 20 matches and carry
+// no completeness metadata, and cache.VulnCacheEntry has nowhere to put any.
+// After an upgrade — and for the whole of a rolling deployment, where an older
+// instance is still writing into the same Redis — a component with 563 matches
+// would be served its stale 20-record prefix as a complete cache hit: no HTTP
+// request, no page walk, no truncation, and no way for anything downstream to
+// tell. The fix that this wave shipped (do not CACHE a truncated result) does
+// nothing about entries that are already there.
+//
+// Changing the key namespace makes every pre-M55 entry a miss, so the first
+// scan after the upgrade re-walks and re-decides. The orphaned old keys expire
+// on their own 24h TTL (cache.NVDCacheTTL) and cost nothing but Redis memory
+// until then.
+//
+// It is applied to the component NAME rather than to cache.NVDCachePrefix
+// because the prefix belongs to the cache package, and every scanner-side
+// caller of Get / Set / Delete goes through nvdCacheName, so the two cannot
+// drift.
+const nvdCacheSchema = "m55/"
+
+// nvdCacheName is the namespaced component name used for every cache
+// operation. See nvdCacheSchema.
+func nvdCacheName(name string) string { return nvdCacheSchema + name }
 
 // getVulnerabilitiesWithCache tries cache first, falls back to API.
 func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, version string, pace nvdPacer) (nvdLookup, error) {
 	// Try cache first
 	if s.cache != nil {
-		entry, err := s.cache.Get(ctx, name, version)
+		entry, err := s.cache.Get(ctx, nvdCacheName(name), version)
 		if err != nil {
 			slog.Debug("cache get error", "component", name, "error", err)
 		} else if entry != nil {
@@ -948,7 +1003,7 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 				PublishedAt: v.PublishedAt,
 			}
 		}
-		if err := s.cache.Set(ctx, name, version, cachedVulns); err != nil {
+		if err := s.cache.Set(ctx, nvdCacheName(name), version, cachedVulns); err != nil {
 			slog.Debug("cache set error", "component", name, "error", err)
 		}
 	}
@@ -956,8 +1011,10 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 	return nvdLookup{
 		vulns:     vulns,
 		truncated: res.truncated,
+		shifted:   res.shifted,
 		total:     res.total,
 		fetched:   res.fetched,
+		requests:  res.pages,
 	}, nil
 }
 
@@ -971,16 +1028,39 @@ type nvdSearchResult struct {
 	// vulns are the matches, de-duplicated by canonical CVE id.
 	vulns []model.Vulnerability
 	// fetched is how many RECORDS the walk consumed (pre-dedup), i.e. how far
-	// into the result set it got. Compared against total to decide truncation.
+	// into the result set its offsets got. Compared against total.
 	fetched int
 	// total is totalResults as NVD last reported it. NVD is live, so a walk
 	// can see this change between pages; the last value wins.
 	total int
-	// pages is the number of HTTP requests this lookup issued.
+	// pages is the number of HTTP requests this lookup issued, INCLUDING the
+	// one that failed when the walk ends in an error.
 	pages int
-	// truncated is true when the result set is provably larger than what was
-	// fetched. It is never inferred from a heuristic — only from NVD's own
-	// totalResults.
+	// shifted records that the result set moved underneath the walk: either
+	// totalResults changed between pages, or a record was delivered twice.
+	//
+	// This is not a cosmetic distinction (Codex M55 R1, Critical). Paging is
+	// by OFFSET, so a record removed from the middle of the set slides every
+	// later record down one position, and the record that occupied the next
+	// startIndex is never returned by any request. Concretely: 350 matches,
+	// page 1 fetches offsets 0-199, record #0 is then removed, page 2 asks for
+	// offset 200 and receives what is now offsets 200-348 — the record that
+	// WAS at offset 200 has moved to 199 and is silently skipped. The walk
+	// ends with fetched=349 against total=349 and looks complete.
+	//
+	// Neither the record count nor the de-duplicated count can detect that,
+	// because the missing record is simply absent. What IS detectable is the
+	// disturbance that caused it, and both of its symptoms are cheap to spot:
+	// totalResults changing, and a duplicate arriving (which happens on the
+	// mirror-image case, a record INSERTED mid-set). So the walk does not try
+	// to prove which records it lost; it records that it can no longer prove
+	// it lost none.
+	shifted bool
+	// truncated is true when the walk cannot prove it saw the whole match set:
+	// either the result set is larger than what was fetched (the paging budget
+	// ran out) or it shifted underneath the walk. Never a heuristic — the
+	// first is NVD's own totalResults, the second is an observed
+	// inconsistency.
 	truncated bool
 }
 
@@ -1089,11 +1169,11 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 	}
 
 	var out nvdSearchResult
-	// seen de-duplicates by canonical CVE id ACROSS pages. NVD is live and
-	// ordering is not promised to be stable, so a record can legitimately
-	// appear on two pages of one walk; without this the component would be
-	// linked to it twice and the finding count would be inflated.
+	// seen de-duplicates by canonical CVE id ACROSS pages, and — see the
+	// shifted-window discussion on nvdSearchResult.truncated — a hit is also
+	// PROOF that the offsets this walk used are no longer coherent.
 	seen := make(map[string]struct{})
+	firstTotal := -1
 
 	for out.pages < nvdMaxPagesPerComponent {
 		// Every page after the first is an EXTRA request that the worker
@@ -1102,24 +1182,32 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 		// requests per tick and blow through NVD's published rate.
 		if out.pages > 0 && pace != nil {
 			if err := pace(ctx); err != nil {
-				return nvdSearchResult{}, err
+				return nvdSearchResult{pages: out.pages}, err
 			}
 		}
 
 		page, err := s.fetchPage(ctx, keyword, out.fetched)
+		out.pages++
 		if err != nil {
 			// A failure partway through a walk is a failure of the whole
-			// lookup, not a partial success: returning the pages we did get
+			// lookup, not a partial success: returning the records we did get
 			// would be exactly the silent under-report this function exists to
-			// stop, only with a nicer-looking count.
-			return nvdSearchResult{}, err
+			// stop, only with a nicer-looking count. The PAGE COUNT is still
+			// returned, so the sweep's request accounting includes the
+			// requests that were actually spent (Codex M55 R1, Low).
+			return nvdSearchResult{pages: out.pages}, err
 		}
-		out.pages++
 		out.total = *page.TotalResults
+		if firstTotal < 0 {
+			firstTotal = out.total
+		} else if out.total != firstTotal {
+			out.shifted = true
+		}
 
 		entries := page.entries()
 		for _, v := range s.convertToVulnerabilities(entries) {
 			if _, dup := seen[v.CVEID]; dup {
+				out.shifted = true
 				continue
 			}
 			seen[v.CVEID] = struct{}{}
@@ -1131,7 +1219,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 		// validate's totalResults > startIndex rule) and as a belt-and-braces
 		// guard against a mirror that answers a later page with an empty one:
 		// without it the walk would re-request the same startIndex until the
-		// budget ran out and then call the component truncated.
+		// budget ran out.
 		if len(entries) == 0 {
 			break
 		}
@@ -1140,7 +1228,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 		}
 	}
 
-	out.truncated = out.fetched < out.total
+	out.truncated = out.fetched < out.total || out.shifted
 	return out, nil
 }
 

@@ -248,20 +248,118 @@ func TestM55SearchByKeyword_RefusesAPageThatIsNotTheOneAsked(t *testing.T) {
 	}
 }
 
-// TestM55SearchByKeyword_ToleratesAResultSetThatShrinksMidWalk covers the live
-// data race the page-aware validate had to make room for.
+// TestM55SearchByKeyword_AShiftedResultSetIsNotProvablyComplete is the Codex
+// M55 R1 (Critical) regression.
 //
-// NVD is live: totalResults can fall between page 1 and page 2 (a CVE is
-// rejected, a keyword match is re-scored away). The follow-up then legitimately
-// answers with zero entries and a SMALLER totalResults. Under M54's
-// `totalResults > 0 && len == 0` rule that was a hard error, costing the
-// component its entire lookup; it must be the ordinary end of the walk.
+// Paging is by OFFSET. If a record is removed from the middle of the result set
+// between two requests, every later record slides down one position and the
+// record that occupied the next startIndex is returned by NO request. Counting
+// records — or counting DE-DUPLICATED records — cannot see that: the missing
+// record is simply absent, and the arithmetic still comes out even. The first
+// cut of this walk reported such a lookup as complete, which is the same silent
+// under-report the whole change exists to remove, reached by a different route.
 //
-// It is also the guard against spinning: a page that returns nothing does not
-// advance startIndex, so without an explicit break the walk would re-request
-// the same page until the budget ran out and then declare the component
-// truncated.
-func TestM55SearchByKeyword_ToleratesAResultSetThatShrinksMidWalk(t *testing.T) {
+// What IS observable is the disturbance: totalResults changing, or a record
+// arriving twice (the mirror image, caused by an insertion). Either one means
+// the offsets are no longer coherent and completeness cannot be claimed.
+//
+// The subtests below are the two symptoms, plus the control that must stay
+// green so this does not degrade into "always report truncated".
+func TestM55SearchByKeyword_AShiftedResultSetIsNotProvablyComplete(t *testing.T) {
+	t.Run("totalResults changes mid-walk", func(t *testing.T) {
+		pager := &cannedNVDPager{total: 350}
+		pager.rewrite = func(page int, resp *NVDResponse) {
+			if page >= 1 {
+				// One record was removed between the two requests, so the
+				// remaining set is 349 and every record after the removed one
+				// has slid down a position.
+				resp.TotalResults = nvdIntPtr(349)
+			}
+		}
+		srv := pager.start(t)
+
+		svc := NewNVDService(nil, nil, "k", srv.URL, false)
+		res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
+		if err != nil {
+			t.Fatalf("a shifted result set must not fail the lookup: %v", err)
+		}
+		if !res.shifted {
+			t.Error("totalResults changed between pages and the walk did not notice")
+		}
+		if !res.truncated {
+			t.Errorf("fetched=%d total=%d and the walk called itself COMPLETE. Offsets moved "+
+				"under it, so a record can have slid past the next startIndex and be missing "+
+				"from every page — arithmetic that comes out even does not prove otherwise.",
+				res.fetched, res.total)
+		}
+	})
+
+	t.Run("a record arrives on two pages", func(t *testing.T) {
+		pager := &cannedNVDPager{total: 350}
+		pager.rewrite = func(page int, resp *NVDResponse) {
+			if page == 1 {
+				entries := *resp.Vulnerabilities
+				entries[0].CVE.ID = m55CVEID(0) // already delivered on page 0
+				resp.Vulnerabilities = &entries
+			}
+		}
+		srv := pager.start(t)
+
+		svc := NewNVDService(nil, nil, "k", srv.URL, false)
+		res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
+		if err != nil {
+			t.Fatalf("searchByKeyword: %v", err)
+		}
+		// De-duplication still happens: the component must not be linked to
+		// the same CVE twice, whatever the walk concludes about completeness.
+		seen := make(map[string]int, len(res.vulns))
+		for _, v := range res.vulns {
+			seen[v.CVEID]++
+		}
+		for id, n := range seen {
+			if n > 1 {
+				t.Errorf("%s appears %d times in one component's result", id, n)
+			}
+		}
+		if len(res.vulns) != 349 {
+			t.Errorf("got %d unique matches, want 349", len(res.vulns))
+		}
+		if !res.truncated {
+			t.Errorf("349 unique records were returned for a result set of %d and the walk "+
+				"called itself complete; a duplicate means the window moved, and the record "+
+				"it displaced is in no page at all", res.total)
+		}
+	})
+
+	t.Run("a stable result set is still complete", func(t *testing.T) {
+		pager := &cannedNVDPager{total: 350}
+		srv := pager.start(t)
+
+		svc := NewNVDService(nil, nil, "k", srv.URL, false)
+		res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
+		if err != nil {
+			t.Fatalf("searchByKeyword: %v", err)
+		}
+		if res.shifted || res.truncated {
+			t.Errorf("shifted=%v truncated=%v on an undisturbed 2-page walk; the shift "+
+				"detection must not degrade into reporting every paged component",
+				res.shifted, res.truncated)
+		}
+		if len(res.vulns) != 350 {
+			t.Errorf("got %d matches, want 350", len(res.vulns))
+		}
+	})
+}
+
+// TestM55SearchByKeyword_DoesNotSpinOnAPageWithNoEntries pins the termination
+// guard.
+//
+// A page that returns nothing does not advance startIndex, so without an
+// explicit break the walk would re-request the same offset until the budget ran
+// out. It is reachable: validate's `totalResults > startIndex` rule
+// deliberately admits an empty answer past the end of a SHRUNKEN result set,
+// which is exactly this shape.
+func TestM55SearchByKeyword_DoesNotSpinOnAPageWithNoEntries(t *testing.T) {
 	pager := &cannedNVDPager{total: 350}
 	pager.rewrite = func(page int, resp *NVDResponse) {
 		if page >= 1 {
@@ -275,60 +373,49 @@ func TestM55SearchByKeyword_ToleratesAResultSetThatShrinksMidWalk(t *testing.T) 
 	svc := NewNVDService(nil, nil, "k", srv.URL, false)
 	res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
 	if err != nil {
-		t.Fatalf("a result set that shrank mid-walk must not fail the lookup: %v", err)
+		t.Fatalf("an empty page past the end of a shrunken result set must not fail the "+
+			"lookup: %v", err)
 	}
 	if got := len(pager.calls()); got != 2 {
 		t.Errorf("issued %d requests, want 2 — a page with no entries must end the walk, "+
 			"not be re-requested until the budget runs out: %v", got, pager.calls())
 	}
-	if res.truncated {
-		t.Error("a walk that consumed more records than the (shrunken) result set claims " +
-			"must not be reported as truncated")
-	}
 	if len(res.vulns) != 200 {
 		t.Errorf("got %d matches, want the 200 the first page really carried", len(res.vulns))
 	}
+	// And it is still not claimed as complete: totalResults moved.
+	if !res.truncated {
+		t.Error("the result set shrank mid-walk, so completeness cannot be claimed")
+	}
 }
 
-// TestM55SearchByKeyword_DeduplicatesARecordSeenOnTwoPages pins the other
-// consequence of NVD being live: ordering across pages is not promised to be
-// stable, so one record can appear on two pages of a single walk. Without
-// de-duplication the component is linked to it twice and the finding count is
-// inflated.
-func TestM55SearchByKeyword_DeduplicatesARecordSeenOnTwoPages(t *testing.T) {
-	pager := &cannedNVDPager{total: 350}
+// TestM55SearchByKeyword_CountsTheRequestsAFailedWalkSpent pins the sweep's
+// rate-limit accounting (Codex M55 R1, Low). A walk that dies on page 3 has
+// still spent three requests against NVD's published rate, and the sweep
+// summary has to say so.
+func TestM55SearchByKeyword_CountsTheRequestsAFailedWalkSpent(t *testing.T) {
+	pager := &cannedNVDPager{total: 1000}
 	pager.rewrite = func(page int, resp *NVDResponse) {
-		if page == 1 {
-			entries := *resp.Vulnerabilities
-			entries[0].CVE.ID = m55CVEID(0) // already delivered on page 0
-			resp.Vulnerabilities = &entries
+		if page == 2 {
+			// A page that fails validate: it claims records it does not carry.
+			resp.ResultsPerPage = nvdIntPtr(200)
+			resp.Vulnerabilities = nvdEntriesPtr([]NVDVulnEntry{})
 		}
 	}
 	srv := pager.start(t)
 
 	svc := NewNVDService(nil, nil, "k", srv.URL, false)
 	res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
-	if err != nil {
-		t.Fatalf("searchByKeyword: %v", err)
+	if err == nil {
+		t.Fatal("a page that does not carry what it claims must fail the lookup")
 	}
-	if len(res.vulns) != 349 {
-		t.Errorf("got %d matches, want 349 — one record was delivered on both pages and "+
-			"must be counted once", len(res.vulns))
+	if res.pages != 3 {
+		t.Errorf("pages = %d, want 3 — the requests a failed walk already spent still count "+
+			"against the rate limit", res.pages)
 	}
-	seen := make(map[string]int, len(res.vulns))
-	for _, v := range res.vulns {
-		seen[v.CVEID]++
-	}
-	for id, n := range seen {
-		if n > 1 {
-			t.Errorf("%s appears %d times in one component's result", id, n)
-		}
-	}
-	// fetched still counts RECORDS consumed, which is what totalResults is
-	// comparable with — de-duplication must not make the walk think it is
-	// further behind than it is.
-	if res.fetched != 350 || res.truncated {
-		t.Errorf("fetched=%d truncated=%v, want 350/false", res.fetched, res.truncated)
+	if len(res.vulns) != 0 {
+		t.Errorf("a failed walk returned %d matches; a partial walk must not be handed back "+
+			"as if it were an answer", len(res.vulns))
 	}
 }
 

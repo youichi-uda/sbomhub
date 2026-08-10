@@ -133,7 +133,7 @@ func TestM55NVDCache_TruncatedLookupsAreNotCached(t *testing.T) {
 
 			nvdCache := cache.NewNVDCache(rdb)
 			t.Cleanup(func() {
-				if err := nvdCache.Delete(ctx, name, version); err != nil {
+				if err := nvdCache.Delete(ctx, nvdCacheName(name), version); err != nil {
 					t.Errorf("cleanup: delete cache entry: %v", err)
 				}
 			})
@@ -153,8 +153,9 @@ func TestM55NVDCache_TruncatedLookupsAreNotCached(t *testing.T) {
 			}
 			before := calls()
 
-			// Is it in Redis?
-			entry, err := nvdCache.Get(ctx, name, version)
+			// Is it in Redis? Read through the same namespaced name the
+			// scanner writes under (nvdCacheSchema).
+			entry, err := nvdCache.Get(ctx, nvdCacheName(name), version)
 			if err != nil {
 				t.Fatalf("cache get: %v", err)
 			}
@@ -185,5 +186,75 @@ func TestM55NVDCache_TruncatedLookupsAreNotCached(t *testing.T) {
 					second.truncated, tc.wantTrunc)
 			}
 		})
+	}
+}
+
+// TestM55NVDCache_PreM55EntriesAreNotServed is the Codex M55 R1 (High)
+// regression: the upgrade path.
+//
+// Not caching a truncated result does nothing about the truncated results that
+// are ALREADY in Redis. A pre-M55 build cached the first 20 matches of every
+// component under `nvd:vuln:<name>:<version>`, and cache.VulnCacheEntry carries
+// no completeness metadata — so after an upgrade (and throughout any rolling
+// deployment where an older instance still writes to the same Redis) those
+// 20-record prefixes would be served as complete cache hits for up to
+// cache.NVDCacheTTL: no HTTP request, no page walk, no truncation, nothing
+// downstream able to tell.
+//
+// The fix is a namespaced key (nvdCacheSchema), so this test writes an entry in
+// the OLD key format and asserts the scanner does not read it.
+func TestM55NVDCache_PreM55EntriesAreNotServed(t *testing.T) {
+	rdb := m55RedisOrSkip(t)
+	ctx := context.Background()
+
+	name := fmt.Sprintf("m55-legacy-%d", time.Now().UnixNano())
+	version := "1.0"
+
+	// Exactly what a pre-M55 build wrote: the first 20 of 563 matches, at the
+	// un-namespaced key.
+	legacy := make([]cache.CachedVuln, 0, 20)
+	for i := 0; i < 20; i++ {
+		legacy = append(legacy, cache.CachedVuln{
+			CVEID:       fmt.Sprintf("CVE-2093-%07d", i),
+			Description: "pre-M55 cached prefix",
+			Severity:    "HIGH",
+		})
+	}
+	legacyCache := cache.NewNVDCache(rdb)
+	if err := legacyCache.Set(ctx, name, version, legacy); err != nil {
+		t.Fatalf("seed legacy cache entry: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := legacyCache.Delete(ctx, name, version); err != nil {
+			t.Errorf("cleanup: delete legacy entry: %v", err)
+		}
+		if err := legacyCache.Delete(ctx, nvdCacheName(name), version); err != nil {
+			t.Errorf("cleanup: delete namespaced entry: %v", err)
+		}
+	})
+
+	// Sanity: the legacy entry really is there, under the legacy key.
+	if entry, err := legacyCache.Get(ctx, name, version); err != nil || entry == nil {
+		t.Fatalf("precondition: legacy entry not readable (entry=%v err=%v)", entry, err)
+	}
+
+	srv, calls := m55CachePager(t, 563) // measured: keywordSearch=openssl
+	svc := NewNVDServiceWithCache(nil, nil, "", cache.NewNVDCache(rdb), srv.URL, false)
+
+	got, err := svc.getVulnerabilitiesWithCache(ctx, name, version, nil)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if got.fromCache {
+		t.Fatal("a pre-M55 cache entry was served as a complete answer. It holds the first 20 " +
+			"of 563 matches and has no field that says so, so every scan for the next 24h " +
+			"would report that component as checked and clean.")
+	}
+	if calls() != 3 {
+		t.Errorf("issued %d requests, want 3 — the lookup must fall through to a full page "+
+			"walk", calls())
+	}
+	if len(got.vulns) != 563 {
+		t.Errorf("got %d matches, want 563", len(got.vulns))
 	}
 }
