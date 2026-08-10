@@ -722,6 +722,13 @@ func TestM55NVDCacheName_CannotBeSteeredByAComponentName(t *testing.T) {
 	// 3. Injective over the pairs the legacy scheme confuses. `nvd:vuln:a:b` is
 	//    what the cache builds for BOTH ("a:b", "") and ("a", "b") — a
 	//    pre-existing ambiguity the digest also closes.
+	//
+	//    Injectivity is what this function CAN promise, and it is the whole
+	//    promise: two lookups on THIS build never share a key. It does not make
+	//    the key unreachable from a PRE-M55 build, which keys by raw component
+	//    name and can therefore land on any key at all — see the mixed-version
+	//    limitation on nvdCacheName. That residual is not testable here because
+	//    it is not a property of this function.
 	pairs := [][2]string{
 		{"a:b", ""},
 		{"a", "b"},

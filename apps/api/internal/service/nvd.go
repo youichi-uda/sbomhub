@@ -922,14 +922,34 @@ const nvdCacheSchema = "m55."
 // version with a colon and neither is escaped. The digest covers both fields
 // separated by a byte that ends neither of them.
 //
-// The residual is stated rather than hidden: the key space is flat and shared
-// with a package this scanner does not own, so no encoding can be PROVEN
-// disjoint from a legacy key derived from an arbitrary name. What is left is a
-// preimage — a pre-M55 entry for a component named exactly
-// `m55.<64 lowercase hex digits>` with no version, or named `m55` with such a
-// string as its version. That is not a plausible component name, and unlike the
-// prefix form it cannot be produced by simply choosing a name with a known
-// prefix.
+// # What this closes, and what it does NOT (Codex M55 R4, High)
+//
+// Between instances running THIS build, two different (name, version) pairs
+// cannot share a key: every read and every write goes through this function,
+// and the digest is injective over the pair (modulo a SHA-256 collision).
+//
+// Across BUILDS it is not closed, and an earlier draft of this comment claimed
+// otherwise — it called the remaining preimage "not a plausible component
+// name", which is wrong, because the preimage is not a search problem: an
+// attacker computes sha256("openssl\x1f1.1.1") offline, names a component
+// `m55.<that digest>`, and uploads it. A PRE-M55 instance keys that component
+// by its RAW name, lands on exactly the key this build reads for
+// `openssl@1.1.1`, and caches whatever NVD answers for that nonsense keyword —
+// which is nothing. This build then serves an empty, complete-looking result
+// for openssl to every tenant (the NVD cache is global, not tenant-scoped)
+// until the 24h TTL expires.
+//
+// The window is a mixed-version deployment: a rolling upgrade, or a pre-M55
+// instance left pointed at the same Redis. Once every writer is on this build,
+// there is no way to produce a raw-name key at all and the hole is shut.
+//
+// It cannot be shut from THIS file. Every key any caller can construct has the
+// form `NVDCachePrefix + X`, and a pre-M55 writer produces `NVDCachePrefix + X`
+// for any X simply by scanning a component named X with no version — so no
+// encoding chosen here is unreachable. Closing it properly means changing
+// `cache.NVDCachePrefix` so the two builds do not share a namespace at all,
+// which is a one-line change in internal/cache, outside this wave's file scope.
+// Reported upward rather than left as a comment that overclaims.
 func nvdCacheName(name, version string) string {
 	sum := sha256.Sum256([]byte(name + "\x1f" + version))
 	return nvdCacheSchema + hex.EncodeToString(sum[:])
