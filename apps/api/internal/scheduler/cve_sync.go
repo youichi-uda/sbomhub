@@ -52,6 +52,38 @@ const (
 // expensive direction, which is why it is not 30.
 const cveSyncMaxHeldWindow = 7 * 24 * time.Hour
 
+// cveSyncMaxFetchSpan caps how wide a single modified-CVE request may be.
+//
+// NVD's /cves/2.0 accepts a lastModStartDate..lastModEndDate range of at most
+// 120 CONSECUTIVE DAYS and rejects anything wider outright. The watermark is
+// whatever the last successful run stored, so a long scheduler outage, a
+// restored backup, or a fresh deployment against an old database can leave a
+// span past that limit — at which point fetchModifiedCVEs fails, Run returns
+// before it can advance anything, and the SAME impossible request is repeated
+// on every subsequent tick. The whole catalogue then stops updating,
+// permanently and silently (Codex M55 R4, High).
+//
+// So the window start is clamped and the skipped interval is reported. That
+// LOSES the modifications inside the skipped gap — they are not fetched and
+// nothing will come back for them until upstream touches those CVEs again —
+// but the alternative is fetching nothing at all, forever. 110 days rather
+// than 120 leaves margin for clock skew between us and NVD and for the run's
+// own duration.
+const cveSyncMaxFetchSpan = 110 * 24 * time.Hour
+
+// cveSyncRetrySinceKey records WHEN the current run of catalogue-write
+// failures began, so cveSyncMaxHeldWindow bounds time spent RETRYING rather
+// than time since the last successful sync (Codex M55 R4, High).
+//
+// Measuring the bound against the watermark conflated the two: after an
+// eight-day outage the watermark is already older than the bound, so the very
+// first failed write on the recovery run would be abandoned without a single
+// retry — the failure mode the bound was added to prevent, reached from the
+// other side. This key is set on the first failing run, compared against on
+// every subsequent one, and cleared as soon as a run completes with no
+// catalogue failures.
+const cveSyncRetrySinceKey = "cve_sync_catalogue_retry_since"
+
 // cveMatchBatchChunkSizeDefault is the production default for how many
 // tenants to evaluate inside a single BEGIN / COMMIT envelope in
 // matchTenantsChunked (F258, M17-3 #109).
@@ -363,8 +395,23 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		watermarkIsStored = false
 	}
 
+	// Clamp the request span to what NVD will accept (see cveSyncMaxFetchSpan).
+	// windowStart is what we ASK for; lastSync stays the value the retry policy
+	// reasons about.
+	windowStart := lastSync
+	if startTime.Sub(windowStart) > cveSyncMaxFetchSpan {
+		clamped := startTime.Add(-cveSyncMaxFetchSpan)
+		slog.Error("CVE sync: the gap since the last sync exceeds what NVD will answer in one request; "+
+			"clamping the window and SKIPPING the interval before it — modifications in that interval are not "+
+			"fetched and those CVEs keep their stored metadata until upstream touches them again",
+			"stored_watermark", windowStart.Format(time.RFC3339),
+			"skipped_until", clamped.Format(time.RFC3339),
+			"max_fetch_span", cveSyncMaxFetchSpan.String())
+		windowStart = clamped
+	}
+
 	// Fetch CVEs modified since last sync
-	cves, err := j.fetchModifiedCVEs(ctx, lastSync)
+	cves, err := j.fetchModifiedCVEs(ctx, windowStart)
 	if err != nil {
 		// M43 Phase D R2 finding 6: the OSV vuln_funcs backfill (Phase 3) is
 		// independent of the NVD feed, so an NVD outage must not starve it.
@@ -380,7 +427,7 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to fetch CVEs: %w", err)
 	}
 
-	slog.Info("fetched modified CVEs", "count", len(cves), "since", lastSync.Format(time.RFC3339))
+	slog.Info("fetched modified CVEs", "count", len(cves), "since", windowStart.Format(time.RFC3339))
 
 	// Phase 1: upsert vulnerability rows at the system level
 	// (`vulnerabilities` is non-RLS and shared across tenants — one row per
@@ -466,21 +513,40 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// named, and left to whatever their next upstream modification brings.
 	// That is a real loss and it is the deliberate one: bounded damage to the
 	// poison records instead of unbounded damage to all of them.
+	//
+	// The bound is measured from when RETRYING started, not from the
+	// watermark (Codex M55 R4, High). Those are different clocks: after an
+	// eight-day scheduler outage the watermark is already older than the
+	// bound, so measuring against it would abandon the recovery run's very
+	// first failure without one retry.
 	catalogueWritesFailed := refreshFailures > 0 || upsertFailures > 0
-	heldWindow := startTime.Sub(lastSync)
-	holdWatermark := catalogueWritesFailed && heldWindow < cveSyncMaxHeldWindow
+	retrySince := j.catalogueRetrySince(ctx, startTime)
+	retryAge := startTime.Sub(retrySince)
+	if retryAge < 0 {
+		retryAge = 0
+	}
+	holdWatermark := catalogueWritesFailed && retryAge < cveSyncMaxHeldWindow
 	switch {
 	case catalogueWritesFailed && holdWatermark:
+		if err := j.setCatalogueRetrySince(ctx, retrySince); err != nil {
+			slog.Error("CVE sync: could not record when catalogue retries started; the retry bound cannot be enforced",
+				"error", err)
+		}
 		slog.Error("CVE sync: some catalogue writes failed; holding the sync watermark so the window is retried next tick",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
-			"cves_fetched", len(cves), "held_window", heldWindow.String())
+			"cves_fetched", len(cves), "retrying_for", retryAge.String())
 	case catalogueWritesFailed:
-		slog.Error("CVE sync: catalogue writes are still failing after the maximum retained window; advancing the "+
-			"watermark and ABANDONING those records, because a wider window is rejected by NVD outright and would "+
-			"stop every CVE's metadata, not just these",
+		slog.Error("CVE sync: catalogue writes are still failing after the maximum retry period; advancing the "+
+			"watermark and ABANDONING those records, because holding it indefinitely widens the window past what "+
+			"NVD will answer and would stop every CVE's metadata, not just these",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
-			"cves_fetched", len(cves), "held_window", heldWindow.String(),
-			"max_held_window", cveSyncMaxHeldWindow.String())
+			"cves_fetched", len(cves), "retrying_for", retryAge.String(),
+			"max_retry_period", cveSyncMaxHeldWindow.String())
+		j.clearCatalogueRetrySince(ctx)
+	default:
+		// A clean run ends the retry period, so the next failure gets the full
+		// bound rather than inheriting an old one.
+		j.clearCatalogueRetrySince(ctx)
 	}
 
 	// Phase 2: per-tenant matching against `components` (RLS-bound).
@@ -523,13 +589,19 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 		// the retained window can grow towards the abandonment bound instead
 		// of resetting to 24h every run (Codex M55 R3, High).
 		if err := j.updateLastSyncTime(ctx, lastSync); err != nil {
+			// Reported as a FAILED tick, not logged and forgotten (Codex M55
+			// R4, Medium). Without a durable anchor the "hold" did not happen:
+			// the next tick invents a newer fallback and the records this one
+			// failed on fall out of the window for good. That is exactly the
+			// silent loss the hold exists to prevent, so it must not be
+			// reported as an ordinary completed run.
 			slog.Error("CVE sync: could not persist the retry anchor; the failed CVEs may fall outside the next window",
 				"anchor", lastSync.Format(time.RFC3339), "error", err)
-		} else {
-			slog.Warn("CVE sync: no stored watermark to hold; pinned this run's window start as the retry anchor",
-				"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
-				"anchor", lastSync.Format(time.RFC3339))
+			return fmt.Errorf("cve_sync: catalogue writes failed and the retry anchor could not be persisted: %w", err)
 		}
+		slog.Warn("CVE sync: no stored watermark to hold; pinned this run's window start as the retry anchor",
+			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
+			"anchor", lastSync.Format(time.RFC3339))
 	default:
 		if err := j.updateLastSyncTime(ctx, startTime); err != nil {
 			slog.Warn("failed to update last sync time", "error", err)
@@ -1644,6 +1716,57 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 		return uuid.Nil, false, err
 	}
 	return vulnID, false, nil
+}
+
+// catalogueRetrySince returns when the current run of catalogue-write failures
+// began, defaulting to `now` (i.e. "this run is the first") when no marker is
+// stored or it cannot be read.
+//
+// Defaulting to `now` is the fail-SAFE direction: an unreadable marker grants
+// a fresh retry period rather than abandoning records immediately. The
+// opposite default would turn a transient settings-read failure into
+// permanent data loss.
+func (j *CVESyncJob) catalogueRetrySince(ctx context.Context, now time.Time) time.Time {
+	var raw string
+	if err := j.db.QueryRowContext(ctx,
+		`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&raw); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("CVE sync: could not read the catalogue retry marker; treating this run as the first failure",
+				"error", err)
+		}
+		return now
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		slog.Warn("CVE sync: catalogue retry marker does not parse; treating this run as the first failure",
+			"value", raw, "error", err)
+		return now
+	}
+	if t.After(now) {
+		// Same corruption shape as a future watermark: a marker ahead of the
+		// clock would make the retry period never elapse.
+		slog.Warn("CVE sync: catalogue retry marker is in the future; treating this run as the first failure",
+			"value", raw)
+		return now
+	}
+	return t
+}
+
+func (j *CVESyncJob) setCatalogueRetrySince(ctx context.Context, at time.Time) error {
+	_, err := j.db.ExecContext(ctx, `
+		INSERT INTO system_settings (key, value, updated_at)
+		VALUES ($1, $2::text, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+	`, cveSyncRetrySinceKey, at.Format(time.RFC3339))
+	return err
+}
+
+func (j *CVESyncJob) clearCatalogueRetrySince(ctx context.Context) {
+	if _, err := j.db.ExecContext(ctx,
+		`DELETE FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey); err != nil {
+		slog.Warn("CVE sync: could not clear the catalogue retry marker; the next failure inherits a shortened retry period",
+			"error", err)
+	}
 }
 
 // getLastSyncTime returns the last CVE sync time

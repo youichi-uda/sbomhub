@@ -374,6 +374,7 @@ func TestM55CVEMetadata_KeywordlessCVENotInCatalogueIsNotInserted(t *testing.T) 
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectWatermark(t, migDB)
 
 	cveID := m55CVEID(t)
 	t.Cleanup(func() {
@@ -553,10 +554,19 @@ func TestM55CVEMetadata_WatermarkAdvancesOncePastTheRetryBound(t *testing.T) {
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
 
-	// One hour past the bound: the same failure that held the watermark in the
-	// test above must now let it go.
-	pinned := time.Now().UTC().Add(-(cveSyncMaxHeldWindow + time.Hour)).Truncate(time.Second)
+	m55ProtectRetryMarker(t, migDB)
+	// The watermark is recent; what is old is the RETRY period — this failure
+	// has been recurring for longer than the bound allows, so the same failure
+	// that was held in the test above must now be let go.
+	pinned := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	m55PinWatermark(t, migDB, pinned)
+	if _, err := migDB.Exec(`
+		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		cveSyncRetrySinceKey,
+		time.Now().UTC().Add(-(cveSyncMaxHeldWindow + time.Hour)).Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed retry marker: %v", err)
+	}
 
 	cveID := m55CVEID(t)
 	m55SeedLegacy(t, migDB, cveID, "NVD")
@@ -644,6 +654,156 @@ func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
 	if got.After(time.Now().UTC()) {
 		t.Errorf("stored watermark = %s, still in the future: a future value yields a negative retained window, "+
 			"which always compares as inside the retry bound and pins the sync forever", got.UTC())
+	}
+}
+
+// m55ProtectRetryMarker restores the catalogue retry marker after the test.
+func m55ProtectRetryMarker(t *testing.T, migDB *sql.DB) {
+	t.Helper()
+	var before sql.NullString
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&before); err != nil {
+		if err != sql.ErrNoRows {
+			t.Fatalf("read retry marker: %v", err)
+		}
+		before = sql.NullString{}
+	}
+	t.Cleanup(func() {
+		var err error
+		if before.Valid {
+			_, err = migDB.Exec(`
+				INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+				ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+				cveSyncRetrySinceKey, before.String)
+		} else {
+			_, err = migDB.Exec(`DELETE FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey)
+		}
+		if err != nil {
+			t.Errorf("restore retry marker: %v", err)
+		}
+	})
+	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey); err != nil {
+		t.Fatalf("clear retry marker: %v", err)
+	}
+}
+
+// TestM55CVEMetadata_RecoveryRunAfterAnOutageStillGetsItsRetries is the bound's
+// clock (Codex M55 R4, High).
+//
+// The retry bound must measure time spent RETRYING, not time since the last
+// successful sync. Those diverge exactly when it matters: after a scheduler
+// outage the watermark is already older than the bound, so measuring against
+// it abandons the recovery run's very FIRST failed write without one retry —
+// the silent-loss outcome the bound was added to prevent, reached from the
+// other side.
+func TestM55CVEMetadata_RecoveryRunAfterAnOutageStillGetsItsRetries(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectRetryMarker(t, migDB)
+
+	// An outage far longer than the retry bound, but inside the fetch span.
+	outage := cveSyncMaxHeldWindow + 24*time.Hour
+	pinned := time.Now().UTC().Add(-outage).Truncate(time.Second)
+	m55PinWatermark(t, migDB, pinned)
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	if got := m55Watermark(t, migDB); got != pinned.Format(time.RFC3339) {
+		t.Errorf("cve_sync_last_run = %q, want it held at %q: this is the FIRST failing run, so it is owed the "+
+			"whole retry period — the watermark's age is a different clock from the time spent retrying",
+			got, pinned.Format(time.RFC3339))
+	}
+	var marker string
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&marker); err != nil {
+		t.Fatalf("the retry marker was never written (%v); without it the bound has nothing to measure against", err)
+	}
+}
+
+// TestM55CVEMetadata_RetryMarkerIsClearedByACleanRun: a clean run ends the
+// retry period, so the next failure is owed the full bound rather than
+// inheriting a shortened one from an unrelated earlier incident.
+func TestM55CVEMetadata_RetryMarkerIsClearedByACleanRun(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectRetryMarker(t, migDB)
+	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
+
+	if _, err := migDB.Exec(`
+		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		cveSyncRetrySinceKey, time.Now().UTC().Add(-48*time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed retry marker: %v", err)
+	}
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "clean run",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	var marker string
+	err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&marker)
+	if err == nil {
+		t.Errorf("retry marker still present (%s) after a clean run: the next failure would inherit a shortened "+
+			"retry period from an unrelated earlier incident", marker)
+	} else if err != sql.ErrNoRows {
+		t.Fatalf("read retry marker: %v", err)
+	}
+}
+
+// TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped (Codex M55 R4, High).
+//
+// NVD answers a lastModStartDate..lastModEndDate span of at most 120 days and
+// rejects anything wider. A watermark older than that — a long outage, a
+// restored backup, a fresh deployment against an old database — makes EVERY
+// request invalid, so the fetch fails, Run returns before it can advance
+// anything, and the identical impossible request is repeated forever. The
+// whole catalogue stops updating, not one CVE.
+//
+// The canned server here records what it was asked for; the assertion is on
+// the requested window, not on the response.
+func TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectRetryMarker(t, migDB)
+	m55PinWatermark(t, migDB, time.Now().UTC().Add(-365*24*time.Hour).Truncate(time.Second))
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	var gotStart string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gotStart == "" {
+			gotStart = r.URL.Query().Get("lastModStartDate")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(m55Feed(cveID, "CRITICAL", 9.8, "clamped window",
+			"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty)))
+	}))
+	defer srv.Close()
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, srv.URL, false)
+	if err := j.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if gotStart == "" {
+		t.Fatal("the job never issued a request")
+	}
+	start, err := time.Parse("2006-01-02T15:04:05.000", gotStart)
+	if err != nil {
+		t.Fatalf("lastModStartDate %q does not parse: %v", gotStart, err)
+	}
+	span := time.Now().UTC().Sub(start)
+	if span > cveSyncMaxFetchSpan+time.Hour {
+		t.Errorf("requested window span = %s, want it clamped to %s: NVD rejects a span wider than 120 days "+
+			"outright, so every tick would repeat the same impossible request and the whole catalogue would stop "+
+			"updating", span, cveSyncMaxFetchSpan)
 	}
 }
 

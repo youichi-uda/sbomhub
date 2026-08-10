@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 
 	_ "github.com/lib/pq"
+	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/model"
 )
 
@@ -620,5 +621,81 @@ func TestM55Create_ConflictDoesNotRewriteMetadata(t *testing.T) {
 	if severity != "CRITICAL" || description != "owner wrote this" || source != "NVD" || !score.Valid || score.Float64 != 9.8 {
 		t.Errorf("row after a racing Create = %s / %q / %s / %v, want the owner's CRITICAL / \"owner wrote this\" / NVD / 9.8: "+
 			"the scanner is a linker and must not rewrite catalogue metadata", severity, description, source, score.Float64)
+	}
+}
+
+// TestM55Create_ConflictTakesNoRowLock pins the other half of the pure-linker
+// boundary (Codex M55 R4, Medium).
+//
+// The scanners call Create inside a TENANT transaction that lives for the
+// whole sweep. A conflict branch that WRITES — even a self-assignment like
+// `SET updated_at = updated_at` — takes the row's lock and holds it until that
+// transaction commits, on a GLOBAL row shared with every other tenant. The
+// catalogue owner's UpdateMetadata locks the same row FOR UPDATE, so it would
+// queue behind an unrelated tenant's scan for as long as that scan runs.
+//
+// The test holds an open transaction across a conflicting Create and then
+// requires UpdateMetadata, on a different connection, to complete anyway.
+func TestM55Create_ConflictTakesNoRowLock(t *testing.T) {
+	appURL, migURL := rlsTestEnv(t)
+	appDB := openOrSkip(t, appURL)
+	migDB := openOrSkip(t, migURL)
+
+	july := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &july)
+
+	// A scanner's tenant transaction, still open.
+	tx, err := appDB.Begin()
+	if err != nil {
+		t.Fatalf("begin scanner tx: %v", err)
+	}
+	committed := false
+	t.Cleanup(func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	})
+	txCtx := database.WithTx(context.Background(), tx)
+
+	score := 1.0
+	pub := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
+	if err := NewVulnerabilityRepository(appDB).Create(txCtx, &model.Vulnerability{
+		ID: uuid.New(), CVEID: cveID, Description: "scanner", Severity: "LOW",
+		CVSSScore: &score, Source: "JVN", PublishedAt: &pub, UpdatedAt: &now,
+	}); err != nil {
+		t.Fatalf("Create inside the scanner tx: %v", err)
+	}
+
+	// The catalogue owner, on its own connection, must not be blocked.
+	august := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	done := make(chan error, 1)
+	go func() {
+		_, uerr := NewVulnerabilityRepository(appDB).
+			UpdateMetadata(context.Background(), m55Meta(cveID, "CRITICAL", 9.8, "owner refresh", &august))
+		done <- uerr
+	}()
+
+	select {
+	case uerr := <-done:
+		if uerr != nil {
+			t.Fatalf("UpdateMetadata: %v", uerr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("UpdateMetadata blocked behind an open scanner transaction: Create's conflict branch is taking the " +
+			"row lock on a GLOBAL row and holding it for the length of one tenant's sweep")
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit scanner tx: %v", err)
+	}
+	committed = true
+
+	var severity string
+	if err := migDB.QueryRow(`SELECT severity FROM vulnerabilities WHERE cve_id = $1`, cveID).Scan(&severity); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if severity != "CRITICAL" {
+		t.Errorf("severity = %q, want the owner's CRITICAL", severity)
 	}
 }
