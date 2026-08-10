@@ -58,7 +58,7 @@ const (
 	// nvdPageSize-1 on each of the rest, because every follow-up page spends
 	// its first record on the boundary anchor (see nvdSearchResult.shifted).
 	//
-	// This is a deliberate budget, not a belief that 1000 is enough for
+	// This is a deliberate budget, not a belief that 996 is enough for
 	// everything — see searchByKeyword for why "fetch everything" is the wrong
 	// answer rather than merely the slow one, and for what happens when the
 	// budget is exhausted (the result is REPORTED as truncated, never silently

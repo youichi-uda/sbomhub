@@ -240,9 +240,10 @@ func TestM55NVDTruncatedResultSetIsReportedToTheCaller(t *testing.T) {
 	}
 
 	// --- and the findings it DID obtain are still recorded ---------------
-	// Escalating must not mean discarding: the 1000 matches that were fetched
-	// are real, and the transaction still commits (SbomHandler.runScan returns
-	// nil from the tx func on a scanner error, by design).
+	// Escalating must not mean discarding: the `fetched` matches the walk did
+	// retrieve (996, not 1000 — see the boundary anchor) are real, and the
+	// transaction still commits (SbomHandler.runScan returns nil from the tx
+	// func on a scanner error, by design).
 	var durable int
 	if err := appDB.QueryRow(
 		`SELECT COUNT(*) FROM vulnerabilities WHERE cve_id = ANY($1)`,
