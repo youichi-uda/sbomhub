@@ -15,14 +15,23 @@ import (
 //
 // The <status:Status> element is REQUIRED here as of M54 (Codex R10,
 // Critical): MyJVN sends it on both success and error responses, so its
-// absence means the body is not a MyJVN answer at all, and parseJVNResponse
+// absence means the body is not a MyJVN answer at all, and parseJVNPage
 // now rejects that rather than reading it as "no vulnerabilities". This
 // fixture omitted it, which is why it needed updating — a fixture that does
 // not carry what the real contract carries stops the test from exercising the
 // contract.
+//
+// M55 (Codex R3, High): the same objection applied to its NAMESPACES. This
+// fixture used bare <RDF> / <Status> / <item> in no namespace at all, which is
+// not what MyJVN sends — and because it passed, it certified a parser that
+// matched on local names alone and would therefore have accepted any document
+// that happened to use those three words. The namespaces below are the ones in
+// the live feed's schemaLocation.
 const cannedJVNFeed = `<?xml version="1.0" encoding="UTF-8"?>
-<RDF>
-  <Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="1" totalResRet="1" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns:dcterms="http://purl.org/dc/terms/" xmlns:sec="http://jvn.jp/rss/mod_sec/3.0/"
+ xmlns:status="http://jvndb.jvn.jp/myjvn/Status" xml:lang="ja">
+  <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="1" totalResRet="1" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
   <channel>
     <title>JVNDB Vulnerability Overview</title>
     <description>test feed</description>
@@ -31,14 +40,14 @@ const cannedJVNFeed = `<?xml version="1.0" encoding="UTF-8"?>
     <title>libfoo における脆弱性</title>
     <link>https://jvndb.jvn.jp/ja/contents/2023/JVNDB-2023-000001.html</link>
     <description>libfoo に境界外書き込みの脆弱性が存在します。</description>
-    <identifier>JVNDB-2023-000001</identifier>
-    <references source="CVE" id="CVE-2023-1234">CVE-2023-1234</references>
-    <cpe version="2.2" vendor="foo" product="libfoo">cpe:/a:foo:libfoo</cpe>
-    <cvss version="3.1" type="Base" severity="High" score="7.5" vector="CVSS:3.1/AV:N/AC:L"/>
-    <issued>2023-01-15T10:30:00+09:00</issued>
-    <modified>2023-06-20T15:45:00+09:00</modified>
+    <sec:identifier>JVNDB-2023-000001</sec:identifier>
+    <sec:references source="CVE" id="CVE-2023-1234">CVE-2023-1234</sec:references>
+    <sec:cpe version="2.2" vendor="foo" product="libfoo">cpe:/a:foo:libfoo</sec:cpe>
+    <sec:cvss version="3.1" type="Base" severity="High" score="7.5" vector="CVSS:3.1/AV:N/AC:L"/>
+    <dcterms:issued>2023-01-15T10:30:00+09:00</dcterms:issued>
+    <dcterms:modified>2023-06-20T15:45:00+09:00</dcterms:modified>
   </item>
-</RDF>`
+</rdf:RDF>`
 
 func TestNewJVNService_DefaultBaseURL(t *testing.T) {
 	svc := NewJVNService(nil, nil, "", false)

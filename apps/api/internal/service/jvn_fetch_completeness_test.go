@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sbomhub/sbomhub/internal/model"
 )
 
 // ---------------------------------------------------------------------------
@@ -514,12 +516,30 @@ func TestM55JVN_ResponseMustEchoTheRequest(t *testing.T) {
 		},
 		{
 			// The whole point of the change: proving the seven-day
-			// default is gone, not merely no longer requested.
-			name: "answer still covers MyJVN's one-week default window",
+			// default is gone, not merely no longer requested. All
+			// THREE are covered separately — with only rangeDatePublic
+			// exercised, either of the other two checks could be
+			// deleted and the suite would stay green (Codex M55 R3,
+			// Medium).
+			name: "answer still covers the one-week default (rangeDatePublic)",
 			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
 				st.RangeDatePublic = "w"
 			},
 			wantErr: "rangeDatePublic",
+		},
+		{
+			name: "answer still covers the one-week default (rangeDatePublished)",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.RangeDatePublished = "w"
+			},
+			wantErr: "rangeDatePublished",
+		},
+		{
+			name: "answer still covers the one-week default (rangeDateFirstPublished)",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.RangeDateFirstPublished = "m"
+			},
+			wantErr: "rangeDateFirstPublished",
 		},
 		{
 			name: "answer was built for a different startItem",
@@ -649,13 +669,13 @@ func TestM55JVN_ShrinkingTotalResStillCountsAsTruncated(t *testing.T) {
 // DISTINCT advisories (Codex M55 R1, Critical).
 //
 // A mirror that re-serves page 1's entries as page 2, with a correct firstRes,
-// made 50 distinct advisories count as 100 against a totalRes of 137 — and the
-// second half of the match set was never fetched. It also covers the honest
+// made 50 distinct advisories count as 100 against the real total — and the
+// rest of the match set was never fetched. It also covers the honest
 // version of the same event: MyJVN orders newest-first, so an advisory
 // published mid-scan shifts the window and one entry really does repeat.
 func TestM55JVN_RepeatedEntriesAreNotCountedTwice(t *testing.T) {
 	now := time.Now()
-	corpus := cannedCorpus(now, 137, 137)
+	corpus := cannedCorpus(now, 500, 500)
 	srv := &cannedMyJVN{corpus: corpus, now: now,
 		corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
 			// Always hand back the first 50, whatever was asked for,
@@ -678,10 +698,168 @@ func TestM55JVN_RepeatedEntriesAreNotCountedTwice(t *testing.T) {
 			res.Retrieved, res.Entries)
 	}
 	if !res.Truncated {
-		t.Error("50 distinct advisories out of 137 were reported as a complete answer")
+		t.Error("50 distinct advisories out of 500 were reported as a complete answer")
 	}
 	if len(res.Vulns) != 50 {
 		t.Errorf("returned %d vulnerabilities, want 50 — duplicates were not collapsed", len(res.Vulns))
+	}
+}
+
+// TestM55JVN_NamespacesAreBound pins that the parse structs match on the MyJVN
+// namespaces and not merely on local names (Codex M55 R3, High).
+//
+// encoding/xml matches an untagged field name against the local part alone, so
+// the document below — which uses the words RDF, Status and item in a namespace
+// that has nothing to do with MyJVN, and carries a plausible request echo with
+// zero counts — parsed as a MyJVN feed and was accepted as an authoritative
+// "this component has no advisories".
+func TestM55JVN_NamespacesAreBound(t *testing.T) {
+	const impostor = `<?xml version="1.0" encoding="UTF-8"?>
+<x:RDF xmlns:x="http://attacker.example/not-rdf" xmlns:y="http://attacker.example/not-status">
+  <y:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
+</x:RDF>`
+
+	svc := NewJVNService(nil, nil, "", false)
+	if _, err := svc.parseJVNPage([]byte(impostor), jvnTestPageReq()); err == nil {
+		t.Fatal("a document using the MyJVN local names in foreign namespaces was accepted " +
+			"as an authoritative empty answer")
+	}
+
+	// The same body in the RIGHT namespaces is a legitimate empty answer —
+	// the check must discriminate, not just reject.
+	genuine := strings.NewReplacer(
+		"http://attacker.example/not-rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+		"http://attacker.example/not-status", "http://jvndb.jvn.jp/myjvn/Status",
+	).Replace(impostor)
+	if _, err := svc.parseJVNPage([]byte(genuine), jvnTestPageReq()); err != nil {
+		t.Fatalf("a correctly-namespaced empty answer was rejected: %v", err)
+	}
+}
+
+// TestM55JVN_PageCountsMustBeSelfConsistent pins the arithmetic bounds a page
+// has to satisfy against its own totalRes (Codex M55 R3, High).
+//
+// Both shapes below are impossible for a real answer and both used to be
+// accepted. The first is the one that mattered: totalRes=1 with totalResRet=2,
+// one usable entry and one without an identity, landed on Retrieved == TotalRes
+// and reported a complete answer while dropping half of what it returned.
+func TestM55JVN_PageCountsMustBeSelfConsistent(t *testing.T) {
+	now := time.Now()
+
+	cases := []struct {
+		name    string
+		corrupt func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory)
+		wantErr string
+	}{
+		{
+			name: "page holds more entries than the match set has",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				*items = (*items)[:2]
+				(*items)[1].ID, (*items)[1].CVE = "", ""
+				st.TotalRes = 1
+				st.TotalResRet = 2
+			},
+			wantErr: "contradicts the total",
+		},
+		{
+			// firstRes=3 with 3 entries claims [3,5] out of a 4-entry
+			// match set: each count is individually plausible, only
+			// their sum is not.
+			name: "page runs past the end of the match set",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				*items = (*items)[:3]
+				st.TotalRes = 4
+				st.TotalResRet = 3
+				st.FirstRes = 3
+				st.StartItem = "3"
+			},
+			wantErr: "runs past the end",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &cannedMyJVN{corpus: cannedCorpus(now, 5, 5), now: now, corrupt: tc.corrupt}
+			ts := srv.start(t)
+			svc := NewJVNService(nil, nil, ts.URL, false)
+			svc.requestDelay = 0
+
+			_, err := svc.fetchPage(context.Background(), "libfoo", startItemFor(tc.name))
+			if err == nil {
+				t.Fatal("a page whose counts contradict each other was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// startItemFor picks the startItem the forged page in each case claims.
+func startItemFor(name string) int {
+	if strings.Contains(name, "runs past") {
+		return 3
+	}
+	return 1
+}
+
+// TestM55JVN_ZeroCountPageMayNotSmuggleEntries pins that a totalResRet=0 answer
+// is the documented one-item placeholder and nothing else (Codex M55 R3, High).
+//
+// Allowing any number of identity-less items left a body that could carry
+// arbitrary entries, have all of them discarded, and still be accepted as an
+// authoritative "this component has no advisories" — Retrieved=0, TotalRes=0,
+// Truncated=false, with nothing downstream able to tell.
+func TestM55JVN_ZeroCountPageMayNotSmuggleEntries(t *testing.T) {
+	now := time.Now()
+	srv := &cannedMyJVN{corpus: nil, now: now,
+		corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+			// Two entries, neither identifiable, under a zero count.
+			*items = []cannedJVNAdvisory{{Published: now}, {Published: now}}
+			st.TotalRes = 0
+			st.TotalResRet = 0
+		}}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	if _, err := svc.searchKeyword(context.Background(), "libfoo", nil); err == nil {
+		t.Fatal("a zero-count page carrying multiple entries was accepted as an empty answer")
+	}
+}
+
+// TestM55JVN_DuplicateCVEKeepsTheMoreSevere pins that when two JVNDB advisories
+// cite the same CVE, the assessment that survives is the more severe one
+// (Codex M55 R3, High).
+//
+// Only one catalogue row can exist per CVE. Keeping whichever advisory happened
+// to arrive first meant a critical score could be discarded in favour of a low
+// one that came earlier in the feed, and a severity-gated CI check would pass on
+// the milder of the two.
+func TestM55JVN_DuplicateCVEKeepsTheMoreSevere(t *testing.T) {
+	low := 3.1
+	high := 9.8
+	mk := func(score *float64, sev string) model.Vulnerability {
+		return model.Vulnerability{CVEID: "CVE-2021-44228", CVSSScore: score, Severity: sev}
+	}
+
+	if !jvnMoreSevere(mk(&high, "CRITICAL"), mk(&low, "LOW")) {
+		t.Error("a critical assessment did not displace a low one")
+	}
+	if jvnMoreSevere(mk(&low, "LOW"), mk(&high, "CRITICAL")) {
+		t.Error("a low assessment displaced a critical one")
+	}
+	if !jvnMoreSevere(mk(&low, "LOW"), mk(nil, "UNKNOWN")) {
+		t.Error("a scored advisory did not displace an unscored one")
+	}
+	if jvnMoreSevere(mk(nil, "UNKNOWN"), mk(&low, "LOW")) {
+		t.Error("an unscored advisory displaced a scored one")
+	}
+	if !jvnMoreSevere(mk(nil, "HIGH"), mk(nil, "MEDIUM")) {
+		t.Error("with no scores, the severity label did not decide")
+	}
+	if jvnMoreSevere(mk(&high, "CRITICAL"), mk(&high, "CRITICAL")) {
+		t.Error("an equal assessment displaced the incumbent; arrival order must not matter")
 	}
 }
 

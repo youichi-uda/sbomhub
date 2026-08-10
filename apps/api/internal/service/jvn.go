@@ -115,11 +115,20 @@ func NewJVNService(vulnRepo *repository.VulnerabilityRepository, componentRepo *
 	}
 }
 
-// JVNRSS XML structures
+// JVNRSS XML structures.
+//
+// Every element is bound to the NAMESPACE MyJVN publishes it in, not just to
+// its local name (Codex M55 R3, High). encoding/xml matches an untagged name
+// against the local part alone, so before this an unrelated document that
+// merely used the local names RDF / Status / item — in any namespace at all,
+// or none — parsed as a MyJVN feed. With plausible echo attributes and zero
+// counts it was then accepted as an authoritative "this component has no
+// advisories". The URIs are the ones in the schemaLocation the live feed
+// declares (jvnrss_3.2, mod_sec_3.0, status_3.3).
 type JVNRSSFeed struct {
-	XMLName xml.Name   `xml:"RDF"`
-	Channel JVNChannel `xml:"channel"`
-	Items   []JVNItem  `xml:"item"`
+	XMLName xml.Name   `xml:"http://www.w3.org/1999/02/22-rdf-syntax-ns# RDF"`
+	Channel JVNChannel `xml:"http://purl.org/rss/1.0/ channel"`
+	Items   []JVNItem  `xml:"http://purl.org/rss/1.0/ item"`
 	// Status is MyJVN's application-level result, and it was not modelled at
 	// all until M54 (Codex R9, Critical). MyJVN reports failures — bad
 	// parameters, service trouble — through retCd on this element, commonly
@@ -127,7 +136,7 @@ type JVNRSSFeed struct {
 	// happily into zero items, scanComponent returned nil, the component was
 	// counted as successfully checked, and even a total application-level
 	// outage finished as "JVN scan completed" with no findings.
-	Status JVNStatus `xml:"Status"`
+	Status JVNStatus `xml:"http://jvndb.jvn.jp/myjvn/Status Status"`
 }
 
 // JVNStatus is the MyJVN <status:Status> element. retCd "0" is success;
@@ -178,20 +187,20 @@ type JVNStatus struct {
 }
 
 type JVNChannel struct {
-	Title       string `xml:"title"`
-	Description string `xml:"description"`
+	Title       string `xml:"http://purl.org/rss/1.0/ title"`
+	Description string `xml:"http://purl.org/rss/1.0/ description"`
 }
 
 type JVNItem struct {
-	Title       string    `xml:"title"`
-	Link        string    `xml:"link"`
-	Description string    `xml:"description"`
-	Identifier  string    `xml:"identifier"`
-	References  []JVNRef  `xml:"references"`
-	CPE         []JVNCPE  `xml:"cpe"`
-	CVSS        []JVNCVSS `xml:"cvss"`
-	Published   string    `xml:"issued"`
-	Modified    string    `xml:"modified"`
+	Title       string    `xml:"http://purl.org/rss/1.0/ title"`
+	Link        string    `xml:"http://purl.org/rss/1.0/ link"`
+	Description string    `xml:"http://purl.org/rss/1.0/ description"`
+	Identifier  string    `xml:"http://jvn.jp/rss/mod_sec/3.0/ identifier"`
+	References  []JVNRef  `xml:"http://jvn.jp/rss/mod_sec/3.0/ references"`
+	CPE         []JVNCPE  `xml:"http://jvn.jp/rss/mod_sec/3.0/ cpe"`
+	CVSS        []JVNCVSS `xml:"http://jvn.jp/rss/mod_sec/3.0/ cvss"`
+	Published   string    `xml:"http://purl.org/dc/terms/ issued"`
+	Modified    string    `xml:"http://purl.org/dc/terms/ modified"`
 }
 
 type JVNRef struct {
@@ -578,7 +587,7 @@ func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPag
 	}
 
 	seenAdvisories := make(map[string]struct{})
-	seenCVEs := make(map[string]struct{})
+	seenCVEs := make(map[string]int)
 	startItem := 1
 	for page := 0; page < jvnMaxPagesPerComponent; page++ {
 		if page > 0 {
@@ -615,10 +624,20 @@ func (s *JVNService) searchKeyword(ctx context.Context, keyword string, extraPag
 			res.Retrieved++
 		}
 		for _, v := range p.vulns {
-			if _, dup := seenCVEs[v.CVEID]; dup {
+			// Two JVNDB advisories can cite the SAME CVE. Both are
+			// retrieved, but only one row can be written, and taking
+			// whichever arrived first meant a critical assessment could
+			// be discarded in favour of a low one that happened to come
+			// earlier in the feed (Codex M55 R3, High) — a severity-gated
+			// CI check would then pass on the milder of the two. Keep the
+			// more severe.
+			if at, dup := seenCVEs[v.CVEID]; dup {
+				if jvnMoreSevere(v, res.Vulns[at]) {
+					res.Vulns[at] = v
+				}
 				continue
 			}
-			seenCVEs[v.CVEID] = struct{}{}
+			seenCVEs[v.CVEID] = len(res.Vulns)
 			res.Vulns = append(res.Vulns, v)
 		}
 
@@ -787,10 +806,35 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 		return nil, fmt.Errorf("JVN response totalResRet=%d exceeds the requested maxCountItem=%d; "+
 			"the answer is not to the question that was asked", totalResRet, req.maxCountItem)
 	}
+	// A page cannot hold more entries than the whole match set has, and it
+	// cannot run past the end of it (Codex M55 R3, High). Without these, a
+	// response could claim totalRes=1 / totalResRet=2, hand over two entries
+	// one of which is unusable, and land on Retrieved == TotalRes — i.e.
+	// report a complete answer while dropping one of the two entries it
+	// actually returned.
+	if totalResRet > totalRes {
+		return nil, fmt.Errorf("JVN response holds totalResRet=%d entries out of a totalRes=%d "+
+			"match set; the page contradicts the total it reports", totalResRet, totalRes)
+	}
+	if totalResRet > 0 && firstRes+totalResRet-1 > totalRes {
+		return nil, fmt.Errorf("JVN response page [%d,%d] runs past the end of its own totalRes=%d "+
+			"match set", firstRes, firstRes+totalResRet-1, totalRes)
+	}
 
 	page := &jvnPage{totalRes: totalRes, totalResRet: totalResRet, firstRes: firstRes}
 
 	if totalResRet == 0 {
+		// The measured zero-match body carries exactly ONE placeholder
+		// <item> and nothing else. Allowing any number of identity-less
+		// items (Codex M55 R3, High) left a shape in which a body could
+		// carry arbitrary entries, have every one of them discarded, and
+		// still be accepted as an authoritative "no advisories" — with
+		// Retrieved=0, TotalRes=0 and Truncated=false, so nothing
+		// downstream could tell.
+		if len(feed.Items) > 1 {
+			return nil, fmt.Errorf("JVN response declares totalResRet=0 but carries %d entries; "+
+				"a zero-match answer holds at most the one placeholder item", len(feed.Items))
+		}
 		for _, item := range feed.Items {
 			if jvnItemIdentity(item) != "" {
 				return nil, fmt.Errorf("JVN response declares totalResRet=0 but carries advisory %q; "+
@@ -825,6 +869,38 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	}
 
 	return page, nil
+}
+
+// jvnSeverityRank orders the severity labels this scanner stores, most severe
+// first. Anything unrecognised ranks lowest so it can never displace a rated
+// advisory.
+var jvnSeverityRank = map[string]int{
+	"CRITICAL": 5,
+	"HIGH":     4,
+	"MEDIUM":   3,
+	"LOW":      2,
+	"NONE":     1,
+}
+
+// jvnMoreSevere reports whether a should replace b as the record kept for a CVE
+// that two advisories both describe.
+//
+// A present CVSS score beats an absent one, a higher score beats a lower one,
+// and the severity label breaks ties when neither carries a score. Equality
+// keeps the incumbent, so the order entries arrive in cannot change the outcome
+// except by strictly raising it.
+func jvnMoreSevere(a, b model.Vulnerability) bool {
+	switch {
+	case a.CVSSScore != nil && b.CVSSScore != nil:
+		if *a.CVSSScore != *b.CVSSScore {
+			return *a.CVSSScore > *b.CVSSScore
+		}
+	case a.CVSSScore != nil:
+		return true
+	case b.CVSSScore != nil:
+		return false
+	}
+	return jvnSeverityRank[strings.ToUpper(a.Severity)] > jvnSeverityRank[strings.ToUpper(b.Severity)]
 }
 
 // jvnAdvisoryKey is the identity used to tell entries apart ACROSS pages.
