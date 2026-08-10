@@ -2644,6 +2644,10 @@
         "nullable": true,
         "type": "character varying(20)"
       },
+      "source_modified_at": {
+        "nullable": true,
+        "type": "timestamp with time zone"
+      },
       "updated_at": {
         "nullable": true,
         "type": "timestamp with time zone"
