@@ -75,6 +75,7 @@ const (
 	jvnMethodOverviewList = "getVulnOverviewList"
 	jvnFeedHND            = "hnd"
 	jvnDateRangeAll       = "n"
+	jvnLang               = "ja"
 )
 
 // JVNService handles JVN (Japan Vulnerability Notes) API integration
@@ -157,6 +158,7 @@ type JVNRSSFeed struct {
 type JVNStatus struct {
 	Version     string `xml:"version,attr"`
 	Method      string `xml:"method,attr"`
+	Lang        string `xml:"lang,attr"`
 	RetCd       string `xml:"retCd,attr"`
 	RetMax      string `xml:"retMax,attr"`
 	ErrCd       string `xml:"errCd,attr"`
@@ -646,7 +648,7 @@ func (s *JVNService) fetchPage(ctx context.Context, keyword string, startItem in
 	params.Set("rangeDatePublic", jvnDateRangeAll)
 	params.Set("rangeDatePublished", jvnDateRangeAll)
 	params.Set("rangeDateFirstPublished", jvnDateRangeAll)
-	params.Set("lang", "ja")
+	params.Set("lang", jvnLang)
 
 	reqURL := fmt.Sprintf("%s?%s", s.baseURL, params.Encode())
 
@@ -848,6 +850,15 @@ func jvnCheckEcho(st JVNStatus, req jvnPageRequest) error {
 	}
 	if got := strings.TrimSpace(st.Feed); got != jvnFeedHND {
 		return fmt.Errorf("JVN response is for feed %q, not %q", got, jvnFeedHND)
+	}
+	// lang is not cosmetic: it selects which corpus is searched. Measured on
+	// the live API, keyword=openssl with the same date range answers
+	// totalRes=459 under lang=ja and totalRes=4 under lang=en. A proxy that
+	// served the English corpus would therefore under-report by two orders of
+	// magnitude while looking entirely well-formed.
+	if got := strings.TrimSpace(st.Lang); got != jvnLang {
+		return fmt.Errorf("JVN response is in lang %q, not %q; that is a different corpus, "+
+			"not a translation of the same one", got, jvnLang)
 	}
 	for _, rng := range []struct{ name, got string }{
 		{"rangeDatePublic", st.RangeDatePublic},

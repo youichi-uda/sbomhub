@@ -74,6 +74,7 @@ type cannedJVNStatus struct {
 	// The request echo the live API sends back on every success.
 	Method                  string
 	Feed                    string
+	Lang                    string
 	Keyword                 string
 	MaxCountItem            string
 	StartItem               string
@@ -93,6 +94,7 @@ func echoOf(q url.Values) cannedJVNStatus {
 	return cannedJVNStatus{
 		Method:                  def("method", "getVulnOverviewList"),
 		Feed:                    def("feed", "hnd"),
+		Lang:                    def("lang", "ja"),
 		Keyword:                 q.Get("keyword"),
 		MaxCountItem:            def("maxCountItem", "50"),
 		StartItem:               def("startItem", "1"),
@@ -247,8 +249,8 @@ func renderCannedMyJVN(st cannedJVNStatus, items []cannedJVNAdvisory, now time.T
 	if st.omitTotalResRet {
 		trr = ""
 	}
-	fmt.Fprintf(&b, `  <status:Status version="3.3" method="%s" lang="ja" retCd="%s" retMax="50" errCd="" errMsg="" totalRes="%d"%s firstRes="%d" feed="%s" keyword="%s" maxCountItem="%s" startItem="%s" rangeDatePublic="%s" rangeDatePublished="%s" rangeDateFirstPublished="%s"/>
-</rdf:RDF>`, st.Method, st.RetCd, st.TotalRes, trr, st.FirstRes, st.Feed,
+	fmt.Fprintf(&b, `  <status:Status version="3.3" method="%s" lang="%s" retCd="%s" retMax="50" errCd="" errMsg="" totalRes="%d"%s firstRes="%d" feed="%s" keyword="%s" maxCountItem="%s" startItem="%s" rangeDatePublic="%s" rangeDatePublished="%s" rangeDateFirstPublished="%s"/>
+</rdf:RDF>`, st.Method, st.Lang, st.RetCd, st.TotalRes, trr, st.FirstRes, st.Feed,
 		st.Keyword, st.MaxCountItem, st.StartItem,
 		st.RangeDatePublic, st.RangeDatePublished, st.RangeDateFirstPublished)
 	return b.String()
@@ -539,6 +541,16 @@ func TestM55JVN_ResponseMustEchoTheRequest(t *testing.T) {
 				st.Method = "getAlertList"
 			},
 			wantErr: "method",
+		},
+		{
+			// Measured: lang selects the corpus, it does not translate
+			// one. keyword=openssl answers totalRes=459 under lang=ja
+			// and totalRes=4 under lang=en.
+			name: "answer is from the English corpus",
+			corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+				st.Lang = "en"
+			},
+			wantErr: "lang",
 		},
 		{
 			name: "answer is in a different feed format",
