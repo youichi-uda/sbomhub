@@ -1204,6 +1204,59 @@ func TestM55JVN_R8Regressions(t *testing.T) {
 		}
 	})
 
+	t.Run("an unknown version cannot suppress a valid v2 entry", func(t *testing.T) {
+		// M55 R9, High: every non-v2 version used to enter a PREFERRED
+		// pass, so an unrecognised version reporting Low/0.1 was returned
+		// before the v2 HIGH beside it was ever considered.
+		got := svc.convertJVNItemToVulnerability(JVNItem{
+			Identifier: "JVNDB-2024-000010",
+			CVSS: []JVNCVSS{
+				jvnTestCVSS("9.9", "Low", "0.1"),
+				jvnTestCVSS("2.0", "High", "10.0"),
+			},
+		})
+		if got == nil {
+			t.Fatal("item was dropped")
+		}
+		if got.Severity != "HIGH" || got.CVSSScore == nil || *got.CVSSScore != 10.0 {
+			t.Errorf("stored %s/%v, want HIGH/10 — an unknown version outranked a valid v2 entry",
+				got.Severity, got.CVSSScore)
+		}
+	})
+
+	t.Run("a v3 CRITICAL still beats a higher-scored v2 HIGH", func(t *testing.T) {
+		// The property the removed version-preference stage existed for.
+		// It survives because the comparison leads with the rating.
+		got := svc.convertJVNItemToVulnerability(JVNItem{
+			Identifier: "JVNDB-2024-000011",
+			CVSS: []JVNCVSS{
+				jvnTestCVSS("2.0", "High", "10.0"),
+				jvnTestCVSS("3.1", "Critical", "9.8"),
+			},
+		})
+		if got == nil || got.Severity != "CRITICAL" || got.CVSSScore == nil || *got.CVSSScore != 9.8 {
+			t.Errorf("stored %v, want CRITICAL/9.8", got)
+		}
+	})
+
+	t.Run("a reference declaring source=CVE is CVE-intended", func(t *testing.T) {
+		// M55 R9, Medium: the id alone was tested, so a mangled id under
+		// source="CVE" was skipped in silence and left no shortfall.
+		ids, complete := jvnItemCVEIDs(JVNItem{
+			Identifier: "JVNDB-2024-000012",
+			References: []JVNRef{
+				jvnTestRef("CVE", "CVE-2026-20704"),
+				jvnTestRef("CVE", "2026-22550"),
+			},
+		})
+		if len(ids) != 1 || ids[0] != "CVE-2026-20704" {
+			t.Errorf("ids = %v, want the one parseable CVE", ids)
+		}
+		if complete {
+			t.Error("complete = true although a reference declaring source=CVE could not be recorded")
+		}
+	})
+
 	t.Run("CVSS v4 is banded on the five-band scale", func(t *testing.T) {
 		got := svc.convertJVNItemToVulnerability(JVNItem{
 			Identifier: "JVNDB-2024-000002",

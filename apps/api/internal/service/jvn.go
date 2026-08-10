@@ -405,6 +405,16 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 	// whole scan's allowance and every component still gets its first page.
 	extraPages := s.extraPageBudget
 
+	// queried counts components actually looked up, and drives the pacing:
+	// the delay is applied BEFORE each query except the first, never after
+	// one (Codex M55 R8 Low, R9 Low). Pausing after each component left a
+	// dead wait at the end of the sweep, and the "skip it on the last
+	// index" patch still waited when the trailing components were nameless
+	// and would never be queried at all — in both cases a context expiring
+	// in that wait turned a sweep that had scanned everything into a
+	// cancelled, "results are incomplete" one.
+	queried := 0
+
 	for i := range components {
 		comp := &components[i]
 
@@ -416,6 +426,15 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 			rep.SkippedNoName++
 			continue
 		}
+
+		if queried > 0 {
+			if err := s.pause(ctx); err != nil {
+				rep.Cancelled = true
+				rep.Unscanned = len(components) - i
+				break
+			}
+		}
+		queried++
 
 		out, err := s.scanComponent(ctx, comp, &extraPages)
 		rep.RefusedWrites += out.RefusedWrites
@@ -453,19 +472,6 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 			continue
 		}
 		rep.Scanned++
-
-		// No pause after the LAST component: there is nothing left to
-		// pace, and a context that expired during that dead wait turned a
-		// sweep which had in fact finished everything into a cancelled one
-		// (Codex M55 R8, Low).
-		if i == len(components)-1 {
-			continue
-		}
-		if err := s.pause(ctx); err != nil {
-			rep.Cancelled = true
-			rep.Unscanned = len(components) - i - 1
-			break
-		}
 	}
 
 	slog.Info("JVN component scan completed", "report", rep.Summary())
@@ -1267,21 +1273,25 @@ func jvnItemIdentity(item JVNItem) string {
 
 // jvnWorstCVSS picks the assessment to store from an advisory's CVSS elements.
 //
-// CVSS v3 is preferred over v2 outright rather than by comparing their numbers:
-// the two scales are not comparable, and a v2 HIGH of 10.0 is a LOWER
-// assessment than a v3.1 CRITICAL of 9.8 (Codex M55 R4, High). Within a
-// version family the highest score wins. Entries whose score does not parse are
-// skipped rather than silently becoming 0.0.
+// ONE ranked pass over every entry, whatever its version. There is deliberately
+// no "prefer the modern scale" stage any more (Codex M55 R9, High). That stage
+// existed to stop a v2 HIGH of 10.0 outranking a v3.1 CRITICAL of 9.8 — but
+// since M55 R4 the comparison leads with the SEVERITY RATING and uses the score
+// only as a tiebreak, so CRITICAL already beats HIGH regardless of version and
+// the stage bought nothing. What it did do was create a preference an
+// unrecognised version could hijack: version="9.9" severity="Low" landed in the
+// preferred pass and suppressed a valid v2 HIGH beside it, storing LOW.
+//
+// Each entry is reconciled against its OWN version's band table, so the
+// comparison is between ratings on a common scale rather than between raw
+// numbers from different ones. Entries whose score is unusable keep the
+// severity they state and contribute no number.
 func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
-	pick := func(want func(version string) bool) (*float64, string) {
+	{
 		var best *float64
 		var severity string
 		seen := false
 		for _, e := range entries {
-			if !want(strings.TrimSpace(e.Version())) {
-				continue
-			}
-
 			var candidateScore *float64
 			candidate := mapCVSSSeverity(e.Severity())
 			score, err := strconv.ParseFloat(strings.TrimSpace(e.Score()), 64)
@@ -1324,22 +1334,6 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 		}
 		return best, severity
 	}
-
-	// The modern-scale pass only wins when it actually yielded an
-	// assessment. Treating any non-empty severity as a win meant a v3 entry
-	// that produced nothing usable — no score AND no recognisable label, so
-	// UNKNOWN — suppressed a perfectly good v2 HIGH sitting next to it
-	// (Codex M55 R8, High).
-	usable := func(score *float64, severity string) bool {
-		return score != nil || (severity != "" && severity != "UNKNOWN")
-	}
-	if score, severity := pick(jvnIsModernCVSS); usable(score, severity) {
-		return score, severity
-	}
-	if score, severity := pick(func(v string) bool { return !jvnIsModernCVSS(v) }); usable(score, severity) {
-		return score, severity
-	}
-	return nil, ""
 }
 
 // jvnItemCVEIDs returns EVERY CVE this advisory is filed under, canonicalised
@@ -1363,7 +1357,13 @@ func jvnItemCVEIDs(item JVNItem) (ids []string, complete bool) {
 	seen := make(map[string]struct{})
 	for _, ref := range item.References {
 		id := strings.TrimSpace(ref.ID())
-		if !strings.HasPrefix(strings.ToUpper(id), "CVE-") {
+		// A reference counts as CVE-intended when it SAYS SO, not only
+		// when its id already looks like a CVE (Codex M55 R9, Medium).
+		// Testing the prefix alone meant <sec:references source="CVE"
+		// id="2026-22550"> — a CVE the advisory plainly carries, with a
+		// mangled id — was skipped in silence and left no shortfall.
+		if !strings.EqualFold(strings.TrimSpace(ref.Source()), "CVE") &&
+			!strings.HasPrefix(strings.ToUpper(id), "CVE-") {
 			continue
 		}
 		canonical, err := validation.ValidateCVEID(id)

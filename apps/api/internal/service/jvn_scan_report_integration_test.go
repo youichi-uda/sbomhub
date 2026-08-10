@@ -293,6 +293,17 @@ func TestM55JVNScanReport_NoPauseAfterTheLastComponent(t *testing.T) {
 	for _, name := range []string{"aaa", "bbb", "ccc"} {
 		seedComponentVS(t, migDB, tenant, sbom, name, "1.0", "pkg:generic/"+name+"@1.0")
 	}
+	// Nameless components are never queried, so they must not be paced
+	// either. NOTE, measured: ListBySbom orders by name and a blank name
+	// sorts FIRST ("[  ] [   ] [aaa] [bbb] [ccc]"), so these land at the
+	// HEAD of the sweep, not the tail. Codex's M55 R9 Low described a
+	// nameless TAIL defeating the earlier "skip the pause on the last
+	// index" form; that ordering is not reachable through this query, so
+	// the scenario as stated was not reproducible. Pacing before each query
+	// instead of after each component makes the question moot either way,
+	// and these rows pin that a skipped component consumes no pause.
+	seedComponentVS(t, migDB, tenant, sbom, "   ", "1.0", "pkg:generic/blank1@1.0")
+	seedComponentVS(t, migDB, tenant, sbom, "  ", "1.0", "pkg:generic/blank2@1.0")
 
 	now := time.Now()
 	srv := &cannedMyJVN{now: now, corpusFor: func(string) []cannedJVNAdvisory { return nil }}
@@ -314,6 +325,9 @@ func TestM55JVNScanReport_NoPauseAfterTheLastComponent(t *testing.T) {
 		}
 		if rep.Scanned != 3 {
 			t.Fatalf("Scanned = %d, want 3", rep.Scanned)
+		}
+		if rep.SkippedNoName != 2 {
+			t.Fatalf("SkippedNoName = %d, want 2", rep.SkippedNoName)
 		}
 		if elapsed >= 520*time.Millisecond {
 			t.Errorf("sweep of 3 components took %v; with no pause after the last one it should "+
