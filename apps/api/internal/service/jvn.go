@@ -165,25 +165,30 @@ type JVNRSSFeed struct {
 // keyword comes back percent-encoded (keyword=日本語 echoes
 // "%E6%97%A5%E6%9C%AC%E8%AA%9E") — the comparison has to allow for that.
 type JVNStatus struct {
-	Version     string `xml:"version,attr"`
-	Method      string `xml:"method,attr"`
-	Lang        string `xml:"lang,attr"`
-	RetCd       string `xml:"retCd,attr"`
-	RetMax      string `xml:"retMax,attr"`
-	ErrCd       string `xml:"errCd,attr"`
-	ErrMsg      string `xml:"errMsg,attr"`
-	TotalRes    string `xml:"totalRes,attr"`
-	TotalResRet string `xml:"totalResRet,attr"`
-	FirstRes    string `xml:"firstRes,attr"`
-	Feed        string `xml:"feed,attr"`
+	// Attrs holds the element's attributes with their namespaces intact.
+	//
+	// Named `xml:"retCd,attr"` fields would be simpler and are WRONG here
+	// (Codex M55 R4, High): encoding/xml matches an attribute tag on its
+	// local name in ANY namespace, so a correctly-namespaced <status:Status>
+	// carrying evil:retCd / evil:keyword / evil:totalRes from an attacker
+	// namespace populated every field and let a forged zero-result envelope
+	// through the whole validator. Measured: with tag `xml:"retCd,attr"`,
+	// `<s:S xmlns:evil="http://evil/" evil:retCd="0"/>` yields RetCd="0";
+	// the ` retCd,attr` (empty-namespace) form does NOT fix it — it matches
+	// just the same. Reading the attributes ourselves and requiring an empty
+	// namespace is the only form that discriminates.
+	Attrs []xml.Attr `xml:",any,attr"`
+}
 
-	// Echoed request parameters.
-	Keyword                 string `xml:"keyword,attr"`
-	MaxCountItem            string `xml:"maxCountItem,attr"`
-	StartItem               string `xml:"startItem,attr"`
-	RangeDatePublic         string `xml:"rangeDatePublic,attr"`
-	RangeDatePublished      string `xml:"rangeDatePublished,attr"`
-	RangeDateFirstPublished string `xml:"rangeDateFirstPublished,attr"`
+// attr returns the value of an UNPREFIXED attribute, or "" when it is absent.
+// A namespaced attribute of the same local name is not this attribute.
+func (st JVNStatus) attr(name string) string {
+	for _, a := range st.Attrs {
+		if a.Name.Space == "" && a.Name.Local == name {
+			return a.Value
+		}
+	}
+	return ""
 }
 
 type JVNChannel struct {
@@ -775,29 +780,29 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	// an authoritative "no vulnerabilities" (R10, Critical). Same reasoning as
 	// NVDResponse.validate: what distinguishes "no matches" from "not an
 	// answer" is the presence of the envelope, not its value.
-	rc := strings.TrimSpace(feed.Status.RetCd)
+	rc := strings.TrimSpace(feed.Status.attr("retCd"))
 	if rc == "" {
 		return nil, fmt.Errorf("JVN response has no status element; the endpoint returned 200 " +
 			"but the body is not a MyJVN getVulnOverviewList response")
 	}
 	if rc != "0" {
 		return nil, fmt.Errorf("JVN API reported failure: retCd=%s errCd=%s errMsg=%s",
-			rc, feed.Status.ErrCd, feed.Status.ErrMsg)
+			rc, feed.Status.attr("errCd"), feed.Status.attr("errMsg"))
 	}
 
 	if err := jvnCheckEcho(feed.Status, req); err != nil {
 		return nil, err
 	}
 
-	totalRes, err := jvnCount(feed.Status.TotalRes, "totalRes")
+	totalRes, err := jvnCount(feed.Status.attr("totalRes"), "totalRes")
 	if err != nil {
 		return nil, err
 	}
-	totalResRet, err := jvnCount(feed.Status.TotalResRet, "totalResRet")
+	totalResRet, err := jvnCount(feed.Status.attr("totalResRet"), "totalResRet")
 	if err != nil {
 		return nil, err
 	}
-	firstRes, err := jvnCount(feed.Status.FirstRes, "firstRes")
+	firstRes, err := jvnCount(feed.Status.attr("firstRes"), "firstRes")
 	if err != nil {
 		return nil, err
 	}
@@ -885,22 +890,27 @@ var jvnSeverityRank = map[string]int{
 // jvnMoreSevere reports whether a should replace b as the record kept for a CVE
 // that two advisories both describe.
 //
-// A present CVSS score beats an absent one, a higher score beats a lower one,
-// and the severity label breaks ties when neither carries a score. Equality
-// keeps the incumbent, so the order entries arrive in cannot change the outcome
-// except by strictly raising it.
+// The SEVERITY LABEL is compared first and the raw score only breaks ties
+// (Codex M55 R4, High). Comparing scores first is wrong across CVSS versions,
+// which JVN mixes: a v2 HIGH of 10.0 would otherwise displace a v3.1 CRITICAL
+// of 9.8, demoting the record a critical-only CI gate is looking for. A rated
+// advisory beats an unrated one, and a scored one beats an unscored one at
+// equal rating. Equality keeps the incumbent, so arrival order can only ever
+// raise the stored assessment, never lower it.
 func jvnMoreSevere(a, b model.Vulnerability) bool {
+	ra := jvnSeverityRank[strings.ToUpper(strings.TrimSpace(a.Severity))]
+	rb := jvnSeverityRank[strings.ToUpper(strings.TrimSpace(b.Severity))]
+	if ra != rb {
+		return ra > rb
+	}
 	switch {
 	case a.CVSSScore != nil && b.CVSSScore != nil:
-		if *a.CVSSScore != *b.CVSSScore {
-			return *a.CVSSScore > *b.CVSSScore
-		}
+		return *a.CVSSScore > *b.CVSSScore
 	case a.CVSSScore != nil:
 		return true
-	case b.CVSSScore != nil:
+	default:
 		return false
 	}
-	return jvnSeverityRank[strings.ToUpper(a.Severity)] > jvnSeverityRank[strings.ToUpper(b.Severity)]
 }
 
 // jvnAdvisoryKey is the identity used to tell entries apart ACROSS pages.
@@ -921,10 +931,10 @@ func jvnAdvisoryKey(item JVNItem, fallback string) string {
 // (measured); an absent one is a refusal, because "the parameter I cannot see"
 // and "the parameter that was ignored" have to be treated the same way.
 func jvnCheckEcho(st JVNStatus, req jvnPageRequest) error {
-	if got := strings.TrimSpace(st.Method); got != jvnMethodOverviewList {
+	if got := strings.TrimSpace(st.attr("method")); got != jvnMethodOverviewList {
 		return fmt.Errorf("JVN response is for method %q, not %q", got, jvnMethodOverviewList)
 	}
-	if got := strings.TrimSpace(st.Feed); got != jvnFeedHND {
+	if got := strings.TrimSpace(st.attr("feed")); got != jvnFeedHND {
 		return fmt.Errorf("JVN response is for feed %q, not %q", got, jvnFeedHND)
 	}
 	// lang is not cosmetic: it selects which corpus is searched. Measured on
@@ -932,33 +942,33 @@ func jvnCheckEcho(st JVNStatus, req jvnPageRequest) error {
 	// totalRes=459 under lang=ja and totalRes=4 under lang=en. A proxy that
 	// served the English corpus would therefore under-report by two orders of
 	// magnitude while looking entirely well-formed.
-	if got := strings.TrimSpace(st.Lang); got != jvnLang {
+	if got := strings.TrimSpace(st.attr("lang")); got != jvnLang {
 		return fmt.Errorf("JVN response is in lang %q, not %q; that is a different corpus, "+
 			"not a translation of the same one", got, jvnLang)
 	}
 	for _, rng := range []struct{ name, got string }{
-		{"rangeDatePublic", st.RangeDatePublic},
-		{"rangeDatePublished", st.RangeDatePublished},
-		{"rangeDateFirstPublished", st.RangeDateFirstPublished},
+		{"rangeDatePublic", st.attr("rangeDatePublic")},
+		{"rangeDatePublished", st.attr("rangeDatePublished")},
+		{"rangeDateFirstPublished", st.attr("rangeDateFirstPublished")},
 	} {
 		if got := strings.TrimSpace(rng.got); got != jvnDateRangeAll {
 			return fmt.Errorf("JVN response echoes %s=%q, not %q; the answer covers a narrower "+
 				"date window than was asked for", rng.name, got, jvnDateRangeAll)
 		}
 	}
-	if got, err := jvnCount(st.StartItem, "startItem echo"); err != nil {
+	if got, err := jvnCount(st.attr("startItem"), "startItem echo"); err != nil {
 		return err
 	} else if got != req.startItem {
 		return fmt.Errorf("JVN response echoes startItem=%d, not the requested %d", got, req.startItem)
 	}
-	if got, err := jvnCount(st.MaxCountItem, "maxCountItem echo"); err != nil {
+	if got, err := jvnCount(st.attr("maxCountItem"), "maxCountItem echo"); err != nil {
 		return err
 	} else if got != req.maxCountItem {
 		return fmt.Errorf("JVN response echoes maxCountItem=%d, not the requested %d", got, req.maxCountItem)
 	}
-	if !jvnKeywordEchoMatches(st.Keyword, req.keyword) {
+	if !jvnKeywordEchoMatches(st.attr("keyword"), req.keyword) {
 		return fmt.Errorf("JVN response echoes keyword %q, not the requested %q; "+
-			"this answer is about a different component", st.Keyword, req.keyword)
+			"this answer is about a different component", st.attr("keyword"), req.keyword)
 	}
 	return nil
 }
@@ -969,12 +979,20 @@ func jvnCheckEcho(st JVNStatus, req jvnPageRequest) error {
 // MyJVN returns the value exactly as it appeared in the query string rather
 // than decoding it, so a non-ASCII component name comes back percent-encoded
 // (measured: keyword=日本語 テスト echoes
-// "%E6%97%A5%E6%9C%AC%E8%AA%9E%20%E3%83%86%E3%82%B9%E3%83%88"). Both forms are
-// accepted; requiring the literal form would reject every component whose name
-// is not plain ASCII, turning this check from a guard into an outage.
+// "%E6%97%A5%E6%9C%AC%E8%AA%9E%20%E3%83%86%E3%82%B9%E3%83%88"). Requiring the
+// literal name would therefore reject every component whose name is not plain
+// ASCII — turning this check from a guard into an outage.
+//
+// What it must NOT do is compare the echo against the RAW name (Codex M55 R4,
+// High). Query encoding is not injective on that comparison: a component named
+// "foo+bar" goes on the wire as "foo%2Bbar", while a component named "foo bar"
+// goes on the wire as "foo+bar" — so a cached answer for "foo bar" echoes
+// exactly the string "foo+bar" and a raw comparison accepted it as the answer
+// for "foo+bar". The two forms compared here are the two the wire can actually
+// carry: what WE sent, and what the echo decodes back to.
 func jvnKeywordEchoMatches(echo, want string) bool {
 	echo = strings.TrimSpace(echo)
-	if echo == want {
+	if echo == url.QueryEscape(want) {
 		return true
 	}
 	if decoded, err := url.QueryUnescape(echo); err == nil && decoded == want {
@@ -1059,23 +1077,14 @@ func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerab
 	// Get CVSS score and severity. M46 B2: an item without any CVSS
 	// entry yields a nil score (NOT 0.0, a real "None" score) so
 	// un-scored JVN advisories are stored as NULL.
-	var cvssScore *float64
-	var severity string
-	for _, cvss := range item.CVSS {
-		if cvss.Version == "3.0" || cvss.Version == "3.1" {
-			score, _ := strconv.ParseFloat(cvss.Score, 64)
-			cvssScore = &score
-			severity = s.mapCVSSSeverity(cvss.Severity)
-			break
-		}
-	}
-	// Fallback to CVSS v2
-	if severity == "" && len(item.CVSS) > 0 {
-		score, _ := strconv.ParseFloat(item.CVSS[0].Score, 64)
-		cvssScore = &score
-		severity = s.mapCVSSSeverity(item.CVSS[0].Severity)
-	}
-
+	//
+	// M55 (Codex R4, High): this used to take the FIRST v3 element and
+	// break, and to discard ParseFloat's error. An advisory carrying a v3.0
+	// LOW before a v3.1 CRITICAL was therefore stored as LOW, and one whose
+	// first score was malformed was stored as 0.0 — in both cases while the
+	// same item explicitly stated a critical assessment. Take the most
+	// severe entry instead, and skip entries whose score will not parse.
+	cvssScore, severity := jvnWorstCVSS(item.CVSS)
 	if severity == "" {
 		severity = "UNKNOWN"
 	}
@@ -1109,6 +1118,42 @@ func jvnItemIdentity(item JVNItem) string {
 	return strings.TrimSpace(item.Identifier)
 }
 
+// jvnWorstCVSS picks the assessment to store from an advisory's CVSS elements.
+//
+// CVSS v3 is preferred over v2 outright rather than by comparing their numbers:
+// the two scales are not comparable, and a v2 HIGH of 10.0 is a LOWER
+// assessment than a v3.1 CRITICAL of 9.8 (Codex M55 R4, High). Within a
+// version family the highest score wins. Entries whose score does not parse are
+// skipped rather than silently becoming 0.0.
+func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
+	pick := func(want func(version string) bool) (*float64, string) {
+		var best *float64
+		var severity string
+		for _, e := range entries {
+			if !want(strings.TrimSpace(e.Version)) {
+				continue
+			}
+			score, err := strconv.ParseFloat(strings.TrimSpace(e.Score), 64)
+			if err != nil {
+				slog.Warn("ignoring JVN CVSS entry with an unparseable score",
+					"version", e.Version, "score", e.Score)
+				continue
+			}
+			if best == nil || score > *best {
+				s := score
+				best = &s
+				severity = mapCVSSSeverity(e.Severity)
+			}
+		}
+		return best, severity
+	}
+
+	if score, severity := pick(func(v string) bool { return strings.HasPrefix(v, "3.") }); score != nil {
+		return score, severity
+	}
+	return pick(func(v string) bool { return !strings.HasPrefix(v, "3.") })
+}
+
 // extractJVNCVEID finds the CVE this advisory is about, if it names one.
 //
 // The prefix test is case-INSENSITIVE (M54). It was `HasPrefix(ref.ID, "CVE-")`
@@ -1133,7 +1178,7 @@ func extractJVNCVEID(item JVNItem) string {
 	return ""
 }
 
-func (s *JVNService) mapCVSSSeverity(severity string) string {
+func mapCVSSSeverity(severity string) string {
 	switch strings.ToLower(severity) {
 	case "critical", "c":
 		return "CRITICAL"

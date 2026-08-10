@@ -44,6 +44,14 @@ type cannedJVNAdvisory struct {
 	ID        string
 	CVE       string
 	Published time.Time
+	// CVSS, when set, replaces the default single 3.1/High/7.5 element.
+	CVSS []cannedJVNCVSS
+}
+
+type cannedJVNCVSS struct {
+	Version  string
+	Severity string
+	Score    string
 }
 
 type cannedMyJVN struct {
@@ -239,12 +247,11 @@ func renderCannedMyJVN(st cannedJVNStatus, items []cannedJVNAdvisory, now time.T
     <description>test advisory</description>
     <sec:identifier>%s</sec:identifier>
     <sec:references source="CVE" id="%s">https://www.cve.org/CVERecord?id=%s</sec:references>
-    <sec:cvss version="3.1" type="Base" severity="High" score="7.5" vector="CVSS:3.1/AV:N/AC:L"/>
-    <dc:date>%s</dc:date>
+%s    <dc:date>%s</dc:date>
     <dcterms:issued>%s</dcterms:issued>
     <dcterms:modified>%s</dcterms:modified>
   </item>
-`, a.ID, a.ID, a.ID, a.ID, a.CVE, a.CVE,
+`, a.ID, a.ID, a.ID, a.ID, a.CVE, a.CVE, renderCannedCVSS(a.CVSS),
 			a.Published.Format(time.RFC3339), a.Published.Format(time.RFC3339), a.Published.Format(time.RFC3339))
 	}
 	trr := fmt.Sprintf(` totalResRet="%d"`, st.TotalResRet)
@@ -255,6 +262,18 @@ func renderCannedMyJVN(st cannedJVNStatus, items []cannedJVNAdvisory, now time.T
 </rdf:RDF>`, st.Method, st.Lang, st.RetCd, st.TotalRes, trr, st.FirstRes, st.Feed,
 		st.Keyword, st.MaxCountItem, st.StartItem,
 		st.RangeDatePublic, st.RangeDatePublished, st.RangeDateFirstPublished)
+	return b.String()
+}
+
+func renderCannedCVSS(entries []cannedJVNCVSS) string {
+	if entries == nil {
+		entries = []cannedJVNCVSS{{Version: "3.1", Severity: "High", Score: "7.5"}}
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		fmt.Fprintf(&b, "    <sec:cvss version=%q type=\"Base\" severity=%q score=%q vector=\"CVSS:3.1/AV:N/AC:L\"/>\n",
+			e.Version, e.Severity, e.Score)
+	}
 	return b.String()
 }
 
@@ -615,6 +634,21 @@ func TestM55JVN_ResponseMustEchoTheRequest(t *testing.T) {
 // A literal comparison would fail every such component — turning a guard into
 // an outage for exactly the Japanese-market components this product exists for.
 func TestM55JVN_NonASCIIKeywordEchoIsAccepted(t *testing.T) {
+	// Query encoding is not injective against the RAW name (Codex M55 R4,
+	// High): "foo bar" goes on the wire as "foo+bar", which is exactly the
+	// literal name of a DIFFERENT component. A cached answer for one was
+	// accepted as the answer for the other.
+	if jvnKeywordEchoMatches("foo+bar", "foo+bar") {
+		t.Error(`the echo "foo+bar" — which is the wire form of the component "foo bar" — ` +
+			`was accepted as the answer for the component "foo+bar"`)
+	}
+	if !jvnKeywordEchoMatches("foo+bar", "foo bar") {
+		t.Error(`the genuine echo for the component "foo bar" was rejected`)
+	}
+	if !jvnKeywordEchoMatches("foo%2Bbar", "foo+bar") {
+		t.Error(`the genuine echo for the component "foo+bar" was rejected`)
+	}
+
 	for _, keyword := range []string{"日本語 テスト", "golang.org/x/crypto", "OpenSSL-Test_1.0"} {
 		t.Run(keyword, func(t *testing.T) {
 			if !jvnKeywordEchoMatches(url.QueryEscape(keyword), keyword) {
@@ -736,6 +770,43 @@ func TestM55JVN_NamespacesAreBound(t *testing.T) {
 	}
 }
 
+// TestM55JVN_StatusAttributeNamespaces pins that the Status attributes are read
+// from the EMPTY namespace only (Codex M55 R4, High).
+//
+// encoding/xml matches an attribute tag on its local name in any namespace, so
+// a correctly-namespaced <status:Status> carrying evil:retCd / evil:keyword /
+// evil:totalRes and friends from an attacker namespace populated every field
+// and walked a forged zero-result envelope through the entire validator.
+// Measured with a scratch program: with tag `xml:"retCd,attr"`,
+// `<s:S xmlns:evil="http://evil/" evil:retCd="0"/>` yields RetCd="0" — and so
+// does the ` retCd,attr` empty-namespace form, which is why the attributes are
+// read by hand instead.
+func TestM55JVN_StatusAttributeNamespaces(t *testing.T) {
+	const tmpl = `<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns:status="http://jvndb.jvn.jp/myjvn/Status" xmlns:evil="http://attacker.example/">
+  <status:Status %sversion="3.3" %smethod="getVulnOverviewList" %slang="ja" %sretCd="0" retMax="50" errCd="" errMsg="" %stotalRes="0" %stotalResRet="0" %sfirstRes="1" %sfeed="hnd" %skeyword="libfoo" %smaxCountItem="50" %sstartItem="1" %srangeDatePublic="n" %srangeDatePublished="n" %srangeDateFirstPublished="n"/>
+</rdf:RDF>`
+	fill := func(prefix string) string {
+		args := make([]any, 14)
+		for i := range args {
+			args[i] = prefix
+		}
+		return fmt.Sprintf(tmpl, args...)
+	}
+
+	svc := NewJVNService(nil, nil, "", false)
+
+	if _, err := svc.parseJVNPage([]byte(fill("evil:")), jvnTestPageReq()); err == nil {
+		t.Fatal("a Status whose every attribute came from an attacker namespace was accepted " +
+			"as an authoritative empty answer")
+	}
+	// The same body with unprefixed attributes is a legitimate empty answer.
+	if _, err := svc.parseJVNPage([]byte(fill("")), jvnTestPageReq()); err != nil {
+		t.Fatalf("a genuine unprefixed Status was rejected: %v", err)
+	}
+}
+
 // TestM55JVN_PageCountsMustBeSelfConsistent pins the arithmetic bounds a page
 // has to satisfy against its own totalRes (Codex M55 R3, High).
 //
@@ -852,6 +923,17 @@ func TestM55JVN_DuplicateCVEKeepsTheMoreSevere(t *testing.T) {
 	if !jvnMoreSevere(mk(&low, "LOW"), mk(nil, "UNKNOWN")) {
 		t.Error("a scored advisory did not displace an unscored one")
 	}
+	// The severity LABEL outranks the raw score, because CVSS v2 and v3
+	// numbers are not comparable (Codex M55 R4, High): a v2 HIGH of 10.0
+	// must not displace a v3.1 CRITICAL of 9.8.
+	v2high := 10.0
+	v3crit := 9.8
+	if jvnMoreSevere(mk(&v2high, "HIGH"), mk(&v3crit, "CRITICAL")) {
+		t.Error("a HIGH/10.0 displaced a CRITICAL/9.8; raw scores were compared across versions")
+	}
+	if !jvnMoreSevere(mk(&v3crit, "CRITICAL"), mk(&v2high, "HIGH")) {
+		t.Error("a CRITICAL/9.8 did not displace a HIGH/10.0")
+	}
 	if jvnMoreSevere(mk(nil, "UNKNOWN"), mk(&low, "LOW")) {
 		t.Error("an unscored advisory displaced a scored one")
 	}
@@ -860,6 +942,111 @@ func TestM55JVN_DuplicateCVEKeepsTheMoreSevere(t *testing.T) {
 	}
 	if jvnMoreSevere(mk(&high, "CRITICAL"), mk(&high, "CRITICAL")) {
 		t.Error("an equal assessment displaced the incumbent; arrival order must not matter")
+	}
+}
+
+// TestM55JVN_WorstCVSSIsStored pins that an advisory carrying several CVSS
+// elements is stored at its most severe assessment (Codex M55 R4, High).
+//
+// Taking the first v3 element and breaking meant a v3.0 LOW listed before a
+// v3.1 CRITICAL was stored as LOW, and a malformed first score was stored as
+// 0.0 — in both cases while the same item explicitly stated a critical
+// assessment, so a critical-only CI gate would pass.
+func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+
+	got := svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000001",
+		CVSS: []JVNCVSS{
+			{Version: "3.0", Type: "Base", Severity: "Low", Score: "3.1"},
+			{Version: "3.1", Type: "Base", Severity: "Critical", Score: "9.8"},
+		},
+	})
+	if got == nil {
+		t.Fatal("item was dropped")
+	}
+	if got.Severity != "CRITICAL" || got.CVSSScore == nil || *got.CVSSScore != 9.8 {
+		t.Errorf("stored %s/%v, want CRITICAL/9.8 — the milder of two stated assessments was kept",
+			got.Severity, got.CVSSScore)
+	}
+
+	// A malformed score must be skipped, not turned into 0.0.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000002",
+		CVSS: []JVNCVSS{
+			{Version: "3.1", Type: "Base", Severity: "Critical", Score: "n/a"},
+			{Version: "3.1", Type: "Base", Severity: "High", Score: "7.5"},
+		},
+	})
+	if got == nil {
+		t.Fatal("item was dropped")
+	}
+	if got.CVSSScore == nil || *got.CVSSScore != 7.5 || got.Severity != "HIGH" {
+		t.Errorf("stored %s/%v, want HIGH/7.5 — an unparseable score became a real one",
+			got.Severity, got.CVSSScore)
+	}
+
+	// CVSS v3 wins over v2 outright: the scales are not comparable.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000003",
+		CVSS: []JVNCVSS{
+			{Version: "2.0", Type: "Base", Severity: "High", Score: "10.0"},
+			{Version: "3.1", Type: "Base", Severity: "Critical", Score: "9.8"},
+		},
+	})
+	if got == nil {
+		t.Fatal("item was dropped")
+	}
+	if got.Severity != "CRITICAL" || got.CVSSScore == nil || *got.CVSSScore != 9.8 {
+		t.Errorf("stored %s/%v, want CRITICAL/9.8 — a v2 10.0 outranked a v3.1 CRITICAL",
+			got.Severity, got.CVSSScore)
+	}
+
+	// No CVSS at all stays NULL, not 0.0 (M46 B2).
+	got = svc.convertJVNItemToVulnerability(JVNItem{Identifier: "JVNDB-2024-000004"})
+	if got == nil {
+		t.Fatal("item was dropped")
+	}
+	if got.CVSSScore != nil || got.Severity != "UNKNOWN" {
+		t.Errorf("stored %s/%v, want UNKNOWN/nil", got.Severity, got.CVSSScore)
+	}
+}
+
+// TestM55JVN_DuplicateCVEAcrossPagesKeepsTheMoreSevere drives the same rule
+// through the REAL paging path (Codex M55 R4, High: the unit test called
+// jvnMoreSevere directly, so reverting the searchKeyword wiring to
+// first-entry-wins left it green).
+func TestM55JVN_DuplicateCVEAcrossPagesKeepsTheMoreSevere(t *testing.T) {
+	now := time.Now()
+	// Two DISTINCT JVNDB advisories citing one CVE; the milder one is
+	// listed first, exactly the order that used to win.
+	corpus := []cannedJVNAdvisory{
+		{ID: "JVNDB-2021-000001", CVE: "CVE-2021-44228", Published: now,
+			CVSS: []cannedJVNCVSS{{Version: "3.1", Severity: "Low", Score: "3.1"}}},
+		{ID: "JVNDB-2021-000002", CVE: "CVE-2021-44228", Published: now,
+			CVSS: []cannedJVNCVSS{{Version: "3.1", Severity: "Critical", Score: "9.8"}}},
+	}
+	srv := &cannedMyJVN{corpus: corpus, now: now}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	res, err := svc.searchKeyword(context.Background(), "log4j", nil)
+	if err != nil {
+		t.Fatalf("searchKeyword: %v", err)
+	}
+	if res.Retrieved != 2 {
+		t.Errorf("Retrieved = %d, want 2 distinct advisories", res.Retrieved)
+	}
+	if res.Truncated {
+		t.Error("both advisories were retrieved; this is not truncated")
+	}
+	if len(res.Vulns) != 1 {
+		t.Fatalf("got %d vulnerabilities, want 1 (both advisories name one CVE)", len(res.Vulns))
+	}
+	if res.Vulns[0].Severity != "CRITICAL" || res.Vulns[0].CVSSScore == nil || *res.Vulns[0].CVSSScore != 9.8 {
+		t.Errorf("kept %s/%v, want CRITICAL/9.8 — the advisory that arrived first won on order alone",
+			res.Vulns[0].Severity, res.Vulns[0].CVSSScore)
 	}
 }
 
