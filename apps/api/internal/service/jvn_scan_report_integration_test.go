@@ -265,6 +265,63 @@ func TestM55JVNScanReport_CancellationIsNotSuccess(t *testing.T) {
 	}
 }
 
+// TestM55JVNScanReport_NoPauseAfterTheLastComponent pins that the sweep does
+// not sit in an inter-component pause after the LAST component (Codex M55 R8,
+// Low).
+//
+// There is nothing left to pace, and the dead wait was observable: a context
+// expiring inside it turned a sweep that had in fact scanned everything into a
+// cancelled, "results are incomplete" one.
+//
+// The assertion is on elapsed time because the pause count is what is being
+// pinned, and the two shapes are far apart: with the guard, 3 components spend
+// 2 pauses (~400ms); without it, 3 (~600ms). The 520ms bound sits between them
+// with 80ms of headroom on each side, and the canned server answers in
+// microseconds.
+func TestM55JVNScanReport_NoPauseAfterTheLastComponent(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	appDB := openOrSkipVS(t, appURL)
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+
+	tenant := seedTenantVS(t, migDB, "m55jvntail")
+	project := uuid.New()
+	seedProjectVS(t, migDB, tenant, project, "m55jvntail-"+project.String())
+	sbom := seedSbomVS(t, migDB, tenant, project)
+	for _, name := range []string{"aaa", "bbb", "ccc"} {
+		seedComponentVS(t, migDB, tenant, sbom, name, "1.0", "pkg:generic/"+name+"@1.0")
+	}
+
+	now := time.Now()
+	srv := &cannedMyJVN{now: now, corpusFor: func(string) []cannedJVNAdvisory { return nil }}
+	ts := srv.start(t)
+
+	svc := NewJVNService(repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB), ts.URL, false)
+	const delay = 200 * time.Millisecond
+	svc.requestDelay = delay
+
+	withTenantScanTx(t, appDB, tenant, func(ctx context.Context) {
+		start := time.Now()
+		rep, err := svc.ScanComponentsReport(ctx, sbom)
+		elapsed := time.Since(start)
+		t.Logf("report: %s (elapsed %v)", rep.Summary(), elapsed)
+
+		if err != nil {
+			t.Fatalf("a clean sweep reported %v", err)
+		}
+		if rep.Scanned != 3 {
+			t.Fatalf("Scanned = %d, want 3", rep.Scanned)
+		}
+		if elapsed >= 520*time.Millisecond {
+			t.Errorf("sweep of 3 components took %v; with no pause after the last one it should "+
+				"spend 2 pauses (~%v), not 3", elapsed, 2*delay)
+		}
+	})
+}
+
 // TestM55JVNScanReport_PartialFetchFailureIsCounted pins the observability
 // requirement: a sweep where SOME components could not be reached still
 // reports success (unchanged product policy), but the number that failed is a

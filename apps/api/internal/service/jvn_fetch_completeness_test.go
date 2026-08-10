@@ -1181,6 +1181,108 @@ func TestM55JVN_ExactlyOneStatusElement(t *testing.T) {
 	}
 }
 
+// TestM55JVN_R8Regressions pins the four defects Codex found in the machinery
+// added by the previous rounds' own fixes (M55 R8). Each is a way for a scan to
+// under-report while reporting success.
+func TestM55JVN_R8Regressions(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+
+	t.Run("an unusable v3 entry does not suppress a valid v2 one", func(t *testing.T) {
+		got := svc.convertJVNItemToVulnerability(JVNItem{
+			Identifier: "JVNDB-2024-000001",
+			CVSS: []JVNCVSS{
+				jvnTestCVSS("3.1", "", "n/a"), // yields nothing usable
+				jvnTestCVSS("2.0", "High", "10.0"),
+			},
+		})
+		if got == nil {
+			t.Fatal("item was dropped")
+		}
+		if got.Severity != "HIGH" || got.CVSSScore == nil || *got.CVSSScore != 10.0 {
+			t.Errorf("stored %s/%v, want HIGH/10 — an empty v3 pass hid a valid v2 assessment",
+				got.Severity, got.CVSSScore)
+		}
+	})
+
+	t.Run("CVSS v4 is banded on the five-band scale", func(t *testing.T) {
+		got := svc.convertJVNItemToVulnerability(JVNItem{
+			Identifier: "JVNDB-2024-000002",
+			CVSS:       []JVNCVSS{jvnTestCVSS("4.0", "Low", "9.8")},
+		})
+		if got == nil || got.Severity != "CRITICAL" {
+			t.Errorf("stored %v, want CRITICAL — v4 was banded with the v2 table", got)
+		}
+		// An unrecognised version fails towards the harsher rating too.
+		got = svc.convertJVNItemToVulnerability(JVNItem{
+			Identifier: "JVNDB-2024-000003",
+			CVSS:       []JVNCVSS{jvnTestCVSS("9.9", "Low", "9.8")},
+		})
+		if got == nil || got.Severity != "CRITICAL" {
+			t.Errorf("stored %v, want CRITICAL for an unknown CVSS version", got)
+		}
+	})
+
+	t.Run("a malformed CVE reference makes the advisory incomplete", func(t *testing.T) {
+		ids, complete := jvnItemCVEIDs(JVNItem{
+			Identifier: "JVNDB-2024-000004",
+			References: []JVNRef{
+				jvnTestRef("CVE", "CVE-2026-20704"),
+				jvnTestRef("CVE", "CVE-2026-BOGUS"),
+			},
+		})
+		if len(ids) != 1 || ids[0] != "CVE-2026-20704" {
+			t.Errorf("ids = %v, want the one parseable CVE", ids)
+		}
+		if complete {
+			t.Error("complete = true although a CVE that was on the wire could not be recorded")
+		}
+	})
+
+	t.Run("advisory identity is case-canonical", func(t *testing.T) {
+		upper := jvnAdvisoryKey(JVNItem{Identifier: "JVNDB-2026-027713"}, "")
+		lower := jvnAdvisoryKey(JVNItem{Identifier: "jvndb-2026-027713"}, "")
+		if upper != lower {
+			t.Errorf("%q and %q are the same advisory but key differently; a mirror could "+
+				"re-serve a page in another case and have it counted as new entries", upper, lower)
+		}
+	})
+}
+
+// TestM55JVN_CaseVariantRepeatIsNotNewCoverage drives the case-canonical
+// identity through the REAL paging path.
+func TestM55JVN_CaseVariantRepeatIsNotNewCoverage(t *testing.T) {
+	now := time.Now()
+	corpus := cannedCorpus(now, 100, 100)
+	srv := &cannedMyJVN{corpus: corpus, now: now,
+		corrupt: func(q url.Values, st *cannedJVNStatus, items *[]cannedJVNAdvisory) {
+			if q.Get("startItem") == "51" {
+				// Page 1 again, lower-cased: distinct bytes, same advisories.
+				repeat := make([]cannedJVNAdvisory, 50)
+				for i, a := range corpus[:50] {
+					a.ID = strings.ToLower(a.ID)
+					repeat[i] = a
+				}
+				*items = repeat
+				st.TotalResRet = 50
+			}
+		}}
+	ts := srv.start(t)
+	svc := NewJVNService(nil, nil, ts.URL, false)
+	svc.requestDelay = 0
+
+	res, err := svc.searchKeyword(context.Background(), "libfoo", nil)
+	if err != nil {
+		t.Fatalf("searchKeyword: %v", err)
+	}
+	if res.Retrieved != 50 {
+		t.Errorf("Retrieved = %d, want 50 distinct advisories (the wire returned %d)",
+			res.Retrieved, res.Entries)
+	}
+	if !res.Truncated {
+		t.Error("a re-served page in another case was counted as new coverage")
+	}
+}
+
 // TestM55JVN_PageCountsMustBeSelfConsistent pins the arithmetic bounds a page
 // has to satisfy against its own totalRes (Codex M55 R3, High).
 //

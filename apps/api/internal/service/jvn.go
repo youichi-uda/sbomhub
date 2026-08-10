@@ -454,6 +454,13 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 		}
 		rep.Scanned++
 
+		// No pause after the LAST component: there is nothing left to
+		// pace, and a context that expired during that dead wait turned a
+		// sweep which had in fact finished everything into a cancelled one
+		// (Codex M55 R8, Low).
+		if i == len(components)-1 {
+			continue
+		}
 		if err := s.pause(ctx); err != nil {
 			rep.Cancelled = true
 			rep.Unscanned = len(components) - i - 1
@@ -974,10 +981,13 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	}
 
 	for _, item := range feed.Items {
-		// An entry with no identity is one this scan cannot record. It is
-		// NOT counted as retrieved (see jvnKeywordResult.Retrieved), so it
-		// surfaces as a shortfall against totalRes rather than vanishing.
-		if id := jvnItemIdentity(item); id != "" {
+		// An entry this scan cannot record IN FULL is not counted as
+		// retrieved (see jvnKeywordResult.Retrieved), so it surfaces as a
+		// shortfall against totalRes rather than vanishing. That covers an
+		// entry with no identity at all AND one carrying a CVE reference
+		// that could not be parsed.
+		_, complete := jvnItemCVEIDs(item)
+		if id := jvnItemIdentity(item); id != "" && complete {
 			page.advisoryIDs = append(page.advisoryIDs, jvnAdvisoryKey(item, id))
 		}
 		page.vulns = append(page.vulns, s.convertJVNItemToVulnerabilities(item)...)
@@ -1030,10 +1040,15 @@ func jvnMoreSevere(a, b model.Vulnerability) bool {
 // the CVE would collapse them, make Retrieved fall short of totalRes, and
 // report a truncation that did not happen.
 func jvnAdvisoryKey(item JVNItem, fallback string) string {
+	// Upper-cased as well as trimmed (Codex M55 R8, High). JVNDB ids are
+	// upper-case, and comparing them byte-for-byte let a mirror re-serve
+	// page 1 with lower-cased identifiers: the entries looked distinct, so
+	// Retrieved reached TotalRes and the scan claimed complete coverage
+	// while half the match set had never been fetched.
 	if id := strings.TrimSpace(item.Identifier); id != "" {
-		return id
+		return strings.ToUpper(id)
 	}
-	return fallback
+	return strings.ToUpper(strings.TrimSpace(fallback))
 }
 
 // jvnCheckEcho verifies that the Status element echoes the request that was
@@ -1157,7 +1172,7 @@ func jvnCount(raw, name string) (int, error) {
 // convertJVNItemToVulnerabilities turns one advisory into one row PER CVE it
 // names. See jvnItemCVEIDs.
 func (s *JVNService) convertJVNItemToVulnerabilities(item JVNItem) []model.Vulnerability {
-	ids := jvnItemCVEIDs(item)
+	ids, _ := jvnItemCVEIDs(item)
 	if len(ids) == 0 {
 		slog.Warn("dropping JVN item with no CVE reference and no identifier",
 			"title", item.Title, "link", item.Link)
@@ -1310,10 +1325,21 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 		return best, severity
 	}
 
-	if score, severity := pick(func(v string) bool { return strings.HasPrefix(v, "3.") }); severity != "" {
+	// The modern-scale pass only wins when it actually yielded an
+	// assessment. Treating any non-empty severity as a win meant a v3 entry
+	// that produced nothing usable — no score AND no recognisable label, so
+	// UNKNOWN — suppressed a perfectly good v2 HIGH sitting next to it
+	// (Codex M55 R8, High).
+	usable := func(score *float64, severity string) bool {
+		return score != nil || (severity != "" && severity != "UNKNOWN")
+	}
+	if score, severity := pick(jvnIsModernCVSS); usable(score, severity) {
 		return score, severity
 	}
-	return pick(func(v string) bool { return !strings.HasPrefix(v, "3.") })
+	if score, severity := pick(func(v string) bool { return !jvnIsModernCVSS(v) }); usable(score, severity) {
+		return score, severity
+	}
+	return nil, ""
 }
 
 // jvnItemCVEIDs returns EVERY CVE this advisory is filed under, canonicalised
@@ -1331,8 +1357,9 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 // the shared score can overstate a milder sibling. Overstating severity is the
 // safe direction for a security gate; dropping the CVE entirely, which is what
 // happened before, is not.
-func jvnItemCVEIDs(item JVNItem) []string {
-	var out []string
+func jvnItemCVEIDs(item JVNItem) (ids []string, complete bool) {
+	out := []string{}
+	complete = true
 	seen := make(map[string]struct{})
 	for _, ref := range item.References {
 		id := strings.TrimSpace(ref.ID())
@@ -1341,8 +1368,13 @@ func jvnItemCVEIDs(item JVNItem) []string {
 		}
 		canonical, err := validation.ValidateCVEID(id)
 		if err != nil {
+			// A CVE that was ON THE WIRE and could not be recorded is a
+			// gap, not a log line (Codex M55 R8, Medium). The advisory
+			// still has its JVNDB id, so without this it went on counting
+			// as fully retrieved and the missing CVE left no trace.
 			slog.Warn("dropping malformed CVE reference on a JVN advisory",
 				"advisory", item.Identifier, "reference", id)
+			complete = false
 			continue
 		}
 		if _, dup := seen[canonical]; dup {
@@ -1352,14 +1384,14 @@ func jvnItemCVEIDs(item JVNItem) []string {
 		out = append(out, canonical)
 	}
 	if len(out) > 0 {
-		return out
+		return out, complete
 	}
 	// An advisory with a CVE-shaped identifier, or none at all, keeps the
 	// single-identity behaviour.
 	if id := jvnItemIdentity(item); id != "" {
-		return []string{id}
+		return []string{id}, complete
 	}
-	return nil
+	return nil, complete
 }
 
 // jvnScoreIsSane rejects the values a CVSS base score cannot take. NaN and the
@@ -1391,10 +1423,22 @@ func jvnReconcileSeverity(version, label string, score float64) string {
 	return stated
 }
 
+// jvnIsModernCVSS reports whether a version uses the five-band qualitative
+// scale (v3 and v4) rather than CVSS v2's three bands.
+//
+// The test is "not v2" rather than "is v3" (Codex M55 R8, High): keying on the
+// "3." prefix put CVSS v4 — and every future or unrecognised version — into the
+// v2 table, so a v4 score of 9.8 was banded HIGH instead of CRITICAL. An
+// unknown version is treated as modern so that the failure direction is the
+// harsher rating, not the milder one.
+func jvnIsModernCVSS(version string) bool {
+	return !strings.HasPrefix(strings.TrimSpace(version), "2.")
+}
+
 // jvnScoreBand is the qualitative rating a score implies, per CVSS version.
-// v3 defines five bands; v2 defines three and has no CRITICAL.
+// v3 and v4 define five bands; v2 defines three and has no CRITICAL.
 func jvnScoreBand(version string, score float64) string {
-	if strings.HasPrefix(strings.TrimSpace(version), "3.") {
+	if jvnIsModernCVSS(version) {
 		switch {
 		case score >= 9.0:
 			return "CRITICAL"
