@@ -520,7 +520,7 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// bound, so measuring against it would abandon the recovery run's very
 	// first failure without one retry.
 	catalogueWritesFailed := refreshFailures > 0 || upsertFailures > 0
-	retrySince := j.catalogueRetrySince(ctx, startTime)
+	retrySince := j.catalogueRetrySince(ctx, startTime, lastSync)
 	retryAge := startTime.Sub(retrySince)
 	if retryAge < 0 {
 		retryAge = 0
@@ -529,8 +529,14 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	switch {
 	case catalogueWritesFailed && holdWatermark:
 		if err := j.setCatalogueRetrySince(ctx, retrySince); err != nil {
+			// Reported as a FAILED tick for the same reason the retry anchor
+			// is (Codex M55 R5, High): without a durable marker every
+			// subsequent tick believes it is the FIRST failing run, the bound
+			// never elapses, and the hold this branch just chose becomes the
+			// unbounded one the bound exists to prevent.
 			slog.Error("CVE sync: could not record when catalogue retries started; the retry bound cannot be enforced",
 				"error", err)
+			return fmt.Errorf("cve_sync: catalogue writes failed and the retry marker could not be persisted: %w", err)
 		}
 		slog.Error("CVE sync: some catalogue writes failed; holding the sync watermark so the window is retried next tick",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
@@ -1719,14 +1725,31 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 }
 
 // catalogueRetrySince returns when the current run of catalogue-write failures
-// began, defaulting to `now` (i.e. "this run is the first") when no marker is
-// stored or it cannot be read.
+// began, defaulting to `now` — "this run is the first" — whenever the stored
+// marker is missing, unreadable, or not a value this job could have written.
 //
-// Defaulting to `now` is the fail-SAFE direction: an unreadable marker grants
-// a fresh retry period rather than abandoning records immediately. The
-// opposite default would turn a transient settings-read failure into
-// permanent data loss.
-func (j *CVESyncJob) catalogueRetrySince(ctx context.Context, now time.Time) time.Time {
+// EVERY rejection defaults to `now`, i.e. to granting a FRESH retry period.
+// That is the fail-safe direction: the opposite default turns a transient
+// settings problem into permanent, silent data loss, since an "already
+// exhausted" verdict abandons the records this tick failed on.
+//
+// Three validations, and the third is the one that matters (Codex M55 R5,
+// High):
+//
+//	unparseable    a corrupt value tells us nothing about when retries began
+//	in the future  a marker ahead of the clock makes the bound never elapse —
+//	               the same livelock a future watermark causes
+//	 <= lastSync   IMPOSSIBLE for a marker this job wrote. Retries begin
+//	               AFTER the window they are retrying, and while we hold, the
+//	               watermark does not move — so a marker at or before the
+//	               watermark is a leftover from an earlier incident whose
+//	               clear failed (clearCatalogueRetrySince only warns). Left
+//	               accepted, it makes the NEXT unrelated failure look already
+//	               exhausted and abandons it without a single retry. Rejecting
+//	               it here is what makes a failed clear self-healing: the
+//	               watermark advances on the clean run, and the stale marker
+//	               falls behind it and stops being believed.
+func (j *CVESyncJob) catalogueRetrySince(ctx context.Context, now, lastSync time.Time) time.Time {
 	var raw string
 	if err := j.db.QueryRowContext(ctx,
 		`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&raw); err != nil {
@@ -1743,10 +1766,14 @@ func (j *CVESyncJob) catalogueRetrySince(ctx context.Context, now time.Time) tim
 		return now
 	}
 	if t.After(now) {
-		// Same corruption shape as a future watermark: a marker ahead of the
-		// clock would make the retry period never elapse.
 		slog.Warn("CVE sync: catalogue retry marker is in the future; treating this run as the first failure",
 			"value", raw)
+		return now
+	}
+	if !t.After(lastSync) {
+		slog.Warn("CVE sync: catalogue retry marker is at or before the sync watermark, which this job never "+
+			"writes; treating it as a leftover from an earlier incident and starting a fresh retry period",
+			"value", raw, "watermark", lastSync.Format(time.RFC3339))
 		return now
 	}
 	return t

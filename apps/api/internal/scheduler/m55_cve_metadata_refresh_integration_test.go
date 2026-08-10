@@ -443,17 +443,30 @@ func m55PinWatermark(t *testing.T, migDB *sql.DB, at time.Time) {
 	}
 }
 
-// m55ProtectWatermark restores system_settings.cve_sync_last_run — including
-// its absence — after the test. EVERY test that calls m55Sync needs it, not
-// just the ones that assert on it (Codex M55 R2, Low): m55Sync runs the real
-// job, which moves this GLOBAL row, so an unprotected test hands the next one
-// a scheduler position it did not choose.
+// m55ProtectWatermark restores BOTH pieces of the job's global scheduler
+// state — cve_sync_last_run and the catalogue retry marker — including their
+// absence, after the test.
+//
+// EVERY test that calls m55Sync needs it, not just the ones that assert on it
+// (Codex M55 R2 and R5, Low): m55Sync runs the real job, a clean run CLEARS
+// the retry marker and a failing one SETS it, so a test that protects only the
+// watermark still hands the next test a scheduler state it did not choose —
+// and the two keys are read together, so a leftover from one test changes
+// another's verdict.
 func m55ProtectWatermark(t *testing.T, migDB *sql.DB) {
 	t.Helper()
+	m55ProtectSetting(t, migDB, "cve_sync_last_run")
+	m55ProtectSetting(t, migDB, cveSyncRetrySinceKey)
+}
+
+// m55ProtectSetting snapshots one system_settings row (or its absence) and
+// restores it in t.Cleanup.
+func m55ProtectSetting(t *testing.T, migDB *sql.DB, key string) {
+	t.Helper()
 	var before sql.NullString
-	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&before); err != nil {
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, key).Scan(&before); err != nil {
 		if err != sql.ErrNoRows {
-			t.Fatalf("read cve_sync_last_run: %v", err)
+			t.Fatalf("read %s: %v", key, err)
 		}
 		before = sql.NullString{}
 	}
@@ -461,13 +474,13 @@ func m55ProtectWatermark(t *testing.T, migDB *sql.DB) {
 		var err error
 		if before.Valid {
 			_, err = migDB.Exec(`
-				INSERT INTO system_settings (key, value, updated_at) VALUES ('cve_sync_last_run', $1, NOW())
-				ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`, before.String)
+				INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+				ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, key, before.String)
 		} else {
-			_, err = migDB.Exec(`DELETE FROM system_settings WHERE key = 'cve_sync_last_run'`)
+			_, err = migDB.Exec(`DELETE FROM system_settings WHERE key = $1`, key)
 		}
 		if err != nil {
-			t.Errorf("restore cve_sync_last_run: %v", err)
+			t.Errorf("restore %s: %v", key, err)
 		}
 	})
 }
@@ -555,10 +568,12 @@ func TestM55CVEMetadata_WatermarkAdvancesOncePastTheRetryBound(t *testing.T) {
 	migDB := schedOpenOrSkip(t, migURL)
 
 	m55ProtectRetryMarker(t, migDB)
-	// The watermark is recent; what is old is the RETRY period — this failure
-	// has been recurring for longer than the bound allows, so the same failure
-	// that was held in the test above must now be let go.
-	pinned := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	// This failure has been recurring for longer than the bound allows, so the
+	// same failure that was held in the test above must now be let go. The
+	// watermark sits BEFORE the retry marker, which is the shape a real hold
+	// produces — the window is frozen at the point retries began from, and a
+	// marker at or before the watermark is rejected as a leftover.
+	pinned := time.Now().UTC().Add(-(cveSyncMaxHeldWindow + 2*time.Hour)).Truncate(time.Second)
 	m55PinWatermark(t, migDB, pinned)
 	if _, err := migDB.Exec(`
 		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
@@ -657,30 +672,13 @@ func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
 	}
 }
 
-// m55ProtectRetryMarker restores the catalogue retry marker after the test.
+// m55ProtectRetryMarker protects the retry marker and starts the test from a
+// known-clear state. m55ProtectWatermark already covers the restore half; this
+// adds the clear, for tests whose verdict depends on there being no marker
+// left over from an earlier one.
 func m55ProtectRetryMarker(t *testing.T, migDB *sql.DB) {
 	t.Helper()
-	var before sql.NullString
-	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&before); err != nil {
-		if err != sql.ErrNoRows {
-			t.Fatalf("read retry marker: %v", err)
-		}
-		before = sql.NullString{}
-	}
-	t.Cleanup(func() {
-		var err error
-		if before.Valid {
-			_, err = migDB.Exec(`
-				INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-				ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-				cveSyncRetrySinceKey, before.String)
-		} else {
-			_, err = migDB.Exec(`DELETE FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey)
-		}
-		if err != nil {
-			t.Errorf("restore retry marker: %v", err)
-		}
-	})
+	m55ProtectSetting(t, migDB, cveSyncRetrySinceKey)
 	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey); err != nil {
 		t.Fatalf("clear retry marker: %v", err)
 	}
@@ -804,6 +802,87 @@ func TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped(t *testing.T) {
 		t.Errorf("requested window span = %s, want it clamped to %s: NVD rejects a span wider than 120 days "+
 			"outright, so every tick would repeat the same impossible request and the whole catalogue would stop "+
 			"updating", span, cveSyncMaxFetchSpan)
+	}
+}
+
+// TestM55CVEMetadata_StaleRetryMarkerDoesNotAbandonANewFailure (Codex M55 R5,
+// High).
+//
+// clearCatalogueRetrySince only warns on failure, so a marker from an earlier,
+// already-resolved incident can survive. Believed, it makes the NEXT unrelated
+// failure look as though it has already used up its whole retry period, and
+// the records that failed are abandoned without one retry — the silent loss
+// the bound exists to prevent, reached by a third route.
+//
+// A marker at or before the watermark is impossible for this job to have
+// written (retries start after the window they retry, and while holding the
+// watermark does not move), so it is rejected and a fresh period starts.
+func TestM55CVEMetadata_StaleRetryMarkerDoesNotAbandonANewFailure(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectRetryMarker(t, migDB)
+
+	pinned := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	m55PinWatermark(t, migDB, pinned)
+	// Older than the watermark: a leftover, not this incident's marker.
+	if _, err := migDB.Exec(`
+		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		cveSyncRetrySinceKey,
+		time.Now().UTC().Add(-(cveSyncMaxHeldWindow + 48*time.Hour)).Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed stale marker: %v", err)
+	}
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	if got := m55Watermark(t, migDB); got != pinned.Format(time.RFC3339) {
+		t.Errorf("cve_sync_last_run = %q, want it held at %q: a retry marker predating the watermark is a "+
+			"leftover from an earlier incident and must not spend this failure's retry period",
+			got, pinned.Format(time.RFC3339))
+	}
+}
+
+// TestM55CVEMetadata_FutureRetryMarkerDoesNotDisableTheBound: a marker ahead of
+// the clock yields a negative age, which compares as "no time spent retrying"
+// and would hold the watermark forever — the same livelock a future watermark
+// causes. It must be replaced with this run's time, so the period actually
+// starts running.
+func TestM55CVEMetadata_FutureRetryMarkerDoesNotDisableTheBound(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectRetryMarker(t, migDB)
+	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
+
+	if _, err := migDB.Exec(`
+		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+		cveSyncRetrySinceKey, time.Now().UTC().Add(365*24*time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatalf("seed future marker: %v", err)
+	}
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	var raw string
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&raw); err != nil {
+		t.Fatalf("read retry marker: %v", err)
+	}
+	got, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		t.Fatalf("retry marker %q does not parse: %v", raw, perr)
+	}
+	if got.After(time.Now().UTC()) {
+		t.Errorf("retry marker = %s, still in the future: the retry period never starts running and the "+
+			"watermark is held forever", got.UTC())
 	}
 }
 
