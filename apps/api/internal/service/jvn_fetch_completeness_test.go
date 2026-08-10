@@ -1053,7 +1053,9 @@ func TestM55JVN_ImpossibleCVSSValuesAreRefused(t *testing.T) {
 		t.Errorf("stored %v, want 9.8 — a NaN score blocked the real one", got)
 	}
 
-	// Out of range is not a CVSS base score.
+	// Out of range is not a CVSS base score: it must not be stored. The
+	// severity that element states is still honoured (see R7 above), so the
+	// stated CRITICAL wins and the bad number is simply absent.
 	got = svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000002",
 		CVSS: []JVNCVSS{
@@ -1061,8 +1063,11 @@ func TestM55JVN_ImpossibleCVSSValuesAreRefused(t *testing.T) {
 			jvnTestCVSS("3.1", "High", "7.5"),
 		},
 	})
-	if got == nil || got.CVSSScore == nil || *got.CVSSScore != 7.5 {
-		t.Errorf("stored %v, want 7.5 — an out-of-range score was accepted", got)
+	if got == nil || got.CVSSScore != nil {
+		t.Errorf("stored %v, want no score — an out-of-range score was accepted", got)
+	}
+	if got != nil && got.Severity != "CRITICAL" {
+		t.Errorf("stored severity %s, want CRITICAL", got.Severity)
 	}
 
 	// A label that contradicts its own score is read at the harsher of the
@@ -1075,13 +1080,35 @@ func TestM55JVN_ImpossibleCVSSValuesAreRefused(t *testing.T) {
 		t.Errorf("stored %v, want CRITICAL — a LOW label on a 9.8 score was taken at face value", got)
 	}
 
-	// A v2 score does not gain a CRITICAL band that the v2 scale lacks.
+	// A v2 score does not gain a CRITICAL band that the v2 scale lacks...
 	got = svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000004",
 		CVSS:       []JVNCVSS{jvnTestCVSS("2.0", "High", "10.0")},
 	})
 	if got == nil || got.Severity != "HIGH" {
 		t.Errorf("stored %v, want HIGH — a v2 score was given a v3 CRITICAL band", got)
+	}
+
+	// ...but a v2 element still has to agree with the v2 band table
+	// (Codex M55 R7, High). severity="Low" score="10.0" is HIGH on the v2
+	// scale, and skipping v2 reconciliation entirely stored it as LOW.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000006",
+		CVSS:       []JVNCVSS{jvnTestCVSS("2.0", "Low", "10.0")},
+	})
+	if got == nil || got.Severity != "HIGH" {
+		t.Errorf("stored %v, want HIGH — a v2 LOW label on a 10.0 score was taken at face value", got)
+	}
+
+	// A severity label with stray whitespace must still be recognised
+	// (Codex M55 R7, Medium): untrimmed it fell through to UNKNOWN and the
+	// score band then supplied HIGH, silently demoting a stated CRITICAL.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000007",
+		CVSS:       []JVNCVSS{jvnTestCVSS("3.1", "Critical ", "8.0")},
+	})
+	if got == nil || got.Severity != "CRITICAL" {
+		t.Errorf("stored %v, want CRITICAL — a padded label was not recognised", got)
 	}
 }
 
@@ -1130,6 +1157,27 @@ func TestM55JVN_RefAndCVSSAttributeNamespaces(t *testing.T) {
 	if one.CVSSScore != nil || one.Severity != "UNKNOWN" {
 		t.Errorf("stored %s/%v, want UNKNOWN/nil — namespaced evil:score decided the severity",
 			one.Severity, one.CVSSScore)
+	}
+}
+
+// TestM55JVN_ExactlyOneStatusElement pins that a response carries exactly one
+// answer (Codex M55 R7, High).
+//
+// The Status field used to be a scalar, so a body holding BOTH a success
+// envelope and a retCd!=0 error envelope resolved to whichever one the decoder
+// kept, and the reported failure was never seen.
+func TestM55JVN_ExactlyOneStatusElement(t *testing.T) {
+	const two = `<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
+  <channel><title>JVNDB</title><description/></channel>
+  <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
+  <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="1" retMax="50" errCd="MYJVN-ERR-101" errMsg="service trouble" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
+</rdf:RDF>`
+
+	svc := NewJVNService(nil, nil, "", false)
+	if _, err := svc.parseJVNPage([]byte(two), jvnTestPageReq()); err == nil {
+		t.Fatal("a body carrying both a success and a failure status was accepted as a success")
 	}
 }
 
@@ -1296,7 +1344,13 @@ func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
 			got.Severity, got.CVSSScore)
 	}
 
-	// A malformed score must be skipped, not turned into 0.0.
+	// A malformed score must be skipped, but the severity the same element
+	// STATES must not go with it (Codex M55 R7, High). An earlier cut
+	// dropped the whole element, so an advisory reading
+	// severity="Critical" score="n/a" was stored as UNKNOWN and a
+	// critical-only gate passed on an advisory that says Critical in words.
+	// The stated CRITICAL outranks the High sibling; the unusable score
+	// stays absent rather than becoming a number.
 	got = svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000002",
 		CVSS: []JVNCVSS{
@@ -1307,9 +1361,21 @@ func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
 	if got == nil {
 		t.Fatal("item was dropped")
 	}
-	if got.CVSSScore == nil || *got.CVSSScore != 7.5 || got.Severity != "HIGH" {
-		t.Errorf("stored %s/%v, want HIGH/7.5 — an unparseable score became a real one",
-			got.Severity, got.CVSSScore)
+	if got.Severity != "CRITICAL" {
+		t.Errorf("stored severity %s, want CRITICAL — a stated Critical was discarded with its "+
+			"unparseable score", got.Severity)
+	}
+	if got.CVSSScore != nil {
+		t.Errorf("stored score %v, want nil — an unparseable score became a real one", *got.CVSSScore)
+	}
+
+	// A sole element with an unusable score still carries its severity.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000005",
+		CVSS:       []JVNCVSS{jvnTestCVSS("3.1", "Critical", "n/a")},
+	})
+	if got == nil || got.Severity != "CRITICAL" || got.CVSSScore != nil {
+		t.Errorf("stored %v, want CRITICAL with no score", got)
 	}
 
 	// CVSS v3 wins over v2 outright: the scales are not comparable.

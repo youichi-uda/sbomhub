@@ -144,6 +144,61 @@ func TestM55JVNScanReport_TruncationReachesScanComponents(t *testing.T) {
 	})
 }
 
+// TestM55JVNScanReport_ExtraPageBudgetIsSharedAcrossComponents pins that the
+// pool of pages 2..N belongs to the SWEEP, not to each component (Codex M55
+// R7, Low: the unit test shares a pointer it owns itself, so reverting the
+// production wiring to a fresh pool per component left it green — and that
+// revert turns the bound from "components + 500" into "components x 10").
+func TestM55JVNScanReport_ExtraPageBudgetIsSharedAcrossComponents(t *testing.T) {
+	appURL, migURL := vexSuggestionsTestEnv(t)
+	migDB := openOrSkipVS(t, migURL)
+	appDB := openOrSkipVS(t, appURL)
+	if !schemaReadyVS(t, migDB) {
+		return
+	}
+
+	tenant := seedTenantVS(t, migDB, "m55jvnpool")
+	project := uuid.New()
+	seedProjectVS(t, migDB, tenant, project, "m55jvnpool-"+project.String())
+	sbom := seedSbomVS(t, migDB, tenant, project)
+	for _, name := range []string{"aaa", "bbb", "ccc"} {
+		seedComponentVS(t, migDB, tenant, sbom, name, "1.0", "pkg:generic/"+name+"@1.0")
+	}
+
+	now := time.Now()
+	// Every component matches more than one page, so each WANTS a second
+	// page; the pool only has one to give out for the whole sweep.
+	srv := &cannedMyJVN{
+		now:       now,
+		corpusFor: func(string) []cannedJVNAdvisory { return cannedCorpus(now, 120, 0) },
+	}
+	ts := srv.start(t)
+
+	svc := NewJVNService(repository.NewVulnerabilityRepository(appDB),
+		repository.NewComponentRepository(appDB), ts.URL, false)
+	svc.requestDelay = 0
+	svc.extraPageBudget = 1
+
+	withTenantScanTx(t, appDB, tenant, func(ctx context.Context) {
+		rep, err := svc.ScanComponentsReport(ctx, sbom)
+		t.Logf("report: %s", rep.Summary())
+		// 3 mandatory first pages + exactly 1 from the shared pool.
+		if rep.Requests != 4 {
+			t.Errorf("Requests = %d, want 4 (3 first pages + 1 shared extra page); "+
+				"a per-component pool would allow 3 extra", rep.Requests)
+		}
+		if !rep.BudgetExhausted {
+			t.Error("BudgetExhausted = false; the sweep drained the pool and did not say so")
+		}
+		if rep.TruncatedComponents != 3 {
+			t.Errorf("TruncatedComponents = %d, want 3", rep.TruncatedComponents)
+		}
+		if err == nil {
+			t.Fatal("a sweep truncated by its own budget reported success")
+		}
+	})
+}
+
 // TestM55JVNScanReport_CancellationIsNotSuccess pins that a sweep killed
 // part-way does not report success (Codex M55 R1, Critical).
 //

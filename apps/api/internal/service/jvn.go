@@ -93,6 +93,12 @@ type JVNService struct {
 	// requestDelay paces outbound MyJVN requests (jvnRequestDelay by
 	// default). Tests set it to zero; nothing else writes it.
 	requestDelay time.Duration
+	// extraPageBudget is the per-sweep pool of pages 2..N
+	// (jvnExtraPageBudgetPerScan by default). It is a field only so a test
+	// can shrink it: at the real value a test would need 500 pages of
+	// fixtures to observe the pool being shared, which is why the sharing
+	// went unpinned (Codex M55 R7, Low). Nothing but tests writes it.
+	extraPageBudget int
 }
 
 // NewJVNService creates a new JVN service.
@@ -110,9 +116,10 @@ func NewJVNService(vulnRepo *repository.VulnerabilityRepository, componentRepo *
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		baseURL:      baseURL,
-		offline:      offline,
-		requestDelay: jvnRequestDelay,
+		baseURL:         baseURL,
+		offline:         offline,
+		requestDelay:    jvnRequestDelay,
+		extraPageBudget: jvnExtraPageBudgetPerScan,
 	}
 }
 
@@ -141,7 +148,12 @@ type JVNRSSFeed struct {
 	// happily into zero items, scanComponent returned nil, the component was
 	// counted as successfully checked, and even a total application-level
 	// outage finished as "JVN scan completed" with no findings.
-	Status JVNStatus `xml:"http://jvndb.jvn.jp/myjvn/Status Status"`
+	// Statuses is a SLICE so that "how many status elements are there?" is
+	// answerable (Codex M55 R7, High). A scalar field silently keeps one of
+	// them, so a body carrying a success envelope alongside a retCd!=0
+	// error envelope resolved to whichever the decoder happened to keep and
+	// the failure was never seen.
+	Statuses []JVNStatus `xml:"http://jvndb.jvn.jp/myjvn/Status Status"`
 }
 
 // JVNStatus is the MyJVN <status:Status> element. retCd "0" is success;
@@ -391,7 +403,7 @@ func (s *JVNService) ScanComponentsReport(ctx context.Context, sbomID uuid.UUID)
 
 	// The pool is per-SWEEP, so one pathological component cannot spend the
 	// whole scan's allowance and every component still gets its first page.
-	extraPages := jvnExtraPageBudgetPerScan
+	extraPages := s.extraPageBudget
 
 	for i := range components {
 		comp := &components[i]
@@ -851,17 +863,27 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 	// an authoritative "no vulnerabilities" (R10, Critical). Same reasoning as
 	// NVDResponse.validate: what distinguishes "no matches" from "not an
 	// answer" is the presence of the envelope, not its value.
-	rc := strings.TrimSpace(feed.Status.attr("retCd"))
+	if len(feed.Statuses) != 1 {
+		if len(feed.Statuses) == 0 {
+			return nil, fmt.Errorf("JVN response has no status element; the endpoint returned 200 " +
+				"but the body is not a MyJVN getVulnOverviewList response")
+		}
+		return nil, fmt.Errorf("JVN response carries %d status elements; exactly one answer is "+
+			"expected and which of them is the answer is not decidable", len(feed.Statuses))
+	}
+	status := feed.Statuses[0]
+
+	rc := strings.TrimSpace(status.attr("retCd"))
 	if rc == "" {
 		return nil, fmt.Errorf("JVN response has no status element; the endpoint returned 200 " +
 			"but the body is not a MyJVN getVulnOverviewList response")
 	}
 	if rc != "0" {
 		return nil, fmt.Errorf("JVN API reported failure: retCd=%s errCd=%s errMsg=%s",
-			rc, feed.Status.attr("errCd"), feed.Status.attr("errMsg"))
+			rc, status.attr("errCd"), status.attr("errMsg"))
 	}
 
-	if err := jvnCheckEcho(feed.Status, req); err != nil {
+	if err := jvnCheckEcho(status, req); err != nil {
 		return nil, err
 	}
 
@@ -876,15 +898,15 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 			"but is not a JVNRSS feed")
 	}
 
-	totalRes, err := jvnCount(feed.Status.attr("totalRes"), "totalRes")
+	totalRes, err := jvnCount(status.attr("totalRes"), "totalRes")
 	if err != nil {
 		return nil, err
 	}
-	totalResRet, err := jvnCount(feed.Status.attr("totalResRet"), "totalResRet")
+	totalResRet, err := jvnCount(status.attr("totalResRet"), "totalResRet")
 	if err != nil {
 		return nil, err
 	}
-	firstRes, err := jvnCount(feed.Status.attr("firstRes"), "firstRes")
+	firstRes, err := jvnCount(status.attr("firstRes"), "firstRes")
 	if err != nil {
 		return nil, err
 	}
@@ -1239,41 +1261,56 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 	pick := func(want func(version string) bool) (*float64, string) {
 		var best *float64
 		var severity string
+		seen := false
 		for _, e := range entries {
 			if !want(strings.TrimSpace(e.Version())) {
 				continue
 			}
+
+			var candidateScore *float64
+			candidate := mapCVSSSeverity(e.Severity())
 			score, err := strconv.ParseFloat(strings.TrimSpace(e.Score()), 64)
-			if err != nil || !jvnScoreIsSane(score) {
-				// NaN in particular is not merely useless: ParseFloat
-				// accepts it, and every later comparison against it is
-				// false, so one NaN entry would pin the result and keep a
-				// legitimate Critical from ever winning (Codex M55 R5,
-				// High).
-				slog.Warn("ignoring JVN CVSS entry with an unusable score",
-					"version", e.Version(), "score", e.Score())
-				continue
-			}
-			// Reconcile FIRST, then rank on the reconciled severity with
-			// the score as the tiebreak (Codex M55 R6, High). Ranking on
-			// the raw score meant an entry saying severity="Critical"
-			// score="8.0" lost to one saying severity="High" score="8.5",
-			// and the stated CRITICAL was discarded — the same
-			// version-blind numeric comparison already corrected in
-			// jvnMoreSevere, one level down.
-			candidate := jvnReconcileSeverity(e.Version(), e.Severity(), score)
-			if best == nil ||
-				jvnSeverityRank[candidate] > jvnSeverityRank[severity] ||
-				(jvnSeverityRank[candidate] == jvnSeverityRank[severity] && score > *best) {
+			switch {
+			case err != nil || !jvnScoreIsSane(score):
+				// The SCORE is unusable; the stated SEVERITY is not
+				// (Codex M55 R7, High). Dropping the whole element meant
+				// an advisory whose only assessment read
+				// severity="Critical" score="n/a" was stored as UNKNOWN
+				// with no score at all, and a critical-only gate passed on
+				// an advisory that says Critical in words.
+				//
+				// NaN is the reason the score cannot simply be kept:
+				// ParseFloat accepts it and every later comparison against
+				// it is false, so one NaN would pin the result and keep a
+				// real Critical from ever winning (M55 R5).
+				slog.Warn("ignoring JVN CVSS score but keeping its stated severity",
+					"version", e.Version(), "score", e.Score(), "severity", e.Severity())
+			default:
+				// Reconcile FIRST, then rank on the reconciled severity
+				// with the score as the tiebreak (M55 R6): ranking on the
+				// raw score meant severity="Critical" score="8.0" lost to
+				// severity="High" score="8.5".
+				candidate = jvnReconcileSeverity(e.Version(), e.Severity(), score)
 				s := score
-				best = &s
+				candidateScore = &s
+			}
+
+			if !seen || jvnMoreSevere(
+				model.Vulnerability{Severity: candidate, CVSSScore: candidateScore},
+				model.Vulnerability{Severity: severity, CVSSScore: best},
+			) {
+				seen = true
+				best = candidateScore
 				severity = candidate
 			}
+		}
+		if !seen {
+			return nil, ""
 		}
 		return best, severity
 	}
 
-	if score, severity := pick(func(v string) bool { return strings.HasPrefix(v, "3.") }); score != nil {
+	if score, severity := pick(func(v string) bool { return strings.HasPrefix(v, "3.") }); severity != "" {
 		return score, severity
 	}
 	return pick(func(v string) bool { return !strings.HasPrefix(v, "3.") })
@@ -1340,26 +1377,38 @@ func jvnScoreIsSane(score float64) bool {
 // 9.8. Taking the harsher reading is the safe direction when a response
 // contradicts itself.
 //
-// The band is only applied to CVSS v3, whose qualitative ratings are defined by
-// the score. CVSS v2 has no CRITICAL band, so deriving one from a v2 score
-// would invent a rating the scale does not have.
+// Each CVSS version is reconciled against ITS OWN band table (Codex M55 R7,
+// High). An earlier cut skipped v2 entirely to avoid inventing a CRITICAL the
+// v2 scale does not have — but that also let `version="2.0" severity="Low"
+// score="10.0"` through as LOW, when 10.0 is HIGH on the v2 scale. Using the v2
+// table gives the correction without inventing the missing band.
 func jvnReconcileSeverity(version, label string, score float64) string {
 	stated := mapCVSSSeverity(label)
-	if !strings.HasPrefix(strings.TrimSpace(version), "3.") {
-		return stated
-	}
-	banded := jvnScoreBand(score)
+	banded := jvnScoreBand(version, score)
 	if jvnSeverityRank[banded] > jvnSeverityRank[stated] {
 		return banded
 	}
 	return stated
 }
 
-// jvnScoreBand is the CVSS v3 qualitative rating scale.
-func jvnScoreBand(score float64) string {
+// jvnScoreBand is the qualitative rating a score implies, per CVSS version.
+// v3 defines five bands; v2 defines three and has no CRITICAL.
+func jvnScoreBand(version string, score float64) string {
+	if strings.HasPrefix(strings.TrimSpace(version), "3.") {
+		switch {
+		case score >= 9.0:
+			return "CRITICAL"
+		case score >= 7.0:
+			return "HIGH"
+		case score >= 4.0:
+			return "MEDIUM"
+		case score > 0:
+			return "LOW"
+		default:
+			return "NONE"
+		}
+	}
 	switch {
-	case score >= 9.0:
-		return "CRITICAL"
 	case score >= 7.0:
 		return "HIGH"
 	case score >= 4.0:
@@ -1395,8 +1444,12 @@ func extractJVNCVEID(item JVNItem) string {
 	return ""
 }
 
+// mapCVSSSeverity normalises a CVSS qualitative rating. The label is TRIMMED
+// (Codex M55 R7, Medium): `severity="Critical "` otherwise fell through to
+// UNKNOWN, and with the score band supplying the answer instead, a stated
+// CRITICAL was silently read as HIGH.
 func mapCVSSSeverity(severity string) string {
-	switch strings.ToLower(severity) {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
 	case "critical", "c":
 		return "CRITICAL"
 	case "high", "h":
