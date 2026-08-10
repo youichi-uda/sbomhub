@@ -356,6 +356,37 @@ func TestM55UpdateMetadata_NilCVSSScoreClearsTheScore(t *testing.T) {
 	}
 }
 
+// m55AwaitLockWaiter blocks until some backend is WAITING on a lock on
+// `vulnerabilities`, i.e. until the racing UpdateMetadata has demonstrably
+// reached the held row lock.
+//
+// The race tests used a fixed sleep, which proves nothing: a goroutine
+// scheduled after the holder commits reads post-commit state and passes even
+// against the unlocked implementation (Codex M55 R2, Low — a false-negative
+// generator, exactly the shape M54 rejected elsewhere). pg_locks is readable
+// by any role and shows ungranted entries, so the wait is observable rather
+// than assumed.
+func m55AwaitLockWaiter(t *testing.T, db *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting int
+		// A ROW-level wait does not appear as an ungranted lock on the
+		// relation: the waiter blocks on the holding transaction's XID (and,
+		// transiently, on a tuple lock), so the filter has to be "any
+		// ungranted lock", not "ungranted lock on vulnerabilities".
+		if err := db.QueryRow(`SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting); err != nil {
+			t.Fatalf("poll pg_locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no backend ever blocked: the racing write never reached the contended row, " +
+		"so this test would pass against an implementation with no lock at all")
+}
+
 // m55HoldRowLock opens a transaction, applies `stmt` to the row (taking its
 // lock), and returns a func that commits. The caller races UpdateMetadata
 // against the held lock.
@@ -425,8 +456,9 @@ func TestM55UpdateMetadata_StaleWaiterLosesToACommittedNewerWrite(t *testing.T) 
 		done <- result{o, err}
 	}()
 
-	// Give the waiter time to reach the lock, then let the fresher write win.
-	time.Sleep(300 * time.Millisecond)
+	// Wait until the racing write is demonstrably blocked on the row lock,
+	// then let the fresher write win.
+	m55AwaitLockWaiter(t, migDB)
 	commit()
 
 	got := <-done
@@ -479,7 +511,7 @@ func TestM55UpdateMetadata_ConcurrentDeleteReportsRowAbsent(t *testing.T) {
 		done <- result{o, err}
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	m55AwaitLockWaiter(t, migDB)
 	commit()
 
 	got := <-done

@@ -30,6 +30,28 @@ const (
 	cveSyncResultsPerPage = 2000
 )
 
+// cveSyncMaxHeldWindow bounds how far back the retained modification window is
+// allowed to grow while Run holds the sync watermark to retry failed catalogue
+// writes (Codex M55 R2, High).
+//
+// Two bounds decide the value, and they point in opposite directions:
+//
+//	upper  NVD's /cves/2.0 rejects a lastModStartDate..lastModEndDate span
+//	       wider than 120 DAYS outright. Reaching that would stop the whole
+//	       sync, so the cap has to sit far enough below it that no realistic
+//	       operator schedule can drift into it.
+//	lower  Every retry re-paginates the whole retained window against a
+//	       rate-limited API (6s per page without a key). The window has to
+//	       stay small enough that a retry is cheap next to a daily tick.
+//
+// 7 days is ~6% of the API's hard limit and, at the default 24h interval, 7
+// retries — enough for a transient cause (a locked row, a statement timeout, a
+// connection blip) to clear itself many times over, and short enough that a
+// PERMANENT cause is abandoned in a week rather than silently killing every
+// other CVE's metadata behind it. Being wrong towards "too long" is the
+// expensive direction, which is why it is not 30.
+const cveSyncMaxHeldWindow = 7 * 24 * time.Hour
+
 // cveMatchBatchChunkSizeDefault is the production default for how many
 // tenants to evaluate inside a single BEGIN / COMMIT envelope in
 // matchTenantsChunked (F258, M17-3 #109).
@@ -400,17 +422,42 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// there is no second chance until upstream modifies the CVE again — which
 	// for a CVE whose analysis has settled may be never (Codex M55 R1, High).
 	//
-	// So the window is NOT advanced when any catalogue write failed. The whole
-	// window is re-fetched next tick and the failures are retried. That is the
-	// same policy the NVD-fetch failure above already applies ("the last-sync
-	// time is deliberately NOT advanced ... so the NVD window is retried in
-	// full next tick"), for the same reason; it costs a repeat of one window's
-	// pagination against a rate-limited API, which is the cheaper side of the
-	// trade against serving a stale CRITICAL.
+	// So the window is NOT advanced when a catalogue write failed: it is
+	// re-fetched next tick and the failures are retried. Same policy the
+	// NVD-fetch failure above already applies ("the last-sync time is
+	// deliberately NOT advanced ... so the NVD window is retried in full next
+	// tick"), for the same reason.
+	//
+	// BUT THE HOLD IS BOUNDED, and that bound is not decoration (Codex M55 R2,
+	// High — the unbounded first cut). The retained window is one global row.
+	// A PERMANENTLY failing record — an upstream value the schema rejects, say
+	// a severity longer than `varchar(20)` — fails identically on every tick,
+	// so an unbounded hold pins the watermark forever while the window grows.
+	// NVD's /cves/2.0 caps lastModStartDate..lastModEndDate at 120 days and
+	// rejects a wider request outright, so past that point the ENTIRE sync
+	// stops: one poison CVE would take every other CVE's metadata with it,
+	// which is strictly worse than the staleness the hold prevents.
+	//
+	// cveSyncMaxHeldWindow is where we stop paying. Past it the watermark
+	// advances and the still-failing records are ABANDONED — logged at Error,
+	// named, and left to whatever their next upstream modification brings.
+	// That is a real loss and it is the deliberate one: bounded damage to the
+	// poison records instead of unbounded damage to all of them.
 	catalogueWritesFailed := refreshFailures > 0 || upsertFailures > 0
-	if catalogueWritesFailed {
+	heldWindow := startTime.Sub(lastSync)
+	holdWatermark := catalogueWritesFailed && heldWindow < cveSyncMaxHeldWindow
+	switch {
+	case catalogueWritesFailed && holdWatermark:
 		slog.Error("CVE sync: some catalogue writes failed; holding the sync watermark so the window is retried next tick",
-			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures, "cves_fetched", len(cves))
+			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
+			"cves_fetched", len(cves), "held_window", heldWindow.String())
+	case catalogueWritesFailed:
+		slog.Error("CVE sync: catalogue writes are still failing after the maximum retained window; advancing the "+
+			"watermark and ABANDONING those records, because a wider window is rejected by NVD outright and would "+
+			"stop every CVE's metadata, not just these",
+			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
+			"cves_fetched", len(cves), "held_window", heldWindow.String(),
+			"max_held_window", cveSyncMaxHeldWindow.String())
 	}
 
 	// Phase 2: per-tenant matching against `components` (RLS-bound).
@@ -439,9 +486,10 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// full NVD feed) — see syncOSVVulnFuncs for the fetch-count bounds.
 	j.syncOSVVulnFuncs(ctx, tenantIDs)
 
-	// Update last sync time — unless a catalogue write failed, in which case
-	// holding it is what buys the retry (see above).
-	if catalogueWritesFailed {
+	// Update last sync time — unless a catalogue write failed inside the
+	// bounded retry window, in which case holding it is what buys the retry
+	// (see above).
+	if holdWatermark {
 		slog.Warn("CVE sync: sync watermark held at its previous value because catalogue writes failed",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures)
 	} else if err := j.updateLastSyncTime(ctx, startTime); err != nil {
@@ -1423,16 +1471,19 @@ func catalogueCtx(ctx context.Context) context.Context {
 // writeCatalogueMetadata applies one fetched record to an EXISTING catalogue
 // row. It never inserts.
 //
-// A record with no usable upstream timestamp is not offered at all. NVD always
-// publishes `lastModified`; its absence here means the field did not parse, and
-// a record we cannot date cannot be arbitrated against the one already stored
-// (repository.UpdateMetadata refuses it defensively, but reporting that as a
-// "stale" skip would be a lie about why). It is NOT counted as a failure
-// either: re-fetching the window would return the same malformed record, so
-// treating it as retryable debt would hold the sync watermark forever
-// (Codex M55 R1, High).
+// A record with no usable upstream timestamp is not offered to the UPDATE at
+// all. NVD always publishes `lastModified`; its absence here means the field
+// did not parse, and a record we cannot date cannot be arbitrated against the
+// one already stored (repository.UpdateMetadata refuses it defensively, but
+// reporting that as a "stale" skip would be a lie about why). It is NOT
+// counted as a failure either: re-fetching the window would return the same
+// malformed record, so treating it as retryable debt would hold the sync
+// watermark until the bound in Run gives up (Codex M55 R1, High).
 //
-// Returns true when the caller may treat the row as up to date for this tick.
+// The INSERT path deliberately does NOT share that rule — see
+// upsertVulnerability. This function governs OVERWRITING an existing row,
+// where an undateable record risks a downgrade; a first insert has nothing to
+// downgrade.
 func (j *CVESyncJob) writeCatalogueMetadata(ctx context.Context, cve CVEInfo) (repository.MetadataWriteOutcome, error) {
 	if cve.ModifiedAt.IsZero() {
 		slog.Warn("CVE sync: NVD record carries no usable lastModified; not written",
@@ -1486,6 +1537,18 @@ func (j *CVESyncJob) refreshCatalogueMetadata(ctx context.Context, cve CVEInfo) 
 // A refused-as-stale update is NOT an error: the caller still needs vulnID to
 // run the match phase, and the row it points at holds the newer record.
 func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid.UUID, bool, error) {
+	// An undateable record is still INSERTED when the CVE is absent, and that
+	// asymmetry with the refresh path is deliberate (Codex M55 R2, Medium,
+	// which read it as an oversight). The refresh rule exists to stop an
+	// unarbitrable record OVERWRITING one we can date; a first insert has
+	// nothing to overwrite, and refusing it would drop a possibly-critical CVE
+	// out of the match phase — no link, no vulnerability page entry, nothing —
+	// over a malformed date field. The row is stored with source_modified_at
+	// NULL, which is the same "unknown" state every scanner-created row is in,
+	// and the first dateable record for that CVE writes it (a stored NULL is
+	// writable exactly once, by design). It is logged so the shape is visible
+	// rather than inferred from a NULL column.
+	//
 	// INSERT FIRST, conflict-safe. The previous shape was check-then-insert:
 	// SELECT id, and INSERT on a miss. Another writer inserting the same CVE in
 	// between — a scanner racing this job, or two ticks overlapping — turned
@@ -1498,6 +1561,10 @@ func (j *CVESyncJob) upsertVulnerability(ctx context.Context, cve CVEInfo) (uuid
 	// Analysis" CVE is stored as un-scored rather than as the 0.0 sentinel
 	// (M46 B-1 High-3). published_at / source_modified_at take the same
 	// treatment for the zero time — see nilIfZeroTime.
+	if cve.ModifiedAt.IsZero() {
+		slog.Warn("CVE sync: NVD record carries no usable lastModified; if this CVE is new it is stored unarbitrated (source_modified_at NULL)",
+			"cve_id", cve.ID)
+	}
 	newID := uuid.New()
 	var insertedID uuid.UUID
 	err := j.db.QueryRowContext(ctx, `
