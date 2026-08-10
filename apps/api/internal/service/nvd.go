@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,39 @@ const (
 	rateLimitWithKey     = 700 * time.Millisecond // ~50 requests per 30 seconds
 	maxConcurrentWithKey = 5                      // Max concurrent workers with API key
 	maxConcurrentNoKey   = 1                      // Single worker without API key
+
+	// nvdPageSize is the resultsPerPage this scanner asks NVD for. It was 20
+	// (M55), which is where the silent truncation came from; the value is
+	// measured, not guessed.
+	//
+	// Bigger is strictly better up to the point where ONE page stops fitting
+	// inside httpClient.Timeout, because the NVD rate limit counts REQUESTS,
+	// not records: a page of 200 and a page of 20 cost the same one token.
+	// Measured against the live API on 2026-08-11 (no API key, from this
+	// host), keywordSearch=openssl (totalResults=563):
+	//
+	//	resultsPerPage=20   ->   249 KB   4.4 s
+	//	resultsPerPage=200  ->  2.79 MB   1.8 s
+	//	resultsPerPage=563  ->  5.87 MB  35.9 s   <- EXCEEDS the 30s client timeout
+	//
+	// and keywordSearch=linux (totalResults=21670) at resultsPerPage=200:
+	// 495 KB in 8.2 s. So the API's own maximum (2000) — and even a single
+	// page big enough to hold a 563-match component — is NOT usable here: the
+	// request would time out, the component would be counted as a fetch
+	// failure, and we would have traded a truncation for a total miss. 200 is
+	// the largest size measured to stay well inside the timeout (8.2 s worst
+	// observed, 3.6x margin).
+	nvdPageSize = 200
+
+	// nvdMaxPagesPerComponent bounds how many pages ONE component may spend.
+	// 5 pages x 200 = 1000 matches per component.
+	//
+	// This is a deliberate budget, not a belief that 1000 is enough for
+	// everything — see searchByKeyword for why "fetch everything" is the wrong
+	// answer rather than merely the slow one, and for what happens when the
+	// budget is exhausted (the result is REPORTED as truncated, never silently
+	// returned as complete).
+	nvdMaxPagesPerComponent = 5
 )
 
 type NVDService struct {
@@ -99,13 +133,18 @@ type NVDResponse struct {
 	// response envelope, so requiring it present costs nothing against a real
 	// endpoint.
 	ResultsPerPage *int `json:"resultsPerPage"`
-	// StartIndex is a POINTER and is required to be 0 (Codex M54 R8,
-	// Critical). searchByKeyword never sends a startIndex, so a conforming
-	// endpoint answers with page zero; a mirror returning a LATER page would
-	// otherwise be accepted as a complete, internally consistent answer with
-	// the first page silently missing. This is separate from the accepted
-	// decision not to FETCH later pages: that is about pages we chose not to
-	// ask for, this is about not being able to tell which page we got.
+	// StartIndex is a POINTER and is required to equal the startIndex the
+	// request asked for (Codex M54 R8, Critical). A mirror returning a
+	// DIFFERENT page would otherwise be accepted as a complete, internally
+	// consistent answer with the requested page silently missing.
+	//
+	// M55 made the expected value a parameter rather than the constant 0.
+	// searchByKeyword now walks pages, so "which page did I ask for" is no
+	// longer always zero — and the check matters MORE once paging exists, not
+	// less: a server that answers every follow-up with page 0 would otherwise
+	// let the walk collect the same 200 records five times and call the result
+	// complete. Measured on the live API 2026-08-11: startIndex is echoed
+	// exactly (asked 200 -> answered 200; asked 400 -> answered 400).
 	StartIndex *int `json:"startIndex"`
 	// TotalResults is a POINTER for the same reason (Codex M54 R6, Critical):
 	// as a plain int, `{"resultsPerPage":0,"vulnerabilities":[]}` — no
@@ -143,20 +182,35 @@ func (r *NVDResponse) entries() []NVDVulnEntry {
 //  1. resultsPerPage is PRESENT. `null` and `{}` decode into a zero-valued
 //     struct without error, so absence is what distinguishes "not an NVD
 //     response" from "no CVEs for this component".
+//
 //  2. totalResults is PRESENT, for the same reason — without this,
 //     `{"resultsPerPage":0,"vulnerabilities":[]}` read as an authoritative
 //     "no CVEs" (Codex M54 R6, Critical).
+//
 //  3. the vulnerabilities array is PRESENT (it may be empty — that is the
 //     genuine no-matches answer).
+//
 //  4. the page carries what it says it carries: len(vulnerabilities) equals
 //     resultsPerPage, which the NVD schema defines as the number of records in
 //     THIS response. A page declaring two and shipping one is silently short,
 //     and the missing one may be the finding that mattered.
-//  5. totalResults > 0 with no entries at all is inconsistent even when
-//     resultsPerPage agrees (`{"resultsPerPage":0,"totalResults":5,...}`), and
-//     must not be read as "no CVEs".
-//  6. startIndex is PRESENT and zero — the scanner never asks for a later
-//     page, so an answer that is one cannot be the answer to this request.
+//
+//  5. the page is not empty when the result set says it should not be:
+//     totalResults > startIndex with no entries at all is inconsistent even
+//     when resultsPerPage agrees (`{"resultsPerPage":0,"totalResults":5,...}`),
+//     and must not be read as "no CVEs".
+//
+//     M55 relaxed the left-hand side from `totalResults > 0` to
+//     `totalResults > startIndex`, which is the same rule on page zero and the
+//     correct one on a later page. NVD is live data: a result set that SHRINKS
+//     between page 1 and page 2 legitimately answers a startIndex=200 request
+//     with zero entries and totalResults=150. Under the old form that raced
+//     into a hard error and cost the component its whole lookup; it is now the
+//     ordinary end-of-walk condition.
+//
+//  6. startIndex is PRESENT and is the page that was ASKED for — see the field
+//     comment. Not "is zero": since M55 the scanner does ask for later pages.
+//
 //  7. every entry carries a well-formed cve.id. `[{}]` used to satisfy every
 //     check above (Codex M54 R7, Critical): it became a vulnerability with
 //     CVEID "", which the VARCHAR NOT NULL column accepts, so a nameless row
@@ -165,12 +219,12 @@ func (r *NVDResponse) entries() []NVDVulnEntry {
 //     is the ON CONFLICT key, so every such entry across every component
 //     collapses onto the same "" row.
 //
-// What it still does NOT do is verify that the RESULT SET is complete — see
-// the known truncation defect on searchByKeyword. A first page of 20 out of
-// totalResults=500 satisfies every check above, because each of them is about
-// the page being internally honest, not about the pages that were never
-// fetched.
-func (r *NVDResponse) validate() error {
+// What it still does NOT do is verify that the RESULT SET is complete: a page
+// of 200 out of totalResults=21670 satisfies every check above, because each of
+// them is about THIS page being internally honest, not about the pages that
+// were never fetched. Completeness is searchByKeyword's job (M55) and is
+// reported through nvdSearchResult.truncated, not through this error.
+func (r *NVDResponse) validate(wantStartIndex int) error {
 	if r == nil || r.ResultsPerPage == nil {
 		return fmt.Errorf("NVD response is missing the resultsPerPage envelope field; " +
 			"the endpoint returned 200 but the body is not an NVD CVE API response")
@@ -187,18 +241,20 @@ func (r *NVDResponse) validate() error {
 		return fmt.Errorf("NVD response is missing the startIndex envelope field; " +
 			"the endpoint returned 200 but the body is not an NVD CVE API response")
 	}
-	if *r.StartIndex != 0 {
-		return fmt.Errorf("NVD response is page startIndex=%d; this request asked for the "+
-			"first page, so earlier results would be silently missing", *r.StartIndex)
+	if *r.StartIndex != wantStartIndex {
+		return fmt.Errorf("NVD response is page startIndex=%d; this request asked for "+
+			"startIndex=%d, so the requested records would be silently missing",
+			*r.StartIndex, wantStartIndex)
 	}
 	if got, want := len(*r.Vulnerabilities), *r.ResultsPerPage; got != want {
 		return fmt.Errorf("NVD response declares resultsPerPage=%d but carries %d entries; "+
 			"the page is short of what it claims and the missing entries would be "+
 			"silently dropped", want, got)
 	}
-	if *r.TotalResults > 0 && len(*r.Vulnerabilities) == 0 {
-		return fmt.Errorf("NVD response claims totalResults=%d but carries no entries; "+
-			"treating that as 'no vulnerabilities' would silently under-report", *r.TotalResults)
+	if *r.TotalResults > *r.StartIndex && len(*r.Vulnerabilities) == 0 {
+		return fmt.Errorf("NVD response claims totalResults=%d from startIndex=%d but carries "+
+			"no entries; treating that as 'no vulnerabilities' would silently under-report",
+			*r.TotalResults, *r.StartIndex)
 	}
 	for i, e := range *r.Vulnerabilities {
 		if !validation.IsValidCVEID(e.CVE.ID) {
@@ -264,21 +320,83 @@ type nvdComponentKey struct {
 	Version string
 }
 
-// ScanComponents scans all components in an SBOM for vulnerabilities
-// Uses Redis cache and deduplication for efficiency
+// NVDScanReport is the accounting for one NVDService sweep.
+//
+// # Why this type exists (M55)
+//
+// ScanComponents can only ever tell its caller ONE bit: error or nil. The
+// handlers turn that bit into ScanTracker completed/failed, which the CLI turns
+// into an exit code and the MCP server into `counts_final`. That is enough for
+// the outcomes the product has already decided are failures, and not enough for
+// anything it has not.
+//
+// The specific gap it was added for is the PARTIAL fetch failure: some
+// components answered, some did not. Deciding how many may fail before a scan
+// is worthless is a product-policy question (a threshold), and this wave
+// deliberately does not answer it — but "we have not decided the policy" must
+// not mean "the number is unavailable", which is how it was before. The count
+// is now returned, so the policy can be written against a number that exists.
+//
+// Honest limitation: no production caller reads this yet. handler.SbomHandler
+// and handler.VulnerabilityHandler both depend on the narrow
+// `ScanComponents(ctx, sbomID) error` interface, and ScanTracker has no state
+// between completed and failed to carry a partial count into. Wiring it
+// through is a change to those files and is out of this wave's scope; what is
+// in scope is that the number is counted, logged at WARN, and reachable in-band
+// rather than swallowed.
+type NVDScanReport struct {
+	// UniqueComponents is the number of deduplicated (name, version) work
+	// items the sweep was given.
+	UniqueComponents int
+	// Processed is how many of them produced an answer (from cache or API).
+	Processed int
+	CacheHits int
+	APICalls  int
+	// FetchFailures counts work items whose NVD lookup never returned an
+	// answer. Processed + FetchFailures == UniqueComponents unless the sweep
+	// was cancelled.
+	FetchFailures int
+	// RefusedWrites counts statements the DATABASE refused. See
+	// persistWorkItem: it is a floor on the loss, not its size.
+	RefusedWrites int
+	// TruncatedComponents counts work items whose match set was provably
+	// larger than the paging budget could fetch.
+	TruncatedComponents int
+	// DroppedMatches is the sum of (totalResults - fetched) over those
+	// components: how many matches are known to exist and were not retrieved.
+	DroppedMatches int
+}
+
+// ScanComponents scans all components in an SBOM for vulnerabilities.
+// Uses Redis cache and deduplication for efficiency.
+//
+// This is the narrow `componentScanner` surface the handlers and the scheduler
+// depend on. It is a thin policy wrapper over ScanComponentsWithReport: the
+// error it returns is exactly NVDScanReport.incompleteErr, and everything the
+// sweep measured is discarded. Callers that want the numbers should use
+// ScanComponentsWithReport.
 func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error {
+	_, err := s.ScanComponentsWithReport(ctx, sbomID)
+	return err
+}
+
+// ScanComponentsWithReport is ScanComponents with the sweep's accounting
+// returned alongside the error. The report is populated even when the error is
+// non-nil — the counts are what the error is derived FROM, so discarding them
+// on failure would hide the most interesting cases.
+func (s *NVDService) ScanComponentsWithReport(ctx context.Context, sbomID uuid.UUID) (NVDScanReport, error) {
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "nvd")
-		return nil
+		return NVDScanReport{}, nil
 	}
 
 	components, err := s.compRepo.ListBySbom(ctx, sbomID)
 	if err != nil {
-		return fmt.Errorf("failed to get components: %w", err)
+		return NVDScanReport{}, fmt.Errorf("failed to get components: %w", err)
 	}
 
 	if len(components) == 0 {
-		return nil
+		return NVDScanReport{}, nil
 	}
 
 	slog.Info("starting component scan", "sbom_id", sbomID, "component_count", len(components))
@@ -362,7 +480,9 @@ func (s *NVDService) ScanComponents(ctx context.Context, sbomID uuid.UUID) error
 // does not change what an abort costs. What it does change, as of the R1
 // follow-up below, is that the scanner now REPORTS it instead of returning
 // nil.
-func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) error {
+func (s *NVDService) processComponentsParallel(ctx context.Context, components map[nvdComponentKey][]uuid.UUID) (NVDScanReport, error) {
+	report := NVDScanReport{UniqueComponents: len(components)}
+
 	maxWorkers := maxConcurrentNoKey
 	rateLimit := rateLimitWithoutKey
 	if s.apiKey != "" {
@@ -385,6 +505,29 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	rateLimiter := time.NewTicker(rateLimit)
 	defer rateLimiter.Stop()
 
+	// pace is the SAME ticker, handed to searchByKeyword so that the follow-up
+	// pages of a multi-page component are rate-limited too (M55).
+	//
+	// This is the whole reason paging is safe to add. The worker loop below
+	// takes one tick per WORK ITEM, which was one request until M55; a walk
+	// that issued its extra pages without a tick would let the pool emit up to
+	// maxConcurrentWithKey * nvdMaxPagesPerComponent requests inside one tick
+	// and blow straight through NVD's published rate (50 requests / 30s with a
+	// key). Sharing the ticker keeps the invariant that held before: the whole
+	// pool issues at most one NVD request per `rateLimit`, whatever the mix of
+	// first pages and follow-ups.
+	//
+	// A per-worker sleep would NOT do: five workers each pausing rateLimit
+	// between their own pages is five times the intended aggregate rate.
+	pace := func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-rateLimiter.C:
+			return nil
+		}
+	}
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	// dbMu guards every statement issued against the (possibly transactional)
@@ -399,10 +542,14 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	apiCalls := 0
 	// refusedWrites counts statements the DATABASE refused (Codex M54 R1,
 	// Critical); fetchFailures counts work items whose NVD lookup never
-	// returned an answer (Codex M54 R2, Critical). See the returns at the
-	// bottom of this function for exactly which combinations are escalated.
+	// returned an answer (Codex M54 R2, Critical); truncatedComponents and
+	// droppedMatches count work items whose match set was provably bigger than
+	// the paging budget (M55). See the returns at the bottom of this function
+	// for exactly which combinations are escalated.
 	refusedWrites := 0
 	fetchFailures := 0
+	truncatedComponents := 0
+	droppedMatches := 0
 
 	for i := 0; i < maxWorkers; i++ {
 		wg.Add(1)
@@ -417,7 +564,7 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					// Rate limit acquired
 				}
 
-				vulns, fromCache, err := s.getVulnerabilitiesWithCache(ctx, work.key.Name, work.key.Version)
+				lookup, err := s.getVulnerabilitiesWithCache(ctx, work.key.Name, work.key.Version, pace)
 				if err != nil {
 					slog.Warn("failed to get vulnerabilities",
 						"component", work.key.Name,
@@ -429,17 +576,36 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 					continue
 				}
 
+				if lookup.truncated {
+					// Per-component, at WARN, with the numbers: an operator
+					// reading only the aggregate below cannot tell WHICH
+					// component's match set was cut off, and that is the one
+					// thing they need in order to act (pin a version, add a
+					// purl, or accept the noise).
+					slog.Warn("nvd: component match set truncated",
+						"component", work.key.Name,
+						"version", work.key.Version,
+						"fetched", lookup.fetched,
+						"total", lookup.total,
+						"page_size", nvdPageSize,
+						"page_budget", nvdMaxPagesPerComponent)
+				}
+
 				mu.Lock()
 				processedCount++
-				if fromCache {
+				if lookup.fromCache {
 					cacheHits++
 				} else {
 					apiCalls++
 				}
+				if lookup.truncated {
+					truncatedComponents++
+					droppedMatches += lookup.total - lookup.fetched
+				}
 				mu.Unlock()
 
 				// Link vulnerabilities to all component instances
-				refused := s.persistWorkItem(ctx, &dbMu, vulns, work.componentIDs)
+				refused := s.persistWorkItem(ctx, &dbMu, lookup.vulns, work.componentIDs)
 				if refused > 0 {
 					mu.Lock()
 					refusedWrites += refused
@@ -451,14 +617,51 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 
 	wg.Wait()
 
-	slog.Info("component scan completed",
+	report.Processed = processedCount
+	report.CacheHits = cacheHits
+	report.APICalls = apiCalls
+	report.RefusedWrites = refusedWrites
+	report.FetchFailures = fetchFailures
+	report.TruncatedComponents = truncatedComponents
+	report.DroppedMatches = droppedMatches
+
+	// The summary is WARN, not INFO, whenever the sweep is known to be less
+	// than complete (M55). A PARTIAL fetch failure is not escalated into a scan
+	// error — that needs a threshold, which is a product decision — but it is
+	// not swallowed either: the count is in this line, and it is in the report
+	// this function returns.
+	//
+	// "component scan completed" at INFO with fetch_failures=37 buried in it
+	// was the previous shape, and it reads as success to everything that
+	// filters on level.
+	logArgs := []any{
 		"processed", processedCount,
+		"unique_components", report.UniqueComponents,
 		"cache_hits", cacheHits,
 		"api_calls", apiCalls,
 		"refused_writes", refusedWrites,
 		"fetch_failures", fetchFailures,
-	)
+		"truncated_components", truncatedComponents,
+		"dropped_matches", droppedMatches,
+	}
+	if fetchFailures > 0 || truncatedComponents > 0 || refusedWrites > 0 {
+		slog.Warn("component scan completed with incomplete coverage", logArgs...)
+	} else {
+		slog.Info("component scan completed", logArgs...)
+	}
 
+	return report, report.incompleteErr()
+}
+
+// incompleteErr is the ONE bit ScanComponents is able to hand its caller: the
+// error that turns into ScanTracker.MarkFailed, scan_state "failed",
+// `counts_final: false` in the MCP server, and exit 2 from `sbomhub scan`.
+//
+// Everything it escalates has the same shape — the scan's results are known to
+// be less than what the scan claims to have looked for — and everything it does
+// NOT escalate is listed at the bottom, because a reader needs both halves to
+// know what a nil return is worth.
+func (r NVDScanReport) incompleteErr() error {
 	// A refused WRITE means the database declined to record a match we had
 	// already obtained. Reporting success after that is the silent-data-loss
 	// failure this product cannot afford: the caller marks the scan completed,
@@ -470,8 +673,8 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	// refused, so this count goes from 0 to "all of them" and the scanner now
 	// says so instead of returning nil.
 	//
-	if refusedWrites > 0 {
-		return fmt.Errorf("nvd: database refused %d vulnerability write(s); scan results are incomplete", refusedWrites)
+	if r.RefusedWrites > 0 {
+		return fmt.Errorf("nvd: database refused %d vulnerability write(s); scan results are incomplete", r.RefusedWrites)
 	}
 
 	// TOTAL fetch failure: every work item was asked about and none answered,
@@ -482,10 +685,39 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	// silent-data-loss shape as the refused writes above. `sbomhub scan
 	// --fail-on critical` would exit 0 on an NVD outage.
 	//
-	// The condition is deliberately processedCount == 0 rather than
-	// fetchFailures > 0: it fires only when NOTHING got through.
-	if processedCount == 0 && fetchFailures > 0 {
-		return fmt.Errorf("nvd: all %d component lookup(s) failed; the scan has no coverage", fetchFailures)
+	// The condition is deliberately Processed == 0 rather than
+	// FetchFailures > 0: it fires only when NOTHING got through.
+	if r.Processed == 0 && r.FetchFailures > 0 {
+		return fmt.Errorf("nvd: all %d component lookup(s) failed; the scan has no coverage", r.FetchFailures)
+	}
+
+	// TRUNCATED RESULT SET (M55). At least one component matched more CVEs than
+	// the paging budget could fetch, so the findings recorded for it are a
+	// PREFIX of its match set and the omitted tail may hold the critical CVE.
+	//
+	// Escalating needs no threshold, which is what separates it from the
+	// partial fetch failure below: we are not estimating how much coverage is
+	// enough, we are reporting that NVD itself told us how many matches exist
+	// and we did not fetch them. searchByKeyword makes this rare by
+	// construction — every versioned component in the measured distribution
+	// fits in one page — so what reaches here is the component whose keyword
+	// stopped being a match query at all, and that is precisely the case an
+	// operator must not read as "checked, clean".
+	//
+	// The cost of escalating, stated plainly because it is real: ScanTracker
+	// marks the whole scan failed, and `sbomhub scan --fail-on <sev>` then
+	// exits 2 WITHOUT evaluating the threshold, so a critical that WAS fetched
+	// no longer produces exit 1. Exit 2 is still non-zero, so a CI job that
+	// checks for success fails either way; what is lost is only the
+	// distinction, and what is gained is that a scan which provably did not
+	// see everything can never be read as a clean bill of health. The
+	// alternative — stay silent and let the count look authoritative — is the
+	// failure mode this product exists to prevent.
+	if r.TruncatedComponents > 0 {
+		return fmt.Errorf("nvd: %d component(s) matched more CVEs than the paging budget "+
+			"(%d pages x %d) could fetch; %d known match(es) were not retrieved and the "+
+			"findings for those components are incomplete",
+			r.TruncatedComponents, nvdMaxPagesPerComponent, nvdPageSize, r.DroppedMatches)
 	}
 
 	// STILL NOT escalated, and this is the honest remainder: a PARTIAL fetch
@@ -495,8 +727,15 @@ func (s *NVDService) processComponentsParallel(ctx context.Context, components m
 	// fix. It stays tracked as the ※要確認 threshold noted on
 	// SbomHandler.runScan.
 	//
-	// Note that the guard above is `processedCount == 0 && fetchFailures > 0`,
-	// not `processedCount == 0`. A scan with NO work at all must not be
+	// M55 changed what "not escalated" costs, without taking that decision:
+	// NVDScanReport.FetchFailures now carries the count out of the sweep, and
+	// the summary above logs at WARN when it is non-zero. So the policy, when
+	// it is written, can be written against a number that already exists, and
+	// in the meantime a partial failure is visible instead of being absorbed
+	// into an INFO line that says "completed".
+	//
+	// Note that the guard above is `Processed == 0 && FetchFailures > 0`,
+	// not `Processed == 0`. A scan with NO work at all must not be
 	// reported as a failure — there was nothing to look up — and the two
 	// clauses are what distinguish it from a scan that tried and got nothing.
 	//
@@ -603,8 +842,21 @@ func (s *NVDService) persistWorkItem(
 	return refused
 }
 
-// getVulnerabilitiesWithCache tries cache first, falls back to API
-func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, version string) ([]model.Vulnerability, bool, error) {
+// nvdLookup is one work item's outcome: the matches plus everything the caller
+// needs in order to describe how sound they are.
+type nvdLookup struct {
+	vulns     []model.Vulnerability
+	fromCache bool
+	// truncated, total and fetched are always false/0 for a cache hit — see
+	// getVulnerabilitiesWithCache for why a truncated result is never cached
+	// in the first place.
+	truncated bool
+	total     int
+	fetched   int
+}
+
+// getVulnerabilitiesWithCache tries cache first, falls back to API.
+func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, version string, pace nvdPacer) (nvdLookup, error) {
 	// Try cache first
 	if s.cache != nil {
 		entry, err := s.cache.Get(ctx, name, version)
@@ -658,20 +910,34 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 				})
 			}
 			if usable {
-				return vulns, true, nil
+				return nvdLookup{vulns: vulns, fromCache: true}, nil
 			}
 			// Fall through to the API below, exactly as a cache miss would.
 		}
 	}
 
 	// Cache miss - call API
-	vulns, err := s.searchByKeyword(ctx, name, version)
+	res, err := s.searchByKeyword(ctx, name, version, pace)
 	if err != nil {
-		return nil, false, err
+		return nvdLookup{}, err
 	}
+	vulns := res.vulns
 
-	// Store in cache
-	if s.cache != nil && len(vulns) >= 0 {
+	// Store in cache — but NOT a truncated result (M55).
+	//
+	// cache.VulnCacheEntry has no field for "this is a prefix of the match
+	// set", and it is served back as an ordinary complete answer. Caching a
+	// truncated lookup would therefore launder it: the scan that fetched it
+	// would report the truncation, and every scan for the next NVDCacheTTL
+	// (24h) would serve the same short list and report NOTHING, because the
+	// cache branch above returns before searchByKeyword is ever reached. The
+	// signal would survive exactly one scan and then disappear.
+	//
+	// Not caching costs those components a full walk on every scan. That is
+	// the right way round: they are the components whose answers we already
+	// know to be incomplete, and by the measured distribution there are very
+	// few of them (see searchByKeyword).
+	if s.cache != nil && !res.truncated {
 		cachedVulns := make([]cache.CachedVuln, len(vulns))
 		for i, v := range vulns {
 			cachedVulns[i] = cache.CachedVuln{
@@ -687,36 +953,134 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 		}
 	}
 
-	return vulns, false, nil
+	return nvdLookup{
+		vulns:     vulns,
+		truncated: res.truncated,
+		total:     res.total,
+		fetched:   res.fetched,
+	}, nil
 }
 
-// searchByKeyword asks NVD for CVEs matching "<name> <version>".
+// nvdSearchResult is one component's keyword lookup, including how much of the
+// match set it actually managed to see.
 //
-// # Known defect, NOT fixed in M54: the result set is silently truncated
+// `truncated` exists so that "we saw everything" and "we saw the first N" are
+// different values rather than the same slice. Before M55 they were the same
+// slice.
+type nvdSearchResult struct {
+	// vulns are the matches, de-duplicated by canonical CVE id.
+	vulns []model.Vulnerability
+	// fetched is how many RECORDS the walk consumed (pre-dedup), i.e. how far
+	// into the result set it got. Compared against total to decide truncation.
+	fetched int
+	// total is totalResults as NVD last reported it. NVD is live, so a walk
+	// can see this change between pages; the last value wins.
+	total int
+	// pages is the number of HTTP requests this lookup issued.
+	pages int
+	// truncated is true when the result set is provably larger than what was
+	// fetched. It is never inferred from a heuristic — only from NVD's own
+	// totalResults.
+	truncated bool
+}
+
+// nvdPacer blocks until the sweep's shared rate limiter allows one more NVD
+// request, or the context ends. nil means "unpaced" (a caller outside the
+// worker pool, e.g. a test driving one lookup against an httptest server).
 //
-// This asks for resultsPerPage=20, decodes ONE response, and returns. It never
-// reads NVDResponse.TotalResults and never issues the startIndex follow-ups
-// the NVD API requires when totalResults exceeds resultsPerPage. A component
-// matching 21+ CVEs therefore contributes its first 20 and the scan reports
-// success — the omitted page can hold the critical CVE that should have failed
-// the build. Raised by Codex in M54 R2 (Critical) and reported upward rather
-// than left undocumented.
+// It is a parameter rather than a field on NVDService because the limiter is
+// per-SCAN, not per-process: processComponentsParallel creates one ticker for
+// the whole sweep, and that is the only thing that keeps the POOL — up to
+// maxConcurrentWithKey workers — inside NVD's published rate.
+type nvdPacer func(ctx context.Context) error
+
+// searchByKeyword asks NVD for CVEs matching "<name> <version>" and walks the
+// result set, up to a budget, reporting whether it saw all of it.
 //
-// It is not fixed here because the repair is a design decision, not a loop.
-// Every page costs one rate-limited request (rateLimitWithKey is 700ms), so
-// paging exhaustively multiplies a scan's wall time by the match cardinality —
-// a keyword like "linux" matches thousands. The real options are to cap
-// deliberately and SAY the result is capped, to match on CPE instead of a
-// keyword, or to surface truncation as a scan-level warning; picking among
-// them is out of scope for a concurrency fix, and doing it badly would make
-// every scan of a common library unusably slow.
+// # What was wrong before M55
 //
-// Until then, callers must read a completed NVD scan as "the first
-// resultsPerPage matches per component", not "every match".
-func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) ([]model.Vulnerability, error) {
+// It asked for resultsPerPage=20, decoded ONE response, and returned. It never
+// read NVDResponse.TotalResults and never issued the startIndex follow-ups the
+// NVD API requires when totalResults exceeds resultsPerPage, so a component
+// matching 21+ CVEs contributed its first 20 and the scan reported success.
+// Raised by Codex in M54 R2 (Critical).
+//
+// That was not a corner case. Measured against the live API on 2026-08-11
+// (one request per keyword, resultsPerPage=1, reading totalResults), building
+// each keyword exactly as this function does:
+//
+//	jackson-databind 2.9.10   44      <- 24 matches dropped, silently
+//	libxml2 2.9.10             4
+//	glibc 2.31                 3
+//	tomcat 9.0.30              3
+//	openssl 1.1.1k             2
+//	express 4.17.1             2
+//	lodash 4.17.20             1
+//	log4j-core 2.14.1          0
+//	spring-core 5.3.18         0
+//	curl 7.68.0                0
+//	busybox 1.32.0             0
+//	python 3.8.10              0
+//	zlib 1.2.11                0
+//	lodash                    16
+//	log4j                     32
+//	curl                     322      <- 302 dropped
+//	openssl                  563      <- 543 dropped
+//	linux                  21670      <- 21650 dropped
+//
+// Two things follow, and they pull in opposite directions.
+//
+// # Why the fix is mostly a bigger page, not a longer loop
+//
+// A VERSIONED keyword is precise: NVD's keywordSearch requires every word to
+// appear in the CVE description, so "jackson-databind 2.9.10" matches 44 and
+// the rest match single digits. Everything in that half of the table fits in
+// ONE page of nvdPageSize=200 — which costs exactly the same single
+// rate-limited request as the old page of 20. For the SBOMs this product
+// actually scans (syft / trivy output, where components carry versions), the
+// truncation is therefore repaired at zero additional request cost and zero
+// additional wall time.
+//
+// # Why "just fetch everything" is wrong, not merely slow
+//
+// An UNVERSIONED keyword is not a match query at all, it is a text search:
+// "linux" matches 21670 CVEs. Fetching them all would cost 109 pages
+// (76 seconds of rate limit for ONE component with an API key, 11 minutes
+// without one) — and then LINK ALL 21670 to that component, because that is
+// what persistWorkItem does with whatever this function returns. The product
+// would report twenty-one thousand findings against one component, none of
+// them evidence of anything. Exhaustive paging makes the answer worse, not
+// just later.
+//
+// So the budget is not a compromise between correctness and speed. It is the
+// line past which the query has stopped being a vulnerability match, and the
+// honest thing to do at that line is to say the result is incomplete rather
+// than to keep spending requests on noise. That is what `truncated` is for and
+// what processComponentsParallel escalates.
+//
+// # What the budget costs, in requests
+//
+// Requests for one component = min(ceil(totalResults / 200), 5). Against the
+// measured table above: every versioned component costs 1 (as today), "curl"
+// costs 2, "openssl" costs 3, "linux" costs 5 and is reported truncated. A
+// 500-component SBOM of versioned components therefore still costs 500
+// requests — 350 s with an API key at rateLimitWithKey, unchanged from before
+// this fix. The pathological upper bound is 5x that, and it requires an SBOM
+// whose components are ALL unversioned generic words.
+//
+// # What is deliberately NOT done here
+//
+// Matching on CPE (cpeName / virtualMatchString) instead of a keyword is the
+// real root fix for the precision half of the problem — it would replace a
+// description text search with NVD's own affected-configuration data, and the
+// unversioned blow-up above would simply not exist. It is out of this wave's
+// scope because it changes what a "match" MEANS for every component in the
+// product (and needs component CPE/purl mapping that this function does not
+// have), not because it was overlooked.
+func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, pace nvdPacer) (nvdSearchResult, error) {
 	if s.offline {
 		slog.Info("scan skipped: offline mode", "source", "nvd")
-		return nil, nil
+		return nvdSearchResult{}, nil
 	}
 
 	keyword := name
@@ -724,9 +1088,75 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 		keyword = fmt.Sprintf("%s %s", name, version)
 	}
 
+	var out nvdSearchResult
+	// seen de-duplicates by canonical CVE id ACROSS pages. NVD is live and
+	// ordering is not promised to be stable, so a record can legitimately
+	// appear on two pages of one walk; without this the component would be
+	// linked to it twice and the finding count would be inflated.
+	seen := make(map[string]struct{})
+
+	for out.pages < nvdMaxPagesPerComponent {
+		// Every page after the first is an EXTRA request that the worker
+		// pool's per-work-item tick did not pay for, so it takes its own tick.
+		// Without this the pool would issue up to maxConcurrentWithKey * 5
+		// requests per tick and blow through NVD's published rate.
+		if out.pages > 0 && pace != nil {
+			if err := pace(ctx); err != nil {
+				return nvdSearchResult{}, err
+			}
+		}
+
+		page, err := s.fetchPage(ctx, keyword, out.fetched)
+		if err != nil {
+			// A failure partway through a walk is a failure of the whole
+			// lookup, not a partial success: returning the pages we did get
+			// would be exactly the silent under-report this function exists to
+			// stop, only with a nicer-looking count.
+			return nvdSearchResult{}, err
+		}
+		out.pages++
+		out.total = *page.TotalResults
+
+		entries := page.entries()
+		for _, v := range s.convertToVulnerabilities(entries) {
+			if _, dup := seen[v.CVEID]; dup {
+				continue
+			}
+			seen[v.CVEID] = struct{}{}
+			out.vulns = append(out.vulns, v)
+		}
+		out.fetched += len(entries)
+
+		// No progress. Reachable when the result set SHRANK mid-walk (see
+		// validate's totalResults > startIndex rule) and as a belt-and-braces
+		// guard against a mirror that answers a later page with an empty one:
+		// without it the walk would re-request the same startIndex until the
+		// budget ran out and then call the component truncated.
+		if len(entries) == 0 {
+			break
+		}
+		if out.fetched >= out.total {
+			break
+		}
+	}
+
+	out.truncated = out.fetched < out.total
+	return out, nil
+}
+
+// fetchPage issues ONE NVD keyword request and returns the validated envelope.
+//
+// startIndex is sent explicitly on every page, page zero included. The
+// alternative — omitting it on the first page, as the pre-M55 code did — would
+// leave validate with nothing to compare against on the request that matters
+// most, and the parameter is documented as defaulting to 0 anyway (verified
+// against the live API on 2026-08-11: an explicit startIndex=0 answers
+// identically to omitting it).
+func (s *NVDService) fetchPage(ctx context.Context, keyword string, startIndex int) (*NVDResponse, error) {
 	params := url.Values{}
 	params.Set("keywordSearch", keyword)
-	params.Set("resultsPerPage", "20")
+	params.Set("resultsPerPage", strconv.Itoa(nvdPageSize))
+	params.Set("startIndex", strconv.Itoa(startIndex))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", s.baseURL+"?"+params.Encode(), nil)
 	if err != nil {
@@ -748,12 +1178,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 		return nil, fmt.Errorf("NVD API error: %d - %s", resp.StatusCode, string(body))
 	}
 
-	nvdResp, err := decodeNVDResponse(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return s.convertToVulnerabilities(nvdResp.entries()), nil
+	return decodeNVDResponse(resp.Body, startIndex)
 }
 
 // decodeNVDResponse decodes exactly ONE JSON value from r, requires nothing to
@@ -775,7 +1200,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string) 
 // after the body, More() is false while a second Decode returns
 // "unexpected EOF". Requiring io.EOF separates the three outcomes that matter:
 // clean end, trailing content, and a broken transfer.
-func decodeNVDResponse(r io.Reader) (*NVDResponse, error) {
+func decodeNVDResponse(r io.Reader, wantStartIndex int) (*NVDResponse, error) {
 	dec := json.NewDecoder(r)
 	var out NVDResponse
 	if err := dec.Decode(&out); err != nil {
@@ -791,7 +1216,7 @@ func decodeNVDResponse(r io.Reader) (*NVDResponse, error) {
 	default:
 		return nil, fmt.Errorf("NVD response body did not end cleanly: %w", err)
 	}
-	if err := out.validate(); err != nil {
+	if err := out.validate(wantStartIndex); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -979,7 +1404,11 @@ func (s *NVDService) SearchByCVEID(ctx context.Context, cveID string) (*model.Vu
 	// Same decode + envelope contract as searchByKeyword: without it an empty
 	// body reads as an authoritative "CVE not found" (Codex M54 R4, Critical)
 	// and a body with trailing content is accepted whole (R8, Critical).
-	nvdResp, err := decodeNVDResponse(resp.Body)
+	//
+	// startIndex 0: this is a POINT lookup by cveId, it sends no startIndex,
+	// and it does not page — a cveId query answers with at most one record, so
+	// there is nothing to walk.
+	nvdResp, err := decodeNVDResponse(resp.Body, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode NVD response: %w", err)
 	}

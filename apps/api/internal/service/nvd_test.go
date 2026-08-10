@@ -332,10 +332,11 @@ func TestNVDService_HTTPMock_SuccessfulSearch(t *testing.T) {
 	// driven end-to-end against an httptest server (recon flagged this as the
 	// gap at nvd_test.go:320-322).
 	svc := NewNVDService(nil, nil, "test-api-key", server.URL, false)
-	vulns, err := svc.searchByKeyword(context.Background(), "lodash", "4.17.20")
+	res, err := svc.searchByKeyword(context.Background(), "lodash", "4.17.20", nil)
 	if err != nil {
 		t.Fatalf("searchByKeyword returned error: %v", err)
 	}
+	vulns := res.vulns
 	if len(vulns) != 1 {
 		t.Fatalf("expected 1 vulnerability, got %d", len(vulns))
 	}
@@ -415,10 +416,11 @@ func TestNVDService_Offline_NoHTTP(t *testing.T) {
 
 	svc := NewNVDService(nil, nil, "", server.URL, true)
 
-	vulns, err := svc.searchByKeyword(context.Background(), "lodash", "4.17.20")
+	res, err := svc.searchByKeyword(context.Background(), "lodash", "4.17.20", nil)
 	if err != nil {
 		t.Fatalf("offline searchByKeyword should not error, got %v", err)
 	}
+	vulns := res.vulns
 	if len(vulns) != 0 {
 		t.Errorf("offline searchByKeyword should return empty, got %d", len(vulns))
 	}
@@ -465,7 +467,7 @@ func TestNVDService_HTTPMock_APIError(t *testing.T) {
 	defer server.Close()
 
 	svc := NewNVDService(nil, nil, "", server.URL, false)
-	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil); err == nil {
 		t.Error("a 429 from NVD produced no error; the component would be counted as " +
 			"successfully checked with zero findings")
 	}
@@ -486,7 +488,7 @@ func TestNVDService_HTTPMock_InvalidJSON(t *testing.T) {
 			defer server.Close()
 
 			svc := NewNVDService(nil, nil, "", server.URL, false)
-			if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+			if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil); err == nil {
 				t.Errorf("body %q produced no error; a valid envelope followed by anything at "+
 					"all would be accepted as an authoritative empty result", body)
 			}
@@ -507,7 +509,7 @@ func TestNVDService_HTTPMock_Timeout(t *testing.T) {
 
 	svc := NewNVDService(nil, nil, "", server.URL, false)
 	svc.httpClient = &http.Client{Timeout: 20 * time.Millisecond}
-	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil); err == nil {
 		t.Error("a timed-out NVD request produced no error")
 	}
 }
@@ -530,10 +532,11 @@ func TestNVDService_HTTPMock_EmptyResults(t *testing.T) {
 	defer server.Close()
 
 	svc := NewNVDService(nil, nil, "", server.URL, false)
-	vulns, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0")
+	res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
 	if err != nil {
 		t.Fatalf("a well-formed zero-result response must not error: %v", err)
 	}
+	vulns := res.vulns
 	if len(vulns) != 0 {
 		t.Errorf("got %d vulnerabilities, want 0", len(vulns))
 	}
@@ -552,7 +555,7 @@ func TestNVDService_HTTPMock_NetworkError(t *testing.T) {
 	defer server.Close()
 
 	svc := NewNVDService(nil, nil, "", server.URL, false)
-	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0"); err == nil {
+	if _, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil); err == nil {
 		t.Error("a dropped connection produced no error")
 	}
 }
@@ -871,7 +874,7 @@ func TestM54NVDResponse_EnvelopeAbsenceIsNotZeroResults(t *testing.T) {
 			defer srv.Close()
 
 			svc := NewNVDService(nil, nil, "", srv.URL, false)
-			_, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0")
+			_, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
 			if tc.wantErr && err == nil {
 				t.Errorf("body %s produced no error — an empty body is indistinguishable from "+
 					"'no CVEs found', which the scan reports as a completed, clean result", tc.body)
@@ -1059,7 +1062,7 @@ func TestM54NVDResponse_ValidateChecksTheWholeEnvelope(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.body), &r); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			err := r.validate()
+			err := r.validate(0)
 			if tc.wantErr && err == nil {
 				t.Errorf("validate() accepted %s; an unusable body must not read as "+
 					"'this component has no CVEs'", tc.body)
@@ -1154,13 +1157,13 @@ func (t *m54TruncatedBody) Read(p []byte) (int, error) {
 func TestM54DecodeNVDResponse_RejectsATruncatedTransfer(t *testing.T) {
 	envelope := `{"resultsPerPage":0,"startIndex":0,"totalResults":0,"vulnerabilities":[]}`
 
-	if _, err := decodeNVDResponse(&m54TruncatedBody{data: []byte(envelope)}); err == nil {
+	if _, err := decodeNVDResponse(&m54TruncatedBody{data: []byte(envelope)}, 0); err == nil {
 		t.Error("a truncated transfer produced no error; a complete-looking empty envelope " +
 			"followed by a broken connection would be read as 'this component has no CVEs'")
 	}
 
 	// The same bytes over a clean reader must still be accepted.
-	if _, err := decodeNVDResponse(strings.NewReader(envelope)); err != nil {
+	if _, err := decodeNVDResponse(strings.NewReader(envelope), 0); err != nil {
 		t.Errorf("a clean, well-formed zero-result body must be accepted: %v", err)
 	}
 }
