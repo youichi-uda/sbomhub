@@ -400,12 +400,21 @@ func TestM55CVEMetadata_KeywordlessCVENotInCatalogueIsNotInserted(t *testing.T) 
 // unique-index entry. A speculative insertion blocks on the inserting
 // transaction's XID rather than on the relation, so this looks at every
 // ungranted lock. pg_locks is readable by any role.
-func m55AwaitLockWaiter(t *testing.T, db *sql.DB) {
+func m55AwaitLockWaiter(t *testing.T, db *sql.DB, holderXID int64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var waiting int
-		if err := db.QueryRow(`SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting); err != nil {
+		// Scoped to the HOLDER'S transaction id. "Any ungranted lock in the
+		// cluster" would be satisfied by an unrelated waiter, and the test
+		// would then commit before the race ever happened and pass against the
+		// check-then-insert implementation too (Codex M55 R3, Low). A duplicate
+		// key against an uncommitted inserter is a ShareLock wait on that
+		// inserter's XID.
+		if err := db.QueryRow(`
+			SELECT count(*) FROM pg_locks
+			WHERE NOT granted AND locktype = 'transactionid' AND transactionid = $1::text::xid`,
+			holderXID).Scan(&waiting); err != nil {
 			t.Fatalf("poll pg_locks: %v", err)
 		}
 		if waiting > 0 {
@@ -413,8 +422,8 @@ func m55AwaitLockWaiter(t *testing.T, db *sql.DB) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("no backend ever blocked: the racing insert never reached the contended unique-index entry, " +
-		"so this test would pass against the check-then-insert implementation too")
+	t.Fatal("no backend ever blocked on the competing creator's transaction: the racing insert never reached the " +
+		"contended unique-index entry, so this test would pass against the check-then-insert implementation too")
 }
 
 // m55PinWatermark snapshots system_settings.cve_sync_last_run (including its
@@ -563,6 +572,81 @@ func TestM55CVEMetadata_WatermarkAdvancesOncePastTheRetryBound(t *testing.T) {
 	}
 }
 
+// TestM55CVEMetadata_MissingWatermarkIsPinnedWhenAWriteFails covers the case
+// where "hold the watermark" means nothing (Codex M55 R3, High).
+//
+// With no stored cve_sync_last_run the run invents `now - 24h`. Holding an
+// invented value is a no-op: the next tick invents a NEWER one, so the records
+// this tick failed on can fall outside the window and are never retried — and
+// the retained window sits at ~24h forever, so the abandonment bound is never
+// reached either. The anchor has to be written down for the hold to exist.
+func TestM55CVEMetadata_MissingWatermarkIsPinnedWhenAWriteFails(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	m55ProtectWatermark(t, migDB)
+	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = 'cve_sync_last_run'`); err != nil {
+		t.Fatalf("clear watermark: %v", err)
+	}
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	before := time.Now().UTC()
+	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	var raw string
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&raw); err != nil {
+		t.Fatalf("the run held a watermark that was never written: %v.\n"+
+			"Holding an invented anchor is a no-op — the next tick invents a newer one and the failed records "+
+			"fall out of the window", err)
+	}
+	got, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		t.Fatalf("stored watermark %q does not parse: %v", raw, perr)
+	}
+	// It must be the retry ANCHOR (this run's window start, ~24h ago), not
+	// this run's start time — pinning `now` would discard the window entirely.
+	if !got.Before(before.Add(-12 * time.Hour)) {
+		t.Errorf("stored watermark = %s, want this run's window start (~24h before %s): pinning the run's start "+
+			"time instead would skip the whole window the failed records live in", got.UTC(), before)
+	}
+}
+
+// TestM55CVEMetadata_FutureWatermarkIsIgnored: a stored watermark in the
+// future is corrupt (a clock jump, an operator edit, a restored backup). Used
+// as-is it makes the retained window NEGATIVE, which compares as "well inside
+// the retry bound" and would hold the watermark forever — the livelock the
+// bound exists to prevent — and it makes lastModStartDate > lastModEndDate,
+// which NVD rejects outright (Codex M55 R3, High).
+func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+
+	m55PinWatermark(t, migDB, time.Now().UTC().Add(365*24*time.Hour).Truncate(time.Second))
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
+
+	raw := m55Watermark(t, migDB)
+	got, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		t.Fatalf("stored watermark %q does not parse: %v", raw, perr)
+	}
+	if got.After(time.Now().UTC()) {
+		t.Errorf("stored watermark = %s, still in the future: a future value yields a negative retained window, "+
+			"which always compares as inside the retry bound and pins the sync forever", got.UTC())
+	}
+}
+
 // TestM55CVEMetadata_UndateableRecordIsNotWrittenAndNotRetried: NVD always
 // publishes `lastModified`; its absence means the field did not parse. Such a
 // record cannot be arbitrated against the stored one, so it must not be
@@ -636,6 +720,10 @@ func TestM55CVEMetadata_ConcurrentCreatorIsRefreshedNotRejected(t *testing.T) {
 		otherID, cveID); err != nil {
 		t.Fatalf("competing insert: %v", err)
 	}
+	var holderXID int64
+	if err := tx.QueryRow(`SELECT txid_current()`).Scan(&holderXID); err != nil {
+		t.Fatalf("read competing creator xid: %v", err)
+	}
 
 	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, "", false)
 	score := 9.8
@@ -665,7 +753,7 @@ func TestM55CVEMetadata_ConcurrentCreatorIsRefreshedNotRejected(t *testing.T) {
 	// Low). A speculative-insertion wait registers as an ungranted lock on the
 	// index's transaction, so pg_stat_activity's wait_event_type is what shows
 	// it.
-	m55AwaitLockWaiter(t, migDB)
+	m55AwaitLockWaiter(t, migDB, holderXID)
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit competing creator: %v", err)
 	}

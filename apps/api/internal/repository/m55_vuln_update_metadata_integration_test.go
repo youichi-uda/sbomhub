@@ -366,16 +366,22 @@ func TestM55UpdateMetadata_NilCVSSScoreClearsTheScore(t *testing.T) {
 // generator, exactly the shape M54 rejected elsewhere). pg_locks is readable
 // by any role and shows ungranted entries, so the wait is observable rather
 // than assumed.
-func m55AwaitLockWaiter(t *testing.T, db *sql.DB) {
+func m55AwaitLockWaiter(t *testing.T, db *sql.DB, holderXID int64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var waiting int
 		// A ROW-level wait does not appear as an ungranted lock on the
-		// relation: the waiter blocks on the holding transaction's XID (and,
-		// transiently, on a tuple lock), so the filter has to be "any
-		// ungranted lock", not "ungranted lock on vulnerabilities".
-		if err := db.QueryRow(`SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting); err != nil {
+		// relation: the waiter blocks on the HOLDING TRANSACTION'S XID (and,
+		// transiently, on a tuple lock). The XID is what makes this specific —
+		// polling for "any ungranted lock in the cluster" would be satisfied
+		// by an unrelated waiter and let the test pass without the race ever
+		// happening (Codex M55 R3, Low). The bigint->text->xid cast is how a
+		// 64-bit txid_current() value is compared with pg_locks' 32-bit xid.
+		if err := db.QueryRow(`
+			SELECT count(*) FROM pg_locks
+			WHERE NOT granted AND locktype = 'transactionid' AND transactionid = $1::text::xid`,
+			holderXID).Scan(&waiting); err != nil {
 			t.Fatalf("poll pg_locks: %v", err)
 		}
 		if waiting > 0 {
@@ -383,14 +389,14 @@ func m55AwaitLockWaiter(t *testing.T, db *sql.DB) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("no backend ever blocked: the racing write never reached the contended row, " +
+	t.Fatal("no backend ever blocked on the holder's transaction: the racing write never reached the contended row, " +
 		"so this test would pass against an implementation with no lock at all")
 }
 
 // m55HoldRowLock opens a transaction, applies `stmt` to the row (taking its
 // lock), and returns a func that commits. The caller races UpdateMetadata
 // against the held lock.
-func m55HoldRowLock(t *testing.T, db *sql.DB, stmt, cveID string) func() {
+func m55HoldRowLock(t *testing.T, db *sql.DB, stmt, cveID string) (xid int64, commit func()) {
 	t.Helper()
 	tx, err := db.Begin()
 	if err != nil {
@@ -400,13 +406,17 @@ func m55HoldRowLock(t *testing.T, db *sql.DB, stmt, cveID string) func() {
 		_ = tx.Rollback()
 		t.Fatalf("lock holder statement: %v", err)
 	}
+	if err := tx.QueryRow(`SELECT txid_current()`).Scan(&xid); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("read holder xid: %v", err)
+	}
 	committed := false
 	t.Cleanup(func() {
 		if !committed {
 			_ = tx.Rollback()
 		}
 	})
-	return func() {
+	return xid, func() {
 		if err := tx.Commit(); err != nil {
 			t.Errorf("lock holder commit: %v", err)
 		}
@@ -437,7 +447,7 @@ func TestM55UpdateMetadata_StaleWaiterLosesToACommittedNewerWrite(t *testing.T) 
 	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &old)
 
 	// A fresher record lands and holds its lock.
-	commit := m55HoldRowLock(t, migDB, `
+	holderXID, commit := m55HoldRowLock(t, migDB, `
 		UPDATE vulnerabilities
 		SET severity = 'CRITICAL', description = 'fresher record',
 		    source_modified_at = '2026-07-01T00:00:00Z'
@@ -458,7 +468,7 @@ func TestM55UpdateMetadata_StaleWaiterLosesToACommittedNewerWrite(t *testing.T) 
 
 	// Wait until the racing write is demonstrably blocked on the row lock,
 	// then let the fresher write win.
-	m55AwaitLockWaiter(t, migDB)
+	m55AwaitLockWaiter(t, migDB, holderXID)
 	commit()
 
 	got := <-done
@@ -497,7 +507,7 @@ func TestM55UpdateMetadata_ConcurrentDeleteReportsRowAbsent(t *testing.T) {
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	cveID := m55SeedCatalogueRow(t, migDB, "NVD", &old)
 
-	commit := m55HoldRowLock(t, migDB, `DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID)
+	holderXID, commit := m55HoldRowLock(t, migDB, `DELETE FROM vulnerabilities WHERE cve_id = $1`, cveID)
 
 	july := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	type result struct {
@@ -511,7 +521,7 @@ func TestM55UpdateMetadata_ConcurrentDeleteReportsRowAbsent(t *testing.T) {
 		done <- result{o, err}
 	}()
 
-	m55AwaitLockWaiter(t, migDB)
+	m55AwaitLockWaiter(t, migDB, holderXID)
 	commit()
 
 	got := <-done

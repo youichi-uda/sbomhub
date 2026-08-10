@@ -333,11 +333,34 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	slog.Info("starting CVE sync")
 	startTime := time.Now()
 
-	// Get last sync time
+	// Get last sync time.
+	//
+	// watermarkIsStored says whether the value came from system_settings or is
+	// a fallback this run invented. The distinction is load-bearing for the
+	// retry policy below (Codex M55 R3, High): "hold the watermark" means
+	// "leave the stored value alone", which does nothing at all when there is
+	// no stored value — the next tick would invent a fresh `now - 24h` that has
+	// moved forward, so the records we meant to retry drop out of the window,
+	// and `heldWindow` would sit at ~24h forever and never reach the
+	// abandonment bound. When we hold on an invented anchor we PERSIST it, so
+	// there is something concrete to hold.
 	lastSync, err := j.getLastSyncTime(ctx)
+	watermarkIsStored := err == nil
 	if err != nil {
 		slog.Warn("failed to get last sync time, using 24h ago", "error", err)
-		lastSync = time.Now().Add(-24 * time.Hour)
+		lastSync = startTime.Add(-24 * time.Hour)
+	}
+	// A stored value in the FUTURE is corrupt (a clock jump, an operator
+	// edit, a restored backup). Left alone it makes the retained window
+	// NEGATIVE, which compares as "well inside the bound" and would hold the
+	// watermark forever — the exact livelock the bound exists to stop. It also
+	// makes lastModStartDate > lastModEndDate, which NVD rejects. Treat it as
+	// no stored value at all.
+	if lastSync.After(startTime) {
+		slog.Warn("CVE sync: stored sync watermark is in the future; ignoring it and using 24h ago",
+			"stored", lastSync.Format(time.RFC3339), "now", startTime.Format(time.RFC3339))
+		lastSync = startTime.Add(-24 * time.Hour)
+		watermarkIsStored = false
 	}
 
 	// Fetch CVEs modified since last sync
@@ -489,11 +512,28 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// Update last sync time — unless a catalogue write failed inside the
 	// bounded retry window, in which case holding it is what buys the retry
 	// (see above).
-	if holdWatermark {
+	switch {
+	case holdWatermark && watermarkIsStored:
 		slog.Warn("CVE sync: sync watermark held at its previous value because catalogue writes failed",
-			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures)
-	} else if err := j.updateLastSyncTime(ctx, startTime); err != nil {
-		slog.Warn("failed to update last sync time", "error", err)
+			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
+			"held_since", lastSync.Format(time.RFC3339))
+	case holdWatermark:
+		// Nothing to hold: this run's window start was invented, not read. Pin
+		// it so the retry actually covers the same records next tick and so
+		// the retained window can grow towards the abandonment bound instead
+		// of resetting to 24h every run (Codex M55 R3, High).
+		if err := j.updateLastSyncTime(ctx, lastSync); err != nil {
+			slog.Error("CVE sync: could not persist the retry anchor; the failed CVEs may fall outside the next window",
+				"anchor", lastSync.Format(time.RFC3339), "error", err)
+		} else {
+			slog.Warn("CVE sync: no stored watermark to hold; pinned this run's window start as the retry anchor",
+				"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
+				"anchor", lastSync.Format(time.RFC3339))
+		}
+	default:
+		if err := j.updateLastSyncTime(ctx, startTime); err != nil {
+			slog.Warn("failed to update last sync time", "error", err)
+		}
 	}
 
 	duration := time.Since(startTime)
