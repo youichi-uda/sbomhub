@@ -590,14 +590,38 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //     the DATABASE refused and errors when that count is non-zero, so a scan
 //     that obtained matches and then failed to record them reaches `errs` and
 //     MarkFailed. This is the case where the data we already hold is unsound.
+//
 //   - TOTAL FETCH FAILURE (R2). If every component lookup failed (429 / 500 /
 //     timeout) the scanner errors too. Deciding that a scan which checked
 //     nothing checked nothing needs no threshold, and leaving it as success
 //     meant an NVD outage read out as "completed, 0 vulnerabilities".
+//
+//   - TRUNCATED RESULT SET (M55). A component whose keyword matched more CVEs
+//     than NVDService's paging budget (5 pages x 200) could fetch makes the
+//     scanner error, so it reaches `errs` and MarkFailed. NVD's own
+//     totalResults is what proves the set is incomplete, so no threshold is
+//     involved. Note what that costs on this path: the CLI treats a failed
+//     scan as "threshold NOT evaluated" and exits 2, so a critical that WAS
+//     fetched no longer produces exit 1. Exit 2 is still non-zero — a CI job
+//     checking for success fails either way — and the alternative is a scan
+//     that provably did not see everything being read as a clean bill of
+//     health. See NVDService.searchByKeyword for the measured distribution
+//     that makes this rare (every versioned component in it fits in one page).
+//     JVN is NOT part of this change; its own truncation is listed below.
+//
 //   - PARTIAL FETCH FAILURE — still success, still open. Some components
 //     answered and some did not, and choosing how many may fail before the
 //     scan is worthless (e.g. "N% failed → error") is a product-policy
 //     decision, not a bug fix. Tracked separately (※要確認).
+//
+//     M55 did NOT take that decision, and did close the observability half of
+//     it: service.NVDScanReport.FetchFailures carries the count out of the
+//     sweep (NVDService.ScanComponentsWithReport), and the sweep summary logs
+//     at WARN rather than INFO whenever it is non-zero. This handler still
+//     consumes only the error bit — ScanTracker has no state between completed
+//     and failed to put a partial count in — so the number is visible to an
+//     operator and to any caller that asks for the report, and not yet to the
+//     CLI.
 //
 // So what "completed" is worth, stated as the weakest true form (Codex M54 R3,
 // Critical — an earlier draft of this paragraph promised "at least one
@@ -618,20 +642,24 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 //     empty keyword — Codex M54 R6, Low. The limitation on what "completed"
 //     means still holds; that example was simply wrong.);
 //   - that every component was checked (partial fetch failure, above);
-//   - that every match for a checked component was seen (the resultsPerPage
-//     truncation, below);
+//   - that every match for a checked component was seen — this is now true of
+//     NVD (M55: a truncated NVD result set makes the scan fail, so a completed
+//     scan did see every NVD match for every component it checked), and is
+//     still false of JVN, whose truncation is listed below;
 //   - that CVE metadata already in the catalogue was refreshed — a CVE NVD has
 //     re-scored is linked but not updated (see NVDService.persistWorkItem).
 //
-// Not closed by any of the above, and reported rather than fixed in M54 —
-// three fetch-COMPLETENESS defects, all of the same shape. Each makes a
-// successful scan mean less than it appears to, and each needs a paging and
-// rate-limit budget rather than a loop, so all three belong in their own
-// change:
+// Reported rather than fixed in M54 — fetch-COMPLETENESS defects, all of the
+// same shape. Each makes a successful scan mean less than it appears to, and
+// each needs a paging and rate-limit budget rather than a loop, so each belongs
+// in its own change. The first is now done; the JVN ones are not:
 //
-//   - NVDService.searchByKeyword asks NVD for resultsPerPage=20 and never
-//     follows `totalResults` / `startIndex`, so a component matching more than
-//     20 CVEs is truncated to the first 20 (Codex M54 R2, Critical).
+//   - NVDService.searchByKeyword asked NVD for resultsPerPage=20 and never
+//     followed `totalResults` / `startIndex`, so a component matching more than
+//     20 CVEs was truncated to the first 20 (Codex M54 R2, Critical).
+//     FIXED in M55: 200 per page, up to 5 pages, and anything past that budget
+//     is reported as a scan failure rather than returned as if it were the
+//     whole match set. See the TRUNCATED RESULT SET entry above.
 //   - JVNService.searchByKeyword sends no date range, and MyJVN defaults to
 //     the PAST WEEK — so JVN results cover seven days, not history (R9,
 //     Critical).
@@ -647,8 +675,9 @@ func mapDecisionToStatus(d *diff_webhook.FireDecision) string {
 // Paging any of them naively multiplies a scan's rate-limited request count by
 // the match cardinality; the JVN pair in particular must be decided together,
 // because removing the date default without paging makes the truncation worse.
-// The honest reading of a completed scan today is therefore "the first N
-// matches per component, from the window each API defaults to".
+// The honest reading of a completed scan today is therefore "every NVD match
+// per component, and the first N JVN matches from the window MyJVN defaults
+// to".
 func (h *SbomHandler) runScan(ctx context.Context, sbomID, tenantID uuid.UUID) {
 	var errs []string
 
