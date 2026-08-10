@@ -641,6 +641,67 @@ func TestM55CVEMetadata_MissingWatermarkIsPinnedWhenAWriteFails(t *testing.T) {
 	}
 }
 
+// TestM55CVEMetadata_RetryAnchorSurvivesAFailureLaterInTheRun (Codex M55 R6,
+// High).
+//
+// Pinning the invented anchor after the per-tenant match phase left a window:
+// tenant enumeration returns an error, Run returns before the watermark write,
+// and the hold it had already decided on was never written down. The next tick
+// invents a newer 24h window and the records this one failed on are gone.
+//
+// The later failure is produced by dropping the `tenants` table's visibility
+// out from under the enumeration — a real error shape (a permissions or
+// migration accident), and one that lands exactly between the two points.
+func TestM55CVEMetadata_RetryAnchorSurvivesAFailureLaterInTheRun(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m55ProtectRetryMarker(t, migDB)
+	m55ProtectSetting(t, migDB, "cve_sync_last_run")
+	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = 'cve_sync_last_run'`); err != nil {
+		t.Fatalf("clear watermark: %v", err)
+	}
+
+	// Make the tenant enumeration fail for the app role, and put it back.
+	if _, err := migDB.Exec(`REVOKE SELECT ON tenants FROM sbomhub_app`); err != nil {
+		t.Skipf("cannot revoke SELECT on tenants (%v) - skipping", err)
+	}
+	t.Cleanup(func() {
+		if _, err := migDB.Exec(`GRANT SELECT ON tenants TO sbomhub_app`); err != nil {
+			t.Errorf("restore SELECT on tenants: %v", err)
+		}
+	})
+
+	cveID := m55CVEID(t)
+	m55SeedLegacy(t, migDB, cveID, "NVD")
+
+	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	body := m55Feed(cveID, oversized, 9.8, "write will be refused",
+		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, srv.URL, false)
+	// The run is EXPECTED to fail here — the point is what it left behind.
+	_ = j.Run(context.Background())
+
+	var raw string
+	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&raw); err != nil {
+		t.Fatalf("no retry anchor was written (%v): the run decided to hold the watermark and then returned "+
+			"through an error path before recording it, so the next tick invents a newer window and the failed "+
+			"CVE is dropped for good", err)
+	}
+	got, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		t.Fatalf("stored anchor %q does not parse: %v", raw, perr)
+	}
+	if !got.Before(time.Now().UTC().Add(-12 * time.Hour)) {
+		t.Errorf("stored anchor = %s, want this run's window start (~24h ago)", got.UTC())
+	}
+}
+
 // TestM55CVEMetadata_FutureWatermarkIsIgnored: a stored watermark in the
 // future is corrupt (a clock jump, an operator edit, a restored backup). Used
 // as-is it makes the retained window NEGATIVE, which compares as "well inside

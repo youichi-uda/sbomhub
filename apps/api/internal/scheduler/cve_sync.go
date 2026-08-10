@@ -538,6 +538,26 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 				"error", err)
 			return fmt.Errorf("cve_sync: catalogue writes failed and the retry marker could not be persisted: %w", err)
 		}
+		// Pin the anchor HERE, with the decision, not after the match phase
+		// (Codex M55 R6, High). Everything between this point and the
+		// watermark write can return early — tenant enumeration is one
+		// statement away and returns an error — and on those paths a hold that
+		// was never written down is not a hold at all: the next tick invents a
+		// newer 24h window and the records this one failed on drop out of it
+		// for good. "Nothing to hold" applies only when the value was invented
+		// rather than read; a stored watermark is held by leaving it alone.
+		if !watermarkIsStored {
+			if err := j.updateLastSyncTime(ctx, lastSync); err != nil {
+				// A FAILED tick, not a log line (Codex M55 R4, Medium):
+				// without a durable anchor the hold did not happen, which is
+				// exactly the silent loss it exists to prevent.
+				slog.Error("CVE sync: could not persist the retry anchor; the failed CVEs may fall outside the next window",
+					"anchor", lastSync.Format(time.RFC3339), "error", err)
+				return fmt.Errorf("cve_sync: catalogue writes failed and the retry anchor could not be persisted: %w", err)
+			}
+			slog.Warn("CVE sync: no stored watermark to hold; pinned this run's window start as the retry anchor",
+				"anchor", lastSync.Format(time.RFC3339))
+		}
 		slog.Error("CVE sync: some catalogue writes failed; holding the sync watermark so the window is retried next tick",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
 			"cves_fetched", len(cves), "retrying_for", retryAge.String())
@@ -584,34 +604,14 @@ func (j *CVESyncJob) Run(ctx context.Context) error {
 	// Update last sync time — unless a catalogue write failed inside the
 	// bounded retry window, in which case holding it is what buys the retry
 	// (see above).
-	switch {
-	case holdWatermark && watermarkIsStored:
-		slog.Warn("CVE sync: sync watermark held at its previous value because catalogue writes failed",
+	// The hold itself was already made durable at the point the decision was
+	// taken; all that is left here is to not overwrite it.
+	if holdWatermark {
+		slog.Warn("CVE sync: sync watermark held because catalogue writes failed",
 			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
 			"held_since", lastSync.Format(time.RFC3339))
-	case holdWatermark:
-		// Nothing to hold: this run's window start was invented, not read. Pin
-		// it so the retry actually covers the same records next tick and so
-		// the retained window can grow towards the abandonment bound instead
-		// of resetting to 24h every run (Codex M55 R3, High).
-		if err := j.updateLastSyncTime(ctx, lastSync); err != nil {
-			// Reported as a FAILED tick, not logged and forgotten (Codex M55
-			// R4, Medium). Without a durable anchor the "hold" did not happen:
-			// the next tick invents a newer fallback and the records this one
-			// failed on fall out of the window for good. That is exactly the
-			// silent loss the hold exists to prevent, so it must not be
-			// reported as an ordinary completed run.
-			slog.Error("CVE sync: could not persist the retry anchor; the failed CVEs may fall outside the next window",
-				"anchor", lastSync.Format(time.RFC3339), "error", err)
-			return fmt.Errorf("cve_sync: catalogue writes failed and the retry anchor could not be persisted: %w", err)
-		}
-		slog.Warn("CVE sync: no stored watermark to hold; pinned this run's window start as the retry anchor",
-			"refresh_failures", refreshFailures, "upsert_failures", upsertFailures,
-			"anchor", lastSync.Format(time.RFC3339))
-	default:
-		if err := j.updateLastSyncTime(ctx, startTime); err != nil {
-			slog.Warn("failed to update last sync time", "error", err)
-		}
+	} else if err := j.updateLastSyncTime(ctx, startTime); err != nil {
+		slog.Warn("failed to update last sync time", "error", err)
 	}
 
 	duration := time.Since(startTime)
