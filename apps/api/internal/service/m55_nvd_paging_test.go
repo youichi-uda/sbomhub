@@ -729,6 +729,11 @@ func TestM55NVDCacheName_CannotBeSteeredByAComponentName(t *testing.T) {
 	//    name and can therefore land on any key at all — see the mixed-version
 	//    limitation on nvdCacheName. That residual is not testable here because
 	//    it is not a property of this function.
+	//
+	//    The last pair is the Codex M55 R6 (Medium) case: a separator-joined
+	//    digest input is ambiguous whenever the separator can occur INSIDE a
+	//    field, and SBOM component names and versions are arbitrary strings.
+	//    The first cut joined with \x1f and collided on exactly this pair.
 	pairs := [][2]string{
 		{"a:b", ""},
 		{"a", "b"},
@@ -736,6 +741,8 @@ func TestM55NVDCacheName_CannotBeSteeredByAComponentName(t *testing.T) {
 		{nvdCacheSchema + "openssl", "1.0"},
 		{"", "openssl:1.0"},
 		{"openssl:1.0", ""},
+		{"a\x1fb", "c"},
+		{"a", "b\x1fc"},
 	}
 	seen := make(map[string][2]string, len(pairs))
 	for _, p := range pairs {

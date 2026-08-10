@@ -919,8 +919,18 @@ const nvdCacheSchema = "m55."
 //
 // Hashing the pair fixes that and a pre-existing ambiguity with it: the legacy
 // scheme cannot tell `("a:b", "")` from `("a", "b")`, because it joins name and
-// version with a colon and neither is escaped. The digest covers both fields
-// separated by a byte that ends neither of them.
+// version with a colon and neither is escaped.
+//
+// The digest input is LENGTH-PREFIXED rather than separator-joined, which is
+// what makes it injective. A separator only works if it cannot occur inside
+// either field, and component names and versions are arbitrary strings from an
+// uploaded SBOM — the first cut joined them with \x1f and inherited exactly the
+// ambiguity it was meant to remove: `("a\x1fb", "c")` and `("a", "b\x1fc")`
+// produce the same joined string, so two different components would share one
+// cached result and one of them could be served an empty answer with no HTTP
+// request at all (Codex M55 R6, Medium). `<len(name)>:<name><version>` has no
+// such pair: the digits before the first colon are the name length, and they
+// determine where the name ends whatever either field contains.
 //
 // # What this closes, and what it does NOT (Codex M55 R4, High)
 //
@@ -951,7 +961,7 @@ const nvdCacheSchema = "m55."
 // which is a one-line change in internal/cache, outside this wave's file scope.
 // Reported upward rather than left as a comment that overclaims.
 func nvdCacheName(name, version string) string {
-	sum := sha256.Sum256([]byte(name + "\x1f" + version))
+	sum := sha256.Sum256([]byte(strconv.Itoa(len(name)) + ":" + name + version))
 	return nvdCacheSchema + hex.EncodeToString(sum[:])
 }
 
