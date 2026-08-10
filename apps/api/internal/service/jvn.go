@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -126,9 +127,13 @@ func NewJVNService(vulnRepo *repository.VulnerabilityRepository, componentRepo *
 // advisories". The URIs are the ones in the schemaLocation the live feed
 // declares (jvnrss_3.2, mod_sec_3.0, status_3.3).
 type JVNRSSFeed struct {
-	XMLName xml.Name   `xml:"http://www.w3.org/1999/02/22-rdf-syntax-ns# RDF"`
-	Channel JVNChannel `xml:"http://purl.org/rss/1.0/ channel"`
-	Items   []JVNItem  `xml:"http://purl.org/rss/1.0/ item"`
+	XMLName xml.Name `xml:"http://www.w3.org/1999/02/22-rdf-syntax-ns# RDF"`
+	// Channel is a POINTER so its absence is detectable. A body carrying
+	// only a Status element is not a JVNRSS feed, and accepting one meant a
+	// document with no feed content at all could assert "this component has
+	// no advisories" (Codex M55 R5, High).
+	Channel *JVNChannel `xml:"http://purl.org/rss/1.0/ channel"`
+	Items   []JVNItem   `xml:"http://purl.org/rss/1.0/ item"`
 	// Status is MyJVN's application-level result, and it was not modelled at
 	// all until M54 (Codex R9, Critical). MyJVN reports failures — bad
 	// parameters, service trouble — through retCd on this element, commonly
@@ -182,8 +187,13 @@ type JVNStatus struct {
 
 // attr returns the value of an UNPREFIXED attribute, or "" when it is absent.
 // A namespaced attribute of the same local name is not this attribute.
-func (st JVNStatus) attr(name string) string {
-	for _, a := range st.Attrs {
+func (st JVNStatus) attr(name string) string { return jvnAttr(st.Attrs, name) }
+
+// jvnAttr is the empty-namespace attribute lookup every MyJVN element needs.
+// See the note on JVNStatus for why encoding/xml's own attribute tags cannot
+// express this.
+func jvnAttr(attrs []xml.Attr, name string) string {
+	for _, a := range attrs {
 		if a.Name.Space == "" && a.Name.Local == name {
 			return a.Value
 		}
@@ -208,12 +218,22 @@ type JVNItem struct {
 	Modified    string    `xml:"http://purl.org/dc/terms/ modified"`
 }
 
+// JVNRef is a <sec:references> element. Its attributes are read through
+// jvnAttr for the same reason JVNStatus's are (Codex M55 R5, High): a plain
+// `xml:"id,attr"` tag matches the local name in ANY namespace, so a forged
+// evil:id would have supplied the CVE this advisory is filed under.
 type JVNRef struct {
-	ID     string `xml:"id,attr"`
-	Source string `xml:"source,attr"`
-	Title  string `xml:",chardata"`
+	Attrs []xml.Attr `xml:",any,attr"`
+	Title string     `xml:",chardata"`
 }
 
+func (r JVNRef) ID() string     { return jvnAttr(r.Attrs, "id") }
+func (r JVNRef) Source() string { return jvnAttr(r.Attrs, "source") }
+
+// JVNCPE is decoded and not read by anything. Its attributes are left with
+// plain tags deliberately: nothing downstream consumes them, so there is no
+// decision for a forged one to influence. If a caller ever starts reading them,
+// they need jvnAttr like the rest.
 type JVNCPE struct {
 	Version string `xml:"version,attr"`
 	Vendor  string `xml:"vendor,attr"`
@@ -221,13 +241,16 @@ type JVNCPE struct {
 	Value   string `xml:",chardata"`
 }
 
+// JVNCVSS is a <sec:cvss> element. Namespace-aware for the same reason as
+// JVNRef: a forged evil:severity / evil:score would otherwise decide what a
+// severity-gated CI check sees.
 type JVNCVSS struct {
-	Version  string `xml:"version,attr"`
-	Type     string `xml:"type,attr"`
-	Severity string `xml:"severity,attr"`
-	Score    string `xml:"score,attr"`
-	Vector   string `xml:"vector,attr"`
+	Attrs []xml.Attr `xml:",any,attr"`
 }
+
+func (c JVNCVSS) Version() string  { return jvnAttr(c.Attrs, "version") }
+func (c JVNCVSS) Severity() string { return jvnAttr(c.Attrs, "severity") }
+func (c JVNCVSS) Score() string    { return jvnAttr(c.Attrs, "score") }
 
 // JVNScanReport is what one ScanComponents sweep did, as counts.
 //
@@ -794,6 +817,17 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 		return nil, err
 	}
 
+	// A success response is JVNRSS + Status, and JVNRSS always carries a
+	// <channel> (Codex M55 R5, High). Without this, a body holding nothing
+	// but a well-formed zero-count Status — no channel, no entries, no feed
+	// at all — was accepted as an authoritative "this component has no
+	// advisories", with Retrieved=0 / Truncated=false and nothing downstream
+	// able to tell it apart from a real empty answer.
+	if feed.Channel == nil {
+		return nil, fmt.Errorf("JVN response has no channel element; the body carries a status " +
+			"but is not a JVNRSS feed")
+	}
+
 	totalRes, err := jvnCount(feed.Status.attr("totalRes"), "totalRes")
 	if err != nil {
 		return nil, err
@@ -867,10 +901,7 @@ func (s *JVNService) parseJVNPage(data []byte, req jvnPageRequest) (*jvnPage, er
 		if id := jvnItemIdentity(item); id != "" {
 			page.advisoryIDs = append(page.advisoryIDs, jvnAdvisoryKey(item, id))
 		}
-		vuln := s.convertJVNItemToVulnerability(item)
-		if vuln != nil {
-			page.vulns = append(page.vulns, *vuln)
-		}
+		page.vulns = append(page.vulns, s.convertJVNItemToVulnerabilities(item)...)
 	}
 
 	return page, nil
@@ -1044,6 +1075,28 @@ func jvnCount(raw, name string) (int, error) {
 	return n, nil
 }
 
+// convertJVNItemToVulnerabilities turns one advisory into one row PER CVE it
+// names. See jvnItemCVEIDs.
+func (s *JVNService) convertJVNItemToVulnerabilities(item JVNItem) []model.Vulnerability {
+	ids := jvnItemCVEIDs(item)
+	if len(ids) == 0 {
+		slog.Warn("dropping JVN item with no CVE reference and no identifier",
+			"title", item.Title, "link", item.Link)
+		return nil
+	}
+	base := s.convertJVNItemToVulnerability(item)
+	if base == nil {
+		return nil
+	}
+	out := make([]model.Vulnerability, 0, len(ids))
+	for _, id := range ids {
+		v := *base
+		v.CVEID = id
+		out = append(out, v)
+	}
+	return out
+}
+
 func (s *JVNService) convertJVNItemToVulnerability(item JVNItem) *model.Vulnerability {
 	// Extract CVE ID from references or identifier.
 	//
@@ -1130,19 +1183,24 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 		var best *float64
 		var severity string
 		for _, e := range entries {
-			if !want(strings.TrimSpace(e.Version)) {
+			if !want(strings.TrimSpace(e.Version())) {
 				continue
 			}
-			score, err := strconv.ParseFloat(strings.TrimSpace(e.Score), 64)
-			if err != nil {
-				slog.Warn("ignoring JVN CVSS entry with an unparseable score",
-					"version", e.Version, "score", e.Score)
+			score, err := strconv.ParseFloat(strings.TrimSpace(e.Score()), 64)
+			if err != nil || !jvnScoreIsSane(score) {
+				// NaN in particular is not merely useless: ParseFloat
+				// accepts it, and every later comparison against it is
+				// false, so one NaN entry would pin the result and keep a
+				// legitimate Critical from ever winning (Codex M55 R5,
+				// High).
+				slog.Warn("ignoring JVN CVSS entry with an unusable score",
+					"version", e.Version(), "score", e.Score())
 				continue
 			}
 			if best == nil || score > *best {
 				s := score
 				best = &s
-				severity = mapCVSSSeverity(e.Severity)
+				severity = jvnReconcileSeverity(e.Version(), e.Severity(), score)
 			}
 		}
 		return best, severity
@@ -1152,6 +1210,98 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 		return score, severity
 	}
 	return pick(func(v string) bool { return !strings.HasPrefix(v, "3.") })
+}
+
+// jvnItemCVEIDs returns EVERY CVE this advisory is filed under, canonicalised
+// and de-duplicated, or the JVNDB id when it names none.
+//
+// M55 (Codex R5, High): a JVN advisory routinely covers several CVEs, and only
+// the first was kept. Measured against the live API on 2026-08-11,
+// JVNDB-2026-000019 carries four — CVE-2026-20704 / -22550 / -24449 / -24465 —
+// so three of the four vulnerabilities it reports were dropped, while the
+// advisory still counted as retrieved and the component was reported complete.
+//
+// Every CVE of the advisory inherits the advisory's CVSS. That is the shape of
+// the data, not a shortcut: the MyJVN FAQ (Q2-3) states that an advisory
+// covering several CVEs publishes the assessment of the MOST severe of them, so
+// the shared score can overstate a milder sibling. Overstating severity is the
+// safe direction for a security gate; dropping the CVE entirely, which is what
+// happened before, is not.
+func jvnItemCVEIDs(item JVNItem) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, ref := range item.References {
+		id := strings.TrimSpace(ref.ID())
+		if !strings.HasPrefix(strings.ToUpper(id), "CVE-") {
+			continue
+		}
+		canonical, err := validation.ValidateCVEID(id)
+		if err != nil {
+			slog.Warn("dropping malformed CVE reference on a JVN advisory",
+				"advisory", item.Identifier, "reference", id)
+			continue
+		}
+		if _, dup := seen[canonical]; dup {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	if len(out) > 0 {
+		return out
+	}
+	// An advisory with a CVE-shaped identifier, or none at all, keeps the
+	// single-identity behaviour.
+	if id := jvnItemIdentity(item); id != "" {
+		return []string{id}
+	}
+	return nil
+}
+
+// jvnScoreIsSane rejects the values a CVSS base score cannot take. NaN and the
+// infinities parse happily and then poison every comparison they take part in;
+// a score outside 0..10 is not a CVSS base score at all.
+func jvnScoreIsSane(score float64) bool {
+	return !math.IsNaN(score) && !math.IsInf(score, 0) && score >= 0 && score <= 10
+}
+
+// jvnReconcileSeverity returns the MORE severe of the label an advisory states
+// and the band its own score falls in (Codex M55 R5, High).
+//
+// `severity="Low" score="9.8"` is internally impossible, and taking the label
+// stored it as LOW — letting a critical-only gate pass on an entry that says
+// 9.8. Taking the harsher reading is the safe direction when a response
+// contradicts itself.
+//
+// The band is only applied to CVSS v3, whose qualitative ratings are defined by
+// the score. CVSS v2 has no CRITICAL band, so deriving one from a v2 score
+// would invent a rating the scale does not have.
+func jvnReconcileSeverity(version, label string, score float64) string {
+	stated := mapCVSSSeverity(label)
+	if !strings.HasPrefix(strings.TrimSpace(version), "3.") {
+		return stated
+	}
+	banded := jvnScoreBand(score)
+	if jvnSeverityRank[banded] > jvnSeverityRank[stated] {
+		return banded
+	}
+	return stated
+}
+
+// jvnScoreBand is the CVSS v3 qualitative rating scale.
+func jvnScoreBand(score float64) string {
+	switch {
+	case score >= 9.0:
+		return "CRITICAL"
+	case score >= 7.0:
+		return "HIGH"
+	case score >= 4.0:
+		return "MEDIUM"
+	case score > 0:
+		return "LOW"
+	default:
+		return "NONE"
+	}
 }
 
 // extractJVNCVEID finds the CVE this advisory is about, if it names one.
@@ -1167,8 +1317,8 @@ func jvnWorstCVSS(entries []JVNCVSS) (*float64, string) {
 // only a candidate.
 func extractJVNCVEID(item JVNItem) string {
 	for _, ref := range item.References {
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ref.ID)), "CVE-") {
-			return ref.ID
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ref.ID())), "CVE-") {
+			return ref.ID()
 		}
 	}
 	// Check in identifier

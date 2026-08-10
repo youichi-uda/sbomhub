@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -93,6 +94,17 @@ type cannedJVNStatus struct {
 	RangeDateFirstPublished string
 }
 
+// rawQueryParam returns a parameter's value as it literally appears in the
+// query string, undecoded.
+func rawQueryParam(rawQuery, name string) string {
+	for _, kv := range strings.Split(rawQuery, "&") {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == name {
+			return v
+		}
+	}
+	return ""
+}
+
 // echoOf builds the Status request echo for a query, the way MyJVN does.
 func echoOf(q url.Values) cannedJVNStatus {
 	def := func(name, fallback string) string {
@@ -112,6 +124,25 @@ func echoOf(q url.Values) cannedJVNStatus {
 		RangeDatePublished:      def("rangeDatePublished", "w"),
 		RangeDateFirstPublished: def("rangeDateFirstPublished", "w"),
 	}
+}
+
+// jvnTestCVSS builds a <sec:cvss> element the way the wire carries it —
+// unprefixed attributes — now that JVNCVSS reads them namespace-aware.
+func jvnTestCVSS(version, severity, score string) JVNCVSS {
+	return JVNCVSS{Attrs: []xml.Attr{
+		{Name: xml.Name{Local: "version"}, Value: version},
+		{Name: xml.Name{Local: "type"}, Value: "Base"},
+		{Name: xml.Name{Local: "severity"}, Value: severity},
+		{Name: xml.Name{Local: "score"}, Value: score},
+	}}
+}
+
+// jvnTestRef builds a <sec:references> element with unprefixed attributes.
+func jvnTestRef(source, id string) JVNRef {
+	return JVNRef{Attrs: []xml.Attr{
+		{Name: xml.Name{Local: "source"}, Value: source},
+		{Name: xml.Name{Local: "id"}, Value: id},
+	}}
 }
 
 // jvnTestPageReq is the request shape the hand-written fixtures answer: they
@@ -135,6 +166,12 @@ func (c *cannedMyJVN) start(t *testing.T) *httptest.Server {
 		c.mu.Lock()
 		c.requests = append(c.requests, q)
 		c.mu.Unlock()
+		// MEASURED: MyJVN echoes each parameter exactly as it appeared in
+		// the query string, WITHOUT decoding it — a Japanese component name
+		// comes back percent-encoded. Echoing r.URL.Query()'s decoded value
+		// would have made the fixture kinder than the real API and left the
+		// wire-form branch of the keyword check unexercised.
+		rawKeyword := rawQueryParam(r.URL.RawQuery, "keyword")
 
 		if c.fail != nil {
 			if code := c.fail(q); code != 0 {
@@ -199,6 +236,7 @@ func (c *cannedMyJVN) start(t *testing.T) *httptest.Server {
 		}
 
 		st := echoOf(q)
+		st.Keyword = rawKeyword
 		st.RetCd = "0"
 		st.TotalRes = len(filtered)
 		st.TotalResRet = len(window)
@@ -649,6 +687,29 @@ func TestM55JVN_NonASCIIKeywordEchoIsAccepted(t *testing.T) {
 		t.Error(`the genuine echo for the component "foo+bar" was rejected`)
 	}
 
+	// And the same rule has to hold through the REAL fetch path, not just
+	// in the helper (Codex M55 R5, Low): the canned server echoes the raw
+	// wire form, so a component whose name is not plain ASCII exercises the
+	// branch that production depends on.
+	t.Run("through the fetch path", func(t *testing.T) {
+		now := time.Now()
+		srv := &cannedMyJVN{corpus: cannedCorpus(now, 3, 3), now: now}
+		ts := srv.start(t)
+		svc := NewJVNService(nil, nil, ts.URL, false)
+		svc.requestDelay = 0
+
+		for _, keyword := range []string{"日本語 テスト", "golang.org/x/crypto", "foo+bar", "foo bar"} {
+			res, err := svc.searchKeyword(context.Background(), keyword, nil)
+			if err != nil {
+				t.Errorf("a legitimate answer for %q was rejected: %v", keyword, err)
+				continue
+			}
+			if len(res.Vulns) != 3 {
+				t.Errorf("keyword %q returned %d vulnerabilities, want 3", keyword, len(res.Vulns))
+			}
+		}
+	})
+
 	for _, keyword := range []string{"日本語 テスト", "golang.org/x/crypto", "OpenSSL-Test_1.0"} {
 		t.Run(keyword, func(t *testing.T) {
 			if !jvnKeywordEchoMatches(url.QueryEscape(keyword), keyword) {
@@ -749,7 +810,8 @@ func TestM55JVN_RepeatedEntriesAreNotCountedTwice(t *testing.T) {
 // "this component has no advisories".
 func TestM55JVN_NamespacesAreBound(t *testing.T) {
 	const impostor = `<?xml version="1.0" encoding="UTF-8"?>
-<x:RDF xmlns:x="http://attacker.example/not-rdf" xmlns:y="http://attacker.example/not-status">
+<x:RDF xmlns="http://purl.org/rss/1.0/" xmlns:x="http://attacker.example/not-rdf" xmlns:y="http://attacker.example/not-status">
+  <channel><title>JVNDB</title><description/></channel>
   <y:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
 </x:RDF>`
 
@@ -785,6 +847,10 @@ func TestM55JVN_StatusAttributeNamespaces(t *testing.T) {
 	const tmpl = `<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
  xmlns:status="http://jvndb.jvn.jp/myjvn/Status" xmlns:evil="http://attacker.example/">
+  <channel rdf:about="https://jvndb.jvn.jp/apis/myjvn">
+    <title>JVNDB　脆弱性対策情報</title>
+    <description/>
+  </channel>
   <status:Status %sversion="3.3" %smethod="getVulnOverviewList" %slang="ja" %sretCd="0" retMax="50" errCd="" errMsg="" %stotalRes="0" %stotalResRet="0" %sfirstRes="1" %sfeed="hnd" %skeyword="libfoo" %smaxCountItem="50" %sstartItem="1" %srangeDatePublic="n" %srangeDatePublished="n" %srangeDateFirstPublished="n"/>
 </rdf:RDF>`
 	fill := func(prefix string) string {
@@ -804,6 +870,180 @@ func TestM55JVN_StatusAttributeNamespaces(t *testing.T) {
 	// The same body with unprefixed attributes is a legitimate empty answer.
 	if _, err := svc.parseJVNPage([]byte(fill("")), jvnTestPageReq()); err != nil {
 		t.Fatalf("a genuine unprefixed Status was rejected: %v", err)
+	}
+}
+
+// TestM55JVN_StatusOnlyBodyIsNotAFeed pins that a body carrying nothing but a
+// well-formed zero-count Status is refused (Codex M55 R5, High).
+//
+// A getVulnOverviewList success is JVNRSS + Status, and JVNRSS always carries a
+// <channel>. Accepting a Status-only document meant a body with no feed content
+// whatsoever could assert "this component has no advisories" — Retrieved=0,
+// TotalRes=0, Truncated=false — and be indistinguishable from a real empty
+// answer. The earlier fixtures for this package were themselves Status-only,
+// which is what certified the acceptance.
+func TestM55JVN_StatusOnlyBodyIsNotAFeed(t *testing.T) {
+	const statusOnly = `<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
+  <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
+</rdf:RDF>`
+
+	svc := NewJVNService(nil, nil, "", false)
+	if _, err := svc.parseJVNPage([]byte(statusOnly), jvnTestPageReq()); err == nil {
+		t.Fatal("a body with a status and no feed at all was accepted as an authoritative " +
+			"empty answer")
+	}
+}
+
+// TestM55JVN_MultiCVEAdvisoryYieldsEveryCVE pins that an advisory covering
+// several CVEs contributes all of them (Codex M55 R5, High).
+//
+// Measured on the live API (2026-08-11): JVNDB-2026-000019 carries four CVE
+// references — CVE-2026-20704 / -22550 / -24449 / -24465. Keeping only the
+// first dropped three real vulnerabilities per such advisory while the advisory
+// still counted as retrieved, so the component was reported complete.
+func TestM55JVN_MultiCVEAdvisoryYieldsEveryCVE(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+
+	got := svc.convertJVNItemToVulnerabilities(JVNItem{
+		Identifier: "JVNDB-2026-000019",
+		References: []JVNRef{
+			jvnTestRef("CVE", "CVE-2026-20704"),
+			jvnTestRef("CVE", "CVE-2026-22550"),
+			jvnTestRef("JVN", "JVNVU#92139835"),
+			jvnTestRef("CVE", "cve-2026-24449"),
+			jvnTestRef("CVE", "CVE-2026-24465"),
+			jvnTestRef("CVE", "CVE-2026-20704"), // repeated
+		},
+		CVSS: []JVNCVSS{jvnTestCVSS("3.1", "Critical", "9.8")},
+	})
+
+	var ids []string
+	for _, v := range got {
+		ids = append(ids, v.CVEID)
+		if v.Severity != "CRITICAL" {
+			t.Errorf("%s stored as %s, want the advisory's CRITICAL assessment", v.CVEID, v.Severity)
+		}
+	}
+	want := []string{"CVE-2026-20704", "CVE-2026-22550", "CVE-2026-24449", "CVE-2026-24465"}
+	if len(ids) != len(want) {
+		t.Fatalf("got %v, want all four CVEs %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Errorf("CVE[%d] = %q, want %q (canonicalised, de-duplicated, order preserved)",
+				i, ids[i], want[i])
+		}
+	}
+
+	// An advisory naming no CVE is still keyed by its JVNDB id.
+	got = svc.convertJVNItemToVulnerabilities(JVNItem{Identifier: "JVNDB-2024-000123"})
+	if len(got) != 1 || got[0].CVEID != "JVNDB-2024-000123" {
+		t.Errorf("advisory with no CVE gave %v, want one row keyed by its JVNDB id", got)
+	}
+
+	// No identity at all is still dropped.
+	if got = svc.convertJVNItemToVulnerabilities(JVNItem{Title: "nothing"}); len(got) != 0 {
+		t.Errorf("an item with no identity produced %v, want nothing", got)
+	}
+}
+
+// TestM55JVN_ImpossibleCVSSValuesAreRefused pins the score sanity checks
+// (Codex M55 R5, High).
+func TestM55JVN_ImpossibleCVSSValuesAreRefused(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+
+	// NaN parses, and every later comparison against it is false — one NaN
+	// entry would otherwise pin the result and keep a Critical from winning.
+	got := svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000001",
+		CVSS: []JVNCVSS{
+			jvnTestCVSS("3.1", "Critical", "NaN"),
+			jvnTestCVSS("3.1", "Critical", "9.8"),
+		},
+	})
+	if got == nil || got.CVSSScore == nil || *got.CVSSScore != 9.8 {
+		t.Errorf("stored %v, want 9.8 — a NaN score blocked the real one", got)
+	}
+
+	// Out of range is not a CVSS base score.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000002",
+		CVSS: []JVNCVSS{
+			jvnTestCVSS("3.1", "Critical", "1000"),
+			jvnTestCVSS("3.1", "High", "7.5"),
+		},
+	})
+	if got == nil || got.CVSSScore == nil || *got.CVSSScore != 7.5 {
+		t.Errorf("stored %v, want 7.5 — an out-of-range score was accepted", got)
+	}
+
+	// A label that contradicts its own score is read at the harsher of the
+	// two: severity="Low" score="9.8" must not be stored as LOW.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000003",
+		CVSS:       []JVNCVSS{jvnTestCVSS("3.1", "Low", "9.8")},
+	})
+	if got == nil || got.Severity != "CRITICAL" {
+		t.Errorf("stored %v, want CRITICAL — a LOW label on a 9.8 score was taken at face value", got)
+	}
+
+	// A v2 score does not gain a CRITICAL band that the v2 scale lacks.
+	got = svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000004",
+		CVSS:       []JVNCVSS{jvnTestCVSS("2.0", "High", "10.0")},
+	})
+	if got == nil || got.Severity != "HIGH" {
+		t.Errorf("stored %v, want HIGH — a v2 score was given a v3 CRITICAL band", got)
+	}
+}
+
+// TestM55JVN_RefAndCVSSAttributeNamespaces pins that an advisory's identity and
+// its severity are read from unprefixed attributes only (Codex M55 R5, High).
+//
+// This is the same encoding/xml trap already closed on Status, one element
+// deeper: `xml:"id,attr"` on <sec:references> and `xml:"score,attr"` on
+// <sec:cvss> matched a forged evil:id / evil:score, so an attacker-chosen CVE
+// and a lowered assessment were stored while the advisory still counted as
+// retrieved.
+func TestM55JVN_RefAndCVSSAttributeNamespaces(t *testing.T) {
+	svc := NewJVNService(nil, nil, "", false)
+	ns := func(space, local, value string) xml.Attr {
+		return xml.Attr{Name: xml.Name{Space: space, Local: local}, Value: value}
+	}
+
+	// A reference whose id lives in a foreign namespace names no CVE, so the
+	// advisory falls back to its JVNDB id rather than adopting the forgery.
+	got := svc.convertJVNItemToVulnerabilities(JVNItem{
+		Identifier: "JVNDB-2024-000001",
+		References: []JVNRef{{Attrs: []xml.Attr{
+			ns("", "source", "CVE"),
+			ns("http://attacker.example/", "id", "CVE-1999-0001"),
+		}}},
+	})
+	if len(got) != 1 || got[0].CVEID != "JVNDB-2024-000001" {
+		t.Errorf("got %v, want the advisory keyed by its own JVNDB id — a namespaced evil:id "+
+			"supplied the CVE this advisory is filed under", got)
+	}
+
+	// A CVSS element whose score and severity live in a foreign namespace
+	// carries no assessment at all, so the advisory stays unrated instead of
+	// being lowered to the forged one.
+	one := svc.convertJVNItemToVulnerability(JVNItem{
+		Identifier: "JVNDB-2024-000002",
+		CVSS: []JVNCVSS{{Attrs: []xml.Attr{
+			ns("", "version", "3.1"),
+			ns("http://attacker.example/", "severity", "Low"),
+			ns("http://attacker.example/", "score", "0.1"),
+		}}},
+	})
+	if one == nil {
+		t.Fatal("item was dropped")
+	}
+	if one.CVSSScore != nil || one.Severity != "UNKNOWN" {
+		t.Errorf("stored %s/%v, want UNKNOWN/nil — namespaced evil:score decided the severity",
+			one.Severity, one.CVSSScore)
 	}
 }
 
@@ -958,8 +1198,8 @@ func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
 	got := svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000001",
 		CVSS: []JVNCVSS{
-			{Version: "3.0", Type: "Base", Severity: "Low", Score: "3.1"},
-			{Version: "3.1", Type: "Base", Severity: "Critical", Score: "9.8"},
+			jvnTestCVSS("3.0", "Low", "3.1"),
+			jvnTestCVSS("3.1", "Critical", "9.8"),
 		},
 	})
 	if got == nil {
@@ -974,8 +1214,8 @@ func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
 	got = svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000002",
 		CVSS: []JVNCVSS{
-			{Version: "3.1", Type: "Base", Severity: "Critical", Score: "n/a"},
-			{Version: "3.1", Type: "Base", Severity: "High", Score: "7.5"},
+			jvnTestCVSS("3.1", "Critical", "n/a"),
+			jvnTestCVSS("3.1", "High", "7.5"),
 		},
 	})
 	if got == nil {
@@ -990,8 +1230,8 @@ func TestM55JVN_WorstCVSSIsStored(t *testing.T) {
 	got = svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000003",
 		CVSS: []JVNCVSS{
-			{Version: "2.0", Type: "Base", Severity: "High", Score: "10.0"},
-			{Version: "3.1", Type: "Base", Severity: "Critical", Score: "9.8"},
+			jvnTestCVSS("2.0", "High", "10.0"),
+			jvnTestCVSS("3.1", "Critical", "9.8"),
 		},
 	})
 	if got == nil {

@@ -186,7 +186,8 @@ func TestM54JVN_ApplicationErrorIsNotZeroResults(t *testing.T) {
 			// element itself.
 			name: "retCd=0 with no matches is a legitimate empty answer",
 			body: `<?xml version="1.0" encoding="UTF-8"?>
-<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:status="http://jvndb.jvn.jp/myjvn/Status">
+  <channel rdf:about="https://jvndb.jvn.jp/apis/myjvn"><title>JVNDB</title><description/></channel>
   <status:Status version="3.3" method="getVulnOverviewList" lang="ja" retCd="0" retMax="50" errCd="" errMsg="" totalRes="0" totalResRet="0" firstRes="1" feed="hnd" keyword="libfoo" maxCountItem="50" startItem="1" rangeDatePublic="n" rangeDatePublished="n" rangeDateFirstPublished="n"/>
 </rdf:RDF>`,
 			wantErr: false,
@@ -236,7 +237,7 @@ func TestM54JVN_ItemWithoutAnyIdentityIsDropped(t *testing.T) {
 	// A CVE reference is canonicalised, for the same uniqueness reason as NVD.
 	got = svc.convertJVNItemToVulnerability(JVNItem{
 		Identifier: "JVNDB-2024-000124",
-		References: []JVNRef{{ID: "cve-2021-44228", Source: "CVE"}},
+		References: []JVNRef{jvnTestRef("CVE", "cve-2021-44228")},
 	})
 	if got == nil {
 		t.Fatal("an advisory with a CVE reference must be kept")
