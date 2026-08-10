@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,7 +54,9 @@ const (
 	nvdPageSize = 200
 
 	// nvdMaxPagesPerComponent bounds how many pages ONE component may spend.
-	// 5 pages x 200 = 1000 matches per component.
+	// 5 pages reach offset 996: nvdPageSize on the first page and
+	// nvdPageSize-1 on each of the rest, because every follow-up page spends
+	// its first record on the boundary anchor (see nvdSearchResult.shifted).
 	//
 	// This is a deliberate budget, not a belief that 1000 is enough for
 	// everything — see searchByKeyword for why "fetch everything" is the wrong
@@ -892,29 +896,50 @@ type nvdLookup struct {
 // instance is still writing into the same Redis — a component with 563 matches
 // would be served its stale 20-record prefix as a complete cache hit: no HTTP
 // request, no page walk, no truncation, and no way for anything downstream to
-// tell. The fix that this wave shipped (do not CACHE a truncated result) does
+// tell. The fix this wave shipped (do not CACHE a truncated result) does
 // nothing about entries that are already there.
 //
 // Changing the key namespace makes every pre-M55 entry a miss, so the first
 // scan after the upgrade re-walks and re-decides. The orphaned old keys expire
 // on their own 24h TTL (cache.NVDCacheTTL) and cost nothing but Redis memory
 // until then.
-//
-// It is applied to the component NAME rather than to cache.NVDCachePrefix
-// because the prefix belongs to the cache package, and every scanner-side
-// caller of Get / Set / Delete goes through nvdCacheName, so the two cannot
-// drift.
-const nvdCacheSchema = "m55/"
+const nvdCacheSchema = "m55."
 
-// nvdCacheName is the namespaced component name used for every cache
-// operation. See nvdCacheSchema.
-func nvdCacheName(name string) string { return nvdCacheSchema + name }
+// nvdCacheName is the cache identity for one (name, version) pair.
+//
+// # Why it hashes rather than prefixes (Codex M55 R2, High)
+//
+// The first cut passed `"m55/" + name` to cache.NVDCache, which builds its key
+// as `nvd:vuln:<name>[:<version>]`. Component names come from uploaded SBOMs
+// and are arbitrary strings, so that namespace is not disjoint from the legacy
+// one at all: a pre-M55 entry for a component literally named `m55/openssl`
+// occupies exactly the key this build computes for `openssl`, and the stale
+// 20-record prefix is served as a complete answer for the wrong component.
+// Prefixing an attacker- (or merely user-) controlled field is not namespacing.
+//
+// Hashing the pair fixes that and a pre-existing ambiguity with it: the legacy
+// scheme cannot tell `("a:b", "")` from `("a", "b")`, because it joins name and
+// version with a colon and neither is escaped. The digest covers both fields
+// separated by a byte that ends neither of them.
+//
+// The residual is stated rather than hidden: the key space is flat and shared
+// with a package this scanner does not own, so no encoding can be PROVEN
+// disjoint from a legacy key derived from an arbitrary name. What is left is a
+// preimage — a pre-M55 entry for a component named exactly
+// `m55.<64 lowercase hex digits>` with no version, or named `m55` with such a
+// string as its version. That is not a plausible component name, and unlike the
+// prefix form it cannot be produced by simply choosing a name with a known
+// prefix.
+func nvdCacheName(name, version string) string {
+	sum := sha256.Sum256([]byte(name + "\x1f" + version))
+	return nvdCacheSchema + hex.EncodeToString(sum[:])
+}
 
 // getVulnerabilitiesWithCache tries cache first, falls back to API.
 func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, version string, pace nvdPacer) (nvdLookup, error) {
 	// Try cache first
 	if s.cache != nil {
-		entry, err := s.cache.Get(ctx, nvdCacheName(name), version)
+		entry, err := s.cache.Get(ctx, nvdCacheName(name, version), "")
 		if err != nil {
 			slog.Debug("cache get error", "component", name, "error", err)
 		} else if entry != nil {
@@ -974,7 +999,11 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 	// Cache miss - call API
 	res, err := s.searchByKeyword(ctx, name, version, pace)
 	if err != nil {
-		return nvdLookup{}, err
+		// The requests the failed walk already spent are still charged against
+		// NVD's rate limit, so they are still reported (Codex M55 R2, Low —
+		// the R1 fix propagated them out of searchByKeyword and this wrapper
+		// then threw them away again).
+		return nvdLookup{requests: res.pages}, err
 	}
 	vulns := res.vulns
 
@@ -1003,7 +1032,7 @@ func (s *NVDService) getVulnerabilitiesWithCache(ctx context.Context, name, vers
 				PublishedAt: v.PublishedAt,
 			}
 		}
-		if err := s.cache.Set(ctx, nvdCacheName(name), version, cachedVulns); err != nil {
+		if err := s.cache.Set(ctx, nvdCacheName(name, version), "", cachedVulns); err != nil {
 			slog.Debug("cache set error", "component", name, "error", err)
 		}
 	}
@@ -1036,25 +1065,51 @@ type nvdSearchResult struct {
 	// pages is the number of HTTP requests this lookup issued, INCLUDING the
 	// one that failed when the walk ends in an error.
 	pages int
-	// shifted records that the result set moved underneath the walk: either
-	// totalResults changed between pages, or a record was delivered twice.
+	// shifted records that the result set moved underneath the walk.
 	//
-	// This is not a cosmetic distinction (Codex M55 R1, Critical). Paging is
-	// by OFFSET, so a record removed from the middle of the set slides every
-	// later record down one position, and the record that occupied the next
-	// startIndex is never returned by any request. Concretely: 350 matches,
-	// page 1 fetches offsets 0-199, record #0 is then removed, page 2 asks for
-	// offset 200 and receives what is now offsets 200-348 — the record that
-	// WAS at offset 200 has moved to 199 and is silently skipped. The walk
-	// ends with fetched=349 against total=349 and looks complete.
+	// # Why an offset walk needs this at all (Codex M55 R1/R2, Critical)
 	//
-	// Neither the record count nor the de-duplicated count can detect that,
-	// because the missing record is simply absent. What IS detectable is the
-	// disturbance that caused it, and both of its symptoms are cheap to spot:
-	// totalResults changing, and a duplicate arriving (which happens on the
-	// mirror-image case, a record INSERTED mid-set). So the walk does not try
-	// to prove which records it lost; it records that it can no longer prove
-	// it lost none.
+	// Paging is by OFFSET. A record removed from the middle of a live result
+	// set slides every later record down one position, so the record that
+	// occupied the next startIndex is returned by NO request. Concretely: 350
+	// matches, page 1 fetches offsets 0-199, record #0 is then removed, page 2
+	// asks for offset 200 and receives what is now offsets 200-348 — the
+	// record that WAS at offset 200 is now at 199 and is silently skipped. The
+	// walk ends with the arithmetic coming out even and looks complete.
+	//
+	// Counting records cannot see that, and neither can counting DISTINCT
+	// records: a simultaneous removal and insertion keeps totalResults
+	// identical and every delivered id distinct while still skipping one
+	// (Codex M55 R2, Critical, against the first cut of this field, which
+	// checked only those two things).
+	//
+	// # How it is detected
+	//
+	// Three signals, cheapest first:
+	//
+	//  1. totalResults changing between pages.
+	//  2. a record arriving twice where no overlap was requested.
+	//  3. the BOUNDARY ANCHOR: every page after the first is requested at
+	//     `fetched - 1`, i.e. deliberately overlapping the previous page by one
+	//     record, and its first entry must be the record that ended the
+	//     previous page. If the window moved, that record is no longer at that
+	//     offset and the mismatch is visible. This costs no extra REQUEST (the
+	//     overlap record rides inside a page that was going to be fetched
+	//     anyway) — only one record of the per-component budget per page, so
+	//     the reachable depth is nvdPageSize + (nvdMaxPagesPerComponent-1) *
+	//     (nvdPageSize-1) = 996 rather than 1000.
+	//
+	// # What it still does not prove
+	//
+	// Nothing here makes offset pagination over a mutable set sound; that is
+	// not achievable without a stable cursor, and the NVD CVE API 2.0 does not
+	// offer one. The anchor detects any shift that moves records ACROSS a page
+	// boundary, which is the shape that loses records. A rewrite that keeps the
+	// anchor at its offset while moving some other record backwards past an
+	// offset the walk has already passed would still slip through. So this
+	// field means "an inconsistency was observed", and its absence means "none
+	// was observed" — not "none occurred". The claim the product makes on top
+	// of it is deliberately the weak one; see SbomHandler.runScan.
 	shifted bool
 	// truncated is true when the walk cannot prove it saw the whole match set:
 	// either the result set is larger than what was fetched (the paging budget
@@ -1140,10 +1195,13 @@ type nvdPacer func(ctx context.Context) error
 //
 // # What the budget costs, in requests
 //
-// Requests for one component = min(ceil(totalResults / 200), 5). Against the
-// measured table above: every versioned component costs 1 (as today), "curl"
-// costs 2, "openssl" costs 3, "linux" costs 5 and is reported truncated. A
-// 500-component SBOM of versioned components therefore still costs 500
+// One request covers the first nvdPageSize records and each further request
+// covers nvdPageSize-1 more (the first record of every follow-up page is the
+// boundary anchor — see nvdSearchResult.shifted), so the budget reaches offset
+// 996 and costs at most nvdMaxPagesPerComponent requests. Against the measured
+// table above: every versioned component costs 1 (as before this change),
+// "curl" costs 2, "openssl" costs 3, "linux" costs 5 and is reported truncated.
+// A 500-component SBOM of versioned components therefore still costs 500
 // requests — 350 s with an API key at rateLimitWithKey, unchanged from before
 // this fix. The pathological upper bound is 5x that, and it requires an SBOM
 // whose components are ALL unversioned generic words.
@@ -1170,10 +1228,18 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 
 	var out nvdSearchResult
 	// seen de-duplicates by canonical CVE id ACROSS pages, and — see the
-	// shifted-window discussion on nvdSearchResult.truncated — a hit is also
-	// PROOF that the offsets this walk used are no longer coherent.
+	// shifted-window discussion on nvdSearchResult.shifted — a hit that is not
+	// the deliberate overlap record is also evidence that the offsets this walk
+	// used are no longer coherent.
 	seen := make(map[string]struct{})
 	firstTotal := -1
+	// anchorID is the last record of the previous page, and start is the
+	// offset this page asks for. Every page after the first DELIBERATELY
+	// overlaps the previous one by a single record (start = fetched - 1) so
+	// that the alignment can be checked rather than assumed. See the
+	// "boundary anchor" note on nvdSearchResult.shifted.
+	anchorID := ""
+	start := 0
 
 	for out.pages < nvdMaxPagesPerComponent {
 		// Every page after the first is an EXTRA request that the worker
@@ -1186,7 +1252,7 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 			}
 		}
 
-		page, err := s.fetchPage(ctx, keyword, out.fetched)
+		page, err := s.fetchPage(ctx, keyword, start)
 		out.pages++
 		if err != nil {
 			// A failure partway through a walk is a failure of the whole
@@ -1205,27 +1271,48 @@ func (s *NVDService) searchByKeyword(ctx context.Context, name, version string, 
 		}
 
 		entries := page.entries()
-		for _, v := range s.convertToVulnerabilities(entries) {
+		fresh := s.convertToVulnerabilities(entries)
+
+		// Boundary anchor. This page was asked to START with the record that
+		// ended the previous one; if it does not, the window moved.
+		if anchorID != "" {
+			if len(fresh) == 0 || fresh[0].CVEID != anchorID {
+				out.shifted = true
+			}
+			if len(fresh) > 0 {
+				fresh = fresh[1:]
+			}
+		}
+
+		for _, v := range fresh {
 			if _, dup := seen[v.CVEID]; dup {
+				// A repeat that is NOT the deliberate overlap: the window
+				// moved backwards, so something moved forwards past an offset
+				// this walk had already passed.
 				out.shifted = true
 				continue
 			}
 			seen[v.CVEID] = struct{}{}
 			out.vulns = append(out.vulns, v)
 		}
-		out.fetched += len(entries)
+		// fetched is an ABSOLUTE position, not a running sum, because the
+		// pages overlap by one record.
+		out.fetched = start + len(entries)
 
-		// No progress. Reachable when the result set SHRANK mid-walk (see
-		// validate's totalResults > startIndex rule) and as a belt-and-braces
-		// guard against a mirror that answers a later page with an empty one:
-		// without it the walk would re-request the same startIndex until the
-		// budget ran out.
-		if len(entries) == 0 {
+		// No progress: this page carried nothing the walk had not already
+		// seen. Reachable when the result set SHRANK mid-walk (see validate's
+		// totalResults > startIndex rule) and as a belt-and-braces guard
+		// against a mirror that answers a later page with an empty or
+		// anchor-only one — without it the walk would re-request the same
+		// offset until the budget ran out.
+		if len(fresh) == 0 {
 			break
 		}
 		if out.fetched >= out.total {
 			break
 		}
+		anchorID = fresh[len(fresh)-1].CVEID
+		start = out.fetched - 1
 	}
 
 	out.truncated = out.fetched < out.total || out.shifted

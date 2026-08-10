@@ -133,7 +133,7 @@ func TestM55NVDCache_TruncatedLookupsAreNotCached(t *testing.T) {
 
 			nvdCache := cache.NewNVDCache(rdb)
 			t.Cleanup(func() {
-				if err := nvdCache.Delete(ctx, nvdCacheName(name), version); err != nil {
+				if err := nvdCache.Delete(ctx, nvdCacheName(name, version), ""); err != nil {
 					t.Errorf("cleanup: delete cache entry: %v", err)
 				}
 			})
@@ -155,7 +155,7 @@ func TestM55NVDCache_TruncatedLookupsAreNotCached(t *testing.T) {
 
 			// Is it in Redis? Read through the same namespaced name the
 			// scanner writes under (nvdCacheSchema).
-			entry, err := nvdCache.Get(ctx, nvdCacheName(name), version)
+			entry, err := nvdCache.Get(ctx, nvdCacheName(name, version), "")
 			if err != nil {
 				t.Fatalf("cache get: %v", err)
 			}
@@ -228,7 +228,7 @@ func TestM55NVDCache_PreM55EntriesAreNotServed(t *testing.T) {
 		if err := legacyCache.Delete(ctx, name, version); err != nil {
 			t.Errorf("cleanup: delete legacy entry: %v", err)
 		}
-		if err := legacyCache.Delete(ctx, nvdCacheName(name), version); err != nil {
+		if err := legacyCache.Delete(ctx, nvdCacheName(name, version), ""); err != nil {
 			t.Errorf("cleanup: delete namespaced entry: %v", err)
 		}
 	})

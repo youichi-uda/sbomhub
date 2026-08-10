@@ -135,13 +135,16 @@ func TestM55SearchByKeyword_ReturnsEveryMatchWithinTheBudget(t *testing.T) {
 	}{
 		{0, 1},
 		{20, 1},
-		{21, 1},   // the smallest set the old resultsPerPage=20 truncated
-		{44, 1},   // measured: jackson-databind 2.9.10
-		{200, 1},  // exactly one page
-		{201, 2},  // one over
-		{350, 2},  // measured shape: 2 pages, second one short
-		{563, 3},  // measured: openssl
-		{1000, 5}, // exactly the budget
+		{21, 1},  // the smallest set the old resultsPerPage=20 truncated
+		{44, 1},  // measured: jackson-databind 2.9.10
+		{200, 1}, // exactly one page
+		{201, 2}, // one over
+		{350, 2}, // measured shape: 2 pages, second one short
+		{563, 3}, // measured: openssl
+		// Exactly the budget. It is 996 rather than 1000 because every page
+		// after the first re-reads one record as the boundary anchor — see
+		// nvdSearchResult.shifted.
+		{996, 5},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -201,10 +204,13 @@ func TestM55SearchByKeyword_StopsAtTheBudgetAndSaysSo(t *testing.T) {
 		t.Fatalf("searchByKeyword: %v", err)
 	}
 
-	wantFetched := nvdPageSize * nvdMaxPagesPerComponent
+	// One page of nvdPageSize, then nvdMaxPagesPerComponent-1 pages that each
+	// spend one record on the boundary anchor.
+	wantFetched := nvdPageSize + (nvdMaxPagesPerComponent-1)*(nvdPageSize-1)
 	if res.fetched != wantFetched {
-		t.Errorf("fetched %d, want %d (%d pages x %d)",
-			res.fetched, wantFetched, nvdMaxPagesPerComponent, nvdPageSize)
+		t.Errorf("fetched %d, want %d (%d pages x %d, less %d anchor records)",
+			res.fetched, wantFetched, nvdMaxPagesPerComponent, nvdPageSize,
+			nvdMaxPagesPerComponent-1)
 	}
 	if got := len(pager.calls()); got != nvdMaxPagesPerComponent {
 		t.Errorf("issued %d requests, want the budget %d", got, nvdMaxPagesPerComponent)
@@ -294,12 +300,15 @@ func TestM55SearchByKeyword_AShiftedResultSetIsNotProvablyComplete(t *testing.T)
 		}
 	})
 
-	t.Run("a record arrives on two pages", func(t *testing.T) {
+	t.Run("a record arrives twice outside the anchor", func(t *testing.T) {
 		pager := &cannedNVDPager{total: 350}
 		pager.rewrite = func(page int, resp *NVDResponse) {
 			if page == 1 {
 				entries := *resp.Vulnerabilities
-				entries[0].CVE.ID = m55CVEID(0) // already delivered on page 0
+				// entries[0] is the deliberate overlap record and must stay
+				// intact, or this would test the anchor rather than the
+				// duplicate. entries[1] is a record page 0 already delivered.
+				entries[1].CVE.ID = m55CVEID(0)
 				resp.Vulnerabilities = &entries
 			}
 		}
@@ -328,6 +337,43 @@ func TestM55SearchByKeyword_AShiftedResultSetIsNotProvablyComplete(t *testing.T)
 			t.Errorf("349 unique records were returned for a result set of %d and the walk "+
 				"called itself complete; a duplicate means the window moved, and the record "+
 				"it displaced is in no page at all", res.total)
+		}
+	})
+
+	// The Codex M55 R2 (Critical) case: a removal AND an insertion between the
+	// two requests. totalResults is unchanged, every delivered id is distinct,
+	// and one record that existed throughout is returned by no request. Only
+	// the boundary anchor can see it.
+	t.Run("same cardinality, window slid by one", func(t *testing.T) {
+		pager := &cannedNVDPager{total: 350}
+		pager.rewrite = func(page int, resp *NVDResponse) {
+			if page == 1 {
+				// Record #0 was removed and a new one appended, so everything
+				// after it has slid down one position: the offset that held
+				// id N now holds id N+1.
+				entries := *resp.Vulnerabilities
+				for i := range entries {
+					n := 200 + i // ids this page would have carried
+					entries[i].CVE.ID = m55CVEID(n)
+				}
+				resp.Vulnerabilities = &entries
+			}
+		}
+		srv := pager.start(t)
+
+		svc := NewNVDService(nil, nil, "k", srv.URL, false)
+		res, err := svc.searchByKeyword(context.Background(), "libfoo", "1.0", nil)
+		if err != nil {
+			t.Fatalf("searchByKeyword: %v", err)
+		}
+		if !res.shifted {
+			t.Error("the page-2 window had slid by one record and the anchor check did not " +
+				"notice: its first entry was not the record that ended page 1")
+		}
+		if !res.truncated {
+			t.Errorf("totalResults never changed and no id arrived twice, so counting alone "+
+				"says this walk is complete (fetched=%d total=%d). It is not: the record at "+
+				"the old offset 200 was returned by no request.", res.fetched, res.total)
 		}
 	})
 
@@ -395,8 +441,11 @@ func TestM55SearchByKeyword_DoesNotSpinOnAPageWithNoEntries(t *testing.T) {
 // summary has to say so.
 func TestM55SearchByKeyword_CountsTheRequestsAFailedWalkSpent(t *testing.T) {
 	pager := &cannedNVDPager{total: 1000}
-	pager.rewrite = func(page int, resp *NVDResponse) {
-		if page == 2 {
+	// Keyed on the OFFSET, not on the request ordinal, because this test drives
+	// two independent walks against one server: 0 -> 199 -> 398 is the third
+	// page of either walk.
+	pager.rewrite = func(_ int, resp *NVDResponse) {
+		if resp.StartIndex != nil && *resp.StartIndex == 398 {
 			// A page that fails validate: it claims records it does not carry.
 			resp.ResultsPerPage = nvdIntPtr(200)
 			resp.Vulnerabilities = nvdEntriesPtr([]NVDVulnEntry{})
@@ -416,6 +465,21 @@ func TestM55SearchByKeyword_CountsTheRequestsAFailedWalkSpent(t *testing.T) {
 	if len(res.vulns) != 0 {
 		t.Errorf("a failed walk returned %d matches; a partial walk must not be handed back "+
 			"as if it were an answer", len(res.vulns))
+	}
+
+	// And the count must survive the wrapper the sweep actually calls (Codex
+	// M55 R2, Low): the R1 fix propagated it out of searchByKeyword and
+	// getVulnerabilitiesWithCache then discarded it again, so
+	// processComponentsParallel added zero to APICalls for a walk that had
+	// spent three requests. Asserting only on searchByKeyword was vacuous for
+	// the claim the sweep summary makes.
+	lookup, err := svc.getVulnerabilitiesWithCache(context.Background(), "libfoo", "1.0", nil)
+	if err == nil {
+		t.Fatal("the wrapper must propagate the failed lookup")
+	}
+	if lookup.requests != 3 {
+		t.Errorf("lookup.requests = %d, want 3 — this is the field the sweep adds to "+
+			"APICalls, and the rate limit was charged for all three", lookup.requests)
 	}
 }
 
@@ -614,5 +678,64 @@ func TestM55ScanReport_EscalationLadder(t *testing.T) {
 				t.Errorf("incompleteErr() = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestM55NVDCacheName_CannotBeSteeredByAComponentName is the Codex M55 R2
+// (High) regression.
+//
+// The first cut namespaced the cache by prepending a literal tag to the
+// COMPONENT NAME, which comes from an uploaded SBOM and is an arbitrary string.
+// cache.NVDCache builds its key as `nvd:vuln:<name>[:<version>]`, so that
+// namespace was not disjoint from the legacy one at all: a pre-M55 entry for a
+// component literally named `m55/openssl` occupies exactly the key the new
+// build computes for `openssl`, and its stale 20-record prefix is then served
+// as a complete answer for a different component.
+//
+// Prefixing a user-controlled field is not namespacing. The assertions below
+// are the properties that make it one.
+func TestM55NVDCacheName_CannotBeSteeredByAComponentName(t *testing.T) {
+	// 1. No part of the caller's input appears in the identity, so no choice of
+	//    component name can aim it at another component's key.
+	const victim = "openssl"
+	got := nvdCacheName(victim, "1.0")
+	if strings.Contains(got, victim) {
+		t.Errorf("nvdCacheName(%q, \"1.0\") = %q embeds the component name; a pre-M55 entry "+
+			"for a component named %q would collide with it", victim, got, nvdCacheSchema+victim)
+	}
+
+	// 2. Fixed shape: schema tag plus a SHA-256 digest.
+	rest := strings.TrimPrefix(got, nvdCacheSchema)
+	if rest == got {
+		t.Errorf("nvdCacheName = %q, want the %q schema tag", got, nvdCacheSchema)
+	}
+	if len(rest) != 64 {
+		t.Errorf("nvdCacheName digest = %q (%d chars), want 64 hex chars", rest, len(rest))
+	}
+	for _, c := range rest {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Errorf("nvdCacheName digest %q is not lowercase hex", rest)
+			break
+		}
+	}
+
+	// 3. Injective over the pairs the legacy scheme confuses. `nvd:vuln:a:b` is
+	//    what the cache builds for BOTH ("a:b", "") and ("a", "b") — a
+	//    pre-existing ambiguity the digest also closes.
+	pairs := [][2]string{
+		{"a:b", ""},
+		{"a", "b"},
+		{"openssl", "1.0"},
+		{nvdCacheSchema + "openssl", "1.0"},
+		{"", "openssl:1.0"},
+		{"openssl:1.0", ""},
+	}
+	seen := make(map[string][2]string, len(pairs))
+	for _, p := range pairs {
+		k := nvdCacheName(p[0], p[1])
+		if prev, dup := seen[k]; dup {
+			t.Errorf("nvdCacheName%v and nvdCacheName%v both produce %q", prev, p, k)
+		}
+		seen[k] = p
 	}
 }

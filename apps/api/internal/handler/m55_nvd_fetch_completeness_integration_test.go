@@ -145,7 +145,10 @@ func TestM55NVDTruncatedResultSetIsReportedToTheCaller(t *testing.T) {
 	seed := m47SeedAll(t, migDB, "m55trunc")
 
 	ns := m54NewNamespace()
-	fetched := m55PageSize * m55Budget
+	// One page of m55PageSize, then m55Budget-1 pages that each spend their
+	// first record on the boundary anchor (see nvdSearchResult.shifted), so the
+	// walk reaches offset 996 rather than 1000 and delivers 996 distinct CVEs.
+	fetched := m55PageSize + (m55Budget-1)*(m55PageSize-1)
 	ids := make([]string, 0, fetched)
 	for i := 0; i < fetched; i++ {
 		ids = append(ids, ns.m54CVEID(0, i))
@@ -189,8 +192,10 @@ func TestM55NVDTruncatedResultSetIsReportedToTheCaller(t *testing.T) {
 	if len(q) != m55Budget {
 		t.Fatalf("issued %d NVD requests, want the budget %d: %v", len(q), m55Budget, q)
 	}
-	for i, want := range []string{"startIndex=0", "startIndex=200", "startIndex=400",
-		"startIndex=600", "startIndex=800"} {
+	// Each follow-up starts ONE record before the previous page ended: that
+	// overlap record is the boundary anchor.
+	for i, want := range []string{"startIndex=0", "startIndex=199", "startIndex=398",
+		"startIndex=597", "startIndex=796"} {
 		if !strings.Contains(q[i], want) {
 			t.Errorf("request %d = %q, want it to carry %q", i, q[i], want)
 		}
