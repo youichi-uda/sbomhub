@@ -15,6 +15,22 @@
 --   than an oversight. If the rollback is expected to last, disable the
 --   cve_sync scheduler job while it does.
 --
+-- Measured round trip (2026-08-11, PostgreSQL 15, apply -> down -> apply):
+--   after this file, `source_modified_at` is gone and NOTHING else on the
+--   table changes — severity, cvss_score, source, published_at, the EPSS
+--   columns and the KEV columns all keep their values on every row, and the
+--   other 16 columns are untouched. Re-applying the up file brings the column
+--   back with NULL on every row, including rows that were dated before the
+--   rollback: that value is not recoverable, as stated above.
+--
+--   THE BINARY MUST BE ROLLED BACK WITH THE SCHEMA. Measured on the same
+--   run: the post-066 code against a rolled-back schema fails loudly with
+--   `pq: column "source_modified_at" of relation "vulnerabilities" does not
+--   exist` on its first catalogue write. That is the correct failure — it
+--   refuses rather than silently writing unarbitrated metadata — but it means
+--   a schema-only rollback takes catalogue updates down until the binary
+--   follows.
+--
 -- RLS: untouched. `vulnerabilities` is the global, non-tenant CVE catalogue
 --   (structural exemption; 066 declared no RLS).
 --

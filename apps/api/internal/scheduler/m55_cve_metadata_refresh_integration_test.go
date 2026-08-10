@@ -67,10 +67,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/sbomhub/sbomhub/internal/database"
 	"github.com/sbomhub/sbomhub/internal/repository"
@@ -100,6 +102,25 @@ func m55Feed(cveID, severity string, score float64, description, published, last
 			"configurations": %s
 		}}]
 	}`, cveID, published, lastModified, description, score, severity, configurations)
+}
+
+// m55FeedMany renders one NVD 2.0 page holding several CVEs, all with the same
+// scoring — the shape a post-migration sync sees when a batch of legacy rows is
+// re-scored together.
+func m55FeedMany(cveIDs []string, severity string, score float64, description, published, lastModified, configurations string) string {
+	items := make([]string, 0, len(cveIDs))
+	for _, id := range cveIDs {
+		items = append(items, fmt.Sprintf(`{"cve": {
+			"id": %q,
+			"published": %q,
+			"lastModified": %q,
+			"descriptions": [{"lang": "en", "value": %q}],
+			"metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": %v, "baseSeverity": %q}}]},
+			"configurations": %s
+		}}`, id, published, lastModified, description, score, severity, configurations))
+	}
+	return fmt.Sprintf(`{"totalResults": %d, "startIndex": 0, "resultsPerPage": 2000, "vulnerabilities": [%s]}`,
+		len(items), strings.Join(items, ","))
 }
 
 // m55Row is the catalogue state the product reads.
@@ -443,20 +464,16 @@ func m55PinWatermark(t *testing.T, migDB *sql.DB, at time.Time) {
 	}
 }
 
-// m55ProtectWatermark restores BOTH pieces of the job's global scheduler
-// state — cve_sync_last_run and the catalogue retry marker — including their
-// absence, after the test.
+// m55ProtectWatermark restores system_settings.cve_sync_last_run — including
+// its absence — after the test.
 //
 // EVERY test that calls m55Sync needs it, not just the ones that assert on it
-// (Codex M55 R2 and R5, Low): m55Sync runs the real job, a clean run CLEARS
-// the retry marker and a failing one SETS it, so a test that protects only the
-// watermark still hands the next test a scheduler state it did not choose —
-// and the two keys are read together, so a leftover from one test changes
-// another's verdict.
+// (Codex M55 R2, Low): m55Sync runs the real job, which moves this GLOBAL row,
+// so an unprotected test hands the next one a scheduler position it did not
+// choose.
 func m55ProtectWatermark(t *testing.T, migDB *sql.DB) {
 	t.Helper()
 	m55ProtectSetting(t, migDB, "cve_sync_last_run")
-	m55ProtectSetting(t, migDB, cveSyncRetrySinceKey)
 }
 
 // m55ProtectSetting snapshots one system_settings row (or its absence) and
@@ -494,47 +511,26 @@ func m55Watermark(t *testing.T, migDB *sql.DB) string {
 	return v
 }
 
-// TestM55CVEMetadata_WatermarkHeldWhenACatalogueWriteFails is the retry half
-// of the fix (Codex M55 R1, High).
+// TestM55CVEMetadata_AFailedWriteIsNotRetried states the ACCEPTED LIMITATION
+// rather than a fix, and it is here so the limitation is measured instead of
+// asserted in a comment.
 //
-// The job only ever fetches FORWARD from cve_sync_last_run. If a catalogue
-// write fails and the watermark still advances, that CVE is never offered
-// again until upstream modifies it — which, for a CVE whose analysis has
-// settled, may be never. The failed write becomes permanent staleness on a row
-// the product is serving.
+// A catalogue write that the database refuses is not retried: the watermark
+// advances, the CVE keeps its previously stored metadata, and it is offered
+// again only when upstream next modifies it.
 //
-// The failure here is a severity longer than `severity varchar(20)`, which is
-// a real shape (an upstream vocabulary change) and, unlike a killed
-// connection, is reproducible.
-func TestM55CVEMetadata_WatermarkHeldWhenACatalogueWriteFails(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-
-	// Inside the retry bound: the window this hold retains is one hour old.
-	pinned := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	m55PinWatermark(t, migDB, pinned)
-
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-
-	// 31 characters: the UPDATE is refused by the column, not by the guard.
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	if got := m55Watermark(t, migDB); got != pinned.Format(time.RFC3339) {
-		t.Errorf("cve_sync_last_run = %q, want it held at %q: advancing past a failed catalogue write means "+
-			"the CVE is never retried and keeps the previous severity indefinitely", got, pinned.Format(time.RFC3339))
-	}
-	if got := m55Read(t, migDB, cveID); got.severity != "LOW" {
-		t.Errorf("severity = %q, want the seeded LOW — the oversized write must not have partially landed", got.severity)
-	}
-}
-
-// TestM55CVEMetadata_WatermarkAdvancesOnACleanRun is the control for the test
-// above: holding the watermark must be the exception, not the behaviour.
-func TestM55CVEMetadata_WatermarkAdvancesOnACleanRun(t *testing.T) {
+// M55 built a retry policy for this — hold the watermark, bound the hold, mark
+// when retries began — and removed it again after six review rounds in which
+// that machinery produced five High findings of its own and closed nothing the
+// freshness guard needed. What makes the removal safe is the second half of
+// this test: the failed write leaves source_modified_at untouched, so the
+// guard still admits the NEXT record for that CVE. The failure costs one
+// refresh opportunity; it is not sticky.
+//
+// The failure used here is a severity longer than `severity varchar(20)` — a
+// real shape (an upstream vocabulary change) and, unlike a killed connection,
+// reproducible.
+func TestM55CVEMetadata_AFailedWriteIsNotRetried(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
@@ -544,170 +540,120 @@ func TestM55CVEMetadata_WatermarkAdvancesOnACleanRun(t *testing.T) {
 
 	cveID := m55CVEID(t)
 	m55SeedLegacy(t, migDB, cveID, "NVD")
-	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "clean run",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
 
-	if got := m55Watermark(t, migDB); got == pinned.Format(time.RFC3339) {
-		t.Errorf("cve_sync_last_run = %q, want it advanced past the pinned value on a clean run", got)
-	}
-}
-
-// TestM55CVEMetadata_WatermarkAdvancesOncePastTheRetryBound is the other half
-// of the retry policy, and the one that keeps it from being worse than the bug
-// (Codex M55 R2, High).
-//
-// The watermark is a single GLOBAL row, so holding it for a PERMANENTLY
-// failing record — an upstream value the schema rejects — pins it forever
-// while the retained window grows. NVD rejects a lastModStartDate span wider
-// than 120 days outright, so an unbounded hold ends with the whole sync
-// stopped: every CVE's metadata frozen to protect one. Past
-// cveSyncMaxHeldWindow the failing records are abandoned instead.
-func TestM55CVEMetadata_WatermarkAdvancesOncePastTheRetryBound(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-
-	m55ProtectRetryMarker(t, migDB)
-	// This failure has been recurring for longer than the bound allows, so the
-	// same failure that was held in the test above must now be let go. The
-	// watermark sits BEFORE the retry marker, which is the shape a real hold
-	// produces — the window is frozen at the point retries began from, and a
-	// marker at or before the watermark is rejected as a leftover.
-	pinned := time.Now().UTC().Add(-(cveSyncMaxHeldWindow + 2*time.Hour)).Truncate(time.Second)
-	m55PinWatermark(t, migDB, pinned)
-	if _, err := migDB.Exec(`
-		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-		cveSyncRetrySinceKey,
-		time.Now().UTC().Add(-(cveSyncMaxHeldWindow + time.Hour)).Format(time.RFC3339)); err != nil {
-		t.Fatalf("seed retry marker: %v", err)
-	}
-
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
+	oversized := "CRITICALCRITICALCRITICALCRITICA" // 31 chars: refused by the column
 	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
 		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
 
+	// The limitation: the window moves on regardless.
 	if got := m55Watermark(t, migDB); got == pinned.Format(time.RFC3339) {
-		t.Errorf("cve_sync_last_run = %q, still held: a permanently failing record would pin it until the "+
-			"retained window exceeds NVD's 120-day maximum span, at which point every CVE's metadata stops "+
-			"updating, not just this one", got)
+		t.Errorf("cve_sync_last_run = %q, want it advanced: this build does NOT hold the watermark to retry "+
+			"failed catalogue writes, and a test that lets the old hold back in silently would hide that", got)
+	}
+	row := m55Read(t, migDB, cveID)
+	if row.severity != "LOW" {
+		t.Errorf("severity = %q, want the seeded LOW — the refused write must not have partially landed", row.severity)
+	}
+	// The reason the limitation is affordable: nothing was poisoned.
+	if row.sourceModAt.Valid {
+		t.Errorf("source_modified_at = %v, want NULL: a REFUSED write must not record a freshness timestamp, or "+
+			"the guard would defend metadata that was never written", row.sourceModAt.Time.UTC())
+	}
+
+	// And the next record for the same CVE is still accepted.
+	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "the next record lands",
+		"2026-06-01T00:00:00Z", "2026-07-02T00:00:00Z", m55CPEEmpty))
+	if got := m55Read(t, migDB, cveID); got.severity != "CRITICAL" {
+		t.Errorf("severity = %q after the next record, want CRITICAL: a failed write must not make the row "+
+			"permanently unwritable — that is what makes dropping the retry policy affordable", got.severity)
 	}
 }
 
-// TestM55CVEMetadata_MissingWatermarkIsPinnedWhenAWriteFails covers the case
-// where "hold the watermark" means nothing (Codex M55 R3, High).
+// TestM55CVEMetadata_LegacyNULLRowsAreRefreshedByTheFirstSync is the migration
+// question in its production shape: on the day 066 ships, EVERY row in the
+// catalogue has source_modified_at NULL.
 //
-// With no stored cve_sync_last_run the run invents `now - 24h`. Holding an
-// invented value is a no-op: the next tick invents a NEWER one, so the records
-// this tick failed on can fall outside the window and are never retried — and
-// the retained window sits at ~24h forever, so the abandonment bound is never
-// reached either. The anchor has to be written down for the hold to exist.
-func TestM55CVEMetadata_MissingWatermarkIsPinnedWhenAWriteFails(t *testing.T) {
+// NULL must mean "unknown", not "newer than everything". If the guard read it
+// as the latter, shipping 066 would freeze the entire existing catalogue —
+// strictly worse than the defect M55 set out to fix. This drives a batch of
+// legacy rows through one real sync tick and requires every one of them to be
+// refreshed AND dated, after which they are arbitrated normally.
+func TestM55CVEMetadata_LegacyNULLRowsAreRefreshedByTheFirstSync(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
-
 	m55ProtectWatermark(t, migDB)
-	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = 'cve_sync_last_run'`); err != nil {
-		t.Fatalf("clear watermark: %v", err)
-	}
 
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	before := time.Now().UTC()
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	var raw string
-	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&raw); err != nil {
-		t.Fatalf("the run held a watermark that was never written: %v.\n"+
-			"Holding an invented anchor is a no-op — the next tick invents a newer one and the failed records "+
-			"fall out of the window", err)
-	}
-	got, perr := time.Parse(time.RFC3339, raw)
-	if perr != nil {
-		t.Fatalf("stored watermark %q does not parse: %v", raw, perr)
-	}
-	// It must be the retry ANCHOR (this run's window start, ~24h ago), not
-	// this run's start time — pinning `now` would discard the window entirely.
-	if !got.Before(before.Add(-12 * time.Hour)) {
-		t.Errorf("stored watermark = %s, want this run's window start (~24h before %s): pinning the run's start "+
-			"time instead would skip the whole window the failed records live in", got.UTC(), before)
-	}
-}
-
-// TestM55CVEMetadata_RetryAnchorSurvivesAFailureLaterInTheRun (Codex M55 R6,
-// High).
-//
-// Pinning the invented anchor after the per-tenant match phase left a window:
-// tenant enumeration returns an error, Run returns before the watermark write,
-// and the hold it had already decided on was never written down. The next tick
-// invents a newer 24h window and the records this one failed on are gone.
-//
-// The later failure is produced by dropping the `tenants` table's visibility
-// out from under the enumeration — a real error shape (a permissions or
-// migration accident), and one that lands exactly between the two points.
-func TestM55CVEMetadata_RetryAnchorSurvivesAFailureLaterInTheRun(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-	m55ProtectRetryMarker(t, migDB)
-	m55ProtectSetting(t, migDB, "cve_sync_last_run")
-	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = 'cve_sync_last_run'`); err != nil {
-		t.Fatalf("clear watermark: %v", err)
-	}
-
-	// Make the tenant enumeration fail for the app role, and put it back.
-	if _, err := migDB.Exec(`REVOKE SELECT ON tenants FROM sbomhub_app`); err != nil {
-		t.Skipf("cannot revoke SELECT on tenants (%v) - skipping", err)
+	const n = 25
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		id := m55CVEID(t)
+		// Seeded WITHOUT source_modified_at: exactly what every pre-066 row
+		// and every scanner-created row looks like.
+		if _, err := migDB.Exec(`
+			INSERT INTO vulnerabilities (id, cve_id, description, severity, cvss_score, source, published_at, updated_at)
+			VALUES ($1, $2, 'pre-066 row', 'LOW', 2.0, 'NVD', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')`,
+			uuid.New(), id); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+		ids = append(ids, id)
 	}
 	t.Cleanup(func() {
-		if _, err := migDB.Exec(`GRANT SELECT ON tenants TO sbomhub_app`); err != nil {
-			t.Errorf("restore SELECT on tenants: %v", err)
+		if _, err := migDB.Exec(`DELETE FROM vulnerabilities WHERE cve_id = ANY($1)`, pq.Array(ids)); err != nil {
+			t.Errorf("cleanup: %v", err)
 		}
 	})
 
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
+	var nullBefore int
+	if err := migDB.QueryRow(`SELECT count(*) FROM vulnerabilities WHERE cve_id = ANY($1) AND source_modified_at IS NULL`,
+		pq.Array(ids)).Scan(&nullBefore); err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+	if nullBefore != n {
+		t.Fatalf("setup: %d of %d rows carry a NULL source_modified_at, want all of them", nullBefore, n)
+	}
 
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	body := m55Feed(cveID, oversized, 9.8, "write will be refused",
+	// One tick, one page, every seeded CVE re-scored CRITICAL.
+	body := m55FeedMany(ids, "CRITICAL", 9.8, "refreshed by the first post-066 sync",
 		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(body))
-	}))
-	defer srv.Close()
-	j := NewCVESyncJob(appDB, repository.NewTenantRepository(appDB), "", 24*time.Hour, nil, srv.URL, false)
-	// The run is EXPECTED to fail here — the point is what it left behind.
-	_ = j.Run(context.Background())
+	m55Sync(t, appDB, body)
 
-	var raw string
-	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = 'cve_sync_last_run'`).Scan(&raw); err != nil {
-		t.Fatalf("no retry anchor was written (%v): the run decided to hold the watermark and then returned "+
-			"through an error path before recording it, so the next tick invents a newer window and the failed "+
-			"CVE is dropped for good", err)
+	var refreshed, dated int
+	if err := migDB.QueryRow(`
+		SELECT count(*) FILTER (WHERE severity = 'CRITICAL'),
+		       count(*) FILTER (WHERE source_modified_at IS NOT NULL)
+		FROM vulnerabilities WHERE cve_id = ANY($1)`, pq.Array(ids)).Scan(&refreshed, &dated); err != nil {
+		t.Fatalf("count after: %v", err)
 	}
-	got, perr := time.Parse(time.RFC3339, raw)
-	if perr != nil {
-		t.Fatalf("stored anchor %q does not parse: %v", raw, perr)
+	if refreshed != n {
+		t.Errorf("%d of %d legacy rows refreshed, want all: a stored NULL must be writable, or shipping 066 "+
+			"freezes the whole existing catalogue", refreshed, n)
 	}
-	if !got.Before(time.Now().UTC().Add(-12 * time.Hour)) {
-		t.Errorf("stored anchor = %s, want this run's window start (~24h ago)", got.UTC())
+	if dated != n {
+		t.Errorf("%d of %d legacy rows recorded an upstream timestamp, want all: a row that is refreshed but not "+
+			"dated stays unarbitrable and can be downgraded by the next stale page", dated, n)
+	}
+
+	// Dated now means arbitrated: an older record must no longer win.
+	m55Sync(t, appDB, m55FeedMany(ids, "LOW", 2.0, "stale replay after the first sync",
+		"2026-06-01T00:00:00Z", "2026-01-01T00:00:00Z", m55CPEEmpty))
+	var downgraded int
+	if err := migDB.QueryRow(`SELECT count(*) FROM vulnerabilities WHERE cve_id = ANY($1) AND severity = 'LOW'`,
+		pq.Array(ids)).Scan(&downgraded); err != nil {
+		t.Fatalf("count after replay: %v", err)
+	}
+	if downgraded != 0 {
+		t.Errorf("%d legacy rows were downgraded by a stale replay, want 0: the first sync is what arms the guard "+
+			"for these rows", downgraded)
 	}
 }
 
 // TestM55CVEMetadata_FutureWatermarkIsIgnored: a stored watermark in the
 // future is corrupt (a clock jump, an operator edit, a restored backup). Used
-// as-is it makes the retained window NEGATIVE, which compares as "well inside
-// the retry bound" and would hold the watermark forever — the livelock the
-// bound exists to prevent — and it makes lastModStartDate > lastModEndDate,
-// which NVD rejects outright (Codex M55 R3, High).
+// as-is it makes lastModStartDate later than lastModEndDate, which NVD rejects
+// outright — so every subsequent tick repeats the same impossible request and
+// the whole catalogue stops updating, silently and permanently (Codex M55 R3,
+// High).
 func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
@@ -733,88 +679,6 @@ func TestM55CVEMetadata_FutureWatermarkIsIgnored(t *testing.T) {
 	}
 }
 
-// m55ProtectRetryMarker protects the retry marker and starts the test from a
-// known-clear state. m55ProtectWatermark already covers the restore half; this
-// adds the clear, for tests whose verdict depends on there being no marker
-// left over from an earlier one.
-func m55ProtectRetryMarker(t *testing.T, migDB *sql.DB) {
-	t.Helper()
-	m55ProtectSetting(t, migDB, cveSyncRetrySinceKey)
-	if _, err := migDB.Exec(`DELETE FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey); err != nil {
-		t.Fatalf("clear retry marker: %v", err)
-	}
-}
-
-// TestM55CVEMetadata_RecoveryRunAfterAnOutageStillGetsItsRetries is the bound's
-// clock (Codex M55 R4, High).
-//
-// The retry bound must measure time spent RETRYING, not time since the last
-// successful sync. Those diverge exactly when it matters: after a scheduler
-// outage the watermark is already older than the bound, so measuring against
-// it abandons the recovery run's very FIRST failed write without one retry —
-// the silent-loss outcome the bound was added to prevent, reached from the
-// other side.
-func TestM55CVEMetadata_RecoveryRunAfterAnOutageStillGetsItsRetries(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-	m55ProtectRetryMarker(t, migDB)
-
-	// An outage far longer than the retry bound, but inside the fetch span.
-	outage := cveSyncMaxHeldWindow + 24*time.Hour
-	pinned := time.Now().UTC().Add(-outage).Truncate(time.Second)
-	m55PinWatermark(t, migDB, pinned)
-
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	if got := m55Watermark(t, migDB); got != pinned.Format(time.RFC3339) {
-		t.Errorf("cve_sync_last_run = %q, want it held at %q: this is the FIRST failing run, so it is owed the "+
-			"whole retry period — the watermark's age is a different clock from the time spent retrying",
-			got, pinned.Format(time.RFC3339))
-	}
-	var marker string
-	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&marker); err != nil {
-		t.Fatalf("the retry marker was never written (%v); without it the bound has nothing to measure against", err)
-	}
-}
-
-// TestM55CVEMetadata_RetryMarkerIsClearedByACleanRun: a clean run ends the
-// retry period, so the next failure is owed the full bound rather than
-// inheriting a shortened one from an unrelated earlier incident.
-func TestM55CVEMetadata_RetryMarkerIsClearedByACleanRun(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-	m55ProtectRetryMarker(t, migDB)
-	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
-
-	if _, err := migDB.Exec(`
-		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-		cveSyncRetrySinceKey, time.Now().UTC().Add(-48*time.Hour).Format(time.RFC3339)); err != nil {
-		t.Fatalf("seed retry marker: %v", err)
-	}
-
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-	m55Sync(t, appDB, m55Feed(cveID, "CRITICAL", 9.8, "clean run",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	var marker string
-	err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&marker)
-	if err == nil {
-		t.Errorf("retry marker still present (%s) after a clean run: the next failure would inherit a shortened "+
-			"retry period from an unrelated earlier incident", marker)
-	} else if err != sql.ErrNoRows {
-		t.Fatalf("read retry marker: %v", err)
-	}
-}
-
 // TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped (Codex M55 R4, High).
 //
 // NVD answers a lastModStartDate..lastModEndDate span of at most 120 days and
@@ -830,7 +694,7 @@ func TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped(t *testing.T) {
 	appURL, migURL := schedIntEnv(t)
 	appDB := schedOpenOrSkip(t, appURL)
 	migDB := schedOpenOrSkip(t, migURL)
-	m55ProtectRetryMarker(t, migDB)
+	m55ProtectWatermark(t, migDB)
 	m55PinWatermark(t, migDB, time.Now().UTC().Add(-365*24*time.Hour).Truncate(time.Second))
 
 	cveID := m55CVEID(t)
@@ -863,87 +727,6 @@ func TestM55CVEMetadata_ImpossiblyOldWatermarkIsClamped(t *testing.T) {
 		t.Errorf("requested window span = %s, want it clamped to %s: NVD rejects a span wider than 120 days "+
 			"outright, so every tick would repeat the same impossible request and the whole catalogue would stop "+
 			"updating", span, cveSyncMaxFetchSpan)
-	}
-}
-
-// TestM55CVEMetadata_StaleRetryMarkerDoesNotAbandonANewFailure (Codex M55 R5,
-// High).
-//
-// clearCatalogueRetrySince only warns on failure, so a marker from an earlier,
-// already-resolved incident can survive. Believed, it makes the NEXT unrelated
-// failure look as though it has already used up its whole retry period, and
-// the records that failed are abandoned without one retry — the silent loss
-// the bound exists to prevent, reached by a third route.
-//
-// A marker at or before the watermark is impossible for this job to have
-// written (retries start after the window they retry, and while holding the
-// watermark does not move), so it is rejected and a fresh period starts.
-func TestM55CVEMetadata_StaleRetryMarkerDoesNotAbandonANewFailure(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-	m55ProtectRetryMarker(t, migDB)
-
-	pinned := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-	m55PinWatermark(t, migDB, pinned)
-	// Older than the watermark: a leftover, not this incident's marker.
-	if _, err := migDB.Exec(`
-		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-		cveSyncRetrySinceKey,
-		time.Now().UTC().Add(-(cveSyncMaxHeldWindow + 48*time.Hour)).Format(time.RFC3339)); err != nil {
-		t.Fatalf("seed stale marker: %v", err)
-	}
-
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	if got := m55Watermark(t, migDB); got != pinned.Format(time.RFC3339) {
-		t.Errorf("cve_sync_last_run = %q, want it held at %q: a retry marker predating the watermark is a "+
-			"leftover from an earlier incident and must not spend this failure's retry period",
-			got, pinned.Format(time.RFC3339))
-	}
-}
-
-// TestM55CVEMetadata_FutureRetryMarkerDoesNotDisableTheBound: a marker ahead of
-// the clock yields a negative age, which compares as "no time spent retrying"
-// and would hold the watermark forever — the same livelock a future watermark
-// causes. It must be replaced with this run's time, so the period actually
-// starts running.
-func TestM55CVEMetadata_FutureRetryMarkerDoesNotDisableTheBound(t *testing.T) {
-	appURL, migURL := schedIntEnv(t)
-	appDB := schedOpenOrSkip(t, appURL)
-	migDB := schedOpenOrSkip(t, migURL)
-	m55ProtectRetryMarker(t, migDB)
-	m55PinWatermark(t, migDB, time.Now().UTC().Add(-time.Hour).Truncate(time.Second))
-
-	if _, err := migDB.Exec(`
-		INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-		cveSyncRetrySinceKey, time.Now().UTC().Add(365*24*time.Hour).Format(time.RFC3339)); err != nil {
-		t.Fatalf("seed future marker: %v", err)
-	}
-
-	cveID := m55CVEID(t)
-	m55SeedLegacy(t, migDB, cveID, "NVD")
-	oversized := "CRITICALCRITICALCRITICALCRITICA"
-	m55Sync(t, appDB, m55Feed(cveID, oversized, 9.8, "write will be refused",
-		"2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z", m55CPEEmpty))
-
-	var raw string
-	if err := migDB.QueryRow(`SELECT value FROM system_settings WHERE key = $1`, cveSyncRetrySinceKey).Scan(&raw); err != nil {
-		t.Fatalf("read retry marker: %v", err)
-	}
-	got, perr := time.Parse(time.RFC3339, raw)
-	if perr != nil {
-		t.Fatalf("retry marker %q does not parse: %v", raw, perr)
-	}
-	if got.After(time.Now().UTC()) {
-		t.Errorf("retry marker = %s, still in the future: the retry period never starts running and the "+
-			"watermark is held forever", got.UTC())
 	}
 }
 
