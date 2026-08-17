@@ -25,10 +25,10 @@
 # lock_timeout = 0". This workflow is the follow-up that stops the gap
 # from growing.
 #
-# Across all 65 files the lint's own scan reports 5 that take no
-# contending lock (001 / 024 / 025 / 049 / 065), 2 that take a contending
-# lock and declare a budget (063 / 064) and 58 that need a waiver. Three files
-# actually contain a `SET LOCAL lock_timeout`: 065 declares one for a
+# Across all 66 files the lint's own scan reports 5 that take no
+# contending lock (001 / 024 / 025 / 049 / 065), 3 that take a contending
+# lock and declare a budget (063 / 064 / 066) and 58 that need a waiver. Four
+# files actually contain a `SET LOCAL lock_timeout`: 065 declares one for a
 # SHARE UPDATE EXCLUSIVE statement the lint does not require it for, which
 # is why these counts are about locks, not about budget lines. Of the 62 files that predate 063,
 # that is 4 clean (001 / 024 / 025 / 049 — 065 is post-063) and 58 waived.

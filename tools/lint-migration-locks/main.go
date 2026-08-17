@@ -44,7 +44,7 @@
 // appear: the `DO` blocks in migrations 027 / 041 / 044 / 045 (charged
 // conservatively, see item 8), the `CREATE EXTENSION "uuid-ossp"` in
 // migration 001 (also item 8 — that extension's script creates only
-// functions), and the 65 `.down.sql` files (item 9 — not scanned at
+// functions), and the 66 `.down.sql` files (item 9 — not scanned at
 // all). No migration here uses any of the others.
 //
 //  1. A budget long enough to be no budget: `SET LOCAL lock_timeout =
@@ -201,8 +201,8 @@
 // The legacy baseline
 // ===================
 //
-// Of the 65 existing `*.up.sql` files the scan finds 5 that take no
-// contending lock, 2 that take one and declare a budget (063, 064) and 58
+// Of the 66 existing `*.up.sql` files the scan finds 5 that take no
+// contending lock, 3 that take one and declare a budget (063, 064, 066) and 58
 // that need a waiver. The 58 are grandfathered by an explicit baseline
 // (legacyBaseline) rather than edited, because a shipped migration is
 // immutable by convention once recorded in `schema_migrations`.

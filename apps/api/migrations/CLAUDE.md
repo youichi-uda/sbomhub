@@ -186,7 +186,7 @@ inherits the server default of `0` — wait forever.
 
 **Every new migration that acquires a lock conflicting with live traffic
 must declare a budget before the first statement that needs one** (the
-convention is to put it first in the file, and 063 / 064 / 065 do):
+convention is to put it first in the file, and 063 / 064 / 065 / 066 do):
 
 ```sql
 SET LOCAL lock_timeout = '5s';
