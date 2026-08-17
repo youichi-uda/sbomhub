@@ -949,17 +949,29 @@ const nvdCacheSchema = "m55."
 // for openssl to every tenant (the NVD cache is global, not tenant-scoped)
 // until the 24h TTL expires.
 //
-// The window is a mixed-version deployment: a rolling upgrade, or a pre-M55
-// instance left pointed at the same Redis. Once every writer is on this build,
-// there is no way to produce a raw-name key at all and the hole is shut.
+// The window was a mixed-version deployment: a rolling upgrade, or a pre-M55
+// instance left pointed at the same Redis.
 //
-// It cannot be shut from THIS file. Every key any caller can construct has the
-// form `NVDCachePrefix + X`, and a pre-M55 writer produces `NVDCachePrefix + X`
-// for any X simply by scanning a component named X with no version — so no
-// encoding chosen here is unreachable. Closing it properly means changing
-// `cache.NVDCachePrefix` so the two builds do not share a namespace at all,
-// which is a one-line change in internal/cache, outside this wave's file scope.
-// Reported upward rather than left as a comment that overclaims.
+// It could not be shut from THIS file. Every key any caller can construct has
+// the form `NVDCachePrefix + X`, and a pre-M55 writer produces
+// `NVDCachePrefix + X` for any X simply by scanning a component named X with no
+// version — so no encoding chosen here is unreachable.
+//
+// # It is shut now, in internal/cache (M55 follow-up)
+//
+// `cache.NVDCachePrefix` moved from `nvd:vuln:` to `nvdv2:`, which shares no
+// prefix with the old spelling. Because the two prefixes are prefix-incomparable
+// and both builds compose keys as `<prefix> + <arbitrary component name>`, the
+// two key spaces are disjoint: no component name lets a pre-M55 writer construct
+// a key this build reads. Note that the obvious bump — `nvd:vuln:v2:` — would
+// NOT have worked, since a pre-M55 writer reaches it by scanning a component
+// named `v2:m55.<digest>`. The property is pinned by
+// TestNVDCacheKeySpaceIsDisjointFromTheLegacyOne and
+// TestNVDCacheKeyIsUnreachableFromALegacyComponentName in internal/cache, both
+// of which fail on either spelling above.
+//
+// The cost is one cold cache: entries written by an older build are orphaned and
+// expire on their own 24h TTL. See cache.NVDCachePrefix's doc comment.
 func nvdCacheName(name, version string) string {
 	sum := sha256.Sum256([]byte(strconv.Itoa(len(name)) + ":" + name + version))
 	return nvdCacheSchema + hex.EncodeToString(sum[:])

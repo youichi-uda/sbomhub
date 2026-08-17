@@ -12,8 +12,42 @@ import (
 const (
 	// NVDCacheTTL is the TTL for NVD vulnerability cache entries
 	NVDCacheTTL = 24 * time.Hour
-	// NVDCachePrefix is the prefix for all NVD cache keys
-	NVDCachePrefix = "nvd:vuln:"
+
+	// NVDCachePrefix is the prefix for all NVD cache keys.
+	//
+	// # Why this is `nvdv2:` and not `nvd:vuln:` (M55 follow-up)
+	//
+	// cacheKey below interpolates a caller-supplied string, and that string
+	// reaches this package from an uploaded SBOM's component name — an
+	// arbitrary byte string. So the set of keys a caller can construct is
+	// exactly `NVDCachePrefix + <anything>`, and two builds that share this
+	// prefix share a key space no matter how either of them encodes the rest.
+	//
+	// service.nvdCacheName now hashes (name, version) into
+	// `m55.<sha256>` precisely so that no two components collide WITHIN a
+	// build. That does not help ACROSS builds: an attacker computes the digest
+	// offline, names a component `m55.<digest>`, and a pre-M55 instance — one
+	// mid-rolling-upgrade, or left pointed at the same Redis — keys it by the
+	// raw name and lands on the exact key this build reads for the component
+	// the digest stands for. NVD answers nothing for that nonsense keyword, so
+	// this build then serves an empty, complete-looking result to every tenant
+	// (this cache is global, not tenant-scoped) until the TTL expires.
+	//
+	// Bumping the prefix only closes that if the new prefix is NOT reachable
+	// from the old one. `nvd:vuln:v2:` would NOT have worked: it is a
+	// prefix-extension of `nvd:vuln:`, so a pre-M55 writer still reaches it by
+	// scanning a component literally named `v2:m55.<digest>`. `nvdv2:` shares
+	// no prefix with `nvd:vuln:` at all, so no component name lets the old code
+	// path construct a key this build reads. That is what makes the two key
+	// spaces disjoint rather than merely differently-spelled.
+	//
+	// Cost of the bump, stated: every entry written by an older build is
+	// orphaned. Nothing reads them and nothing deletes them — Clear and
+	// GetStats below scan this prefix only — so they expire on their own
+	// NVDCacheTTL (24h). The first scan after an upgrade therefore refetches
+	// from NVD instead of serving cache. That is the intended trade: a cold
+	// cache for one TTL, against serving a poisoned empty answer for one.
+	NVDCachePrefix = "nvdv2:"
 )
 
 // VulnCacheEntry represents cached vulnerability data for a component
