@@ -1241,3 +1241,153 @@ down the API-key path, failed validation and answered 401. What changed is the
 values that previously escaped API-key classification altogether and were served
 as the default identity: a bad delimiter, a bare scheme, or a credential whose
 first four characters are not `sbh_` in some casing.
+
+---
+
+## 9. Vulnerability scanning now looks at far more of NVD and JVN (M55)
+
+Three independent truncations were removed. Every one of them was silent: the
+scan reported `completed` while having examined a small fraction of what the
+upstream catalogue held. **Expect the number of findings to rise, in some cases
+by two orders of magnitude, with no change to your SBOM.**
+
+Nothing here is a schema change except migration 066 (§9.4).
+
+### 9.1 NVD: the first 20 matches were the only matches
+
+`searchByKeyword` asked NVD for `resultsPerPage=20`, read the first page, and
+returned. `totalResults` and `startIndex` were both present in the response and
+both ignored, so anything past the twentieth match was discarded with no log
+line and no error.
+
+Measured against live NVD on 2026-08-11:
+
+| keyword | matches | seen before | seen now |
+|---|---|---|---|
+| `jackson-databind 2.9.10` | 44 | 20 | 44 |
+| `libxml2 2.9.10` | 4 | 4 | 4 |
+| `openssl 1.1.1k` | 2 | 2 | 2 |
+
+The scanner sends `name` **and** `version`, and NVD treats the words as an AND,
+so a versioned component matches tens of records, not thousands. Raising the
+page size to 200 therefore returns every match for a realistic component **in
+the same single request** — the rate limit is charged per request, not per
+record, so a 500-component SBOM still costs 500 requests and takes the same
+time it did before.
+
+Components with no version are the exception (`openssl` alone matches 563,
+`linux` matches 21,670). Those are capped at 5 pages / 996 records and reported
+as truncated rather than fetched — see §9.3.
+
+### 9.2 JVN: only the last seven days, ten at a time
+
+Three defects compounded:
+
+- **No date range was sent.** MyJVN defaults `rangeDatePublic`,
+  `rangeDatePublished` and `rangeDateFirstPublished` to `w` — the current day
+  plus six. Anything older was invisible.
+- **`maxCountItem=10`, `startItem` never sent.** The response's `totalRes` was
+  ignored.
+- **The page was never identified.** MyJVN returns `firstRes` (where this page
+  starts) and `totalResRet` (how many entries it holds); neither was checked, so
+  a response that was short of its own declared length was accepted as complete.
+
+Measured coverage before the fix, against corpora sized from live `totalRes`:
+
+| keyword | catalogue | retrieved before | retrieved now |
+|---|---|---|---|
+| `openssl` | 459 | 1 (0.2%) | 459 |
+| `glibc` | 158 | ~3 | 158 |
+| `linux` | 17,622 | 2 (0.011%) | 500, reported truncated |
+
+The request now sends `rangeDate*=n` (no range) and `maxCountItem=50` (the API
+maximum), and pages up to 10 pages per component with an additional sweep-wide
+pool of 500 pages shared across components. Page identity is verified on every
+response.
+
+**Note that MyJVN ORs the keyword words rather than ANDing them** — measured:
+`glibc` = 158, `2.31` = 40, `glibc 2.31` = 198. Adding the version therefore
+widens the result set. The scanner deliberately sends the component name only.
+
+### 9.3 What "completed" means now, and a CLI exit-code change
+
+When a component's matches exceed the budget, the scan no longer pretends to be
+complete. The truncation propagates through `ScanComponents` to
+`ScanTracker.MarkFailed`, so `GET /projects/:id/sboms/:sbom_id/scan-status`
+reports `failed` and the MCP server reports `counts_final: false`.
+
+**This changes `sbomhub scan --fail-on <severity>`.** A truncated sweep is
+reported as a failed scan, so the CLI exits **2** (scan did not complete) rather
+than **1** (threshold exceeded), even when the records it did retrieve contain a
+finding above your threshold. Both are non-zero, so a plain `set -e` CI step
+still fails; a pipeline that branches on the specific code needs updating.
+
+The trade was made deliberately: a partial answer must not be readable as a
+clean one.
+
+### 9.4 CVE metadata is now refreshed (migration 066)
+
+`cve_sync` already updated `description`, `severity` and `cvss_score` on rows it
+matched, but three classes of row were frozen forever:
+
+- CVEs whose NVD record carries no CPE (the keyword set came out empty),
+- rows whose `source` was `JVN`,
+- **any row, when an older record arrived after a newer one** — there was no
+  staleness comparison at all, so a replayed old record silently downgraded a
+  CRITICAL back to LOW.
+
+Migration 066 adds `vulnerabilities.source_modified_at`, holding upstream's
+`lastModified`. A write is now accepted only when the incoming record is
+strictly newer than what is stored, or when nothing is stored.
+
+**Existing rows are not frozen by this.** `source_modified_at` is NULL for every
+row that predates the migration, and NULL is treated as "unknown, therefore
+writable" — the first sync after upgrading refreshes those rows and stamps them.
+Verified with 25 legacy rows: all 25 refreshed and stamped in one tick, and a
+replay of the older record afterwards downgraded none of them.
+
+What is still not reached: a CVE that NVD has not modified since the sync
+watermark. The delta feed never mentions it, so its stored metadata stands. Rows
+in that state are identifiable with `WHERE source_modified_at IS NULL`; a bounded
+reconciliation pass over them is future work.
+
+The scanner remains a **pure linker** — it creates a row if the CVE is unknown
+and links it to the component, and never rewrites metadata. Ownership of the
+global catalogue row sits with `cve_sync` alone, which is what keeps a
+per-tenant scan from writing global rows inside its tenant transaction.
+
+`down` is safe: it drops only the new column, leaves all sixteen others intact,
+and a new binary run against the rolled-back schema fails loudly on its first
+catalogue write rather than silently writing unarbitrated metadata.
+
+### 9.5 The NVD response cache is cold for one TTL after upgrade
+
+`cache.NVDCachePrefix` changed from `nvd:vuln:` to `nvdv2:`. Entries written by
+an older build are orphaned — nothing reads them and nothing deletes them — and
+expire on their own 24-hour TTL. The first scan after upgrading refetches from
+NVD instead of serving cache.
+
+The reason is that both builds compose keys as `<prefix> + <component name>`,
+and component names are arbitrary strings from an uploaded SBOM. Sharing a
+prefix therefore means sharing a key space regardless of how either build
+encodes the rest, which let a component named after a precomputed digest poison
+the entry a newer build reads for an unrelated component. `nvdv2:` shares no
+prefix with `nvd:vuln:`, so the two spaces are disjoint. (A bump to
+`nvd:vuln:v2:` would *not* have achieved this — it is reachable from the old
+scheme by naming a component `v2:...`.)
+
+### 9.6 What this release does not fix
+
+- **Matching precision is unchanged.** Both scanners match on keywords, not
+  CPEs. Retrieving 459 JVN advisories for `openssl` instead of 1 surfaces the
+  true positives that were being missed *and* the false positives that were
+  always going to be there. CPE-based matching is the real fix and is not in
+  this release.
+- **Partial fetch failures are still reported as success.** Only a total failure
+  escalates. The counts are now carried on `NVDScanReport` / `JVNScanReport`, but
+  no threshold policy consumes them yet.
+- **A single refused statement still discards a whole sweep.** The scanner writes
+  inside the tenant transaction; one rejected row rolls back everything the sweep
+  had written.
+- **Components above the budget stay truncated** — `linux` and similar retrieve
+  996 (NVD) / 500 (JVN) records and say so.
