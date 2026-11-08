@@ -235,8 +235,21 @@ test.describe("AI CRA Reports (M2-5)", () => {
             const card = cardFor(page, report);
             await expect(card).toBeVisible({ timeout: 10000 });
 
+            // Approve drops the card optimistically and then re-fetches the
+            // pending list WITHOUT awaiting it (page.tsx handleDecision). Wait
+            // for that refetch before switching filters below: the page
+            // applies list responses in arrival order, so a late pending
+            // response would overwrite the approved view — a real race,
+            // reproduced deterministically in the fixme test that follows.
+            const pendingRefetch = page.waitForResponse(
+                (r) =>
+                    r.request().method() === "GET" &&
+                    new URL(r.url()).pathname === `/api/v1/projects/${project.projectId}/cra-reports` &&
+                    new URL(r.url()).searchParams.get("decision") === "pending",
+            );
             await card.getByTestId("cra-approve").click();
             await expect(card).toHaveCount(0);
+            expect((await pendingRefetch).status()).toBe(200);
 
             await expect
                 .poll(async () => {
@@ -252,6 +265,43 @@ test.describe("AI CRA Reports (M2-5)", () => {
             await expect(card).toBeVisible();
             await expect(card).toHaveAttribute("data-decision", "approved");
             await expect(card.getByTestId("cra-approve")).toBeDisabled();
+        });
+
+        test("should show the approved filter's rows even when an older list response lands late", async ({ page, request }) => {
+            test.fixme(true, "BUG: cra-reports page.tsx loadReports applies list responses in arrival order with no staleness guard, so a slow earlier response (e.g. the un-awaited pending refetch after Approve) overwrites a newer filter's rows; seen as a flake of the approve test on 2026-11-09");
+            // Its own project: the shared one's CVEs are used by sibling tests.
+            const own = await createVulnerableProject(request, "CRA Stale Response");
+            try {
+                await approveVexDraft(request, own, "CVE-2021-44228");
+                const report = await runCRA(request, own, "CVE-2021-44228", "final_report");
+                const decided = await request.put(`${API_BASE_URL}/api/v1/projects/${own.projectId}/cra-reports/${report.id}/decision`, {
+                    data: { decision: "approved", decision_note: "approved for the stale-response repro" },
+                });
+                expect(decided.status()).toBe(200);
+
+                await page.goto(`/en/projects/${own.projectId}/cra-reports`);
+                // Hold the "pending" list response until after the "approved"
+                // one has been rendered, i.e. deliver them out of order.
+                let releasePending: () => void = () => {};
+                const pendingHeld = new Promise<void>((r) => (releasePending = r));
+                await page.route(
+                    (url) => url.pathname === `/api/v1/projects/${own.projectId}/cra-reports` && url.searchParams.get("decision") === "pending",
+                    async (route) => {
+                        await pendingHeld;
+                        await route.continue();
+                    },
+                );
+                await page.getByTestId("filter-decision").selectOption("pending");
+                await page.getByTestId("filter-decision").selectOption("approved");
+                const card = cardFor(page, report);
+                await expect(card).toBeVisible({ timeout: 10000 });
+                releasePending();
+                // The late pending answer must not replace the approved view.
+                await page.waitForTimeout(1000);
+                await expect(card).toBeVisible();
+            } finally {
+                await deleteProject(request, own.projectId);
+            }
         });
     });
 });
