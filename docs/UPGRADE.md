@@ -1738,8 +1738,10 @@ replaced.
   request, as before. Each unknown candidate costs two (query + product probe),
   so Maven packages where Syft guesses `apache:log4j-core` first cost up to 5.
   The fixture above took 41 NVD requests for 13 components on a cold cache (14
-  before: one keyword walk each, two pages for one of them) and 5 on the next scan (24-hour cache; "unknown product" answers are
-  cached too). Without an NVD API key that is ~6 s per request.
+  before: one keyword walk each, two pages for one of them) and 7 on the next scan (24-hour cache; "unknown product" answers are
+  cached too; truncated answers and answers holding an `nvd_cpe_unverified` CVE
+  are not — here the kernel's 5 pages and openssl's 2). Without an NVD API key
+  that is ~6 s per request.
 - **Truncation.** The CPE path uses the same page budget as the keyword path
   (5 pages, 996 records). A Linux kernel component exceeds it (NVD: 7,059 CVEs
   for 5.10.46), so the scan is reported **failed / truncated**. Before, the
