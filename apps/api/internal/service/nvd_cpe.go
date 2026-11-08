@@ -181,6 +181,10 @@ type cpeCandidate struct {
 	// ("beta9" in log4j:2.0:beta9), else "". It is part of the release the
 	// CPE names (Codex M60 R1 High-1).
 	update string
+	// updateNA: the SBOM's CPE said update NA ("2.0:-"), i.e. the final
+	// release. update "" with updateNA false is ANY: the release is not
+	// pinned (Codex M60 R11 High).
+	updateNA bool
 }
 
 // plainVersion reports whether the candidate's version is dotted numbers
@@ -323,18 +327,19 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 			// (Codex M60 R6 Medium).
 			continue
 		}
-		v, update := compVersion, ""
+		v, update, updateNA := compVersion, "", false
 		if cpeConcrete(n.Version) {
 			v = n.Version
 			if cpeConcrete(n.Update) {
 				update = n.Update
 			}
+			updateNA = n.Update == "-"
 		}
 		v = normaliseCPEVersion(v, distro)
 		if !cpeConcrete(v) {
 			continue
 		}
-		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v), update: update}
+		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v), update: update, updateNA: updateNA}
 		if _, dup := seen[c.productKey()]; dup {
 			continue
 		}
@@ -469,6 +474,28 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 			}
 		default:
 			target += "-" + crit.Update
+			if cmp, ok := compareVersions(mine, target); ok && cmp == 0 {
+				return cpeMatched
+			}
+			if c.update != "" {
+				// The candidate pins a different update.
+				if _, ok := compareVersions(mine, target); !ok {
+					return cpeUndecidable
+				}
+				return cpeRejected
+			}
+			// The candidate pins no update. If its base version is the
+			// criterion's, the component may BE that update unless its CPE
+			// said NA (final release); ANY cannot be decided (Codex M60
+			// R11 High).
+			base, ok := compareVersions(c.version, crit.Version)
+			switch {
+			case !ok:
+				return cpeUndecidable
+			case base != 0 || c.updateNA:
+				return cpeRejected
+			}
+			return cpeUndecidable
 		}
 		cmp, ok := compareVersions(mine, target)
 		if !ok {
