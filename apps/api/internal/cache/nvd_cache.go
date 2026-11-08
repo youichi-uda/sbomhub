@@ -77,6 +77,20 @@ type NVDCache struct {
 	ttl    time.Duration
 }
 
+// OpTimeout bounds each cache round trip (one GET / SET / DEL, or one SCAN
+// page) regardless of the caller's context. The cache is an optimisation: the
+// scanner treats any error as a miss and asks NVD, so a slow or hung Redis
+// must produce that error quickly instead of stalling every component of a
+// scan, whose own context may live for hours. It is shorter than
+// redis.CommandTimeout (the API's bound for security bookkeeping) because a
+// healthy Redis answers in milliseconds and a cache miss costs nothing but
+// the NVD request that would happen anyway.
+const OpTimeout = 1 * time.Second
+
+func opContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, OpTimeout)
+}
+
 // NewNVDCache creates a new NVD cache instance
 func NewNVDCache(client *redis.Client) *NVDCache {
 	return &NVDCache{
@@ -106,6 +120,8 @@ func (c *NVDCache) cacheKey(name, version string) string {
 func (c *NVDCache) Get(ctx context.Context, name, version string) (*VulnCacheEntry, error) {
 	key := c.cacheKey(name, version)
 
+	ctx, cancel := opContext(ctx)
+	defer cancel()
 	data, err := c.client.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return nil, nil // Cache miss
@@ -137,6 +153,8 @@ func (c *NVDCache) Set(ctx context.Context, name, version string, vulns []Cached
 		return fmt.Errorf("failed to marshal cache entry: %w", err)
 	}
 
+	ctx, cancel := opContext(ctx)
+	defer cancel()
 	if err := c.client.Set(ctx, key, data, c.ttl).Err(); err != nil {
 		return fmt.Errorf("redis set error: %w", err)
 	}
@@ -147,6 +165,8 @@ func (c *NVDCache) Set(ctx context.Context, name, version string, vulns []Cached
 // Delete removes a cache entry
 func (c *NVDCache) Delete(ctx context.Context, name, version string) error {
 	key := c.cacheKey(name, version)
+	ctx, cancel := opContext(ctx)
+	defer cancel()
 	return c.client.Del(ctx, key).Err()
 }
 
@@ -164,7 +184,9 @@ func (c *NVDCache) GetStats(ctx context.Context) (*CacheStats, error) {
 	var count int64
 
 	for {
-		keys, nextCursor, err := c.client.Scan(ctx, cursor, NVDCachePrefix+"*", 100).Result()
+		opCtx, cancel := opContext(ctx)
+		keys, nextCursor, err := c.client.Scan(opCtx, cursor, NVDCachePrefix+"*", 100).Result()
+		cancel()
 		if err != nil {
 			return nil, err
 		}
@@ -184,14 +206,14 @@ func (c *NVDCache) GetStats(ctx context.Context) (*CacheStats, error) {
 func (c *NVDCache) Clear(ctx context.Context) error {
 	var cursor uint64
 	for {
-		keys, nextCursor, err := c.client.Scan(ctx, cursor, NVDCachePrefix+"*", 100).Result()
+		opCtx, cancel := opContext(ctx)
+		keys, nextCursor, err := c.client.Scan(opCtx, cursor, NVDCachePrefix+"*", 100).Result()
+		if err == nil && len(keys) > 0 {
+			err = c.client.Del(opCtx, keys...).Err()
+		}
+		cancel()
 		if err != nil {
 			return err
-		}
-		if len(keys) > 0 {
-			if err := c.client.Del(ctx, keys...).Err(); err != nil {
-				return err
-			}
 		}
 		cursor = nextCursor
 		if cursor == 0 {

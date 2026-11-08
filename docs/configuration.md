@@ -13,7 +13,7 @@ SBOMHub can be configured through environment variables.
 |----------|---------|-------------|
 | `PORT` | `8080` | API server port |
 | `DATABASE_URL` | `postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable` | PostgreSQL connection string |
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string. Client timeouts default to dial 3s / read 2s / write 2s / pool wait 3s and can be overridden with go-redis query parameters, e.g. `redis://redis:6379/0?read_timeout=1s` (see [Redis](#redis)). |
 | `BASE_URL` | `http://localhost:3000` | Base URL for the web application |
 | `APP_ENV` | (none — required) | Environment: `development`, `staging`, `production`. **No default.** The server refuses to start when it is unset or is not one of those three values (M48). Every startup guard downgrades itself to a warning only under `development`, so an unset value used to select the weakest posture silently. The legacy name `ENVIRONMENT` is still read as a fallback when `APP_ENV` is unset (M0 Trust Rescue, codex-r18); the value it yields is validated the same way. |
 | `ENCRYPTION_KEY` | (none — required unless `APP_ENV=development`) | AES-256 key for secrets stored in the database (BYOK LLM API keys, issue-tracker tokens, diff-webhook signing secrets). Must be at least 32 bytes and must not be a known placeholder value; the server refuses to start otherwise, and downgrades that refusal to a warning only under `APP_ENV=development`. Generate with `openssl rand -base64 32`. Rotation runbook: [`encryption-key-rotation.md`](./encryption-key-rotation.md). |
@@ -251,6 +251,20 @@ Recommended settings:
 maxmemory 256mb
 maxmemory-policy allkeys-lru
 ```
+
+Client timeouts. The API sets explicit go-redis timeouts unless `REDIS_URL`
+sets them: `dial_timeout=3s`, `read_timeout=2s`, `write_timeout=2s`,
+`pool_timeout=3s` (a value in the URL wins; `-1` means no socket timeout).
+Independently of those, every Redis operation the API performs is bounded at
+the call site: rate-limit bookkeeping gives up after 3s, an NVD cache round
+trip after 1s. A Redis that is down or hung therefore degrades requests
+instead of holding them:
+
+- API-key rate limiting answers `500` (fails closed).
+- Public-link rate limiting answers `503` (fails closed).
+- The NVD cache counts as a miss and the scan asks NVD directly (each
+  component pays up to 1s per cache call while Redis is hung).
+- At startup, a Redis that does not answer within 5s stops the server.
 
 ## Security Recommendations
 

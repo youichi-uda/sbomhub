@@ -13,7 +13,7 @@ SBOMHub は環境変数で設定できます。
 |------|---------|------|
 | `PORT` | `8080` | APIサーバーポート |
 | `DATABASE_URL` | `postgres://sbomhub:sbomhub@localhost:5432/sbomhub?sslmode=disable` | PostgreSQL接続文字列 |
-| `REDIS_URL` | `redis://localhost:6379` | Redis接続文字列 |
+| `REDIS_URL` | `redis://localhost:6379` | Redis接続文字列。クライアントの timeout は既定で dial 3s / read 2s / write 2s / pool 待ち 3s。go-redis の query parameter で上書き可能 (例: `redis://redis:6379/0?read_timeout=1s`、[Redis](#redis) 参照) |
 | `BASE_URL` | `http://localhost:3000` | WebアプリケーションのベースURL |
 | `APP_ENV` | (なし・必須) | 環境: `development`, `staging`, `production`。**デフォルトはありません。** 未設定、またはこの 3 値以外の場合、サーバーは起動を拒否します (M48)。起動時ガードはいずれも `development` のときだけ警告に格下げされるため、未設定が最も弱い構成を暗黙に選ぶ状態になっていました。旧名 `ENVIRONMENT` は `APP_ENV` 未設定時のフォールバックとして引き続き読まれます (M0 Trust Rescue, codex-r18)。フォールバックで得た値も同じ検証を受けます。 |
 | `ENCRYPTION_KEY` | (なし・`APP_ENV=development` 以外では必須) | DB に保存する秘密情報 (BYOK の LLM API キー、Issue tracker 連携トークン、diff webhook の署名シークレット) を暗号化する AES-256 鍵。32 バイト以上で、既知のプレースホルダ値でないことが必要です。満たさない場合サーバーは起動を拒否し、`APP_ENV=development` のときのみ警告に格下げされます。`openssl rand -base64 32` で生成してください。ローテーション手順: [`encryption-key-rotation.md`](./encryption-key-rotation.md)。 |
@@ -251,6 +251,18 @@ maintenance_work_mem = 128MB
 maxmemory 256mb
 maxmemory-policy allkeys-lru
 ```
+
+クライアントの timeout: `REDIS_URL` で指定しない限り、API は go-redis に
+`dial_timeout=3s`、`read_timeout=2s`、`write_timeout=2s`、`pool_timeout=3s`
+を明示設定します (URL の値が優先、`-1` は socket timeout なし)。それとは別に、
+API が行う Redis 操作はすべて呼び出し側で期限を持ちます (rate limit の記録は
+3s、NVD cache の 1 往復は 1s)。Redis が停止・応答なしになったときの挙動:
+
+- API key の rate limit は `500` を返す (fail closed)。
+- 公開リンクの rate limit は `503` を返す (fail closed)。
+- NVD cache は miss 扱いになり、scan は NVD に直接問い合わせる (応答なしの
+  Redis では component ごとに cache 呼び出し 1 回あたり最大 1s かかる)。
+- 起動時に Redis が 5s 以内に応答しなければ server は起動しない。
 
 ## セキュリティ推奨事項
 

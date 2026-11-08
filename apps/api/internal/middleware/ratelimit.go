@@ -15,6 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/sbomhub/sbomhub/internal/model"
+	sbomredis "github.com/sbomhub/sbomhub/internal/redis"
 )
 
 // Budget names ONE per-API-key rate-limit counter, together with the ceiling
@@ -198,13 +199,19 @@ func RateLimitByAPIKey(rdb *redis.Client, budget Budget) echo.MiddlewareFunc {
 			// Previously always used minute granularity regardless of window setting
 			redisKey := rateLimitRedisKey(key, budget, now)
 
-			count, err := rdb.Incr(c.Request().Context(), redisKey).Result()
+			// Bounded: the request context has no deadline, so a hung Redis
+			// would otherwise hold the request for as long as go-redis's
+			// socket timeouts allow, per call. On timeout this fails closed
+			// (500) like any other Redis error.
+			rctx, cancel := sbomredis.CommandContext(c.Request().Context())
+			defer cancel()
+			count, err := rdb.Incr(rctx, redisKey).Result()
 			if err != nil {
 				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "rate limit error"})
 			}
 			if count == 1 {
 				// Set expiry slightly longer than window to handle edge cases
-				_ = rdb.Expire(c.Request().Context(), redisKey, window+time.Second).Err()
+				_ = rdb.Expire(rctx, redisKey, window+time.Second).Err()
 			}
 			if count > int64(limit) {
 				c.Response().Header().Set("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
@@ -283,8 +290,11 @@ const (
 	// deadline on the server (see the residuals).
 	publicLinkInFlightTTL = 2 * time.Minute
 	// publicLinkRedisTimeout bounds the bookkeeping round trips, which run on
-	// a context detached from the client's (see RateLimitPublicLink).
-	publicLinkRedisTimeout = 3 * time.Second
+	// a context detached from the client's (see RateLimitPublicLink). It is
+	// only effective because the client is built with ContextTimeoutEnabled
+	// (internal/redis.Options); without that go-redis ignored this deadline
+	// for socket I/O and a hung Redis held the request for its read timeout.
+	publicLinkRedisTimeout = sbomredis.CommandTimeout
 )
 
 // RateLimitPublicLink throttles failed attempts against the anonymous public
