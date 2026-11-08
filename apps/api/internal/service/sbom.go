@@ -402,6 +402,27 @@ func parseComponents(data []byte, format model.SbomFormat, version string) ([]mo
 }
 
 func parseCycloneDX(data []byte) ([]model.Component, error) {
+	// "components" is optional, but when present it must be an array of
+	// objects. encoding/json decodes null (and a null element) without an
+	// error, which used to store a schema-invalid SBOM with no — or an empty
+	// — component (Codex R4 Medium).
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return nil, err
+	}
+	if rawComps, ok := top["components"]; ok {
+		var elems []json.RawMessage
+		if err := json.Unmarshal(rawComps, &elems); err != nil || elems == nil {
+			return nil, fmt.Errorf("CycloneDX components must be an array")
+		}
+		for i, e := range elems {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(e, &obj); err != nil || obj == nil {
+				return nil, fmt.Errorf("CycloneDX components[%d] must be an object", i)
+			}
+		}
+	}
+
 	var bom cdx.BOM
 	if err := json.Unmarshal(data, &bom); err != nil {
 		return nil, err

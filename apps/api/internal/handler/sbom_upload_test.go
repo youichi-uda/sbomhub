@@ -182,6 +182,8 @@ func TestSBOMHandler_Upload_ParseFailureTouchesNoRepository(t *testing.T) {
 		"spdx2 packages not an array":       `{"spdxVersion":"SPDX-2.3","packages":5}`,
 		"spdx2 package not an object":       `{"spdxVersion":"SPDX-2.3","packages":[1]}`,
 		"spdx2 packages null":               `{"spdxVersion":"SPDX-2.3","packages":null}`,
+		"cyclonedx components null":         `{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":null}`,
+		"cyclonedx component null":          `{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[null]}`,
 	}
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
