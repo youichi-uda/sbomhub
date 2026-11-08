@@ -134,14 +134,19 @@ test.describe('Search Functionality', () => {
         // (observed 2026-11-09: NVD 429 -> 500). This test is about how the
         // PAGE renders a not-found answer, so that one response is pinned to
         // the handler's own 404 body (apps/api/internal/handler/search.go).
-        await page.route('**/api/v1/search/cve?*', (route) =>
-            route.fulfill({
+        // The stub records what it was asked, so a page that sent the wrong
+        // (or no) query cannot pass on the canned answer (Codex R4 Low).
+        const asked: string[] = [];
+        await page.route('**/api/v1/search/cve?*', (route) => {
+            asked.push(new URL(route.request().url()).searchParams.get('q') ?? '<none>');
+            return route.fulfill({
                 status: 404,
                 contentType: 'application/json',
                 body: JSON.stringify({ error: 'CVE not found' }),
-            }),
-        );
+            });
+        });
         await searchCve(page, 'CVE-9999-99999', 404);
+        expect(asked).toEqual(['CVE-9999-99999']);
 
         const errorCard = page.getByTestId('empty-state');
         await expect(errorCard).toBeVisible();

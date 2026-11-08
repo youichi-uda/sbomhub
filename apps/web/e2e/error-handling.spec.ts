@@ -185,10 +185,18 @@ test.describe('Error Handling', () => {
     test('should accept a 10,000-component SBOM upload', async ({ request }) => {
         const project = await createProject(request, uniqueName('Large File Test'), 'For large file test');
         try {
+            // 10,000 distinct component ROWS (distinct purls) that share ONE
+            // synthetic name/version. Every upload starts a background NVD/JVN
+            // scan, which de-duplicates by name+version
+            // (service/nvd_cpe.go::nvdWorkKey); with 10,000 distinct names it
+            // made ~10,000 live NVD lookups for up to the 30 min scan deadline,
+            // outliving this test and the project. One shared synthetic name
+            // keeps it at a single unmatchable lookup (Codex R4 High).
             const components = Array.from({ length: 10000 }, (_, i) => ({
                 type: 'library',
-                name: `component-${i}`,
+                name: 'sbomhub-e2e-bulk-load',
                 version: '1.0.0',
+                purl: `pkg:generic/sbomhub-e2e/bulk-load@1.0.0?n=${i}`,
                 licenses: [{ license: { id: 'MIT' } }],
             }));
             const uploadResponse = await request.post(`${API_BASE_URL}/api/v1/projects/${project.id}/sbom`, {

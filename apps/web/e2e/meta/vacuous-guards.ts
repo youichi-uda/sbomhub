@@ -470,7 +470,12 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
                 const parent = node.parent;
                 if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return false;
                 const idx = parent.statements.indexOf(node as ts.Statement);
-                return parent.statements.slice(idx + 1).some((st) => branchExpects(st));
+                // Only an UNCONDITIONAL later statement counts: a top-level
+                // expression statement (`await expect(…)…;`, `await helper();`)
+                // — not one nested in another if/loop (Codex R4 Low).
+                return parent.statements
+                    .slice(idx + 1)
+                    .some((st) => ts.isExpressionStatement(st) && branchExpects(st));
             };
             const terminates = (st: ts.Statement | undefined): boolean => {
                 if (!st) return false;
@@ -521,15 +526,26 @@ export function analyzeVacuous(fileName: string, text: string): VacuousSite[] {
     };
     visit(sf);
 
+    // Name -> function, for names declared EXACTLY once in the file. A name
+    // declared in several scopes is ambiguous without scope resolution, and
+    // resolving it wrongly is a false positive (or a miss); it is left
+    // unchecked (Codex R4 Medium).
     const sameFileFunctions = new Map<string, ts.Node>();
+    const declarationCount = new Map<string, number>();
     const collectNamed = (n: ts.Node): void => {
-        if (ts.isFunctionDeclaration(n) && n.name) sameFileFunctions.set(n.name.text, n);
-        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && isFunctionLike(unwrap(n.initializer))) {
-            sameFileFunctions.set(n.name.text, unwrap(n.initializer));
+        let named: [string, ts.Node] | null = null;
+        if (ts.isFunctionDeclaration(n) && n.name) named = [n.name.text, n];
+        else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
+            named = [n.name.text, n.initializer && isFunctionLike(unwrap(n.initializer)) ? unwrap(n.initializer) : n];
+        } else if (ts.isParameter(n) && ts.isIdentifier(n.name)) named = [n.name.text, n];
+        if (named) {
+            declarationCount.set(named[0], (declarationCount.get(named[0]) ?? 0) + 1);
+            sameFileFunctions.set(named[0], named[1]);
         }
         ts.forEachChild(n, collectNamed);
     };
     collectNamed(sf);
+    for (const [name, count] of declarationCount) if (count !== 1) sameFileFunctions.delete(name);
     const visitTests = (n: ts.Node): void => {
         if (
             ts.isCallExpression(n) &&
@@ -714,6 +730,21 @@ test('smoke', smoke);`,
     await expect(page.locator('body')).toBeVisible();
 });`,
     ],
+    [
+        // Codex R4 Low: the fall-through assertion is itself conditional.
+        'asserting early return followed by a CONDITIONAL assertion',
+        'V1',
+        `${HDR}test('t', async ({ page }) => {
+    const rows = page.locator('tr');
+    if (await page.getByText('empty').isVisible()) {
+        await expect(rows).toHaveCount(0);
+        return;
+    }
+    if (process.env.FULL === '1') {
+        await expect(rows.first()).toBeVisible();
+    }
+});`,
+    ],
 ];
 
 export const VACUOUS_MUST_BE_CLEAN: ReadonlyArray<readonly [string, string]> = [
@@ -879,6 +910,19 @@ test('check', check);`,
 test('t', async () => {
     const view = <Widget />;
     expect(view).toBeTruthy();
+});`,
+    ],
+    [
+        // Codex R4 Medium: two scopes each define their own `body`; an
+        // ambiguous name is left unchecked rather than resolved wrongly.
+        'same helper name in two describe blocks',
+        `${HDR}test.describe('a', () => {
+    const body = async ({ page }: any) => { await expect(page.locator('main')).toBeVisible(); };
+    test('a', body);
+});
+test.describe('b', () => {
+    const body = async ({ page }: any) => { await page.goto('/x'); };
+    test('b', body);
 });`,
     ],
 ];
