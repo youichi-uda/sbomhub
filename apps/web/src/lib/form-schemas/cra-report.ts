@@ -8,11 +8,14 @@
 // user-visible contract.
 import { z } from "zod";
 
-import { maxChars } from "./v3-messages.ts";
+import { maxChars, stringError } from "./v3-messages.ts";
 
 export const reportEditSchema = z.object({
-  draft_text: z.string().min(1, { error: "draft_text is required" }).max(50000, maxChars(50000)),
-  decision_note: z.string().max(2000, maxChars(2000)),
+  draft_text: z
+    .string(stringError)
+    .min(1, { error: "draft_text is required" })
+    .max(50000, maxChars(50000)),
+  decision_note: z.string(stringError).max(2000, maxChars(2000)),
 });
 
 export type ReportEditFormValues = z.infer<typeof reportEditSchema>;
@@ -23,10 +26,13 @@ export type ReportEditFormValues = z.infer<typeof reportEditSchema>;
 // empty value lets the server default to NOW(). reference_number is
 // VARCHAR(255); notes is TEXT (kept generous but bounded client-side).
 export const reportSubmitSchema = z.object({
-  authority: z.string().min(1, { error: "authority is required" }).max(255, maxChars(255)),
-  submitted_at: z.string(),
-  reference_number: z.string().max(255, maxChars(255)),
-  notes: z.string().max(5000, maxChars(5000)),
+  authority: z
+    .string(stringError)
+    .min(1, { error: "authority is required" })
+    .max(255, maxChars(255)),
+  submitted_at: z.string(stringError),
+  reference_number: z.string(stringError).max(255, maxChars(255)),
+  notes: z.string(stringError).max(5000, maxChars(5000)),
 });
 
 export type ReportSubmitFormValues = z.infer<typeof reportSubmitSchema>;

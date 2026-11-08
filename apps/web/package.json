@@ -9,6 +9,7 @@
     "//eslint-config": "Next 16 removed `next lint`; we invoke eslint v9 against eslint.config.mjs (flat config). M11-5 #80.",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test:schemas": "node --test src/lib/form-schemas/__tests__/form-schemas.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "dev:test": "cross-env NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY= CLERK_SECRET_KEY= next dev"

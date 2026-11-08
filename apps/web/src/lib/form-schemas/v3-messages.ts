@@ -17,6 +17,29 @@ export function maxChars(n: number): { error: string } {
   return { error: `String must contain at most ${n} character(s)` };
 }
 
+/** zod 3's name for a value's type, as used in "received <type>". */
+function v3TypeName(input: unknown): string {
+  if (input === null) return "null";
+  if (Array.isArray(input)) return "array";
+  if (input instanceof Date) return "date";
+  if (input instanceof Map) return "map";
+  if (input instanceof Set) return "set";
+  if (typeof Promise !== "undefined" && input instanceof Promise) return "promise";
+  if (typeof input === "number" && Number.isNaN(input)) return "nan";
+  return typeof input;
+}
+
+/**
+ * zod 3 messages for a wrong-typed string: "Required" when missing,
+ * "Expected string, received <type>" otherwise. Pass to z.string(...).
+ */
+export const stringError = {
+  error: (issue: { input?: unknown }) =>
+    issue.input === undefined
+      ? "Required"
+      : `Expected string, received ${v3TypeName(issue.input)}`,
+};
+
 /** zod 3 `z.enum(values)` messages: invalid option, missing value, wrong type. */
 export function enumError(values: readonly string[]) {
   const expected = values.map((v) => `'${v}'`).join(" | ");
@@ -27,7 +50,7 @@ export function enumError(values: readonly string[]) {
       if (typeof input === "string") {
         return `Invalid enum value. Expected ${expected}, received '${input}'`;
       }
-      return `Expected ${expected}, received ${input === null ? "null" : typeof input}`;
+      return `Expected ${expected}, received ${v3TypeName(input)}`;
     },
   };
 }

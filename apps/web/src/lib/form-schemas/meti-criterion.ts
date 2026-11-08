@@ -3,7 +3,7 @@
 // i18n strings keyed on the presence of an error, not the zod message.
 import { z } from "zod";
 
-import { enumError, maxChars } from "./v3-messages.ts";
+import { enumError, maxChars, stringError } from "./v3-messages.ts";
 
 const OVERRIDE_STATUSES = [
   "achieved",
@@ -15,8 +15,8 @@ const OVERRIDE_STATUSES = [
 /** zod schema for the override form. Mirrors handler.metiOverrideRequest. */
 export const criterionOverrideSchema = z.object({
   override_status: z.enum(OVERRIDE_STATUSES, enumError(OVERRIDE_STATUSES)),
-  override_note: z.string().max(2000, maxChars(2000)),
-  improvement_action: z.string().max(2000, maxChars(2000)),
+  override_note: z.string(stringError).max(2000, maxChars(2000)),
+  improvement_action: z.string(stringError).max(2000, maxChars(2000)),
 });
 
 export type CriterionOverrideFormValues = z.infer<typeof criterionOverrideSchema>;
@@ -32,8 +32,7 @@ export type CriterionOverrideFormValues = z.infer<typeof criterionOverrideSchema
  * resolver typing; both are `{ note: string }`.
  */
 export const criterionClearOverrideSchema = z.object({
-  note: z
-    .string()
+  note: z.string(stringError)
     .transform((s) => s.trim())
     .refine((s) => s.length >= 1 && s.length <= 4096, {
       error: "note must be 1..4096 characters after trim",

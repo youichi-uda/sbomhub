@@ -21,19 +21,22 @@ export type DiffWebhookFormat = (typeof DIFF_WEBHOOK_FORMATS)[number];
 // zod 4 notes:
 //   - coerce INPUT is typed `unknown` (the form holds strings, onSubmit gets
 //     numbers), hence the separate DiffWebhookFormInput type below.
-//   - The integer check is a refinement, not `.int()`: zod 4's int() reports
-//     a fractional value as an ABORTING issue, which would also suppress the
-//     url_required / url_protocol refinement below — zod 3 showed both
-//     errors together. The refinement keeps zod 3's message.
-//   - Number.isSafeInteger also refuses values beyond 2^53 that zod 3's
-//     int() accepted (e.g. "1e20"); no Go int threshold can hold those, so
-//     this tightens rather than loosens. z.number() itself refuses NaN and
-//     (new in zod 4) ±Infinity — both were already rejected by zod 3, via
-//     NaN / int().
+//   - The integer check is a refinement, not `.int()`, for two zod 3 parity
+//     reasons. (1) zod 4's int() reports a fractional value as an ABORTING
+//     issue, which skips the url_required / url_protocol refinement below;
+//     zod 3 treated it as non-aborting and showed both errors together.
+//     Refinement issues are non-aborting, so the default refinement gating
+//     now matches zod 3: type failures (NaN, a bad `format`) abort and skip
+//     the URL check, value failures (fractional, negative) do not.
+//     (2) zod 4's int() is Number.isSafeInteger and refuses e.g. 2^53;
+//     zod 3's was Number.isInteger.
+//   - z.number() itself refuses NaN and, new in zod 4, ±Infinity; both were
+//     already rejected under zod 3 (NaN by the type check, ±Infinity by int()).
+//   - The messages are zod 3's; the page does not render threshold errors.
 const threshold = () =>
   z.coerce
     .number()
-    .refine((n) => Number.isSafeInteger(n), { error: "Expected integer, received float" })
+    .refine((n) => Number.isInteger(n), { error: "Expected integer, received float" })
     .refine((n) => n >= 0, { error: "Number must be greater than or equal to 0" });
 
 export const diffWebhookSchema = z
@@ -46,38 +49,25 @@ export const diffWebhookSchema = z
     high_threshold: threshold(),
     license_violation_threshold: threshold(),
   })
-  .superRefine(
-    (data, ctx) => {
-      if (data.enabled && data.webhook_url.trim() === "") {
-        ctx.addIssue({
-          code: "custom",
-          path: ["webhook_url"],
-          message: "url_required",
-        });
-      }
-      if (
-        data.webhook_url.trim() !== "" &&
-        !/^https?:\/\//.test(data.webhook_url)
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["webhook_url"],
-          message: "url_protocol",
-        });
-      }
-    },
-    {
-      // zod 4 skips an object refinement once ANY field has failed; zod 3 ran
-      // it after non-aborting failures (a negative or fractional threshold),
-      // so the form showed the URL error alongside the threshold error. The
-      // check only reads `enabled` and `webhook_url`, so run it whenever
-      // those two are well-typed.
-      when: (payload) => {
-        const v = payload.value as { enabled?: unknown; webhook_url?: unknown };
-        return typeof v?.enabled === "boolean" && typeof v?.webhook_url === "string";
-      },
-    },
-  );
+  .superRefine((data, ctx) => {
+    if (data.enabled && data.webhook_url.trim() === "") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["webhook_url"],
+        message: "url_required",
+      });
+    }
+    if (
+      data.webhook_url.trim() !== "" &&
+      !/^https?:\/\//.test(data.webhook_url)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["webhook_url"],
+        message: "url_protocol",
+      });
+    }
+  });
 
 export type DiffWebhookFormInput = z.input<typeof diffWebhookSchema>;
 export type DiffWebhookFormValues = z.output<typeof diffWebhookSchema>;

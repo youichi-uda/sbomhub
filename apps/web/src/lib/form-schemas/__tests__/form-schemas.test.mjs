@@ -274,6 +274,24 @@ describe("diff-webhook settings form", () => {
       );
     }
   });
+  test("integers beyond 2^53 are accepted, as zod 3 int() did (Codex R1 Medium)", () => {
+    // zod 3's int() is Number.isInteger; zod 4's is Number.isSafeInteger.
+    for (const v of ["9007199254740992", "1e20"]) {
+      assert.equal(
+        typeof accept(diffWebhookSchema, { ...ok, critical_threshold: v }).critical_threshold,
+        "number",
+        v,
+      );
+    }
+  });
+  test("an aborting threshold failure suppresses the url check, as in zod 3 (Codex R1 Low)", () => {
+    // NaN is a type failure: zod 3 aborted the object and skipped the
+    // refinement, so only the threshold failed. Same for an invalid format.
+    assert.deepEqual(pathsOf(diffWebhookSchema, { ...ok, webhook_url: "", critical_threshold: "abc" }), [
+      "critical_threshold",
+    ]);
+    assert.deepEqual(pathsOf(diffWebhookSchema, { ...ok, webhook_url: "", format: "xml" }), ["format"]);
+  });
   test("url issue still reported alongside a threshold issue", () => {
     // The form shows both at once; the refinement must not be skipped
     // because a sibling field failed.
@@ -341,6 +359,46 @@ describe("llm settings form", () => {
     assert.deepEqual(issuesOf(buildLlmSettingsSchema(PROVIDERS, true), { ...empty, provider: "nope" }), [
       ["provider", enumMsg(PROVIDERS, "nope")],
     ]);
+  });
+});
+
+describe("malformed value types keep zod 3's messages (Codex R1 Low)", () => {
+  // Only reachable through programmatic form state (reset/setValue), since
+  // HTML controls produce strings — but these fields render the message
+  // verbatim. Expected texts were read from zod 3 (the zod/v3 subpath).
+  const STATES = ["not_affected", "affected", "under_investigation", "resolved"];
+  // First issue per field = what zodResolver hands react-hook-form (default
+  // criteriaMode "firstError") = what the UI renders. Compared that way
+  // because zod 4 also runs a length check (min/max) on an ARRAY input after
+  // the type failure (arrays have `length`); that extra issue never surfaces.
+  const firstPerField = (schema, value) => {
+    const seen = new Map();
+    for (const [p, m] of issuesOf(schema, value)) if (!seen.has(p)) seen.set(p, m);
+    return [...seen];
+  };
+  test("string fields", () => {
+    for (const [v, t] of [[1, "number"], [null, "null"], [[], "array"], [true, "boolean"], [{}, "object"], [NaN, "nan"], [new Date(0), "date"]]) {
+      assert.deepEqual(firstPerField(reportEditSchema, { draft_text: v, decision_note: "" }), [
+        ["draft_text", `Expected string, received ${t}`],
+      ]);
+      assert.deepEqual(
+        firstPerField(reportSubmitSchema, { authority: v, submitted_at: "", reference_number: "", notes: "" }),
+        [["authority", `Expected string, received ${t}`]],
+      );
+      assert.deepEqual(firstPerField(triageEditSchema, { state: "affected", justification: "", detail: v, note: "" }), [
+        ["detail", `Expected string, received ${t}`],
+      ]);
+    }
+    assert.deepEqual(firstPerField(reportEditSchema, { decision_note: "" }), [["draft_text", "Required"]]);
+  });
+  test("enum fields", () => {
+    const exp = STATES.map((v) => `'${v}'`).join(" | ");
+    for (const [v, t] of [[1, "number"], [null, "null"], [[], "array"], [NaN, "nan"], [new Date(0), "date"]]) {
+      assert.deepEqual(issuesOf(triageEditSchema, { state: v, justification: "", detail: "", note: "" }), [
+        ["state", `Expected ${exp}, received ${t}`],
+      ]);
+    }
+    assert.deepEqual(issuesOf(triageEditSchema, { justification: "", detail: "", note: "" }), [["state", "Required"]]);
   });
 });
 
