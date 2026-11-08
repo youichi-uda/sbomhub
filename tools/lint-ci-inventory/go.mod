@@ -31,13 +31,13 @@
 // without a covering workspace, so entering the module directory is the
 // most robust invocation.
 //
-// The `toolchain go1.26.4` line below is checked by
+// The `toolchain go1.26.10` line below is checked by
 // `tools/lint-toolchain-alignment` layer 1 (it globs `tools/*/go.mod`),
 // so it must track `apps/api/go.mod`'s toolchain directive exactly.
 module github.com/sbomhub/sbomhub/tools/lint-ci-inventory
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.26.10
 
 require github.com/goccy/go-yaml v1.19.2
