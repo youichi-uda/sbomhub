@@ -34,7 +34,9 @@
 // paragraph is a claim about someone else's code.
 //
 // Built on the current @modelcontextprotocol/sdk high-level API:
-// McpServer.registerTool with zod raw-shape input schemas. The SDK validates
+// McpServer.registerTool with zod object input schemas (toolInput() in
+// zod-shapes.ts: a plain z.object whose advertised JSON Schema matches what
+// the zod 3 raw-shape registration produced). The SDK validates
 // tool arguments against the schema before the callback runs and answers
 // invalid calls with a protocol-level InvalidParams error, so every callback
 // below receives typed, already-validated args. Tool *execution* failures
@@ -47,6 +49,7 @@ import { z } from "zod";
 
 import { ApiClient } from "./client/api.js";
 import { SCOPE_NOTE } from "./scope-notes.js";
+import { toolInput, uuidString } from "./zod-shapes.js";
 
 const apiUrl = process.env.SBOMHUB_API_URL || "http://localhost:8080";
 const apiKey = process.env.SBOMHUB_API_KEY || "";
@@ -122,15 +125,12 @@ const SCAN_STATE_NOTE =
 // (TestM50W2PathParamDenialIsIndistinguishable asserts byte equality), so a
 // description promising "it exists, you just cannot see it" would hand the
 // model an inference the status does not support (Codex R1, Medium).
-const projectIdSchema = z
-  .string()
-  .uuid()
-  .describe(
-    "プロジェクトID (UUID)。" +
-      "プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を" +
-      "指定すると403で拒否される。この403は「このキーではそのIDを扱えない」" +
-      "という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
-  );
+const projectIdSchema = uuidString().describe(
+  "プロジェクトID (UUID)。" +
+    "プロジェクトスコープのAPIキーでは、そのキー自身のプロジェクト以外を" +
+    "指定すると403で拒否される。この403は「このキーではそのIDを扱えない」" +
+    "という意味だけで、そのプロジェクトが存在するかどうかは判断できない"
+);
 
 server.registerTool(
   "sbomhub_list_projects",
@@ -183,9 +183,9 @@ server.registerTool(
       "プロジェクトの全件を数えた値ではない (全体の件数は total)。" +
       SCAN_STATE_NOTE +
       "これらは vulnerabilities の下に入る",
-    inputSchema: {
+    inputSchema: toolInput({
       project_id: projectIdSchema,
-    },
+    }),
   },
   async ({ project_id }) => {
     try {
@@ -203,9 +203,9 @@ server.registerTool(
       "プロジェクトのSBOM一覧を取得 (新しい順)。" +
       "version はSBOM仕様のバージョン (CycloneDX/SPDX) であってアップロードの" +
       "版数ではないため、同じ値が並ぶのが普通。個々のSBOMを指すには id を使うこと",
-    inputSchema: {
+    inputSchema: toolInput({
       project_id: projectIdSchema,
-    },
+    }),
   },
   async ({ project_id }) => {
     try {
@@ -224,7 +224,7 @@ server.registerTool(
       SCOPE_NOTE.tenantWide +
       "。「見つからない」と「見る権限が無い」を区別できなくなるため、" +
       "絞り込みではなく拒否する",
-    inputSchema: {
+    inputSchema: toolInput({
       cve_id: z
         .string()
         // Flag-free pattern: the SDK's JSON-schema conversion drops regex
@@ -233,7 +233,7 @@ server.registerTool(
         // accepted prefixes instead so schema and behavior agree.
         .regex(/^(?:CVE|cve)-\d{4}-\d{4,}$/, "CVE-YYYY-NNNN 形式で指定してください")
         .describe("CVE ID (例: CVE-2021-44228)"),
-    },
+    }),
   },
   async ({ cve_id }) => {
     try {
@@ -251,12 +251,12 @@ server.registerTool(
       "コンポーネント名でテナントの全プロジェクトを横断検索。" +
       SCOPE_NOTE.tenantWide +
       " (理由は sbomhub_search_cve と同じ)",
-    inputSchema: {
+    inputSchema: toolInput({
       name: z.string().min(1).describe("コンポーネント名 (例: log4j)"),
       // min(1) for the same reason as sbomhub_diff's version selectors: an
       // empty string would pass the schema and then silently widen the search.
-      version: z.string().min(1).optional().describe("バージョン (任意)"),
-    },
+      version: z.string().min(1).describe("バージョン (任意)").optional(),
+    }),
   },
   async ({ name, version }) => {
     try {
@@ -276,23 +276,19 @@ server.registerTool(
       " — 自分のプロジェクトのSBOM同士であっても拒否される " +
       "(対象SBOMをbodyのUUIDで選ぶため、どのプロジェクトのものかが" +
       "判明するのが両行の読み込み後になる)",
-    inputSchema: {
+    inputSchema: toolInput({
       project_id: projectIdSchema,
       // Ids first: they are the only selector that identifies one snapshot.
-      base_sbom_id: z
-        .string()
-        .uuid()
-        .optional()
+      base_sbom_id: uuidString()
         .describe(
           "比較元SBOMのID (sbomhub_list_sboms の id。任意。指定すると base_version より優先)"
-        ),
-      target_sbom_id: z
-        .string()
-        .uuid()
-        .optional()
+        )
+        .optional(),
+      target_sbom_id: uuidString()
         .describe(
           "比較先SBOMのID (sbomhub_list_sboms の id。任意。指定すると target_version より優先)"
-        ),
+        )
+        .optional(),
       base_version: z
         .string()
         // An empty string is not "omitted": without min(1) it passes the
@@ -301,20 +297,20 @@ server.registerTool(
         // present the result as the comparison the caller asked for
         // (Codex R7).
         .min(1)
-        .optional()
         .describe(
           "比較元SBOMの仕様バージョン (省略時: 2番目に新しいSBOM)。" +
             "これはCycloneDX/SPDXの仕様バージョンでアップロードの版数ではないため、" +
             "同じ値のSBOMが複数あるのが普通で、その場合はエラーになる — base_sbom_id を使うこと"
-        ),
+        )
+        .optional(),
       target_version: z
         .string()
         .min(1)
-        .optional()
         .describe(
           "比較先SBOMの仕様バージョン (省略時: 最新SBOM)。base_version と同じ注意点"
-        ),
-    },
+        )
+        .optional(),
+    }),
   },
   async ({
     project_id,
@@ -348,7 +344,7 @@ server.registerTool(
       "走査した範囲での件数なので、プロジェクト全体の値として報告しないこと " +
       "(全体の件数は total_in_project)。" +
       SCAN_STATE_NOTE,
-    inputSchema: {
+    inputSchema: toolInput({
       project_id: projectIdSchema,
       severity: z
         .string()
@@ -359,15 +355,15 @@ server.registerTool(
           /^(?:critical|high|medium|low|CRITICAL|HIGH|MEDIUM|LOW)$/,
           "critical / high / medium / low のいずれかを指定してください"
         )
-        .optional()
         .describe(
           "severity で絞り込み (任意): critical / high / medium / low (小文字または大文字)"
-        ),
+        )
+        .optional(),
       sort: z
         .enum(["cvss", "epss"])
-        .optional()
-        .describe("並び順 (デフォルト: cvss)"),
-    },
+        .describe("並び順 (デフォルト: cvss)")
+        .optional(),
+    }),
   },
   async ({ project_id, severity, sort }) => {
     try {
@@ -384,9 +380,9 @@ server.registerTool(
   "sbomhub_get_compliance",
   {
     description: "コンプライアンススコアを取得 (経産省ガイドライン準拠チェック)",
-    inputSchema: {
+    inputSchema: toolInput({
       project_id: projectIdSchema,
-    },
+    }),
   },
   async ({ project_id }) => {
     try {

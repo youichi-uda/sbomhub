@@ -16,7 +16,7 @@
   "dependencies": {
     "@clerk/localizations": "^3.37.10",
     "@clerk/nextjs": "^6.39.8",
-    "@hookform/resolvers": "^3.10.0",
+    "@hookform/resolvers": "^7.0.3",
     "@tanstack/react-query": "^5.107.1",
     "@xyflow/react": "^12.12.1",
     "class-variance-authority": "^0.7.1",
@@ -28,7 +28,7 @@
     "react-dom": "^19.3.1",
     "react-hook-form": "^7.91.0",
     "tailwind-merge": "^2.6.1",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.0",

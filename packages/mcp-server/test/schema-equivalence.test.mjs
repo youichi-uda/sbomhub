@@ -9,8 +9,11 @@
 //      Under zod 4 the SDK switches to zod's own toJSONSchema, whose defaults
 //      differ (input-mode objects drop `additionalProperties: false`, uuid()
 //      gains a `pattern`). The advertised schema is the contract MCP clients
-//      generate calls from, so it is compared EXACTLY: any difference has to be
-//      a deliberate edit of the fixture, not drift.
+//      generate calls from, so it is compared EXACTLY (deepStrictEqual: every
+//      key and value; JSON object key ORDER is not part of the comparison —
+//      under zod 4 `$schema` is emitted before `additionalProperties` instead of
+//      after it, which RFC 8259 objects do not distinguish). Any other
+//      difference has to be a deliberate edit of the fixture, not drift.
 //
 //   2. What the server DOES with arguments — accept/reject per argument, and
 //      which request (if any) reaches the API. Written green against zod 3

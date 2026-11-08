@@ -57,6 +57,7 @@ import {
   DIFF_WEBHOOK_FORMATS,
   diffWebhookSchema,
   type DiffWebhookFormat,
+  type DiffWebhookFormInput,
   type DiffWebhookFormValues,
 } from "@/lib/form-schemas/diff-webhook";
 
@@ -65,6 +66,9 @@ const SECRET_PLACEHOLDER = "***";
 const FORMATS = DIFF_WEBHOOK_FORMATS;
 type Format = DiffWebhookFormat;
 const schema = diffWebhookSchema;
+// zod 4 + @hookform/resolvers 5+: the form holds the schema INPUT (threshold
+// strings typed `unknown` by z.coerce) and onSubmit receives the OUTPUT.
+type FormInput = DiffWebhookFormInput;
 type FormValues = DiffWebhookFormValues;
 
 interface SettingsDiffWebhookResponse {
@@ -113,7 +117,7 @@ export default function DiffWebhookSettingsPage() {
     control,
     setValue,
     formState: { errors },
-  } = useForm<FormValues>({
+  } = useForm<FormInput, unknown, FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
       enabled: false,

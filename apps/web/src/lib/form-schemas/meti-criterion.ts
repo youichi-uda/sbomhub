@@ -3,16 +3,20 @@
 // i18n strings keyed on the presence of an error, not the zod message.
 import { z } from "zod";
 
+import { enumError, maxChars } from "./v3-messages.ts";
+
+const OVERRIDE_STATUSES = [
+  "achieved",
+  "not_achieved",
+  "needs_review",
+  "not_applicable",
+] as const;
+
 /** zod schema for the override form. Mirrors handler.metiOverrideRequest. */
 export const criterionOverrideSchema = z.object({
-  override_status: z.enum([
-    "achieved",
-    "not_achieved",
-    "needs_review",
-    "not_applicable",
-  ]),
-  override_note: z.string().max(2000),
-  improvement_action: z.string().max(2000),
+  override_status: z.enum(OVERRIDE_STATUSES, enumError(OVERRIDE_STATUSES)),
+  override_note: z.string().max(2000, maxChars(2000)),
+  improvement_action: z.string().max(2000, maxChars(2000)),
 });
 
 export type CriterionOverrideFormValues = z.infer<typeof criterionOverrideSchema>;
@@ -23,13 +27,16 @@ export type CriterionOverrideFormValues = z.infer<typeof criterionOverrideSchema
  * AFTER trim, so we mirror the trim-then-length check here to keep the
  * UI validation aligned. The client-side cap is set to MAX 4096 to
  * surface the server bound; 2000 would silently truncate visually.
+ *
+ * The transform makes input and output distinct types under zod 4's
+ * resolver typing; both are `{ note: string }`.
  */
 export const criterionClearOverrideSchema = z.object({
   note: z
     .string()
     .transform((s) => s.trim())
     .refine((s) => s.length >= 1 && s.length <= 4096, {
-      message: "note must be 1..4096 characters after trim",
+      error: "note must be 1..4096 characters after trim",
     }),
 });
 

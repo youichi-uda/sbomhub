@@ -40,6 +40,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   buildLlmSettingsSchema,
+  type LlmSettingsFormInput,
   type LlmSettingsFormValues,
 } from "@/lib/form-schemas/llm-settings";
 
@@ -68,6 +69,9 @@ type Provider = (typeof PROVIDERS)[number];
 const buildSchema = (requireKey: boolean) =>
   buildLlmSettingsSchema(PROVIDERS, requireKey);
 
+// zod 4 + @hookform/resolvers 5+: the form holds the schema INPUT (optional
+// strings) and onSubmit receives the OUTPUT (defaults applied).
+type FormInput = LlmSettingsFormInput<typeof PROVIDERS>;
 type FormValues = LlmSettingsFormValues<typeof PROVIDERS>;
 
 interface SettingsLLMResponse {
@@ -102,7 +106,7 @@ export default function LLMSettingsPage() {
     control,
     setValue,
     formState: { errors },
-  } = useForm<FormValues>({
+  } = useForm<FormInput, unknown, FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
       provider: "openai",
