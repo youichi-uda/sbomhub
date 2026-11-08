@@ -443,8 +443,21 @@ func parseSPDX(data []byte) ([]model.Component, error) {
 		return nil, err
 	}
 
+	// "packages" is optional, but when present it must be an array of
+	// objects. A wrong-typed value used to be read as "no packages" and the
+	// SBOM was stored with zero components (Codex R2 Medium).
 	var components []model.Component
-	if packages, ok := raw["packages"].([]interface{}); ok {
+	rawPackages, present := raw["packages"]
+	packages, isArray := rawPackages.([]interface{})
+	if present && rawPackages != nil && !isArray {
+		return nil, fmt.Errorf("SPDX packages must be an array")
+	}
+	for i, pkg := range packages {
+		if _, ok := pkg.(map[string]interface{}); !ok {
+			return nil, fmt.Errorf("SPDX packages[%d] must be an object", i)
+		}
+	}
+	if isArray {
 		for _, pkg := range packages {
 			if p, ok := pkg.(map[string]interface{}); ok {
 				comp := model.Component{

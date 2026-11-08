@@ -179,6 +179,8 @@ func TestSBOMHandler_Upload_ParseFailureTouchesNoRepository(t *testing.T) {
 	bodies := map[string]string{
 		"cyclonedx components not an array": `{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":5}`,
 		"spdx3 graph not an array":          `{"@context":"https://spdx.org/rdf/3.0.1/spdx-context.jsonld","@graph":"x"}`,
+		"spdx2 packages not an array":       `{"spdxVersion":"SPDX-2.3","packages":5}`,
+		"spdx2 package not an object":       `{"spdxVersion":"SPDX-2.3","packages":[1]}`,
 	}
 	for name, body := range bodies {
 		t.Run(name, func(t *testing.T) {
