@@ -1545,3 +1545,62 @@ you upgraded to M55), and rows the JVN scanner created with JVN's metadata —
 keep their stored metadata until NVD next modifies the CVE. They are
 identifiable with `WHERE source_modified_at IS NULL`. Fetching them by id is a
 rate-limit budget decision and is not in this release.
+
+## 12. Monthly full re-read of NVD's catalogue, and stricter page checks (M58)
+
+**Who must act:** nobody. Read §12.2 if you point `SBOMHUB_NVD_URL` at a
+mirror, and §12.1 if you meter outbound traffic.
+
+### 12.1 What runs, and what it costs
+
+§11.4 left one class of row unreached: CVEs NVD has not modified since well
+before the daily sync's watermark keep whatever metadata they were stored
+with. Measured 2026-11-08 against live NVD, that class is most of the
+catalogue for anyone upgrading from M55/M56: 315,761 of NVD's 421,074 CVEs were
+last modified between 2026-04-21 and 2026-08-09, while the sync's refresh was
+not writing (§11.2).
+
+The CVE sync now re-reads NVD's whole modification history in 110-day windows,
+by default every 30 days, and refreshes every CVE already in your catalogue
+through the same freshness guard as the daily sync (an older record never
+overwrites a newer one). It never adds CVEs.
+
+| | with `NVD_API_KEY` | without |
+|---|---|---|
+| requests per pass | ~300 (211 data pages + ~93 mostly empty windows) | same |
+| transfer per pass | ~2.4 GB (2000-record page = 11.4 MB) | same |
+| duration | ~20 min | a little over 1 h |
+
+The first pass starts right after the first daily sync following the upgrade.
+
+- Configure with `SBOMHUB_NVD_RECONCILE_INTERVAL` (`30d` default, `off` to
+  disable; see [configuration.md](./configuration.md)). An unusable value
+  stops the API at startup.
+- It runs after the daily sync, never alongside it, at half its request rate,
+  and pauses after 6 hours (resuming the next day).
+- Progress and the last result live in the `system_settings` row
+  `cve_catalogue_reconcile`. A restart resumes at the window it was in. A pass
+  in which the database refused some rows finishes as
+  `completed_with_write_failures` and names up to 20 of them; a window NVD
+  could not serve leaves the pass in progress (logged at ERROR), and the next
+  day retries from that window.
+
+### 12.2 The daily sync now refuses a page that is not the page it asked for
+
+Every page of NVD's modification feed must now carry `startIndex` and
+`totalResults`, `startIndex` must be the one requested, and a page may not be
+empty while `totalResults` says records remain. Before, a mirror that answered
+every request with its first page made the sync stop early and skip the rest
+of the window without any error. A mirror that omits `startIndex` now makes
+the sync fail loudly (it is retried each day) instead of silently reading part
+of the feed — fix the mirror rather than the check.
+
+### 12.3 Not covered
+
+- CVEs that exist only in JVN (JVNDB ids) — NVD has no record to re-read.
+- Two API processes sharing one database each run the re-read (as they each
+  already run the daily sync); they share the progress row, so they converge,
+  but the NVD traffic doubles.
+- Records that move between pages while a large window is being read are
+  reached by the daily sync (if NVD changed them) or by the next pass.
+

@@ -44,6 +44,9 @@ nginx、Traefik、ロードバランサ、PaaS のルーターの後ろに API �
 | 変数 | デフォルト | 説明 |
 |------|---------|------|
 | `NVD_API_KEY` | (空) | NVD APIキー（レート制限緩和用）。https://nvd.nist.gov/developers/request-an-api-key で取得 |
+| `SBOMHUB_NVD_RECONCILE_INTERVAL` | `30d` | CVE sync が NVD の**全カタログ**を読み直し、日次の差分 feed では届かない (NVD が最近更新していない CVE の) 保存済み metadata を更新する間隔。日数 (`30d`)、Go の duration (`720h`)、または無効化の `off` / `disabled` / `false` / `0` を指定。24h 未満や解釈できない値は起動時に拒否します。`SBOMHUB_OFFLINE=true` のときは実行しません。 |
+
+全件の読み直しは NVD への約 300 request・約 2.4 GB (2026-11-08 実測ベース) で、`NVD_API_KEY` ありで約 20 分、なしで 1 時間強かかります。request 間隔は日次 sync の 2 倍です。日次 sync と同じ job の中で日次 sync の後に実行されるため同時には走らず、6 時間を超えると中断して翌日に再開するので、日次 feed を それ以上待たせることはありません。進捗は `system_settings` の `cve_catalogue_reconcile` 行 (JSON) に保存され、再起動しても途中から再開します。同じ行に直近の結果 (`completed` または `completed_with_write_failures` と該当 CVE ID) が記録されます。更新対象はカタログに既にある CVE だけで、新しい CVE は追加しません。[UPGRADE.md §12](./UPGRADE.md) も参照してください。
 
 ### LLM プロバイダ (AI 機能・BYOK)
 
