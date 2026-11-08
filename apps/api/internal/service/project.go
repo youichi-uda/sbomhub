@@ -10,7 +10,51 @@ import (
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
+
+// Limits for the user-supplied project fields, shared by every route that
+// creates a project (POST /api/v1/projects, POST /api/v1/cli/projects and the
+// create-on-first-upload path of POST /api/v1/cli/upload).
+const (
+	// ProjectNameMaxChars matches projects.name VARCHAR(255) (001_init), which
+	// PostgreSQL counts in characters, not bytes. A longer name used to reach
+	// the INSERT and fail with 22001 (500).
+	ProjectNameMaxChars = 255
+	// ProjectDescriptionMaxChars is the limit the request models have always
+	// declared (`validate:"max=1000"`) but nothing enforced; the column itself
+	// is TEXT.
+	ProjectDescriptionMaxChars = 1000
+)
+
+var (
+	projectNameRule        = validation.TextRule{Required: true, MaxChars: ProjectNameMaxChars, SingleLine: true}
+	projectDescriptionRule = validation.TextRule{MaxChars: ProjectDescriptionMaxChars}
+)
+
+// ValidateProjectName checks a caller-supplied project name: required, at most
+// ProjectNameMaxChars characters, valid UTF-8, no NUL or other control
+// characters. The error is an ErrValidation whose message is safe to return.
+func ValidateProjectName(name string) error {
+	if err := validation.CheckTextField("name", name, projectNameRule); err != nil {
+		return ValidationErrorf("%s", err.Error())
+	}
+	return nil
+}
+
+// ValidateProjectInput checks the name (see ValidateProjectName) and the
+// optional description: at most ProjectDescriptionMaxChars characters, valid
+// UTF-8, no NUL; tab and line breaks are allowed, other control characters
+// are not.
+func ValidateProjectInput(name, description string) error {
+	if err := ValidateProjectName(name); err != nil {
+		return err
+	}
+	if err := validation.CheckTextField("description", description, projectDescriptionRule); err != nil {
+		return ValidationErrorf("%s", err.Error())
+	}
+	return nil
+}
 
 type ProjectService struct {
 	repo *repository.ProjectRepository
@@ -22,6 +66,9 @@ func NewProjectService(repo *repository.ProjectRepository) *ProjectService {
 
 // Create creates a project with tenant isolation
 func (s *ProjectService) Create(ctx context.Context, tenantID uuid.UUID, req model.CreateProjectRequest) (*model.Project, error) {
+	if err := ValidateProjectInput(req.Name, req.Description); err != nil {
+		return nil, err
+	}
 	project := &model.Project{
 		ID:          uuid.New(),
 		Name:        req.Name,
@@ -122,7 +169,9 @@ func (s *ProjectService) Get(ctx context.Context, tenantID, projectID uuid.UUID)
 	return s.repo.GetByTenant(ctx, tenantID, projectID)
 }
 
-// Delete deletes a project with tenant verification
+// Delete deletes a project with tenant verification. A project that does not
+// exist in the tenant (or is hidden by RLS) yields an error wrapping
+// sql.ErrNoRows, which the handler maps to 404.
 func (s *ProjectService) Delete(ctx context.Context, tenantID, projectID uuid.UUID) error {
 	return s.repo.DeleteByTenant(ctx, tenantID, projectID)
 }

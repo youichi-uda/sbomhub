@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sbomhub/sbomhub/internal/model"
 	"github.com/sbomhub/sbomhub/internal/repository"
+	"github.com/sbomhub/sbomhub/internal/validation"
 )
 
 // FormatInfo contains the detected SBOM format and version
@@ -43,6 +44,9 @@ func (s *SbomService) SbomInProject(ctx context.Context, tenantID, projectID, sb
 }
 
 func (s *SbomService) Import(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, error) {
+	if err := checkSBOMText(data); err != nil {
+		return nil, err
+	}
 	info, err := detectFormatAndVersion(data)
 	if err != nil {
 		// F443: format-detection failure is caller-fixable feedback about a
@@ -657,4 +661,19 @@ func parseSPDX3(data []byte) ([]model.Component, error) {
 	}
 
 	return components, nil
+}
+
+// checkSBOMText refuses an SBOM whose bytes are not valid UTF-8 or carry
+// U+0000 (raw or as \u0000), as a 400-class ErrValidation. The document is
+// stored in sboms.raw_data (JSONB), which refuses U+0000, and its component
+// names / versions / purls go to text columns that refuse it too, so such an
+// upload used to fail at the INSERT with a 500. The SBOM routes read the raw
+// body themselves (they do not go through c.Bind and its TextGuardBinder),
+// whatever the Content-Type, so the check lives here, for both the canonical
+// route (Import) and the CLI multipart route (CLIService.UploadSBOM).
+func checkSBOMText(data []byte) error {
+	if err := validation.CheckJSONText(data); err != nil {
+		return ValidationErrorf("failed to parse SBOM: %s", err.Error())
+	}
+	return nil
 }

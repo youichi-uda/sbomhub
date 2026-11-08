@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -29,11 +31,14 @@ func (h *ProjectHandler) Create(c echo.Context) error {
 
 	var req model.CreateProjectRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return respondBindError(c, err)
 	}
 
 	project, err := h.projectService.Create(c.Request().Context(), tenantID, req)
 	if err != nil {
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
 		slog.Warn("project: create failed", "tenant_id", tenantID, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create project"})
 	}
@@ -154,6 +159,9 @@ func (h *ProjectHandler) Delete(c echo.Context) error {
 	}
 
 	if err := h.projectService.Delete(c.Request().Context(), tenantID, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		}
 		slog.Warn("project: delete failed", "tenant_id", tenantID, "project_id", id, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete project"})
 	}

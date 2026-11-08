@@ -109,6 +109,9 @@ var ErrCLIProjectOutOfScope = errors.New("project is outside the api key's scope
 func (s *CLIService) ResolveProjectForScopedKey(
 	ctx context.Context, tenantID, keyProjectID uuid.UUID, name string,
 ) (*model.Project, error) {
+	if err := ValidateProjectName(name); err != nil {
+		return nil, err
+	}
 	existing, err := s.projectRepo.GetByName(ctx, tenantID, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search project: %w", err)
@@ -125,6 +128,12 @@ func (s *CLIService) ResolveProjectForScopedKey(
 // project_id — the create-on-unknown-name half is the escape hatch out of the
 // key's scope. Use ResolveProjectForScopedKey for those callers.
 func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID, name, description string) (*model.Project, bool, error) {
+	// The name is checked before the lookup (a NUL in it fails the SELECT
+	// too); the description only matters, and is only checked, when the
+	// project is created.
+	if err := ValidateProjectName(name); err != nil {
+		return nil, false, err
+	}
 	// Try to find existing project
 	existing, err := s.projectRepo.GetByName(ctx, tenantID, name)
 	if err != nil {
@@ -132,6 +141,10 @@ func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID,
 	}
 	if existing != nil {
 		return existing, false, nil // false = not created
+	}
+
+	if err := ValidateProjectInput(name, description); err != nil {
+		return nil, false, err
 	}
 
 	// Create new project
@@ -152,6 +165,9 @@ func (s *CLIService) GetOrCreateProject(ctx context.Context, tenantID uuid.UUID,
 
 // UploadSBOM imports an SBOM for a project via CLI.
 func (s *CLIService) UploadSBOM(ctx context.Context, projectID uuid.UUID, data []byte) (*model.Sbom, int, error) {
+	if err := checkSBOMText(data); err != nil {
+		return nil, 0, err
+	}
 	info, err := detectFormatAndVersion(data)
 	if err != nil {
 		// F443: format-detection failure is caller-fixable feedback about a

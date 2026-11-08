@@ -159,10 +159,13 @@ func (h *CLIHandler) Upload(c echo.Context) error {
 			return middleware.RespondProjectScopeDenied(c,
 				"upload names a project outside the key's scope")
 		}
-		// GetOrCreateProject / ResolveProjectForScopedKey otherwise only ever
-		// return %w-wrapped DB errors (search / create) — none are
-		// caller-fixable, so log the raw error server-side and return a
-		// generic body.
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		// Past the name / description validation above, GetOrCreateProject /
+		// ResolveProjectForScopedKey only ever return %w-wrapped DB errors
+		// (search / create) — none are caller-fixable, so log the raw error
+		// server-side and return a generic body.
 		slog.Warn("cli: get or create project failed", "tenant_id", tenantID, "project_name", projectName, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to resolve project",
@@ -333,9 +336,7 @@ func (h *CLIHandler) CreateProject(c echo.Context) error {
 
 	var req CreateProjectRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "invalid request body",
-		})
+		return respondBindError(c, err)
 	}
 
 	if req.Name == "" {
@@ -353,6 +354,9 @@ func (h *CLIHandler) CreateProject(c echo.Context) error {
 		if errors.Is(err, service.ErrCLIProjectOutOfScope) {
 			return middleware.RespondProjectScopeDenied(c,
 				"create names a project outside the key's scope")
+		}
+		if errors.Is(err, service.ErrValidation) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		slog.Warn("cli: get or create project failed", "tenant_id", tenantID, "project_name", req.Name, "error", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
