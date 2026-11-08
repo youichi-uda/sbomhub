@@ -407,11 +407,17 @@ func parseCycloneDX(data []byte) ([]model.Component, error) {
 	// error, which used to store a schema-invalid SBOM with no — or an empty
 	// — component (Codex R4 Medium). Only the top-level list is parsed into
 	// components; nested component trees are not read, so not checked.
-	var top map[string]json.RawMessage
+	// A struct field, not a map lookup: it matches the key with the same
+	// case-insensitive rule the cdx.BOM decode below uses, so "Components"
+	// cannot slip past (Codex R6 Medium). RawMessage receives a JSON null
+	// as the bytes "null", so absent (empty) and null stay distinguishable.
+	var top struct {
+		Components json.RawMessage `json:"components"`
+	}
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, err
 	}
-	if rawComps, ok := top["components"]; ok {
+	if rawComps := top.Components; len(rawComps) > 0 {
 		var elems []json.RawMessage
 		if err := json.Unmarshal(rawComps, &elems); err != nil || elems == nil {
 			return nil, fmt.Errorf("CycloneDX components must be an array")
