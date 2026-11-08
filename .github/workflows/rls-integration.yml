@@ -263,6 +263,20 @@ jobs:
         # the tool's lib/pq connection and pins that the error-classification
         # (exit 2, never skipped by --continue-on-error) matches the type the
         # driver really returns. It only creates a TEMP table.
+        #
+        # ./internal/database/... and ./cmd/migrate/... (M64): the migration
+        # advisory-lock tests run two or three migrators concurrently against
+        # an EMPTY database. Each creates and drops its own scratch database
+        # as sbomhub_migrator (CREATEDB, granted by install.sh), so the shared
+        # schema these other packages use is never touched.
+        #
+        # ./cmd/server/... (M64): m48_trusted_proxy_integration_test.go builds
+        # and starts the real server binary with SBOMHUB_TRUSTED_PROXIES and
+        # checks X-Forwarded-For handling for the public-link rate-limit key
+        # and the audit-log IP, from a trusted (127.0.0.1) and an untrusted
+        # (127.0.0.2) loopback source. It needs postgres + redis as above and
+        # the go toolchain on PATH (setup-go); the build adds ~1 min on a cold
+        # cache, within the per-package -timeout.
         shell: bash
         working-directory: apps/api
         run: |
@@ -277,6 +291,9 @@ jobs:
             ./internal/service/... \
             ./internal/handler/... \
             ./internal/model/... \
+            ./internal/database/... \
+            ./cmd/migrate/... \
+            ./cmd/server/... \
             ./cmd/migrate-encryption/...
 
       - name: Dump postgres / redis logs on failure
