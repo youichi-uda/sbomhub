@@ -1647,6 +1647,18 @@ Versions are normalised before matching: a leading `v` is dropped (Go modules;
 (purl type `deb`, `rpm`, `apk`, `alpm`) the epoch and distro revision are
 dropped (`1.1.1k-1+deb11u2` → `1.1.1k`).
 
+Version comparison against NVD's ranges is deliberately conservative. Dotted
+numbers, OpenSSL-style patch letters (`1.1.1k`), Maven's `.Final`/`.GA`, and
+pre-releases that every scheme orders alike (`alpha` < `beta` < `rc`, before
+the release) are compared. Where version schemes disagree — a bare `a`/`b`
+(PEP 440 alpha vs OpenSSL patch), a number or word after `-` that is not a
+pre-release word (`1.0.0-1`, `1.0.0-final`), `dev`/`pre`/`snapshot`/`M1`
+against each other, or separators such as `!`, `~`, `^` — the comparison is
+**undecidable**: the CVE NVD returned is kept and labelled
+`nvd_cpe_unverified` (low confidence), and that answer is not cached. A
+comparator limit therefore costs a label, never a missed finding. `+build`
+metadata is ignored, as SemVer specifies.
+
 ### 13.2 `match_method` / `match_confidence`
 
 | `match_method` | `match_confidence` | meaning |
