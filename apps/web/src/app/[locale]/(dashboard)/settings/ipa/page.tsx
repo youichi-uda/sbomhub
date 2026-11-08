@@ -229,7 +229,7 @@ export default function IPASettingsPage() {
           <CardContent>
             <div className="space-y-4">
               <div className="flex items-start gap-4 p-4 rounded-lg border">
-                <Shield className="h-8 w-8 text-blue-600 flex-shrink-0" />
+                <Shield className="h-8 w-8 text-blue-600 shrink-0" />
                 <div>
                   <h4 className="font-medium">{t('ipaSecurityAlert')}</h4>
                   <p className="text-sm text-muted-foreground mt-1">
@@ -247,7 +247,7 @@ export default function IPASettingsPage() {
               </div>
 
               <div className="flex items-start gap-4 p-4 rounded-lg border">
-                <Shield className="h-8 w-8 text-green-600 flex-shrink-0" />
+                <Shield className="h-8 w-8 text-green-600 shrink-0" />
                 <div>
                   <h4 className="font-medium">{t('jvnVulnerabilityInfo')}</h4>
                   <p className="text-sm text-muted-foreground mt-1">

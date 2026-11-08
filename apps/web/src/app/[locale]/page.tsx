@@ -237,12 +237,12 @@ export default async function LandingPage({ params }: Props) {
 
         <main className="flex-1">
           {/* Hero */}
-          <section className="py-20 bg-gradient-to-b from-blue-50 to-white">
+          <section className="py-20 bg-linear-to-b from-blue-50 to-white">
             <div className="container mx-auto px-4 text-center">
               <Badge variant="secondary" className="mb-4">
                 {t("hero.badge")}
               </Badge>
-              <h1 className="text-4xl md:text-6xl font-bold mb-6 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent whitespace-pre-line leading-tight">
+              <h1 className="text-4xl md:text-6xl font-bold mb-6 bg-linear-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent whitespace-pre-line leading-tight">
                 {t("hero.title")}
               </h1>
               <p className="text-xl text-muted-foreground mb-8 max-w-3xl mx-auto">
@@ -333,7 +333,7 @@ export default async function LandingPage({ params }: Props) {
                   return (
                     <Card
                       key={index}
-                      className="border hover:border-primary/40 hover:shadow-sm transition-all"
+                      className="border hover:border-primary/40 hover:shadow-xs transition-all"
                     >
                       <CardHeader className="pb-3">
                         <Icon className="h-8 w-8 text-primary mb-2" />
@@ -501,7 +501,7 @@ export default async function LandingPage({ params }: Props) {
           </section>
 
           {/* Final waitlist CTA */}
-          <section className="py-20 bg-gradient-to-b from-white to-blue-50">
+          <section className="py-20 bg-linear-to-b from-white to-blue-50">
             <div className="container mx-auto px-4 max-w-3xl text-center">
               <h2 className="text-3xl font-bold mb-4">{t("waitlist.title")}</h2>
               <p className="text-muted-foreground mb-8">{t("waitlist.description")}</p>

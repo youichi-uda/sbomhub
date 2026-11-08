@@ -101,9 +101,9 @@ function CheckItem({ check }: { check: ComplianceCheck }) {
   return (
     <div className="flex items-start gap-3 py-2">
       {check.passed ? (
-        <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 flex-shrink-0" />
+        <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 shrink-0" />
       ) : (
-        <XCircle className="h-5 w-5 text-red-500 mt-0.5 flex-shrink-0" />
+        <XCircle className="h-5 w-5 text-red-500 mt-0.5 shrink-0" />
       )}
       <div>
         <p className={check.passed ? "text-foreground" : "text-muted-foreground"}>
@@ -214,9 +214,9 @@ function ChecklistItemComponent({
           {item.auto_verify ? (
             // Auto-verified item
             item.auto_result ? (
-              <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 flex-shrink-0" />
+              <CheckCircle className="h-5 w-5 text-green-500 mt-0.5 shrink-0" />
             ) : (
-              <XCircle className="h-5 w-5 text-red-500 mt-0.5 flex-shrink-0" />
+              <XCircle className="h-5 w-5 text-red-500 mt-0.5 shrink-0" />
             )
           ) : (
             // Manual item with checkbox
@@ -794,7 +794,7 @@ export default function CompliancePage() {
           <a
             href={api.projects.exportComplianceReport(projectId, "json")}
             download
-            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
           >
             <Download className="h-4 w-4 mr-2" />
             JSON
@@ -802,7 +802,7 @@ export default function CompliancePage() {
           <a
             href={api.projects.exportComplianceReport(projectId, "pdf")}
             download
-            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
           >
             <Download className="h-4 w-4 mr-2" />
             PDF
@@ -810,7 +810,7 @@ export default function CompliancePage() {
           <a
             href={api.projects.exportComplianceReport(projectId, "xlsx")}
             download
-            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
           >
             <Download className="h-4 w-4 mr-2" />
             Excel

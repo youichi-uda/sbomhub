@@ -474,7 +474,7 @@ export function ReportCard({
           */}
           <pre
             data-testid="cra-report-draft"
-            className="max-h-[24rem] overflow-y-auto whitespace-pre-wrap rounded border bg-muted/30 p-3 font-sans text-sm leading-relaxed"
+            className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded border bg-muted/30 p-3 font-sans text-sm leading-relaxed"
           >
             {draftDisplay}
           </pre>
@@ -674,7 +674,7 @@ export function ReportCard({
       {alreadyDecided && (
         <CardContent className="border-t pt-3">
           <p className="flex items-start gap-1 text-xs text-yellow-700">
-            <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span>
               {t("alreadyDecided", { decision: safeT(tDecision, report.decision) })}
             </span>

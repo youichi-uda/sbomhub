@@ -1,6 +1,117 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+@import './tailwind-v3-palette.css';
+
+/*
+  v3 parity: font-size line-heights.
+  Tailwind v4 expresses them as unitless ratios (text-xs = 1.333…), v3 as
+  absolute rem. The rendered line box is the same for the element that
+  carries `text-xs`, but a child that only overrides the font size
+  (`text-[10px]` badges inside a `text-xs` evidence row) inherits the ratio
+  and shrinks — measured as -3px per evidence row on the triage / CRA /
+  METI cards. Pin the v3 absolute values.
+*/
+@theme {
+  --text-xs--line-height: 1rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl--line-height: 2.25rem;
+  --text-4xl--line-height: 2.5rem;
+
+  /*
+    v3 parity: `font-sans` stack. tailwindcss 4.3 replaced the
+    ui-sans-serif/system-ui stack with -apple-system/Roboto/Noto Sans…,
+    which changed the glyphs of `font-sans` blocks inside the Inter body
+    (CRA draft body). Pin the v3 stack.
+  */
+  --font-sans:
+    ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+    'Noto Color Emoji';
+}
+
+/*
+  Tailwind v4 CSS-first theme (migrated from tailwind.config.ts).
+  `inline` makes each utility emit the var() reference itself instead of a
+  value resolved once on :root, so the `.dark` overrides of --primary etc.
+  below still take effect (shadcn/ui v4 pattern). The tokens stay HSL
+  triplets so the rendered colours are identical to the v3 build.
+*/
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+
+  /*
+    v3 parity (Tailwind v4 upgrade guide, "Preflight changes"):
+    v4 renders placeholders in the current text colour at 50% opacity and
+    gives <button> the default cursor. Keep the v3 look (gray-400
+    placeholders, pointer cursor on enabled buttons).
+  */
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /*
+    v4 Preflight also sets `background-color: transparent` on form
+    controls; v3 only did that for buttons. Bare <select>/<input>/<textarea>
+    without a bg-* class (the CRA / METI filter selects) kept the browser's
+    field background in v3 — restore it. Any bg-* utility still wins
+    (utilities layer > base layer).
+  */
+  input:where(:not([type='button'], [type='reset'], [type='submit'])),
+  select,
+  textarea {
+    background-color: revert;
+  }
+}
 
 @layer base {
   :root {
@@ -47,5 +158,36 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/*
+  v3 parity for `space-y-*` (213 call sites).
+
+  Tailwind v4 changed the selector from
+    `> :not([hidden]) ~ :not([hidden]) { margin-top }`      (v3)
+  to
+    `:where(> :not(:last-child)) { margin-bottom }`          (v4).
+  Vertical margins are ignored on `display: inline` boxes, so with v4 a
+  stack that starts with a bare <label> (settings/llm, settings/ipa,
+  settings/diff-webhook, every form dialog) loses the gap between the label
+  and its control — measured in the v3→v4 visual diff (-8px per field).
+
+  The @utility below re-emits the v3 rule (same selector, same
+  specificity), and the rule in the trailing `@layer utilities` block —
+  emitted after the generated utilities, so it wins the zero-specificity
+  tie with v4's `:where()` rule — cancels v4's margin-bottom. A child's own
+  `mb-*` class still wins, exactly as in v3. Remove both once the stacks
+  are migrated to `flex flex-col gap-*`.
+*/
+@utility space-y-* {
+  & > :not([hidden]) ~ :not([hidden]) {
+    margin-top: calc(var(--spacing) * --value(number));
+  }
+}
+
+@layer utilities {
+  :where([class*='space-y-'] > :not(:last-child)) {
+    margin-block-end: 0;
   }
 }

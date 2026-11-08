@@ -441,7 +441,7 @@ export default function ProjectDetailPage() {
                 setEvidencePackFormat(e.target.value as "zip" | "markdown")
               }
               disabled={evidencePackBuilding}
-              className="h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-50"
               title={tp("evidencePackFormatLabel")}
             >
               <option value="zip">{tp("evidencePackFormatZip")}</option>
@@ -1248,7 +1248,7 @@ export default function ProjectDetailPage() {
                   <div key={key.id} className="border rounded-lg p-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 min-w-0">
-                        <Key className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                        <Key className="h-4 w-4 text-muted-foreground shrink-0" />
                         <span className="font-medium truncate">{key.name}</span>
                         <span className="text-muted-foreground text-sm font-mono">
                           ({key.key_prefix}...)

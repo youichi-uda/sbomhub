@@ -301,7 +301,7 @@ export default function AnalyticsPage() {
                                             title={`${point.date}: Critical=${point.critical}, High=${point.high}, Medium=${point.medium}, Low=${point.low}`}
                                         >
                                             <div
-                                                className="w-full bg-gradient-to-t from-red-500 via-orange-400 to-yellow-300 rounded-t"
+                                                className="w-full bg-linear-to-t from-red-500 via-orange-400 to-yellow-300 rounded-t"
                                                 style={{ height: `${height}%` }}
                                             />
                                         </div>

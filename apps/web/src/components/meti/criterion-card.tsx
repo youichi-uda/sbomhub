@@ -308,7 +308,7 @@ export function CriterionCard({
                       {titleTrunc.display}
                     </CardTitle>
                   </TooltipTrigger>
-                  <TooltipContent className="max-w-xl whitespace-normal break-words text-left">
+                  <TooltipContent className="max-w-xl whitespace-normal wrap-break-word text-left">
                     {title}
                   </TooltipContent>
                 </Tooltip>
@@ -427,7 +427,7 @@ export function CriterionCard({
         {isOverridden && (
           <section className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
             <div className="flex items-start gap-2">
-              <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <div className="space-y-1">
                 <p>
                   <span className="font-semibold">

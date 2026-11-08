@@ -290,7 +290,7 @@ export function DependencyPathPanel({
                 }
               >
                 <p className="font-semibold flex items-center gap-1.5">
-                  <Info className="h-4 w-4 flex-shrink-0" />
+                  <Info className="h-4 w-4 shrink-0" />
                   {data.is_direct ? t("directTitle") : t("transitiveTitle")}
                 </p>
                 <p className="mt-1 text-muted-foreground">
@@ -446,7 +446,7 @@ export function PathChain({ nodes }: { nodes: ComponentPathNode[] }) {
               )}
             </span>
             {ni < nodes.length - 1 && (
-              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             )}
           </span>
         );

@@ -508,7 +508,7 @@ export default function METIAssessmentPage() {
           data-testid="meti-truncation-banner"
           className="mb-4 flex items-start gap-2 rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-900"
         >
-          <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
             Showing {assessments.length} of {totalCount} criteria.
           </span>

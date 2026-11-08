@@ -242,7 +242,7 @@ function TrendChart({ trend, noDataMessage, locale, countLabel }: { trend: Trend
             title={`${formatDate(point.date)}: ${countLabel.replace('{count}', String(total))}`}
           >
             <div
-              className="bg-gradient-to-t from-red-500 via-orange-400 to-yellow-300 rounded-t"
+              className="bg-linear-to-t from-red-500 via-orange-400 to-yellow-300 rounded-t"
               style={{ height: `${height}%`, minHeight: total > 0 ? "4px" : "0" }}
             />
           </div>

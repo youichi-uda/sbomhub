@@ -246,7 +246,7 @@ export function DraftCard({
           />
           {belowThreshold && (
             <p className="mt-2 flex items-start gap-1 text-xs text-yellow-700">
-              <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
               <span>{t("lowConfidence", { threshold: Math.round(threshold * 100) })}</span>
             </p>
           )}

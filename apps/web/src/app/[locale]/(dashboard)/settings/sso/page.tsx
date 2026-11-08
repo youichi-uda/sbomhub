@@ -154,7 +154,7 @@ export default function SSOSettingsPage() {
                 key={provider.id}
                 className="flex items-center gap-4 p-4 rounded-lg border"
               >
-                <div className="flex-shrink-0">{provider.logo}</div>
+                <div className="shrink-0">{provider.logo}</div>
                 <div className="flex-1 min-w-0">
                   <h4 className="font-medium">{provider.name}</h4>
                   <p className="text-sm text-muted-foreground truncate">
@@ -178,7 +178,7 @@ export default function SSOSettingsPage() {
         <CardContent className="space-y-6">
           <div className="space-y-4">
             <div className="flex gap-4">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
+              <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
                 1
               </div>
               <div>
@@ -190,7 +190,7 @@ export default function SSOSettingsPage() {
             </div>
 
             <div className="flex gap-4">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
+              <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
                 2
               </div>
               <div>
@@ -213,7 +213,7 @@ export default function SSOSettingsPage() {
             </div>
 
             <div className="flex gap-4">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
+              <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
                 3
               </div>
               <div>
@@ -226,7 +226,7 @@ export default function SSOSettingsPage() {
             </div>
 
             <div className="flex gap-4">
-              <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
+              <div className="shrink-0 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-medium">
                 4
               </div>
               <div>
