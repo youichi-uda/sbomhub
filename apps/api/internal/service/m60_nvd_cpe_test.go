@@ -58,7 +58,7 @@ func TestM60ParseCPE(t *testing.T) {
 }
 
 func TestM60CandidateQueryRoundTrips(t *testing.T) {
-	c := cpeCandidate{part: "a", vendor: "golang", product: "x/net", version: "0.7.0+incompatible"}
+	c := cpeCandidate{part: "a", vendor: "golang", product: "x/net", version: "0.7.0+incompatible", raw: "0.7.0+incompatible"}
 	if got, want := c.query(), `cpe:2.3:a:golang:x\/net:0.7.0\+incompatible:*:*:*:*:*:*:*`; got != want {
 		t.Errorf("query = %q want %q", got, want)
 	}
@@ -95,34 +95,105 @@ func TestM60NormaliseCPEVersion(t *testing.T) {
 	}
 }
 
+// M60 decision 1 (option B): compareVersions decides ONLY plain dotted-numeric
+// pairs. Everything else is undecidable — including every scheme-specific
+// case Codex M60 R2-R13 raised against the earlier, smarter comparator, each
+// of which is listed here so a future "improvement" cannot quietly start
+// excluding on them again.
 func TestM60CompareVersions(t *testing.T) {
-	cases := []struct {
+	for _, tc := range []struct {
 		a, b string
 		want int
-		ok   bool
 	}{
-		{"1.1.1k", "1.1.1l", -1, true},
-		{"1.1.1k", "1.1.1", 1, true}, // OpenSSL letter release is AFTER the base
-		{"1.1.1k", "1.1.1ze", -1, true},
-		{"1.1.1z", "1.1.1za", -1, true},
-		{"1.0.2zd", "1.0.2", 1, true},
-		{"9.0.30", "9.0.31", -1, true},
-		{"9.0.30", "9.0.4", 1, true}, // numeric, not lexical
-		{"2.14.1", "2.15.0", -1, true},
-		{"2.0-beta9", "2.0", -1, true}, // pre-release before release
-		{"2.0-rc1", "2.0-beta9", 1, true},
-		{"9.0.0.M1", "9.0.0", -1, true},
-		{"2.0-beta9", "2.0.1", -1, true},
-		{"1.0", "1.0.0", 0, true},
-		{"5.10.46", "5.10.46", 0, true},
-		{"0.7.0", "0.17.0", -1, true},
-		{"1.2.a", "1.2.3", 0, false}, // not orderable without the scheme
-		{"", "1.0", 0, false},
-	}
-	for _, tc := range cases {
+		{"9.0.30", "9.0.31", -1},
+		{"9.0.30", "9.0.4", 1}, // numeric, not lexical
+		{"2.14.1", "2.15.0", -1},
+		{"1.0", "1.0.0", 0},
+		{"5.10.46", "5.10.46", 0},
+		{"0.7.0", "0.17.0", -1},
+		{"v0.7.0", "0.7.0", 0}, // one leading v is allowed
+		{"1.01", "1.1", 0},
+		{"10", "9.99", 1},
+	} {
 		got, ok := compareVersions(tc.a, tc.b)
-		if ok != tc.ok || (ok && got != tc.want) {
-			t.Errorf("compareVersions(%q,%q) = %d,%v want %d,%v", tc.a, tc.b, got, ok, tc.want, tc.ok)
+		if !ok || got != tc.want {
+			t.Errorf("compareVersions(%q,%q) = %d,%v want %d", tc.a, tc.b, got, ok, tc.want)
+		}
+	}
+	nonPlain := []string{
+		"1.1.1k", "1.1.1za", "1.0.2zd", "2.0-beta9", "2.0-rc1", "9.0.0.M1", "9.0.0-M1",
+		"1.0a1", "1.0b1", "1.0c", "1.0c1", "1.0a", "1.1.1a", "1.0-dev", "1.0-pre1", "1.0-preview",
+		"1.0-SNAPSHOT", "1.0.0-1", "1.0.0+1", "v2.0.0+incompatible", "1.2.3+dfsg", "1.0.0-final",
+		"4.1.100.Final", "1.0_final", "1.0final", "1.1.1-k", "1!2.0", "1.0~1", "1.0^20210101",
+		"1..0", ".1", "1.0.", "1_2_3", "1.0.0-rc.1", "1.0 beta", "1.1.1k-1", "2.31-13", "1:2.31",
+		"vv1.0", "", "V", "-1",
+	}
+	for _, v := range nonPlain {
+		for _, other := range []string{"1.0", "2.0", v} {
+			if c, ok := compareVersions(v, other); ok {
+				t.Errorf("compareVersions(%q,%q) = %d decided; only plain dotted-numeric pairs may be", v, other, c)
+			}
+			if c, ok := compareVersions(other, v); ok {
+				t.Errorf("compareVersions(%q,%q) = %d decided; only plain dotted-numeric pairs may be", other, v, c)
+			}
+		}
+	}
+}
+
+// For a non-plain component version, or a criterion with a non-plain bound
+// or a pinned update, NO criterion shape may reject: the verdict is matched
+// (an unbounded "*" criterion — no comparison involved) or undecidable.
+func TestM60NonPlainNeverRejectsByComparison(t *testing.T) {
+	shapes := []NVDCPEMatch{
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:2.0:*:*:*:*:*:*:*"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:2.0:-:*:*:*:*:*:*"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:2.0:beta9:*:*:*:*:*:*"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:-:*:*:*:*:*:*:*"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionEndExcluding: "1.0"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionStartIncluding: "3.0", VersionEndExcluding: "3.1"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionStartExcluding: "0.1", VersionEndIncluding: "0.2"},
+	}
+	cands := []cpeCandidate{
+		{part: "a", vendor: "v", product: "p", version: "2.0-beta9", raw: "2.0-beta9"},
+		{part: "a", vendor: "v", product: "p", version: "1.1.1k", raw: "1.1.1k"},
+		{part: "a", vendor: "v", product: "p", version: "1.1.1k", raw: "1.1.1k-1"},           // distro raw
+		{part: "a", vendor: "v", product: "p", version: "2.0.0", raw: "v2.0.0+incompatible"}, // build metadata
+		{part: "a", vendor: "v", product: "p", version: "2.0", update: "sp1", raw: "2.0"},    // pinned update
+	}
+	for _, c := range cands {
+		for _, m := range shapes {
+			crit, _ := parseCPE(m.Criteria)
+			if got := criterionContains(crit, m, c); got == cpeRejected {
+				t.Errorf("non-plain candidate %+v rejected by %s %+v", c, m.Criteria, m)
+			}
+		}
+	}
+	// A plain candidate against a non-plain bound or a pinned update: same.
+	plainC := cpeCandidate{part: "a", vendor: "v", product: "p", version: "5.0", raw: "5.0"}
+	for _, m := range []NVDCPEMatch{
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionStartIncluding: "2.0-beta9", VersionEndExcluding: "2.3"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:2.0:beta9:*:*:*:*:*:*"},
+		{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionEndExcluding: "1.1.1b"},
+	} {
+		crit, _ := parseCPE(m.Criteria)
+		if got := criterionContains(crit, m, plainC); got != cpeUndecidable {
+			t.Errorf("plain 5.0 vs %s %+v = %v, want undecidable", m.Criteria, m, got)
+		}
+	}
+	// And plain-vs-plain does decide, both ways.
+	for _, tc := range []struct {
+		m    NVDCPEMatch
+		want cpeVerdict
+	}{
+		{NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionStartIncluding: "4.0", VersionEndExcluding: "5.1"}, cpeMatched},
+		{NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:*:*:*:*:*:*:*:*", VersionEndExcluding: "5.0"}, cpeRejected},
+		{NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:5.0.0:*:*:*:*:*:*:*"}, cpeMatched},
+		{NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:5.0:-:*:*:*:*:*:*"}, cpeMatched},
+		{NVDCPEMatch{Vulnerable: true, Criteria: "cpe:2.3:a:v:p:5.1:*:*:*:*:*:*:*"}, cpeRejected},
+	} {
+		crit, _ := parseCPE(tc.m.Criteria)
+		if got := criterionContains(crit, tc.m, plainC); got != tc.want {
+			t.Errorf("plain 5.0 vs %s %+v = %v, want %v", tc.m.Criteria, tc.m, got, tc.want)
 		}
 	}
 }
@@ -170,10 +241,12 @@ func TestM60CPECandidatesFromSyft(t *testing.T) {
 
 // verifyCPEMatch against the live openssl 1.1.1k answer: NVD's cpeName
 // returned 47 CVEs, 5 of which name openssl ONLY as a vulnerable=false
-// platform. Those 5 are rejected; nothing is undecidable.
+// platform. Those 5 are rejected — on positive evidence that involves no
+// version comparison. "1.1.1k" is not plain, so (option B) the other 42 are
+// undecidable, not matched: kept, labelled nvd_cpe_unverified.
 func TestM60VerifyCPEMatch_OpenSSLRejectsPlatformOnlyCVEs(t *testing.T) {
 	r := m60NVDFixture(t, "p06_cpename_openssl")
-	cand := cpeCandidate{part: "a", vendor: "openssl", product: "openssl", version: "1.1.1k"}
+	cand := cpeCandidate{part: "a", vendor: "openssl", product: "openssl", version: "1.1.1k", raw: "1.1.1k"}
 	var rejected []string
 	matched, undecidable := 0, 0
 	for _, e := range r.entries() {
@@ -191,8 +264,8 @@ func TestM60VerifyCPEMatch_OpenSSLRejectsPlatformOnlyCVEs(t *testing.T) {
 	if !reflect.DeepEqual(rejected, want) {
 		t.Errorf("rejected = %q want %q", rejected, want)
 	}
-	if matched != 42 || undecidable != 0 {
-		t.Errorf("matched=%d undecidable=%d, want 42 / 0", matched, undecidable)
+	if matched != 0 || undecidable != 42 {
+		t.Errorf("matched=%d undecidable=%d, want 0 / 42", matched, undecidable)
 	}
 }
 
@@ -207,12 +280,12 @@ func TestM60VerifyCPEMatch_NoVersionDisagreementOnRecordedAnswers(t *testing.T) 
 		cand    cpeCandidate
 		want    int // CVEs kept (matched + undecidable)
 	}{
-		{"p01_cpename_log4j", cpeCandidate{"a", "apache", "log4j", "2.14.1", "", false}, 10},
-		{"p09_cpename_tomcat", cpeCandidate{"a", "apache", "tomcat", "9.0.30", "", false}, 0},
-		{"p11_cpename_lodash_node", cpeCandidate{"a", "lodash", "lodash", "4.17.20", "", false}, 5},
-		{"p14_cpename_xnet", cpeCandidate{"a", "golang", "networking", "0.7.0", "", false}, 2},
-		{"p15_cpename_gin", cpeCandidate{"a", "gin-gonic", "gin", "1.7.0", "", false}, 2},
-		{"p18_cpename_glibc", cpeCandidate{"a", "gnu", "glibc", "2.31", "", false}, 0},
+		{"p01_cpename_log4j", cpeCandidate{part: "a", vendor: "apache", product: "log4j", version: "2.14.1", raw: "2.14.1"}, 10},
+		{"p09_cpename_tomcat", cpeCandidate{part: "a", vendor: "apache", product: "tomcat", version: "9.0.30", raw: "9.0.30"}, 0},
+		{"p11_cpename_lodash_node", cpeCandidate{part: "a", vendor: "lodash", product: "lodash", version: "4.17.20", raw: "4.17.20"}, 5},
+		{"p14_cpename_xnet", cpeCandidate{part: "a", vendor: "golang", product: "networking", version: "0.7.0", raw: "0.7.0"}, 2},
+		{"p15_cpename_gin", cpeCandidate{part: "a", vendor: "gin-gonic", product: "gin", version: "1.7.0", raw: "1.7.0"}, 2},
+		{"p18_cpename_glibc", cpeCandidate{part: "a", vendor: "gnu", product: "glibc", version: "2.31", raw: "2.31"}, 0},
 	}
 	for _, tc := range cases {
 		r := m60NVDFixture(t, tc.fixture)
@@ -246,8 +319,11 @@ func TestM60VerifyCPEMatch_NoVersionDisagreementOnRecordedAnswers(t *testing.T) 
 	}
 }
 
-// A version outside every range is rejected even if a server returned the
-// CVE: the local check is not a rubber stamp.
+// Log4Shell's configurations mix plain ranges with exact criteria that pin
+// an update (log4j:2.0:beta9, 2.0:rc1, ...). Under option B a pinned update
+// is not plain, so a version the plain ranges exclude is still UNDECIDABLE —
+// kept as nvd_cpe_unverified — because one of its criteria cannot be decided.
+// Versions inside a plain range, or equal to the NA criterion 2.0:-, match.
 func TestM60VerifyCPEMatch_RangeBoundaries(t *testing.T) {
 	r := m60NVDFixture(t, "p01_cpename_log4j")
 	var log4shell NVDCVE
@@ -261,26 +337,33 @@ func TestM60VerifyCPEMatch_RangeBoundaries(t *testing.T) {
 	}
 	for v, want := range map[string]cpeVerdict{
 		"2.14.1":    cpeMatched,
-		"2.15.0":    cpeRejected, // fixed release
-		"2.17.1":    cpeRejected,
 		"2.12.1":    cpeMatched,
-		"1.2.17":    cpeRejected, // log4j 1.x is not CVE-2021-44228
-		"2.0-beta9": cpeMatched,  // NVD lists log4j:2.0:beta9 explicitly
-		"2.0-rc2":   cpeMatched,
-		"2.0":       cpeMatched,  // log4j:2.0:- (the final release)
-		"2.0-beta1": cpeRejected, // not listed
-		"2.0.1":     cpeMatched,  // >= 2.0.1, < 2.3.1
+		"2.0.1":     cpeMatched, // >= 2.0.1, < 2.3.1
+		"2.0":       cpeMatched, // log4j:2.0:- (the final release)
+		"2.15.0":    cpeUndecidable,
+		"2.17.1":    cpeUndecidable,
+		"1.2.17":    cpeUndecidable,
+		"2.0-beta9": cpeUndecidable,
+		"2.0-beta1": cpeUndecidable,
 	} {
-		got := verifyCPEMatch(log4shell, cpeCandidate{"a", "apache", "log4j", v, "", false})
+		got := verifyCPEMatch(log4shell, cpeCandidate{part: "a", vendor: "apache", product: "log4j", version: v, raw: v})
 		if got != want {
 			t.Errorf("CVE-2021-44228 @ %s = %v want %v", v, got, want)
 		}
+	}
+	// A CVE whose configurations are plain throughout IS excluded by a plain
+	// comparison (synthetic; see also TestM60NonPlainNeverRejectsByComparison).
+	plainOnly := NVDCVE{Configurations: []NVDConfiguration{{Nodes: []NVDConfigNode{{CpeMatch: []NVDCPEMatch{
+		{Vulnerable: true, Criteria: "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*", VersionStartIncluding: "2.4", VersionEndExcluding: "2.15.0"},
+	}}}}}}
+	if got := verifyCPEMatch(plainOnly, cpeCandidate{part: "a", vendor: "apache", product: "log4j", version: "2.15.0", raw: "2.15.0"}); got != cpeRejected {
+		t.Errorf("plain 2.15.0 outside plain [2.4,2.15.0) = %v, want rejected", got)
 	}
 	// A product the CVE never mentions is never MATCHED. Since Codex M60 R1
 	// High-2 it is "undecidable" rather than rejected — rejection needs
 	// positive evidence — which only matters for a mirror that answers a
 	// cpeName query with records not about that product.
-	if got := verifyCPEMatch(log4shell, cpeCandidate{"a", "apache", "log4j-core", "2.14.1", "", false}); got == cpeMatched {
+	if got := verifyCPEMatch(log4shell, cpeCandidate{part: "a", vendor: "apache", product: "log4j-core", version: "2.14.1", raw: "2.14.1"}); got == cpeMatched {
 		t.Errorf("log4j-core product matched: %v", got)
 	}
 }

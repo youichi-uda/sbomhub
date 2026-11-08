@@ -9,43 +9,6 @@ import (
 	"testing"
 )
 
-// Codex M60 R6 High-1: a criterion whose `update` is ANY accepts every
-// update of its version, so candidate widget:2.0:beta1 is inside widget:2.0:*.
-func TestM60R6_CriterionUpdateAnyAcceptsCandidateUpdate(t *testing.T) {
-	c := cpeCandidate{part: "a", vendor: "v", product: "widget", version: "2.0", update: "beta1"}
-	for _, tc := range []struct {
-		criteria string
-		want     cpeVerdict
-	}{
-		{"cpe:2.3:a:v:widget:2.0:*:*:*:*:*:*:*", cpeMatched},
-		{"cpe:2.3:a:v:widget:2.0:beta1:*:*:*:*:*:*", cpeMatched},
-		{"cpe:2.3:a:v:widget:2.0:beta2:*:*:*:*:*:*", cpeRejected},
-		{"cpe:2.3:a:v:widget:2.0:-:*:*:*:*:*:*", cpeRejected}, // NA: the final release only
-		{"cpe:2.3:a:v:widget:2.1:*:*:*:*:*:*:*", cpeRejected},
-	} {
-		cve := NVDCVE{Configurations: []NVDConfiguration{{Nodes: []NVDConfigNode{{CpeMatch: []NVDCPEMatch{
-			{Vulnerable: true, Criteria: tc.criteria},
-		}}}}}}
-		if got := verifyCPEMatch(cve, c); got != tc.want {
-			t.Errorf("%s vs 2.0:beta1 = %v, want %v", tc.criteria, got, tc.want)
-		}
-	}
-}
-
-// Codex M60 R6 High-2: a bare "a"/"b" is PEP 440 alpha/beta ("1.0a" < "1.0")
-// or an OpenSSL patch letter ("1.1.1a" > "1.1.1") depending on the scheme; it
-// is undecidable. Longer bare letters ("k", "za") stay OpenSSL patches.
-func TestM60R6_BareAOrBIsSchemeDependent(t *testing.T) {
-	for _, tc := range []struct{ a, b string }{{"1.0a", "1.0"}, {"1.0b", "1.0"}, {"1.1.1a", "1.1.1"}} {
-		if _, ok := compareVersions(tc.a, tc.b); ok {
-			t.Errorf("compareVersions(%q,%q) decided; want undecidable", tc.a, tc.b)
-		}
-	}
-	if c, ok := compareVersions("1.1.1k", "1.1.1"); !ok || c != 1 {
-		t.Errorf("1.1.1k vs 1.1.1 = %d,%v", c, ok)
-	}
-}
-
 // Codex M60 R6 High-3: the product probe's answer must be ABOUT the product.
 // A mirror that ignores virtualMatchString and answers with an unrelated
 // record would otherwise make an unknown product "known", end the candidate

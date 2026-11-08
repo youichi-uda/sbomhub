@@ -27,6 +27,12 @@ package service
 //     CVEs, 5 of them only because openssl appears as a vulnerable=false
 //     PLATFORM in an AND configuration (Mutt CVE-2009-1390 etc., httpd
 //     CVE-2019-0190). Those are not openssl vulnerabilities.
+//     A VERSION comparison may exclude a CVE only when the component version
+//     and every version the criterion involves are plain dotted-numeric (M60
+//     decision 1, option B; criterionContains). Anything else keeps the CVE
+//     as nvd_cpe_unverified. Measured on log4j: NVD's own cpeName answer for
+//     "2.0-beta9" omitted Log4Shell, so for non-plain versions neither a
+//     local comparator nor NVD's server-side one is trusted to exclude.
 //  4. A cpeName answer of ZERO is never taken as "clean": NVD answers 0, with
 //     no error, for a product it has never heard of (measured:
 //     apache:log4j-core), for a known product whose version is unaffected,
@@ -190,16 +196,33 @@ type cpeCandidate struct {
 	// release. update "" with updateNA false is ANY: the release is not
 	// pinned (Codex M60 R11 High).
 	updateNA bool
+	// raw is the version as the SBOM stated it, before normaliseCPEVersion
+	// (no "v", distro revision or "+build" stripping). Whether a local
+	// comparison may EXCLUDE a CVE is decided on this value: see plain.
+	raw string
 }
 
-// plainVersion reports whether the candidate's version is dotted numbers
-// only, with no update — the one shape whose cpeName encoding is unambiguous.
-func (c cpeCandidate) plainVersion() bool {
-	if c.update != "" || c.version == "" {
+// plain reports whether the candidate's version may take part in a local
+// comparison that EXCLUDES a CVE (M60 decision 1, option B): the version as the
+// SBOM stated it is plain dotted-numeric (isPlainVersion) and the CPE pins no
+// update. Distro revisions, "+build" metadata, letters and qualifiers all make
+// it non-plain, however obvious their ordering may look — every scheme-specific
+// ordering rule tried in Codex M60 R2-R13 had another counter-example.
+func (c cpeCandidate) plain() bool {
+	return c.update == "" && isPlainVersion(c.raw)
+}
+
+// isPlainVersion: digits separated by single '.', optionally after one leading
+// 'v'/'V'. Nothing else.
+func isPlainVersion(v string) bool {
+	if len(v) > 1 && (v[0] == 'v' || v[0] == 'V') {
+		v = v[1:]
+	}
+	if v == "" {
 		return false
 	}
 	prevDot := true
-	for _, r := range c.version {
+	for _, r := range v {
 		switch {
 		case r >= '0' && r <= '9':
 			prevDot = false
@@ -343,7 +366,7 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 			// (Codex M60 R6 Medium).
 			continue
 		}
-		v, update, updateNA := compVersion, "", false
+		v, update, updateNA := strings.TrimSpace(compVersion), "", false
 		if cpeConcrete(n.Version) {
 			v = n.Version
 			if cpeConcrete(n.Update) {
@@ -351,11 +374,12 @@ func cpeCandidates(cpes []string, compVersion, purl string) []cpeCandidate {
 			}
 			updateNA = n.Update == "-"
 		}
+		raw := v
 		v = normaliseCPEVersion(v, distro)
 		if !cpeConcrete(v) {
 			continue
 		}
-		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v), update: update, updateNA: updateNA}
+		c := cpeCandidate{part: n.Part, vendor: n.Vendor, product: n.Product, version: strings.ToLower(v), update: update, updateNA: updateNA, raw: raw}
 		if _, dup := seen[c.productKey()]; dup {
 			continue
 		}
@@ -461,77 +485,40 @@ func verifyCPEMatch(cve NVDCVE, c cpeCandidate) cpeVerdict {
 
 // criterionContains decides whether one vulnerable criterion covers the
 // candidate.
+//
+// M60 decision 1 (option B): a CVE may be EXCLUDED by a version comparison only
+// when the component version and every version the criterion involves are
+// plain dotted-numeric. Any other comparison is undecidable — the CVE is kept
+// as nvd_cpe_unverified and the answer is not cached. A gap in the comparison
+// can therefore never drop a CVE; it can only lower a label.
 func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
-	version := c.effectiveVersion()
 	if crit.Version == "-" {
-		// NA: the criterion applies to a version-less thing; a versioned
-		// component is not it.
-		return cpeRejected
+		// NA: a version-less thing. Not a comparison this code may decide.
+		return cpeUndecidable
 	}
 	if cpeConcrete(crit.Version) {
-		// A criterion can pin a qualifier in the CPE `update` attribute
-		// (NVD writes log4j 2.0-beta9 as `log4j:2.0:beta9`), so the release
-		// it names is version+update, and an SBOM writes that as one
-		// version string ("2.0-beta9"). `update` = "-" (NA) names the final
-		// release itself.
-		//
-		// The criterion's update decides what is compared (Codex M60 R6
-		// High-1): ANY accepts every update of its version, so only the base
-		// versions are compared; NA names the final release, so a candidate
-		// with an update is a different release; a concrete update names
-		// one release.
-		target, mine := crit.Version, version
 		switch crit.Update {
 		case "", "*":
-			mine = c.version
 		case "-":
-			if c.update != "" {
-				return cpeRejected
-			}
-			// A candidate with update ANY and a version string carrying no
-			// qualifier ("2.0", Syft's default "2.0:*") is taken to BE the
-			// final release, and matches. Deliberate (Codex M60 R12
-			// Medium-1, declined): an SBOM writes a pre-release's qualifier
-			// into the version string ("2.0-beta9", compared below against
-			// the plain "2.0" and rejected), and this is the inclusive
-			// direction — at worst a high-confidence false positive, never
-			// a missed finding. Making it undecidable would downgrade every
-			// exact-version NVD criterion for every Syft SBOM.
+			// NA names the final release. A candidate with update ANY and a
+			// plain version is taken to BE the final release and matches
+			// (Codex M60 R12 Medium-1, declined: the inclusive direction; a
+			// pre-release writes its qualifier into the version string, which
+			// then is not plain and so is undecidable here).
 		default:
-			target += "-" + crit.Update
-			if cmp, ok := compareVersions(mine, target); ok && cmp == 0 {
-				return cpeMatched
-			}
-			if c.update != "" {
-				// The candidate pins a different update.
-				if _, ok := compareVersions(mine, target); !ok {
-					return cpeUndecidable
-				}
-				return cpeRejected
-			}
-			// The candidate pins no update. If its base version is the
-			// criterion's, the component may BE that update unless its CPE
-			// said NA (final release); ANY cannot be decided (Codex M60
-			// R11 High).
-			base, ok := compareVersions(c.version, crit.Version)
-			switch {
-			case !ok:
-				return cpeUndecidable
-			case base != 0 || c.updateNA:
-				return cpeRejected
-			}
+			// The criterion pins an update ("2.0:beta9", "2.0:sp1"): not plain.
 			return cpeUndecidable
 		}
-		cmp, ok := compareVersions(mine, target)
-		if !ok {
+		cmp, ok := compareVersions(c.raw, crit.Version)
+		switch {
+		case !ok || !c.plain():
 			return cpeUndecidable
+		case cmp == 0:
+			return cpeMatched
 		}
-		if cmp != 0 {
-			return cpeRejected
-		}
-		return cpeMatched
+		return cpeRejected
 	}
-	// version "*": a range, or every version when no bound is given.
+	// version "*": every version, or a range.
 	bounds := []struct {
 		v    string
 		pass func(int) bool
@@ -541,11 +528,27 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 		{m.VersionEndIncluding, func(c int) bool { return c <= 0 }},
 		{m.VersionEndExcluding, func(c int) bool { return c < 0 }},
 	}
+	hasBound := false
 	for _, b := range bounds {
 		if b.v == "" {
 			continue
 		}
-		cmp, ok := compareVersions(version, strings.ToLower(b.v))
+		hasBound = true
+		if !isPlainVersion(b.v) {
+			return cpeUndecidable // every bound involved must be plain
+		}
+	}
+	if !hasBound {
+		return cpeMatched // all versions: no comparison involved
+	}
+	if !c.plain() {
+		return cpeUndecidable
+	}
+	for _, b := range bounds {
+		if b.v == "" {
+			continue
+		}
+		cmp, ok := compareVersions(c.raw, b.v)
 		if !ok {
 			return cpeUndecidable
 		}
@@ -556,167 +559,34 @@ func criterionContains(crit cpeName, m NVDCPEMatch, c cpeCandidate) cpeVerdict {
 	return cpeMatched
 }
 
-// Version ordering for NVD ranges.
-//
-// A version is tokenised into runs of digits and runs of letters. Letter runs
-// are classified, because the same letters mean opposite things in different
-// schemes (Codex M60 R2 High / R3 High):
-//
-//   - PRE-RELEASE: a known qualifier word ("alpha", "beta", "rc", "dev", ...)
-//     or a shorthand letter immediately followed by a number ("1.0a1",
-//     "1.0b2", Tomcat's "9.0.0.M1"). Sorts BEFORE the release it qualifies.
-//     Between two pre-releases only alpha < beta < rc is decided — the one
-//     chain every scheme agrees on; other pairs are undecidable.
-//   - POST-RELEASE: one or two bare letters with no number after them —
-//     OpenSSL's patch releases ("1.1.1k" > "1.1.1", "1.1.1za" > "1.1.1z").
-//     OpenSSL 1.1.1m is a patch release, not a milestone.
-//   - RELEASE MARKER: "final", "ga", "release" (Maven's "4.1.100.Final") mean
-//     the release itself and are dropped.
-//   - anything else ("post1", "dfsg", "final2", ...) is UNKNOWN: a comparison
-//     that depends on it is undecidable, never guessed. The caller keeps such
-//     a CVE as nvd_cpe_unverified and does not cache the answer.
-//
-// Separators matter in two places (Codex M60 R5 High):
-//
-//   - everything from "+" on is SemVer build metadata and is ignored
-//     ("1.0.0+1" == "1.0.0", "1.2.3+dfsg" == "1.2.3");
-//   - a NUMBER directly after "-" is a pre-release in SemVer ("1.0.0-1" <
-//     "1.0.0") but a revision in other schemes. Such a token compares only
-//     against another dash-number; any order that depends on it otherwise is
-//     undecidable.
-//
-// Numeric zero padding is skipped wherever a number faces a qualifier, so
-// "1.0" == "1.0.0" and "1.0.0-rc1" < "1.0" < "1.0.0a" all hold together.
-// The orderings are pinned by transitivity tests over mixed sets.
-
-type versionToken struct {
-	num   bool
-	value string
-	// sep is the separator directly before the token (0: none, or the
-	// start). dash: sep was "-". dashNum: a number so preceded (see above).
-	sep     rune
-	dash    bool
-	dashNum bool
-}
-
-var releaseMarkers = map[string]bool{"final": true, "ga": true, "release": true}
-
-// preReleaseRank orders the qualifier words; shorthand letters map onto them.
-//
-// "dev", "pre", "preview" are NOT here (Codex M60 R13 High): Maven sorts an
-// unknown qualifier AFTER the release while PEP 440 puts dev before it and
-// reads pre/preview as rc, so against the release they are undecidable
-// (tokenKindAt classifies them unknown).
-var preReleaseRank = map[string]int{
-	"alpha": 1, "a": 1, "beta": 2, "b": 2, "c": 5, "milestone": 3, "m": 3,
-	"rc": 5, "cr": 5, "snapshot": 6,
-}
-
-// agreedPreRelease are the qualifiers every supported scheme orders the same
-// way among themselves (see compareTokens).
-var agreedPreRelease = map[string]bool{"a": true, "alpha": true, "b": true, "beta": true, "rc": true}
-
-// shorthandPreRelease are qualifiers that are pre-releases ONLY when a number
-// follows them. Bare, "m" is an OpenSSL patch letter (1.1.1m), while a bare
-// "a"/"b" is an alpha/beta in PEP 440 ("1.0a" < "1.0") but a patch letter in
-// OpenSSL ("1.1.1a" > "1.1.1"), so it is UNKNOWN (Codex M60 R6 High-2).
-//
-// Bare "c" is PEP 440's rc and an OpenSSL patch letter alike, so it is
-// unknown too; "c1" is a pre-release (Codex M60 R13 High).
-var shorthandPreRelease = map[string]bool{"a": true, "b": true, "c": true, "m": true}
-
-type tokenKind int
-
-const (
-	kindNum tokenKind = iota
-	kindPre
-	kindPost
-	kindUnknown
-)
-
-func tokenKindAt(toks []versionToken, i int) tokenKind {
-	k := tokenKindIgnoringDash(toks, i)
-	// Letters directly after '-' are a pre-release in SemVer whatever they
-	// say; other schemes agree only when they are a pre-release word too
-	// ("2.0-beta9"). "-final", "-k", ... are read differently by different
-	// schemes, so they are unknown (Codex M60 R8 High).
-	if t := toks[i]; !t.num && t.dash && k != kindPre {
-		return kindUnknown
+// compareVersions orders two PLAIN dotted-numeric versions (isPlainVersion),
+// treating missing trailing segments as zero ("1.0" == "1.0.0"). ok is false
+// for anything else: this function is the only place a version comparison
+// can exclude a CVE, so it decides nothing it cannot decide for every scheme.
+func compareVersions(a, b string) (int, bool) {
+	if !isPlainVersion(a) || !isPlainVersion(b) {
+		return 0, false
 	}
-	return k
-}
-
-func tokenKindIgnoringDash(toks []versionToken, i int) tokenKind {
-	t := toks[i]
-	if t.num {
-		return kindNum
-	}
-	numberFollows := i+1 < len(toks) && toks[i+1].num
-	if shorthandPreRelease[t.value] {
-		switch {
-		case numberFollows:
-			return kindPre
-		case t.value == "m":
-			return kindPost
+	trim := func(v string) []string {
+		if v[0] == 'v' || v[0] == 'V' {
+			v = v[1:]
 		}
-		return kindUnknown
+		return strings.Split(v, ".")
 	}
-	if _, ok := preReleaseRank[t.value]; ok {
-		return kindPre
-	}
-	if releaseMarkers[t.value] {
-		// A marker that survived tokenisation was not after '.' ("_ga",
-		// "1.0final"): not decided (Codex M60 R9 High-2).
-		return kindUnknown
-	}
-	if len(t.value) <= 2 && !numberFollows {
-		return kindPost
-	}
-	return kindUnknown
-}
-
-func tokeniseVersion(v string) []versionToken {
-	if i := strings.IndexByte(v, '+'); i >= 0 {
-		v = v[:i] // SemVer build metadata takes no part in ordering
-	}
-	var out []versionToken
-	var cur strings.Builder
-	curNum := false
-	var sep rune // separator seen since the last token
-	flush := func() {
-		if cur.Len() > 0 {
-			out = append(out, versionToken{num: curNum, value: cur.String(), sep: sep, dash: sep == '-', dashNum: curNum && sep == '-'})
-			cur.Reset()
-			sep = 0
+	sa, sb := trim(a), trim(b)
+	for i := 0; i < len(sa) || i < len(sb); i++ {
+		x, y := "0", "0"
+		if i < len(sa) {
+			x = sa[i]
+		}
+		if i < len(sb) {
+			y = sb[i]
+		}
+		if c := compareNumeric(x, y); c != 0 {
+			return c, true
 		}
 	}
-	for _, r := range strings.ToLower(v) {
-		isNum := r >= '0' && r <= '9'
-		isAlpha := r >= 'a' && r <= 'z'
-		if !isNum && !isAlpha {
-			flush()
-			sep = r
-			continue
-		}
-		if cur.Len() > 0 && isNum != curNum {
-			flush()
-		}
-		curNum = isNum
-		cur.WriteRune(r)
-	}
-	flush()
-	// Drop release markers, but only bare ones ("final2" is not "final")
-	// and only after '.', where every scheme reads them as the release:
-	// SemVer reads "-final" as a pre-release (Codex M60 R8 High).
-	kept := out[:0]
-	for i, t := range out {
-		numberFollows := i+1 < len(out) && out[i+1].num
-		if !t.num && t.sep == '.' && releaseMarkers[t.value] && !numberFollows {
-			continue
-		}
-		kept = append(kept, t)
-	}
-	return kept
+	return 0, true
 }
 
 func compareNumeric(a, b string) int {
@@ -729,189 +599,6 @@ func compareNumeric(a, b string) int {
 		return 1
 	}
 	return strings.Compare(a, b)
-}
-
-// versionCharsSupported is false when the version (before any "+" build
-// metadata) contains a separator other than '.', '-', '_'. Such separators
-// carry scheme-specific order — PEP 440's epoch "1!2.0", Debian's "~"
-// pre-release, RPM's "^" — that this tokenizer cannot honour, so the whole
-// comparison is undecidable (Codex M60 R7 High). Closing the class here, not
-// separator by separator.
-func versionCharsSupported(v string) bool {
-	if i := strings.IndexByte(v, '+'); i >= 0 {
-		v = v[:i]
-	}
-	// Empty segments ("1..0") and leading/trailing separators (".1",
-	// "1.0.") are read differently by different schemes; the tokenizer
-	// would collapse them (Codex M60 R12 Medium-2).
-	isSep := func(r rune) bool { return r == '.' || r == '-' || r == '_' }
-	prevSep := true // a leading separator is an empty first segment
-	for _, r := range strings.ToLower(v) {
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
-			prevSep = false
-		case isSep(r):
-			if prevSep {
-				return false
-			}
-			prevSep = true
-		default:
-			return false
-		}
-	}
-	return v != "" && !prevSep
-}
-
-func sameKind(ta []versionToken, i int, tb []versionToken, j int) bool {
-	if ta[i].num || tb[j].num {
-		return ta[i].num && tb[j].num
-	}
-	return tokenKindAt(ta, i) == tokenKindAt(tb, j)
-}
-
-func normSep(r rune) rune {
-	if r == '_' {
-		return '.'
-	}
-	return r
-}
-
-// isZero is a zero that can be read as padding — never a dash-number.
-func isZero(t versionToken) bool {
-	return t.num && !t.dashNum && strings.TrimLeft(t.value, "0") == ""
-}
-
-// compareVersions compares two versions the way NVD's configuration ranges
-// are written. ok is false when they cannot be ordered with confidence;
-// callers must treat that as "unknown", never as "outside".
-func compareVersions(a, b string) (int, bool) {
-	if !versionCharsSupported(a) || !versionCharsSupported(b) {
-		return 0, false
-	}
-	ta, tb := tokeniseVersion(a), tokeniseVersion(b)
-	if len(ta) == 0 || len(tb) == 0 {
-		return 0, false
-	}
-	return compareTokens(ta, tb)
-}
-
-func compareTokens(ta, tb []versionToken) (int, bool) {
-	for i := 0; i < len(ta) && i < len(tb); i++ {
-		x, y := ta[i], tb[i]
-		// Corresponding tokens OF THE SAME KIND must be joined the same way:
-		// "rc.1" is two SemVer identifiers and "rc1" one, so they are not
-		// equal and their order is scheme-dependent (Codex M60 R10 High-2).
-		// A pre-release against a post-release letter is ordered alike by
-		// every scheme whatever joins them. '_' reads as '.'.
-		if normSep(x.sep) != normSep(y.sep) && sameKind(ta, i, tb, i) {
-			return 0, false
-		}
-		switch {
-		case x.num && y.num:
-			if x.dashNum != y.dashNum {
-				// "1.0.0-1" vs "1.0.0.1": pre-release or revision?
-				return 0, false
-			}
-			if c := compareNumeric(x.value, y.value); c != 0 {
-				return c, true
-			}
-		case !x.num && !y.num:
-			kx, ky := tokenKindAt(ta, i), tokenKindAt(tb, i)
-			if kx == kindUnknown || ky == kindUnknown {
-				if x.value == y.value {
-					continue
-				}
-				return 0, false
-			}
-			if kx != ky { // pre-release before post-release
-				if kx == kindPre {
-					return -1, true
-				}
-				return 1, true
-			}
-			if kx == kindPre {
-				if x.value == y.value {
-					continue
-				}
-				// Only alpha < beta < rc (and their a/b shorthands) is
-				// ordered alike by SemVer (lexically), Maven and PEP 440,
-				// and within that set lexical and rank order coincide when
-				// the ranks differ. "dev", "pre"/"preview", "cr", "m",
-				// "snapshot" — and "a" vs "alpha" — are ordered differently
-				// by different schemes (M60 self-review).
-				rx, ry := preReleaseRank[x.value], preReleaseRank[y.value]
-				if !agreedPreRelease[x.value] || !agreedPreRelease[y.value] || rx == ry {
-					return 0, false
-				}
-				if rx < ry {
-					return -1, true
-				}
-				return 1, true
-			}
-			if c := strings.Compare(x.value, y.value); c != 0 {
-				return c, true
-			}
-		case x.num: // number vs qualifier
-			return compareNumVsQualifier(ta[i:], tb[i:], 1)
-		default: // qualifier vs number
-			return compareNumVsQualifier(tb[i:], ta[i:], -1)
-		}
-	}
-	if len(ta) == len(tb) {
-		return 0, true
-	}
-	longer, sign := ta, 1
-	if len(tb) > len(ta) {
-		longer, sign = tb, -1
-	}
-	c, ok := compareRest(longer[min(len(ta), len(tb)):])
-	return sign * c, ok
-}
-
-// compareNumVsQualifier handles a number (head of nums) facing a qualifier
-// (head of quals). sign orients the result: +1 when nums is the left operand.
-func compareNumVsQualifier(nums, quals []versionToken, sign int) (int, bool) {
-	if nums[0].dashNum {
-		return 0, false // SemVer and Maven order "1.0-1" vs "1.0-rc1" differently
-	}
-	if isZero(nums[0]) {
-		// Zero padding: "1.0.0" vs "1.0a" compares like "1.0" vs "1.0a".
-		j := 0
-		for j < len(nums) && isZero(nums[j]) {
-			j++
-		}
-		c, ok := compareTokens(nums[j:], quals)
-		if len(nums[j:]) == 0 {
-			c, ok = compareRest(quals)
-			c = -c
-		}
-		return sign * c, ok
-	}
-	if tokenKindAt(quals, 0) == kindPre {
-		return sign, true // "2.0-beta9" < "2.0.1"
-	}
-	return 0, false
-}
-
-// compareRest orders the tail a longer version has beyond a shorter one that
-// is its prefix: positive when the tail makes it newer.
-func compareRest(rest []versionToken) (int, bool) {
-	for len(rest) > 0 && isZero(rest[0]) {
-		rest = rest[1:]
-	}
-	if len(rest) == 0 {
-		return 0, true
-	}
-	if rest[0].dashNum {
-		return 0, false // "1.0.0-1" vs "1.0.0": pre-release or revision?
-	}
-	switch tokenKindAt(rest, 0) {
-	case kindNum, kindPost:
-		return 1, true
-	case kindPre:
-		return -1, true
-	}
-	return 0, false
 }
 
 // nvdCPECacheName / nvdNoCPECacheName are the cache identities of the CPE
@@ -1036,7 +723,7 @@ func (s *NVDService) lookupCPECandidate(ctx context.Context, c cpeCandidate, dis
 	// qualifiers that encoding is ambiguous (NVD stores 2.0-beta9 as version
 	// 2.0 + update beta9), so such versions go straight to step 2.
 	spent := 0
-	if c.plainVersion() {
+	if c.plain() {
 		q := url.Values{}
 		q.Set("cpeName", c.query())
 		res, err := s.walkNVD(ctx, q, pace, paceFirst)

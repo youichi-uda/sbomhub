@@ -8,7 +8,9 @@ import (
 // Codex M60 R11 High: a candidate whose CPE update is ANY ("2.0:*", Syft's
 // default) is not "the final release": against a criterion pinning an update
 // of the same version ("2.0:sp1") it is undecidable — kept, unverified, not
-// cached. Only an explicit NA ("2.0:-") means the final release.
+// cached. Since M60 decision 1 (option B) a criterion that pins an update is
+// never plain, so it is undecidable for EVERY candidate (even "2.0:-" or a
+// different base version: a vendor may label 2.0 SP1 as 2.0.1).
 func TestM60R11_CandidateUpdateAnyIsNotFinalOnly(t *testing.T) {
 	cve := NVDCVE{Configurations: []NVDConfiguration{{Nodes: []NVDConfigNode{{CpeMatch: []NVDCPEMatch{
 		{Vulnerable: true, Criteria: "cpe:2.3:a:v:widget:2.0:sp1:*:*:*:*:*:*"},
@@ -22,11 +24,11 @@ func TestM60R11_CandidateUpdateAnyIsNotFinalOnly(t *testing.T) {
 	if got := verifyCPEMatch(cve, anyUpd[0]); got != cpeUndecidable {
 		t.Errorf("2.0:* vs criterion 2.0:sp1 = %v, want undecidable", got)
 	}
-	if got := verifyCPEMatch(cve, na[0]); got != cpeRejected {
-		t.Errorf("2.0:- (final) vs criterion 2.0:sp1 = %v, want rejected", got)
+	if got := verifyCPEMatch(cve, na[0]); got != cpeUndecidable {
+		t.Errorf("2.0:- (final) vs criterion 2.0:sp1 = %v, want undecidable", got)
 	}
-	if got := verifyCPEMatch(cve, other[0]); got != cpeRejected {
-		t.Errorf("2.1:* vs criterion 2.0:sp1 = %v, want rejected", got)
+	if got := verifyCPEMatch(cve, other[0]); got != cpeUndecidable {
+		t.Errorf("2.1:* vs criterion 2.0:sp1 = %v, want undecidable", got)
 	}
 	// Log4Shell lists log4j 2.0:- and 2.0:beta9 ...: a plain "2.0" component
 	// still MATCHES (via 2.0:-), so the change costs nothing there.

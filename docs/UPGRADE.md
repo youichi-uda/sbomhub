@@ -1654,19 +1654,19 @@ Versions are normalised before matching: a leading `v` is dropped (Go modules;
 (purl type `deb`, `rpm`, `apk`, `alpm`) the epoch and distro revision are
 dropped (`1.1.1k-1+deb11u2` → `1.1.1k`).
 
-Version comparison against NVD's ranges is deliberately conservative. Dotted
-numbers, OpenSSL-style patch letters (`1.1.1k`), Maven's `.Final`/`.GA`, and
-pre-releases that every scheme orders alike (`alpha` < `beta` < `rc`, before
-the release) are compared. Where version schemes disagree — a bare `a`/`b`
-(PEP 440 alpha vs OpenSSL patch), a number or word after `-` that is not a
-pre-release word (`1.0.0-1`, `1.0.0-final`), `dev`/`pre`/`preview` (Maven
-and PEP 440 put them on opposite sides of the release), a bare `c`, two
-pre-releases other than alpha < beta < rc, `rc.1` vs `rc1`, empty segments
-(`1..0`), or separators such as `!`, `~`, `^` — the comparison is
-**undecidable**: the CVE NVD returned is kept and labelled
-`nvd_cpe_unverified` (low confidence), and that answer is not cached. A
-comparator limit therefore costs a label, never a missed finding. `+build`
-metadata is ignored, as SemVer specifies.
+A version comparison may **exclude** a CVE only when the component version, as
+the SBOM states it, and every version the NVD criterion involves are **plain
+dotted-numeric** (`2.14.1`, `v0.7.0`; no letters, no `-`, `+`, `~`, `!`, `^`,
+`_`, and no pinned CPE update other than ANY/NA). In every other case — OpenSSL
+letter releases (`1.1.1k`), pre-releases (`2.0-beta9`), distro versions
+(`1.1.1k-1`), `+build` metadata, criteria that pin an update (`log4j:2.0:beta9`)
+— the CVE NVD returned is **kept** and labelled `nvd_cpe_unverified` (low
+confidence), and that answer is not cached. A gap in version comparison
+therefore never drops a CVE; it only lowers a label. Records that name the
+product only as a `vulnerable: false` platform are still dropped (no version
+comparison is involved). Non-plain versions skip the exact `cpeName` query and
+walk the whole product, because NVD's own `cpeName` answer for such versions can
+be incomplete (measured: for log4j `2.0-beta9` it omitted Log4Shell).
 
 ### 13.2 `match_method` / `match_confidence`
 

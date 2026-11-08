@@ -20,16 +20,3 @@ func TestM60R12_UpdateNAAndAnyHaveDistinctIdentities(t *testing.T) {
 		t.Errorf("ANY and NA components share a work item")
 	}
 }
-
-// Codex M60 R12 Medium-2: empty segments and leading/trailing separators
-// ("1..0", ".1", "1.0.") are not collapsed into a decided comparison.
-func TestM60R12_EmptySegmentsAreUndecidable(t *testing.T) {
-	for _, tc := range []struct{ a, b string }{{"1..0", "1.0"}, {".1", "1"}, {"1.0.", "1.0"}, {"1.0--rc1", "1.0-rc1"}} {
-		if c, ok := compareVersions(tc.a, tc.b); ok {
-			t.Errorf("compareVersions(%q,%q) = %d decided; want undecidable", tc.a, tc.b, c)
-		}
-	}
-	if c, ok := compareVersions("1.0+build..x", "1.0"); !ok || c != 0 {
-		t.Errorf("build metadata is ignored whatever it contains: %d,%v", c, ok)
-	}
-}

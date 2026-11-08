@@ -8,7 +8,9 @@ import (
 // Codex M60 R1 High-1: a CPE's `update` attribute is part of the release it
 // names (NVD writes log4j 2.0-beta9 as `log4j:2.0:beta9`). Dropping it turned
 // a beta9 component into "2.0", which matches final-2.0-only CVEs and misses
-// beta-only ones.
+// beta-only ones. The update is carried into the query; since M60 decision 1
+// (option B) a pinned update is not plain, so local verification keeps every
+// such CVE as undecidable rather than deciding it.
 func TestM60R1_CPEUpdateAttributeIsPartOfTheVersion(t *testing.T) {
 	cs := cpeCandidates([]string{"cpe:2.3:a:apache:log4j:2.0:beta9:*:*:*:*:*:*"}, "", "")
 	if len(cs) != 1 {
@@ -21,8 +23,8 @@ func TestM60R1_CPEUpdateAttributeIsPartOfTheVersion(t *testing.T) {
 	r := m60NVDFixture(t, "p01_cpename_log4j")
 	for _, e := range r.entries() {
 		if e.CVE.ID == "CVE-2021-44228" {
-			if got := verifyCPEMatch(e.CVE, c); got != cpeMatched {
-				t.Errorf("2.0:beta9 vs CVE-2021-44228 (lists log4j:2.0:beta9) = %v, want matched", got)
+			if got := verifyCPEMatch(e.CVE, c); got != cpeUndecidable {
+				t.Errorf("2.0:beta9 vs CVE-2021-44228 (lists log4j:2.0:beta9) = %v, want undecidable (kept)", got)
 			}
 		}
 	}
@@ -45,7 +47,7 @@ func TestM60R1_CPEUpdateAttributeIsPartOfTheVersion(t *testing.T) {
 // component clean. Rejection needs POSITIVE evidence: a criterion for the
 // product that is not vulnerable or does not cover the version.
 func TestM60R1_MissingConfigurationIsUnverifiableNotRejected(t *testing.T) {
-	c := cpeCandidate{part: "a", vendor: "apache", product: "log4j", version: "2.14.1"}
+	c := cpeCandidate{part: "a", vendor: "apache", product: "log4j", version: "2.14.1", raw: "2.14.1"}
 	if got := verifyCPEMatch(NVDCVE{ID: "CVE-2021-44228"}, c); got != cpeUndecidable {
 		t.Errorf("no configurations at all = %v, want undecidable (kept)", got)
 	}

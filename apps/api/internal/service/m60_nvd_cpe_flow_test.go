@@ -153,12 +153,15 @@ func TestM60Lookup_Log4jCoreReachesNVDProductThroughThirdCandidate(t *testing.T)
 	}
 }
 
-// Debian openssl 1.1.1k-1: matched on the upstream version, labelled
-// nvd_cpe_distro, and the 5 platform-only CVEs NVD returned are dropped.
+// Debian openssl 1.1.1k-1: the version is not plain (letters, distro
+// revision), so (Codex M60 R10) the lookup skips cpeName and walks openssl's
+// whole product-level answer — 321 records over two pages, recorded live
+// 2026-11-08. Under M60 decision 1 (option B) no comparison involving
+// "1.1.1k-1" may exclude anything: only the 8 records that name openssl solely
+// as a vulnerable=false platform are dropped, and the other 313 are KEPT as
+// nvd_cpe_unverified. That is the measured price of option B for a distro
+// package; precision, not recall, pays it.
 func TestM60Lookup_DebianOpenSSLIsDistroLabelledAndVerified(t *testing.T) {
-	// 1.1.1k is not a plain dotted-numeric version, so (Codex M60 R10) the
-	// lookup skips cpeName and walks openssl's whole product-level answer —
-	// 321 records over two pages, recorded live 2026-11-08 — verifying each.
 	r := &replayNVD{t: t, routes: map[string]string{
 		"virtualMatchString=cpe:2.3:a:openssl:openssl@0":   "v01_vms_openssl_p0",
 		"virtualMatchString=cpe:2.3:a:openssl:openssl@199": "v01_vms_openssl_p1",
@@ -173,21 +176,19 @@ func TestM60Lookup_DebianOpenSSLIsDistroLabelledAndVerified(t *testing.T) {
 	if l.method != model.MatchNVDCPEDistro {
 		t.Errorf("method = %q, want nvd_cpe_distro", l.method)
 	}
-	// Measured: the same 42 CVEs the cpeName query verified (all 42 in the
-	// openssl.org ground truth for 1.1.1k) plus 5 kept as nvd_cpe_unverified
-	// because their ranges end at "1.1.1b" / "1.1.1c" (a bare a/b/c is
-	// scheme-dependent; none of the 5 affects 1.1.1k per openssl.org). 274
-	// records rejected on positive evidence.
-	if len(l.vulns) != 47 || l.cpeRejected != 274 || l.cpeUndecidable != 5 || l.requests != 2 || l.truncated {
-		t.Errorf("kept=%d rejected=%d undecidable=%d requests=%d truncated=%v, want 47/274/5/2/false",
+	if len(l.vulns) != 313 || l.cpeRejected != 8 || l.cpeUndecidable != 313 || l.requests != 2 || l.truncated {
+		t.Errorf("kept=%d rejected=%d undecidable=%d requests=%d truncated=%v, want 313/8/313/2/false",
 			len(l.vulns), l.cpeRejected, l.cpeUndecidable, l.requests, l.truncated)
 	}
 	if !l.uncacheable {
 		t.Errorf("an answer holding an unverified CVE was cacheable")
 	}
-	for _, v := range l.vulns {
+	for i, v := range l.vulns {
 		if v.CVEID == "CVE-2009-1390" || v.CVEID == "CVE-2019-0190" {
 			t.Errorf("platform-only CVE %s was kept", v.CVEID)
+		}
+		if l.methods[i] != model.MatchNVDCPEUnverified {
+			t.Errorf("%s labelled %q, want nvd_cpe_unverified", v.CVEID, l.methods[i])
 		}
 	}
 }
@@ -195,7 +196,8 @@ func TestM60Lookup_DebianOpenSSLIsDistroLabelledAndVerified(t *testing.T) {
 // libc6 (Debian): Syft's only CPE names a product NVD has never heard of
 // (measured: virtualMatchString=cpe:2.3:a:libc6:libc6 -> 0). The lookup must
 // fall back to the keyword search — never report the component clean on the
-// strength of a wrong CPE.
+// strength of a wrong CPE. "2.31-13" is not plain, so cpeName is skipped: one
+// product query, then the keyword walk.
 func TestM60Lookup_UnknownProductFallsBackToKeyword(t *testing.T) {
 	r := &replayNVD{t: t, routes: map[string]string{
 		"keywordSearch=libc6 2.31-13": "k07_libc6",
@@ -210,19 +212,21 @@ func TestM60Lookup_UnknownProductFallsBackToKeyword(t *testing.T) {
 		t.Errorf("method=%q fallback=%v, want nvd_keyword fallback", l.method, l.keywordFallback)
 	}
 	got := r.requests()
-	if len(got) != 3 || got[2] != "keywordSearch=libc6 2.31-13" {
+	if len(got) != 2 || !strings.HasPrefix(got[0], "virtualMatchString=") || got[1] != "keywordSearch=libc6 2.31-13" {
 		t.Errorf("requests = %q", got)
 	}
-	if p.n != 2 || l.requests != 3 {
-		t.Errorf("ticks=%d requests=%d, want 2 / 3", p.n, l.requests)
+	if p.n != 1 || l.requests != 2 {
+		t.Errorf("ticks=%d requests=%d, want 1 / 2", p.n, l.requests)
 	}
 }
 
-// A known product whose version is unaffected: cpeName answers 0, the
-// product-level walk returns log4j's 20 CVEs, local verification rejects
-// them all on positive evidence, and that is a FINAL verified "none" — no
-// keyword request, links labelled nvd_cpe. 2.25.5 is past every recorded
-// range (the newest, CVE-2026-49844, ends before 2.25.5).
+// A known product, plain version past every recorded range (the newest,
+// CVE-2026-49844, ends before 2.25.5): cpeName answers 0, the product-level
+// walk returns log4j's 20 CVEs, and it is FINAL — no keyword request. Under
+// option B the 10 CVEs whose configurations are plain throughout are
+// rejected; the 10 that also carry an exact criterion pinning an update
+// (log4j:2.0:beta9, 3.0.0:alpha1, ...) cannot be decided and are kept as
+// nvd_cpe_unverified, never as verified matches.
 func TestM60Lookup_KnownProductUnaffectedVersionIsFinal(t *testing.T) {
 	r := &replayNVD{t: t, routes: map[string]string{
 		"virtualMatchString=cpe:2.3:a:apache:log4j": "v02_vms_log4j",
@@ -236,8 +240,14 @@ func TestM60Lookup_KnownProductUnaffectedVersionIsFinal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
-	if l.method != model.MatchNVDCPE || len(l.vulns) != 0 || l.cpeRejected != 20 {
-		t.Errorf("method=%q vulns=%d rejected=%d, want nvd_cpe / 0 / 20", l.method, len(l.vulns), l.cpeRejected)
+	if l.method != model.MatchNVDCPE || len(l.vulns) != 10 || l.cpeRejected != 10 || l.cpeUndecidable != 10 {
+		t.Errorf("method=%q vulns=%d rejected=%d undecidable=%d, want nvd_cpe / 10 / 10 / 10",
+			l.method, len(l.vulns), l.cpeRejected, l.cpeUndecidable)
+	}
+	for i := range l.vulns {
+		if l.methods[i] != model.MatchNVDCPEUnverified {
+			t.Errorf("%s labelled %q, want nvd_cpe_unverified", l.vulns[i].CVEID, l.methods[i])
+		}
 	}
 	for _, q := range r.requests() {
 		if strings.HasPrefix(q, "keywordSearch=") {
@@ -249,7 +259,8 @@ func TestM60Lookup_KnownProductUnaffectedVersionIsFinal(t *testing.T) {
 // Codex M60 R10 High-1: a cpeName ZERO is not a verified "clean". Here the
 // cpeName answer is empty (as it is when the SBOM's version is encoded
 // differently from NVD's release), yet 2.25.3 is inside six 2026 ranges;
-// the product-level walk finds and verifies them.
+// the product-level walk finds and verifies them. Four older CVEs with
+// update-pinned criteria are kept beside them as nvd_cpe_unverified.
 func TestM60R10_ZeroCPENameIsNotTakenAsClean(t *testing.T) {
 	r := &replayNVD{t: t, routes: map[string]string{
 		"virtualMatchString=cpe:2.3:a:apache:log4j": "v02_vms_log4j",
@@ -263,13 +274,20 @@ func TestM60R10_ZeroCPENameIsNotTakenAsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
-	var ids []string
-	for _, v := range l.vulns {
-		ids = append(ids, v.CVEID)
+	var verified, unverified []string
+	for i, v := range l.vulns {
+		if l.methods[i] == model.MatchNVDCPE {
+			verified = append(verified, v.CVEID)
+		} else {
+			unverified = append(unverified, v.CVEID)
+		}
 	}
 	want := "CVE-2026-34477 CVE-2026-34478 CVE-2026-34479 CVE-2026-34480 CVE-2026-34481 CVE-2026-49844"
-	if got := strings.Join(ids, " "); got != want {
-		t.Errorf("kept %q, want %q", got, want)
+	if got := strings.Join(verified, " "); got != want {
+		t.Errorf("verified %q, want %q", got, want)
+	}
+	if len(unverified) != 4 {
+		t.Errorf("unverified %q, want 4 (Log4Shell family with 2.0:betaN criteria)", unverified)
 	}
 	if got := r.requests(); len(got) != 2 || !strings.HasPrefix(got[0], "cpeName=") || !strings.HasPrefix(got[1], "virtualMatchString=") {
 		t.Errorf("requests = %q, want cpeName then the product walk", got)
