@@ -427,3 +427,39 @@ func TestM58Reconcile_DoesNotJoinACallersTransaction(t *testing.T) {
 		t.Errorf("severity = %q after the caller's tx rolled back: the re-read joined it", got)
 	}
 }
+
+// TestM58Reconcile_AWindowCutByTheDeadlineIsNotSkipped (Codex M58 R2,
+// Medium): a write that the deadline cancels comes back as a per-row failure
+// with no error from the walk. That window must stay under the cursor, not be
+// recorded as read with a write failure.
+func TestM58Reconcile_AWindowCutByTheDeadlineIsNotSkipped(t *testing.T) {
+	appURL, migURL := schedIntEnv(t)
+	appDB := schedOpenOrSkip(t, appURL)
+	migDB := schedOpenOrSkip(t, migURL)
+	m58Fresh(t, migDB)
+
+	locked := m55CVEID(t)
+	m55SeedLegacy(t, migDB, locked, "NVD")
+	fake := &m58NVD{records: []m58Record{{id: locked, severity: "CRITICAL", score: 9.8,
+		modified: time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)}}}
+	j := m58Job(appDB, fake.server(t).URL)
+	j.reconcileBudget = 500 * time.Millisecond
+
+	tx, err := migDB.Begin()
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE vulnerabilities SET description = description WHERE cve_id = $1`, locked); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("take row lock: %v", err)
+	}
+	out, err := j.reconcileCatalogue(context.Background(), time.Now().UTC())
+	_ = tx.Rollback()
+	if err != nil || out.Finished {
+		t.Fatalf("outcome %+v err %v, want a paused pass", out, err)
+	}
+	st := m58State(t, migDB)
+	if st.Cursor == nil || !st.Cursor.Equal(j.reconcileEpoch) || st.PassWriteFailures != 0 {
+		t.Errorf("state = %+v: the window whose write the deadline cut off was recorded as read", st)
+	}
+}

@@ -84,6 +84,11 @@ const (
 	// cveReconcileTickBudget bounds how long one invocation may walk before it
 	// stops between windows and leaves the rest to the next tick.
 	cveReconcileTickBudget = 6 * time.Hour
+	// cveReconcileStateTimeout bounds each read or write of the progress row,
+	// which runs outside the tick budget's deadline: a lock held on that row
+	// must not hold the sync goroutine — and the next delta read — with it
+	// (Codex M58 R2, Medium).
+	cveReconcileStateTimeout = time.Minute
 	// cveReconcileFailureSample caps the CVE ids a pass records as failed.
 	cveReconcileFailureSample = 20
 )
@@ -230,8 +235,13 @@ func (j *CVESyncJob) reconcileCatalogue(ctx context.Context, now time.Time) (rec
 			winFailed = append(winFailed, failed...)
 			return perr
 		})
+		// Read the deadline off walkCtx BEFORE cancel: a page whose writes were
+		// cut short by it can come back as per-row failures with a nil error,
+		// and advancing past that window would leave its CVEs stale until the
+		// next pass (Codex M58 R2, Medium).
+		budgetHit := walkCtx.Err() != nil
 		cancel()
-		if err != nil && ctx.Err() == nil && time.Now().After(deadline) {
+		if budgetHit && ctx.Err() == nil {
 			// The budget ran out inside this window. Not a failure: the cursor
 			// still points at it and the next invocation re-reads it whole.
 			slog.Warn("CVE reconcile: tick budget ran out inside a window; pausing, the next tick re-reads that window",
@@ -390,8 +400,10 @@ func (j *CVESyncJob) cataloguePresence(ctx context.Context, ids []string) (map[s
 // value costs one pass from the epoch rather than stopping the re-read for
 // good.
 func (j *CVESyncJob) loadReconcileState(ctx context.Context) (cveReconcileState, error) {
+	sctx, cancel := context.WithTimeout(catalogueCtx(ctx), cveReconcileStateTimeout)
+	defer cancel()
 	var raw string
-	err := j.db.QueryRowContext(catalogueCtx(ctx),
+	err := j.db.QueryRowContext(sctx,
 		`SELECT value FROM system_settings WHERE key = $1`, cveReconcileStateKey).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return cveReconcileState{}, nil
@@ -412,7 +424,9 @@ func (j *CVESyncJob) saveReconcileState(ctx context.Context, st cveReconcileStat
 	if err != nil {
 		return fmt.Errorf("cve reconcile: encode state: %w", err)
 	}
-	if _, err := j.db.ExecContext(catalogueCtx(ctx), `
+	sctx, cancel := context.WithTimeout(catalogueCtx(ctx), cveReconcileStateTimeout)
+	defer cancel()
+	if _, err := j.db.ExecContext(sctx, `
 		INSERT INTO system_settings (key, value, description, updated_at)
 		VALUES ($1, $2, 'Progress and last result of the full NVD catalogue re-read (M58)', NOW())
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
