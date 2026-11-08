@@ -16,7 +16,11 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -83,7 +87,45 @@ func TestM68Schema_NoCheckLiteralExceedsColumnWidth(t *testing.T) {
 	if !schemaReadyCRAReports(t, migDB) {
 		return
 	}
-	rows, err := migDB.Query(`
+	for _, v := range overlongCheckLiterals(t, migDB) {
+		t.Error(v)
+	}
+}
+
+// The guard must see a literal that contains a quote (deparsed as '...”...'):
+// Codex R3 showed a regex that stopped at the doubled quote split
+// '12345678901234567890”x' (22 characters) into a 20- and a 1-character
+// fragment and passed a VARCHAR(20) column that cannot hold it.
+func TestM68Schema_GuardSeesQuotedLiterals(t *testing.T) {
+	_, migURL := craReportsTestEnv(t)
+	migDB := openOrSkipCRAReports(t, migURL)
+	tx, err := migDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`CREATE TABLE m68_guard_probe (
+		c VARCHAR(20) CHECK (c IN ('short', '12345678901234567890''x')))`); err != nil {
+		t.Fatal(err)
+	}
+	got := overlongCheckLiterals(t, tx)
+	want := `m68_guard_probe.c is limited to 20 characters but its CHECK allows "12345678901234567890'x" (22)`
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("guard found %q, want exactly [%q]", got, want)
+	}
+}
+
+type catalogueQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// overlongCheckLiterals lists every CHECK literal longer than its
+// length-limited character column. Literals are parsed in Go from
+// pg_get_constraintdef: a '...' run with ” as an escaped quote (the
+// deparser always emits standard-conforming strings).
+func overlongCheckLiterals(t *testing.T, db catalogueQueryer) []string {
+	t.Helper()
+	rows, err := db.Query(`
 		WITH cols AS (
 			SELECT c.oid AS relid, c.relname, a.attname, a.attnum,
 			       a.atttypmod - 4 AS maxlen
@@ -94,35 +136,61 @@ func TestM68Schema_NoCheckLiteralExceedsColumnWidth(t *testing.T) {
 			  AND a.attnum > 0 AND NOT a.attisdropped
 			  AND a.atttypid IN ('varchar'::regtype, 'bpchar'::regtype)
 			  AND a.atttypmod > 0
-		), chk AS (
-			SELECT con.conrelid, unnest(con.conkey) AS attnum,
-			       pg_get_constraintdef(con.oid) AS def
-			FROM pg_constraint con WHERE con.contype = 'c'
 		)
-		SELECT cols.relname, cols.attname, cols.maxlen, l.lit
+		SELECT cols.relname, cols.attname, cols.maxlen, pg_get_constraintdef(con.oid)
 		FROM cols
-		JOIN chk ON chk.conrelid = cols.relid AND chk.attnum = cols.attnum
-		CROSS JOIN LATERAL (
-			SELECT (regexp_matches(chk.def, '''([^'']*)''', 'g'))[1] AS lit
-		) l
-		WHERE length(l.lit) > cols.maxlen
-		ORDER BY 1, 2, 4`)
+		JOIN pg_constraint con ON con.conrelid = cols.relid AND con.contype = 'c'
+		                      AND cols.attnum = ANY (con.conkey)
+		ORDER BY 1, 2`)
 	if err != nil {
 		t.Fatalf("catalogue query: %v", err)
 	}
 	defer rows.Close()
-	n := 0
+	var out []string
+	checked := 0
 	for rows.Next() {
-		var rel, col, lit string
+		var rel, col, def string
 		var maxlen int
-		if err := rows.Scan(&rel, &col, &maxlen, &lit); err != nil {
+		if err := rows.Scan(&rel, &col, &maxlen, &def); err != nil {
 			t.Fatal(err)
 		}
-		n++
-		t.Errorf("%s.%s is limited to %d characters but its CHECK allows %q (%d)", rel, col, maxlen, lit, len(lit))
+		for _, lit := range sqlStringLiterals(def) {
+			checked++
+			if n := utf8.RuneCountInString(lit); n > maxlen {
+				out = append(out, fmt.Sprintf("%s.%s is limited to %d characters but its CHECK allows %q (%d)", rel, col, maxlen, lit, n))
+			}
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("checked: %d over-long CHECK literal(s)", n)
+	if checked == 0 {
+		t.Fatal("guard checked no CHECK literal at all; the catalogue query is blind")
+	}
+	return out
+}
+
+func sqlStringLiterals(def string) []string {
+	var out []string
+	for i := 0; i < len(def); i++ {
+		if def[i] != '\'' {
+			continue
+		}
+		var b strings.Builder
+		j := i + 1
+		for ; j < len(def); j++ {
+			if def[j] == '\'' {
+				if j+1 < len(def) && def[j+1] == '\'' {
+					b.WriteByte('\'')
+					j++
+					continue
+				}
+				break
+			}
+			b.WriteByte(def[j])
+		}
+		out = append(out, b.String())
+		i = j
+	}
+	return out
 }

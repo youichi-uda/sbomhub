@@ -43,8 +43,15 @@
 --   a live reader and every later request queues behind us. A bounded wait
 --   turns an indefinite stall into a retry: the runner's transaction rolls
 --   back the DDL and the schema_migrations row together.
+--   lock_timeout bounds only the acquisition; the CHECK re-validation scan
+--   above then runs with the lock held. statement_timeout bounds that: 60 s
+--   is ~2,400x the measured 25 ms for 300k rows, and a scan that has not
+--   finished by then is cancelled and the whole file rolled back (retry in a
+--   maintenance window with a larger value), rather than holding every
+--   reader and writer of cra_reports indefinitely.
 -- ============================================
 
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 ALTER TABLE cra_reports ALTER COLUMN report_type TYPE VARCHAR(32);

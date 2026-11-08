@@ -384,7 +384,7 @@ first statement's ACCESS EXCLUSIVE held across the validation scan. See
 
 ### The legacy baseline
 
-Of the 68 existing migrations, the lint's own scan (647 statements)
+Of the 68 existing migrations, the lint's own scan (648 statements)
 classifies them as:
 
   - **5** take no contending lock and need nothing — `001_init`

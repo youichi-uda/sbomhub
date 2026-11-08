@@ -1783,6 +1783,7 @@ type NVDUpstreamError struct {
 const (
 	nvdRetryAfterDefault = 30 * time.Second
 	nvdRetryAfterMax     = time.Hour
+	nvdErrorBodyDrainMax = 256 << 10
 )
 
 func (e *NVDUpstreamError) Error() string {
@@ -1799,6 +1800,11 @@ func (e *NVDUpstreamError) Error() string {
 func (e *NVDUpstreamError) Unwrap() error { return e.Err }
 
 func newNVDStatusError(resp *http.Response, now time.Time) *NVDUpstreamError {
+	// Drain (a bounded amount of) the refusal so the keep-alive connection
+	// can be reused: refusals arrive exactly while NVD is throttling us, and
+	// a new TCP/TLS connection per refused lookup only adds to it. The body
+	// itself is discarded, never logged or returned.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, nvdErrorBodyDrainMax))
 	e := &NVDUpstreamError{Status: resp.StatusCode}
 	switch resp.StatusCode {
 	case http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
