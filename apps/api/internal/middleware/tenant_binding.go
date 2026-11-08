@@ -658,15 +658,16 @@ type PreTenantTxRule struct {
 // rather than a claim.
 var preTenantTxMiddleware = map[string]PreTenantTxRule{
 	// -----------------------------------------------------------------
-	// Echo's own global middleware. `e.Use` applies these to every route
+	// The global middleware (echo's own, plus appmw.AccessLog which wraps
+	// echo's RequestLogger). `e.Use` applies these to every route
 	// however it was registered, so they are the first four entries of all
 	// 181 chains and are unbound on every one of them.
 	// -----------------------------------------------------------------
-	"middleware.Logger": {
+	"appmw.AccessLog": {
 		Kind: PreTenantTxNamesNoTable,
-		Why: "echo's request logger (labstack/echo/v4/middleware). It writes a line to the " +
-			"configured io.Writer after the handler returns and holds no database handle " +
-			"of any kind — the whole of its state is a template and an output stream.",
+		Why: "access_log.go, the slog access log built on echo's RequestLogger. It emits one " +
+			"slog record after the handler returns and holds no database handle of any " +
+			"kind — its whole state is the *slog.Logger it was given.",
 	},
 	"middleware.Recover": {
 		Kind: PreTenantTxNamesNoTable,

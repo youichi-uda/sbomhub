@@ -1046,12 +1046,11 @@ func main() {
 	// raw-error-leak class in one place. See sanitizingErrorHandler.
 	e.HTTPErrorHandler = sanitizingErrorHandler(e.HTTPErrorHandler)
 
-	// middleware.Logger is deprecated since echo v4.16 in favour of
-	// RequestLogger, which is NOT a drop-in swap: it changes the access-log
-	// format (slog instead of the JSON line) and, with its default
-	// HandleError=true, the point at which the error handler runs. Kept as-is
-	// in the dependency bump; migrating is a separate, reviewed change.
-	e.Use(middleware.Logger()) //nolint:staticcheck // SA1019: see comment above
+	// Access log via slog (echo's middleware.Logger is deprecated). Same
+	// fields and error-handler timing as before, but the query string is no
+	// longer logged and public-link tokens in the path are redacted; see
+	// appmw.AccessLog.
+	e.Use(appmw.AccessLog(slog.Default()))
 	e.Use(middleware.Recover())
 	// SECURITY: Limit request body size to prevent memory exhaustion DoS attacks
 	// 10MB should be sufficient for most SBOM files while preventing abuse
